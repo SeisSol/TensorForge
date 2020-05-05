@@ -1,0 +1,2 @@
+allocate_mem: 2.0  # in GB
+num_repeats: 100

@@ -1,0 +1,59 @@
+test_suites:
+   - # m = 34, n = 12, k = 10
+     test_base_name: "LoaderA"
+     matrix_a:
+       rows: "num_rows_a_params"
+       cols: 43
+       addressing: "strided"
+       bbox: [0, 0, 11, 33]
+       trans:  yes
+
+     matrix_b:
+       rows: 39
+       cols: 41
+       addressing: "strided"
+       bbox: [0, 0, 11, 9]
+       trans:  no
+
+     matrix_c:
+       rows: 61
+       cols: 39
+       addressing: "strided"
+       bbox: [0, 0, 33, 9]
+       trans:  no
+
+     num_rows_a_params: [63, 65]
+
+     alpha: 1.1
+     beta: 1.1
+     num_elements: 10
+
+   -
+    # m = 30, n = 12, k = 10
+    test_base_name: "LoaderB"
+    matrix_a:
+      rows: 56
+      cols: 56
+      addressing: "strided"
+      bbox: [0, 0, 29, 9]
+      trans:  no
+
+    matrix_b:
+      rows: "num_rows_b_params"
+      cols: 56
+      addressing: "strided"
+      bbox: [0, 0, 9, 11]
+      trans:  no
+
+    matrix_c:
+      rows: 56
+      cols: 56
+      addressing: "strided"
+      bbox: [0, 0, 29, 11]
+      trans:  no
+
+    num_rows_b_params: [31, 33]
+
+    alpha: 1.1
+    beta: 1.1
+    num_elements: 10

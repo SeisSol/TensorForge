@@ -1,0 +1,32 @@
+---
+MatC:
+  num_rows: 56
+  num_cols: 56
+  addressing: "none"
+  bbox: [0, 0, 55, 55]
+  trans:  no
+
+MatA:
+  num_rows: 56
+  num_cols: 9
+  addressing: "strided"
+  bbox: [0, 0, 55, 8]
+  trans:  no
+
+MatB:
+  num_rows: 9
+  num_cols: 9
+  addressing: "strided"
+  bbox: [0, 0, 8, 8]
+  trans:  no
+
+MatD:
+  num_rows: 56
+  num_cols: 9
+  addressing: "strided"
+  bbox: [0, 0, 55, 8]
+  trans:  no
+
+
+alpha: 1.0
+beta: 1.0
