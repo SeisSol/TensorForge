@@ -1,9 +1,9 @@
 import unittest
-from gemmgen import DenseMatrix
-from gemmgen.loaders import shm_mem_factory
-from gemmgen.loaders.shr_mem_loaders import ExactPatchLoader, ExtendedPatchLoader
-from gemmgen.loaders.shr_transpose_mem_loaders import ExactTransposePatchLoader
-from gemmgen.loaders.shr_transpose_mem_loaders import ExtendedTransposePatchLoader
+from gemmforge import DenseMatrix
+from gemmforge.loaders import shm_mem_factory
+from gemmforge.loaders.shr_mem_loaders import ExactPatchLoader, ExtendedPatchLoader
+from gemmforge.loaders.shr_transpose_mem_loaders import ExactTransposePatchLoader
+from gemmforge.loaders.shr_transpose_mem_loaders import ExtendedTransposePatchLoader
 
 
 class TestLoaders(unittest.TestCase):

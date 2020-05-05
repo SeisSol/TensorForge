@@ -2,9 +2,9 @@ import os
 import yaml
 import argparse
 
-from gemmgen import DenseMatrix, GemmGenerator, GenerationError
-from gemmgen import arch
-from gemmgen import constructs
+from gemmforge import DenseMatrix, GemmGenerator, GenerationError
+from gemmforge import arch
+from gemmforge import constructs
 from io import StringIO
 from test_loader import TestLoader
 

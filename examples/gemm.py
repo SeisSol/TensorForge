@@ -1,7 +1,7 @@
 import os
 
-from gemmgen import DenseMatrix, GemmGenerator, GenerationError
-from gemmgen import arch
+from gemmforge import DenseMatrix, GemmGenerator, GenerationError
+from gemmforge import arch
 
 arch = arch.produce("nvidia")
 

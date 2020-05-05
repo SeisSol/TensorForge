@@ -1,7 +1,7 @@
 import os
 
-from gemmgen import DenseMatrix, TriadGenerator, GenerationError
-from gemmgen import arch
+from gemmforge import DenseMatrix, TriadGenerator, GenerationError
+from gemmforge import arch
 
 arch = arch.produce("nvidia")
 mat_d = DenseMatrix(num_rows=56, num_cols=9, addressing="strided", transpose=False)

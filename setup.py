@@ -9,7 +9,7 @@ install_requires = [
         'scipy']
 
 setuptools.setup(
-    name="gemmgen",
+    name="gemmforge",
     version="0.0.1",
     license="MIT",
     author="Ravil Dorozhinskii",
@@ -18,7 +18,7 @@ setuptools.setup(
     long_description=long_description,
     long_description_content_type="text/markdown",
     #url="https://github.com/pypa/sampleproject",
-    packages=["gemmgen"],
+    packages=["gemmforge"],
     classifiers=[
         "Programming Language :: Python :: 3",
         "License :: OSI Approved :: MIT License",

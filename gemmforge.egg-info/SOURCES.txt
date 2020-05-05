@@ -1,0 +1,15 @@
+README.md
+setup.py
+gemmforge/__init__.py
+gemmforge/abstract_generator.py
+gemmforge/arch.py
+gemmforge/common.py
+gemmforge/exceptions.py
+gemmforge/gemm_generator.py
+gemmforge/support.py
+gemmforge/triad_generator.py
+gemmforge.egg-info/PKG-INFO
+gemmforge.egg-info/SOURCES.txt
+gemmforge.egg-info/dependency_links.txt
+gemmforge.egg-info/requires.txt
+gemmforge.egg-info/top_level.txt
