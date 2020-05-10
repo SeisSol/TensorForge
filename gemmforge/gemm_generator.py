@@ -1,18 +1,16 @@
 from . import constructs
 from io import StringIO
-from math import ceil
 from .exceptions import GenerationError
 from .abstract_generator import Generator
-from .loaders import shm_mem_factory
-from .loaders import StubLoader
+from .loaders import shm_mem_factory, StubLoader
 import math
 import hashlib
 
 
 class GemmGenerator(Generator):
+  """ Generates GEMM GPU kernels: C = alpha * A * B + beta * C
   """
-  Generates GEMM GPU kernels
-  """
+  TEAM_INDEX_STR = "(threadIdx.y + blockDim.y * blockIdx.x)"
 
   def __init__(self, arch, precision):
     super(GemmGenerator, self).__init__(arch, precision)
@@ -62,7 +60,7 @@ class GemmGenerator(Generator):
       max_num_threads_per_block = self.num_active_threads * self.num_mult_per_block
       kernel_bounds = [max_num_threads_per_block]
       with file.Kernel(self.base_name, self._get_func_params(), kernel_bounds):
-        with file.If("{} < {}".format(Generator.TEAM_INDEX_STR, Generator.NUM_ELEMENTS_STR)):
+        with file.If("{} < {}".format(GemmGenerator.TEAM_INDEX_STR, Generator.NUM_ELEMENTS_STR)):
 
           # declare ptrs for correct matrices
           file.VariableDeclaration("const {}*".format(self.precision),
@@ -153,7 +151,10 @@ class GemmGenerator(Generator):
               if self.alpha == 1.0:
                 lhs = "Results[n]"
               else:
-                lhs = "{} * Results[n]".format("{}{}".format(self.alpha, 'f' if self.precision == "float" else ''))
+                if self.precision == "float" and isinstance(self.alpha, float):
+                  lhs = f'{self.alpha}f * Results[n]'
+                else:
+                  lhs = f'{self.alpha} * Results[n]'
 
               if self.beta != 0.0:
                 if self.beta == 1.0:
@@ -284,25 +285,6 @@ class GemmGenerator(Generator):
   def _get_total_shared_mem_size(self):
     return self.shr_mem_size_per_mult * self.num_mult_per_block
 
-  def _get_global_matrix_ptr(self, matrix):
-    if matrix.addressing == "strided":
-      main_offset = "{} * {}".format(Generator.TEAM_INDEX_STR, matrix.get_real_volume())
-      sub_offset = matrix.get_offset_to_first_element()
-      return "&{}[{} + {}]".format(matrix.name,
-                                   main_offset,
-                                   sub_offset)
-
-    elif matrix.addressing == "pointer_based":
-      main_offset = Generator.TEAM_INDEX_STR
-      sub_offset = matrix.get_offset_to_first_element()
-      return "&{}[{}][{}]".format(matrix.name,
-                                  main_offset,
-                                  sub_offset)
-
-    else:
-      sub_offset = matrix.get_offset_to_first_element()
-      return "&{}[{}]".format(matrix.name, sub_offset)
-
   def _generate_base_name(self):
     if self.mat_a.transpose:
       dim1 = "m{}_{}".format(self.mat_a.get_actual_num_cols(), self.mat_a.num_rows)
@@ -339,3 +321,51 @@ class GemmGenerator(Generator):
                                        dims,
                                        addressing,
                                        md5encoding[:Generator.ENCODING_LENGTH])
+
+  def _get_func_params(self):
+    base_params = super(GemmGenerator, self)._get_func_params()
+    if isinstance(self.alpha, float):
+      return base_params
+    else:
+      return f'{self.precision} {self.alpha}, {base_params}'
+
+  def _get_func_args(self):
+    base_args = super(GemmGenerator, self)._get_func_args()
+    if isinstance(self.alpha, float):
+      return base_args
+    else:
+      return f'{self.alpha}, {base_args}'
+
+
+  def _get_block_dim_spec(self):
+   super(GemmGenerator, self)._get_block_dim_spec()
+   return f'Block({self.num_active_threads}, {self.num_mult_per_block}, 1)'
+
+  def _get_grid_dim_spec(self):
+    super(GemmGenerator, self)._get_grid_dim_spec()
+    num_blocks = "({0} + {1} - 1) / {1}".format(Generator.NUM_ELEMENTS_STR,
+                                                self.num_mult_per_block)
+    return f'Grid({num_blocks}, 1, 1)'
+
+  def _get_global_matrix_ptr(self, matrix):
+
+    extra_offset_symbol = self._generate_extra_offset_symbol(matrix)
+    if matrix.addressing == "strided":
+      main_offset = "{} * {}".format(GemmGenerator.TEAM_INDEX_STR, matrix.get_real_volume())
+      sub_offset = matrix.get_offset_to_first_element()
+      return "&{}[{} + {} + {}]".format(matrix.name,
+                                        main_offset,
+                                        sub_offset,
+                                        extra_offset_symbol)
+
+    elif matrix.addressing == "pointer_based":
+      main_offset = GemmGenerator.TEAM_INDEX_STR
+      sub_offset = matrix.get_offset_to_first_element()
+      return "&{}[{}][{} + {}]".format(matrix.name,
+                                       main_offset,
+                                       sub_offset,
+                                       extra_offset_symbol)
+
+    else:
+      sub_offset = matrix.get_offset_to_first_element()
+      return "&{}[{} + {}]".format(matrix.name, sub_offset, extra_offset_symbol)

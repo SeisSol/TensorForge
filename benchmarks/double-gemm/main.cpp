@@ -126,8 +126,8 @@ int main(int Argc, char* Arcv[]) {
                            NumElements);
 
   std::cout << "INFO: computing on GPU started" << std::endl;
-  callFirstGemm(DeviceA, DeviceB, DeviceTmp, NumElements);
-  callSecondGemm(DeviceC, DeviceTmp, DeviceD, NumElements);
+  callFirstGemm(DeviceA, 0, DeviceB, 0, DeviceTmp, 0, NumElements);
+  callSecondGemm(DeviceC, 0, DeviceTmp, 0, DeviceD, 0, NumElements);
   synchDevice();
 
   std::cout << "INFO: comparsion started" << std::endl;
@@ -146,8 +146,8 @@ int main(int Argc, char* Arcv[]) {
   int NumRepeats = Config["num_repeats"].as<int>();
   Timer.start();
   for (int Repeat = 0; Repeat < NumRepeats; ++Repeat) {
-    callFirstGemm(DeviceA, DeviceB, DeviceTmp, NumElements);
-    callSecondGemm(DeviceC, DeviceTmp, DeviceD, NumElements);
+    callFirstGemm(DeviceA, 0, DeviceB, 0, DeviceTmp, 0, NumElements);
+    callSecondGemm(DeviceC, 0, DeviceTmp, 0, DeviceD, 0, NumElements);
   }
   synchDevice();
   Timer.stop();

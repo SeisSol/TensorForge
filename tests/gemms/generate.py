@@ -106,9 +106,9 @@ for suite in suites:
           file.Expression("Driver.prepareData()")
 
           args = []
-          args.append("{}".format("DeviceShuffledA" if mat_a.addressing == "pointer_based" else "DeviceA"))
-          args.append("{}".format("DeviceShuffledB" if mat_b.addressing == "pointer_based" else "DeviceB"))
-          args.append("{}".format("DeviceShuffledC" if mat_c.addressing == "pointer_based" else "DeviceC"))
+          args.append("{}, 0".format("DeviceShuffledA" if mat_a.addressing == "pointer_based" else "DeviceA"))
+          args.append("{}, 0".format("DeviceShuffledB" if mat_b.addressing == "pointer_based" else "DeviceB"))
+          args.append("{}, 0".format("DeviceShuffledC" if mat_c.addressing == "pointer_based" else "DeviceC"))
           args.append("NumElements")
           args = ", ".join(args)
           file.Expression("{}({})".format(generator.get_base_name(), args))

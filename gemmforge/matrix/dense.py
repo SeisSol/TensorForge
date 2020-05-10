@@ -7,7 +7,7 @@ class DenseMatrix:
                  "strided": "*",
                  "pointer_based": "**"}
 
-    def __init__(self, num_rows, num_cols, addressing, bbox=None, transpose=False):
+    def __init__(self, num_rows, num_cols, addressing, bbox=None, transpose=False, explicit_offset=False):
         self.name = None
         self.num_rows = num_rows
         self.num_cols = num_cols

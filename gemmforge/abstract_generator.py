@@ -5,7 +5,6 @@ from .exceptions import GenerationError, InternalError
 class Generator(ABC):
   PRECISION = ["float", "double"]
   PRECISION_TO_BYTES = {"float": 4, "double": 8}
-  TEAM_INDEX_STR = "(threadIdx.y + blockDim.y * blockIdx.x)"
   NUM_ELEMENTS_STR = "NumElements"
   ENCODING_LENGTH = 7
 
@@ -59,7 +58,7 @@ class Generator(ABC):
     @abstractmethod
     def _generate_base_name(self):
       pass
-    
+
   def get_base_name(self):
     if self.base_name is not None:
       return self.base_name
@@ -82,36 +81,37 @@ class Generator(ABC):
       return self._header
     raise InternalError("launcher header hasn't been generated")
 
+  @abstractmethod
   def _get_func_params(self):
     params = [self._build_param(matrix) for matrix in self._matrices]
     params = ", ".join(params)
     return "{}, unsigned {}".format(params, Generator.NUM_ELEMENTS_STR)
 
+  @abstractmethod
   def _get_func_args(self):
-    names = [matrix.name for matrix in self._matrices]
+    names = [f'{matrix.name}, {self._generate_extra_offset_symbol(matrix)}' for matrix in self._matrices]
     names = ", ".join(names)
     return "{}, {}".format(names, Generator.NUM_ELEMENTS_STR)
 
+  @abstractmethod
   def _get_block_dim_spec(self):
-    if self.num_active_threads and self.num_mult_per_block:
-      return "Block({}, {}, 1)".format(self.num_active_threads,
-                                       self.num_mult_per_block)
-    else:
+    if not (self.num_active_threads and self.num_mult_per_block):
       raise InternalError("kernel analysis hasn't been done yet")
 
+  @abstractmethod
   def _get_grid_dim_spec(self):
-    if self.num_mult_per_block:
-      num_blocks = "({0} + {1} - 1) / {1}".format(Generator.NUM_ELEMENTS_STR,
-                                                  self.num_mult_per_block)
-      return "Grid({}, 1, 1)".format(num_blocks)
-    else:
+    if not self.num_mult_per_block:
       raise InternalError("kernel analysis hasn't been done yet")
 
   def _build_param(self, matrix):
+    sub_offset = f'int {self._generate_extra_offset_symbol(matrix)}'
     if matrix.is_mutable():
-      return "{} {} {}".format(self.precision, matrix.ptr_type, matrix.name)
+      return f'{self.precision} {matrix.ptr_type} {matrix.name}, {sub_offset}'
     else:
       if matrix.addressing == "none":
-        return "const {} {} __restrict__ {}".format(self.precision, matrix.ptr_type, matrix.name)
+        return f'const {self.precision} {matrix.ptr_type} __restrict__ {matrix.name}, {sub_offset}'
       else:
-        return "const {} {} {}".format(self.precision, matrix.ptr_type, matrix.name)
+        return f'const {self.precision} {matrix.ptr_type} {matrix.name}, {sub_offset}'
+
+  def _generate_extra_offset_symbol(self, matrix):
+    return  f'ExtraOffset{matrix.name}'

@@ -36,6 +36,7 @@ class ExtendedTransposePatchLoader(AbstractShrMemLoader):
     file.Emptyline()
     file.Comment("using ExtendedTransposePatchLoader")
     num_hops = int(self.shm_volume / self.num_active_threads)
+    file.VariableDeclaration("int", "Index")
     if num_hops > 0:
       if num_hops > self.manual_unroll_threshold:
         # load using a for-loop
@@ -43,9 +44,9 @@ class ExtendedTransposePatchLoader(AbstractShrMemLoader):
         file.Pragma("unroll")
         with file.For("int i = 0; i < {}; ++i".format(num_hops)):
 
-          file.VariableDeclaration("int",
-                                   "Index",
-                                   "threadIdx.x + i * {}".format(self.num_active_threads))
+          file.Assignment("Index",
+                          "threadIdx.x + i * {}".format(self.num_active_threads))
+
           shr_mem_index = "(Index % {}) * {} + Index / {}".format(self.matrix.num_rows,
                                                                   self.lid_dim,
                                                                   self.matrix.num_rows)
@@ -56,11 +57,11 @@ class ExtendedTransposePatchLoader(AbstractShrMemLoader):
       else:
         # load using manual loop unrolling
         counter = 0
+
         while counter < num_hops:
 
-          file.VariableDeclaration("int",
-                                   "Index",
-                                   "threadIdx.x + {}".format(counter * self.num_active_threads))
+          file.Assignment("Index",
+                          "threadIdx.x + {}".format(counter * self.num_active_threads))
           shr_mem_index = "(Index % {}) * {} + Index / {}".format(self.matrix.num_rows,
                                                                   self.lid_dim,
                                                                   self.matrix.num_rows)
@@ -75,9 +76,8 @@ class ExtendedTransposePatchLoader(AbstractShrMemLoader):
       residue = self.shm_volume - num_hops * self.num_active_threads
 
       with file.If("threadIdx.x < {}".format(residue)):
-        file.VariableDeclaration("int",
-                                 "Index",
-                                 "threadIdx.x + {}".format(num_hops * self.num_active_threads))
+        file.Assignment("Index",
+                        "threadIdx.x + {}".format(num_hops * self.num_active_threads))
 
         shr_mem_index = "(Index % {}) * {} + Index / {}".format(self.matrix.num_rows,
                                                                 self.lid_dim,

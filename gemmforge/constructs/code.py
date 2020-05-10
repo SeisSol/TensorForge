@@ -159,6 +159,9 @@ class Cpp:
     def Accumulate(self, left, right):
         return self.__call__("{} += {};".format(left, right))
 
+    def Deaccumulate(self, left, right):
+        return self.__call__("{} -= {};".format(left, right))
+
     def Expression(self, expression):
         return self.__call__("{};".format(expression))
 
