@@ -1,15 +1,15 @@
 from . import constructs
 from io import StringIO
 from .exceptions import GenerationError
-from .abstract_generator import Generator
-from .matrix import DenseMatrix
+from .abstract_gemmlike_generator import GemmLikeGenerator
+from .abstract_generator import AbstractGenerator as Generator
+from .initializers import initializer_factory, StubInitializer
 import math
 import hashlib
 from copy import deepcopy
 
-import random
 
-class CsaGenerator(Generator):
+class CsaGenerator(GemmLikeGenerator):
   TEAM_INDEX_STR = "(threadIdx.z + blockDim.z * blockIdx.x)"
 
   """ Copy-Add-Scale Generator: B = beta * B + alpha * A, where alpha is a real number
@@ -18,7 +18,7 @@ class CsaGenerator(Generator):
 
   def __init__(self, arch, precision):
     super(CsaGenerator, self).__init__(arch, precision)
-    pass
+    self._mat_b_initializer = None
 
   def generate(self, mat_a, mat_b,  alpha, beta, base_name=None):
     self.mat_a = mat_a
@@ -35,6 +35,15 @@ class CsaGenerator(Generator):
     self.beta = beta
 
     self.base_name = base_name if base_name is not None else self._generate_base_name()
+
+    if self.beta == 0.0:
+      self._mat_b_initializer = initializer_factory(self.beta,
+                                                    deepcopy(self.mat_b),
+                                                    self.arch,
+                                                    self.precision)
+    else:
+      self._mat_b_initializer = StubInitializer(self.arch, self.precision)
+    self._mat_b_initializer.generate()
 
     self._check()
     self._analyze()
@@ -71,7 +80,6 @@ class CsaGenerator(Generator):
       raise error
 
   def _analyze(self):
-
     lid_dim_length = self.mat_a.get_actual_num_rows()
 
     # we use active threads to add a single column
@@ -89,8 +97,6 @@ class CsaGenerator(Generator):
     glob_symbols = {}
     for matrix in [self.mat_a, self.mat_b]:
       glob_symbols[matrix.name] = "GlobMat{}".format(matrix.name)
-
-    current_symbols = {}
 
     src = StringIO()
     with constructs.Cpp(src) as file:
@@ -129,11 +135,27 @@ class CsaGenerator(Generator):
               file.Assignment(left=f'{glob_symbols[self.mat_b.name]}[threadIdx.x]', right=rhs)
 
       self._kernel = src.getvalue()
+      self._kernel += self._mat_b_initializer.get_kernel()
 
   def _generate_launcher(self):
+    self._launcher = self._mat_b_initializer.get_launcher()
+
     src = StringIO()
     with constructs.Cpp(src) as file:
       with file.Function(self.base_name, self._get_func_params()):
+
+        # prepare arguments for the initializer of matrix "b"
+        initializer_args = [self.mat_b.name,
+                            self._generate_extra_offset_symbol(self.mat_b),
+                            "NumElements"]
+
+        # pass an additional argument if "beta" is known at run-time only
+        if not isinstance(self.beta, float):
+          initializer_args.insert(0, self.beta)
+
+        # call the initializer. Note: the initializer can be a stub i.e. will do nothing
+        file("{}".format(self._mat_b_initializer.func_call(initializer_args)))
+
         file.VariableDeclaration("dim3", self._get_block_dim_spec())
         file.VariableDeclaration("dim3", self._get_grid_dim_spec())
         krnl_launch_param = "<<<Grid,Block>>>"
@@ -141,7 +163,8 @@ class CsaGenerator(Generator):
                                                  krnl_launch_param,
                                                  self._get_func_args()))
         file.Expression("CHECK_ERR")
-      self._launcher = src.getvalue()
+      self._launcher += src.getvalue()
+
 
   def _generate_header(self):
     src = StringIO()
@@ -149,9 +172,6 @@ class CsaGenerator(Generator):
       file.FunctionDeclaration(self.base_name, self._get_func_params())
       content = src.getvalue()
     self._header = content
-
-  def _get_total_shared_mem_size(self):
-    pass
 
   def _generate_base_name(self):
     dim1 = f'm{self.mat_a.get_actual_num_rows()}_{self.mat_b.num_rows}'

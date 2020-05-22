@@ -2,7 +2,7 @@ from abc import ABC, abstractmethod
 from .exceptions import GenerationError, InternalError
 
 
-class Generator(ABC):
+class AbstractGenerator(ABC):
   PRECISION = ["float", "double"]
   PRECISION_TO_BYTES = {"float": 4, "double": 8}
   NUM_ELEMENTS_STR = "NumElements"
@@ -10,18 +10,15 @@ class Generator(ABC):
 
   def __init__(self, arch, precision):
     self.arch = arch
-    if precision in Generator.PRECISION:
+    if precision in AbstractGenerator.PRECISION:
       self.precision = precision
     else:
       raise ValueError("given precision: {}. "
                        "Allowed values: {}".format(precision,
-                                                   ", ".join(Generator.PRECISION)))
+                                                   ", ".join(AbstractGenerator.PRECISION)))
 
     self.base_name = None
-    self.alpha = None
-    self.beta = None
     self.num_mult_per_block = None
-    self.shr_mem_size_per_mult = None
     self.num_active_threads = None
     self.num_compute_threads = None
     self.max_num_regs_per_thread = None
@@ -30,6 +27,10 @@ class Generator(ABC):
     self._kernel = None
     self._launcher = None
     self._header = None
+
+    @abstractmethod
+    def generate(self):
+      pass
 
     @abstractmethod
     def _check(self):
@@ -49,10 +50,6 @@ class Generator(ABC):
 
     @abstractmethod
     def _generate_header(self):
-      pass
-
-    @abstractmethod
-    def _get_total_shared_mem_size(self):
       pass
 
     @abstractmethod
@@ -85,13 +82,13 @@ class Generator(ABC):
   def _get_func_params(self):
     params = [self._build_param(matrix) for matrix in self._matrices]
     params = ", ".join(params)
-    return "{}, unsigned {}".format(params, Generator.NUM_ELEMENTS_STR)
+    return "{}, unsigned {}".format(params, AbstractGenerator.NUM_ELEMENTS_STR)
 
   @abstractmethod
   def _get_func_args(self):
     names = [f'{matrix.name}, {self._generate_extra_offset_symbol(matrix)}' for matrix in self._matrices]
     names = ", ".join(names)
-    return "{}, {}".format(names, Generator.NUM_ELEMENTS_STR)
+    return "{}, {}".format(names, AbstractGenerator.NUM_ELEMENTS_STR)
 
   @abstractmethod
   def _get_block_dim_spec(self):

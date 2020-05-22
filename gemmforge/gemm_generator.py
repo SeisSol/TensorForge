@@ -1,13 +1,14 @@
 from . import constructs
 from io import StringIO
 from .exceptions import GenerationError
-from .abstract_generator import Generator
+from .abstract_gemmlike_generator import GemmLikeGenerator
+from .abstract_generator import AbstractGenerator as Generator
 from .loaders import shm_mem_factory, StubLoader
 import math
 import hashlib
 
 
-class GemmGenerator(Generator):
+class GemmGenerator(GemmLikeGenerator):
   """ Generates GEMM GPU kernels: C = alpha * A * B + beta * C
   """
   TEAM_INDEX_STR = "(threadIdx.y + blockDim.y * blockIdx.x)"
@@ -47,7 +48,6 @@ class GemmGenerator(Generator):
     self._generate_launcher()
 
   def _generate_kernel(self):
-
     glob_symbols = {}
     for matrix in [self.mat_a, self.mat_b, self.mat_c]:
       glob_symbols[matrix.name] = "GlobMat{}".format(matrix.name)
@@ -248,7 +248,6 @@ class GemmGenerator(Generator):
     return factor * (32 + contraction_length)
 
   def _analyze(self):
-
     if self.mat_a.transpose:
       lid_dim_length = self.mat_a.get_actual_num_cols()
     else:
@@ -316,11 +315,25 @@ class GemmGenerator(Generator):
     md5encoding = result.hexdigest()
     prefix = 's' if self.precision == "float" else "d"
 
+    # TODO: the below line is for debugging
+
+    gemm_dims = f'm{self.mat_a.get_actual_num_rows()}_n{self.mat_b.get_actual_num_cols()}_k{self.mat_a.get_actual_num_cols()}'
+    ldas = f'lda{self.mat_a.num_rows}_ldb{self.mat_b.num_rows}_ldc{self.mat_c.num_rows}'
+    consts = f'alpha_{int(self.alpha)}_beta_{int(self.beta)}'
+    """
     return "{}gemm_{}_{}_{}_{}".format(prefix,
                                        traspose,
                                        dims,
                                        addressing,
                                        md5encoding[:Generator.ENCODING_LENGTH])
+    """
+    return "{0}gemm_{1}_{2}_{3}_{4}_{5}_{6}".format(prefix,
+                                                traspose,
+                                                gemm_dims,
+                                                ldas,
+                                                consts,
+                                                addressing,
+                                                md5encoding[:Generator.ENCODING_LENGTH])
 
   def _get_func_params(self):
     base_params = super(GemmGenerator, self)._get_func_params()

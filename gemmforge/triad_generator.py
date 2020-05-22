@@ -2,12 +2,12 @@ from . import constructs
 from io import StringIO
 from math import ceil
 from .exceptions import GenerationError
-from .abstract_generator import Generator
+from .abstract_gemmlike_generator import GemmLikeGenerator
 
 """
 Generates Double Gemm kernels for GPU
 """
-class TriadGenerator(Generator):
+class TriadGenerator(GemmLikeGenerator):
   def __init__(self, arch, precision):
     super(TriadGenerator, self).__init__(arch, precision)
     self.mat_d = None
