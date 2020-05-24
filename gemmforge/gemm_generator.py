@@ -128,6 +128,19 @@ class GemmGenerator(GemmLikeGenerator):
                                                                 self.mat_a_loader.get_lid_dim())
               file.Assignment("Value", "{}".format(first_operand))
 
+              """
+              # EXPEREMENTAL
+              # perform prefetch if possible
+              if self.mat_a.addressing != 'none' and isinstance(self.mat_a_loader, StubLoader):
+                # In other words, if matrix a is not going to be implicitly cached 
+                # AND
+                # it is going to reside on global memory without loading into the shared memory
+                # (in case of matrix 'a' is transposed)
+                next_addrs = "{} + threadIdx.x + {} * (k + 1)".format(current_symbols[self.mat_a.name],
+                                                                      self.mat_a_loader.get_lid_dim())
+                file.Expression(f'asm(" prefetch.global.L2 [ %0 ];" : : "l"({next_addrs}))')
+              """
+
               file.Emptyline()
               file.Pragma("unroll")
               with file.For("int n = 0; n < {}; ++n".format(self.mat_c.get_actual_num_cols())):
