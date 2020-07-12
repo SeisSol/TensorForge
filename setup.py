@@ -4,9 +4,7 @@ with open("README.md", "r") as fh:
     long_description = fh.read()
 
 
-install_requires = [
-        'numpy',
-        'scipy']
+install_requires = ['numpy']
 
 setuptools.setup(
     name="gemmforge",
@@ -17,7 +15,6 @@ setuptools.setup(
     description="GPU-GEMM generator",
     long_description=long_description,
     long_description_content_type="text/markdown",
-    #url="https://github.com/pypa/sampleproject",
     packages=["gemmforge"],
     classifiers=[
         "Programming Language :: Python :: 3",
