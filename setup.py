@@ -1,5 +1,8 @@
 import setuptools
 
+with open("VERSION", "r") as version_file:
+    current_version = version_file.read().strip()
+    
 with open("README.md", "r") as fh:
     long_description = fh.read()
 
@@ -8,7 +11,7 @@ install_requires = ['numpy']
 
 setuptools.setup(
     name="gemmforge",
-    version="0.0.1",
+    version=current_version,
     license="MIT",
     author="Ravil Dorozhinskii",
     author_email="ravil.aviva.com@gmail.com",
@@ -27,4 +30,5 @@ setuptools.setup(
     ],
     python_requires='>=3.5',
     install_requires=install_requires,
+    include_package_data=True,
 )

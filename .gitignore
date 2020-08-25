@@ -13,7 +13,9 @@ __pycache__
 docs/build
 
 build
-cmake-build-debug
+cmake-build-*
 gen_code
+dist
+
 
 test-deployment
