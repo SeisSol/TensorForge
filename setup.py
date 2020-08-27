@@ -2,7 +2,8 @@ import setuptools
 
 with open("gemmforge/VERSION", "r") as version_file:
     current_version = version_file.read().strip()
-    
+
+ 
 with open("README.md", "r") as fh:
     long_description = fh.read()
 
@@ -28,6 +29,7 @@ setuptools.setup(
         "License :: OSI Approved :: MIT License",
         "Operating System :: OS Independent",
     ],
+    url="https://github.com/ravil-mobile/gemmforge/wiki",
     python_requires='>=3.5',
     install_requires=install_requires,
     include_package_data=True,
