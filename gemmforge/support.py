@@ -23,13 +23,11 @@ def copy_includes_and_aux(destination, name_as=None):
 
 def print_cmake_path():
   current_dir = os.path.dirname(os.path.abspath(__file__))
-  top_dir, _ = os.path.split(current_dir)
-  print(os.path.join(top_dir, "share/cmake"), end='')
+  print(os.path.join(current_dir, "share/cmake"), end='')
 
 
 def get_version():
   current_dir = os.path.dirname(os.path.abspath(__file__))
-  top_dir, _ = os.path.split(current_dir)
-  with open(os.path.join(top_dir, 'VERSION')) as version_file:
+  with open(os.path.join(current_dir, 'VERSION')) as version_file:
     version = version_file.read().strip()
     print(version, end='')

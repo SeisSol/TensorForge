@@ -1,6 +1,6 @@
 import setuptools
 
-with open("VERSION", "r") as version_file:
+with open("gemmforge/VERSION", "r") as version_file:
     current_version = version_file.read().strip()
     
 with open("README.md", "r") as fh:
