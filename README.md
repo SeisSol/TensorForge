@@ -13,7 +13,7 @@ cd gemmforge
 pip install -e .
 ```
 
-#### Usage
+## Usage
 ```python
 from gemmforge import DenseMatrix, GemmGenerator, GenerationError
 from gemmforge import arch
