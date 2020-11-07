@@ -41,7 +41,7 @@ set(CUDA_NVCC_FLAGS ${CUDA_NVCC_FLAGS};
         -res-usage;
         -O3;
 #        -g;
-#        -lineinfo;
+        -lineinfo;
         -Xptxas -v;
 #        -maxrregcount 64;
         -DREAL_SIZE=${REAL_SIZE})

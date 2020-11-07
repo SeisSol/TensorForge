@@ -36,7 +36,7 @@ tmp = produce_matrix(spec)
 
 alpha = config["alpha"]
 beta = config["beta"]
-arch = arch.produce("nvidia")
+arch = arch.produce("nvidia", "sm_60")
 
 try:
     kernels = []
