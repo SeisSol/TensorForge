@@ -8,6 +8,16 @@ from gemmforge import arch
 parser = argparse.ArgumentParser()
 parser.add_argument('-r', '--realsize', type=int, action='store',
                     help="size of real: 4(single)/8(double)")
+parser.add_argument("-m", "--manufacturer",
+                    type=str,
+                    action="store",
+                    help="Name of the Manufacturer, currently nvidia and amd are supported",
+                    default="nvidia")
+parser.add_argument("-s", "--sub_arch",
+                    type=str,
+                    action="store",
+                    help="Sub_arch of the GPU, e.g sm_60 for Nvidia or gfx906 for AMD",
+                    default="sm_60")
 args = parser.parse_args()
 
 def produce_matrix(spec):
@@ -26,7 +36,7 @@ mat_b = produce_matrix(config["MatB"])
 mat_c = produce_matrix(config["MatC"])
 alpha = config["alpha"]
 beta = config["beta"]
-arch = arch.produce("nvidia")
+arch = arch.produce(args.manufacturer, args.sub_arch)
 
 try:
     gen = GemmGenerator(arch, "float" if args.realsize == 4 else "double")
@@ -43,9 +53,16 @@ try:
     if not os.path.exists(dir_name):
         os.mkdir(dir_name)
 
-    path = os.path.join(dir_name, "kernels.cu")
+    path = None
+    if arch.manufacturer == "nvidia":
+        path = os.path.join(dir_name, "kernels.cu")
+    elif arch.manufacturer == "amd":
+        path = os.path.join(dir_name, "kernels.cpp")
+        
     with open(path, 'w') as file:
         file.write("#include \"gemmgen_aux.h\"\n")
+        if arch.manufacturer == "amd":
+            file.write("#include \"hip/hip_runtime.h\"\n")
         file.write(krnl)
         file.write(lnch)
 
