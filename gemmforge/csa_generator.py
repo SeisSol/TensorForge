@@ -142,12 +142,13 @@ class CsaGenerator(GemmLikeGenerator):
 
     src = StringIO()
     with constructs.Cpp(src) as file:
-      with file.Function(self.base_name, self._get_func_params()):
+      with file.Function(self.base_name, self._get_launcher_params()):
 
         # prepare arguments for the initializer of matrix "b"
         initializer_args = [self.mat_b.name,
                             self._generate_extra_offset_symbol(self.mat_b),
-                            "NumElements"]
+                            "NumElements",
+                            Generator.STREAM_PTR_STR]
 
         # pass an additional argument if "beta" is known at run-time only
         if not isinstance(self.beta, float):
@@ -158,7 +159,12 @@ class CsaGenerator(GemmLikeGenerator):
 
         file.VariableDeclaration("dim3", self._get_block_dim_spec())
         file.VariableDeclaration("dim3", self._get_grid_dim_spec())
-        krnl_launch_param = "<<<Grid,Block>>>"
+
+        if_stream_exists = f'({Generator.STREAM_PTR_STR} != nullptr)'
+        stream_obj = f'*(static_cast<cudaStream_t*>({Generator.STREAM_PTR_STR}))'
+        file(f'cudaStream_t stream = {if_stream_exists} ? {stream_obj} : 0;')
+
+        krnl_launch_param = "<<<Grid,Block,0,stream>>>"
         file.Expression("kernel_{}{}({})".format(self.base_name,
                                                  krnl_launch_param,
                                                  self._get_func_args()))
@@ -169,7 +175,7 @@ class CsaGenerator(GemmLikeGenerator):
   def _generate_header(self):
     src = StringIO()
     with constructs.Cpp(src) as file:
-      file.FunctionDeclaration(self.base_name, self._get_func_params())
+      file.FunctionDeclaration(self.base_name, self._get_launcher_params(with_defaults=True))
       content = src.getvalue()
     self._header = content
 
@@ -191,6 +197,9 @@ class CsaGenerator(GemmLikeGenerator):
 
   def _get_func_params(self):
     return f'{self.precision} Scale, {super(CsaGenerator, self)._get_func_params()}'
+
+  def _get_launcher_params(self, with_defaults=False):
+    return f'{self.precision} Scale, {super(CsaGenerator, self)._get_launcher_params(with_defaults)}'
 
   def _get_func_args(self):
     return f'Scale, {super(CsaGenerator, self)._get_func_args()}'

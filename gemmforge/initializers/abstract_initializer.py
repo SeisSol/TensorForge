@@ -70,10 +70,15 @@ class ExactInitializer(AbstractGenerator):
   def _generate_launcher(self):
     src = StringIO()
     with constructs.Cpp(src) as file:
-      with file.Function(self.base_name, self._get_func_params()):
+      with file.Function(self.base_name, self._get_launcher_params()):
         file.VariableDeclaration("dim3", self._get_block_dim_spec())
         file.VariableDeclaration("dim3", self._get_grid_dim_spec())
-        krnl_launch_param = "<<<Grid,Block>>>"
+
+        if_stream_exists = f'({AbstractGenerator.STREAM_PTR_STR} != nullptr)'
+        stream_obj = f'*(static_cast<cudaStream_t*>({AbstractGenerator.STREAM_PTR_STR}))'
+        file(f'cudaStream_t stream = {if_stream_exists} ? {stream_obj} : 0;')
+
+        krnl_launch_param = "<<<Grid,Block,0,stream>>>"
         file.Expression("kernel_{}{}({})".format(self.base_name,
                                                  krnl_launch_param,
                                                  self._get_func_args()))
@@ -100,6 +105,13 @@ class ExactInitializer(AbstractGenerator):
 
   def _get_func_params(self):
     base_params = super(ExactInitializer, self)._get_func_params()
+    if isinstance(self.init_value, float):
+      return base_params
+    else:
+      return f'{self.precision} {self.init_value}, {base_params}'
+
+  def _get_launcher_params(self, with_defaults=False):
+    base_params = super(ExactInitializer, self)._get_launcher_params(with_defaults)
     if isinstance(self.init_value, float):
       return base_params
     else:

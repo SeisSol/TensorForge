@@ -183,10 +183,15 @@ class GemmGenerator(GemmLikeGenerator):
   def _generate_launcher(self):
     src = StringIO()
     with constructs.Cpp(src) as file:
-      with file.Function(self.base_name, self._get_func_params()):
+      with file.Function(self.base_name, self._get_launcher_params()):
         file.VariableDeclaration("dim3", self._get_block_dim_spec())
         file.VariableDeclaration("dim3", self._get_grid_dim_spec())
-        krnl_launch_param = "<<<Grid,Block>>>"
+
+        if_stream_exists = f'({Generator.STREAM_PTR_STR} != nullptr)'
+        stream_obj = f'*(static_cast<cudaStream_t*>({Generator.STREAM_PTR_STR}))'
+        file(f'cudaStream_t stream = {if_stream_exists} ? {stream_obj} : 0;')
+
+        krnl_launch_param = "<<<Grid,Block,0,stream>>>"
         file.Expression("kernel_{}{}({})".format(self.base_name,
                                                  krnl_launch_param,
                                                  self._get_func_args()))
@@ -196,7 +201,7 @@ class GemmGenerator(GemmLikeGenerator):
   def _generate_header(self):
     src = StringIO()
     with constructs.Cpp(src) as file:
-      file.FunctionDeclaration(self.base_name, self._get_func_params())
+      file.FunctionDeclaration(self.base_name, self._get_launcher_params(with_defaults=True))
       content = src.getvalue()
     self._header = content
 
@@ -291,9 +296,9 @@ class GemmGenerator(GemmLikeGenerator):
     shr_mem_bytes = self.shr_mem_size_per_mult * Generator.PRECISION_TO_BYTES[self.precision]
     mults_wrt_shr_mem = self.arch.max_local_mem_size_per_block / shr_mem_bytes
     mults_wrt_num_regs = self.arch.max_reg_per_block / (self.num_active_threads * self.max_num_regs_per_thread)
-    mults_per_sm = int(min(mults_wrt_shr_mem, mults_wrt_num_regs))
+    self.mults_per_sm = int(min(mults_wrt_shr_mem, mults_wrt_num_regs))
 
-    self.num_mult_per_block = max(math.ceil(mults_per_sm / self.arch.max_block_per_sm), 1)
+    self.num_mult_per_block = max(int(self.mults_per_sm / self.arch.max_block_per_sm), 1)
 
   def _get_total_shared_mem_size(self):
     return self.shr_mem_size_per_mult * self.num_mult_per_block
@@ -329,28 +334,26 @@ class GemmGenerator(GemmLikeGenerator):
     md5encoding = result.hexdigest()
     prefix = 's' if self.precision == "float" else "d"
 
-    # TODO: the below line is for debugging
-
     gemm_dims = f'm{self.mat_a.get_actual_num_rows()}_n{self.mat_b.get_actual_num_cols()}_k{self.mat_a.get_actual_num_cols()}'
     ldas = f'lda{self.mat_a.num_rows}_ldb{self.mat_b.num_rows}_ldc{self.mat_c.num_rows}'
     consts = f'alpha_{int(self.alpha)}_beta_{int(self.beta)}'
-    """
-    return "{}gemm_{}_{}_{}_{}".format(prefix,
-                                       traspose,
-                                       dims,
-                                       addressing,
-                                       md5encoding[:Generator.ENCODING_LENGTH])
-    """
     return "{0}gemm_{1}_{2}_{3}_{4}_{5}_{6}".format(prefix,
-                                                traspose,
-                                                gemm_dims,
-                                                ldas,
-                                                consts,
-                                                addressing,
-                                                md5encoding[:Generator.ENCODING_LENGTH])
+                                                    traspose,
+                                                    gemm_dims,
+                                                    ldas,
+                                                    consts,
+                                                    addressing,
+                                                    md5encoding[:Generator.ENCODING_LENGTH])
 
   def _get_func_params(self):
     base_params = super(GemmGenerator, self)._get_func_params()
+    if isinstance(self.alpha, float):
+      return base_params
+    else:
+      return f'{self.precision} {self.alpha}, {base_params}'
+
+  def _get_launcher_params(self, with_defaults=False):
+    base_params = super(GemmGenerator, self)._get_launcher_params(with_defaults)
     if isinstance(self.alpha, float):
       return base_params
     else:

@@ -6,6 +6,7 @@ class AbstractGenerator(ABC):
   PRECISION = ["float", "double"]
   PRECISION_TO_BYTES = {"float": 4, "double": 8}
   NUM_ELEMENTS_STR = "NumElements"
+  STREAM_PTR_STR = "streamPtr"
   ENCODING_LENGTH = 7
 
   def __init__(self, arch, precision):
@@ -83,6 +84,16 @@ class AbstractGenerator(ABC):
     params = [self._build_param(matrix) for matrix in self._matrices]
     params = ", ".join(params)
     return "{}, unsigned {}".format(params, AbstractGenerator.NUM_ELEMENTS_STR)
+
+  @abstractmethod
+  def _get_launcher_params(self, with_defaults):
+    params = [self._build_param(matrix) for matrix in self._matrices]
+    params = ", ".join(params)
+    stream_ptr_default = ' = nullptr' if with_defaults else ''
+    return "{}, unsigned {}, void* {}{}".format(params,
+                                                AbstractGenerator.NUM_ELEMENTS_STR,
+                                                AbstractGenerator.STREAM_PTR_STR,
+                                                stream_ptr_default)
 
   @abstractmethod
   def _get_func_args(self):
