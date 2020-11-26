@@ -293,7 +293,7 @@ class GemmGenerator(GemmLikeGenerator):
     mults_wrt_num_regs = self.arch.max_reg_per_block / (self.num_active_threads * self.max_num_regs_per_thread)
     mults_per_sm = int(min(mults_wrt_shr_mem, mults_wrt_num_regs))
 
-    self.num_mult_per_block = max(math.ceil(mults_per_sm / self.arch.max_block_per_sm), 1)
+    self.num_mult_per_block = max(int(mults_per_sm / self.arch.max_block_per_sm), 1)
 
   def _get_total_shared_mem_size(self):
     return self.shr_mem_size_per_mult * self.num_mult_per_block
