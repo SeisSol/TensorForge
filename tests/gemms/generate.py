@@ -11,6 +11,8 @@ from test_loader import TestLoader
 parser = argparse.ArgumentParser()
 parser.add_argument('-s', '--specfile', action='store', help="path to a yaml file with a test spec")
 parser.add_argument('-r', '--realsize', type=int, action='store', help="size of real: 4(single)/8(double)")
+parser.add_argument('-a', '--arch', type=str, action='store', help="nvidia or amd")
+parser.add_argument('-m', '--sub_arch', type=str, action='store', help="sm_60, sm_70, etc.")
 args = parser.parse_args()
 
 # check input parameters. Make sure there are valid ones
@@ -27,7 +29,7 @@ else:
     raise ValueError("Floating point size must be either 4 or 8")
 
 
-arch = arch.produce("nvidia")
+arch = arch.produce(args.arch, args.sub_arch)
 generator = GemmGenerator(arch, "float" if args.realsize == 4 else "double")
 stream = open(args.specfile, 'r')
 suites = yaml.safe_load(stream)["test_suites"]
