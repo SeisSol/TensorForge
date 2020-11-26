@@ -32,6 +32,9 @@ class StubInitializer(AbstractGenerator):
   def _get_func_params(self):
     pass
 
+  def _get_launcher_params(self):
+    pass
+
   def _get_func_args(self):
     pass
 

@@ -4,13 +4,14 @@ from .exceptions import GenerationError
 from .abstract_gemmlike_generator import GemmLikeGenerator
 from .abstract_generator import AbstractGenerator as Generator
 from .loaders import shm_mem_factory, StubLoader
+from .arch_lexic import arch_lexic_factory
 import math
 import hashlib
 
 
 class GemmGenerator(GemmLikeGenerator):
     """ Generates GEMM GPU kernels: C = alpha * A * B + beta * C
-  """
+    """
 
     def __init__(self, arch, precision):
         super(GemmGenerator, self).__init__(arch, precision)
@@ -19,17 +20,13 @@ class GemmGenerator(GemmLikeGenerator):
         self.mat_c = None
         self.mat_a_loader = None
         self.mat_b_loader = None
-        self.TEAM_INDEX_STR = None
-        self.name_threadIdx_y = None
-        self.name_threadIdx_x = None
-        if arch.manufacturer == "nvidia":
-            self.TEAM_INDEX_STR = "(threadIdx.y + blockDim.y * blockIdx.x)"
-            self.name_threadIdx_y = "threadIdx.y"
-            self.name_threadIdx_x = "threadIdx.x"
-        elif arch.manufacturer == "amd":
-            self.TEAM_INDEX_STR = "(hipThreadIdx_y + hipBlockDim_y * hipBlockIdx_x)"
-            self.name_threadIdx_y = "hipThreadIdx_y"
-            self.name_threadIdx_x = "hipThreadIdx_x"
+        self.arch_lexic = arch_lexic_factory(arch.manufacturer)
+        # For better readability for the remaining code
+        self.TEAM_INDEX_STR = self.arch_lexic.get_tid_counter(self.arch_lexic.get_thread_idx_y(),
+                                                              self.arch_lexic.get_block_dim_y(),
+                                                              self.arch_lexic.get_block_idx_x())
+        self.name_threadIdx_y = self.arch_lexic.get_thread_idx_y()
+        self.name_threadIdx_x = self.arch_lexic.get_thread_idx_x()
 
     def generate(self, mat_a, mat_b, mat_c, alpha, beta, base_name=None):
         self.mat_a = mat_a
@@ -140,18 +137,17 @@ class GemmGenerator(GemmLikeGenerator):
                             file.Assignment("Value", "{}".format(first_operand))
 
                             """
-              # EXPEREMENTAL
-              # perform prefetch if possible
-              if self.mat_a.addressing != 'none' and isinstance(self.mat_a_loader, StubLoader):
-                # In other words, if matrix a is not going to be implicitly cached 
-                # AND
-                # it is going to reside on global memory without loading into the shared memory
-                # (in case of matrix 'a' is transposed)
-                next_addrs = "{} + {} + {} * (k + 1)".format(current_symbols[self.mat_a.name],
-                                                             self.name_threadIdx_x,
-                                                            self.mat_a_loader.get_lid_dim())
-                file.Expression(f'asm(" prefetch.global.L2 [ %0 ];" : : "l"({next_addrs}))')
-              """
+                            # EXPEREMENTAL
+                            # perform prefetch if possible
+                            if self.mat_a.addressing != 'none' and isinstance(self.mat_a_loader, StubLoader):
+                              # In other words, if matrix a is not going to be implicitly cached 
+                              # AND
+                              # it is going to reside on global memory without loading into the shared memory
+                              # (in case of matrix 'a' is transposed)
+                              next_addrs = "{} + threadIdx.x + {} * (k + 1)".format(current_symbols[self.mat_a.name],
+                                                                                    self.mat_a_loader.get_lid_dim())
+                              file.Expression(f'asm(" prefetch.global.L2 [ %0 ];" : : "l"({next_addrs}))')
+                            """
 
                             file.Emptyline()
                             file.Pragma("unroll")
@@ -197,24 +193,26 @@ class GemmGenerator(GemmLikeGenerator):
     def _generate_launcher(self):
         src = StringIO()
         with constructs.Cpp(src) as file:
-            with file.Function(self.base_name, self._get_func_params()):
+            with file.Function(self.base_name, self._get_launcher_params()):
                 file.VariableDeclaration("dim3", self._get_block_dim_spec())
                 file.VariableDeclaration("dim3", self._get_grid_dim_spec())
-                if self.arch.manufacturer == "nvidia":
-                    krnl_launch_param = "<<<Grid,Block>>>"
-                    file.Expression("kernel_{}{}({})".format(self.base_name,
-                                                             krnl_launch_param,
-                                                             self._get_func_args()))
-                elif self.arch.manufacturer == "amd":
-                    file.Expression("hipLaunchKernelGGL({}, Grid, Block, 0, 0, {})".format(self.base_name,
-                                                                                           self._get_func_args()))
+
+                if_stream_exists = f'({Generator.STREAM_PTR_STR} != nullptr)'
+                stream_obj = f'static_cast<{self.arch_lexic.get_stream_name()}>({Generator.STREAM_PTR_STR})'
+                file(f'{self.arch_lexic.get_stream_name()} stream = {if_stream_exists} ? {stream_obj} : 0;')
+
+                file.Expression(self.arch_lexic.get_launch_code(self.base_name,
+                                                                "Grid",
+                                                                "Block",
+                                                                "stream",
+                                                                self._get_func_args()))
                 file.Expression("CHECK_ERR")
             self._launcher = src.getvalue()
 
     def _generate_header(self):
         src = StringIO()
         with constructs.Cpp(src) as file:
-            file.FunctionDeclaration(self.base_name, self._get_func_params())
+            file.FunctionDeclaration(self.base_name, self._get_launcher_params(with_defaults=True))
             content = src.getvalue()
         self._header = content
 
@@ -274,9 +272,9 @@ class GemmGenerator(GemmLikeGenerator):
 
             raise error
 
-    def _estimate_num_registers_per_mult(self, contraction_length):
+    def _estimate_num_registers_per_mult(self, accumulator_length):
         factor = GemmGenerator.PRECISION_TO_BYTES[self.precision] / 4
-        return factor * (32 + contraction_length)
+        return factor * (32 + accumulator_length)
 
     def _analyze(self):
         if self.mat_a.transpose:
@@ -302,7 +300,8 @@ class GemmGenerator(GemmLikeGenerator):
                                             load_and_transpose=False,
                                             manufacturer=self.arch.manufacturer)
 
-        self.max_num_regs_per_thread = self._estimate_num_registers_per_mult(lid_dim_length)
+        accumulator_length = self.mat_c.get_actual_num_cols()
+        self.max_num_regs_per_thread = self._estimate_num_registers_per_mult(accumulator_length)
 
         self.shr_mem_size_per_mult = self.mat_a_loader.compute_shared_mem_size() \
                                      + self.mat_b_loader.compute_shared_mem_size()
@@ -310,9 +309,9 @@ class GemmGenerator(GemmLikeGenerator):
         shr_mem_bytes = self.shr_mem_size_per_mult * Generator.PRECISION_TO_BYTES[self.precision]
         mults_wrt_shr_mem = self.arch.max_local_mem_size_per_block / shr_mem_bytes
         mults_wrt_num_regs = self.arch.max_reg_per_block / (self.num_active_threads * self.max_num_regs_per_thread)
-        mults_per_sm = int(min(mults_wrt_shr_mem, mults_wrt_num_regs))
+        self.mults_per_sm = int(min(mults_wrt_shr_mem, mults_wrt_num_regs))
 
-        self.num_mult_per_block = max(int(mults_per_sm / self.arch.max_block_per_sm), 1)
+        self.num_mult_per_block = max(int(self.mults_per_sm / self.arch.max_block_per_sm), 1)
 
     def _get_total_shared_mem_size(self):
         return self.shr_mem_size_per_mult * self.num_mult_per_block
@@ -348,18 +347,9 @@ class GemmGenerator(GemmLikeGenerator):
         md5encoding = result.hexdigest()
         prefix = 's' if self.precision == "float" else "d"
 
-        # TODO: the below line is for debugging
-
         gemm_dims = f'm{self.mat_a.get_actual_num_rows()}_n{self.mat_b.get_actual_num_cols()}_k{self.mat_a.get_actual_num_cols()}'
         ldas = f'lda{self.mat_a.num_rows}_ldb{self.mat_b.num_rows}_ldc{self.mat_c.num_rows}'
         consts = f'alpha_{int(self.alpha)}_beta_{int(self.beta)}'
-        """
-    return "{}gemm_{}_{}_{}_{}".format(prefix,
-                                       traspose,
-                                       dims,
-                                       addressing,
-                                       md5encoding[:Generator.ENCODING_LENGTH])
-    """
         return "{0}gemm_{1}_{2}_{3}_{4}_{5}_{6}".format(prefix,
                                                         traspose,
                                                         gemm_dims,
@@ -370,6 +360,13 @@ class GemmGenerator(GemmLikeGenerator):
 
     def _get_func_params(self):
         base_params = super(GemmGenerator, self)._get_func_params()
+        if isinstance(self.alpha, float):
+            return base_params
+        else:
+            return f'{self.precision} {self.alpha}, {base_params}'
+
+    def _get_launcher_params(self, with_defaults=False):
+        base_params = super(GemmGenerator, self)._get_launcher_params(with_defaults)
         if isinstance(self.alpha, float):
             return base_params
         else:
