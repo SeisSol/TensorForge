@@ -188,7 +188,7 @@ class GemmGenerator(GemmLikeGenerator):
         file.VariableDeclaration("dim3", self._get_grid_dim_spec())
 
         if_stream_exists = f'({Generator.STREAM_PTR_STR} != nullptr)'
-        stream_obj = f'*(static_cast<cudaStream_t*>({Generator.STREAM_PTR_STR}))'
+        stream_obj = f'static_cast<cudaStream_t>({Generator.STREAM_PTR_STR})'
         file(f'cudaStream_t stream = {if_stream_exists} ? {stream_obj} : 0;')
 
         krnl_launch_param = "<<<Grid,Block,0,stream>>>"

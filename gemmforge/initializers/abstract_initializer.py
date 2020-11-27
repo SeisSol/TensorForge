@@ -75,7 +75,7 @@ class ExactInitializer(AbstractGenerator):
         file.VariableDeclaration("dim3", self._get_grid_dim_spec())
 
         if_stream_exists = f'({AbstractGenerator.STREAM_PTR_STR} != nullptr)'
-        stream_obj = f'*(static_cast<cudaStream_t*>({AbstractGenerator.STREAM_PTR_STR}))'
+        stream_obj = f'static_cast<cudaStream_t>({AbstractGenerator.STREAM_PTR_STR})'
         file(f'cudaStream_t stream = {if_stream_exists} ? {stream_obj} : 0;')
 
         krnl_launch_param = "<<<Grid,Block,0,stream>>>"
