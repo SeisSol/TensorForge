@@ -1,4 +1,4 @@
-execute_process(COMMAND python -c "import gemmforge; gemmforge.get_version()"
+execute_process(COMMAND python3 -c "import gemmforge; gemmforge.get_version()"
                 OUTPUT_VARIABLE PACKAGE_VERSION)
 
 # Check whether the requested PACKAGE_FIND_VERSION is compatible
