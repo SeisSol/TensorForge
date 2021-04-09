@@ -7,10 +7,8 @@ set(CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG} -Og")
 set(REAL_SIZE "4" CACHE STRING "size of the floating point data type")
 set_property(CACHE REAL_SIZE PROPERTY STRINGS "8" "4")
 
-set(DEVICE_BACKEND "HIP" CACHE STRING "type of an interface")
+set(DEVICE_BACKEND "CUDA" CACHE STRING "type of an interface")
 set_property(CACHE DEVICE_BACKEND PROPERTY STRINGS "CUDA" "HIP")
-
-set(MANUFACTURER "")
 
 if (${DEVICE_BACKEND} STREQUAL "CUDA")
   set(MANUFACTURER "nvidia")
@@ -18,7 +16,7 @@ elseif (${DEVICE_BACKEND} STREQUAL "HIP")
   set(MANUFACTURER "amd")
 endif()
 
-set(SUB_ARCH "gfx906" CACHE STRING "size of the floating point data type")
+set(SUB_ARCH "sm_61" CACHE STRING "size of the floating point data type")
 set_property(CACHE SUB_ARCH PROPERTY STRINGS "sm_60" "sm_61" "sm_70" "sm_71" "gfx906")
 
 set(TEST_SUITE "" CACHE STRING "relative path to test suite spec file")
@@ -94,12 +92,7 @@ elseif(${DEVICE_BACKEND} STREQUAL "HIP")
 
   set(HIP_COMPILER hcc)
 
-  find_package(HIP QUIET)
-  if(HIP_FOUND)
-    message(STATUS "Found HIP: " ${HIP_VERSION})
-  else()
-    message(FATAL_ERROR "Could not find HIP. Ensure that HIP is either installed in /opt/rocm/hip or the variable HIP_PATH is set to point to the right location.")
-  endif()
+  find_package(HIP REQUIRED)
 
   set(HIP_COMPILER hcc)
 

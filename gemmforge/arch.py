@@ -46,8 +46,8 @@ def produce(name, sub_name):
                           max_num_threads,
                           max_reg_per_block,
                           max_threads_per_sm,
-                          max_block_per_sm)
-                            name)
+                          max_block_per_sm,
+                          name)
 
     elif name == "amd":
         

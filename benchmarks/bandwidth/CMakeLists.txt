@@ -1,10 +1,10 @@
 cmake_minimum_required(VERSION 3.5)
 project(simple-bandwidth-test)
 
-set(SM_ARCH "gfx906" CACHE STRING "size of the floating point data type")
+set(SM_ARCH "sm_61" CACHE STRING "size of the floating point data type")
 set_property(CACHE SM_ARCH PROPERTY STRINGS "sm_60" "sm_61" "sm_70" "sm_71")
 
-set(DEVICE_BACKEND "HIP" CACHE STRING "type of an interface")
+set(DEVICE_BACKEND "CUDA" CACHE STRING "type of an interface")
 set_property(CACHE DEVICE_BACKEND PROPERTY STRINGS "CUDA" "HIP")
 
 if(${DEVICE_BACKEND} STREQUAL "CUDA")
@@ -34,12 +34,8 @@ elseif(${DEVICE_BACKEND} STREQUAL "HIP")
   #set the CMAKE_MODULE_PATH for the helper cmake files from HIP
   set(CMAKE_MODULE_PATH "${HIP_PATH}/cmake" ${CMAKE_MODULE_PATH})
 
-  find_package(HIP QUIET)
-  if(HIP_FOUND)
-    message(STATUS "Found HIP: " ${HIP_VERSION})
-  else()
-    message(FATAL_ERROR "Could not find HIP. Ensure that HIP is either installed in /opt/rocm/hip or the variable HIP_PATH is set to point to the right location.")
-  endif()
+  find_package(HIP REQUIRED)
+
   #Do NOT set this if you make an executable
   #set(HIP_COMPILER hcc)
 
