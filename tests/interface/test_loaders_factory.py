@@ -31,7 +31,8 @@ class TestLoaders(unittest.TestCase):
                                                 bbox=[0, 0, 15, 20],
                                                 transpose=False),
                              num_active_threads=32,
-                             load_and_transpose=False)
+                             load_and_transpose=False,
+                             manufacturer="nvidia")
     self.assertIsInstance(loader, ExtendedPatchLoader)
 
     # multiple hops to load a column
@@ -41,7 +42,8 @@ class TestLoaders(unittest.TestCase):
                                                 bbox=[0, 0, 34, 20],
                                                 transpose=False),
                              num_active_threads=32,
-                             load_and_transpose=False)
+                             load_and_transpose=False,
+                             manufacturer="nvidia")
     self.assertIsInstance(loader, ExtendedPatchLoader)
 
   def test_exact_loader(self):
@@ -52,7 +54,8 @@ class TestLoaders(unittest.TestCase):
                                                 bbox=[0, 0, 15, 20],
                                                 transpose=False),
                              num_active_threads=32,
-                             load_and_transpose=False)
+                             load_and_transpose=False,
+                             manufacturer="nvidia")
 
     self.assertIsInstance(loader, ExactPatchLoader)
 
@@ -63,7 +66,8 @@ class TestLoaders(unittest.TestCase):
                                                 bbox=[0, 0, 34, 20],
                                                 transpose=False),
                              num_active_threads=32,
-                             load_and_transpose=False)
+                             load_and_transpose=False,
+                             manufacturer="nvidia")
     self.assertIsInstance(loader, ExactPatchLoader)
 
   def test_extended_transpose_loader(self):
@@ -74,7 +78,8 @@ class TestLoaders(unittest.TestCase):
                                                 bbox=[0, 0, 15, 20],
                                                 transpose=True),
                              num_active_threads=32,
-                             load_and_transpose=True)
+                             load_and_transpose=True,
+                             manufacturer="nvidia")
     self.assertIsInstance(loader, ExtendedTransposePatchLoader)
 
     # multiple hops to load a column
@@ -84,7 +89,8 @@ class TestLoaders(unittest.TestCase):
                                                 bbox=[0, 0, 34, 20],
                                                 transpose=True),
                              num_active_threads=32,
-                             load_and_transpose=True)
+                             load_and_transpose=True,
+                             manufacturer="nvidia")
     self.assertIsInstance(loader, ExtendedTransposePatchLoader)
 
   def test_exact_transpose_loader(self):
@@ -95,7 +101,8 @@ class TestLoaders(unittest.TestCase):
                                                 bbox=[0, 0, 15, 20],
                                                 transpose=True),
                              num_active_threads=32,
-                             load_and_transpose=True)
+                             load_and_transpose=True,
+                             manufacturer="nvidia")
     self.assertIsInstance(loader, ExactTransposePatchLoader)
 
     # multiple hops to load a column
@@ -105,7 +112,8 @@ class TestLoaders(unittest.TestCase):
                                                 bbox=[0, 0, 34, 20],
                                                 transpose=True),
                              num_active_threads=32,
-                             load_and_transpose=True)
+                             load_and_transpose=True,
+                             manufacturer="nvidia")
     self.assertIsInstance(loader, ExactTransposePatchLoader)
 
 
