@@ -177,7 +177,11 @@ class CsaGenerator(GemmLikeGenerator):
         stream_obj = f'static_cast<{self.arch_lexic.get_stream_name()}>({Generator.STREAM_PTR_STR})'
         file(f'{self.arch_lexic.get_stream_name()} stream = {if_stream_exists} ? {stream_obj} : 0;')
 
-        self.arch_lexic.get_launch_code(self.base_name, "Grid", "Block", "stream", self._get_func_args())
+        file.Expression(self.arch_lexic.get_launch_code(self.base_name,
+                                                        "Grid",
+                                                        "Block",
+                                                        "stream",
+                                                        self._get_func_args()))
         file.Expression("CHECK_ERR")
       self._launcher += src.getvalue()
 
@@ -206,10 +210,6 @@ class CsaGenerator(GemmLikeGenerator):
 
   def _get_func_params(self):
     return f'{self.precision} Scale, {super(CsaGenerator, self)._get_func_params()}'
-
-
-def _get_launcher_params(self, with_defaults=False):
-  return f'{self.precision} Scale, {super(CsaGenerator, self)._get_launcher_params(with_defaults)}'
 
   def _get_launcher_params(self, with_defaults=False):
     return f'{self.precision} Scale, {super(CsaGenerator, self)._get_launcher_params(with_defaults)}'
