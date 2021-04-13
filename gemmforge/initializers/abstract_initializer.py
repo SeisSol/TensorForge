@@ -1,4 +1,5 @@
 from ..abstract_generator import AbstractGenerator
+from ..arch_lexic import arch_lexic_factory
 from .. import constructs
 from io import StringIO
 import math
@@ -6,7 +7,6 @@ import hashlib
 
 
 class ExactInitializer(AbstractGenerator):
-  TEAM_INDEX_STR = "(threadIdx.z + blockDim.z * blockIdx.x)"
 
   def __init__(self, init_value, matrix, arch, precision):
     super(ExactInitializer, self).__init__(arch, precision)
@@ -17,6 +17,10 @@ class ExactInitializer(AbstractGenerator):
     self.matrix._set_name('A')
     self.matrix._set_mutability(True)
     self._matrices = [self.matrix]
+    self.arch_lexic = arch_lexic_factory(arch.manufacturer)
+    self.TEAM_INDEX_STR = self.arch_lexic.get_tid_counter(self.arch_lexic.get_thread_idx_z(),
+                                                          self.arch_lexic.get_block_dim_z(),
+                                                          self.arch_lexic.get_block_idx_x())
 
   def generate(self, base_name=None):
     self.base_name = base_name if base_name is not None else self._generate_base_name()
@@ -53,7 +57,7 @@ class ExactInitializer(AbstractGenerator):
       max_num_threads_per_block = total_num_threas_per_op * self.num_mult_per_block
       kernel_bounds = [max_num_threads_per_block]
       with file.Kernel(self.base_name, self._get_func_params(), kernel_bounds):
-        with file.If("{} < {}".format(ExactInitializer.TEAM_INDEX_STR, AbstractGenerator.NUM_ELEMENTS_STR)):
+        with file.If("{} < {}".format(self.TEAM_INDEX_STR, AbstractGenerator.NUM_ELEMENTS_STR)):
 
           # declare ptrs for correct matrices
           file.VariableDeclaration("{}*".format(self.precision),
@@ -61,8 +65,8 @@ class ExactInitializer(AbstractGenerator):
                                    self._get_global_matrix_ptr(self.matrix))
 
           # assign initial value to a matrix element
-          with file.If("threadIdx.x < {}".format(self.matrix.get_actual_num_rows())):
-              file.Assignment(f'{global_symbols[self.matrix.name]}[threadIdx.x]',
+          with file.If(f"{self.arch_lexic.get_thread_idx_x()} < {self.matrix.get_actual_num_rows()}"):
+              file.Assignment(f'{global_symbols[self.matrix.name]}[{self.arch_lexic.get_thread_idx_x()}]',
                               f'{self.init_value}')
 
       self._kernel = src.getvalue()
@@ -75,13 +79,15 @@ class ExactInitializer(AbstractGenerator):
         file.VariableDeclaration("dim3", self._get_grid_dim_spec())
 
         if_stream_exists = f'({AbstractGenerator.STREAM_PTR_STR} != nullptr)'
-        stream_obj = f'static_cast<cudaStream_t>({AbstractGenerator.STREAM_PTR_STR})'
-        file(f'cudaStream_t stream = {if_stream_exists} ? {stream_obj} : 0;')
+        stream_obj = f'static_cast<{self.arch_lexic.get_stream_name()}>({AbstractGenerator.STREAM_PTR_STR})'
+        file(f'{self.arch_lexic.get_stream_name()} stream = {if_stream_exists} ? {stream_obj} : 0;')
 
-        krnl_launch_param = "<<<Grid,Block,0,stream>>>"
-        file.Expression("kernel_{}{}({})".format(self.base_name,
-                                                 krnl_launch_param,
-                                                 self._get_func_args()))
+        file.Expression(self.arch_lexic.get_launch_code(self.base_name,
+                                                        "Grid",
+                                                        "Block",
+                                                        "stream",
+                                                        self._get_func_args()))
+
         file.Expression("CHECK_ERR")
       self._launcher = src.getvalue()
 
@@ -136,10 +142,10 @@ class ExactInitializer(AbstractGenerator):
 
   def _get_global_matrix_ptr(self, matrix):
     extra_offset_symbol = self._generate_extra_offset_symbol(matrix)
-    offset_to_row = f'threadIdx.y * {matrix.num_rows}'
+    offset_to_row = f'{self.arch_lexic.get_thread_idx_y()} * {matrix.num_rows}'
 
     if matrix.addressing == "strided":
-      main_offset = "{} * {}".format(ExactInitializer.TEAM_INDEX_STR, matrix.get_real_volume())
+      main_offset = "{} * {}".format(self.TEAM_INDEX_STR, matrix.get_real_volume())
       sub_offset = matrix.get_offset_to_first_element()
       return "&{}[{} + {} + {} + {}]".format(matrix.name,
                                              extra_offset_symbol,
@@ -148,7 +154,7 @@ class ExactInitializer(AbstractGenerator):
                                              offset_to_row)
 
     elif matrix.addressing == "pointer_based":
-      main_offset = ExactInitializer.TEAM_INDEX_STR
+      main_offset = self.TEAM_INDEX_STR
       sub_offset = matrix.get_offset_to_first_element()
       return "&{}[{}][{} + {} + {}]".format(matrix.name,
                                             main_offset,

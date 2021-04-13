@@ -11,8 +11,16 @@ from test_loader import TestLoader
 parser = argparse.ArgumentParser()
 parser.add_argument('-s', '--specfile', action='store', help="path to a yaml file with a test spec")
 parser.add_argument('-r', '--realsize', type=int, action='store', help="size of real: 4(single)/8(double)")
-parser.add_argument('-a', '--arch', type=str, action='store', help="nvidia or amd")
-parser.add_argument('-m', '--sub_arch', type=str, action='store', help="sm_60, sm_70, etc.")
+parser.add_argument("-m",
+                    "--manufacturer",
+                    action="store",
+                    help="Name of the Manufacturer, currently nvidia and amd are supported",
+                    default="nvidia")
+parser.add_argument("-a",
+                    "--sub_arch",
+                    action="store",
+                    help="Sub_arch of the GPU, e.g sm_60 for Nvidia or gfx906 for AMD",
+                    default="sm_61")
 args = parser.parse_args()
 
 # check input parameters. Make sure there are valid ones
@@ -28,8 +36,7 @@ else:
   if not ((args.realsize == 4) or (args.realsize == 8)):
     raise ValueError("Floating point size must be either 4 or 8")
 
-
-arch = arch.produce(args.arch, args.sub_arch)
+arch = arch.produce(args.manufacturer, args.sub_arch)
 generator = GemmGenerator(arch, "float" if args.realsize == 4 else "double")
 stream = open(args.specfile, 'r')
 suites = yaml.safe_load(stream)["test_suites"]
@@ -40,6 +47,8 @@ tests_code = StringIO()
 
 with constructs.Cpp(StringIO()) as file:
   file.Include("gemmgen_aux.h")
+  if arch.manufacturer == "amd":
+    file.Include("hip/hip_runtime.h")
   src.write(file.stream.getvalue())
 
 with constructs.Cpp(StringIO()) as file:
@@ -52,11 +61,10 @@ with constructs.Cpp(StringIO()) as file:
   file.Emptyline()
   tests_code.write(file.stream.getvalue())
 
-
 for suite in suites:
   for test in TestLoader(suite):
     mat_a, mat_b, mat_c, alpha, beta, num_elements, test_name = test
-    
+
     try:
       generator.generate(mat_a, mat_b, mat_c, alpha, beta)
       src.write(generator.get_kernel())
@@ -89,15 +97,19 @@ for suite in suites:
           file.VariableDeclaration("int", "NextC", "{}".format(0 if mat_c.addressing == "none" else "SizeC"))
           file.Emptyline()
 
-          file.VariableDeclaration("int", "OffsetA", "{} * {} + {}".format(mat_a.num_rows, mat_a.bbox[1], mat_a.bbox[0]))
-          file.VariableDeclaration("int", "OffsetB", "{} * {} + {}".format(mat_b.num_rows, mat_b.bbox[1], mat_b.bbox[0]))
-          file.VariableDeclaration("int", "OffsetC", "{} * {} + {}".format(mat_c.num_rows, mat_c.bbox[1], mat_c.bbox[0]))
+          file.VariableDeclaration("int", "OffsetA",
+                                   "{} * {} + {}".format(mat_a.num_rows, mat_a.bbox[1], mat_a.bbox[0]))
+          file.VariableDeclaration("int", "OffsetB",
+                                   "{} * {} + {}".format(mat_b.num_rows, mat_b.bbox[1], mat_b.bbox[0]))
+          file.VariableDeclaration("int", "OffsetC",
+                                   "{} * {} + {}".format(mat_c.num_rows, mat_c.bbox[1], mat_c.bbox[0]))
           file.Emptyline()
 
-          file.VariableDeclaration("LayoutType", "TransA", "LayoutType::{}".format("Trans" if mat_a.transpose else "NoTrans"))
-          file.VariableDeclaration("LayoutType", "TransB", "LayoutType::{}".format("Trans" if mat_b.transpose else "NoTrans"))
+          file.VariableDeclaration("LayoutType", "TransA",
+                                   "LayoutType::{}".format("Trans" if mat_a.transpose else "NoTrans"))
+          file.VariableDeclaration("LayoutType", "TransB",
+                                   "LayoutType::{}".format("Trans" if mat_b.transpose else "NoTrans"))
           file.Emptyline()
-
 
           file.VariableDeclaration(generator.precision, "alpha", alpha)
           file.VariableDeclaration(generator.precision, "beta", beta)
@@ -142,7 +154,6 @@ for suite in suites:
       print("ERROR: {}".format(error))
       raise error
 
-
 dir_name = "./gen_code"
 if not os.path.exists(dir_name):
   os.mkdir(dir_name)
@@ -151,14 +162,18 @@ path = os.path.join(dir_name, "test.cpp")
 with open(path, 'w') as file:
   file.write(tests_code.getvalue())
 
-path = os.path.join(dir_name, "kernels.cu")
+if arch.manufacturer == "nvidia":
+  path = os.path.join(dir_name, "kernels.cu")
+elif arch.manufacturer == "amd":
+  path = os.path.join(dir_name, "kernels.cpp")
+else:
+  print("Manufacturer not supported, could not write kernel file")
 with open(path, 'w') as file:
   file.write(src.getvalue())
 
 path = os.path.join(dir_name, "kernels.h")
 with open(path, 'w') as file:
   file.write(headers.getvalue())
-
 
 tests_code.close()
 src.close()
