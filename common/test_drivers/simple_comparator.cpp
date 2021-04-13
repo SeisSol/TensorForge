@@ -14,12 +14,12 @@ bool L1NormComparator::compare(const PackedData &Host, const PackedData &Device,
       real Difference = fabs(Host[Element][Index] - Device[Element][Index]);
       if (Difference > Eps) {
         IsEqual = false;
-        /*
+
         Stream << "Element: " << Element << "; " << "Index: " << Index << "; "
                << "Host: " << Host[Element][Index] << "; "
                << "Device: " << Device[Element][Index] << "; "
                << "Diff.: " << Difference << "\n";
-        */
+
       }
     }
   }

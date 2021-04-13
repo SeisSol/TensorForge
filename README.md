@@ -15,7 +15,7 @@ pip install -e .
 
 ## Usage
 ```python
-from gemmforge import DenseMatrix, GemmGenerator, GenerationError
+from gemmforge import DenseMatrix, GenerationError
 from gemmforge import arch
 
 arch = arch.produce("nvidia", "sm_60")
@@ -39,7 +39,7 @@ mat_c = DenseMatrix(num_rows=56,
                     addressing="strided",
                     transpose=False)
 try:
-    gen = GemmGenerator(arch, "float")
+    gen = arch.get_gemm_generator_factory().create("float")
     gen.generate(mat_a, mat_b, mat_c, alpha=1.1, beta=1.1)
     print(gen.get_kernel())
     print(gen.get_launcher())

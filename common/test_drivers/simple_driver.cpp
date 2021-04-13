@@ -57,6 +57,9 @@ void TestDriver::prepareData() {
   }
 }
 
+void *TestDriver::getTestStream() {
+    return nullptr;
+}
 
 void TestDriver::initMatrix(real *Matrix, int Size) {
   if (m_IsSet) {

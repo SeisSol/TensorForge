@@ -37,6 +37,9 @@ void TestDriver::SetUp() {
   }
 }
 
+void *TestDriver::getTestStream() {
+    return nullptr;
+}
 
 void TestDriver::prepareData() {
   if (m_IsSet) {

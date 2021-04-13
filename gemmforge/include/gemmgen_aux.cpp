@@ -23,7 +23,7 @@ namespace gemmgen {
       PrevLine = Line;
     }
 
-  void synchDevice() {
+  void synchDevice(void *stream) {
     hipDeviceSynchronize();
     checkErr(__FILE__, __LINE__);
   }

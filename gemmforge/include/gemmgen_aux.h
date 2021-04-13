@@ -7,7 +7,7 @@
 #define CHECK_ERR gemmgen::checkErr(__FILE__,__LINE__)
 namespace gemmgen {
   void checkErr(const std::string &file, int line);
-  void synchDevice();
+  void synchDevice(void *stream = nullptr);
 }
 
 #endif  // GEMMGEN_INTERNALS_H

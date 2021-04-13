@@ -2,7 +2,7 @@ import os
 import yaml
 import argparse
 
-from gemmforge import DenseMatrix, GemmGenerator, GenerationError
+from gemmforge import GenerationError, GemmGenerator
 from gemmforge import arch
 from gemmforge import constructs
 from io import StringIO
@@ -38,6 +38,7 @@ else:
 
 arch = arch.produce(args.manufacturer, args.sub_arch)
 generator = GemmGenerator(arch, "float" if args.realsize == 4 else "double")
+
 stream = open(args.specfile, 'r')
 suites = yaml.safe_load(stream)["test_suites"]
 
@@ -49,6 +50,8 @@ with constructs.Cpp(StringIO()) as file:
     file.Include("gemmgen_aux.h")
     if arch.manufacturer == "amd":
         file.Include("hip/hip_runtime.h")
+    elif arch.manufacturer == "sycl":
+        file.Include("CL/sycl.hpp")
     src.write(file.stream.getvalue())
 
 with constructs.Cpp(StringIO()) as file:
@@ -57,6 +60,7 @@ with constructs.Cpp(StringIO()) as file:
     file.Include("gemm_driver.h")
     file.Include("kernels.h")
     file.Include("gemm.h")
+    file.Include("iostream")
     file.Expression("using namespace gemmgen::reference")
     file.Emptyline()
     tests_code.write(file.stream.getvalue())
@@ -124,8 +128,11 @@ for suite in suites:
                     args.append("{}, 0".format("DeviceShuffledB" if mat_b.addressing == "pointer_based" else "DeviceB"))
                     args.append("{}, 0".format("DeviceShuffledC" if mat_c.addressing == "pointer_based" else "DeviceC"))
                     args.append("NumElements")
+                    args.append("Driver.getTestStream()")
+
                     args = ", ".join(args)
                     file.Expression("{}({})".format(generator.get_base_name(), args))
+
 
                     args = ["TransA", "TransB", "M", "N", "K"]
                     args.extend(["alpha", "&HostA[OffsetA], Lda"])
@@ -164,7 +171,7 @@ with open(path, 'w') as file:
 
 if arch.manufacturer == "nvidia":
     path = os.path.join(dir_name, "kernels.cu")
-elif arch.manufacturer == "amd":
+elif arch.manufacturer == "amd" or arch.manufacturer == "sycl":
     path = os.path.join(dir_name, "kernels.cpp")
 else:
     print("Manufacturer not supported, could not write kernel file")

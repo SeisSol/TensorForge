@@ -41,5 +41,30 @@ class AbstractArchLexic(ABC):
         return self.stream_name
 
     @abstractmethod
-    def get_launch_code(self, func_name, grid, block, func_params):
+    def get_launch_code(self, func_name, grid, block, stream, func_params):
         pass
+
+    @abstractmethod
+    def declare_shared_memory_inline(self, name, precision, size):
+        pass
+
+    @abstractmethod
+    def kernel_definition(self, file, kernel_bounds, base_name, params, precision=None, total_shared_mem_size=None):
+        pass
+
+    @abstractmethod
+    def sync_threads(self):
+        pass
+
+    @abstractmethod
+    def kernel_range_object(self):
+        pass
+
+    @abstractmethod
+    def get_stream_via_pointer(self, file, stream_name, pointer_name):
+        pass
+
+    @abstractmethod
+    def check_error(self):
+        pass
+

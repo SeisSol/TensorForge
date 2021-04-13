@@ -10,6 +10,7 @@ import hashlib
 from copy import deepcopy
 
 
+
 class CsaGenerator(GemmLikeGenerator):
     """ Copy-Add-Scale Generator: B = beta * B + alpha * A, where alpha is a real number
   and beta is either 1.0 or 0.0
@@ -108,7 +109,7 @@ class CsaGenerator(GemmLikeGenerator):
             total_num_threas_per_op = self.num_active_threads * self.mat_a.get_actual_num_cols()
             max_num_threads_per_block = total_num_threas_per_op * self.num_mult_per_block
             kernel_bounds = [max_num_threads_per_block]
-            with file.Kernel(self.base_name, self._get_func_params(), kernel_bounds):
+            with self.arch_lexic.kernel_definition(file, kernel_bounds, self.base_name, self._get_func_params()):
                 with file.If("{} < {}".format(self.TEAM_INDEX_STR, Generator.NUM_ELEMENTS_STR)):
 
                     # declare ptrs for correct matrices
@@ -146,7 +147,7 @@ class CsaGenerator(GemmLikeGenerator):
                                   f'[{self.name_threadIdx_x}]' \
                                   f' + {self.beta}' \
                                   f' * {glob_symbols[self.mat_b.name]}[{self.name_threadIdx_x}] '
-                            file.Assignment(left=f'{glob_symbols[self.mat_b.name]}[threadIdx.x]', right=rhs)
+                            file.Assignment(left=f'{glob_symbols[self.mat_b.name]}[{self.name_threadIdx_x}]', right=rhs)
 
             self._kernel = src.getvalue()
             self._kernel += self._mat_b_initializer.get_kernel()
@@ -170,15 +171,18 @@ class CsaGenerator(GemmLikeGenerator):
                 # call the initializer. Note: the initializer can be a stub i.e. will do nothing
                 file("{}".format(self._mat_b_initializer.func_call(initializer_args)))
 
-                file.VariableDeclaration("dim3", self._get_block_dim_spec())
-                file.VariableDeclaration("dim3", self._get_grid_dim_spec())
+                file.VariableDeclaration(self.arch_lexic.kernel_range_object(), self._get_block_dim_spec())
+                file.VariableDeclaration(self.arch_lexic.kernel_range_object(), self._get_grid_dim_spec())
 
-                if_stream_exists = f'({Generator.STREAM_PTR_STR} != nullptr)'
-                stream_obj = f'static_cast<{self.arch_lexic.get_stream_name()}>({Generator.STREAM_PTR_STR})'
-                file(f'{self.arch_lexic.get_stream_name()} stream = {if_stream_exists} ? {stream_obj} : 0;')
-
-                self.arch_lexic.get_launch_code(self.base_name, "Grid", "Block", "stream", self._get_func_args())
-                file.Expression("CHECK_ERR")
+                self.arch_lexic.get_stream_via_pointer(file, "streamPtr", Generator.STREAM_PTR_STR)
+                file.Expression(self.arch_lexic.get_launch_code(self.base_name,
+                                                                "Grid",
+                                                                "Block",
+                                                                "stream",
+                                                                self._get_func_args()))
+                err = self.arch_lexic.check_error()
+                if err is not None:
+                    file.Expression(err)
             self._launcher += src.getvalue()
 
     def _generate_header(self):

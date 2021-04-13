@@ -63,12 +63,7 @@ class ExactPatchLoader(AbstractShrMemLoader):
     def __init__(self, matrix, num_active_threads, load_and_transpose, manufacturer):
         super(ExactPatchLoader, self).__init__(matrix, num_active_threads, manufacturer, load_and_transpose)
         self.lid_dim = self.matrix.get_actual_num_rows()
-
-        self.name_treadIdx_x = None
-        if manufacturer == "nvidia":
-            self.name_treadIdx_x = "threadIdx.x"
-        elif manufacturer == "amd":
-            self.name_treadIdx_x = "hipThreadIdx_x"
+        self.name_treadIdx_x = self.arch_lexic.get_thread_idx_x()
 
     def compute_shared_mem_size(self):
         return self.matrix.get_actual_volume()

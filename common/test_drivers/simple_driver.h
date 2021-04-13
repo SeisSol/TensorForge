@@ -24,6 +24,8 @@ namespace gemmgen {
       void prepareData();
       void TearDown();
 
+      void *getTestStream();
+
       std::tuple<real*, real*, real*> getDeviceRawData() {
         return std::make_tuple(m_DeviceMatA, m_DeviceMatB, m_DeviceMatC);
       }

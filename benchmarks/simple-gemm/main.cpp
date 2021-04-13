@@ -93,8 +93,8 @@ int main(int Argc, char* Arcv[]) {
                            NumElements);
 
   std::cout << "INFO: computing on GPU started" << std::endl;
-  gemm(DeviceA, 0, DeviceB, 0, DeviceC, 0, NumElements);
-  synchDevice();
+  gemm(DeviceA, 0, DeviceB, 0, DeviceC, 0, NumElements, Driver.getTestStream());
+  synchDevice(Driver.getTestStream());
 
   std::cout << "INFO: comparsion started" << std::endl;
   Driver.packResults(M,  Ldc, N, OffsetC, SizeC, NumElements);
@@ -111,9 +111,9 @@ int main(int Argc, char* Arcv[]) {
   int NumRepeats = Config["num_repeats"].as<int>();
   Timer.start();
   for (int Repeat = 0; Repeat < NumRepeats; ++Repeat) {
-    gemm(DeviceA, 0, DeviceB, 0, DeviceC, 0, NumElements);
+    gemm(DeviceA, 0, DeviceB, 0, DeviceC, 0, NumElements, Driver.getTestStream());
   }
-  synchDevice();
+  synchDevice(Driver.getTestStream());
   Timer.stop();
 
   std::cout << "Num elements: " << NumElements << std::endl;

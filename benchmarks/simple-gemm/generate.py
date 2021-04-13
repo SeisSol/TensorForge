@@ -2,7 +2,7 @@ import os
 import yaml
 import argparse
 
-from gemmforge import DenseMatrix, GemmGenerator, GenerationError
+from gemmforge import DenseMatrix, GenerationError, GemmGenerator
 from gemmforge import arch
 
 parser = argparse.ArgumentParser()
@@ -56,13 +56,15 @@ try:
     path = None
     if arch.manufacturer == "nvidia":
         path = os.path.join(dir_name, "kernels.cu")
-    elif arch.manufacturer == "amd":
+    elif arch.manufacturer == "amd" or arch.manufacturer == "sycl":
         path = os.path.join(dir_name, "kernels.cpp")
         
     with open(path, 'w') as file:
         file.write("#include \"gemmgen_aux.h\"\n")
         if arch.manufacturer == "amd":
             file.write("#include \"hip/hip_runtime.h\"\n")
+        elif arch.manufacturer == "sycl":
+            file.write("#include <CL/sycl.hpp>\n")
         file.write(krnl)
         file.write(lnch)
 
