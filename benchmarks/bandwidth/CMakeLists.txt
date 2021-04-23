@@ -5,9 +5,13 @@ set(DEVICE_SUB_ARCH "gfx906" CACHE STRING "size of the floating point data type"
 set_property(CACHE DEVICE_SUB_ARCH PROPERTY STRINGS "sm_60" "sm_61" "sm_70" "sm_71")
 
 set(DEVICE_BACKEND "HIP" CACHE STRING "type of an interface")
-set_property(CACHE DEVICE_BACKEND PROPERTY STRINGS "CUDA" "HIP")
+set_property(CACHE DEVICE_BACKEND PROPERTY STRINGS "CUDA" "HIP" "ONEAPI" "HIPSYCL")
 
 set(REAL_SIZE_IN_BYTES 4)
+
+if(NOT DEFINED PREFERRED_DEVICE_TYPE)
+    set(ENV{PREFERRED_DEVICE_TYPE} GPU)
+endif()
 
 add_subdirectory(../../submodules/Device build)
 

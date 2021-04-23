@@ -1,5 +1,5 @@
 from .matrix import DenseMatrix
-from .arch import produce
+from gemmforge.vm import VM
 from .gemm_generator import GemmGenerator
 from .csa_generator import CsaGenerator
 from .interfaces import YatetoInterface

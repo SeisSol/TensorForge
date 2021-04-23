@@ -1,22 +1,18 @@
 from abc import ABC, abstractmethod
+from .vm import VM
 from .exceptions import GenerationError, InternalError
 
 
 class AbstractGenerator(ABC):
-  PRECISION = ["float", "double"]
-  PRECISION_TO_BYTES = {"float": 4, "double": 8}
   NUM_ELEMENTS_STR = "NumElements"
   STREAM_PTR_STR = "streamPtr"
   ENCODING_LENGTH = 7
 
-  def __init__(self, arch, precision):
-    self.arch = arch
-    if precision in AbstractGenerator.PRECISION:
-      self.precision = precision
-    else:
-      raise ValueError("given precision: {}. "
-                       "Allowed values: {}".format(precision,
-                                                   ", ".join(AbstractGenerator.PRECISION)))
+  def __init__(self, vm: VM):
+    self._vm = vm
+    self._lexic = self._vm.get_lexic()
+    self._hw_descr = self._vm.get_hw_descr()
+    self._precision = self._vm.fp_as_str()
 
     self.base_name = None
     self.num_mult_per_block = None
@@ -113,13 +109,14 @@ class AbstractGenerator(ABC):
 
   def _build_param(self, matrix):
     sub_offset = f'int {self._generate_extra_offset_symbol(matrix)}'
+    precision = self._vm.fp_as_str()
     if matrix.is_mutable():
-      return f'{self.precision} {matrix.ptr_type} {matrix.name}, {sub_offset}'
+      return f'{precision} {matrix.ptr_type} {matrix.name}, {sub_offset}'
     else:
       if matrix.addressing == "none":
-        return f'const {self.precision} {matrix.ptr_type} __restrict__ {matrix.name}, {sub_offset}'
+        return f'const {precision} {matrix.ptr_type} __restrict__ {matrix.name}, {sub_offset}'
       else:
-        return f'const {self.precision} {matrix.ptr_type} {matrix.name}, {sub_offset}'
+        return f'const {precision} {matrix.ptr_type} {matrix.name}, {sub_offset}'
 
   def _generate_extra_offset_symbol(self, matrix):
     return  f'ExtraOffset{matrix.name}'

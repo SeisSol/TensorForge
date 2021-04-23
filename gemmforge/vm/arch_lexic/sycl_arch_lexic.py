@@ -5,12 +5,12 @@ class SyclArchLexic(AbstractArchLexic):
 
     def __init__(self):
         AbstractArchLexic.__init__(self)
-        self.threadIdx_y = "item.get_local_id(1)"
-        self.threadIdx_x = "item.get_local_id(0)"
-        self.threadIdx_z = "item.get_local_id(2)"
-        self.blockIdx_x = "item.get_group().get_id(0)"
-        self.blockDim_y = "item.get_group().get_local_range(1)"
-        self.blockDim_z = "item.get_group().get_local_range(2)"
+        self.thread_idx_y = "item.get_local_id(1)"
+        self.thread_idx_x = "item.get_local_id(0)"
+        self.thread_idx_z = "item.get_local_id(2)"
+        self.block_idx_x = "item.get_group().get_id(0)"
+        self.block_dim_y = "item.get_group().get_local_range(1)"
+        self.block_dim_z = "item.get_group().get_local_range(2)"
         self.stream_name = "cl::sycl::queue"
 
     def get_launch_code(self, func_name, grid, block, stream, func_params):
@@ -37,8 +37,8 @@ class SyclArchLexic(AbstractArchLexic):
         with file.If(f"{pointer_name} == nullptr"):
             file.Expression("throw std::invalid_argument(\"stream may not be null!\")")
 
-        stream_obj = f'static_cast<{self.get_stream_name()} *>({pointer_name})'
-        file(f'{self.get_stream_name()} *stream = {stream_obj};')
+        stream_obj = f'static_cast<{self.stream_name} *>({pointer_name})'
+        file(f'{self.stream_name} *stream = {stream_obj};')
 
     def check_error(self):
         return None

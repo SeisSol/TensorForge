@@ -1,9 +1,10 @@
 from .stub_initializer import StubInitializer
 from .abstract_initializer import ExactInitializer
+from gemmforge.vm import VM
 
 
-def initializer_factory(init_value, matrix, arch, precision):
+def initializer_factory(vm: VM, init_value, matrix):
     if init_value == 1.0:
-        return StubInitializer(arch, precision)
+        return StubInitializer(vm)
     else:
-        return ExactInitializer(init_value, matrix, arch, precision)
+        return ExactInitializer(vm, init_value, matrix)

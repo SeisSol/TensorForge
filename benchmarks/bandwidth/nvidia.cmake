@@ -8,5 +8,6 @@
                         -maxrregcount 64;
                         -DREAL_SIZE=${REAL_SIZE_IN_BYTES})
 
-    cuda_add_executable(${CMAKE_PROJECT_NAME} global.cu
-                                              include/gemmgen_aux.cu)
+    cuda_add_executable(${CMAKE_PROJECT_NAME} global.cpp
+                                              include/gemmgen_aux.cu
+                                              cuda_kernel.cu)

@@ -5,12 +5,12 @@ class NvidiaArchLexic(AbstractArchLexic):
 
     def __init__(self):
         AbstractArchLexic.__init__(self)
-        self.threadIdx_y = "threadIdx.y"
-        self.threadIdx_x = "threadIdx.x"
-        self.threadIdx_z = "threadIdx.z"
-        self.blockIdx_x = "blockIdx.x"
-        self.blockDim_y = "blockDim.y"
-        self.blockDim_z = "blockDim.z"
+        self.thread_idx_y = "threadIdx.y"
+        self.thread_idx_x = "threadIdx.x"
+        self.thread_idx_z = "threadIdx.z"
+        self.block_idx_x = "blockIdx.x"
+        self.block_dim_y = "blockDim.y"
+        self.block_dim_z = "blockDim.z"
         self.stream_name = "cudaStream_t"
 
     def get_launch_code(self, func_name, grid, block, stream, func_params):
@@ -30,8 +30,8 @@ class NvidiaArchLexic(AbstractArchLexic):
 
     def get_stream_via_pointer(self, file, stream_name, pointer_name):
         if_stream_exists = f'({pointer_name} != nullptr)'
-        stream_obj = f'static_cast<{self.get_stream_name()}>({pointer_name})'
-        file(f'{self.get_stream_name()} stream = {if_stream_exists} ? {stream_obj} : 0;')
+        stream_obj = f'static_cast<{self.stream_name}>({pointer_name})'
+        file(f'{self.stream_name} stream = {if_stream_exists} ? {stream_obj} : 0;')
 
     def check_error(self):
         return "CHECK_ERR"

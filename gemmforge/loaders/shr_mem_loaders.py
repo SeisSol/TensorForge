@@ -2,13 +2,14 @@ from abc import ABC, abstractmethod
 from .. import constructs
 from .abstract_loader import AbstractShrMemLoader
 
+
 class ExtendedPatchLoader(AbstractShrMemLoader):
     """A strategy which loads an entire matrix into shared memory.
 
   """
 
-    def __init__(self, matrix, num_active_threads, load_and_transpose, manufacturer):
-        super(ExtendedPatchLoader, self).__init__(matrix, num_active_threads, manufacturer, load_and_transpose)
+    def __init__(self, vm, matrix, num_active_threads, load_and_transpose):
+        super(ExtendedPatchLoader, self).__init__(vm, matrix, num_active_threads, load_and_transpose)
 
         full_subvolume = (self.matrix.get_actual_num_cols() - 2) * self.matrix.num_rows
         cropped_subvolume = self.matrix.get_actual_num_rows() + self.matrix.num_rows
@@ -16,7 +17,7 @@ class ExtendedPatchLoader(AbstractShrMemLoader):
 
         self.lid_dim = self.matrix.num_rows
         # For better readability
-        self.name_treadIdx_x = self.arch_lexic.get_thread_idx_x()
+        self.name_treadIdx_x = self._lexic.thread_idx_x
 
     def compute_shared_mem_size(self):
         return self.shm_volume
@@ -60,10 +61,10 @@ class ExactPatchLoader(AbstractShrMemLoader):
 
   """
 
-    def __init__(self, matrix, num_active_threads, load_and_transpose, manufacturer):
-        super(ExactPatchLoader, self).__init__(matrix, num_active_threads, manufacturer, load_and_transpose)
+    def __init__(self, vm, matrix, num_active_threads, load_and_transpose):
+        super(ExactPatchLoader, self).__init__(vm, matrix, num_active_threads, load_and_transpose)
         self.lid_dim = self.matrix.get_actual_num_rows()
-        self.name_treadIdx_x = self.arch_lexic.get_thread_idx_x()
+        self.name_treadIdx_x = self._lexic.thread_idx_x
 
     def compute_shared_mem_size(self):
         return self.matrix.get_actual_volume()

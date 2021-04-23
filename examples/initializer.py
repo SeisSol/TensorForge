@@ -1,7 +1,8 @@
 from gemmforge import DenseMatrix, GenerationError
-from gemmforge import arch
-import argparse
+from gemmforge.vm import hw_descr
 from gemmforge.initializers import ExactInitializer
+from gemmforge.vm import vm_factory
+import argparse
 
 parser = argparse.ArgumentParser(description="Specify Manufacturer and Sub_Arch of the GPU")
 parser.add_argument("-m",
@@ -16,7 +17,7 @@ parser.add_argument("-s",
                     default="sm_60")
 
 args = parser.parse_args()
-arch = arch.produce(args.manufacturer, args.sub_arch)
+arch = hw_descr.hw_descr_factory(args.manufacturer, args.sub_arch)
 mat_a = DenseMatrix(num_rows=9,
                     num_cols=9,
                     addressing="strided",
@@ -24,7 +25,11 @@ mat_a = DenseMatrix(num_rows=9,
                     transpose=False)
 
 try:
-    gen = ExactInitializer(1, mat_a, arch, "float")
+    vm = vm_factory(name=args.manufacturer,
+                    sub_name=args.sub_arch,
+                    fp_type="float")
+
+    gen = ExactInitializer(vm, 1, mat_a)
     gen.generate()
     print(gen.get_kernel())
     print(gen.get_launcher())

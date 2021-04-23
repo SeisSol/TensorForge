@@ -4,11 +4,11 @@ from .exceptions import GenerationError
 from .abstract_gemmlike_generator import GemmLikeGenerator
 from .abstract_generator import AbstractGenerator as Generator
 from .initializers import initializer_factory, StubInitializer
-from .arch_lexic import arch_lexic_factory
+from gemmforge.vm import VM
+from .thread_policies import TheadPolicyFactory
 import math
 import hashlib
 from copy import deepcopy
-
 
 
 class CsaGenerator(GemmLikeGenerator):
@@ -16,15 +16,15 @@ class CsaGenerator(GemmLikeGenerator):
   and beta is either 1.0 or 0.0
   """
 
-    def __init__(self, arch, precision):
-        super(CsaGenerator, self).__init__(arch, precision)
+    def __init__(self, vm: VM):
+        super(CsaGenerator, self).__init__(vm)
         self._mat_b_initializer = None
-        self.arch_lexic = arch_lexic_factory(arch.manufacturer)
+        self._vm = vm
         # For better readability of the remaining code
-        self.TEAM_INDEX_STR = self.arch_lexic.get_tid_counter(self.arch_lexic.get_thread_idx_z(),
-                                                              self.arch_lexic.get_block_dim_z(),
-                                                              self.arch_lexic.get_block_idx_x())
-        self.name_threadIdx_x = self.arch_lexic.get_thread_idx_x()
+        self.team_index_str = self._lexic.get_tid_counter(self._lexic.thread_idx_z,
+                                                          self._lexic.block_dim_z,
+                                                          self._lexic.block_idx_x)
+        self.name_threadIdx_x = self._lexic.thread_idx_x
 
     def generate(self, mat_a, mat_b, alpha, beta, base_name=None):
         self.mat_a = mat_a
@@ -43,12 +43,11 @@ class CsaGenerator(GemmLikeGenerator):
         self.base_name = base_name if base_name is not None else self._generate_base_name()
 
         if self.beta == 0.0:
-            self._mat_b_initializer = initializer_factory(self.beta,
-                                                          deepcopy(self.mat_b),
-                                                          self.arch,
-                                                          self.precision)
+            self._mat_b_initializer = initializer_factory(self._vm,
+                                                          self.beta,
+                                                          deepcopy(self.mat_b))
         else:
-            self._mat_b_initializer = StubInitializer(self.arch, self.precision)
+            self._mat_b_initializer = StubInitializer(self._vm)
         self._mat_b_initializer.generate()
 
         self._check()
@@ -89,15 +88,16 @@ class CsaGenerator(GemmLikeGenerator):
         lid_dim_length = self.mat_a.get_actual_num_rows()
 
         # we use active threads to add a single column
-        num_vector_units_required = math.ceil(lid_dim_length / self.arch.vec_unit_length)
+        num_vector_units_required = math.ceil(lid_dim_length / self._hw_descr.vec_unit_length)
         self.num_compute_threads = lid_dim_length
-        self.num_active_threads = num_vector_units_required * self.arch.vec_unit_length
+        self.num_active_threads = num_vector_units_required * self._hw_descr.vec_unit_length
 
-        total_num_threas_per_op = self.num_active_threads * self.mat_a.get_actual_num_cols()
+        thread_policy = TheadPolicyFactory.get_csa_policy(vm=self._vm,
+                                                          num_threads=self.num_active_threads,
+                                                          op1=self.mat_a,
+                                                          op2=self.mat_b)
 
-        self.max_num_regs_per_thread = 10
-        mults_wrt_num_regs = self.arch.max_reg_per_block / (total_num_threas_per_op * self.max_num_regs_per_thread)
-        self.num_mult_per_block = max(int(mults_wrt_num_regs / self.arch.max_block_per_sm), 1)
+        self.num_mult_per_block = thread_policy.get_num_ops_per_block()
 
     def _generate_kernel(self):
         glob_symbols = {}
@@ -109,11 +109,11 @@ class CsaGenerator(GemmLikeGenerator):
             total_num_threas_per_op = self.num_active_threads * self.mat_a.get_actual_num_cols()
             max_num_threads_per_block = total_num_threas_per_op * self.num_mult_per_block
             kernel_bounds = [max_num_threads_per_block]
-            with self.arch_lexic.kernel_definition(file, kernel_bounds, self.base_name, self._get_func_params()):
-                with file.If("{} < {}".format(self.TEAM_INDEX_STR, Generator.NUM_ELEMENTS_STR)):
+            with self._lexic.kernel_definition(file, kernel_bounds, self.base_name, self._get_func_params()):
+                with file.If("{} < {}".format(self.team_index_str, Generator.NUM_ELEMENTS_STR)):
 
                     # declare ptrs for correct matrices
-                    file.VariableDeclaration("const {}*".format(self.precision),
+                    file.VariableDeclaration("const {}*".format(self._precision),
                                              glob_symbols[self.mat_a.name],
                                              self._get_global_matrix_ptr(self.mat_a))
 
@@ -122,7 +122,7 @@ class CsaGenerator(GemmLikeGenerator):
                     view = deepcopy(self.mat_b)
                     view.bbox = self.mat_a.bbox
 
-                    file.VariableDeclaration("{}*".format(self.precision),
+                    file.VariableDeclaration("{}*".format(self._precision),
                                              glob_symbols[self.mat_b.name],
                                              self._get_global_matrix_ptr(view))
 
@@ -171,16 +171,16 @@ class CsaGenerator(GemmLikeGenerator):
                 # call the initializer. Note: the initializer can be a stub i.e. will do nothing
                 file("{}".format(self._mat_b_initializer.func_call(initializer_args)))
 
-                file.VariableDeclaration(self.arch_lexic.kernel_range_object(), self._get_block_dim_spec())
-                file.VariableDeclaration(self.arch_lexic.kernel_range_object(), self._get_grid_dim_spec())
+                file.VariableDeclaration(self._lexic.kernel_range_object(), self._get_block_dim_spec())
+                file.VariableDeclaration(self._lexic.kernel_range_object(), self._get_grid_dim_spec())
 
-                self.arch_lexic.get_stream_via_pointer(file, "streamPtr", Generator.STREAM_PTR_STR)
-                file.Expression(self.arch_lexic.get_launch_code(self.base_name,
-                                                                "Grid",
-                                                                "Block",
-                                                                "stream",
-                                                                self._get_func_args()))
-                err = self.arch_lexic.check_error()
+                self._lexic.get_stream_via_pointer(file, "streamPtr", Generator.STREAM_PTR_STR)
+                file.Expression(self._lexic.get_launch_code(self.base_name,
+                                                            "Grid",
+                                                            "Block",
+                                                            "stream",
+                                                             self._get_func_args()))
+                err = self._lexic.check_error()
                 if err is not None:
                     file.Expression(err)
             self._launcher += src.getvalue()
@@ -202,17 +202,17 @@ class CsaGenerator(GemmLikeGenerator):
         result = hashlib.md5(f'{constants}_{self.mat_a.__str__()}{self.mat_b.__str__()}'.encode())
         md5encoding = result.hexdigest()
 
-        prefix = 's' if self.precision == "float" else "d"
+        prefix = 's' if self._precision == "float" else "d"
         return "{}copyAddScale_{}_{}_{}".format(prefix,
                                                 dims,
                                                 addressing,
                                                 md5encoding[:Generator.ENCODING_LENGTH])
 
     def _get_func_params(self):
-        return f'{self.precision} Scale, {super(CsaGenerator, self)._get_func_params()}'
+        return f'{self._precision} Scale, {super(CsaGenerator, self)._get_func_params()}'
 
     def _get_launcher_params(self, with_defaults=False):
-        return f'{self.precision} Scale, {super(CsaGenerator, self)._get_launcher_params(with_defaults)}'
+        return f'{self._precision} Scale, {super(CsaGenerator, self)._get_launcher_params(with_defaults)}'
 
     def _get_func_args(self):
         return f'Scale, {super(CsaGenerator, self)._get_func_args()}'
@@ -229,10 +229,10 @@ class CsaGenerator(GemmLikeGenerator):
 
     def _get_global_matrix_ptr(self, matrix):
         extra_offset_symbol = self._generate_extra_offset_symbol(matrix)
-        offset_to_row = f'{self.arch_lexic.get_thread_idx_y()} * {matrix.num_rows}'
+        offset_to_row = f'{self._lexic.thread_idx_y} * {matrix.num_rows}'
 
         if matrix.addressing == "strided":
-            main_offset = "{} * {}".format(self.TEAM_INDEX_STR, matrix.get_real_volume())
+            main_offset = "{} * {}".format(self.team_index_str, matrix.get_real_volume())
             sub_offset = matrix.get_offset_to_first_element()
             return "&{}[{} + {} + {} + {}]".format(matrix.name,
                                                    extra_offset_symbol,
@@ -241,7 +241,7 @@ class CsaGenerator(GemmLikeGenerator):
                                                    offset_to_row)
 
         elif matrix.addressing == "pointer_based":
-            main_offset = self.TEAM_INDEX_STR
+            main_offset = self.team_index_str
             sub_offset = matrix.get_offset_to_first_element()
             return "&{}[{}][{} + {} + {}]".format(matrix.name,
                                                   main_offset,

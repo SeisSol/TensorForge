@@ -1,12 +1,12 @@
+from gemmforge import GenerationError, GemmGenerator
+from gemmforge.vm import vm_factory
+from gemmforge import constructs
+from io import StringIO
+from test_loader import TestLoader
 import os
 import yaml
 import argparse
 
-from gemmforge import GenerationError, GemmGenerator
-from gemmforge import arch
-from gemmforge import constructs
-from io import StringIO
-from test_loader import TestLoader
 
 parser = argparse.ArgumentParser()
 parser.add_argument('-s', '--specfile', action='store', help="path to a yaml file with a test spec")
@@ -36,8 +36,11 @@ else:
     if not ((args.realsize == 4) or (args.realsize == 8)):
         raise ValueError("Floating point size must be either 4 or 8")
 
-arch = arch.produce(args.manufacturer, args.sub_arch)
-generator = GemmGenerator(arch, "float" if args.realsize == 4 else "double")
+vm = vm_factory(name=args.manufacturer,
+                sub_name=args.sub_arch,
+                fp_type="float" if args.realsize == 4 else "double")
+
+generator = GemmGenerator(vm)
 
 stream = open(args.specfile, 'r')
 suites = yaml.safe_load(stream)["test_suites"]
@@ -46,11 +49,13 @@ src = StringIO()
 headers = StringIO()
 tests_code = StringIO()
 
+hw_descr = vm.get_hw_descr()
+precision = vm.fp_as_str()
 with constructs.Cpp(StringIO()) as file:
     file.Include("gemmgen_aux.h")
-    if arch.manufacturer == "amd":
+    if hw_descr.manufacturer == "amd":
         file.Include("hip/hip_runtime.h")
-    elif arch.manufacturer == "sycl":
+    elif hw_descr.manufacturer == "sycl":
         file.Include("CL/sycl.hpp")
     src.write(file.stream.getvalue())
 
@@ -115,8 +120,8 @@ for suite in suites:
                                              "LayoutType::{}".format("Trans" if mat_b.transpose else "NoTrans"))
                     file.Emptyline()
 
-                    file.VariableDeclaration(generator.precision, "alpha", alpha)
-                    file.VariableDeclaration(generator.precision, "beta", beta)
+                    file.VariableDeclaration(precision, "alpha", alpha)
+                    file.VariableDeclaration(precision, "beta", beta)
                     file.VariableDeclaration("int", "NumElements", num_elements)
                     file.Emptyline()
 
@@ -169,9 +174,9 @@ path = os.path.join(dir_name, "test.cpp")
 with open(path, 'w') as file:
     file.write(tests_code.getvalue())
 
-if arch.manufacturer == "nvidia":
+if hw_descr.manufacturer == "nvidia":
     path = os.path.join(dir_name, "kernels.cu")
-elif arch.manufacturer == "amd" or arch.manufacturer == "sycl":
+elif hw_descr.manufacturer == "amd" or hw_descr.manufacturer == "sycl":
     path = os.path.join(dir_name, "kernels.cpp")
 else:
     print("Manufacturer not supported, could not write kernel file")

@@ -1,9 +1,10 @@
 from gemmforge.abstract_generator import AbstractGenerator
+from gemmforge.vm import VM
 
 
 class StubInitializer(AbstractGenerator):
-    def __init__(self, arch, precision):
-        super(StubInitializer, self).__init__(arch, precision)
+    def __init__(self, vm: VM):
+        super(StubInitializer, self).__init__(vm)
 
     def generate(self):
         self._generate_header()

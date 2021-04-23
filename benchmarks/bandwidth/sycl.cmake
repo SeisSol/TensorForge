@@ -1,4 +1,4 @@
-set(SOURCE_FILES global_sycl.cpp
+set(SOURCE_FILES global.cpp
                  include/gemmgen_aux_sycl.cpp
                  sycl_kernel.cpp)
 add_executable(${CMAKE_PROJECT_NAME} ${SOURCE_FILES})

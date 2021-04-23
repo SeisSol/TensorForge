@@ -1,9 +1,9 @@
 from .matrix import DenseMatrix
 
+
 class YatetoInterface:
   def __init__(self):
     pass
-
 
   @classmethod
   def deduce_bbox(cls, yateto_ranges, mem_layout, transpose):
@@ -28,7 +28,6 @@ class YatetoInterface:
             last.start - mem_layout[1].start,
             first.stop - mem_layout[0].start - 1,
             last.stop - mem_layout[1].start - 1]
-
 
   @classmethod
   def produce_dense_matrix(cls,

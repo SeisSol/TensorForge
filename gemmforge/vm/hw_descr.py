@@ -1,5 +1,4 @@
-
-class Architecture:
+class HwDecription:
     def __init__(self,
                  vec_unit_length,
                  max_local_mem_size_per_block,
@@ -17,7 +16,7 @@ class Architecture:
         self.manufacturer = name
 
 
-def produce(name, sub_name):
+def hw_descr_factory(name, sub_name):
     KB = 1024
     if name == "nvidia":
 
@@ -41,7 +40,7 @@ def produce(name, sub_name):
         else:
             raise ValueError(f'Given nvidia SM model is not supported. Provided: {sub_name}')
 
-        return Architecture(nvidia_warp,
+        return HwDecription(nvidia_warp,
                             max_local_mem_size_per_block,
                             max_num_threads,
                             max_reg_per_block,
@@ -82,7 +81,7 @@ def produce(name, sub_name):
         else:
             raise ValueError(f'Given amd CU model is not supported. Provided: {sub_name}')
 
-        return Architecture(amd_wavefront,
+        return HwDecription(amd_wavefront,
                             max_local_mem_size_per_workgroup,
                             max_num_threads,
                             max_reg_per_workgroup,
@@ -92,7 +91,7 @@ def produce(name, sub_name):
 
     elif name == "sycl":
         if sub_name in ['dg1']:
-            return Architecture(64,
+            return HwDecription(64,
                                 64 * KB,
                                 512,
                                 64 * KB,
@@ -100,7 +99,7 @@ def produce(name, sub_name):
                                 64,
                                 name)
         else:
-            return Architecture(32,
+            return HwDecription(32,
                                 48 * KB,
                                 1024,
                                 64 * KB,

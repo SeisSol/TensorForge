@@ -1,6 +1,8 @@
 import unittest
 from gemmforge import DenseMatrix
-from gemmforge import arch
+from gemmforge import GemmGenerator
+from gemmforge.vm import vm_factory
+
 
 class TestOccupancyNvidia(unittest.TestCase):
 
@@ -13,7 +15,11 @@ class TestOccupancyNvidia(unittest.TestCase):
     pass
 
   def setUp(self):
-    self.gen = arch.produce("nvidia", "sm_70").get_gemm_generator_factory().create("float")
+    self._vm = vm_factory(name="nvidia",
+                          sub_name="sm_70",
+                          fp_type="float")
+
+    self.gen = GemmGenerator(self._vm)
 
   def tearDown(self):
     pass
@@ -93,4 +99,3 @@ class TestOccupancyNvidia(unittest.TestCase):
     # shared memory
     self.assertEqual(self.gen.num_active_threads, 32)
     self.assertEqual(self.gen.num_mult_per_block, 2)
-

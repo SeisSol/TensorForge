@@ -1,9 +1,9 @@
+from gemmforge import DenseMatrix, GenerationError, GemmGenerator
+from gemmforge.vm import vm_factory
 import os
 import yaml
 import argparse
 
-from gemmforge import DenseMatrix, GenerationError, GemmGenerator
-from gemmforge import arch
 
 parser = argparse.ArgumentParser()
 parser.add_argument('-r', '--realsize', type=int, action='store',
@@ -36,10 +36,13 @@ mat_b = produce_matrix(config["MatB"])
 mat_c = produce_matrix(config["MatC"])
 alpha = config["alpha"]
 beta = config["beta"]
-arch = arch.produce(args.manufacturer, args.sub_arch)
 
 try:
-    gen = GemmGenerator(arch, "float" if args.realsize == 4 else "double")
+    vm = vm_factory(name=args.manufacturer,
+                    sub_name=args.sub_arch,
+                    fp_type="float" if args.realsize == 4 else "double")
+
+    gen = GemmGenerator(vm)
     gen.generate(mat_a, mat_b, mat_c, alpha, beta, base_name="gemm")
 
     krnl = gen.get_kernel()
@@ -54,16 +57,17 @@ try:
         os.mkdir(dir_name)
 
     path = None
-    if arch.manufacturer == "nvidia":
+    hw_descr = vm.get_hw_descr()
+    if hw_descr.manufacturer == "nvidia":
         path = os.path.join(dir_name, "kernels.cu")
-    elif arch.manufacturer == "amd" or arch.manufacturer == "sycl":
+    elif hw_descr.manufacturer == "amd" or hw_descr.manufacturer == "sycl":
         path = os.path.join(dir_name, "kernels.cpp")
         
     with open(path, 'w') as file:
         file.write("#include \"gemmgen_aux.h\"\n")
-        if arch.manufacturer == "amd":
+        if hw_descr.manufacturer == "amd":
             file.write("#include \"hip/hip_runtime.h\"\n")
-        elif arch.manufacturer == "sycl":
+        elif hw_descr.manufacturer == "sycl":
             file.write("#include <CL/sycl.hpp>\n")
         file.write(krnl)
         file.write(lnch)

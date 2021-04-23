@@ -19,17 +19,17 @@ def _find_prime_in_range(source, target):
 
 class ExtendedTransposePatchLoader(AbstractShrMemLoader):
 
-    def __init__(self, matrix, num_active_threads, load_and_transpose, manufacturer):
-        super(ExtendedTransposePatchLoader, self).__init__(matrix,
+    def __init__(self, vm, matrix, num_active_threads, load_and_transpose):
+        super(ExtendedTransposePatchLoader, self).__init__(vm,
+                                                           matrix,
                                                            num_active_threads,
-                                                           manufacturer,
                                                            load_and_transpose)
 
         optimal_num_cols = _find_next_prime(self.matrix.get_actual_num_cols())
         self.shm_volume = optimal_num_cols * self.matrix.num_rows
         self.lid_dim = optimal_num_cols
         # For better readability
-        self.name_treadIdx_x = self.arch_lexic.get_thread_idx_x()
+        self.name_treadIdx_x = self._lexic.thread_idx_x
 
     def compute_shared_mem_size(self):
         return self.shm_volume
@@ -95,13 +95,13 @@ class ExactTransposePatchLoader(AbstractShrMemLoader):
 
   """
 
-    def __init__(self, matrix, num_active_threads, load_and_transpose, manufacturer):
-        super(ExactTransposePatchLoader, self).__init__(matrix, num_active_threads, manufacturer, load_and_transpose)
+    def __init__(self, vm, matrix, num_active_threads, load_and_transpose):
+        super(ExactTransposePatchLoader, self).__init__(vm, matrix, num_active_threads, load_and_transpose)
 
         optimal_num_cols = _find_next_prime(self.matrix.get_actual_num_cols())
         self.shm_volume = optimal_num_cols * self.matrix.num_rows
         self.lid_dim = optimal_num_cols
-        self.name_treadIdx_x = self.arch_lexic.get_thread_idx_x()
+        self.name_treadIdx_x = self._lexic.thread_idx_x
 
     def compute_shared_mem_size(self):
         return self.shm_volume

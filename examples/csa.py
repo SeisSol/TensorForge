@@ -1,5 +1,5 @@
 from gemmforge import DenseMatrix, GenerationError, CsaGenerator
-from gemmforge import arch
+from gemmforge.vm import vm_factory
 import argparse
 
 parser = argparse.ArgumentParser(description="Specify Manufacturer and Sub_Arch of the GPU")
@@ -16,8 +16,6 @@ parser.add_argument("-s",
 
 args = parser.parse_args()
 
-arch = arch.produce(args.manufacturer, args.sub_arch)
-
 mat_a = DenseMatrix(num_rows=9,
                     num_cols=9,
                     addressing="strided",
@@ -31,7 +29,11 @@ mat_b = DenseMatrix(num_rows=9,
                     transpose=False)
 
 try:
-    gen = CsaGenerator(arch, "float")
+    vm = vm_factory(name=args.manufacturer,
+                    sub_name=args.sub_arch,
+                    fp_type="float")
+
+    gen = CsaGenerator(vm)
     gen.generate(mat_a, mat_b, alpha=13, beta=6)
     print(gen.get_kernel())
     print(gen.get_launcher())

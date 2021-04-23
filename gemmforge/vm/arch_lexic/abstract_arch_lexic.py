@@ -8,37 +8,16 @@ class AbstractArchLexic(ABC):
     """
 
     def __init__(self):
-        self.threadIdx_x = None
-        self.threadIdx_y = None
-        self.threadIdx_z = None
-        self.blockDim_y = None
-        self.blockDim_z = None
-        self.blockIdx_x = None
+        self.thread_idx_x = None
+        self.thread_idx_y = None
+        self.thread_idx_z = None
+        self.block_dim_y = None
+        self.block_dim_z = None
+        self.block_idx_x = None
         self.stream_name = None
 
     def get_tid_counter(self, thread_id, block_dim, block_id):
-        return "(" + thread_id + " + " + block_dim + " * " + block_id + ")"
-
-    def get_thread_idx_x(self):
-        return self.threadIdx_x
-
-    def get_thread_idx_y(self):
-        return self.threadIdx_y
-
-    def get_thread_idx_z(self):
-        return self.threadIdx_z
-
-    def get_block_dim_y(self):
-        return self.blockDim_y
-
-    def get_block_dim_z(self):
-        return self.blockDim_z
-
-    def get_block_idx_x(self):
-        return self.blockIdx_x
-
-    def get_stream_name(self):
-        return self.stream_name
+        return f'({thread_id} + {block_dim} * {block_id})'
 
     @abstractmethod
     def get_launch_code(self, func_name, grid, block, stream, func_params):
