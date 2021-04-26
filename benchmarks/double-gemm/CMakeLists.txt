@@ -100,3 +100,6 @@ endif()
 
 add_dependencies(gpu_part gpu_generator)
 add_dependencies(${CMAKE_PROJECT_NAME} copy_params)
+
+enable_testing()
+add_test(NAME test COMMAND ${CMAKE_PROJECT_NAME})
