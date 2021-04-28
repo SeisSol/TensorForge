@@ -1,4 +1,4 @@
-set(SOURCE_FILES common/test_drivers/simple_driver_sycl.cpp
+set(SOURCE_FILES common/test_drivers/simple_driver.cpp
                gen_code/kernels.cpp
                include/gemmgen_aux_sycl.cpp)
 

@@ -11,6 +11,6 @@
   #        -maxrregcount 64;
           -DREAL_SIZE=${REAL_SIZE})
 
-  cuda_add_library(gpu_part STATIC common/test_drivers/simple_driver.cu
+  cuda_add_library(gpu_part STATIC common/test_drivers/simple_driver.cpp
                                    include/gemmgen_aux.cu
                                    gen_code/kernels.cu)

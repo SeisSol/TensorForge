@@ -23,6 +23,14 @@ elseif ((${DEVICE_BACKEND} STREQUAL "ONEAPI") OR (${DEVICE_BACKEND} STREQUAL "HI
   set(MANUFACTURER "sycl")
 endif()
 
+set(REAL_SIZE_IN_BYTES ${REAL_SIZE})
+set(DEVICE_SUB_ARCH ${SM_ARCH})
+
+if(NOT DEFINED PREFERRED_DEVICE_TYPE)
+    set(ENV{PREFERRED_DEVICE_TYPE} GPU)
+endif()
+
+add_subdirectory(../../submodules/Device build)
 
 add_executable(${CMAKE_PROJECT_NAME}
                main.cpp
@@ -41,9 +49,8 @@ if (${REFERENCE_IMPL} STREQUAL "OPENBLAS")
     target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE ${OpenBLAS_INCLUDE_DIRS})
     target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE ${OpenBLAS_LIBRARIES})
 endif()
+
 target_compile_definitions(${CMAKE_PROJECT_NAME} PUBLIC "CONCRETE_CPU_BACKEND=${REFERENCE_IMPL}")
-
-
 target_compile_options(${CMAKE_PROJECT_NAME} PUBLIC "-std=c++11")
 target_compile_definitions(${CMAKE_PROJECT_NAME} PUBLIC "REAL_SIZE=${REAL_SIZE}")
 
@@ -55,16 +62,15 @@ elseif((${DEVICE_BACKEND} STREQUAL "ONEAPI") OR (${DEVICE_BACKEND} STREQUAL "HIP
     include(sycl.cmake)
 endif()
 
-
-target_include_directories(gpu_part PRIVATE include
+target_compile_definitions(gpu_part PRIVATE DEVICE_${DEVICE_BACKEND}_LANG REAL_SIZE=${REAL_SIZE})
+target_include_directories(gpu_part PRIVATE ../../submodules/Device
+                                            include
                                             common
                                             common/test_drivers
                                             gen_code)
 
-target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE gpu_part)
-
 find_package(yaml-cpp REQUIRED)
-target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE ${YAML_CPP_LIBRARIES})
+target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE gpu_part device ${YAML_CPP_LIBRARIES})
 target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE ${YAML_CPP_INCLUDE_DIR})
 
 add_custom_target(copy_params ALL
