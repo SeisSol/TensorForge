@@ -25,6 +25,7 @@ elseif((${DEVICE_BACKEND} STREQUAL "ONEAPI") OR (${DEVICE_BACKEND} STREQUAL "HIP
     include(sycl.cmake)
 endif()
 
+target_compile_definitions(${CMAKE_PROJECT_NAME}  PRIVATE DEVICE_${DEVICE_BACKEND}_LANG REAL_SIZE=${REAL_SIZE})
 target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE include
                                                          common)
 

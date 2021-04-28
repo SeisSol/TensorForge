@@ -19,4 +19,3 @@ else()
 endif()
 
 target_compile_options(${CMAKE_PROJECT_NAME}  PRIVATE "-std=c++17" "-O3")
-target_compile_definitions(${CMAKE_PROJECT_NAME}  PRIVATE DEVICE_${DEVICE_BACKEND}_LANG REAL_SIZE=${REAL_SIZE})
