@@ -23,6 +23,16 @@ endif()
 set(SUB_ARCH "gfx906" CACHE STRING "size of the floating point data type")
 set_property(CACHE SUB_ARCH PROPERTY STRINGS "sm_60" "sm_61" "sm_70" "sm_71" "gfx906")
 
+set(REAL_SIZE_IN_BYTES "4")
+set(REAL_SIZE "4")
+set(DEVICE_SUB_ARCH ${SUB_ARCH})
+
+if(NOT DEFINED PREFERRED_DEVICE_TYPE)
+    set(ENV{PREFERRED_DEVICE_TYPE} GPU)
+endif()
+
+add_subdirectory(../../submodules/Device build)
+
 set(TEST_SUITE "" CACHE STRING "relative path to test suite spec file")
 if ("${TEST_SUITE}" STREQUAL "")
     message(FATAL_ERROR "NO TEST SUITE PROVIDED")
@@ -70,13 +80,14 @@ elseif(${DEVICE_BACKEND} STREQUAL "HIP")
 elseif((${DEVICE_BACKEND} STREQUAL "ONEAPI") OR (${DEVICE_BACKEND} STREQUAL "HIPSYCL"))
     include(sycl.cmake)
 endif()
-
+target_compile_definitions(gpu_part PRIVATE DEVICE_${DEVICE_BACKEND}_LANG REAL_SIZE=${REAL_SIZE})
 
 target_include_directories(gpu_part PRIVATE include
                                             common
-                                            common/test_drivers)
+                                            common/test_drivers
+                                            ../../submodules/Device)
 
-target_link_libraries(${CMAKE_PROJECT_NAME} gpu_part -lpthread)
+target_link_libraries(${CMAKE_PROJECT_NAME} gpu_part -lpthread device)
 
 if(${DEVICE_BACKEND} STREQUAL "CUDA")
   add_custom_target(gpu_generator ALL

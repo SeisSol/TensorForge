@@ -10,6 +10,15 @@ set_property(CACHE REAL_SIZE PROPERTY STRINGS "8" "4")
 set(DEVICE_BACKEND "HIP" CACHE STRING "type of an interface")
 set_property(CACHE DEVICE_BACKEND PROPERTY STRINGS "CUDA" "HIP" "ONEAPI" "HIPSYCL")
 
+set(REAL_SIZE_IN_BYTES "4")
+set(REAL_SIZE "4")
+set(DEVICE_SUB_ARCH ${SUB_ARCH})
+
+if(NOT DEFINED PREFERRED_DEVICE_TYPE)
+    set(ENV{PREFERRED_DEVICE_TYPE} GPU)
+endif()
+
+add_subdirectory(../../submodules/Device build)
 set(MANUFACTURER "")
 
 if (${DEVICE_BACKEND} STREQUAL "CUDA")
@@ -70,13 +79,15 @@ elseif(${DEVICE_BACKEND} STREQUAL "HIP")
 elseif((${DEVICE_BACKEND} STREQUAL "ONEAPI") OR (${DEVICE_BACKEND} STREQUAL "HIPSYCL"))
     include(sycl.cmake)
 endif()
+target_compile_definitions(gpu_part PRIVATE DEVICE_${DEVICE_BACKEND}_LANG REAL_SIZE=${REAL_SIZE})
 
 
 target_include_directories(gpu_part PRIVATE include
                                             common
-                                            common/test_drivers)
+                                            common/test_drivers
+                                            ../../submodules/Device)
 
-target_link_libraries(${CMAKE_PROJECT_NAME} gpu_part -lpthread)
+target_link_libraries(${CMAKE_PROJECT_NAME} gpu_part -lpthread device)
 
 if(${DEVICE_BACKEND} STREQUAL "CUDA")
   add_custom_target(gpu_generator ALL
