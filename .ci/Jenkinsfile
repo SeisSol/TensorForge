@@ -18,6 +18,7 @@ properties([
         ],
         printContributedVariables: true,
         printPostContent: true,
+        token: 'gemmforge-testing'
        ]
   ])
 ])
@@ -71,7 +72,7 @@ pipeline {
                         curr_dir=./tests/gemms/build
                         mkdir -p \$curr_dir && cd \$curr_dir
                         for test in ../testsuites/*.yaml; do 
-                            cmake .. -DSUB_ARCH=\$SM -DDEVICE_BACKEND=CUDA -DREAL_SIZE=4 -DTEST_SUITE=\$test
+                            cmake .. -DSM_ARCH=\$SM -DDEVICE_BACKEND=CUDA -DREAL_SIZE=4 -DTEST_SUITE=\$test
                             make -j4
                             ./gemm-tests
                             rm -rf ./*
@@ -81,7 +82,7 @@ pipeline {
                         curr_dir=./tests/csa/build
                         mkdir -p \$curr_dir && cd \$curr_dir
                         for test in ../testsuites/*.yaml; do 
-                            cmake .. -DSUB_ARCH=\$SM -DDEVICE_BACKEND=CUDA -DREAL_SIZE=4 -DTEST_SUITE=\$test
+                            cmake .. -DSM_ARCH=\$SM -DDEVICE_BACKEND=CUDA -DREAL_SIZE=4 -DTEST_SUITE=\$test
                             make -j4
                             ./csa-tests
                             rm -rf ./*

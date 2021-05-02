@@ -6,7 +6,7 @@ using namespace device;
 
 void copyData(float *To, float *From, size_t size, size_t blocks, size_t threads, void *stream) {
     auto device = &DeviceInstance::getInstance();
-    long workItemSize = 512; //device->api->getMaxThreadBlockSize();
+    long workItemSize = device->api->getMaxThreadBlockSize();
 
     ((cl::sycl::queue *)stream)->submit([&](cl::sycl::handler &cgh) {
         cgh.parallel_for(cl::sycl::nd_range<1> {blocks*threads, workItemSize}, [=](cl::sycl::nd_item<1> item) {

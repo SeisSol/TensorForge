@@ -20,10 +20,6 @@
 
   set(HIP_COMPILER hcc)
 
-  set(SOURCE_FILES common/test_drivers/simple_driver.cpp
-                   include/gemmgen_aux.cpp
-                   gen_code/kernels.cpp)
-
   set(HIPCC_FLAGS -DREAL_SIZE=${REAL_SIZE};
                   -std=c++11;
                   -O3)
@@ -32,8 +28,8 @@
 
   set(CMAKE_HIP_CREATE_SHARED_LIBRARY "${HIP_HIPCC_CMAKE_LINKER_HELPER} ${HCC_PATH} <CMAKE_SHARED_LIBRARY_CXX_FLAGS> <LANGUAGE_COMPILE_FLAGS> <LINK_FLAGS> <CMAKE_SHARED_LIBRARY_CREATE_CXX_FLAGS> -o <TARGET> <OBJECTS> <LINK_LIBRARIES>")
 
-  set_source_files_properties(${SOURCE_FILES} PROPERTIES HIP_SOURCE_PROPERTY_FORMAT 1)
+  set_source_files_properties(${GPU_TARGET_SOURCE_FILES} PROPERTIES HIP_SOURCE_PROPERTY_FORMAT 1)
 
-  hip_add_library(gpu_part STATIC ${SOURCE_FILES} HIPCC_OPTIONS ${HIPCC_FLAGS} HCC_OPTIONS ${HCC_FLAGS} NVCC_OPTIONS ${NVCC_FLAGS})
+  hip_add_library(${GPU_TARGET} STATIC ${GPU_TARGET_SOURCE_FILES} HIPCC_OPTIONS ${HIPCC_FLAGS} HCC_OPTIONS ${HCC_FLAGS} NVCC_OPTIONS ${NVCC_FLAGS})
 
-  target_link_libraries(gpu_part PUBLIC ${HIP_PATH}/lib/libamdhip64.so)
+  target_link_libraries(${GPU_TARGET} PUBLIC ${HIP_PATH}/lib/libamdhip64.so)

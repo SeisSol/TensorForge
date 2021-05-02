@@ -1,12 +1,9 @@
 #include "stop_watch.h"
-#include "gemmgen_aux.h"
-#include "stop_watch.h"
 #include "yaml-cpp/yaml.h"
 #include <iostream>
 #include <device.h>
 #include "kernel.h"
 
-using namespace gemmgen;
 using namespace device;
 
 

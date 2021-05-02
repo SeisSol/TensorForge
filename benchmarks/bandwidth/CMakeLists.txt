@@ -1,34 +1,27 @@
 cmake_minimum_required(VERSION 3.5)
 project(simple-bandwidth-test)
 
-set(SM_ARCH "gfx906" CACHE STRING "size of the floating point data type")
-set_property(CACHE SM_ARCH PROPERTY STRINGS "sm_60" "sm_61" "sm_70" "sm_71")
+set(TARGET ${CMAKE_PROJECT_NAME})
+set(TARGET_SOURCE_FILES global.cpp)
+set(TARGET_INCLUDE_DIRS ../../submodules/Device
+        include
+        common
+        common/test_drivers)
 
-set(DEVICE_BACKEND "HIP" CACHE STRING "type of an interface")
-set_property(CACHE DEVICE_BACKEND PROPERTY STRINGS "CUDA" "HIP" "ONEAPI" "HIPSYCL")
+include(../../cmake/setupTarget.cmake)
 
-set(REAL_SIZE_IN_BYTES "4")
-set(REAL_SIZE "4")
-set(DEVICE_SUB_ARCH ${SM_ARCH})
-
-if(NOT DEFINED PREFERRED_DEVICE_TYPE)
-    set(ENV{PREFERRED_DEVICE_TYPE} GPU)
-endif()
-
-add_subdirectory(../../submodules/Device build)
+set(GPU_TARGET gpu_part)
+set(GPU_TARGET_INCLUDE_DIRS ../../submodules/Device)
 
 if(${DEVICE_BACKEND} STREQUAL "CUDA")
-    include(nvidia.cmake)
+    set(GPU_TARGET_SOURCE_FILES cuda_kernel.cu)
 elseif(${DEVICE_BACKEND} STREQUAL "HIP")
-    include(amd.cmake)
+    set(GPU_TARGET_SOURCE_FILES hip_kernel.cpp)
 elseif((${DEVICE_BACKEND} STREQUAL "ONEAPI") OR (${DEVICE_BACKEND} STREQUAL "HIPSYCL"))
-    include(sycl.cmake)
+    set(GPU_TARGET_SOURCE_FILES sycl_kernel.cpp)
 endif()
 
-target_compile_definitions(${CMAKE_PROJECT_NAME}  PRIVATE DEVICE_${DEVICE_BACKEND}_LANG REAL_SIZE=${REAL_SIZE})
-target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE include
-                                                         common)
-
-find_package(yaml-cpp REQUIRED)
-target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE ${YAML_CPP_INCLUDE_DIR} ../../submodules/Device)
-target_link_libraries(${CMAKE_PROJECT_NAME} ${YAML_CPP_LIBRARIES} device)
+include(../../cmake/setupGpuTarget.cmake)
+include(../../cmake/addYaml.cmake)
+include(../../cmake/linkTargetGpuAndDevice.cmake)
+include(../../cmake/enableTesting.cmake)
