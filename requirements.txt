@@ -1,3 +1,2 @@
 numpy
-scipy
 PyYAML==5.4

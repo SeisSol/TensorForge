@@ -54,7 +54,7 @@ pipeline {
         stage('TestNvidia') {
             steps {
                 script {
-                    testImage = docker.build("gftest:nvidia", ". -f ./.ci/Dockerfile.nvidia")
+                    testImage = docker.build("gftest:nvidia", ". -f ./.ci/docker/Dockerfile.nvidia")
                     testImage.inside("--gpus all --env SM=${env.GPU_MODEL}") {
                       sh """
                         set -eu pipefail
@@ -109,11 +109,11 @@ pipeline {
         }
         success {
             githubNotify account: github_login, context: 'CUDA test', credentialsId: 'forge-github-notify', 
-            description: 'Running Gemmforge tests...', repo: repo, sha: after, status: 'SUCCESS'
+            description: 'Running Gemmforge tests succeed!', repo: repo, sha: after, status: 'SUCCESS'
         }
         failure {
             githubNotify account: github_login, context: 'CUDA test', credentialsId: 'forge-github-notify', 
-            description: 'Running Gemmforge tests...', repo: repo, sha: after, status: 'FAILURE'
+            description: 'Running Gemmforge tests failed :(', repo: repo, sha: after, status: 'FAILURE'
         }
     }
 }
