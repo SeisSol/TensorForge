@@ -182,7 +182,7 @@ class Cpp:
     def Function(self, name, arguments='', returnType='void', const=False):
         return Block(self, '{} {}({}){}'.format(returnType, name, arguments, ' const' if const else ''))
 
-    def Kernel(self, name, arguments='', kernel_bounds=None):
+    def CudaKernel(self, name, arguments='', kernel_bounds=None):
         if kernel_bounds:
             args = [str(item) for item in kernel_bounds]
             bounds = "\n__launch_bounds__({})\n".format(", ".join(args))
@@ -191,6 +191,17 @@ class Cpp:
                                                                          arguments))
         else:
             return Block(self, '__global__ void kernel_{}({})'.format(name, arguments))
+
+    def SyclKernel(self, name, arguments='', kernel_bounds=None, lambdaPrefixBlock = None):
+
+        l1 = "inline void kernel_{}(cl::sycl::queue *stream, cl::sycl::range<3> group_count, cl::sycl::range<3> group_size, {})".format(name, arguments)
+        l2 = "stream->submit([&](cl::sycl::handler &cgh)"
+        l3 = "cgh.parallel_for(cl::sycl::nd_range<3>{{group_count.get(0) * group_size.get(0), group_count.get(1) * group_size.get(1), group_count.get(2) * group_size.get(2)}, group_size}, [=](cl::sycl::nd_item<3> item)"
+
+        if lambdaPrefixBlock is None:
+            return MultiBlock(self, [l1, l2, l3], ["", ");", ");"])
+        else:
+            return MultiBlock(self, [l1, l2, lambdaPrefixBlock, l3], ["", ");", "", ");"])
 
     def FunctionDeclaration(self, name, arguments=''):
         return self.__call__('void {}({});'.format(name, arguments))
@@ -205,7 +216,7 @@ class Cpp:
         return Block(self, 'TEST_F({},{})'.format(suite_name, test_name))
 
     def Pragma(self, name):
-        return  self.__call__("#pragma {}".format(name))
+        return self.__call__("#pragma {}".format(name))
 
     def ClassDeclaration(self, name):
         return self.__call__('class {};'.format(name))

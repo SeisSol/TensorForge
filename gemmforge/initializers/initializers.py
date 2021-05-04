@@ -1,8 +1,7 @@
-from abc import ABC, abstractmethod
-from ..exceptions import GenerationError, InternalError
-from ..abstract_generator import AbstractGenerator
+from gemmforge.abstract_generator import AbstractGenerator
+from gemmforge.vm import VM
 
 
 class AbstractInitializer(AbstractGenerator):
-  def __init__(self, arch, precision):
-    super(AbstractInitializer, self).__init__(arch, precision)
+  def __init__(self, vm: VM):
+    super(AbstractInitializer, self).__init__(vm)

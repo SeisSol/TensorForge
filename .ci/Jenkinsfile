@@ -1,0 +1,119 @@
+properties([
+    parameters([
+        string(
+            defaultValue: 'atsccs68_runner', 
+            description: 'agent name tells where to run a job', 
+            name: 'AGENT',
+            trim: true)
+    ]),
+    pipelineTriggers([
+       [$class: 'GenericTrigger',
+        genericVariables: [
+         [key: 'ref', value: '$.ref'],
+         [key: 'after', value: '$.after'],
+         [key: 'clone_url', value: '$.repository.clone_url'],
+         [key: 'statuses_url', value: '$.repository.statuses_url'],
+         [key: 'github_login', value: '$.repository.owner.login'],
+         [key: 'repo', value: '$.repository.name'],
+        ],
+        printContributedVariables: true,
+        printPostContent: true,
+        token: 'gemmforge-testing'
+       ]
+  ])
+])
+
+pipeline {
+    agent {label "${env.AGENT}"}
+
+    stages {
+        stage('NotifyGithub') {
+            steps {
+                githubNotify account: github_login, context: 'CUDA test', credentialsId: 'forge-github-notify', 
+                    description: 'Running Gemmforge tests...', repo: repo, sha: after, status: 'PENDING'
+            }
+        }
+        stage('CleanWorkspace') {
+            steps {
+                deleteDir()
+            }
+        }
+
+        stage('Clone') {
+            steps {
+                script {
+                    filter = "${ref}".split("refs/heads/")
+                    branch = filter[1]
+                }
+                sh """
+                git clone --branch ${branch} --recurse-submodules ${clone_url} .
+                """
+            }
+        }
+        
+        stage('TestNvidia') {
+            steps {
+                script {
+                    testImage = docker.build("gftest:nvidia", ". -f ./.ci/Dockerfile.nvidia")
+                    testImage.inside("--gpus all --env SM=${env.GPU_MODEL}") {
+                      sh """
+                        set -eu pipefail
+
+                        for example in ./examples/*.py; do
+                            python3 \$example
+                        done
+                        python3 ./tests/interface/test_loaders_factory.py
+
+                        export CTEST_OUTPUT_ON_FAILURE=1
+                        export CC=gcc
+                        export CXX=g++
+
+                        root_dir=\$PWD
+                        curr_dir=./tests/gemms/build
+                        mkdir -p \$curr_dir && cd \$curr_dir
+                        for test in ../testsuites/*.yaml; do 
+                            cmake .. -DSM_ARCH=\$SM -DDEVICE_BACKEND=CUDA -DREAL_SIZE=4 -DTEST_SUITE=\$test
+                            make -j4
+                            ./gemm-tests
+                            rm -rf ./*
+                        done
+
+                        cd \$root_dir
+                        curr_dir=./tests/csa/build
+                        mkdir -p \$curr_dir && cd \$curr_dir
+                        for test in ../testsuites/*.yaml; do 
+                            cmake .. -DSM_ARCH=\$SM -DDEVICE_BACKEND=CUDA -DREAL_SIZE=4 -DTEST_SUITE=\$test
+                            make -j4
+                            ./csa-tests
+                            rm -rf ./*
+                        done
+                        cd \$root_dir
+
+                        for bench in ./benchmarks/*; do
+                            curr_dir=\$bench/build
+                            mkdir -p \$curr_dir && cd \$curr_dir
+                            cmake .. -DSM_ARCH=\$SM -DDEVICE_BACKEND=CUDA -DREAL_SIZE=4
+                            make -j
+                            make test ARGS=\"-V\"
+                            cd \$root_dir
+                        done
+                      """
+                    }
+                }
+            }
+        }
+    }
+    post { 
+        always {
+            sh 'docker rmi -f $(docker images -f "dangling=true" -q)'
+        }
+        success {
+            githubNotify account: github_login, context: 'CUDA test', credentialsId: 'forge-github-notify', 
+            description: 'Running Gemmforge tests...', repo: repo, sha: after, status: 'SUCCESS'
+        }
+        failure {
+            githubNotify account: github_login, context: 'CUDA test', credentialsId: 'forge-github-notify', 
+            description: 'Running Gemmforge tests...', repo: repo, sha: after, status: 'FAILURE'
+        }
+    }
+}

@@ -1,58 +1,52 @@
-#include "hip/hip_runtime.h"
-#include "stop_watch.h"
-#include "gemmgen_aux.h"
 #include "stop_watch.h"
 #include "yaml-cpp/yaml.h"
 #include <iostream>
+#include <device.h>
+#include "kernel.h"
 
-using namespace gemmgen;
-
-__global__ void copyData(float *To, float *From, size_t NumElements) {
-  int Idx = hipThreadIdx_x + hipBlockDim_x * hipBlockIdx_x;
-  if (Idx < NumElements) {
-    To[Idx] = From[Idx];
-  }
-}
+using namespace device;
 
 
 int main(int Argc, char *Argv[]) {
-  YAML::Node Config = YAML::LoadFile("../config.yaml");
-  int NumRepeats = Config["num_repeats"].as<int>();
-  double AllocatedMemGb = Config["allocated_mem"].as<double>();
 
-  constexpr long long FACTOR = 1024 * 1024 * 1024;
-  size_t NumElements = (FACTOR * AllocatedMemGb) / sizeof(float);
+    auto device = &DeviceInstance::getInstance();
+    auto api = device->api;
 
-  float *To = nullptr;
-  float *From = nullptr;
+    YAML::Node Config = YAML::LoadFile("../config.yaml");
+    int NumRepeats = Config["num_repeats"].as<int>();
+    auto AllocatedMemGb = Config["allocated_mem"].as<double>();
 
-  hipMalloc(&To, NumElements * sizeof(float)); CHECK_ERR;
-  hipMalloc(&From, NumElements * sizeof(float)); CHECK_ERR;
+    constexpr long long FACTOR = 1024 * 1024 * 1024;
+    size_t NumElements = (FACTOR * AllocatedMemGb) / sizeof(float);
 
-  dim3 Block(1024, 1, 1);
-  dim3 Grid((NumElements + 1024 - 1) / 1024, 1, 1);
+    auto To = (float *) api->allocGlobMem(NumElements * sizeof(float));;
+    auto From = (float *) api->allocGlobMem(NumElements * sizeof(float));;
 
-  utils::StopWatch<std::chrono::duration<double, std::chrono::nanoseconds::period>> Timer;
-  Timer.start();
-  for (int Repeat = 0; Repeat < NumRepeats; ++Repeat) {
-    hipLaunchKernelGGL(copyData, dim3(Grid), dim3(Block), 0, 0, To, From, NumElements);
-  }
-  synchDevice();
+    size_t blocks = (NumElements + 1024 - 1) / 1024;
+    size_t threads = 1024;
+    api->synchDevice();
 
-  Timer.stop();
-  CHECK_ERR;
+    utils::StopWatch <std::chrono::duration<double, std::chrono::nanoseconds::period>> Timer;
+    Timer.start();
+    for (int Repeat = 0; Repeat < NumRepeats; ++Repeat) {
+        copyData(To, From, NumElements, blocks, threads, api->getDefaultStream());
+    }
+    api->synchDevice();
+    Timer.stop();
 
-  auto AverageTime = Timer.getTime() / NumRepeats;
-  // 1 copy and 1 write explains the factor of 2
-  double BandwidthGb = 2 * (NumElements / AverageTime) * sizeof(float);
-  std::cout << "Allocated Mem, GB: " << AllocatedMemGb << std::endl;
-  std::cout << "Time: " << Timer.getTime() << std::endl;
-  std::cout << "Num. Repeats: " << NumRepeats << std::endl;
-  std::cout << "Num. Elements: " << NumElements << std::endl;
-  std::cout << "Achieved bandwidth: " << BandwidthGb << " GB/s" << std::endl;
+    auto AverageTime = Timer.getTime() / NumRepeats;
+    // 1 copy and 1 write explains the factor of 2
+    double BandwidthGb = 2 * (NumElements / AverageTime) * sizeof(float);
+    std::cout << "Allocated Mem, GB: " << AllocatedMemGb << std::endl;
+    std::cout << "Time: " << Timer.getTime() << std::endl;
+    std::cout << "Num. Repeats: " << NumRepeats << std::endl;
+    std::cout << "Num. Elements: " << NumElements << std::endl;
+    std::cout << "Achieved bandwidth: " << BandwidthGb << " GB/s" << std::endl;
 
-  hipFree(To); CHECK_ERR;
-  hipFree(From); CHECK_ERR;
+    api->freeMem(To);
+    api->freeMem(From);
 
-  return 0;
+    device->finalize();
+
+    return 0;
 }

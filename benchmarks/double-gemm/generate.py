@@ -1,9 +1,9 @@
+from gemmforge import DenseMatrix, GenerationError, GemmGenerator
+from gemmforge.vm import vm_factory
 import os
 import yaml
 import argparse
 
-from gemmforge import DenseMatrix, GemmGenerator, GenerationError
-from gemmforge import arch
 
 parser = argparse.ArgumentParser()
 parser.add_argument('-r', '--realsize', type=int, action='store',
@@ -19,6 +19,7 @@ parser.add_argument("-s", "--sub_arch",
                     help="Sub_arch of the GPU, e.g sm_60 for Nvidia or gfx906 for AMD",
                     default="sm_60")
 args = parser.parse_args()
+
 
 def produce_matrix(spec):
     return DenseMatrix(num_rows=spec["num_rows"],
@@ -46,14 +47,17 @@ tmp = produce_matrix(spec)
 
 alpha = config["alpha"]
 beta = config["beta"]
-arch = arch.produce(args.manufacturer, args.sub_arch)
 
 try:
     kernels = []
     launches = []
     headers = []
 
-    gen = GemmGenerator(arch, "float" if args.realsize == 4 else "double")
+    vm = vm_factory(name=args.manufacturer,
+                    sub_name=args.sub_arch,
+                    fp_type="float" if args.realsize == 4 else "double")
+
+    gen = GemmGenerator(vm)
     gen.generate(mat_a, mat_b, tmp, 1.0, 0.0, base_name="callFirstGemm")
 
     kernels.append(gen.get_kernel())
@@ -72,15 +76,19 @@ try:
         os.mkdir(dir_name)
 
     path = None
-    if arch.manufacturer == "nvidia":
+    hw_descr = vm.get_hw_descr()
+    if hw_descr.manufacturer == "nvidia":
         path = os.path.join(dir_name, "kernels.cu")
-    elif arch.manufacturer == "amd":
+    elif hw_descr.manufacturer == "amd" or hw_descr.manufacturer == "sycl":
         path = os.path.join(dir_name, "kernels.cpp")
 
     with open(path, 'w') as file:
         file.write("#include \"gemmgen_aux.h\"\n")
-        if arch.manufacturer == "amd":
+        if hw_descr.manufacturer == "amd":
             file.write("#include \"hip/hip_runtime.h\"\n")
+        elif hw_descr.manufacturer == "sycl":
+            file.write("#include <CL/sycl.hpp>\n")
+
         for kernel in kernels:
             file.write(kernel)
             print(kernel)

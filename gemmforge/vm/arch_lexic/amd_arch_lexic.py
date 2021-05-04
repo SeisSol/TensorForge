@@ -1,7 +1,8 @@
+from . import NvidiaArchLexic
 from .abstract_arch_lexic import AbstractArchLexic
 
 
-class AmdArchLexic(AbstractArchLexic):
+class AmdArchLexic(NvidiaArchLexic):
 
   def __init__(self):
     AbstractArchLexic.__init__(self)

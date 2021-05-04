@@ -7,8 +7,8 @@ class StubLoader(AbstractShrMemLoader):
 
   """
 
-  def __init__(self, matrix, num_active_threads, manufacturer):
-    super(StubLoader, self).__init__(matrix, num_active_threads, manufacturer)
+  def __init__(self, vm, matrix, num_active_threads):
+    super(StubLoader, self).__init__(vm, matrix, num_active_threads)
     self.lid_dim = self.matrix.num_rows
 
   def compute_shared_mem_size(self):

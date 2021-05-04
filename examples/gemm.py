@@ -1,5 +1,5 @@
-from gemmforge import DenseMatrix, GemmGenerator, GenerationError
-from gemmforge import arch
+from gemmforge import DenseMatrix, GenerationError, GemmGenerator
+from gemmforge.vm import vm_factory
 import argparse
 
 parser = argparse.ArgumentParser(description="Specify Manufacturer and Sub_Arch of the GPU")
@@ -15,8 +15,6 @@ parser.add_argument("-s",
                     default="sm_60")
 
 args = parser.parse_args()
-
-arch = arch.produce(args.manufacturer, args.sub_arch)
 
 mat_a = DenseMatrix(num_rows=56,
                     num_cols=9,
@@ -38,7 +36,11 @@ mat_c = DenseMatrix(num_rows=56,
                     transpose=False)
 
 try:
-    gen = GemmGenerator(arch, "float")
+    vm = vm_factory(name=args.manufacturer,
+                    sub_name=args.sub_arch,
+                    fp_type="float")
+
+    gen = GemmGenerator(vm)
     gen.generate(mat_a, mat_b, mat_c, alpha=1.1, beta=1.1)
     print(gen.get_kernel())
     print(gen.get_launcher())
