@@ -19,11 +19,7 @@ setuptools.setup(
     description="GPU-GEMM generator",
     long_description=long_description,
     long_description_content_type="text/markdown",
-    packages=["gemmforge", 
-              "gemmforge.matrix", 
-              "gemmforge.loaders",
-              "gemmforge.constructs",
-              "gemmforge.initializers"],
+    packages=setuptools.find_packages(),
     classifiers=[
         "Programming Language :: Python :: 3",
         "License :: OSI Approved :: MIT License",

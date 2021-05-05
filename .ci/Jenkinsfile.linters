@@ -1,0 +1,91 @@
+properties([
+    parameters([
+        string(
+            defaultValue: 'atsccs68_runner',
+            description: 'agent name tells where to run a job',
+            name: 'AGENT',
+            trim: true)
+    ]),
+    pipelineTriggers([
+       [$class: 'GenericTrigger',
+        genericVariables: [
+         [key: 'ref', value: '$.ref'],
+         [key: 'after', value: '$.after'],
+         [key: 'clone_url', value: '$.repository.clone_url'],
+         [key: 'statuses_url', value: '$.repository.statuses_url'],
+         [key: 'github_login', value: '$.repository.owner.login'],
+         [key: 'repo', value: '$.repository.name'],
+        ],
+        printContributedVariables: true,
+        printPostContent: true,
+        token: 'gemmforge-linters',
+       ]
+  ])
+])
+
+
+pipeline {
+    agent {label "${env.AGENT}"}
+
+    stages {
+        stage('CleanWorkspace') {
+            steps {
+                deleteDir()
+            }
+        }
+
+        stage('Clone') {
+            steps {
+                script {
+                    filter = "${ref}".split("refs/heads/")
+                    branch = filter[1]
+                }
+                sh """
+                git clone --branch ${branch} --recurse-submodules ${clone_url} .
+                """
+            }
+        }
+
+        stage('BuildImage') {
+            steps {
+                script {
+                    testImage = docker.build("gflinters:latest", ". -f ./.ci/docker/Dockerfile.python --build-arg BRANCH=${branch}")
+                }
+            }
+        }
+
+        stage('PEP8') {
+            steps {
+                script {
+                    catchError {
+                        testImage.inside() {
+                            sh """
+                            pep8 gemmforge
+                            """
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Pylint') {
+            steps {
+                script {
+                    testImage.inside() {
+                        sh """
+                        pylint gemmforge
+                        """
+                    }
+                }
+            }
+        }
+
+
+    }
+
+    post {
+        always {
+            sh 'docker rmi -f $(docker images -f "dangling=true" -q)'
+        }
+    }
+}
