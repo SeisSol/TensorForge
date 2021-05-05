@@ -8,22 +8,22 @@
 ## Installation
 #### For users
 ```console
-pip install gemmforge
+pip3 install gemmforge
 ```
 
 #### For developers
 ```console
 git clone https://github.com/ravil-mobile/gemmforge.git gemmforge
 cd gemmforge
-pip install -e .
+pip3 install -e .
 ```
+
 
 ## Usage
 ```python
-from gemmforge import DenseMatrix, GenerationError
-from gemmforge import arch
+from gemmforge import DenseMatrix, GenerationError, GemmGenerator
+from gemmforge.vm import vm_factory
 
-arch = arch.produce("nvidia", "sm_60")
 
 mat_a = DenseMatrix(num_rows=56,
                     num_cols=9,
@@ -43,8 +43,11 @@ mat_c = DenseMatrix(num_rows=56,
                     bbox=[0, 0, 55, 8],
                     addressing="strided",
                     transpose=False)
+
 try:
-    gen = arch.get_gemm_generator_factory().create("float")
+    vm = vm_factory(name="nvidia", sub_name="sm_60", fp_type="float")
+    gen = GemmGenerator(vm)
+
     gen.generate(mat_a, mat_b, mat_c, alpha=1.1, beta=1.1)
     print(gen.get_kernel())
     print(gen.get_launcher())
