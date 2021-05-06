@@ -1,21 +1,21 @@
 #include <iostream>
-#include <hip/hip_runtime.h>
+#include <cuda_runtime.h>
 
-namespace gemmgen {
+namespace gemmforge {
     std::string PrevFile = "";
     int PrevLine = 0;
 
     void checkErr(const std::string &File, int Line) {
-      hipError_t Error = hipGetLastError();
-      if (Error != hipSuccess) {
+      cudaError_t Error = cudaGetLastError();
+      if (Error != cudaSuccess) {
         std::cout << std::endl << File 
                   << ", line " << Line
-                  << ": " << hipGetErrorString(Error) 
+                  << ": " << cudaGetErrorString(Error) 
                   << " (" << Error << ")" 
                   << std::endl;
                   
         if (PrevLine > 0)
-          std::cout << "Previous HIP call:" << std::endl
+          std::cout << "Previous CUDA call:" << std::endl
                     << PrevFile << ", line " << PrevLine << std::endl;
         throw;
       }
@@ -24,7 +24,7 @@ namespace gemmgen {
     }
 
   void synchDevice(void *stream) {
-    hipDeviceSynchronize();
+    cudaDeviceSynchronize();
     checkErr(__FILE__, __LINE__);
   }
 }

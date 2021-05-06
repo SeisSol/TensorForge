@@ -28,8 +28,6 @@ class ExtendedTransposePatchLoader(AbstractShrMemLoader):
         optimal_num_cols = _find_next_prime(self.matrix.get_actual_num_cols())
         self.shm_volume = optimal_num_cols * self.matrix.num_rows
         self.lid_dim = optimal_num_cols
-        # For better readability
-        self.name_treadIdx_x = self._lexic.thread_idx_x
 
     def compute_shared_mem_size(self):
         return self.shm_volume
@@ -48,13 +46,13 @@ class ExtendedTransposePatchLoader(AbstractShrMemLoader):
                 with file.For("int i = 0; i < {}; ++i".format(num_hops)):
 
                     file.Assignment("Index",
-                                    "{} + i * {}".format(self.name_treadIdx_x, self.num_active_threads))
+                                    "{} + i * {}".format(self._lexic.thread_idx_x, self.num_active_threads))
 
                     shr_mem_index = "(Index % {}) * {} + Index / {}".format(self.matrix.num_rows,
                                                                             self.lid_dim,
                                                                             self.matrix.num_rows)
 
-                    glob_mem_index = "{} + i * {}".format(self.name_treadIdx_x, self.num_active_threads)
+                    glob_mem_index = "{} + i * {}".format(self._lexic.thread_idx_x, self.num_active_threads)
                     file.Assignment("{}[{}]".format(self.out_symbol, shr_mem_index),
                                     "{}[{}]".format(in_symbol, glob_mem_index))
             else:
@@ -63,12 +61,12 @@ class ExtendedTransposePatchLoader(AbstractShrMemLoader):
 
                 while counter < num_hops:
                     file.Assignment("Index",
-                                    "{} + {}".format(self.name_treadIdx_x, counter * self.num_active_threads))
+                                    "{} + {}".format(self._lexic.thread_idx_x, counter * self.num_active_threads))
                     shr_mem_index = "(Index % {}) * {} + Index / {}".format(self.matrix.num_rows,
                                                                             self.lid_dim,
                                                                             self.matrix.num_rows)
 
-                    glob_mem_index = "{} + {}".format(self.name_treadIdx_x, counter * self.num_active_threads)
+                    glob_mem_index = "{} + {}".format(self._lexic.thread_idx_x, counter * self.num_active_threads)
                     file.Assignment("{}[{}]".format(self.out_symbol, shr_mem_index),
                                     "{}[{}]".format(in_symbol, glob_mem_index))
                     counter += 1
@@ -77,15 +75,15 @@ class ExtendedTransposePatchLoader(AbstractShrMemLoader):
         if (self.shm_volume % self.num_active_threads) != 0:
             residue = self.shm_volume - num_hops * self.num_active_threads
 
-            with file.If("{} < {}".format(self.name_treadIdx_x, residue)):
+            with file.If("{} < {}".format(self._lexic.thread_idx_x, residue)):
                 file.Assignment("Index",
-                                "{} + {}".format(self.name_treadIdx_x, num_hops * self.num_active_threads))
+                                "{} + {}".format(self._lexic.thread_idx_x, num_hops * self.num_active_threads))
 
                 shr_mem_index = "(Index % {}) * {} + Index / {}".format(self.matrix.num_rows,
                                                                         self.lid_dim,
                                                                         self.matrix.num_rows)
 
-                glob_mem_index = "{} + {}".format(self.name_treadIdx_x, num_hops * self.num_active_threads)
+                glob_mem_index = "{} + {}".format(self._lexic.thread_idx_x, num_hops * self.num_active_threads)
                 file.Assignment("{}[{}]".format(self.out_symbol, shr_mem_index),
                                 "{}[{}]".format(in_symbol, glob_mem_index))
 
@@ -101,7 +99,6 @@ class ExactTransposePatchLoader(AbstractShrMemLoader):
         optimal_num_cols = _find_next_prime(self.matrix.get_actual_num_cols())
         self.shm_volume = optimal_num_cols * self.matrix.num_rows
         self.lid_dim = optimal_num_cols
-        self.name_treadIdx_x = self._lexic.thread_idx_x
 
     def compute_shared_mem_size(self):
         return self.shm_volume
@@ -117,7 +114,7 @@ class ExactTransposePatchLoader(AbstractShrMemLoader):
                 # load using a for-loop
                 file.Pragma("unroll")
                 with file.For("int Counter = 0; Counter < {}; ++Counter".format(num_hops)):
-                    thread_idx = "{} + Counter * {}".format(self.name_treadIdx_x,
+                    thread_idx = "{} + Counter * {}".format(self._lexic.thread_idx_x,
                                                             self.num_active_threads,
                                                             self.matrix.get_actual_num_rows())
 
@@ -138,9 +135,9 @@ class ExactTransposePatchLoader(AbstractShrMemLoader):
             # the last hop to fill shared mem with data
             if (self.matrix.get_actual_num_rows() % self.num_active_threads) != 0:
                 residue = self.matrix.get_actual_num_rows() - num_hops * self.num_active_threads
-                with file.If("{} < {}".format(self.name_treadIdx_x, residue)):
+                with file.If("{} < {}".format(self._lexic.thread_idx_x, residue)):
                     finial_offset = num_hops * self.num_active_threads
-                    thread_idx = "{} + {}".format(self.name_treadIdx_x, finial_offset)
+                    thread_idx = "{} + {}".format(self._lexic.thread_idx_x, finial_offset)
 
                     file.VariableDeclaration("int", "Index",
                                              "{} + i * {}".format(thread_idx,

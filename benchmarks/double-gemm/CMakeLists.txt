@@ -21,13 +21,13 @@ set(GPU_TARGET_INCLUDE_DIRS ../../submodules/Device
                             gencode)
 
 if(${DEVICE_BACKEND} STREQUAL "CUDA")
-    set(GPU_TARGET_SOURCE_FILES common/test_drivers/simple_driver.cpp gen_code/kernels.cu include/gemmgen_aux.cu)
+    set(GPU_TARGET_SOURCE_FILES common/test_drivers/simple_driver.cpp gen_code/kernels.cu include/gemmforge_aux.cu)
     set(GEN_COPY_PRODUCTS ${CMAKE_SOURCE_DIR}/gen_code/kernels.cu ${CMAKE_SOURCE_DIR}/gen_code/kernels.h)
 elseif(${DEVICE_BACKEND} STREQUAL "HIP")
-    set(GPU_TARGET_SOURCE_FILES common/test_drivers/simple_driver.cpp gen_code/kernels.cpp include/gemmgen_aux.cpp)
+    set(GPU_TARGET_SOURCE_FILES common/test_drivers/simple_driver.cpp gen_code/kernels.cpp include/gemmforge_aux.cpp)
     set(GEN_COPY_PRODUCTS ${CMAKE_SOURCE_DIR}/gen_code/kernels.cpp ${CMAKE_SOURCE_DIR}/gen_code/kernels.h)
 elseif((${DEVICE_BACKEND} STREQUAL "ONEAPI") OR (${DEVICE_BACKEND} STREQUAL "HIPSYCL"))
-    set(GPU_TARGET_SOURCE_FILES common/test_drivers/simple_driver.cpp gen_code/kernels.cpp include/gemmgen_aux_sycl.cpp)
+    set(GPU_TARGET_SOURCE_FILES common/test_drivers/simple_driver.cpp gen_code/kernels.cpp include/gemmforge_aux_sycl.cpp)
     set(GEN_COPY_PRODUCTS ${CMAKE_SOURCE_DIR}/gen_code/kernels.cpp ${CMAKE_SOURCE_DIR}/gen_code/kernels.h)
 endif()
 

@@ -77,25 +77,27 @@ class GemmGenerator(GemmLikeGenerator):
                 with file.If("{} < {}".format(self.team_index_str, Generator.NUM_ELEMENTS_STR)):
 
                     # declare ptrs for correct matrices
-                    file.VariableDeclaration("const {}*".format(self._precision),
+                    file.VariableDeclaration(f'const {self._precision}*',
                                              glob_symbols[self.mat_a.name],
                                              self._get_global_matrix_ptr(self.mat_a))
 
-                    file.VariableDeclaration("const {}*".format(self._precision),
+                    file.VariableDeclaration(f'const {self._precision}*',
                                              glob_symbols[self.mat_b.name],
                                              self._get_global_matrix_ptr(self.mat_b))
 
-                    file.VariableDeclaration("{}*".format(self._precision),
+                    file.VariableDeclaration(f'{self._precision}*',
                                              glob_symbols[self.mat_c.name],
                                              self._get_global_matrix_ptr(self.mat_c))
 
                     # declare shared memory per kernel
-                    mem = self._lexic.declare_shared_memory_inline("Scratch", self._precision, self._get_total_shared_mem_size())
+                    mem = self._lexic.declare_shared_memory_inline('Scratch',
+                                                                   self._precision,
+                                                                   self._get_total_shared_mem_size())
                     if mem is not None:
                         file.Expression(mem)
 
                     # find address of matrix B within block shared memory
-                    shr_mem_address = "&Scratch[{} * {}]".format(self.name_threadIdx_y, self.shr_mem_size_per_mult)
+                    shr_mem_address = f'&Scratch[{self.name_threadIdx_y} * {self.shr_mem_size_per_mult}]'
                     file.VariableDeclaration("{}*".format(self._precision),
                                              self.mat_b_loader.get_output_symbol(),
                                              shr_mem_address)
@@ -115,21 +117,20 @@ class GemmGenerator(GemmLikeGenerator):
                     self.mat_a_loader.generate_scr(file, glob_symbols[self.mat_a.name])
                     file.Expression(self._lexic.sync_threads())
 
-
                     # set up current compute symbols within the rest of the scope
                     current_symbols[self.mat_b.name] = self.mat_b_loader.get_output_symbol()
                     current_symbols[self.mat_a.name] = self.mat_a_loader.get_output_symbol()
                     file.Emptyline()
 
-                    with file.If("{} < {}".format(self.name_threadIdx_x, self.num_compute_threads)):
+                    with file.If(f'{self.name_threadIdx_x} < {self.num_compute_threads}'):
                         # allocate a buffer for each cuda thread to hold computed results
                         file.Emptyline()
-                        zero_fp_value = "0.0{}".format('f' if self._precision == "float" else '')
+                        zero_fp_value = "0.0{}".format('f' if self._precision == 'float' else '')
                         file.ArrayDeclaration(self._precision,
-                                              "Results",
+                                              'Results',
                                               [zero_fp_value] * self.mat_c.get_actual_num_cols())
 
-                        file.VariableDeclaration(self._precision, "Value")
+                        file.VariableDeclaration(self._precision, 'Value')
 
                         # perform matrix multiplication
                         # m, n, k - according to the BLAS documentation. Read BLAS spec.
@@ -139,14 +140,14 @@ class GemmGenerator(GemmLikeGenerator):
                             contraction_length = self.mat_a.get_actual_num_cols()
 
                         file.Emptyline()
-                        with file.For("int k = 0; k < {}; ++k".format(contraction_length)):
+                        with file.For(f'int k = 0; k < {contraction_length}; ++k'):
                             first_operand = "{}[{} + {} * k]".format(current_symbols[self.mat_a.name],
                                                                      self.name_threadIdx_x,
                                                                      self.mat_a_loader.get_lid_dim())
-                            file.Assignment("Value", "{}".format(first_operand))
+                            file.Assignment('Value', f'{first_operand}')
                             file.Emptyline()
-                            file.Pragma("unroll")
-                            with file.For("int n = 0; n < {}; ++n".format(self.mat_c.get_actual_num_cols())):
+                            file.Pragma('unroll')
+                            with file.For(f'int n = 0; n < {self.mat_c.get_actual_num_cols()}; ++n'):
                                 if self.mat_b.transpose:
                                     second_operand = "{}[n + {} * k]".format(current_symbols[self.mat_b.name],
                                                                              self.mat_b_loader.get_lid_dim())
@@ -155,27 +156,27 @@ class GemmGenerator(GemmLikeGenerator):
                                                                              self.mat_b_loader.get_lid_dim())
 
                                 file.Accumulate("Results[n]",
-                                                "Value * {}".format(second_operand))
+                                                f'Value * {second_operand}')
 
                         # write results back to memory
                         file.Emptyline()
                         file.Pragma("unroll")
-                        with file.For("int n = 0; n < {}; ++n".format(self.mat_c.get_actual_num_cols())):
+                        with file.For(f'int n = 0; n < {self.mat_c.get_actual_num_cols()}; ++n'):
                             rhs = "{}[{} + {} * n]".format(glob_symbols[self.mat_c.name],
                                                            self.name_threadIdx_x,
                                                            self.mat_c.num_rows)
 
                             if self.alpha == 1.0:
-                                lhs = "Results[n]"
+                                lhs = 'Results[n]'
                             else:
-                                if self._precision == "float" and isinstance(self.alpha, float):
+                                if self._precision == 'float' and isinstance(self.alpha, float):
                                     lhs = f'{self.alpha}f * Results[n]'
                                 else:
                                     lhs = f'{self.alpha} * Results[n]'
 
                             if self.beta != 0.0:
                                 if self.beta == 1.0:
-                                    lhs += " + {}".format(rhs)
+                                    lhs += f' + {rhs}'
                                 else:
                                     lhs += " + {} * {}".format(
                                         "{}{}".format(self.beta, 'f' if self._precision == "float" else ''),
@@ -192,12 +193,12 @@ class GemmGenerator(GemmLikeGenerator):
                 file.VariableDeclaration(self._lexic.kernel_range_object(), self._get_block_dim_spec())
                 file.VariableDeclaration(self._lexic.kernel_range_object(), self._get_grid_dim_spec())
 
-                self._lexic.get_stream_via_pointer(file, "stream", Generator.STREAM_PTR_STR)
+                self._lexic.get_stream_via_pointer(file, 'stream', Generator.STREAM_PTR_STR)
                 file.Expression(self._lexic.get_launch_code(self.base_name,
-                                                            "Grid",
-                                                            "Block",
-                                                            "stream",
-                                                             self._get_func_args()))
+                                                            'Grid',
+                                                            'Block',
+                                                            'stream',
+                                                            self._get_func_args()))
                 err = self._lexic.check_error()
                 if err is not None:
                     file.Expression(err)
@@ -259,9 +260,9 @@ class GemmGenerator(GemmLikeGenerator):
                                               "Matrix A (NoTrans) and B (NoTrans) do not match")
 
         except GenerationError as error:
-            matrices = {"A": self.mat_a, "B": self.mat_b, "C": self.mat_c}
+            matrices = {'A': self.mat_a, 'B': self.mat_b, 'C': self.mat_c}
             for name in matrices:
-                print("Matrix {}:".format(name))
+                print(f'Matrix {name}:')
                 print(matrices[name])
                 print("=" * 80)
 
@@ -291,9 +292,8 @@ class GemmGenerator(GemmLikeGenerator):
                                             num_active_threads=self.num_active_threads,
                                             load_and_transpose=False)
 
-
-        self.shr_mem_size_per_mult = self.mat_a_loader.compute_shared_mem_size() \
-                                     + self.mat_b_loader.compute_shared_mem_size()
+        self.shr_mem_size_per_mult = \
+            self.mat_a_loader.compute_shared_mem_size() + self.mat_b_loader.compute_shared_mem_size()
 
         thread_policy = TheadPolicyFactory.get_gemm_policy(vm=self._vm,
                                                            reals_per_op=self.shr_mem_size_per_mult,
@@ -338,7 +338,10 @@ class GemmGenerator(GemmLikeGenerator):
         md5encoding = result.hexdigest()
         prefix = 's' if self._precision == "float" else "d"
 
-        gemm_dims = f'm{self.mat_a.get_actual_num_rows()}_n{self.mat_b.get_actual_num_cols()}_k{self.mat_a.get_actual_num_cols()}'
+        gemm_dims = f'm{self.mat_a.get_actual_num_rows()}'
+        gemm_dims += f'_n{self.mat_b.get_actual_num_cols()}'
+        gemm_dims += f'_k{self.mat_a.get_actual_num_cols()}'
+
         ldas = f'lda{self.mat_a.num_rows}_ldb{self.mat_b.num_rows}_ldc{self.mat_c.num_rows}'
         consts = f'alpha_{int(self.alpha)}_beta_{int(self.beta)}'
         return "{0}gemm_{1}_{2}_{3}_{4}_{5}_{6}".format(prefix,
@@ -402,6 +405,3 @@ class GemmGenerator(GemmLikeGenerator):
         else:
             sub_offset = matrix.get_offset_to_first_element()
             return "&{}[{} + {}]".format(matrix.name, sub_offset, extra_offset_symbol)
-
-
-

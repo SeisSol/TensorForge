@@ -1,9 +1,9 @@
-.. gemmgen documentation master file, created by
+.. gemmforge documentation master file, created by
    sphinx-quickstart on Sun Mar 29 16:19:10 2020.
    You can adapt this file completely to your liking, but it should at least
    contain the root `toctree` directive.
 
-Welcome to gemmgen's documentation!
+Welcome to gemmforge's documentation!
 ===================================
 
 .. toctree::

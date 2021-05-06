@@ -12,18 +12,18 @@
 #
 import os
 import sys
-sys.path.insert(0, os.path.abspath('../../gemmgen'))
+sys.path.insert(0, os.path.abspath('../../gemmforge'))
 
 import sphinx_rtd_theme
 
 # -- Project information -----------------------------------------------------
 
-project = 'gemmgen'
+project = 'gemmforge'
 copyright = '2020, Ravil Dorozhinskii'
 author = 'Ravil Dorozhinskii'
 
 # The full version, including alpha/beta/rc tags
-release = '0.0.1'
+release = '0.0.202'
 
 
 # -- General configuration ---------------------------------------------------

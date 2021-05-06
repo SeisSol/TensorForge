@@ -24,7 +24,6 @@ class CsaGenerator(GemmLikeGenerator):
         self.team_index_str = self._lexic.get_tid_counter(self._lexic.thread_idx_z,
                                                           self._lexic.block_dim_z,
                                                           self._lexic.block_idx_x)
-        self.name_threadIdx_x = self._lexic.thread_idx_x
 
     def generate(self, mat_a, mat_b, alpha, beta, base_name=None):
         self.mat_a = mat_a
@@ -68,8 +67,11 @@ class CsaGenerator(GemmLikeGenerator):
                 raise GenerationError("Cannot generate a copy-add-scale op. "
                                       "Matrix B is transpose")
 
-            is_inside = lambda rst_range, term_range: term_range[0] >= rst_range[0] and term_range[1] <= rst_range[1]
-            make_range = lambda bbox, dim: [bbox[dim], bbox[dim + 2]]
+            def is_inside(rst_range, term_range):
+                return term_range[0] >= rst_range[0] and term_range[1] <= rst_range[1]
+
+            def make_range(bbox, dim):
+                return [bbox[dim], bbox[dim + 2]]
 
             for dim in range(2):
                 if not is_inside(make_range(self.mat_b.bbox, dim), make_range(self.mat_a.bbox, dim)):
@@ -77,7 +79,7 @@ class CsaGenerator(GemmLikeGenerator):
                                           "Data of mat. A (term) in not inside of mat. B (result)")
 
         except GenerationError as error:
-            matrices = {"A": self.mat_a, "B": self.mat_b}
+            matrices = {'A': self.mat_a, 'B': self.mat_b}
             for name in matrices:
                 print("Matrix {}:".format(name))
                 print(matrices[name])
@@ -102,7 +104,7 @@ class CsaGenerator(GemmLikeGenerator):
     def _generate_kernel(self):
         glob_symbols = {}
         for matrix in [self.mat_a, self.mat_b]:
-            glob_symbols[matrix.name] = "GlobMat{}".format(matrix.name)
+            glob_symbols[matrix.name] = f'GlobMat{matrix.name}'
 
         src = StringIO()
         with constructs.Cpp(src) as file:
@@ -110,10 +112,10 @@ class CsaGenerator(GemmLikeGenerator):
             max_num_threads_per_block = total_num_threas_per_op * self.num_mult_per_block
             kernel_bounds = [max_num_threads_per_block]
             with self._lexic.kernel_definition(file, kernel_bounds, self.base_name, self._get_func_params()):
-                with file.If("{} < {}".format(self.team_index_str, Generator.NUM_ELEMENTS_STR)):
+                with file.If(f'{self.team_index_str} < {Generator.NUM_ELEMENTS_STR}'):
 
                     # declare ptrs for correct matrices
-                    file.VariableDeclaration("const {}*".format(self._precision),
+                    file.VariableDeclaration(f'const {self._precision}*',
                                              glob_symbols[self.mat_a.name],
                                              self._get_global_matrix_ptr(self.mat_a))
 
@@ -122,32 +124,32 @@ class CsaGenerator(GemmLikeGenerator):
                     view = deepcopy(self.mat_b)
                     view.bbox = self.mat_a.bbox
 
-                    file.VariableDeclaration("{}*".format(self._precision),
+                    file.VariableDeclaration(f'{self._precision}*',
                                              glob_symbols[self.mat_b.name],
                                              self._get_global_matrix_ptr(view))
 
-                    with file.If("{} < {}".format(self.name_threadIdx_x, self.mat_a.get_actual_num_rows())):
+                    with file.If(f'{self._lexic.thread_idx_x} < {self.mat_a.get_actual_num_rows()}'):
                         if self.beta == 0.0:
                             file.Assignment(f'{glob_symbols[self.mat_b.name]}'
-                                            f'[{self.name_threadIdx_x}]',
+                                            f'[{self._lexic.thread_idx_x}]',
                                             f'Scale * {glob_symbols[self.mat_a.name]}'
-                                            f'[{self.name_threadIdx_x}]')
+                                            f'[{self._lexic.thread_idx_x}]')
                         elif self.beta == 1.0:
                             file.Accumulate(f'{glob_symbols[self.mat_b.name]}'
-                                            f'[{self.name_threadIdx_x}]',
+                                            f'[{self._lexic.thread_idx_x}]',
                                             f'Scale * {glob_symbols[self.mat_a.name]}'
-                                            f'[{self.name_threadIdx_x}]')
+                                            f'[{self._lexic.thread_idx_x}]')
                         elif self.beta == -1.0:
                             file.Deaccumulate(f'{glob_symbols[self.mat_b.name]}'
-                                              f'[{self.name_threadIdx_x}]',
+                                              f'[{self._lexic.thread_idx_x}]',
                                               f'Scale * {glob_symbols[self.mat_a.name]}'
-                                              f'[{self.name_threadIdx_x}]')
+                                              f'[{self._lexic.thread_idx_x}]')
                         else:
                             rhs = f'Scale * {glob_symbols[self.mat_a.name]}' \
-                                  f'[{self.name_threadIdx_x}]' \
+                                  f'[{self._lexic.thread_idx_x}]' \
                                   f' + {self.beta}' \
-                                  f' * {glob_symbols[self.mat_b.name]}[{self.name_threadIdx_x}] '
-                            file.Assignment(left=f'{glob_symbols[self.mat_b.name]}[{self.name_threadIdx_x}]', right=rhs)
+                                  f' * {glob_symbols[self.mat_b.name]}[{self._lexic.thread_idx_x}] '
+                            file.Assignment(left=f'{glob_symbols[self.mat_b.name]}[{self._lexic.thread_idx_x}]', right=rhs)
 
             self._kernel = src.getvalue()
             self._kernel += self._mat_b_initializer.get_kernel()
@@ -161,7 +163,7 @@ class CsaGenerator(GemmLikeGenerator):
                 # prepare arguments for the initializer of matrix "b"
                 initializer_args = [self.mat_b.name,
                                     self._generate_extra_offset_symbol(self.mat_b),
-                                    "NumElements",
+                                    'NumElements',
                                     Generator.STREAM_PTR_STR]
 
                 # pass an additional argument if "beta" is known at run-time only
@@ -169,17 +171,17 @@ class CsaGenerator(GemmLikeGenerator):
                     initializer_args.insert(0, self.beta)
 
                 # call the initializer. Note: the initializer can be a stub i.e. will do nothing
-                file("{}".format(self._mat_b_initializer.func_call(initializer_args)))
+                file(f'{self._mat_b_initializer.func_call(initializer_args)}')
 
                 file.VariableDeclaration(self._lexic.kernel_range_object(), self._get_block_dim_spec())
                 file.VariableDeclaration(self._lexic.kernel_range_object(), self._get_grid_dim_spec())
 
-                self._lexic.get_stream_via_pointer(file, "streamPtr", Generator.STREAM_PTR_STR)
+                self._lexic.get_stream_via_pointer(file, 'streamPtr', Generator.STREAM_PTR_STR)
                 file.Expression(self._lexic.get_launch_code(self.base_name,
-                                                            "Grid",
-                                                            "Block",
-                                                            "stream",
-                                                             self._get_func_args()))
+                                                            'Grid',
+                                                            'Block',
+                                                            'stream',
+                                                            self._get_func_args()))
                 err = self._lexic.check_error()
                 if err is not None:
                     file.Expression(err)
@@ -202,7 +204,7 @@ class CsaGenerator(GemmLikeGenerator):
         result = hashlib.md5(f'{constants}_{self.mat_a.__str__()}{self.mat_b.__str__()}'.encode())
         md5encoding = result.hexdigest()
 
-        prefix = 's' if self._precision == "float" else "d"
+        prefix = 's' if self._precision == 'float' else 'd'
         return "{}copyAddScale_{}_{}_{}".format(prefix,
                                                 dims,
                                                 addressing,
@@ -251,4 +253,4 @@ class CsaGenerator(GemmLikeGenerator):
 
         else:
             sub_offset = matrix.get_offset_to_first_element()
-            return "&{}[{} + {} + {}]".format(matrix.name, sub_offset, extra_offset_symbol, offset_to_row)
+            return f'&{matrix.name}[{sub_offset} + {extra_offset_symbol} + {offset_to_row}]'

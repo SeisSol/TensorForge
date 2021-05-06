@@ -4,7 +4,7 @@
 #include <vector>
 #include <assert.h>
 
-namespace gemmgen {
+namespace gemmforge {
   namespace dense {
 
     class TestDriver {

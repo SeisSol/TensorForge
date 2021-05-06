@@ -119,4 +119,4 @@ class AbstractGenerator(ABC):
         return f'const {precision} {matrix.ptr_type} {matrix.name}, {sub_offset}'
 
   def _generate_extra_offset_symbol(self, matrix):
-    return  f'ExtraOffset{matrix.name}'
+    return f'ExtraOffset{matrix.name}'

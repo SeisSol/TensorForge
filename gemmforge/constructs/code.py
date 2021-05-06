@@ -192,7 +192,7 @@ class Cpp:
         else:
             return Block(self, '__global__ void kernel_{}({})'.format(name, arguments))
 
-    def SyclKernel(self, name, arguments='', kernel_bounds=None, lambdaPrefixBlock = None):
+    def SyclKernel(self, name, arguments='', kernel_bounds=None, lambdaPrefixBlock=None):
 
         l1 = "inline void kernel_{}(cl::sycl::queue *stream, cl::sycl::range<3> group_count, cl::sycl::range<3> group_size, {})".format(name, arguments)
         l2 = "stream->submit([&](cl::sycl::handler &cgh)"

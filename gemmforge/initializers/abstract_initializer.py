@@ -3,10 +3,8 @@ from io import StringIO
 import math
 import hashlib
 
-from gemmforge.vm import VM
 from gemmforge.abstract_generator import AbstractGenerator
 from ..thread_policies import TheadPolicyFactory
-
 
 
 class ExactInitializer(AbstractGenerator):
@@ -59,13 +57,12 @@ class ExactInitializer(AbstractGenerator):
             with self._lexic.kernel_definition(file, kernel_bounds, self.base_name, self._get_func_params()):
                 with file.If("{} < {}".format(self.team_index_str(), AbstractGenerator.NUM_ELEMENTS_STR)):
                     # declare ptrs for correct matrices
-                    file.VariableDeclaration("{}*".format(self._precision),
+                    file.VariableDeclaration(f'{self._precision}*',
                                              global_symbols[self.matrix.name],
                                              self._get_global_matrix_ptr(self.matrix))
 
                     # assign initial value to a matrix element
-                    with file.If(
-                            "{} < {}".format(self._lexic.thread_idx_x, self.matrix.get_actual_num_rows())):
+                    with file.If(f'{self._lexic.thread_idx_x} < {self.matrix.get_actual_num_rows()}'):
                         file.Assignment(f'{global_symbols[self.matrix.name]}[{self._lexic.thread_idx_x}]',
                                         f'{self.init_value}')
 
@@ -78,11 +75,11 @@ class ExactInitializer(AbstractGenerator):
                 file.VariableDeclaration(self._lexic.kernel_range_object(), self._get_block_dim_spec())
                 file.VariableDeclaration(self._lexic.kernel_range_object(), self._get_grid_dim_spec())
 
-                self._lexic.get_stream_via_pointer(file, "stream", AbstractGenerator.STREAM_PTR_STR)
+                self._lexic.get_stream_via_pointer(file, 'stream', AbstractGenerator.STREAM_PTR_STR)
                 file.Expression(self._lexic.get_launch_code(self.base_name,
-                                                            "Grid",
-                                                            "Block",
-                                                            "stream",
+                                                            'Grid',
+                                                            'Block',
+                                                            'stream',
                                                             self._get_func_args()))
                 err = self._lexic.check_error()
                 if err is not None:
@@ -93,7 +90,7 @@ class ExactInitializer(AbstractGenerator):
     def _generate_header(self):
         src = StringIO()
         with constructs.Cpp(src) as file:
-            file.FunctionDeclaration(self.base_name,  self._get_launcher_params(with_defaults=True))
+            file.FunctionDeclaration(self.base_name, self._get_launcher_params(with_defaults=True))
             content = src.getvalue()
         self._header = content
 

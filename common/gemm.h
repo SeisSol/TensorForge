@@ -1,10 +1,10 @@
-#ifndef GEMMGEN_REFERENCE_GEMM_H
-#define GEMMGEN_REFERENCE_GEMM_H
+#ifndef GEMMFORGE_REFERENCE_GEMM_H
+#define GEMMFORGE_REFERENCE_GEMM_H
 
 #include "typedef.h"
 #include <iostream>
 
-#define GEMMGEN 1
+#define GEMMFORGE 1
 #define OPENBLAS 2
 
 #define CPU_BACKEND CONCRETE_CPU_BACKEND
@@ -13,7 +13,7 @@
 #include <cblas.h>
 #endif
 
-namespace gemmgen {
+namespace gemmforge {
   namespace reference {
     enum class LayoutType {
       Trans, NoTrans
@@ -47,7 +47,7 @@ namespace gemmgen {
         real *MatrixB = findData(B, OffsetB, Index);
         real *MatrixC = findData(C, OffsetC, Index);
 
-#if CPU_BACKEND == GEMMGEN
+#if CPU_BACKEND == GEMMFORGE
         singleGemm(TypeA, TypeB,
                    M, N, K,
                    Alpha, MatrixA, Lda,
@@ -81,4 +81,4 @@ namespace gemmgen {
   }
 }
 
-#endif //GEMMGEN_REFERENCE_GEMM_H
+#endif //GEMMFORGE_REFERENCE_GEMM_H

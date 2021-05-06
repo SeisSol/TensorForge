@@ -1,5 +1,5 @@
-#ifndef GEMMGEN_TYPEDEF_H
-#define GEMMGEN_TYPEDEF_H
+#ifndef GEMMFORGE_TYPEDEF_H
+#define GEMMFORGE_TYPEDEF_H
 
 #include <vector>
 
@@ -13,4 +13,4 @@ typedef float real;
 
 using PackedData = std::vector<std::vector<real>>;
 
-#endif //SIMPLE_TYPEDEF_H
+#endif //GEMMFORGE_TYPEDEF_H

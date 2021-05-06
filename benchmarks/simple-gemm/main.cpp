@@ -4,14 +4,14 @@
 #include "kernels.h"
 #include "stop_watch.h"
 #include "gemm.h"
-#include "gemmgen_aux.h"
+#include "gemmforge_aux.h"
 #include "yaml-cpp/yaml.h"
 #include <iostream>
 #include <tuple>
 #include <vector>
 #include <string>
 
-using namespace gemmgen;
+using namespace gemmforge;
 using namespace reference;
 
 int estimateNumElements(int SizeA, int SizeB, int SizeC, double AllowedSpaceInGB);
@@ -84,13 +84,13 @@ int main(int Argc, char* Arcv[]) {
   int OffsetB = computeOffset(Ldb, BboxB);
   int OffsetC = computeOffset(Ldc, BboxC);
 
-  gemmgen::reference::gemm(TransA, TransB,
-                           M, N, K,
-                           Alpha, &HostA[OffsetA], Lda,
-                           &HostB[OffsetB], Ldb,
-                           Beta, &HostC[OffsetC], Ldc,
-                           NextA, NextB, NextC,
-                           NumElements);
+  gemmforge::reference::gemm(TransA, TransB,
+                             M, N, K,
+                             Alpha, &HostA[OffsetA], Lda,
+                             &HostB[OffsetB], Ldb,
+                             Beta, &HostC[OffsetC], Ldc,
+                             NextA, NextB, NextC,
+                             NumElements);
 
   std::cout << "INFO: computing on GPU started" << std::endl;
   gemm(DeviceA, 0, DeviceB, 0, DeviceC, 0, NumElements, Driver.getTestStream());

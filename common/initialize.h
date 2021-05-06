@@ -1,5 +1,5 @@
-#ifndef GEMMGEN_REFERENCE_INITIALIZE_H
-#define GEMMGEN_REFERENCE_INITIALIZE_H
+#ifndef GEMMFORGE_REFERENCE_INITIALIZE_H
+#define GEMMFORGE_REFERENCE_INITIALIZE_H
 
 #include "typedef.h"
 #include <iostream>
@@ -24,4 +24,4 @@ namespace initgen {
   }
 }
 
-#endif //GEMMGEN_REFERENCE_GEMM_H
+#endif //GEMMFORGE_REFERENCE_GEMM_H

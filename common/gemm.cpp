@@ -1,8 +1,8 @@
 #include "gemm.h"
 
-using namespace gemmgen::reference;
+using namespace gemmforge::reference;
 
-namespace gemmgen {
+namespace gemmforge {
   namespace reference {
 
     void singleGemm(LayoutType TypeA,

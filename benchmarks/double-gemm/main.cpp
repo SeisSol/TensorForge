@@ -4,14 +4,14 @@
 #include "kernels.h"
 #include "stop_watch.h"
 #include "gemm.h"
-#include "gemmgen_aux.h"
+#include "gemmforge_aux.h"
 #include "yaml-cpp/yaml.h"
 #include <iostream>
 #include <tuple>
 #include <vector>
 #include <string>
 
-using namespace gemmgen;
+using namespace gemmforge;
 using namespace reference;
 
 int estimateNumElements(int SizeA, int SizeB, int SizeC, int SizeD, int SizeTmp, double AllowedSpaceInGB);
@@ -108,22 +108,22 @@ int main(int Argc, char* Arcv[]) {
   int OffsetTemp = 0;
 
 
-  gemmgen::reference::gemm(TransA, TransB,
-                           M, N, K,
-                           1.0, &HostA[OffsetA], Lda,
-                           &HostB[OffsetB], Ldb,
-                           0.0, HostTmp, LdTemp,
-                           NextA, NextB, NextTmp,
-                           NumElements);
+  gemmforge::reference::gemm(TransA, TransB,
+                             M, N, K,
+                             1.0, &HostA[OffsetA], Lda,
+                             &HostB[OffsetB], Ldb,
+                             0.0, HostTmp, LdTemp,
+                             NextA, NextB, NextTmp,
+                             NumElements);
 
 
-  gemmgen::reference::gemm(TransC, reference::LayoutType::NoTrans,
-                           L, N, M,
-                           Alpha, &HostC[OffsetC], Ldc,
-                           HostTmp, M,
-                           Beta, &HostD[OffsetD], Ldd,
-                           NextC, NextTmp, NextD,
-                           NumElements);
+  gemmforge::reference::gemm(TransC, reference::LayoutType::NoTrans,
+                             L, N, M,
+                             Alpha, &HostC[OffsetC], Ldc,
+                             HostTmp, M,
+                             Beta, &HostD[OffsetD], Ldd,
+                             NextC, NextTmp, NextD,
+                             NumElements);
 
   std::cout << "INFO: computing on GPU started" << std::endl;
   callFirstGemm(DeviceA, 0, DeviceB, 0, DeviceTmp, 0, NumElements, FirstDriver.getTestStream());

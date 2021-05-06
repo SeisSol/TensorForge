@@ -37,9 +37,10 @@ class VM:
   @classmethod
   def _is_valid_type(self, fp_type: str):
     allowed = ['double', 'float']
-    if not fp_type in allowed:
+    if fp_type not in allowed:
       raise RuntimeError(f'unknown fp_type. Allowed {", ".join(allowed)}, given {fp_type}')
     return True
+
 
 def vm_factory(name: str,
                sub_name: str,

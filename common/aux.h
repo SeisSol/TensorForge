@@ -1,5 +1,5 @@
-#ifndef GEMMGEN_AUX_H
-#define GEMMGEN_AUX_H
+#ifndef GEMMFORGE_AUX_H
+#define GEMMFORGE_AUX_H
 
 #include "typedef.h"
 #include <vector>
@@ -10,4 +10,4 @@ std::vector<real*> shuffleMatrices(real* Matrices, int Size, int NumElements);
 real getRandomNumber();
 
 
-#endif //GEMMGEN_AUX_H
+#endif //GEMMFORGE_AUX_H

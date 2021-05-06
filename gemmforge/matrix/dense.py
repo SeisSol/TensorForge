@@ -1,5 +1,6 @@
 from ..exceptions import GenerationError
 
+
 class DenseMatrix:
 
     ADDRESSIGN = ["none", "strided", "pointer_based"]
@@ -25,14 +26,12 @@ class DenseMatrix:
                                                                     self.num_cols,
                                                                     coords))
             if (self.num_rows <= self.bbox[2]) or (self.num_cols <= self.bbox[3]):
-                raise GenerationError('Bbox {} is ' 
+                raise GenerationError('Bbox {} is '
                                       'outside of Matrix {}x{}'.format(coords,
                                                                        self.num_rows,
                                                                        self.num_cols))
-
         else:
             self.bbox = (0, 0, num_rows - 1, num_cols - 1)
-
 
         if addressing in DenseMatrix.ADDRESSIGN:
             self.addressing = addressing
@@ -77,4 +76,3 @@ class DenseMatrix:
         string += "num. actual cols = {}\n".format(self.get_actual_num_cols())
         string += "transpose = {}\n".format(self.transpose)
         return string
-

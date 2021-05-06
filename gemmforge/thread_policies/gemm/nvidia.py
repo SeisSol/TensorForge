@@ -1,6 +1,7 @@
 from ..abstract_thread_policy import AbstractGemmLikeThreadPolicy, DenseMatrix
 from gemmforge.vm import VM
 
+
 class NvidiaGemmThreadPolicy(AbstractGemmLikeThreadPolicy):
   def __init__(self,
                vm: VM,

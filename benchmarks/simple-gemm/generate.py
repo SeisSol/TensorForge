@@ -64,7 +64,7 @@ try:
         path = os.path.join(dir_name, "kernels.cpp")
         
     with open(path, 'w') as file:
-        file.write("#include \"gemmgen_aux.h\"\n")
+        file.write("#include \"gemmforge_aux.h\"\n")
         if hw_descr.manufacturer == "amd":
             file.write("#include \"hip/hip_runtime.h\"\n")
         elif hw_descr.manufacturer == "sycl":

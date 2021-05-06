@@ -51,7 +51,7 @@ tests_code = StringIO()
 hw_descr = vm.get_hw_descr()
 precision = vm.fp_as_str()
 with constructs.Cpp(StringIO()) as file:
-    file.Include("gemmgen_aux.h")
+    file.Include("gemmforge_aux.h")
     if hw_descr.manufacturer == "amd":
         file.Include("hip/hip_runtime.h")
     elif hw_descr.manufacturer == "sycl":
