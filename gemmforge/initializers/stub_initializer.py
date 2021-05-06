@@ -11,6 +11,9 @@ class StubInitializer(AbstractGenerator):
         self._generate_kernel()
         self._generate_launcher()
 
+    def set(self):
+        pass
+
     def _check(self):
         pass
 

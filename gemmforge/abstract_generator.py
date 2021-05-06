@@ -13,6 +13,7 @@ class AbstractGenerator(ABC):
     self._lexic = self._vm.get_lexic()
     self._hw_descr = self._vm.get_hw_descr()
     self._precision = self._vm.fp_as_str()
+    self._is_set = False
 
     self.base_name = None
     self.num_mult_per_block = None
@@ -52,6 +53,10 @@ class AbstractGenerator(ABC):
     @abstractmethod
     def _generate_base_name(self):
       pass
+
+  def _check_if_set(self):
+    if not self._is_set:
+      raise GenerationError(f'call to generate before set. Please, set params first')
 
   def get_base_name(self):
     if self.base_name is not None:

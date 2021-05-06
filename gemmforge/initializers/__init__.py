@@ -1,5 +1,5 @@
 from .stub_initializer import StubInitializer
-from .abstract_initializer import ExactInitializer
+from .initializer import ExactInitializer
 from gemmforge.vm import VM
 
 

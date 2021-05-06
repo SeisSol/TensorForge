@@ -28,7 +28,7 @@ class GemmGenerator(GemmLikeGenerator):
         self.name_threadIdx_y = self._lexic.thread_idx_y
         self.name_threadIdx_x = self._lexic.thread_idx_x
 
-    def generate(self, mat_a, mat_b, mat_c, alpha, beta, base_name=None):
+    def set(self, mat_a, mat_b, mat_c, alpha, beta, base_name=None):
         self.mat_a = mat_a
         self.mat_a._set_name('A')
         self.mat_a._set_mutability(False)
@@ -46,6 +46,10 @@ class GemmGenerator(GemmLikeGenerator):
         self.beta = beta
 
         self.base_name = base_name if base_name is not None else self._generate_base_name()
+        self._is_set = True
+
+    def generate(self):
+        self._check_if_set()
 
         self._check()
         self._analyze()

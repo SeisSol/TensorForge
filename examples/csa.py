@@ -34,7 +34,8 @@ try:
                     fp_type="float")
 
     gen = CsaGenerator(vm)
-    gen.generate(mat_a, mat_b, alpha=13, beta=6)
+    gen.set(mat_a, mat_b, alpha=13, beta=6)
+    gen.generate()
     print(gen.get_kernel())
     print(gen.get_launcher())
     print(gen.get_launcher_header())

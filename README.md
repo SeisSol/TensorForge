@@ -48,12 +48,13 @@ try:
     vm = vm_factory(name="nvidia", sub_name="sm_60", fp_type="float")
     gen = GemmGenerator(vm)
 
-    gen.generate(mat_a, mat_b, mat_c, alpha=1.1, beta=1.1)
+    gen.set(mat_a, mat_b, mat_c, alpha=1.1, beta=1.1)
+    gen.generate()
     print(gen.get_kernel())
     print(gen.get_launcher())
     print(gen.get_launcher_header())
 
 except GenerationError as err:
-    print("ERROR: {}".format(err))
+    print(f'ERROR: {err}')
     raise err
 ```

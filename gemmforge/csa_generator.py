@@ -25,7 +25,7 @@ class CsaGenerator(GemmLikeGenerator):
                                                           self._lexic.block_dim_z,
                                                           self._lexic.block_idx_x)
 
-    def generate(self, mat_a, mat_b, alpha, beta, base_name=None):
+    def set(self, mat_a, mat_b, alpha, beta, base_name=None):
         self.mat_a = mat_a
         self.mat_a._set_name('A')
         self.mat_a._set_mutability(False)
@@ -47,6 +47,12 @@ class CsaGenerator(GemmLikeGenerator):
                                                           deepcopy(self.mat_b))
         else:
             self._mat_b_initializer = StubInitializer(self._vm)
+        self._mat_b_initializer.set()
+        self._is_set = True
+
+    def generate(self):
+        self._check_if_set()
+
         self._mat_b_initializer.generate()
 
         self._check()

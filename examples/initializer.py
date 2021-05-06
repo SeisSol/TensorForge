@@ -30,6 +30,7 @@ try:
                     fp_type="float")
 
     gen = ExactInitializer(vm, 1, mat_a)
+    gen.set()
     gen.generate()
     print(gen.get_kernel())
     print(gen.get_launcher())

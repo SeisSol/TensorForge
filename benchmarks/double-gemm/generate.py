@@ -58,13 +58,15 @@ try:
                     fp_type="float" if args.realsize == 4 else "double")
 
     gen = GemmGenerator(vm)
-    gen.generate(mat_a, mat_b, tmp, 1.0, 0.0, base_name="callFirstGemm")
+    gen.set(mat_a, mat_b, tmp, 1.0, 0.0, base_name="callFirstGemm")
+    gen.generate()
 
     kernels.append(gen.get_kernel())
     launches.append(gen.get_launcher())
     headers.append(gen.get_launcher_header())
 
-    gen.generate(mat_c, tmp, mat_d, alpha, beta, base_name="callSecondGemm")
+    gen.set(mat_c, tmp, mat_d, alpha, beta, base_name="callSecondGemm")
+    gen.generate()
 
     kernels.append(gen.get_kernel())
     launches.append(gen.get_launcher())

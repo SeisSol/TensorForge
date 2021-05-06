@@ -73,6 +73,7 @@ for suite in suites:
         generator = ExactInitializer(vm, alpha, mat_c)
 
         try:
+            generator.set()
             generator.generate()
             src.write(generator.get_kernel())
             src.write(generator.get_launcher())

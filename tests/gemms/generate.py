@@ -75,7 +75,8 @@ for suite in suites:
         mat_a, mat_b, mat_c, alpha, beta, num_elements, test_name = test
 
         try:
-            generator.generate(mat_a, mat_b, mat_c, alpha, beta)
+            generator.set(mat_a, mat_b, mat_c, alpha, beta)
+            generator.generate()
             src.write(generator.get_kernel())
             src.write(generator.get_launcher())
             headers.write(generator.get_launcher_header())
