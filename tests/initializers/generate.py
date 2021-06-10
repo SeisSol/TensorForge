@@ -52,7 +52,7 @@ with constructs.Cpp(StringIO()) as file:
     file.Include("gemmforge_aux.h")
     if hw_descr.manufacturer == "amd":
         file.Include("hip/hip_runtime.h")
-    elif hw_descr.manufacturer == "sycl":
+    elif  hw_descr.manufacturer == "hipsycl" or hw_descr.manufacturer == "oneapi":
         file.Include("CL/sycl.hpp")
     src.write(file.stream.getvalue())
 
@@ -146,7 +146,7 @@ with open(path, 'w') as file:
 
 if hw_descr.manufacturer == "nvidia":
     path = os.path.join(dir_name, "kernels.cu")
-elif hw_descr.manufacturer == "amd" or hw_descr.manufacturer == "sycl":
+elif hw_descr.manufacturer == "amd" or hw_descr.manufacturer == "hipsycl" or hw_descr.manufacturer == "oneapi":
     path = os.path.join(dir_name, "kernels.cpp")
 else:
     print("Manufacturer not supported, could not write kernel file")

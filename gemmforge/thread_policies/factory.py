@@ -6,7 +6,7 @@ from .initializer.nvidia import NvidiaInitializerThreadPolicy
 
 
 class TheadPolicyFactory:
-  ALLOWED_MANUFACTURES = ['nvidia', 'amd', 'sycl']
+  ALLOWED_MANUFACTURES = ['nvidia', 'amd', "hipsycl", "oneapi"]
 
   def __init__(self):
     pass

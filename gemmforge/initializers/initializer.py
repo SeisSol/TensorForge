@@ -16,10 +16,6 @@ class ExactInitializer(AbstractGenerator):
         self.matrix._set_mutability(True)
         self._matrices = [self.matrix]
 
-    def team_index_str(self):
-        lexic = self._vm.get_lexic()
-        return f'({lexic.thread_idx_z} + {lexic.block_dim_z} * {lexic.block_idx_x})'
-
     def set(self, base_name=None):
         self.base_name = base_name if base_name is not None else self._generate_base_name()
         self._is_set = True
@@ -59,7 +55,7 @@ class ExactInitializer(AbstractGenerator):
             max_num_threads_per_block = total_num_threas_per_op * self.num_mult_per_block
             kernel_bounds = [max_num_threads_per_block]
             with self._lexic.kernel_definition(file, kernel_bounds, self.base_name, self._get_func_params()):
-                with file.If("{} < {}".format(self.team_index_str(), AbstractGenerator.NUM_ELEMENTS_STR)):
+                with file.If("{} < {}".format(self._lexic.batch_indexer_init(), AbstractGenerator.NUM_ELEMENTS_STR)):
                     # declare ptrs for correct matrices
                     file.VariableDeclaration(f'{self._precision}*',
                                              global_symbols[self.matrix.name],
@@ -145,7 +141,7 @@ class ExactInitializer(AbstractGenerator):
         offset_to_row = f'{self._lexic.thread_idx_y} * {matrix.num_rows}'
 
         if matrix.addressing == "strided":
-            main_offset = "{} * {}".format(self.team_index_str(), matrix.get_real_volume())
+            main_offset = "{} * {}".format(self._lexic.batch_indexer_init(), matrix.get_real_volume())
             sub_offset = matrix.get_offset_to_first_element()
             return "&{}[{} + {} + {} + {}]".format(matrix.name,
                                                    extra_offset_symbol,
@@ -154,7 +150,7 @@ class ExactInitializer(AbstractGenerator):
                                                    offset_to_row)
 
         elif matrix.addressing == "pointer_based":
-            main_offset = self.team_index_str()
+            main_offset = self._lexic.batch_indexer_init()
             sub_offset = matrix.get_offset_to_first_element()
             return "&{}[{}][{} + {} + {}]".format(matrix.name,
                                                   main_offset,

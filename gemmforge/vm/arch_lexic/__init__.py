@@ -9,7 +9,7 @@ def lexic_factory(arch_name):
         return NvidiaArchLexic()
     elif arch_name == "amd":
         return AmdArchLexic()
-    elif arch_name == "sycl":
+    elif arch_name == "hipsycl" or arch_name == "oneapi":
         return SyclArchLexic()
     else:
         raise ValueError('Unknown architecture')

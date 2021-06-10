@@ -9,6 +9,7 @@ class SyclArchLexic(AbstractArchLexic):
         self.thread_idx_x = "item.get_local_id(0)"
         self.thread_idx_z = "item.get_local_id(2)"
         self.block_idx_x = "item.get_group().get_id(0)"
+        self.block_idx_z = "item.get_group().get_id(2)"
         self.block_dim_y = "item.get_group().get_local_range(1)"
         self.block_dim_z = "item.get_group().get_local_range(2)"
         self.stream_name = "cl::sycl::queue"
@@ -23,7 +24,8 @@ class SyclArchLexic(AbstractArchLexic):
         localmem = None
 
         if total_shared_mem_size is not None and precision is not None:
-            localmem = "cl::sycl::accessor<{}, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> Scratch ({}, cgh);".format(precision, total_shared_mem_size)
+            localmem = "cl::sycl::accessor<{}, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> Scratch ({}, cgh);".format(
+                precision, total_shared_mem_size)
 
         return file.SyclKernel(base_name, params, kernel_bounds, localmem)
 
@@ -42,3 +44,12 @@ class SyclArchLexic(AbstractArchLexic):
 
     def check_error(self):
         return None
+
+    def batch_indexer_gemm(self):
+        return self.get_tid_counter(self.thread_idx_y, self.block_dim_y, self.block_idx_z)
+
+    def batch_indexer_csa(self):
+        return self.get_tid_counter(self.thread_idx_z, self.block_dim_z, self.block_idx_z)
+
+    def batch_indexer_init(self):
+        return self.get_tid_counter(self.thread_idx_z, self.block_dim_z, self.block_idx_z)

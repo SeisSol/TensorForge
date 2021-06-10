@@ -46,3 +46,16 @@ class AbstractArchLexic(ABC):
     @abstractmethod
     def check_error(self):
         pass
+
+    @abstractmethod
+    def batch_indexer_gemm(self):
+        pass
+
+    @abstractmethod
+    def batch_indexer_csa(self):
+        pass
+
+    @abstractmethod
+    def batch_indexer_init(self):
+        pass
+

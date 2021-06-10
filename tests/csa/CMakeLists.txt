@@ -16,15 +16,35 @@ set(TARGET_INCLUDE_DIRS ${CMAKE_SOURCE_DIR}
 set(REFERENCE_IMPL "GEMMFORGE" CACHE STRING "size of the floating point data type")
 set_property(CACHE REFERENCE_IMPL PROPERTY STRINGS "GEMMFORGE" "OPENBLAS")
 
-include(../../cmake/setupTarget.cmake)
+include(../../cmake/setupOptions.cmake)
+add_subdirectory(../../submodules/Device build)
+
+add_executable(${TARGET} ${TARGET_SOURCE_FILES})
+target_compile_options(${TARGET} PUBLIC "-std=c++11")
+target_compile_definitions(${TARGET} PUBLIC "REAL_SIZE=${REAL_SIZE}")
+target_include_directories(${TARGET} PUBLIC ${TARGET_INCLUDE_DIRS})
+
+if (${REFERENCE_IMPL} STREQUAL "OPENBLAS")
+    find_package(OpenBLAS REQUIRED)
+    target_include_directories(${TARGET} PRIVATE ${OpenBLAS_INCLUDE_DIRS})
+    target_link_libraries(${TARGET} PRIVATE ${OpenBLAS_LIBRARIES})
+endif()
+target_compile_definitions(${TARGET} PUBLIC "CONCRETE_CPU_BACKEND=${REFERENCE_IMPL}")
 
 set(TEST_SUITE "" CACHE STRING "relative path to test suite spec file")
 if ("${TEST_SUITE}" STREQUAL "")
     message(FATAL_ERROR "NO TEST SUITE PROVIDED")
 endif()
 
-include(../../cmake/addGTest.cmake)
-include(../../cmake/addYaml.cmake)
+#add GTest
+find_package(GTest REQUIRED)
+target_link_libraries(${TARGET} PRIVATE ${GTEST_BOTH_LIBRARIES})
+target_include_directories(${TARGET} PRIVATE ${GTEST_INCLUDE_DIR})
+
+#add Yaml
+find_package(yaml-cpp REQUIRED)
+target_include_directories(${TARGET} PRIVATE ${YAML_CPP_INCLUDE_DIR})
+target_link_libraries(${TARGET} PRIVATE ${YAML_CPP_LIBRARIES})
 
 set(GPU_TARGET gpu_part)
 set(GPU_TARGET_INCLUDE_DIRS include
@@ -46,6 +66,6 @@ endif()
 set(GEN_COPY_FILES ${CMAKE_BINARY_DIR}/${TEST_SUITE})
 
 include(../../cmake/setupGpuTarget.cmake)
-include(../../cmake/linkTargetGpuAndDevice.cmake)
+target_link_libraries(${TARGET} PRIVATE ${GPU_TARGET} device -lpthread)
 include(../../cmake/generateCode.cmake)
 

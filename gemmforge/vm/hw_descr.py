@@ -49,7 +49,6 @@ def hw_descr_factory(name, sub_name):
                             name)
 
     elif name == "amd":
-
         if sub_name in ['gfx906']:
             # MI50
             # warpSize equals a wavefront for AMD (Page 31 from
@@ -89,7 +88,35 @@ def hw_descr_factory(name, sub_name):
                             max_workgroup_per_cu,
                             name)
 
-    elif name == "sycl":
+    elif name == "hipsycl" or name == "oneapi":
+        if 'sm_' in sub_name:
+            # from: https://en.wikipedia.org/wiki/CUDA
+            nvidia_warp = 32
+            max_reg_per_block = 64 * KB
+            max_num_threads = 1024  # per block TODO: rename
+            max_threads_per_sm = 2048
+            max_block_per_sm = 32
+            if sub_name in ['sm_60', 'sm_61', 'sm_62']:
+                max_local_mem_size_per_block = 48 * KB
+            elif sub_name == 'sm_70':
+                max_local_mem_size_per_block = 96 * KB
+            elif sub_name == 'sm_71':
+                max_local_mem_size_per_block = 48 * KB
+            elif sub_name == 'sm_75':
+                max_block_per_sm = 16
+                max_threads_per_sm = 1024
+                max_local_mem_size_per_block = 64 * KB
+
+            else:
+                raise ValueError(f'Given nvidia SM model is not supported. Provided: {sub_name}')
+
+            return HwDecription(nvidia_warp,
+                                max_local_mem_size_per_block,
+                                max_num_threads,
+                                max_reg_per_block,
+                                max_threads_per_sm,
+                                max_block_per_sm,
+                                name)
         if sub_name in ['dg1']:
             return HwDecription(64,
                                 64 * KB,
@@ -101,9 +128,9 @@ def hw_descr_factory(name, sub_name):
         else:
             return HwDecription(32,
                                 48 * KB,
-                                1024,
+                                256,
                                 64 * KB,
-                                2048,
+                                256,
                                 32,
                                 name)
     else:

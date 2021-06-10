@@ -21,9 +21,7 @@ class CsaGenerator(GemmLikeGenerator):
         self._mat_b_initializer = None
         self._vm = vm
         # For better readability of the remaining code
-        self.team_index_str = self._lexic.get_tid_counter(self._lexic.thread_idx_z,
-                                                          self._lexic.block_dim_z,
-                                                          self._lexic.block_idx_x)
+        self.team_index_str = self._lexic.batch_indexer_csa()
 
     def set(self, mat_a, mat_b, alpha, beta, base_name=None):
         self.mat_a = mat_a

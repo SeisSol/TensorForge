@@ -33,9 +33,29 @@ endif()
 
 set(GEN_COPY_FILES ${CMAKE_SOURCE_DIR}/params.yaml ${CMAKE_SOURCE_DIR}/config.yaml)
 
-include(../../cmake/setupTarget.cmake)
+include(../../cmake/setupOptions.cmake)
+add_subdirectory(../../submodules/Device build)
+
+add_executable(${TARGET} ${TARGET_SOURCE_FILES})
+target_compile_options(${TARGET} PUBLIC "-std=c++11")
+target_compile_definitions(${TARGET} PUBLIC "REAL_SIZE=${REAL_SIZE}")
+target_include_directories(${TARGET} PUBLIC ${TARGET_INCLUDE_DIRS})
+
+if (${REFERENCE_IMPL} STREQUAL "OPENBLAS")
+    find_package(OpenBLAS REQUIRED)
+    target_include_directories(${TARGET} PRIVATE ${OpenBLAS_INCLUDE_DIRS})
+    target_link_libraries(${TARGET} PRIVATE ${OpenBLAS_LIBRARIES})
+endif()
+target_compile_definitions(${TARGET} PUBLIC "CONCRETE_CPU_BACKEND=${REFERENCE_IMPL}")
+
+#add Yaml
+find_package(yaml-cpp REQUIRED)
+target_include_directories(${TARGET} PRIVATE ${YAML_CPP_INCLUDE_DIR})
+target_link_libraries(${TARGET} PRIVATE ${YAML_CPP_LIBRARIES})
+
 include(../../cmake/setupGpuTarget.cmake)
-include(../../cmake/addYaml.cmake)
-include(../../cmake/linkTargetGpuAndDevice.cmake)
+target_link_libraries(${TARGET} PRIVATE ${GPU_TARGET} device -lpthread)
 include(../../cmake/generateCode.cmake)
-include(../../cmake/enableTesting.cmake)
+
+enable_testing()
+add_test(NAME test COMMAND ${CMAKE_PROJECT_NAME})

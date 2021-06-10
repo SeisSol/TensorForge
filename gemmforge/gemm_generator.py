@@ -22,9 +22,7 @@ class GemmGenerator(GemmLikeGenerator):
         self.mat_a_loader = None
         self.mat_b_loader = None
         # For better readability for the remaining code
-        self.team_index_str = self._lexic.get_tid_counter(self._lexic.thread_idx_y,
-                                                          self._lexic.block_dim_y,
-                                                          self._lexic.block_idx_x)
+        self.team_index_str = self._lexic.batch_indexer_gemm()
         self.name_threadIdx_y = self._lexic.thread_idx_y
         self.name_threadIdx_x = self._lexic.thread_idx_x
 
@@ -78,7 +76,9 @@ class GemmGenerator(GemmLikeGenerator):
                                                self._precision,
                                                self._get_total_shared_mem_size()):
 
-                with file.If("{} < {}".format(self.team_index_str, Generator.NUM_ELEMENTS_STR)):
+                file.VariableDeclaration("int", "batchId", self.team_index_str)
+
+                with file.If("{} < {}".format("batchId", Generator.NUM_ELEMENTS_STR)):
 
                     # declare ptrs for correct matrices
                     file.VariableDeclaration(f'const {self._precision}*',
@@ -387,11 +387,11 @@ class GemmGenerator(GemmLikeGenerator):
                                                     self.num_mult_per_block)
         return f'Grid({num_blocks}, 1, 1)'
 
-    def _get_global_matrix_ptr(self, matrix):
+    def  _get_global_matrix_ptr(self, matrix):
 
         extra_offset_symbol = self._generate_extra_offset_symbol(matrix)
         if matrix.addressing == "strided":
-            main_offset = "{} * {}".format(self.team_index_str, matrix.get_real_volume())
+            main_offset = "{} * {}".format("batchId", matrix.get_real_volume())
             sub_offset = matrix.get_offset_to_first_element()
             return "&{}[{} + {} + {}]".format(matrix.name,
                                               main_offset,
@@ -399,7 +399,7 @@ class GemmGenerator(GemmLikeGenerator):
                                               extra_offset_symbol)
 
         elif matrix.addressing == "pointer_based":
-            main_offset = self.team_index_str
+            main_offset = "batchId"
             sub_offset = matrix.get_offset_to_first_element()
             return "&{}[{}][{} + {}]".format(matrix.name,
                                              main_offset,
