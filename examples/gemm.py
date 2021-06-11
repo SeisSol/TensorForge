@@ -28,7 +28,6 @@ mat_b = DenseMatrix(num_rows=9,
                     bbox=[0, 0, 8, 8],
                     transpose=False)
 
-
 mat_c = DenseMatrix(num_rows=56,
                     num_cols=9,
                     bbox=[0, 0, 55, 8],
@@ -36,18 +35,17 @@ mat_c = DenseMatrix(num_rows=56,
                     transpose=False)
 
 try:
-    vm = vm_factory(name=args.manufacturer,
-                    sub_name=args.sub_arch,
-                    fp_type="float")
-
-    gen = GemmGenerator(vm)
-    gen.set(mat_a, mat_b, mat_c, alpha=1.1, beta=1.1)
-    gen.generate()
-    print(gen.get_kernel())
-    print(gen.get_launcher())
-    print(gen.get_launcher_header())
+  vm = vm_factory(name=args.manufacturer,
+                  sub_name=args.sub_arch,
+                  fp_type="float")
+  
+  gen = GemmGenerator(vm)
+  gen.set(mat_a, mat_b, mat_c, alpha=1.1, beta=1.1)
+  gen.generate()
+  print(gen.get_kernel())
+  print(gen.get_launcher())
+  print(gen.get_launcher_header())
 
 except GenerationError as err:
-    print("ERROR: {}".format(err))
-    raise err
-
+  print("ERROR: {}".format(err))
+  raise err

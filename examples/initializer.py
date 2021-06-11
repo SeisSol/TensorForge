@@ -25,18 +25,17 @@ mat_a = DenseMatrix(num_rows=9,
                     transpose=False)
 
 try:
-    vm = vm_factory(name=args.manufacturer,
-                    sub_name=args.sub_arch,
-                    fp_type="float")
-
-    gen = ExactInitializer(vm, 1, mat_a)
-    gen.set()
-    gen.generate()
-    print(gen.get_kernel())
-    print(gen.get_launcher())
-    print(gen.get_launcher_header())
+  vm = vm_factory(name=args.manufacturer,
+                  sub_name=args.sub_arch,
+                  fp_type="float")
+  
+  gen = ExactInitializer(vm, 1, mat_a)
+  gen.set()
+  gen.generate()
+  print(gen.get_kernel())
+  print(gen.get_launcher())
+  print(gen.get_launcher_header())
 
 except GenerationError as err:
-    print("ERROR: {}".format(err))
-    raise err
-
+  print("ERROR: {}".format(err))
+  raise err
