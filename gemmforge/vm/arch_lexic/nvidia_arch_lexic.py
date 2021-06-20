@@ -17,7 +17,7 @@ class NvidiaArchLexic(AbstractArchLexic):
     return "kernel_{}<<<{},{},0,{}>>>({})".format(func_name, grid, block, stream, func_params)
   
   def declare_shared_memory_inline(self, name, precision, size):
-    return f"__shared__ {precision} {name}[{size}]"
+    return f"__shared__  {precision} {name}[{size}]"
   
   def kernel_definition(self, file, kernel_bounds, base_name, params, precision=None,
                         total_shared_mem_size=None):
@@ -25,6 +25,9 @@ class NvidiaArchLexic(AbstractArchLexic):
   
   def sync_threads(self):
     return "__syncthreads()"
+  
+  def sync_vec_unit(self):
+    return "__syncwarp()"
   
   def kernel_range_object(self):
     return "dim3"

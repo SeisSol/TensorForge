@@ -1,10 +1,10 @@
 import unittest
 from gemmforge import DenseMatrix
 from gemmforge.vm import vm_factory
-from gemmforge.loaders import shm_mem_factory
-from gemmforge.loaders.shr_mem_loaders import ExactPatchLoader, ExtendedPatchLoader
-from gemmforge.loaders.shr_transpose_mem_loaders import ExactTransposePatchLoader
-from gemmforge.loaders.shr_transpose_mem_loaders import ExtendedTransposePatchLoader
+from gemmforge.instructions.loaders import shm_mem_factory
+from gemmforge.instructions.loaders import ExactPatchLoader, ExtendedPatchLoader
+from gemmforge.instructions.loaders import ExactTransposePatchLoader
+from gemmforge.instructions.loaders import ExtendedTransposePatchLoader
 
 
 class TestLoaders(unittest.TestCase):

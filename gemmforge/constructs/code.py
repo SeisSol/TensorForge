@@ -132,7 +132,10 @@ class Cpp:
   
   def Emptyline(self):
     self.out.write('\n')
-  
+    
+  def Scope(self):
+    return Block(self, '')
+    
   def If(self, expression):
     return Block(self, 'if ({})'.format(expression))
   

@@ -28,27 +28,24 @@ from gemmforge.vm import vm_factory
 mat_a = DenseMatrix(num_rows=56,
                     num_cols=9,
                     addressing="strided",
-                    bbox=[0, 0, 55, 8],
-                    transpose=False)
+                    bbox=[0, 0, 56, 9])
 
 mat_b = DenseMatrix(num_rows=9,
                     num_cols=9,
                     addressing="strided",
-                    bbox=[0, 0, 8, 8],
-                    transpose=False)
+                    bbox=[0, 0, 9, 9])
 
 
 mat_c = DenseMatrix(num_rows=56,
                     num_cols=9,
-                    bbox=[0, 0, 55, 8],
-                    addressing="strided",
-                    transpose=False)
+                    bbox=[0, 0, 56, 9],
+                    addressing="strided")
 
 try:
     vm = vm_factory(name="nvidia", sub_name="sm_60", fp_type="float")
     gen = GemmGenerator(vm)
 
-    gen.set(mat_a, mat_b, mat_c, alpha=1.1, beta=1.1)
+    gen.set(False, False, mat_a, mat_b, mat_c, alpha=1.1, beta=1.1)
     gen.generate()
     print(gen.get_kernel())
     print(gen.get_launcher())

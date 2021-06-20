@@ -25,11 +25,11 @@ class CsaGenerator(GemmLikeGenerator):
   
   def set(self, mat_a, mat_b, alpha, beta, base_name=None):
     self.mat_a = mat_a
-    self.mat_a._set_name('A')
+    self.mat_a.set_name('A')
     self.mat_a._set_mutability(False)
     
     self.mat_b = mat_b
-    self.mat_b._set_name('B')
+    self.mat_b.set_name('B')
     self.mat_b._set_mutability(True)
     
     self._matrices = [self.mat_a, self.mat_b]

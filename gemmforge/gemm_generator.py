@@ -2,9 +2,13 @@ from . import constructs
 from io import StringIO
 from .exceptions import GenerationError
 from .abstract_gemmlike_generator import GemmLikeGenerator
+from .basic_types import GeneralLexicon, DataFlowDirection, RegMemObject
+from .symbol_table import InverseSymbolTable, Symbol, SymbolType
 from .abstract_generator import AbstractGenerator as Generator
-from .loaders import shm_mem_factory, StubLoader
-from gemmforge.vm import VM
+from .instructions.builders import GetElementPtrBuilder, RegistersAllocBuilder, ShrMemAllocBuilder
+from .instructions.builders import GemmBuilder
+from .instructions import StoreRegToGlb
+from .vm import VM
 from .thread_policies import TheadPolicyFactory
 import math
 import hashlib
@@ -16,28 +20,34 @@ class GemmGenerator(GemmLikeGenerator):
   
   def __init__(self, vm: VM):
     super(GemmGenerator, self).__init__(vm)
+    self._trans_a = None
+    self._trans_b = None
     self.mat_a = None
     self.mat_b = None
     self.mat_c = None
-    self.mat_a_loader = None
-    self.mat_b_loader = None
-    # For better readability for the remaining code
-    self.team_index_str = self._lexic.batch_indexer_gemm()
-    self.name_threadIdx_y = self._lexic.thread_idx_y
-    self.name_threadIdx_x = self._lexic.thread_idx_x
+    
+    self._symbol_table = InverseSymbolTable()
+    self._instructions = []
+    self._reg_array_obj = None
+    self._shr_mem_obj = None
+    self._shr_mem_loads = []
   
-  def set(self, mat_a, mat_b, mat_c, alpha, beta, base_name=None):
+  def set(self, trans_a, trans_b, mat_a, mat_b, mat_c, alpha, beta, base_name=None):
+    self._instructions = []
+    
     self.mat_a = mat_a
-    self.mat_a._set_name('A')
-    self.mat_a._set_mutability(False)
+    self._trans_a = trans_a
+    self.mat_a.set_name('A')
+    self.mat_a.set_data_flow_direction(DataFlowDirection.SOURCE)
     
     self.mat_b = mat_b
-    self.mat_b._set_name('B')
-    self.mat_b._set_mutability(False)
+    self._trans_b = trans_b
+    self.mat_b.set_name('B')
+    self.mat_b.set_data_flow_direction(DataFlowDirection.SOURCE)
     
     self.mat_c = mat_c
-    self.mat_c._set_name('C')
-    self.mat_c._set_mutability(True)
+    self.mat_c.set_name('C')
+    self.mat_c.set_data_flow_direction(DataFlowDirection.SINK)
     self._matrices = [self.mat_a, self.mat_b, self.mat_c]
     
     self.alpha = alpha
@@ -50,6 +60,9 @@ class GemmGenerator(GemmLikeGenerator):
     self._check_if_set()
     
     self._check()
+    self._deduce_num_threads()
+    self._populate_global_scope()
+    self._emit_instructions()
     self._analyze()
     
     self._generate_kernel()
@@ -57,136 +70,28 @@ class GemmGenerator(GemmLikeGenerator):
     self._generate_launcher()
   
   def _generate_kernel(self):
-    glob_symbols = {}
-    for matrix in [self.mat_a, self.mat_b, self.mat_c]:
-      glob_symbols[matrix.name] = "GlobMat{}".format(matrix.name)
-    
-    current_symbols = {}
-    
     src = StringIO()
     with constructs.Cpp(src) as file:
       
       max_num_threads_per_block = self.num_active_threads * self.num_mult_per_block
       kernel_bounds = [max_num_threads_per_block]
-      
+      team_index_str = self._lexic.batch_indexer_gemm()
+
       with self._lexic.kernel_definition(file,
                                          kernel_bounds,
                                          self.base_name,
                                          self._get_func_params(),
                                          self._precision,
-                                         self._get_total_shared_mem_size()):
+                                         self._shr_mem_obj.get_total_size()):
         
-        file.VariableDeclaration("int", "batchId", self.team_index_str)
-        
-        with file.If("{} < {}".format("batchId", Generator.NUM_ELEMENTS_STR)):
-          
-          # declare ptrs for correct matrices
-          file.VariableDeclaration(f'const {self._precision}*',
-                                   glob_symbols[self.mat_a.name],
-                                   self._get_global_matrix_ptr(self.mat_a))
-          
-          file.VariableDeclaration(f'const {self._precision}*',
-                                   glob_symbols[self.mat_b.name],
-                                   self._get_global_matrix_ptr(self.mat_b))
-          
-          file.VariableDeclaration(f'{self._precision}*',
-                                   glob_symbols[self.mat_c.name],
-                                   self._get_global_matrix_ptr(self.mat_c))
-          
-          # declare shared memory per kernel
-          mem = self._lexic.declare_shared_memory_inline('Scratch',
-                                                         self._precision,
-                                                         self._get_total_shared_mem_size())
-          if mem is not None:
-            file.Expression(mem)
-          
-          # find address of matrix B within block shared memory
-          shr_mem_address = f'&Scratch[{self.name_threadIdx_y} * {self.shr_mem_size_per_mult}]'
-          file.VariableDeclaration("{}*".format(self._precision),
-                                   self.mat_b_loader.get_output_symbol(),
-                                   shr_mem_address)
-          
-          if self.mat_a.transpose:
-            # find address of matrix A within block shared memory
-            shr_mem_offset = self.mat_b_loader.compute_shared_mem_size()
-            shr_mem_address = "&Scratch[{} * {} + {}]".format(self.name_threadIdx_y,
-                                                              self.shr_mem_size_per_mult,
-                                                              shr_mem_offset)
-            file.VariableDeclaration("{}*".format(self._precision),
-                                     self.mat_a_loader.get_output_symbol(),
-                                     shr_mem_address)
-          
-          # load matrices into shared memory
-          self.mat_b_loader.generate_scr(file, glob_symbols[self.mat_b.name])
-          self.mat_a_loader.generate_scr(file, glob_symbols[self.mat_a.name])
-          file.Expression(self._lexic.sync_threads())
-          
-          # set up current compute symbols within the rest of the scope
-          current_symbols[self.mat_b.name] = self.mat_b_loader.get_output_symbol()
-          current_symbols[self.mat_a.name] = self.mat_a_loader.get_output_symbol()
-          file.Emptyline()
-          
-          with file.If(f'{self.name_threadIdx_x} < {self.num_compute_threads}'):
-            # allocate a buffer for each cuda thread to hold computed results
-            file.Emptyline()
-            zero_fp_value = "0.0{}".format('f' if self._precision == 'float' else '')
-            file.ArrayDeclaration(self._precision,
-                                  'Results',
-                                  [zero_fp_value] * self.mat_c.get_actual_num_cols())
-            
-            file.VariableDeclaration(self._precision, 'Value')
-            
-            # perform matrix multiplication
-            # m, n, k - according to the BLAS documentation. Read BLAS spec.
-            if self.mat_a.transpose:
-              contraction_length = self.mat_a.get_actual_num_rows()
+        file(f'int {GeneralLexicon.BATCH_ID} = {team_index_str};')
+        with file.If(f'{GeneralLexicon.BATCH_ID} < {GeneralLexicon.NUM_ELEMENTS}'):
+  
+          for instr in self._instructions:
+            if instr.is_ready():
+              instr.gen_code(file)
             else:
-              contraction_length = self.mat_a.get_actual_num_cols()
-            
-            file.Emptyline()
-            with file.For(f'int k = 0; k < {contraction_length}; ++k'):
-              first_operand = "{}[{} + {} * k]".format(current_symbols[self.mat_a.name],
-                                                       self.name_threadIdx_x,
-                                                       self.mat_a_loader.get_lid_dim())
-              file.Assignment('Value', f'{first_operand}')
-              file.Emptyline()
-              file.Pragma('unroll')
-              with file.For(f'int n = 0; n < {self.mat_c.get_actual_num_cols()}; ++n'):
-                if self.mat_b.transpose:
-                  second_operand = "{}[n + {} * k]".format(current_symbols[self.mat_b.name],
-                                                           self.mat_b_loader.get_lid_dim())
-                else:
-                  second_operand = "{}[k + {} * n]".format(current_symbols[self.mat_b.name],
-                                                           self.mat_b_loader.get_lid_dim())
-                
-                file.Accumulate("Results[n]",
-                                f'Value * {second_operand}')
-            
-            # write results back to memory
-            file.Emptyline()
-            file.Pragma("unroll")
-            with file.For(f'int n = 0; n < {self.mat_c.get_actual_num_cols()}; ++n'):
-              rhs = "{}[{} + {} * n]".format(glob_symbols[self.mat_c.name],
-                                             self.name_threadIdx_x,
-                                             self.mat_c.num_rows)
-              
-              if self.alpha == 1.0:
-                lhs = 'Results[n]'
-              else:
-                if self._precision == 'float' and isinstance(self.alpha, float):
-                  lhs = f'{self.alpha}f * Results[n]'
-                else:
-                  lhs = f'{self.alpha} * Results[n]'
-              
-              if self.beta != 0.0:
-                if self.beta == 1.0:
-                  lhs += f' + {rhs}'
-                else:
-                  lhs += " + {} * {}".format(
-                    "{}{}".format(self.beta, 'f' if self._precision == "float" else ''),
-                    rhs)
-              
-              file.Assignment(rhs, lhs)
+              raise GenerationError("gemm_generator: requested instr is not ready")
       
       self._kernel = src.getvalue()
   
@@ -197,7 +102,7 @@ class GemmGenerator(GemmLikeGenerator):
         file.VariableDeclaration(self._lexic.kernel_range_object(), self._get_block_dim_spec())
         file.VariableDeclaration(self._lexic.kernel_range_object(), self._get_grid_dim_spec())
         
-        self._lexic.get_stream_via_pointer(file, 'stream', Generator.STREAM_PTR_STR)
+        self._lexic.get_stream_via_pointer(file, 'stream', GeneralLexicon.STREAM_PTR_STR)
         file.Expression(self._lexic.get_launch_code(self.base_name,
                                                     'Grid',
                                                     'Block',
@@ -218,13 +123,9 @@ class GemmGenerator(GemmLikeGenerator):
   
   def _check(self):
     try:
-      # make sure that C is not transposed
-      if self.mat_c.transpose:
-        raise GenerationError("Cannot generate a matrix multiplication. "
-                              "Matrix C is transposed")
       
       # check whether C and A match each other
-      if self.mat_a.transpose:
+      if self._trans_a:
         if self.mat_c.get_actual_num_rows() != self.mat_a.get_actual_num_cols():
           raise GenerationError("Cannot generate a matrix multiplication "
                                 "with given parameters. Matrix C and A (Trans) do not match")
@@ -234,7 +135,7 @@ class GemmGenerator(GemmLikeGenerator):
                                 "with given parameters. Matrix C and A (NoTrans) do not match")
       
       # check whether C and B match each other
-      if self.mat_b.transpose:
+      if self._trans_b:
         if self.mat_c.get_actual_num_cols() != self.mat_b.get_actual_num_rows():
           raise GenerationError("Cannot generate a matrix multiplication "
                                 "with given parameters. Matrix C and B (Trans) do not match")
@@ -244,8 +145,8 @@ class GemmGenerator(GemmLikeGenerator):
                                 "with given parameters. Matrix C and B (NoTrans) do not match")
       
       # check whether A and B match each other
-      if self.mat_a.transpose:
-        if self.mat_b.transpose:
+      if self._trans_a:
+        if self._trans_b:
           if self.mat_a.get_actual_num_rows() != self.mat_b.get_actual_num_cols():
             raise GenerationError("Cannot generate a matrix multiplication with given parameters. "
                                   "Matrix A (Trans) and B (Trans) do not match")
@@ -254,7 +155,7 @@ class GemmGenerator(GemmLikeGenerator):
             raise GenerationError("Cannot generate a matrix multiplication with given parameters. "
                                   "Matrix A (Trans) and B (NoTrans) do not match")
       else:
-        if self.mat_b.transpose:
+        if self._trans_b:
           if self.mat_a.get_actual_num_cols() != self.mat_b.get_actual_num_cols():
             raise GenerationError("Cannot generate a matrix multiplication with given parameters. "
                                   "Matrix A (NoTrans) and B (Trans) do not match")
@@ -271,55 +172,97 @@ class GemmGenerator(GemmLikeGenerator):
         print("=" * 80)
       
       raise error
+
+  def _deduce_num_threads(self):
+    if self._trans_a:
+      lead_dim_length = self.mat_a.get_actual_num_cols()
+    else:
+      lead_dim_length = self.mat_a.get_actual_num_rows()
   
-  def _analyze(self):
-    if self.mat_a.transpose:
-      lid_dim_length = self.mat_a.get_actual_num_cols()
-    else:
-      lid_dim_length = self.mat_a.get_actual_num_rows()
-    
-    num_vector_units_required = math.ceil(lid_dim_length / self._hw_descr.vec_unit_length)
-    self.num_compute_threads = lid_dim_length
+    num_vector_units_required = math.ceil(lead_dim_length / self._hw_descr.vec_unit_length)
+    self.num_compute_threads = lead_dim_length
     self.num_active_threads = num_vector_units_required * self._hw_descr.vec_unit_length
+
+  def _populate_global_scope(self):
+    for matrix in [self.mat_a, self.mat_b, self.mat_c]:
+      self._symbol_table.add_symbol(Symbol(obj=matrix,
+                                    name=matrix.name,
+                                    stype=SymbolType.Batch))
+    self._symbol_table.add_scope()
+
+  def _emit_instructions(self):
+    # extract matrices from batches
+    builder = GetElementPtrBuilder(self._vm, self._symbol_table)
+    for symbol in self._symbol_table.from_global.values():
+      builder.build(symbol)
+      self._instructions.extend(builder.get_instructions())
     
-    if self.mat_a.transpose:
-      self.mat_a_loader = shm_mem_factory(vm=self._vm,
-                                          matrix=self.mat_a,
-                                          num_active_threads=self.num_active_threads,
-                                          load_and_transpose=True)
+    # create an array of registers
+    builder = RegistersAllocBuilder(self._vm, self._symbol_table)
+    builder.build(self.mat_c.get_actual_num_cols(), 0.0)
+    self._instructions.extend(builder.get_instructions())
+    self._reg_array_obj = builder.get_resultant_obj()
     
-    else:
-      self.mat_a_loader = StubLoader(self._vm, self.mat_a, self.num_active_threads)
+    # create shared mem
+    builder = ShrMemAllocBuilder(self._vm, self._symbol_table)
+    builder.build(size=None)
+    self._instructions.extend(builder.get_instructions())
+    self._shr_mem_obj = builder.get_resultant_obj()
+
+    # generate the rest instructions i.e., load to shr. mem, compute, store
+    builder = GemmBuilder(self._vm,
+                          self._symbol_table,
+                          self._reg_array_obj,
+                          self._shr_mem_obj,
+                          self.num_active_threads)
     
-    self.mat_b_loader = shm_mem_factory(vm=self._vm,
-                                        matrix=self.mat_b,
-                                        num_active_threads=self.num_active_threads,
-                                        load_and_transpose=False)
+    builder.build(trans_a=self._trans_a,
+                  trans_b=self._trans_b,
+                  op1=self._symbol_table[self.mat_a],
+                  op2=self._symbol_table[self.mat_b],
+                  dest=self._symbol_table[self._reg_array_obj])
+
+    self._shr_mem_loads = builder.get_srh_mem_loads()
     
-    self.shr_mem_size_per_mult = \
-      self.mat_a_loader.compute_shared_mem_size() + self.mat_b_loader.compute_shared_mem_size()
+    self._instructions.extend(builder.get_instructions())
     
+    store = StoreRegToGlb(self._vm,
+                          self._symbol_table[self.mat_c],
+                          self._symbol_table[self._reg_array_obj],
+                          self.alpha,
+                          self.beta,
+                          self.num_compute_threads)
+    self._instructions.append(store)
+
+  def _analyze(self):
+    # compute total required shr. mem
+    shr_mem_counter = 0
+    for instr in self._shr_mem_loads:
+      instr.set_shr_mem_offset(shr_mem_counter)
+      shr_mem_counter += instr.compute_shared_mem_size()
+      
+    self._shr_mem_obj.set_size_per_mult(shr_mem_counter)
+    
+    # compute num matrix multiplications per block
     thread_policy = TheadPolicyFactory.get_gemm_policy(vm=self._vm,
-                                                       reals_per_op=self.shr_mem_size_per_mult,
+                                                       reals_per_op=shr_mem_counter,
                                                        num_threads=self.num_active_threads,
                                                        op1=self.mat_a,
                                                        op2=self.mat_b,
                                                        res=self.mat_c)
     
     self.num_mult_per_block = thread_policy.get_num_ops_per_block()
-  
-  def _get_total_shared_mem_size(self):
-    return self.shr_mem_size_per_mult * self.num_mult_per_block
+    self._shr_mem_obj.set_mults_per_block(self.num_mult_per_block)
   
   def _generate_base_name(self):
-    if self.mat_a.transpose:
+    if self._trans_a:
       dim1 = "m{}_{}".format(self.mat_a.get_actual_num_cols(), self.mat_a.num_rows)
       dim3 = "k{}".format(self.mat_a.get_actual_num_rows())
     else:
       dim1 = "m{}_{}".format(self.mat_a.get_actual_num_rows(), self.mat_a.num_rows)
       dim3 = "k{}".format(self.mat_a.get_actual_num_cols())
     
-    if self.mat_b.transpose:
+    if self._trans_b:
       dim2 = "n{}_{}".format(self.mat_b.get_actual_num_rows(), self.mat_b.num_rows)
     else:
       dim2 = "n{}_{}".format(self.mat_b.get_actual_num_cols(), self.mat_b.num_rows)
@@ -330,8 +273,8 @@ class GemmGenerator(GemmLikeGenerator):
                                  self.mat_b.addressing[0],
                                  self.mat_c.addressing[0])
     
-    traspose = "{}_{}".format("T" if self.mat_a.transpose else "NT",
-                              "T" if self.mat_b.transpose else "NT")
+    traspose = "{}_{}".format("T" if self._trans_a else "NT",
+                              "T" if self._trans_b else "NT")
     
     constants = "{}_{}".format(self.alpha, self.beta)
     
@@ -383,29 +326,7 @@ class GemmGenerator(GemmLikeGenerator):
   
   def _get_grid_dim_spec(self):
     super(GemmGenerator, self)._get_grid_dim_spec()
-    num_blocks = "({0} + {1} - 1) / {1}".format(Generator.NUM_ELEMENTS_STR,
+    num_blocks = "({0} + {1} - 1) / {1}".format(GeneralLexicon.NUM_ELEMENTS,
                                                 self.num_mult_per_block)
     return f'Grid({num_blocks}, 1, 1)'
-  
-  def _get_global_matrix_ptr(self, matrix):
-    
-    extra_offset_symbol = self._generate_extra_offset_symbol(matrix)
-    if matrix.addressing == "strided":
-      main_offset = "{} * {}".format("batchId", matrix.get_real_volume())
-      sub_offset = matrix.get_offset_to_first_element()
-      return "&{}[{} + {} + {}]".format(matrix.name,
-                                        main_offset,
-                                        sub_offset,
-                                        extra_offset_symbol)
-    
-    elif matrix.addressing == "pointer_based":
-      main_offset = "batchId"
-      sub_offset = matrix.get_offset_to_first_element()
-      return "&{}[{}][{} + {}]".format(matrix.name,
-                                       main_offset,
-                                       sub_offset,
-                                       extra_offset_symbol)
-    
-    else:
-      sub_offset = matrix.get_offset_to_first_element()
-      return "&{}[{} + {}]".format(matrix.name, sub_offset, extra_offset_symbol)
+

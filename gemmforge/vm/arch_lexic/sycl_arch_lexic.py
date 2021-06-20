@@ -32,6 +32,9 @@ class SyclArchLexic(AbstractArchLexic):
   def sync_threads(self):
     return "item.barrier()"
   
+  def sync_vec_unit(self):
+    return "item.barrier()"
+  
   def kernel_range_object(self):
     return "cl::sycl::range<3>"
   

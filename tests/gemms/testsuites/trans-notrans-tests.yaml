@@ -7,26 +7,25 @@ test_suites:
       cols: 43
       addressing: "strided"
       bbox: "bbox_params_a"
-      trans:  yes
 
     matrix_b:
       rows: 39
       cols: 41
       addressing: "strided"
       bbox: "bbox_params_b"
-      trans:  no
 
     matrix_c:
       rows: 61
       cols: 39
       addressing: "strided"
       bbox: "bbox_params_c"
-      trans:  no
 
-    bbox_params_a: [[0, 0, 11, 33], [0, 9, 11, 42], [48, 0, 59, 33], [48, 9, 59, 42], [24, 4, 35, 37]]
-    bbox_params_b: [[0, 0, 11, 9], [0, 31, 11, 40], [27, 0, 38, 9], [27, 31, 38, 40], [13, 15, 24, 24]]
-    bbox_params_c: [[0, 0, 33, 9], [0, 9, 33, 18], [27, 0, 60, 9], [27, 9, 60, 18], [13, 4, 46, 13]]
+    bbox_params_a: [[0, 0, 12, 34], [0, 9, 12, 43], [48, 0, 60, 34], [48, 9, 60, 43], [24, 4, 36, 38]]
+    bbox_params_b: [[0, 0, 12, 10], [0, 31, 12, 41], [27, 0, 39, 10], [27, 31, 39, 41], [13, 15, 25, 25]]
+    bbox_params_c: [[0, 0, 34, 10], [0, 9, 34, 19], [27, 0, 61, 10], [27, 9, 61, 19], [13, 4, 47, 14]]
 
+    trans_a:  yes
+    trans_b:  no
     alpha: 1.1
     beta: 1.1
     num_elements: 10

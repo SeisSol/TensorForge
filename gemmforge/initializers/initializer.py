@@ -12,7 +12,7 @@ class ExactInitializer(AbstractGenerator):
     super(ExactInitializer, self).__init__(vm)
     self.init_value = init_value
     self.matrix = matrix
-    self.matrix._set_name('A')
+    self.matrix.set_name('A')
     self.matrix._set_mutability(True)
     self._matrices = [self.matrix]
   

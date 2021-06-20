@@ -34,10 +34,10 @@ int main(int Argc, char* Arcv[]) {
   std::vector<int> BboxC = MatrixCSpec["bbox"].as<std::vector<int>>();
   std::vector<int> BboxD = MatrixCSpec["bbox"].as<std::vector<int>>();
 
-  int L = BboxC[2] - BboxC[0] + 1;
-  int M = BboxA[2] - BboxA[0] + 1;
-  int N = BboxB[3] - BboxB[1] + 1;
-  int K = BboxA[3] - BboxA[1] + 1;
+  int L = BboxC[2] - BboxC[0];
+  int M = BboxA[2] - BboxA[0];
+  int N = BboxB[3] - BboxB[1];
+  int K = BboxA[3] - BboxA[1];
 
   int SizeTemp = M * N;  // !< required only the exact size
 
@@ -87,9 +87,9 @@ int main(int Argc, char* Arcv[]) {
   unsigned NextB = MatrixBSpec["addressing"].as<std::string>() == std::string("strided") ? SizeB : 0;
   unsigned NextC = MatrixCSpec["addressing"].as<std::string>() == std::string("strided") ? SizeC : 0;
 
-  LayoutType TransA = MatrixASpec["trans"].as<bool>() ? LayoutType::Trans : LayoutType::NoTrans;
-  LayoutType TransB = MatrixBSpec["trans"].as<bool>() ? LayoutType::Trans : LayoutType::NoTrans;
-  LayoutType TransC = MatrixCSpec["trans"].as<bool>() ? LayoutType::Trans : LayoutType::NoTrans;
+  LayoutType TransA = Params["trans_a"].as<bool>() ? LayoutType::Trans : LayoutType::NoTrans;
+  LayoutType TransB = Params["trans_b"].as<bool>() ? LayoutType::Trans : LayoutType::NoTrans;
+  LayoutType TransC = Params["trans_c"].as<bool>() ? LayoutType::Trans : LayoutType::NoTrans;
 
   int Lda = MatrixASpec["num_rows"].as<int>();
   int Ldb = MatrixBSpec["num_rows"].as<int>();

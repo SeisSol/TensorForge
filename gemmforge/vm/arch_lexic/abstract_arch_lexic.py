@@ -35,7 +35,11 @@ class AbstractArchLexic(ABC):
   @abstractmethod
   def sync_threads(self):
     pass
-  
+
+  @abstractmethod
+  def sync_vec_unit(self):
+    pass
+
   @abstractmethod
   def kernel_range_object(self):
     pass
