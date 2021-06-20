@@ -8,41 +8,40 @@ import yaml
 import argparse
 
 parser = argparse.ArgumentParser()
-parser.add_argument('-s', '--specfile', action='store', help="path to a yaml file with a test spec")
+parser.add_argument('-s', '--specfile', action='store', help='path to a yaml file with a test spec')
 parser.add_argument('-r', '--realsize', type=int, action='store',
-                    help="size of real: 4(single)/8(double)")
-parser.add_argument("-m",
-                    "--manufacturer",
-                    action="store",
-                    help="Name of the Manufacturer, currently nvidia and amd are supported",
-                    default="nvidia")
-parser.add_argument("-a",
-                    "--sub_arch",
-                    action="store",
-                    help="Sub_arch of the GPU, e.g sm_60 for Nvidia or gfx906 for AMD",
-                    default="sm_61")
+                    help='size of real: 4(single)/8(double)')
+parser.add_argument('-m',
+                    '--manufacturer',
+                    action='store',
+                    help='Name of the Manufacturer, currently nvidia and amd are supported',
+                    default='nvidia')
+parser.add_argument('-a',
+                    '--sub_arch',
+                    action='store',
+                    help='Sub_arch of the GPU, e.g sm_60 for Nvidia or gfx906 for AMD',
+                    default='sm_61')
 args = parser.parse_args()
 
 # check input parameters. Make sure there are valid ones
 if not args.specfile:
-  raise ValueError("A test spec file has not been provided")
+  raise ValueError('A test spec file has not been provided')
 else:
   if not os.path.exists(args.specfile):
-    raise ValueError("A test spec file doen't exists")
+    raise ValueError('A test spec file doens\'t exists')
 
 if not args.realsize:
-  raise ValueError("Please, specify floating point size: 4 or 8")
+  raise ValueError('Please, specify floating point size: 4 or 8')
 else:
   if not ((args.realsize == 4) or (args.realsize == 8)):
-    raise ValueError("Floating point size must be either 4 or 8")
+    raise ValueError('Floating point size must be either 4 or 8')
 
 vm = vm_factory(name=args.manufacturer,
                 sub_name=args.sub_arch,
-                fp_type="float" if args.realsize == 4 else "double")
-generator = CsaGenerator(vm)
+                fp_type='float' if args.realsize == 4 else 'double')
 
 stream = open(args.specfile, 'r')
-suites = yaml.safe_load(stream)["test_suites"]
+suites = yaml.safe_load(stream)['test_suites']
 
 src = StringIO()
 headers = StringIO()
@@ -54,7 +53,7 @@ with constructs.Cpp(StringIO()) as file:
   file.Include("gemmforge_aux.h")
   if hw_descr.manufacturer == "amd":
     file.Include("hip/hip_runtime.h")
-  elif hw_descr.manufacturer == "hipsycl" or hw_descr.manufacturer == "oneapi":
+  elif hw_descr.manufacturer == 'hipsycl' or hw_descr.manufacturer == 'oneapi':
     file.Include("CL/sycl.hpp")
   src.write(file.stream.getvalue())
 
@@ -65,7 +64,8 @@ with constructs.Cpp(StringIO()) as file:
   file.Include("kernels.h")
   file.Include("csa.h")
   file.Include("iostream")
-  file.Expression("using namespace csagen::reference")
+  file.Include("algorithm")
+  file('using namespace csagen::reference;')
   file.Emptyline()
   tests_code.write(file.stream.getvalue())
 
@@ -74,71 +74,76 @@ for suite in suites:
     mat_a, mat_c, alpha, beta, num_elements, test_name = test
     
     try:
+      generator = CsaGenerator(vm)
       generator.set(mat_a, mat_c, alpha, beta)
       generator.generate()
       src.write(generator.get_kernel())
+      print(generator.get_kernel())  # TODO: delete after debugging
       src.write(generator.get_launcher())
+      print(generator.get_launcher())  # TODO: delete after debugging
       headers.write(generator.get_launcher_header())
       
       with constructs.Cpp(StringIO()) as file:
-        with file.GoogleTestSuit("DenseCsaTest", test_name):
+        with file.GoogleTestSuit('DenseCsaTest', test_name):
           # A and B must be both MxN matrices (or NxM if transposed)
-          M = mat_a.get_actual_num_cols() if mat_a.transpose else mat_a.get_actual_num_rows()
-          N = mat_a.get_actual_num_rows() if mat_a.transpose else mat_a.get_actual_num_cols()
+          M = mat_a.get_actual_num_rows()
+          N = mat_a.get_actual_num_cols()
           
-          file.VariableDeclaration("int", "M", M)
-          file.VariableDeclaration("int", "N", N)
+          file(f'int M = {M};')
+          file(f'int N = {N};')
           file.Emptyline()
           
-          file.Expression("int Size = {} * {}".format(M, N))
+          file(f'int sizeA = {mat_a.num_rows} * {mat_a.num_cols};')
+          file(f'int sizeC = {mat_c.num_rows} * {mat_c.num_cols};')
           # count rows must be equal at A and B (matrices perform component-wise add!)
-          file.VariableDeclaration("int", "Ld", mat_a.num_rows)
+          file(f'int lda = {mat_a.num_rows};')
+          file(f'int ldc = {mat_c.num_rows};')
           file.Emptyline()
           
-          file.VariableDeclaration("int", "OffsetA",
-                                   "{} * {} + {}".format(mat_a.num_rows, mat_a.bbox[1],
-                                                         mat_a.bbox[0]))
-          file.VariableDeclaration("int", "OffsetC",
-                                   "{} * {} + {}".format(mat_c.num_rows, mat_c.bbox[1],
-                                                         mat_c.bbox[0]))
+          file(f'int offsetA = {mat_a.num_rows} * {mat_a.bbox[1]} + {mat_a.bbox[0]};')
+          file(f'int offsetC = {mat_c.num_rows} * {mat_c.bbox[1]} + {mat_c.bbox[0]};')
           file.Emptyline()
           
-          file.VariableDeclaration(precision, "alpha", alpha)
-          file.VariableDeclaration(precision, "beta", beta)
-          file.VariableDeclaration("int", "NumElements", num_elements)
+          file(f'{precision} alpha = {alpha};')
+          file(f'{precision} beta = {beta};')
+          file(f'int numElements = {num_elements};')
           file.Emptyline()
           
-          # test driver expects three matrices but it is ok for our use case to just not use the matrix C
-          file.Expression("SetUp(Size, Size, Size, NumElements)")
+          # NOTE: test driver expects three matrices but it is ok
+          # for our use case to just not use the matrix C
+          file(f'SetUp(sizeA, sizeA, sizeC, numElements);')
+          
           # this fills the matrices with random data (on host and device!)
-          file.Expression("Driver.prepareData()")
+          file('Driver.prepareData();')
           
           args = []
-          args.append("alpha")
+          args.append('alpha')
           args.append(
-            "{}, 0".format("DeviceShuffledA" if mat_a.addressing == "pointer_based" else "DeviceA"))
+            f'{"DeviceShuffledA" if mat_a.addressing == "pointer_based" else "DeviceA"}, 0'
+          )
           args.append(
-            "{}, 0".format("DeviceShuffledC" if mat_c.addressing == "pointer_based" else "DeviceC"))
-          args.append("NumElements")
-          args.append("Driver.getTestStream()")
+            f'{"DeviceShuffledC" if mat_c.addressing == "pointer_based" else "DeviceC"}, 0'
+          )
+          args.append('numElements')
+          args.append('Driver.getTestStream()')
           
-          args = ", ".join(args)
           # calls the kernel
-          file.Expression("{}({})".format(generator.get_base_name(), args))
+          file(f'{generator.get_base_name()}({", ".join(args)});')
+          if beta == 0.0:
+            file(f'std::fill(&HostC[0], &HostC[sizeC * numElements], 0.0);')
           
-          args = ["M", "N", "alpha", "&HostA[OffsetA]", "beta", "&HostC[OffsetC]"]
-          args.extend(["Ld", "Size", "NumElements"])
+          args = ['M', 'N', 'alpha', '&HostA[offsetA]', 'lda']
+          args.extend(['beta', '&HostC[offsetC]', 'ldc', 'sizeA', 'sizeC', 'numElements'])
           
-          args = ", ".join(args)
           # calls the reference code
-          file.Expression("csa({})".format(args))
+          file(f'csa({", ".join(args)});')
           
-          args = ["M", "Ld", "N", "OffsetC", "Size", "NumElements"]
+          args = ['M', 'ldc', 'N', 'offsetC', 'sizeC', 'numElements']
           # this copies the results into packed arrays (without offset)
-          file.Expression("Driver.packResults({})".format(", ".join(args)))
-          file.VariableDeclaration("bool", "Result")
-          file.Assignment("Result", "Driver.isTestPassed<L1NormComparator>()")
-          file.Expression("EXPECT_EQ(true, Result)")
+          file(f'Driver.packResults({", ".join(args)});')
+          file(f'bool result;')
+          file(f'result = Driver.isTestPassed<L1NormComparator>();')
+          file(f'EXPECT_EQ(true, result);')
         
         file.Emptyline()
         file.Emptyline()
@@ -149,27 +154,27 @@ for suite in suites:
       src.close()
       headers.close()
       
-      print("ERROR: {}".format(error))
+      print(f'ERROR: {error}')
       raise error
 
-dir_name = "./gen_code"
+dir_name = './gen_code'
 if not os.path.exists(dir_name):
   os.mkdir(dir_name)
 
-path = os.path.join(dir_name, "test.cpp")
+path = os.path.join(dir_name, 'test.cpp')
 with open(path, 'w') as file:
   file.write(tests_code.getvalue())
 
-if hw_descr.manufacturer == "nvidia":
-  path = os.path.join(dir_name, "kernels.cu")
-elif hw_descr.manufacturer == "amd" or hw_descr.manufacturer == "hipsycl" or hw_descr.manufacturer == "oneapi":
-  path = os.path.join(dir_name, "kernels.cpp")
+if hw_descr.manufacturer == 'nvidia':
+  path = os.path.join(dir_name, 'kernels.cu')
+elif hw_descr.manufacturer == 'amd' or hw_descr.manufacturer == 'hipsycl' or hw_descr.manufacturer == 'oneapi':
+  path = os.path.join(dir_name, 'kernels.cpp')
 else:
-  print("Manufacturer not supported, could not write kernel file")
+  print('Manufacturer not supported, could not write kernel file')
 with open(path, 'w') as file:
   file.write(src.getvalue())
 
-path = os.path.join(dir_name, "kernels.h")
+path = os.path.join(dir_name, 'kernels.h')
 with open(path, 'w') as file:
   file.write(headers.getvalue())
 

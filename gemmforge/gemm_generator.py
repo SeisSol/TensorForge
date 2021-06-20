@@ -3,7 +3,7 @@ from io import StringIO
 from .exceptions import GenerationError
 from .abstract_gemmlike_generator import GemmLikeGenerator
 from .basic_types import GeneralLexicon, DataFlowDirection, RegMemObject
-from .symbol_table import InverseSymbolTable, Symbol, SymbolType
+from .symbol_table import Symbol, SymbolType
 from .abstract_generator import AbstractGenerator as Generator
 from .instructions.builders import GetElementPtrBuilder, RegistersAllocBuilder, ShrMemAllocBuilder
 from .instructions.builders import GemmBuilder
@@ -22,12 +22,10 @@ class GemmGenerator(GemmLikeGenerator):
     super(GemmGenerator, self).__init__(vm)
     self._trans_a = None
     self._trans_b = None
-    self.mat_a = None
-    self.mat_b = None
-    self.mat_c = None
+    self._mat_a = None
+    self._mat_b = None
+    self._mat_c = None
     
-    self._symbol_table = InverseSymbolTable()
-    self._instructions = []
     self._reg_array_obj = None
     self._shr_mem_obj = None
     self._shr_mem_loads = []
@@ -35,25 +33,25 @@ class GemmGenerator(GemmLikeGenerator):
   def set(self, trans_a, trans_b, mat_a, mat_b, mat_c, alpha, beta, base_name=None):
     self._instructions = []
     
-    self.mat_a = mat_a
+    self._mat_a = mat_a
     self._trans_a = trans_a
-    self.mat_a.set_name('A')
-    self.mat_a.set_data_flow_direction(DataFlowDirection.SOURCE)
+    self._mat_a.set_name('A')
+    self._mat_a.set_data_flow_direction(DataFlowDirection.SOURCE)
     
-    self.mat_b = mat_b
+    self._mat_b = mat_b
     self._trans_b = trans_b
-    self.mat_b.set_name('B')
-    self.mat_b.set_data_flow_direction(DataFlowDirection.SOURCE)
+    self._mat_b.set_name('B')
+    self._mat_b.set_data_flow_direction(DataFlowDirection.SOURCE)
     
-    self.mat_c = mat_c
-    self.mat_c.set_name('C')
-    self.mat_c.set_data_flow_direction(DataFlowDirection.SINK)
-    self._matrices = [self.mat_a, self.mat_b, self.mat_c]
+    self._mat_c = mat_c
+    self._mat_c.set_name('C')
+    self._mat_c.set_data_flow_direction(DataFlowDirection.SINK)
+    self._matrices = [self._mat_a, self._mat_b, self._mat_c]
     
-    self.alpha = alpha
-    self.beta = beta
+    self._alpha = alpha
+    self._beta = beta
     
-    self.base_name = base_name if base_name is not None else self._generate_base_name()
+    self._base_name = base_name if base_name is not None else self._generate_base_name()
     self._is_set = True
   
   def generate(self):
@@ -73,13 +71,13 @@ class GemmGenerator(GemmLikeGenerator):
     src = StringIO()
     with constructs.Cpp(src) as file:
       
-      max_num_threads_per_block = self.num_active_threads * self.num_mult_per_block
+      max_num_threads_per_block = self._num_active_threads * self._num_ops_per_block
       kernel_bounds = [max_num_threads_per_block]
       team_index_str = self._lexic.batch_indexer_gemm()
 
       with self._lexic.kernel_definition(file,
                                          kernel_bounds,
-                                         self.base_name,
+                                         self._base_name,
                                          self._get_func_params(),
                                          self._precision,
                                          self._shr_mem_obj.get_total_size()):
@@ -98,14 +96,14 @@ class GemmGenerator(GemmLikeGenerator):
   def _generate_launcher(self):
     src = StringIO()
     with constructs.Cpp(src) as file:
-      with file.Function(self.base_name, self._get_launcher_params()):
-        file.VariableDeclaration(self._lexic.kernel_range_object(), self._get_block_dim_spec())
-        file.VariableDeclaration(self._lexic.kernel_range_object(), self._get_grid_dim_spec())
+      with file.Function(self._base_name, self._get_launcher_params()):
+        file(f'{self._lexic.kernel_range_object()} {self._get_block_dim_spec()};')
+        file(f'{self._lexic.kernel_range_object()} {self._get_grid_dim_spec()};')
         
         self._lexic.get_stream_via_pointer(file, 'stream', GeneralLexicon.STREAM_PTR_STR)
-        file.Expression(self._lexic.get_launch_code(self.base_name,
-                                                    'Grid',
-                                                    'Block',
+        file.Expression(self._lexic.get_launch_code(self._base_name,
+                                                    'grid',
+                                                    'block',
                                                     'stream',
                                                     self._get_func_args()))
         err = self._lexic.check_error()
@@ -117,7 +115,7 @@ class GemmGenerator(GemmLikeGenerator):
   def _generate_header(self):
     src = StringIO()
     with constructs.Cpp(src) as file:
-      file.FunctionDeclaration(self.base_name, self._get_launcher_params(with_defaults=True))
+      file.FunctionDeclaration(self._base_name, self._get_launcher_params(with_defaults=True))
       content = src.getvalue()
     self._header = content
   
@@ -126,48 +124,48 @@ class GemmGenerator(GemmLikeGenerator):
       
       # check whether C and A match each other
       if self._trans_a:
-        if self.mat_c.get_actual_num_rows() != self.mat_a.get_actual_num_cols():
-          raise GenerationError("Cannot generate a matrix multiplication "
-                                "with given parameters. Matrix C and A (Trans) do not match")
+        if self._mat_c.get_actual_num_rows() != self._mat_a.get_actual_num_cols():
+          raise GenerationError('Cannot generate a matrix multiplication '
+                                'with given parameters. Matrix C and A (Trans) do not match')
       else:
-        if self.mat_c.get_actual_num_rows() != self.mat_a.get_actual_num_rows():
-          raise GenerationError("Cannot generate a matrix multiplication "
-                                "with given parameters. Matrix C and A (NoTrans) do not match")
+        if self._mat_c.get_actual_num_rows() != self._mat_a.get_actual_num_rows():
+          raise GenerationError('Cannot generate a matrix multiplication '
+                                'with given parameters. Matrix C and A (NoTrans) do not match')
       
       # check whether C and B match each other
       if self._trans_b:
-        if self.mat_c.get_actual_num_cols() != self.mat_b.get_actual_num_rows():
-          raise GenerationError("Cannot generate a matrix multiplication "
-                                "with given parameters. Matrix C and B (Trans) do not match")
+        if self._mat_c.get_actual_num_cols() != self._mat_b.get_actual_num_rows():
+          raise GenerationError('Cannot generate a matrix multiplication '
+                                'with given parameters. Matrix C and B (Trans) do not match')
       else:
-        if self.mat_c.get_actual_num_cols() != self.mat_b.get_actual_num_cols():
-          raise GenerationError("Cannot generate a matrix multiplication "
-                                "with given parameters. Matrix C and B (NoTrans) do not match")
+        if self._mat_c.get_actual_num_cols() != self._mat_b.get_actual_num_cols():
+          raise GenerationError('Cannot generate a matrix multiplication '
+                                'with given parameters. Matrix C and B (NoTrans) do not match')
       
       # check whether A and B match each other
       if self._trans_a:
         if self._trans_b:
-          if self.mat_a.get_actual_num_rows() != self.mat_b.get_actual_num_cols():
-            raise GenerationError("Cannot generate a matrix multiplication with given parameters. "
-                                  "Matrix A (Trans) and B (Trans) do not match")
+          if self._mat_a.get_actual_num_rows() != self._mat_b.get_actual_num_cols():
+            raise GenerationError('Cannot generate a matrix multiplication with given parameters. '
+                                  'Matrix A (Trans) and B (Trans) do not match')
         else:
-          if self.mat_a.get_actual_num_rows() != self.mat_b.get_actual_num_rows():
-            raise GenerationError("Cannot generate a matrix multiplication with given parameters. "
-                                  "Matrix A (Trans) and B (NoTrans) do not match")
+          if self._mat_a.get_actual_num_rows() != self._mat_b.get_actual_num_rows():
+            raise GenerationError('Cannot generate a matrix multiplication with given parameters. '
+                                  'Matrix A (Trans) and B (NoTrans) do not match')
       else:
         if self._trans_b:
-          if self.mat_a.get_actual_num_cols() != self.mat_b.get_actual_num_cols():
-            raise GenerationError("Cannot generate a matrix multiplication with given parameters. "
-                                  "Matrix A (NoTrans) and B (Trans) do not match")
+          if self._mat_a.get_actual_num_cols() != self._mat_b.get_actual_num_cols():
+            raise GenerationError('Cannot generate a matrix multiplication with given parameters. '
+                                  'Matrix A (NoTrans) and B (Trans) do not match')
         else:
-          if self.mat_a.get_actual_num_cols() != self.mat_b.get_actual_num_rows():
-            raise GenerationError("Cannot generate a matrix multiplication with given parameters. "
-                                  "Matrix A (NoTrans) and B (NoTrans) do not match")
+          if self._mat_a.get_actual_num_cols() != self._mat_b.get_actual_num_rows():
+            raise GenerationError('Cannot generate a matrix multiplication with given parameters. '
+                                  'Matrix A (NoTrans) and B (NoTrans) do not match')
     
     except GenerationError as error:
-      matrices = {'A': self.mat_a, 'B': self.mat_b, 'C': self.mat_c}
+      matrices = {'A': self._mat_a, 'B': self._mat_b, 'C': self._mat_c}
       for name in matrices:
-        print(f'Matrix {name}:')
+        print(f'matrix {name}:')
         print(matrices[name])
         print("=" * 80)
       
@@ -175,16 +173,16 @@ class GemmGenerator(GemmLikeGenerator):
 
   def _deduce_num_threads(self):
     if self._trans_a:
-      lead_dim_length = self.mat_a.get_actual_num_cols()
+      lead_dim_length = self._mat_a.get_actual_num_cols()
     else:
-      lead_dim_length = self.mat_a.get_actual_num_rows()
+      lead_dim_length = self._mat_a.get_actual_num_rows()
   
     num_vector_units_required = math.ceil(lead_dim_length / self._hw_descr.vec_unit_length)
-    self.num_compute_threads = lead_dim_length
-    self.num_active_threads = num_vector_units_required * self._hw_descr.vec_unit_length
+    self._num_compute_threads = lead_dim_length
+    self._num_active_threads = num_vector_units_required * self._hw_descr.vec_unit_length
 
   def _populate_global_scope(self):
-    for matrix in [self.mat_a, self.mat_b, self.mat_c]:
+    for matrix in self._matrices:
       self._symbol_table.add_symbol(Symbol(obj=matrix,
                                     name=matrix.name,
                                     stype=SymbolType.Batch))
@@ -199,7 +197,7 @@ class GemmGenerator(GemmLikeGenerator):
     
     # create an array of registers
     builder = RegistersAllocBuilder(self._vm, self._symbol_table)
-    builder.build(self.mat_c.get_actual_num_cols(), 0.0)
+    builder.build(self._mat_c.get_actual_num_cols(), 0.0)
     self._instructions.extend(builder.get_instructions())
     self._reg_array_obj = builder.get_resultant_obj()
     
@@ -214,12 +212,12 @@ class GemmGenerator(GemmLikeGenerator):
                           self._symbol_table,
                           self._reg_array_obj,
                           self._shr_mem_obj,
-                          self.num_active_threads)
+                          self._num_active_threads)
     
     builder.build(trans_a=self._trans_a,
                   trans_b=self._trans_b,
-                  op1=self._symbol_table[self.mat_a],
-                  op2=self._symbol_table[self.mat_b],
+                  op1=self._symbol_table[self._mat_a],
+                  op2=self._symbol_table[self._mat_b],
                   dest=self._symbol_table[self._reg_array_obj])
 
     self._shr_mem_loads = builder.get_srh_mem_loads()
@@ -227,11 +225,11 @@ class GemmGenerator(GemmLikeGenerator):
     self._instructions.extend(builder.get_instructions())
     
     store = StoreRegToGlb(self._vm,
-                          self._symbol_table[self.mat_c],
+                          self._symbol_table[self._mat_c],
                           self._symbol_table[self._reg_array_obj],
-                          self.alpha,
-                          self.beta,
-                          self.num_compute_threads)
+                          self._alpha,
+                          self._beta,
+                          self._num_compute_threads)
     self._instructions.append(store)
 
   def _analyze(self):
@@ -246,87 +244,81 @@ class GemmGenerator(GemmLikeGenerator):
     # compute num matrix multiplications per block
     thread_policy = TheadPolicyFactory.get_gemm_policy(vm=self._vm,
                                                        reals_per_op=shr_mem_counter,
-                                                       num_threads=self.num_active_threads,
-                                                       op1=self.mat_a,
-                                                       op2=self.mat_b,
-                                                       res=self.mat_c)
+                                                       num_threads=self._num_active_threads,
+                                                       op1=self._mat_a,
+                                                       op2=self._mat_b,
+                                                       res=self._mat_c)
     
-    self.num_mult_per_block = thread_policy.get_num_ops_per_block()
-    self._shr_mem_obj.set_mults_per_block(self.num_mult_per_block)
+    self._num_ops_per_block = thread_policy.get_num_ops_per_block()
+    self._shr_mem_obj.set_mults_per_block(self._num_ops_per_block)
   
   def _generate_base_name(self):
     if self._trans_a:
-      dim1 = "m{}_{}".format(self.mat_a.get_actual_num_cols(), self.mat_a.num_rows)
-      dim3 = "k{}".format(self.mat_a.get_actual_num_rows())
+      dim1 = f'm{self._mat_a.get_actual_num_cols()}_{self._mat_a.num_rows}'
+      dim3 = f'k{self._mat_a.get_actual_num_rows()}'
     else:
-      dim1 = "m{}_{}".format(self.mat_a.get_actual_num_rows(), self.mat_a.num_rows)
-      dim3 = "k{}".format(self.mat_a.get_actual_num_cols())
+      dim1 = f'm{self._mat_a.get_actual_num_rows()}_{self._mat_a.num_rows}'
+      dim3 = f'k{self._mat_a.get_actual_num_cols()}'
     
     if self._trans_b:
-      dim2 = "n{}_{}".format(self.mat_b.get_actual_num_rows(), self.mat_b.num_rows)
+      dim2 = f'n{self._mat_b.get_actual_num_rows()}_{self._mat_b.num_rows}'
     else:
-      dim2 = "n{}_{}".format(self.mat_b.get_actual_num_cols(), self.mat_b.num_rows)
+      dim2 = f'n{self._mat_b.get_actual_num_cols()}_{self._mat_b.num_rows}'
     
-    dims = "{}_{}_{}".format(dim1, dim2, dim3)
+    dims = f'{dim1}_{dim2}_{dim3}'
+
+    addresses = f'{self._mat_a.addressing[0]}{self._mat_b.addressing[0]}{self._mat_c.addressing[0]}'
+    traspose = f'{"T" if self._trans_a else "NT"}_{"T" if self._trans_b else "NT"}'
+    constants = f'{self._alpha}_{self._beta}'
     
-    addressing = "{}{}{}".format(self.mat_a.addressing[0],
-                                 self.mat_b.addressing[0],
-                                 self.mat_c.addressing[0])
-    
-    traspose = "{}_{}".format("T" if self._trans_a else "NT",
-                              "T" if self._trans_b else "NT")
-    
-    constants = "{}_{}".format(self.alpha, self.beta)
-    
-    result = hashlib.md5(("{}_{}{}{}".format(constants,
-                                             self.mat_a.__str__(),
-                                             self.mat_b.__str__(),
-                                             self.mat_c.__str__()).encode()))
+    result = hashlib.md5(('{}_{}{}{}'.format(constants,
+                                             self._mat_a.__str__(),
+                                             self._mat_b.__str__(),
+                                             self._mat_c.__str__()).encode()))
     md5encoding = result.hexdigest()
     prefix = 's' if self._precision == "float" else "d"
     
-    gemm_dims = f'm{self.mat_a.get_actual_num_rows()}'
-    gemm_dims += f'_n{self.mat_b.get_actual_num_cols()}'
-    gemm_dims += f'_k{self.mat_a.get_actual_num_cols()}'
+    gemm_dims = f'm{self._mat_a.get_actual_num_rows()}'
+    gemm_dims += f'_n{self._mat_b.get_actual_num_cols()}'
+    gemm_dims += f'_k{self._mat_a.get_actual_num_cols()}'
     
-    ldas = f'lda{self.mat_a.num_rows}_ldb{self.mat_b.num_rows}_ldc{self.mat_c.num_rows}'
-    consts = f'alpha_{int(self.alpha)}_beta_{int(self.beta)}'
-    return "{0}gemm_{1}_{2}_{3}_{4}_{5}_{6}".format(prefix,
+    ldas = f'lda{self._mat_a.num_rows}_ldb{self._mat_b.num_rows}_ldc{self._mat_c.num_rows}'
+    consts = f'alpha_{int(self._alpha)}_beta_{int(self._beta)}'
+    return '{0}gemm_{1}_{2}_{3}_{4}_{5}_{6}'.format(prefix,
                                                     traspose,
                                                     gemm_dims,
                                                     ldas,
                                                     consts,
-                                                    addressing,
+                                                    addresses,
                                                     md5encoding[:Generator.ENCODING_LENGTH])
   
   def _get_func_params(self):
     base_params = super(GemmGenerator, self)._get_func_params()
-    if isinstance(self.alpha, float):
+    if isinstance(self._alpha, float):
       return base_params
     else:
-      return f'{self._precision} {self.alpha}, {base_params}'
+      return f'{self._precision} {self._alpha}, {base_params}'
   
   def _get_launcher_params(self, with_defaults=False):
     base_params = super(GemmGenerator, self)._get_launcher_params(with_defaults)
-    if isinstance(self.alpha, float):
+    if isinstance(self._alpha, float):
       return base_params
     else:
-      return f'{self._precision} {self.alpha}, {base_params}'
+      return f'{self._precision} {self._alpha}, {base_params}'
   
   def _get_func_args(self):
     base_args = super(GemmGenerator, self)._get_func_args()
-    if isinstance(self.alpha, float):
+    if isinstance(self._alpha, float):
       return base_args
     else:
-      return f'{self.alpha}, {base_args}'
+      return f'{self._alpha}, {base_args}'
   
   def _get_block_dim_spec(self):
     super(GemmGenerator, self)._get_block_dim_spec()
-    return f'Block({self.num_active_threads}, {self.num_mult_per_block}, 1)'
+    return f'block({self._num_active_threads}, {self._num_ops_per_block}, 1)'
   
   def _get_grid_dim_spec(self):
     super(GemmGenerator, self)._get_grid_dim_spec()
     num_blocks = "({0} + {1} - 1) / {1}".format(GeneralLexicon.NUM_ELEMENTS,
-                                                self.num_mult_per_block)
-    return f'Grid({num_blocks}, 1, 1)'
-
+                                                self._num_ops_per_block)
+    return f'grid({num_blocks}, 1, 1)'

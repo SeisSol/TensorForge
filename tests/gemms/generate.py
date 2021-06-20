@@ -76,7 +76,6 @@ for suite in suites:
       generator = GemmGenerator(vm)
       generator.set(trans_a, trans_b, mat_a, mat_b, mat_c, alpha, beta)
       generator.generate()
-      print(generator.get_kernel())  # TODO: delete after debugging
       src.write(generator.get_kernel())
       src.write(generator.get_launcher())
       headers.write(generator.get_launcher_header())

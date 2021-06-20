@@ -5,13 +5,13 @@ test_suites:
       rows: 9
       cols: 10
       addressing: "strided"
-      bbox: [0, 0, 8, 9]
+      bbox: [0, 0, 9, 10]
 
     matrix_c:
       rows: 9
       cols: 10
       addressing: "strided"
-      bbox: [0, 0, 8, 9]
+      bbox: [0, 0, 9, 10]
 
     alpha: "alpha_params"
     beta: "beta_params"

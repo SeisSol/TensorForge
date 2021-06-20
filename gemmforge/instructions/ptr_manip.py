@@ -10,29 +10,35 @@ class GetElementPtr(AbstractInstruction):
   def __init__(self,
                vm: VM,
                src,
-               dest):
+               dest,
+               include_extra_offset=True):
     super(GetElementPtr, self).__init__(vm)
     self._src = src
     self._dest = dest
+    self._include_extra_offset = include_extra_offset
     self._is_ready = True
     
   def gen_code(self, writer):
    
     batch_obj = self._src.obj
     batch_addressing = batch_obj.addressing
-    extra_offset = get_extra_offset_name(self._src.name)
+    
+    if self._include_extra_offset:
+      extra_offset = f' + {get_extra_offset_name(self._src.name)}'
+    else:
+      extra_offset = ''
     
     address = ''
     if batch_addressing == "strided":
       main_offset = f'{GeneralLexicon.BATCH_ID} * {batch_obj.get_real_volume()}'
       sub_offset = f'{batch_obj.get_offset_to_first_element()}'
-      address = f'{main_offset} + {sub_offset} + {extra_offset}'
+      address = f'{main_offset} + {sub_offset}{extra_offset}'
     elif batch_addressing == "pointer_based":
       main_offset = f'{GeneralLexicon.BATCH_ID}'
       sub_offset = f'{batch_obj.get_offset_to_first_element()}'
-      address = f'{main_offset}][{sub_offset} + {extra_offset}'
+      address = f'{main_offset}][{sub_offset}{extra_offset}'
     elif batch_addressing == "none":
-      address = f'{batch_obj.get_offset_to_first_element()} + {extra_offset}'
+      address = f'{batch_obj.get_offset_to_first_element()}{extra_offset}'
     else:
       GenerationError(f'unknown addressing of {self._src.name}, given {batch_addressing}')
 

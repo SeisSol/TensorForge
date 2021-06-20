@@ -62,6 +62,9 @@ class InverseSymbolTable:
     
   def add_scope(self):
     self._scopes.append(Scope())
+    
+  def pop_scope(self):
+    self._scopes.pop()
 
   def add_symbol(self, symbol: Symbol):
     if symbol.obj in self._scopes[-1]:

@@ -45,8 +45,8 @@ class TestOccupancyNvidia(unittest.TestCase):
                         transpose=False)
 
     self.gen.generate(mat_a, mat_b, mat_c, alpha=1.1, beta=1.1)
-    self.assertEqual(self.gen.num_active_threads, 64)
-    self.assertEqual(self.gen.num_mult_per_block, 1)
+    self.assertEqual(self.gen._num_active_threads, 64)
+    self.assertEqual(self.gen._num_mult_per_block, 1)
 
   def test_occupancy_32_9_56_threads(self):
     mat_a = DenseMatrix(num_rows=32,
@@ -71,8 +71,8 @@ class TestOccupancyNvidia(unittest.TestCase):
 
     # one multiplication per block because the kernel requires too much of
     # shared memory
-    self.assertEqual(self.gen.num_active_threads, 32)
-    self.assertEqual(self.gen.num_mult_per_block, 2)
+    self.assertEqual(self.gen._num_active_threads, 32)
+    self.assertEqual(self.gen._num_mult_per_block, 2)
 
   def test_occupancy_32_9_21_threads(self):
     mat_a = DenseMatrix(num_rows=32,
@@ -97,5 +97,5 @@ class TestOccupancyNvidia(unittest.TestCase):
 
     # one multiplication per block because the kernel requires too much of
     # shared memory
-    self.assertEqual(self.gen.num_active_threads, 32)
-    self.assertEqual(self.gen.num_mult_per_block, 2)
+    self.assertEqual(self.gen._num_active_threads, 32)
+    self.assertEqual(self.gen._num_mult_per_block, 2)

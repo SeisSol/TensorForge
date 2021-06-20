@@ -9,7 +9,7 @@ class GetElementPtrBuilder(AbstractBuilder):
   def __init__(self, vm, symbol_table):
     super(GetElementPtrBuilder, self).__init__(vm, symbol_table)
 
-  def build(self, src: Symbol):
+  def build(self, src: Symbol, include_extra_offset: bool = True):
     self._reset()
     if src.stype != SymbolType.Batch:
       raise InternalError("src operand is not in a batch")
@@ -25,4 +25,4 @@ class GetElementPtrBuilder(AbstractBuilder):
                               is_transposed=False)
 
     self._symbol_table.add_symbol(dest)
-    self._instructions.append(GetElementPtr(self._vm, src, dest))
+    self._instructions.append(GetElementPtr(self._vm, src, dest, include_extra_offset))
