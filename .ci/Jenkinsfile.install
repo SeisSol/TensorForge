@@ -43,9 +43,10 @@ pipeline {
         stage('Clone') {
             steps {
                 script {
-                    filter = "${ref}".split("refs/heads/")
+                    filter = "${ref}".split("refs/(heads|tags)/")
                     branch = filter[1]
                 }
+                echo "fetching: ${branch}"
                 sh """
                 git clone --branch ${branch} --recurse-submodules ${clone_url} .
                 """
