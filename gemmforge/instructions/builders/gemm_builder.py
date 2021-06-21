@@ -57,15 +57,15 @@ class GemmBuilder(AbstractBuilder):
     self._op2 = self._make_loader_and_symbol(operand=op2, do_transpose=False)
     
     self._insert_sync_threads()
-    
-    instr = GenericGemm(vm=self._vm,
-                        trans_a=False,
-                        trans_b=trans_b,
-                        op1=self._op1,
-                        op2=self._op2,
-                        dest=dest,
-                        num_threads=self._num_threads)
-    self._instructions.append(instr)
+
+    gemm_params = {'vm': self._vm,
+                   'trans_a': False,
+                   'trans_b': trans_b,
+                   'op1': self._op1,
+                   'op2': self._op2,
+                   'dest': dest,
+                   'num_threads': self._num_threads}
+    self._instructions.append(GenericGemm(**gemm_params))
 
   def _make_loader_and_symbol(self, operand, do_transpose):
     shr_mem_region = Symbol(name=self._name_shr_reg(),

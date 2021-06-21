@@ -16,8 +16,8 @@ class NvidiaArchLexic(AbstractArchLexic):
   def get_launch_code(self, func_name, grid, block, stream, func_params):
     return "kernel_{}<<<{},{},0,{}>>>({})".format(func_name, grid, block, stream, func_params)
   
-  def declare_shared_memory_inline(self, name, precision, size):
-    return f"__shared__  {precision} {name}[{size}]"
+  def declare_shared_memory_inline(self, name, precision, size, alignment):
+    return f"__shared__  __align__({alignment}) {precision} {name}[{size}]"
   
   def kernel_definition(self, file, kernel_bounds, base_name, params, precision=None,
                         total_shared_mem_size=None):

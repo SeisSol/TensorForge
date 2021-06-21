@@ -16,7 +16,7 @@ class SyclArchLexic(AbstractArchLexic):
   def get_launch_code(self, func_name, grid, block, stream, func_params):
     return f"kernel_{func_name}({stream}, {grid}, {block}, {func_params})"
   
-  def declare_shared_memory_inline(self, name, precision, size):
+  def declare_shared_memory_inline(self, name, precision, size, alignment):
     return None
   
   def kernel_definition(self, file, kernel_bounds, base_name, params, precision=None,

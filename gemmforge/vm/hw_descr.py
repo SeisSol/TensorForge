@@ -6,6 +6,7 @@ class HwDecription:
                max_reg_per_block,
                max_threads_per_sm,
                max_block_per_sm,
+               model,
                name):
     self.vec_unit_length = vec_unit_length
     self.max_local_mem_size_per_block = max_local_mem_size_per_block
@@ -13,6 +14,7 @@ class HwDecription:
     self.max_reg_per_block = max_reg_per_block
     self.max_threads_per_sm = max_threads_per_sm
     self.max_block_per_sm = max_block_per_sm
+    self.model = model
     self.manufacturer = name
 
 
@@ -52,6 +54,7 @@ def hw_descr_factory(name, sub_name):
                         max_reg_per_block,
                         max_threads_per_sm,
                         max_block_per_sm,
+                        sub_name,
                         name)
   
   elif name == "amd":
@@ -92,6 +95,7 @@ def hw_descr_factory(name, sub_name):
                         max_reg_per_workgroup,
                         max_vec_units_per_cu,
                         max_workgroup_per_cu,
+                        sub_name,
                         name)
   
   elif name == "hipsycl" or name == "oneapi":
@@ -127,6 +131,7 @@ def hw_descr_factory(name, sub_name):
                           max_reg_per_block,
                           max_threads_per_sm,
                           max_block_per_sm,
+                          sub_name,
                           name)
     if sub_name in ['dg1']:
       return HwDecription(64,
@@ -135,6 +140,7 @@ def hw_descr_factory(name, sub_name):
                           64 * KB,
                           512,
                           64,
+                          sub_name,
                           name)
     else:
       return HwDecription(32,
@@ -143,6 +149,7 @@ def hw_descr_factory(name, sub_name):
                           64 * KB,
                           256,
                           32,
+                          sub_name,
                           name)
   else:
     raise ValueError('Unknown gpu architecture')

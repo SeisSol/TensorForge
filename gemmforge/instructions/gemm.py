@@ -3,34 +3,28 @@ from gemmforge.vm import VM
 from gemmforge.symbol_table import SymbolType, Symbol, DataView, InverseSymbolTable
 from gemmforge.basic_types import GeneralLexicon, DataFlowDirection, RegMemObject
 from gemmforge.exceptions import InternalError
+from abc import abstractmethod
 
 
 class GenericGemm(AbstractInstruction):
-  def __init__(self,
-               vm: VM,
-               trans_a: bool,
-               trans_b: bool,
-               op1: Symbol,
-               op2: Symbol,
-               dest: Symbol,
-               num_threads: int):
-    super(GenericGemm, self).__init__(vm)
-    
-    if op1.stype == SymbolType.Batch:
+  def __init__(self, **kwargs):
+    super(GenericGemm, self).__init__(kwargs['vm'])
+    self._trans_a = kwargs['trans_a']
+    self._trans_b = kwargs['trans_b']
+    self._op1 = kwargs['op1']
+    self._op2 = kwargs['op2']
+    self._dest = kwargs['dest']
+    self._num_threads = kwargs['num_threads']
+
+    if self._op1.stype == SymbolType.Batch:
       raise InternalError('gemm: `op1` is a batch type, must be either glb. or shr.')
-    
-    if op2.stype == SymbolType.Batch:
+
+    if self._op2.stype == SymbolType.Batch:
       raise InternalError('gemm: `op2` is a batch type, must be either glb. or shr.')
-    
-    if dest.stype != SymbolType.Register:
+
+    if self._dest.stype != SymbolType.Register:
       raise InternalError('gemm: `dest` must be a register obj.')
-    
-    self._trans_a = trans_a
-    self._trans_b = trans_b
-    self._op1 = op1
-    self._op2 = op2
-    self._dest = dest
-    self._num_threads = num_threads
+
     self._is_ready = True
   
   def gen_code(self, writer):
@@ -47,14 +41,18 @@ class GenericGemm(AbstractInstruction):
         writer(f'{value_var} = {self._op1.name}[{op1_addr}];')
 
         writer.Emptyline()
-        writer.Pragma('unroll')
-        with writer.For(f'int n = 0; n < {self._dest.obj.size}; ++n'):
-          if self._trans_b:
-            op2_addr = f'n + {op2_data_view.lead_dim} * k'
-          else:
-            op2_addr = f'k + {op2_data_view.lead_dim} * n'
+        self._get_inner_loop(writer, value_var)
 
-          writer(f'{self._dest.name}[n] += value * {self._op2.name}[{op2_addr}];')
-  
+  def _get_inner_loop(self, writer, op1_value):
+    op2_data_view = self._op2.data_view
+    writer.Pragma('unroll')
+    with writer.For(f'int n = 0; n < {self._dest.obj.size}; ++n'):
+      if self._trans_b:
+        op2_addr = f'n + {op2_data_view.lead_dim} * k'
+      else:
+        op2_addr = f'k + {op2_data_view.lead_dim} * n'
+
+      writer(f'{self._dest.name}[n] += {op1_value} * {self._op2.name}[{op2_addr}];')
+
   def __str__(self) -> str:
     return f'{self._dest.name} = gemm({self._op1.name}, {self._op2.name})'

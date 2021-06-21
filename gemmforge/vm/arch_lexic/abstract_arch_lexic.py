@@ -24,7 +24,7 @@ class AbstractArchLexic(ABC):
     pass
   
   @abstractmethod
-  def declare_shared_memory_inline(self, name, precision, size):
+  def declare_shared_memory_inline(self, name, precision, size, alignment):
     pass
   
   @abstractmethod
