@@ -5,10 +5,10 @@ using namespace csagen::reference;
 namespace csagen {
   namespace reference {
 
-    void singleCsa(int M, int N, real Alpha, real *A, real Beta, real *B, int Ld) {
+    void singleCsa(int M, int N, real Alpha, real *A, int lda, real Beta, real *B, int ldb) {
           for (int n = 0; n < N; ++n) {
             for (int m = 0; m < M; ++m) {
-              B[m + n * Ld] = Alpha * A[m + n * Ld] + Beta * B[m + n * Ld];
+              B[m + n * ldb] = Alpha * A[m + n * lda] + Beta * B[m + n * ldb];
             }
           }
         }

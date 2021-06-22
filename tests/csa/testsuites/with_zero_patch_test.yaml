@@ -1,0 +1,18 @@
+test_suites:
+  -
+    test_base_name: "ZeroPatch"
+    matrix_a:
+      rows: 32
+      cols: 32
+      addressing: "strided"
+      bbox: [5, 5, 11, 13]
+
+    matrix_c:
+      rows: 56
+      cols: 56
+      addressing: "strided"
+      bbox: [5, 5, 11, 13]
+
+    alpha: 2.0
+    beta: 0.0
+    num_elements: 3

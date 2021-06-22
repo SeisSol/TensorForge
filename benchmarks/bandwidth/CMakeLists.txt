@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.5)
 project(simple-bandwidth-test)
 
+include(../../cmake/setupOptions.cmake)
+
 set(TARGET ${CMAKE_PROJECT_NAME})
 set(TARGET_SOURCE_FILES global.cpp)
 set(TARGET_INCLUDE_DIRS ../../submodules/Device
@@ -8,7 +10,6 @@ set(TARGET_INCLUDE_DIRS ../../submodules/Device
         common
         common/test_drivers)
 
-include(../../cmake/setupOptions.cmake)
 add_subdirectory(../../submodules/Device build)
 
 add_executable(${TARGET} ${TARGET_SOURCE_FILES})

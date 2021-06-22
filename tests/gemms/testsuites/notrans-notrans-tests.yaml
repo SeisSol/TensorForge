@@ -1,32 +1,33 @@
 test_suites:
    -
-    # m = 34, n = 12, k = 10
+    # m = 33, n = 11, k = 9
     test_base_name: "LeadingDims_NT_NT"
     matrix_a:
       rows: 56
       cols: 56
       addressing: "strided"
       bbox: "bbox_params_a"
-      trans:  no
+
 
     matrix_b:
       rows: 56
       cols: 56
       addressing: "strided"
       bbox: "bbox_params_b"
-      trans:  no
+
 
     matrix_c:
       rows: 56
       cols: 56
       addressing: "strided"
       bbox: "bbox_params_c"
-      trans:  no
 
     bbox_params_a: [[0, 0, 33, 9], [22, 46, 55, 55], [0, 46, 33, 55], [22, 0, 55, 9], [11, 23, 44, 32]]
     bbox_params_b: [[0, 0, 9, 11], [46, 44, 55, 55], [0, 44, 9, 55], [46, 0, 55, 11], [23, 22, 32, 33]]
     bbox_params_c: [[0, 0, 33, 11], [0, 44, 33, 55], [22, 0, 55, 11], [22, 44, 55, 55], [11, 22, 44, 33]]
 
+    trans_a: no
+    trans_b: no
     alpha: 1.1
     beta: 1.1
     num_elements: 10

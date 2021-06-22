@@ -4,7 +4,7 @@ from .matrix import DenseMatrix
 class YatetoInterface:
   def __init__(self):
     pass
-
+  
   @classmethod
   def deduce_bbox(cls, yateto_ranges, mem_layout, transpose):
     """Converts yateto memory layout (bounding boxes) and ranges to GemmForge bounding boxes i.e.,
@@ -23,25 +23,24 @@ class YatetoInterface:
       last, first = yateto_ranges
     else:
       first, last = yateto_ranges
-
+    
     return [first.start - mem_layout[0].start,
             last.start - mem_layout[1].start,
-            first.stop - mem_layout[0].start - 1,
-            last.stop - mem_layout[1].start - 1]
-
+            first.stop - mem_layout[0].start,
+            last.stop - mem_layout[1].start]
+  
   @classmethod
   def produce_dense_matrix(cls,
                            yateto_ranges,
                            yateto_memory_layout_bbox,
                            addressing,
                            transpose):
-
+    
     gemmforge_bbox = cls.deduce_bbox(yateto_ranges=yateto_ranges,
                                      mem_layout=yateto_memory_layout_bbox,
                                      transpose=transpose)
-
+    
     return DenseMatrix(num_rows=yateto_memory_layout_bbox[0].stop,
                        num_cols=yateto_memory_layout_bbox[1].stop,
                        addressing=addressing,
-                       bbox=gemmforge_bbox,
-                       transpose=transpose)
+                       bbox=gemmforge_bbox)

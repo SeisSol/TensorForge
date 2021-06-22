@@ -1,11 +1,12 @@
 from abc import ABC, abstractmethod
 from .vm import VM
 from .exceptions import GenerationError, InternalError
+from .basic_types import DataFlowDirection
+from .basic_types import GeneralLexicon
+from .common import get_extra_offset_name
 
 
 class AbstractGenerator(ABC):
-  NUM_ELEMENTS_STR = "NumElements"
-  STREAM_PTR_STR = "streamPtr"
   ENCODING_LENGTH = 7
 
   def __init__(self, vm: VM):
@@ -15,11 +16,10 @@ class AbstractGenerator(ABC):
     self._precision = self._vm.fp_as_str()
     self._is_set = False
 
-    self.base_name = None
-    self.num_mult_per_block = None
-    self.num_active_threads = None
-    self.num_compute_threads = None
-    self.max_num_regs_per_thread = None
+    self._base_name = None
+    self._num_ops_per_block = None
+    self._num_active_threads = None
+    self._num_compute_threads = None
     self._matrices = []
 
     self._kernel = None
@@ -32,6 +32,10 @@ class AbstractGenerator(ABC):
 
     @abstractmethod
     def _check(self):
+      pass
+
+    @abstractmethod
+    def _deduce_num_threads(self):
       pass
 
     @abstractmethod
@@ -59,8 +63,8 @@ class AbstractGenerator(ABC):
       raise GenerationError(f'call to generate before set. Please, set params first')
 
   def get_base_name(self):
-    if self.base_name is not None:
-      return self.base_name
+    if self._base_name is not None:
+      return self._base_name
     else:
       raise InternalError("base name hasn't been set yet")
 
@@ -84,7 +88,7 @@ class AbstractGenerator(ABC):
   def _get_func_params(self):
     params = [self._build_param(matrix) for matrix in self._matrices]
     params = ", ".join(params)
-    return "{}, unsigned {}".format(params, AbstractGenerator.NUM_ELEMENTS_STR)
+    return f'{params}, unsigned {GeneralLexicon.NUM_ELEMENTS}'
 
   @abstractmethod
   def _get_launcher_params(self, with_defaults):
@@ -92,30 +96,30 @@ class AbstractGenerator(ABC):
     params = ", ".join(params)
     stream_ptr_default = ' = nullptr' if with_defaults else ''
     return "{}, unsigned {}, void* {}{}".format(params,
-                                                AbstractGenerator.NUM_ELEMENTS_STR,
-                                                AbstractGenerator.STREAM_PTR_STR,
+                                                GeneralLexicon.NUM_ELEMENTS,
+                                                GeneralLexicon.STREAM_PTR_STR,
                                                 stream_ptr_default)
 
   @abstractmethod
   def _get_func_args(self):
     names = [f'{matrix.name}, {self._generate_extra_offset_symbol(matrix)}' for matrix in self._matrices]
     names = ", ".join(names)
-    return "{}, {}".format(names, AbstractGenerator.NUM_ELEMENTS_STR)
+    return f'{names}, {GeneralLexicon.NUM_ELEMENTS}'
 
   @abstractmethod
   def _get_block_dim_spec(self):
-    if not (self.num_active_threads and self.num_mult_per_block):
+    if not (self._num_active_threads and self._num_ops_per_block):
       raise InternalError("kernel analysis hasn't been done yet")
 
   @abstractmethod
   def _get_grid_dim_spec(self):
-    if not self.num_mult_per_block:
+    if not self._num_ops_per_block:
       raise InternalError("kernel analysis hasn't been done yet")
 
   def _build_param(self, matrix):
     sub_offset = f'int {self._generate_extra_offset_symbol(matrix)}'
     precision = self._vm.fp_as_str()
-    if matrix.is_mutable():
+    if matrix.direction == DataFlowDirection.SINK:
       return f'{precision} {matrix.ptr_type} {matrix.name}, {sub_offset}'
     else:
       if matrix.addressing == "none":
@@ -124,4 +128,5 @@ class AbstractGenerator(ABC):
         return f'const {precision} {matrix.ptr_type} {matrix.name}, {sub_offset}'
 
   def _generate_extra_offset_symbol(self, matrix):
-    return f'ExtraOffset{matrix.name}'
+    # TODO: remove this
+    return get_extra_offset_name(matrix.name)

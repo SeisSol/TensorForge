@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.5)
 project(gemm-tests)
 
+include(../../cmake/setupOptions.cmake)
+
 set(TARGET ${CMAKE_PROJECT_NAME})
 set(TARGET_SOURCE_FILES main.cpp
         common/aux.cpp
@@ -16,7 +18,6 @@ set(TARGET_INCLUDE_DIRS ${CMAKE_SOURCE_DIR}
 set(REFERENCE_IMPL "GEMMFORGE" CACHE STRING "size of the floating point data type")
 set_property(CACHE REFERENCE_IMPL PROPERTY STRINGS "GEMMFORGE" "OPENBLAS")
 
-include(../../cmake/setupOptions.cmake)
 add_subdirectory(../../submodules/Device build)
 
 add_executable(${TARGET} ${TARGET_SOURCE_FILES})

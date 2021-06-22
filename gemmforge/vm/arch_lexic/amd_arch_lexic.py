@@ -15,3 +15,7 @@ class AmdArchLexic(NvidiaArchLexic):
 
   def get_launch_code(self, func_name, grid, block, stream, func_params):
     return f"hipLaunchKernelGGL(kernel_{func_name}, {grid}, {block}, 0, {stream}, {func_params})"
+
+  def sync_vec_unit(self):
+    # RoCM (AMD) currently doesn't support __syncwarp
+    return "__syncthreads()"

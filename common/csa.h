@@ -7,24 +7,24 @@
 namespace csagen {
   namespace reference {
     void singleCsa(int M, int N,
-                    real Alpha, real *A,
-                    real Beta, real *B, int Ld);
+                   real Alpha, real *A, int lda,
+                   real Beta, real *B, int ldb);
 
     real *findData(real *Data, unsigned Stride, unsigned BlockId);
 
     template<typename AT, typename BT>
     void csa( int M, int N,
-              real Alpha, AT A,
-              real Beta, BT B,
-              int Ld,
-              unsigned Offset,
+              real Alpha, AT A, int lda,
+              real Beta, BT B, int ldb,
+              unsigned OffsetA,
+              unsigned OffsetB,
               unsigned NumElements) {
 
       for (unsigned Index = 0; Index < NumElements; ++Index) {
-        real *MatrixA = findData(A, Offset, Index);
-        real *MatrixB = findData(B, Offset, Index);
+        real *MatrixA = findData(A, OffsetA, Index);
+        real *MatrixB = findData(B, OffsetB, Index);
 
-        singleCsa(M, N, Alpha, MatrixA, Beta, MatrixB, Ld);
+        singleCsa(M, N, Alpha, MatrixA, lda, Beta, MatrixB, ldb);
 
 
       }

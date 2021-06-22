@@ -1,6 +1,6 @@
 class GenerationError(Exception):
-    pass
+  pass
 
 
 class InternalError(Exception):
-    pass
+  pass

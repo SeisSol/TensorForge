@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.5)
 project(double-gemm)
 
+include(../../cmake/setupOptions.cmake)
+
 set(TARGET ${CMAKE_PROJECT_NAME})
 set(TARGET_SOURCE_FILES main.cpp
                         common/gemm.cpp
@@ -33,7 +35,6 @@ endif()
 
 set(GEN_COPY_FILES ${CMAKE_SOURCE_DIR}/params.yaml ${CMAKE_SOURCE_DIR}/config.yaml)
 
-include(../../cmake/setupOptions.cmake)
 add_subdirectory(../../submodules/Device build)
 
 add_executable(${TARGET} ${TARGET_SOURCE_FILES})

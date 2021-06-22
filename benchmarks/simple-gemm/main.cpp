@@ -32,9 +32,9 @@ int main(int Argc, char* Arcv[]) {
   std::vector<int> BboxB = MatrixBSpec["bbox"].as<std::vector<int>>();
   std::vector<int> BboxC = MatrixCSpec["bbox"].as<std::vector<int>>();
 
-  int M = BboxA[2] - BboxA[0] + 1;
-  int N = BboxB[3] - BboxB[1] + 1;
-  int K = BboxA[3] - BboxA[1] + 1;
+  int M = BboxA[2] - BboxA[0];
+  int N = BboxB[3] - BboxB[1];
+  int K = BboxA[3] - BboxA[1];
 
   real Alpha = Params["alpha"].as<real>();
   real Beta = Params["beta"].as<real>();
@@ -69,8 +69,8 @@ int main(int Argc, char* Arcv[]) {
   unsigned NextB = MatrixBSpec["addressing"].as<std::string>() == std::string("strided") ? SizeB : 0;
   unsigned NextC = SizeC;
 
-  LayoutType TransA = MatrixASpec["trans"].as<bool>() ? LayoutType::Trans : LayoutType::NoTrans;
-  LayoutType TransB = MatrixBSpec["trans"].as<bool>() ? LayoutType::Trans : LayoutType::NoTrans;
+  LayoutType TransA = Params["trans_a"].as<bool>() ? LayoutType::Trans : LayoutType::NoTrans;
+  LayoutType TransB = Params["trans_b"].as<bool>() ? LayoutType::Trans : LayoutType::NoTrans;
 
   int Lda = MatrixASpec["num_rows"].as<int>();
   int Ldb = MatrixBSpec["num_rows"].as<int>();

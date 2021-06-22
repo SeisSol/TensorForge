@@ -6,22 +6,21 @@ test_suites:
       cols: 56
       addressing: "strided"
       bbox: [0, 0, 33, 31]
-      trans:  yes
 
     matrix_b:
       rows: 56
       cols: 56
       addressing: "strided"
       bbox: [0, 0, 33, 9]
-      trans:  no
 
     matrix_c:
       rows: 56
       cols: 56
       addressing: "strided"
       bbox: [0, 0, 31, 9]
-      trans:  no
 
+    trans_a:  yes
+    trans_b: no
     alpha: 1.1
     beta: 1.1
     num_elements: 1
