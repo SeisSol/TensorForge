@@ -26,8 +26,8 @@ class YatetoInterface:
     
     return [first.start - mem_layout[0].start,
             last.start - mem_layout[1].start,
-            first.stop - mem_layout[0].start - 1,
-            last.stop - mem_layout[1].start - 1]
+            first.stop - mem_layout[0].start,
+            last.stop - mem_layout[1].start]
   
   @classmethod
   def produce_dense_matrix(cls,
