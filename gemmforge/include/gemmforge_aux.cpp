@@ -6,6 +6,7 @@ namespace gemmforge {
     int PrevLine = 0;
 
     void checkErr(const std::string &File, int Line) {
+#ifndef NDEBUG
       hipError_t Error = hipGetLastError();
       if (Error != hipSuccess) {
         std::cout << std::endl << File 
@@ -21,6 +22,7 @@ namespace gemmforge {
       }
       PrevFile = File;
       PrevLine = Line;
+#endif
     }
 
   void synchDevice(void *stream) {
