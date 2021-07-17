@@ -6,6 +6,7 @@ namespace gemmforge {
     int PrevLine = 0;
 
     void checkErr(const std::string &File, int Line) {
+#ifndef NDEBUG
       cudaError_t Error = cudaGetLastError();
       if (Error != cudaSuccess) {
         std::cout << std::endl << File 
@@ -21,6 +22,7 @@ namespace gemmforge {
       }
       PrevFile = File;
       PrevLine = Line;
+#endif
     }
 
   void synchDevice(void *stream) {
