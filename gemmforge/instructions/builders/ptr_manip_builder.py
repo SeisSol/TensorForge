@@ -17,7 +17,7 @@ class GetElementPtrBuilder(AbstractBuilder):
     dest = Symbol(name=f'glb_{src.name}',
                   stype=SymbolType.Global,
                   obj=src.obj)
-    
+
     batched_matrix = src.obj
     dest.data_view = DataView(rows=batched_matrix.get_actual_num_rows(),
                               columns=batched_matrix.get_actual_num_cols(),

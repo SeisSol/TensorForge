@@ -20,7 +20,7 @@ class VM:
 
   def get_lexic(self):
     return self._lexic
-  
+
   def get_real_literal(self):
     return self._real_literal
 
@@ -52,7 +52,6 @@ class VM:
 def vm_factory(name: str,
                sub_name: str,
                fp_type: str):
-
   descr = hw_descr_factory(name, sub_name)
   lexic = lexic_factory(name)
   return VM(hw_descr=descr,
