@@ -56,3 +56,6 @@ class SyclArchLexic(AbstractArchLexic):
   
   def batch_indexer_init(self):
     return self.get_tid_counter(self.thread_idx_z, self.block_dim_z, self.block_idx_z)
+
+  def get_headers(self):
+    return ['CL/sycl.hpp']

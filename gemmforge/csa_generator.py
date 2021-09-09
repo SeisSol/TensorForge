@@ -161,7 +161,7 @@ class CsaGenerator(GemmLikeGenerator):
     real_literal = self._vm.get_real_literal()
     dest = self._symbol_table[matrix]
     with file.For(f'int cols = 0; cols < {matrix.num_cols}; ++cols'):
-      num_hops = int(matrix.num_cols / self._num_active_threads)
+      num_hops = int(dest.data_view.lead_dim / self._num_active_threads)
       if num_hops > 0:
         for counter in range(num_hops):
           offset = counter * self._num_active_threads
