@@ -20,7 +20,7 @@ class VM:
 
   def get_lexic(self):
     return self._lexic
-  
+
   def get_real_literal(self):
     return self._real_literal
 
@@ -38,6 +38,9 @@ class VM:
   def align(self, num):
     return ceil(num / self._hw_descr.vec_unit_length) * self._hw_descr.vec_unit_length
 
+  def get_headers(self):
+    return ['gemmforge_aux.h'] + self._lexic.get_headers()
+
   @classmethod
   def _is_valid_type(self, fp_type: str):
     allowed = ['double', 'float']
@@ -49,7 +52,6 @@ class VM:
 def vm_factory(name: str,
                sub_name: str,
                fp_type: str):
-
   descr = hw_descr_factory(name, sub_name)
   lexic = lexic_factory(name)
   return VM(hw_descr=descr,

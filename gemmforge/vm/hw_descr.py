@@ -21,7 +21,7 @@ class HwDecription:
 def hw_descr_factory(name, sub_name):
   KB = 1024
   if name == "nvidia":
-    
+
     # from: https://en.wikipedia.org/wiki/CUDA
     nvidia_warp = 32
     max_reg_per_block = 64 * KB
@@ -44,10 +44,10 @@ def hw_descr_factory(name, sub_name):
       max_block_per_sm = 16
       max_threads_per_sm = 1536
       max_local_mem_size_per_block = 100 * KB
-    
+
     else:
       raise ValueError(f'Given nvidia SM model is not supported. Provided: {sub_name}')
-    
+
     return HwDecription(nvidia_warp,
                         max_local_mem_size_per_block,
                         max_num_threads,
@@ -56,7 +56,7 @@ def hw_descr_factory(name, sub_name):
                         max_block_per_sm,
                         sub_name,
                         name)
-  
+
   elif name == "amd":
     if sub_name in ['gfx906']:
       # MI50
@@ -88,7 +88,7 @@ def hw_descr_factory(name, sub_name):
       max_local_mem_size_per_workgroup = 64 * KB
     else:
       raise ValueError(f'Given amd CU model is not supported. Provided: {sub_name}')
-    
+
     return HwDecription(amd_wavefront,
                         max_local_mem_size_per_workgroup,
                         max_num_threads,
@@ -97,7 +97,7 @@ def hw_descr_factory(name, sub_name):
                         max_workgroup_per_cu,
                         sub_name,
                         name)
-  
+
   elif name == "hipsycl" or name == "oneapi":
     if 'sm_' in sub_name:
       # from: https://en.wikipedia.org/wiki/CUDA
@@ -121,10 +121,10 @@ def hw_descr_factory(name, sub_name):
       elif sub_name == 'sm_86':
         max_block_per_sm = 16
         max_threads_per_sm = 1536
-      
+
       else:
         raise ValueError(f'Given nvidia SM model is not supported. Provided: {sub_name}')
-      
+
       return HwDecription(nvidia_warp,
                           max_local_mem_size_per_block,
                           max_num_threads,

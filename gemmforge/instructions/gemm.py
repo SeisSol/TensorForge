@@ -26,7 +26,7 @@ class GenericGemm(AbstractInstruction):
       raise InternalError('gemm: `dest` must be a register obj.')
 
     self._is_ready = True
-  
+
   def gen_code(self, writer):
     value_var = 'value'
     op1_data_view = self._op1.data_view
@@ -34,7 +34,7 @@ class GenericGemm(AbstractInstruction):
     thread_idx_x = self._vm.get_lexic().thread_idx_x
     with writer.If(self.gen_mask_threads(op1_data_view.rows)):
       writer(f'{self._vm.fp_as_str()} {value_var};')
-      
+
       writer.Emptyline()
       with writer.For(f'int k = 0; k < {op1_data_view.columns}; ++k'):
         op1_addr = f'{thread_idx_x} + k * {op1_data_view.lead_dim}'

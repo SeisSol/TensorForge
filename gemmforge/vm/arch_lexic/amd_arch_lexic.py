@@ -19,3 +19,6 @@ class AmdArchLexic(NvidiaArchLexic):
   def sync_vec_unit(self):
     # RoCM (AMD) currently doesn't support __syncwarp
     return "__syncthreads()"
+
+  def get_headers(self):
+    return []

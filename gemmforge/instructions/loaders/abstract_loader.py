@@ -17,10 +17,10 @@ class AbstractShrMemWrite(AbstractInstruction):
   def set_shr_mem_offset(self, offset: int):
     self._shr_mem_offset = offset
     self._is_ready = True
-    
+
   def __str__(self) -> str:
     pass
-    
+
 
 class AbstractShrMemLoader(AbstractShrMemWrite):
   def __init__(self, **kwargs):
