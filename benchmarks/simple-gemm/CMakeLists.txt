@@ -8,10 +8,12 @@ set(TARGET_SOURCE_FILES main.cpp
         common/gemm.cpp
         common/aux.cpp
         common/test_drivers/simple_comparator.cpp)
+
 set(TARGET_INCLUDE_DIRS gen_code
         common
         common/test_drivers
-        include)
+        include
+        ../../submodules/Device)
 
 set(GPU_TARGET gpu_part)
 set(GPU_TARGET_INCLUDE_DIRS ../../submodules/Device

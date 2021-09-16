@@ -1,3 +1,4 @@
+from gemmforge.basic_types import GeneralLexicon
 from .abstract_arch_lexic import AbstractArchLexic
 
 
@@ -19,13 +20,14 @@ class SyclArchLexic(AbstractArchLexic):
   def declare_shared_memory_inline(self, name, precision, size, alignment):
     return None
 
-  def kernel_definition(self, file, kernel_bounds, base_name, params, precision=None,
-                        total_shared_mem_size=None):
-    localmem = None
-
+  def kernel_definition(self, file, kernel_bounds, base_name, params, precision=None, total_shared_mem_size=None):
     if total_shared_mem_size is not None and precision is not None:
-      localmem = "cl::sycl::accessor<{}, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> Scratch ({}, cgh);".format(
-        precision, total_shared_mem_size)
+      localmem = f'cl::sycl::accessor<{precision}, 1,'
+      localmem += ' cl::sycl::access::mode::read_write,'
+      localmem += ' cl::sycl::access::target::local> '
+      localmem += f'{GeneralLexicon.TOTAL_SHR_MEM} ({total_shared_mem_size}, cgh);'
+    else:
+      localmem = None
 
     return file.SyclKernel(base_name, params, kernel_bounds, localmem)
 

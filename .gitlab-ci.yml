@@ -1,0 +1,195 @@
+stages:
+    - adjust 
+    - install
+    - test
+    - miscellaneous
+
+
+image:
+  name: ravilmobile/gemmforge-nvidia:latest
+  entrypoint: [""]
+
+
+before_script:
+  - pip3 install -e .
+  - pip3 install -r ./requirements.txt
+
+
+submodules:
+  stage: adjust
+  tags:
+    - atsccs68-docker-executor
+  image:
+    name: ravilmobile/gemmforge-nvidia:latest
+    entrypoint: [""]
+  script:
+    - cat ./.gitmodules
+    - git submodule update --init --recursive
+  artifacts:
+    paths:
+      - submodules
+
+
+examples:
+  stage: test 
+  tags:
+  -  atsccs68-docker-executor
+  parallel:
+    matrix:
+      - BACKEND: [nvidia, hipsycl]
+  script:
+    - for example in ./examples/*.py; do
+        python3 $example -m ${BACKEND} -s ${GPU_MODEL} ;
+      done ;
+    - python3 ./tests/interface/test_loaders_factory.py
+
+
+.common_test_steps_template_gcc8: &common_test_script_steps_gcc8
+    - export CTEST_OUTPUT_ON_FAILURE=1
+    - export CC=/usr/bin/gcc-8
+    - export CXX=/usr/bin/g++-8
+    - export root_dir=$PWD
+
+
+.common_test_steps_template_gcc9: &common_test_script_steps_gcc9
+    - export CTEST_OUTPUT_ON_FAILURE=1
+    - export CC=/usr/bin/gcc-9
+    - export CXX=/usr/bin/g++-9
+    - export root_dir=$PWD
+
+
+cuda_gemms:
+  stage: test
+  tags:
+  -  atsccs68-docker-executor
+  script:
+    - *common_test_script_steps_gcc8
+    - export curr_dir=./tests/gemms/build
+    - mkdir -p $curr_dir && cd $curr_dir
+    - for test in ../testsuites/*.yaml; do
+        cmake .. -DSM_ARCH=${GPU_MODEL} -DDEVICE_BACKEND=CUDA -DREAL_SIZE=4 -DTEST_SUITE=$test ;
+        make -j4 ;
+        ./gemm-tests ;
+        rm -rf ./* ;
+      done ;
+
+
+sycl_gemms:
+  stage: test
+  tags:
+  -  atsccs68-docker-executor
+  script:
+    - *common_test_script_steps_gcc9
+    - export curr_dir=./tests/gemms/build
+    - mkdir -p $curr_dir && cd $curr_dir
+    - for test in ../testsuites/*.yaml; do
+        cmake .. -DSM_ARCH=${GPU_MODEL} -DDEVICE_BACKEND=HIPSYCL -DREAL_SIZE=4 -DTEST_SUITE=$test ;
+        make -j4 ;
+        ./gemm-tests ;
+        rm -rf ./* ;
+      done ;
+
+
+cuda_csa:
+  stage: test
+  tags:
+  -  atsccs68-docker-executor
+  script:
+    - *common_test_script_steps_gcc8
+    - export curr_dir=./tests/csa/build
+    - mkdir -p $curr_dir && cd $curr_dir
+    - for test in ../testsuites/*.yaml; do
+        cmake .. -DSM_ARCH=${GPU_MODEL} -DDEVICE_BACKEND=CUDA -DREAL_SIZE=4 -DTEST_SUITE=$test ;
+        make -j4 ;
+        ./csa-tests ;
+        rm -rf ./* ;
+      done ;
+
+
+sycl_csa:
+  stage: test
+  tags:
+  -  atsccs68-docker-executor
+  script:
+    - *common_test_script_steps_gcc9
+    - export curr_dir=./tests/csa/build
+    - mkdir -p $curr_dir && cd $curr_dir
+    - for test in ../testsuites/*.yaml; do
+        cmake .. -DSM_ARCH=${GPU_MODEL} -DDEVICE_BACKEND=HIPSYCL -DREAL_SIZE=4 -DTEST_SUITE=$test ;
+        make -j4 ;
+        ./csa-tests ;
+        rm -rf ./* ;
+      done ;
+
+
+cuda_benchmarks:
+  stage: test
+  tags:
+  -  atsccs68-docker-executor
+  script:
+    - *common_test_script_steps_gcc8
+    - for bench in ./benchmarks/*; do
+        export curr_dir=$bench/build ;
+        mkdir -p $curr_dir && cd $curr_dir ;
+        cmake .. -DSM_ARCH=${GPU_MODEL} -DDEVICE_BACKEND=CUDA -DREAL_SIZE=4 ;
+        make -j4 ;
+        make test ARGS="-V" ;
+        cd $root_dir ;
+      done ;
+
+
+sycl_benchmarks:
+  stage: test
+  tags:
+  -  atsccs68-docker-executor
+  script:
+    - *common_test_script_steps_gcc9
+    - for bench in ./benchmarks/*; do
+        export curr_dir=$bench/build ;
+        mkdir -p $curr_dir && cd $curr_dir ;
+        cmake .. -DSM_ARCH=${GPU_MODEL} -DDEVICE_BACKEND=HIPSYCL -DREAL_SIZE=4 ;
+        make -j4 ;
+        make test ARGS="-V" ;
+        cd $root_dir ;
+      done ;
+
+
+pep8:
+  stage: miscellaneous
+  tags:
+  -  atsccs68-docker-executor
+  allow_failure: true
+  script:
+    - pep8 gemmforge
+
+
+pylint:
+  stage: miscellaneous
+  tags:
+  -  atsccs68-docker-executor
+  allow_failure: true
+  script:
+    - pylint gemmforge
+
+
+install:
+  stage: miscellaneous
+  tags:
+  -  atsccs68-docker-executor
+  parallel:
+    matrix:
+      - BACKEND: [nvidia, hipsycl]
+  before_script:
+  - pip3 install --user git+https://github.com/ravil-mobile/gemmforge.git@$CI_COMMIT_BRANCH
+  script:
+    - export isntall_path=$(python3 -c 'import gemmforge, os; print(os.path.dirname(gemmforge.__file__))')
+    - tree $isntall_path
+    - export root_dir=$PWD
+    - cd ./tests/cmake_integration
+    - mkdir -p ./build && cd ./build
+    - cmake ..
+    - make
+    - mkdir $root_dir/localspace && cd $root_dir/localspace
+    - for example in ../examples/*.py; do
+        python3 $example -m ${BACKEND} -s sm_60 ;
+      done

@@ -8,9 +8,9 @@ using namespace device;
 
 
 int main(int Argc, char *Argv[]) {
-
-    auto device = &DeviceInstance::getInstance();
-    auto api = device->api;
+    DeviceInstance &device = DeviceInstance::getInstance();
+    device.api->setDevice(0);
+    device.api->initialize();
 
     YAML::Node Config = YAML::LoadFile("../config.yaml");
     int NumRepeats = Config["num_repeats"].as<int>();
@@ -19,19 +19,19 @@ int main(int Argc, char *Argv[]) {
     constexpr long long FACTOR = 1024 * 1024 * 1024;
     size_t NumElements = (FACTOR * AllocatedMemGb) / sizeof(float);
 
-    auto To = (float *) api->allocGlobMem(NumElements * sizeof(float));;
-    auto From = (float *) api->allocGlobMem(NumElements * sizeof(float));;
+    auto To = (float *) device.api->allocGlobMem(NumElements * sizeof(float));;
+    auto From = (float *) device.api->allocGlobMem(NumElements * sizeof(float));;
 
     size_t blocks = (NumElements + 1024 - 1) / 1024;
     size_t threads = 1024;
-    api->synchDevice();
+    device.api->synchDevice();
 
     utils::StopWatch <std::chrono::duration<double, std::chrono::nanoseconds::period>> Timer;
     Timer.start();
     for (int Repeat = 0; Repeat < NumRepeats; ++Repeat) {
-        copyData(To, From, NumElements, blocks, threads, api->getDefaultStream());
+        copyData(To, From, NumElements, blocks, threads, device.api->getDefaultStream());
     }
-    api->synchDevice();
+    device.api->synchDevice();
     Timer.stop();
 
     auto AverageTime = Timer.getTime() / NumRepeats;
@@ -43,10 +43,10 @@ int main(int Argc, char *Argv[]) {
     std::cout << "Num. Elements: " << NumElements << std::endl;
     std::cout << "Achieved bandwidth: " << BandwidthGb << " GB/s" << std::endl;
 
-    api->freeMem(To);
-    api->freeMem(From);
+    device.api->freeMem(To);
+    device.api->freeMem(From);
 
-    device->finalize();
+    device.api->finalize();
 
     return 0;
 }

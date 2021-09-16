@@ -1,14 +1,10 @@
 from .abstract_builder import AbstractBuilder
 from gemmforge.symbol_table import SymbolType, Symbol
-from gemmforge.basic_types import RegMemObject, ShrMemObject
-from gemmforge.instructions import RegisterAlloc, ShrMemAlloc, StoreRegToGlb, SyncThreads
+from gemmforge.instructions import SyncThreads
 from gemmforge.instructions import GenericGemm
 from gemmforge.instructions.loaders import shm_mem_loader_factory
-from gemmforge.symbol_table import DataView
-from gemmforge.instructions import GetElementPtr
-from gemmforge.exceptions import InternalError
-from abc import abstractmethod
-from typing import Union
+from gemmforge.basic_types import GeneralLexicon
+
 
 
 class GemmBuilder(AbstractBuilder):
@@ -90,6 +86,6 @@ class GemmBuilder(AbstractBuilder):
     self._instructions.append(SyncThreads(self._vm, self._num_threads))
 
   def _name_shr_reg(self):
-    name = f'shr_region_{self._counter}'
+    name = f'{GeneralLexicon.SHR_MEM_REGION_PREFIX}{self._counter}'
     self._counter += 1
     return name

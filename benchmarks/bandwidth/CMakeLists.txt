@@ -5,10 +5,11 @@ include(../../cmake/setupOptions.cmake)
 
 set(TARGET ${CMAKE_PROJECT_NAME})
 set(TARGET_SOURCE_FILES global.cpp)
-set(TARGET_INCLUDE_DIRS ../../submodules/Device
-        include
+
+set(TARGET_INCLUDE_DIRS include
         common
-        common/test_drivers)
+        common/test_drivers
+        ../../submodules/Device)
 
 add_subdirectory(../../submodules/Device build)
 

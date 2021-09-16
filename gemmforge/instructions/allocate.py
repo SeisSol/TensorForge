@@ -1,8 +1,8 @@
 from .abstract_instruction import AbstractInstruction
 from gemmforge.vm import VM
-from gemmforge.symbol_table import SymbolType, Symbol, DataView, InverseSymbolTable
+from gemmforge.symbol_table import Symbol
+from gemmforge.basic_types import GeneralLexicon
 from gemmforge.exceptions import InternalError
-from gemmforge.basic_types import RegMemObject
 
 
 class RegisterAlloc(AbstractInstruction):
@@ -49,16 +49,18 @@ class ShrMemAlloc(AbstractInstruction):
 
   def gen_code(self, writer):
     shrmem_obj = self._dest.obj
-    common_shrmem = f'total_{shrmem_obj.name}'
+    common_shrmem = f'{GeneralLexicon.TOTAL_SHR_MEM}'
     common_shrmem_size = shrmem_obj.get_total_size()
 
     lexic = self._vm.get_lexic()
-    mem = lexic.declare_shared_memory_inline(name=common_shrmem,
-                                             precision=self._vm.fp_as_str(),
-                                             size=common_shrmem_size,
-                                             alignment=8)
+    shr_mem_decl = lexic.declare_shared_memory_inline(name=common_shrmem,
+                                                      precision=self._vm.fp_as_str(),
+                                                      size=common_shrmem_size,
+                                                      alignment=8)
 
-    writer(f'{mem};')
+    if shr_mem_decl:
+      writer(f'{shr_mem_decl};')
+
     address = f'{shrmem_obj.get_size_per_mult()} * {lexic.thread_idx_y}'
     writer(f'{self._vm.fp_as_str()} * {shrmem_obj.name} = &{common_shrmem}[{address}];')
 

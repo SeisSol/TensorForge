@@ -2,9 +2,7 @@ from .abstract_builder import AbstractBuilder
 from gemmforge.symbol_table import SymbolType, Symbol
 from gemmforge.basic_types import RegMemObject, ShrMemObject
 from gemmforge.instructions import RegisterAlloc, ShrMemAlloc
-from gemmforge.symbol_table import DataView
-from gemmforge.instructions import GetElementPtr
-from gemmforge.exceptions import InternalError
+from gemmforge.basic_types import GeneralLexicon
 from abc import abstractmethod
 
 
@@ -40,7 +38,7 @@ class ShrMemAllocBuilder(AbstractAllocBuilder):
     self._instructions.append(ShrMemAlloc(self._vm, dest, size))
 
   def _name_new_symbol(self):
-    name = f'shrmem{self._counter}'
+    name = f'{GeneralLexicon.LOCAL_SHR_MEM}{self._counter}'
     self._counter += 1
     return name
 
@@ -63,6 +61,6 @@ class RegistersAllocBuilder(AbstractAllocBuilder):
     self._instructions.append(RegisterAlloc(self._vm, dest, init_value))
 
   def _name_new_symbol(self):
-    name = f'reg{self._counter}'
+    name = f'{GeneralLexicon.REG_NAME}{self._counter}'
     self._counter += 1
     return name

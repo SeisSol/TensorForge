@@ -1,8 +1,3 @@
-[![Build Status](http://vmbungartz10.informatik.tu-muenchen.de/seissol/buildStatus/icon?job=gemmforge)](http://vmbungartz10.informatik.tu-muenchen.de/seissol/view/Forge/job/gemmforge/)
-[![Build Status](http://vmbungartz10.informatik.tu-muenchen.de/seissol/buildStatus/icon?job=gemmforge-install&subject=pip)](http://vmbungartz10.informatik.tu-muenchen.de/seissol/view/Forge/job/gemmforge-install/)
-[![Build Status](http://vmbungartz10.informatik.tu-muenchen.de/seissol/buildStatus/icon?job=gemmforge-linters&subject=Code+Style)](http://vmbungartz10.informatik.tu-muenchen.de/seissol/view/Forge/job/gemmforge-linters/)
-
-
 ## GPU-GEMM generator for the Discontinuous Galerkin method
 
 ## Installation

@@ -6,6 +6,7 @@
 #include "gemm.h"
 #include "gemmforge_aux.h"
 #include "yaml-cpp/yaml.h"
+#include <device.h>
 #include <iostream>
 #include <tuple>
 #include <vector>
@@ -13,6 +14,7 @@
 
 using namespace gemmforge;
 using namespace reference;
+using namespace device;
 
 int estimateNumElements(int SizeA, int SizeB, int SizeC, double AllowedSpaceInGB);
 
@@ -43,6 +45,10 @@ int main(int Argc, char* Arcv[]) {
   int NumElements = estimateNumElements(SizeA, SizeB, SizeC, Config["allocate_mem"].as<double>());
 
   long long FlopCounter = computeNumFlops(M, N, K, Alpha, Beta);
+
+  DeviceInstance &device = DeviceInstance::getInstance();
+  device.api->setDevice(0);
+  device.api->initialize();
 
   dense::TestDriver Driver(SizeA, SizeB, SizeC, NumElements);
   std::cout << "Allocated Device Mem. GB: " << Driver.getDeviceAllocatedMemSize() << std::endl;
@@ -123,6 +129,7 @@ int main(int Argc, char* Arcv[]) {
   std::cout << "GFLOPS: " << NumRepeats * FlopCounter / (Timer.getTime() / NumElements) << std::endl;
 
   Driver.TearDown();
+  device.api->finalize();
   return 0;
 }
 

@@ -2,6 +2,7 @@ from .abstract_builder import AbstractBuilder
 from gemmforge.symbol_table import SymbolType, Symbol
 from gemmforge.symbol_table import DataView
 from gemmforge.instructions import GetElementPtr
+from gemmforge.basic_types import GeneralLexicon
 from gemmforge.exceptions import InternalError
 
 
@@ -14,7 +15,7 @@ class GetElementPtrBuilder(AbstractBuilder):
     if src.stype != SymbolType.Batch:
       raise InternalError("src operand is not in a batch")
 
-    dest = Symbol(name=f'glb_{src.name}',
+    dest = Symbol(name=f'{GeneralLexicon.GLOBAL_MEM_PREFIX}{src.name}',
                   stype=SymbolType.Global,
                   obj=src.obj)
 

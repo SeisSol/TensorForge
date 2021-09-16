@@ -9,11 +9,13 @@ set(TARGET_SOURCE_FILES main.cpp
         common/gemm.cpp
         common/test_drivers/simple_comparator.cpp
         gen_code/test.cpp)
+
 set(TARGET_INCLUDE_DIRS ${CMAKE_SOURCE_DIR}
         gen_code
         common
         common/test_drivers
-        include)
+        include
+        ../../submodules/Device)
 
 set(REFERENCE_IMPL "GEMMFORGE" CACHE STRING "size of the floating point data type")
 set_property(CACHE REFERENCE_IMPL PROPERTY STRINGS "GEMMFORGE" "OPENBLAS")
@@ -67,6 +69,7 @@ endif()
 set(GEN_COPY_FILES ${CMAKE_BINARY_DIR}/${TEST_SUITE})
 
 include(../../cmake/setupGpuTarget.cmake)
+target_include_directories(${TARGET} PRIVATE ../../submodules/Device)
 target_link_libraries(${TARGET} PRIVATE ${GPU_TARGET} device -lpthread)
 include(../../cmake/generateCode.cmake)
 

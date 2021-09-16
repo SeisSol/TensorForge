@@ -1,7 +1,8 @@
 add_library(${GPU_TARGET} SHARED ${GPU_TARGET_SOURCE_FILES})
 
 if (${DEVICE_BACKEND} STREQUAL "HIPSYCL")
-    set(HIPSYCL_TARGETS 'cuda:${DEVICE_SUB_ARCH}')
+    set(HIPSYCL_TARGETS "cuda:${DEVICE_SUB_ARCH}")
+
     find_package(hipSYCL CONFIG REQUIRED)
     add_sycl_to_target(TARGET ${GPU_TARGET}  SOURCES ${DEVICE_SOURCE_FILES})
 else()
