@@ -44,110 +44,74 @@ examples:
     - python3 ./tests/interface/test_loaders_factory.py
 
 
-.common_test_steps_template_gcc8: &common_test_script_steps_gcc8
+
+.common_test_steps: &common_test_script
     - export CTEST_OUTPUT_ON_FAILURE=1
-    - export CC=/usr/bin/gcc-8
-    - export CXX=/usr/bin/g++-8
     - export root_dir=$PWD
+    - if [[ "${BACKEND}" == "HIPSYCL" ]]; then
+        export CC=/usr/bin/gcc-9 ;
+        export CXX=/usr/bin/g++-9 ;
+      else
+        export CC=/usr/bin/gcc-8 ;
+        export CXX=/usr/bin/g++-8 ;
+      fi ;
+    - if [[ "${BACKEND}" == "HIP" ]]; then
+        . /etc/profile.d/rocm.sh ;
+        export HIP_PLATFORM=nvidia ;
+      fi ;
 
 
-.common_test_steps_template_gcc9: &common_test_script_steps_gcc9
-    - export CTEST_OUTPUT_ON_FAILURE=1
-    - export CC=/usr/bin/gcc-9
-    - export CXX=/usr/bin/g++-9
-    - export root_dir=$PWD
-
-
-cuda_gemms:
+gemms:
   stage: test
   tags:
   -  atsccs68-docker-executor
+  parallel:
+    matrix:
+      - BACKEND: [CUDA, HIPSYCL]
   script:
-    - *common_test_script_steps_gcc8
+    - *common_test_script
     - export curr_dir=./tests/gemms/build
     - mkdir -p $curr_dir && cd $curr_dir
     - for test in ../testsuites/*.yaml; do
-        cmake .. -DSM_ARCH=${GPU_MODEL} -DDEVICE_BACKEND=CUDA -DREAL_SIZE=4 -DTEST_SUITE=$test ;
+        cmake .. -DSM_ARCH=${GPU_MODEL} -DDEVICE_BACKEND=${BACKEND} -DREAL_SIZE=4 -DTEST_SUITE=$test ;
         make -j4 ;
         ./gemm-tests ;
         rm -rf ./* ;
       done ;
 
 
-sycl_gemms:
+csa:
   stage: test
   tags:
   -  atsccs68-docker-executor
+  parallel:
+    matrix:
+      - BACKEND: [CUDA, HIPSYCL]
   script:
-    - *common_test_script_steps_gcc9
-    - export curr_dir=./tests/gemms/build
-    - mkdir -p $curr_dir && cd $curr_dir
-    - for test in ../testsuites/*.yaml; do
-        cmake .. -DSM_ARCH=${GPU_MODEL} -DDEVICE_BACKEND=HIPSYCL -DREAL_SIZE=4 -DTEST_SUITE=$test ;
-        make -j4 ;
-        ./gemm-tests ;
-        rm -rf ./* ;
-      done ;
-
-
-cuda_csa:
-  stage: test
-  tags:
-  -  atsccs68-docker-executor
-  script:
-    - *common_test_script_steps_gcc8
+    - *common_test_script
     - export curr_dir=./tests/csa/build
     - mkdir -p $curr_dir && cd $curr_dir
     - for test in ../testsuites/*.yaml; do
-        cmake .. -DSM_ARCH=${GPU_MODEL} -DDEVICE_BACKEND=CUDA -DREAL_SIZE=4 -DTEST_SUITE=$test ;
+        cmake .. -DSM_ARCH=${GPU_MODEL} -DDEVICE_BACKEND=${BACKEND} -DREAL_SIZE=4 -DTEST_SUITE=$test ;
         make -j4 ;
         ./csa-tests ;
         rm -rf ./* ;
       done ;
 
 
-sycl_csa:
+benchmarks:
   stage: test
   tags:
   -  atsccs68-docker-executor
+  parallel:
+    matrix:
+      - BACKEND: [CUDA, HIPSYCL]
   script:
-    - *common_test_script_steps_gcc9
-    - export curr_dir=./tests/csa/build
-    - mkdir -p $curr_dir && cd $curr_dir
-    - for test in ../testsuites/*.yaml; do
-        cmake .. -DSM_ARCH=${GPU_MODEL} -DDEVICE_BACKEND=HIPSYCL -DREAL_SIZE=4 -DTEST_SUITE=$test ;
-        make -j4 ;
-        ./csa-tests ;
-        rm -rf ./* ;
-      done ;
-
-
-cuda_benchmarks:
-  stage: test
-  tags:
-  -  atsccs68-docker-executor
-  script:
-    - *common_test_script_steps_gcc8
+    - *common_test_script
     - for bench in ./benchmarks/*; do
         export curr_dir=$bench/build ;
         mkdir -p $curr_dir && cd $curr_dir ;
-        cmake .. -DSM_ARCH=${GPU_MODEL} -DDEVICE_BACKEND=CUDA -DREAL_SIZE=4 ;
-        make -j4 ;
-        make test ARGS="-V" ;
-        cd $root_dir ;
-      done ;
-
-
-sycl_benchmarks:
-  stage: test
-  tags:
-  -  atsccs68-docker-executor
-  script:
-    - *common_test_script_steps_gcc9
-    - for bench in ./benchmarks/*; do
-        export curr_dir=$bench/build ;
-        mkdir -p $curr_dir && cd $curr_dir ;
-        cmake .. -DSM_ARCH=${GPU_MODEL} -DDEVICE_BACKEND=HIPSYCL -DREAL_SIZE=4 ;
+        cmake .. -DSM_ARCH=${GPU_MODEL} -DDEVICE_BACKEND=${BACKEND} -DREAL_SIZE=4 ;
         make -j4 ;
         make test ARGS="-V" ;
         cd $root_dir ;
