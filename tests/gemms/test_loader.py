@@ -13,16 +13,16 @@ class TestLoader:
     self._test_spec = test_spec
     self._param_iterator = None
     self._analyze()
-  
+
   def __iter__(self):
     return self
-  
+
   def __next__(self):
     test_params = next(self._param_iterator)
     spec = deepcopy(self._test_spec)
     for param in test_params:
       _set_value(spec, param, test_params[param])
-    
+
     return (spec["trans_a"],
             spec["trans_b"],
             self._produce_matrix(spec["matrix_a"]),
@@ -32,13 +32,13 @@ class TestLoader:
             spec["beta"],
             spec["num_elements"],
             self._gen_test_name(test_params))
-  
+
   def _produce_matrix(self, matrix_spec):
     return DenseMatrix(num_rows=matrix_spec["rows"],
                        num_cols=matrix_spec["cols"],
                        addressing=matrix_spec["addressing"],
                        bbox=matrix_spec["bbox"])
-  
+
   def is_param(self, param):
     if isinstance(param, str):
       if param.find('param') != -1:
@@ -47,18 +47,18 @@ class TestLoader:
         return False
     else:
       return False
-  
+
   def _analyze(self):
     flatten_spec = {}
     _build_flatten_table(flatten_spec, self._test_spec)
-    
+
     params = {}
     for item in flatten_spec:
       if (self.is_param(flatten_spec[item])):
         params[item] = self._test_spec[flatten_spec[item]]
-    
+
     self._param_iterator = (dict(zip(params, x)) for x in product(*params.values()))
-  
+
   def _gen_test_name(self, params):
     param_to_str = []
     for item in params:
@@ -70,7 +70,7 @@ class TestLoader:
         value_str = [str(item) for item in params[item]]
         value_str = "_".join(value_str)
       param_to_str.append("{}_{}".format(item_str, value_str))
-    
+
     return "{}_{}".format(self._test_spec['test_base_name'], "_".join(param_to_str))
 
 

@@ -1,4 +1,5 @@
 #include "kernel.h"
+#include <hip/hip_runtime.h>
 
 __global__ void kernel_copyData(float *To, float *From, size_t NumElements) {
     int Idx = threadIdx.x + blockDim.x * blockIdx.x;

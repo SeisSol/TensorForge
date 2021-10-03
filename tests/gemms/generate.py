@@ -51,9 +51,9 @@ hw_descr = vm.get_hw_descr()
 precision = vm.fp_as_str()
 with constructs.Cpp(StringIO()) as file:
   file.Include('gemmforge_aux.h')
-  if hw_descr.manufacturer == 'amd':
+  if hw_descr.backend == 'amd':
     file.Include('hip/hip_runtime.h')
-  elif hw_descr.manufacturer == 'hipsycl' or hw_descr.manufacturer == 'oneapi':
+  elif hw_descr.backend == 'hipsycl' or hw_descr.backend == 'oneapi':
     file.Include('CL/sycl.hpp')
   src.write(file.stream.getvalue())
 
@@ -71,7 +71,7 @@ with constructs.Cpp(StringIO()) as file:
 for suite in suites:
   for test in TestLoader(suite):
     trans_a, trans_b, mat_a, mat_b, mat_c, alpha, beta, num_elements, test_name = test
-    
+
     try:
       generator = GemmGenerator(vm)
       generator.set(trans_a, trans_b, mat_a, mat_b, mat_c, alpha, beta)
@@ -79,50 +79,50 @@ for suite in suites:
       src.write(generator.get_kernel())
       src.write(generator.get_launcher())
       headers.write(generator.get_launcher_header())
-      
+
       with constructs.Cpp(StringIO()) as file:
         with file.GoogleTestSuit('DenseGemmTest', test_name):
           file(f'int sizeA = {mat_a.num_rows} * {mat_a.num_cols};')
           file(f'int sizeB = {mat_b.num_rows} * {mat_b.num_cols};')
           file(f'int sizeC = {mat_c.num_rows} * {mat_c.num_cols};')
           file.Emptyline()
-          
+
           M = mat_a.get_actual_num_cols() if trans_a else mat_a.get_actual_num_rows()
           N = mat_b.get_actual_num_rows() if trans_b else mat_b.get_actual_num_cols()
           K = mat_a.get_actual_num_rows() if trans_a else mat_a.get_actual_num_cols()
-          
+
           file(f'int M = {M};')
           file(f'int N = {N};')
           file(f'int K = {K};')
           file.Emptyline()
-          
+
           file(f'int lda = {mat_a.num_rows};')
           file(f'int ldb = {mat_b.num_rows};')
           file(f'int ldc = {mat_c.num_rows};')
           file.Emptyline()
-          
+
           file(f'int nextA = {0 if mat_a.addressing == "none" else "sizeA"};')
           file(f'int nextB = {0 if mat_b.addressing == "none" else "sizeB"};')
           file(f'int nextC = {0 if mat_c.addressing == "none" else "sizeC"};')
           file.Emptyline()
-          
+
           file(f'int offsetA = {mat_a.num_rows} * {mat_a.bbox[1]} + {mat_a.bbox[0]};')
           file(f'int offsetB = {mat_b.num_rows} * {mat_b.bbox[1]} + {mat_b.bbox[0]};')
           file(f'int offsetC = {mat_c.num_rows} * {mat_c.bbox[1]} + {mat_c.bbox[0]};')
           file.Emptyline()
-          
+
           file(f'LayoutType transA = LayoutType::{"Trans" if trans_a else "NoTrans"};')
           file(f'LayoutType transB = LayoutType::{"Trans" if trans_b else "NoTrans"};')
           file.Emptyline()
-          
+
           file(f'{precision} alpha = {alpha};')
           file(f'{precision} beta = {beta};')
           file(f'int numElements = {num_elements};')
           file.Emptyline()
-          
+
           file('SetUp(sizeA, sizeB, sizeC, numElements);')
           file('Driver.prepareData();')
-          
+
           args = []
           args.append(
             f'{"DeviceShuffledA" if mat_a.addressing == "pointer_based" else "DeviceA"}, 0')
@@ -132,34 +132,34 @@ for suite in suites:
             f'{"DeviceShuffledC" if mat_c.addressing == "pointer_based" else "DeviceC"}, 0')
           args.append('numElements')
           args.append('Driver.getTestStream()')
-          
+
           args = ', '.join(args)
           file(f'{generator.get_base_name()}({args});')
-          
+
           args = ['transA', 'transB', 'M', 'N', 'K']
           args.extend(['alpha', '&HostA[offsetA]', 'lda'])
           args.extend(['&HostB[offsetB]', 'ldb'])
           args.extend(['beta', '&HostC[offsetC]', 'ldc'])
           args.extend(['nextA', 'nextB', 'nextC', 'numElements'])
-          
+
           args = ", ".join(args)
           file(f'gemm({args});')
-          
+
           args = ['M', 'ldc', 'N', 'offsetC', 'sizeC', 'numElements']
           file(f'Driver.packResults({", ".join(args)});')
           file(f'bool Result;')
           file(f'Result = Driver.isTestPassed<L1NormComparator>();')
           file('EXPECT_EQ(true, Result);')
-        
+
         file.Emptyline()
         file.Emptyline()
         tests_code.write(file.stream.getvalue())
-    
+
     except GenerationError as error:
       tests_code.close()
       src.close()
       headers.close()
-      
+
       print(f'ERROR: {error}')
       raise error
 
@@ -171,9 +171,9 @@ path = os.path.join(dir_name, 'test.cpp')
 with open(path, 'w') as file:
   file.write(tests_code.getvalue())
 
-if hw_descr.manufacturer == 'nvidia':
+if hw_descr.backend == 'nvidia':
   path = os.path.join(dir_name, 'kernels.cu')
-elif hw_descr.manufacturer == 'amd' or hw_descr.manufacturer == 'hipsycl' or hw_descr.manufacturer == 'oneapi':
+elif hw_descr.backend== 'amd' or hw_descr.backend == 'hipsycl' or hw_descr.backend == 'oneapi':
   path = os.path.join(dir_name, 'kernels.cpp')
 else:
   print('Manufacturer not supported, could not write kernel file')

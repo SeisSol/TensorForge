@@ -5,7 +5,7 @@ from .csa.nvidia import NvidiaCsaThreadPolicy
 
 
 class TheadPolicyFactory:
-  ALLOWED_MANUFACTURES = ['nvidia', 'amd', "hipsycl", "oneapi"]
+  ALLOWED_MANUFACTURES = ['nvidia', 'amd', 'intel']
 
   def __init__(self):
     pass

@@ -63,16 +63,16 @@ try:
 
     path = None
     hw_descr = vm.get_hw_descr()
-    if hw_descr.manufacturer == 'nvidia':
+    if hw_descr.backend == 'nvidia':
         path = os.path.join(dir_name, 'kernels.cu')
-    elif hw_descr.manufacturer == 'amd' or hw_descr.manufacturer == 'hipsycl' or hw_descr.manufacturer == 'oneapi':
+    elif hw_descr.backend == 'amd' or hw_descr.backend == 'hipsycl' or hw_descr.backend == 'oneapi':
         path = os.path.join(dir_name, 'kernels.cpp')
         
     with open(path, 'w') as file:
         file.write('#include \"gemmforge_aux.h\"\n')
-        if hw_descr.manufacturer == 'amd':
+        if hw_descr.backend == 'amd':
             file.write('#include \"hip/hip_runtime.h\"\n')
-        elif  hw_descr.manufacturer == 'hipsycl' or hw_descr.manufacturer == 'oneapi':
+        elif  hw_descr.backend == 'hipsycl' or hw_descr.backend == 'oneapi':
             file.write('#include <CL/sycl.hpp>\n')
         file.write(krnl)
         file.write(lnch)

@@ -51,9 +51,9 @@ hw_descr = vm.get_hw_descr()
 precision = vm.fp_as_str()
 with constructs.Cpp(StringIO()) as file:
   file.Include("gemmforge_aux.h")
-  if hw_descr.manufacturer == "amd":
+  if hw_descr.backend == "amd":
     file.Include("hip/hip_runtime.h")
-  elif hw_descr.manufacturer == 'hipsycl' or hw_descr.manufacturer == 'oneapi':
+  elif hw_descr.backend == 'hipsycl' or hw_descr.backend == 'oneapi':
     file.Include("CL/sycl.hpp")
   src.write(file.stream.getvalue())
 
@@ -72,7 +72,7 @@ with constructs.Cpp(StringIO()) as file:
 for suite in suites:
   for test in TestLoader(suite):
     mat_a, mat_c, alpha, beta, num_elements, test_name = test
-    
+
     try:
       generator = CsaGenerator(vm)
       generator.set(mat_a, mat_c, alpha, beta)
@@ -82,40 +82,40 @@ for suite in suites:
       src.write(generator.get_launcher())
       print(generator.get_launcher())  # TODO: delete after debugging
       headers.write(generator.get_launcher_header())
-      
+
       with constructs.Cpp(StringIO()) as file:
         with file.GoogleTestSuit('DenseCsaTest', test_name):
           # A and B must be both MxN matrices (or NxM if transposed)
           M = mat_a.get_actual_num_rows()
           N = mat_a.get_actual_num_cols()
-          
+
           file(f'int M = {M};')
           file(f'int N = {N};')
           file.Emptyline()
-          
+
           file(f'int sizeA = {mat_a.num_rows} * {mat_a.num_cols};')
           file(f'int sizeC = {mat_c.num_rows} * {mat_c.num_cols};')
           # count rows must be equal at A and B (matrices perform component-wise add!)
           file(f'int lda = {mat_a.num_rows};')
           file(f'int ldc = {mat_c.num_rows};')
           file.Emptyline()
-          
+
           file(f'int offsetA = {mat_a.num_rows} * {mat_a.bbox[1]} + {mat_a.bbox[0]};')
           file(f'int offsetC = {mat_c.num_rows} * {mat_c.bbox[1]} + {mat_c.bbox[0]};')
           file.Emptyline()
-          
+
           file(f'{precision} alpha = {alpha};')
           file(f'{precision} beta = {beta};')
           file(f'int numElements = {num_elements};')
           file.Emptyline()
-          
+
           # NOTE: test driver expects three matrices but it is ok
           # for our use case to just not use the matrix C
           file(f'SetUp(sizeA, sizeA, sizeC, numElements);')
-          
+
           # this fills the matrices with random data (on host and device!)
           file('Driver.prepareData();')
-          
+
           args = []
           args.append('alpha')
           args.append(
@@ -126,34 +126,34 @@ for suite in suites:
           )
           args.append('numElements')
           args.append('Driver.getTestStream()')
-          
+
           # calls the kernel
           file(f'{generator.get_base_name()}({", ".join(args)});')
           if beta == 0.0:
             file(f'std::fill(&HostC[0], &HostC[sizeC * numElements], 0.0);')
-          
+
           args = ['M', 'N', 'alpha', '&HostA[offsetA]', 'lda']
           args.extend(['beta', '&HostC[offsetC]', 'ldc', 'sizeA', 'sizeC', 'numElements'])
-          
+
           # calls the reference code
           file(f'csa({", ".join(args)});')
-          
+
           args = ['M', 'ldc', 'N', 'offsetC', 'sizeC', 'numElements']
           # this copies the results into packed arrays (without offset)
           file(f'Driver.packResults({", ".join(args)});')
           file(f'bool result;')
           file(f'result = Driver.isTestPassed<L1NormComparator>();')
           file(f'EXPECT_EQ(true, result);')
-        
+
         file.Emptyline()
         file.Emptyline()
         tests_code.write(file.stream.getvalue())
-    
+
     except GenerationError as error:
       tests_code.close()
       src.close()
       headers.close()
-      
+
       print(f'ERROR: {error}')
       raise error
 
@@ -165,12 +165,12 @@ path = os.path.join(dir_name, 'test.cpp')
 with open(path, 'w') as file:
   file.write(tests_code.getvalue())
 
-if hw_descr.manufacturer == 'nvidia':
+if hw_descr.backend == 'nvidia':
   path = os.path.join(dir_name, 'kernels.cu')
-elif hw_descr.manufacturer == 'amd' or hw_descr.manufacturer == 'hipsycl' or hw_descr.manufacturer == 'oneapi':
+elif hw_descr.backend == 'amd' or hw_descr.backend == 'hipsycl' or hw_descr.backend == 'oneapi':
   path = os.path.join(dir_name, 'kernels.cpp')
 else:
-  print('Manufacturer not supported, could not write kernel file')
+  print('Backend not supported, could not write kernel file')
 with open(path, 'w') as file:
   file.write(src.getvalue())
 

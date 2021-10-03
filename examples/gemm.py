@@ -36,7 +36,7 @@ try:
   vm = vm_factory(name=args.manufacturer,
                   sub_name=args.sub_arch,
                   fp_type="float")
-  
+
   gen = GemmGenerator(vm)
   gen.set(False, False, mat_a, mat_b, mat_c, alpha=1.1, beta=1.1)
   gen.generate()
