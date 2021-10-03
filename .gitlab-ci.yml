@@ -36,10 +36,15 @@ examples:
   -  atsccs68-docker-executor
   parallel:
     matrix:
-      - BACKEND: [nvidia, hipsycl, amd]
+      - BACKEND: nvidia
+        MODEL: sm_60
+      - BACKEND: oneapi
+        MODEL: dg1
+      - BACKEND: amd
+        MODEL: gfx908
   script:
     - for example in ./examples/*.py; do
-        python3 $example -m ${BACKEND} -s ${GPU_MODEL} ;
+        python3 $example -m ${BACKEND} -s ${MODEL} ;
       done ;
     - python3 ./tests/interface/test_loaders_factory.py
 
@@ -61,6 +66,7 @@ examples:
       fi ;
 
 
+# NOTE: GPU_MODEL is an env. variable defined in a gitlab-runner config
 gemms:
   stage: test
   tags:

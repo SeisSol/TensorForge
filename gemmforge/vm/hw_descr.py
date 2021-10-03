@@ -99,11 +99,14 @@ def get_known_arch():
     'vec_unit_length': amd_wavefront,
     'max_local_mem_size_per_block': 64 * KB,
     'max_num_threads': 1024,
-    'max_reg_per_block': 512 * KB,
+    'max_reg_per_block': 256 * KB,
     'max_threads_per_sm': 40 * amd_wavefront,
     'max_block_per_sm': 40,
     'name': 'amd',
   }
+
+  arch['gfx908'] = deepcopy(arch['gfx906'])
+  arch['gfx908']['max_reg_per_block'] = 512 * KB
 
 
   # Intel
