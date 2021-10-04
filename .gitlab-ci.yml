@@ -19,9 +19,6 @@ submodules:
   stage: adjust
   tags:
     - atsccs68-docker-executor
-  image:
-    name: ravilmobile/gemmforge-nvidia:latest
-    entrypoint: [""]
   script:
     - cat ./.gitmodules
     - git submodule update --init --recursive
