@@ -6,8 +6,17 @@ string(REGEX REPLACE "\n$" "" GEMMFORGE_PATH "${GEMMFORGE_PATH}")
 
 set(GemmForge_INCLUDE_DIRS "${GEMMFORGE_PATH}/include")
 
-set(DEVICE_BACKEND "CUDA" CACHE STRING "type of an interface")
-set_property(CACHE DEVICE_BACKEND PROPERTY STRINGS "CUDA" "HIP" "ONEAPI" "HIPSYCL")
+set(GemmForge_ALLOWED "CUDA" "HIP" "ONEAPI" "HIPSYCL")
+if(NOT DEFINED DEVICE_BACKEND)
+  set(DEVICE_BACKEND "CUDA" CACHE STRING "type of an interface")
+  set_property(CACHE DEVICE_BACKEND PROPERTY STRINGS ${GemmForge_ALLOWED})
+else()
+  list(FIND GemmForge_ALLOWED ${DEVICE_BACKEND} INDEX)
+  set(GemmForge_WRONG_INDEX -1)
+  if (${INDEX} EQUAL ${GemmForge_WRONG_INDEX})
+    message(FATAL_ERROR "DEVICE_BACKEND=${DEVICE_BACKEND} is wrong. Allowed: ${GemmForge_ALLOWED}")
+  endif()
+endif()
 
 
 if (${DEVICE_BACKEND} STREQUAL "CUDA")
