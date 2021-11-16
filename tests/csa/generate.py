@@ -7,20 +7,21 @@ import os
 import yaml
 import argparse
 
+
 parser = argparse.ArgumentParser()
 parser.add_argument('-s', '--specfile', action='store', help='path to a yaml file with a test spec')
 parser.add_argument('-r', '--realsize', type=int, action='store',
                     help='size of real: 4(single)/8(double)')
-parser.add_argument('-m',
-                    '--manufacturer',
-                    action='store',
-                    help='Name of the Manufacturer, currently nvidia and amd are supported',
-                    default='nvidia')
 parser.add_argument('-a',
-                    '--sub_arch',
+                    '--arch',
                     action='store',
-                    help='Sub_arch of the GPU, e.g sm_60 for Nvidia or gfx906 for AMD',
-                    default='sm_61')
+                    help='Arch of the GPU, e.g sm_60 for Nvidia or gfx906 for AMD',
+                    default='sm_60')
+parser.add_argument('-b',
+                    '--backend',
+                    action='store',
+                    help='Name of the Backend, currently cuda, hip, hipsycl and oneapi are supported',
+                    default='cuda')
 args = parser.parse_args()
 
 # check input parameters. Make sure there are valid ones
@@ -36,8 +37,8 @@ else:
   if not ((args.realsize == 4) or (args.realsize == 8)):
     raise ValueError('Floating point size must be either 4 or 8')
 
-vm = vm_factory(name=args.manufacturer,
-                sub_name=args.sub_arch,
+vm = vm_factory(backend=args.backend,
+                arch=args.arch,
                 fp_type='float' if args.realsize == 4 else 'double')
 
 stream = open(args.specfile, 'r')
@@ -50,11 +51,9 @@ tests_code = StringIO()
 hw_descr = vm.get_hw_descr()
 precision = vm.fp_as_str()
 with constructs.Cpp(StringIO()) as file:
-  file.Include("gemmforge_aux.h")
-  if hw_descr.backend == "amd":
-    file.Include("hip/hip_runtime.h")
-  elif hw_descr.backend == 'hipsycl' or hw_descr.backend == 'oneapi':
-    file.Include("CL/sycl.hpp")
+  for header_file in vm.get_headers():
+    file.Include(f'{header_file}')
+
   src.write(file.stream.getvalue())
 
 with constructs.Cpp(StringIO()) as file:
@@ -165,9 +164,9 @@ path = os.path.join(dir_name, 'test.cpp')
 with open(path, 'w') as file:
   file.write(tests_code.getvalue())
 
-if hw_descr.backend == 'nvidia':
+if hw_descr.backend == 'cuda':
   path = os.path.join(dir_name, 'kernels.cu')
-elif hw_descr.backend == 'amd' or hw_descr.backend == 'hipsycl' or hw_descr.backend == 'oneapi':
+elif hw_descr.backend == 'hip' or hw_descr.backend == 'hipsycl' or hw_descr.backend == 'oneapi':
   path = os.path.join(dir_name, 'kernels.cpp')
 else:
   print('Backend not supported, could not write kernel file')

@@ -1,13 +1,14 @@
 from abc import ABC, abstractmethod
 
 
-class AbstractArchLexic(ABC):
+class Lexic(ABC):
   """
-  You can use this abstract class to add a dictionary for any manufacturer for variables like e.g.
+  You can use this abstract class to add a dictionary for any backend for variables like e.g.
   threadIdx.x for CUDA that are used by the generators and loaders
   """
 
-  def __init__(self):
+  def __init__(self, underlying_hardware):
+    self._underlying_hardware = underlying_hardware
     self.thread_idx_x = None
     self.thread_idx_y = None
     self.thread_idx_z = None

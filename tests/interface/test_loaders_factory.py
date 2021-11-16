@@ -21,7 +21,7 @@ class TestLoaders(unittest.TestCase):
     pass
 
   def setUp(self):
-    self._vm = vm_factory(name='nvidia', sub_name='sm_60', fp_type='float')
+    self._vm = vm_factory(arch='sm_60', backend='cuda', fp_type='float')
     self._table = InverseSymbolTable()
     
     self._shr_mem_obj = ShrMemObject(name='shr_mem', size=1000, mults_per_block=1)

@@ -1,10 +1,10 @@
 from gemmforge.basic_types import GeneralLexicon
-from .abstract_arch_lexic import AbstractArchLexic
+from .lexic import Lexic
 
 
-class SyclArchLexic(AbstractArchLexic):
-  def __init__(self):
-    AbstractArchLexic.__init__(self)
+class SyclLexic(Lexic):
+  def __init__(self, underlying_hardware):
+    super().__init__(underlying_hardware)
     self.thread_idx_y = "item.get_local_id(1)"
     self.thread_idx_x = "item.get_local_id(0)"
     self.thread_idx_z = "item.get_local_id(2)"

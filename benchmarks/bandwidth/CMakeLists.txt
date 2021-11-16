@@ -28,12 +28,14 @@ target_compile_definitions(${TARGET} PUBLIC "CONCRETE_CPU_BACKEND=${REFERENCE_IM
 set(GPU_TARGET gpu_part)
 set(GPU_TARGET_INCLUDE_DIRS ../../submodules/Device)
 
-if(${DEVICE_BACKEND} STREQUAL "CUDA")
+if(${DEVICE_BACKEND} STREQUAL "cuda")
     set(GPU_TARGET_SOURCE_FILES cuda_kernel.cu)
-elseif(${DEVICE_BACKEND} STREQUAL "HIP")
+elseif(${DEVICE_BACKEND} STREQUAL "hip")
     set(GPU_TARGET_SOURCE_FILES hip_kernel.cpp)
-elseif((${DEVICE_BACKEND} STREQUAL "ONEAPI") OR (${DEVICE_BACKEND} STREQUAL "HIPSYCL"))
+elseif((${DEVICE_BACKEND} STREQUAL "oneapi") OR (${DEVICE_BACKEND} STREQUAL "hipsycl"))
     set(GPU_TARGET_SOURCE_FILES sycl_kernel.cpp)
+else()
+    message(FATAL_ERROR "unknown backend, given: ${DEVICE_BACKEND}")
 endif()
 
 #add Yaml

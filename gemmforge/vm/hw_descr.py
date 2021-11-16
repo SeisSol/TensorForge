@@ -2,7 +2,7 @@ from copy import deepcopy
 
 
 class HwDecription:
-  def __init__(self, param_table, sub_name, backend):
+  def __init__(self, param_table, arch, backend):
     self.vec_unit_length = param_table['vec_unit_length']
     self.max_local_mem_size_per_block = param_table['max_local_mem_size_per_block']
     self.max_num_threads = param_table['max_num_threads']
@@ -10,41 +10,39 @@ class HwDecription:
     self.max_threads_per_sm = param_table['max_threads_per_sm']
     self.max_block_per_sm = param_table['max_block_per_sm']
     self.manufacturer = param_table['name']
-    self.model = sub_name
+    self.model = arch
     self.backend = backend
+
 
 def report_error(usr_vendor, user_sub_arch):
   print(f'{user_sub_arch} is not listed in allowed set for {usr_vendor}')
 
 
-def hw_descr_factory(name, sub_name):
-  backend = name
+def hw_descr_factory(arch, backend):
   known_arch = get_known_arch()
 
-  if sub_name not in known_arch.keys():
-    raise RuntimeError(f'Unknown arch name: {sub_name}')
 
   nvidia_list = retrieve_arch(arch_table=known_arch, vendor='nvidia')
   amd_list = retrieve_arch(arch_table=known_arch, vendor='amd')
   intel_list = retrieve_arch(arch_table=known_arch, vendor='intel')
 
-  if backend == 'nvidia':
-    if sub_name in nvidia_list:
-      return HwDecription(known_arch[sub_name], sub_name, backend)
+  if backend == 'cuda':
+    if arch in nvidia_list:
+      return HwDecription(known_arch[arch], arch, backend)
     else:
-      report_error(name, sub_name)
-  elif backend == 'amd':
-    if sub_name in nvidia_list or sub_name in amd_list:
-      return HwDecription(known_arch[sub_name], sub_name, backend)
+      report_error(backend, arch)
+  elif backend == 'hip':
+    if arch in nvidia_list or arch in amd_list:
+      return HwDecription(known_arch[arch], arch, backend)
     else:
-      report_error(name, sub_name)
-  elif backend == 'oneapi' or name == 'hipsycl':
-    if sub_name in nvidia_list or sub_name in intel_list:
-      return HwDecription(known_arch[sub_name], sub_name, backend)
+      report_error(backend, arch)
+  elif backend == 'oneapi' or backend == 'hipsycl':
+    if arch in nvidia_list or arch in intel_list:
+      return HwDecription(known_arch[arch], arch, backend)
     else:
-      report_error(name, sub_name)
+      report_error(backend, arch)
 
-  raise ValueError(f'Unknown gpu architecture: {backend} {sub_name}')
+  raise ValueError(f'Unknown gpu architecture: {backend} {arch}')
 
 
 def get_known_arch():
@@ -120,6 +118,14 @@ def get_known_arch():
     'name': 'intel',
   }
 
+  for intel_integrated_gpu in ['bdw', 'skl', 'Gen8', 'Gen9', 'Gen11', 'Gen12LP']:
+    arch[intel_integrated_gpu] = {'vec_unit_length': 32,
+                                  'max_local_mem_size_per_block': 48 * KB,
+                                  'max_num_threads': 256,
+                                  'max_reg_per_block': 64 * KB,
+                                  'max_threads_per_sm': 256,
+                                  'max_block_per_sm': 32,
+                                  'name': 'intel'}
   return arch
 
 

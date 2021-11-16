@@ -1,4 +1,4 @@
-from .arch_lexic import AbstractArchLexic, lexic_factory
+from .lexic import Lexic, lexic_factory
 from .hw_descr import HwDecription, hw_descr_factory
 from math import ceil
 from typing import Type
@@ -7,10 +7,10 @@ from typing import Type
 class VM:
   def __init__(self,
                hw_descr: HwDecription,
-               basic_arch_lexic: Type[AbstractArchLexic],
+               lexic: Type[Lexic],
                fp_type: str):
     self._hw_descr = hw_descr
-    self._lexic = basic_arch_lexic
+    self._lexic = lexic
     self._fp_type = None
     self.set_fp_type(fp_type)
     self._real_literal = 'f' if self._fp_type == 'float' else ''
@@ -49,11 +49,11 @@ class VM:
     return True
 
 
-def vm_factory(name: str,
-               sub_name: str,
+def vm_factory(arch: str,
+               backend: str,
                fp_type: str):
-  descr = hw_descr_factory(name, sub_name)
-  lexic = lexic_factory(name)
+  descr = hw_descr_factory(arch, backend)
+  lexic = lexic_factory(backend=backend, underlying_hardware=descr.manufacturer)
   return VM(hw_descr=descr,
-            basic_arch_lexic=lexic,
+            lexic=lexic,
             fp_type=fp_type)

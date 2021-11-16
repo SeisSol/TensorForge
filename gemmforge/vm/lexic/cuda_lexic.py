@@ -1,10 +1,10 @@
-from .abstract_arch_lexic import AbstractArchLexic
+from .lexic import Lexic
 
 
-class NvidiaArchLexic(AbstractArchLexic):
+class CudaLexic(Lexic):
 
-  def __init__(self):
-    AbstractArchLexic.__init__(self)
+  def __init__(self, underlying_hardware):
+    super().__init__(underlying_hardware)
     self.thread_idx_y = "threadIdx.y"
     self.thread_idx_x = "threadIdx.x"
     self.thread_idx_z = "threadIdx.z"

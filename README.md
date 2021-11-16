@@ -37,7 +37,7 @@ mat_c = DenseMatrix(num_rows=56,
                     addressing="strided")
 
 try:
-    vm = vm_factory(name="nvidia", sub_name="sm_60", fp_type="float")
+    vm = vm_factory(arch="sm_60", backend="cuda", fp_type="float")
     gen = GemmGenerator(vm)
 
     gen.set(False, False, mat_a, mat_b, mat_c, alpha=1.1, beta=1.1)

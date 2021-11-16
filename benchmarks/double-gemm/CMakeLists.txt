@@ -24,16 +24,19 @@ set(GPU_TARGET_INCLUDE_DIRS ../../submodules/Device
                             common/test_drivers
                             gencode)
 
-if(${DEVICE_BACKEND} STREQUAL "CUDA")
+if(${DEVICE_BACKEND} STREQUAL "cuda")
     set(GPU_TARGET_SOURCE_FILES common/test_drivers/simple_driver.cpp gen_code/kernels.cu include/gemmforge_aux.cu)
     set(GEN_COPY_PRODUCTS ${CMAKE_SOURCE_DIR}/gen_code/kernels.cu ${CMAKE_SOURCE_DIR}/gen_code/kernels.h)
-elseif(${DEVICE_BACKEND} STREQUAL "HIP")
+elseif(${DEVICE_BACKEND} STREQUAL "hip")
     set(GPU_TARGET_SOURCE_FILES common/test_drivers/simple_driver.cpp gen_code/kernels.cpp include/gemmforge_aux.cpp)
     set(GEN_COPY_PRODUCTS ${CMAKE_SOURCE_DIR}/gen_code/kernels.cpp ${CMAKE_SOURCE_DIR}/gen_code/kernels.h)
-elseif((${DEVICE_BACKEND} STREQUAL "ONEAPI") OR (${DEVICE_BACKEND} STREQUAL "HIPSYCL"))
+elseif((${DEVICE_BACKEND} STREQUAL "oneapi") OR (${DEVICE_BACKEND} STREQUAL "hipsycl"))
     set(GPU_TARGET_SOURCE_FILES common/test_drivers/simple_driver.cpp gen_code/kernels.cpp include/gemmforge_aux_sycl.cpp)
     set(GEN_COPY_PRODUCTS ${CMAKE_SOURCE_DIR}/gen_code/kernels.cpp ${CMAKE_SOURCE_DIR}/gen_code/kernels.h)
+else()
+    message(FATAL_ERROR "unknown backend, given: ${DEVICE_BACKEND}")
 endif()
+
 
 set(GEN_COPY_FILES ${CMAKE_SOURCE_DIR}/params.yaml ${CMAKE_SOURCE_DIR}/config.yaml)
 

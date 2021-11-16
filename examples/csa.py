@@ -3,17 +3,17 @@ from gemmforge.vm import vm_factory
 import argparse
 
 
-parser = argparse.ArgumentParser(description='Specify Manufacturer and Sub_Arch of the GPU')
-parser.add_argument('-m',
-                    '--manufacturer',
+parser = argparse.ArgumentParser(description='Specify Backend and Arch of the GPU')
+parser.add_argument('-a',
+                    '--arch',
                     action='store',
-                    help='Name of the Manufacturer, currently nvidia and amd are supported',
-                    default='nvidia')
-parser.add_argument('-s',
-                    '--sub_arch',
-                    action='store',
-                    help='Sub_arch of the GPU, e.g sm_60 for Nvidia or gfx906 for AMD',
+                    help='Arch of the GPU, e.g sm_60 for Nvidia or gfx906 for AMD',
                     default='sm_60')
+parser.add_argument('-b',
+                    '--backend',
+                    action='store',
+                    help='Name of the Backend, currently cuda, hip, hipsycl and oneapi are supported',
+                    default='cuda')
 
 args = parser.parse_args()
 
@@ -28,8 +28,8 @@ mat_b = DenseMatrix(num_rows=9,
                     bbox=[0, 0, 9, 9])
 
 try:
-  vm = vm_factory(name=args.manufacturer,
-                  sub_name=args.sub_arch,
+  vm = vm_factory(backend=args.backend,
+                  arch=args.arch,
                   fp_type='float')
   
   gen = CsaGenerator(vm)

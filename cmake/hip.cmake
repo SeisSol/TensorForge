@@ -6,35 +6,36 @@ if(NOT DEFINED HIP_PATH)
   endif()
 endif()
 
-#set the CMAKE_MODULE_PATH for the helper cmake files from HIP
+
 set(CMAKE_MODULE_PATH "${HIP_PATH}/cmake" ${CMAKE_MODULE_PATH})
 
-set(HIP_COMPILER hcc)
 
-find_package(HIP QUIET)
-if(HIP_FOUND)
-  message(STATUS "Found HIP: " ${HIP_VERSION})
-else()
-  message(FATAL_ERROR "Could not find HIP. \
-  Ensure that HIP is either installed in /opt/rocm/hip \
-  or the variable HIP_PATH is set to point to the right location.")
+set(HIP_COMPILER hcc)
+find_package(HIP REQUIRED)
+
+
+set(IS_NVCC_PLATFORM OFF)
+if (DEFINED ENV{HIP_PLATFORM})
+    if ($ENV{HIP_PLATFORM} STREQUAL "nvidia")
+        set(IS_NVCC_PLATFORM ON)
+    endif()
 endif()
 
-# set up HIP specific flag in case offloading to AMD GPUs
-set(HCC_FLAGS)
 
-# set up CUDA specific flag in case offloading to Nvidia GPUs
-if (DEFINED ENV{HIP_PLATFORM})
-  if ($ENV{HIP_PLATFORM} STREQUAL "nvidia")
-    set(NVCC_FLAGS -arch=${DEVICE_SUB_ARCH};
-                   -dc;
-                   --expt-relaxed-constexpr;
-                   -DCUDA_UNDERHOOD)
-  endif()
+set(HCC_FLAGS)
+if (IS_NVCC_PLATFORM)
+   set(NVCC_FLAGS -arch=${DEVICE_ARCH};
+                  -dc;
+                  --expt-relaxed-constexpr;
+                  --compiler-options -fPIC;
+                  -DCUDA_UNDERHOOD)
+else()
+    set(HIPCC_FLAGS --amdgpu-target=${DEVICE_ARCH})
 endif()
 
 # set up common compiler flags
-set(HIPCC_FLAGS -DREAL_SIZE=${REAL_SIZE};
+set(HIPCC_FLAGS ${HIPCC_FLAGS} 
+                -DREAL_SIZE=${REAL_SIZE};
                 -std=c++11;
                 -O3)
 
@@ -50,6 +51,7 @@ ${HCC_PATH} \
 
 set_source_files_properties(${GPU_TARGET_SOURCE_FILES} PROPERTIES HIP_SOURCE_PROPERTY_FORMAT 1)
 
+hip_reset_flags()
 hip_add_library(${GPU_TARGET} SHARED ${GPU_TARGET_SOURCE_FILES}
                               HIPCC_OPTIONS ${HIPCC_FLAGS}
                               HCC_OPTIONS ${HCC_FLAGS}
@@ -57,13 +59,9 @@ hip_add_library(${GPU_TARGET} SHARED ${GPU_TARGET_SOURCE_FILES}
 
 set_property(TARGET ${GPU_TARGET} PROPERTY HIP_ARCHITECTURES OFF)
 
-if (DEFINED ENV{HIP_PLATFORM})
-    if ($ENV{HIP_PLATFORM} STREQUAL "nvidia")
-        set_target_properties(${GPU_TARGET} PROPERTIES LINKER_LANGUAGE HIP)
-        target_link_options(${GPU_TARGET} PRIVATE -arch=${DEVICE_SUB_ARCH})
-    else()
-        target_link_libraries(${GPU_TARGET} PUBLIC ${HIP_PATH}/lib/libamdhip64.so)
-    endif()
+if (IS_NVCC_PLATFORM)
+    set_target_properties(${GPU_TARGET} PROPERTIES LINKER_LANGUAGE HIP)
+    target_link_options(${GPU_TARGET} PRIVATE -arch=${DEVICE_ARCH})
 else()
     target_link_libraries(${GPU_TARGET} PUBLIC ${HIP_PATH}/lib/libamdhip64.so)
 endif()

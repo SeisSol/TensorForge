@@ -4,7 +4,7 @@ endif()
 
 add_custom_target(gpu_generator ALL
         python3 ${CMAKE_CURRENT_SOURCE_DIR}/generate.py
-        ${TEST_SPEC} --realsize=${REAL_SIZE} --manufacturer=${MANUFACTURER} --sub_arch=${SM_ARCH}
+        ${TEST_SPEC} --realsize=${REAL_SIZE} --backend=${DEVICE_BACKEND} --arch=${SM_ARCH}
         BYPRODUCTS
         ${GEN_COPY_PRODUCTS}
         COMMENT

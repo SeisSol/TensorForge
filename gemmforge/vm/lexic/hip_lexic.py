@@ -1,10 +1,10 @@
-from . import NvidiaArchLexic
-from .abstract_arch_lexic import AbstractArchLexic
+from . import CudaLexic
+from .lexic import Lexic
 
 
-class AmdArchLexic(NvidiaArchLexic):
-  def __init__(self):
-    AbstractArchLexic.__init__(self)
+class HipLexic(CudaLexic):
+  def __init__(self, underlying_hardware):
+    super().__init__(underlying_hardware)
     self.thread_idx_y = "hipThreadIdx_y"
     self.thread_idx_x = "hipThreadIdx_x"
     self.thread_idx_z = "hipThreadIdx_z"
@@ -21,4 +21,4 @@ class AmdArchLexic(NvidiaArchLexic):
     return "__syncthreads()"
 
   def get_headers(self):
-    return []
+    return ["hip/hip_runtime.h"]

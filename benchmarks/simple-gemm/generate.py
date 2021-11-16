@@ -8,16 +8,16 @@ import argparse
 parser = argparse.ArgumentParser()
 parser.add_argument('-r', '--realsize', type=int, action='store',
                     help="size of real: 4(single)/8(double)")
-parser.add_argument('-m', '--manufacturer',
-                    type=str,
+parser.add_argument('-a',
+                    '--arch',
                     action='store',
-                    help='Name of the Manufacturer, currently nvidia and amd are supported',
-                    default='nvidia')
-parser.add_argument('-s', '--sub_arch',
-                    type=str,
-                    action='store',
-                    help='Sub_arch of the GPU, e.g sm_60 for Nvidia or gfx906 for AMD',
+                    help='Arch of the GPU, e.g sm_60 for Nvidia or gfx906 for AMD',
                     default='sm_60')
+parser.add_argument('-b',
+                    '--backend',
+                    action='store',
+                    help='Name of the Backend, currently cuda, hip, hipsycl and oneapi are supported',
+                    default='cuda')
 args = parser.parse_args()
 
 def produce_matrix(spec):
@@ -35,8 +35,8 @@ mat_b = produce_matrix(config['MatB'])
 mat_c = produce_matrix(config['MatC'])
 
 try:
-    vm = vm_factory(name=args.manufacturer,
-                    sub_name=args.sub_arch,
+    vm = vm_factory(backend=args.backend,
+                    arch=args.arch,
                     fp_type='float' if args.realsize == 4 else 'double')
 
     gen = GemmGenerator(vm)
@@ -63,17 +63,15 @@ try:
 
     path = None
     hw_descr = vm.get_hw_descr()
-    if hw_descr.backend == 'nvidia':
+    if hw_descr.backend == 'cuda':
         path = os.path.join(dir_name, 'kernels.cu')
-    elif hw_descr.backend == 'amd' or hw_descr.backend == 'hipsycl' or hw_descr.backend == 'oneapi':
+    elif hw_descr.backend == 'hip' or hw_descr.backend == 'hipsycl' or hw_descr.backend == 'oneapi':
         path = os.path.join(dir_name, 'kernels.cpp')
-        
+
     with open(path, 'w') as file:
-        file.write('#include \"gemmforge_aux.h\"\n')
-        if hw_descr.backend == 'amd':
-            file.write('#include \"hip/hip_runtime.h\"\n')
-        elif  hw_descr.backend == 'hipsycl' or hw_descr.backend == 'oneapi':
-            file.write('#include <CL/sycl.hpp>\n')
+        for header_file in vm.get_headers():
+          file.write(f'#include \"{header_file}\"\n')
+
         file.write(krnl)
         file.write(lnch)
 

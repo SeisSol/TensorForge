@@ -15,9 +15,7 @@ class TestOccupancyNvidia(unittest.TestCase):
     pass
 
   def setUp(self):
-    self._vm = vm_factory(name="nvidia",
-                          sub_name="sm_70",
-                          fp_type="float")
+    self._vm = vm_factory(arch='sm_60', backend='cuda', fp_type="float")
 
     self.gen = GemmGenerator(self._vm)
 
