@@ -82,7 +82,7 @@ class GemmGenerator(GemmLikeGenerator):
                                          self._precision,
                                          self._shr_mem_obj.get_total_size()):
 
-        file(f'int {GeneralLexicon.BATCH_ID} = {team_index_str};')
+        file(f'unsigned {GeneralLexicon.BATCH_ID} = {team_index_str};')
         with file.If(f'{GeneralLexicon.BATCH_ID} < {GeneralLexicon.NUM_ELEMENTS}'):
 
           for instr in self._instructions:

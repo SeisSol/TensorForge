@@ -109,7 +109,7 @@ class CsaGenerator(GemmLikeGenerator):
                                          self._get_func_params()):
 
         team_index_str = self._lexic.batch_indexer_gemm()
-        file(f'int {GeneralLexicon.BATCH_ID} = {team_index_str};')
+        file(f'unsigned {GeneralLexicon.BATCH_ID} = {team_index_str};')
         with file.If(f'{GeneralLexicon.BATCH_ID} < {GeneralLexicon.NUM_ELEMENTS}'):
 
           # fill matrix b with zeros if necessary
