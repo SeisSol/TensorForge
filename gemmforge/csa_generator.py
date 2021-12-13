@@ -108,43 +108,42 @@ class CsaGenerator(GemmLikeGenerator):
       with self._lexic.kernel_definition(file, kernel_bounds, self._base_name,
                                          self._get_func_params()):
 
-        team_index_str = self._lexic.batch_indexer_gemm()
-        file(f'unsigned {GeneralLexicon.BATCH_ID} = {team_index_str};')
-        with file.If(f'{GeneralLexicon.BATCH_ID} < {GeneralLexicon.NUM_ELEMENTS}'):
+        with file.If(f'{self.get_element_size_guard(file)}'):
+          with file.If(f'{self.get_flag_guard(file)}'):
 
-          # fill matrix b with zeros if necessary
-          with file.Scope():
-            if self._beta == 0.0:
-              self._fill_with_zeros(self._mat_b, file)
-
-          # get pointer from batches to matrices
-          for instr in self._instructions:
-            if instr.is_ready():
-              instr.gen_code(file)
-            else:
-              raise GenerationError('gemm_generator: requested instr is not ready')
-
-          # generate the rest of the operion
-          op1 = self._symbol_table[self._mat_a]
-          op2 = self._symbol_table[self._mat_b]
-
-          with file.If(f'{self._lexic.thread_idx_x} < {op1.data_view.rows}'):
-            with file.For(f'int col = 0; col < {op1.data_view.columns}; ++col'):
-              addr_op1 = f'{self._lexic.thread_idx_x} + col * {op1.data_view.lead_dim}'
-              addr_op2 = f'{self._lexic.thread_idx_x} + col * {op2.data_view.lead_dim}'
-
-              expr = f'{op2.name}[{addr_op2}]'
-              expr += f' = scale * {op1.name}[{addr_op1}]'
+            # fill matrix b with zeros if necessary
+            with file.Scope():
               if self._beta == 0.0:
-                pass
-              elif self._beta == 1.0:
-                expr += f' + {op2.name}[{addr_op2}]'
-              elif self._beta == -1.0:
-                expr += f' - {op2.name}[{addr_op2}]'
-              else:
-                expr += f' + {self._beta} * {op2.name}[{addr_op2}]'
+                self._fill_with_zeros(self._mat_b, file)
 
-              file(f'{expr};')
+            # get pointer from batches to matrices
+            for instr in self._instructions:
+              if instr.is_ready():
+                instr.gen_code(file)
+              else:
+                raise GenerationError('gemm_generator: requested instr is not ready')
+
+            # generate the rest of the operion
+            op1 = self._symbol_table[self._mat_a]
+            op2 = self._symbol_table[self._mat_b]
+
+            with file.If(f'{self._lexic.thread_idx_x} < {op1.data_view.rows}'):
+              with file.For(f'int col = 0; col < {op1.data_view.columns}; ++col'):
+                addr_op1 = f'{self._lexic.thread_idx_x} + col * {op1.data_view.lead_dim}'
+                addr_op2 = f'{self._lexic.thread_idx_x} + col * {op2.data_view.lead_dim}'
+
+                expr = f'{op2.name}[{addr_op2}]'
+                expr += f' = scale * {op1.name}[{addr_op1}]'
+                if self._beta == 0.0:
+                  pass
+                elif self._beta == 1.0:
+                  expr += f' + {op2.name}[{addr_op2}]'
+                elif self._beta == -1.0:
+                  expr += f' - {op2.name}[{addr_op2}]'
+                else:
+                  expr += f' + {self._beta} * {op2.name}[{addr_op2}]'
+
+                file(f'{expr};')
 
       self._kernel = src.getvalue()
 

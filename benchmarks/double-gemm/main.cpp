@@ -132,8 +132,8 @@ int main(int Argc, char* Arcv[]) {
                              NumElements);
 
   std::cout << "INFO: computing on GPU started" << std::endl;
-  callFirstGemm(DeviceA, 0, DeviceB, 0, DeviceTmp, 0, NumElements, FirstDriver.getTestStream());
-  callSecondGemm(DeviceC, 0, DeviceTmp, 0, DeviceD, 0, NumElements, SecondDriver.getTestStream());
+  callFirstGemm(DeviceA, 0, DeviceB, 0, DeviceTmp, 0, NumElements, nullptr, FirstDriver.getTestStream());
+  callSecondGemm(DeviceC, 0, DeviceTmp, 0, DeviceD, 0, NumElements, nullptr, SecondDriver.getTestStream());
   synchDevice(FirstDriver.getTestStream());
   synchDevice(SecondDriver.getTestStream());
 
@@ -153,8 +153,8 @@ int main(int Argc, char* Arcv[]) {
   int NumRepeats = Config["num_repeats"].as<int>();
   Timer.start();
   for (int Repeat = 0; Repeat < NumRepeats; ++Repeat) {
-    callFirstGemm(DeviceA, 0, DeviceB, 0, DeviceTmp, 0, NumElements, FirstDriver.getTestStream());
-    callSecondGemm(DeviceC, 0, DeviceTmp, 0, DeviceD, 0, NumElements, SecondDriver.getTestStream());
+    callFirstGemm(DeviceA, 0, DeviceB, 0, DeviceTmp, 0, NumElements, nullptr, FirstDriver.getTestStream());
+    callSecondGemm(DeviceC, 0, DeviceTmp, 0, DeviceD, 0, NumElements, nullptr, SecondDriver.getTestStream());
   }
   synchDevice(FirstDriver.getTestStream());
   synchDevice(SecondDriver.getTestStream());

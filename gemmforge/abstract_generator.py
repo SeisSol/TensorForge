@@ -84,27 +84,40 @@ class AbstractGenerator(ABC):
       return self._header
     raise InternalError("launcher header hasn't been generated")
 
+  def get_element_size_guard(self, writer):
+    team_index_str = self._lexic.batch_indexer_gemm()
+    writer(f'unsigned {GeneralLexicon.BATCH_ID} = {team_index_str};')
+    return f'{GeneralLexicon.BATCH_ID} < {GeneralLexicon.NUM_ELEMENTS}'
+
+  def get_flag_guard(self, writer):
+    writer(f'bool isFlagsProvided = ({GeneralLexicon.FLAGS_ID} != nullptr);')
+    flag_value = f'static_cast<bool>({GeneralLexicon.FLAGS_ID}[{GeneralLexicon.BATCH_ID}])'
+    writer(f'bool allowed = isFlagsProvided ? {flag_value} : true;')
+    return 'allowed'
+
   @abstractmethod
   def _get_func_params(self):
     params = [self._build_param(matrix) for matrix in self._matrices]
     params = ", ".join(params)
-    return f'{params}, unsigned {GeneralLexicon.NUM_ELEMENTS}'
+    return f'{params}, unsigned {GeneralLexicon.NUM_ELEMENTS}, unsigned* {GeneralLexicon.FLAGS_ID}'
 
   @abstractmethod
   def _get_launcher_params(self, with_defaults):
     params = [self._build_param(matrix) for matrix in self._matrices]
     params = ", ".join(params)
-    stream_ptr_default = ' = nullptr' if with_defaults else ''
-    return "{}, unsigned {}, void* {}{}".format(params,
-                                                GeneralLexicon.NUM_ELEMENTS,
-                                                GeneralLexicon.STREAM_PTR_STR,
-                                                stream_ptr_default)
+    nullptr = ' = nullptr' if with_defaults else ''
+    return "{}, unsigned {}, unsigned* {}{}, void* {}{}".format(params,
+                                                                GeneralLexicon.NUM_ELEMENTS,
+                                                                GeneralLexicon.FLAGS_ID,
+                                                                nullptr,
+                                                                GeneralLexicon.STREAM_PTR_STR,
+                                                                nullptr)
 
   @abstractmethod
   def _get_func_args(self):
     names = [f'{matrix.name}, {self._generate_extra_offset_symbol(matrix)}' for matrix in self._matrices]
     names = ", ".join(names)
-    return f'{names}, {GeneralLexicon.NUM_ELEMENTS}'
+    return f'{names}, {GeneralLexicon.NUM_ELEMENTS}, {GeneralLexicon.FLAGS_ID}'
 
   @abstractmethod
   def _get_block_dim_spec(self):

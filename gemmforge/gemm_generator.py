@@ -81,15 +81,14 @@ class GemmGenerator(GemmLikeGenerator):
                                          self._get_func_params(),
                                          self._precision,
                                          self._shr_mem_obj.get_total_size()):
+        with file.If(f'{self.get_element_size_guard(file)}'):
+          with file.If(f'{self.get_flag_guard(file)}'):
 
-        file(f'unsigned {GeneralLexicon.BATCH_ID} = {team_index_str};')
-        with file.If(f'{GeneralLexicon.BATCH_ID} < {GeneralLexicon.NUM_ELEMENTS}'):
-
-          for instr in self._instructions:
-            if instr.is_ready():
-              instr.gen_code(file)
-            else:
-              raise GenerationError("gemm_generator: requested instr is not ready")
+            for instr in self._instructions:
+              if instr.is_ready():
+                instr.gen_code(file)
+              else:
+                raise GenerationError("gemm_generator: requested instr is not ready")
 
       self._kernel = src.getvalue()
 

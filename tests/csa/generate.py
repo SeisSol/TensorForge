@@ -106,6 +106,7 @@ for suite in suites:
           file(f'{precision} alpha = {alpha};')
           file(f'{precision} beta = {beta};')
           file(f'int numElements = {num_elements};')
+          file(f'unsigned *flags = nullptr;')
           file.Emptyline()
 
           # NOTE: test driver expects three matrices but it is ok
@@ -124,6 +125,7 @@ for suite in suites:
             f'{"DeviceShuffledC" if mat_c.addressing == "pointer_based" else "DeviceC"}, 0'
           )
           args.append('numElements')
+          args.append('flags')
           args.append('Driver.getTestStream()')
 
           # calls the kernel

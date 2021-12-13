@@ -52,7 +52,8 @@ class GenericGemm(AbstractInstruction):
       else:
         op2_addr = f'k + {op2_data_view.lead_dim} * n'
 
-      writer(f'{self._dest.name}[n] += {op1_value} * {self._op2.name}[{op2_addr}];')
+      res_access = '' if self._dest.obj.size == 1 else '[n]'
+      writer(f'{self._dest.name}{res_access} += {op1_value} * {self._op2.name}[{op2_addr}];')
 
   def __str__(self) -> str:
     return f'{self._dest.name} = gemm({self._op1.name}, {self._op2.name})'

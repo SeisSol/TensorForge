@@ -117,6 +117,7 @@ for suite in suites:
           file(f'{precision} alpha = {alpha};')
           file(f'{precision} beta = {beta};')
           file(f'int numElements = {num_elements};')
+          file(f'unsigned* flags = nullptr;')
           file.Emptyline()
 
           file('SetUp(sizeA, sizeB, sizeC, numElements);')
@@ -130,6 +131,7 @@ for suite in suites:
           args.append(
             f'{"DeviceShuffledC" if mat_c.addressing == "pointer_based" else "DeviceC"}, 0')
           args.append('numElements')
+          args.append('flags')
           args.append('Driver.getTestStream()')
 
           args = ', '.join(args)
@@ -139,7 +141,8 @@ for suite in suites:
           args.extend(['alpha', '&HostA[offsetA]', 'lda'])
           args.extend(['&HostB[offsetB]', 'ldb'])
           args.extend(['beta', '&HostC[offsetC]', 'ldc'])
-          args.extend(['nextA', 'nextB', 'nextC', 'numElements'])
+          args.extend(['nextA', 'nextB', 'nextC'])
+          args.extend(['numElements'])
 
           args = ", ".join(args)
           file(f'gemm({args});')

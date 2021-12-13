@@ -42,13 +42,14 @@ class StoreRegToGlb(AbstractInstruction):
 
         real_suffix = 'f' if precision == "float" else ''
 
+        src_access = '' if self._src.obj.size == 1 else '[n]'
         if not isinstance(self._alpha, float):
-          lhs = f'{self._alpha} * {self._src.name}[n]'
+          lhs = f'{self._alpha} * {self._src.name}{src_access}'
         else:
           if self._alpha == 1.0:
-            lhs = f'{self._src.name}[n]'
+            lhs = f'{self._src.name}{src_access}'
           else:
-            lhs = f'{self._alpha}{real_suffix} * {self._src.name}[n]'
+            lhs = f'{self._alpha}{real_suffix} * {self._src.name}{src_access}'
 
         if not isinstance(self._beta, float):
           lhs += f' + {self._beta} * {rhs}'
