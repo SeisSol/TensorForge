@@ -11,4 +11,4 @@
   #        -maxrregcount 64;
           -DREAL_SIZE=${REAL_SIZE})
 
-  cuda_add_library(${GPU_TARGET} STATIC ${GPU_TARGET_SOURCE_FILES})
+  cuda_add_library(${GPU_TARGET} SHARED ${GPU_TARGET_SOURCE_FILES})

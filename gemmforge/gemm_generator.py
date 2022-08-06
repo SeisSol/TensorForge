@@ -67,6 +67,26 @@ class GemmGenerator(GemmLikeGenerator):
     self._generate_header()
     self._generate_launcher()
 
+  def get_flops(self):
+    flops_per_element = 2 * self._mat_c.get_actual_num_cols() - 1
+    if self._trans_a:
+      m = self._mat_a.get_actual_num_cols()
+      k = self._mat_a.get_actual_num_rows()
+    else:
+      m = self._mat_a.get_actual_num_rows()
+      k = self._mat_a.get_actual_num_cols()
+
+    if self._trans_b:
+      n = self._mat_b.get_actual_num_rows()
+    else:
+      n = self._mat_b.get_actual_num_cols()
+
+    flops_per_op = 2 * (k - 1) * m * n
+    if self._beta:
+      flops_per_op += self._mat_c.get_actual_volume()
+
+    return flops_per_op
+
   def _generate_kernel(self):
     src = StringIO()
     with constructs.Cpp(src) as file:
