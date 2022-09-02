@@ -1,4 +1,4 @@
-FROM nvidia/cuda:11.1-devel-ubuntu18.04
+FROM nvidia/cuda:11.2.1-devel-ubuntu18.04
 
 
 RUN apt-get update -yqq && \
@@ -84,7 +84,7 @@ cd ../../ && rm -rf ./llvm-project
 
 # Install hipsycl
 RUN apt install -yqq libomp-dev && \
-git clone --depth 1 --branch v0.9.1 https://github.com/illuhad/hipSYCL.git hipsycl && \
+git clone --depth 1 --branch v0.9.2 https://github.com/illuhad/hipSYCL.git hipsycl && \
 cd hipsycl && \
 git submodule update --init --recursive && \
 mkdir build && cd build && \

@@ -73,3 +73,8 @@ target_include_directories(${TARGET} PRIVATE ../../submodules/Device)
 target_link_libraries(${TARGET} PRIVATE ${GPU_TARGET} device -lpthread)
 include(../../cmake/generateCode.cmake)
 
+if (${DEVICE_BACKEND} STREQUAL "hipsycl")
+    find_package(OpenMP REQUIRED)
+    target_link_libraries(${TARGET} PUBLIC OpenMP::OpenMP_CXX)
+    target_link_libraries(${GPU_TARGET} PUBLIC OpenMP::OpenMP_CXX)
+endif()

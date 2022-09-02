@@ -21,6 +21,7 @@ submodules:
     - atsccs68-docker-executor
   script:
     - cat ./.gitmodules
+    - rm -rf ./submodules
     - git submodule update --init --recursive
   artifacts:
     paths:
@@ -50,13 +51,6 @@ examples:
 .common_test_steps: &common_test_script
     - export CTEST_OUTPUT_ON_FAILURE=1
     - export root_dir=$PWD
-    - if [[ "${BACKEND}" == "hipsycl" ]]; then
-        export CC=/usr/bin/gcc-9 ;
-        export CXX=/usr/bin/g++-9 ;
-      else
-        export CC=/usr/bin/gcc-8 ;
-        export CXX=/usr/bin/g++-8 ;
-      fi ;
     - if [[ "${BACKEND}" == "hip" ]]; then
         . /etc/profile.d/rocm.sh ;
         export HIP_PLATFORM=nvidia ;
@@ -111,8 +105,8 @@ benchmarks:
       - BACKEND: [cuda, hipsycl, hip]
   script:
     - *common_test_script
-    - for bench in ./benchmarks/*; do
-        export curr_dir=$bench/build ;
+    - for bench in "bandwidth" "double-gemm" "simple-gemm" ; do
+        export curr_dir=./benchmarks/$bench/build ;
         mkdir -p $curr_dir && cd $curr_dir ;
         cmake .. -DSM_ARCH=${GPU_MODEL} -DDEVICE_BACKEND=${BACKEND} -DREAL_SIZE=4 ;
         make -j4 ;
