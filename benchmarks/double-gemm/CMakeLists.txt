@@ -65,8 +65,7 @@ target_compile_definitions(${TARGET} PUBLIC "CONCRETE_CPU_BACKEND=${REFERENCE_IM
 
 #add Yaml
 find_package(yaml-cpp REQUIRED)
-target_include_directories(${TARGET} PRIVATE ${YAML_CPP_INCLUDE_DIR})
-target_link_libraries(${TARGET} PRIVATE ${YAML_CPP_LIBRARIES})
+target_link_libraries(${TARGET} PRIVATE yaml-cpp)
 
 include(../../cmake/setupGpuTarget.cmake)
 target_link_libraries(${TARGET} PRIVATE ${GPU_TARGET} device -lpthread)
