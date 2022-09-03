@@ -46,8 +46,7 @@ target_include_directories(${TARGET} PRIVATE ${GTEST_INCLUDE_DIR})
 
 #add Yaml
 find_package(yaml-cpp REQUIRED)
-target_include_directories(${TARGET} PRIVATE ${YAML_CPP_INCLUDE_DIR})
-target_link_libraries(${TARGET} PRIVATE ${YAML_CPP_LIBRARIES})
+target_link_libraries(${TARGET} PRIVATE yaml-cpp)
 
 set(GPU_TARGET gpu_part)
 set(GPU_TARGET_INCLUDE_DIRS include
@@ -73,3 +72,8 @@ target_include_directories(${TARGET} PRIVATE ../../submodules/Device)
 target_link_libraries(${TARGET} PRIVATE ${GPU_TARGET} device -lpthread)
 include(../../cmake/generateCode.cmake)
 
+if (${DEVICE_BACKEND} STREQUAL "hipsycl")
+    find_package(OpenMP REQUIRED)
+    target_link_libraries(${TARGET} PUBLIC OpenMP::OpenMP_CXX)
+    target_link_libraries(${GPU_TARGET} PUBLIC OpenMP::OpenMP_CXX)
+endif()

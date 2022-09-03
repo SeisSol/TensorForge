@@ -25,14 +25,23 @@ set(GPU_TARGET_INCLUDE_DIRS ../../submodules/Device
                             gencode)
 
 if(${DEVICE_BACKEND} STREQUAL "cuda")
-    set(GPU_TARGET_SOURCE_FILES common/test_drivers/simple_driver.cpp gen_code/kernels.cu include/gemmforge_aux.cu)
-    set(GEN_COPY_PRODUCTS ${CMAKE_SOURCE_DIR}/gen_code/kernels.cu ${CMAKE_SOURCE_DIR}/gen_code/kernels.h)
+    set(GPU_TARGET_SOURCE_FILES common/test_drivers/simple_driver.cpp
+        gen_code/kernels.cu
+        include/gemmforge_aux.cu)
+    set(GEN_COPY_PRODUCTS ${CMAKE_SOURCE_DIR}/gen_code/kernels.cu
+        ${CMAKE_SOURCE_DIR}/gen_code/kernels.h)
 elseif(${DEVICE_BACKEND} STREQUAL "hip")
-    set(GPU_TARGET_SOURCE_FILES common/test_drivers/simple_driver.cpp gen_code/kernels.cpp include/gemmforge_aux.cpp)
-    set(GEN_COPY_PRODUCTS ${CMAKE_SOURCE_DIR}/gen_code/kernels.cpp ${CMAKE_SOURCE_DIR}/gen_code/kernels.h)
+    set(GPU_TARGET_SOURCE_FILES common/test_drivers/simple_driver.cpp
+        gen_code/kernels.cpp
+        include/gemmforge_aux.cpp)
+    set(GEN_COPY_PRODUCTS ${CMAKE_SOURCE_DIR}/gen_code/kernels.cpp
+        ${CMAKE_SOURCE_DIR}/gen_code/kernels.h)
 elseif((${DEVICE_BACKEND} STREQUAL "oneapi") OR (${DEVICE_BACKEND} STREQUAL "hipsycl"))
-    set(GPU_TARGET_SOURCE_FILES common/test_drivers/simple_driver.cpp gen_code/kernels.cpp include/gemmforge_aux_sycl.cpp)
-    set(GEN_COPY_PRODUCTS ${CMAKE_SOURCE_DIR}/gen_code/kernels.cpp ${CMAKE_SOURCE_DIR}/gen_code/kernels.h)
+    set(GPU_TARGET_SOURCE_FILES common/test_drivers/simple_driver.cpp
+        gen_code/kernels.cpp
+        include/gemmforge_aux_sycl.cpp)
+    set(GEN_COPY_PRODUCTS ${CMAKE_SOURCE_DIR}/gen_code/kernels.cpp
+        ${CMAKE_SOURCE_DIR}/gen_code/kernels.h)
 else()
     message(FATAL_ERROR "unknown backend, given: ${DEVICE_BACKEND}")
 endif()
@@ -56,12 +65,17 @@ target_compile_definitions(${TARGET} PUBLIC "CONCRETE_CPU_BACKEND=${REFERENCE_IM
 
 #add Yaml
 find_package(yaml-cpp REQUIRED)
-target_include_directories(${TARGET} PRIVATE ${YAML_CPP_INCLUDE_DIR})
-target_link_libraries(${TARGET} PRIVATE ${YAML_CPP_LIBRARIES})
+target_link_libraries(${TARGET} PRIVATE yaml-cpp)
 
 include(../../cmake/setupGpuTarget.cmake)
 target_link_libraries(${TARGET} PRIVATE ${GPU_TARGET} device -lpthread)
 include(../../cmake/generateCode.cmake)
+
+if (${DEVICE_BACKEND} STREQUAL "hipsycl")
+    find_package(OpenMP REQUIRED)
+    target_link_libraries(${TARGET} PUBLIC OpenMP::OpenMP_CXX)
+    target_link_libraries(${GPU_TARGET} PUBLIC OpenMP::OpenMP_CXX)
+endif()
 
 enable_testing()
 add_test(NAME test COMMAND ${CMAKE_PROJECT_NAME})

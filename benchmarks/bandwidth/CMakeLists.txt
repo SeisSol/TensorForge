@@ -40,12 +40,17 @@ endif()
 
 #add Yaml
 find_package(yaml-cpp REQUIRED)
-target_include_directories(${TARGET} PRIVATE ${YAML_CPP_INCLUDE_DIR})
-target_link_libraries(${TARGET} PRIVATE ${YAML_CPP_LIBRARIES})
+target_link_libraries(${TARGET} PRIVATE yaml-cpp)
 
 include(../../cmake/setupGpuTarget.cmake)
 
 target_link_libraries(${TARGET} PRIVATE ${GPU_TARGET} device -lpthread)
+
+if (${DEVICE_BACKEND} STREQUAL "hipsycl")
+    find_package(OpenMP REQUIRED)
+    target_link_libraries(${TARGET} PUBLIC OpenMP::OpenMP_CXX)
+    target_link_libraries(${GPU_TARGET} PUBLIC OpenMP::OpenMP_CXX)
+endif()
 
 enable_testing()
 add_test(NAME test COMMAND ${CMAKE_PROJECT_NAME})
