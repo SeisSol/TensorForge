@@ -3,8 +3,9 @@ from .lexic import Lexic
 
 
 class SyclLexic(Lexic):
-  def __init__(self, underlying_hardware):
+  def __init__(self, backend, underlying_hardware):
     super().__init__(underlying_hardware)
+    self._backend = backend
     self.thread_idx_y = "item.get_local_id(1)"
     self.thread_idx_x = "item.get_local_id(0)"
     self.thread_idx_z = "item.get_local_id(2)"
@@ -22,9 +23,13 @@ class SyclLexic(Lexic):
 
   def kernel_definition(self, file, kernel_bounds, base_name, params, precision=None, total_shared_mem_size=None):
     if total_shared_mem_size is not None and precision is not None:
-      localmem = f'cl::sycl::accessor<{precision}, 1,'
-      localmem += ' cl::sycl::access::mode::read_write,'
-      localmem += ' cl::sycl::access::target::local> '
+      if self._backend == 'hipsycl':
+        localmem = f'cl::sycl::accessor<{precision}, 1,'
+        localmem += ' cl::sycl::access::mode::read_write,'
+        localmem += f' cl::sycl::access::target::local> '
+      else:
+        localmem = f'cl::sycl::local_accessor<{precision}, 1> '
+
       localmem += f'{GeneralLexicon.TOTAL_SHR_MEM} ({total_shared_mem_size}, cgh);'
     else:
       localmem = None
