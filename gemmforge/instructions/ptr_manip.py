@@ -33,10 +33,12 @@ class GetElementPtr(AbstractInstruction):
       main_offset = f'{GeneralLexicon.BATCH_ID} * {batch_obj.get_real_volume()}'
       sub_offset = f'{batch_obj.get_offset_to_first_element()}'
       address = f'{main_offset} + {sub_offset}{extra_offset}'
+      #print("A:", main_offset, "|", sub_offset, "|", address)
     elif batch_addressing == "pointer_based":
       main_offset = f'{GeneralLexicon.BATCH_ID}'
       sub_offset = f'{batch_obj.get_offset_to_first_element()}'
       address = f'{main_offset}][{sub_offset}{extra_offset}'
+      #print("B:", main_offset, "|", sub_offset, "|", address)
     elif batch_addressing == "none":
       address = f'{batch_obj.get_offset_to_first_element()}{extra_offset}'
     else:

@@ -24,8 +24,12 @@ class ExtendedTransposePatchLoader(AbstractShrMemLoader):
     super(ExtendedTransposePatchLoader, self).__init__(**kwargs)
 
     data_view = self._src.data_view
-    optimal_num_cols = _find_next_prime(data_view.columns)
-    self._shm_volume = data_view.lead_dim * optimal_num_cols
+    matrix = self._src.obj
+    if matrix.get_matrix_type() == "dense":
+      optimal_num_cols = _find_next_prime(data_view.columns)
+      self._shm_volume = data_view.lead_dim * optimal_num_cols
+    else: # Has to be sparse if not dense
+      self._shm_volume = matrix.get_el_count()
 
     self._dest.data_view = DataView(rows=data_view.columns,
                                     columns=data_view.rows,

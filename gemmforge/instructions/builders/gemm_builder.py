@@ -1,3 +1,4 @@
+from typing import List, Tuple
 from .abstract_builder import AbstractBuilder
 from gemmforge.symbol_table import SymbolType, Symbol
 from gemmforge.instructions import SyncThreads
@@ -34,7 +35,13 @@ class GemmBuilder(AbstractBuilder):
             trans_b: bool,
             op1: Symbol,
             op2: Symbol,
-            dest: Symbol):
+            dest: Symbol,
+            sparse_a: bool,
+            sparse_b: bool,
+            coo_a: Tuple[List[list[int]],List[list[int]]],
+            coo_b: Tuple[List[list[int]],List[list[int]]],
+            val_a: Tuple[List[int],List[int]] | None,
+            val_b: Tuple[List[int],List[int]] | None):
     self._reset()
 
     # Note: of trans_a==True than an operand is given as KxM instead of (MxK).
@@ -54,12 +61,18 @@ class GemmBuilder(AbstractBuilder):
     self._insert_sync_threads()
 
     gemm_params = {'vm': self._vm,
-                   'trans_a': False,
-                   'trans_b': trans_b,
-                   'op1': self._op1,
-                   'op2': self._op2,
-                   'dest': dest,
-                   'num_threads': self._num_threads}
+                    'trans_a': False,
+                    'trans_b': trans_b,
+                    'op1': self._op1,
+                    'op2': self._op2,
+                    'dest': dest,
+                    'num_threads': self._num_threads,
+                    'sparse_a': sparse_a,
+                    'sparse_b': sparse_b,
+                    'coo_a': coo_a,
+                    'coo_b': coo_b,
+                    'val_a': val_a,
+                    'val_b': val_b}
     self._instructions.append(GenericGemm(**gemm_params))
 
   def _make_loader_and_symbol(self, operand, do_transpose):

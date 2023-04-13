@@ -17,7 +17,12 @@ class ExtendedPatchLoader(AbstractShrMemLoader):
     data_view = self._src.data_view
     full_subvolume = (data_view.columns - 2) * data_view.lead_dim
     cropped_subvolume = data_view.rows + data_view.lead_dim
-    self._shm_volume = cropped_subvolume + full_subvolume
+    matrix = self._src.obj
+    if matrix.get_matrix_type() == "dense":
+      self._shm_volume = cropped_subvolume + full_subvolume
+    else: # Has to be sparse if not dense
+      self._shm_volume = matrix.get_el_count()
+
     self._dest.data_view = deepcopy(self._src.data_view)
 
   def gen_code(self, writer):
