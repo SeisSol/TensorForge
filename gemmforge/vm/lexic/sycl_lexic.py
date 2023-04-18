@@ -42,6 +42,15 @@ class SyclLexic(Lexic):
   def sync_vec_unit(self):
     return "item.barrier()"
 
+  def get_sub_group_id(self, sub_group_size):
+    return f'item.get_sub_group().get_local_id()[0]'
+
+  def active_sub_group_mask(self):
+    return f'item.get_sub_group()'
+
+  def broadcast_sync(self, variable, lane, mask):
+    return f'group_broadcast({mask}, {variable}, {lane})'
+
   def kernel_range_object(self):
     return "cl::sycl::range<3>"
 

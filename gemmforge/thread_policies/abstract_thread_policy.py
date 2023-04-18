@@ -34,13 +34,11 @@ class AbstractBinaryOpThreadPolicy(AbstractUniOpThreadPolicy):
 class AbstractGemmLikeThreadPolicy(AbstractBinaryOpThreadPolicy):
   def __init__(self,
                vm: VM,
-               reals_per_op: int,
                num_threads: int,
                op1: DenseMatrix,
                op2: DenseMatrix,
                res: DenseMatrix):
     super().__init__(vm, num_threads, op1, op2)
-    self._reals_per_op = reals_per_op
     self._res = res
 
   @abstractmethod

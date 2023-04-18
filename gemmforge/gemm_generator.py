@@ -2,12 +2,11 @@ from . import constructs
 from io import StringIO
 from .exceptions import GenerationError
 from .abstract_gemmlike_generator import GemmLikeGenerator
-from .basic_types import GeneralLexicon, DataFlowDirection, RegMemObject
+from .basic_types import GeneralLexicon, DataFlowDirection
 from .symbol_table import Symbol, SymbolType
 from .abstract_generator import AbstractGenerator as Generator
-from .instructions.builders import GetElementPtrBuilder, RegistersAllocBuilder, ShrMemAllocBuilder
-from .instructions.builders import GemmBuilder
-from .instructions import StoreRegToGlb
+from .instructions.builders.kernels import GemmKernelsFactory
+from .instructions.builders.kernels import GemmKernelType
 from .vm import VM
 from .thread_policies import TheadPolicyFactory
 import math
@@ -18,8 +17,9 @@ class GemmGenerator(GemmLikeGenerator):
   """ Generates GEMM GPU kernels: C = alpha * A * B + beta * C
   """
 
-  def __init__(self, vm: VM):
+  def __init__(self, vm: VM, kernel_type=GemmKernelType.AUTO):
     super(GemmGenerator, self).__init__(vm)
+    self._kernel_type = kernel_type
     self._trans_a = None
     self._trans_b = None
     self._mat_a = None
@@ -61,6 +61,7 @@ class GemmGenerator(GemmLikeGenerator):
     self._deduce_num_threads()
     self._populate_global_scope()
     self._emit_instructions()
+
     self._analyze()
 
     self._generate_kernel()
@@ -208,48 +209,29 @@ class GemmGenerator(GemmLikeGenerator):
     self._symbol_table.add_scope()
 
   def _emit_instructions(self):
-    # extract matrices from batches
-    builder = GetElementPtrBuilder(self._vm, self._symbol_table)
-    for symbol in self._symbol_table.from_global.values():
-      builder.build(symbol)
-      self._instructions.extend(builder.get_instructions())
+    params = {'vm': self._vm,
+              'gemm_kernel_type': self._kernel_type,
+              'symbol_table': self._symbol_table,
+              'trans_a': self._trans_a,
+              'trans_b': self._trans_b,
+              'mat_a': self._mat_a,
+              'mat_b': self._mat_b,
+              'mat_c': self._mat_c,
+              'alpha': self._alpha,
+              'beta': self._beta,
+              'num_compute_threads': self._num_compute_threads,
+              'num_active_threads': self._num_active_threads}
 
-    # create an array of registers
-    builder = RegistersAllocBuilder(self._vm, self._symbol_table)
-    builder.build(self._mat_c.get_actual_num_cols(), 0.0)
-    self._instructions.extend(builder.get_instructions())
-    self._reg_array_obj = builder.get_resultant_obj()
+    kernel_factory = GemmKernelsFactory(**params)
+    self._kernel_type = kernel_factory.gemm_kernel_type()
 
-    # create shared mem
-    builder = ShrMemAllocBuilder(self._vm, self._symbol_table)
-    builder.build(size=None)
-    self._instructions.extend(builder.get_instructions())
-    self._shr_mem_obj = builder.get_resultant_obj()
+    gemm_kernel_builder = kernel_factory.get_builder()
+    gemm_kernel_builder.build()
 
-    # generate the rest instructions i.e., load to shr. mem, compute, store
-    builder = GemmBuilder(self._vm,
-                          self._symbol_table,
-                          self._reg_array_obj,
-                          self._shr_mem_obj,
-                          self._num_active_threads)
-
-    builder.build(trans_a=self._trans_a,
-                  trans_b=self._trans_b,
-                  op1=self._symbol_table[self._mat_a],
-                  op2=self._symbol_table[self._mat_b],
-                  dest=self._symbol_table[self._reg_array_obj])
-
-    self._shr_mem_loads = builder.get_srh_mem_loads()
-
-    self._instructions.extend(builder.get_instructions())
-
-    store = StoreRegToGlb(self._vm,
-                          self._symbol_table[self._mat_c],
-                          self._symbol_table[self._reg_array_obj],
-                          self._alpha,
-                          self._beta,
-                          self._num_compute_threads)
-    self._instructions.append(store)
+    self._instructions = gemm_kernel_builder.get_instructions()
+    self._reg_array_obj = gemm_kernel_builder.get_reg_array_obj()
+    self._shr_mem_obj = gemm_kernel_builder.get_shr_mem_obj()
+    self._shr_mem_loads = gemm_kernel_builder.get_shr_mem_loads()
 
   def _analyze(self):
     # compute total required shr. mem
@@ -262,7 +244,7 @@ class GemmGenerator(GemmLikeGenerator):
 
     # compute num matrix multiplications per block
     thread_policy = TheadPolicyFactory.get_gemm_policy(vm=self._vm,
-                                                       reals_per_op=shr_mem_counter,
+                                                       shr_mem_per_op=shr_mem_counter,
                                                        num_threads=self._num_active_threads,
                                                        op1=self._mat_a,
                                                        op2=self._mat_b,
@@ -290,10 +272,12 @@ class GemmGenerator(GemmLikeGenerator):
     traspose = f'{"T" if self._trans_a else "NT"}_{"T" if self._trans_b else "NT"}'
     constants = f'{self._alpha}_{self._beta}'
 
-    result = hashlib.md5(('{}_{}{}{}'.format(constants,
-                                             self._mat_a.__str__(),
-                                             self._mat_b.__str__(),
-                                             self._mat_c.__str__()).encode()))
+    result = hashlib.md5(('{}_{}{}{}_{}'.format(
+      constants,
+      self._mat_a.__str__(),
+      self._mat_b.__str__(),
+      self._mat_c.__str__(),
+      self._kernel_type.value.__str__()).encode()))
     md5encoding = result.hexdigest()
     prefix = 's' if self._precision == "float" else "d"
 
