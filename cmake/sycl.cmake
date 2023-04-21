@@ -3,6 +3,11 @@ add_library(${GPU_TARGET} SHARED ${GPU_TARGET_SOURCE_FILES})
 if (${DEVICE_BACKEND} STREQUAL "hipsycl")
     set(HIPSYCL_TARGETS "cuda:${DEVICE_ARCH}")
 
+    # Note: explicit linking of OpenMP is required
+    # maybe because of a bug in hipSYCL@9.3.0
+    find_package(OpenMP REQUIRED)
+    target_link_libraries(${GPU_TARGET} PUBLIC ${OpenMP_CXX_FLAGS})
+
     find_package(hipSYCL CONFIG REQUIRED)
     add_sycl_to_target(TARGET ${GPU_TARGET}  SOURCES ${DEVICE_SOURCE_FILES})
 else()

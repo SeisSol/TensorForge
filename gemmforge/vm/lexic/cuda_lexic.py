@@ -29,6 +29,15 @@ class CudaLexic(Lexic):
   def sync_vec_unit(self):
     return "__syncwarp()"
 
+  def get_sub_group_id(self, sub_group_size):
+    return f'{self.thread_idx_x} % {sub_group_size}'
+
+  def active_sub_group_mask(self):
+    return "__activemask()"
+
+  def broadcast_sync(self, variable, lane, mask):
+    return f'__shfl_sync({mask}, {variable}, {lane})'
+
   def kernel_range_object(self):
     return "dim3"
 

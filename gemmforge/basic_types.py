@@ -28,6 +28,7 @@ class RegMemObject:
   def __str__(self):
     return f'name: {self.name}; size = {self.size}'
 
+
 class ShrMemObject:
   def __init__(self, name, size=None, mults_per_block=None):
     self.name = name
