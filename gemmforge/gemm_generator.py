@@ -56,8 +56,8 @@ class GemmGenerator(GemmLikeGenerator):
     self._trans_b = trans_b
     self._sparse_b = mat_b.get_matrix_type() == "sparse"
     if self._sparse_b:
-        self._coo_b = (self._mat_b.get_coo_col_major(), self._mat_b.get_coo_row_major())
-        self._val_b = (self._mat_b.get_values_col_major(), self._mat_b.get_values_row_major())
+        self._coo_b = (self._mat_b.get_coo_col_major(), self._mat_b.get_coo_row_major(), self._mat_b.get_coordinates())
+        self._val_b = self._mat_b.get_values()
     self._mat_b.set_name('B')
     self._mat_b.set_data_flow_direction(DataFlowDirection.SOURCE)
 

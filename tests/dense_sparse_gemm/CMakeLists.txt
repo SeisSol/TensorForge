@@ -56,13 +56,13 @@ set(GPU_TARGET_INCLUDE_DIRS include
         ../../submodules/Device)
 
 if(${DEVICE_BACKEND} STREQUAL "cuda")
-    set(GPU_TARGET_SOURCE_FILES common/test_drivers/simple_driver.cpp include/gemmforge_aux.cu gen_code/kernels.cu)
+    set(GPU_TARGET_SOURCE_FILES common/test_drivers/simple_driver.cpp common/test_drivers/simple_dense_sparse_driver.cpp include/gemmforge_aux.cu gen_code/kernels.cu)
     set(GEN_COPY_PRODUCTS ${CMAKE_SOURCE_DIR}/gen_code/kernels.cu ${CMAKE_SOURCE_DIR}/gen_code/kernels.h ${CMAKE_SOURCE_DIR}/gen_code/test.cpp)
 elseif(${DEVICE_BACKEND} STREQUAL "hip")
-    set(GPU_TARGET_SOURCE_FILES common/test_drivers/simple_driver.cpp include/gemmforge_aux.cpp gen_code/kernels.cpp)
+    set(GPU_TARGET_SOURCE_FILES common/test_drivers/simple_driver.cpp common/test_drivers/simple_dense_sparse_driver.cpp include/gemmforge_aux.cpp gen_code/kernels.cpp)
     set(GEN_COPY_PRODUCTS ${CMAKE_SOURCE_DIR}/gen_code/kernels.cpp ${CMAKE_SOURCE_DIR}/gen_code/kernels.h ${CMAKE_SOURCE_DIR}/gen_code/test.cpp)
 elseif((${DEVICE_BACKEND} STREQUAL "oneapi") OR (${DEVICE_BACKEND} STREQUAL "hipsycl"))
-    set(GPU_TARGET_SOURCE_FILES common/test_drivers/simple_driver.cpp include/gemmforge_aux_sycl.cpp gen_code/kernels.cpp )
+    set(GPU_TARGET_SOURCE_FILES common/test_drivers/simple_driver.cpp common/test_drivers/simple_dense_sparse_driver.cpp include/gemmforge_aux_sycl.cpp gen_code/kernels.cpp )
     set(GEN_COPY_PRODUCTS ${CMAKE_SOURCE_DIR}/gen_code/kernels.cpp ${CMAKE_SOURCE_DIR}/gen_code/kernels.h ${CMAKE_SOURCE_DIR}/gen_code/test.cpp)
 endif()
 

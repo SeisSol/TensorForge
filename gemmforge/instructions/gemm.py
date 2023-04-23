@@ -37,7 +37,6 @@ class GenericGemm(AbstractInstruction):
   def gen_code(self, writer):
     value_var = 'value'
     op1_data_view = self._op1.data_view
-    op2_data_view = self._op2.data_view
     thread_idx_x = self._vm.get_lexic().thread_idx_x
     with writer.If(self.gen_mask_threads(op1_data_view.rows)):
       writer(f'{self._vm.fp_as_str()} {value_var};')
@@ -45,16 +44,14 @@ class GenericGemm(AbstractInstruction):
       writer.Emptyline()
       if self._sparse_b:
         for k in range(0, op1_data_view.columns):
-          # with writer.For(f'int k = 0; k < {op1_data_view.columns}; ++k'):
           op1_addr = f'{thread_idx_x} + {k} * {op1_data_view.lead_dim}'
-          if len(self._coo_b[0][k]) > 0:
-            writer(f'{value_var} = {self._op1.name}[{op1_addr}];')
-            writer.Emptyline()
+          writer(f'{value_var} = {self._op1.name}[{op1_addr}];')
+          writer.Emptyline()
 
-            #if not self._val_b:
-            self._get_inner_loop_sparse(writer, value_var, k, self._coo_b[0][k], False, None)
-            #else:
-            #  self._get_inner_loop_sparse(writer, value_var, k, self._coo_b[0][k], True, self._val_b) 
+          #if self._trans_b:
+          self._get_inner_loop_sparse_with_a_row(writer, value_var, k, self._coo_b[1][k], self._val_b)
+          #else:
+          #  self._get_inner_loop_sparse_with_a_col(writer, value_var, k, self._coo_b[0][k], self._val_b)
       else:
         with writer.For(f'int k = 0; k < {op1_data_view.columns}; ++k'):
           op1_addr = f'{thread_idx_x} + k * {op1_data_view.lead_dim}'
@@ -75,58 +72,54 @@ class GenericGemm(AbstractInstruction):
       res_access = '' if self._dest.obj.size == 1 else '[n]'
       writer(f'{self._dest.name}{res_access} += {op1_value} * {self._op2.name}[{op2_addr}];')
 
-  def _get_inner_loop_sparse(self, writer, op1_value, col_id, non_zeros, value_known=False, val_b=None):
+  def _get_inner_loop_sparse_with_a_row(self, writer, op1_value, row_id, non_zeros, val_b=None):
+    # Iterate the first column first then the second etc. (coo_b[0] if col major, otherwise coo_b[1] if row major)
+    # As we iterate we need to find the element in the real ordering (coordiantes)
+    # This function iterates a column until the end
     if len(non_zeros) > 0:
-      op2_data_view = self._op2.data_view
-      writer.Comment(f"Mul begin col {col_id}")
-      for non_zero in non_zeros:
-        """
-        # If the sparse would be saved as if the full array then we would do it like here
-        if self._trans_b:
-            op2_addr = f'{non_zero} + {op2_data_view.lead_dim} * {col_id}'
-        else:
-            op2_addr = f'{col_id} + {op2_data_view.lead_dim} * {non_zero}'
-        """
+      value_known = val_b != None
+      writer.Comment(f"Mul begin col {row_id}")
+      coordinates = self._coo_b[2]
 
-        # Counter is in this case the number of the non-zero element
-        # If we found a matrix address (i,j) that corresponds to (non_zero, col_id)
-        # Then we write its offset in the array that will be provided and access it
-        counter = 0
-        if self._trans_b:
-          coo_to_use = self._coo_b[0] #col major iter coo
-          val_b_to_use = self._val_b[0]
-          col = 0
-          found = False
-          for row_ids in coo_to_use:
-            for row in row_ids:
-              if row == non_zero and col == col_id:
-                found = True
-              if not found:
-                counter += 1
-            col += 1
-          if not found:
-            raise Exception("oh no")
-        else:
-          coo_to_use = self._coo_b[1] #row major iter coo
-          val_b_to_use = self._val_b[1]
-          row = 0
-          found = False
-          for col_ids in coo_to_use:
-            for col in col_ids:
-              if row == non_zero and col == col_id:
-                found = True
-              if not found:
-                counter += 1
-            row += 1
-          if not found:
-            raise Exception("oh no")
+      for col_id in non_zeros:
+        (i, j) = (row_id, col_id)
+        iter = 0
+        for (_i, _j) in coordinates:
+          if i == _i and j == _j:
+            break
+          iter += 1
 
-        res_access = f"[{non_zero}]"
+        res_access = f"[{col_id}]"
         if not value_known:
-            writer(f'{self._dest.name}{res_access} += {op1_value} * {self._op2.name}[{counter}];')
+            writer(f'{self._dest.name}{res_access} += {op1_value} * {self._op2.name}[{iter}];')
         else:
-            writer(f'{self._dest.name}{res_access} += {op1_value} * {val_b_to_use[counter]};')
-      writer.Comment(f"Mul end col {col_id}")
+            writer(f'{self._dest.name}{res_access} += {op1_value} * {val_b[iter]};')
+      writer.Comment(f"Mul end col {row_id}")
+      writer.Emptyline()
+
+  def _get_inner_loop_sparse_with_a_col(self, writer, op1_value, col_id, non_zeros, val_b=None):
+    # Iterate the first column first then the second etc. (coo_b[0] if col major, otherwise coo_b[1] if row major)
+    # As we iterate we need to find the element in the real ordering (coordiantes)
+    # This function iterates a column until the end
+    if len(non_zeros) > 0:
+      value_known = val_b != None
+      writer.Comment(f"Mul begin with a col {col_id}")
+      coordinates = self._coo_b[2]
+
+      for row_id in non_zeros:
+        (i, j) = (row_id, col_id)
+        iter = 0
+        for (_i, _j) in coordinates:
+          if i == _i and j == _j:
+            break
+          iter += 1
+
+        res_access = f"[{col_id}]"
+        if not value_known:
+            writer(f'{self._dest.name}{res_access} += {op1_value} * {self._op2.name}[{iter}];')
+        else:
+            writer(f'{self._dest.name}{res_access} += {op1_value} * {val_b[iter]};')
+      writer.Comment(f"Mul end with a col {col_id}")
       writer.Emptyline()
 
   def __str__(self) -> str:
