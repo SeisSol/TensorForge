@@ -48,10 +48,7 @@ class GenericGemm(AbstractInstruction):
           writer(f'{value_var} = {self._op1.name}[{op1_addr}];')
           writer.Emptyline()
 
-          #if self._trans_b:
           self._get_inner_loop_sparse_with_a_row(writer, value_var, k, self._coo_b[1][k], self._val_b)
-          #else:
-          #  self._get_inner_loop_sparse_with_a_col(writer, value_var, k, self._coo_b[0][k], self._val_b)
       else:
         with writer.For(f'int k = 0; k < {op1_data_view.columns}; ++k'):
           op1_addr = f'{thread_idx_x} + k * {op1_data_view.lead_dim}'
@@ -72,16 +69,16 @@ class GenericGemm(AbstractInstruction):
       res_access = '' if self._dest.obj.size == 1 else '[n]'
       writer(f'{self._dest.name}{res_access} += {op1_value} * {self._op2.name}[{op2_addr}];')
 
-  def _get_inner_loop_sparse_with_a_row(self, writer, op1_value, row_id, non_zeros, val_b=None):
+  def _get_inner_loop_sparse_with_a_row(self, writer, op1_value, row_id, non_zeros_in_row, val_b=None):
     # Iterate the first column first then the second etc. (coo_b[0] if col major, otherwise coo_b[1] if row major)
     # As we iterate we need to find the element in the real ordering (coordiantes)
     # This function iterates a column until the end
-    if len(non_zeros) > 0:
+    if len(non_zeros_in_row) > 0:
       value_known = val_b != None
-      writer.Comment(f"Mul begin col {row_id}")
+      writer.Comment(f"Mul begin with the row {row_id}")
       coordinates = self._coo_b[2]
 
-      for col_id in non_zeros:
+      for col_id in non_zeros_in_row:
         (i, j) = (row_id, col_id)
         iter = 0
         for (_i, _j) in coordinates:
@@ -94,32 +91,7 @@ class GenericGemm(AbstractInstruction):
             writer(f'{self._dest.name}{res_access} += {op1_value} * {self._op2.name}[{iter}];')
         else:
             writer(f'{self._dest.name}{res_access} += {op1_value} * {val_b[iter]};')
-      writer.Comment(f"Mul end col {row_id}")
-      writer.Emptyline()
-
-  def _get_inner_loop_sparse_with_a_col(self, writer, op1_value, col_id, non_zeros, val_b=None):
-    # Iterate the first column first then the second etc. (coo_b[0] if col major, otherwise coo_b[1] if row major)
-    # As we iterate we need to find the element in the real ordering (coordiantes)
-    # This function iterates a column until the end
-    if len(non_zeros) > 0:
-      value_known = val_b != None
-      writer.Comment(f"Mul begin with a col {col_id}")
-      coordinates = self._coo_b[2]
-
-      for row_id in non_zeros:
-        (i, j) = (row_id, col_id)
-        iter = 0
-        for (_i, _j) in coordinates:
-          if i == _i and j == _j:
-            break
-          iter += 1
-
-        res_access = f"[{col_id}]"
-        if not value_known:
-            writer(f'{self._dest.name}{res_access} += {op1_value} * {self._op2.name}[{iter}];')
-        else:
-            writer(f'{self._dest.name}{res_access} += {op1_value} * {val_b[iter]};')
-      writer.Comment(f"Mul end with a col {col_id}")
+      writer.Comment(f"Mul end with the row {row_id}")
       writer.Emptyline()
 
   def __str__(self) -> str:

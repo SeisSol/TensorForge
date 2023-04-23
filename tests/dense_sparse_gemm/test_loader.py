@@ -7,7 +7,6 @@ import numpy as np
 from random import randint
 
 def gen_matrix_b(rowB, colB, transposed, btype):
-    B = np.zeros([rowB, colB])
     coo = {"name": "B", "rows": rowB, "cols": colB, "entries": [], "coordinates": []}
 
     if btype == "band_diagonal":
@@ -45,59 +44,54 @@ def gen_matrix_b(rowB, colB, transposed, btype):
             coo["coordinates"].append([i, i-1])
             coo["entries"].append([i, i, 2.0])
             coo["coordinates"].append([i, i])
-
-        for i in range(rowB):
-            B[i, i] = 2.0
-        for i in range(rowB - 1):
-            B[i, i + 1] = 3.0
-        for i in range(1, rowB):
-            B[i, i - 1] = 1.0
-    elif btype == "one_col_b":
-        if colB < 2:
-            at = 0
-        else:
-            at = 1
-        for i in range(rowB):
-            B[i, at] = 4.0
+    elif btype == "single_column":
+        at = 1
         for i in range(rowB):
             coo["entries"].append([i, at, 4.0])
             coo["coordinates"].append([i, at])
-    elif btype == "one_row_b":
-        if rowB < 2:
-            at = 0
-        else:
-            at = 1
+    elif btype == "single_row":
+        at = 1
         for j in range(colB):
-            B[at, j] = 5.0
-        coo = {"name": "B", "rows": rowB, "cols": colB, "entries": [], "coordinates": []}
-        for j in range(rowB):
             coo["entries"].append([at, j, 4.0])
             coo["coordinates"].append([at, j])
-    elif btype == "random_entries":
-        nonzeros = set()
-        while len(nonzeros) < int(np.sqrt(rowB * colB)):
-            nonzeros.add(randint(0, rowB * colB - 1))
+    elif btype == "full":
+      if transposed:
+        for i in range(colB):
+          for j in range(rowB):
+            coo["entries"].append([i, j, 8.0])
+            coo["coordinates"].append([i, j])
+      else:
+        for j in range(colB):
+          for i in range(rowB):
+            coo["entries"].append([i, j, 8.0])
+            coo["coordinates"].append([i, j])
+    elif btype == "chequered":
+      npB = np.zeros((rowB,colB))
+      if transposed:
+        for i in range(rowB):
+          offset = i % 2
+          for j in range(offset, colB, 2):
+            coo["entries"].append([i, j, 9.0])
+            coo["coordinates"].append([i, j])
+            npB[i, j] = i*10 + j
+      else:
+        for j in range(colB):
+          offset = j % 2
+          for i in range(offset, rowB, 2):
+            coo["entries"].append([i, j, 9.0])
+            coo["coordinates"].append([i, j])
+            npB[i, j] = i*10 + j
 
-        B_nonzeros = []
-        for el in nonzeros:
-            row = el // rowB
-            col = el % colB
-            coo["entries"].append([row, col, "9.0"])
-            coo["coordinates"].append([row, col])
-            B[row, col] = 9.0
-            B_nonzeros.append(9.0)
+      if colB % 2 == 0:
+        a = rowB*colB//2
+      elif rowB % 2 == 0:
+        a = rowB*colB//2
+      else:
+        a = 1 + rowB*colB//2
+      print(npB, len(coo["coordinates"]), coo["coordinates"], a)
     else:
         raise Exception("NO")
-    if btype != "random_entries":
-        if transposed:
-            B = B.flatten("C")
-        else:
-            B = B.flatten("F")
-    B_nonzeros = []
-    for el in B:
-        if el != 0.0:
-            B_nonzeros.append(el)
-    return (coo, B, B_nonzeros)
+    return coo
 
 
 class LoaderError(Exception):
@@ -150,7 +144,7 @@ class TestLoader:
 
   def _produce_matrix(self, matrix_spec, spec):
     if matrix_spec["sparse"]:
-      (coo, B, B_nonzeros) = gen_matrix_b(matrix_spec["rows"],matrix_spec["cols"],spec["trans_b"],matrix_spec["matrix_type"])
+      coo = gen_matrix_b(matrix_spec["rows"],matrix_spec["cols"],spec["trans_b"],matrix_spec["matrix_type"])
       sparse = SparseMatrix(num_rows=matrix_spec["rows"],
                         num_cols=matrix_spec["cols"],
                         addressing=matrix_spec["addressing"],

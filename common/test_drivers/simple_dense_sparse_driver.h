@@ -6,6 +6,11 @@
 #include <stdexcept>
 #include <iostream>
 
+/*
+  The sole change of this driver compared to the simple driver is that it compares Dense x Sparse Matrix multiplication 
+  with Dense x Dense already implemented. The correctnesss of this test case relies and assumes that Dense x Dense is already correct.
+  Furthermore, it does the test by multiplying both the Dense and Sparse version of B.
+*/
 namespace gemmforge {
   namespace dense_sparse {
     class TestDriver {
@@ -101,10 +106,27 @@ namespace gemmforge {
           return (rowB*colB)*sparsity;
         }else if (matrix_b_type == "band_diagonal"){
           return 2 + 2 + (rowB-2)*3;
-        }else if (matrix_b_type == "one_col"){
+        }else if (matrix_b_type == "single_column"){
           return rowB;
-        }else if (matrix_b_type == "one_row"){
+        }else if (matrix_b_type == "single_row"){
           return colB;
+        }else if (matrix_b_type == "full") {
+          return rowB * colB;
+        }else if (matrix_b_type == "chequered") {
+          if (colB % 2 == 0){
+            return static_cast<int>(rowB * colB / 2);
+          }else{
+            // 1 row A+1, 1 row A elements
+            // Where A == L colB / 2 (rounded down to nearest int)
+            // This means colB many white elements per 2 rows
+            if (rowB % 2 == 0){
+              return static_cast<int>(colB * rowB / 2);
+            } else {
+              // Implementation specific of the element orders, in my case first row has +1 element,
+              // when unequal then we get 1 too many
+              return 1 + static_cast<int>(colB * rowB / 2);
+            }
+          }
         }else {
           throw std::runtime_error("Unallowed Matrix B Type!");
         }

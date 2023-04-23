@@ -74,14 +74,16 @@ for suite in suites:
     print(matrix_b_type)
     try:
       generator1 = GemmGenerator(vm)
-      generator1.set(trans_a, trans_b, mat_a, mat_b, mat_c, alpha, beta)
+      T = "T"
+      NT = ""
+      generator1.set(trans_a, trans_b, mat_a, mat_b, mat_c, alpha, beta, base_name=f"A{T if trans_a else NT}_B{T if trans_b else NT}_{matrix_b_type}_DenseXDense")
       generator1.generate()
       src.write(generator1.get_kernel())
       src.write(generator1.get_launcher())
       headers.write(generator1.get_launcher_header())
 
       generator2 = GemmGenerator(vm)
-      generator2.set(trans_a, trans_b, mat_a, mat_b_sparse, mat_c, alpha, beta)
+      generator2.set(trans_a, trans_b, mat_a, mat_b_sparse, mat_c, alpha, beta, base_name=f"A{T if trans_a else NT}_B{T if trans_b else NT}_{matrix_b_type}_DenseXSparse")
       generator2.generate()
       src.write(generator2.get_kernel())
       src.write(generator2.get_launcher())
@@ -138,7 +140,7 @@ for suite in suites:
           file.Emptyline()
 
           file(f'SetUp(rowA, colA, rowB, colB, rowC, colC, numElements, \"{matrix_b_type}\", {"true" if not trans_b else "false"});')
-          file('Driver.prepareData(\"{matrix_b_type}\");')
+          file(f'Driver.prepareData(\"{matrix_b_type}\");')
 
           args = []
           args.append("DeviceA, 0")
