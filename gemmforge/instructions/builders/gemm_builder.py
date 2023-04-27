@@ -1,4 +1,4 @@
-from typing import List, Tuple
+from typing import List, Tuple, Union
 from .abstract_builder import AbstractBuilder
 from gemmforge.symbol_table import SymbolType, Symbol
 from gemmforge.instructions import SyncThreads
@@ -38,10 +38,10 @@ class GemmBuilder(AbstractBuilder):
             dest: Symbol,
             sparse_a: bool,
             sparse_b: bool,
-            coo_a: Tuple[List[list[int]],List[list[int]]],
-            coo_b: Tuple[List[list[int]],List[list[int]]],
-            val_a: Tuple[List[int],List[int]] | None,
-            val_b: Tuple[List[int],List[int]] | None):
+            coo_a: Tuple[List[List[int]],List[List[int]]],
+            coo_b: Tuple[List[List[int]],List[List[int]]],
+            val_a: Union[Tuple[List[int],List[int]], None],
+            val_b: Union[Tuple[List[int],List[int]], None]):
     self._reset()
 
     # Note: of trans_a==True than an operand is given as KxM instead of (MxK).
