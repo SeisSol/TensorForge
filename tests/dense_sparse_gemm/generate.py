@@ -70,8 +70,6 @@ with constructs.Cpp(StringIO()) as file:
 for suite in suites:
   for test in TestLoader(suite):
     trans_a, trans_b, mat_a, mat_b, mat_b_sparse, mat_c, alpha, beta, num_elements, matrix_b_type, test_name  = test
-    print(test)
-    print(matrix_b_type)
     try:
       generator1 = GemmGenerator(vm)
       T = "T"

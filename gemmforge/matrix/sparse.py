@@ -33,8 +33,8 @@ class SparseMatrix(Matrix):
 
         self.coo_row_major = [[] for _ in range(num_rows)]
         self.coo_col_major = [[] for _ in range(num_cols)]
-        print(self.dense_representation)
-        
+
+
         iter = 0
         for coordinate in coordinates:
             val = "X"

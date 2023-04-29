@@ -88,7 +88,6 @@ def gen_matrix_b(rowB, colB, transposed, btype):
         a = rowB*colB//2
       else:
         a = 1 + rowB*colB//2
-      print(npB, len(coo["coordinates"]), coo["coordinates"], a)
     else:
         raise Exception("NO")
     return coo
@@ -113,7 +112,6 @@ class TestLoader:
     for param in test_params:
       _set_value(spec, param, test_params[param])
 
-    print(spec)
     if spec["matrix_b"]["sparse"]:
       dense, sparse = self._produce_matrix(spec["matrix_b"], spec)  
       return (spec["trans_a"],
