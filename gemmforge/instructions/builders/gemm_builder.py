@@ -38,8 +38,8 @@ class GemmBuilder(AbstractBuilder):
             dest: Symbol,
             sparse_a: bool,
             sparse_b: bool,
-            coo_a: Tuple[List[list[int]],List[list[int]]],
-            coo_b: Tuple[List[list[int]],List[list[int]]],
+            coo_a: Tuple[List[List[int]],List[List[int]]],
+            coo_b: Tuple[List[List[int]],List[List[int]]],
             val_a: Union[Tuple[List[int],List[int]], None],
             val_b: Union[Tuple[List[int],List[int]], None]):
     self._reset()
