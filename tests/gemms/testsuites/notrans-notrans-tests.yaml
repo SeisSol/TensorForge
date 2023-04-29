@@ -31,3 +31,6 @@ test_suites:
     alpha: 1.1
     beta: 1.1
     num_elements: 10
+
+    gemm_type: "params_gemm_type"
+    params_gemm_type: ["shr_mem", "register_only"]

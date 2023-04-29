@@ -1,7 +1,8 @@
 from gemmforge.vm import VM
 from ..matrix import DenseMatrix
-from .gemm.nvidia import NvidiaGemmThreadPolicy
-from .csa.nvidia import NvidiaCsaThreadPolicy
+from .gemm.generic import GenericGemmThreadPolicy
+from .gemm.only_register_based import OnlyRegisterBasedThreadPolicy
+from .csa.generic import GenericCsaThreadPolicy
 
 
 class TheadPolicyFactory:
@@ -13,20 +14,27 @@ class TheadPolicyFactory:
   @classmethod
   def get_gemm_policy(cls,
                       vm: VM,
-                      reals_per_op: int,
+                      shr_mem_per_op: int,
                       num_threads: int,
                       op1: DenseMatrix,
                       op2: DenseMatrix,
                       res: DenseMatrix):
-    default_policy = NvidiaGemmThreadPolicy(vm,
-                                            reals_per_op,
-                                            num_threads,
-                                            op1,
-                                            op2,
-                                            res)
+
     hw_descr = vm.get_hw_descr()
     if hw_descr.manufacturer in TheadPolicyFactory.ALLOWED_MANUFACTURES:
-      return default_policy
+      if shr_mem_per_op == 0:
+        return OnlyRegisterBasedThreadPolicy(vm,
+                                             num_threads,
+                                             op1,
+                                             op2,
+                                             res)
+      else:
+        return GenericGemmThreadPolicy(vm,
+                                       shr_mem_per_op,
+                                       num_threads,
+                                       op1,
+                                       op2,
+                                       res)
     else:
       raise RuntimeError('unknown manufacturer')
 
@@ -36,7 +44,7 @@ class TheadPolicyFactory:
                      num_threads: int,
                      op1: DenseMatrix,
                      op2: DenseMatrix):
-    default_policy = NvidiaCsaThreadPolicy(vm, num_threads, op1, op2)
+    default_policy = GenericCsaThreadPolicy(vm, num_threads, op1, op2)
     hw_descr = vm.get_hw_descr()
     if hw_descr.manufacturer in TheadPolicyFactory.ALLOWED_MANUFACTURES:
       return default_policy

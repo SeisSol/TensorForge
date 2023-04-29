@@ -1,21 +1,23 @@
-from typing import List, Tuple, Union
-from .abstract_builder import AbstractBuilder
+from gemmforge.instructions.builders.abstract_builder import AbstractBuilder
 from gemmforge.symbol_table import SymbolType, Symbol
 from gemmforge.instructions import SyncThreads
-from gemmforge.instructions import GenericGemm
+from gemmforge.instructions import ShrMemBasedDenseGemm
+from gemmforge.instructions import RegisterOnlyDenseGemm
 from gemmforge.instructions.loaders import shm_mem_loader_factory
 from gemmforge.basic_types import GeneralLexicon
 
 
+class ShrMemBasedDenseGemmBuilder(AbstractBuilder):
+  """This class helps to assemble all necessary instructions
+  required to build a shared-memory-based dense gemm operation"""
 
-class GemmBuilder(AbstractBuilder):
   def __init__(self,
                vm,
                symbol_table,
                register_array,
                shr_mem,
                num_threads: int):
-    super(GemmBuilder, self).__init__(vm, symbol_table)
+    super(ShrMemBasedDenseGemmBuilder, self).__init__(vm, symbol_table)
     self._dest_regs = register_array
     self._shr_mem = shr_mem
     self._num_threads = num_threads
@@ -61,19 +63,19 @@ class GemmBuilder(AbstractBuilder):
     self._insert_sync_threads()
 
     gemm_params = {'vm': self._vm,
-                    'trans_a': False,
-                    'trans_b': trans_b,
-                    'op1': self._op1,
-                    'op2': self._op2,
-                    'dest': dest,
-                    'num_threads': self._num_threads,
-                    'sparse_a': sparse_a,
-                    'sparse_b': sparse_b,
-                    'coo_a': coo_a,
-                    'coo_b': coo_b,
-                    'val_a': val_a,
-                    'val_b': val_b}
-    self._instructions.append(GenericGemm(**gemm_params))
+                   'trans_a': False,
+                   'trans_b': trans_b,
+                   'op1': self._op1,
+                   'op2': self._op2,
+                   'dest': dest,
+                   'num_threads': self._num_threads,
+                   'sparse_a': sparse_a,
+                   'sparse_b': sparse_b,
+                   'coo_a': coo_a,
+                   'coo_b': coo_b,
+                   'val_a': val_a,
+                   'val_b': val_b}}
+    self._instructions.append(ShrMemBasedDenseGemm(**gemm_params))
 
   def _make_loader_and_symbol(self, operand, do_transpose):
     shr_mem_region = Symbol(name=self._name_shr_reg(),
@@ -102,3 +104,46 @@ class GemmBuilder(AbstractBuilder):
     name = f'{GeneralLexicon.SHR_MEM_REGION_PREFIX}{self._counter}'
     self._counter += 1
     return name
+
+
+class RegisterOnlyDenseGemmBuilder(AbstractBuilder):
+  """This class helps to assemble all necessary instructions
+  required to build a shared-memory-based dense gemm operation"""
+
+  def __init__(self,
+               vm,
+               symbol_table,
+               register_array,
+               shr_mem,
+               num_threads: int):
+    super(RegisterOnlyDenseGemmBuilder, self).__init__(vm, symbol_table)
+    self._dest_regs = register_array
+    self._shr_mem = shr_mem
+    self._num_threads = num_threads
+
+    self._op1 = None
+    self._op2 = None
+    self._dest = None
+
+    self._mem_region_a = None
+    self._mem_region_b = None
+
+  def build(self,
+            trans_a: bool,
+            trans_b: bool,
+            op1: Symbol,
+            op2: Symbol,
+            dest: Symbol):
+    self._reset()
+
+    gemm_params = {'vm': self._vm,
+                   'trans_a': trans_a,
+                   'trans_b': trans_b,
+                   'op1': op1,
+                   'op2': op2,
+                   'dest': dest,
+                   'num_threads': self._num_threads}
+    self._instructions.append(RegisterOnlyDenseGemm(**gemm_params))
+
+  def get_srh_mem_loads(self):
+    return []

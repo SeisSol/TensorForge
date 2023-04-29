@@ -1,4 +1,5 @@
-from gemmforge import DenseMatrix, GenerationError, GemmGenerator
+from gemmforge import DenseMatrix, GenerationError
+from gemmforge import GemmGenerator, GemmKernelType
 from gemmforge.vm import vm_factory
 import os
 import yaml
@@ -33,13 +34,17 @@ config = yaml.safe_load(stream)
 mat_a = produce_matrix(config['MatA'])
 mat_b = produce_matrix(config['MatB'])
 mat_c = produce_matrix(config['MatC'])
+if 'gemm_type' in config:
+  gemm_type = GemmKernelType.to_str(config['gemm_type'])
+else:
+  gemm_type = GemmKernelType.AUTO
 
 try:
     vm = vm_factory(backend=args.backend,
                     arch=args.arch,
                     fp_type='float' if args.realsize == 4 else 'double')
 
-    gen = GemmGenerator(vm)
+    gen = GemmGenerator(vm, gemm_type)
     gen.set(trans_a=config['trans_a'],
             trans_b=config['trans_b'],
             mat_a=mat_a,

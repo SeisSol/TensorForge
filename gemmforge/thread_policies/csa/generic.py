@@ -2,7 +2,7 @@ from ..abstract_thread_policy import AbstractBinaryOpThreadPolicy, DenseMatrix
 from gemmforge.vm import VM
 
 
-class NvidiaCsaThreadPolicy(AbstractBinaryOpThreadPolicy):
+class GenericCsaThreadPolicy(AbstractBinaryOpThreadPolicy):
   def __init__(self,
                vm: VM,
                num_threads: int,

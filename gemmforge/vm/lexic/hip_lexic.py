@@ -20,5 +20,14 @@ class HipLexic(CudaLexic):
     # RoCM (AMD) currently doesn't support __syncwarp
     return "__syncthreads()"
 
+  def get_sub_group_id(self, sub_group_size):
+    return f'{self.thread_idx_x} % {sub_group_size}'
+
+  def active_sub_group_mask(self):
+    return None
+
+  def broadcast_sync(self, variable, lane, mask):
+    return f'__shfl({variable}, {lane})'
+
   def get_headers(self):
     return ["hip/hip_runtime.h"]

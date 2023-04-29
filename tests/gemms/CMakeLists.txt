@@ -70,7 +70,7 @@ set(GEN_COPY_FILES ${CMAKE_BINARY_DIR}/${TEST_SUITE})
 
 include(../../cmake/setupGpuTarget.cmake)
 target_include_directories(${TARGET} PRIVATE ../../submodules/Device)
-target_link_libraries(${TARGET} PRIVATE ${GPU_TARGET} device -lpthread)
+target_link_libraries(${TARGET} PRIVATE ${GPU_TARGET} device)
 include(../../cmake/generateCode.cmake)
 
 if (${DEVICE_BACKEND} STREQUAL "hipsycl")

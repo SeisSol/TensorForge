@@ -1,4 +1,5 @@
 from gemmforge import DenseMatrix
+from gemmforge import GemmKernelType
 from itertools import product
 import functools
 from copy import deepcopy
@@ -20,10 +21,16 @@ class TestLoader:
   def __next__(self):
     test_params = next(self._param_iterator)
     spec = deepcopy(self._test_spec)
+    gemm_type = GemmKernelType.AUTO
+
     for param in test_params:
       _set_value(spec, param, test_params[param])
 
-    return (spec["trans_a"],
+      if "gemm_type" in spec:
+        gemm_type = GemmKernelType.to_str(spec["gemm_type"])
+
+    return (gemm_type,
+            spec["trans_a"],
             spec["trans_b"],
             self._produce_matrix(spec["matrix_a"]),
             self._produce_matrix(spec["matrix_b"]),
@@ -80,7 +87,6 @@ def _build_flatten_table(flatten_table, original_table, combo_key=()):
       _build_flatten_table(flatten_table, original_table[key], (*combo_key, key))
   else:
     flatten_table[combo_key] = original_table
-
 
 def _set_value(table, combo_key, value):
   if len(combo_key) == 1:
