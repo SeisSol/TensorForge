@@ -250,7 +250,13 @@ class GemmGenerator(GemmLikeGenerator):
               'alpha': self._alpha,
               'beta': self._beta,
               'num_compute_threads': self._num_compute_threads,
-              'num_active_threads': self._num_active_threads}
+              'num_active_threads': self._num_active_threads,
+              'sparse_a': self._sparse_a,
+              'sparse_b': self._sparse_b,
+              'coo_a': self._coo_a,
+              'coo_b': self._coo_b,
+              'val_a': self._val_a,
+              'val_b': self._val_b}
 
     kernel_factory = GemmKernelsFactory(**params)
     self._kernel_type = kernel_factory.gemm_kernel_type()

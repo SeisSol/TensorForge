@@ -19,6 +19,12 @@ class BaseGemmKernelBuilder(AbstractBuilder):
     self._beta = kwargs['beta']
     self._num_compute_threads = kwargs['num_compute_threads']
     self._num_active_threads = kwargs['num_active_threads']
+    self._sparse_a = kwargs['sparse_a']
+    self._sparse_b = kwargs['sparse_b']
+    self._coo_a = kwargs['coo_a']
+    self._coo_b = kwargs['coo_b']
+    self._val_a = kwargs['val_a']
+    self._val_b = kwargs['val_b']
 
     self._reg_array_obj = None
     self._shr_mem_obj = None
