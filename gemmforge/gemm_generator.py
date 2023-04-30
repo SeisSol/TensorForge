@@ -81,7 +81,6 @@ class GemmGenerator(GemmLikeGenerator):
     self._emit_instructions()
 
     self._analyze()
-
     self._generate_kernel()
     self._generate_header()
     self._generate_launcher()

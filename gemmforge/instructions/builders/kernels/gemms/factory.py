@@ -30,17 +30,16 @@ class GemmKernelType(Enum):
 
 class GemmKernelsFactory:
   def __init__(self, **kwargs):
-    print(kwargs)
     self._kwargs = kwargs
     self._vm = kwargs['vm']
     self._hw_descr = self._vm.get_hw_descr()
     self._gemm_kernel_type = kwargs['gemm_kernel_type']
 
     self._sparse_b = False
-    if 'sparse_b' in kwargs:
+    if 'sparse_b' in kwargs and kwargs['sparse_b']:
       self._sparse_b = True
     self._sparse_a = False
-    if 'sparse_a' in kwargs:
+    if 'sparse_a' in kwargs and kwargs['sparse_b']:
       self._sparse_a = True
 
   def _auto_select(self):
