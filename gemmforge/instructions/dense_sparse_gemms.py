@@ -73,7 +73,7 @@ class ShrMemBasedDenseSparseGemm(AbstractInstruction):
         if not value_known:
             writer(f'{self._dest.name}{res_access} += {op1_value} * {self._op2.name}[{iter}];')
         else:
-            writer(f'{self._dest.name}{res_access} += {op1_value} * {val_b[iter]};')
+            writer(f'{self._dest.name}{res_access} += {op1_value} * {val_b[iter]}{self._vm.get_real_literal()};')
       writer.Comment(f"Mul end col {row_id}")
       writer.Emptyline()
 

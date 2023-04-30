@@ -40,13 +40,7 @@ class ShrMemBasedDenseGemmBuilder(AbstractBuilder):
             trans_b: bool,
             op1: Symbol,
             op2: Symbol,
-            dest: Symbol,
-            sparse_a: bool,
-            sparse_b: bool,
-            coo_a: Tuple[List[List[int]],List[List[int]]],
-            coo_b: Tuple[List[List[int]],List[List[int]]],
-            val_a: Union[Tuple[List[int],List[int]], None],
-            val_b: Union[Tuple[List[int],List[int]], None]):
+            dest: Symbol):
     self._reset()
 
     # Note: of trans_a==True than an operand is given as KxM instead of (MxK).
@@ -71,13 +65,7 @@ class ShrMemBasedDenseGemmBuilder(AbstractBuilder):
                    'op1': self._op1,
                    'op2': self._op2,
                    'dest': dest,
-                   'num_threads': self._num_threads,
-                   'sparse_a': sparse_a,
-                   'sparse_b': sparse_b,
-                   'coo_a': coo_a,
-                   'coo_b': coo_b,
-                   'val_a': val_a,
-                   'val_b': val_b}
+                   'num_threads': self._num_threads}
     self._instructions.append(ShrMemBasedDenseGemm(**gemm_params))
 
   def _make_loader_and_symbol(self, operand, do_transpose):

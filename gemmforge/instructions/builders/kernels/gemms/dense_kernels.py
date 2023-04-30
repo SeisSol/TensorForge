@@ -30,13 +30,7 @@ class ShrMemBasedDenseGemmKernelBuilder(BaseGemmKernelBuilder):
                   trans_b=self._trans_b,
                   op1=self._symbol_table[self._mat_a],
                   op2=self._symbol_table[self._mat_b],
-                  dest=self._symbol_table[self._reg_array_obj],
-                  sparse_a=self._sparse_a,
-                  sparse_b=self._sparse_b,
-                  coo_a=self._coo_a,
-                  coo_b=self._coo_b,
-                  val_a=self._val_a,
-                  val_b=self._val_b)
+                  dest=self._symbol_table[self._reg_array_obj])
 
     self._shr_mem_loads = builder.get_srh_mem_loads()
     self._instructions.extend(builder.get_instructions())
@@ -62,13 +56,7 @@ class RegisterOnlyDenseGemmKernelBuilder(BaseGemmKernelBuilder):
                   trans_b=self._trans_b,
                   op1=self._symbol_table[self._mat_a],
                   op2=self._symbol_table[self._mat_b],
-                  dest=self._symbol_table[self._reg_array_obj],
-                  sparse_a=self._sparse_a,
-                  sparse_b=self._sparse_b,
-                  coo_a=self._coo_a,
-                  coo_b=self._coo_b,
-                  val_a=self._val_a,
-                  val_b=self._val_b)
+                  dest=self._symbol_table[self._reg_array_obj])
 
     self._shr_mem_loads = builder.get_srh_mem_loads()
     self._instructions.extend(builder.get_instructions())
