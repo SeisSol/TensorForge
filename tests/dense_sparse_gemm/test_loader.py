@@ -6,6 +6,9 @@ import numpy as np
 import numpy as np
 from random import randint
 
+first = True
+writes = 0
+random_coordinates = True
 def gen_matrix_b(rowB, colB, transposed, btype):
     coo = {"name": "B", "rows": rowB, "cols": colB, "entries": [], "coordinates": []}
 
@@ -81,13 +84,54 @@ def gen_matrix_b(rowB, colB, transposed, btype):
             coo["entries"].append([i, j, 9.0])
             coo["coordinates"].append([i, j])
             npB[i, j] = i*10 + j
-
-      if colB % 2 == 0:
-        a = rowB*colB//2
-      elif rowB % 2 == 0:
-        a = rowB*colB//2
+    elif btype == "random":
+      entry_count = int(0.15*rowB*colB)
+      l = set()
+      while len(l) < entry_count:
+        i = randint(0,8)
+        j = randint(0,8)
+        l.add((i,j))
+      llist = list(l)
+      if transposed:
+        llist.sort(key=lambda x:x[0]*colB + x[1])
       else:
-        a = 1 + rowB*colB//2
+        llist.sort(key=lambda x:x[0] + x[1]*rowB)
+
+      for i, j in llist:
+        coo["entries"].append([i, j, 11.0])
+        coo["coordinates"].append([i, j])
+
+      global first
+      global writes
+      if first:
+        if transposed:
+          raise Exception("The B-sparsity parameters should be exactly [False, True]")
+        with open("gen_code/coordinate_vector.cpp", "w") as f:
+          f.write("#include <vector>\n")
+          f.write("#include <tuple>\n")
+          f.write("std::vector<std::tuple<int, int>> get_coordinates_B_core()\n")
+          f.write("{\n")
+          f.write("std::vector<std::tuple<int, int>> coordinates;\n")
+          for (i,j) in llist:
+            f.write(f"coordinates.push_back(std::make_tuple({i}, {j}));\n")
+          f.write("return coordinates;\n")
+          f.write("}\n")
+          first = False
+          writes += 1
+      else:
+          if not transposed:
+           raise Exception("The B-sparsity parameters should be exactly [False, True]")
+          if writes > 2:
+            raise Exception("Random sparse matrix test is allowed to create precisely 2 matrices, one B and one B transposed")
+          with open("gen_code/coordinate_vector.cpp", "a") as f:
+            f.write("std::vector<std::tuple<int, int>> get_coordinates_B_core_transposed()\n")
+            f.write("{\n")
+            f.write("std::vector<std::tuple<int, int>> coordinates;\n")
+            for (i,j) in llist:
+              f.write(f"coordinates.push_back(std::make_tuple({i}, {j}));\n")
+            f.write("return coordinates;\n")
+            f.write("}\n")
+          writes += 1
     else:
         raise Exception("NO")
     return coo
@@ -124,7 +168,8 @@ class TestLoader:
               spec["beta"],
               spec["num_elements"],
               spec["matrix_b"]["matrix_type"],
-              self._gen_test_name(test_params))
+              self._gen_test_name(test_params),
+              spec["kernel_type"])
 
     else:
       dense = self._produce_matrix(spec["matrix_b"], spec)  
@@ -138,7 +183,8 @@ class TestLoader:
               spec["beta"],
               spec["num_elements"],
               spec["matrix_b"]["matrix_type"],
-              self._gen_test_name(test_params))
+              self._gen_test_name(test_params),
+              spec["kernel_type"])
 
   def _produce_matrix(self, matrix_spec, spec):
     if matrix_spec["sparse"]:

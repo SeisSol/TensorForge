@@ -9,7 +9,8 @@ set(TARGET_SOURCE_FILES main.cpp
         common/aux.cpp
         common/gemm.cpp
         common/test_drivers/simple_comparator.cpp
-        gen_code/test.cpp)
+        gen_code/test.cpp
+        gen_code/coordinate_vector.cpp)
 
 set(TARGET_INCLUDE_DIRS ${CMAKE_SOURCE_DIR}
         gen_code
@@ -56,14 +57,14 @@ set(GPU_TARGET_INCLUDE_DIRS include
         ../../submodules/Device)
 
 if(${DEVICE_BACKEND} STREQUAL "cuda")
-    set(GPU_TARGET_SOURCE_FILES common/test_drivers/simple_driver.cpp common/test_drivers/simple_dense_sparse_driver.cpp include/gemmforge_aux.cu gen_code/kernels.cu)
-    set(GEN_COPY_PRODUCTS ${CMAKE_SOURCE_DIR}/gen_code/kernels.cu ${CMAKE_SOURCE_DIR}/gen_code/kernels.h ${CMAKE_SOURCE_DIR}/gen_code/test.cpp)
+    set(GPU_TARGET_SOURCE_FILES common/test_drivers/simple_driver.cpp common/test_drivers/simple_dense_sparse_driver.cpp include/gemmforge_aux.cu gen_code/kernels.cu gen_code/coordinate_vector.cpp)
+    set(GEN_COPY_PRODUCTS ${CMAKE_SOURCE_DIR}/gen_code/kernels.cu ${CMAKE_SOURCE_DIR}/gen_code/kernels.h ${CMAKE_SOURCE_DIR}/gen_code/test.cpp ${CMAKE_SOURCE_DIR}/gen_code/coordinate_vector.cpp)
 elseif(${DEVICE_BACKEND} STREQUAL "hip")
-    set(GPU_TARGET_SOURCE_FILES common/test_drivers/simple_driver.cpp common/test_drivers/simple_dense_sparse_driver.cpp include/gemmforge_aux.cpp gen_code/kernels.cpp)
-    set(GEN_COPY_PRODUCTS ${CMAKE_SOURCE_DIR}/gen_code/kernels.cpp ${CMAKE_SOURCE_DIR}/gen_code/kernels.h ${CMAKE_SOURCE_DIR}/gen_code/test.cpp)
+    set(GPU_TARGET_SOURCE_FILES common/test_drivers/simple_driver.cpp common/test_drivers/simple_dense_sparse_driver.cpp include/gemmforge_aux.cpp gen_code/kernels.cpp gen_code/coordinate_vector.cpp)
+    set(GEN_COPY_PRODUCTS ${CMAKE_SOURCE_DIR}/gen_code/kernels.cpp ${CMAKE_SOURCE_DIR}/gen_code/kernels.h ${CMAKE_SOURCE_DIR}/gen_code/test.cpp ${CMAKE_SOURCE_DIR}/gen_code/coordinate_vector.cpp)
 elseif((${DEVICE_BACKEND} STREQUAL "oneapi") OR (${DEVICE_BACKEND} STREQUAL "hipsycl"))
-    set(GPU_TARGET_SOURCE_FILES common/test_drivers/simple_driver.cpp common/test_drivers/simple_dense_sparse_driver.cpp include/gemmforge_aux_sycl.cpp gen_code/kernels.cpp )
-    set(GEN_COPY_PRODUCTS ${CMAKE_SOURCE_DIR}/gen_code/kernels.cpp ${CMAKE_SOURCE_DIR}/gen_code/kernels.h ${CMAKE_SOURCE_DIR}/gen_code/test.cpp)
+    set(GPU_TARGET_SOURCE_FILES common/test_drivers/simple_driver.cpp common/test_drivers/simple_dense_sparse_driver.cpp include/gemmforge_aux_sycl.cpp gen_code/kernels.cpp gen_code/coordinate_vector.cpp)
+    set(GEN_COPY_PRODUCTS ${CMAKE_SOURCE_DIR}/gen_code/kernels.cpp ${CMAKE_SOURCE_DIR}/gen_code/kernels.h ${CMAKE_SOURCE_DIR}/gen_code/test.cpp ${CMAKE_SOURCE_DIR}/gen_code/coordinate_vector.cpp)
 endif()
 
 set(GEN_COPY_FILES ${CMAKE_BINARY_DIR}/${TEST_SUITE})

@@ -45,6 +45,11 @@ class SparseMatrix(Matrix):
             self.elcount += 1
             iter += 1
 
+        non_zero_cols = []
+        for i in  self.coo_row_major:
+            non_zero_cols.append(len(i))
+        self.num_max_non_zero_cols = max(non_zero_cols)
+
         # If the coordinates are not sorted, we need to generated iteration orders, during the generation we need
         # to find the offsets of the elements
         for row in self.coo_row_major:
@@ -57,6 +62,9 @@ class SparseMatrix(Matrix):
 
     def get_actual_num_cols(self):
         return self.num_cols
+
+    def get_actual_num_max_nonzero_cols(self):
+        return self.num_max_non_zero_cols
 
     def get_actual_volume(self):
         return self.num_rows * self.num_cols

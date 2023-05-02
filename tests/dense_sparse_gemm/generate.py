@@ -6,7 +6,7 @@ from test_loader import TestLoader
 import os
 import yaml
 import argparse
-
+from gemmforge import GemmKernelType
 
 parser = argparse.ArgumentParser()
 parser.add_argument('-s', '--specfile', action='store', help='path to a yaml file with a test spec')
@@ -69,19 +69,28 @@ with constructs.Cpp(StringIO()) as file:
 
 for suite in suites:
   for test in TestLoader(suite):
-    trans_a, trans_b, mat_a, mat_b, mat_b_sparse, mat_c, alpha, beta, num_elements, matrix_b_type, test_name  = test
+    trans_a, trans_b, mat_a, mat_b, mat_b_sparse, mat_c, alpha, beta, num_elements, matrix_b_type, test_name, kernel_type  = test
     try:
-      generator1 = GemmGenerator(vm)
+      if kernel_type == "shr_mem":
+        dense_kernel_type = GemmKernelType.SHR_MEM_BASED
+        dense_sparse_kernel_type = GemmKernelType.DENSE_SPARSE_SHR_MEM_BASED
+      elif kernel_type == "register_only":
+        dense_kernel_type = GemmKernelType.REGISTER_ONLY_BASED
+        dense_sparse_kernel_type = GemmKernelType.DENSE_SPARSE_REGISTER_ONLY_BASED
+      else:
+        raise Exception("Wrong kernel_type string")
+      
+      generator1 = GemmGenerator(vm=vm, kernel_type=dense_kernel_type)
       T = "T"
       NT = ""
-      generator1.set(trans_a, trans_b, mat_a, mat_b, mat_c, alpha, beta, base_name=f"A{T if trans_a else NT}_B{T if trans_b else NT}_{matrix_b_type}_DenseXDense")
+      generator1.set(trans_a, trans_b, mat_a, mat_b, mat_c, alpha, beta, base_name=f"A{T if trans_a else NT}_B{T if trans_b else NT}_{matrix_b_type}_DenseXDense_{kernel_type}")
       generator1.generate()
       src.write(generator1.get_kernel())
       src.write(generator1.get_launcher())
       headers.write(generator1.get_launcher_header())
 
-      generator2 = GemmGenerator(vm)
-      generator2.set(trans_a, trans_b, mat_a, mat_b_sparse, mat_c, alpha, beta, base_name=f"A{T if trans_a else NT}_B{T if trans_b else NT}_{matrix_b_type}_DenseXSparse")
+      generator2 = GemmGenerator(vm=vm, kernel_type=dense_sparse_kernel_type)
+      generator2.set(trans_a, trans_b, mat_a, mat_b_sparse, mat_c, alpha, beta, base_name=f"A{T if trans_a else NT}_B{T if trans_b else NT}_{matrix_b_type}_DenseXSparse_{kernel_type}")
       generator2.generate()
       src.write(generator2.get_kernel())
       src.write(generator2.get_launcher())
@@ -137,7 +146,7 @@ for suite in suites:
           file(f'unsigned* flags = nullptr;')
           file.Emptyline()
 
-          file(f'SetUp(rowA, colA, rowB, colB, rowC, colC, numElements, \"{matrix_b_type}\", {"true" if not trans_b else "false"});')
+          file(f'SetUp(rowA, colA, rowB, colB, rowC, colC, numElements, \"{matrix_b_type}\", {"true" if trans_b else "false"});')
           file(f'Driver.prepareData(\"{matrix_b_type}\");')
 
           args = []

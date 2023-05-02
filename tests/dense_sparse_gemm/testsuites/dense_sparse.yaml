@@ -28,9 +28,12 @@ test_suites:
     trans_params_a: [False]
     trans_params_b: [False, True]
 
-    matrix_b_params_type: ["band_diagonal", "single_column", "single_row", "chequered", "full"]
+    matrix_b_params_type: ["band_diagonal", "single_column", "single_row", "chequered", "full", "random"]
 
     alpha: 1.0
     beta: 1.0
 
     num_elements: 100
+
+    kernel_type: "kernel_type_params"
+    kernel_type_params: ["shr_mem"]
