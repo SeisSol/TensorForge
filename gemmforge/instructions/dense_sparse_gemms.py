@@ -15,15 +15,7 @@ class ShrMemBasedDenseSparseGemm(AbstractInstruction):
     self._op2 = kwargs['op2']
     self._dest = kwargs['dest']
     self._num_threads = kwargs['num_threads']
-    self._sparse_a = kwargs['sparse_a']
-    self._sparse_b = kwargs['sparse_b']
-    self._coo_a = kwargs['coo_a']
-    self._coo_b = kwargs['coo_b']
-    self._val_a = kwargs['val_a']
-    self._val_b = kwargs['val_b']
-
-    if self._coo_b == None:
-      raise InternalError("For Dense x Sparse Kernel we need coordinates of Matrix b")
+    self._mat_b = kwargs['mat_b']
 
     if self._op1.stype == SymbolType.Batch:
       raise InternalError('gemm: `op1` is a batch type, must be either glb. or shr.')
@@ -50,7 +42,7 @@ class ShrMemBasedDenseSparseGemm(AbstractInstruction):
         writer(f'{value_var} = {self._op1.name}[{op1_addr}];')
         writer.Emptyline()
 
-        self._get_inner_loop_sparse_with_a_row(writer, value_var, k, self._coo_b[1][k], self._val_b)
+        self._get_inner_loop_sparse_with_a_row(writer, value_var, k, self._mat_b.get_coo_row_major()[k], self._mat_b.get_values())
 
   def _get_inner_loop_sparse_with_a_row(self, writer, op1_value, row_id, non_zeros, val_b=None):
     # Iterate the first column first then the second etc. (coo_b[0] if col major, otherwise coo_b[1] if row major)
@@ -59,7 +51,7 @@ class ShrMemBasedDenseSparseGemm(AbstractInstruction):
     if len(non_zeros) > 0:
       value_known = val_b != None
       writer.Comment(f"Mul begin col {row_id}")
-      coordinates = self._coo_b[2]
+      coordinates = self._mat_b.get_coordinates()
 
       for col_id in non_zeros:
         (i, j) = (row_id, col_id)
@@ -90,15 +82,7 @@ class RegisterOnlyDenseSparseGemm(AbstractInstruction):
     self._op2 = kwargs['op2']
     self._dest = kwargs['dest']
     self._num_threads = kwargs['num_threads']
-    self._sparse_a = kwargs['sparse_a']
-    self._sparse_b = kwargs['sparse_b']
-    self._coo_a = kwargs['coo_a']
-    self._coo_b = kwargs['coo_b']
-    self._val_a = kwargs['val_a']
-    self._val_b = kwargs['val_b']
-
-    if self._coo_b == None:
-      raise InternalError("For Dense x Sparse Kernel we need coordinates of Matrix b")
+    self._mat_b = kwargs['mat_b']
 
     if self._op1.stype == SymbolType.Batch:
       raise InternalError('gemm: `op1` is a batch type, must be either glb. or shr.')

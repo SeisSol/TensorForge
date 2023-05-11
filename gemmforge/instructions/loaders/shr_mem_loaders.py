@@ -3,7 +3,7 @@ from gemmforge import constructs
 from .abstract_loader import AbstractShrMemLoader
 from gemmforge.symbol_table import SymbolType, Symbol, DataView
 from copy import deepcopy
-
+from gemmforge.matrix import SparseMatrix, DenseMatrix
 
 class ExtendedPatchLoader(AbstractShrMemLoader):
   """A strategy which loads an entire matrix into shared memory
@@ -18,7 +18,7 @@ class ExtendedPatchLoader(AbstractShrMemLoader):
     full_subvolume = (data_view.columns - 2) * data_view.lead_dim
     cropped_subvolume = data_view.rows + data_view.lead_dim
     matrix = self._src.obj
-    if matrix.get_matrix_type() == "dense":
+    if isinstance(matrix, DenseMatrix):
       self._shm_volume = cropped_subvolume + full_subvolume
     else: # Has to be sparse if not dense
       self._shm_volume = matrix.get_el_count()

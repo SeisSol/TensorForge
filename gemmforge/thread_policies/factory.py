@@ -23,13 +23,13 @@ class TheadPolicyFactory:
     hw_descr = vm.get_hw_descr()
     if hw_descr.manufacturer in TheadPolicyFactory.ALLOWED_MANUFACTURES:
       if shr_mem_per_op == 0:
-        if op2.get_matrix_type() == "dense":
+        if isinstance(op2, DenseMatrix):
           return OnlyRegisterBasedThreadPolicy(vm,
                                                 num_threads,
                                                 op1,
                                                 op2,
                                                 res)
-        elif op2.get_matrix_type() == "sparse":
+        elif isinstance(op2, SparseMatrix):
           return OnlyRegisterBasedThreadPolicy(vm,
                                                 num_threads,
                                                 op1,
@@ -38,14 +38,14 @@ class TheadPolicyFactory:
         else:
           raise RuntimeError('Unknown Matrix type')
       else:
-        if op2.get_matrix_type() == "dense":
+        if isinstance(op2, DenseMatrix):
           return GenericGemmThreadPolicy(vm,
                                          shr_mem_per_op,
                                          num_threads,
                                          op1,
                                          op2,
                                          res)
-        elif op2.get_matrix_type() == "sparse":
+        elif isinstance(op2, SparseMatrix):
           return GenericDenseSparseGemmThreadPolicy(vm,
                                                     shr_mem_per_op,
                                                     num_threads,

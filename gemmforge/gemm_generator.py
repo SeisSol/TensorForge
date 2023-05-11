@@ -9,6 +9,7 @@ from .instructions.builders.kernels import GemmKernelsFactory
 from .instructions.builders.kernels import GemmKernelType
 from .vm import VM
 from .thread_policies import TheadPolicyFactory
+from .matrix import SparseMatrix
 import math
 import hashlib
 
@@ -25,15 +26,6 @@ class GemmGenerator(GemmLikeGenerator):
     self._mat_a = None
     self._mat_b = None
     self._mat_c = None
-    self._sparse_a = None
-    self._sparse_b = None
-    self._coo_a = None
-    self._coo_b = None
-    self._val_a = None
-    self._val_b = None
-    self._mat_a = None
-    self._mat_b = None
-    self._mat_c = None
 
     self._reg_array_obj = None
     self._shr_mem_obj = None
@@ -44,9 +36,6 @@ class GemmGenerator(GemmLikeGenerator):
 
     self._mat_a = mat_a
     self._trans_a = trans_a
-    self._sparse_a = mat_a.get_matrix_type() == "sparse"
-    if self._sparse_a:
-        raise Exception("AxB Matrix mult with Sparse A is under development")
     self._mat_a.set_name('A')
     self._mat_a.set_data_flow_direction(DataFlowDirection.SOURCE)
     self._mat_a.set_name('A')
@@ -54,10 +43,6 @@ class GemmGenerator(GemmLikeGenerator):
 
     self._mat_b = mat_b
     self._trans_b = trans_b
-    self._sparse_b = mat_b.get_matrix_type() == "sparse"
-    if self._sparse_b:
-        self._coo_b = (self._mat_b.get_coo_col_major(), self._mat_b.get_coo_row_major(), self._mat_b.get_coordinates())
-        self._val_b = self._mat_b.get_values()
     self._mat_b.set_name('B')
     self._mat_b.set_data_flow_direction(DataFlowDirection.SOURCE)
 
@@ -199,17 +184,10 @@ class GemmGenerator(GemmLikeGenerator):
             raise GenerationError('Cannot generate a matrix multiplication with given parameters. '
                                   'Matrix A (NoTrans) and B (NoTrans) do not match')
 
-      if self._sparse_a and self._sparse_b:
+      if isinstance(self._mat_a, SparseMatrix) and isinstance(self._mat_a, SparseMatrix):
           raise GenerationError("Gemmforge does not support AxB where both A and B are sparse")
-      elif self._sparse_a:
+      elif  isinstance(self._mat_a, SparseMatrix):
           raise GenerationError("AxB where A is sparse is not yet implemented")
-
-      if self._sparse_a and self._coo_a == None:
-          raise GenerationError(
-              "In AxB, if A is sparse then the coordinates need to provided by the SparseMatrix class")
-      if self._sparse_b and self._coo_b == None:
-          raise GenerationError(
-              "In AxB, if B is sparse then the coordinates need to provided by the SparseMatrix class")
 
     except GenerationError as error:
       matrices = {'A': self._mat_a, 'B': self._mat_b, 'C': self._mat_c}
@@ -249,13 +227,7 @@ class GemmGenerator(GemmLikeGenerator):
               'alpha': self._alpha,
               'beta': self._beta,
               'num_compute_threads': self._num_compute_threads,
-              'num_active_threads': self._num_active_threads,
-              'sparse_a': self._sparse_a,
-              'sparse_b': self._sparse_b,
-              'coo_a': self._coo_a,
-              'coo_b': self._coo_b,
-              'val_a': self._val_a,
-              'val_b': self._val_b}
+              'num_active_threads': self._num_active_threads}
 
     kernel_factory = GemmKernelsFactory(**params)
     self._kernel_type = kernel_factory.gemm_kernel_type()

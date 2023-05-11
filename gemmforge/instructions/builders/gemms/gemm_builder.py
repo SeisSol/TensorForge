@@ -8,7 +8,7 @@ from gemmforge.instructions import RegisterOnlyDenseSparseGemm
 from gemmforge.instructions import ShrMemBasedDenseSparseGemm
 from gemmforge.instructions.loaders import shm_mem_loader_factory
 from gemmforge.basic_types import GeneralLexicon
-
+from gemmforge.matrix import SparseMatrix
 
 class ShrMemBasedDenseGemmBuilder(AbstractBuilder):
   """This class helps to assemble all necessary instructions
@@ -171,12 +171,7 @@ class ShrMemBasedDenseSparseGemmBuilder(AbstractBuilder):
             op1: Symbol,
             op2: Symbol,
             dest: Symbol,
-            sparse_a: bool,
-            sparse_b: bool,
-            coo_a: Tuple[List[List[int]],List[List[int]]],
-            coo_b: Tuple[List[List[int]],List[List[int]]],
-            val_a: Union[Tuple[List[int],List[int]], None],
-            val_b: Union[Tuple[List[int],List[int]], None]):
+            mat_b: SparseMatrix):
     self._reset()
 
     # Note: of trans_a==True than an operand is given as KxM instead of (MxK).
@@ -202,12 +197,7 @@ class ShrMemBasedDenseSparseGemmBuilder(AbstractBuilder):
                    'op2': self._op2,
                    'dest': dest,
                    'num_threads': self._num_threads,
-                   'sparse_a': sparse_a,
-                   'sparse_b': sparse_b,
-                   'coo_a': coo_a,
-                   'coo_b': coo_b,
-                   'val_a': val_a,
-                   'val_b': val_b}
+                   'mat_b': mat_b}
     self._instructions.append(ShrMemBasedDenseSparseGemm(**gemm_params))
 
   def _make_loader_and_symbol(self, operand, do_transpose):
@@ -256,7 +246,8 @@ class RegisterOnlyDenseSparseGemmBuilder(AbstractBuilder):
             trans_b: bool,
             op1: Symbol,
             op2: Symbol,
-            dest: Symbol):
+            dest: Symbol,
+            mat_b: SparseMatrix):
     raise Exception("TODO: Not yet Implemented!")
 
   def get_srh_mem_loads(self):

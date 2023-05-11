@@ -56,7 +56,3 @@ class Matrix(ABC):
         string += "num. columns = {}\n".format(self.num_cols)
         string += "addressing = {}\n".format(self.addressing)
         return string
-
-    @abstractmethod
-    def get_matrix_type(self):
-        return "undefined"

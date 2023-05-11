@@ -2,6 +2,7 @@ from .dense_kernels import ShrMemBasedDenseGemmKernelBuilder
 from .dense_kernels import RegisterOnlyDenseGemmKernelBuilder
 from .dense_sparse_kernels import ShrMemBasedDenseSparseGemmKernelBuilder
 from .dense_sparse_kernels import RegisterOnlyDenseSparseGemmKernelBuilder
+from gemmforge.matrix import SparseMatrix, DenseMatrix
 from enum import Enum
 
 
@@ -35,11 +36,13 @@ class GemmKernelsFactory:
     self._hw_descr = self._vm.get_hw_descr()
     self._gemm_kernel_type = kwargs['gemm_kernel_type']
 
+    self._mat_a = kwargs['mat_a']
+    self._mat_b = kwargs['mat_b']
     self._sparse_b = False
-    if 'sparse_b' in kwargs and kwargs['sparse_b']:
-      self._sparse_b = True
     self._sparse_a = False
-    if 'sparse_a' in kwargs and kwargs['sparse_b']:
+    if isinstance(self._mat_b, SparseMatrix):
+      self._sparse_b = True
+    if isinstance(self._mat_b, DenseMatrix):
       self._sparse_a = True
 
   def _auto_select(self):

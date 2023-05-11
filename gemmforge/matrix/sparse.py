@@ -75,9 +75,6 @@ class SparseMatrix(Matrix):
     def get_offset_to_first_element(self):
         return 0
 
-    def get_matrix_type(self):
-        return "sparse"
-
     def __str__(self):
         string = super().__str__()
         string += str(self.dense_representation)

@@ -46,6 +46,3 @@ class DenseMatrix(Matrix):
         string += "num. actual rows = {}\n".format(self.get_actual_num_rows())
         string += "num. actual cols = {}\n".format(self.get_actual_num_cols())
         return string
-
-    def get_matrix_type(self):
-        return "dense"
