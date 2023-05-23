@@ -73,6 +73,7 @@ class ShrMemBasedDenseSparseGemm(AbstractInstruction):
     return f'{self._dest.name} = gemm({self._op1.name}, {self._op2.name})'
 
 
+
 class RegisterOnlyDenseSparseGemm(AbstractInstruction):
   def __init__(self, **kwargs):
     super(RegisterOnlyDenseSparseGemm, self).__init__(kwargs['vm'])
@@ -97,9 +98,12 @@ class RegisterOnlyDenseSparseGemm(AbstractInstruction):
 
 
   def gen_code(self, writer):
+    self._val_b = self._mat_b.get_values()
+    value_known = self._val_b != None
     op1_variable = 'value1'
     op2_variable = 'value2'
     warp_idx_variable = 'wid'
+    self._vec_unit_length = self._vm.get_hw_descr().vec_unit_length
 
     op1_data_view = self._op1.data_view
     op2_data_view = self._op2.data_view
@@ -110,6 +114,8 @@ class RegisterOnlyDenseSparseGemm(AbstractInstruction):
 
     writer(f'{self._vm.fp_as_str()} {op1_variable};')
     writer(f'{self._vm.fp_as_str()} {op2_variable};')
+    writer(f'{self._vm.fp_as_str()} tmp;')
+    writer(f'int shiftedWid;')
 
     active_sub_group_mask = self._vm._lexic.active_sub_group_mask()
     if active_sub_group_mask:
@@ -123,68 +129,90 @@ class RegisterOnlyDenseSparseGemm(AbstractInstruction):
 
     writer.Emptyline()
     writer.Pragma('unroll')
-    with writer.For(f'int k = 0; k < {k_end}; ++k'):
+    for k in range(k_end):
+      writer.Comment(f"Begin Column {k} of A")
       with writer.If(self.gen_mask_threads(num_cols)):
         if self._trans_a:
-          op1_addr = f'k + {thread_idx_x} * {op1_data_view.lead_dim}'
+          op1_addr = f'{k} + {thread_idx_x} * {op1_data_view.lead_dim}'
         else:
-          op1_addr = f'{thread_idx_x} + k * {op1_data_view.lead_dim}'
+          op1_addr = f'{thread_idx_x} + {k} * {op1_data_view.lead_dim}'
         writer(f'{op1_variable} = {self._op1.name}[{op1_addr}];')
+    
+      l = list()
+      rb = list()
+      rb.append(0)
+      i = 0
+      for row in self._mat_b.get_coo_row_major():
+        l.append(len(row))
+        if i!=0 and i!=len(self._mat_b.get_coo_row_major())-1:
+          rb[i] = rb[i-1] + len(row)
 
-      start_tile_variable = 'startTileN'
-      end_tile_variable = 'endTileN'
+      assert(len(l) == k_end)
+
+      #non_zero_el_per_row = "non_zero_el_per_row"
+      #s = f"int {non_zero_el_per_row}[{k_end}] = {'{'}"
+      #for i in range(len(l)-1):
+      #  s += (str(l[i]))
+      #  s += (", ")
+      #s += (str(l[len(l)-1]))
+      #s += ("};")
+      
+      #writer(s) 
 
       writer.Emptyline()
-      writer.Pragma('unroll')
-      with writer.For(f'int {start_tile_variable} = 0; '
-                      f'{start_tile_variable} < {self._dest.obj.size}; '
-                      f'{start_tile_variable} += {self._vec_unit_length}'):
-        writer(f'int shiftedWid = {start_tile_variable} + {warp_idx_variable};')
-        with writer.If(f'shiftedWid < {self._dest.obj.size}'):
-          if self._trans_b:
-            op2_addr = f'shiftedWid + k * {op2_data_view.lead_dim}'
+      tileid = 0
+      for start_tile_n in range(0, k_end, self._vec_unit_length):
+        writer.Comment(f"Begin Tile {start_tile_n}..{start_tile_n+self._vec_unit_length}")
+        writer(f'shiftedWid = {start_tile_n} + {warp_idx_variable};')
+        
+        # We need to load values of k'th row of k for that we need to find their offset in the sparse matrix
+        non_zeros = self._mat_b.get_coo_row_major()[k]
+        non_zeros_of_this_tile = non_zeros[start_tile_n:start_tile_n+self._vec_unit_length]
+
+        if len(non_zeros_of_this_tile) == 0:
+          continue
+
+        it = 0
+        non_zero_to_thread = list()
+        for non_zero_col_id in non_zeros_of_this_tile:
+          with writer.If(f'shiftedWid == {it}'):
+            op2_addr = self._mat_b.find_1d_offset(k, non_zero_col_id)
+            writer(f'{op2_variable} = {self._op2.name}[{op2_addr}];')
+            non_zero_to_thread.append((non_zero_col_id, it))
+          if it != len(non_zeros_of_this_tile) - 1:
+            writer(f'else')
+          it += 1
+
+        if active_sub_group_mask:
+          writer(f'{sub_group} = {active_sub_group_mask};')
+
+        end_tile = start_tile_n + self._vec_unit_length
+        if end_tile >= k_end:
+          end_tile = k_end
+        if end_tile > start_tile_n + len(non_zeros_of_this_tile):
+          end_tile = start_tile_n + len(non_zeros_of_this_tile)
+        
+        broadcast_idx = 0
+        for n in non_zeros_of_this_tile: #range(start_tile_n, end_tile):
+          if not value_known:
+            tmp_value = 'tmp'
+            broadcast_sync = self._vm._lexic.broadcast_sync(op2_variable,
+                                                            broadcast_idx,
+                                                            sub_group)
+            writer(f'{tmp_value} = {broadcast_sync};')
+            res_access = f"[{n}]"
+            writer(f'{self._dest.name}{res_access} += {op1_variable} * {tmp_value};')
           else:
-            op2_addr = f'shiftedWid * {op2_data_view.lead_dim} + k'
-          writer(f'{op2_variable} = {self._op2.name}[{op2_addr}];')
-
-          if active_sub_group_mask:
-            writer(f'{sub_group} = {active_sub_group_mask};')
-
-        writer.Emptyline()
-        writer(f'int {end_tile_variable} = '
-               f'{start_tile_variable} + {self._vec_unit_length};')
-
-        writer(f'{end_tile_variable} = '
-               f'({end_tile_variable} < {self._dest.obj.size}) '
-               f' ? {end_tile_variable} : {self._dest.obj.size};')
-
-        writer.Emptyline()
-        self._get_inner_loop(writer,
-                             op1_variable,
-                             op2_variable,
-                             start_tile_variable,
-                             end_tile_variable,
-                             sub_group)
-
-  def _get_inner_loop(self,
-                      writer,
-                      op1_variable,
-                      op2_variable,
-                      start,
-                      end,
-                      sub_group):
-    writer.Pragma('unroll')
-    with writer.For(f'int n = {start}, broadcastIdx = 0; '
-                    f'n < {end}; '
-                    f'++n, ++broadcastIdx'):
-      tmp_value = 'tmp'
-      broadcast_sync = self._vm._lexic.broadcast_sync(op2_variable,
-                                                      "broadcastIdx",
-                                                      sub_group)
-      writer(f'auto {tmp_value} = {broadcast_sync};')
-
-      res_access = '' if self._dest.obj.size == 1 else '[n]'
-      writer(f'{self._dest.name}{res_access} += {op1_variable} * {tmp_value};')
+            res_access = f"[{n}]"
+            address = self._mat_b.find_1d_offset(k ,n)
+            writer(f'{self._dest.name}{res_access} += {op1_variable} * {self._val_b[address]}{self._vm.get_real_literal()};')
+          broadcast_idx += 1
+        tileid += 1
+        writer.Comment(f"End Tile {start_tile_n}..{start_tile_n+self._vec_unit_length}")
+        if start_tile_n < k_end - self._vec_unit_length:
+          writer.Emptyline()
+      writer.Comment(f"End Column {k} of A")
+      writer.Emptyline()
 
   def __str__(self) -> str:
     return f'{self._dest.name} = rb_gemm({self._op1.name}, {self._op2.name})'

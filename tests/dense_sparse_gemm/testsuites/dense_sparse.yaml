@@ -36,4 +36,4 @@ test_suites:
     num_elements: 100
 
     kernel_type: "kernel_type_params"
-    kernel_type_params: ["shr_mem"]
+    kernel_type_params: ["shr_mem", "register_only"]

@@ -94,3 +94,15 @@ class SparseMatrix(Matrix):
 
     def get_el_count(self):
         return self.elcount
+
+    def find_1d_offset(self, row, col):
+        assert(row < self.get_actual_num_rows())
+        assert(col < self.get_actual_num_cols())
+        coordinates = self.get_coordinates()
+        iter = 0
+        for (_row, _col) in coordinates:
+            if row == _row and col == _col:
+                break
+            iter += 1
+        assert(iter < len(coordinates))
+        return iter
