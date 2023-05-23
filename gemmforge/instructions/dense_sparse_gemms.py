@@ -128,7 +128,6 @@ class RegisterOnlyDenseSparseGemm(AbstractInstruction):
     num_cols = op1_data_view.columns if self._trans_a else op1_data_view.rows
 
     writer.Emptyline()
-    writer.Pragma('unroll')
     for k in range(k_end):
       writer.Comment(f"Begin Column {k} of A")
       with writer.If(self.gen_mask_threads(num_cols)):

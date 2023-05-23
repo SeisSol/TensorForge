@@ -9,6 +9,8 @@ from random import randint
 first = True
 writes = 0
 random_coordinates = True
+random_coo1 = list()
+random_coo2 = list()
 def gen_matrix_b(rowB, colB, transposed, btype):
     coo = {"name": "B", "rows": rowB, "cols": colB, "entries": [], "coordinates": []}
 
@@ -85,6 +87,10 @@ def gen_matrix_b(rowB, colB, transposed, btype):
             coo["coordinates"].append([i, j])
             npB[i, j] = i*10 + j
     elif btype == "random":
+      global random_coo1
+      global random_coo2
+      global first
+      global writes
       entry_count = int(0.15*rowB*colB)
       l = set()
       while len(l) < entry_count:
@@ -97,13 +103,28 @@ def gen_matrix_b(rowB, colB, transposed, btype):
       else:
         llist.sort(key=lambda x:x[0] + x[1]*rowB)
 
-      for i, j in llist:
-        coo["entries"].append([i, j, 11.0])
-        coo["coordinates"].append([i, j])
+      if writes == 0:
+        random_coo1 = (list(), list())
+        for i, j in llist:
+          random_coo1[0].append([i, j, 11.0])
+          random_coo1[1].append([i, j])
+        coo["entries"] = random_coo1[0]
+        coo["coordinates"] = random_coo1[1]
+      elif writes == 2:
+        random_coo2 = (list(), list())
+        for i, j in llist:
+          random_coo2[0].append([i, j, 11.0])
+          random_coo2[1].append([i, j])
+        coo["entries"] = random_coo2[0]
+        coo["coordinates"] = random_coo2[1]
+      elif writes % 4 == 0 or writes % 4 == 1:
+        coo["entries"] = random_coo1[0]
+        coo["coordinates"] = random_coo1[1]
+      else:
+        coo["entries"] = random_coo2[0]
+        coo["coordinates"] = random_coo2[1]
 
-      global first
-      global writes
-      if first:
+      if writes == 0:
         if transposed:
           raise Exception("The B-sparsity parameters should be exactly [False, True]")
         with open("gen_code/coordinate_vector.cpp", "w") as f:
@@ -117,21 +138,27 @@ def gen_matrix_b(rowB, colB, transposed, btype):
           f.write("return coordinates;\n")
           f.write("}\n")
           first = False
-          writes += 1
+        writes += 1
+      elif writes == 2:
+        if not transposed:
+          raise Exception("The B-sparsity parameters should be exactly [False, True]")
+        #if writes > 2:
+        #  raise Exception("Random sparse matrix test is allowed to create precisely 2 matrices, one B and one B transposed")
+        with open("gen_code/coordinate_vector.cpp", "a") as f:
+          f.write("std::vector<std::tuple<int, int>> get_coordinates_B_core_transposed()\n")
+          f.write("{\n")
+          f.write("std::vector<std::tuple<int, int>> coordinates;\n")
+          for (i,j) in llist:
+            f.write(f"coordinates.push_back(std::make_tuple({i}, {j}));\n")
+          f.write("return coordinates;\n")
+          f.write("}\n")
+        writes += 1
+      elif writes % 4 == 0 or writes % 4 == 1:
+        #random_coo1
+        writes += 1
       else:
-          if not transposed:
-           raise Exception("The B-sparsity parameters should be exactly [False, True]")
-          if writes > 2:
-            raise Exception("Random sparse matrix test is allowed to create precisely 2 matrices, one B and one B transposed")
-          with open("gen_code/coordinate_vector.cpp", "a") as f:
-            f.write("std::vector<std::tuple<int, int>> get_coordinates_B_core_transposed()\n")
-            f.write("{\n")
-            f.write("std::vector<std::tuple<int, int>> coordinates;\n")
-            for (i,j) in llist:
-              f.write(f"coordinates.push_back(std::make_tuple({i}, {j}));\n")
-            f.write("return coordinates;\n")
-            f.write("}\n")
-          writes += 1
+        #random_coo2
+        writes += 1
     else:
         raise Exception("NO")
     return coo
