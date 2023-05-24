@@ -5,6 +5,7 @@ from copy import deepcopy
 import numpy as np
 import numpy as np
 from random import randint
+import os
 
 first = True
 writes = 0
@@ -127,6 +128,10 @@ def gen_matrix_b(rowB, colB, transposed, btype):
       if writes == 0:
         if transposed:
           raise Exception("The B-sparsity parameters should be exactly [False, True]")
+
+        if not os.path.exists("gen_code"):
+          os.mkdir("gen_code")
+
         with open("gen_code/coordinate_vector.cpp", "w") as f:
           f.write("#include <vector>\n")
           f.write("#include <tuple>\n")
