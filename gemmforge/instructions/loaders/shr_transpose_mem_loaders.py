@@ -3,7 +3,7 @@ from gemmforge import constructs
 from .abstract_loader import AbstractShrMemLoader
 from gemmforge.symbol_table import SymbolType, DataView
 from copy import deepcopy
-from matrix import SparseMatrix, DenseMatrix
+from gemmforge.matrix import SparseMatrix, DenseMatrix
 
 
 def _find_next_prime(number):
