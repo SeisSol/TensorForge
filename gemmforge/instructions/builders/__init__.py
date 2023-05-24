@@ -4,3 +4,5 @@ from gemmforge.instructions.builders.gemms.gemm_builder import ShrMemBasedDenseG
 from gemmforge.instructions.builders.gemms.gemm_builder import RegisterOnlyDenseGemmBuilder
 from gemmforge.instructions.builders.gemms.gemm_builder import ShrMemBasedDenseSparseGemmBuilder
 from gemmforge.instructions.builders.gemms.gemm_builder import RegisterOnlyDenseSparseGemmBuilder
+from gemmforge.instructions.builders.gemms.gemm_builder import ShrMemBasedSparseDenseGemmBuilder
+from gemmforge.instructions.builders.gemms.gemm_builder import RegisterOnlySparseDenseGemmBuilder

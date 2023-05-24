@@ -2,6 +2,8 @@ from .dense_kernels import ShrMemBasedDenseGemmKernelBuilder
 from .dense_kernels import RegisterOnlyDenseGemmKernelBuilder
 from .dense_sparse_kernels import ShrMemBasedDenseSparseGemmKernelBuilder
 from .dense_sparse_kernels import RegisterOnlyDenseSparseGemmKernelBuilder
+from .sparse_dense_kernels import ShrMemBasedSparseDenseGemmKernelBuilder
+from .sparse_dense_kernels import RegisterOnlySparseDenseGemmKernelBuilder
 from gemmforge.matrix import SparseMatrix, DenseMatrix
 from enum import Enum
 
@@ -12,6 +14,8 @@ class GemmKernelType(Enum):
   REGISTER_ONLY_BASED = 2
   DENSE_SPARSE_SHR_MEM_BASED = 3
   DENSE_SPARSE_REGISTER_ONLY_BASED = 4
+  SPARSE_DENSE_SHR_MEM_BASED = 5
+  SPARSE_DENSE_REGISTER_ONLY_BASED = 6
 
   @classmethod
   def to_str(cls, value):
@@ -25,6 +29,10 @@ class GemmKernelType(Enum):
       return GemmKernelType.DENSE_SPARSE_SHR_MEM_BASED
     elif value == "dense_sparse_register_only":
       return GemmKernelType.DENSE_SPARSE_REGISTER_ONLY_BASED
+    elif value == "sparse_dense_shr_mem":
+      return GemmKernelType.SPARSE_DENSE_SHR_MEM_BASED
+    elif value == "sparse_dense_register_only":
+      return GemmKernelType.SPARSE_DENSE_REGISTER_ONLY_BASED
     else:
       RuntimeError('unknown representation of gemm kernel type as `str`')
 
@@ -47,14 +55,23 @@ class GemmKernelsFactory:
 
   def _auto_select(self):
     model = self._hw_descr.model
+    both_sparse_error = "Gemmforge does not support both matrix A and B being sparse"
     if model == 'pvc':
-      if self._sparse_b:
+      if self._sparse_a and self._sparse_b:
+        raise Exception(both_sparse_error)
+      elif self._sparse_b:
         return GemmKernelType.DENSE_SPARSE_REGISTER_ONLY_BASED
+      elif self._sparse_a:
+        return GemmKernelType.SPARSE_DENSE_REGISTER_ONLY_BASED
       else:
         return GemmKernelType.REGISTER_ONLY_BASED
     else:
-      if self._sparse_b:
+      if self._sparse_a and self._sparse_b:
+        raise Exception(both_sparse_error)
+      elif self._sparse_b:
         return GemmKernelType.DENSE_SPARSE_SHR_MEM_BASED
+      elif self._sparse_a:
+        return GemmKernelType.SPARSE_DENSE_SHR_MEM_BASED
       else:
         return GemmKernelType.SHR_MEM_BASED
 
@@ -66,10 +83,14 @@ class GemmKernelsFactory:
       return ShrMemBasedDenseGemmKernelBuilder(**self._kwargs)
     elif self._gemm_kernel_type == GemmKernelType.REGISTER_ONLY_BASED:
       return RegisterOnlyDenseGemmKernelBuilder(**self._kwargs)
-    elif self._gemm_kernel_type == GemmKernelType.DENSE_SPARSE_REGISTER_ONLY_BASED:
-      return RegisterOnlyDenseSparseGemmKernelBuilder(**self._kwargs)
     elif self._gemm_kernel_type == GemmKernelType.DENSE_SPARSE_SHR_MEM_BASED:
       return ShrMemBasedDenseSparseGemmKernelBuilder(**self._kwargs)
+    elif self._gemm_kernel_type == GemmKernelType.DENSE_SPARSE_REGISTER_ONLY_BASED:
+      return RegisterOnlyDenseSparseGemmKernelBuilder(**self._kwargs)
+    elif self._gemm_kernel_type == GemmKernelType.SPARSE_DENSE_SHR_MEM_BASED:
+      return ShrMemBasedSparseDenseGemmKernelBuilder(**self._kwargs)
+    elif self._gemm_kernel_type == GemmKernelType.SPARSE_DENSE_REGISTER_ONLY_BASED:
+      return RegisterOnlySparseDenseGemmKernelBuilder(**self._kwargs)
     else:
       raise RuntimeError('unknown gemm type')
 
