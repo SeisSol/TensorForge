@@ -3,6 +3,7 @@ from gemmforge import constructs
 from .abstract_loader import AbstractShrMemLoader
 from gemmforge.symbol_table import SymbolType, DataView
 from copy import deepcopy
+from gemmforge.matrix import SparseMatrix, DenseMatrix
 
 
 def _find_next_prime(number):
@@ -25,7 +26,7 @@ class ExtendedTransposePatchLoader(AbstractShrMemLoader):
 
     data_view = self._src.data_view
     matrix = self._src.obj
-    if matrix.get_matrix_type() == "dense":
+    if isinstance(matrix, DenseMatrix):
       optimal_num_cols = _find_next_prime(data_view.columns)
       self._shm_volume = data_view.lead_dim * optimal_num_cols
     else: # Has to be sparse if not dense
