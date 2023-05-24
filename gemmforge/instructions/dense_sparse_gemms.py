@@ -38,11 +38,15 @@ class ShrMemBasedDenseSparseGemm(AbstractInstruction):
 
       writer.Emptyline()
       for k in range(0, op1_data_view.columns):
+        non_zeros = self._mat_b.get_coo_row_major()[k]
+        if len(non_zeros) == 0:
+          continue
+  
         op1_addr = f'{thread_idx_x} + {k} * {op1_data_view.lead_dim}'
         writer(f'{value_var} = {self._op1.name}[{op1_addr}];')
         writer.Emptyline()
 
-        self._get_inner_loop_sparse_with_a_row(writer, value_var, k, self._mat_b.get_coo_row_major()[k], self._mat_b.get_values())
+        self._get_inner_loop_sparse_with_a_row(writer, value_var, k, non_zeros, self._mat_b.get_values())
 
   def _get_inner_loop_sparse_with_a_row(self, writer, op1_value, row_id, non_zeros, val_b=None):
     # Iterate the first column first then the second etc. (coo_b[0] if col major, otherwise coo_b[1] if row major)
@@ -51,21 +55,16 @@ class ShrMemBasedDenseSparseGemm(AbstractInstruction):
     if len(non_zeros) > 0:
       value_known = val_b != None
       writer.Comment(f"Mul begin col {row_id}")
-      coordinates = self._mat_b.get_coordinates()
 
       for col_id in non_zeros:
-        (i, j) = (row_id, col_id)
-        iter = 0
-        for (_i, _j) in coordinates:
-          if i == _i and j == _j:
-            break
-          iter += 1
-
+        iter = self._mat_b.find_1d_offset(row_id, col_id)
         res_access = f"[{col_id}]"
+
         if not value_known:
             writer(f'{self._dest.name}{res_access} += {op1_value} * {self._op2.name}[{iter}];')
         else:
             writer(f'{self._dest.name}{res_access} += {op1_value} * {val_b[iter]}{self._vm.get_real_literal()};')
+
       writer.Comment(f"Mul end col {row_id}")
       writer.Emptyline()
 
@@ -136,27 +135,6 @@ class RegisterOnlyDenseSparseGemm(AbstractInstruction):
         else:
           op1_addr = f'{thread_idx_x} + {k} * {op1_data_view.lead_dim}'
         writer(f'{op1_variable} = {self._op1.name}[{op1_addr}];')
-    
-      l = list()
-      rb = list()
-      rb.append(0)
-      i = 0
-      for row in self._mat_b.get_coo_row_major():
-        l.append(len(row))
-        if i!=0 and i!=len(self._mat_b.get_coo_row_major())-1:
-          rb[i] = rb[i-1] + len(row)
-
-      assert(len(l) == k_end)
-
-      #non_zero_el_per_row = "non_zero_el_per_row"
-      #s = f"int {non_zero_el_per_row}[{k_end}] = {'{'}"
-      #for i in range(len(l)-1):
-      #  s += (str(l[i]))
-      #  s += (", ")
-      #s += (str(l[len(l)-1]))
-      #s += ("};")
-      
-      #writer(s) 
 
       writer.Emptyline()
       tileid = 0
@@ -192,7 +170,7 @@ class RegisterOnlyDenseSparseGemm(AbstractInstruction):
           end_tile = start_tile_n + len(non_zeros_of_this_tile)
         
         broadcast_idx = 0
-        for n in non_zeros_of_this_tile: #range(start_tile_n, end_tile):
+        for n in non_zeros_of_this_tile:
           if not value_known:
             tmp_value = 'tmp'
             broadcast_sync = self._vm._lexic.broadcast_sync(op2_variable,
