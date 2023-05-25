@@ -31,7 +31,7 @@ class ShrMemBasedSparseDenseGemmKernelBuilder(BaseGemmKernelBuilder):
                   op1=self._symbol_table[self._mat_a],
                   op2=self._symbol_table[self._mat_b],
                   dest=self._symbol_table[self._reg_array_obj],
-                  mat_b=self._mat_b)
+                  mat_a=self._mat_a)
 
     self._shr_mem_loads = builder.get_srh_mem_loads()
     self._instructions.extend(builder.get_instructions())
@@ -58,7 +58,7 @@ class RegisterOnlySparseDenseGemmKernelBuilder(BaseGemmKernelBuilder):
                   op1=self._symbol_table[self._mat_a],
                   op2=self._symbol_table[self._mat_b],
                   dest=self._symbol_table[self._reg_array_obj],
-                  mat_b=self._mat_b)
+                  mat_a=self._mat_a)
 
     self._shr_mem_loads = builder.get_srh_mem_loads()
     self._instructions.extend(builder.get_instructions())

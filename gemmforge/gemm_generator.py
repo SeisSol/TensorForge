@@ -184,10 +184,8 @@ class GemmGenerator(GemmLikeGenerator):
             raise GenerationError('Cannot generate a matrix multiplication with given parameters. '
                                   'Matrix A (NoTrans) and B (NoTrans) do not match')
 
-      if isinstance(self._mat_a, SparseMatrix) and isinstance(self._mat_a, SparseMatrix):
+      if isinstance(self._mat_a, SparseMatrix) and isinstance(self._mat_b, SparseMatrix):
           raise GenerationError("Gemmforge does not support AxB where both A and B are sparse")
-      elif  isinstance(self._mat_a, SparseMatrix):
-          raise GenerationError("AxB where A is sparse is not yet implemented")
 
     except GenerationError as error:
       matrices = {'A': self._mat_a, 'B': self._mat_b, 'C': self._mat_c}
