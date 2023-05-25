@@ -50,7 +50,7 @@ class GemmKernelsFactory:
     self._sparse_a = False
     if isinstance(self._mat_b, SparseMatrix):
       self._sparse_b = True
-    if isinstance(self._mat_b, DenseMatrix):
+    if isinstance(self._mat_a, SparseMatrix):
       self._sparse_a = True
 
   def _auto_select(self):
