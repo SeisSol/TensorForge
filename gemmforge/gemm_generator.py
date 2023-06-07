@@ -61,7 +61,6 @@ class GemmGenerator(GemmLikeGenerator):
     self._check_if_set()
 
     self._check()
-    self._deduce_num_threads()
     self._populate_global_scope()
     self._emit_instructions()
 
@@ -196,16 +195,6 @@ class GemmGenerator(GemmLikeGenerator):
 
       raise error
 
-  def _deduce_num_threads(self):
-    if self._trans_a:
-      lead_dim_length = self._mat_a.get_actual_num_cols()
-    else:
-      lead_dim_length = self._mat_a.get_actual_num_rows()
-
-    num_vector_units_required = math.ceil(lead_dim_length / self._hw_descr.vec_unit_length)
-    self._num_compute_threads = lead_dim_length
-    self._num_active_threads = num_vector_units_required * self._hw_descr.vec_unit_length
-
   def _populate_global_scope(self):
     for matrix in self._matrices:
       self._symbol_table.add_symbol(Symbol(obj=matrix,
@@ -224,14 +213,14 @@ class GemmGenerator(GemmLikeGenerator):
               'mat_c': self._mat_c,
               'alpha': self._alpha,
               'beta': self._beta,
-              'num_compute_threads': self._num_compute_threads,
-              'num_active_threads': self._num_active_threads}
+              'hw_descr': self._hw_descr}
 
     kernel_factory = GemmKernelsFactory(**params)
     self._kernel_type = kernel_factory.gemm_kernel_type()
 
     gemm_kernel_builder = kernel_factory.get_builder()
     gemm_kernel_builder.build()
+    self._num_compute_threads, self._num_active_threads = gemm_kernel_builder._deduce_num_threads()
 
     self._instructions = gemm_kernel_builder.get_instructions()
     self._reg_array_obj = gemm_kernel_builder.get_reg_array_obj()

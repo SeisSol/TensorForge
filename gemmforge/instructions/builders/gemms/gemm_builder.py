@@ -176,24 +176,28 @@ class ShrMemBasedSparseDenseGemmBuilder(AbstractBuilder):
             mat_a: SparseMatrix):
     self._reset()
 
-    # Note: of trans_a==True than an operand is given as KxM instead of (MxK).
-    # In this case, a loader will load an operand from glb. mem. to shr. mem
-    # transposing it on the fly. In, short, the loader guaranties to deliver
-    # an operand as (MxK) to shr. mem.
-    self._symbol_table.add_scope()
-    if trans_a:
-      self._op1 = self._make_loader_and_symbol(operand=op1, do_transpose=True)
+    if mat_a.get_values() == None:
+      # Note: of trans_a==True than an operand is given as KxM instead of (MxK).
+      # In this case, a loader will load an operand from glb. mem. to shr. mem
+      # transposing it on the fly. In, short, the loader guaranties to deliver
+      # an operand as (MxK) to shr. mem.
+      self._symbol_table.add_scope()
+      self._op1 = self._make_loader_and_symbol(operand=op1, do_transpose=False)
+      #self._op1 = self._make_loader_and_symbol(operand=op1, do_transpose=False)
+
+      # Note: we will handle transposition of the second operand during
+      # the matrix multiplication
+      self._symbol_table.add_scope()
+      #self._op2 = self._make_loader_and_symbol(operand=op2, do_transpose=False)
+      self._op2 = op2
+
+      self._insert_sync_threads()
     else:
+      self._op2 = op2
       self._op1 = op1
 
-    # Note: we will handle transposition of the second operand during
-    # the matrix multiplication
-    self._op2 = self._make_loader_and_symbol(operand=op2, do_transpose=False)
-
-    self._insert_sync_threads()
-
     gemm_params = {'vm': self._vm,
-                   'trans_a': False,
+                   'trans_a': trans_a,
                    'trans_b': trans_b,
                    'op1': self._op1,
                    'op2': self._op2,
@@ -317,7 +321,9 @@ class ShrMemBasedDenseSparseGemmBuilder(AbstractBuilder):
     # In this case, a loader will load an operand from glb. mem. to shr. mem
     # transposing it on the fly. In, short, the loader guaranties to deliver
     # an operand as (MxK) to shr. mem.
-    self._symbol_table.add_scope()
+    if mat_b.get_values() == None or trans_a: 
+      self._symbol_table.add_scope()
+
     if trans_a:
       self._op1 = self._make_loader_and_symbol(operand=op1, do_transpose=True)
     else:
@@ -325,9 +331,14 @@ class ShrMemBasedDenseSparseGemmBuilder(AbstractBuilder):
 
     # Note: we will handle transposition of the second operand during
     # the matrix multiplication
-    self._op2 = self._make_loader_and_symbol(operand=op2, do_transpose=False)
+    
+    if mat_b.get_values() == None:
+      self._op2 = self._make_loader_and_symbol(operand=op2, do_transpose=False)
+    else:
+      self._op2 = op2
 
-    self._insert_sync_threads()
+    if mat_b.get_values() == None or trans_a: 
+      self._insert_sync_threads()
 
     gemm_params = {'vm': self._vm,
                    'trans_a': False,

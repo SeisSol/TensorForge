@@ -20,12 +20,13 @@ class SparseMatrix(Matrix):
         self.elcount = 0
 
         self.values = values
-        
-        self.dense_representation = [[0] * num_rows for _ in range(num_cols)]
+
+        self.dense_representation = [[0] * num_cols for _ in range(num_rows)]
         iter = 0
         for coordinate in coordinates:
             val = "X"
             if values != None:
+                assert iter < len(values), f"iter < len(values) : {iter} < {len}"
                 val = values[iter]
             self.dense_representation[int(coordinate[0])][int(coordinate[1])] = val
             iter += 1
@@ -95,7 +96,7 @@ class SparseMatrix(Matrix):
     def get_el_count(self):
         return self.elcount
 
-    def find_1d_offset(self, row, col):
+    def find_1d_offset(self, row, col, transpose=False):
         assert(row < self.get_actual_num_rows())
         assert(col < self.get_actual_num_cols())
         coordinates = self.get_coordinates()

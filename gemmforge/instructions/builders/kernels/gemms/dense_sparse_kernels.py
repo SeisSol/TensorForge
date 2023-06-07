@@ -13,11 +13,13 @@ class ShrMemBasedDenseSparseGemmKernelBuilder(BaseGemmKernelBuilder):
     super(ShrMemBasedDenseSparseGemmKernelBuilder, self).__init__(**kwargs)
 
   def build_kernel(self):
-    # create shared mem
-    builder = ShrMemAllocBuilder(self._vm, self._symbol_table)
-    builder.build(size=None)
-    self._instructions.extend(builder.get_instructions())
-    self._shr_mem_obj = builder.get_resultant_obj()
+    if not self._trans_a and self._mat_b.get_values() != None:
+      self._shr_mem_obj = ShrMemObject(name=None, size=0)
+    else:
+      builder = ShrMemAllocBuilder(self._vm, self._symbol_table)
+      builder.build(size=None)
+      self._instructions.extend(builder.get_instructions())
+      self._shr_mem_obj = builder.get_resultant_obj()
 
     # generate the rest instructions i.e., load to shr. mem, compute, store
     builder = ShrMemBasedDenseSparseGemmBuilder(self._vm,
