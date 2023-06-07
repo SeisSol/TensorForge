@@ -1,3 +1,4 @@
+import random
 from gemmforge import DenseMatrix, SparseMatrix
 from itertools import product
 import functools
@@ -16,75 +17,70 @@ def gen_matrix_a(rowA, colA, transposed, atype):
     coo = {"name": "A", "rows": rowA, "cols": colA, "entries": [], "coordinates": []}
 
     if atype == "full":
-      if transposed:
+      A = np.zeros([rowA, colA])
+      for j in range(colA):
         for i in range(rowA):
-          for j in range(colA):
-            coo["entries"].append([i, j, 8.0])
-            coo["coordinates"].append([i, j])
-      else:
-        for j in range(colA):
-          for i in range(rowA):
-            coo["entries"].append([i, j, 8.0])
-            coo["coordinates"].append([i, j])
-    """
-    elif btype == "single_column":
-        at = 1
-        for i in range(rowB):
-            coo["entries"].append([i, at, 4.0])
-            coo["coordinates"].append([i, at])
-    elif btype == "single_row":
-        at = 1
-        for j in range(colB):
-            coo["entries"].append([at, j, 4.0])
-            coo["coordinates"].append([at, j])
-    elif btype == "chequered":
-      npB = np.zeros((rowB,colB))
-      if transposed:
-        for i in range(rowB):
-          offset = i % 2
-          for j in range(offset, colB, 2):
-            coo["entries"].append([i, j, 9.0])
-            coo["coordinates"].append([i, j])
-            npB[i, j] = i*10 + j
-      else:
-        for j in range(colB):
-          offset = j % 2
-          for i in range(offset, rowB, 2):
-            coo["entries"].append([i, j, 9.0])
-            coo["coordinates"].append([i, j])
-            npB[i, j] = i*10 + j
-    elif btype == "random":
+          coo["entries"].append([i, j, 8.0])
+          coo["coordinates"].append([i, j])
+          A[i, j] = 1
+      Ao = A
+      A = A.flatten("F")
+      A_nonzeros = []
+      for el in A:
+          if el > 0.0001 or el < -0.0001:
+              assert(el != 0 and el != 0.0)
+              A_nonzeros.append(el)
+    elif atype == "random":
       global random_coo1
       global random_coo2
       global first
       global writes
-      entry_count = int(0.15*rowB*colB)
+      entry_count = int(0.25*rowA*colA)
+      a_el_count = entry_count
       l = set()
+      A = np.zeros([rowA, colA])
       while len(l) < entry_count:
-        i = randint(0,8)
-        j = randint(0,8)
-        l.add((i,j))
+          i = randint(0,rowA-1)
+          j = randint(0,colA-1)
+          l.add((i,j))
       llist = list(l)
-      if transposed:
-        llist.sort(key=lambda x:x[0]*colB + x[1])
-      else:
-        llist.sort(key=lambda x:x[0] + x[1]*rowB)
+      assert(len(llist) == a_el_count)
+      for (row,col) in llist:
+          A[row, col] = 1
 
+      coordinates = []
+      entries = []
+      for j in range(colA):
+          for i in range(rowA):
+              if A[i, j] != 0:
+                  r = random.randint(1, 9)
+                  coordinates.append([i,j])
+                  entries.append([i, j, r])
+                  A[i, j] = r
+      Ao = A
+      A = A.flatten("F")
+      A_nonzeros = []
+      for el in A:
+          if el > 0.0001 or el < -0.0001:
+              assert(el != 0 and el != 0.0)
+              A_nonzeros.append(el)
+
+      # the iteration is (for every type you repeat)
+      # At - False, Bt - False
+      # At - True, Bt - False
       if writes == 0:
-        random_coo1 = (list(), list())
-        for i, j in llist:
-          random_coo1[0].append([i, j, 11.0])
-          random_coo1[1].append([i, j])
+        random_coo1 = [list(), list()]
+        random_coo1[0] = entries
+        random_coo1[1] = coordinates
         coo["entries"] = random_coo1[0]
         coo["coordinates"] = random_coo1[1]
-      elif writes == 2:
-        random_coo2 = (list(), list())
-        for i, j in llist:
-          random_coo2[0].append([i, j, 11.0])
-          random_coo2[1].append([i, j])
+      elif writes == 1:
+        random_coo2 = [list(), list()]
+        random_coo2[0] = entries
+        random_coo2[1] = coordinates
         coo["entries"] = random_coo2[0]
         coo["coordinates"] = random_coo2[1]
-      elif writes % 4 == 0 or writes % 4 == 1:
+      elif writes % 2 == 0:
         coo["entries"] = random_coo1[0]
         coo["coordinates"] = random_coo1[1]
       else:
@@ -93,7 +89,7 @@ def gen_matrix_a(rowA, colA, transposed, atype):
 
       if writes == 0:
         if transposed:
-          raise Exception("The B-sparsity parameters should be exactly [False, True]")
+          raise Exception("The A-sparsity parameters should be exactly [False, True]")
 
         if not os.path.exists("gen_code"):
           os.mkdir("gen_code")
@@ -101,39 +97,30 @@ def gen_matrix_a(rowA, colA, transposed, atype):
         with open("gen_code/coordinate_vector.cpp", "w") as f:
           f.write("#include <vector>\n")
           f.write("#include <tuple>\n")
-          f.write("std::vector<std::tuple<int, int>> get_coordinates_B_core()\n")
+          f.write("std::vector<std::tuple<int, int>> get_coordinates_A_core()\n")
           f.write("{\n")
           f.write("std::vector<std::tuple<int, int>> coordinates;\n")
-          for (i,j) in llist:
+          for (i,j) in coordinates:
             f.write(f"coordinates.push_back(std::make_tuple({i}, {j}));\n")
           f.write("return coordinates;\n")
           f.write("}\n")
           first = False
-        writes += 1
-      elif writes == 2:
+      elif writes == 1:
         if not transposed:
-          raise Exception("The B-sparsity parameters should be exactly [False, True]")
+          raise Exception("The A-sparsity parameters should be exactly [False, True]")
         #if writes > 2:
         #  raise Exception("Random sparse matrix test is allowed to create precisely 2 matrices, one B and one B transposed")
         with open("gen_code/coordinate_vector.cpp", "a") as f:
-          f.write("std::vector<std::tuple<int, int>> get_coordinates_B_core_transposed()\n")
+          f.write("std::vector<std::tuple<int, int>> get_coordinates_A_core_transposed()\n")
           f.write("{\n")
           f.write("std::vector<std::tuple<int, int>> coordinates;\n")
-          for (i,j) in llist:
+          for (i,j) in coordinates:
             f.write(f"coordinates.push_back(std::make_tuple({i}, {j}));\n")
           f.write("return coordinates;\n")
           f.write("}\n")
-        writes += 1
-      elif writes % 4 == 0 or writes % 4 == 1:
-        #random_coo1
-        writes += 1
-      else:
-        #random_coo2
-        writes += 1
+      writes += 1
     else:
         raise Exception("NO")
-    return coo
-    """
     return coo
 
 

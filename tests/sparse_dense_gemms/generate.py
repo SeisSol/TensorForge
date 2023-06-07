@@ -70,6 +70,7 @@ with constructs.Cpp(StringIO()) as file:
 for suite in suites:
   for test in TestLoader(suite):
     trans_a, trans_b, mat_a_dense, mat_a_sparse, mat_b, mat_c, alpha, beta, num_elements, matrix_a_type, test_name, kernel_type  = test
+
     try:
       if kernel_type == "shr_mem":
           dense_kernel_type = GemmKernelType.SHR_MEM_BASED

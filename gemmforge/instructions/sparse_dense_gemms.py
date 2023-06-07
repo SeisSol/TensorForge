@@ -48,7 +48,6 @@ class ShrMemBasedSparseDenseGemm(AbstractInstruction):
             writer(f'{self._vm.fp_as_str()} {value_var};')
 
             writer.Emptyline()
-            writer.Pragma('unroll')
             if not self._trans_a:
                 for k in range(0, op2_data_view.rows):
                     non_zeros = self._mat_a.get_coo_col_major()[k]

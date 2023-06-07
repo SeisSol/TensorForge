@@ -92,7 +92,7 @@ def gen_matrix_b(rowB, colB, transposed, btype):
       global random_coo2
       global first
       global writes
-      entry_count = int(0.15*rowB*colB)
+      entry_count = int(0.25*rowB*colB)
       l = set()
       while len(l) < entry_count:
         i = randint(0,8)

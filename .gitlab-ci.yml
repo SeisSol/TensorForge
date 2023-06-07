@@ -95,6 +95,25 @@ dense_sparse_gemms:
         rm -rf ./* ;
       done ;
 
+sparse_dense_gemms:
+  stage: test
+  tags:
+  -  atsccs68-docker-executor
+  parallel:
+    matrix:
+      - BACKEND: [cuda, hipsycl, hip]
+  script:
+    - *common_test_script
+    - export curr_dir=./tests/sparse_dense_gemms/build
+    - mkdir -p $curr_dir && cd $curr_dir
+    - for test in ../testsuites/*.yaml; do
+        cmake .. -DSM_ARCH=${GPU_MODEL} -DDEVICE_BACKEND=${BACKEND} -DREAL_SIZE=4 -DTEST_SUITE=$test ;
+        make -j4 ;
+        ./sparse-dense-gemm-tests ;
+        rm -rf ./* ;
+      done ;
+
+
 csa:
   stage: test
   tags:
