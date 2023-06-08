@@ -84,14 +84,14 @@ for suite in suites:
       generator1 = GemmGenerator(vm=vm, kernel_type=dense_kernel_type)
       T = "T"
       NT = ""
-      generator1.set(trans_a, trans_b, mat_a_dense, mat_b, mat_c, alpha, beta, base_name=f"A{T if trans_a else NT}_B{T if trans_b else NT}_{matrix_a_type}_DenseXDense_{kernel_type}")
+      generator1.set(trans_a, trans_b, mat_a_dense, mat_b, mat_c, alpha, beta, base_name=f"A{T if trans_a else NT}_{matrix_a_type}_B{T if trans_b else NT}_SparseXDense_{kernel_type}")
       generator1.generate()
       src.write(generator1.get_kernel())
       src.write(generator1.get_launcher())
       headers.write(generator1.get_launcher_header())
 
       generator2 = GemmGenerator(vm=vm, kernel_type=sparse_dense_kernel_type)
-      generator2.set(trans_a, trans_b, mat_a_sparse, mat_b, mat_c, alpha, beta, base_name=f"A{T if trans_a else NT}_B{T if trans_b else NT}_{matrix_a_type}_DenseXSparse_{kernel_type}")
+      generator2.set(trans_a, trans_b, mat_a_sparse, mat_b, mat_c, alpha, beta, base_name=f"A{T if trans_a else NT}_{matrix_a_type}_B{T if trans_b else NT}_SparseXSparse_{kernel_type}")
       generator2.generate()
       src.write(generator2.get_kernel())
       src.write(generator2.get_launcher())
