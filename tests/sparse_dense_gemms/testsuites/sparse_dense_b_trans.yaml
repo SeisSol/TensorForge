@@ -1,6 +1,5 @@
 test_suites:
-   -
-    test_base_name: "A_B_Sparse_Dense"
+  - test_base_name: "A_B_Sparse_Dense"
     matrix_a:
       rows: 56
       cols: 9
@@ -12,22 +11,22 @@ test_suites:
       rows: 9
       cols: 9
       addressing: "strided"
-      bbox: [0, 0, 56, 9]
+      bbox: [ 0, 0, 56, 9 ]
 
     matrix_c:
       rows: 56
       cols: 9
       addressing: "strided"
       sparse: False
-      bbox: [0, 0, 56, 9]
+      bbox: [ 0, 0, 56, 9 ]
 
     trans_a: "trans_params_a"
     trans_b: "trans_params_b"
 
-    trans_params_a: [False, True]
-    trans_params_b: [True]
+    trans_params_a: [ False, True ]
+    trans_params_b: [ True ]
 
-    matrix_a_params_type: ["full", "random"] #, "band_diagonal", "single_column", "single_row", "chequered","random"
+    matrix_a_params_type: [ "full", "random" ] #, "band_diagonal", "single_column", "single_row", "chequered","random"
 
     alpha: 1.0
     beta: 1.0
@@ -35,4 +34,4 @@ test_suites:
     num_elements: 100
 
     kernel_type: "kernel_type_params"
-    kernel_type_params: ["shr_mem"]
+    kernel_type_params: [ "shr_mem" ]

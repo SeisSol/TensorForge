@@ -1,12 +1,14 @@
-from gemmforge import GenerationError, GemmGenerator
-from gemmforge.vm import vm_factory
-from gemmforge import constructs
-from io import StringIO
-from test_loader import TestLoader
-import os
-import yaml
 import argparse
+import os
+from io import StringIO
+
+import yaml
+
 from gemmforge import GemmKernelType
+from gemmforge import GenerationError, GemmGenerator
+from gemmforge import constructs
+from gemmforge.vm import vm_factory
+from test_loader import TestLoader
 
 parser = argparse.ArgumentParser()
 parser.add_argument('-s', '--specfile', action='store', help='path to a yaml file with a test spec')
@@ -69,29 +71,31 @@ with constructs.Cpp(StringIO()) as file:
 
 for suite in suites:
   for test in TestLoader(suite):
-    trans_a, trans_b, mat_a_dense, mat_a_sparse, mat_b, mat_c, alpha, beta, num_elements, matrix_a_type, test_name, kernel_type  = test
+    trans_a, trans_b, mat_a_dense, mat_a_sparse, mat_b, mat_c, alpha, beta, num_elements, matrix_a_type, test_name, kernel_type = test
 
     try:
       if kernel_type == "shr_mem":
-          dense_kernel_type = GemmKernelType.SHR_MEM_BASED
-          sparse_dense_kernel_type = GemmKernelType.SPARSE_DENSE_SHR_MEM_BASED
+        dense_kernel_type = GemmKernelType.SHR_MEM_BASED
+        sparse_dense_kernel_type = GemmKernelType.SPARSE_DENSE_SHR_MEM_BASED
       elif kernel_type == "register_only":
         dense_kernel_type = GemmKernelType.REGISTER_ONLY_BASED
         sparse_dense_kernel_type = GemmKernelType.SPARSE_DENSE_REGISTER_ONLY_BASED
       else:
         raise Exception("Wrong kernel_type string")
-      
+
       generator1 = GemmGenerator(vm=vm, kernel_type=dense_kernel_type)
       T = "T"
       NT = ""
-      generator1.set(trans_a, trans_b, mat_a_dense, mat_b, mat_c, alpha, beta, base_name=f"A{T if trans_a else NT}_{matrix_a_type}_B{T if trans_b else NT}_SparseXDense_{kernel_type}")
+      generator1.set(trans_a, trans_b, mat_a_dense, mat_b, mat_c, alpha, beta,
+                     base_name=f"A{T if trans_a else NT}_{matrix_a_type}_B{T if trans_b else NT}_SparseXDense_{kernel_type}")
       generator1.generate()
       src.write(generator1.get_kernel())
       src.write(generator1.get_launcher())
       headers.write(generator1.get_launcher_header())
 
       generator2 = GemmGenerator(vm=vm, kernel_type=sparse_dense_kernel_type)
-      generator2.set(trans_a, trans_b, mat_a_sparse, mat_b, mat_c, alpha, beta, base_name=f"A{T if trans_a else NT}_{matrix_a_type}_B{T if trans_b else NT}_SparseXSparse_{kernel_type}")
+      generator2.set(trans_a, trans_b, mat_a_sparse, mat_b, mat_c, alpha, beta,
+                     base_name=f"A{T if trans_a else NT}_{matrix_a_type}_B{T if trans_b else NT}_SparseXSparse_{kernel_type}")
       generator2.generate()
       src.write(generator2.get_kernel())
       src.write(generator2.get_launcher())
@@ -147,7 +151,8 @@ for suite in suites:
           file(f'unsigned* flags = nullptr;')
           file.Emptyline()
 
-          file(f'SetUp(rowA, colA, rowB, colB, rowC, colC, numElements, \"{matrix_a_type}\", {"true" if trans_a else "false"});')
+          file(
+            f'SetUp(rowA, colA, rowB, colB, rowC, colC, numElements, \"{matrix_a_type}\", {"true" if trans_a else "false"});')
           file(f'Driver.prepareData(\"{matrix_a_type}\");')
 
           args = []
@@ -188,7 +193,7 @@ for suite in suites:
 
       print(f'ERROR: {error}')
       raise error
-    
+
 dir_name = './gen_code'
 if not os.path.exists(dir_name):
   os.mkdir(dir_name)
@@ -199,7 +204,7 @@ with open(path, 'w') as file:
 
 if hw_descr.backend == 'cuda':
   path = os.path.join(dir_name, 'kernels.cu')
-elif hw_descr.backend== 'hip' or hw_descr.backend == 'hipsycl' or hw_descr.backend == 'oneapi':
+elif hw_descr.backend == 'hip' or hw_descr.backend == 'hipsycl' or hw_descr.backend == 'oneapi':
   path = os.path.join(dir_name, 'kernels.cpp')
 else:
   print('Backend is not supported, could not write kernel file')

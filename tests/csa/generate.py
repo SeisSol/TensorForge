@@ -7,7 +7,6 @@ import os
 import yaml
 import argparse
 
-
 parser = argparse.ArgumentParser()
 parser.add_argument('-s', '--specfile', action='store', help='path to a yaml file with a test spec')
 parser.add_argument('-r', '--realsize', type=int, action='store',
