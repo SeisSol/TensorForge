@@ -41,7 +41,7 @@ class ShrMemBasedDenseSparseGemm(AbstractInstruction):
         non_zeros = self._mat_b.get_coo_row_major()[k]
         if len(non_zeros) == 0:
           continue
-  
+
         op1_addr = f'{thread_idx_x} + {k} * {op1_data_view.lead_dim}'
         writer(f'{value_var} = {self._op1.name}[{op1_addr}];')
         writer.Emptyline()
@@ -61,16 +61,16 @@ class ShrMemBasedDenseSparseGemm(AbstractInstruction):
         res_access = f"[{col_id}]"
 
         if not value_known:
-            writer(f'{self._dest.name}{res_access} += {op1_value} * {self._op2.name}[{iter}];')
+          writer(f'{self._dest.name}{res_access} += {op1_value} * {self._op2.name}[{iter}];')
         else:
-            writer(f'{self._dest.name}{res_access} += {op1_value} * {val_b[iter]}{self._vm.get_real_literal()};')
+          writer(
+            f'{self._dest.name}{res_access} += {op1_value} * {val_b[iter]}{self._vm.get_real_literal()};')
 
       writer.Comment(f"Mul end col {row_id}")
       writer.Emptyline()
 
   def __str__(self) -> str:
     return f'{self._dest.name} = gemm({self._op1.name}, {self._op2.name})'
-
 
 
 class RegisterOnlyDenseSparseGemm(AbstractInstruction):
@@ -94,7 +94,6 @@ class RegisterOnlyDenseSparseGemm(AbstractInstruction):
       raise InternalError('gemm: `dest` must be a register obj.')
 
     self._is_ready = True
-
 
   def gen_code(self, writer):
     self._val_b = self._mat_b.get_values()
@@ -139,12 +138,12 @@ class RegisterOnlyDenseSparseGemm(AbstractInstruction):
       writer.Emptyline()
       tileid = 0
       for start_tile_n in range(0, k_end, self._vec_unit_length):
-        writer.Comment(f"Begin Tile {start_tile_n}..{start_tile_n+self._vec_unit_length}")
+        writer.Comment(f"Begin Tile {start_tile_n}..{start_tile_n + self._vec_unit_length}")
         writer(f'shiftedWid = {start_tile_n} + {warp_idx_variable};')
-        
+
         # We need to load values of k'th row of k for that we need to find their offset in the sparse matrix
         non_zeros = self._mat_b.get_coo_row_major()[k]
-        non_zeros_of_this_tile = non_zeros[start_tile_n:start_tile_n+self._vec_unit_length]
+        non_zeros_of_this_tile = non_zeros[start_tile_n:start_tile_n + self._vec_unit_length]
 
         if len(non_zeros_of_this_tile) == 0:
           continue
@@ -168,7 +167,7 @@ class RegisterOnlyDenseSparseGemm(AbstractInstruction):
           end_tile = k_end
         if end_tile > start_tile_n + len(non_zeros_of_this_tile):
           end_tile = start_tile_n + len(non_zeros_of_this_tile)
-        
+
         broadcast_idx = 0
         for n in non_zeros_of_this_tile:
           if not value_known:
@@ -181,11 +180,12 @@ class RegisterOnlyDenseSparseGemm(AbstractInstruction):
             writer(f'{self._dest.name}{res_access} += {op1_variable} * {tmp_value};')
           else:
             res_access = f"[{n}]"
-            address = self._mat_b.find_1d_offset(k ,n)
-            writer(f'{self._dest.name}{res_access} += {op1_variable} * {self._val_b[address]}{self._vm.get_real_literal()};')
+            address = self._mat_b.find_1d_offset(k, n)
+            writer(
+              f'{self._dest.name}{res_access} += {op1_variable} * {self._val_b[address]}{self._vm.get_real_literal()};')
           broadcast_idx += 1
         tileid += 1
-        writer.Comment(f"End Tile {start_tile_n}..{start_tile_n+self._vec_unit_length}")
+        writer.Comment(f"End Tile {start_tile_n}..{start_tile_n + self._vec_unit_length}")
         if start_tile_n < k_end - self._vec_unit_length:
           writer.Emptyline()
       writer.Comment(f"End Column {k} of A")

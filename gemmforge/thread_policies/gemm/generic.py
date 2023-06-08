@@ -19,7 +19,6 @@ class GenericGemmThreadPolicy(AbstractGemmLikeThreadPolicy):
     return factor * (32 + accumulator_length)
 
   def get_num_ops_per_block(self):
-
     accumulator_length = self._res.get_actual_num_cols()
     max_num_regs_per_thread = self._estimate_num_registers_per_mult(accumulator_length)
 

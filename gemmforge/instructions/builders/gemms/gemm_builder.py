@@ -12,6 +12,7 @@ from gemmforge.instructions.loaders import shm_mem_loader_factory
 from gemmforge.basic_types import GeneralLexicon
 from gemmforge.matrix import SparseMatrix
 
+
 class ShrMemBasedDenseGemmBuilder(AbstractBuilder):
   """This class helps to assemble all necessary instructions
   required to build a shared-memory-based dense gemm operation"""
@@ -233,7 +234,6 @@ class ShrMemBasedSparseDenseGemmBuilder(AbstractBuilder):
     return name
 
 
-
 class RegisterOnlySparseDenseGemmBuilder(AbstractBuilder):
   """This class helps to assemble all necessary instructions
   required to build a shared-memory-based dense gemm operation"""
@@ -279,8 +279,6 @@ class RegisterOnlySparseDenseGemmBuilder(AbstractBuilder):
     return []
 
 
-
-
 class ShrMemBasedDenseSparseGemmBuilder(AbstractBuilder):
   """This class helps to assemble all necessary instructions
   required to build a shared-memory-based dense gemm operation"""
@@ -319,7 +317,7 @@ class ShrMemBasedDenseSparseGemmBuilder(AbstractBuilder):
     # In this case, a loader will load an operand from glb. mem. to shr. mem
     # transposing it on the fly. In, short, the loader guaranties to deliver
     # an operand as (MxK) to shr. mem.
-    if mat_b.get_values() == None or trans_a: 
+    if mat_b.get_values() == None or trans_a:
       self._symbol_table.add_scope()
 
     if trans_a:
@@ -329,13 +327,13 @@ class ShrMemBasedDenseSparseGemmBuilder(AbstractBuilder):
 
     # Note: we will handle transposition of the second operand during
     # the matrix multiplication
-    
+
     if mat_b.get_values() == None:
       self._op2 = self._make_loader_and_symbol(operand=op2, do_transpose=False)
     else:
       self._op2 = op2
 
-    if mat_b.get_values() == None or trans_a: 
+    if mat_b.get_values() == None or trans_a:
       self._insert_sync_threads()
 
     gemm_params = {'vm': self._vm,
@@ -375,7 +373,6 @@ class ShrMemBasedDenseSparseGemmBuilder(AbstractBuilder):
     name = f'{GeneralLexicon.SHR_MEM_REGION_PREFIX}{self._counter}'
     self._counter += 1
     return name
-
 
 
 class RegisterOnlyDenseSparseGemmBuilder(AbstractBuilder):

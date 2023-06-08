@@ -184,7 +184,7 @@ class GemmGenerator(GemmLikeGenerator):
                                   'Matrix A (NoTrans) and B (NoTrans) do not match')
 
       if isinstance(self._mat_a, SparseMatrix) and isinstance(self._mat_b, SparseMatrix):
-          raise GenerationError("Gemmforge does not support AxB where both A and B are sparse")
+        raise GenerationError("Gemmforge does not support AxB where both A and B are sparse")
 
     except GenerationError as error:
       matrices = {'A': self._mat_a, 'B': self._mat_b, 'C': self._mat_c}

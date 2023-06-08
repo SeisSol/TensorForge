@@ -5,6 +5,8 @@ from .gemm.only_register_based import OnlyRegisterBasedThreadPolicy
 from .csa.generic import GenericCsaThreadPolicy
 from typing import Union
 from .gemm.dense_sparse import GenericDenseSparseGemmThreadPolicy
+
+
 class TheadPolicyFactory:
   ALLOWED_MANUFACTURES = ['nvidia', 'amd', 'intel']
 
@@ -25,16 +27,16 @@ class TheadPolicyFactory:
       if shr_mem_per_op == 0:
         if isinstance(op2, DenseMatrix):
           return OnlyRegisterBasedThreadPolicy(vm,
-                                                num_threads,
-                                                op1,
-                                                op2,
-                                                res)
+                                               num_threads,
+                                               op1,
+                                               op2,
+                                               res)
         elif isinstance(op2, SparseMatrix):
           return OnlyRegisterBasedThreadPolicy(vm,
-                                                num_threads,
-                                                op1,
-                                                op2,
-                                                res)
+                                               num_threads,
+                                               op1,
+                                               op2,
+                                               res)
         else:
           raise RuntimeError('Unknown Matrix type')
       else:

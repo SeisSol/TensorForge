@@ -5,6 +5,7 @@ from gemmforge.instructions import StoreRegToGlb
 from abc import abstractmethod
 import math
 
+
 class BaseGemmKernelBuilder(AbstractBuilder):
   """ This is the base class for building complete gemm kernels."""
 
@@ -67,7 +68,6 @@ class BaseGemmKernelBuilder(AbstractBuilder):
                           self._beta,
                           self._num_compute_threads)
     self._instructions.append(store)
-
 
   def build(self):
     self.build_prologue()

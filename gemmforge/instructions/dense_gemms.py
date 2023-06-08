@@ -77,7 +77,6 @@ class RegisterOnlyDenseGemm(AbstractInstruction):
     self._num_threads = kwargs['num_threads']
     self._vec_unit_length = self._vm.get_hw_descr().vec_unit_length
 
-
     if self._op1.stype != SymbolType.Global:
       raise InternalError('gemm: `op1` must be glb. memory')
 

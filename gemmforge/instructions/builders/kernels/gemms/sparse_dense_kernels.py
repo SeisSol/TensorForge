@@ -8,6 +8,7 @@ from gemmforge.instructions.builders import RegisterOnlySparseDenseGemmBuilder
 from gemmforge.basic_types import ShrMemObject
 import math
 
+
 class ShrMemBasedSparseDenseGemmKernelBuilder(BaseGemmKernelBuilder):
   """ This is a class for building shared-memory-based gemm kernels.
   This type of gemm kernels perform well on Nvidia and AMD GPUs"""
@@ -38,14 +39,13 @@ class ShrMemBasedSparseDenseGemmKernelBuilder(BaseGemmKernelBuilder):
     self._instructions.extend(builder.get_instructions())
     self._reg_array_obj = builder.get_resultant_obj()
 
-
   def build_epilogue(self):
     store = StoreRegToGlbIterateByRow(self._vm,
-                          self._symbol_table[self._mat_c],
-                          self._symbol_table[self._reg_array_obj],
-                          self._alpha,
-                          self._beta,
-                          self._num_compute_threads)
+                                      self._symbol_table[self._mat_c],
+                                      self._symbol_table[self._reg_array_obj],
+                                      self._alpha,
+                                      self._beta,
+                                      self._num_compute_threads)
     self._instructions.append(store)
 
   def build_kernel(self):
@@ -60,10 +60,10 @@ class ShrMemBasedSparseDenseGemmKernelBuilder(BaseGemmKernelBuilder):
 
     # generate the rest instructions i.e., load to shr. mem, compute, store
     builder = ShrMemBasedSparseDenseGemmBuilder(self._vm,
-                                          self._symbol_table,
-                                          self._reg_array_obj,
-                                          self._shr_mem_obj,
-                                          self._num_active_threads)
+                                                self._symbol_table,
+                                                self._reg_array_obj,
+                                                self._shr_mem_obj,
+                                                self._num_active_threads)
 
     builder.build(trans_a=self._trans_a,
                   trans_b=self._trans_b,
@@ -87,10 +87,10 @@ class RegisterOnlySparseDenseGemmKernelBuilder(BaseGemmKernelBuilder):
     # generate the rest instructions i.e., load to shr. mem, compute, store
     self._shr_mem_obj = ShrMemObject(name=None, size=0)
     builder = RegisterOnlySparseDenseGemmBuilder(self._vm,
-                                           self._symbol_table,
-                                           self._reg_array_obj,
-                                           self._shr_mem_obj,
-                                           self._num_active_threads)
+                                                 self._symbol_table,
+                                                 self._reg_array_obj,
+                                                 self._shr_mem_obj,
+                                                 self._num_active_threads)
 
     builder.build(trans_a=self._trans_a,
                   trans_b=self._trans_b,

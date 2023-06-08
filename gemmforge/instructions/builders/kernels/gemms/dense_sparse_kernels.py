@@ -23,10 +23,10 @@ class ShrMemBasedDenseSparseGemmKernelBuilder(BaseGemmKernelBuilder):
 
     # generate the rest instructions i.e., load to shr. mem, compute, store
     builder = ShrMemBasedDenseSparseGemmBuilder(self._vm,
-                                          self._symbol_table,
-                                          self._reg_array_obj,
-                                          self._shr_mem_obj,
-                                          self._num_active_threads)
+                                                self._symbol_table,
+                                                self._reg_array_obj,
+                                                self._shr_mem_obj,
+                                                self._num_active_threads)
 
     builder.build(trans_a=self._trans_a,
                   trans_b=self._trans_b,
@@ -50,10 +50,10 @@ class RegisterOnlyDenseSparseGemmKernelBuilder(BaseGemmKernelBuilder):
     # generate the rest instructions i.e., load to shr. mem, compute, store
     self._shr_mem_obj = ShrMemObject(name=None, size=0)
     builder = RegisterOnlyDenseSparseGemmBuilder(self._vm,
-                                           self._symbol_table,
-                                           self._reg_array_obj,
-                                           self._shr_mem_obj,
-                                           self._num_active_threads)
+                                                 self._symbol_table,
+                                                 self._reg_array_obj,
+                                                 self._shr_mem_obj,
+                                                 self._num_active_threads)
 
     builder.build(trans_a=self._trans_a,
                   trans_b=self._trans_b,

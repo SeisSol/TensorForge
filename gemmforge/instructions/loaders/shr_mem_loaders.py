@@ -5,6 +5,7 @@ from gemmforge.symbol_table import SymbolType, Symbol, DataView
 from copy import deepcopy
 from gemmforge.matrix import SparseMatrix, DenseMatrix
 
+
 class ExtendedPatchLoader(AbstractShrMemLoader):
   """A strategy which loads an entire matrix into shared memory
   including padding (caused by a difference between lead_dim and
@@ -20,7 +21,7 @@ class ExtendedPatchLoader(AbstractShrMemLoader):
     matrix = self._src.obj
     if isinstance(matrix, DenseMatrix):
       self._shm_volume = cropped_subvolume + full_subvolume
-    else: # Has to be sparse if not dense
+    else:  # Has to be sparse if not dense
       self._shm_volume = matrix.get_el_count()
 
     self._dest.data_view = deepcopy(self._src.data_view)
