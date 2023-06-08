@@ -89,9 +89,7 @@ class ShrMemBasedSparseDenseGemm(AbstractInstruction):
 
                 
                 for col_id in non_zeros:
-                    #print(transposed_row_id, ", ", col_id)
                     iter = self._mat_a.find_1d_offset(transposed_row_id, col_id)
-                    #print(f"{transposed_row_id}, {col_id} maps to {iter}")
                     res_access = f"[{col_id}]"
 
                     if not value_known:

@@ -183,12 +183,10 @@ class ShrMemBasedSparseDenseGemmBuilder(AbstractBuilder):
       # an operand as (MxK) to shr. mem.
       self._symbol_table.add_scope()
       self._op1 = self._make_loader_and_symbol(operand=op1, do_transpose=False)
-      #self._op1 = self._make_loader_and_symbol(operand=op1, do_transpose=False)
 
       # Note: we will handle transposition of the second operand during
       # the matrix multiplication
       self._symbol_table.add_scope()
-      #self._op2 = self._make_loader_and_symbol(operand=op2, do_transpose=False)
       self._op2 = op2
 
       self._insert_sync_threads()

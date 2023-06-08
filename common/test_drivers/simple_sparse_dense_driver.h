@@ -7,8 +7,8 @@
 #include <iostream>
 
 /*
-  The sole change of this driver compared to the simple driver is that it compares Dense x Sparse Matrix multiplication 
-  with Dense x Dense already implemented. The correctnesss of this test case relies and assumes that Dense x Dense is already correct.
+  The sole change of this driver compared to the simple driver is that it compares Sparse x Dense Matrix multiplication
+  with Dense x Dense already implemented. The correctness of this test case relies and assumes that Dense x Dense is already correct.
   Furthermore, it does the test by multiplying both the Dense and Sparse version of B.
 */
 namespace gemmforge {

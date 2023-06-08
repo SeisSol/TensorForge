@@ -161,7 +161,7 @@ void TestDriver::initSparseMatrix(real *DenseVersionOfSparseMatrix, real* Sparse
             }
         }
     }else {
-        std::runtime_error("matrix_b_type needs to be band | single_column | single_row | checkquered");
+        std::runtime_error("matrix_b_type needs to be full | random");
     }
 }
 
