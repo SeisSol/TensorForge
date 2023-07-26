@@ -28,17 +28,6 @@ class ShrMemBasedSparseDenseGemm(AbstractInstruction):
 
     self._is_ready = True
 
-  def _get_inner_loop(self, writer, op2_value):
-    op1_data_view = self._op1.data_view
-    writer.Pragma('unroll')
-    with writer.For(f'int m = 0; m < {op1_data_view.rows}; ++m'):
-      if self._trans_a:
-        raise Exception("TODO")
-      op1_addr = f'm + {op1_data_view.rows} * k'
-
-      res_access = '' if self._dest.obj.size == 1 else '[m]'
-      writer(f'{self._dest.name}{res_access} += {op2_value} * {self._op1.name}[{op1_addr}];')
-
   def gen_code(self, writer):
     value_var = 'value'
     op1_data_view = self._op1.data_view
