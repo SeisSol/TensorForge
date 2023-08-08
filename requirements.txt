@@ -1,0 +1,2 @@
+numpy
+PyYAML==5.4

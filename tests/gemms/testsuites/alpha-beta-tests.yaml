@@ -1,0 +1,29 @@
+test_suites:
+  -
+    test_base_name: "AlphaBetaTest"
+    matrix_a:
+      rows: 56
+      cols: 9
+      addressing: "strided"
+      bbox: [0, 0, 56, 9]
+
+    matrix_b:
+      rows: 9
+      cols: 9
+      addressing: "strided"
+      bbox: [0, 0, 9, 9]
+
+    matrix_c:
+      rows: 56
+      cols: 9
+      addressing: "strided"
+      bbox: [0, 0, 56, 9]
+
+    trans_a:  no
+    trans_b:  no
+    alpha: "alpha_params"
+    beta: "beta_params"
+    num_elements: 10
+
+    alpha_params: [1.0, 0.0, 2.0]
+    beta_params: [1.0, 0.0, 1.5]

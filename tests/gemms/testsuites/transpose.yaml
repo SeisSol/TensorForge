@@ -1,0 +1,26 @@
+test_suites:
+   -
+    test_base_name: "Transposition"
+    matrix_a:
+      rows: 72
+      cols: 56
+      addressing: "strided"
+      bbox: [0, 0, 33, 31]
+
+    matrix_b:
+      rows: 56
+      cols: 56
+      addressing: "strided"
+      bbox: [0, 0, 33, 9]
+
+    matrix_c:
+      rows: 56
+      cols: 56
+      addressing: "strided"
+      bbox: [0, 0, 31, 9]
+
+    trans_a:  yes
+    trans_b: no
+    alpha: 1.1
+    beta: 1.1
+    num_elements: 1

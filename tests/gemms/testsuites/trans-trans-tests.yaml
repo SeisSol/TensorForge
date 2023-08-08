@@ -1,0 +1,34 @@
+test_suites:
+   -
+    # m = 11, n = 33, k = 9
+    test_base_name: "LeadingDims_T_T"
+    matrix_a:
+      rows: 43
+      cols: 72
+      addressing: "strided"
+      bbox: "bbox_params_a"
+
+    matrix_b:
+      rows: 41
+      cols: 39
+      addressing: "strided"
+      bbox: "bbox_params_b"
+
+    matrix_c:
+      rows: 39
+      cols: 61
+      addressing: "strided"
+      bbox: "bbox_params_c"
+
+    bbox_params_a: [[0, 0, 9, 11], [0, 60, 9, 71], [33, 0, 42, 11], [33, 60, 42, 71], [16, 30, 25, 41]]
+    bbox_params_b: [[0, 0, 33, 9], [0, 29, 33, 38], [7, 0, 40, 9], [7, 29, 40, 38], [3, 14, 36, 23]]
+    bbox_params_c: [[0, 0, 11, 33], [0, 27, 11, 60], [27, 0, 38, 33], [27, 27, 38, 60], [13, 13, 24, 46]]
+
+    trans_a:  yes
+    trans_b:  yes
+    alpha: 1.1
+    beta: 1.1
+    num_elements: 10
+
+    gemm_type: "params_gemm_type"
+    params_gemm_type: ["shr_mem", "register_only"]
