@@ -1,5 +1,5 @@
-#ifndef CHAINFORGE_BENCHMARK_TYPEDEF_H
-#define CHAINFORGE_BENCHMARK_TYPEDEF_H
+#ifndef TENSORFORGE_TYPEDEF_H
+#define TENSORFORGE_TYPEDEF_H
 
 #include <vector>
 
@@ -11,4 +11,6 @@ typedef float real;
 #  error REAL_SIZE not supported.
 #endif
 
-#endif //CHAINFORGE_BENCHMARK_TYPEDEF_H
+using PackedData = std::vector<std::vector<real>>;
+
+#endif // TENSORFORGE_TYPEDEF_H
