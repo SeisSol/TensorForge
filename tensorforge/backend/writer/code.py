@@ -62,6 +62,9 @@ class Block:
   def __exit__(self, type, value, traceback):
     self.writer.indent -= 1
     self.writer('}' + self.foot)
+  
+  def __call__(self, line):
+    self.writer(line)
 
 
 class MultiBlock:
@@ -112,9 +115,10 @@ class PPIfBlock:
 
 
 class Cpp:
-  def __init__(self, stream=sys.stdout):
+  def __init__(self, stream=sys.stdout, factor=2):
     self.stream = stream
     self.indent = 0
+    self.factor = 2
 
   def __enter__(self):
     self.out = open(self.stream, 'w+') if isinstance(self.stream, str) else self.stream
@@ -126,9 +130,21 @@ class Cpp:
     self.out = None
 
   def __call__(self, code):
-    white_spaces = self.indent * '  '
+    white_spaces = (' ' * self.factor) * self.curr_indent
     for line in code.splitlines():
       self.out.write(white_spaces + line + '\n')
+
+  def mv_left(self):
+    self.curr_indent -= 1
+
+  def mv_right(self):
+    self.curr_indent += 1
+
+  def new_line(self):
+    self.__call__('')
+
+  def insert_pragma_unroll(self):
+    self.__call__(f'#pragma unroll')
 
   def Emptyline(self):
     self.out.write('\n')
