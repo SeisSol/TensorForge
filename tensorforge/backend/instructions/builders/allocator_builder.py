@@ -42,7 +42,7 @@ class ShrMemAllocBuilder(AbstractAllocBuilder):
     self._instructions.append(ShrMemAlloc(self._context, dest, size))
 
   def _name_new_symbol(self):
-    name = f'shrmem{self._counter}'
+    name = f'{GeneralLexicon.LOCAL_SHR_MEM}{self._counter}'
     self._counter += 1
     return name
 
@@ -66,6 +66,6 @@ class RegistersAllocBuilder(AbstractAllocBuilder):
     self._instructions.append(RegisterAlloc(self._context, dest, size, init_value))
 
   def _name_new_symbol(self):
-    name = f'reg{self._counter}'
+    name = f'{GeneralLexicon.REG_NAME}{self._counter}'
     self._counter += 1
     return name
