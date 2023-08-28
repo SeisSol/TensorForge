@@ -60,3 +60,8 @@ class GeneralLexicon:
   ALPHA_SYMBOL_NAME = 'alpha'
   BETA_SYMBOL_NAME = 'beta'
   FLAGS_NAME = 'flags'
+  GLOBAL_MEM_PREFIX = 'glb_'
+  TOTAL_SHR_MEM = 'totalShrMem'
+  LOCAL_SHR_MEM = 'localShrMem'
+  SHR_MEM_REGION_PREFIX = 'shrRegion'
+  REG_NAME = 'reg'
