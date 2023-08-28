@@ -16,6 +16,7 @@ class Lexic(ABC):
     self.block_dim_z = None
     self.block_idx_x = None
     self.stream_name = None
+    self.restrict_kw = None
 
   def get_tid_counter(self, thread_id, block_dim, block_id):
     return f'({thread_id} + {block_dim} * {block_id})'
