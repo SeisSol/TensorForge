@@ -1,7 +1,6 @@
-from chainforge.backend.exceptions import GenerationError
-from chainforge.common import Addressing, DataFlowDirection
+from tensorforge.common.exceptions import GenerationError
+from tensorforge.common.basic_types import Addressing, DataFlowDirection
 from typing import Union, List
-
 
 class Matrix():
   def __init__(self,
@@ -37,7 +36,7 @@ class Matrix():
                                                                self.num_cols))
 
     else:
-      self.bbox = (0, 0, num_rows - 1, num_cols - 1)
+      self.bbox = (0, 0, num_rows, num_cols)
 
     if isinstance(addressing, Addressing):
       self.addressing = addressing
@@ -82,13 +81,14 @@ class Matrix():
   def __str__(self):
     return self.name
 
-  def gen_descr(self):
-    string = f'{self.name} = {{'
-    string += f'rows: {self.num_rows}, '
-    string += f'cols: {self.num_cols}, '
-    string += f'addr: {Addressing.addr2str(self.addressing)}, '
-    string += f'bbox: {self.bbox}'
-    string += f'}};'
+  def __str__(self):
+    string = self.name + '\n'
+    string += "num. rows = {}\n".format(self.num_rows)
+    string += "num. columns = {}\n".format(self.num_cols)
+    string += "bounding box = {}\n".format(self.bbox)
+    string += "addressing = {}\n".format(self.addressing)
+    string += "num. actual rows = {}\n".format(self.get_actual_num_rows())
+    string += "num. actual cols = {}\n".format(self.get_actual_num_cols())
     return string
 
 
@@ -106,3 +106,4 @@ class DenseMatrix(Matrix):
                                       bbox,
                                       alias,
                                       is_tmp)
+
