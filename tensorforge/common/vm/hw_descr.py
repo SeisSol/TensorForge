@@ -38,14 +38,11 @@ def hw_descr_factory(arch, backend):
       return HwDecription(known_arch[arch], arch, backend)
     else:
       report_error(backend, arch)
-  """
-  # TODO: add sycl
   elif backend == 'oneapi' or backend == 'hipsycl':
     if arch in nvidia_list or arch in intel_list:
       return HwDecription(known_arch[arch], arch, backend)
     else:
       report_error(backend, arch)
-  """
 
   raise ValueError(f'Unknown gpu architecture: {backend} {arch}')
 
@@ -96,7 +93,7 @@ def get_known_arch():
   # MI50
 
   # info:
-  # 1. p31. https://www.olcf.ornl.gov/wp-content/uploads/2019/10/ORNL_Application_Readiness_Workshop-AMD_GPU_Basics.pd
+  # 1. p31. https://www.olcf.ornl.gov/wp-content/uploads/2019/10/ORNL_Application_Readiness_Workshop-AMD_GPU_Basics.pdf
   # 2. p16. https://developer.amd.com/wordpress/media/2017/08/Vega_Shader_ISA_28July2017.pdf
   # 3. https://en.wikipedia.org/wiki/Graphics_Core_Next#CU_scheduler
   # 4. https://en.wikipedia.org/wiki/Graphics_Core_Next#Compute_units
