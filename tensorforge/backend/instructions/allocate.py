@@ -31,7 +31,8 @@ class RegisterAlloc(AbstractInstruction):
     else:
       init_values_list = ''
       if isinstance(self._init_value, float):
-        init_values = ', '.join([str(self._init_value)] * self._dest.obj.size)
+        real_literal = self._vm.get_real_literal()
+        init_values = ', '.join([f'{str(self._init_value)}{real_literal}'] * self._dest.obj.size)
         init_values_list = f' = {{{init_values}}}'
       result = f'{self._context.fp_as_str()} {self._dest.obj.name}[{self._dest.obj.size}]{init_values_list};'
     writer(result)
@@ -53,12 +54,16 @@ class ShrMemAlloc(AbstractInstruction):
 
   def gen_code(self, writer: Writer):
     shrmem_obj = self._dest.obj
-    common_shrmem = f'total_{shrmem_obj.name}'
+    common_shrmem = f'{GeneralLexicon.TOTAL_SHR_MEM}'
     common_shrmem_size = shrmem_obj.get_total_size()
 
-    alignment = 8
-    type_as_str = f'{self._vm.lexic.shr_mem_kw} __align__({alignment}) {self._fp_as_str}'
-    writer(f'{type_as_str} {common_shrmem}[{common_shrmem_size}];')
+    shr_mem_decl = lexic.declare_shared_memory_inline(name=common_shrmem,
+                                                      precision=self._vm.fp_as_str(),
+                                                      size=common_shrmem_size,
+                                                      alignment=8)
+
+    if shr_mem_decl:
+      writer(f'{shr_mem_decl};')
 
     address = f'{shrmem_obj.get_size_per_mult()} * {self._vm.lexic.thread_idx_y}'
     writer(f'{self._fp_as_str} * {shrmem_obj.name} = &{common_shrmem}[{address}];')
