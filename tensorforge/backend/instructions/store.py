@@ -140,13 +140,28 @@ class StoreRegToGlb(AbstractInstruction):
           dest_row_idx += f' - {thread_id_displacement}'
 
         dest_addr = dest_view.get_address(row_idx=dest_row_idx, column_idx='n')
-        lhs = f'{self._dest.name}[{dest_addr}]'
+        rhs = f'{self._dest.name}[{dest_addr}]'
 
-        src_address = '' if self._src.obj.size == 1 else '[n]'
-        rhs = f'{self._alpha} * {self._src.name}{src_address}'
+        real_suffix = 'f' if precision == "float" else ''
 
-        if self._beta != 0.0:
-            rhs += f' + {self._beta} * {lhs}'
+        src_access = '' if self._src.obj.size == 1 else '[n]'
+        if not isinstance(self._alpha, float):
+          rhs = f'{self._alpha} * {self._src.name}{src_access}'
+        else:
+          if self._alpha == 1.0:
+            rhs = f'{self._src.name}{src_access}'
+          else:
+            rhs = f'{self._alpha}{real_suffix} * {self._src.name}{src_access}'
+
+        if not isinstance(self._beta, float):
+          rhs += f' + {self._beta} * {lhs}'
+        else:
+          if self._beta != 0.0:
+            if self._beta == 1.0:
+              rhs += f' + {lhs}'
+            else:
+              const = f'{self._beta}{real_suffix}'
+              rhs += f' + {const} * {lhs}'
 
         writer(f'{lhs} = {rhs};')
 
