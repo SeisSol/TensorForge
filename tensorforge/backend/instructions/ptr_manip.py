@@ -29,15 +29,15 @@ class GetElementPtr(AbstractInstruction):
       extra_offset = ''
 
     address = ''
-    if batch_addressing == "strided":
+    if batch_addressing == Addressing.STRIDED:
       main_offset = f'{GeneralLexicon.BATCH_ID} * {batch_obj.get_real_volume()}'
       sub_offset = f'{batch_obj.get_offset_to_first_element()}'
       address = f'{main_offset} + {sub_offset}{extra_offset}'
-    elif batch_addressing == "pointer_based":
+    elif batch_addressing == Addressing.PTR_BASED:
       main_offset = f'{GeneralLexicon.BATCH_ID}'
       sub_offset = f'{batch_obj.get_offset_to_first_element()}'
       address = f'{main_offset}][{sub_offset}{extra_offset}'
-    elif batch_addressing == "none":
+    elif batch_addressing == Addressing.NONE:
       address = f'{batch_obj.get_offset_to_first_element()}{extra_offset}'
     else:
       GenerationError(f'unknown addressing of {self._src.name}, given {batch_addressing}')
@@ -45,7 +45,7 @@ class GetElementPtr(AbstractInstruction):
     rhs = f'&{self._src.name}[{address}]'
 
     lhs = 'const ' if self._src.obj.direction == DataFlowDirection.SOURCE else ''
-    lhs += f'{self._vm.fp_as_str()} * const __restrict__ {self._dest.name}'
+    lhs += f'{self._vm.fp_as_str()} * const {self._vm.lexic.restrict_kw} {self._dest.name}'
     writer(f'{lhs} = {rhs};')
 
   def __str__(self) -> str:
