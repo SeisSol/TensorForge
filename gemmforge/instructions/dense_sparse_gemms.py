@@ -20,7 +20,7 @@ class ShrMemBasedDenseSparseGemm(AbstractInstruction):
     if self._op1.stype == SymbolType.Batch:
       raise InternalError('gemm: `op1` is a batch type, must be either glb. or shr.')
 
-    if self._op2.stype == SymbolType.Batch:
+    if self._op2.obj.get_values() == None and self._op2.stype == SymbolType.Batch:
       raise InternalError('gemm: `op2` is a batch type, must be either glb. or shr.')
 
     if self._dest.stype != SymbolType.Register:
@@ -87,7 +87,7 @@ class RegisterOnlyDenseSparseGemm(AbstractInstruction):
     if self._op1.stype == SymbolType.Batch:
       raise InternalError('gemm: `op1` is a batch type, must be either glb. or shr.')
 
-    if self._op2.stype == SymbolType.Batch:
+    if self._op2.obj.get_values() == None and self._op2.stype == SymbolType.Batch:
       raise InternalError('gemm: `op2` is a batch type, must be either glb. or shr.')
 
     if self._dest.stype != SymbolType.Register:

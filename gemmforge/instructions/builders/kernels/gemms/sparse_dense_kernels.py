@@ -18,10 +18,10 @@ class ShrMemBasedSparseDenseGemmKernelBuilder(BaseGemmKernelBuilder):
     self._deduce_num_threads()
 
   def _deduce_num_threads(self):
-    if self._trans_a:
-      lead_dim_length = self._mat_a.get_actual_num_rows()
+    if self._trans_b:
+      lead_dim_length = self._mat_b.get_actual_num_rows()
     else:
-      lead_dim_length = self._mat_a.get_actual_num_cols()
+      lead_dim_length = self._mat_b.get_actual_num_cols()
     num_vector_units_required = math.ceil(lead_dim_length / self._hw_descr.vec_unit_length)
     self._num_compute_threads = lead_dim_length
     self._num_active_threads = num_vector_units_required * self._hw_descr.vec_unit_length

@@ -1,3 +1,6 @@
+from gemmforge.instructions.builders.alloctor_builder import RegistersAllocBuilder
+from gemmforge.instructions.builders.ptr_manip_builder import GetElementPtrBuilder
+from gemmforge.matrix.sparse import SparseMatrix
 from .base_kernel import BaseGemmKernelBuilder
 from gemmforge.instructions.builders import ShrMemAllocBuilder
 from gemmforge.instructions.builders import ShrMemBasedDenseSparseGemmBuilder
@@ -12,9 +15,24 @@ class ShrMemBasedDenseSparseGemmKernelBuilder(BaseGemmKernelBuilder):
   def __init__(self, **kwargs):
     super(ShrMemBasedDenseSparseGemmKernelBuilder, self).__init__(**kwargs)
 
+  def build_prologue(self):
+    builder = GetElementPtrBuilder(self._vm, self._symbol_table)
+    for symbol in self._symbol_table.from_global.values():
+      if isinstance(symbol.obj, SparseMatrix) and symbol.obj.get_values() != None:
+        continue
+      builder.build(symbol)
+      self._instructions.extend(builder.get_instructions())
+
+    # create an array of registers
+    builder = RegistersAllocBuilder(self._vm, self._symbol_table)
+    builder.build(self._mat_c.get_actual_num_cols(), 0.0)
+    self._instructions.extend(builder.get_instructions())
+    self._reg_array_obj = builder.get_resultant_obj()
+
   def build_kernel(self):
     if not self._trans_a and self._mat_b.get_values() != None:
       self._shr_mem_obj = ShrMemObject(name=None, size=0)
+      #self._shr_mem_obj = None
     else:
       builder = ShrMemAllocBuilder(self._vm, self._symbol_table)
       builder.build(size=None)
@@ -45,6 +63,21 @@ class RegisterOnlyDenseSparseGemmKernelBuilder(BaseGemmKernelBuilder):
 
   def __init__(self, **kwargs):
     super(RegisterOnlyDenseSparseGemmKernelBuilder, self).__init__(**kwargs)
+
+  def build_prologue(self):
+    builder = GetElementPtrBuilder(self._vm, self._symbol_table)
+    for symbol in self._symbol_table.from_global.values():
+      if isinstance(symbol.obj, SparseMatrix) and symbol.obj.get_values() != None:
+        print("skip", symbol)
+        continue
+      builder.build(symbol)
+      self._instructions.extend(builder.get_instructions())
+
+    # create an array of registers
+    builder = RegistersAllocBuilder(self._vm, self._symbol_table)
+    builder.build(self._mat_c.get_actual_num_cols(), 0.0)
+    self._instructions.extend(builder.get_instructions())
+    self._reg_array_obj = builder.get_resultant_obj()
 
   def build_kernel(self):
     # generate the rest instructions i.e., load to shr. mem, compute, store

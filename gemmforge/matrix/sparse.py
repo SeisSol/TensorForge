@@ -8,10 +8,7 @@ import json
 # cols - number of columns (int) e.g. "cols": 2
 # entries - and array of coordinate arrayys of row,col,value, 0-indexed e.g. "entries" : [[0,0,"1.0"],[1,1,"1.0"]]
 # Optionally a name can be provided e.g. "name": "simple_identity"
-# Final example : {"name": "simple_identity", "rows": 2, "cols": 2, "entries": [[0,0,"1.0"],[1,1,"1.0"]]}
-
-# Right now the values are discarded and the locations of non-zeros are preserved
-# Coo_matrix is either the json read into a python dict of the string representation of json
+# Final example : {"name": "simple_identity", "rows": 2, "cols": 2, "coordinates": [[0,0],[1,1], ...]
 
 # 1-input 1 coordinate list (sbp)
 # 2-input 2 optional list of values (valeus)

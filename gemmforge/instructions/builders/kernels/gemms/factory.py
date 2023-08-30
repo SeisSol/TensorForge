@@ -84,12 +84,20 @@ class GemmKernelsFactory:
     elif self._gemm_kernel_type == GemmKernelType.REGISTER_ONLY_BASED:
       return RegisterOnlyDenseGemmKernelBuilder(**self._kwargs)
     elif self._gemm_kernel_type == GemmKernelType.DENSE_SPARSE_SHR_MEM_BASED:
+      if not isinstance(self._mat_a, DenseMatrix) or not isinstance(self._mat_b, SparseMatrix):
+        raise Exception("For dense x sparse kernel matrix A needs to be dense and matrix B sparse")
       return ShrMemBasedDenseSparseGemmKernelBuilder(**self._kwargs)
     elif self._gemm_kernel_type == GemmKernelType.DENSE_SPARSE_REGISTER_ONLY_BASED:
+      if not isinstance(self._mat_a, DenseMatrix) or not isinstance(self._mat_b, SparseMatrix):
+        raise Exception("For dense x sparse kernel matrix A needs to be dense and matrix B sparse")
       return RegisterOnlyDenseSparseGemmKernelBuilder(**self._kwargs)
     elif self._gemm_kernel_type == GemmKernelType.SPARSE_DENSE_SHR_MEM_BASED:
+      if not isinstance(self._mat_a, SparseMatrix) or not isinstance(self._mat_b, DenseMatrix):
+        raise Exception("For sparse x dense kernel matrix A needs to be sparse and matrix B dense")
       return ShrMemBasedSparseDenseGemmKernelBuilder(**self._kwargs)
     elif self._gemm_kernel_type == GemmKernelType.SPARSE_DENSE_REGISTER_ONLY_BASED:
+      if not isinstance(self._mat_a, SparseMatrix) or not isinstance(self._mat_b, DenseMatrix):
+        raise Exception("For sparse x dense kernel matrix A needs to be sparse and matrix B dense")
       return RegisterOnlySparseDenseGemmKernelBuilder(**self._kwargs)
     else:
       raise RuntimeError('unknown gemm type')
