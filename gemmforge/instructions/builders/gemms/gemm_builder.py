@@ -143,7 +143,7 @@ class RegisterOnlyDenseGemmBuilder(AbstractBuilder):
     return []
 
 
-class ShrMemBasedSparseDenseGemmBuilder(AbstractBuilder):
+class  ShrMemBasedSparseDenseGemmBuilder(AbstractBuilder):
   """This class helps to assemble all necessary instructions
   required to build a shared-memory-based dense gemm operation"""
 
@@ -163,6 +163,7 @@ class ShrMemBasedSparseDenseGemmBuilder(AbstractBuilder):
 
     self._op1 = None
     self._op2 = None
+    self._intermediate_dest = None
     self._dest = None
 
     self._mem_region_a = None
@@ -173,7 +174,8 @@ class ShrMemBasedSparseDenseGemmBuilder(AbstractBuilder):
             trans_b: bool,
             op1: Symbol,
             op2: Symbol,
-            dest: Symbol,
+            intermediate_dest: Symbol,
+            register_dest: Symbol,
             mat_a: SparseMatrix):
     self._reset()
 
@@ -182,25 +184,34 @@ class ShrMemBasedSparseDenseGemmBuilder(AbstractBuilder):
       # In this case, a loader will load an operand from glb. mem. to shr. mem
       # transposing it on the fly. In, short, the loader guaranties to deliver
       # an operand as (MxK) to shr. mem.
-      self._symbol_table.add_scope()
-      self._op1 = self._make_loader_and_symbol(operand=op1, do_transpose=False)
+      #self._symbol_table.add_scope()
+      #Access global?
+      #self._op1 = self._make_loader_and_symbol(operand=op1, do_transpose=False)
 
       # Note: we will handle transposition of the second operand during
       # the matrix multiplication
+      self._op1 = op1
+    else:
+      self._op1 = op1
+    
+    if trans_b:
       self._symbol_table.add_scope()
-      self._op2 = op2
-
-      self._insert_sync_threads()
+      self._op2 = self._make_loader_and_symbol(operand=op2, do_transpose=True)
     else:
       self._op2 = op2
-      self._op1 = op1
 
+    self._symbol_table.add_scope()
+    self._intermediate_dest = self._make_loader_and_symbol(operand=intermediate_dest, do_transpose=False)
+
+    self._insert_sync_threads()
+  
     gemm_params = {'vm': self._vm,
                    'trans_a': trans_a,
                    'trans_b': trans_b,
                    'op1': self._op1,
                    'op2': self._op2,
-                   'dest': dest,
+                   'intermediate_dest': self._intermediate_dest,
+                   'register_dest': register_dest,
                    'num_threads': self._num_threads,
                    'mat_a': mat_a}
     self._instructions.append(ShrMemBasedSparseDenseGemm(**gemm_params))
@@ -211,6 +222,7 @@ class ShrMemBasedSparseDenseGemmBuilder(AbstractBuilder):
                             obj=operand.obj)
 
     self._symbol_table.add_symbol(shr_mem_region)
+
     load_op = shm_mem_loader_factory(vm=self._vm,
                                      dest=shr_mem_region,
                                      src=operand,
@@ -263,6 +275,7 @@ class RegisterOnlySparseDenseGemmBuilder(AbstractBuilder):
             op2: Symbol,
             dest: Symbol,
             mat_a: SparseMatrix):
+    raise Exception("Sparse x Dense Kernel for register only approach not yet implemented")
     self._reset()
 
     gemm_params = {'vm': self._vm,
@@ -332,6 +345,7 @@ class ShrMemBasedDenseSparseGemmBuilder(AbstractBuilder):
       self._op2 = self._make_loader_and_symbol(operand=op2, do_transpose=False)
     else:
       self._op2 = op2
+
 
     if mat_b.get_values() == None or trans_a:
       self._insert_sync_threads()

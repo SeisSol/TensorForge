@@ -5,7 +5,8 @@ from .gemm.only_register_based import OnlyRegisterBasedThreadPolicy
 from .csa.generic import GenericCsaThreadPolicy
 from typing import Union
 from .gemm.dense_sparse import GenericDenseSparseGemmThreadPolicy
-
+from .gemm.dense_sparse import DenseSparseOnlyRegisterBasedThreadPolicy, GenericDenseSparseGemmThreadPolicy
+from .gemm.sparse_dense import GenericSparseDenseGemmThreadPolicy, SparseDenseOnlyRegisterBasedThreadPolicy
 
 class TheadPolicyFactory:
   ALLOWED_MANUFACTURES = ['nvidia', 'amd', 'intel']
@@ -25,14 +26,20 @@ class TheadPolicyFactory:
     hw_descr = vm.get_hw_descr()
     if hw_descr.manufacturer in TheadPolicyFactory.ALLOWED_MANUFACTURES:
       if shr_mem_per_op == 0:
-        if isinstance(op2, DenseMatrix):
+        if isinstance(op1, DenseMatrix) and isinstance(op2, DenseMatrix):
           return OnlyRegisterBasedThreadPolicy(vm,
                                                num_threads,
                                                op1,
                                                op2,
                                                res)
+        elif isinstance(op1, SparseMatrix):
+          return SparseDenseOnlyRegisterBasedThreadPolicy(vm,
+                                               num_threads,
+                                               op1,
+                                               op2,
+                                               res)
         elif isinstance(op2, SparseMatrix):
-          return OnlyRegisterBasedThreadPolicy(vm,
+          return DenseSparseOnlyRegisterBasedThreadPolicy(vm,
                                                num_threads,
                                                op1,
                                                op2,
@@ -40,20 +47,27 @@ class TheadPolicyFactory:
         else:
           raise RuntimeError('Unknown Matrix type')
       else:
-        if isinstance(op2, DenseMatrix):
+        if isinstance(op1, DenseMatrix) and isinstance(op2, DenseMatrix):
           return GenericGemmThreadPolicy(vm,
                                          shr_mem_per_op,
                                          num_threads,
                                          op1,
                                          op2,
                                          res)
+        elif isinstance(op1, SparseMatrix):
+          return GenericSparseDenseGemmThreadPolicy(vm,
+                                         shr_mem_per_op,
+                                         num_threads,
+                                         op1,
+                                         op2,
+                                         res)
         elif isinstance(op2, SparseMatrix):
-          return GenericDenseSparseGemmThreadPolicy(vm,
-                                                    shr_mem_per_op,
-                                                    num_threads,
-                                                    op1,
-                                                    op2,
-                                                    res)
+          return GenericSparseDenseGemmThreadPolicy(vm,
+                                         shr_mem_per_op,
+                                         num_threads,
+                                         op1,
+                                         op2,
+                                         res)
         else:
           raise RuntimeError('Unknown Matrix type')
     else:

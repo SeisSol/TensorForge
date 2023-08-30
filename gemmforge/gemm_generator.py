@@ -3,7 +3,7 @@ from io import StringIO
 from .exceptions import GenerationError
 from .abstract_gemmlike_generator import GemmLikeGenerator
 from .basic_types import GeneralLexicon, DataFlowDirection
-from .symbol_table import Symbol, SymbolType
+from .symbol_table import InverseSymbolTable, Symbol, SymbolType
 from .abstract_generator import AbstractGenerator as Generator
 from .instructions.builders.kernels import GemmKernelsFactory
 from .instructions.builders.kernels import GemmKernelType
@@ -33,6 +33,7 @@ class GemmGenerator(GemmLikeGenerator):
 
   def set(self, trans_a, trans_b, mat_a, mat_b, mat_c, alpha, beta, base_name=None):
     self._instructions = []
+    self._symbol_table = InverseSymbolTable()
 
     self._mat_a = mat_a
     self._trans_a = trans_a

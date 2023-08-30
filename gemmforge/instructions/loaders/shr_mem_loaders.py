@@ -91,10 +91,10 @@ class ExactPatchLoader(AbstractShrMemLoader):
             writer.Pragma("unroll")
             with writer.For(f'int counter = 0; counter < {num_hops}; ++counter'):
               shr_mem_addr = f'{thread_idx_x}'
-              shr_mem_addr += f' + counter * {self._num_threads} + i {dest_data_view.lead_dim}'
+              shr_mem_addr += f' + counter * {self._num_threads} + i * {dest_data_view.lead_dim}'
 
               glb_mem_addr = f'{thread_idx_x}'
-              glb_mem_addr += f' + counter * {self._num_threads} + i {src_data_view.lead_dim}'
+              glb_mem_addr += f' + counter * {self._num_threads} + i * {src_data_view.lead_dim}'
 
               self._assign(writer, shr_mem_addr, glb_mem_addr)
           else:

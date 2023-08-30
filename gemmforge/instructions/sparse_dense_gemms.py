@@ -13,17 +13,18 @@ class ShrMemBasedSparseDenseGemm(AbstractInstruction):
     self._trans_b = kwargs['trans_b']
     self._op1 = kwargs['op1']
     self._op2 = kwargs['op2']
-    self._dest = kwargs['dest']
+    self._intermediate_dest = kwargs['intermediate_dest']
+    self._register_dest = kwargs['register_dest']
     self._num_threads = kwargs['num_threads']
     self._mat_a = kwargs['mat_a']
 
-    if self._op1.stype == SymbolType.Batch:
+    if self._op1.obj.get_values() == None and self._op1.stype == SymbolType.Batch:
       raise InternalError('gemm: `op1` is a batch type, must be either glb. or shr.')
 
     if self._op2.stype == SymbolType.Batch:
       raise InternalError('gemm: `op2` is a batch type, must be either glb. or shr.')
 
-    if self._dest.stype != SymbolType.Register:
+    if self._register_dest.stype != SymbolType.Register:
       raise InternalError('gemm: `dest` must be a register obj.')
 
     self._is_ready = True
@@ -37,77 +38,79 @@ class ShrMemBasedSparseDenseGemm(AbstractInstruction):
       writer(f'{self._vm.fp_as_str()} {value_var};')
 
       writer.Emptyline()
-      if not self._trans_a:
-        for k in range(0, op2_data_view.rows):
-          non_zeros = self._mat_a.get_coo_col_major()[k]
-          if len(non_zeros) == 0:
-            continue
 
-          if self._trans_b:
-            op2_addr = f'{k} * {op2_data_view.lead_dim} + {thread_idx_x}'
-          else:
-            op2_addr = f'{k} + {thread_idx_x} * {op2_data_view.rows}'
-          writer(f'{value_var} = {self._op2.name}[{op2_addr}];')
-
-          writer.Emptyline()
-          self._get_inner_loop_sparse_with_a_col(writer, value_var, k, non_zeros, self._mat_a.get_values())
-      else:
-        for k in range(0, op2_data_view.rows):
+      # A was transposed on load, so swapping rows and columns are enough
+      rows_b = op2_data_view.rows
+      cols_b = op2_data_view.columns
+      #if self._trans_b:
+      #  rows_b = op2_data_view.columns
+      #  cols_b = op2_data_view.rows
+  
+      for k in range(0, rows_b):
+        # Get ith row of AT, or
+        # get ith col of A
+        if self._trans_a:
           non_zeros = self._mat_a.get_coo_row_major()[k]
-          if len(non_zeros) == 0:
-            continue
+        else:
+          non_zeros = self._mat_a.get_coo_col_major()[k]
 
-          if self._trans_b:
-            op2_addr = f'{k} * {op2_data_view.lead_dim} + {thread_idx_x}'
-          else:
-            op2_addr = f'{k} + {thread_idx_x} * {op2_data_view.rows}'
-          writer(f'{value_var} = {self._op2.name}[{op2_addr}];')
+        if len(non_zeros) == 0:
+          continue
 
-          writer.Emptyline()
-          self._get_inner_loop_sparse_with_a_col(writer, value_var, k, non_zeros, self._mat_a.get_values())
+        op2_addr = f'{k} + {thread_idx_x} * {op2_data_view.lead_dim}'
+        writer(f'{value_var} = {self._op2.name}[{op2_addr}];')
 
-  def _get_inner_loop_sparse_with_a_col(self, writer, op2_value, col_id, non_zeros, val_a=None):
+        writer.Emptyline()
+        self._get_inner_loop_sparse_with_a_col(writer, value_var, k, self._mat_a.get_values())
+
+  def _get_inner_loop_sparse_with_a_col(self, writer, op2_value, b_col_id, val_a=None):
     # Iterate the first column first then the second etc. (coo_b[0] if col major, otherwise coo_b[1] if row major)
     # As we iterate we need to find the element in the real ordering (coordiantes)
     # This function iterates a column until the end
     if self._trans_a:
+      # Multiply an element of ith column of B with the ith column of A
+      # Since A is transposed we get ith row
+      a_row_id = b_col_id
+      non_zeros = self._mat_a.get_coo_row_major()[a_row_id]
       if len(non_zeros) > 0:
         value_known = val_a != None
-        transposed_row_id = col_id
-        writer.Comment(f"Mul begin col {transposed_row_id} (would be a row of non transposed matrix)")
+        writer.Comment(f"Mul begin col {a_row_id}")
 
         for col_id in non_zeros:
-          iter = self._mat_a.find_1d_offset(transposed_row_id, col_id)
+          iter = self._mat_a.find_1d_offset(a_row_id, col_id)
           res_access = f"[{col_id}]"
 
           if not value_known:
-            writer(f'{self._dest.name}{res_access} += {op2_value} * {self._op1.name}[{iter}];')
+            writer(f'{self._register_dest.name}{res_access} += {self._op1.name}[{iter}] * {op2_value};')
           else:
             writer(
-              f'{self._dest.name}{res_access} += {op2_value} * {val_a[iter]}{self._vm.get_real_literal()};')
+              f'{self._register_dest.name}{res_access} += {val_a[iter]}{self._vm.get_real_literal()} * {op2_value};')
 
-        writer.Comment(f"Mul end col {transposed_row_id} (would be a row of non transposed matrix)")
+        writer.Comment(f"Mul end col {a_row_id}")
         writer.Emptyline()
     else:
+      # Multiply an element of ith column of B with the ith column of A
+      a_col_id = b_col_id
+      non_zeros = self._mat_a.get_coo_col_major()[a_col_id]
       if len(non_zeros) > 0:
         value_known = val_a != None
-        writer.Comment(f"Mul begin col {col_id}")
+        writer.Comment(f"Mul begin col {a_col_id}")
 
         for row_id in non_zeros:
-          iter = self._mat_a.find_1d_offset(row_id, col_id)
+          iter = self._mat_a.find_1d_offset(row_id, a_col_id)
           res_access = f"[{row_id}]"
 
           if not value_known:
-            writer(f'{self._dest.name}{res_access} += {op2_value} * {self._op1.name}[{iter}];')
+            writer(f'{self._register_dest.name}{res_access} += {self._op1.name}[{iter}] * {op2_value};')
           else:
             writer(
-              f'{self._dest.name}{res_access} += {op2_value} * {val_a[iter]}{self._vm.get_real_literal()};')
+              f'{self._register_dest.name}{res_access} += {val_a[iter]}{self._vm.get_real_literal()} * {op2_value};')
 
-        writer.Comment(f"Mul end col {col_id}")
+        writer.Comment(f"Mul end col {a_col_id}")
         writer.Emptyline()
 
   def __str__(self) -> str:
-    return f'{self._dest.name} = gemm({self._op1.name}, {self._op2.name})'
+    return f'{self._register_dest.name} = gemm({self._op1.name}, {self._op2.name})'
 
 
 class RegisterOnlySparseDenseGemm(AbstractInstruction):
