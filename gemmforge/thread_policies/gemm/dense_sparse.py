@@ -31,7 +31,10 @@ class GenericDenseSparseGemmThreadPolicy(AbstractGemmLikeThreadPolicy):
     el_count_if_dense = self._op2.get_actual_num_cols() * self._op2.get_actual_num_rows()
     el_count_if_sparse = self._op2.get_el_count()
     factor = (el_count_if_dense / el_count_if_sparse)
+    if factor > 1.00/0.15:
+      factor = 1.00/0.15
     factor_int = int(factor + 0.25)
+                                
     return max(int(factor_int * mults_per_sm / hw_descr.max_block_per_sm), 1)
 
 
