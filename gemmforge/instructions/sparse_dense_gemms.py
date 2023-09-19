@@ -70,30 +70,6 @@ class ShrMemBasedSparseDenseGemm(AbstractInstruction):
     # Iterate the first column first then the second etc. (coo_b[0] if col major, otherwise coo_b[1] if row major)
     # As we iterate we need to find the element in the real ordering (coordiantes)
     # This function iterates a column until the end
-    """
-    if self._trans_a:
-      # Multiply an element of ith column of B with the ith column of A
-      # Since A is transposed we get ith row
-      a_row_id = b_col_id
-      non_zeros = self._mat_a.get_coo_row_major()[a_row_id]
-      if len(non_zeros) > 0:
-        value_known = val_a != None
-        writer.Comment(f"Mul begin col {a_row_id}")
-
-        for col_id in non_zeros:
-          iter = self._mat_a.find_1d_offset(a_row_id, col_id)
-          res_access = f"[{col_id}]"
-
-          if not value_known:
-            writer(f'{self._register_dest.name}{res_access} += {self._op1.name}[{iter}] * {op2_value};')
-          else:
-            writer(
-              f'{self._register_dest.name}{res_access} += {val_a[iter]}{self._vm.get_real_literal()} * {op2_value};')
-
-        writer.Comment(f"Mul end col {a_row_id}")
-        writer.Emptyline()
-    else:
-    """
     # Multiply an element of ith column of B with the ith column of A
     a_col_id = b_col_id
     non_zeros = self._mat_a.get_coo_col_major()[a_col_id]
