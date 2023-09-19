@@ -205,7 +205,7 @@ class Generator:
 
   def _name_operands(self, gemm_list: List[GemmDescr]):
     tmp_counter = 0
-    op_counter = 'A'
+    op_counter = 0
     tmp_base_name = 'tmp'
 
     self._matrix_list = []
@@ -227,7 +227,7 @@ class Generator:
           tmp_counter += 1
         else:
           matrix.name = f'{op_counter}'
-          op_counter = chr(ord(op_counter) + 1)
+          op_counter += 1
 
   def _collect_tmp_matrices(self):
     self._tmp_list = []
