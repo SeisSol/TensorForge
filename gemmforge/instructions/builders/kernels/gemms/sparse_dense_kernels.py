@@ -77,11 +77,16 @@ class ShrMemBasedSparseDenseGemmKernelBuilder(BaseGemmKernelBuilder):
     self._instructions.append(store_to_glb)
 
   def build_kernel(self):
-    # create shared mem
-    builder = ShrMemAllocBuilder(self._vm, self._symbol_table)
-    builder.build(size=None)
-    self._instructions.extend(builder.get_instructions())
-    self._shr_mem_obj = builder.get_resultant_obj()
+    if self._trans_b and self._mat_a.get_values() != None:
+      builder = ShrMemAllocBuilder(self._vm, self._symbol_table)
+      builder.build(size=self._mat_c.num_rows * self._mat_c.num_cols)
+      self._instructions.extend(builder.get_instructions())
+      self._shr_mem_obj = builder.get_resultant_obj()
+    else:
+      builder = ShrMemAllocBuilder(self._vm, self._symbol_table)
+      builder.build(size=None)
+      self._instructions.extend(builder.get_instructions())
+      self._shr_mem_obj = builder.get_resultant_obj()
 
     # generate the rest instructions i.e., load to shr. mem, compute, store
     builder = ShrMemBasedSparseDenseGemmBuilder(self._vm,
@@ -96,7 +101,8 @@ class ShrMemBasedSparseDenseGemmKernelBuilder(BaseGemmKernelBuilder):
                   op2=self._symbol_table[self._mat_b],
                   intermediate_dest=self._symbol_table[self._mat_c],
                   register_dest=self._symbol_table[self._reg_array_obj],
-                  mat_a=self._mat_a)
+                  mat_a=self._mat_a,
+                  beta=self._beta)
 
     self._shr_mem_loads = builder.get_srh_mem_loads()
     self._instructions.extend(builder.get_instructions())

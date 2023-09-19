@@ -119,7 +119,7 @@ class StoreShrMemToGlb(AbstractInstruction):
           shr_mem_addr += f' + counter * {self._num_threads} + k * {dest_data_view.lead_dim}'
 
           glb_mem_addr = f'{thread_idx_x}'
-          glb_mem_addr += f' + counter * {self._num_threads} + k * {src_data_view.lead_dim}'
+          glb_mem_addr += f' + counter * {self._num_threads} + k * {self._src.obj.num_rows}'
 
           rhs = "{}[{}]".format(dest_name, glb_mem_addr)
           lhs = "{}[{}]".format(src_name,  shr_mem_addr)

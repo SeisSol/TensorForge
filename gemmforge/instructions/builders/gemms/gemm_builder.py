@@ -1,5 +1,6 @@
 from typing import Tuple, List, Union
 from gemmforge.instructions.builders.abstract_builder import AbstractBuilder
+from gemmforge.instructions.loaders.abstract_loader import NoLoadShrMemLoader
 from gemmforge.symbol_table import SymbolType, Symbol
 from gemmforge.instructions import SyncThreads
 from gemmforge.instructions import ShrMemBasedDenseGemm
@@ -176,8 +177,12 @@ class  ShrMemBasedSparseDenseGemmBuilder(AbstractBuilder):
             op2: Symbol,
             intermediate_dest: Symbol,
             register_dest: Symbol,
-            mat_a: SparseMatrix):
+            mat_a: SparseMatrix,
+            beta: float):
     self._reset()
+
+    #if mat_a.get_values() == None or not trans_b:
+    self._symbol_table.add_scope()
 
     if mat_a.get_values() == None:
       # Note: of trans_a==True than an operand is given as KxM instead of (MxK).
@@ -190,21 +195,22 @@ class  ShrMemBasedSparseDenseGemmBuilder(AbstractBuilder):
 
       # Note: we will handle transposition of the second operand during
       # the matrix multiplication
-      self._op1 = op1
+      self._op1 = self._make_loader_and_symbol(operand=op1, do_transpose=False)
+      self._symbol_table.add_scope()
     else:
       self._op1 = op1
     
-    if trans_b:
-      self._symbol_table.add_scope()
+    if not trans_b:
       self._op2 = self._make_loader_and_symbol(operand=op2, do_transpose=True)
     else:
       self._op2 = op2
-
     self._symbol_table.add_scope()
-    self._intermediate_dest = self._make_loader_and_symbol(operand=intermediate_dest, do_transpose=False)
+
+    self._intermediate_dest = self._make_loader_and_symbol_do_not_load_if_cond(operand=intermediate_dest, do_transpose=False, cond=beta!=0.0)
+    #self._symbol_table.add_scope()
 
     self._insert_sync_threads()
-  
+
     gemm_params = {'vm': self._vm,
                    'trans_a': trans_a,
                    'trans_b': trans_b,
@@ -233,6 +239,34 @@ class  ShrMemBasedSparseDenseGemmBuilder(AbstractBuilder):
     self._instructions.append(load_op)
     self._load_instrs.append(load_op)
     return shr_mem_region
+
+  def _make_loader_and_symbol_do_not_load_if_cond(self, operand, do_transpose, cond):
+    shr_mem_region = Symbol(name=self._name_shr_reg(),
+                            stype=SymbolType.SharedMem,
+                            obj=operand.obj)
+
+    self._symbol_table.add_symbol(shr_mem_region)
+
+    if cond:
+      load_op = shm_mem_loader_factory(vm=self._vm,
+                                      dest=shr_mem_region,
+                                      src=operand,
+                                      shr_mem=self._shr_mem,
+                                      num_threads=self._num_threads,
+                                      load_and_transpose=do_transpose)
+    else:
+      params = {'vm': self._vm,
+            'dest': shr_mem_region,
+            'src': operand,
+            'shr_mem': self._shr_mem,
+            'num_threads': self._num_threads,
+            'load_and_transpose': do_transpose}
+      load_op = NoLoadShrMemLoader(**params)
+    self._instructions.append(load_op)
+    self._load_instrs.append(load_op)
+
+    return shr_mem_region
+
 
   def get_srh_mem_loads(self):
     return self._load_instrs

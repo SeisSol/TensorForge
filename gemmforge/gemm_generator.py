@@ -111,7 +111,7 @@ class GemmGenerator(GemmLikeGenerator):
               if instr.is_ready():
                 instr.gen_code(file)
               else:
-                raise GenerationError("gemm_generator: requested instr is not ready")
+                raise GenerationError("gemm_generator: requested instr is not ready: " + str(instr))
 
       self._kernel = src.getvalue()
 
