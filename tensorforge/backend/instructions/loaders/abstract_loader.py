@@ -1,10 +1,10 @@
 from abc import abstractmethod
 from typing import Union
 import enum
-from tensorforge.common.matrix import Matrix
-from tensorforge.backend.instructions import AbstractShrMemWrite
-from tensorforge.backend.symbol import SymbolType, Symbol
-from tensorforge.backend.exceptions import InternalError
+from kernelforge.common.matrix import Matrix
+from kernelforge.backend.instructions import AbstractShrMemWrite
+from kernelforge.backend.symbol import SymbolType, Symbol
+from kernelforge.backend.exceptions import InternalError
 
 
 class ShrMemLoaderType(enum.Enum):

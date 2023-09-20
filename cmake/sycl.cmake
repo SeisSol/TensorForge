@@ -11,10 +11,10 @@ if (${DEVICE_BACKEND} STREQUAL "hipsycl")
     find_package(hipSYCL CONFIG REQUIRED)
     add_sycl_to_target(TARGET ${GPU_TARGET}  SOURCES ${DEVICE_SOURCE_FILES})
 else()
-    set(PYTHON_SCRIPT "from pathlib import Path;import tensorforge as gf;print(Path(gf.__file__).parents[1], end='')")
+    set(PYTHON_SCRIPT "from pathlib import Path;import kernelforge as gf;print(Path(gf.__file__).parents[1], end='')")
     execute_process(COMMAND python3 -c "${PYTHON_SCRIPT}"
-                    OUTPUT_VARIABLE TENSORFORGE_PATH)
-    set(CMAKE_MODULE_PATH "${TENSORFORGE_PATH}/submodules/Device/cmake"
+                    OUTPUT_VARIABLE KERNELFORGE_PATH)
+    set(CMAKE_MODULE_PATH "${KERNELFORGE_PATH}/submodules/Device/cmake"
                           "${CMAKE_ROOT}/Modules")
 
     find_package(DpcppFlags REQUIRED)

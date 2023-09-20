@@ -1,8 +1,8 @@
-from tensorforge.common import DenseMatrix
-from tensorforge.common import Context
-from tensorforge.common.aux import generate_tmp_matrix
-from tensorforge.common import GemmDescr, FloatingPointType, Addressing
-from tensorforge.backend.generator import Generator
+from kernelforge.common import DenseMatrix
+from kernelforge.common import Context
+from kernelforge.common.aux import generate_tmp_matrix
+from kernelforge.common import GemmDescr, FloatingPointType, Addressing
+from kernelforge.backend.generator import Generator
 
 
 # Q = (((A x B) x (C x B)) x D)

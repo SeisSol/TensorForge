@@ -1,5 +1,5 @@
-from tensorforge import DenseMatrix, GenerationError, CsaGenerator
-from tensorforge.vm import vm_factory
+from kernelforge import DenseMatrix, GenerationError, CsaGenerator
+from kernelforge.vm import vm_factory
 import argparse
 
 

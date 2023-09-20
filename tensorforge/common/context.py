@@ -1,6 +1,6 @@
 from math import ceil
-from tensorforge.common.vm import VM, vm_factory
-from tensorforge.common.basic_types import FloatingPointType
+from kernelforge.common.vm import VM, vm_factory
+from kernelforge.common.basic_types import FloatingPointType
 
 
 class Options:

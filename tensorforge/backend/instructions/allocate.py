@@ -1,8 +1,8 @@
 from typing import Union
-from tensorforge.common import Context
-from tensorforge.backend.symbol import Symbol
-from tensorforge.backend.exceptions import InternalError
-from tensorforge.backend.writer import Writer
+from kernelforge.common import Context
+from kernelforge.backend.symbol import Symbol
+from kernelforge.backend.exceptions import InternalError
+from kernelforge.backend.writer import Writer
 from .abstract_instruction import AbstractInstruction
 
 

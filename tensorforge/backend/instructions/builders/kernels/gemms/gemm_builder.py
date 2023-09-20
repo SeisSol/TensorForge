@@ -1,17 +1,17 @@
 from typing import Tuple, Dict
-from tensorforge.common import Context, VM
-from tensorforge.backend.scopes import Scopes
-from tensorforge.backend.symbol import Symbol, SymbolType
-from tensorforge.backend.instructions import Gemm
-from tensorforge.backend.instructions.loaders import shm_mem_loader_factory, AbstractShrMemLoader
-from tensorforge.backend.instructions.loaders import ShrMemLoaderType
-from tensorforge.backend.instructions import ClearRegisters
-from tensorforge.backend.instructions import StoreRegToGlb, StoreRegToShr
-from tensorforge.backend.instructions import SyncThreads
-from tensorforge.backend.instructions.gemm import ShrMemBasedDenseGemm, RegisterOnlyDenseGemm
-from tensorforge.common.matrix import Matrix
-from tensorforge.backend.exceptions import InternalError
-from tensorforge.common.descriptions import GemmDescr
+from kernelforge.common import Context, VM
+from kernelforge.backend.scopes import Scopes
+from kernelforge.backend.symbol import Symbol, SymbolType
+from kernelforge.backend.instructions import Gemm
+from kernelforge.backend.instructions.loaders import shm_mem_loader_factory, AbstractShrMemLoader
+from kernelforge.backend.instructions.loaders import ShrMemLoaderType
+from kernelforge.backend.instructions import ClearRegisters
+from kernelforge.backend.instructions import StoreRegToGlb, StoreRegToShr
+from kernelforge.backend.instructions import SyncThreads
+from kernelforge.backend.instructions.gemm import ShrMemBasedDenseGemm, RegisterOnlyDenseGemm
+from kernelforge.common.matrix import Matrix
+from kernelforge.backend.exceptions import InternalError
+from kernelforge.common.descriptions import GemmDescr
 from .allocator_builder import AbstractBuilder
 
 

@@ -1,10 +1,10 @@
 from abc import abstractmethod
 from typing import Union
-from tensorforge.common import Context, VM
-from tensorforge.backend.scopes import Scopes
-from tensorforge.backend.symbol import Symbol, SymbolType
-from tensorforge.backend.instructions.allocate import RegisterAlloc, ShrMemAlloc
-from tensorforge.backend.data_types import ShrMemObject, RegMemObject
+from kernelforge.common import Context, VM
+from kernelforge.backend.scopes import Scopes
+from kernelforge.backend.symbol import Symbol, SymbolType
+from kernelforge.backend.instructions.allocate import RegisterAlloc, ShrMemAlloc
+from kernelforge.backend.data_types import ShrMemObject, RegMemObject
 from .abstract_builder import AbstractBuilder
 
 

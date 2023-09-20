@@ -1,5 +1,5 @@
 from ..abstract_thread_policy import AbstractGemmLikeThreadPolicy, DenseMatrix
-from tensorforge.vm import VM
+from kernelforge.vm import VM
 
 
 class OnlyRegisterBasedThreadPolicy(AbstractGemmLikeThreadPolicy):

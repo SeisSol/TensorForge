@@ -1,9 +1,9 @@
 from .abstract_instruction import AbstractInstruction
-from tensorforge.vm import VM
-from tensorforge.common import get_extra_offset_name
-from tensorforge.symbol_table import SymbolType, Symbol, DataView, InverseSymbolTable
-from tensorforge.basic_types import GeneralLexicon, DataFlowDirection
-from tensorforge.exceptions import GenerationError
+from kernelforge.vm import VM
+from kernelforge.common import get_extra_offset_name
+from kernelforge.symbol_table import SymbolType, Symbol, DataView, InverseSymbolTable
+from kernelforge.basic_types import GeneralLexicon, DataFlowDirection
+from kernelforge.exceptions import GenerationError
 
 
 class GetElementPtr(AbstractInstruction):

@@ -1,5 +1,5 @@
-#ifndef TENSORFORGE_TYPEDEF_H
-#define TENSORFORGE_TYPEDEF_H
+#ifndef KERNELFORGE_TYPEDEF_H
+#define KERNELFORGE_TYPEDEF_H
 
 #include <vector>
 
@@ -13,4 +13,4 @@ typedef float real;
 
 using PackedData = std::vector<std::vector<real>>;
 
-#endif // TENSORFORGE_TYPEDEF_H
+#endif // KERNELFORGE_TYPEDEF_H

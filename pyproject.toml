@@ -1,5 +1,5 @@
 [project]
-name = "tensorforge"
+name = "kernelforge"
 description="Small GEMM/GETT generator for GPUs"
 license = {file = "LICENSE"}
 requires-python = ">=3.5"
@@ -24,5 +24,5 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.dynamic]
 readme = {file = ["README.md"], content-type = "text/markdown"}
-version = {file = ["tensorforge/VERSION"]}
+version = {file = ["kernelforge/VERSION"]}
 dependencies = {file = ["requirements.txt"]}

@@ -6,7 +6,7 @@ stages:
 
 
 image:
-  name: ravilmobile/tensorforge-nvidia:latest
+  name: ravilmobile/kernelforge-nvidia:latest
   entrypoint: [""]
 
 
@@ -127,7 +127,7 @@ pep8:
     - helper
   allow_failure: true
   script:
-    - pep8 tensorforge
+    - pep8 kernelforge
 
 
 pylint:
@@ -137,7 +137,7 @@ pylint:
     - helper
   allow_failure: true
   script:
-    - pylint tensorforge
+    - pylint kernelforge
 
 
 install:
@@ -149,9 +149,9 @@ install:
     matrix:
       - BACKEND: [cuda, hipsycl, hip]
   before_script:
-  - pip3 install --user git+https://github.com/seissol/tensorforge.git@$CI_COMMIT_SHA
+  - pip3 install --user git+https://github.com/seissol/kernelforge.git@$CI_COMMIT_SHA
   script:
-    - export isntall_path=$(python3 -c 'import tensorforge, os; print(os.path.dirname(tensorforge.__file__))')
+    - export isntall_path=$(python3 -c 'import kernelforge, os; print(os.path.dirname(kernelforge.__file__))')
     - tree $isntall_path
     - export root_dir=$PWD
     - cd ./tests/cmake_integration

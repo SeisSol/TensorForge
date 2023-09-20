@@ -4,7 +4,7 @@
 #include <vector>
 #include <assert.h>
 
-namespace tensorforge {
+namespace kernelforge {
   namespace dense {
 
     class TestDriver {

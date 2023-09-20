@@ -1,5 +1,5 @@
-from tensorforge.common import Context
-from tensorforge.backend.writer import Writer
+from kernelforge.common import Context
+from kernelforge.backend.writer import Writer
 from .abstract_instruction import AbstractInstruction
 
 

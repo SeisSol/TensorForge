@@ -1,6 +1,6 @@
-from tensorforge import DenseMatrix, GenerationError
-from tensorforge import GemmGenerator, GemmKernelType
-from tensorforge.vm import vm_factory
+from kernelforge import DenseMatrix, GenerationError
+from kernelforge import GemmGenerator, GemmKernelType
+from kernelforge.vm import vm_factory
 import os
 import yaml
 import argparse

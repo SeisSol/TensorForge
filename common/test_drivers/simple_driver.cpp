@@ -1,11 +1,11 @@
 #include "aux.h"
 #include "simple_driver.h"
-#include "tensorforge_aux.h"
+#include "kernelforge_aux.h"
 #include <sstream>
 #include <iostream>
 #include <device.h>
 
-using namespace tensorforge::dense;
+using namespace kernelforge::dense;
 using namespace device;
 
 AbstractAPI *getDeviceAPI() {

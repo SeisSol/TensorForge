@@ -1,4 +1,4 @@
-from tensorforge.vm import VM
+from kernelforge.vm import VM
 from ..matrix import DenseMatrix
 from abc import ABC, abstractmethod
 

@@ -1,9 +1,9 @@
-from tensorforge.common import Context, VM
-from tensorforge.backend.scopes import Scopes, Symbol
-from tensorforge.common.matrix import Matrix
-from tensorforge.backend.symbol import SymbolType
-from tensorforge.backend.instructions import GetElementPtr
-from tensorforge.backend.exceptions import InternalError
+from kernelforge.common import Context, VM
+from kernelforge.backend.scopes import Scopes, Symbol
+from kernelforge.common.matrix import Matrix
+from kernelforge.backend.symbol import SymbolType
+from kernelforge.backend.instructions import GetElementPtr
+from kernelforge.backend.exceptions import InternalError
 from .abstract_builder import AbstractBuilder
 
 

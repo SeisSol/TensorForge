@@ -1,7 +1,7 @@
 #include <iostream>
 #include <cuda_runtime.h>
 
-namespace tensorforge {
+namespace kernelforge {
     std::string PrevFile = "";
     int PrevLine = 0;
 

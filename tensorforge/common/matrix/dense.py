@@ -1,5 +1,5 @@
-from tensorforge.common.exceptions import GenerationError
-from tensorforge.common.basic_types import Addressing, DataFlowDirection
+from kernelforge.common.exceptions import GenerationError
+from kernelforge.common.basic_types import Addressing, DataFlowDirection
 from typing import Union, List
 
 class Matrix():

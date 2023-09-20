@@ -1,4 +1,4 @@
-from tensorforge.vm import VM
+from kernelforge.vm import VM
 from ..matrix import DenseMatrix
 from .gemm.generic import GenericGemmThreadPolicy
 from .gemm.only_register_based import OnlyRegisterBasedThreadPolicy

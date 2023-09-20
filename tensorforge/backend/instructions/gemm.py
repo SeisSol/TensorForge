@@ -1,8 +1,8 @@
-from tensorforge.common import Context
-from tensorforge.common.matrix import Matrix
-from tensorforge.backend.symbol import Symbol, SymbolType, DataView
-from tensorforge.backend.exceptions import InternalError, GenerationError
-from tensorforge.backend.writer import Writer
+from kernelforge.common import Context
+from kernelforge.common.matrix import Matrix
+from kernelforge.backend.symbol import Symbol, SymbolType, DataView
+from kernelforge.backend.exceptions import InternalError, GenerationError
+from kernelforge.backend.writer import Writer
 from .abstract_instruction import AbstractInstruction
 from copy import deepcopy
 

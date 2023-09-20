@@ -1,4 +1,4 @@
-from tensorforge.basic_types import GeneralLexicon
+from kernelforge.basic_types import GeneralLexicon
 from .lexic import Lexic
 
 

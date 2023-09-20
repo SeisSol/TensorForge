@@ -4,7 +4,7 @@
 #include "kernels.h"
 #include "stop_watch.h"
 #include "gemm.h"
-#include "tensorforge_aux.h"
+#include "kernelforge_aux.h"
 #include "yaml-cpp/yaml.h"
 #include <device.h>
 #include <iostream>
@@ -12,7 +12,7 @@
 #include <vector>
 #include <string>
 
-using namespace tensorforge;
+using namespace kernelforge;
 using namespace reference;
 using namespace device;
 
@@ -90,7 +90,7 @@ int main(int Argc, char* Arcv[]) {
   int OffsetB = computeOffset(Ldb, BboxB);
   int OffsetC = computeOffset(Ldc, BboxC);
 
-  tensorforge::reference::gemm(TransA, TransB,
+  kernelforge::reference::gemm(TransA, TransB,
                              M, N, K,
                              Alpha, &HostA[OffsetA], Lda,
                              &HostB[OffsetB], Ldb,

@@ -1,10 +1,10 @@
-#ifndef TENSORFORGE_REFERENCE_GEMM_H
-#define TENSORFORGE_REFERENCE_GEMM_H
+#ifndef KERNELFORGE_REFERENCE_GEMM_H
+#define KERNELFORGE_REFERENCE_GEMM_H
 
 #include "typedef.h"
 #include <iostream>
 
-#define TENSORFORGE 1
+#define KERNELFORGE 1
 #define OPENBLAS 2
 
 #define CPU_BACKEND CONCRETE_CPU_BACKEND
@@ -13,7 +13,7 @@
 #include <cblas.h>
 #endif
 
-namespace tensorforge {
+namespace kernelforge {
   namespace reference {
     enum class LayoutType {
       Trans, NoTrans
@@ -47,7 +47,7 @@ namespace tensorforge {
         real *MatrixB = findData(B, OffsetB, Index);
         real *MatrixC = findData(C, OffsetC, Index);
 
-#if CPU_BACKEND == TENSORFORGE
+#if CPU_BACKEND == KERNELFORGE
         singleGemm(TypeA, TypeB,
                    M, N, K,
                    Alpha, MatrixA, Lda,
@@ -81,4 +81,4 @@ namespace tensorforge {
   }
 }
 
-#endif //TENSORFORGE_REFERENCE_GEMM_H
+#endif //KERNELFORGE_REFERENCE_GEMM_H

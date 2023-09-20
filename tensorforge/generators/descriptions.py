@@ -1,4 +1,4 @@
-from tensorforge.backend.exceptions import GenerationError
+from kernelforge.backend.exceptions import GenerationError
 from .context import Context
 from .basic_types import DataFlowDirection, FloatingPointType
 

@@ -1,8 +1,8 @@
 from typing import List, Dict, Set
-from tensorforge.common import Context
-from tensorforge.backend.symbol import Symbol
-from tensorforge.backend.instructions import AbstractInstruction
-from tensorforge.backend.data_types import ShrMemObject
+from kernelforge.common import Context
+from kernelforge.backend.symbol import Symbol
+from kernelforge.backend.instructions import AbstractInstruction
+from kernelforge.backend.data_types import ShrMemObject
 from .liveness import LivenessAnalysis
 from .mem_region_allocation import MemoryRegionAllocation, Region
 from .shr_mem_analyzer import ShrMemOpt

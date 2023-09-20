@@ -1,5 +1,5 @@
-#ifndef TENSORFORGE_BENCHMARK_AUX_H
-#define TENSORFORGE_BENCHMARK_AUX_H
+#ifndef KERNELFORGE_BENCHMARK_AUX_H
+#define KERNELFORGE_BENCHMARK_AUX_H
 
 #include "typedef.h"
 #include <vector>
@@ -16,4 +16,4 @@ namespace cf {
 } // namespace cf
 
 
-#endif //TENSORFORGE_BENCHMARK_AUX_H
+#endif //KERNELFORGE_BENCHMARK_AUX_H

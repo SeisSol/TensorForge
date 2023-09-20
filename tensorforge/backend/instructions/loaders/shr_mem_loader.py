@@ -1,5 +1,5 @@
-from tensorforge.backend.writer import Writer
-from tensorforge.backend.symbol import DataView
+from kernelforge.backend.writer import Writer
+from kernelforge.backend.symbol import DataView
 from .abstract_loader import AbstractShrMemLoader, ShrMemLoaderType
 
 

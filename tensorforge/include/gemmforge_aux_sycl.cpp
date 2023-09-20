@@ -1,7 +1,7 @@
 #include <iostream>
 #include <CL/sycl.hpp>
 
-namespace tensorforge {
+namespace kernelforge {
     void checkErr(const std::string &File, int Line) {
 
     }

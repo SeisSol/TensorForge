@@ -24,7 +24,7 @@ if(${DEVICE_BACKEND} STREQUAL "cuda")
     set(GPU_TARGET_SOURCE_FILES common/test_drivers/simple_driver.cpp
                                 ${CMAKE_SOURCE_DIR}/gen_code/main.cu
                                 gen_code/kernels.cu
-                                include/tensorforge_aux.cu)
+                                include/kernelforge_aux.cu)
     set(GEN_COPY_PRODUCTS ${CMAKE_SOURCE_DIR}/gen_code/main.cu
                           ${CMAKE_SOURCE_DIR}/gen_code/kernels.h
                           ${CMAKE_SOURCE_DIR}/gen_code/kernels.h)
@@ -32,13 +32,13 @@ elseif(${DEVICE_BACKEND} STREQUAL "hip")
     set(GPU_TARGET_SOURCE_FILES common/test_drivers/simple_driver.cpp
                                 gen_code/main.cpp
                                 gen_code/kernels.cpp
-                                include/tensorforge_aux.cpp)
+                                include/kernelforge_aux.cpp)
     set(GEN_COPY_PRODUCTS ${CMAKE_SOURCE_DIR}/gen_code/kernels.cpp ${CMAKE_SOURCE_DIR}/gen_code/kernels.h)
 elseif((${DEVICE_BACKEND} STREQUAL "oneapi") OR (${DEVICE_BACKEND} STREQUAL "hipsycl"))
     set(GPU_TARGET_SOURCE_FILES common/test_drivers/simple_driver.cpp
                                 gen_code/kernels.cpp
                                 gen_code/main.cpp
-                                include/tensorforge_aux_sycl.cpp)
+                                include/kernelforge_aux_sycl.cpp)
     set(GEN_COPY_PRODUCTS ${CMAKE_SOURCE_DIR}/gen_code/kernels.cpp ${CMAKE_SOURCE_DIR}/gen_code/kernels.h)
 else()
     message(FATAL_ERROR "unknown backend, given: ${DEVICE_BACKEND}")

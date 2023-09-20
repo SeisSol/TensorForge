@@ -1,6 +1,6 @@
 from typing import List
-from tensorforge.backend.instructions import Gemm, SyncThreads, AbstractShrMemWrite
-from tensorforge.backend.symbol import SymbolType
+from kernelforge.backend.instructions import Gemm, SyncThreads, AbstractShrMemWrite
+from kernelforge.backend.symbol import SymbolType
 from .abstract import AbstractTransformer, Context, AbstractInstruction
 from .mem_region_allocation import Region
 
