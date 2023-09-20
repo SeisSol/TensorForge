@@ -59,18 +59,30 @@ class ExtendedTransposePatchLoader(AbstractShrMemLoader):
       writer(f'int {tmp_var};')
       writer.new_line()
       if num_hops > 0:
-        # for-block: main part
-        writer.insert_pragma_unroll()
-        with writer.block(f'for (int i = 0; i < {num_hops}; ++i)'):
-          writer(f'{tmp_var} = {self._vm.lexic.thread_idx_x} + i * {self._num_threads};')
+        if num_hops > self._manual_unroll_threshold:
+          # for-block: main part
+          writer.insert_pragma_unroll()
+          with writer.block(f'for (int i = 0; i < {num_hops}; ++i)'):
+            writer(f'{tmp_var} = {self._vm.lexic.thread_idx_x} + i * {self._num_threads};')
 
-          shr_mem_index = f'({tmp_var} % {src_lead_dim}) * {dest_lead_dim}'
-          shr_mem_index += f' + {tmp_var} / {src_lead_dim}'
-          lhs = f'{self._dest.name}[{shr_mem_index}]'
+            shr_mem_index = f'({tmp_var} % {src_lead_dim}) * {dest_lead_dim}'
+            shr_mem_index += f' + {tmp_var} / {src_lead_dim}'
+            lhs = f'{self._dest.name}[{shr_mem_index}]'
 
-          glb_mem_index = f'{self._vm.lexic.thread_idx_x} + i * {self._num_threads}'
-          rhs = f'{self._src.name}[{src_offset}{glb_mem_index}]'
-          writer(f'{lhs} = {rhs};')
+            glb_mem_index = f'{self._vm.lexic.thread_idx_x} + i * {self._num_threads}'
+            rhs = f'{self._src.name}[{src_offset}{glb_mem_index}]'
+            writer(f'{lhs} = {rhs};')
+        else:
+          for counter in range(num_hops):
+            writer(f'{tmp_var} = {self._vm.lexic.thread_idx_x} + {counter * self._num_threads};')
+
+            shr_mem_index = f'({tmp_var} % {src_lead_dim}) * {dest_lead_dim}'
+            shr_mem_index += f' + {tmp_var} / {src_lead_dim}'
+            lhs = f'{self._dest.name}[{shr_mem_index}]'
+
+            glb_mem_index = f'{self._vm.lexic.thread_idx_x} + {counter * self._num_threads}'
+            rhs = f'{self._src.name}[{src_offset}{glb_mem_index}]'
+            writer(f'{lhs} = {rhs};')
 
       # if-block: residual part
       if (self._shm_volume % self._num_threads) != 0:
@@ -130,20 +142,32 @@ class ExactTransposePatchLoader(AbstractShrMemLoader):
     with writer.block(f'for (int i = 0; i < {src_view.get_dim_size(1)}; ++i)'):
       num_hops = int(src_view.get_dim_size(0) / self._num_threads)
       if num_hops > 0:
+        if num_hops > self._manual_unroll_threshold:
+          # for-block: main part
+          writer.insert_pragma_unroll()
+          with writer.block(f'for (int counter = 0; counter < {num_hops}; ++counter)'):
+            thread_idx = f'{self._vm.lexic.thread_idx_x} + counter * {self._num_threads}'
+            writer(f'int {tmp_var} = {thread_idx} + i * {src_view.get_dim_size(0)};')
 
-        # for-block: main part
-        writer.insert_pragma_unroll()
-        with writer.block(f'for (int counter = 0; counter < {num_hops}; ++counter)'):
-          thread_idx = f'{self._vm.lexic.thread_idx_x} + counter * {self._num_threads}'
-          writer(f'int {tmp_var} = {thread_idx} + i * {src_view.get_dim_size(0)};')
+            shr_mem_index = f'({tmp_var} % {src_view.get_dim_size(0)}) * {dest_view.get_lead_dim()} + '
+            shr_mem_index += f'{tmp_var} / {src_view.get_dim_size(0)}'
+            lhs = f'{self._dest.name}[{shr_mem_index}]'
 
-          shr_mem_index = f'({tmp_var} % {src_view.get_dim_size(0)}) * {dest_view.get_lead_dim()} + '
-          shr_mem_index += f'{tmp_var} / {src_view.get_dim_size(0)}'
-          lhs = f'{self._dest.name}[{shr_mem_index}]'
+            glb_mem_index = f'{thread_idx} + i * {src_view.get_lead_dim()}'
+            rhs = f'{self._src.name}[{src_offset}{glb_mem_index}]'
+            writer(f'{lhs} = {rhs};')
+        else:
+          for counter in range(num_hops):
+            thread_idx = f'{self._vm.lexic.thread_idx_x} + {counter * self._num_threads}'
+            writer(f'int {tmp_var} = {thread_idx} + i * {src_view.get_dim_size(0)};')
 
-          glb_mem_index = f'{thread_idx} + i * {src_view.get_lead_dim()}'
-          rhs = f'{self._src.name}[{src_offset}{glb_mem_index}]'
-          writer(f'{lhs} = {rhs};')
+            shr_mem_index = f'({tmp_var} % {src_view.get_dim_size(0)}) * {dest_view.get_lead_dim()} + '
+            shr_mem_index += f'{tmp_var} / {src_view.get_dim_size(0)}'
+            lhs = f'{self._dest.name}[{shr_mem_index}]'
+
+            glb_mem_index = f'{thread_idx} + i * {src_view.get_lead_dim()}'
+            rhs = f'{self._src.name}[{src_offset}{glb_mem_index}]'
+            writer(f'{lhs} = {rhs};')
 
       # if-block: residual part
       if (src_view.get_dim_size(0) % self._num_threads) != 0:

@@ -38,12 +38,21 @@ class ExtendedPatchLoader(AbstractShrMemLoader):
 
     num_hops = int(self._shm_volume / self._num_threads)
     if num_hops > 0:
-      writer.insert_pragma_unroll()
-      with writer.block(f'for (int i = 0; i < {num_hops}; ++i)'):
-        index = f'{self._vm.lexic.thread_idx_x} + i * {self._num_threads}'
-        lhs = f'{self._dest.name}[{index}]'
-        rhs = f'{self._src.name}[{src_offset}{index}]'
-        writer(f'{lhs} = {rhs};')
+      if num_hops > self._manual_unroll_threshold:
+        # load using a for-loop
+        writer.insert_pragma_unroll()
+        with writer.block(f'for (int i = 0; i < {num_hops}; ++i)'):
+          index = f'{self._vm.lexic.thread_idx_x} + i * {self._num_threads}'
+          lhs = f'{self._dest.name}[{index}]'
+          rhs = f'{self._src.name}[{src_offset}{index}]'
+          writer(f'{lhs} = {rhs};')
+      else:
+        # load using manual loop unrolling
+        for counter in range(num_hops):
+          index = f'{self._vm.lexic.thread_idx_x} + {counter * self._num_threads}'
+          lhs = f'{self._dest.name}[{index}]'
+          rhs = f'{self._src.name}[{src_offset}{index}]'
+          writer(f'{lhs} = {rhs};')
 
     # the last hop to fill shared mem with data
     if (self._shm_volume % self._num_threads) != 0:
@@ -85,21 +94,33 @@ class ExactPatchLoader(AbstractShrMemLoader):
     src_offset = self._src.data_view.get_offset()
     src_offset = f'{src_offset} + ' if src_offset else ''
 
+    writer.insert_pragma_unroll()
     with writer.block(f'for (int i = 0; i < {self._src.data_view.get_dim_size(1)}; ++i)'):
 
       num_hops = int(num_data_rows / self._num_threads)
       if num_hops > 0:
+        if num_hops > self._manual_unroll_threshold:
 
-        writer.insert_pragma_unroll()
-        with writer.block(f'for (int counter = 0; counter < {num_hops}; ++counter)'):
-          shr_mem_index = f'{self._vm.lexic.thread_idx_x} + '
-          shr_mem_index += f'counter * {self._num_threads} + i * {self._dest.data_view.get_lead_dim()}'
-          lhs = f'{self._dest.name}[{shr_mem_index}]'
+          writer.insert_pragma_unroll()
+          with writer.block(f'for (int counter = 0; counter < {num_hops}; ++counter)'):
+            shr_mem_index = f'{self._vm.lexic.thread_idx_x} + '
+            shr_mem_index += f'counter * {self._num_threads} + i * {self._dest.data_view.get_lead_dim()}'
+            lhs = f'{self._dest.name}[{shr_mem_index}]'
 
-          glob_mem_index = f'{self._vm.lexic.thread_idx_x} + '
-          glob_mem_index += f'counter * {self._num_threads} + i * {self._src.data_view.get_lead_dim()}'
-          rhs = f'{self._src.name}[{src_offset}{glob_mem_index}]'
-          writer(f'{lhs} = {rhs};')
+            glob_mem_index = f'{self._vm.lexic.thread_idx_x} + '
+            glob_mem_index += f'counter * {self._num_threads} + i * {self._src.data_view.get_lead_dim()}'
+            rhs = f'{self._src.name}[{src_offset}{glob_mem_index}]'
+            writer(f'{lhs} = {rhs};')
+        else:
+          for counter in range(num_hops):
+            shr_mem_index = f'{self._vm.lexic.thread_idx_x} + '
+            shr_mem_index += f'{counter * self._num_threads} + i * {self._dest.data_view.get_lead_dim()}'
+            lhs = f'{self._dest.name}[{shr_mem_index}]'
+
+            glob_mem_index = f'{self._vm.lexic.thread_idx_x} + '
+            glob_mem_index += f'{counter * self._num_threads} + i * {self._src.data_view.get_lead_dim()}'
+            rhs = f'{self._src.name}[{src_offset}{glob_mem_index}]'
+            writer(f'{lhs} = {rhs};')
 
       # the last hop to fill shared mem with data
       if (num_data_rows % self._num_threads) != 0:
