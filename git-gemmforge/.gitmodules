@@ -1,3 +1,0 @@
-[submodule "submodules/Device"]
-	path = submodules/Device
-	url = https://github.com/SeisSol/Device.git
