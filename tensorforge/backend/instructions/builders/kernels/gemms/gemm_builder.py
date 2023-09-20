@@ -1,20 +1,23 @@
 from typing import Tuple, Dict
-from chainforge.common import Context, VM
-from chainforge.backend.scopes import Scopes
-from chainforge.backend.symbol import Symbol, SymbolType
-from chainforge.backend.instructions import Gemm
-from chainforge.backend.instructions.loaders import shm_mem_loader_factory, AbstractShrMemLoader
-from chainforge.backend.instructions.loaders import ShrMemLoaderType
-from chainforge.backend.instructions import ClearRegisters
-from chainforge.backend.instructions import StoreRegToGlb, StoreRegToShr
-from chainforge.backend.instructions import SyncThreads
-from chainforge.common.matrix import Matrix
-from chainforge.backend.exceptions import InternalError
-from chainforge.common.descriptions import GemmDescr
+from tensorforge.common import Context, VM
+from tensorforge.backend.scopes import Scopes
+from tensorforge.backend.symbol import Symbol, SymbolType
+from tensorforge.backend.instructions import Gemm
+from tensorforge.backend.instructions.loaders import shm_mem_loader_factory, AbstractShrMemLoader
+from tensorforge.backend.instructions.loaders import ShrMemLoaderType
+from tensorforge.backend.instructions import ClearRegisters
+from tensorforge.backend.instructions import StoreRegToGlb, StoreRegToShr
+from tensorforge.backend.instructions import SyncThreads
+from tensorforge.backend.instructions.gemm import ShrMemBasedDenseGemm, RegisterOnlyDenseGemm
+from tensorforge.common.matrix import Matrix
+from tensorforge.backend.exceptions import InternalError
+from tensorforge.common.descriptions import GemmDescr
 from .allocator_builder import AbstractBuilder
 
 
-class GemmBuilder(AbstractBuilder):
+class DenseGemmBuilder(AbstractBuilder):
+  GemmClass = None
+
   def __init__(self,
                context: Context,
                scopes: Scopes,
@@ -127,7 +130,7 @@ class GemmBuilder(AbstractBuilder):
       raise InternalError('gemm-builder: reg_array must be in registers')
 
   def _make_gemm(self):
-    self._instructions.append(Gemm(context=self._context,
+    self._instructions.append(self.GemmClass(context=self._context,
                                    trans_a=self._descr.trans_a,
                                    trans_b=self._descr.trans_b,
                                    op1=self._mem_region_a,
@@ -178,3 +181,9 @@ class GemmBuilder(AbstractBuilder):
     name = f'_{self._counter}'
     self._counter += 1
     return name
+
+class ShrMemBasedDenseGemmKernelBuilder(DenseGemmBuilder):
+  GemmClass = ShrMemBasedDenseGemm
+
+class RegisterOnlyDenseGemmKernelBuilder(DenseGemmBuilder):
+  GemmClass = RegisterOnlyDenseGemm

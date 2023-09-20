@@ -1,5 +1,4 @@
-from .dense_kernels import ShrMemBasedDenseGemmKernelBuilder
-from .dense_kernels import RegisterOnlyDenseGemmKernelBuilder
+from .gemm_builder import ShrMemBasedDenseGemmKernelBuilder, RegisterOnlyDenseGemmKernelBuilder
 from enum import Enum
 
 
