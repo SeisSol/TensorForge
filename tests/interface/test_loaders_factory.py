@@ -1,13 +1,13 @@
 import unittest
-from gemmforge import DenseMatrix
-from gemmforge.vm import vm_factory
-from gemmforge.instructions.loaders import shm_mem_loader_factory
-from gemmforge.instructions.loaders import ExactPatchLoader, ExtendedPatchLoader
-from gemmforge.instructions.loaders import ExactTransposePatchLoader
-from gemmforge.instructions.loaders import ExtendedTransposePatchLoader
-from gemmforge.basic_types import ShrMemObject
-from gemmforge.symbol_table import Symbol, SymbolType, InverseSymbolTable
-from gemmforge.symbol_table import DataView
+from tensorforge import DenseMatrix
+from tensorforge.vm import vm_factory
+from tensorforge.instructions.loaders import shm_mem_loader_factory
+from tensorforge.instructions.loaders import ExactPatchLoader, ExtendedPatchLoader
+from tensorforge.instructions.loaders import ExactTransposePatchLoader
+from tensorforge.instructions.loaders import ExtendedTransposePatchLoader
+from tensorforge.basic_types import ShrMemObject
+from tensorforge.symbol_table import Symbol, SymbolType, InverseSymbolTable
+from tensorforge.symbol_table import DataView
 
 
 class TestLoaders(unittest.TestCase):

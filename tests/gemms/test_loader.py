@@ -1,5 +1,5 @@
-from gemmforge import DenseMatrix
-from gemmforge import GemmKernelType
+from tensorforge import DenseMatrix
+from tensorforge import GemmKernelType
 from itertools import product
 import functools
 from copy import deepcopy

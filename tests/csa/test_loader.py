@@ -1,4 +1,4 @@
-from gemmforge import DenseMatrix
+from tensorforge import DenseMatrix
 from itertools import product
 import functools
 from copy import deepcopy

@@ -1,7 +1,7 @@
-from chainforge.frontend import Parser, PostProcessor
-from chainforge.common import FloatingPointType
-from chainforge.backend.generator import Generator
-from chainforge.common import Context
+from tensorforge.frontend import Parser, PostProcessor
+from tensorforge.common import FloatingPointType
+from tensorforge.backend.generator import Generator
+from tensorforge.common import Context
 from internals import BenchGenerator, EnryPointGenerator, Aux
 from os import path, makedirs
 import sys
@@ -98,7 +98,7 @@ def main():
 
   # write kernel, launcher and header to files
   with open(path.join(tmp_dir, f'kernel.{file_suffix}'), 'w') as file:
-    file.write('#include \"chainforge_aux.h\"\n')
+    file.write('#include \"tensorforge_aux.h\"\n')
     for kernel, launcher in zip(kernels, launchers):
       file.write(kernel)
       file.write(launcher)

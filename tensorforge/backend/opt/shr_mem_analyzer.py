@@ -1,9 +1,9 @@
 from typing import List, Dict, Union, Tuple, Set
-from chainforge.backend.instructions import StoreRegToShr
-from chainforge.backend.instructions.loaders import AbstractShrMemLoader
-from chainforge.backend.symbol import Symbol
-from chainforge.backend.data_types import ShrMemObject
-from chainforge.backend.exceptions import GenerationError
+from tensorforge.backend.instructions import StoreRegToShr
+from tensorforge.backend.instructions.loaders import AbstractShrMemLoader
+from tensorforge.backend.symbol import Symbol
+from tensorforge.backend.data_types import ShrMemObject
+from tensorforge.backend.exceptions import GenerationError
 from .abstract import AbstractOptStage, Context
 from .mem_region_allocation import Region
 

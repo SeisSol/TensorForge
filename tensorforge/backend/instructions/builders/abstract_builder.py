@@ -1,6 +1,6 @@
 from abc import ABC
 from typing import List
-from chainforge.common import Context
+from tensorforge.common import Context
 from ..abstract_instruction import AbstractInstruction
 
 

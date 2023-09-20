@@ -1,10 +1,10 @@
-#include <gemmforge_aux.h>
+#include <tensorforge_aux.h>
 #include <iostream>
 
 
 // This test checks whether pip-installation is correct and
-// gemmforge can be found by CMake (see CMakeLists.txt)
+// tensorforge can be found by CMake (see CMakeLists.txt)
 int main() {
-    std::cout << "hello gemmforge" << std::endl;
+    std::cout << "hello tensorforge" << std::endl;
     return 0;
 }

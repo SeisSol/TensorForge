@@ -1,8 +1,8 @@
-from chainforge.common import DenseMatrix
-from chainforge.common import Context
-from chainforge.common.aux import generate_tmp_matrix
-from chainforge.common import GemmDescr, FloatingPointType, Addressing
-from chainforge.backend.generator import Generator
+from tensorforge.common import DenseMatrix
+from tensorforge.common import Context
+from tensorforge.common.aux import generate_tmp_matrix
+from tensorforge.common import GemmDescr, FloatingPointType, Addressing
+from tensorforge.backend.generator import Generator
 
 
 # Q += A * ((A^Trans * B) * C)

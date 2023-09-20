@@ -1,8 +1,8 @@
 from typing import List, Dict, Set
-from chainforge.common import Context
-from chainforge.backend.symbol import Symbol
-from chainforge.backend.instructions import AbstractInstruction
-from chainforge.backend.data_types import ShrMemObject
+from tensorforge.common import Context
+from tensorforge.backend.symbol import Symbol
+from tensorforge.backend.instructions import AbstractInstruction
+from tensorforge.backend.data_types import ShrMemObject
 from .liveness import LivenessAnalysis
 from .mem_region_allocation import MemoryRegionAllocation, Region
 from .shr_mem_analyzer import ShrMemOpt

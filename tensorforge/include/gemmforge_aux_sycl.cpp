@@ -1,7 +1,7 @@
 #include <iostream>
 #include <CL/sycl.hpp>
 
-namespace gemmforge {
+namespace tensorforge {
     void checkErr(const std::string &File, int Line) {
 
     }

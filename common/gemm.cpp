@@ -1,8 +1,8 @@
 #include "gemm.h"
 
-using namespace gemmforge::reference;
+using namespace tensorforge::reference;
 
-namespace gemmforge {
+namespace tensorforge {
   namespace reference {
 
     void singleGemm(LayoutType TypeA,

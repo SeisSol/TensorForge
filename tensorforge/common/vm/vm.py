@@ -39,7 +39,7 @@ class VM:
     return ceil(num / self._hw_descr.vec_unit_length) * self._hw_descr.vec_unit_length
 
   def get_headers(self):
-    return ['gemmforge_aux.h'] + self._lexic.get_headers()
+    return ['tensorforge_aux.h'] + self._lexic.get_headers()
 
   @classmethod
   def _is_valid_type(self, fp_type: str):

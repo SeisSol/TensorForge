@@ -1,8 +1,8 @@
-from chainforge.common import Context
-from chainforge.common.matrix import Matrix
-from chainforge.backend.symbol import Symbol, SymbolType, DataView
-from chainforge.backend.exceptions import InternalError, GenerationError
-from chainforge.backend.writer import Writer
+from tensorforge.common import Context
+from tensorforge.common.matrix import Matrix
+from tensorforge.backend.symbol import Symbol, SymbolType, DataView
+from tensorforge.backend.exceptions import InternalError, GenerationError
+from tensorforge.backend.writer import Writer
 from .abstract_instruction import AbstractInstruction
 from copy import deepcopy
 

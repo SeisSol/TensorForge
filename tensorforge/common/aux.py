@@ -1,7 +1,7 @@
-from chainforge.common.matrix import Matrix, DenseMatrix
-from chainforge.common.basic_types import Addressing, GeneralLexicon
-from chainforge.common.vm import VM
-from chainforge.backend.symbol import Symbol
+from tensorforge.common.matrix import Matrix, DenseMatrix
+from tensorforge.common.basic_types import Addressing, GeneralLexicon
+from tensorforge.common.vm import VM
+from tensorforge.backend.symbol import Symbol
 
 
 def generate_tmp_matrix(op1: Matrix, op2: Matrix, trans_op1: bool = False, trans_op2: bool = False):

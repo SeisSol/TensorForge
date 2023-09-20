@@ -34,7 +34,7 @@ protected:
   std::vector<real*> DeviceShuffledB{};
   std::vector<real*> DeviceShuffledC{};
 
-  gemmforge::dense::TestDriver Driver;
+  tensorforge::dense::TestDriver Driver;
 };
 
 #endif //GEMMS_GEMM_DRIVER_H

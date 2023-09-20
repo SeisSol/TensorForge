@@ -1,5 +1,5 @@
-#ifndef GEMMFORGE_REFERENCE_INITIALIZE_H
-#define GEMMFORGE_REFERENCE_INITIALIZE_H
+#ifndef TENSORFORGE_REFERENCE_INITIALIZE_H
+#define TENSORFORGE_REFERENCE_INITIALIZE_H
 
 #include "typedef.h"
 #include <iostream>
@@ -24,4 +24,4 @@ namespace initgen {
   }
 }
 
-#endif //GEMMFORGE_REFERENCE_GEMM_H
+#endif //TENSORFORGE_REFERENCE_GEMM_H

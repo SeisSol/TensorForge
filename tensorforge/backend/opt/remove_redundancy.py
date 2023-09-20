@@ -1,5 +1,5 @@
 from typing import List
-from chainforge.backend.instructions import StoreRegToGlb
+from tensorforge.backend.instructions import StoreRegToGlb
 from .abstract import AbstractTransformer, Context, AbstractInstruction
 
 

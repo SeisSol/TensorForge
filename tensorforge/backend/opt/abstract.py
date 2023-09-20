@@ -1,7 +1,7 @@
 from abc import ABC, abstractmethod
 from typing import List
-from chainforge.common import Context
-from chainforge.backend.instructions import AbstractInstruction
+from tensorforge.common import Context
+from tensorforge.backend.instructions import AbstractInstruction
 
 
 class AbstractOptStage(ABC):

@@ -1,9 +1,9 @@
-from chainforge.common import Context, VM
-from chainforge.backend.scopes import Scopes, Symbol
-from chainforge.common.matrix import Matrix
-from chainforge.backend.symbol import SymbolType
-from chainforge.backend.instructions import GetElementPtr
-from chainforge.backend.exceptions import InternalError
+from tensorforge.common import Context, VM
+from tensorforge.backend.scopes import Scopes, Symbol
+from tensorforge.common.matrix import Matrix
+from tensorforge.backend.symbol import SymbolType
+from tensorforge.backend.instructions import GetElementPtr
+from tensorforge.backend.exceptions import InternalError
 from .abstract_builder import AbstractBuilder
 
 

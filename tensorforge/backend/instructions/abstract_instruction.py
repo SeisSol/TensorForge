@@ -1,7 +1,7 @@
 from abc import ABC, abstractmethod
 from typing import Union
-from chainforge.common import Context, VM
-from chainforge.backend.writer import Writer
+from tensorforge.common import Context, VM
+from tensorforge.backend.writer import Writer
 
 
 class AbstractInstruction(ABC):

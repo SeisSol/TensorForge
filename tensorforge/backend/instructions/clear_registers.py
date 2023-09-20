@@ -1,8 +1,8 @@
-from chainforge.common import Context
-from chainforge.common.basic_types import FloatingPointType
-from chainforge.backend.symbol import Symbol, SymbolType
-from chainforge.backend.writer import Writer
-from chainforge.backend.exceptions import InternalError
+from tensorforge.common import Context
+from tensorforge.common.basic_types import FloatingPointType
+from tensorforge.backend.symbol import Symbol, SymbolType
+from tensorforge.backend.writer import Writer
+from tensorforge.backend.exceptions import InternalError
 from .abstract_instruction import AbstractInstruction
 
 

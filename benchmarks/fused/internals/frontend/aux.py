@@ -1,4 +1,4 @@
-from chainforge.common import DenseMatrix, Addressing
+from tensorforge.common import DenseMatrix, Addressing
 
 
 class VarFactory:

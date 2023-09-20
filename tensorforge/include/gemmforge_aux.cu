@@ -1,7 +1,7 @@
 #include <iostream>
 #include <cuda_runtime.h>
 
-namespace gemmforge {
+namespace tensorforge {
     std::string PrevFile = "";
     int PrevLine = 0;
 

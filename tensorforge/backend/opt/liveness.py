@@ -1,10 +1,10 @@
 from typing import List, Dict, Set, Union
 from copy import copy
 from collections import OrderedDict
-from chainforge.backend.symbol import Symbol
-from chainforge.backend.instructions import Gemm, StoreRegToShr
-from chainforge.backend.instructions.loaders import AbstractShrMemLoader
-from chainforge.backend.symbol import SymbolType
+from tensorforge.backend.symbol import Symbol
+from tensorforge.backend.instructions import Gemm, StoreRegToShr
+from tensorforge.backend.instructions.loaders import AbstractShrMemLoader
+from tensorforge.backend.symbol import SymbolType
 from .abstract import AbstractOptStage, Context, AbstractInstruction
 
 

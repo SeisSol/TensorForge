@@ -1,6 +1,6 @@
 import enum
 from typing import Dict, Union
-from chainforge.common import DenseMatrix, Addressing
+from tensorforge.common import DenseMatrix, Addressing
 
 
 class ObjType(enum.Enum):

@@ -1,5 +1,5 @@
-from chainforge.backend.writer import Writer
-from chainforge.backend.symbol import DataView
+from tensorforge.backend.writer import Writer
+from tensorforge.backend.symbol import DataView
 from .abstract_loader import AbstractShrMemLoader, ShrMemLoaderType
 
 

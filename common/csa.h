@@ -1,5 +1,5 @@
-#ifndef GEMMFORGE_REFERENCE_CSA_H
-#define GEMMFORGE_REFERENCE_CSA_H
+#ifndef TENSORFORGE_REFERENCE_CSA_H
+#define TENSORFORGE_REFERENCE_CSA_H
 
 #include "typedef.h"
 #include <iostream>
@@ -32,4 +32,4 @@ namespace csagen {
   }
 }
 
-#endif //GEMMFORGE_REFERENCE_GEMM_H
+#endif //TENSORFORGE_REFERENCE_GEMM_H

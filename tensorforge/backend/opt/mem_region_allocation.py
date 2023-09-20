@@ -1,7 +1,7 @@
 from collections import OrderedDict
 from copy import copy
 from typing import Dict, Set, Union, List, Tuple
-from chainforge.backend.symbol import Symbol
+from tensorforge.backend.symbol import Symbol
 from .abstract import AbstractOptStage, Context
 from .coloring import Vertex
 from .coloring import GraphColoring

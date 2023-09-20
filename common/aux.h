@@ -1,5 +1,5 @@
-#ifndef CHAINFORGE_BENCHMARK_AUX_H
-#define CHAINFORGE_BENCHMARK_AUX_H
+#ifndef TENSORFORGE_BENCHMARK_AUX_H
+#define TENSORFORGE_BENCHMARK_AUX_H
 
 #include "typedef.h"
 #include <vector>
@@ -16,4 +16,4 @@ namespace cf {
 } // namespace cf
 
 
-#endif //CHAINFORGE_BENCHMARK_AUX_H
+#endif //TENSORFORGE_BENCHMARK_AUX_H

@@ -1,11 +1,11 @@
 #include "aux.h"
 #include "simple_driver.h"
-#include "gemmforge_aux.h"
+#include "tensorforge_aux.h"
 #include <sstream>
 #include <iostream>
 #include <device.h>
 
-using namespace gemmforge::dense;
+using namespace tensorforge::dense;
 using namespace device;
 
 AbstractAPI *getDeviceAPI() {

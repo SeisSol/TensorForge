@@ -1,8 +1,8 @@
 from typing import Union
-from chainforge.common import Context
-from chainforge.backend.symbol import Symbol
-from chainforge.backend.exceptions import InternalError
-from chainforge.backend.writer import Writer
+from tensorforge.common import Context
+from tensorforge.backend.symbol import Symbol
+from tensorforge.backend.exceptions import InternalError
+from tensorforge.backend.writer import Writer
 from .abstract_instruction import AbstractInstruction
 
 

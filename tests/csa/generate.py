@@ -1,6 +1,6 @@
-from gemmforge import GenerationError, CsaGenerator
-from gemmforge.vm import vm_factory
-from gemmforge import constructs
+from tensorforge import GenerationError, CsaGenerator
+from tensorforge.vm import vm_factory
+from tensorforge import constructs
 from io import StringIO
 from test_loader import TestLoader
 import os

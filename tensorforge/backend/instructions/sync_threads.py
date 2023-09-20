@@ -1,5 +1,5 @@
-from chainforge.common import Context
-from chainforge.backend.writer import Writer
+from tensorforge.common import Context
+from tensorforge.backend.writer import Writer
 from .abstract_instruction import AbstractInstruction
 
 

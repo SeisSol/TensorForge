@@ -1,7 +1,7 @@
 import os
 from graphviz import Digraph
-from chainforge.common import generate_tmp_matrix
-from chainforge.common import GemmDescr
+from tensorforge.common import generate_tmp_matrix
+from tensorforge.common import GemmDescr
 from .nodes import VarNode, ScalarNode, MatrixNode, DeadNode
 from .nodes import BinarryOps, AssignNode, AddNode, MultNode
 from .nodes import StatementsNode, GemmListNode

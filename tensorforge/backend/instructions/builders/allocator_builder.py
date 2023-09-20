@@ -1,10 +1,10 @@
 from abc import abstractmethod
 from typing import Union
-from chainforge.common import Context, VM
-from chainforge.backend.scopes import Scopes
-from chainforge.backend.symbol import Symbol, SymbolType
-from chainforge.backend.instructions.allocate import RegisterAlloc, ShrMemAlloc
-from chainforge.backend.data_types import ShrMemObject, RegMemObject
+from tensorforge.common import Context, VM
+from tensorforge.backend.scopes import Scopes
+from tensorforge.backend.symbol import Symbol, SymbolType
+from tensorforge.backend.instructions.allocate import RegisterAlloc, ShrMemAlloc
+from tensorforge.backend.data_types import ShrMemObject, RegMemObject
 from .abstract_builder import AbstractBuilder
 
 

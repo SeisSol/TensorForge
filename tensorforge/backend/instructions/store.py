@@ -1,10 +1,10 @@
 from typing import Union
-from chainforge.common import Context
-from chainforge.common.matrix import Matrix
-from chainforge.backend.data_types import RegMemObject
-from chainforge.backend.symbol import Symbol, SymbolType, DataView
-from chainforge.backend.exceptions import InternalError
-from chainforge.backend.writer import Writer
+from tensorforge.common import Context
+from tensorforge.common.matrix import Matrix
+from tensorforge.backend.data_types import RegMemObject
+from tensorforge.backend.symbol import Symbol, SymbolType, DataView
+from tensorforge.backend.exceptions import InternalError
+from tensorforge.backend.writer import Writer
 from .abstract_instruction import AbstractInstruction, AbstractShrMemWrite
 from copy import deepcopy
 

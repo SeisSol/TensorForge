@@ -1,10 +1,10 @@
 from typing import List, Union, Type
 from copy import deepcopy
 import hashlib
-from chainforge.common import GemmDescr
-from chainforge.common import Context
-from chainforge.common import Addressing, GeneralLexicon
-from chainforge.common.aux import get_extra_offset_name
+from tensorforge.common import GemmDescr
+from tensorforge.common import Context
+from tensorforge.common import Addressing, GeneralLexicon
+from tensorforge.common.aux import get_extra_offset_name
 from .data_types import ShrMemObject, RegMemObject
 from .opt import OptimizationStage
 from .scopes import Scopes
