@@ -6,7 +6,7 @@ stages:
 
 
 image:
-  name: ravilmobile/gemmforge-nvidia:latest
+  name: ravilmobile/tensorforge-nvidia:latest
   entrypoint: [""]
 
 
@@ -18,7 +18,8 @@ before_script:
 submodules:
   stage: adjust
   tags:
-    - atsccs68-docker-executor
+    - sccs
+    - helper
   script:
     - cat ./.gitmodules
     - rm -rf ./submodules
@@ -31,7 +32,8 @@ submodules:
 examples:
   stage: test 
   tags:
-  -  atsccs68-docker-executor
+    - sccs
+    - helper
   parallel:
     matrix:
       - BACKEND: cuda
@@ -61,7 +63,8 @@ examples:
 gemms:
   stage: test
   tags:
-  -  atsccs68-docker-executor
+    - sccs
+    - gpubuild
   parallel:
     matrix:
       - BACKEND: [cuda, hipsycl, hip]
@@ -80,7 +83,8 @@ gemms:
 csa:
   stage: test
   tags:
-  -  atsccs68-docker-executor
+    - sccs
+    - gpubuild
   parallel:
     matrix:
       - BACKEND: [cuda, hipsycl, hip]
@@ -99,7 +103,8 @@ csa:
 benchmarks:
   stage: test
   tags:
-  -  atsccs68-docker-executor
+    - sccs
+    - gpubuild
   parallel:
     matrix:
       - BACKEND: [cuda, hipsycl, hip]
@@ -118,32 +123,35 @@ benchmarks:
 pep8:
   stage: miscellaneous
   tags:
-  -  atsccs68-docker-executor
+    - sccs
+    - helper
   allow_failure: true
   script:
-    - pep8 gemmforge
+    - pep8 tensorforge
 
 
 pylint:
   stage: miscellaneous
   tags:
-  -  atsccs68-docker-executor
+    - sccs
+    - helper
   allow_failure: true
   script:
-    - pylint gemmforge
+    - pylint tensorforge
 
 
 install:
   stage: miscellaneous
   tags:
-  -  atsccs68-docker-executor
+    - sccs
+    - gpubuild
   parallel:
     matrix:
       - BACKEND: [cuda, hipsycl, hip]
   before_script:
-  - pip3 install --user git+https://github.com/ravil-mobile/gemmforge.git@$CI_COMMIT_SHA
+  - pip3 install --user git+https://github.com/seissol/tensorforge.git@$CI_COMMIT_SHA
   script:
-    - export isntall_path=$(python3 -c 'import gemmforge, os; print(os.path.dirname(gemmforge.__file__))')
+    - export isntall_path=$(python3 -c 'import tensorforge, os; print(os.path.dirname(tensorforge.__file__))')
     - tree $isntall_path
     - export root_dir=$PWD
     - cd ./tests/cmake_integration
