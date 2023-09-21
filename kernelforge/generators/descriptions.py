@@ -2,8 +2,11 @@ from kernelforge.backend.exceptions import GenerationError
 from .context import Context
 from .basic_types import DataFlowDirection, FloatingPointType
 
+class OperationDescription:
+  pass
 
-class GemmDescr:
+
+class GemmDescr(OperationDescription):
   def __init__(self,
                trans_a,
                trans_b,
@@ -124,3 +127,90 @@ class GemmDescr:
     if self.beta != 0:
       flops += self._m * self._n
     return flops
+
+class CSA(OperationDescription):
+  def __init__(self,
+               trans_a,
+               a,
+               c,
+               alpha=1.0,
+               beta=0.0,
+               strict_match: bool = False,
+               prefer_align: bool = False):
+
+    self.trans_a = trans_a
+
+    self.mat_a = a
+    self.mat_a.set_data_flow_direction(DataFlowDirection.SOURCE)
+
+    self.mat_c = c
+    self.mat_c.set_data_flow_direction(DataFlowDirection.SINK)
+
+    self.alpha = alpha
+    self.beta = beta
+
+    self._m = None
+    self._n = None
+    self._strict_match = strict_match
+    self.prefer_align = prefer_align
+
+    self._check()
+    self._analyze()
+
+  def _analyze(self):
+    if self.trans_a:
+      self._m = self.mat_a.get_actual_num_cols()
+      self._n = self.mat_a.get_actual_num_rows()
+    else:
+      self._m = self.mat_a.get_actual_num_rows()
+      self._n = self.mat_a.get_actual_num_cols()
+
+  def get_num_threads(self, context: Context):
+    num_threads = context.align(num=self._m)
+    return num_threads, self._m
+
+  def get_accumulator_size(self):
+    return self._n
+
+  def is_strict_math(self):
+    return self._strict_match
+
+  def __str__(self):
+    suffix_a = '^T' if self.trans_a else ''
+    op1 = f'{self.alpha} * {self.mat_a}{suffix_a}'
+    op2 = '' if self.beta == 0 else f' + {self.beta} * {self.mat_c}'
+    return f'{self.mat_c} = {op1}{op2}'
+
+  def _check(self):
+    try:
+      # check whether C and A match each other
+      if self.trans_a:
+        if self.mat_c.get_actual_num_rows() != self.mat_a.get_actual_num_cols():
+          raise GenerationError("Cannot generate an assignment "
+                                "with given parameters. Matrix C and A (Trans) do not match")
+      else:
+        if self.mat_c.get_actual_num_rows() != self.mat_a.get_actual_num_rows():
+          raise GenerationError("Cannot generate an assignment "
+                                "with given parameters. Matrix C and A (NoTrans) do not match")
+
+      # check whether C and B match each other
+      if self.trans_b:
+        if self.mat_c.get_actual_num_cols() != self.mat_a.get_actual_num_rows():
+          raise GenerationError("Cannot generate an assignment "
+                                "with given parameters. Matrix C and A (Trans) do not match")
+      else:
+        if self.mat_c.get_actual_num_cols() != self.mat_a.get_actual_num_cols():
+          raise GenerationError("Cannot generate an assignment "
+                                "with given parameters. Matrix C and A (NoTrans) do not match")
+
+    except GenerationError as err:
+      print(self.mat_a.gen_descr())
+      print(self.mat_c.gen_descr())
+      raise err
+
+  def compute_flops(self):
+    aflops = self._m * self._n
+    cflops = 0
+    if self._beta != 0:
+      cflops = self._m * self._n
+    return aflops * cflops

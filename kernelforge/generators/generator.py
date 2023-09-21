@@ -21,10 +21,10 @@ class Generator:
   NAME_ENCODING_LENGTH = 10
 
   def __init__(self,
-               gemm_list: List[GemmDescr],
+               gemm_list: List[OperationDescription],
                context: Context,
                thread_block_policy_type: Type[AbstractThreadBlockPolicy] = SimpleThreadBlockPolicy):
-    self.gemm_list: List[GemmDescr] = gemm_list
+    self.gemm_list: List[OperationDescription] = gemm_list
     self._context: Context = context
     self._thread_block_policy_type: Type[AbstractThreadBlockPolicy] = thread_block_policy_type
     self._base_kernel_name: Union[str, None] = None
@@ -203,7 +203,7 @@ class Generator:
         msg += f'but `exact_contraction_length` is set to {user_options.exact_contraction_length}'
         raise RuntimeError(msg)
 
-  def _name_operands(self, gemm_list: List[GemmDescr]):
+  def _name_operands(self, gemm_list: List[OperationDescription]):
     tmp_counter = 0
     op_counter = 0
     tmp_base_name = 'tmp'

@@ -14,7 +14,6 @@ from kernelforge.backend.exceptions import InternalError
 from kernelforge.common.descriptions import GemmDescr
 from .allocator_builder import AbstractBuilder
 
-
 class DenseGemmBuilder(AbstractBuilder):
   GemmClass = None
 
@@ -24,7 +23,7 @@ class DenseGemmBuilder(AbstractBuilder):
                register_array: Symbol,
                shr_mem: Symbol,
                num_threads: int):
-    super(GemmBuilder, self).__init__(context, scopes)
+    super(DenseGemmBuilder, self).__init__(context, scopes)
     self._dest_regs = register_array
     self._shr_mem = shr_mem
     self._num_threads = num_threads
@@ -40,7 +39,7 @@ class DenseGemmBuilder(AbstractBuilder):
     self._mem_region_a = None
     self._mem_region_b = None
 
-  def build(self, op1: Symbol, op2: Symbol, dest_obj: Matrix, descr: GemmDescr):
+  def build(self, op1: Symbol, op2: Union[Symbol, None], dest_obj: Matrix, descr: GemmDescr):
     self._reset()
 
     self._op1 = op1
@@ -101,15 +100,20 @@ class DenseGemmBuilder(AbstractBuilder):
       raise InternalError(f'gemm-builder: op1 ({self._op1.name}) must be either in shr or glb mem.')
 
   def _make_load_op2(self):
-    if self._op2.stype == SymbolType.Global:
-      self._mem_region_b, load_op2 = self._make_loader_and_symbol(self._op2, self._descr.trans_b)
-      self._loaders_cache[self._mem_region_b] = load_op2
-      self._instructions.append(load_op2)
-
-    elif self._op2.stype == SymbolType.SharedMem:
-      self._mem_region_b = self._op2
+    if self._op2 is None:
+      # unary operation
+      self._mem_region_b = None
     else:
-      raise InternalError(f'gemm-builder: op2 ({self._op2.name}) must be either in shr or glb mem.')
+      # binary operation
+      if self._op2.stype == SymbolType.Global:
+        self._mem_region_b, load_op2 = self._make_loader_and_symbol(self._op2, self._descr.trans_b)
+        self._loaders_cache[self._mem_region_b] = load_op2
+        self._instructions.append(load_op2)
+
+      elif self._op2.stype == SymbolType.SharedMem:
+        self._mem_region_b = self._op2
+      else:
+        raise InternalError(f'gemm-builder: op2 ({self._op2.name}) must be either in shr or glb mem.')
 
   def _make_loader_and_symbol(self, operand, is_transpose) -> Tuple[Symbol, AbstractShrMemLoader]:
     shr_mem_region = Symbol(name=self._name_shr_reg(),
@@ -187,3 +191,6 @@ class ShrMemBasedDenseGemmKernelBuilder(DenseGemmBuilder):
 
 class RegisterOnlyDenseGemmKernelBuilder(DenseGemmBuilder):
   GemmClass = RegisterOnlyDenseGemm
+
+class CSAKernelBuilder(DenseGemmBuilder):
+  GemmClass = CSA
