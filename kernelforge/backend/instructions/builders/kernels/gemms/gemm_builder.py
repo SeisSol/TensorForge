@@ -1,18 +1,18 @@
-from typing import Tuple, Dict
-from kernelforge.common import Context, VM
+from typing import Tuple, Dict, Union
+from kernelforge.common.context import Context, VM
 from kernelforge.backend.scopes import Scopes
 from kernelforge.backend.symbol import Symbol, SymbolType
-from kernelforge.backend.instructions import Gemm
 from kernelforge.backend.instructions.loaders import shm_mem_loader_factory, AbstractShrMemLoader
-from kernelforge.backend.instructions.loaders import ShrMemLoaderType
-from kernelforge.backend.instructions import ClearRegisters
-from kernelforge.backend.instructions import StoreRegToGlb, StoreRegToShr
-from kernelforge.backend.instructions import SyncThreads
+from kernelforge.backend.instructions.loaders.shr_mem_loader import ShrMemLoaderType
+from kernelforge.backend.instructions.clear_registers import ClearRegisters
+from kernelforge.backend.instructions.store import StoreRegToGlb, StoreRegToShr
+from kernelforge.backend.instructions.sync_threads import SyncThreads
 from kernelforge.backend.instructions.gemm import ShrMemBasedDenseGemm, RegisterOnlyDenseGemm
-from kernelforge.common.matrix import Matrix
-from kernelforge.backend.exceptions import InternalError
-from kernelforge.common.descriptions import GemmDescr
-from .allocator_builder import AbstractBuilder
+from kernelforge.backend.instructions.csa import CSA
+from kernelforge.common.matrix.dense import Matrix
+from kernelforge.common.exceptions import InternalError
+from kernelforge.generators.descriptions import GemmDescr, CSADescr
+from kernelforge.backend.instructions.builders.allocator_builder import AbstractBuilder
 
 class DenseGemmBuilder(AbstractBuilder):
   GemmClass = None

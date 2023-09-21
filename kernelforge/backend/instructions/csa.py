@@ -1,7 +1,7 @@
-from kernelforge.common import Context
-from kernelforge.common.matrix import Matrix
+from kernelforge.common.context import Context
+from kernelforge.common.matrix.dense import Matrix
 from kernelforge.backend.symbol import Symbol, SymbolType, DataView
-from kernelforge.backend.exceptions import InternalError, GenerationError
+from kernelforge.common.exceptions import InternalError, GenerationError
 from kernelforge.backend.writer import Writer
 from .abstract_instruction import AbstractInstruction
 from copy import deepcopy
@@ -87,12 +87,12 @@ class CSA(AbstractInstruction):
     if self._gemm_meta_data:
       writer(f'// meta: {self._gemm_meta_data}')
 
-    with writer.block(self.gen_mask_threads(self._op1_view.get_dim_size(0))):
+    with writer.Block(self.gen_mask_threads(self._op1_view.get_dim_size(0))):
       m_range = self._op1_view.get_dim_size(1)
       writer.insert_pragma_unroll()
       # TODO: zero out everything else
-      with writer.block(f'for (int m = 0; m < {m_range}; ++m)'):
-        address = self._op1_view.get_address(row_idx=self._vm.lexic.thread_idx_x, column_idx='m')
+      with writer.Block(f'for (int m = 0; m < {m_range}; ++m)'):
+        address = self._op1_view.get_address(row_idx=self._vm.get_lexic().thread_idx_x, column_idx='m')
         writer(f'{self._fp_as_str} value = {self._op1.name}[{address}];')
 
         writer.new_line()

@@ -1,4 +1,4 @@
-from kernelforge.common import Context
+from kernelforge.common.context import Context
 from kernelforge.backend.writer import Writer
 from .abstract_instruction import AbstractInstruction
 

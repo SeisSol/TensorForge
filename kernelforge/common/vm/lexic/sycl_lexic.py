@@ -1,4 +1,4 @@
-from kernelforge.basic_types import GeneralLexicon
+from kernelforge.common.basic_types import GeneralLexicon
 from .lexic import Lexic
 
 
@@ -13,7 +13,7 @@ class SyclLexic(Lexic):
     self.block_idx_z = "item.get_group().get_group_id(2)"
     self.block_dim_y = "item.get_group().get_local_range(1)"
     self.block_dim_z = "item.get_group().get_local_range(2)"
-    self.stream_name = "cl::sycl::queue"
+    self.stream_type = "cl::sycl::queue"
 
   def get_launch_code(self, func_name, grid, block, stream, func_params):
     return f"kernel_{func_name}({stream}, {grid}, {block}, {func_params})"
@@ -58,8 +58,8 @@ class SyclLexic(Lexic):
     with file.If(f"{pointer_name} == nullptr"):
       file.Expression("throw std::invalid_argument(\"stream may not be null!\")")
 
-    stream_obj = f'static_cast<{self.stream_name} *>({pointer_name})'
-    file(f'{self.stream_name} *stream = {stream_obj};')
+    stream_obj = f'static_cast<{self.stream_type} *>({pointer_name})'
+    file(f'{self.stream_type} *stream = {stream_obj};')
 
   def check_error(self):
     return None

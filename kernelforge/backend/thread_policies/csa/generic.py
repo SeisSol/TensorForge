@@ -1,5 +1,5 @@
 from ..abstract_thread_policy import AbstractBinaryOpThreadPolicy, DenseMatrix
-from kernelforge.vm import VM
+from kernelforge.common.vm.vm import VM
 
 
 class GenericCsaThreadPolicy(AbstractBinaryOpThreadPolicy):

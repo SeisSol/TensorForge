@@ -8,10 +8,11 @@ class CudaLexic(Lexic):
     self.thread_idx_y = "threadIdx.y"
     self.thread_idx_x = "threadIdx.x"
     self.thread_idx_z = "threadIdx.z"
+    self._thread_idx_x = 'tx'
     self.block_idx_x = "blockIdx.x"
     self.block_dim_y = "blockDim.y"
     self.block_dim_z = "blockDim.z"
-    self.stream_name = "cudaStream_t"
+    self.stream_type = "cudaStream_t"
     self.restrict_kw = "__restrict__"
 
   def get_launch_code(self, func_name, grid, block, stream, func_params):
@@ -26,7 +27,7 @@ class CudaLexic(Lexic):
   
   # FIXME: remove?
   def get_mapped_keywords(self):
-    return [(self.thread_idx_x, self._thread_idx_x, 'int')]
+    return [(self._thread_idx_x, self.thread_idx_x, 'int')]
 
   def kernel_definition(self, file, kernel_bounds, base_name, params, precision=None,
                         total_shared_mem_size=None):
@@ -52,8 +53,8 @@ class CudaLexic(Lexic):
 
   def get_stream_via_pointer(self, file, stream_name, pointer_name):
     if_stream_exists = f'({pointer_name} != nullptr)'
-    stream_obj = f'static_cast<{self.stream_name}>({pointer_name})'
-    file(f'{self.stream_name} stream = {if_stream_exists} ? {stream_obj} : 0;')
+    stream_obj = f'static_cast<{self.stream_type}>({pointer_name})'
+    file(f'{self.stream_type} stream = {if_stream_exists} ? {stream_obj} : 0;')
 
   def check_error(self):
     return "CHECK_ERR"

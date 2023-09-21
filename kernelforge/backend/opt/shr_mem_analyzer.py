@@ -1,9 +1,9 @@
 from typing import List, Dict, Union, Tuple, Set
-from kernelforge.backend.instructions import StoreRegToShr
-from kernelforge.backend.instructions.loaders import AbstractShrMemLoader
+from kernelforge.backend.instructions.store import StoreRegToShr
+from kernelforge.backend.instructions.loaders.abstract_loader import AbstractShrMemLoader
 from kernelforge.backend.symbol import Symbol
 from kernelforge.backend.data_types import ShrMemObject
-from kernelforge.backend.exceptions import GenerationError
+from kernelforge.common.exceptions import GenerationError
 from .abstract import AbstractOptStage, Context
 from .mem_region_allocation import Region
 

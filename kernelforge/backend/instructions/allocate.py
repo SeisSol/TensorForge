@@ -1,7 +1,8 @@
 from typing import Union
-from kernelforge.common import Context
+from kernelforge.common.context import Context
 from kernelforge.backend.symbol import Symbol
-from kernelforge.backend.exceptions import InternalError
+from kernelforge.common.exceptions import InternalError
+from kernelforge.common.basic_types import GeneralLexicon
 from kernelforge.backend.writer import Writer
 from .abstract_instruction import AbstractInstruction
 
@@ -57,7 +58,7 @@ class ShrMemAlloc(AbstractInstruction):
     common_shrmem = f'{GeneralLexicon.TOTAL_SHR_MEM}'
     common_shrmem_size = shrmem_obj.get_total_size()
 
-    shr_mem_decl = lexic.declare_shared_memory_inline(name=common_shrmem,
+    shr_mem_decl = self._vm.get_lexic().declare_shared_memory_inline(name=common_shrmem,
                                                       precision=self._vm.fp_as_str(),
                                                       size=common_shrmem_size,
                                                       alignment=8)
@@ -65,7 +66,7 @@ class ShrMemAlloc(AbstractInstruction):
     if shr_mem_decl:
       writer(f'{shr_mem_decl};')
 
-    address = f'{shrmem_obj.get_size_per_mult()} * {self._vm.lexic.thread_idx_y}'
+    address = f'{shrmem_obj.get_size_per_mult()} * {self._vm.get_lexic().thread_idx_y}'
     writer(f'{self._fp_as_str} * {shrmem_obj.name} = &{common_shrmem}[{address}];')
 
   def is_ready(self):

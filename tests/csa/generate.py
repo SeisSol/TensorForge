@@ -1,5 +1,5 @@
 from kernelforge import GenerationError, CsaGenerator
-from kernelforge.vm import vm_factory
+from kernelforge.common.vm.vm import vm_factory
 from kernelforge import constructs
 from io import StringIO
 from test_loader import TestLoader

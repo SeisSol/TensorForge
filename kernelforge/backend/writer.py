@@ -39,6 +39,8 @@
 
 import sys
 
+from io import StringIO
+
 
 class NoScope:
   def __enter__(self):
@@ -114,11 +116,14 @@ class PPIfBlock:
     self.writer('#endif')
 
 
-class Cpp:
+class Writer:
   def __init__(self, stream=sys.stdout, factor=2):
-    self.stream = stream
+    self.stream = StringIO()
     self.indent = 0
     self.factor = 2
+  
+  def get_src(self):
+    return self.stream.getvalue()
 
   def __enter__(self):
     self.out = open(self.stream, 'w+') if isinstance(self.stream, str) else self.stream
@@ -126,19 +131,19 @@ class Cpp:
 
   def __exit__(self, type, value, traceback):
     if self.out is not sys.stdout:
-      self.out.close()
+      self.stream.close()
     self.out = None
 
   def __call__(self, code):
-    white_spaces = (' ' * self.factor) * self.curr_indent
+    white_spaces = (' ' * self.factor) * self.indent
     for line in code.splitlines():
-      self.out.write(white_spaces + line + '\n')
+      self.stream.write(white_spaces + line + '\n')
 
   def mv_left(self):
-    self.curr_indent -= 1
+    self.indent -= 1
 
   def mv_right(self):
-    self.curr_indent += 1
+    self.indent += 1
 
   def new_line(self):
     self.__call__('')
@@ -147,7 +152,10 @@ class Cpp:
     self.__call__(f'#pragma unroll')
 
   def Emptyline(self):
-    self.out.write('\n')
+    self.stream.write('\n')
+  
+  def Block(self, text):
+    return Block(self, text)
 
   def Scope(self):
     return Block(self, '')

@@ -1,7 +1,7 @@
 import unittest
 from kernelforge import DenseMatrix
 from kernelforge import GemmGenerator
-from kernelforge.vm import vm_factory
+from kernelforge.common.vm.vm import vm_factory
 
 
 class TestOccupancyNvidia(unittest.TestCase):

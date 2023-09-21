@@ -3,7 +3,7 @@ from .vm import VM
 from .exceptions import GenerationError, InternalError
 from .basic_types import DataFlowDirection
 from .basic_types import GeneralLexicon
-from .common import get_extra_offset_name
+from .common.aux import get_extra_offset_name
 
 
 class AbstractGenerator(ABC):
@@ -86,12 +86,12 @@ class AbstractGenerator(ABC):
 
   def get_element_size_guard(self, writer):
     team_index_str = self._lexic.batch_indexer_gemm()
-    writer(f'unsigned {GeneralLexicon.BATCH_ID} = {team_index_str};')
-    return f'{GeneralLexicon.BATCH_ID} < {GeneralLexicon.NUM_ELEMENTS}'
+    writer(f'unsigned {GeneralLexicon.BATCH_ID_NAME} = {team_index_str};')
+    return f'{GeneralLexicon.BATCH_ID_NAME} < {GeneralLexicon.NUM_ELEMENTS}'
 
   def get_flag_guard(self, writer):
     writer(f'bool isFlagsProvided = ({GeneralLexicon.FLAGS_ID} != nullptr);')
-    flag_value = f'static_cast<bool>({GeneralLexicon.FLAGS_ID}[{GeneralLexicon.BATCH_ID}])'
+    flag_value = f'static_cast<bool>({GeneralLexicon.FLAGS_ID}[{GeneralLexicon.BATCH_ID_NAME}])'
     writer(f'bool allowed = isFlagsProvided ? {flag_value} : true;')
     return 'allowed'
 

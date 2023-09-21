@@ -1,6 +1,7 @@
 from abc import abstractmethod
 from typing import Union
-from kernelforge.common import Context, VM
+from kernelforge.common.context import Context, VM
+from kernelforge.common.basic_types import GeneralLexicon
 from kernelforge.backend.scopes import Scopes
 from kernelforge.backend.symbol import Symbol, SymbolType
 from kernelforge.backend.instructions.allocate import RegisterAlloc, ShrMemAlloc

@@ -1,8 +1,8 @@
 from kernelforge.common import DenseMatrix
-from kernelforge.common import Context
+from kernelforge.common.context import Context
 from kernelforge.common.aux import generate_tmp_matrix
-from kernelforge.common import GemmDescr, FloatingPointType, Addressing
-from kernelforge.backend.generator import Generator
+from kernelforge.generators.descriptions import GemmDescr, FloatingPointType, Addressing
+from kernelforge.generators.generator import Generator
 
 
 # Q += (A x B^T) x B

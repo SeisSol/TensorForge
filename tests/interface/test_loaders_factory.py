@@ -1,11 +1,11 @@
 import unittest
 from kernelforge import DenseMatrix
-from kernelforge.vm import vm_factory
+from kernelforge.common.vm.vm import vm_factory
 from kernelforge.instructions.loaders import shm_mem_loader_factory
 from kernelforge.instructions.loaders import ExactPatchLoader, ExtendedPatchLoader
 from kernelforge.instructions.loaders import ExactTransposePatchLoader
 from kernelforge.instructions.loaders import ExtendedTransposePatchLoader
-from kernelforge.basic_types import ShrMemObject
+from kernelforge.common.basic_types import ShrMemObject
 from kernelforge.symbol_table import Symbol, SymbolType, InverseSymbolTable
 from kernelforge.symbol_table import DataView
 

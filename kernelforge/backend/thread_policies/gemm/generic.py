@@ -1,5 +1,5 @@
 from ..abstract_thread_policy import AbstractGemmLikeThreadPolicy, DenseMatrix
-from kernelforge.vm import VM
+from kernelforge.common.vm.vm import VM
 
 
 class GenericGemmThreadPolicy(AbstractGemmLikeThreadPolicy):

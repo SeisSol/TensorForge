@@ -1,6 +1,6 @@
-from kernelforge.common.matrix import Matrix, DenseMatrix
+from kernelforge.common.matrix.dense import Matrix, DenseMatrix
 from kernelforge.common.basic_types import Addressing, GeneralLexicon
-from kernelforge.common.vm import VM
+from kernelforge.common.vm.vm import VM
 from kernelforge.backend.symbol import Symbol
 
 

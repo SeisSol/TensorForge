@@ -1,7 +1,7 @@
 from abc import ABC, abstractmethod
 from typing import List
-from kernelforge.common import Context
-from kernelforge.backend.instructions import AbstractInstruction
+from kernelforge.common.context import Context
+from kernelforge.backend.instructions.abstract_instruction import AbstractInstruction
 
 
 class AbstractOptStage(ABC):

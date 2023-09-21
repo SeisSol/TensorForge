@@ -1,5 +1,5 @@
 from kernelforge import DenseMatrix, GenerationError, GemmGenerator
-from kernelforge.vm import vm_factory
+from kernelforge.common.vm.vm import vm_factory
 from jinja2 import Environment, FileSystemLoader
 import os
 import yaml

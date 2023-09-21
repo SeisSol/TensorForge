@@ -41,15 +41,15 @@ class ExtendedPatchLoader(AbstractShrMemLoader):
       if num_hops > self._manual_unroll_threshold:
         # load using a for-loop
         writer.insert_pragma_unroll()
-        with writer.block(f'for (int i = 0; i < {num_hops}; ++i)'):
-          index = f'{self._vm.lexic.thread_idx_x} + i * {self._num_threads}'
+        with writer.For(f'int i = 0; i < {num_hops}; ++i'):
+          index = f'{self._vm.get_lexic().thread_idx_x} + i * {self._num_threads}'
           lhs = f'{self._dest.name}[{index}]'
           rhs = f'{self._src.name}[{src_offset}{index}]'
           writer(f'{lhs} = {rhs};')
       else:
         # load using manual loop unrolling
         for counter in range(num_hops):
-          index = f'{self._vm.lexic.thread_idx_x} + {counter * self._num_threads}'
+          index = f'{self._vm.get_lexic().thread_idx_x} + {counter * self._num_threads}'
           lhs = f'{self._dest.name}[{index}]'
           rhs = f'{self._src.name}[{src_offset}{index}]'
           writer(f'{lhs} = {rhs};')
@@ -57,8 +57,8 @@ class ExtendedPatchLoader(AbstractShrMemLoader):
     # the last hop to fill shared mem with data
     if (self._shm_volume % self._num_threads) != 0:
       residue = self._shm_volume - num_hops * self._num_threads
-      with writer.block(f'if ({self._vm.lexic.thread_idx_x} < {residue})'):
-        index = f'{self._vm.lexic.thread_idx_x} + {num_hops * self._num_threads}'
+      with writer.If(f'{self._vm.get_lexic().thread_idx_x} < {residue}'):
+        index = f'{self._vm.get_lexic().thread_idx_x} + {num_hops * self._num_threads}'
         lhs = f'{self._dest.name}[{index}]'
         rhs = f'{self._src.name}[{src_offset}{index}]'
         writer(f'{lhs} = {rhs};')
@@ -95,29 +95,29 @@ class ExactPatchLoader(AbstractShrMemLoader):
     src_offset = f'{src_offset} + ' if src_offset else ''
 
     writer.insert_pragma_unroll()
-    with writer.block(f'for (int i = 0; i < {self._src.data_view.get_dim_size(1)}; ++i)'):
+    with writer.For(f'int i = 0; i < {self._src.data_view.get_dim_size(1)}; ++i'):
 
       num_hops = int(num_data_rows / self._num_threads)
       if num_hops > 0:
         if num_hops > self._manual_unroll_threshold:
 
           writer.insert_pragma_unroll()
-          with writer.block(f'for (int counter = 0; counter < {num_hops}; ++counter)'):
-            shr_mem_index = f'{self._vm.lexic.thread_idx_x} + '
+          with writer.For(f'int counter = 0; counter < {num_hops}; ++counter'):
+            shr_mem_index = f'{self._vm.get_lexic().thread_idx_x} + '
             shr_mem_index += f'counter * {self._num_threads} + i * {self._dest.data_view.get_lead_dim()}'
             lhs = f'{self._dest.name}[{shr_mem_index}]'
 
-            glob_mem_index = f'{self._vm.lexic.thread_idx_x} + '
+            glob_mem_index = f'{self._vm.get_lexic().thread_idx_x} + '
             glob_mem_index += f'counter * {self._num_threads} + i * {self._src.data_view.get_lead_dim()}'
             rhs = f'{self._src.name}[{src_offset}{glob_mem_index}]'
             writer(f'{lhs} = {rhs};')
         else:
           for counter in range(num_hops):
-            shr_mem_index = f'{self._vm.lexic.thread_idx_x} + '
+            shr_mem_index = f'{self._vm.get_lexic().thread_idx_x} + '
             shr_mem_index += f'{counter * self._num_threads} + i * {self._dest.data_view.get_lead_dim()}'
             lhs = f'{self._dest.name}[{shr_mem_index}]'
 
-            glob_mem_index = f'{self._vm.lexic.thread_idx_x} + '
+            glob_mem_index = f'{self._vm.get_lexic().thread_idx_x} + '
             glob_mem_index += f'{counter * self._num_threads} + i * {self._src.data_view.get_lead_dim()}'
             rhs = f'{self._src.name}[{src_offset}{glob_mem_index}]'
             writer(f'{lhs} = {rhs};')
@@ -125,12 +125,12 @@ class ExactPatchLoader(AbstractShrMemLoader):
       # the last hop to fill shared mem with data
       if (num_data_rows % self._num_threads) != 0:
         residue = num_data_rows - num_hops * self._num_threads
-        with writer.block(f'if ({self._vm.lexic.thread_idx_x} < {residue})'):
+        with writer.If(f'{self._vm.get_lexic().thread_idx_x} < {residue}'):
           finial_offset = num_hops * self._num_threads
-          shr_mem_index = f'{self._vm.lexic.thread_idx_x} + {finial_offset} + i * {self._dest.data_view.get_lead_dim()}'
+          shr_mem_index = f'{self._vm.get_lexic().thread_idx_x} + {finial_offset} + i * {self._dest.data_view.get_lead_dim()}'
           lhs = f'{self._dest.name}[{shr_mem_index}]'
 
-          glb_mem_index = f'{self._vm.lexic.thread_idx_x} + {finial_offset} + i * {self._src.data_view.get_lead_dim()}'
+          glb_mem_index = f'{self._vm.get_lexic().thread_idx_x} + {finial_offset} + i * {self._src.data_view.get_lead_dim()}'
           rhs = f'{self._src.name}[{src_offset}{glb_mem_index}]'
           writer(f'{lhs} = {rhs};')
 

@@ -1,10 +1,10 @@
 from abc import abstractmethod
 from typing import Union
 import enum
-from kernelforge.common.matrix import Matrix
-from kernelforge.backend.instructions import AbstractShrMemWrite
+from kernelforge.common.matrix.dense import Matrix
+from kernelforge.backend.instructions.store import AbstractShrMemWrite
 from kernelforge.backend.symbol import SymbolType, Symbol
-from kernelforge.backend.exceptions import InternalError
+from kernelforge.common.exceptions import InternalError
 
 
 class ShrMemLoaderType(enum.Enum):
@@ -34,7 +34,7 @@ class AbstractShrMemLoader(AbstractShrMemWrite):
 
   def gen_code(self, writer) -> None:
     writer.new_line()
-    lhs = f'{self._fp_as_str}* {self._vm.lexic.restrict_kw} {self._dest.name}'
+    lhs = f'{self._fp_as_str}* {self._vm.get_lexic().restrict_kw} {self._dest.name}'
     rhs = f'{self._shr_mem.name}[{self._shr_mem_offset}]'
     writer(f'{lhs} = &{rhs};')
 

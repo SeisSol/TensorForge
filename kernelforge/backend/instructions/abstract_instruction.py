@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 from typing import Union
-from kernelforge.common import Context, VM
+from kernelforge.common.context import Context, VM
 from kernelforge.backend.writer import Writer
 
 
@@ -26,11 +26,11 @@ class AbstractInstruction(ABC):
     pass
 
   def gen_mask_threads(self, num_threads) -> str:
-    return f'if ({self._vm.lexic.thread_idx_x} < {num_threads})'
+    return f'if ({self._vm.get_lexic().thread_idx_x} < {num_threads})'
 
   def gen_range_mask_threads(self, begin, end) -> str:
     assert begin < end
-    tid = self._vm.lexic.thread_idx_x
+    tid = self._vm.get_lexic().thread_idx_x
     return f'if (({tid} >= {begin}) && ({tid} < {end}))'
 
 

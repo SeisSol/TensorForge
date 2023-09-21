@@ -1,10 +1,8 @@
 from .abstract_instruction import AbstractInstruction
-from kernelforge.vm import VM
-from kernelforge.common import get_extra_offset_name
-from kernelforge.symbol_table import SymbolType, Symbol, DataView, InverseSymbolTable
-from kernelforge.basic_types import GeneralLexicon, DataFlowDirection
-from kernelforge.exceptions import GenerationError
-
+from kernelforge.common.vm.vm import VM
+from kernelforge.common.aux import get_extra_offset_name, Addressing
+from kernelforge.common.basic_types import GeneralLexicon, DataFlowDirection
+from kernelforge.common.exceptions import GenerationError
 
 class GetElementPtr(AbstractInstruction):
   def __init__(self,
@@ -24,17 +22,17 @@ class GetElementPtr(AbstractInstruction):
     batch_addressing = batch_obj.addressing
 
     if self._include_extra_offset:
-      extra_offset = f' + {get_extra_offset_name(self._src.name)}'
+      extra_offset = f' + {get_extra_offset_name(self._src)}'
     else:
       extra_offset = ''
 
     address = ''
     if batch_addressing == Addressing.STRIDED:
-      main_offset = f'{GeneralLexicon.BATCH_ID} * {batch_obj.get_real_volume()}'
+      main_offset = f'{GeneralLexicon.BATCH_ID_NAME} * {batch_obj.get_real_volume()}'
       sub_offset = f'{batch_obj.get_offset_to_first_element()}'
       address = f'{main_offset} + {sub_offset}{extra_offset}'
     elif batch_addressing == Addressing.PTR_BASED:
-      main_offset = f'{GeneralLexicon.BATCH_ID}'
+      main_offset = f'{GeneralLexicon.BATCH_ID_NAME}'
       sub_offset = f'{batch_obj.get_offset_to_first_element()}'
       address = f'{main_offset}][{sub_offset}{extra_offset}'
     elif batch_addressing == Addressing.NONE:
@@ -45,7 +43,7 @@ class GetElementPtr(AbstractInstruction):
     rhs = f'&{self._src.name}[{address}]'
 
     lhs = 'const ' if self._src.obj.direction == DataFlowDirection.SOURCE else ''
-    lhs += f'{self._vm.fp_as_str()} * const {self._vm.lexic.restrict_kw} {self._dest.name}'
+    lhs += f'{self._vm.fp_as_str()} * const {self._vm.get_lexic().restrict_kw} {self._dest.name}'
     writer(f'{lhs} = {rhs};')
 
   def __str__(self) -> str:

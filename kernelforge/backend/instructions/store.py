@@ -1,11 +1,12 @@
 from typing import Union
-from kernelforge.common import Context
-from kernelforge.common.matrix import Matrix
+from kernelforge.common.context import Context
+from kernelforge.common.matrix.dense import Matrix
 from kernelforge.backend.data_types import RegMemObject
 from kernelforge.backend.symbol import Symbol, SymbolType, DataView
-from kernelforge.backend.exceptions import InternalError
+from kernelforge.common.exceptions import InternalError
 from kernelforge.backend.writer import Writer
 from .abstract_instruction import AbstractInstruction, AbstractShrMemWrite
+from kernelforge.common.basic_types import FloatingPointType
 from copy import deepcopy
 
 
@@ -54,18 +55,18 @@ class StoreRegToShr(AbstractShrMemWrite):
   def gen_code(self, writer: Writer) -> None:
     writer.new_line()
     writer(f' // writing to shr mem: from {self._src.name} to {self._dest.name}')
-    lhs = f'{self._fp_as_str}* {self._vm.lexic.restrict_kw} {self._dest.name}'
+    lhs = f'{self._fp_as_str}* {self._vm.get_lexic().restrict_kw} {self._dest.name}'
     rhs = f'&{self._shr_mem.name}[{self._shr_mem_offset}]'
     writer(f'{lhs} = {rhs};')
 
     dest_view = self._dest.data_view
     src_bbox = self._src.data_view.get_bbox()
 
-    with writer.block(self.gen_range_mask_threads(begin=src_bbox[0], end=src_bbox[2])):
+    with writer.Block(self.gen_range_mask_threads(begin=src_bbox[0], end=src_bbox[2])):
       writer.insert_pragma_unroll()
-      loop = f'for (int i = 0; i < {dest_view.get_dim_size(1)}; ++i)'
-      with writer.block(loop):
-        dest_row_idx = f'{self._vm.lexic.thread_idx_x}'
+      loop = f'int i = 0; i < {dest_view.get_dim_size(1)}; ++i'
+      with writer.For(loop):
+        dest_row_idx = f'{self._vm.get_lexic().thread_idx_x}'
         thread_id_displacement = self._src.data_view.get_offset()
         if thread_id_displacement:
           dest_row_idx += f' - {thread_id_displacement}'
@@ -129,20 +130,20 @@ class StoreRegToGlb(AbstractInstruction):
 
     writer('// write results back to glb. memory')
     src_bbox = self._src.data_view.get_bbox()
-    with writer.block(self.gen_range_mask_threads(begin=src_bbox[0], end=src_bbox[2])):
+    with writer.Block(self.gen_range_mask_threads(begin=src_bbox[0], end=src_bbox[2])):
 
       writer.insert_pragma_unroll()
-      loop = f'for(int n = 0; n < {dest_view.get_dim_size(1)}; ++n)'
-      with writer.block(loop):
-        dest_row_idx = f'{self._vm.lexic.thread_idx_x}'
+      loop = f'int n = 0; n < {dest_view.get_dim_size(1)}; ++n'
+      with writer.For(loop):
+        dest_row_idx = f'{self._vm.get_lexic().thread_idx_x}'
         thread_id_displacement = self._src.data_view.get_offset()
         if thread_id_displacement:
           dest_row_idx += f' - {thread_id_displacement}'
 
         dest_addr = dest_view.get_address(row_idx=dest_row_idx, column_idx='n')
-        rhs = f'{self._dest.name}[{dest_addr}]'
+        lhs = f'{self._dest.name}[{dest_addr}]'
 
-        real_suffix = 'f' if precision == "float" else ''
+        real_suffix = 'f' if self._context.fp_type == FloatingPointType.FLOAT else ''
 
         src_access = '' if self._src.obj.size == 1 else '[n]'
         if not isinstance(self._alpha, float):

@@ -1,4 +1,4 @@
-from kernelforge.vm import VM
+from kernelforge.common.vm.vm import VM
 from ..matrix import DenseMatrix
 from abc import ABC, abstractmethod
 

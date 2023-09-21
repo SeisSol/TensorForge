@@ -1,8 +1,8 @@
-from kernelforge.common import Context
+from kernelforge.common.context import Context
 from kernelforge.common.basic_types import FloatingPointType
 from kernelforge.backend.symbol import Symbol, SymbolType
 from kernelforge.backend.writer import Writer
-from kernelforge.backend.exceptions import InternalError
+from kernelforge.common.exceptions import InternalError
 from .abstract_instruction import AbstractInstruction
 
 
@@ -23,7 +23,7 @@ class ClearRegisters(AbstractInstruction):
     writer.new_line()
     writer(f'// clear registers')
     writer.insert_pragma_unroll()
-    with writer.block(f'for (int i = 0; i < {self._src.obj.size}; ++i)'):
+    with writer.For(f'int i = 0; i < {self._src.obj.size}; ++i'):
       fp_prefix = 'f' if self._context.fp_type == FloatingPointType.FLOAT else ''
       writer(f'{self._src.name}[i] = 0.0{fp_prefix};')
 

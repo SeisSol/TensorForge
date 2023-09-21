@@ -1,5 +1,5 @@
 from math import ceil
-from kernelforge.common.vm import VM, vm_factory
+from kernelforge.common.vm.vm import VM, vm_factory
 from kernelforge.common.basic_types import FloatingPointType
 
 
@@ -19,7 +19,7 @@ class Context:
                backend: str,
                fp_type: FloatingPointType,
                options: Options = Options()):
-    self._vm: VM = vm_factory(arch, backend)
+    self._vm: VM = vm_factory(arch, backend, FloatingPointType.as_str(fp_type))
     self.fp_type = fp_type
     self._options = options
 
@@ -37,8 +37,8 @@ class Context:
 
   def align(self, num):
     fp_size = 4 if self.fp_type == FloatingPointType.FLOAT else 8
-    hw_fp_word_size = self._vm.hw_descr.hw_fp_word_size
-    vec_unit_length = self._vm.hw_descr.vec_unit_length
+    hw_fp_word_size = self._vm.get_hw_descr().hw_fp_word_size
+    vec_unit_length = self._vm.get_hw_descr().vec_unit_length
 
     align_length = (vec_unit_length * hw_fp_word_size) / fp_size
     return int(ceil(num / align_length) * align_length)
@@ -46,7 +46,7 @@ class Context:
   def align_range(self, begin, end):
     assert end > begin
     fp_size = 4 if self.fp_type == FloatingPointType.FLOAT else 8
-    mem_access_align_size = self._vm.hw_descr.mem_access_align_size
+    mem_access_align_size = self._vm.get_hw_descr().mem_access_align_size
     align_factor =  mem_access_align_size / fp_size
 
     aligned_begin = begin - begin % align_factor

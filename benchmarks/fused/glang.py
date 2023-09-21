@@ -1,7 +1,7 @@
 from kernelforge.frontend import Parser, PostProcessor
 from kernelforge.common import FloatingPointType
-from kernelforge.backend.generator import Generator
-from kernelforge.common import Context
+from kernelforge.generators.generator import Generator
+from kernelforge.common.context import Context
 from internals import BenchGenerator, EnryPointGenerator, Aux
 from os import path, makedirs
 import sys

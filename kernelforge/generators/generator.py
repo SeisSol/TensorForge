@@ -1,21 +1,44 @@
 from typing import List, Union, Type
 from copy import deepcopy
 import hashlib
-from kernelforge.common import GemmDescr
-from kernelforge.common import Context
-from kernelforge.common import Addressing, GeneralLexicon
+from kernelforge.generators.descriptions import OperationDescription, GemmDescr, CSADescr
+from kernelforge.common.context import Context
+from kernelforge.common.basic_types import Addressing, GeneralLexicon
 from kernelforge.common.aux import get_extra_offset_name
-from .data_types import ShrMemObject, RegMemObject
-from .opt import OptimizationStage
-from .scopes import Scopes
-from .symbol import Symbol, SymbolType
-from .instructions import AbstractInstruction
-from .instructions import GetElementPtrBuilder, GemmBuilder
-from .instructions import ShrMemAllocBuilder, RegistersAllocBuilder
-from .writer import Writer
-from .thread_block_policies import AbstractThreadBlockPolicy, SimpleThreadBlockPolicy
-from .exceptions import GenerationError
+from kernelforge.backend.data_types import ShrMemObject, RegMemObject
+from kernelforge.backend.opt import OptimizationStage
+from kernelforge.backend.scopes import Scopes
+from kernelforge.backend.symbol import Symbol, SymbolType
+from kernelforge.backend.instructions.abstract_instruction import AbstractInstruction
+from kernelforge.backend.instructions.builders.kernels.gemms.gemm_builder import ShrMemBasedDenseGemmKernelBuilder, CSAKernelBuilder
+from kernelforge.backend.instructions.builders.ptr_manip_builder import GetElementPtrBuilder
+from kernelforge.backend.instructions.builders.allocator_builder import ShrMemAllocBuilder, RegistersAllocBuilder
+from kernelforge.backend.writer import Writer
+from kernelforge.common.exceptions import GenerationError
 
+class AbstractThreadBlockPolicy:
+  def __init__(self, context: Context, mem_per_mult: int, num_threads: int):
+    self._context: Context = context
+    self._mem_per_mult: int = mem_per_mult
+    self._num_threads: int = num_threads
+
+    vm = self._context.get_vm()
+    self._max_blocks = vm.get_hw_descr().max_block_per_sm
+    self._max_allowed_mem = vm.get_hw_descr().max_local_mem_size_per_block
+
+  def get_num_mults_per_block(self):
+    pass
+
+
+class SimpleThreadBlockPolicy(AbstractThreadBlockPolicy):
+  def __init__(self, context, mem_size_per_mult, num_threads):
+    super().__init__(context, mem_size_per_mult, num_threads)
+
+  def get_num_mults_per_block(self):
+    if self._num_threads <= 32:
+      return 2
+    else:
+      return 1
 
 class Generator:
   NAME_ENCODING_LENGTH = 10
@@ -81,19 +104,18 @@ class Generator:
 
   def _generate_kernel(self):
     writer = Writer()
-    proto = self._generate_kernel_proto()
-    with writer.block(f'{proto}'):
+    with self._generate_kernel_proto(writer):
       self._write_kernel_meta_data(writer)
 
       vm = self._context.get_vm()
-      mapped_keywords = vm.lexic.get_mapped_keywords()
+      mapped_keywords = vm.get_lexic().get_mapped_keywords()
       for kw in mapped_keywords:
         mapped_kw, real_kw, type = kw
         writer(f'const {type} {mapped_kw} = {real_kw};')
 
       writer(f'unsigned {GeneralLexicon.BATCH_ID_NAME} = {self._get_2d_block_id()};')
-      with writer.block(f'if ({self._get_element_size_guard()})'):
-        with writer.block(f'if ({self._get_flag_guard(writer)})'):
+      with writer.If(f'{self._get_element_size_guard()}'):
+        with writer.If(f'{self._get_flag_guard(writer)}'):
           for instruction in self._ir:
             if instruction.is_ready():
               instruction.gen_code(writer)
@@ -106,11 +128,11 @@ class Generator:
     writer = Writer()
     proto = self._generate_launcher_proto(with_defaults=False)
     mults_per_block = self._shr_mem_obj.get_mults_per_block()
-    lexic = self._context.get_vm().lexic
-    with writer.block(f'{proto}'):
-      writer(f'{lexic.dim3_type} block({self._num_threads}, {mults_per_block}, 1);')
+    lexic = self._context.get_vm().get_lexic()
+    with writer.Block(f'{proto}'):
+      writer(f'{lexic.kernel_range_object()} block({self._num_threads}, {mults_per_block}, 1);')
       num_blocks = f'({GeneralLexicon.NUM_ELEMENTS} + {mults_per_block} - 1) / {mults_per_block}'
-      writer(f'{lexic.dim3_type} grid({num_blocks}, 1, 1);')
+      writer(f'{lexic.kernel_range_object()} grid({num_blocks}, 1, 1);')
 
       if_stream_exists = f'({GeneralLexicon.STREAM_PTR_STR} != nullptr)'
       stream_obj = f'static_cast<{lexic.stream_type}>({GeneralLexicon.STREAM_PTR_STR})'
@@ -165,18 +187,31 @@ class Generator:
 
     self._scopes.add_scope()
     # generate GEMM and store operations
-    builder = GemmBuilder(self._context,
+    builder = ShrMemBasedDenseGemmKernelBuilder(self._context,
+                          self._scopes,
+                          self._scopes.get_symbol(self._register_array_obj),
+                          self._scopes.get_symbol(self._shr_mem_obj),
+                          self._num_threads)
+    
+    csabuilder = CSAKernelBuilder(self._context,
                           self._scopes,
                           self._scopes.get_symbol(self._register_array_obj),
                           self._scopes.get_symbol(self._shr_mem_obj),
                           self._num_threads)
 
     for gemm_descr in self.gemm_list:
-      builder.build(op1=self._scopes.get_symbol(gemm_descr.mat_a),
-                    op2=self._scopes.get_symbol(gemm_descr.mat_b),
-                    dest_obj=gemm_descr.mat_c,
-                    descr=gemm_descr)
-      self._ir.extend(builder.get_instructions())
+      if isinstance(gemm_descr, GemmDescr):
+        builder.build(op1=self._scopes.get_symbol(gemm_descr.mat_a),
+                      op2=self._scopes.get_symbol(gemm_descr.mat_b),
+                      dest_obj=gemm_descr.mat_c,
+                      descr=gemm_descr)
+        self._ir.extend(builder.get_instructions())
+      elif isinstance(gemm_descr, CSADescr):
+        csabuilder.build(op1=self._scopes.get_symbol(gemm_descr.mat_a),
+                      op2=None,
+                      dest_obj=gemm_descr.mat_c,
+                      descr=gemm_descr)
+        self._ir.extend(csabuilder.get_instructions())
 
   def _deduce_mults_per_block(self):
     policy = self._thread_block_policy_type(self._context,
@@ -206,7 +241,7 @@ class Generator:
   def _name_operands(self, gemm_list: List[OperationDescription]):
     tmp_counter = 0
     op_counter = 0
-    tmp_base_name = 'tmp'
+    tmp_base_name = 't'
 
     self._matrix_list = []
     for gemm in gemm_list:
@@ -226,7 +261,7 @@ class Generator:
           matrix.name = f'{tmp_base_name}{tmp_counter}'
           tmp_counter += 1
         else:
-          matrix.name = f'{op_counter}'
+          matrix.name = f'm{op_counter}'
           op_counter += 1
 
   def _collect_tmp_matrices(self):
@@ -322,7 +357,7 @@ class Generator:
     args.extend(self._generate_base_params_list(global_symbols, with_types=False))
     return args
 
-  def _generate_kernel_proto(self):
+  def _generate_kernel_proto(self, writer):
     global_symbols = self._scopes.get_global_scope().values()
     params = self._generate_scalar_param_list()
 
@@ -331,10 +366,11 @@ class Generator:
     params = ', '.join(params)
     total_num_threads_per_block = self._num_threads * self._shr_mem_obj.get_mults_per_block()
 
-    lexic = self._context.get_vm().lexic
+    lexic = self._context.get_vm().get_lexic()
 
-    launch_bounds = lexic.get_launch_bounds(total_num_threads_per_block)
-    return f'{lexic.kernel_type} {launch_bounds} kernel_{self._base_kernel_name}({params})'
+    launch_bounds = (total_num_threads_per_block,)
+
+    return lexic.kernel_definition(writer, launch_bounds, f'kernel_{self._base_kernel_name}', params)
 
   def _generate_launcher_proto(self, with_defaults=True):
     global_symbols = self._scopes.get_global_scope().values()
@@ -404,7 +440,7 @@ class Generator:
     return f'launcher_{self._base_kernel_name}({args});'
 
   def _get_2d_block_id(self):
-    lexic = self._context.get_vm().lexic
+    lexic = self._context.get_vm().get_lexic()
     return f'{lexic.thread_idx_y} + {lexic.block_dim_y} * {lexic.block_idx_x}'
 
   def _get_element_size_guard(self):

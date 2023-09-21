@@ -1,5 +1,5 @@
 from kernelforge import DenseMatrix, GenerationError, CsaGenerator
-from kernelforge.vm import vm_factory
+from kernelforge.common.vm.vm import vm_factory
 import argparse
 
 

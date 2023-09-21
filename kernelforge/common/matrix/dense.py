@@ -81,15 +81,8 @@ class Matrix():
   def __str__(self):
     return self.name
 
-  def __str__(self):
-    string = self.name + '\n'
-    string += "num. rows = {}\n".format(self.num_rows)
-    string += "num. columns = {}\n".format(self.num_cols)
-    string += "bounding box = {}\n".format(self.bbox)
-    string += "addressing = {}\n".format(self.addressing)
-    string += "num. actual rows = {}\n".format(self.get_actual_num_rows())
-    string += "num. actual cols = {}\n".format(self.get_actual_num_cols())
-    return string
+  def gen_descr(self):
+    return f'{self.name} {self.num_rows}x{self.num_cols} {self.bbox} {self.addressing} {self.get_actual_num_rows()}x{self.get_actual_num_cols()}'
 
 
 class DenseMatrix(Matrix):

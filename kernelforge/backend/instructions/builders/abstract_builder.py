@@ -1,6 +1,6 @@
 from abc import ABC
 from typing import List
-from kernelforge.common import Context
+from kernelforge.common.context import Context
 from ..abstract_instruction import AbstractInstruction
 
 

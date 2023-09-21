@@ -2,8 +2,9 @@ from typing import List, Dict, Set, Union
 from copy import copy
 from collections import OrderedDict
 from kernelforge.backend.symbol import Symbol
-from kernelforge.backend.instructions import Gemm, StoreRegToShr
-from kernelforge.backend.instructions.loaders import AbstractShrMemLoader
+from kernelforge.backend.instructions.gemm import Gemm
+from kernelforge.backend.instructions.store import StoreRegToShr
+from kernelforge.backend.instructions.loaders.abstract_loader import AbstractShrMemLoader
 from kernelforge.backend.symbol import SymbolType
 from .abstract import AbstractOptStage, Context, AbstractInstruction
 

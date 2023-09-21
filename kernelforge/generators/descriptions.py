@@ -1,6 +1,6 @@
-from kernelforge.backend.exceptions import GenerationError
-from .context import Context
-from .basic_types import DataFlowDirection, FloatingPointType
+from kernelforge.common.exceptions import GenerationError
+from kernelforge.common.context import Context
+from kernelforge.common.basic_types import DataFlowDirection, FloatingPointType
 
 class OperationDescription:
   pass
@@ -128,7 +128,7 @@ class GemmDescr(OperationDescription):
       flops += self._m * self._n
     return flops
 
-class CSA(OperationDescription):
+class CSADescr(OperationDescription):
   def __init__(self,
                trans_a,
                a,

@@ -1,6 +1,6 @@
 from typing import List
-from .exceptions import InternalError
-from .symbol import Symbol
+from kernelforge.common.exceptions import InternalError
+from kernelforge.backend.symbol import Symbol
 
 
 class InverseSymbolTable:

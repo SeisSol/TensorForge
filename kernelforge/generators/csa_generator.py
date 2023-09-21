@@ -6,7 +6,7 @@ from .abstract_generator import AbstractGenerator as Generator
 from .basic_types import DataFlowDirection, GeneralLexicon
 from .symbol_table import SymbolType, Symbol
 from .instructions.builders import GetElementPtrBuilder
-from kernelforge.vm import VM
+from kernelforge.common.vm.vm import VM
 from .thread_policies import TheadPolicyFactory
 import math
 import hashlib
