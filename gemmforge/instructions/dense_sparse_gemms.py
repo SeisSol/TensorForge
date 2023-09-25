@@ -38,7 +38,7 @@ class ShrMemBasedDenseSparseGemm(AbstractInstruction):
 
       writer.Emptyline()
       for k in range(0, op1_data_view.columns):
-        non_zeros = self._mat_b.get_coo_row_major()[k]
+        non_zeros = self._mat_b.get_coo_per_row()[k]
         if len(non_zeros) == 0:
           continue
 
@@ -142,7 +142,7 @@ class RegisterOnlyDenseSparseGemm(AbstractInstruction):
         writer(f'shiftedWid = {start_tile_n} + {warp_idx_variable};')
 
         # We need to load values of k'th row of k for that we need to find their offset in the sparse matrix
-        non_zeros = self._mat_b.get_coo_row_major()[k]
+        non_zeros = self._mat_b.get_coo_per_row()[k]
         non_zeros_of_this_tile = non_zeros[start_tile_n:start_tile_n + self._vec_unit_length]
 
         if len(non_zeros_of_this_tile) == 0:

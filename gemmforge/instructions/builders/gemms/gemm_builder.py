@@ -195,8 +195,9 @@ class  ShrMemBasedSparseDenseGemmBuilder(AbstractBuilder):
 
       # Note: we will handle transposition of the second operand during
       # the matrix multiplication
-      self._op1 = self._make_loader_and_symbol(operand=op1, do_transpose=False)
-      self._symbol_table.add_scope()
+      #self._op1 = self._make_loader_and_symbol(operand=op1, do_transpose=False)
+      #self._symbol_table.add_scope()
+      self._op1 = op1
     else:
       self._op1 = op1
     

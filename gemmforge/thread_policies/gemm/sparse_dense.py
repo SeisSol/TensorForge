@@ -34,10 +34,12 @@ class GenericSparseDenseGemmThreadPolicy(AbstractGemmLikeThreadPolicy):
     el_count_if_dense = self._op1.get_actual_num_cols() * self._op1.get_actual_num_rows()
     el_count_if_sparse = self._op1.get_el_count()
     factor = (el_count_if_dense / el_count_if_sparse)
-    factor /= 2.0
+    factor /= 4.0
     # To prevent using too much shared memory
     if factor > 1.00/0.15:
       factor = 1.00/0.15
+    if factor < 1.00:
+      factor = 1.0
     factor_int = int(hwfactor*factor + 0.25)
     return max(int(factor_int * mults_per_sm / hw_descr.max_block_per_sm), 1)
 
@@ -57,7 +59,7 @@ class SparseDenseOnlyRegisterBasedThreadPolicy(AbstractGemmLikeThreadPolicy):
     return factor * (32 + accumulator_length)
 
   def get_num_ops_per_block(self):
-    accumulator_length = self._op1.get_actual_num_max_nonzero_cols()
+    accumulator_length = self._op1.get_actual_num_max_nonzero_rows()
     max_num_regs_per_thread = self._estimate_num_registers_per_mult(accumulator_length)
 
     hw_descr = self._vm.get_hw_descr()
