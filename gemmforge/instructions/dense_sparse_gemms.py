@@ -38,7 +38,10 @@ class ShrMemBasedDenseSparseGemm(AbstractInstruction):
 
       writer.Emptyline()
       for k in range(0, op1_data_view.columns):
-        non_zeros = self._mat_b.get_coo_per_row()[k]
+        if not self._trans_b:
+          non_zeros = self._mat_b.get_coo_per_row()[k]
+        else:
+          non_zeros = self._mat_b.get_coo_per_col()[k]
         if len(non_zeros) == 0:
           continue
 
@@ -46,25 +49,41 @@ class ShrMemBasedDenseSparseGemm(AbstractInstruction):
         writer(f'{value_var} = {self._op1.name}[{op1_addr}];')
         writer.Emptyline()
 
-        self._get_inner_loop_sparse_with_a_row(writer, value_var, k, non_zeros, self._mat_b.get_values())
+        self._get_inner_loop_sparse_with_a_row(writer, value_var, k, self._mat_b.get_values())
 
-  def _get_inner_loop_sparse_with_a_row(self, writer, op1_value, row_id, non_zeros, val_b=None):
+  def _get_inner_loop_sparse_with_a_row(self, writer, op1_value, row_id, val_b=None):
     # Iterate the first column first then the second etc. (coo_b[0] if col major, otherwise coo_b[1] if row major)
     # As we iterate we need to find the element in the real ordering (coordiantes)
     # This function iterates a column until the end
+    if not self._trans_b:
+      non_zeros = self._mat_b.get_coo_per_row()[row_id]
+    else:
+      non_zeros = self._mat_b.get_coo_per_col()[row_id]
     if len(non_zeros) > 0:
       value_known = val_b != None
       writer.Comment(f"Mul begin col {row_id}")
 
-      for col_id in non_zeros:
-        iter = self._mat_b.find_1d_offset(row_id, col_id)
-        res_access = f"[{col_id}]"
+      if not self._trans_b:
+        for col_id in non_zeros:
+          it = self._mat_b.find_1d_offset(row_id, col_id)
+          res_access = f"[{col_id}]"
 
-        if not value_known:
-          writer(f'{self._dest.name}{res_access} += {op1_value} * {self._op2.name}[{iter}];')
-        else:
-          writer(
-            f'{self._dest.name}{res_access} += {op1_value} * {val_b[iter]}{self._vm.get_real_literal()};')
+          if not value_known:
+            writer(f'{self._dest.name}{res_access} += {op1_value} * {self._op2.name}[{it}];')
+          else:
+            writer(
+              f'{self._dest.name}{res_access} += {op1_value} * {val_b[it]}{self._vm.get_real_literal()};')
+      else:
+        col_id = row_id
+        for row_id in non_zeros:
+          it = self._mat_b.find_1d_offset(row_id, col_id)
+          res_access = f"[{row_id}]"
+
+          if not value_known:
+            writer(f'{self._dest.name}{res_access} += {op1_value} * {self._op2.name}[{it}];')
+          else:
+            writer(
+              f'{self._dest.name}{res_access} += {op1_value} * {val_b[it]}{self._vm.get_real_literal()};')
 
       writer.Comment(f"Mul end col {row_id}")
       writer.Emptyline()
