@@ -20,15 +20,12 @@ class SparseMatrix(Matrix):
     self.values = values
 
     self.dense_representation = [[0] * num_cols for _ in range(num_rows)]
-    print(self.dense_representation)
     i = 0
     for coordinate in coordinates:
       val = "X"
       if values != None:
         assert i < len(values), f"i < len(values) : {i} < {len}"
         val = values[i]
-      #print(int(coordinate[0]), int(coordinate[1]))
-      print(f"({num_rows}, {num_cols}), ({int(coordinate[0])}, {int(coordinate[1])})")
       self.dense_representation[int(coordinate[0])][int(coordinate[1])] = val
       i += 1
     self.coo = coordinates
@@ -41,7 +38,6 @@ class SparseMatrix(Matrix):
       val = "X"
       if values != None:
         val = values[i]
-      print(f"({num_rows}, {num_cols}), ({int(coordinate[0])}, {int(coordinate[1])})")
       self.coo_per_row[int(coordinate[0])].append(int(coordinate[1]))
       self.coo_per_col[int(coordinate[1])].append(int(coordinate[0]))
       self.elcount += 1
