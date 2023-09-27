@@ -1,3 +1,4 @@
+from gemmforge.thread_policies.gemm.generic import GenericGemmThreadPolicy
 from ..abstract_thread_policy import AbstractGemmLikeThreadPolicy, DenseMatrix, SparseMatrix
 from gemmforge.vm import VM
 
@@ -12,14 +13,13 @@ class GenericSparseDenseGemmThreadPolicy(AbstractGemmLikeThreadPolicy):
                res: DenseMatrix):
     super().__init__(vm, num_threads, op1, op2, res)
     self._shr_mem_per_op = shr_mem_per_op
+    self._g = GenericGemmThreadPolicy(vm, shr_mem_per_op, num_threads, op1, op2, res)
 
   def _estimate_num_registers_per_mult(self, accumulator_length):
-    # Note: derived experimentally
-    factor = self._vm.bytes_per_real() / 4
-    return factor * (32 + accumulator_length)
+    return self._g._estimate_num_registers_per_mult(accumulator_length)
 
   def get_num_ops_per_block(self):
-    accumulator_length = self._op2.get_actual_num_cols()
+    accumulator_length = self._res.get_actual_num_rows()
     hwfactor = 1.0
     if accumulator_length < self._vm._hw_descr.vec_unit_length:
         hwfactor = float(int(self._vm._hw_descr.vec_unit_length / accumulator_length))
