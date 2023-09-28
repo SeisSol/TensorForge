@@ -199,12 +199,13 @@ class  ShrMemBasedSparseDenseGemmBuilder(AbstractBuilder):
       self._symbol_table.add_scope()
     else:
       self._op1 = op1
-    
+
     if not trans_b:
-      self._op2 = self._make_loader_and_symbol(operand=op2, do_transpose=True)
+      self._op2 = op2 #self._make_loader_and_symbol(operand=op2, do_transpose=False)
     else:
-      self._op2 = op2
-    self._symbol_table.add_scope()
+      self._op2 = op2 #self._make_loader_and_symbol(operand=op2, do_transpose=False)
+      #self._op2 = op2
+    #self._symbol_table.add_scope()
 
     self._intermediate_dest = self._make_loader_and_symbol_do_not_load_if_cond(operand=intermediate_dest, do_transpose=False, cond=beta!=0.0)
     #self._symbol_table.add_scope()

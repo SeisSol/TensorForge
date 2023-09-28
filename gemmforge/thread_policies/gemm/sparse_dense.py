@@ -34,7 +34,7 @@ class GenericSparseDenseGemmThreadPolicy(AbstractGemmLikeThreadPolicy):
     el_count_if_dense = self._op1.get_actual_num_cols() * self._op1.get_actual_num_rows()
     el_count_if_sparse = self._op1.get_el_count()
     factor = (el_count_if_dense / el_count_if_sparse)
-    factor /= 4.0
+    factor /= 2.0
     # To prevent using too much shared memory
     if factor > 1.00/0.15:
       factor = 1.00/0.15
