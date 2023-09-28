@@ -182,7 +182,7 @@ class  ShrMemBasedSparseDenseGemmBuilder(AbstractBuilder):
     self._reset()
 
     #if mat_a.get_values() == None or not trans_b:
-    self._symbol_table.add_scope()
+    #self._symbol_table.add_scope()
 
     if mat_a.get_values() == None:
       # Note: of trans_a==True than an operand is given as KxM instead of (MxK).
@@ -195,17 +195,18 @@ class  ShrMemBasedSparseDenseGemmBuilder(AbstractBuilder):
 
       # Note: we will handle transposition of the second operand during
       # the matrix multiplication
-      self._op1 = self._make_loader_and_symbol(operand=op1, do_transpose=False)
       self._symbol_table.add_scope()
+      self._op1 = self._make_loader_and_symbol(operand=op1, do_transpose=False)
     else:
       self._op1 = op1
+    self._symbol_table.add_scope()
 
     if not trans_b:
-      self._op2 = op2 #self._make_loader_and_symbol(operand=op2, do_transpose=False)
+      self._op2 = self._make_loader_and_symbol(operand=op2, do_transpose=True)
+      self._symbol_table.add_scope()
     else:
       self._op2 = op2 #self._make_loader_and_symbol(operand=op2, do_transpose=False)
-      #self._op2 = op2
-    #self._symbol_table.add_scope()
+      #self._symbol_table.add_scope()
 
     self._intermediate_dest = self._make_loader_and_symbol_do_not_load_if_cond(operand=intermediate_dest, do_transpose=False, cond=beta!=0.0)
     #self._symbol_table.add_scope()
