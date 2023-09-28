@@ -161,7 +161,10 @@ class RegisterOnlyDenseSparseGemm(AbstractInstruction):
         writer(f'shiftedWid = {start_tile_n} + {warp_idx_variable};')
 
         # We need to load values of k'th row of k for that we need to find their offset in the sparse matrix
-        non_zeros = self._mat_b.get_coo_per_row()[k]
+        if not self._trans_b:
+          non_zeros = self._mat_b.get_coo_per_row()[k]
+        else:
+          non_zeros = self._mat_b.get_coo_per_col()[k]
         non_zeros_of_this_tile = non_zeros[start_tile_n:start_tile_n + self._vec_unit_length]
 
         if len(non_zeros_of_this_tile) == 0:
@@ -171,7 +174,10 @@ class RegisterOnlyDenseSparseGemm(AbstractInstruction):
         non_zero_to_thread = list()
         for non_zero_col_id in non_zeros_of_this_tile:
           with writer.If(f'shiftedWid == {it}'):
-            op2_addr = self._mat_b.find_1d_offset(k, non_zero_col_id)
+            if not self._trans_b:
+              op2_addr = self._mat_b.find_1d_offset(k, non_zero_col_id)
+            else:
+              op2_addr = self._mat_b.find_1d_offset(non_zero_col_id, k)
             writer(f'{op2_variable} = {self._op2.name}[{op2_addr}];')
             non_zero_to_thread.append((non_zero_col_id, it))
           if it != len(non_zeros_of_this_tile) - 1:

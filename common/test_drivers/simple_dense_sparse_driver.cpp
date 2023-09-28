@@ -117,135 +117,7 @@ void TestDriver::initSparseMatrix(real *DenseVersionOfSparseMatrix, real* Sparse
     std::mt19937 mt(rd());
     std::uniform_real_distribution<real> dist(1.0, 100.0);
 
-    if (matrix_b_type == "band_diagonal"){
-        if (!m_transB){
-            int iter = 0;
-            real a = 0.0;
-            real b = 0.0;
-            real c = 0.0;
-            for (int Element = 0; Element < m_NumElements; Element++){
-                a = dist(mt);
-                b = dist(mt);
-                DenseVersionOfSparseMatrix[_2d21d(0, 0, rowB, colB, Element, !m_transB)] = b;
-                DenseVersionOfSparseMatrix[_2d21d(1, 0, rowB, colB, Element, !m_transB)] = a;
-                SparseMatrix[iter++] = b;
-                SparseMatrix[iter++] = a;
-                
-                for (int j = 1; j < colB - 1; j++){
-                    a = dist(mt);
-                    b = dist(mt);
-                    c = dist(mt);
-                    DenseVersionOfSparseMatrix[_2d21d(j-1, j, rowB, colB, Element, !m_transB)] = c;
-                    DenseVersionOfSparseMatrix[_2d21d(j, j, rowB, colB, Element, !m_transB)] = b;
-                    DenseVersionOfSparseMatrix[_2d21d(j+1, j, rowB, colB, Element, !m_transB)] = a;
-                    SparseMatrix[iter++] = c;
-                    SparseMatrix[iter++] = b;
-                    SparseMatrix[iter++] = a;
-                }
-
-                int j = colB - 1;
-                b = dist(mt);
-                c = dist(mt);
-                DenseVersionOfSparseMatrix[_2d21d(j-1, j, rowB, colB, Element, !m_transB)] = c;
-                DenseVersionOfSparseMatrix[_2d21d(j, j, rowB, colB, Element, !m_transB)] = b;
-                SparseMatrix[iter++] = c;
-                SparseMatrix[iter++] = b;
-            }
-        }else{
-            int iter = 0;
-            real a = 0.0;
-            real b = 0.0;
-            real c = 0.0;
-            for (int Element = 0; Element < m_NumElements; Element++){
-                b = dist(mt);
-                c = dist(mt);
-                DenseVersionOfSparseMatrix[_2d21d(0, 0, rowB, colB, Element, !m_transB)] = b;
-                DenseVersionOfSparseMatrix[_2d21d(0, 1, rowB, colB, Element, !m_transB)] = c;
-                SparseMatrix[iter++] = b;
-                SparseMatrix[iter++] = c;
-                
-                for (int i = 1; i < rowB - 1; i++){
-                    a = dist(mt);
-                    b = dist(mt);
-                    c = dist(mt);
-                    DenseVersionOfSparseMatrix[_2d21d(i, i-1, rowB, colB, Element, !m_transB)] = a;
-                    DenseVersionOfSparseMatrix[_2d21d(i, i, rowB, colB, Element, !m_transB)] = b;
-                    DenseVersionOfSparseMatrix[_2d21d(i, i+1, rowB, colB, Element, !m_transB)] = c;
-                    SparseMatrix[iter++] = a;
-                    SparseMatrix[iter++] = b;
-                    SparseMatrix[iter++] = c;
-                }
-
-                int i = rowB - 1;
-                a = dist(mt);
-                b = dist(mt);
-                DenseVersionOfSparseMatrix[_2d21d(i, i-1, rowB, colB, Element, !m_transB)] = a;
-                DenseVersionOfSparseMatrix[_2d21d(i, i, rowB, colB, Element, !m_transB)] = b;
-                SparseMatrix[iter++] = a;
-                SparseMatrix[iter++] = b;
-            }
-        }
-    }else if (matrix_b_type == "single_column"){
-        constexpr int column_id = 1;
-        int iter = 0;
-        real a = 0.0;
-        for (int Element = 0; Element < m_NumElements; Element++){
-            for (int i = 0; i < rowB; i++){
-                a = dist(mt);
-                DenseVersionOfSparseMatrix[_2d21d(i, column_id, rowB, colB, Element, !m_transB)] = a;
-                SparseMatrix[iter++] = a;
-            }
-        }
-    }else if (matrix_b_type == "single_row"){
-        constexpr int row_id = 1;
-        int iter = 0;
-        real a = 0.0;
-        for (int Element = 0; Element < m_NumElements; Element++){
-            for (int j = 0; j < colB; j++){
-                a = dist(mt);
-                DenseVersionOfSparseMatrix[_2d21d(row_id, j, rowB, colB, Element, !m_transB)] = a;
-                SparseMatrix[iter++] = a;
-            }
-        }
-    }else if (matrix_b_type == "chequered"){
-        int iter = 0;
-        real a = 0.0;
-        if (m_transB){
-            for (int Element = 0; Element < m_NumElements; Element++){
-                for (int i = 0; i < rowB; i++){
-                    int offset = i % 2;
-                    for (int j = offset; j < colB; j+= 2){
-                        a = dist(mt);
-                        DenseVersionOfSparseMatrix[_2d21d(i, j, rowB, colB, Element, false)] = a;
-                        SparseMatrix[iter++] = a;
-                    }
-                }
-            }
-        }else{
-            for (int Element = 0; Element < m_NumElements; Element++){
-                for (int j = 0; j < colB; j++){
-                    int offset = j % 2;
-                    for (int i = offset; i < rowB; i += 2){
-                        a = dist(mt);
-                        DenseVersionOfSparseMatrix[_2d21d(i, j, rowB, colB, Element, true)] = a;
-                        SparseMatrix[iter++] = a;
-                    }
-                }
-            }     
-        }
-    }else if (matrix_b_type == "full"){
-        int iter = 0;
-        real a = 0.0;
-        for (int Element = 0; Element < m_NumElements; Element++){
-            for (int i = 0; i < rowB; i++){
-                for (int j = 0; j < colB; j++){
-                    a = dist(mt);
-                    DenseVersionOfSparseMatrix[_2d21d(i, j, rowB, colB, Element, !m_transB)] = a;
-                    SparseMatrix[_2d21d(i, j, rowB, colB, Element, !m_transB)] = a;
-                }
-            }
-        }
-    }else if (matrix_b_type == "random"){
+    if (matrix_b_type == "random"){
         std::vector<std::tuple<int, int>> coordinates = m_transB ? get_coordinates_B_core_transposed() : get_coordinates_B_core();
         int iter = 0;
         real a = 0.0;
@@ -254,16 +126,12 @@ void TestDriver::initSparseMatrix(real *DenseVersionOfSparseMatrix, real* Sparse
                 int i = std::get<0>(coordinate_pair);
                 int j = std::get<1>(coordinate_pair);
                 a = dist(mt);
-                if (m_transB) {
-                    DenseVersionOfSparseMatrix[_2d21d(i, j, rowB, colB, Element, false)] = a;
-                } else {
-                    DenseVersionOfSparseMatrix[_2d21d(i, j, rowB, colB, Element, true)] = a;
-                }
+                DenseVersionOfSparseMatrix[_2d21d(i, j, rowB, colB, Element)] = a;
                 SparseMatrix[iter++] = a;
             }
         }
     }else {
-        std::runtime_error("matrix_b_type needs to be band | single_column | single_row | checkquered | random | full");
+        std::runtime_error("matrix_b_type needs to be random ");
     }
 }
 

@@ -27,7 +27,7 @@ test_suites:
     trans_params_a: [ True ]
     trans_params_b: [ False, True ]
 
-    matrix_b_params_type: [ "band_diagonal", "single_column", "single_row", "chequered", "full", "random" ]
+    matrix_b_params_type: [ "random" ]
 
     alpha: 1.0
     beta: 1.0

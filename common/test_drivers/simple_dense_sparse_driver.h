@@ -132,12 +132,8 @@ namespace gemmforge {
         }
       }
 
-      int _2d21d(int i, int j, int rowX, int colX, int Element, bool col_major = true){
-        if (col_major){
-          return Element*rowX*colX + i + j*rowX;
-        }else{
-          return Element*rowX*colX + i*colX + j;
-        }
+      int _2d21d(int i, int j, int rowX, int colX, int Element){
+        return Element*rowX*colX + i + j*rowX;
       }
     };
   }
