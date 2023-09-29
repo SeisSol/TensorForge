@@ -106,3 +106,8 @@ class SparseMatrix(Matrix):
       i += 1
     assert (i < len(coordinates))
     return i
+
+  def sparsity(self):
+    size = self.get_actual_num_cols() * self.get_actual_num_rows()
+    el_count = self.get_el_count()
+    return 1.0 - float(el_count / size)
