@@ -34,7 +34,7 @@ class ShrMemBasedSparseDenseGemm(AbstractInstruction):
     op1_data_view = self._op1.data_view
     op2_data_view = self._op2.data_view
     thread_idx_x = self._vm.get_lexic().thread_idx_x
-    with writer.If(self.gen_mask_threads(op2_data_view.lead_dim)):
+    with writer.If(self.gen_mask_threads(self._op2.obj.get_actual_num_cols())):
       writer(f'{self._vm.fp_as_str()} {value_var};')
 
       writer.Emptyline()
