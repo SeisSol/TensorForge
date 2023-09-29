@@ -196,10 +196,18 @@ class  ShrMemBasedSparseDenseGemmBuilder(AbstractBuilder):
       # Note: we will handle transposition of the second operand during
       # the matrix multiplication
       self._symbol_table.add_scope()
-      if trans_a or mat_a.sparsity() > 0.65:
-        self._op1 = op1 #self._make_loader_and_symbol(operand=op1, do_transpose=False)
+      if trans_a:
+        if mat_a.sparsity() > 0.65:
+          self._op1 = op1 #self._make_loader_and_symbol(operand=op1, do_transpose=False)
+        else:
+          self._op1 = self._make_loader_and_symbol(operand=op1, do_transpose=False)
       else:
-        self._op1 = self._make_loader_and_symbol(operand=op1, do_transpose=False)
+        if mat_a.sparsity() > 0.65:
+          #self._op1 = self._make_loader_and_symbol(operand=op1, do_transpose=False)
+          self._op1 =  op1
+        else:
+          self._op1 = self._make_loader_and_symbol(operand=op1, do_transpose=False)
+          
     else:
       self._op1 = op1
     self._symbol_table.add_scope()
