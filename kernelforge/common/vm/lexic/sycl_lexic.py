@@ -14,12 +14,16 @@ class SyclLexic(Lexic):
     self.block_dim_y = "item.get_group().get_local_range(1)"
     self.block_dim_z = "item.get_group().get_local_range(2)"
     self.stream_type = "cl::sycl::queue"
+    self.restrict_kw = "__restrict__"
 
   def get_launch_code(self, func_name, grid, block, stream, func_params):
     return f"kernel_{func_name}({stream}, {grid}, {block}, {func_params})"
 
   def declare_shared_memory_inline(self, name, precision, size, alignment):
     return None
+  
+  def get_mapped_keywords(self):
+    return [('tx', self.thread_idx_x, 'int')]
 
   def kernel_definition(self, file, kernel_bounds, base_name, params, precision=None, total_shared_mem_size=None):
     if total_shared_mem_size is not None and precision is not None:
@@ -51,8 +55,8 @@ class SyclLexic(Lexic):
   def broadcast_sync(self, variable, lane, mask):
     return f'group_broadcast({mask}, {variable}, {lane})'
 
-  def kernel_range_object(self):
-    return "cl::sycl::range<3>"
+  def kernel_range_object(self, name, values):
+    return f"cl::sycl::range<3> {name} ({values})"
 
   def get_stream_via_pointer(self, file, stream_name, pointer_name):
     with file.If(f"{pointer_name} == nullptr"):

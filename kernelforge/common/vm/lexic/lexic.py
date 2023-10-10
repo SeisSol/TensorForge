@@ -55,7 +55,7 @@ class Lexic(ABC):
     pass
 
   @abstractmethod
-  def kernel_range_object(self):
+  def kernel_range_object(self, name, values):
     pass
 
   @abstractmethod

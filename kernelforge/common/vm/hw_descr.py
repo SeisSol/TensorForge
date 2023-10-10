@@ -43,6 +43,11 @@ def hw_descr_factory(arch, backend):
       return HwDecription(known_arch[arch], arch, backend)
     else:
       report_error(backend, arch)
+  elif backend == 'omptarget':
+    if arch in nvidia_list or arch in intel_list:
+      return HwDecription(known_arch[arch], arch, backend)
+    else:
+      report_error(backend, arch)
 
   raise ValueError(f'Unknown gpu architecture: {backend} {arch}')
 

@@ -117,8 +117,8 @@ class GemmGenerator(GemmLikeGenerator):
     src = StringIO()
     with constructs.Cpp(src) as file:
       with file.Function(self._base_name, self._get_launcher_params()):
-        file(f'{self._lexic.kernel_range_object()} {self._get_block_dim_spec()};')
-        file(f'{self._lexic.kernel_range_object()} {self._get_grid_dim_spec()};')
+        file(f'{self._lexic.kernel_range_object(*self._get_block_dim_spec())};')
+        file(f'{self._lexic.kernel_range_object(*self._get_grid_dim_spec())};')
 
         self._lexic.get_stream_via_pointer(file, 'stream', GeneralLexicon.STREAM_PTR_STR)
         file.Expression(self._lexic.get_launch_code(self._base_name,
@@ -318,10 +318,10 @@ class GemmGenerator(GemmLikeGenerator):
 
   def _get_block_dim_spec(self):
     super(GemmGenerator, self)._get_block_dim_spec()
-    return f'block({self._num_active_threads}, {self._num_ops_per_block}, 1)'
+    return ('block', f'{self._num_active_threads}, {self._num_ops_per_block}, 1')
 
   def _get_grid_dim_spec(self):
     super(GemmGenerator, self)._get_grid_dim_spec()
     num_blocks = "({0} + {1} - 1) / {1}".format(GeneralLexicon.NUM_ELEMENTS,
                                                 self._num_ops_per_block)
-    return f'grid({num_blocks}, 1, 1)'
+    return ('grid', f'{num_blocks}, 1, 1')

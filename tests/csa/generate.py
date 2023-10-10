@@ -168,7 +168,7 @@ with open(path, 'w') as file:
 
 if hw_descr.backend == 'cuda':
   path = os.path.join(dir_name, 'kernels.cu')
-elif hw_descr.backend == 'hip' or hw_descr.backend == 'hipsycl' or hw_descr.backend == 'oneapi':
+elif hw_descr.backend == 'hip' or hw_descr.backend == 'sycl':
   path = os.path.join(dir_name, 'kernels.cpp')
 else:
   print('Backend not supported, could not write kernel file')

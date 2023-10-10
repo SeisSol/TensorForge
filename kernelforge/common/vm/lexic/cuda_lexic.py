@@ -48,8 +48,8 @@ class CudaLexic(Lexic):
   def broadcast_sync(self, variable, lane, mask):
     return f'__shfl_sync({mask}, {variable}, {lane})'
 
-  def kernel_range_object(self):
-    return "dim3"
+  def kernel_range_object(self, name, values):
+    return f"dim3 {name} ({values})"
 
   def get_stream_via_pointer(self, file, stream_name, pointer_name):
     if_stream_exists = f'({pointer_name} != nullptr)'

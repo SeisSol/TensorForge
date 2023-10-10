@@ -10,7 +10,7 @@ from kernelforge.backend.opt import OptimizationStage
 from kernelforge.backend.scopes import Scopes
 from kernelforge.backend.symbol import Symbol, SymbolType
 from kernelforge.backend.instructions.abstract_instruction import AbstractInstruction
-from kernelforge.backend.instructions.builders.kernels.gemms.gemm_builder import ShrMemBasedDenseGemmKernelBuilder, CSAKernelBuilder
+from kernelforge.backend.instructions.builders.kernels.gemms.gemm_builder import ShrMemBasedDenseGemmKernelBuilder, RegisterOnlyDenseGemmKernelBuilder, CSAKernelBuilder
 from kernelforge.backend.instructions.builders.ptr_manip_builder import GetElementPtrBuilder
 from kernelforge.backend.instructions.builders.allocator_builder import ShrMemAllocBuilder, RegistersAllocBuilder
 from kernelforge.backend.writer import Writer
@@ -130,9 +130,9 @@ class Generator:
     mults_per_block = self._shr_mem_obj.get_mults_per_block()
     lexic = self._context.get_vm().get_lexic()
     with writer.Block(f'{proto}'):
-      writer(f'{lexic.kernel_range_object()} block({self._num_threads}, {mults_per_block}, 1);')
+      writer(f'{lexic.kernel_range_object("block", f"{self._num_threads}, {mults_per_block}, 1")};')
       num_blocks = f'({GeneralLexicon.NUM_ELEMENTS} + {mults_per_block} - 1) / {mults_per_block}'
-      writer(f'{lexic.kernel_range_object()} grid({num_blocks}, 1, 1);')
+      writer(f'{lexic.kernel_range_object("grid", f"{num_blocks}, 1, 1")};')
 
       if_stream_exists = f'({GeneralLexicon.STREAM_PTR_STR} != nullptr)'
       stream_obj = f'static_cast<{lexic.stream_type}>({GeneralLexicon.STREAM_PTR_STR})'
@@ -245,7 +245,7 @@ class Generator:
 
     self._matrix_list = []
     for gemm in gemm_list:
-      local_list = [gemm.mat_a, gemm.mat_b, gemm.mat_c]
+      local_list = gemm.matrix_list()
 
       # NOTE: to be on the safe side we init all matrix names with None
       for matrix in local_list:
@@ -292,7 +292,7 @@ class Generator:
         str(gemm.alpha),
         str(gemm.beta),
         str(gemm.trans_a),
-        str(gemm.trans_b)
+        # str(gemm.trans_b)
       ])
 
     result = hashlib.md5(', '.join(long_name).encode())
@@ -370,7 +370,8 @@ class Generator:
 
     launch_bounds = (total_num_threads_per_block,)
 
-    return lexic.kernel_definition(writer, launch_bounds, f'kernel_{self._base_kernel_name}', params)
+    return lexic.kernel_definition(writer, launch_bounds, self._base_kernel_name, params, self._context.fp_as_str(),
+                                         self._shr_mem_obj.get_total_size())
 
   def _generate_launcher_proto(self, with_defaults=True):
     global_symbols = self._scopes.get_global_scope().values()
