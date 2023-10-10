@@ -71,7 +71,7 @@ class ShrMemAlloc(AbstractInstruction):
 
   def is_ready(self):
     shrmem_obj = self._dest.obj
-    if shrmem_obj.get_total_size():
+    if shrmem_obj.get_total_size() is not None:
       return True
     else:
       return False
