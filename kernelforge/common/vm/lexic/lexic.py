@@ -31,8 +31,11 @@ class Lexic(ABC):
 
   @abstractmethod
   def kernel_definition(self, file, kernel_bounds, base_name, params, precision=None,
-                        total_shared_mem_size=None):
+                        total_shared_mem_size=None, global_symbols=None):
     pass
+
+  def get_mapped_keywords(self):
+    return []
 
   @abstractmethod
   def sync_threads(self):

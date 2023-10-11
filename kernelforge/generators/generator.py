@@ -134,9 +134,11 @@ class Generator:
       num_blocks = f'({GeneralLexicon.NUM_ELEMENTS} + {mults_per_block} - 1) / {mults_per_block}'
       writer(f'{lexic.kernel_range_object("grid", f"{num_blocks}, 1, 1")};')
 
-      if_stream_exists = f'({GeneralLexicon.STREAM_PTR_STR} != nullptr)'
-      stream_obj = f'static_cast<{lexic.stream_type}>({GeneralLexicon.STREAM_PTR_STR})'
-      writer(f'{lexic.stream_type} stream = {if_stream_exists} ? {stream_obj} : 0;')
+      lexic.get_stream_via_pointer(writer, 'stream', GeneralLexicon.STREAM_PTR_STR)
+
+      # if_stream_exists = f'({GeneralLexicon.STREAM_PTR_STR} != nullptr)'
+      # stream_obj = f'static_cast<{lexic.stream_type}>({GeneralLexicon.STREAM_PTR_STR})'
+      # writer(f'{lexic.stream_type} stream = {if_stream_exists} ? {stream_obj} : 0;')
 
       args = self._generate_kernel_base_args()
       args = ', '.join(args)
@@ -371,7 +373,7 @@ class Generator:
     launch_bounds = (total_num_threads_per_block,)
 
     return lexic.kernel_definition(writer, launch_bounds, self._base_kernel_name, params, self._context.fp_as_str(),
-                                         self._shr_mem_obj.get_total_size())
+                                         self._shr_mem_obj.get_total_size(), global_symbols)
 
   def _generate_launcher_proto(self, with_defaults=True):
     global_symbols = self._scopes.get_global_scope().values()

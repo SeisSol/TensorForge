@@ -17,15 +17,12 @@ class SyclLexic(Lexic):
     self.restrict_kw = "__restrict__"
 
   def get_launch_code(self, func_name, grid, block, stream, func_params):
-    return f"kernel_{func_name}({stream}, {grid}, {block}, {func_params})"
+    return f"{func_name}({stream}, {grid}, {block}, {func_params})"
 
   def declare_shared_memory_inline(self, name, precision, size, alignment):
     return None
-  
-  def get_mapped_keywords(self):
-    return [('tx', self.thread_idx_x, 'int')]
 
-  def kernel_definition(self, file, kernel_bounds, base_name, params, precision=None, total_shared_mem_size=None):
+  def kernel_definition(self, file, kernel_bounds, base_name, params, precision=None, total_shared_mem_size=None, global_symbols=None):
     if total_shared_mem_size is not None and precision is not None:
       if self._backend == 'hipsycl':
         localmem = f'cl::sycl::accessor<{precision}, 1,'

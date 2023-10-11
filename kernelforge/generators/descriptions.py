@@ -127,8 +127,14 @@ class GemmDescr(OperationDescription):
     if self.beta != 0:
       flops += self._m * self._n
     return flops
+  
+  def matrix_list(self):
+    return (self.mat_a, self.mat_b, self.mat_c)
 
 class CSADescr(OperationDescription):
+  def matrix_list(self):
+    return (self.mat_a, self.mat_c)
+
   def __init__(self,
                trans_a,
                a,
@@ -139,6 +145,7 @@ class CSADescr(OperationDescription):
                prefer_align: bool = False):
 
     self.trans_a = trans_a
+    self.trans_b = None
 
     self.mat_a = a
     self.mat_a.set_data_flow_direction(DataFlowDirection.SOURCE)
@@ -193,8 +200,8 @@ class CSADescr(OperationDescription):
           raise GenerationError("Cannot generate an assignment "
                                 "with given parameters. Matrix C and A (NoTrans) do not match")
 
-      # check whether C and B match each other
-      if self.trans_b:
+      # check whether C and A match each other (second round)
+      if self.trans_a:
         if self.mat_c.get_actual_num_cols() != self.mat_a.get_actual_num_rows():
           raise GenerationError("Cannot generate an assignment "
                                 "with given parameters. Matrix C and A (Trans) do not match")

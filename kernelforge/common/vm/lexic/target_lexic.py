@@ -11,30 +11,31 @@ class TargetLexic(Lexic):
     self.thread_idx_z = "tz"
     self.block_idx_x = "bx"
     self.block_idx_z = "bz"
-    self.block_dim_y = "bY"
-    self.block_dim_z = "bZ"
-    self.stream_type = "void *" # none
+    self.block_dim_y = "tY"
+    self.block_dim_z = "tZ"
+    self.stream_type = "int"
     self.restrict_kw = "__restrict"
 
   def get_launch_code(self, func_name, grid, block, stream, func_params):
-    return f"kernel_{func_name}({stream}, {grid}[0], {block}[0], {block}[1], {func_params})"
+    return f"{func_name}({stream}, {grid}[0], {block}[0], {block}[1], {func_params})"
 
   def declare_shared_memory_inline(self, name, precision, size, alignment):
     return ""
 
-  def kernel_definition(self, file, kernel_bounds, base_name, params, precision=None, total_shared_mem_size=None):
+  def kernel_definition(self, file, kernel_bounds, base_name, params, precision=None, total_shared_mem_size=None, global_symbols=None):
+    stream_type = self.stream_type
     class TargetContext:
       def __init__(self):
-        self.function = file.Function(base_name, f'void* streamobj, int bX, int tX, int tY, {params}')
+        self.function = file.Function(f'kernel_{base_name}', f'{stream_type}* streamobj, int bX, int tX, int tY, {params}')
         self.blockloop = file.For('int bx = 0; bx < bX; ++bx')
         self.teamloop1 = file.For('int ty = 0; ty < tY; ++ty')
         self.teamloop2 = file.For('int tx = 0; tx < tX; ++tx')
       def __enter__(self):
         self.function.__enter__()
         file(f'{precision} {GeneralLexicon.TOTAL_SHR_MEM} [{total_shared_mem_size}];')
-        file('#pragma omp target teams distribute nowait depends(inout: streamobj)')
+        file(f'#pragma omp target teams distribute nowait depend(inout: streamobj[0]) is_device_ptr({", ".join(symbol.name for symbol in global_symbols)})')
         self.blockloop.__enter__()
-        file(f'#pragma omp parallel for collapse(2) allocate(omp_pteam_mem_alloc:{GeneralLexicon.TOTAL_SHR_MEM})')
+        file(f'#pragma omp parallel for collapse(2) schedule(static, 1) allocate(omp_pteam_mem_alloc:{GeneralLexicon.TOTAL_SHR_MEM})')
         self.teamloop1.__enter__()
         self.teamloop2.__enter__()
       def __exit__(self, type, value, traceback):
@@ -44,9 +45,6 @@ class TargetLexic(Lexic):
         self.function.__exit__(type, value, traceback)
     
     return TargetContext()
-
-  def get_mapped_keywords(self):
-    return [('tx', self.thread_idx_x, 'int')]
 
   def sync_threads(self):
     return "#pragma omp barrier //"
@@ -64,7 +62,7 @@ class TargetLexic(Lexic):
     return f'NOTIMPLEMENTED'
 
   def kernel_range_object(self, name, values):
-    return f"int {name}[3] = {{ {values} }}"
+    return f"size_t {name}[3] = {{ {values} }}"
 
   def get_stream_via_pointer(self, file, stream_name, pointer_name):
     with file.If(f"{pointer_name} == nullptr"):
