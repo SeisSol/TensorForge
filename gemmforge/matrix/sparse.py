@@ -6,12 +6,8 @@ import json
 # Cordinate object form needs be a dictionary of the following entries:
 # rows - number of rows (int) e.g. "rows" : 2
 # cols - number of columns (int) e.g. "cols": 2
-# entries - and array of coordinate arrayys of row,col,value, 0-indexed e.g. "entries" : [[0,0,"1.0"],[1,1,"1.0"]]
-# Optionally a name can be provided e.g. "name": "simple_identity"
-# Final example : {"name": "simple_identity", "rows": 2, "cols": 2, "coordinates": [[0,0],[1,1], ...]
-
-# 1-input 1 coordinate list (sbp)
-# 2-input 2 optional list of values (valeus)
+# entries - and array of coordinate arrays of row,col, 0-indexed e.g. "entries" : [[0,0],[1,1]] (given as the storage order)
+# Optionally values = [0.2f, 9.4f]... (it is assumed that non of the values here are 0)
 class SparseMatrix(Matrix):
   def __init__(self, num_rows, num_cols, addressing, coordinates, values=None):
     Matrix.__init__(self, num_rows, num_cols, addressing)
@@ -77,7 +73,6 @@ class SparseMatrix(Matrix):
 
   def __str__(self):
     string = super().__str__()
-    #string += str(self.dense_representation)
     return string
 
   def get_coo_per_row(self):
@@ -95,7 +90,7 @@ class SparseMatrix(Matrix):
   def get_el_count(self):
     return self.elcount
 
-  def find_1d_offset(self, row, col, transpose=False):
+  def find_1d_offset(self, row, col):
     assert (row < self.get_actual_num_rows())
     assert (col < self.get_actual_num_cols())
     coordinates = self.get_coordinates()

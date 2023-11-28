@@ -27,6 +27,9 @@ class ShrMemBasedSparseDenseGemm(AbstractInstruction):
     if self._register_dest.stype != SymbolType.Register:
       raise InternalError('gemm: `dest` must be a register obj.')
 
+    if self._trans_a:
+      raise Exception('Sparse Matrix is not supported to be transposed (provide the storage order with the list of coordinates).')
+
     self._is_ready = True
 
   def gen_code(self, writer):
@@ -39,28 +42,16 @@ class ShrMemBasedSparseDenseGemm(AbstractInstruction):
 
       writer.Emptyline()
 
-      # A was transposed on load to AT (always for this type of kernel), so swapping rows and columns are enough
-      #if self._trans_a:
-      #  rows_a = op1_data_view.columns
-      #  cols_a = op1_data_view.rows
-      #else:
-      #  rows_a = op1_data_view.rows
-      #  cols_a = op1_data_view.columns
-
-      # B is loaded into shrmem if B, kept in global mem if BT
       rows_b = op2_data_view.columns
       cols_b = op2_data_view.rows
   
       for k in range(0, cols_b):
-        if self._trans_a:
-          non_zeros = self._mat_a.get_coo_per_row()[k]
-        else:
-          non_zeros = self._mat_a.get_coo_per_col()[k]
+        non_zeros = self._mat_a.get_coo_per_col()[k]
 
         if len(non_zeros) == 0:
           continue
 
-        op2_addr = f'{thread_idx_x} * {op2_data_view.lead_dim} + {k}'
+        op2_addr = f'{thread_idx_x} + {op2_data_view.lead_dim} * {k}'
         writer(f'{value_var} = {self._op2.name}[{op2_addr}];')
 
         writer.Emptyline()
@@ -72,10 +63,7 @@ class ShrMemBasedSparseDenseGemm(AbstractInstruction):
     # This function iterates a column until the end
     # Multiply an element of ith column of B with the ith column of A
     a_col_id = b_col_id
-    if self._trans_a:
-      non_zeros = self._mat_a.get_coo_per_row()[a_col_id]
-    else:
-      non_zeros = self._mat_a.get_coo_per_col()[a_col_id]
+    non_zeros = self._mat_a.get_coo_per_col()[a_col_id]
     if len(non_zeros) > 0:
       value_known = val_a != None
       writer.Comment(f"Mul begin col {a_col_id}")
@@ -130,10 +118,13 @@ class RegisterOnlySparseDenseGemm(AbstractInstruction):
     if self._dest.stype != SymbolType.Register:
       raise InternalError('gemm: `dest` must be a register obj.')
 
+    if self._trans_a:
+      raise Exception('Sparse Matrix is not supported to be transposed (provide the storage order with the list of coordinates).')
+
     self._is_ready = True
 
   def gen_code(self, writer):
-    raise Exception("Register Only Sparse x Dense Matrix Implementation is not yet implemented")
+    raise Exception("Register Only Sparse-by-Dense Matrix Implementation is not supported")
 
   def __str__(self) -> str:
     return f'{self._dest.name} = rb_gemm({self._op1.name}, {self._op2.name})'

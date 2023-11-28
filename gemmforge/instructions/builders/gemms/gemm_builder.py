@@ -196,31 +196,18 @@ class  ShrMemBasedSparseDenseGemmBuilder(AbstractBuilder):
       # Note: we will handle transposition of the second operand during
       # the matrix multiplication
       self._symbol_table.add_scope()
-      if trans_a:
-        if mat_a.sparsity() > 0.65:
-          self._op1 = op1 #self._make_loader_and_symbol(operand=op1, do_transpose=False)
-        else:
-          self._op1 = self._make_loader_and_symbol(operand=op1, do_transpose=False)
-      else:
-        if mat_a.sparsity() > 0.65:
-          #self._op1 = self._make_loader_and_symbol(operand=op1, do_transpose=False)
-          self._op1 =  op1
-        else:
-          self._op1 = self._make_loader_and_symbol(operand=op1, do_transpose=False)
-          
+      self._op1 = self._make_loader_and_symbol(operand=op1, do_transpose=False)
     else:
       self._op1 = op1
     self._symbol_table.add_scope()
 
     if trans_b:
-      self._op2 = self._make_loader_and_symbol(operand=op2, do_transpose=True)
-    else:
       self._op2 = self._make_loader_and_symbol(operand=op2, do_transpose=False)
-      #self._symbol_table.add_scope()
+    else:
+      self._op2 = self._make_loader_and_symbol(operand=op2, do_transpose=True)
     self._symbol_table.add_scope()
 
     self._intermediate_dest = self._make_loader_and_symbol_do_not_load_if_cond(operand=intermediate_dest, do_transpose=False, cond=beta!=0.0)
-    #self._symbol_table.add_scope()
 
     self._insert_sync_threads()
 
@@ -322,18 +309,7 @@ class RegisterOnlySparseDenseGemmBuilder(AbstractBuilder):
             op2: Symbol,
             dest: Symbol,
             mat_a: SparseMatrix):
-    raise Exception("Sparse x Dense Kernel for register only approach not yet implemented")
-    self._reset()
-
-    gemm_params = {'vm': self._vm,
-                   'trans_a': trans_a,
-                   'trans_b': trans_b,
-                   'op1': op1,
-                   'op2': op2,
-                   'dest': dest,
-                   'num_threads': self._num_threads,
-                   'mat_b': mat_a}
-    self._instructions.append(RegisterOnlySparseDenseGemm(**gemm_params))
+    raise Exception("Sparse-by-Dense Kernel for register only approach is not supported.")
 
   def get_srh_mem_loads(self):
     return []
@@ -465,17 +441,8 @@ class RegisterOnlyDenseSparseGemmBuilder(AbstractBuilder):
             op2: Symbol,
             dest: Symbol,
             mat_b: SparseMatrix):
-    self._reset()
+    raise Exception("Dense-by-Sparse Kernel for register only approach is not supported.")
 
-    gemm_params = {'vm': self._vm,
-                   'trans_a': trans_a,
-                   'trans_b': trans_b,
-                   'op1': op1,
-                   'op2': op2,
-                   'dest': dest,
-                   'num_threads': self._num_threads,
-                   'mat_b': mat_b}
-    self._instructions.append(RegisterOnlyDenseSparseGemm(**gemm_params))
 
   def get_srh_mem_loads(self):
     return []
