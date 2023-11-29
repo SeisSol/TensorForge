@@ -12,7 +12,6 @@ using namespace gemmforge::dense_sparse;
 using namespace device;
 
 extern std::vector<std::tuple<int, int>> get_coordinates_B_core();
-extern std::vector<std::tuple<int, int>> get_coordinates_B_core_transposed();
 
 AbstractAPI * getDeviceAPI2() {
     auto device = &DeviceInstance::getInstance();
@@ -118,7 +117,7 @@ void TestDriver::initSparseMatrix(real *DenseVersionOfSparseMatrix, real* Sparse
     std::uniform_real_distribution<real> dist(1.0, 100.0);
 
     if (matrix_b_type == "random"){
-        std::vector<std::tuple<int, int>> coordinates = m_transB ? get_coordinates_B_core_transposed() : get_coordinates_B_core();
+        std::vector<std::tuple<int, int>> coordinates = get_coordinates_B_core();
         int iter = 0;
         real a = 0.0;
         for (int Element = 0; Element < m_NumElements; Element++){

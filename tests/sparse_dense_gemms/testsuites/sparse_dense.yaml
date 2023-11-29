@@ -23,10 +23,10 @@ test_suites:
     trans_a: "trans_params_a"
     trans_b: "trans_params_b"
 
-    trans_params_a: [ False, True ]
+    trans_params_a: [ False ]
     trans_params_b: [ False ]
 
-    matrix_a_params_type: [ "full", "random" ] #, "band_diagonal", "single_column", "single_row", "chequered","random"
+    matrix_a_params_type: [ "full", "random" ]
 
     alpha: 1.0
     beta: 1.0

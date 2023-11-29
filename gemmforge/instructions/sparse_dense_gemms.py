@@ -51,7 +51,8 @@ class ShrMemBasedSparseDenseGemm(AbstractInstruction):
         if len(non_zeros) == 0:
           continue
 
-        op2_addr = f'{thread_idx_x} + {op2_data_view.lead_dim} * {k}'
+        #op2_addr = f'{thread_idx_x} + {op2_data_view.lead_dim} * {k}'
+        op2_addr = f'{thread_idx_x} * {op2_data_view.lead_dim} + {k}'
         writer(f'{value_var} = {self._op2.name}[{op2_addr}];')
 
         writer.Emptyline()

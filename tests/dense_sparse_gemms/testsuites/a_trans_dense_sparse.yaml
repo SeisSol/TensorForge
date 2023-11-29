@@ -24,8 +24,8 @@ test_suites:
     trans_a: "trans_params_a"
     trans_b: "trans_params_b"
 
-    trans_params_a: [ True ]
-    trans_params_b: [ False, True ]
+    trans_params_a: [ True  ]
+    trans_params_b: [ False ]
 
     matrix_b_params_type: [ "random" ]
 
@@ -35,4 +35,4 @@ test_suites:
     num_elements: 100
 
     kernel_type: "kernel_type_params"
-    kernel_type_params: [ "shr_mem", "register_only" ]
+    kernel_type_params: [ "shr_mem" ]

@@ -25,7 +25,7 @@ set_property(CACHE REFERENCE_IMPL PROPERTY STRINGS "GEMMFORGE" "OPENBLAS")
 add_subdirectory(../../submodules/Device build)
 
 add_executable(${TARGET} ${TARGET_SOURCE_FILES})
-target_compile_options(${TARGET} PUBLIC "-std=c++11")
+target_compile_options(${TARGET} PUBLIC "-std=c++17")
 target_compile_definitions(${TARGET} PUBLIC "REAL_SIZE=${REAL_SIZE}")
 target_include_directories(${TARGET} PUBLIC ${TARGET_INCLUDE_DIRS})
 
