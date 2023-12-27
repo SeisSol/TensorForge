@@ -32,10 +32,10 @@ class TargetLexic(Lexic):
         self.teamloop2 = file.For('int tx = 0; tx < tX; ++tx')
       def __enter__(self):
         self.function.__enter__()
-        file(f'{precision} {GeneralLexicon.TOTAL_SHR_MEM} [{total_shared_mem_size}];')
-        file(f'#pragma omp target teams distribute nowait depend(inout: streamobj[0]) is_device_ptr({", ".join(symbol.name for symbol in global_symbols)})')
+        file(f'#pragma omp target teams distribute nowait depend(inout: streamobj[0]) is_device_ptr({", ".join(symbol.name for symbol in global_symbols)}) thread_limit({kernel_bounds})')
         self.blockloop.__enter__()
-        file(f'#pragma omp parallel for collapse(2) schedule(static, 1) allocate(omp_pteam_mem_alloc:{GeneralLexicon.TOTAL_SHR_MEM})')
+        file(f'{precision} {GeneralLexicon.TOTAL_SHR_MEM} [{total_shared_mem_size}];')
+        file(f'#pragma omp parallel for collapse(2) schedule(static, 1)') #  allocate(omp_pteam_mem_alloc:{GeneralLexicon.TOTAL_SHR_MEM})
         self.teamloop1.__enter__()
         self.teamloop2.__enter__()
       def __exit__(self, type, value, traceback):
@@ -44,6 +44,26 @@ class TargetLexic(Lexic):
         self.blockloop.__exit__(type, value, traceback)
         self.function.__exit__(type, value, traceback)
     
+    class TargetContext:
+      def __init__(self):
+        self.function = file.Function(f'kernel_{base_name}', f'{stream_type}* streamobj, int bX, int tX, int tY, {params}')
+        self.blockloop = file.Block('')
+        self.threadblock = file.Block('')
+      def __enter__(self):
+        self.function.__enter__()
+        file(f'#pragma omp target teams nowait num_teams(bX) depend(inout: streamobj[0]) is_device_ptr({", ".join(symbol.name for symbol in global_symbols)}) thread_limit({kernel_bounds})')
+        self.blockloop.__enter__()
+        file(f'{precision} {GeneralLexicon.TOTAL_SHR_MEM}[{total_shared_mem_size}];')
+        file(f'#pragma omp parallel num_threads({kernel_bounds})')
+        self.threadblock.__enter__()
+        file(f'int bx = omp_get_team_num();')
+        file(f'int ty = omp_get_thread_num() / tX;')
+        file(f'int tx = omp_get_thread_num() % tX;')
+      def __exit__(self, type, value, traceback):
+        self.threadblock.__exit__(type, value, traceback)
+        self.blockloop.__exit__(type, value, traceback)
+        self.function.__exit__(type, value, traceback)
+
     return TargetContext()
 
   def sync_threads(self):

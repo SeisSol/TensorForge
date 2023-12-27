@@ -1,5 +1,10 @@
-from kernelforge import DenseMatrix, GenerationError, GemmGenerator
-from kernelforge.common.vm.vm import vm_factory
+from kernelforge.common.matrix.dense import DenseMatrix
+from kernelforge.common.context import Context
+from kernelforge.common.aux import generate_tmp_matrix
+from kernelforge.generators.descriptions import GemmDescr
+from kernelforge.common.basic_types import FloatingPointType, Addressing
+from kernelforge.generators.generator import Generator
+from kernelforge.common.exceptions import GenerationError
 import argparse
 
 
@@ -20,30 +25,30 @@ args = parser.parse_args()
 
 mat_a = DenseMatrix(num_rows=56,
                     num_cols=9,
-                    addressing="strided",
+                    addressing=Addressing.STRIDED,
                     bbox=[0, 0, 56, 9])
 
 mat_b = DenseMatrix(num_rows=9,
                     num_cols=9,
-                    addressing="strided",
+                    addressing=Addressing.STRIDED,
                     bbox=[0, 0, 9, 9])
 
 mat_c = DenseMatrix(num_rows=56,
                     num_cols=9,
                     bbox=[0, 0, 56, 9],
-                    addressing="strided")
+                    addressing=Addressing.STRIDED)
 
 try:
-  vm = vm_factory(backend=args.backend,
-                  arch=args.arch,
-                  fp_type='float')
+  vm = Context(arch=args.arch, backend=args.backend, fp_type=FloatingPointType.FLOAT)
 
-  gen = GemmGenerator(vm)
-  gen.set(False, False, mat_a, mat_b, mat_c, alpha=1.1, beta=1.1)
+  gen = Generator([GemmDescr(trans_a=False,
+                       trans_b=False,
+                       a=mat_a, b=mat_b, c=mat_c,
+                       alpha=1.1, beta=1.1)], vm)
   gen.generate()
   print(gen.get_kernel())
   print(gen.get_launcher())
-  print(gen.get_launcher_header())
+  print(gen.get_header())
 
 except GenerationError as err:
   print("ERROR: {}".format(err))
