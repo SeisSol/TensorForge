@@ -31,11 +31,14 @@ class GenericSparseDenseGemmThreadPolicy(AbstractGemmLikeThreadPolicy):
     mults_wrt_num_regs = hw_descr.max_reg_per_block / (self._num_threads * max_num_regs_per_thread)
     mults_per_sm = int(min(mults_wrt_shr_mem, mults_wrt_num_regs))
 
+    # Note the factor is experimentally derived, but the results indicate
+    # the factor does not have a huge impact on the performance
     el_count_if_dense = self._op1.get_actual_num_cols() * self._op1.get_actual_num_rows()
     el_count_if_sparse = self._op1.get_el_count()
     factor = (el_count_if_dense / el_count_if_sparse)
     factor /= 2.0
-    # To prevent using too much shared memory
+    # To prevent using too much shared memory or threads per thread block
+    # If the matrices are too sparse
     if factor > 1.00/0.15:
       factor = 1.00/0.15
     if factor < 1.00:
@@ -56,7 +59,7 @@ class SparseDenseOnlyRegisterBasedThreadPolicy(AbstractGemmLikeThreadPolicy):
   def _estimate_num_registers_per_mult(self, accumulator_length):
     # Note: derived experimentally
     factor = self._vm.bytes_per_real() / 4
-    return factor * (32 + accumulator_length)
+    return factor * (self._vm._hw_descr.vec_unit_length  + accumulator_length)
 
   def get_num_ops_per_block(self):
     accumulator_length = self._op1.get_actual_num_max_nonzero_rows()

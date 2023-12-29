@@ -1,3 +1,4 @@
+from gemmforge.thread_policies.gemm.generic import GenericGemmThreadPolicy
 from ..abstract_thread_policy import AbstractGemmLikeThreadPolicy, DenseMatrix, SparseMatrix
 from gemmforge.vm import VM
 
@@ -12,11 +13,10 @@ class GenericDenseSparseGemmThreadPolicy(AbstractGemmLikeThreadPolicy):
                res: DenseMatrix):
     super().__init__(vm, num_threads, op1, op2, res)
     self._shr_mem_per_op = shr_mem_per_op
+    self._g = GenericGemmThreadPolicy(vm, shr_mem_per_op, num_threads, op1, op2, res)
 
   def _estimate_num_registers_per_mult(self, accumulator_length):
-    # Note: derived experimentally
-    factor = self._vm.bytes_per_real() / 4
-    return factor * (32 + accumulator_length)
+    return self._g._estimate_num_registers_per_mult(accumulator_length)
 
   def get_num_ops_per_block(self):
     accumulator_length = self._op2.get_actual_num_cols()
@@ -28,11 +28,13 @@ class GenericDenseSparseGemmThreadPolicy(AbstractGemmLikeThreadPolicy):
     mults_wrt_num_regs = hw_descr.max_reg_per_block / (self._num_threads * max_num_regs_per_thread)
     mults_per_sm = int(min(mults_wrt_shr_mem, mults_wrt_num_regs))
 
+    # Note the factor is experimentally derived, but the results indicate
+    # the factor does not have a huge impact on the performance
     el_count_if_dense = self._op2.get_actual_num_cols() * self._op2.get_actual_num_rows()
     el_count_if_sparse = self._op2.get_el_count()
     factor = (el_count_if_dense / el_count_if_sparse)
     factor /= 2.0
-    # To prevent using too much shared memory
+    # To prevent using too much shared memory or threads per threaed block
     if factor > 1.00/0.15:
       factor = 1.00/0.15
     factor_int = int(factor + 0.25)
@@ -52,7 +54,7 @@ class DenseSparseOnlyRegisterBasedThreadPolicy(AbstractGemmLikeThreadPolicy):
   def _estimate_num_registers_per_mult(self, accumulator_length):
     # Note: derived experimentally
     factor = self._vm.bytes_per_real() / 4
-    return factor * (32 + accumulator_length)
+    return factor * (self._vm._hw_descr.vec_unit_length + accumulator_length)
 
   def get_num_ops_per_block(self):
     accumulator_length = self._res.get_actual_num_cols()

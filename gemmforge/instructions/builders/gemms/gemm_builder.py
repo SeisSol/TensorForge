@@ -181,17 +181,11 @@ class  ShrMemBasedSparseDenseGemmBuilder(AbstractBuilder):
             beta: float):
     self._reset()
 
-    #if mat_a.get_values() == None or not trans_b:
-    #self._symbol_table.add_scope()
-
     if mat_a.get_values() == None:
-      # Note: of trans_a==True than an operand is given as KxM instead of (MxK).
+      # Note: of trans_a==True then an operand is given as KxM instead of (MxK).
       # In this case, a loader will load an operand from glb. mem. to shr. mem
       # transposing it on the fly. In, short, the loader guaranties to deliver
       # an operand as (MxK) to shr. mem.
-      #self._symbol_table.add_scope()
-      #Access global?
-      #self._op1 = self._make_loader_and_symbol(operand=op1, do_transpose=False)
 
       # Note: we will handle transposition of the second operand during
       # the matrix multiplication
