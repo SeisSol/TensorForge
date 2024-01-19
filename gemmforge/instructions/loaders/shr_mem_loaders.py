@@ -3,6 +3,7 @@ from gemmforge import constructs
 from .abstract_loader import AbstractShrMemLoader
 from gemmforge.symbol_table import SymbolType, Symbol, DataView
 from copy import deepcopy
+from gemmforge.matrix import SparseMatrix, DenseMatrix
 
 
 class ExtendedPatchLoader(AbstractShrMemLoader):
@@ -17,7 +18,12 @@ class ExtendedPatchLoader(AbstractShrMemLoader):
     data_view = self._src.data_view
     full_subvolume = (data_view.columns - 2) * data_view.lead_dim
     cropped_subvolume = data_view.rows + data_view.lead_dim
-    self._shm_volume = cropped_subvolume + full_subvolume
+    matrix = self._src.obj
+    if isinstance(matrix, DenseMatrix):
+      self._shm_volume = cropped_subvolume + full_subvolume
+    else:  # Has to be sparse if not dense
+      self._shm_volume = matrix.get_el_count()
+
     self._dest.data_view = deepcopy(self._src.data_view)
 
   def gen_code(self, writer):
@@ -85,10 +91,10 @@ class ExactPatchLoader(AbstractShrMemLoader):
             writer.Pragma("unroll")
             with writer.For(f'int counter = 0; counter < {num_hops}; ++counter'):
               shr_mem_addr = f'{thread_idx_x}'
-              shr_mem_addr += f' + counter * {self._num_threads} + i {dest_data_view.lead_dim}'
+              shr_mem_addr += f' + counter * {self._num_threads} + i * {dest_data_view.lead_dim}'
 
               glb_mem_addr = f'{thread_idx_x}'
-              glb_mem_addr += f' + counter * {self._num_threads} + i {src_data_view.lead_dim}'
+              glb_mem_addr += f' + counter * {self._num_threads} + i * {src_data_view.lead_dim}'
 
               self._assign(writer, shr_mem_addr, glb_mem_addr)
           else:
