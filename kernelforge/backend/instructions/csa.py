@@ -42,13 +42,8 @@ class CSA(AbstractInstruction):
   def _analyze(self):
     self._op1_view = self._op1.data_view
 
-    self._is_layout_as_requested = self._op2_view.is_transposed == self._trans_b
-    if self._is_layout_as_requested:
-      self._n_range = self._op2_view.get_dim_size(1)
-    else:
-      self._n_range = self._op2_view.get_dim_size(0)
-
     self._m_range = self._op1_view.get_dim_size(0)
+    self._n_range = self._op1_view.get_dim_size(1)
     num_dirty_rows = 0
 
     if self._prefer_align:
@@ -90,20 +85,16 @@ class CSA(AbstractInstruction):
     with writer.Block(self.gen_mask_threads(self._op1_view.get_dim_size(0))):
       m_range = self._op1_view.get_dim_size(1)
       writer.insert_pragma_unroll()
-      # TODO: zero out everything else
-      with writer.Block(f'for (int m = 0; m < {m_range}; ++m)'):
-        address = self._op1_view.get_address(row_idx=self._vm.get_lexic().thread_idx_x, column_idx='m')
-        writer(f'{self._fp_as_str} value = {self._op1.name}[{address}];')
+      with writer.Block(f'for (int n = 0; n < {m_range}; ++n)'):
+        address = self._op1_view.get_address(row_idx=self._vm.get_lexic().thread_idx_x, column_idx='n')
+
+        op1_element = 'value'
+        writer(f'{self._fp_as_str} {op1_element} = {self._op1.name}[{address}];')
 
         writer.new_line()
         dest_address = '' if self._dest.obj.size == 1 else '[n]'
 
-        if True:
-            writer(f'{self._dest.name}{dest_address} = {alpha}{op1_element};')
-        elif True:
-            writer(f'{self._dest.name}{dest_address} += {alpha}{op1_element};')
-        else:
-            writer(f'{self._dest.name}{dest_address} = {alpha}{op1_element} + {beta}{self._dest.name}{dest_address};')
+        writer(f'{self._dest.name}{dest_address} = {op1_element};')
 
   def _check(self):
     view_op1 = self._op1.data_view

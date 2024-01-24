@@ -3,6 +3,7 @@ from copy import copy
 from collections import OrderedDict
 from kernelforge.backend.symbol import Symbol
 from kernelforge.backend.instructions.gemm import Gemm
+from kernelforge.backend.instructions.csa import CSA
 from kernelforge.backend.instructions.store import StoreRegToShr
 from kernelforge.backend.instructions.loaders.abstract_loader import AbstractShrMemLoader
 from kernelforge.backend.symbol import SymbolType
@@ -23,7 +24,9 @@ class LivenessAnalysis(AbstractOptStage):
     for index, instr in reversed(list(enumerate(self._instrs))):
       self._map[index] = copy(self._map[index + 1])
       if isinstance(instr, Gemm):
-        self._check_use(index, instr)
+        self._check_use_gemm(index, instr)
+      elif isinstance(instr, CSA):
+        self._check_use_csa(index, instr)
       elif isinstance(instr, (StoreRegToShr, AbstractShrMemLoader)):
         self._check_define(index, instr)
 
@@ -32,8 +35,14 @@ class LivenessAnalysis(AbstractOptStage):
   def get_live_map(self) -> Dict[int, Set[Symbol]]:
     return self._live_map
 
-  def _check_use(self, index, instr) -> None:
+  def _check_use_gemm(self, index, instr) -> None:
     operands = [instr.get_op1(), instr.get_op2()]
+    for operand in operands:
+      if operand.stype == SymbolType.SharedMem:
+        self._map[index].add(operand)
+
+  def _check_use_csa(self, index, instr) -> None:
+    operands = [instr.get_op1()]
     for operand in operands:
       if operand.stype == SymbolType.SharedMem:
         self._map[index].add(operand)
