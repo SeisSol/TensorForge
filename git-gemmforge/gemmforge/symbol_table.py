@@ -32,6 +32,9 @@ class Symbol:
 
   def __str__(self):
     return f'name: {self.name}, type: {self.stype}'
+  
+  def __repr__(self):
+    return self.__str__()
 
 
 class Scope:
@@ -53,6 +56,9 @@ class Scope:
 
   def values(self):
     return self._symbols.values()
+
+  def __str__(self):
+    return str(self._symbols)
 
 
 class InverseSymbolTable:
@@ -79,17 +85,24 @@ class InverseSymbolTable:
     if level > len(self._scopes):
       raise InternalError(f'level {level} exceeds num scopes equal to {len(self._scopes)}')
 
-    for symbol in self._scopes[level]:
-      print(symbol)
+    print(self._scopes[level])
 
   def print_scopes(self):
+    print('=' * 80)
     for level, scope in enumerate(self._scopes):
-      print('*' * 80)
       self.print_scope(level)
+      print('*' * 80)
+    print('=' * 80)
 
   @property
   def from_global(self):
     return self._global_scope
+
+  def all(self):
+    d = []
+    for level, scope in enumerate(self._scopes):
+      d.append(scope._symbols)
+    return d
 
   def __getitem__(self, obj):
     for scope in reversed(self._scopes):

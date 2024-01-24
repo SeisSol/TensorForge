@@ -1,4 +1,5 @@
 from .matrix import DenseMatrix
+from .matrix import SparseMatrix
 from gemmforge.vm import vm_factory
 from .gemm_generator import GemmGenerator
 from .gemm_generator import GemmKernelType

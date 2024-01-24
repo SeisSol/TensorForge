@@ -3,6 +3,7 @@ project(gemm-tests)
 
 include(../../cmake/setupOptions.cmake)
 
+
 set(TARGET ${CMAKE_PROJECT_NAME})
 set(TARGET_SOURCE_FILES main.cpp
         common/aux.cpp

@@ -40,6 +40,7 @@ class ShrMemBasedDenseGemm(AbstractInstruction):
       writer(f'{self._vm.fp_as_str()} {value_var};')
 
       writer.Emptyline()
+      writer.Pragma('unroll')
       with writer.For(f'int k = 0; k < {op1_data_view.columns}; ++k'):
         op1_addr = f'{thread_idx_x} + k * {op1_data_view.lead_dim}'
         writer(f'{value_var} = {self._op1.name}[{op1_addr}];')
@@ -76,7 +77,6 @@ class RegisterOnlyDenseGemm(AbstractInstruction):
     self._dest = kwargs['dest']
     self._num_threads = kwargs['num_threads']
     self._vec_unit_length = self._vm.get_hw_descr().vec_unit_length
-
 
     if self._op1.stype != SymbolType.Global:
       raise InternalError('gemm: `op1` must be glb. memory')

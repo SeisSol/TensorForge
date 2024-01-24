@@ -3,10 +3,21 @@ from gemmforge.instructions.builders import GetElementPtrBuilder
 from gemmforge.instructions.builders import RegistersAllocBuilder
 from gemmforge.instructions import StoreRegToGlb
 from abc import abstractmethod
+import math
 
 
 class BaseGemmKernelBuilder(AbstractBuilder):
   """ This is the base class for building complete gemm kernels."""
+
+  def _deduce_num_threads(self):
+    if self._trans_a:
+      lead_dim_length = self._mat_a.get_actual_num_cols()
+    else:
+      lead_dim_length = self._mat_a.get_actual_num_rows()
+    num_vector_units_required = math.ceil(lead_dim_length / self._hw_descr.vec_unit_length)
+    self._num_compute_threads = lead_dim_length
+    self._num_active_threads = num_vector_units_required * self._hw_descr.vec_unit_length
+    return (self._num_compute_threads, self._num_active_threads)
 
   def __init__(self, **kwargs):
     super(BaseGemmKernelBuilder, self).__init__(kwargs['vm'], kwargs['symbol_table'])
@@ -17,8 +28,8 @@ class BaseGemmKernelBuilder(AbstractBuilder):
     self._mat_c = kwargs['mat_c']
     self._alpha = kwargs['alpha']
     self._beta = kwargs['beta']
-    self._num_compute_threads = kwargs['num_compute_threads']
-    self._num_active_threads = kwargs['num_active_threads']
+    self._hw_descr = kwargs['hw_descr']
+    self._deduce_num_threads()
 
     self._reg_array_obj = None
     self._shr_mem_obj = None
@@ -57,7 +68,6 @@ class BaseGemmKernelBuilder(AbstractBuilder):
                           self._beta,
                           self._num_compute_threads)
     self._instructions.append(store)
-
 
   def build(self):
     self.build_prologue()

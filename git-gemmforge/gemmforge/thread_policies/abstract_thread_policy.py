@@ -1,5 +1,5 @@
 from gemmforge.vm import VM
-from ..matrix import DenseMatrix
+from ..matrix import DenseMatrix, SparseMatrix
 from abc import ABC, abstractmethod
 
 

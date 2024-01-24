@@ -20,6 +20,7 @@ class GeneralLexicon:
   SHR_MEM_REGION_PREFIX = 'shrRegion'
   REG_NAME = 'reg'
 
+
 class RegMemObject:
   def __init__(self, name, size=None):
     self.name = name

@@ -1,4 +1,5 @@
 from abc import ABC, abstractmethod
+from copy import deepcopy
 from gemmforge.symbol_table import Symbol, SymbolType
 from ..abstract_instruction import AbstractInstruction
 from gemmforge.basic_types import ShrMemObject
@@ -67,3 +68,12 @@ class AbstractShrMemLoader(AbstractShrMemWrite):
 
     if self._dest.stype != SymbolType.SharedMem:
       raise InternalError('shr-load: `dest` operand is not in shr. mem.')
+
+class NoLoadShrMemLoader(AbstractShrMemLoader):
+  def __init__(self, **kwargs):
+    super(NoLoadShrMemLoader, self).__init__(**kwargs)
+    data_view = self._src.data_view
+    self._shm_volume = data_view.rows * data_view.columns
+
+    self._dest.data_view = deepcopy(self._src.data_view)
+    self._dest.data_view.lead_dim = data_view.rows

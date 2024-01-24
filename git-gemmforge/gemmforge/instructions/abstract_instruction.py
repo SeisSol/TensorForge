@@ -1,5 +1,4 @@
 from gemmforge.vm import VM
-from gemmforge.symbol_table import InverseSymbolTable
 from abc import ABC, abstractmethod
 
 
