@@ -3,12 +3,13 @@ from io import StringIO
 from .exceptions import GenerationError
 from .abstract_gemmlike_generator import GemmLikeGenerator
 from .basic_types import GeneralLexicon, DataFlowDirection
-from .symbol_table import Symbol, SymbolType
+from .symbol_table import InverseSymbolTable, Symbol, SymbolType
 from .abstract_generator import AbstractGenerator as Generator
 from .instructions.builders.kernels import GemmKernelsFactory
 from .instructions.builders.kernels import GemmKernelType
 from .vm import VM
 from .thread_policies import TheadPolicyFactory
+from .matrix import SparseMatrix
 import math
 import hashlib
 
@@ -32,9 +33,12 @@ class GemmGenerator(GemmLikeGenerator):
 
   def set(self, trans_a, trans_b, mat_a, mat_b, mat_c, alpha, beta, base_name=None):
     self._instructions = []
+    self._symbol_table = InverseSymbolTable()
 
     self._mat_a = mat_a
     self._trans_a = trans_a
+    self._mat_a.set_name('A')
+    self._mat_a.set_data_flow_direction(DataFlowDirection.SOURCE)
     self._mat_a.set_name('A')
     self._mat_a.set_data_flow_direction(DataFlowDirection.SOURCE)
 
@@ -58,12 +62,10 @@ class GemmGenerator(GemmLikeGenerator):
     self._check_if_set()
 
     self._check()
-    self._deduce_num_threads()
     self._populate_global_scope()
     self._emit_instructions()
 
     self._analyze()
-
     self._generate_kernel()
     self._generate_header()
     self._generate_launcher()
@@ -109,7 +111,7 @@ class GemmGenerator(GemmLikeGenerator):
               if instr.is_ready():
                 instr.gen_code(file)
               else:
-                raise GenerationError("gemm_generator: requested instr is not ready")
+                raise GenerationError("gemm_generator: requested instr is not ready: " + str(instr))
 
       self._kernel = src.getvalue()
 
@@ -182,6 +184,9 @@ class GemmGenerator(GemmLikeGenerator):
             raise GenerationError('Cannot generate a matrix multiplication with given parameters. '
                                   'Matrix A (NoTrans) and B (NoTrans) do not match')
 
+      if isinstance(self._mat_a, SparseMatrix) and isinstance(self._mat_b, SparseMatrix):
+        raise GenerationError("Gemmforge does not support AxB where both A and B are sparse")
+
     except GenerationError as error:
       matrices = {'A': self._mat_a, 'B': self._mat_b, 'C': self._mat_c}
       for name in matrices:
@@ -190,16 +195,6 @@ class GemmGenerator(GemmLikeGenerator):
         print("=" * 80)
 
       raise error
-
-  def _deduce_num_threads(self):
-    if self._trans_a:
-      lead_dim_length = self._mat_a.get_actual_num_cols()
-    else:
-      lead_dim_length = self._mat_a.get_actual_num_rows()
-
-    num_vector_units_required = math.ceil(lead_dim_length / self._hw_descr.vec_unit_length)
-    self._num_compute_threads = lead_dim_length
-    self._num_active_threads = num_vector_units_required * self._hw_descr.vec_unit_length
 
   def _populate_global_scope(self):
     for matrix in self._matrices:
@@ -219,14 +214,14 @@ class GemmGenerator(GemmLikeGenerator):
               'mat_c': self._mat_c,
               'alpha': self._alpha,
               'beta': self._beta,
-              'num_compute_threads': self._num_compute_threads,
-              'num_active_threads': self._num_active_threads}
+              'hw_descr': self._hw_descr}
 
     kernel_factory = GemmKernelsFactory(**params)
     self._kernel_type = kernel_factory.gemm_kernel_type()
 
     gemm_kernel_builder = kernel_factory.get_builder()
     gemm_kernel_builder.build()
+    self._num_compute_threads, self._num_active_threads = gemm_kernel_builder._deduce_num_threads()
 
     self._instructions = gemm_kernel_builder.get_instructions()
     self._reg_array_obj = gemm_kernel_builder.get_reg_array_obj()

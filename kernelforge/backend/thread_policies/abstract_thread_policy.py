@@ -1,5 +1,10 @@
+<<<<<<< HEAD:kernelforge/backend/thread_policies/abstract_thread_policy.py
 from kernelforge.common.vm.vm import VM
 from ..matrix import DenseMatrix
+=======
+from gemmforge.vm import VM
+from ..matrix import DenseMatrix, SparseMatrix
+>>>>>>> gemmforge:git-gemmforge/gemmforge/thread_policies/abstract_thread_policy.py
 from abc import ABC, abstractmethod
 
 

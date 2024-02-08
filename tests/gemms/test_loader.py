@@ -88,6 +88,7 @@ def _build_flatten_table(flatten_table, original_table, combo_key=()):
   else:
     flatten_table[combo_key] = original_table
 
+
 def _set_value(table, combo_key, value):
   if len(combo_key) == 1:
     table[combo_key[0]] = value

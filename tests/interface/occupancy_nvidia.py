@@ -23,7 +23,6 @@ class TestOccupancyNvidia(unittest.TestCase):
     pass
 
   def test_occupancy_56_9_9_threads(self):
-
     mat_a = DenseMatrix(num_rows=56,
                         num_cols=9,
                         addressing="strided",

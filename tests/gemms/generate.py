@@ -7,7 +7,6 @@ import os
 import yaml
 import argparse
 
-
 parser = argparse.ArgumentParser()
 parser.add_argument('-s', '--specfile', action='store', help='path to a yaml file with a test spec')
 parser.add_argument('-r', '--realsize', type=int, action='store',
@@ -175,7 +174,7 @@ with open(path, 'w') as file:
 
 if hw_descr.backend == 'cuda':
   path = os.path.join(dir_name, 'kernels.cu')
-elif hw_descr.backend== 'hip' or hw_descr.backend == 'hipsycl' or hw_descr.backend == 'oneapi':
+elif hw_descr.backend == 'hip' or hw_descr.backend == 'hipsycl' or hw_descr.backend == 'oneapi':
   path = os.path.join(dir_name, 'kernels.cpp')
 else:
   print('Backend is not supported, could not write kernel file')

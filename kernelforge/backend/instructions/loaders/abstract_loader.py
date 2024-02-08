@@ -60,3 +60,12 @@ class AbstractShrMemLoader(AbstractShrMemWrite):
 
     if not isinstance(self._dest.obj, Matrix):
       raise InternalError(f'shr-load: `dest` operand is not a matrix, instead: {self._dest.obj}')
+
+class NoLoadShrMemLoader(AbstractShrMemLoader):
+  def __init__(self, **kwargs):
+    super(NoLoadShrMemLoader, self).__init__(**kwargs)
+    data_view = self._src.data_view
+    self._shm_volume = data_view.rows * data_view.columns
+
+    self._dest.data_view = deepcopy(self._src.data_view)
+    self._dest.data_view.lead_dim = data_view.rows

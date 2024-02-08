@@ -25,7 +25,10 @@ class ExtendedTransposePatchLoader(AbstractShrMemLoader):
     super(ExtendedTransposePatchLoader, self).__init__(**kwargs)
 
     optimal_num_cols = _find_next_prime(self._matrix.get_actual_num_cols())
-    self._shm_volume = optimal_num_cols * self._matrix.num_rows
+    if isinstance(matrix, DenseMatrix):
+      self._shm_volume = self._matrix.num_rows * optimal_num_cols
+    else:  # Has to be sparse if not dense
+      self._shm_volume = self._matrix.get_el_count()
 
     src_bbox = self._matrix.get_bbox()
     self._src.data_view = DataView(rows=self._matrix.num_rows,

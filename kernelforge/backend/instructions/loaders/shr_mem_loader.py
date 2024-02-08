@@ -12,7 +12,10 @@ class ExtendedPatchLoader(AbstractShrMemLoader):
 
     full_subvolume = (self._matrix.get_actual_num_cols() - 2) * self._matrix.num_rows
     cropped_subvolume = self._matrix.get_actual_num_rows() + self._matrix.num_rows
-    self._shm_volume = cropped_subvolume + full_subvolume
+    if isinstance(matrix, DenseMatrix):
+      self._shm_volume = cropped_subvolume + full_subvolume
+    else:  # Has to be sparse if not dense
+      self._shm_volume = self._matrix.get_el_count()
 
     src_bbox = self._matrix.get_bbox()
     self._src.data_view = DataView(rows=self._matrix.num_rows,

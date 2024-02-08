@@ -98,6 +98,12 @@ class Scopes:
 
     return result
 
+  def all(self):
+    d = []
+    for level, scope in enumerate(self._inv_tables):
+      d.append(scope._symbols)
+    return d
+
   def __str__(self):
     data = []
     for counter, table in enumerate(self._inv_tables):

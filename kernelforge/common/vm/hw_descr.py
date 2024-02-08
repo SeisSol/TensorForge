@@ -23,7 +23,6 @@ def report_error(usr_vendor, user_sub_arch):
 def hw_descr_factory(arch, backend):
   known_arch = get_known_arch()
 
-
   nvidia_list = retrieve_arch(arch_table=known_arch, vendor='nvidia')
   amd_list = retrieve_arch(arch_table=known_arch, vendor='amd')
   intel_list = retrieve_arch(arch_table=known_arch, vendor='intel')
