@@ -1,6 +1,6 @@
 #include "aux.h"
 #include "simple_sparse_dense_driver.h"
-#include "gemmforge_aux.h"
+#include "kernelforge_aux.h"
 #include <sstream>
 #include <iostream>
 #include <device.h>
@@ -8,7 +8,7 @@
 #include <vector>
 #include <tuple>
 
-using namespace gemmforge::sparse_dense;
+using namespace kernelforge::sparse_dense;
 using namespace device;
 
 extern std::vector<std::tuple<int, int>> get_coordinates_A_core();

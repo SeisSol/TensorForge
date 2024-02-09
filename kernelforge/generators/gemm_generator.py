@@ -5,14 +5,12 @@ from .abstract_gemmlike_generator import GemmLikeGenerator
 from .basic_types import GeneralLexicon, DataFlowDirection
 from .symbol_table import InverseSymbolTable, Symbol, SymbolType
 from .abstract_generator import AbstractGenerator as Generator
-from .instructions.builders.kernels import GemmKernelsFactory
-from .instructions.builders.kernels import GemmKernelType
 from .vm import VM
 from .thread_policies import TheadPolicyFactory
 from .matrix import SparseMatrix
 import math
 import hashlib
-
+from kernelforge.backend.instructions.builders.kernels.gemms.gemm_builder import DenseGemmBuilder
 
 class GemmGenerator(GemmLikeGenerator):
   """ Generates GEMM GPU kernels: C = alpha * A * B + beta * C
@@ -185,7 +183,7 @@ class GemmGenerator(GemmLikeGenerator):
                                   'Matrix A (NoTrans) and B (NoTrans) do not match')
 
       if isinstance(self._mat_a, SparseMatrix) and isinstance(self._mat_b, SparseMatrix):
-        raise GenerationError("Gemmforge does not support AxB where both A and B are sparse")
+        raise GenerationError("kernelforge does not support AxB where both A and B are sparse")
 
     except GenerationError as error:
       matrices = {'A': self._mat_a, 'B': self._mat_b, 'C': self._mat_c}
@@ -216,7 +214,7 @@ class GemmGenerator(GemmLikeGenerator):
               'beta': self._beta,
               'hw_descr': self._hw_descr}
 
-    kernel_factory = GemmKernelsFactory(**params)
+    kernel_factory = DenseGemmBuilder(**params)
     self._kernel_type = kernel_factory.gemm_kernel_type()
 
     gemm_kernel_builder = kernel_factory.get_builder()

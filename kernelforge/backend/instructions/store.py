@@ -62,7 +62,7 @@ class StoreRegToShr(AbstractShrMemWrite):
     dest_view = self._dest.data_view
     src_bbox = self._src.data_view.get_bbox()
 
-    with writer.Block(self.gen_range_mask_threads(begin=src_bbox[0], end=src_bbox[2])):
+    with writer.If(self.gen_range_mask_threads(begin=src_bbox[0], end=src_bbox[2])):
       writer.insert_pragma_unroll()
       loop = f'int i = 0; i < {dest_view.get_dim_size(1)}; ++i'
       with writer.For(loop):
@@ -106,9 +106,6 @@ class StoreRegToGlb(AbstractInstruction):
     if not isinstance(dest.obj, Matrix):
       raise InternalError('store: operand `dest` is not a matrix')
 
-    if dest.data_view.get_dim_size(0) != src.data_view.get_dim_size(0):
-      raise InternalError('store: `src` and `dest` do not match in size aling dim `0`')
-
     src.add_user(self)
     dest.add_user(self)
 
@@ -116,6 +113,9 @@ class StoreRegToGlb(AbstractInstruction):
                               columns=dest.obj.num_cols,
                               is_transposed=False,
                               bbox=dest.obj.get_bbox())
+    
+    if dest.data_view.get_dim_size(0) != src.data_view.get_dim_size(0):
+      raise InternalError('store: `src` and `dest` do not match in size aling dim `0`')
 
     self._dest: Symbol = dest
     self._src: Symbol = deepcopy(src)
@@ -130,7 +130,7 @@ class StoreRegToGlb(AbstractInstruction):
 
     writer('// write results back to glb. memory')
     src_bbox = self._src.data_view.get_bbox()
-    with writer.Block(self.gen_range_mask_threads(begin=src_bbox[0], end=src_bbox[2])):
+    with writer.If(self.gen_range_mask_threads(begin=src_bbox[0], end=src_bbox[2])):
 
       writer.insert_pragma_unroll()
       loop = f'int n = 0; n < {dest_view.get_dim_size(1)}; ++n'

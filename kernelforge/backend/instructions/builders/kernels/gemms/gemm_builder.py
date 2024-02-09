@@ -7,12 +7,92 @@ from kernelforge.backend.instructions.loaders.shr_mem_loader import ShrMemLoader
 from kernelforge.backend.instructions.clear_registers import ClearRegisters
 from kernelforge.backend.instructions.store import StoreRegToGlb, StoreRegToShr
 from kernelforge.backend.instructions.sync_threads import SyncThreads
-from kernelforge.backend.instructions.gemm import ShrMemBasedDenseGemm, RegisterOnlyDenseGemm
+from kernelforge.backend.instructions.dense_dense_gemm import ShrMemBasedDenseGemm, RegisterOnlyDenseGemm
+from kernelforge.backend.instructions.sparse_dense_gemm import ShrMemBasedSparseDenseGemm, RegisterOnlySparseDenseGemm
+from kernelforge.backend.instructions.dense_sparse_gemm import ShrMemBasedDenseSparseGemm, RegisterOnlyDenseSparseGemm
 from kernelforge.backend.instructions.csa import CSA
-from kernelforge.common.matrix.dense import Matrix
+from kernelforge.common.matrix.dense import DenseMatrix
+from kernelforge.common.matrix.sparse import SparseMatrix
+from kernelforge.common.matrix.matrix import Matrix
 from kernelforge.common.exceptions import InternalError
 from kernelforge.generators.descriptions import GemmDescr, CSADescr
 from kernelforge.backend.instructions.builders.allocator_builder import AbstractBuilder
+from .type import GemmKernelType
+
+class GemmKernelsFactory:
+  def __init__(self, descr):
+    self._descr = descr
+    if isinstance(descr, GemmDescr):
+      self._gemm_kernel_type = descr.kernel_type
+      self._mat_b = descr.mat_b
+      if isinstance(self._mat_b, SparseMatrix):
+        self._sparse_b = True
+      self._csa = False
+    else:
+      self._csa = True
+
+    self._mat_a = descr.mat_a
+    
+    self._sparse_b = False
+    self._sparse_a = False
+    if isinstance(self._mat_a, SparseMatrix):
+      self._sparse_a = True
+
+  def _auto_select(self, **params):
+    model = params['context'].get_vm().get_hw_descr().model
+    both_sparse_error = "kernelforge does not support both matrix A and B being sparse"
+    if model == 'pvc':
+      if self._sparse_a and self._sparse_b:
+        raise Exception(both_sparse_error)
+      elif self._sparse_b:
+        return GemmKernelType.DENSE_SPARSE_REGISTER_ONLY_BASED
+      elif self._sparse_a:
+        return GemmKernelType.SPARSE_DENSE_REGISTER_ONLY_BASED
+      else:
+        return GemmKernelType.REGISTER_ONLY_BASED
+    else:
+      if self._sparse_a and self._sparse_b:
+        raise Exception(both_sparse_error)
+      elif self._sparse_b:
+        return GemmKernelType.DENSE_SPARSE_SHR_MEM_BASED
+      elif self._sparse_a:
+        return GemmKernelType.SPARSE_DENSE_SHR_MEM_BASED
+      else:
+        return GemmKernelType.SHR_MEM_BASED
+
+  def get_builder(self, **params):
+    if self._csa:
+      return CSA(**params)
+    if self._gemm_kernel_type == GemmKernelType.AUTO:
+      self._gemm_kernel_type = self._auto_select(**params)
+
+    if self._gemm_kernel_type == GemmKernelType.SHR_MEM_BASED:
+      return ShrMemBasedDenseGemm(**params)
+    elif self._gemm_kernel_type == GemmKernelType.REGISTER_ONLY_BASED:
+      return RegisterOnlyDenseGemm(**params)
+    elif self._gemm_kernel_type == GemmKernelType.DENSE_SPARSE_SHR_MEM_BASED:
+      if not isinstance(self._mat_a, DenseMatrix) or not isinstance(self._mat_b, SparseMatrix):
+        raise Exception("For dense x sparse kernel matrix A needs to be dense and matrix B sparse")
+      return ShrMemBasedDenseSparseGemm(**params)
+    elif self._gemm_kernel_type == GemmKernelType.DENSE_SPARSE_REGISTER_ONLY_BASED:
+      if not isinstance(self._mat_a, DenseMatrix) or not isinstance(self._mat_b, SparseMatrix):
+        raise Exception("For dense x sparse kernel matrix A needs to be dense and matrix B sparse")
+      return RegisterOnlyDenseSparseGemm(**params)
+    elif self._gemm_kernel_type == GemmKernelType.SPARSE_DENSE_SHR_MEM_BASED:
+      if not isinstance(self._mat_a, SparseMatrix) or not isinstance(self._mat_b, DenseMatrix):
+        raise Exception("For sparse x dense kernel matrix A needs to be sparse and matrix B dense")
+      return ShrMemBasedSparseDenseGemm(**params)
+    elif self._gemm_kernel_type == GemmKernelType.SPARSE_DENSE_REGISTER_ONLY_BASED:
+      if not isinstance(self._mat_a, SparseMatrix) or not isinstance(self._mat_b, DenseMatrix):
+        raise Exception("For sparse x dense kernel matrix A needs to be sparse and matrix B dense")
+      return RegisterOnlySparseDenseGemm(**params)
+    else:
+      raise RuntimeError('unknown gemm type')
+
+  def gemm_kernel_type(self):
+    """returns a concrete kernel type. It is relevant if the user requested
+    to perform auto-selection"""
+    return self._gemm_kernel_type
 
 class DenseGemmBuilder(AbstractBuilder):
   GemmClass = None
@@ -134,7 +214,7 @@ class DenseGemmBuilder(AbstractBuilder):
       raise InternalError('gemm-builder: reg_array must be in registers')
 
   def _make_gemm(self):
-    self._instructions.append(self.GemmClass(context=self._context,
+    self._instructions.append(GemmKernelsFactory(self._descr).get_builder(context=self._context,
                                    trans_a=self._descr.trans_a,
                                    trans_b=self._descr.trans_b,
                                    op1=self._mem_region_a,
@@ -185,12 +265,3 @@ class DenseGemmBuilder(AbstractBuilder):
     name = f'_{self._counter}'
     self._counter += 1
     return name
-
-class ShrMemBasedDenseGemmKernelBuilder(DenseGemmBuilder):
-  GemmClass = ShrMemBasedDenseGemm
-
-class RegisterOnlyDenseGemmKernelBuilder(DenseGemmBuilder):
-  GemmClass = RegisterOnlyDenseGemm
-
-class CSAKernelBuilder(DenseGemmBuilder):
-  GemmClass = CSA

@@ -12,7 +12,7 @@ def lexic_factory(backend, underlying_hardware):
     return HipLexic(underlying_hardware)
   elif backend == "hipsycl" or backend == "oneapi":
     return SyclLexic(backend, underlying_hardware)
-  elif backend == "omptarget":
+  elif backend == "omptarget" or backend == "targetdart":
     return TargetLexic(backend, underlying_hardware)
   else:
     raise ValueError(f'Unknown backend, given: {backend}')

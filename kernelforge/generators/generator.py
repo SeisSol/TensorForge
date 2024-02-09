@@ -3,14 +3,14 @@ from copy import deepcopy
 import hashlib
 from kernelforge.generators.descriptions import OperationDescription, GemmDescr, CSADescr
 from kernelforge.common.context import Context
-from kernelforge.common.basic_types import Addressing, GeneralLexicon
+from kernelforge.common.basic_types import Addressing, GeneralLexicon, DataFlowDirection
 from kernelforge.common.aux import get_extra_offset_name
 from kernelforge.backend.data_types import ShrMemObject, RegMemObject
 from kernelforge.backend.opt import OptimizationStage
 from kernelforge.backend.scopes import Scopes
 from kernelforge.backend.symbol import Symbol, SymbolType
 from kernelforge.backend.instructions.abstract_instruction import AbstractInstruction
-from kernelforge.backend.instructions.builders.kernels.gemms.gemm_builder import ShrMemBasedDenseGemmKernelBuilder, RegisterOnlyDenseGemmKernelBuilder, CSAKernelBuilder
+from kernelforge.backend.instructions.builders.kernels.gemms.gemm_builder import DenseGemmBuilder
 from kernelforge.backend.instructions.builders.ptr_manip_builder import GetElementPtrBuilder
 from kernelforge.backend.instructions.builders.allocator_builder import ShrMemAllocBuilder, RegistersAllocBuilder
 from kernelforge.backend.writer import Writer
@@ -189,13 +189,7 @@ class Generator:
 
     self._scopes.add_scope()
     # generate GEMM and store operations
-    builder = ShrMemBasedDenseGemmKernelBuilder(self._context,
-                          self._scopes,
-                          self._scopes.get_symbol(self._register_array_obj),
-                          self._scopes.get_symbol(self._shr_mem_obj),
-                          self._num_threads)
-    
-    csabuilder = CSAKernelBuilder(self._context,
+    builder = DenseGemmBuilder(self._context,
                           self._scopes,
                           self._scopes.get_symbol(self._register_array_obj),
                           self._scopes.get_symbol(self._shr_mem_obj),
@@ -207,13 +201,12 @@ class Generator:
                       op2=self._scopes.get_symbol(gemm_descr.mat_b),
                       dest_obj=gemm_descr.mat_c,
                       descr=gemm_descr)
-        self._ir.extend(builder.get_instructions())
       elif isinstance(gemm_descr, CSADescr):
-        csabuilder.build(op1=self._scopes.get_symbol(gemm_descr.mat_a),
+        builder.build(op1=self._scopes.get_symbol(gemm_descr.mat_a),
                       op2=None,
                       dest_obj=gemm_descr.mat_c,
                       descr=gemm_descr)
-        self._ir.extend(csabuilder.get_instructions())
+      self._ir.extend(builder.get_instructions())
 
   def _deduce_mults_per_block(self):
     policy = self._thread_block_policy_type(self._context,
@@ -340,7 +333,8 @@ class Generator:
     params = []
     for symbol in symbol_list:
       ptr_type = Addressing.addr2ptr_type(symbol.obj.addressing)
-      batch_type = f'{fp_as_str}{ptr_type}' if with_types else ''
+      const_modifier = 'const ' if symbol.obj.direction == DataFlowDirection.SOURCE else ''
+      batch_type = f'{const_modifier}{fp_as_str}{ptr_type}' if with_types else ''
       offset_type = 'unsigned' if with_types else ''
       params.extend([f'{batch_type} {symbol.name}',
                      f'{offset_type} {get_extra_offset_name(symbol)}'])

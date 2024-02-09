@@ -82,7 +82,7 @@ class CSA(AbstractInstruction):
     if self._gemm_meta_data:
       writer(f'// meta: {self._gemm_meta_data}')
 
-    with writer.Block(self.gen_mask_threads(self._op1_view.get_dim_size(0))):
+    with writer.If(self.gen_mask_threads(self._op1_view.get_dim_size(0))):
       m_range = self._op1_view.get_dim_size(1)
       writer.insert_pragma_unroll()
       with writer.Block(f'for (int n = 0; n < {m_range}; ++n)'):

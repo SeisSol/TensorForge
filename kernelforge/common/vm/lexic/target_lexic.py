@@ -23,19 +23,20 @@ class TargetLexic(Lexic):
     return ""
 
   def kernel_definition(self, file, kernel_bounds, base_name, params, precision=None, total_shared_mem_size=None, global_symbols=None):
+    bounds = "*".join(str(kb) for kb in kernel_bounds)
     stream_type = self.stream_type
     class TargetContext:
       def __init__(self):
-        self.function = file.Function(f'kernel_{base_name}', f'{stream_type}* streamobj, int bX, int tX, int tY, {params}')
+        self.function = file.Function(f'kernel_{base_name}', f'{stream_type}* streamobj, int bX, int tX, int tY, {bounds}')
         self.blockloop = file.For('int bx = 0; bx < bX; ++bx')
         self.teamloop1 = file.For('int ty = 0; ty < tY; ++ty')
         self.teamloop2 = file.For('int tx = 0; tx < tX; ++tx')
       def __enter__(self):
         self.function.__enter__()
-        file(f'#pragma omp target teams distribute nowait depend(inout: streamobj[0]) is_device_ptr({", ".join(symbol.name for symbol in global_symbols)}) thread_limit({kernel_bounds})')
+        file(f'#pragma omp target teams distribute nowait depend(inout: streamobj[0]) is_device_ptr({", ".join(symbol.name for symbol in global_symbols)}) thread_limit({bounds})')
         self.blockloop.__enter__()
         file(f'{precision} {GeneralLexicon.TOTAL_SHR_MEM} [{total_shared_mem_size}];')
-        file(f'#pragma omp parallel for collapse(2) schedule(static, 1)') #  allocate(omp_pteam_mem_alloc:{GeneralLexicon.TOTAL_SHR_MEM})
+        file(f'#pragma omp parallel for collapse(2) schedule(static, 1)')
         self.teamloop1.__enter__()
         self.teamloop2.__enter__()
       def __exit__(self, type, value, traceback):
@@ -44,6 +45,7 @@ class TargetLexic(Lexic):
         self.blockloop.__exit__(type, value, traceback)
         self.function.__exit__(type, value, traceback)
     
+    backend = self._backend
     class TargetContext:
       def __init__(self):
         self.function = file.Function(f'kernel_{base_name}', f'{stream_type}* streamobj, int bX, int tX, int tY, {params}')
@@ -51,10 +53,14 @@ class TargetLexic(Lexic):
         self.threadblock = file.Block('')
       def __enter__(self):
         self.function.__enter__()
-        file(f'#pragma omp target teams nowait num_teams(bX) depend(inout: streamobj[0]) is_device_ptr({", ".join(symbol.name for symbol in global_symbols)}) thread_limit({kernel_bounds})')
+        if backend == 'targetdart':
+          device = 'device(TARGETDART_DEVICE(0))'
+        else:
+          device = ''
+        file(f'#pragma omp target teams nowait num_teams(bX) depend(inout: streamobj[0]) is_device_ptr({", ".join(symbol.name for symbol in global_symbols)}) thread_limit({bounds}) {device}')
         self.blockloop.__enter__()
         file(f'{precision} {GeneralLexicon.TOTAL_SHR_MEM}[{total_shared_mem_size}];')
-        file(f'#pragma omp parallel num_threads({kernel_bounds})')
+        file(f'#pragma omp parallel num_threads({bounds})')
         self.threadblock.__enter__()
         file(f'int bx = omp_get_team_num();')
         file(f'int ty = omp_get_thread_num() / tX;')
@@ -104,4 +110,4 @@ class TargetLexic(Lexic):
     return self.get_tid_counter(self.thread_idx_z, self.block_dim_z, self.block_idx_z)
 
   def get_headers(self):
-    return []
+    return ['cstdlib', 'stdexcept', 'omp.h']

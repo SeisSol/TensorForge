@@ -1,17 +1,17 @@
 from typing import Tuple, List, Union
-from gemmforge.instructions.builders.abstract_builder import AbstractBuilder
-from gemmforge.instructions.loaders.abstract_loader import NoLoadShrMemLoader
-from gemmforge.symbol_table import SymbolType, Symbol
-from gemmforge.instructions import SyncThreads
-from gemmforge.instructions import ShrMemBasedDenseGemm
-from gemmforge.instructions import RegisterOnlyDenseGemm
-from gemmforge.instructions import RegisterOnlySparseDenseGemm
-from gemmforge.instructions import ShrMemBasedSparseDenseGemm
-from gemmforge.instructions import RegisterOnlyDenseSparseGemm
-from gemmforge.instructions import ShrMemBasedDenseSparseGemm
-from gemmforge.instructions.loaders import shm_mem_loader_factory
-from gemmforge.basic_types import GeneralLexicon
-from gemmforge.matrix import SparseMatrix
+from kernelforge.instructions.builders.abstract_builder import AbstractBuilder
+from kernelforge.instructions.loaders.abstract_loader import NoLoadShrMemLoader
+from kernelforge.symbol_table import SymbolType, Symbol
+from kernelforge.instructions import SyncThreads
+from kernelforge.instructions import ShrMemBasedDenseGemm
+from kernelforge.instructions import RegisterOnlyDenseGemm
+from kernelforge.instructions import RegisterOnlySparseDenseGemm
+from kernelforge.instructions import ShrMemBasedSparseDenseGemm
+from kernelforge.instructions import RegisterOnlyDenseSparseGemm
+from kernelforge.instructions import ShrMemBasedDenseSparseGemm
+from kernelforge.instructions.loaders import shm_mem_loader_factory
+from kernelforge.basic_types import GeneralLexicon
+from kernelforge.matrix import SparseMatrix
 
 
 class ShrMemBasedDenseGemmBuilder(AbstractBuilder):

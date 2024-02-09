@@ -1,5 +1,7 @@
-from gemmforge.exceptions import GenerationError
-from gemmforge.matrix.matrix import Matrix
+from kernelforge.common.exceptions import GenerationError
+from kernelforge.common.basic_types import Addressing, DataFlowDirection
+from typing import Union, List
+from .matrix import Matrix
 import json
 
 
@@ -9,8 +11,12 @@ import json
 # entries - and array of coordinate arrays of row,col, 0-indexed e.g. "entries" : [[0,0],[1,1]] (given as the storage order)
 # Optionally values = [0.2f, 9.4f]... (it is assumed that non of the values here are 0)
 class SparseMatrix(Matrix):
-  def __init__(self, num_rows, num_cols, addressing, coordinates, values=None):
-    Matrix.__init__(self, num_rows, num_cols, addressing)
+  def __init__(self, num_rows: int, num_cols: int, addressing: Addressing, coordinates,
+               values: Union[List[float], None]=None,
+               bbox: Union[List[int], None]=None,
+               alias: Union[str, None]=None,
+               is_tmp: bool = False):
+    Matrix.__init__(self, num_rows, num_cols, addressing, bbox, alias, is_tmp)
     self.elcount = 0
 
     self.values = values
@@ -73,7 +79,7 @@ class SparseMatrix(Matrix):
 
   def __str__(self):
     string = super().__str__()
-    return string
+    return f'[sparse] {string}'
 
   def get_coo_per_row(self):
     return self.coo_per_row

@@ -1,6 +1,6 @@
-from gemmforge.thread_policies.gemm.generic import GenericGemmThreadPolicy
+from kernelforge.thread_policies.gemm.generic import GenericGemmThreadPolicy
 from ..abstract_thread_policy import AbstractGemmLikeThreadPolicy, DenseMatrix, SparseMatrix
-from gemmforge.vm import VM
+from kernelforge.vm import VM
 
 
 class GenericDenseSparseGemmThreadPolicy(AbstractGemmLikeThreadPolicy):

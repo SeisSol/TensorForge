@@ -11,7 +11,7 @@
   with Dense x Dense already implemented. The correctnesss of this test case relies and assumes that Dense x Dense is already correct.
   Furthermore, it does the test by multiplying both the Dense and Sparse version of B.
 */
-namespace gemmforge {
+namespace kernelforge {
   namespace dense_sparse {
     class TestDriver {
     public:

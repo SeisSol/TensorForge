@@ -4,11 +4,13 @@ from io import StringIO
 
 import yaml
 
-from gemmforge import GemmKernelType
-from gemmforge import GenerationError, GemmGenerator
-from gemmforge import constructs
-from gemmforge.vm import vm_factory
+from kernelforge.backend.instructions.builders.kernels.gemms.type import GemmKernelType
+from kernelforge.generators.generator import GenerationError, Generator
+from kernelforge.backend import writer
+from kernelforge.common.basic_types import FloatingPointType, Addressing
+from kernelforge.common.context import Context
 from test_loader import TestLoader
+from kernelforge.generators.descriptions import GemmDescr
 
 parser = argparse.ArgumentParser()
 parser.add_argument('-s', '--specfile', action='store', help='path to a yaml file with a test spec')
@@ -39,9 +41,9 @@ else:
   if not ((args.realsize == 4) or (args.realsize == 8)):
     raise ValueError('Floating point size must be either 4 or 8')
 
-vm = vm_factory(backend=args.backend,
+vm = Context(backend=args.backend,
                 arch=args.arch,
-                fp_type='float' if args.realsize == 4 else 'double')
+                fp_type=FloatingPointType.FLOAT if args.realsize == 4 else FloatingPointType.DOUBLE)
 
 stream = open(args.specfile, 'r')
 suites = yaml.safe_load(stream)['test_suites']
@@ -50,22 +52,22 @@ src = StringIO()
 headers = StringIO()
 tests_code = StringIO()
 
-hw_descr = vm.get_hw_descr()
+hw_descr = vm.get_vm().get_hw_descr()
 precision = vm.fp_as_str()
-with constructs.Cpp(StringIO()) as file:
-  for header_file in vm.get_headers():
+with writer.Writer() as file:
+  for header_file in vm.get_vm().get_headers():
     file.Include(f'{header_file}')
 
   src.write(file.stream.getvalue())
 
-with constructs.Cpp(StringIO()) as file:
+with writer.Writer() as file:
   file.Include('gtest/gtest.h')
   file.Include('comparators.h')
   file.Include('gemm_driver.h')
   file.Include('kernels.h')
   file.Include('gemm.h')
   file.Include('iostream')
-  file('using namespace gemmforge::reference;')
+  file('using namespace kernelforge::reference;')
   file.Emptyline()
   tests_code.write(file.stream.getvalue())
 
@@ -82,25 +84,29 @@ for suite in suites:
       else:
         raise Exception("Wrong kernel_type string")
 
-      generator1 = GemmGenerator(vm=vm, kernel_type=dense_kernel_type)
       T = "T"
       NT = ""
-      generator1.set(trans_a, trans_b, mat_a, mat_b, mat_c, alpha, beta,
-                     base_name=f"A{T if trans_a else NT}_B{T if trans_b else NT}_{matrix_b_type}_DenseXDense_{kernel_type}")
+      
+
+      generator1 = Generator([GemmDescr(trans_a=trans_a,
+                       trans_b=trans_b,
+                       a=mat_a, b=mat_b, c=mat_c, alpha=alpha, beta=beta)], vm)
+
+      
       generator1.generate()
       src.write(generator1.get_kernel())
       src.write(generator1.get_launcher())
-      headers.write(generator1.get_launcher_header())
+      headers.write(generator1.get_header())
 
-      generator2 = GemmGenerator(vm=vm, kernel_type=dense_sparse_kernel_type)
-      generator2.set(trans_a, trans_b, mat_a, mat_b_sparse, mat_c, alpha, beta,
-                     base_name=f"A{T if trans_a else NT}_B{T if trans_b else NT}_{matrix_b_type}_DenseXSparse_{kernel_type}")
+      generator2 = Generator([GemmDescr(trans_a=trans_a,
+                       trans_b=trans_b,
+                       a=mat_a, b=mat_b_sparse, c=mat_c, alpha=alpha, beta=beta)], vm)
       generator2.generate()
       src.write(generator2.get_kernel())
       src.write(generator2.get_launcher())
-      headers.write(generator2.get_launcher_header())
+      headers.write(generator2.get_header())
 
-      with constructs.Cpp(StringIO()) as file:
+      with writer.Writer() as file:
         with file.GoogleTestSuit('DenseXSparseGemmTest', test_name):
           file(f'int sizeA = {mat_a.num_rows} * {mat_a.num_cols};')
           file(f'int sizeB_dense = {mat_b.num_rows} * {mat_b.num_cols};')
@@ -203,10 +209,8 @@ with open(path, 'w') as file:
 
 if hw_descr.backend == 'cuda':
   path = os.path.join(dir_name, 'kernels.cu')
-elif hw_descr.backend == 'hip' or hw_descr.backend == 'hipsycl' or hw_descr.backend == 'oneapi':
-  path = os.path.join(dir_name, 'kernels.cpp')
 else:
-  print('Backend is not supported, could not write kernel file')
+  path = os.path.join(dir_name, 'kernels.cpp')
 with open(path, 'w') as file:
   file.write(src.getvalue())
 

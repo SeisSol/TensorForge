@@ -36,5 +36,5 @@ protected:
   //std::vector<real*> DeviceShuffledB{};
   //std::vector<real*> DeviceShuffledC{};
 
-  gemmforge::sparse_dense::TestDriver Driver;
+  kernelforge::sparse_dense::TestDriver Driver;
 };

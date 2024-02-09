@@ -57,17 +57,17 @@ class ShrMemAlloc(AbstractInstruction):
     shrmem_obj = self._dest.obj
     common_shrmem = f'{GeneralLexicon.TOTAL_SHR_MEM}'
     common_shrmem_size = shrmem_obj.get_total_size()
+    if common_shrmem_size > 0:
+      shr_mem_decl = self._vm.get_lexic().declare_shared_memory_inline(name=common_shrmem,
+                                                        precision=self._vm.fp_as_str(),
+                                                        size=common_shrmem_size,
+                                                        alignment=8)
 
-    shr_mem_decl = self._vm.get_lexic().declare_shared_memory_inline(name=common_shrmem,
-                                                      precision=self._vm.fp_as_str(),
-                                                      size=common_shrmem_size,
-                                                      alignment=8)
+      if shr_mem_decl:
+        writer(f'{shr_mem_decl};')
 
-    if shr_mem_decl:
-      writer(f'{shr_mem_decl};')
-
-    address = f'{shrmem_obj.get_size_per_mult()} * {self._vm.get_lexic().thread_idx_y}'
-    writer(f'{self._fp_as_str} * {shrmem_obj.name} = &{common_shrmem}[{address}];')
+      address = f'{shrmem_obj.get_size_per_mult()} * {self._vm.get_lexic().thread_idx_y}'
+      writer(f'{self._fp_as_str} * {shrmem_obj.name} = &{common_shrmem}[{address}];')
 
   def is_ready(self):
     shrmem_obj = self._dest.obj

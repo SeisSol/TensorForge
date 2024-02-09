@@ -1,6 +1,7 @@
 from kernelforge.common.exceptions import GenerationError
 from kernelforge.common.context import Context
 from kernelforge.common.basic_types import DataFlowDirection, FloatingPointType
+from kernelforge.backend.instructions.builders.kernels.gemms.type import GemmKernelType
 
 class OperationDescription:
   pass
@@ -15,6 +16,7 @@ class GemmDescr(OperationDescription):
                c,
                alpha=1.0,
                beta=0.0,
+               kernel_type: GemmKernelType = GemmKernelType.AUTO,
                strict_match: bool = False,
                prefer_align: bool = False):
     self.trans_a = trans_a
@@ -30,6 +32,8 @@ class GemmDescr(OperationDescription):
 
     self.alpha = alpha
     self.beta = beta
+
+    self.kernel_type = kernel_type
 
     self._m = None
     self._n = None

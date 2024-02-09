@@ -1,5 +1,6 @@
 from kernelforge.backend.writer import Writer
 from kernelforge.backend.symbol import DataView
+from kernelforge.common.matrix.dense import DenseMatrix
 from .abstract_loader import AbstractShrMemLoader, ShrMemLoaderType
 
 
@@ -12,7 +13,7 @@ class ExtendedPatchLoader(AbstractShrMemLoader):
 
     full_subvolume = (self._matrix.get_actual_num_cols() - 2) * self._matrix.num_rows
     cropped_subvolume = self._matrix.get_actual_num_rows() + self._matrix.num_rows
-    if isinstance(matrix, DenseMatrix):
+    if isinstance(self._matrix, DenseMatrix):
       self._shm_volume = cropped_subvolume + full_subvolume
     else:  # Has to be sparse if not dense
       self._shm_volume = self._matrix.get_el_count()

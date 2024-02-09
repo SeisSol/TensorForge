@@ -42,7 +42,7 @@ def hw_descr_factory(arch, backend):
       return HwDecription(known_arch[arch], arch, backend)
     else:
       report_error(backend, arch)
-  elif backend == 'omptarget':
+  elif backend == 'omptarget' or backend == 'targetdart':
     if arch in nvidia_list or arch in intel_list:
       return HwDecription(known_arch[arch], arch, backend)
     else:
@@ -90,6 +90,8 @@ def get_known_arch():
   arch['sm_86']['max_block_per_sm'] = 16
   arch['sm_86']['max_threads_per_sm'] = 1536
 
+  arch['sm_89'] = deepcopy(arch['sm_60'])
+
   arch['sm_90'] = deepcopy(arch['sm_60'])
   arch['sm_90']['max_local_mem_size_per_block'] = 228 * KB
 
@@ -102,24 +104,45 @@ def get_known_arch():
   # 3. https://en.wikipedia.org/wiki/Graphics_Core_Next#CU_scheduler
   # 4. https://en.wikipedia.org/wiki/Graphics_Core_Next#Compute_units
 
-  amd_wavefront = 64
+  amd_gcn_wavefront = 64
   arch['gfx906'] = {
-    'vec_unit_length': amd_wavefront,
+    'vec_unit_length': amd_gcn_wavefront,
     'max_local_mem_size_per_block': 64 * KB,
     'max_num_threads': 1024,
     'max_reg_per_block': 256 * KB,
-    'max_threads_per_sm': 40 * amd_wavefront,
+    'max_threads_per_sm': 40 * amd_gcn_wavefront,
     'max_block_per_sm': 40,
     'hw_fp_word_size': 4,
     'mem_access_align_size': 32,
     'name': 'amd',
   }
 
+  arch['gfx900'] = deepcopy(arch['gfx906'])
+
   arch['gfx908'] = deepcopy(arch['gfx906'])
   arch['gfx908']['max_reg_per_block'] = 512 * KB
 
   arch['gfx90a'] = deepcopy(arch['gfx908'])
 
+  arch['gfx942'] = deepcopy(arch['gfx90a'])
+
+  amd_rdna_wavefront = 32
+  arch['gfx1010'] = {
+    'vec_unit_length': amd_rdna_wavefront,
+    'max_local_mem_size_per_block': 64 * KB,
+    'max_num_threads': 1024,
+    'max_reg_per_block': 256 * KB,
+    'max_threads_per_sm': 40 * amd_rdna_wavefront,
+    'max_block_per_sm': 40,
+    'hw_fp_word_size': 4,
+    'mem_access_align_size': 32,
+    'name': 'amd',
+  }
+
+  arch['gfx1030'] = deepcopy(arch['gfx1010'])
+  arch['gfx1100'] = deepcopy(arch['gfx1010'])
+  arch['gfx1101'] = deepcopy(arch['gfx1010'])
+  arch['gfx1102'] = deepcopy(arch['gfx1010'])
 
   # Intel
   arch['dg1'] = {
@@ -134,6 +157,18 @@ def get_known_arch():
     'name': 'intel',
   }
 
+  arch['pvc'] = {
+    'vec_unit_length': 32,
+    'max_local_mem_size_per_block': 128 * KB,
+    'max_num_threads': 512,
+    'max_reg_per_block': 64 * KB,
+    'max_threads_per_sm': 1024,
+    'max_block_per_sm': 64,
+    'hw_fp_word_size': 4,
+    'mem_access_align_size': 32,
+    'name': 'intel',
+  }
+
   for intel_integrated_gpu in ['bdw', 'skl', 'Gen8', 'Gen9', 'Gen11', 'Gen12LP']:
     arch[intel_integrated_gpu] = {'vec_unit_length': 32,
                                   'max_local_mem_size_per_block': 48 * KB,
@@ -142,6 +177,7 @@ def get_known_arch():
                                   'max_threads_per_sm': 256,
                                   'max_block_per_sm': 32,
                                   'hw_fp_word_size': 4,
+                                  'mem_access_align_size': 32,
                                   'name': 'intel'}
   return arch
 

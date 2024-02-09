@@ -7,7 +7,9 @@ from random import randint
 
 import numpy as np
 
-from gemmforge import DenseMatrix, SparseMatrix
+from kernelforge.common.matrix.dense import DenseMatrix
+from kernelforge.common.matrix.sparse import SparseMatrix
+from kernelforge.common.basic_types import FloatingPointType, Addressing
 
 first = True
 writes = 0
@@ -163,14 +165,14 @@ class TestLoader:
   def _produce_matrix_b(self, matrix_spec, spec):
     dense = DenseMatrix(num_rows=matrix_spec["rows"],
                         num_cols=matrix_spec["cols"],
-                        addressing=matrix_spec["addressing"],
+                        addressing=Addressing.str2addr(matrix_spec["addressing"]),
                         bbox=[0, 0, matrix_spec["rows"], matrix_spec["cols"]])
     return dense
 
   def _produce_matrix_c(self, matrix_spec, spec):
     dense = DenseMatrix(num_rows=matrix_spec["rows"],
                         num_cols=matrix_spec["cols"],
-                        addressing=matrix_spec["addressing"],
+                        addressing=Addressing.str2addr(matrix_spec["addressing"]),
                         bbox=[0, 0, matrix_spec["rows"], matrix_spec["cols"]])
     return dense
 
@@ -180,35 +182,35 @@ class TestLoader:
         coo = gen_matrix_a(matrix_spec["rows"], matrix_spec["cols"], spec["trans_a"], matrix_spec["matrix_type"])
         sparse = SparseMatrix(num_rows=matrix_spec["rows"],
                               num_cols=matrix_spec["cols"],
-                              addressing=matrix_spec["addressing"],
+                              addressing=Addressing.str2addr(matrix_spec["addressing"]),
                               coordinates=coo["coordinates"],
                               values=None)
         dense = DenseMatrix(num_rows=matrix_spec["rows"],
                             num_cols=matrix_spec["cols"],
-                            addressing=matrix_spec["addressing"],
+                            addressing=Addressing.str2addr(matrix_spec["addressing"]),
                             bbox=[0, 0, matrix_spec["rows"], matrix_spec["cols"]])
       else:
         coo = gen_matrix_a(matrix_spec["cols"], matrix_spec["rows"], spec["trans_a"], matrix_spec["matrix_type"])
         sparse = SparseMatrix(num_rows=matrix_spec["cols"],
                               num_cols=matrix_spec["rows"],
-                              addressing=matrix_spec["addressing"],
+                              addressing=Addressing.str2addr(matrix_spec["addressing"]),
                               coordinates=coo["coordinates"],
                               values=None)
         dense = DenseMatrix(num_rows=matrix_spec["cols"],
                             num_cols=matrix_spec["rows"],
-                            addressing=matrix_spec["addressing"],
+                            addressing=Addressing.str2addr(matrix_spec["addressing"]),
                             bbox=[0, 0, matrix_spec["cols"], matrix_spec["rows"]])
       return (dense, sparse)
     else:
       if not spec["trans_a"]:
         dense = DenseMatrix(num_rows=matrix_spec["rows"],
                             num_cols=matrix_spec["cols"],
-                            addressing=matrix_spec["addressing"],
+                            addressing=Addressing.str2addr(matrix_spec["addressing"]),
                             bbox=[0, 0, matrix_spec["rows"], matrix_spec["cols"]])
       else:
         dense = DenseMatrix(num_rows=matrix_spec["cols"],
                             num_cols=matrix_spec["rows"],
-                            addressing=matrix_spec["addressing"],
+                            addressing=Addressing.str2addr(matrix_spec["addressing"]),
                             bbox=[0, 0, matrix_spec["cols"], matrix_spec["rows"]])
       return dense
 

@@ -2,9 +2,9 @@
 from kernelforge.common.vm.vm import VM
 from ..matrix import DenseMatrix
 =======
-from gemmforge.vm import VM
+from kernelforge.vm import VM
 from ..matrix import DenseMatrix, SparseMatrix
->>>>>>> gemmforge:git-gemmforge/gemmforge/thread_policies/abstract_thread_policy.py
+>>>>>>> kernelforge:git-kernelforge/kernelforge/thread_policies/abstract_thread_policy.py
 from abc import ABC, abstractmethod
 
 

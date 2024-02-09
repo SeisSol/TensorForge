@@ -1,5 +1,6 @@
 from kernelforge.backend.writer import Writer
 from kernelforge.backend.symbol import DataView
+from kernelforge.common.matrix.dense import DenseMatrix
 from .abstract_loader import AbstractShrMemLoader, ShrMemLoaderType
 
 
@@ -25,7 +26,7 @@ class ExtendedTransposePatchLoader(AbstractShrMemLoader):
     super(ExtendedTransposePatchLoader, self).__init__(**kwargs)
 
     optimal_num_cols = _find_next_prime(self._matrix.get_actual_num_cols())
-    if isinstance(matrix, DenseMatrix):
+    if isinstance(self._matrix, DenseMatrix):
       self._shm_volume = self._matrix.num_rows * optimal_num_cols
     else:  # Has to be sparse if not dense
       self._shm_volume = self._matrix.get_el_count()
@@ -58,7 +59,7 @@ class ExtendedTransposePatchLoader(AbstractShrMemLoader):
     src_offset = self._src.data_view.get_offset()
     src_offset = f'{src_offset} + ' if src_offset else ''
 
-    with writer.Block():
+    with writer.Block(''):
       writer(f'int {tmp_var};')
       writer.new_line()
       if num_hops > 0:

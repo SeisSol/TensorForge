@@ -7,7 +7,9 @@ import random
 
 import numpy as np
 
-from gemmforge import DenseMatrix, SparseMatrix
+from kernelforge.common.matrix.dense import DenseMatrix
+from kernelforge.common.matrix.sparse import SparseMatrix
+from kernelforge.common.basic_types import FloatingPointType, Addressing
 
 writes = 0
 random_coordinates = True
@@ -136,18 +138,18 @@ class TestLoader:
       coo = gen_matrix_b(matrix_spec["rows"], matrix_spec["cols"], spec["trans_b"], matrix_spec["matrix_type"])
       sparse = SparseMatrix(num_rows=matrix_spec["rows"],
                             num_cols=matrix_spec["cols"],
-                            addressing=matrix_spec["addressing"],
+                            addressing=Addressing.str2addr(matrix_spec["addressing"]),
                             coordinates=coo["coordinates"],
                             values=None)
       dense = DenseMatrix(num_rows=matrix_spec["rows"],
                           num_cols=matrix_spec["cols"],
-                          addressing=matrix_spec["addressing"],
+                          addressing=Addressing.str2addr(matrix_spec["addressing"]),
                           bbox=[0, 0, matrix_spec["rows"], matrix_spec["cols"]])
       return (dense, sparse)
     else:
       dense = DenseMatrix(num_rows=matrix_spec["rows"],
                           num_cols=matrix_spec["cols"],
-                          addressing=matrix_spec["addressing"],
+                          addressing=Addressing.str2addr(matrix_spec["addressing"]),
                           bbox=matrix_spec["bbox"])
       return dense
 

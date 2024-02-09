@@ -26,15 +26,15 @@ class AbstractInstruction(ABC):
     pass
 
   def gen_mask_threads(self, num_threads) -> str:
-    return f'if ({self._vm.get_lexic().thread_idx_x} < {num_threads})'
+    return f'{self._vm.get_lexic().thread_idx_x} < {num_threads}'
 
   def gen_range_mask_threads(self, begin, end) -> str:
     assert begin < end
     tid = self._vm.get_lexic().thread_idx_x
     if begin == 0:
-      return f'if ({tid} < {end})'
+      return f'{tid} < {end}'
     else:
-      return f'if (({tid} >= {begin}) && ({tid} < {end}))'
+      return f'({tid} >= {begin}) && ({tid} < {end})'
 
 
 class AbstractShrMemWrite(AbstractInstruction):

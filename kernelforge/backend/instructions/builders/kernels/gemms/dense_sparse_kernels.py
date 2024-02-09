@@ -1,11 +1,11 @@
-from gemmforge.instructions.builders.alloctor_builder import RegistersAllocBuilder
-from gemmforge.instructions.builders.ptr_manip_builder import GetElementPtrBuilder
-from gemmforge.matrix.sparse import SparseMatrix
+from kernelforge.instructions.builders.alloctor_builder import RegistersAllocBuilder
+from kernelforge.instructions.builders.ptr_manip_builder import GetElementPtrBuilder
+from kernelforge.matrix.sparse import SparseMatrix
 from .base_kernel import BaseGemmKernelBuilder
-from gemmforge.instructions.builders import ShrMemAllocBuilder
-from gemmforge.instructions.builders import ShrMemBasedDenseSparseGemmBuilder
-from gemmforge.instructions.builders import RegisterOnlyDenseSparseGemmBuilder
-from gemmforge.basic_types import ShrMemObject
+from kernelforge.instructions.builders import ShrMemAllocBuilder
+from kernelforge.instructions.builders import ShrMemBasedDenseSparseGemmBuilder
+from kernelforge.instructions.builders import RegisterOnlyDenseSparseGemmBuilder
+from kernelforge.basic_types import ShrMemObject
 
 
 class ShrMemBasedDenseSparseGemmKernelBuilder(BaseGemmKernelBuilder):

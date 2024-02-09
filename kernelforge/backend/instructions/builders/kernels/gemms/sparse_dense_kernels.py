@@ -1,14 +1,14 @@
 from copy import deepcopy
-from gemmforge.instructions.builders.alloctor_builder import RegistersAllocBuilder
-from gemmforge.instructions.builders.ptr_manip_builder import GetElementPtrBuilder
-from gemmforge.instructions.store import StoreRegToGlb, StoreRegToShrMemColumn, StoreShrMemToGlb
-from gemmforge.instructions.sync_threads import SyncThreads
-from gemmforge.matrix.sparse import SparseMatrix
+from kernelforge.instructions.builders.alloctor_builder import RegistersAllocBuilder
+from kernelforge.instructions.builders.ptr_manip_builder import GetElementPtrBuilder
+from kernelforge.instructions.store import StoreRegToGlb, StoreRegToShrMemColumn, StoreShrMemToGlb
+from kernelforge.instructions.sync_threads import SyncThreads
+from kernelforge.matrix.sparse import SparseMatrix
 from .base_kernel import BaseGemmKernelBuilder
-from gemmforge.instructions.builders import ShrMemAllocBuilder
-from gemmforge.instructions.builders import ShrMemBasedSparseDenseGemmBuilder
-from gemmforge.instructions.builders import RegisterOnlySparseDenseGemmBuilder
-from gemmforge.basic_types import ShrMemObject
+from kernelforge.instructions.builders import ShrMemAllocBuilder
+from kernelforge.instructions.builders import ShrMemBasedSparseDenseGemmBuilder
+from kernelforge.instructions.builders import RegisterOnlySparseDenseGemmBuilder
+from kernelforge.basic_types import ShrMemObject
 import math
 
 
