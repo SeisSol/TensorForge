@@ -5,6 +5,7 @@ license = {file = "LICENSE"}
 requires-python = ">=3.5"
 authors = [
     { name = "Ravil Dorozhinskii", email = "ravil.aviva.com@gmail.com" },
+    { name = "Yakup Budanaz", email = "budanaz.yakup@gmail.com" },
     { name = "David Schneller", email = "david.schneller@tum.de" },
 ]
 maintainers = [
