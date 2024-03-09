@@ -15,7 +15,8 @@ class ShrMemBasedDenseSparseGemm(AbstractInstruction, Gemm):
                op1: Symbol,
                op2: Symbol,
                dest: Symbol,
-               prefer_align: bool):
+               prefer_align: bool,
+               num_threads: int):
     super(ShrMemBasedDenseSparseGemm, self).__init__(context)
     self._trans_a = trans_a
     self._trans_b = trans_b
@@ -165,7 +166,7 @@ class ShrMemBasedDenseSparseGemm(AbstractInstruction, Gemm):
 
 class RegisterOnlyDenseSparseGemm(AbstractInstruction, Gemm):
   def __init__(self, **kwargs):
-    super(RegisterOnlyDenseSparseGemm, self).__init__(kwargs['vm'])
+    super(RegisterOnlyDenseSparseGemm, self).__init__(kwargs['context'])
 
   def gen_code(self, writer):
     raise Exception("Register Only Sparse-by-Dense Matrix Implementation is not supported.")

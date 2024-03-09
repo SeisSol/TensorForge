@@ -31,19 +31,27 @@ class GetElementPtr(AbstractInstruction):
       main_offset = f'{GeneralLexicon.BATCH_ID_NAME} * {batch_obj.get_real_volume()}'
       sub_offset = f'{batch_obj.get_offset_to_first_element()}'
       address = f'{main_offset} + {sub_offset}{extra_offset}'
+      rhs = f'&{self._src.name}[{address}]'
+      lhs = 'const ' if self._src.obj.direction == DataFlowDirection.SOURCE else ''
+      lhs += f'{self._vm.fp_as_str()} * const {self._vm.get_lexic().restrict_kw} {self._dest.name}'
     elif batch_addressing == Addressing.PTR_BASED:
       main_offset = f'{GeneralLexicon.BATCH_ID_NAME}'
       sub_offset = f'{batch_obj.get_offset_to_first_element()}'
       address = f'{main_offset}][{sub_offset}{extra_offset}'
+      rhs = f'&{self._src.name}[{address}]'
+      lhs = 'const ' if self._src.obj.direction == DataFlowDirection.SOURCE else ''
+      lhs += f'{self._vm.fp_as_str()} * const {self._vm.get_lexic().restrict_kw} {self._dest.name}'
     elif batch_addressing == Addressing.NONE:
       address = f'{batch_obj.get_offset_to_first_element()}{extra_offset}'
+      rhs = f'&{self._src.name}[{address}]'
+      lhs = 'const ' if self._src.obj.direction == DataFlowDirection.SOURCE else ''
+      lhs += f'{self._vm.fp_as_str()} * const {self._vm.get_lexic().restrict_kw} {self._dest.name}'
+    elif batch_addressing == Addressing.SCALAR:
+      rhs = f'{self._src.name}'
+      lhs = f'{self._vm.fp_as_str()} {self._dest.name}'
     else:
       GenerationError(f'unknown addressing of {self._src.name}, given {batch_addressing}')
 
-    rhs = f'&{self._src.name}[{address}]'
-
-    lhs = 'const ' if self._src.obj.direction == DataFlowDirection.SOURCE else ''
-    lhs += f'{self._vm.fp_as_str()} * const {self._vm.get_lexic().restrict_kw} {self._dest.name}'
     writer(f'{lhs} = {rhs};')
 
   def __str__(self) -> str:

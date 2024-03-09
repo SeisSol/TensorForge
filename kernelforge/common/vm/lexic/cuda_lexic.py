@@ -1,5 +1,5 @@
-from .lexic import Lexic
-
+from .lexic import Lexic, Operation
+from kernelforge.common.basic_types import FloatingPointType
 
 class CudaLexic(Lexic):
 
@@ -65,3 +65,44 @@ class CudaLexic(Lexic):
 
   def get_headers(self):
     return []
+  
+  def get_fptype(self, fptype, length=1):
+    suffix = f'{length}' if length > 1 else ''
+    return f'{fptype}{suffix}'
+
+  def get_operation(self, op: Operation, fptype, value1, value2):
+    fpsuffix = 'f' if fptype == FloatingPointType.FLOAT else ''
+    fpprefix = 'f' if fptype == FloatingPointType.FLOAT else 'd'
+    if op == Operation.COPY:
+      return value1
+    elif op == Operation.ADD:
+      return f'({value1} + {value2})'
+    elif op == Operation.SUB:
+      return f'({value1} - {value2})'
+    elif op == Operation.MUL:
+      return f'({value1} * {value2})'
+    elif op == Operation.DIV:
+      return f'({value1} / {value2})'
+    elif op == Operation.MIN:
+      return f'fmin{fpsuffix}({value1}, {value2})'
+    elif op == Operation.MAX:
+      return f'fmax{fpsuffix}({value1}, {value2})'
+    elif op == Operation.EXP:
+      return f'exp{fpsuffix}({value1})' # has __expf
+    elif op == Operation.LOG:
+      return f'log{fpsuffix}({value1})' # has __logf
+    elif op == Operation.SQRT:
+      # return f'__{fpprefix}sqrt_rn({value1})'
+      return f'sqrt{fpsuffix}({value1})'
+    elif op == Operation.SIN:
+      return f'sin{fpsuffix}({value1})' # has __sinf
+    elif op == Operation.COS:
+      return f'cos{fpsuffix}({value1})' # has __cosf
+    elif op == Operation.TAN:
+      return f'tan{fpsuffix}({value1})' # has __tanf
+    elif op == Operation.ASIN:
+      return f'asin{fpsuffix}({value1})'
+    elif op == Operation.ACOS:
+      return f'acos{fpsuffix}({value1})'
+    elif op == Operation.ATAN:
+      return f'atan{fpsuffix}({value1})'

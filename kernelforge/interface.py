@@ -1,5 +1,5 @@
-from kernelforge.common.matrix.dense import DenseMatrix
-from kernelforge.common.matrix.sparse import SparseMatrix
+from kernelforge.common.matrix.tensor import Tensor
+from kernelforge.common.matrix.boundingbox import BoundingBox
 
 class YatetoInterface:
   def __init__(self):
@@ -18,39 +18,9 @@ class YatetoInterface:
     Returns:
       (list): bounding box in GemmForge format
     """
-    if transpose:
-      last, first = yateto_ranges
-    else:
-      first, last = yateto_ranges
-
-    top_left_corner = (mem_layout[0].start, mem_layout[1].start)
-
-    bbox = [first.start - top_left_corner[0],
-            last.start - top_left_corner[1],
-            first.stop - top_left_corner[0],
-            last.stop - top_left_corner[1]]
-
-    return bbox
-
-  @classmethod
-  def gen_dense_matrix(cls,
-                       yateto_ranges,
-                       yateto_memory_layout_bbox,
-                       addressing,
-                       name,
-                       is_tmp,
-                       transpose):
-
-    chainforge_bbox = cls.deduce_bbox(yateto_ranges=yateto_ranges,
-                                      mem_layout=yateto_memory_layout_bbox,
-                                      transpose=transpose)
-
-    return DenseMatrix(num_rows=yateto_memory_layout_bbox[0].size(),
-                       num_cols=yateto_memory_layout_bbox[1].size(),
-                       addressing=addressing,
-                       bbox=chainforge_bbox,
-                       alias=name,
-                       is_tmp=is_tmp)
+    # TODO: transpose, mem_layout
+    
+    return BoundingBox([rng.start for rng in yateto_ranges], [rng.stop for rng in yateto_ranges])
   
   @classmethod
   def gen_matrix(cls,
@@ -66,19 +36,9 @@ class YatetoInterface:
     chainforge_bbox = cls.deduce_bbox(yateto_ranges=yateto_ranges,
                                       mem_layout=yateto_memory_layout_bbox,
                                       transpose=transpose)
-    if pattern is None:
-        return DenseMatrix(num_rows=yateto_memory_layout_bbox[0].size(),
-                        num_cols=yateto_memory_layout_bbox[1].size(),
-                        addressing=addressing,
-                        bbox=chainforge_bbox,
-                        alias=name,
-                        is_tmp=is_tmp)
-    else:
-        return SparseMatrix(num_rows=yateto_memory_layout_bbox[0].size(),
-                        num_cols=yateto_memory_layout_bbox[1].size(),
-                        addressing=addressing,
-                        coordinates=pattern,
-                        values=values,
-                        bbox=chainforge_bbox,
-                        alias=name,
-                        is_tmp=is_tmp)
+    
+    return Tensor(shape=[yateto_memory_layout_bbox[i].size() for i in range(len(yateto_memory_layout_bbox))],
+                    addressing=addressing,
+                    bbox=BoundingBox([rng.start for rng in yateto_ranges], [rng.stop for rng in yateto_ranges]),
+                    alias=name,
+                    is_tmp=is_tmp)

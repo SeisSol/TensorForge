@@ -36,7 +36,7 @@ class Context:
     return self._options
 
   def align(self, num):
-    fp_size = 4 if self.fp_type == FloatingPointType.FLOAT else 8
+    fp_size = self.fp_type.size()
     hw_fp_word_size = self._vm.get_hw_descr().hw_fp_word_size
     vec_unit_length = self._vm.get_hw_descr().vec_unit_length
 
@@ -45,7 +45,7 @@ class Context:
 
   def align_range(self, begin, end):
     assert end > begin
-    fp_size = 4 if self.fp_type == FloatingPointType.FLOAT else 8
+    fp_size = self.fp_type.size()
     mem_access_align_size = self._vm.get_hw_descr().mem_access_align_size
     align_factor =  mem_access_align_size / fp_size
 

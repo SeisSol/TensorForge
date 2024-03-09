@@ -1,5 +1,5 @@
 from kernelforge.common.basic_types import GeneralLexicon
-from .lexic import Lexic
+from .lexic import Lexic, Operation
 
 
 class SyclLexic(Lexic):
@@ -76,3 +76,40 @@ class SyclLexic(Lexic):
 
   def get_headers(self):
     return ['CL/sycl.hpp']
+  
+  def get_fptype(self, fptype, length=1):
+    return f'sycl::vec<{fptype}, {length}>'
+
+  def get_operation(self, op: Operation, fptype, value1, value2):
+    if op == Operation.COPY:
+      return value1
+    elif op == Operation.ADD:
+      return f'({value1} + {value2})'
+    elif op == Operation.SUB:
+      return f'({value1} - {value2})'
+    elif op == Operation.MUL:
+      return f'({value1} * {value2})'
+    elif op == Operation.DIV:
+      return f'({value1} / {value2})'
+    elif op == Operation.MIN:
+      return f'sycl::min({value1}, {value2})'
+    elif op == Operation.MAX:
+      return f'sycl::max({value1}, {value2})'
+    elif op == Operation.EXP:
+      return f'sycl::exp({value1})' # has __expf
+    elif op == Operation.LOG:
+      return f'sycl::log({value1})' # has __logf
+    elif op == Operation.SQRT:
+      return f'sycl::sqrt({value1})'
+    elif op == Operation.SIN:
+      return f'sycl::sin({value1})' # has __sinf
+    elif op == Operation.COS:
+      return f'sycl::cos({value1})' # has __cosf
+    elif op == Operation.TAN:
+      return f'sycl::tan({value1})' # has __tanf
+    elif op == Operation.ASIN:
+      return f'sycl::asin({value1})'
+    elif op == Operation.ACOS:
+      return f'sycl::acos({value1})'
+    elif op == Operation.ATAN:
+      return f'sycl::atan({value1})'

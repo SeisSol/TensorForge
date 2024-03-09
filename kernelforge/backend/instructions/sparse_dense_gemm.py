@@ -15,7 +15,8 @@ class ShrMemBasedSparseDenseGemm(AbstractInstruction, Gemm):
                op1: Symbol,
                op2: Symbol,
                dest: Symbol,
-               prefer_align: bool):
+               prefer_align: bool,
+               num_threads: int):
     super(ShrMemBasedSparseDenseGemm, self).__init__(context)
     self._trans_a = trans_a
     self._trans_b = trans_b
@@ -168,7 +169,7 @@ class ShrMemBasedSparseDenseGemm(AbstractInstruction, Gemm):
 
 class RegisterOnlySparseDenseGemm(AbstractInstruction, Gemm):
   def __init__(self, **kwargs):
-    super(RegisterOnlySparseDenseGemm, self).__init__(kwargs['vm'])
+    super(RegisterOnlySparseDenseGemm, self).__init__(kwargs['context'])
     self._trans_a = kwargs['trans_a']
     self._trans_b = kwargs['trans_b']
     self._op1 = kwargs['op1']

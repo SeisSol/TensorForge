@@ -6,5 +6,10 @@ from kernelforge.backend.writer import Writer
 from .abstract_instruction import AbstractInstruction
 from copy import deepcopy
 
-class Gemm:
+class ComputeInstruction:
+  @abstractmethod
+  def get_operands(self):
+    return []
+
+class Gemm(ComputeInstruction):
   pass

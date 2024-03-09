@@ -1,7 +1,7 @@
 from abc import abstractmethod
 from typing import Union
 import enum
-from kernelforge.common.matrix.dense import Matrix
+from kernelforge.common.matrix.tensor import Tensor
 from kernelforge.backend.instructions.store import AbstractShrMemWrite
 from kernelforge.backend.symbol import SymbolType, Symbol
 from kernelforge.common.exceptions import InternalError
@@ -25,7 +25,7 @@ class AbstractShrMemLoader(AbstractShrMemWrite):
     self._check()
     self._lid_dim: Union[int, None] = None
     self._align_shm_volume: Union[int, None] = None
-    self._matrix: Matrix = self._src.obj
+    self._tensor: Tensor = self._src.obj
 
     self._dest.add_user(self)
     self._src.add_user(self)

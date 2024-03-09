@@ -68,6 +68,7 @@ def get_known_arch():
     'max_block_per_sm': 32,
     'hw_fp_word_size': 4,
     'mem_access_align_size': 32,
+    'shmem_banks': 32,
     'name': 'nvidia',
   }
 
@@ -114,6 +115,7 @@ def get_known_arch():
     'max_block_per_sm': 40,
     'hw_fp_word_size': 4,
     'mem_access_align_size': 32,
+    'shmem_banks': 32,
     'name': 'amd',
   }
 
@@ -126,6 +128,8 @@ def get_known_arch():
 
   arch['gfx942'] = deepcopy(arch['gfx90a'])
 
+  # https://en.wikipedia.org/wiki/RDNA_(microarchitecture)
+  
   amd_rdna_wavefront = 32
   arch['gfx1010'] = {
     'vec_unit_length': amd_rdna_wavefront,
@@ -136,6 +140,7 @@ def get_known_arch():
     'max_block_per_sm': 40,
     'hw_fp_word_size': 4,
     'mem_access_align_size': 32,
+    'shmem_banks': 32,
     'name': 'amd',
   }
 
@@ -154,6 +159,7 @@ def get_known_arch():
     'max_block_per_sm': 64,
     'hw_fp_word_size': 4,
     'mem_access_align_size': 32,
+    'shmem_banks': 32,
     'name': 'intel',
   }
 
@@ -166,6 +172,7 @@ def get_known_arch():
     'max_block_per_sm': 64,
     'hw_fp_word_size': 4,
     'mem_access_align_size': 32,
+    'shmem_banks': 32,
     'name': 'intel',
   }
 
@@ -178,6 +185,7 @@ def get_known_arch():
                                   'max_block_per_sm': 32,
                                   'hw_fp_word_size': 4,
                                   'mem_access_align_size': 32,
+                                  'shmem_banks': 32,
                                   'name': 'intel'}
   return arch
 

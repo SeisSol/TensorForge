@@ -6,6 +6,7 @@ from kernelforge.backend.writer import Writer
 from .abstract_instruction import AbstractInstruction
 from copy import deepcopy
 from .gemm import Gemm
+from typing import List
 
 class ShrMemBasedDenseGemm(AbstractInstruction, Gemm):
   def __init__(self,
@@ -15,7 +16,8 @@ class ShrMemBasedDenseGemm(AbstractInstruction, Gemm):
                op1: Symbol,
                op2: Symbol,
                dest: Symbol,
-               prefer_align: bool):
+               prefer_align: bool,
+               num_threads: int):
     super(ShrMemBasedDenseGemm, self).__init__(context)
     self._trans_a = trans_a
     self._trans_b = trans_b
@@ -25,6 +27,7 @@ class ShrMemBasedDenseGemm(AbstractInstruction, Gemm):
     self._is_ready = True
     self._user_options = context.get_user_options()
     self._gemm_meta_data = None
+    self._num_threads = num_threads
 
     self.registers = None
     if dest.stype != SymbolType.Register:
@@ -173,74 +176,75 @@ class RegisterOnlyDenseGemm(ShrMemBasedDenseGemm):
     super(RegisterOnlyDenseGemm, self).__init__(context, trans_a, trans_b, op1, op2, dest, prefer_align)
 
   def gen_code(self, writer):
-    op1_variable = 'value1'
-    op2_variable = 'value2'
-    warp_idx_variable = 'wid'
+    with writer.Scope():
+      op1_variable = 'value1'
+      op2_variable = 'value2'
+      warp_idx_variable = 'wid'
 
-    op1_data_view = self._op1.data_view
-    op2_data_view = self._op2.data_view
-    thread_idx_x = self._vm.get_lexic().thread_idx_x
+      op1_data_view = self._op1.data_view
+      op2_data_view = self._op2.data_view
+      thread_idx_x = self._vm.get_lexic().thread_idx_x
 
-    warp_id = self._vm.get_lexic().get_sub_group_id(self._vm.get_hw_descr().vec_unit_length)
-    writer(f'auto {warp_idx_variable} = {warp_id};')
+      warp_id = self._vm.get_lexic().get_sub_group_id(self._vm.get_hw_descr().vec_unit_length)
+      writer(f'auto {warp_idx_variable} = {warp_id};')
 
-    writer(f'{self._vm.fp_as_str()} {op1_variable};')
-    writer(f'{self._vm.fp_as_str()} {op2_variable};')
+      writer(f'{self._vm.fp_as_str()} {op1_variable};')
+      writer(f'{self._vm.fp_as_str()} {op2_variable};')
 
-    active_sub_group_mask = self._vm.get_lexic().active_sub_group_mask()
-    if active_sub_group_mask:
-      sub_group = 'mask'
-      writer(f'auto {sub_group} = {active_sub_group_mask};')
-    else:
-      sub_group = None
+      active_sub_group_mask = self._vm.get_lexic().active_sub_group_mask()
+      if active_sub_group_mask:
+        sub_group = 'mask'
+        writer(f'auto {sub_group} = {active_sub_group_mask};')
+      else:
+        sub_group = None
 
-    k_end = op1_data_view.get_dim_size(0) if self._trans_a else op1_data_view.get_dim_size(1)
-    num_cols = op1_data_view.get_dim_size(1) if self._trans_a else op1_data_view.get_dim_size(0)
-
-    writer.Emptyline()
-    writer.Pragma('unroll')
-    with writer.For(f'int k = 0; k < {k_end}; ++k'):
-      with writer.If(self.gen_mask_threads(num_cols)):
-        if self._trans_a:
-          op1_addr = f'k + {thread_idx_x} * {op1_data_view.get_lead_dim()}'
-        else:
-          op1_addr = f'{thread_idx_x} + k * {op1_data_view.get_lead_dim()}'
-        writer(f'{op1_variable} = {self._op1.name}[{op1_addr}];')
-
-      start_tile_variable = 'startTileN'
-      end_tile_variable = 'endTileN'
+      k_end = op1_data_view.get_dim_size(0) if self._trans_a else op1_data_view.get_dim_size(1)
+      num_cols = op1_data_view.get_dim_size(1) if self._trans_a else op1_data_view.get_dim_size(0)
 
       writer.Emptyline()
       writer.Pragma('unroll')
-      with writer.For(f'int {start_tile_variable} = 0; '
-                      f'{start_tile_variable} < {self._dest.obj.size}; '
-                      f'{start_tile_variable} += {self._vm.get_hw_descr().vec_unit_length}'):
-        writer(f'int shiftedWid = {start_tile_variable} + {warp_idx_variable};')
-        with writer.If(f'shiftedWid < {self._dest.obj.size}'):
-          if self._trans_b:
-            op2_addr = f'shiftedWid + k * {op2_data_view.get_lead_dim()}'
+      with writer.For(f'int k = 0; k < {k_end}; ++k'):
+        with writer.If(self.gen_mask_threads(num_cols)):
+          if self._trans_a:
+            op1_addr = f'k + {thread_idx_x} * {op1_data_view.get_lead_dim()}'
           else:
-            op2_addr = f'shiftedWid * {op2_data_view.get_lead_dim()} + k'
-          writer(f'{op2_variable} = {self._op2.name}[{op2_addr}];')
+            op1_addr = f'{thread_idx_x} + k * {op1_data_view.get_lead_dim()}'
+          writer(f'{op1_variable} = {self._op1.name}[{op1_addr}];')
 
-          if active_sub_group_mask:
-            writer(f'{sub_group} = {active_sub_group_mask};')
-
-        writer.Emptyline()
-        writer(f'int {end_tile_variable} = '
-               f'{start_tile_variable} + {self._vm.get_hw_descr().vec_unit_length};')
-
-        writer(f'{end_tile_variable} = '
-               f'({end_tile_variable} < {self._dest.obj.size}) '
-               f' ? {end_tile_variable} : {self._dest.obj.size};')
+        start_tile_variable = 'startTileN'
+        end_tile_variable = 'endTileN'
 
         writer.Emptyline()
-        self._get_inner_loop(writer,
-                             op1_variable,
-                             op2_variable,
-                             start_tile_variable,
-                             end_tile_variable,
-                             sub_group)
+        writer.Pragma('unroll')
+        with writer.For(f'int {start_tile_variable} = 0; '
+                        f'{start_tile_variable} < {self._dest.obj.size}; '
+                        f'{start_tile_variable} += {self._vm.get_hw_descr().vec_unit_length}'):
+          writer(f'int shiftedWid = {start_tile_variable} + {warp_idx_variable};')
+          with writer.If(f'shiftedWid < {self._dest.obj.size}'):
+            if self._trans_b:
+              op2_addr = f'shiftedWid + k * {op2_data_view.get_lead_dim()}'
+            else:
+              op2_addr = f'shiftedWid * {op2_data_view.get_lead_dim()} + k'
+            writer(f'{op2_variable} = {self._op2.name}[{op2_addr}];')
+
+            if active_sub_group_mask:
+              writer(f'{sub_group} = {active_sub_group_mask};')
+
+          writer.Emptyline()
+          writer(f'int {end_tile_variable} = '
+                f'{start_tile_variable} + {self._vm.get_hw_descr().vec_unit_length};')
+
+          writer(f'{end_tile_variable} = '
+                f'({end_tile_variable} < {self._dest.obj.size}) '
+                f' ? {end_tile_variable} : {self._dest.obj.size};')
+
+          writer.Emptyline()
+          self._get_inner_loop(writer,
+                              op1_variable,
+                              op2_variable,
+                              start_tile_variable,
+                              end_tile_variable,
+                              sub_group)
 
   def _get_inner_loop(self,
                       writer,
@@ -264,3 +268,54 @@ class RegisterOnlyDenseGemm(ShrMemBasedDenseGemm):
 
   def __str__(self) -> str:
     return f'{self._dest.name} = rb_gemm({self._op1.name}, {self._op2.name})'
+
+class CublasdxDenseGemm(ShrMemBasedDenseGemm):
+  """A GEMM using the cuBLASDx library"""
+
+  def __init__(self,
+               context: Context,
+               trans_a: bool,
+               trans_b: bool,
+               op1: Symbol,
+               op2: Symbol,
+               dest: Symbol,
+               prefer_align: bool):
+    super(CublasdxDenseGemm, self).__init__(context, trans_a, trans_b, op1, op2, dest, prefer_align)
+
+  def gen_code(self, writer):
+    with writer.Scope():
+      # a _tiny_ bit hacky... But ok.
+      writer('using namespace cublasdx;')
+
+      m = 0
+      n = 0
+      k = 0
+
+      num_threads = self._num_threads
+
+      gemm_traits = []
+      gemm_traits += [f'Size<{m}, {n}, {k}>']
+      gemm_traits += ['Function<function::MM>']
+      gemm_traits += ['Type<type::real>']
+
+      transpose = lambda isTrue: 'transpose_mode::transposed' if isTrue else 'transpose_mode::non_transposed'
+      gemm_traits += [f'TransposeMode<{transpose(self._trans_a)}, {transpose(self._trans_b)}>']
+      gemm_traits += [f'Precision<{self._vm.fp_as_str()}>']
+
+      # TODO: modify, if there are problems with the Blackwell arch name
+      sm = self._vm.get_hw_descr().model[3:5]
+      smprint = f'{sm}0'
+      gemm_traits += [f'SM<{smprint}>']
+      gemm_traits += ['Block']
+      gemm_traits += [f'Block_Dim<{num_threads}>']
+      traittype = '+'.join(f'{trait}()' for trait in gemm_traits)
+      writer(f'using GemmType = decltype({traittype});')
+
+      # currently, the alpha, beta are handled when storing back to global memory
+      writer(f'GemmType().execute(1, {self._op1.name}, {self._op2.name}, 1, {self._dest.name})')
+
+  def __str__(self) -> str:
+    return f'{self._dest.name} = cdx_gemm({self._op1.name}, {self._op2.name})'
+
+  def get_headers(self) -> List[str]:
+    return ['cublasdx.hpp']

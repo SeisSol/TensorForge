@@ -1,5 +1,5 @@
 from kernelforge.common.basic_types import GeneralLexicon
-from .lexic import Lexic
+from .lexic import Lexic, Operation
 
 
 class TargetLexic(Lexic):
@@ -25,6 +25,26 @@ class TargetLexic(Lexic):
   def kernel_definition(self, file, kernel_bounds, base_name, params, precision=None, total_shared_mem_size=None, global_symbols=None):
     bounds = "*".join(str(kb) for kb in kernel_bounds)
     stream_type = self.stream_type
+    class TargetContextCpu:
+      def __init__(self):
+        self.function = file.Function(f'kernel_{base_name}', f'{stream_type}* streamobj, int bX, int tX, int tY, {bounds}')
+        self.blockloop = file.For('int bx = 0; bx < bX; ++bx')
+        self.teamloop1 = file.For('int ty = 0; ty < tY; ++ty')
+        self.teamloop2 = file.For('int tx = 0; tx < tX; ++tx')
+      def __enter__(self):
+        self.function.__enter__()
+        file(f'#pragma omp parallel for nowait depend(inout: streamobj[0])')
+        self.blockloop.__enter__()
+        file(f'{precision} {GeneralLexicon.TOTAL_SHR_MEM} [{total_shared_mem_size}];')
+        file(f'#pragma omp simd collapse(2)')
+        self.teamloop1.__enter__()
+        self.teamloop2.__enter__()
+      def __exit__(self, type, value, traceback):
+        self.teamloop2.__exit__(type, value, traceback)
+        self.teamloop1.__exit__(type, value, traceback)
+        self.blockloop.__exit__(type, value, traceback)
+        self.function.__exit__(type, value, traceback)
+    
     class TargetContext:
       def __init__(self):
         self.function = file.Function(f'kernel_{base_name}', f'{stream_type}* streamobj, int bX, int tX, int tY, {bounds}')
@@ -33,10 +53,14 @@ class TargetLexic(Lexic):
         self.teamloop2 = file.For('int tx = 0; tx < tX; ++tx')
       def __enter__(self):
         self.function.__enter__()
-        file(f'#pragma omp target teams distribute nowait depend(inout: streamobj[0]) is_device_ptr({", ".join(symbol.name for symbol in global_symbols)}) thread_limit({bounds})')
+        if backend == 'targetdart':
+          device = 'device(TARGETDART_DEVICE(0))'
+        else:
+          device = ''
+        file(f'#pragma omp target teams distribute nowait depend(inout: streamobj[0]) is_device_ptr({", ".join(symbol.name for symbol in global_symbols)}) thread_limit({bounds}) {device}')
         self.blockloop.__enter__()
         file(f'{precision} {GeneralLexicon.TOTAL_SHR_MEM} [{total_shared_mem_size}];')
-        file(f'#pragma omp parallel for collapse(2) schedule(static, 1)')
+        file(f'#pragma omp parallel for collapse(2)')
         self.teamloop1.__enter__()
         self.teamloop2.__enter__()
       def __exit__(self, type, value, traceback):
@@ -49,8 +73,8 @@ class TargetLexic(Lexic):
     class TargetContext:
       def __init__(self):
         self.function = file.Function(f'kernel_{base_name}', f'{stream_type}* streamobj, int bX, int tX, int tY, {params}')
-        self.blockloop = file.Block('')
-        self.threadblock = file.Block('')
+        self.blockloop = file.Scope()
+        self.threadblock = file.Scope()
       def __enter__(self):
         self.function.__enter__()
         if backend == 'targetdart':
@@ -82,10 +106,10 @@ class TargetLexic(Lexic):
     return f'{self.thread_idx_x} % {sub_group_size}'
 
   def active_sub_group_mask(self):
-    return f'NOTIMPLEMENTED'
+    return f''
 
   def broadcast_sync(self, variable, lane, mask):
-    return f'NOTIMPLEMENTED'
+    return 'NOTSUPPORTED' #f'__builtin_shufflevector()'
 
   def kernel_range_object(self, name, values):
     return f"size_t {name}[3] = {{ {values} }}"
@@ -110,4 +134,41 @@ class TargetLexic(Lexic):
     return self.get_tid_counter(self.thread_idx_z, self.block_dim_z, self.block_idx_z)
 
   def get_headers(self):
-    return ['cstdlib', 'stdexcept', 'omp.h']
+    return ['cstdlib', 'stdexcept', 'omp.h', 'cmath']
+
+  def get_fptype(self, fptype, length=1):
+    return f'__attribute__ ((vector_size (sizeof({fptype}) * {length}))) {fptype}'
+
+  def get_operation(self, op: Operation, fptype, value1, value2):
+    if op == Operation.COPY:
+      return value1
+    elif op == Operation.ADD:
+      return f'({value1} + {value2})'
+    elif op == Operation.SUB:
+      return f'({value1} - {value2})'
+    elif op == Operation.MUL:
+      return f'({value1} * {value2})'
+    elif op == Operation.DIV:
+      return f'({value1} / {value2})'
+    elif op == Operation.MIN:
+      return f'std::min({value1}, {value2})'
+    elif op == Operation.MAX:
+      return f'std::max({value1}, {value2})'
+    elif op == Operation.EXP:
+      return f'std::exp({value1})' # has __expf
+    elif op == Operation.LOG:
+      return f'std::log({value1})' # has __logf
+    elif op == Operation.SQRT:
+      return f'std::sqrt({value1})'
+    elif op == Operation.SIN:
+      return f'std::sin({value1})' # has __sinf
+    elif op == Operation.COS:
+      return f'std::cos({value1})' # has __cosf
+    elif op == Operation.TAN:
+      return f'std::tan({value1})' # has __tanf
+    elif op == Operation.ASIN:
+      return f'std::asin({value1})'
+    elif op == Operation.ACOS:
+      return f'std::acos({value1})'
+    elif op == Operation.ATAN:
+      return f'std::atan({value1})'

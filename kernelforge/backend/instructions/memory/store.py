@@ -1,11 +1,13 @@
 from typing import Union
 from kernelforge.common.context import Context
-from kernelforge.common.matrix.dense import Matrix
+from kernelforge.common.matrix.tensor import Tensor
+from kernelforge.common.matrix.boundingbox import BoundingBox
 from kernelforge.backend.data_types import RegMemObject
 from kernelforge.backend.symbol import Symbol, SymbolType, DataView
 from kernelforge.common.exceptions import InternalError
 from kernelforge.backend.writer import Writer
-from .abstract_instruction import AbstractInstruction, AbstractShrMemWrite
+from . import AbstractShrMemWrite
+from ..abstract_instruction import AbstractInstruction
 from kernelforge.common.basic_types import FloatingPointType
 from copy import deepcopy
 
@@ -28,33 +30,28 @@ class StoreRegToShr(AbstractShrMemWrite):
     if dest.stype != SymbolType.SharedMem:
       raise InternalError('store: operand `dest` is not in shared mem.')
 
-    if not isinstance(dest.obj, Matrix):
-      raise InternalError(f'store: operand `dest` is not a matrix, instead: {type(src.obj)}')
+    if not isinstance(dest.obj, Tensor):
+      raise InternalError(f'store: operand `dest` is not a matrix, instead: {type(dest.obj)}')
 
     src.add_user(self)
     dest.add_user(self)
     shr_mem.add_user(self)
 
     bbox = dest.obj.get_bbox()
-    bbox = [0, 0, bbox[2] - bbox[0], bbox[3] - bbox[1]]
-    num_rows = context.align(bbox[2] - bbox[0])
-    num_cols = dest.obj.get_actual_num_cols()
-    dest.data_view = DataView(rows=num_rows,
-                              columns=num_cols,
-                              is_transposed=False,
+    bbox = BoundingBox([0] * bbox.rank(), bbox.sizes())
+    dest.data_view = DataView(bbox.sizes(),
+                              permute=None,
                               bbox=bbox)
 
     self._dest: Symbol = dest
-    self._src: Symbol = deepcopy(src)
+    self._src: Symbol = src.clone()
     self._shr_mem: Symbol = shr_mem
     self._num_threads: int = num_threads
     self._shr_mem_offset: Union[int, None] = None
     view: DataView = self._dest.data_view
     self._shm_volume: int = view.get_volume()
 
-  def gen_code(self, writer: Writer) -> None:
-    writer.new_line()
-    writer(f' // writing to shr mem: from {self._src.name} to {self._dest.name}')
+  def gen_code_inner(self, writer: Writer) -> None:
     lhs = f'{self._fp_as_str}* {self._vm.get_lexic().restrict_kw} {self._dest.name}'
     rhs = f'&{self._shr_mem.name}[{self._shr_mem_offset}]'
     writer(f'{lhs} = {rhs};')
@@ -62,26 +59,27 @@ class StoreRegToShr(AbstractShrMemWrite):
     dest_view = self._dest.data_view
     src_bbox = self._src.data_view.get_bbox()
 
-    with writer.If(self.gen_range_mask_threads(begin=src_bbox[0], end=src_bbox[2])):
-      writer.insert_pragma_unroll()
-      loop = f'int i = 0; i < {dest_view.get_dim_size(1)}; ++i'
-      with writer.For(loop):
-        dest_row_idx = f'{self._vm.get_lexic().thread_idx_x}'
-        thread_id_displacement = self._src.data_view.get_offset()
-        if thread_id_displacement:
-          dest_row_idx += f' - {thread_id_displacement}'
+    with writer.If(self.gen_range_mask_threads(begin=src_bbox.lower()[0], end=src_bbox.upper()[0])):
+      loops = []
+      indices = [self._vm.get_lexic().thread_idx_x]
+      for i in range(1, src_bbox.rank()):
+        writer.insert_pragma_unroll()
+        loop = f'int i{i} = 0; i{i} < {dest_view.shape[i]}; ++i{i}'
+        loops += [writer.For(loop)]
+        loops[-1].__enter__()
+        indices += [f'i{i}']
 
-        dest_addr = dest_view.get_address(row_idx=dest_row_idx, column_idx='i')
-        lhs = f'{self._dest.name}[{dest_addr}]'
-
-        rhs = f'{self._src.name}[i]'
-        writer(f'{lhs} = {rhs};')
+      self._src.load(writer, self._context, 'value', indices, False)
+      self._dest.store(writer, self._context, 'value', indices, False)
+      
+      for loop in reversed(loops):
+        loop.__exit__(None, None, None)
 
   def get_dest(self) -> Symbol:
     return self._dest
 
   def __str__(self) -> str:
-    return f'{self._dest.name} = store_r2s {self._shr_mem.name}, {self._src.name};'
+    return f'{self._dest.name} = store_r2s({self._shr_mem.name}, {self._src.name});'
 
 
 class StoreRegToGlb(AbstractInstruction):
@@ -103,15 +101,14 @@ class StoreRegToGlb(AbstractInstruction):
     if dest.stype != SymbolType.Global:
       raise InternalError('store: operand `dest` is not in global memory.')
 
-    if not isinstance(dest.obj, Matrix):
+    if not isinstance(dest.obj, Tensor):
       raise InternalError('store: operand `dest` is not a matrix')
 
     src.add_user(self)
     dest.add_user(self)
 
-    dest.data_view = DataView(rows=dest.obj.num_rows,
-                              columns=dest.obj.num_cols,
-                              is_transposed=False,
+    dest.data_view = DataView(shape=dest.obj.shape,
+                              permute=None,
                               bbox=dest.obj.get_bbox())
     
     if dest.data_view.get_dim_size(0) != src.data_view.get_dim_size(0):
@@ -130,41 +127,21 @@ class StoreRegToGlb(AbstractInstruction):
 
     writer('// write results back to glb. memory')
     src_bbox = self._src.data_view.get_bbox()
-    with writer.If(self.gen_range_mask_threads(begin=src_bbox[0], end=src_bbox[2])):
+    with writer.If(self.gen_range_mask_threads(begin=src_bbox.lower()[0], end=src_bbox.upper()[0])):
+      loops = []
+      indices = [self._vm.get_lexic().thread_idx_x]
+      for i in range(1, src_bbox.rank()):
+        writer.insert_pragma_unroll()
+        loop = f'int i{i} = 0; i{i} < {dest_view.shape[i]}; ++i{i}'
+        loops += [writer.For(loop)]
+        loops[-1].__enter__()
+        indices += [f'i{i}']
 
-      writer.insert_pragma_unroll()
-      loop = f'int n = 0; n < {dest_view.get_dim_size(1)}; ++n'
-      with writer.For(loop):
-        dest_row_idx = f'{self._vm.get_lexic().thread_idx_x}'
-        thread_id_displacement = self._src.data_view.get_offset()
-        if thread_id_displacement:
-          dest_row_idx += f' - {thread_id_displacement}'
-
-        dest_addr = dest_view.get_address(row_idx=dest_row_idx, column_idx='n')
-        lhs = f'{self._dest.name}[{dest_addr}]'
-
-        real_suffix = 'f' if self._context.fp_type == FloatingPointType.FLOAT else ''
-
-        src_access = '' if self._src.obj.size == 1 else '[n]'
-        if not isinstance(self._alpha, float):
-          rhs = f'{self._alpha} * {self._src.name}{src_access}'
-        else:
-          if self._alpha == 1.0:
-            rhs = f'{self._src.name}{src_access}'
-          else:
-            rhs = f'{self._alpha}{real_suffix} * {self._src.name}{src_access}'
-
-        if not isinstance(self._beta, float):
-          rhs += f' + {self._beta} * {lhs}'
-        else:
-          if self._beta != 0.0:
-            if self._beta == 1.0:
-              rhs += f' + {lhs}'
-            else:
-              const = f'{self._beta}{real_suffix}'
-              rhs += f' + {const} * {lhs}'
-
-        writer(self._vm.get_lexic().glb_store(lhs, rhs, self._dest._users == [self]))
+      self._src.load(writer, self._context, 'value', indices, False)
+      self._dest.store(writer, self._context, 'value', indices, False)
+      
+      for loop in reversed(loops):
+        loop.__exit__(None, None, None)
 
   def __str__(self) -> str:
     return f'{self._dest.name} = store_r2g {self._src.name};'
@@ -206,7 +183,6 @@ class StoreShrMemToGlb(AbstractInstruction):
     src_name = self._src.name
     precision = self._vm.fp_as_str()
     vec_unit_length = self._vm._hw_descr.vec_unit_length
-    #nearest_multiple_of_vec_unti_length = round_up_to_nearest_vec_length(n=self._num_threads, vec_length=vec_unit_length)
 
     thread_idx_x = self._vm.get_lexic().thread_idx_x
     num_hops = int(dest_matrix.get_actual_num_rows() / self._num_threads)

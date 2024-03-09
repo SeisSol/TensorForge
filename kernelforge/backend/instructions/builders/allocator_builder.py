@@ -55,7 +55,7 @@ class RegistersAllocBuilder(AbstractAllocBuilder):
     super(RegistersAllocBuilder, self).__init__(context, scopes)
     self._counter = 0
 
-  def build(self, size: int, init_value: Union[float, None]=None):
+  def build(self, size: Union[int, None]=None, init_value: Union[float, None]=None):
     self._reset()
     name = self._name_new_symbol()
     self._obj = RegMemObject(name, size)

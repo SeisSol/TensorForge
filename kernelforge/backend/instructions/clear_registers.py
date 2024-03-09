@@ -24,8 +24,7 @@ class ClearRegisters(AbstractInstruction):
     writer(f'// clear registers')
     writer.insert_pragma_unroll()
     with writer.For(f'int i = 0; i < {self._src.obj.size}; ++i'):
-      fp_prefix = 'f' if self._context.fp_type == FloatingPointType.FLOAT else ''
-      writer(f'{self._src.name}[i] = 0.0{fp_prefix};')
+      writer(f'{self._src.name}[i] = {self._context.fp_type.literal(0)};')
 
   def __str__(self) -> str:
     return f'clear_regs {self._src.name}[{self._src.obj.size}];'

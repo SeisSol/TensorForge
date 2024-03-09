@@ -17,6 +17,14 @@ def _find_prime_in_range(source, target):
     else:
       return number
 
+# we only need to be coprime to the number of shared memory banks
+def _find_next_coprime(number, conumber):
+  for i in range(number, number + conumber):
+    for j in range(2, conumber):
+      if i % j == 0:
+        break
+    else:
+      return i
 
 class ExtendedTransposePatchLoader(AbstractShrMemLoader):
   """A strategy which loads an entire matrix into shared memory and transposes it on the fly
@@ -59,7 +67,7 @@ class ExtendedTransposePatchLoader(AbstractShrMemLoader):
     src_offset = self._src.data_view.get_offset()
     src_offset = f'{src_offset} + ' if src_offset else ''
 
-    with writer.Block(''):
+    with writer.Scope():
       writer(f'int {tmp_var};')
       writer.new_line()
       if num_hops > 0:

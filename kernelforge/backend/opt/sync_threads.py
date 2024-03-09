@@ -1,6 +1,6 @@
 from typing import List
-from kernelforge.backend.instructions.gemm import Gemm
-from kernelforge.backend.instructions.store import AbstractShrMemWrite
+from kernelforge.backend.instructions.compute import ComputeInstruction
+from kernelforge.backend.instructions.memory import AbstractShrMemWrite
 from kernelforge.backend.instructions.sync_threads import SyncThreads
 from kernelforge.backend.symbol import SymbolType
 from .abstract import AbstractTransformer, Context, AbstractInstruction
@@ -30,8 +30,8 @@ class SyncThreadsOpt(AbstractTransformer):
       if isinstance(instr, AbstractShrMemWrite):
         writes.append(instr.get_dest())
 
-      if isinstance(instr, Gemm):
-        if instr.get_op1() in writes or instr.get_op2() in writes:
+      if isinstance(instr, ComputeInstruction):
+        if any(op in writes for op in instr.get_operands()):
           selected.append(instr)
           writes = []
 
@@ -41,8 +41,8 @@ class SyncThreadsOpt(AbstractTransformer):
     selected = []
     flags = [False] * len(self._regions)
     for index, instr in enumerate(self._instrs):
-      if isinstance(instr, Gemm):
-        for src in [instr.get_op1(), instr.get_op2()]:
+      if isinstance(instr, ComputeInstruction):
+        for src in instr.get_operands():
           if src.stype == SymbolType.SharedMem:
             flags[self._get_region_id(src)] = True
 

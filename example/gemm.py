@@ -24,18 +24,18 @@ parser.add_argument("-b",
 args = parser.parse_args()
 
 mat_a = DenseMatrix(num_rows=56,
-                    num_cols=9,
+                    num_cols=18,
                     addressing=Addressing.STRIDED,
-                    bbox=[0, 0, 56, 9])
+                    bbox=[0, 0, 56, 18])
 
-mat_b = DenseMatrix(num_rows=9,
-                    num_cols=9,
+mat_b = DenseMatrix(num_rows=18,
+                    num_cols=18,
                     addressing=Addressing.STRIDED,
-                    bbox=[0, 0, 9, 9])
+                    bbox=[0, 0, 18, 18])
 
 mat_c = DenseMatrix(num_rows=56,
-                    num_cols=9,
-                    bbox=[0, 0, 56, 9],
+                    num_cols=18,
+                    bbox=[0, 0, 56, 18],
                     addressing=Addressing.STRIDED)
 
 try:

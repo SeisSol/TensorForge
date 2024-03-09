@@ -31,3 +31,15 @@ class HipLexic(CudaLexic):
 
   def get_headers(self):
     return ["hip/hip_runtime.h"]
+
+  def glb_store(self, lhs, rhs, nontemporal=False):
+    if nontemporal and False: # TODO: re-enable once tested
+      return f'__builtin_nontemporal_store({rhs}, &{lhs});'
+    else:
+      return f'{lhs} = {rhs};'
+  
+  def glb_load(self, lhs, rhs, nontemporal=False):
+    if nontemporal and False: # TODO: re-enable once tested
+      return f'{lhs} = __builtin_nontemporal_load(&{rhs});'
+    else:
+      return f'{lhs} = {rhs};'

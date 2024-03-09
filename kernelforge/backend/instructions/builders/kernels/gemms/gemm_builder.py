@@ -15,13 +15,20 @@ from kernelforge.common.matrix.dense import DenseMatrix
 from kernelforge.common.matrix.sparse import SparseMatrix
 from kernelforge.common.matrix.matrix import Matrix
 from kernelforge.common.exceptions import InternalError
-from kernelforge.generators.descriptions import GemmDescr, CSADescr
+from kernelforge.generators.descriptions import GemmDescr, CSADescr, PointwiseDescr, MultilinearDescr, ReductionDescr
 from kernelforge.backend.instructions.builders.allocator_builder import AbstractBuilder
+from kernelforge.backend.instructions.pointwise import build_pointwise
 from .type import GemmKernelType
 
 class GemmKernelsFactory:
   def __init__(self, descr):
     self._descr = descr
+    if isinstance(descr, PointwiseDescr):
+      return
+    if isinstance(descr, MultilinearDescr):
+      raise NotImplementedError('To replace and implement the LoG operator, CSA etc.')
+    if isinstance(descr, ReductionDescr):
+      raise NotImplementedError('To replace and implement the IndexSum, among others')
     if isinstance(descr, GemmDescr):
       self._gemm_kernel_type = descr.kernel_type
       self._mat_b = descr.mat_b
@@ -40,27 +47,23 @@ class GemmKernelsFactory:
 
   def _auto_select(self, **params):
     model = params['context'].get_vm().get_hw_descr().model
-    both_sparse_error = "kernelforge does not support both matrix A and B being sparse"
+    both_sparse_error = 'kernelforge does not support both matrix A and B being sparse'
     if model == 'pvc':
-      if self._sparse_a and self._sparse_b:
-        raise Exception(both_sparse_error)
-      elif self._sparse_b:
-        return GemmKernelType.DENSE_SPARSE_REGISTER_ONLY_BASED
-      elif self._sparse_a:
-        return GemmKernelType.SPARSE_DENSE_REGISTER_ONLY_BASED
-      else:
+      if not self._sparse_a and not self._sparse_b:
         return GemmKernelType.REGISTER_ONLY_BASED
+      # sparse-dense/dense-sparse register-only GEMMs are not yet supported
+    if self._sparse_a and self._sparse_b:
+      raise Exception(both_sparse_error)
+    elif self._sparse_b:
+      return GemmKernelType.DENSE_SPARSE_SHR_MEM_BASED
+    elif self._sparse_a:
+      return GemmKernelType.SPARSE_DENSE_SHR_MEM_BASED
     else:
-      if self._sparse_a and self._sparse_b:
-        raise Exception(both_sparse_error)
-      elif self._sparse_b:
-        return GemmKernelType.DENSE_SPARSE_SHR_MEM_BASED
-      elif self._sparse_a:
-        return GemmKernelType.SPARSE_DENSE_SHR_MEM_BASED
-      else:
-        return GemmKernelType.SHR_MEM_BASED
+      return GemmKernelType.SHR_MEM_BASED
 
   def get_builder(self, **params):
+    if isinstance(self._descr, PointwiseDescr):
+      return build_pointwise(self._descr.operation, **params)
     if self._csa:
       return CSA(**params)
     if self._gemm_kernel_type == GemmKernelType.AUTO:
@@ -220,7 +223,8 @@ class DenseGemmBuilder(AbstractBuilder):
                                    op1=self._mem_region_a,
                                    op2=self._mem_region_b,
                                    dest=self._dest_regs,
-                                   prefer_align=self._descr.prefer_align))
+                                   prefer_align=self._descr.prefer_align,
+                                   num_threads=self._num_threads))
 
   def _make_store(self):
     if self._dest_obj in self._scopes:

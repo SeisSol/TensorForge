@@ -1,7 +1,7 @@
 from typing import List, Union, Type
 from copy import deepcopy
 import hashlib
-from kernelforge.generators.descriptions import OperationDescription, GemmDescr, CSADescr
+from kernelforge.generators.descriptions import OperationDescription, GemmDescr, CSADescr, PointwiseDescr
 from kernelforge.common.context import Context
 from kernelforge.common.basic_types import Addressing, GeneralLexicon, DataFlowDirection
 from kernelforge.common.aux import get_extra_offset_name
@@ -10,7 +10,7 @@ from kernelforge.backend.opt import OptimizationStage
 from kernelforge.backend.scopes import Scopes
 from kernelforge.backend.symbol import Symbol, SymbolType
 from kernelforge.backend.instructions.abstract_instruction import AbstractInstruction
-from kernelforge.backend.instructions.builders.kernels.gemms.gemm_builder import DenseGemmBuilder
+from kernelforge.backend.instructions.builders.multilinear_builder import MultilinearBuilder
 from kernelforge.backend.instructions.builders.ptr_manip_builder import GetElementPtrBuilder
 from kernelforge.backend.instructions.builders.allocator_builder import ShrMemAllocBuilder, RegistersAllocBuilder
 from kernelforge.backend.writer import Writer
@@ -136,10 +136,6 @@ class Generator:
 
       lexic.get_stream_via_pointer(writer, 'stream', GeneralLexicon.STREAM_PTR_STR)
 
-      # if_stream_exists = f'({GeneralLexicon.STREAM_PTR_STR} != nullptr)'
-      # stream_obj = f'static_cast<{lexic.stream_type}>({GeneralLexicon.STREAM_PTR_STR})'
-      # writer(f'{lexic.stream_type} stream = {if_stream_exists} ? {stream_obj} : 0;')
-
       args = self._generate_kernel_base_args()
       args = ', '.join(args)
       kernel_name = f'kernel_{self._base_kernel_name}'
@@ -177,7 +173,7 @@ class Generator:
 
     # allocate registers
     builder = RegistersAllocBuilder(self._context, self._scopes)
-    builder.build(self._accumulator_size, 0.0)
+    builder.build(size=self._accumulator_size, init_value=0.0)
     self._register_array_obj = builder.get_resultant_obj()
     self._ir.extend(builder.get_instructions())
 
@@ -189,22 +185,15 @@ class Generator:
 
     self._scopes.add_scope()
     # generate GEMM and store operations
-    builder = DenseGemmBuilder(self._context,
+    builder = MultilinearBuilder(self._context,
                           self._scopes,
                           self._scopes.get_symbol(self._register_array_obj),
                           self._scopes.get_symbol(self._shr_mem_obj),
                           self._num_threads)
-
+    
     for gemm_descr in self.gemm_list:
-      if isinstance(gemm_descr, GemmDescr):
-        builder.build(op1=self._scopes.get_symbol(gemm_descr.mat_a),
-                      op2=self._scopes.get_symbol(gemm_descr.mat_b),
-                      dest_obj=gemm_descr.mat_c,
-                      descr=gemm_descr)
-      elif isinstance(gemm_descr, CSADescr):
-        builder.build(op1=self._scopes.get_symbol(gemm_descr.mat_a),
-                      op2=None,
-                      dest_obj=gemm_descr.mat_c,
+      builder.build(ops=[self._scopes.get_symbol(op) for op in gemm_descr.ops],
+                      dest_obj=gemm_descr.dest,
                       descr=gemm_descr)
       self._ir.extend(builder.get_instructions())
 
@@ -227,9 +216,9 @@ class Generator:
   def _check_consistency_with_user_options(self):
     user_options = self._context.get_user_options()
     for gemm in self.gemm_list:
-      if not gemm.is_strict_math() == user_options.exact_contraction_length:
+      if not gemm.is_strict_match() == user_options.exact_contraction_length:
         msg = 'gemm list is not consistent with user options. '
-        msg += f'`strict_math` in gemm descr. set to {gemm.is_strict_math()}, '
+        msg += f'`strict_math` in gemm descr. set to {gemm.is_strict_match()}, '
         msg += f'but `exact_contraction_length` is set to {user_options.exact_contraction_length}'
         raise RuntimeError(msg)
 
@@ -274,7 +263,7 @@ class Generator:
       if matrix not in self._tmp_list:
         self._scopes.add_to_global(Symbol(obj=matrix,
                                           name=matrix.name,
-                                          stype=SymbolType.Batch))
+                                          stype=SymbolType.Scalar if matrix.addressing == Addressing.SCALAR else SymbolType.Batch))
 
   def _generate_kernel_name(self):
     global_symbols = self._scopes.get_global_scope().values()
@@ -284,10 +273,7 @@ class Generator:
 
     for gemm in self.gemm_list:
       long_name.extend([
-        str(gemm.alpha),
-        str(gemm.beta),
-        str(gemm.trans_a),
-        # str(gemm.trans_b)
+        str(gemm.dest)
       ])
 
     result = hashlib.md5(', '.join(long_name).encode())
@@ -314,30 +300,19 @@ class Generator:
       writer(f'// {item}')
     writer.new_line()
 
-  def _generate_scalar_param_list(self, with_types=True):
-    scalar_type = self._context.fp_as_str() if with_types else ''
-    last_gemm = self.gemm_list[-1]
-    params = []
-    if not isinstance(last_gemm.alpha, (float, int)):
-      name = self._get_scalar_name(last_gemm.alpha, GeneralLexicon.ALPHA_SYMBOL_NAME)
-      params.append(f'{scalar_type} {name}')
-
-    if not isinstance(last_gemm.beta, (float, int)):
-      name = self._get_scalar_name(last_gemm.beta, GeneralLexicon.BETA_SYMBOL_NAME)
-      params.append(f'{scalar_type} {name}')
-
-    return params
-
   def _generate_base_params_list(self, symbol_list, with_types=True, with_defaults=False):
     fp_as_str = self._context.fp_as_str()
     params = []
     for symbol in symbol_list:
-      ptr_type = Addressing.addr2ptr_type(symbol.obj.addressing)
-      const_modifier = 'const ' if symbol.obj.direction == DataFlowDirection.SOURCE else ''
-      batch_type = f'{const_modifier}{fp_as_str}{ptr_type}' if with_types else ''
-      offset_type = 'unsigned' if with_types else ''
-      params.extend([f'{batch_type} {symbol.name}',
-                     f'{offset_type} {get_extra_offset_name(symbol)}'])
+      if symbol.obj.addressing == Addressing.SCALAR:
+        params.extend([f'{fp_as_str} {symbol.name}' if with_types else f'{symbol.name}'])
+      else:
+        ptr_type = Addressing.addr2ptr_type(symbol.obj.addressing)
+        const_modifier = 'const ' if symbol.obj.direction == DataFlowDirection.SOURCE else ''
+        batch_type = f'{const_modifier}{fp_as_str}{ptr_type}' if with_types else ''
+        offset_type = 'unsigned' if with_types else ''
+        params.extend([f'{batch_type} {symbol.name}',
+                      f'{offset_type} {get_extra_offset_name(symbol)}'])
 
     batch_size_type = 'size_t' if with_types else ''
     params.append(f'{batch_size_type} {GeneralLexicon.NUM_ELEMENTS}')
@@ -349,38 +324,34 @@ class Generator:
 
   def _generate_kernel_base_args(self):
     global_symbols = self._scopes.get_global_scope().values()
-    args = self._generate_scalar_param_list(with_types=False)
-    args.extend(self._generate_base_params_list(global_symbols, with_types=False))
+    args = self._generate_base_params_list(global_symbols, with_types=False)
     return args
 
   def _generate_kernel_proto(self, writer):
     global_symbols = self._scopes.get_global_scope().values()
-    params = self._generate_scalar_param_list()
 
-    params.extend(self._generate_base_params_list(symbol_list=global_symbols,
-                                                  with_types=True))
-    params = ', '.join(params)
+    params = self._generate_base_params_list(symbol_list=global_symbols, with_types=True)
+    str_params = ', '.join(params)
     total_num_threads_per_block = self._num_threads * self._shr_mem_obj.get_mults_per_block()
 
     lexic = self._context.get_vm().get_lexic()
 
     launch_bounds = (total_num_threads_per_block,)
 
-    return lexic.kernel_definition(writer, launch_bounds, self._base_kernel_name, params, self._context.fp_as_str(),
+    return lexic.kernel_definition(writer, launch_bounds, self._base_kernel_name, str_params, self._context.fp_as_str(),
                                          self._shr_mem_obj.get_total_size(), global_symbols)
 
   def _generate_launcher_proto(self, with_defaults=True):
     global_symbols = self._scopes.get_global_scope().values()
-    params = self._generate_scalar_param_list()
 
-    params.extend(self._generate_base_params_list(symbol_list=global_symbols,
+    params = self._generate_base_params_list(symbol_list=global_symbols,
                                                   with_types=True,
-                                                  with_defaults=with_defaults))
+                                                  with_defaults=with_defaults)
 
     default_value = ' = nullptr' if with_defaults else ''
     params.append(f'void* {GeneralLexicon.STREAM_PTR_STR}{default_value}')
-    params = ', '.join(params)
-    return f'void launcher_{self._base_kernel_name}({params})'
+    str_params = ', '.join(params)
+    return f'void launcher_{self._base_kernel_name}({str_params})'
 
   def default_generate_call_site(self):
     if not self._is_registerd:
@@ -390,32 +361,30 @@ class Generator:
       if item.obj.alias:
         item.name = item.obj.alias
 
-    args = self._generate_scalar_param_list(with_types=False)
-    args.extend(self._generate_base_params_list(symbol_list=symbols,
-                                                with_types=False))
+    args = self._generate_base_params_list(symbol_list=symbols,
+                                                with_types=False)
 
     args.append(f'{GeneralLexicon.FLAGS_NAME}')
     args.append(f'{GeneralLexicon.STREAM_PTR_STR}')
-    args = ', '.join(args)
-    return f'launcher_{self._base_kernel_name}({args});'
+    str_args = ', '.join(args)
+    return f'launcher_{self._base_kernel_name}({str_args});'
+
+  def get_helper_headers(self):
+    headerset = set()
+    for irinst in self._ir:
+      for header in irinst.get_headers():
+        headerset.add(header)
+    return list(headerset)
 
   def generate_call_site(self,
                          mat_name_map,
                          offset_name_map,
-                         alpha,
-                         beta,
                          num_element,
                          flags=None,
                          stream=None):
     args = []
 
-    # add scalars
-    scalars = [alpha, beta]
-    for scalar in scalars:
-      if not isinstance(scalar, float):
-        args.append(scalar)
-
-    # add matrices
+    # add tensors
     symbols = list(self._scopes.get_global_scope().values())
     for symbol in symbols:
       if symbol.obj.alias in mat_name_map:

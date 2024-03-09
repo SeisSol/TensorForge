@@ -46,7 +46,7 @@ class BenchGenerator:
 
   def _adjust_template(self):
     def is_batch(addressing):
-      return False if addressing == Addressing.NONE else True
+      return False if addressing == Addressing.NONE or addressing == Addressing.SCALAR else True
 
     def trans2str(is_trans):
       return 'LayoutType::Trans' if is_trans else 'LayoutType::NoTrans'

@@ -1,5 +1,5 @@
 from typing import List
-from kernelforge.backend.instructions.store import StoreRegToGlb
+from kernelforge.backend.instructions.memory.store import StoreRegToGlb
 from .abstract import AbstractTransformer, Context, AbstractInstruction
 
 

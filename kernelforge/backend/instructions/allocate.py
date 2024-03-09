@@ -21,26 +21,17 @@ class RegisterAlloc(AbstractInstruction):
     dest.add_user(self)
 
   def gen_code(self, writer: Writer):
-    if self._dest.obj.size < 1:
-      raise InternalError('size of reg. obj must be at least 1')
-
-    if self._dest.obj.size == 1:
-      init_value = ''
-      if isinstance(self._init_value, float):
-        init_value = f' = {self._init_value}'
-      result = f'{self._context.fp_as_str()} {self._dest.obj.name}{init_value};'
-    else:
+    if self._dest.obj.size > 0:
       init_values_list = ''
       if isinstance(self._init_value, float):
         real_literal = self._vm.get_real_literal()
         init_values = ', '.join([f'{str(self._init_value)}{real_literal}'] * self._dest.obj.size)
         init_values_list = f' = {{{init_values}}}'
       result = f'{self._context.fp_as_str()} {self._dest.obj.name}[{self._dest.obj.size}]{init_values_list};'
-    writer(result)
+      writer(result)
 
   def __str__(self) -> str:
-    return f'{self._dest.obj.name} = alloc_regs {self._dest.obj.size};'
-
+    return f'{self._dest.obj.name} = alloc_regs [{self._dest.obj.size}];'
 
 class ShrMemAlloc(AbstractInstruction):
   def __init__(self,

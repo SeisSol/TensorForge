@@ -1,6 +1,5 @@
 from typing import List, Dict, Union, Tuple, Set
-from kernelforge.backend.instructions.store import StoreRegToShr
-from kernelforge.backend.instructions.loaders.abstract_loader import AbstractShrMemLoader
+from kernelforge.backend.instructions.memory import MemoryInstruction
 from kernelforge.backend.symbol import Symbol
 from kernelforge.backend.data_types import ShrMemObject
 from kernelforge.common.exceptions import GenerationError
@@ -32,8 +31,8 @@ class ShrMemOpt(AbstractOptStage):
   def _check_regions(self) -> None:
     for region in self._regions:
       for symbol in region:
-        first_user = symbol.get_fist_user()
-        if not isinstance(first_user, (AbstractShrMemLoader, StoreRegToShr)):
+        first_user = symbol.get_first_user()
+        if not isinstance(first_user, MemoryInstruction):
           raise GenerationError(f'expected the first user of symbol {symbol.name} '
                                 f'to be a subtype AbstractShrMemLoader or StoreRegToShr')
 
@@ -42,7 +41,7 @@ class ShrMemOpt(AbstractOptStage):
     max_mem_per_region: List[int] = [0 for region in self._regions]
     for index, region in enumerate(self._regions):
       for symbol in region:
-        instruction: Union[AbstractShrMemLoader, StoreRegToShr] = symbol.get_fist_user()
+        instruction: MemoryInstruction = symbol.get_first_user()
         max_mem_per_region[index] = max(instruction.compute_shared_mem_size(),
                                         max_mem_per_region[index])
       max_memory += max_mem_per_region[index]
@@ -58,5 +57,5 @@ class ShrMemOpt(AbstractOptStage):
   def _assign_offsets(self, offsets: List[int]):
     for offset, region in zip(offsets, self._regions):
       for symbol in region:
-        shr_mem_instr = symbol.get_fist_user()
+        shr_mem_instr = symbol.get_first_user()
         shr_mem_instr.set_shr_mem_offset(offset)

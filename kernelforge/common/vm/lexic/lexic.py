@@ -1,5 +1,6 @@
 from abc import ABC, abstractmethod
-
+from enum import Enum
+from kernelforge.common.operation import Operation
 
 class Lexic(ABC):
   """
@@ -84,3 +85,13 @@ class Lexic(ABC):
   @abstractmethod
   def get_headers(self):
     pass
+
+  @abstractmethod
+  def get_operation(self, op: Operation, value1, value2):
+    pass
+
+  def glb_store(self, lhs, rhs, nontemporal=False):
+    return f'{lhs} = {rhs};'
+  
+  def glb_load(self, lhs, rhs, nontemporal=False):
+    return f'{lhs} = {rhs};'
