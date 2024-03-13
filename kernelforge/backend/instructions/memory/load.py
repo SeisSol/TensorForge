@@ -91,12 +91,13 @@ class GlbToShrLoader(AbstractShrMemWrite):
     for dsts in dst_shape:
       self._shm_volume *= dsts
 
-  def gen_code_inner(self, writer: Writer) -> None:
+  def gen_code_declare(self, writer: Writer) -> None:
     writer.new_line()
     lhs = f'{self._fp_as_str}* {self._vm.get_lexic().restrict_kw} {self._dest.name}'
     rhs = f'{self._shr_mem.name}[{self._shr_mem_offset}]'
     writer(f'{lhs} = &{rhs};')
 
+  def gen_code_inner(self, writer: Writer) -> None:
     allow_nontemporal = len(self._src.get_user_list()) == 1
 
     src_offset = 0#self._src.data_view.get_offset()

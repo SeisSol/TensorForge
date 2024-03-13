@@ -12,7 +12,11 @@ class MemoryInstruction(AbstractInstruction):
   def gen_code_inner(self, writer: Writer):
     pass
   
+  def gen_code_declare(self, writer: Writer):
+    pass
+
   def gen_code(self, writer: Writer):
+    self.gen_code_declare(writer)
     with writer.Scope():
       writer.Comment(self.__str__())
       self.gen_code_inner(writer)

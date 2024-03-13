@@ -48,6 +48,10 @@ class MultilinearInstruction(ComputeInstruction):
 
         self._analyze()
 
+    def _choose_lead_dim(self):
+        self._shm_volume = 0
+        pass
+
     def _analyze(self):
         targetrank = 0
         for i, op in enumerate(self._ops):
@@ -73,21 +77,28 @@ class MultilinearInstruction(ComputeInstruction):
             assert -i-1 in preKs
             self._ks[i] = preKs[-i-1]
         
+        loads = []
+        reductions = []
+        iterate_dimensions = []
+        # TODO: sort to minimize loads and multiplications
+
+        # TODO: check if there's even something to compute left... Maybe. If the codegen doesn't get it at least
+        
         # TODO: handle offsets
         self._dest.data_view = DataView(shape = [u - l for l,u in self._ns], permute=[i for i in range(targetrank)])
 
     def gen_code_inner(self, writer: Writer):
-        with writer.If(self.gen_mask_threads(self._dest.data_view.shape[0])):
+        with writer.If(self.gen_range_mask_threads(self._ns[0][0], self._ns[0][1])):
             loopstack = []
-
-            for i, (dimmin, dimmax) in enumerate(self._ns[1:]):
-                writer.insert_pragma_unroll()
-                loop = writer.For(f'int n{i+1} = {dimmin}; n{i+1} < {dimmax}; ++n{i}')
-                loop.__enter__()
-                loopstack += [loop]
 
             for i, (dimmin, dimmax) in enumerate(self._ks):
                 loop = writer.For(f'int k{i} = {dimmin}; k{i} < {dimmax}; ++k{i}')
+                loop.__enter__()
+                loopstack += [loop]
+
+            for i, (dimmin, dimmax) in enumerate(self._ns[1:]):
+                writer.insert_pragma_unroll()
+                loop = writer.For(f'int n{i+1} = {dimmin}; n{i+1} < {dimmax}; ++n{i+1}')
                 loop.__enter__()
                 loopstack += [loop]
 
@@ -104,6 +115,46 @@ class MultilinearInstruction(ComputeInstruction):
 
             for loop in loopstack[::-1]:
                 loop.__exit__(None, None, None)
+
+    def _leading_dim(self, writer: Writer):
+        with writer.Scope():
+            loopstack = []
+            for i, (dimmin, dimmax) in enumerate(self._ns[1:]):
+                writer.insert_pragma_unroll()
+                loop = writer.For(f'int n{i+1} = {dimmin}; n{i+1} < {dimmax}; ++n{i}')
+                loop.__enter__()
+                loopstack += [loop]
+
+            self._dest.load(writer, self._context, 'value', [self._vm.get_lexic().thread_idx_x] + [f'n{i+1}' for i,_ in enumerate(self._ns[1:])], False)
+            writer(f'auto* shmAddr = &{self._shr_mem.name}[{self._shr_mem_offset}];')
+            # TODO: reduce here
+            writer(f'{self._fp_as_str} newvalue = shmAddr[{sublane_address}];')
+            self._dest.store(writer, self._context, 'newvalue', [self._vm.get_lexic().thread_idx_x] + [f'n{i+1}' for i,_ in enumerate(self._ns[1:])], False)
+            
+            for loop in loopstack[::-1]:
+                loop.__exit__(None, None, None)
+    
+    def _butterfly_reduction(self, writer: Writer, amd):
+        for i in [32,16,8,4,2,1]:
+            with writer.Scope():
+                if amd:
+                    writer(f'{self._fp_as_str} rvalue = __shfl_xor(value, {i});') # TODO: check if swizzle is used here (or DPP)
+                    # __amdgcn_move_dpp(int src, int dpp_ctrl, int row_mask, int bank_mask, bool bound_ctrl)
+                    # __amdgcn_move_dpp(static_cast<int>(value), 0x12{i}, 0, 0, false) # 1-8, float
+                    # use xor/permute for everything else :(
+                else:
+                    writer(f'{self._fp_as_str} rvalue = __shfl_xor_sync(-1, value, {i});')
+                writer(f'value = {self._sumOperation.format("value", f"rvalue")};')
+        writer(f'atomicAdd(&shmAddr[{sublane_address}], value);')
+        writer('__syncthreads();')
+    
+    def _sycl_reduction(self, writer: Writer):
+        writer(f'sycl::reduction();')
+    
+    def _omp_reduction(self, writer: Writer):
+        writer(f'#pragma omp for reduction({self._sumOperation}: shmAddr[0:{self._total_shm_size}])')
+        with writer.For(f'int i = 0; i < TODO; ++i'):
+            writer(f'shmAddr[i] = {self._sumOperation.format("shmAddr[i]", f"value")};')
 
     def get_operands(self):
         return self._ops
