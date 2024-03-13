@@ -62,6 +62,7 @@ class DataView:
     return self._bbox.size(index)
   
   def get_dim_strides(self, mask=[], bbox=False):
+    # TODO: permute? Yes or no? Also, unify SPPs.
     strides = [1] * self.rank()
     current = 1
     for i, size in enumerate(self.get_bbox().sizes() if bbox else self.shape):
@@ -210,10 +211,12 @@ class Symbol:
       value = self.obj.value(runIdx)
       if value is not None:
         writer(f'{variable} = {self.get_fptype.literal(value)};')
+      # TODO: variable reference if no value present (self.obj.index(runIdx)?)
     if isinstance(index[pos], int):
       runIdx[pos] = index[pos]
     else:
       if True: # sparse/data
+        # TODO: check sparsity pattern here for which ifs are worth it
         for i in range(self.data_view._shape[pos]):
           myIndex[pos] = i
           with writer.If(f'{index[pos]} == {i}'):

@@ -51,11 +51,12 @@ class StoreRegToShr(AbstractShrMemWrite):
     view: DataView = self._dest.data_view
     self._shm_volume: int = view.get_volume()
 
-  def gen_code_inner(self, writer: Writer) -> None:
+  def gen_code_declare(self, writer: Writer):
     lhs = f'{self._fp_as_str}* {self._vm.get_lexic().restrict_kw} {self._dest.name}'
     rhs = f'&{self._shr_mem.name}[{self._shr_mem_offset}]'
     writer(f'{lhs} = {rhs};')
 
+  def gen_code_inner(self, writer: Writer) -> None:
     dest_view = self._dest.data_view
     src_bbox = self._src.data_view.get_bbox()
 
