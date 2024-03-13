@@ -78,20 +78,25 @@ class TargetLexic(Lexic):
         self.function.__enter__()
         if backend == 'targetdart':
           batched_symbols_inout = [symbol for symbol in global_symbols if symbol.obj.addressing == Addressing.PTR_BASED and symbol.obj.direction == DataFlowDirection.SOURCESINK]
-          batched_symbols_in = [symbol for symbol in global_symbols if symbol.obj.addressing == Addressing.PTR_BASED and symbol.obj.direction == DataFlowDirection.SINK]
-          batched_symbols_out = [symbol for symbol in global_symbols if symbol.obj.addressing == Addressing.PTR_BASED and symbol.obj.direction == DataFlowDirection.SOURCE]
+          batched_symbols_in = [symbol for symbol in global_symbols if symbol.obj.addressing == Addressing.PTR_BASED and symbol.obj.direction == DataFlowDirection.SOURCE]
+          batched_symbols_out = [symbol for symbol in global_symbols if symbol.obj.addressing == Addressing.PTR_BASED and symbol.obj.direction == DataFlowDirection.SINK]
           strided_symbols_inout = [symbol for symbol in global_symbols if symbol.obj.addressing == Addressing.STRIDED and symbol.obj.direction == DataFlowDirection.SOURCESINK]
-          strided_symbols_in = [symbol for symbol in global_symbols if symbol.obj.addressing == Addressing.STRIDED and symbol.obj.direction == DataFlowDirection.SINK]
-          strided_symbols_out = [symbol for symbol in global_symbols if symbol.obj.addressing == Addressing.STRIDED and symbol.obj.direction == DataFlowDirection.SOURCE]
+          strided_symbols_in = [symbol for symbol in global_symbols if symbol.obj.addressing == Addressing.STRIDED and symbol.obj.direction == DataFlowDirection.SOURCE]
+          strided_symbols_out = [symbol for symbol in global_symbols if symbol.obj.addressing == Addressing.STRIDED and symbol.obj.direction == DataFlowDirection.SINK]
           constant_symbols = [symbol for symbol in global_symbols if symbol.obj.addressing == Addressing.NONE]
 
           device = 'device(TARGETDART_DEVICE(0))'
           deviceAny = 'device(TARGETDART_ANY)'
-          for symbol in batched_symbols_in + batched_symbols_out + batched_symbols_inout:
-            file(f'static unordered_map<real**, real(*)[{symbol.obj.get_real_volume()}]> {symbol.name}_datamap;')
+          for symbol in batched_symbols_in:
+            file(f'static unordered_map<const {precision}**, {precision}(*)[{symbol.obj.get_real_volume()}]> {symbol.name}_datamap;')
             file(f'auto* {symbol.name}_ptr = {symbol.name}_datamap[{symbol.name}];')
             with file.If(f'{symbol.name}_ptr == nullptr'):
-              file(f'{symbol.name}_ptr = reinterpret_cast<decltype({symbol.name}_ptr)>(std::malloc(sizeof(real[{symbol.obj.get_real_volume()}]) * bX));')
+              file(f'{symbol.name}_ptr = reinterpret_cast<decltype({symbol.name}_ptr)>(std::malloc(sizeof({precision}[{symbol.obj.get_real_volume()}]) * bX));')
+          for symbol in batched_symbols_out + batched_symbols_inout:
+            file(f'static unordered_map<{precision}**, {precision}(*)[{symbol.obj.get_real_volume()}]> {symbol.name}_datamap;')
+            file(f'auto* {symbol.name}_ptr = {symbol.name}_datamap[{symbol.name}];')
+            with file.If(f'{symbol.name}_ptr == nullptr'):
+              file(f'{symbol.name}_ptr = reinterpret_cast<decltype({symbol.name}_ptr)>(std::malloc(sizeof({precision}[{symbol.obj.get_real_volume()}]) * bX));')
           if len(batched_symbols_in + batched_symbols_inout) > 0:
             file(f'#pragma omp target teams nowait num_teams(bX) depend(inout: streamobj[0]) map(from: {", ".join(f"{symbol.name}_ptr[0:bX]" for symbol in batched_symbols_in + batched_symbols_inout)}) is_device_ptr({", ".join(symbol.name for symbol in global_symbols)}) {device}')
             with file.Scope():

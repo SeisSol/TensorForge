@@ -4,6 +4,7 @@ from .boundingbox import BoundingBox
 from functools import reduce
 from typing import List, Union
 from ..basic_types import Addressing, FloatingPointType, DataFlowDirection
+from kernelforge.common.exceptions import GenerationError
 
 class Tensor:
     def __init__(self,
@@ -30,13 +31,6 @@ class Tensor:
         else:
             self.bbox = BoundingBox([0] * len(shape), shape)
 
-        # check whether bbox was given correctly
-        if any(dimshape < dimsize for dimshape, dimsize in zip(self.shape, self.bbox.sizes())):
-            raise GenerationError(f'Tensor {self} is smaller than bounding box {self.bbox}')
-
-        if any(dimshape < dimupper for dimshape, dimupper in zip(self.shape, self.bbox.upper())):
-            raise GenerationError(f'Bounding box {self.bbox} is smaller than tensor {self}')
-
         if isinstance(addressing, Addressing):
             self.addressing = addressing
             self.ptr_type = Addressing.addr2ptr_type(self.addressing)
@@ -46,6 +40,13 @@ class Tensor:
         if self.addressing == Addressing.SCALAR:
             # allow higher-order tensors, if they're effectively a scalar anyways
             assert all(d == 1 for d in self.shape)
+
+        # check whether bbox was given correctly
+        if any(dimshape < dimsize for dimshape, dimsize in zip(self.shape, self.bbox.sizes())):
+            raise GenerationError(f'Tensor {self} is smaller than bounding box {self.bbox}')
+
+        if any(dimshape < dimupper for dimshape, dimupper in zip(self.shape, self.bbox.upper())):
+            raise GenerationError(f'Bounding box {self.bbox} is smaller than tensor {self}')
 
     def set_data_flow_direction(self, direction: DataFlowDirection):
         if self.direction is None or self.direction == direction:

@@ -410,9 +410,9 @@ class MultilinearDescr:
     self.permute = permute
     self._strict_match = False
 
-    self.dest.set_data_flow_direction(DataFlowDirection.SOURCE)
+    self.dest.set_data_flow_direction(DataFlowDirection.SINK)
     for op in self.ops:
-      op.set_data_flow_direction(DataFlowDirection.SINK)
+      op.set_data_flow_direction(DataFlowDirection.SOURCE)
 
   def _lead_dim(self):
     return self.dest.get_actual_shape()[0]

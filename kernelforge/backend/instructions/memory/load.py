@@ -120,7 +120,7 @@ class GlbToShrLoader(AbstractShrMemWrite):
   def _write_datatransfer(self, writer, src_offset, dst_offset, index, length, nontemporal):
     if not self._use_cuda_memcpy:
       pos = 0
-      for vecsize in [4,2,1]:
+      for vecsize in [1]:
         if src_offset % vecsize == 0:
           num_hops = ((length - pos * self._num_threads) // (self._num_threads * vecsize)) * vecsize
           self._write_hop(writer, src_offset, dst_offset, index, pos, pos + num_hops, vecsize, nontemporal)
