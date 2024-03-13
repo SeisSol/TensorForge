@@ -389,7 +389,8 @@ class Generator:
     for symbol in symbols:
       if symbol.obj.alias in mat_name_map:
         args.append(mat_name_map[symbol.obj.alias])
-        args.append(offset_name_map[symbol.obj.alias])
+        if symbol.obj.addressing != Addressing.SCALAR:
+          args.append(offset_name_map[symbol.obj.alias])
 
     # add num. elements
     args.append(num_element)
