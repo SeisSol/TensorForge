@@ -111,7 +111,7 @@ class StoreRegToGlb(AbstractInstruction):
                               permute=None,
                               bbox=dest.obj.get_bbox())
     
-    if dest.data_view.get_dim_size(0) != src.data_view.get_dim_size(0):
+    if dest.data_view.get_dim_size(0) < src.data_view.get_dim_size(0):
       raise InternalError('store: `src` and `dest` do not match in size aling dim `0`')
 
     self._dest: Symbol = dest
@@ -124,6 +124,8 @@ class StoreRegToGlb(AbstractInstruction):
   def gen_code(self, writer: Writer) -> None:
     writer.new_line()
     dest_view = self._dest.data_view
+
+    allow_nontemporal = len(self._src.get_user_list()) == 1
 
     writer('// write results back to glb. memory')
     src_bbox = self._src.data_view.get_bbox()
@@ -138,7 +140,7 @@ class StoreRegToGlb(AbstractInstruction):
         indices += [f'i{i}']
 
       self._src.load(writer, self._context, 'value', indices, False)
-      self._dest.store(writer, self._context, 'value', indices, False)
+      self._dest.store(writer, self._context, 'value', indices, allow_nontemporal)
       
       for loop in reversed(loops):
         loop.__exit__(None, None, None)
