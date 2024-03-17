@@ -3,8 +3,9 @@ from kernelforge.common.basic_types import FloatingPointType
 
 class CudaLexic(Lexic):
 
-  def __init__(self, underlying_hardware):
+  def __init__(self, backend, underlying_hardware):
     super().__init__(underlying_hardware)
+    self._backend = backend
     self.thread_idx_y = "threadIdx.y"
     self.thread_idx_x = "threadIdx.x"
     self.thread_idx_z = "threadIdx.z"

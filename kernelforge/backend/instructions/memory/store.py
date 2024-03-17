@@ -127,7 +127,7 @@ class StoreRegToGlb(AbstractInstruction):
 
     allow_nontemporal = len(self._src.get_user_list()) == 1
 
-    writer('// {self}')
+    writer(f'// {self}')
     src_bbox = self._src.data_view.get_bbox()
     with writer.If(self.gen_range_mask_threads(begin=src_bbox.lower()[0], end=src_bbox.upper()[0])):
       loops = []

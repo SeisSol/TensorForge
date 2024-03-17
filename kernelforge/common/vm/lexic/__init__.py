@@ -7,9 +7,9 @@ from .target_lexic import TargetLexic
 
 def lexic_factory(backend, underlying_hardware):
   if backend == "cuda":
-    return CudaLexic(underlying_hardware)
+    return CudaLexic(backend, underlying_hardware)
   elif backend == "hip":
-    return HipLexic(underlying_hardware)
+    return HipLexic(backend, underlying_hardware)
   elif backend == "hipsycl" or backend == "oneapi":
     return SyclLexic(backend, underlying_hardware)
   elif backend == "omptarget" or backend == "targetdart":

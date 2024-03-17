@@ -3,8 +3,9 @@ from .lexic import Lexic
 
 
 class HipLexic(CudaLexic):
-  def __init__(self, underlying_hardware):
+  def __init__(self, backend, underlying_hardware):
     super().__init__(underlying_hardware)
+    self._backend = backend
     self.thread_idx_y = "hipThreadIdx_y"
     self.thread_idx_x = "hipThreadIdx_x"
     self.thread_idx_z = "hipThreadIdx_z"
