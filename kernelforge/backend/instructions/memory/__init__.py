@@ -7,6 +7,7 @@ from kernelforge.common.context import Context
 class MemoryInstruction(AbstractInstruction):
   def __init__(self, context: Context):
     super().__init__(context)
+    self._declare = True
 
   @abstractmethod
   def gen_code_inner(self, writer: Writer):
@@ -16,7 +17,8 @@ class MemoryInstruction(AbstractInstruction):
     pass
 
   def gen_code(self, writer: Writer):
-    self.gen_code_declare(writer)
+    if self._declare:
+      self.gen_code_declare(writer)
     with writer.Scope():
       writer.Comment(self.__str__())
       self.gen_code_inner(writer)
@@ -36,9 +38,10 @@ class AbstractShrMemWrite(MemoryInstruction):
       size = self._shm_volume
     return size
 
-  def set_shr_mem_offset(self, offset: int) -> None:
+  def set_shr_mem_offset(self, offset: int, first: bool) -> None:
     self._shr_mem_offset = offset
     self._is_ready = True
+    self._declare = first
 
   @abstractmethod
   def get_dest(self):

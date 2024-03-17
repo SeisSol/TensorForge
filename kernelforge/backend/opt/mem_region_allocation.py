@@ -40,16 +40,16 @@ class MemoryRegionAllocation(AbstractOptStage):
     num_regions = MemoryRegionAllocation.compute_num_regions(self._live_map)
     variable_set = self._get_variable_set()
     self._adj_list, self._objects2vertices_map = self._generate_vertices(variable_set)
-    self._assign_neighbours()
+    self._assign_neighbors()
 
     self._regions: List[Region] = [Region() for i in range(num_regions)]
     gc = GraphColoring(graph=copy(self._adj_list), user_objects=self._regions)
     coloring_map: Dict[Vertex, object] = gc.apply()
 
-    vertices2obkects = {vertex: name for name, vertex in self._objects2vertices_map.items()}
+    vertices2objects = {vertex: name for name, vertex in self._objects2vertices_map.items()}
     for vertex in self._adj_list:
       mem_region = coloring_map[vertex]
-      mem_region.add_item(vertices2obkects[vertex])
+      mem_region.add_item(vertices2objects[vertex])
 
   def get_regions(self) -> List[Region]:
     return self._regions
@@ -71,9 +71,10 @@ class MemoryRegionAllocation(AbstractOptStage):
       objects2vertices_map[variable] = vertex
     return vertices, objects2vertices_map
 
-  def _assign_neighbours(self) -> None:
+  def _assign_neighbors(self) -> None:
     for live_vars in self._live_map.values():
       if live_vars:
+        # the loop over both variables will lead to a symmetric graph
         for var1 in live_vars:
           for var2 in live_vars:
             vertex1 = self._objects2vertices_map[var1]

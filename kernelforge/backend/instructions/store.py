@@ -7,7 +7,6 @@ from kernelforge.common.exceptions import InternalError
 from kernelforge.backend.writer import Writer
 from .abstract_instruction import AbstractInstruction, AbstractShrMemWrite
 from kernelforge.common.basic_types import FloatingPointType
-from copy import deepcopy
 
 
 class StoreRegToShr(AbstractShrMemWrite):
@@ -45,7 +44,7 @@ class StoreRegToShr(AbstractShrMemWrite):
                               bbox=bbox)
 
     self._dest: Symbol = dest
-    self._src: Symbol = deepcopy(src)
+    self._src: Symbol = src.clone()
     self._shr_mem: Symbol = shr_mem
     self._num_threads: int = num_threads
     self._shr_mem_offset: Union[int, None] = None
@@ -118,7 +117,7 @@ class StoreRegToGlb(AbstractInstruction):
       raise InternalError('store: `src` and `dest` do not match in size aling dim `0`')
 
     self._dest: Symbol = dest
-    self._src: Symbol = deepcopy(src)
+    self._src: Symbol = src.clone()
     self._alpha = alpha
     self._beta = beta
     self._num_threads: int = num_threads

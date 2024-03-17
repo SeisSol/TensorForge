@@ -104,3 +104,18 @@ class Tensor:
     
     def __str__(self):
         return self.gen_descr()
+
+class TensorWrapper:
+    pass
+
+class SubTensor(TensorWrapper):
+    def __init__(self,
+        tensor: Tensor,
+        bbox: Union[BoundingBox, None] = None):
+        self.tensor = tensor
+        self.bbox = bbox
+
+class FullTensor(TensorWrapper):
+    def __init__(self, tensor: Tensor):
+        self.tensor = tensor
+

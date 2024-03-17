@@ -1,4 +1,4 @@
-from kernelforge.common.matrix.tensor import Tensor
+from kernelforge.common.matrix.tensor import Tensor, TensorWrapper, SubTensor
 from kernelforge.common.matrix.boundingbox import BoundingBox
 
 class YatetoInterface:
@@ -6,7 +6,7 @@ class YatetoInterface:
     pass
 
   @classmethod
-  def deduce_bbox(cls, yateto_ranges, mem_layout, transpose):
+  def deduce_bbox(cls, yateto_ranges, mem_layout, permute):
     """Converts yateto memory layout (bounding boxes) and ranges to GemmForge bounding boxes i.e.,
        a box is a list of rows and columns indices where the actual data is located within
        a memory patch and should be computed
@@ -18,7 +18,7 @@ class YatetoInterface:
     Returns:
       (list): bounding box in GemmForge format
     """
-    # TODO: transpose, mem_layout
+    # TODO: permute, mem_layout
     
     return BoundingBox([rng.start for rng in yateto_ranges], [rng.stop for rng in yateto_ranges])
   
@@ -29,16 +29,16 @@ class YatetoInterface:
                        addressing,
                        name,
                        is_tmp,
-                       transpose,
+                       permute,
                        pattern=None,
                        values=None):
 
     chainforge_bbox = cls.deduce_bbox(yateto_ranges=yateto_ranges,
                                       mem_layout=yateto_memory_layout_bbox,
-                                      transpose=transpose)
-    
-    return Tensor(shape=[yateto_memory_layout_bbox[i].size() for i in range(len(yateto_memory_layout_bbox))],
+                                      permute=permute)
+    tensor = Tensor(shape=[yateto_memory_layout_bbox[i].size() for i in range(len(yateto_memory_layout_bbox))],
                     addressing=addressing,
-                    bbox=BoundingBox([rng.start for rng in yateto_ranges], [rng.stop for rng in yateto_ranges]),
                     alias=name,
                     is_tmp=is_tmp)
+    return tensor
+    return SubTensor(tensor, BoundingBox([rng.start for rng in yateto_ranges], [rng.stop for rng in yateto_ranges]))

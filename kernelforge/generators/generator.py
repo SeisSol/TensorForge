@@ -225,28 +225,23 @@ class Generator:
   def _name_operands(self, gemm_list: List[OperationDescription]):
     tmp_counter = 0
     op_counter = 0
-    tmp_base_name = 't'
 
-    self._matrix_list = []
+    pre_matrix_list = set()
     for gemm in gemm_list:
       local_list = gemm.matrix_list()
 
-      # NOTE: to be on the safe side we init all matrix names with None
-      for matrix in local_list:
-        matrix.name = None
-
       # gather all matrices
-      self._matrix_list.extend(local_list)
+      for matrix in local_list:
+        pre_matrix_list.add(matrix)
+    self._matrix_list = list(pre_matrix_list)
 
     for matrix in self._matrix_list:
-      # if matrix name is not None
-      if not matrix.name:
-        if matrix.is_tmp:
-          matrix.name = f'{tmp_base_name}{tmp_counter}'
-          tmp_counter += 1
-        else:
-          matrix.name = f'm{op_counter}'
-          op_counter += 1
+      if matrix.is_tmp:
+        matrix.name = f't{tmp_counter}'
+        tmp_counter += 1
+      else:
+        matrix.name = f'm{op_counter}'
+        op_counter += 1
 
   def _collect_tmp_matrices(self):
     self._tmp_list = []

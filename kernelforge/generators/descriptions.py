@@ -6,6 +6,8 @@ from kernelforge.common.operation import Operation
 from kernelforge.common.matrix.tensor import Tensor
 from kernelforge.common.basic_types import Addressing
 
+from typing import List, Union
+
 class OperationDescription:
   pass
 
@@ -401,7 +403,7 @@ class ReductionDescr:
     self._A = A
 
 class MultilinearDescr:
-  def __init__(self, dest: Tensor, ops, target, permute,
+  def __init__(self, dest: Tensor, ops: List[Tensor], target, permute,
                 strict_match: bool = False,
                 prefer_align: bool = False):
     self.dest = dest

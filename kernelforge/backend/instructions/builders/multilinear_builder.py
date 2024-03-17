@@ -66,7 +66,7 @@ class MultilinearBuilder(AbstractBuilder):
         lead_idx = self._descr.target[i].index(0)
 
         # heuristic. We may need to store the L2 load granularity or similar
-        small_lead = self._ops[i].data_view.shape[self._descr.permute[i][lead_idx]] < self._context.get_vm().get_hw_descr().vec_unit_length / 2
+        small_lead = self._ops[i].data_view.shape[self._descr.permute[i][lead_idx]] < self._context.get_vm().get_hw_descr().vec_unit_length
       else:
         small_lead = False
 

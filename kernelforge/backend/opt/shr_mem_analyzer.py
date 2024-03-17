@@ -1,5 +1,5 @@
 from typing import List, Dict, Union, Tuple, Set
-from kernelforge.backend.instructions.memory import MemoryInstruction
+from kernelforge.backend.instructions.memory import MemoryInstruction, AbstractShrMemWrite
 from kernelforge.backend.symbol import Symbol
 from kernelforge.backend.data_types import ShrMemObject
 from kernelforge.common.exceptions import GenerationError
@@ -51,11 +51,15 @@ class ShrMemOpt(AbstractOptStage):
     num_regions: int = len(mem_per_region)
     offsets: List[int] = [0] * num_regions
     for index in range(1, num_regions):
-      offsets[index] += mem_per_region[index - 1]
+      offsets[index] = offsets[index - 1] + mem_per_region[index - 1]
     return offsets
 
   def _assign_offsets(self, offsets: List[int]):
     for offset, region in zip(offsets, self._regions):
       for symbol in region:
         shr_mem_instr = symbol.get_first_user()
-        shr_mem_instr.set_shr_mem_offset(offset)
+        shr_mem_instr.set_shr_mem_offset(offset, True)
+
+        for user in symbol.get_user_list()[1:]:
+          if isinstance(user, AbstractShrMemWrite):
+            user.set_shr_mem_offset(offset, False)

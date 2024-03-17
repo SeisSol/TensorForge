@@ -6,6 +6,9 @@ class BoundingBox:
         self._lower = lower
         self._upper = upper
     
+    def __eq__(self, other):
+        return self._lower == other._lower and self._upper == other._upper
+    
     def rank(self):
         return len(self._lower)
 

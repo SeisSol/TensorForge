@@ -9,7 +9,6 @@ from kernelforge.backend.writer import Writer
 from . import AbstractShrMemWrite
 from ..abstract_instruction import AbstractInstruction
 from kernelforge.common.basic_types import FloatingPointType
-from copy import deepcopy
 
 
 class StoreRegToShr(AbstractShrMemWrite):
@@ -80,7 +79,7 @@ class StoreRegToShr(AbstractShrMemWrite):
     return self._dest
 
   def __str__(self) -> str:
-    return f'{self._dest.name} = store_r2s({self._shr_mem.name}, {self._src.name});'
+    return f'{self._dest.name} = store{{r>s}}({self._shr_mem.name}, {self._src.name});'
 
 
 class StoreRegToGlb(AbstractInstruction):
@@ -116,7 +115,7 @@ class StoreRegToGlb(AbstractInstruction):
       raise InternalError('store: `src` and `dest` do not match in size aling dim `0`')
 
     self._dest: Symbol = dest
-    self._src: Symbol = deepcopy(src)
+    self._src: Symbol = src.clone()
     self._alpha = alpha
     self._beta = beta
     self._num_threads: int = num_threads
@@ -128,7 +127,7 @@ class StoreRegToGlb(AbstractInstruction):
 
     allow_nontemporal = len(self._src.get_user_list()) == 1
 
-    writer('// write results back to glb. memory')
+    writer('// {self}')
     src_bbox = self._src.data_view.get_bbox()
     with writer.If(self.gen_range_mask_threads(begin=src_bbox.lower()[0], end=src_bbox.upper()[0])):
       loops = []
@@ -147,7 +146,7 @@ class StoreRegToGlb(AbstractInstruction):
         loop.__exit__(None, None, None)
 
   def __str__(self) -> str:
-    return f'{self._dest.name} = store_r2g {self._src.name};'
+    return f'{self._dest.name} = store{{r>g}}({self._src.name});'
 
 def round_up_to_nearest_vec_length(n, vec_length):
     return math.ceil(n / vec_length) * vec_length
@@ -195,6 +194,8 @@ class StoreShrMemToGlb(AbstractInstruction):
 
     # TODO: float4 storage
 
+    writer('// {self}')
+
     writer.Pragma("unroll")
     with writer.For(f'int k = 0; k < {dest_data_view.columns}; ++k'):
       num_hops = int(dest_data_view.lead_dim / self._num_threads)
@@ -224,7 +225,7 @@ class StoreShrMemToGlb(AbstractInstruction):
           writer(self._vm.get_lexic().glb_store(lhs, rhs, self._dest._users == [self]))
 
   def __str__(self) -> str:
-    return 'not implemented'
+    return f'{self._dest.name} = store{{s>g}}({self._src.name});'
 
 
 class StoreRegToShrMemColumn(AbstractInstruction):
