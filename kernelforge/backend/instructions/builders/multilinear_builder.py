@@ -2,6 +2,7 @@ from typing import Tuple, Dict, Union, List
 from kernelforge.common.context import Context, VM
 from kernelforge.backend.scopes import Scopes
 from kernelforge.backend.symbol import Symbol, SymbolType
+from kernelforge.backend.instructions.allocate import RegisterAlloc
 from kernelforge.backend.instructions.memory.load import GlbToShrLoader
 from kernelforge.backend.instructions.clear_registers import ClearRegisters
 from kernelforge.backend.instructions.memory.store import StoreRegToGlb, StoreRegToShr
@@ -23,7 +24,7 @@ class MultilinearBuilder(AbstractBuilder):
                shr_mem: Symbol,
                num_threads: int):
     super(MultilinearBuilder, self).__init__(context, scopes)
-    self._dest_regs = register_array
+    self._temp_regs = register_array
     self._shr_mem = shr_mem
     self._num_threads = num_threads
 
@@ -36,12 +37,16 @@ class MultilinearBuilder(AbstractBuilder):
 
     self._mem_regions = None
 
+    self._dest_regs = self._temp_regs
+
   def build(self, ops: List[Symbol], dest_obj: Tensor, descr: MultilinearDescr):
     self._reset()
 
     self._ops = ops
     self._dest_obj = dest_obj
     self._descr = descr
+
+    self._add = descr.add
 
     self._mem_regions = [None] * len(self._ops)
 
@@ -128,6 +133,21 @@ class MultilinearBuilder(AbstractBuilder):
                                      permute=is_transpose)
     return shr_mem_region, load_op
 
+  def _name_registers(self):
+    name = f'r{self._counter}'
+    self._counter += 1
+    return name
+
+  def _alloc_register_array(self):
+    registers = Symbol(name=self._name_registers(), stype=SymbolType.Register, obj=self._dest_obj)
+    regsize = 1
+    for d in range(registers.data_view.rank()):
+      if d not in registers.lead_dims:
+        regsize *= registers.data_view.get_dim_size(d)
+    self._scopes.add_symbol(registers)
+    registerAlloc = RegisterAlloc(self._context, registers, regsize)
+    self._dest_regs = registers
+
   def _check_register_array(self):
     if self._dest_regs.stype != SymbolType.Register:
       raise InternalError('gemm-builder: reg_array must be in registers')
@@ -136,9 +156,10 @@ class MultilinearBuilder(AbstractBuilder):
     self._instructions.append(MultilinearInstruction(context=self._context,
                                    ops=self._mem_regions,
                                    target=self._descr.target,
-                                   dest=self._dest_regs,
+                                   dest=self._temp_regs,
                                    prefer_align=False,#self._descr.prefer_align,
                                    num_threads=self._num_threads,
+                                   prev=self._scopes.get_symbol(self._dest_obj) if self._add else None,
                                    productOperation=MulOperator(),
                                    sumOperation=AddOperator()))
 
@@ -147,13 +168,13 @@ class MultilinearBuilder(AbstractBuilder):
       dest_symbol = self._scopes.get_symbol(self._dest_obj)
       if dest_symbol.stype == SymbolType.SharedMem:
         self._instructions.append(StoreRegToShr(context=self._context,
-                                                src=self._dest_regs,
+                                                src=self._temp_regs,
                                                 dest=dest_symbol,
                                                 shr_mem=self._shr_mem,
                                                 num_threads=self._num_threads))
       elif dest_symbol.stype == SymbolType.Global:
         self._instructions.append(StoreRegToGlb(context=self._context,
-                                                src=self._dest_regs,
+                                                src=self._temp_regs,
                                                 dest=dest_symbol,
                                                 alpha=1,#self._descr.alpha,
                                                 beta=0,#self._descr.beta,
@@ -172,19 +193,19 @@ class MultilinearBuilder(AbstractBuilder):
                            obj=self._dest_obj)
       self._scopes.add_symbol(dest_symbol)
       self._instructions.append(StoreRegToShr(context=self._context,
-                                              src=self._dest_regs,
+                                              src=self._temp_regs,
                                               dest=dest_symbol,
                                               shr_mem=self._shr_mem,
                                               num_threads=self._num_threads))
 
   def _clear_registers(self):
-    self._instructions.append(ClearRegisters(context=self._context, src=self._dest_regs))
+    self._instructions.append(ClearRegisters(context=self._context, src=self._temp_regs))
 
   def _insert_sync_threads(self):
     self._instructions.append(SyncThreads(context=self._context,
                                           num_threads_per_mult=self._num_threads))
 
   def _name_shr_reg(self):
-    name = f'_{self._counter}'
+    name = f's{self._counter}'
     self._counter += 1
     return name

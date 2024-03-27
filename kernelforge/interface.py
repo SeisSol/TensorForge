@@ -20,7 +20,7 @@ class YatetoInterface:
     """
     # TODO: permute, mem_layout
     
-    return BoundingBox([rng.start for rng in yateto_ranges], [rng.stop for rng in yateto_ranges])
+    return BoundingBox([rng.start for rng in mem_layout], [rng.stop for rng in mem_layout])
   
   @classmethod
   def gen_matrix(cls,
@@ -36,8 +36,9 @@ class YatetoInterface:
     chainforge_bbox = cls.deduce_bbox(yateto_ranges=yateto_ranges,
                                       mem_layout=yateto_memory_layout_bbox,
                                       permute=permute)
-    tensor = Tensor(shape=[yateto_memory_layout_bbox[i].size() for i in range(len(yateto_memory_layout_bbox))],
+    tensor = Tensor(shape=[yateto_ranges[i] for i in range(len(yateto_ranges))],
                     addressing=addressing,
+                    bbox=chainforge_bbox,
                     alias=name,
                     is_tmp=is_tmp)
     return tensor

@@ -3,11 +3,12 @@ from typing import Union
 import enum
 import math
 from kernelforge.common.matrix.tensor import Tensor
-from . import AbstractShrMemWrite
+from . import AbstractShrMemWrite, MemoryInstruction
 from kernelforge.backend.symbol import SymbolType, Symbol, DataView
 from kernelforge.common.exceptions import InternalError
 from kernelforge.backend.writer import Writer
 from kernelforge.common.matrix.boundingbox import BoundingBox
+from kernelforge.common.context import Context
 from typing import Union, List
 
 # to find a number coprime to the number of shared memory banks
@@ -40,6 +41,8 @@ class GlbToShrLoader(AbstractShrMemWrite):
 
     if self._permute is None:
       self._permute = [i for i in range(len(self._src.obj.shape))]
+    
+    self._needs_reorder = self._permute != [i for i in range(len(self._src.obj.shape))]
 
     self._get_bounding_box_dense()
 
@@ -102,18 +105,34 @@ class GlbToShrLoader(AbstractShrMemWrite):
 
     src_offset = 0#self._src.data_view.get_offset()
 
-    loops = [writer.For(f'int i{i} = 0; i{i} < {self._dest.data_view.shape[i]}; ++i{i}') for i in self._loop_indices]
+    if self._needs_reorder:
+      loops = [writer.For(f'int i{i} = 0; i{i} < {self._dest.data_view.shape[i]}; ++i{i}') for i in range(1, len(self._dest.data_view.shape))]
+      index = [0] * len(self._dest.data_view.shape)
+      for li in self._loop_indices:
+        index[li] = f'i{li}'
+      index[0] = self._vm.get_lexic().thread_idx_x
 
-    for loop in loops:
-      loop.__enter__()
-    
-    index = [0] * len(self._dest.data_view.shape)
-    for li in self._loop_indices:
-      index[li] = f'i{li}'
-    self._write_datatransfer(writer, 0, 0, index, self._loadsize, allow_nontemporal)
+      for loop in loops:
+        loop.__enter__()
+      self._src.load(writer, self._context, 'value', index, allow_nontemporal)
+      self._dest.store(writer, self._context, 'value', index, False)
+      for loop in loops[::-1]:
+        loop.__exit__(None, None, None)
+    else:
+      loops = [writer.For(f'int i{i} = 0; i{i} < {self._dest.data_view.shape[i]}; ++i{i}') for i in self._loop_indices]
 
-    for loop in loops[::-1]:
-      loop.__exit__(None, None, None)
+      for loop in loops:
+        writer.insert_pragma_unroll()
+        loop.__enter__()
+      
+      index = [0] * len(self._dest.data_view.shape)
+      for li in self._loop_indices:
+        index[li] = f'i{li}'
+      
+      self._write_datatransfer(writer, 0, 0, index, self._loadsize, allow_nontemporal)
+
+      for loop in loops[::-1]:
+        loop.__exit__(None, None, None)
     
     #if False:
     #  writer('cooperative_groups::wait(cooperative_groups::this_thread_block());')
@@ -192,3 +211,69 @@ class GlbToShrLoader(AbstractShrMemWrite):
 
   def __str__(self):
     return f'{self._dest.name} = load{{g>s}}({self._src.name}[{", ".join(str(p) for p in self._permute)}])'
+
+class GlbToRegLoader(MemoryInstruction):
+  def __init__(self,
+               context: Context,
+               src: Symbol,
+               dest: Symbol,
+               alpha: float,
+               beta: float,
+               num_threads: int):
+    super(GlbToRegLoader, self).__init__(context)
+
+    if src.stype != SymbolType.Register:
+      raise InternalError('store: operand `src` is not in reg mem')
+
+    if not isinstance(src.obj, RegMemObject):
+      raise InternalError(f'store: operand `src` is registers, instead: {type(src.obj)}')
+
+    if dest.stype != SymbolType.Global:
+      raise InternalError('store: operand `dest` is not in global memory.')
+
+    if not isinstance(dest.obj, Tensor):
+      raise InternalError('store: operand `dest` is not a matrix')
+
+    src.add_user(self)
+    dest.add_user(self)
+
+    dest.data_view = DataView(shape=dest.obj.shape,
+                              permute=None,
+                              bbox=dest.obj.get_bbox())
+    
+    # if dest.data_view.get_dim_size(0) > src.data_view.get_dim_size(0):
+    #   raise InternalError('store: `src` and `dest` do not match in size aling dim `0`')
+
+    self._dest: Symbol = dest
+    self._src: Symbol = src.clone()
+    self._alpha = alpha
+    self._beta = beta
+    self._num_threads: int = num_threads
+    self._is_ready: bool = True
+
+  def gen_code(self, writer: Writer) -> None:
+    writer.new_line()
+    dest_view = self._dest.data_view
+
+    allow_nontemporal = len(self._src.get_user_list()) == 1
+
+    writer(f'// {self}')
+    src_bbox = self._src.data_view.get_bbox()
+    with writer.If(self.gen_range_mask_threads(begin=src_bbox.lower()[0], end=src_bbox.upper()[0])):
+      loops = []
+      indices = [self._vm.get_lexic().thread_idx_x]
+      for i in range(1, src_bbox.rank()):
+        writer.insert_pragma_unroll()
+        loop = f'int i{i} = 0; i{i} < {dest_view.shape[i]}; ++i{i}'
+        loops += [writer.For(loop)]
+        loops[-1].__enter__()
+        indices += [f'i{i}']
+
+      self._src.load(writer, self._context, 'value', indices, False)
+      self._dest.store(writer, self._context, 'value', indices, allow_nontemporal)
+      
+      for loop in reversed(loops):
+        loop.__exit__(None, None, None)
+
+  def __str__(self) -> str:
+    return f'{self._dest.name} = store{{g>r}}({self._src.name});'

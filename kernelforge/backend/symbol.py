@@ -146,11 +146,12 @@ class Variable:
     return self._name
 
 class LeadIndex:
-  def __init__(self, lane):
+  def __init__(self, lane, stride):
     self._lane = lane
+    self._stride = stride
 
   def write(context: Context):
-    return f'({context.get_vm().get_lexic().thread_idx_x} % {self._lane})'
+    return f'(({context.get_vm().get_lexic().thread_idx_x} % {self._lane}) / {self._stride})'
 
 class Symbol:
   def __init__(self,
@@ -185,16 +186,16 @@ class Symbol:
       return f'&{self.name}'
     else:
       return f'{self.name}'
-  
+
   def access_address(self, context: Context, index: List[Union[str, int]]):
     if self.stype == SymbolType.Global or self.stype == SymbolType.Batch or self.stype == SymbolType.SharedMem:
       # lead_dim + nonlead_dim
-      dimstr = " + ".join(f"{var} * {stride}" for var, stride in zip(index, self.data_view.get_dim_strides()))
+      dimstr = " + ".join(f"{var} * {stride}" for var, stride in zip(index, self.data_view.get_dim_strides()) if var != 0)
       return dimstr if len(dimstr) > 0 else "0"
     if self.stype == SymbolType.Register or self.stype == SymbolType.Scratch:
       # nonlead_dim only
       filtered_index = map(lambda x: x[1], filter(lambda x: x[0] not in self.lead_dims, enumerate(index)))
-      dimstr = " + ".join(f"{var} * {stride}" for var, stride in zip(filtered_index, self.data_view.get_dim_strides(self.lead_dims, True)))
+      dimstr = " + ".join(f"{var} * {stride}" for var, stride in zip(filtered_index, self.data_view.get_dim_strides(self.lead_dims, True)) if var != 0)
       return dimstr if len(dimstr) > 0 else "0"
     raise NotImplementedError('Not supposed to be called')
 

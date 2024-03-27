@@ -17,6 +17,7 @@ class MultilinearInstruction(ComputeInstruction):
                dest: Symbol,
                ops: List[Symbol],
                target: List[List[int]],
+               prev: Union[None, Symbol],
                productOperation: ReductionOperator,
                sumOperation: ReductionOperator,
                prefer_align: bool,
@@ -32,6 +33,8 @@ class MultilinearInstruction(ComputeInstruction):
         self._user_options = context.get_user_options()
         self._gemm_meta_data = None
         self._num_threads = num_threads
+        self._lead_dims = [0]
+        self._prev = prev
 
         self.registers = None
         if dest.stype != SymbolType.Register:
@@ -76,45 +79,110 @@ class MultilinearInstruction(ComputeInstruction):
         for i in range(len(preKs)):
             assert -i-1 in preKs
             self._ks[i] = preKs[-i-1]
-        
+
+        iterate_dimensions = []
         loads = []
         reductions = []
-        iterate_dimensions = []
-        # TODO: sort to minimize loads and multiplications
-
-        # TODO: check if there's even something to compute left... Maybe. If the codegen doesn't get it at least
+        self._is_log = False
+        
+        # TODO: do not really optimize here anything any more (on a higher level)... Just generate code
+        # i.e.: what can be loaded in early/late, do
         
         # TODO: handle offsets
         self._dest.data_view = DataView(shape = [u - l for l,u in self._ns], permute=[i for i in range(targetrank)])
 
     def gen_code_inner(self, writer: Writer):
         with writer.If(self.gen_range_mask_threads(self._ns[0][0], self._ns[0][1])):
-            loopstack = []
+            self._nonleading_dim(writer)
+            if self._prev is not None:
+                self._add_to_prev(writer)
+    
+    def _add_to_prev(self, writer: Writer):
+        loopstack = []
 
-            for i, (dimmin, dimmax) in enumerate(self._ks):
+        for i, (dimmin, dimmax) in enumerate(self._ns):
+            if i not in self._lead_dims:
+                writer.insert_pragma_unroll()
+                loop = writer.For(f'int n{i} = {dimmin}; n{i} < {dimmax}; ++n{i}')
+                loop.__enter__()
+                loopstack += [loop]
+
+        self._dest.load(writer, self._context, 'value', [self._vm.get_lexic().thread_idx_x] + [f'n{i+1}' for i,_ in enumerate(self._ns[1:])], False)
+        self._prev.load(writer, self._context, 'oldvalue', [self._vm.get_lexic().thread_idx_x] + [f'n{i+1}' for i,_ in enumerate(self._ns[1:])], False)
+        writer(f'{self._fp_as_str} newvalue = {self._sumOperation.format("value", "oldvalue")};')
+        self._dest.store(writer, self._context, 'newvalue', [self._vm.get_lexic().thread_idx_x] + [f'n{i+1}' for i,_ in enumerate(self._ns[1:])], False)
+
+        for loop in loopstack[::-1]:
+            loop.__exit__(None, None, None)
+
+    def _nonleading_dim(self, writer: Writer):
+        loopstack = []
+
+        # TODO: preload values where necessary (i.e. no N in there)
+        # Also, postpone multiplications until necessary
+
+        for i, (dimmin, dimmax) in enumerate(self._ks):
+            if -i-1 not in self._lead_dims:
+                writer.insert_pragma_unroll()
                 loop = writer.For(f'int k{i} = {dimmin}; k{i} < {dimmax}; ++k{i}')
                 loop.__enter__()
                 loopstack += [loop]
 
-            for i, (dimmin, dimmax) in enumerate(self._ns[1:]):
+        for i, (dimmin, dimmax) in enumerate(self._ns):
+            if i not in self._lead_dims:
                 writer.insert_pragma_unroll()
-                loop = writer.For(f'int n{i+1} = {dimmin}; n{i+1} < {dimmax}; ++n{i+1}')
+                loop = writer.For(f'int n{i} = {dimmin}; n{i} < {dimmax}; ++n{i}')
                 loop.__enter__()
                 loopstack += [loop]
 
-            for i, op in enumerate(self._ops):
-                op.load(writer, self._context, f'data{i}', [self._vm.get_lexic().thread_idx_x if nk == 'n0' else nk for nk in self._opdim_to_nks[i]], False)
-                if i > 0:
-                    writer(f'{self._fp_as_str} prod{i} = {self._productOperation.format(f"prod{i-1}", f"data{i}")};')
-                else:
-                    writer(f'{self._fp_as_str} prod{i} = data{i};')
-            if len(self._ops) > 0:
-                self._dest.load(writer, self._context, 'value', [self._vm.get_lexic().thread_idx_x] + [f'n{i+1}' for i,_ in enumerate(self._ns[1:])], False)
-                writer(f'{self._fp_as_str} newvalue = {self._sumOperation.format("value", f"prod{len(self._ops)-1}")};')
-                self._dest.store(writer, self._context, 'newvalue', [self._vm.get_lexic().thread_idx_x] + [f'n{i+1}' for i,_ in enumerate(self._ns[1:])], False)
+        for i, op in enumerate(self._ops):
+            op.load(writer, self._context, f'data{i}', [self._vm.get_lexic().thread_idx_x if nk == 'n0' else nk for nk in self._opdim_to_nks[i]], False)
+            if i > 0:
+                writer(f'{self._fp_as_str} prod{i} = {self._productOperation.format(f"prod{i-1}", f"data{i}")};')
+            else:
+                writer(f'{self._fp_as_str} prod{i} = data{i};')
+        if len(self._ops) > 0:
+            self._dest.load(writer, self._context, 'value', [self._vm.get_lexic().thread_idx_x] + [f'n{i+1}' for i,_ in enumerate(self._ns[1:])], False)
+            writer(f'{self._fp_as_str} newvalue = {self._sumOperation.format("value", f"prod{len(self._ops)-1}")};')
+            self._dest.store(writer, self._context, 'newvalue', [self._vm.get_lexic().thread_idx_x] + [f'n{i+1}' for i,_ in enumerate(self._ns[1:])], False)
 
-            for loop in loopstack[::-1]:
-                loop.__exit__(None, None, None)
+        for loop in loopstack[::-1]:
+            loop.__exit__(None, None, None)
+
+    def _cublasdx_nonleadim_dim(self, writer: Writer):
+        assert self._is_log
+        with writer.Scope():
+            # a _tiny_ bit hacky... But ok.
+            writer('using namespace cublasdx;')
+
+            m = 0
+            n = 0
+            k = 0
+
+            num_threads = self._num_threads
+
+            gemm_traits = []
+            gemm_traits += [f'Size<{m}, {n}, {k}>']
+            gemm_traits += ['Function<function::MM>']
+            gemm_traits += ['Type<type::real>']
+
+            transpose = lambda isTrue: 'transpose_mode::transposed' if isTrue else 'transpose_mode::non_transposed'
+            gemm_traits += [f'TransposeMode<{transpose(False)}, {transpose(False)}>']
+            gemm_traits += [f'Precision<{self._vm.fp_as_str()}>']
+
+            # gemm_traits += [f'LeadingDimension<A,B,C>']
+
+            # TODO: modify, if there are problems with the Blackwell arch name
+            sm = self._vm.get_hw_descr().model[3:5]
+            smprint = f'{sm}0'
+            gemm_traits += [f'SM<{smprint}>']
+            gemm_traits += ['Block']
+            gemm_traits += [f'Block_Dim<{num_threads}>']
+            traittype = '+'.join(f'{trait}()' for trait in gemm_traits)
+            writer(f'using GemmType = decltype({traittype});')
+
+            # currently, the alpha, beta are handled when storing back to global memory
+            writer(f'GemmType().execute(1, {self._op1.name}, {self._op2.name}, 1, {self._dest.name})')
 
     def _leading_dim(self, writer: Writer):
         with writer.Scope():
@@ -140,11 +208,13 @@ class MultilinearInstruction(ComputeInstruction):
                 if amd:
                     writer(f'{self._fp_as_str} rvalue = __shfl_xor(value, {i});') # TODO: check if swizzle is used here (or DPP)
                     # __amdgcn_move_dpp(int src, int dpp_ctrl, int row_mask, int bank_mask, bool bound_ctrl)
-                    # __amdgcn_move_dpp(static_cast<int>(value), 0x12{i}, 0, 0, false) # 1-8, float
+                    # __int_as_float(__amdgcn_move_dpp(__float_as_int(value), 0x12{i}, 0, 0, false)) # 1-8, float
                     # use xor/permute for everything else :(
+                    # TODO: look at __builtin_amdgcn_ds_permute for active mask (it's more general than then __shfls)
                 else:
                     writer(f'{self._fp_as_str} rvalue = __shfl_xor_sync(-1, value, {i});')
                 writer(f'value = {self._sumOperation.format("value", f"rvalue")};')
+        # CUDA: __reduce_OP_sync(mask, value) (if: sm_80 or higher; 32 bit)
         writer(f'atomicAdd(&shmAddr[{sublane_address}], value);')
         writer('__syncthreads();')
     

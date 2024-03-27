@@ -6,6 +6,22 @@ class BoundingBox:
         self._lower = lower
         self._upper = upper
     
+    def intersect(self, other):
+        return BoundingBox([max(sl, ol) for sl, ol in zip(self.lower, other.lower)], [min(sl, ol) for sl, ol in zip(self.upper, other.upper)])
+
+    def unite(self, other):
+        return BoundingBox([min(sl, ol) for sl, ol in zip(self.lower, other.lower)], [max(sl, ol) for sl, ol in zip(self.upper, other.upper)])
+
+    def __rand__(self, other):
+        return self.intersect(other)
+
+    def __ror__(self, other):
+        return self.unite(other)
+
+    def __iter__(self):
+        for l,u in zip(self._lower, self._upper):
+            yield l,u
+
     def __eq__(self, other):
         return self._lower == other._lower and self._upper == other._upper
     

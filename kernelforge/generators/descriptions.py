@@ -403,7 +403,7 @@ class ReductionDescr:
     self._A = A
 
 class MultilinearDescr:
-  def __init__(self, dest: Tensor, ops: List[Tensor], target, permute,
+  def __init__(self, dest: Tensor, ops: List[Tensor], target, permute, add: bool = False,
                 strict_match: bool = False,
                 prefer_align: bool = False):
     self.dest = dest
@@ -411,6 +411,7 @@ class MultilinearDescr:
     self.target = target
     self.permute = permute
     self._strict_match = False
+    self.add = add
 
     self.dest.set_data_flow_direction(DataFlowDirection.SINK)
     for op in self.ops:
