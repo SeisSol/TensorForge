@@ -73,6 +73,8 @@ class Generator:
     self._check_consistency_with_user_options()
     self._name_operands(self.gemm_list)
 
+    self._persistent_threading = False
+
   def set_kernel_name(self, name):
     self._base_kernel_name = name
 
@@ -113,14 +115,23 @@ class Generator:
         mapped_kw, real_kw, type = kw
         writer(f'const {type} {mapped_kw} = {real_kw};')
 
-      writer(f'unsigned {GeneralLexicon.BATCH_ID_NAME} = {self._get_2d_block_id()};')
-      with writer.If(f'{self._get_element_size_guard()}'):
-        with writer.If(f'{self._get_flag_guard(writer)}'):
-          for instruction in self._ir:
-            if instruction.is_ready():
-              instruction.gen_code(writer)
-            else:
-              raise GenerationError(f'instr is not ready to be generated: {instruction}')
+      if not self._persistent_threading:
+        writer(f'unsigned {GeneralLexicon.BATCH_ID_NAME} = {self._get_2d_block_id()};')
+        with writer.If(f'{self._get_element_size_guard()}'):
+          with writer.If(f'{self._get_flag_guard(writer)}'):
+            for instruction in self._ir:
+              if instruction.is_ready():
+                instruction.gen_code(writer)
+              else:
+                raise GenerationError(f'instr is not ready to be generated: {instruction}')
+      else:
+        with writer.For(f'unsigned {GeneralLexicon.BATCH_ID_NAME} = {self._get_2d_block_id()}; {GeneralLexicon.BATCH_ID_NAME} < {GeneralLexicon.NUM_ELEMENTS}; {GeneralLexicon.BATCH_ID_NAME} += {vm.get_lexic().grid_dim_x} * {vm.get_lexic().block_dim_y}'):
+          with writer.If(f'{self._get_flag_guard(writer)}'):
+            for instruction in self._ir:
+              if instruction.is_ready():
+                instruction.gen_code(writer)
+              else:
+                raise GenerationError(f'instr is not ready to be generated: {instruction}')
 
     self._kernel = writer.get_src()
 
@@ -130,15 +141,20 @@ class Generator:
     mults_per_block = self._shr_mem_obj.get_mults_per_block()
     lexic = self._context.get_vm().get_lexic()
     with writer.Block(f'{proto}'):
+      kernel_name = f'kernel_{self._base_kernel_name}'
+
       writer(f'{lexic.kernel_range_object("block", f"{self._num_threads}, {mults_per_block}, 1")};')
-      num_blocks = f'({GeneralLexicon.NUM_ELEMENTS} + {mults_per_block} - 1) / {mults_per_block}'
+      if not self._persistent_threading:
+        num_blocks = f'({GeneralLexicon.NUM_ELEMENTS} + {mults_per_block} - 1) / {mults_per_block}'
+      else:
+        writer(f'{lexic.get_launch_size(kernel_name, "block")}')
+        num_blocks = 'gridsize'
       writer(f'{lexic.kernel_range_object("grid", f"{num_blocks}, 1, 1")};')
 
       lexic.get_stream_via_pointer(writer, 'stream', GeneralLexicon.STREAM_PTR_STR)
 
       args = self._generate_kernel_base_args()
       args = ', '.join(args)
-      kernel_name = f'kernel_{self._base_kernel_name}'
       call_site = lexic.get_launch_code(func_name=kernel_name,
                                         grid='grid',
                                         block='block',

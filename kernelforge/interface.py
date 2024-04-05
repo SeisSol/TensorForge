@@ -42,4 +42,4 @@ class YatetoInterface:
                     alias=name,
                     is_tmp=is_tmp)
     return tensor
-    return SubTensor(tensor, BoundingBox([rng.start for rng in yateto_ranges], [rng.stop for rng in yateto_ranges]))
+    return SubTensor(tensor, chainforge_bbox)

@@ -37,13 +37,13 @@ def hw_descr_factory(arch, backend):
       return HwDecription(known_arch[arch], arch, backend)
     else:
       report_error(backend, arch)
-  elif backend == 'oneapi' or backend == 'hipsycl':
-    if arch in nvidia_list or arch in intel_list:
+  elif backend == 'oneapi' or backend == 'acpp':
+    if arch in nvidia_list or arch in amd_list or arch in intel_list:
       return HwDecription(known_arch[arch], arch, backend)
     else:
       report_error(backend, arch)
   elif backend == 'omptarget' or backend == 'targetdart':
-    if arch in nvidia_list or arch in intel_list:
+    if arch in nvidia_list or arch in amd_list or arch in intel_list:
       return HwDecription(known_arch[arch], arch, backend)
     else:
       report_error(backend, arch)
@@ -164,7 +164,7 @@ def get_known_arch():
   }
 
   arch['pvc'] = {
-    'vec_unit_length': 32,
+    'vec_unit_length': 16,
     'max_local_mem_size_per_block': 128 * KB,
     'max_num_threads': 512,
     'max_reg_per_block': 64 * KB,

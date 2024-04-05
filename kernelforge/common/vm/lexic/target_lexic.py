@@ -12,6 +12,7 @@ class TargetLexic(Lexic):
     self.block_idx_z = "bz"
     self.block_dim_y = "tY"
     self.block_dim_z = "tZ"
+    self.grid_dim_x = "omp_get_num_teams()"
     self.stream_type = "int"
     self.restrict_kw = "__restrict"
 
@@ -67,7 +68,7 @@ class TargetLexic(Lexic):
         self.teamloop1.__exit__(type, value, traceback)
         self.blockloop.__exit__(type, value, traceback)
         self.function.__exit__(type, value, traceback)
-    
+
     backend = self._backend
     class TargetContext:
       def __init__(self):

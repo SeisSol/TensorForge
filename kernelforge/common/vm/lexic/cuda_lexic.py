@@ -12,8 +12,20 @@ class CudaLexic(Lexic):
     self.block_idx_x = "blockIdx.x"
     self.block_dim_y = "blockDim.y"
     self.block_dim_z = "blockDim.z"
+    self.grid_dim_x = "gridDim.x"
     self.stream_type = "cudaStream_t"
     self.restrict_kw = "__restrict__"
+
+  def get_launch_size(self, func_name, block):
+    return f"""static int gridsize = -1;
+    if (gridsize <= 0) {{
+      int device, smCount, blocksPerSM;
+      cudaGetDevice(&device);
+      cudaDeviceGetAttribute(&smCount, cudaDevAttrMultiProcessorCount, device);
+      cudaOccupancyMaxActiveBlocksPerMultiprocessor(&blocksPerSM, {func_name}, {block}.x * {block}.y * {block}.z, 0);
+      gridsize = smCount * blocksPerSM;
+    }}
+    """
 
   def get_launch_code(self, func_name, grid, block, stream, func_params):
     return "{}<<<{},{},0,{}>>>({})".format(func_name, grid, block, stream, func_params)

@@ -39,6 +39,8 @@ class MultilinearBuilder(AbstractBuilder):
 
     self._dest_regs = self._temp_regs
 
+    self._deferred_stores = {}
+
   def build(self, ops: List[Symbol], dest_obj: Tensor, descr: MultilinearDescr):
     self._reset()
 
@@ -146,7 +148,9 @@ class MultilinearBuilder(AbstractBuilder):
         regsize *= registers.data_view.get_dim_size(d)
     self._scopes.add_symbol(registers)
     registerAlloc = RegisterAlloc(self._context, registers, regsize)
-    self._dest_regs = registers
+    self._instructions.append(registerAlloc)
+    return registers
+    # self._dest_regs = registers
 
   def _check_register_array(self):
     if self._dest_regs.stype != SymbolType.Register:
@@ -173,6 +177,10 @@ class MultilinearBuilder(AbstractBuilder):
                                                 shr_mem=self._shr_mem,
                                                 num_threads=self._num_threads))
       elif dest_symbol.stype == SymbolType.Global:
+        # if dest_symbol.name not in self._deferred_stores:
+        #   dest_registers = self._alloc_register_array()
+        #   self._deferred_stores[dest_symbol.name] = dest_registers
+        # dest_registers = self._deferred_stores[dest_symbol.name]
         self._instructions.append(StoreRegToGlb(context=self._context,
                                                 src=self._temp_regs,
                                                 dest=dest_symbol,
@@ -180,8 +188,11 @@ class MultilinearBuilder(AbstractBuilder):
                                                 beta=0,#self._descr.beta,
                                                 num_threads=self._num_threads))
       elif dest_symbol.stype == SymbolType.Register:
-        # do nothing when keeping the data in registers anyways
         pass
+        #self._instructions.append(StoreRegToGlb(context=self._context,
+        #                                        src=self._temp_regs,
+        #                                        dest=dest_symbol,
+        #                                        num_threads=self._num_threads))
       else:
         raise InternalError(f'gemm-builder: `res` must be either in shr. or glb. mem., given: {dest_symbol.stype}')
     else:

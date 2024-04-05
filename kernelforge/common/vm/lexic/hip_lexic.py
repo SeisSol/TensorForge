@@ -12,7 +12,19 @@ class HipLexic(CudaLexic):
     self.block_idx_x = "hipBlockIdx_x"
     self.block_dim_y = "hipBlockDim_y"
     self.block_dim_z = "hipBlockDim_z"
+    self.grid_dim_x = "gridDim.x"
     self.stream_type = "hipStream_t"
+
+  def get_launch_size(self, func_name, block):
+    return f"""static int gridsize = -1;
+    if (gridsize <= 0) {{
+      int device, smCount, blocksPerSM;
+      hipGetDevice(&device);
+      hipDeviceGetAttribute(&smCount, hipDeviceAttributeMultiprocessorCount, device);
+      hipOccupancyMaxActiveBlocksPerMultiprocessor(&blocksPerSM, {func_name}, {block}.x * {block}.y * {block}.z, 0);
+      gridsize = smCount * blocksPerSM;
+    }}
+    """
 
   def get_launch_code(self, func_name, grid, block, stream, func_params):
     return f"hipLaunchKernelGGL({func_name}, {grid}, {block}, 0, {stream}, {func_params})"
