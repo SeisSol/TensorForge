@@ -12,6 +12,7 @@ class HwDecription:
     self.max_threads_per_sm = param_table['max_threads_per_sm']
     self.max_block_per_sm = param_table['max_block_per_sm']
     self.manufacturer = param_table['name']
+    self.shmem_banks = param_table['shmem_banks']
     self.model = arch
     self.backend = backend
 
@@ -148,6 +149,8 @@ def get_known_arch():
   arch['gfx1100'] = deepcopy(arch['gfx1010'])
   arch['gfx1101'] = deepcopy(arch['gfx1010'])
   arch['gfx1102'] = deepcopy(arch['gfx1010'])
+  arch['gfx1150'] = deepcopy(arch['gfx1010'])
+  arch['gfx1200'] = deepcopy(arch['gfx1010'])
 
   # Intel
   arch['dg1'] = {

@@ -1,7 +1,7 @@
 from typing import List, Union, Type
 from copy import deepcopy
 import hashlib
-from kernelforge.generators.descriptions import OperationDescription, GemmDescr, CSADescr, PointwiseDescr
+from kernelforge.generators.descriptions import OperationDescription
 from kernelforge.common.context import Context
 from kernelforge.common.basic_types import Addressing, GeneralLexicon, DataFlowDirection
 from kernelforge.common.aux import get_extra_offset_name

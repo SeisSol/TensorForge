@@ -47,7 +47,7 @@ class GlbToShrLoader(AbstractShrMemWrite):
     self._get_bounding_box_dense()
 
   def _next_size(self, size):
-    return _find_next_coprime(size, 32)
+    return _find_next_coprime(size, self._context.get_vm().get_hw_descr().shmem_banks)
 
   def _get_bounding_box_dense(self):
     self._src.data_view = DataView(shape=self._tensor.shape,

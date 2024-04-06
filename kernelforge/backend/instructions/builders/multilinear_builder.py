@@ -56,7 +56,7 @@ class MultilinearBuilder(AbstractBuilder):
         self._make_load_op(i)
     self._insert_sync_threads()
     self._check_register_array()
-    self._make_gemm()
+    self._make_compute()
     self._insert_sync_threads()
     self._make_store()
     self._insert_sync_threads()
@@ -156,7 +156,7 @@ class MultilinearBuilder(AbstractBuilder):
     if self._dest_regs.stype != SymbolType.Register:
       raise InternalError('gemm-builder: reg_array must be in registers')
 
-  def _make_gemm(self):
+  def _make_compute(self):
     self._instructions.append(MultilinearInstruction(context=self._context,
                                    ops=self._mem_regions,
                                    target=self._descr.target,

@@ -3,6 +3,7 @@ from kernelforge.backend.writer import Writer
 from kernelforge.common.context import Context
 from kernelforge.common.operation import Operation
 from kernelforge.common.basic_types import FloatingPointType
+from kernelforge.backend.scopes import Scopes
 
 class VarAlloc:
     def __init__(self):
@@ -31,6 +32,23 @@ class Node:
 class Variable(Node):
     def store(self, writer: Writer, context: Context, value: str):
         pass
+
+class Assignment:
+    def __init__(dest: Variable, optree: Node):
+        self.dest = dest
+        self.optree = optree
+    
+    def assignSymbols(self, scopes: Scopes):
+        self.dest.assignSymbols(scopes)
+        self.optree.assignSymbols(scopes)
+
+    def declare(self, alloc: VarAlloc, writer: Writer, context: Context):
+        optree.declare(alloc, writer, context)
+        self.dest.declare(alloc, writer, context)
+
+    def write(self, alloc: VarAlloc, writer: Writer, context: Context):
+        value = optree.write(alloc, writer, context)
+        self.dest.store(alloc, writer, context, value)
 
 class TensorVar(Variable):
     def __init__(self, tensor, slicing):
@@ -125,7 +143,7 @@ class LexicOpNode(OpNode):
         self.optype = optype
     
     def operation(self, context: Context, var: List[str]):
-        return context.get_vm().get_lexic().get_operation(self.optype, *var)
+        return context.get_vm().get_lexic().get_operation(self.optype, context.fp_type, *var)
 
 class ConditionalOpNode(OpNode):
     def __init__(self, optype: Operation):
@@ -199,23 +217,6 @@ class WhileNode(Node):
                 subassignment.write(alloc, writer, context)
                 resultCondition = self.condition.write(alloc, writer, context)
                 self.conditionVar.store(resultCondition)
-
-class Assignment:
-    def __init__(dest: Variable, optree: Node):
-        self.dest = dest
-        self.optree = optree
-    
-    def assignSymbols(self, scopes: Scopes):
-        self.dest.assignSymbols(scopes)
-        self.optree.assignSymbols(scopes)
-
-    def declare(self, alloc: VarAlloc, writer: Writer, context: Context):
-        optree.declare(alloc, writer, context)
-        self.dest.declare(alloc, writer, context)
-
-    def write(self, alloc: VarAlloc, writer: Writer, context: Context):
-        value = optree.write(alloc, writer, context)
-        self.dest.store(alloc, writer, context, value)
 
 def writeAssignments(assignments: List[Assignment], writer: Writer, context: Context):
     alloc = VarAlloc()
