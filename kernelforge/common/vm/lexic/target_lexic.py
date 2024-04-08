@@ -57,7 +57,7 @@ class TargetLexic(Lexic):
           device = 'device(TARGETDART_DEVICE(0))'
         else:
           device = ''
-        file(f'#pragma omp target teams distribute nowait depend(inout: streamobj[0]) is_device_ptr({", ".join(symbol.name for symbol in global_symbols)}) thread_limit({bounds}) {device}')
+        file(f'#pragma omp target teams distribute nowait depend(inout: streamobj[0]) is_device_ptr({", ".join(symbol.name for symbol in global_symbols if symbol.obj.addressing != Addressing.SCALAR)}) thread_limit({bounds}) {device}')
         self.blockloop.__enter__()
         file(f'{precision} {GeneralLexicon.TOTAL_SHR_MEM} [{total_shared_mem_size}];')
         file(f'#pragma omp parallel for collapse(2)')
@@ -99,7 +99,7 @@ class TargetLexic(Lexic):
             with file.If(f'{symbol.name}_ptr == nullptr'):
               file(f'{symbol.name}_ptr = reinterpret_cast<decltype({symbol.name}_ptr)>(std::malloc(sizeof({precision}[{symbol.obj.get_real_volume()}]) * bX));')
           if len(batched_symbols_in + batched_symbols_inout) > 0:
-            file(f'#pragma omp target teams nowait num_teams(bX) depend(inout: streamobj[0]) map(from: {", ".join(f"{symbol.name}_ptr[0:bX]" for symbol in batched_symbols_in + batched_symbols_inout)}) is_device_ptr({", ".join(symbol.name for symbol in global_symbols)}) {device}')
+            file(f'#pragma omp target teams nowait num_teams(bX) depend(inout: streamobj[0]) map(from: {", ".join(f"{symbol.name}_ptr[0:bX]" for symbol in batched_symbols_in + batched_symbols_inout)}) is_device_ptr({", ".join(symbol.name for symbol in batched_symbols_in + batched_symbols_inout)}) {device}')
             with file.Scope():
               file('#pragma omp parallel')
               with file.Scope():
@@ -109,7 +109,7 @@ class TargetLexic(Lexic):
                     file(f'{symbol.name}_ptr[omp_get_team_num()][i] = {symbol.name}[omp_get_team_num()][i];')
           if len(batched_symbols_out + batched_symbols_inout) > 0:
             def epilogue():
-              file(f'#pragma omp target teams nowait num_teams(bX) depend(inout: streamobj[0]) map(to: {", ".join(f"{symbol.name}_ptr[0:bX]" for symbol in batched_symbols_out + batched_symbols_inout)}) is_device_ptr({", ".join(symbol.name for symbol in global_symbols)}) {device}')
+              file(f'#pragma omp target teams nowait num_teams(bX) depend(inout: streamobj[0]) map(to: {", ".join(f"{symbol.name}_ptr[0:bX]" for symbol in batched_symbols_out + batched_symbols_inout)}) is_device_ptr({", ".join(symbol.name for symbol in batched_symbols_out + batched_symbols_inout)}) {device}')
               with file.Scope():
                 file('#pragma omp parallel')
                 with file.Scope():
@@ -129,7 +129,7 @@ class TargetLexic(Lexic):
           file(f'#pragma omp target teams nowait num_teams(bX) depend(inout: streamobj[0]) {constant_symbols_str} {strided_symbols_in_str} {strided_symbols_out_str} {strided_symbols_inout_str} {batched_symbols_in_str} {batched_symbols_out_str} {batched_symbols_inout_str} thread_limit({bounds}) {deviceAny}')
         else:
           device = ''
-          file(f'#pragma omp target teams nowait num_teams(bX) depend(inout: streamobj[0]) is_device_ptr({", ".join(symbol.name for symbol in global_symbols)}) thread_limit({bounds})')
+          file(f'#pragma omp target teams nowait num_teams(bX) depend(inout: streamobj[0]) is_device_ptr({", ".join(symbol.name for symbol in global_symbols if symbol.obj.addressing != Addressing.SCALAR)}) thread_limit({bounds})')
         self.blockloop.__enter__()
         file(f'{precision} {GeneralLexicon.TOTAL_SHR_MEM}[{total_shared_mem_size}];')
         file(f'#pragma omp parallel num_threads({bounds})')
