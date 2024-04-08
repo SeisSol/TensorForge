@@ -89,12 +89,12 @@ class TargetLexic(Lexic):
           device = 'device(TARGETDART_DEVICE(0))'
           deviceAny = 'device(TARGETDART_ANY)'
           for symbol in batched_symbols_in:
-            file(f'static unordered_map<const {precision}**, {precision}(*)[{symbol.obj.get_real_volume()}]> {symbol.name}_datamap;')
+            file(f'static std::unordered_map<const {precision}**, {precision}(*)[{symbol.obj.get_real_volume()}]> {symbol.name}_datamap;')
             file(f'auto* {symbol.name}_ptr = {symbol.name}_datamap[{symbol.name}];')
             with file.If(f'{symbol.name}_ptr == nullptr'):
               file(f'{symbol.name}_ptr = reinterpret_cast<decltype({symbol.name}_ptr)>(std::malloc(sizeof({precision}[{symbol.obj.get_real_volume()}]) * bX));')
           for symbol in batched_symbols_out + batched_symbols_inout:
-            file(f'static unordered_map<{precision}**, {precision}(*)[{symbol.obj.get_real_volume()}]> {symbol.name}_datamap;')
+            file(f'static std::unordered_map<{precision}**, {precision}(*)[{symbol.obj.get_real_volume()}]> {symbol.name}_datamap;')
             file(f'auto* {symbol.name}_ptr = {symbol.name}_datamap[{symbol.name}];')
             with file.If(f'{symbol.name}_ptr == nullptr'):
               file(f'{symbol.name}_ptr = reinterpret_cast<decltype({symbol.name}_ptr)>(std::malloc(sizeof({precision}[{symbol.obj.get_real_volume()}]) * bX));')
@@ -184,7 +184,10 @@ class TargetLexic(Lexic):
     return self.get_tid_counter(self.thread_idx_z, self.block_dim_z, self.block_idx_z)
 
   def get_headers(self):
-    return ['cstdlib', 'stdexcept', 'omp.h', 'cmath']
+    headers = ['cstdlib', 'stdexcept', 'omp.h', 'cmath']
+    if self._backend == 'targetdart':
+      headers += ['unordered_map']
+    return headers
 
   def get_fptype(self, fptype, length=1):
     return f'__attribute__ ((vector_size (sizeof({fptype}) * {length}))) {fptype}'
