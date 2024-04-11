@@ -207,11 +207,16 @@ class Generator:
                           self._scopes.get_symbol(self._shr_mem_obj),
                           self._num_threads)
     
+    # builder.build_prologue()
+
     for gemm_descr in self.gemm_list:
       builder.build(ops=[self._scopes.get_symbol(op) for op in gemm_descr.ops],
                       dest_obj=gemm_descr.dest,
                       descr=gemm_descr)
       self._ir.extend(builder.get_instructions())
+    
+    builder.build_epilogue()
+    self._ir.extend(builder.get_instructions())
 
   def _deduce_mults_per_block(self):
     policy = self._thread_block_policy_type(self._context,

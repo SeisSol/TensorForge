@@ -5,7 +5,7 @@ from kernelforge.backend.symbol import Symbol, SymbolType
 from kernelforge.backend.instructions.allocate import RegisterAlloc
 from kernelforge.backend.instructions.memory.load import GlbToShrLoader
 from kernelforge.backend.instructions.clear_registers import ClearRegisters
-from kernelforge.backend.instructions.memory.store import StoreRegToGlb, StoreRegToShr
+from kernelforge.backend.instructions.memory.store import StoreRegToGlb, StoreRegToShr, StoreRegToReg
 from kernelforge.backend.instructions.sync_threads import SyncThreads
 from kernelforge.backend.instructions.compute.multilinear import MultilinearInstruction
 from kernelforge.common.matrix.tensor import Tensor
@@ -13,6 +13,7 @@ from kernelforge.common.exceptions import InternalError
 from kernelforge.generators.descriptions import MultilinearDescr
 from kernelforge.backend.instructions.builders.allocator_builder import AbstractBuilder
 from kernelforge.common.operation import AddOperator, MulOperator
+from kernelforge.backend.data_types import RegMemObject
 
 class MultilinearBuilder(AbstractBuilder):
   GemmClass = None
@@ -141,11 +142,13 @@ class MultilinearBuilder(AbstractBuilder):
     return name
 
   def _alloc_register_array(self):
-    registers = Symbol(name=self._name_registers(), stype=SymbolType.Register, obj=self._dest_obj)
     regsize = 1
-    for d in range(registers.data_view.rank()):
-      if d not in registers.lead_dims:
-        regsize *= registers.data_view.get_dim_size(d)
+    for d, dim in enumerate(self._dest_obj.get_actual_shape()):
+      if d not in [0]: # for now, this is the lead dim
+        regsize *= dim
+    name = self._name_registers()
+    regmem = RegMemObject(name, regsize)
+    registers = Symbol(name=name, stype=SymbolType.Register, obj=regmem)
     self._scopes.add_symbol(registers)
     registerAlloc = RegisterAlloc(self._context, registers, regsize)
     self._instructions.append(registerAlloc)
@@ -156,6 +159,14 @@ class MultilinearBuilder(AbstractBuilder):
     if self._dest_regs.stype != SymbolType.Register:
       raise InternalError('gemm-builder: reg_array must be in registers')
 
+  def _get_target_symbol(self):
+    dest_symbol = self._scopes.get_symbol(self._dest_obj)
+    if dest_symbol.name in self._deferred_stores:
+      dest_registers,_ = self._deferred_stores[dest_symbol.name]
+      return dest_registers
+    else:
+      return dest_symbol
+
   def _make_compute(self):
     self._instructions.append(MultilinearInstruction(context=self._context,
                                    ops=self._mem_regions,
@@ -163,7 +174,7 @@ class MultilinearBuilder(AbstractBuilder):
                                    dest=self._temp_regs,
                                    prefer_align=False,#self._descr.prefer_align,
                                    num_threads=self._num_threads,
-                                   prev=self._scopes.get_symbol(self._dest_obj) if self._add else None,
+                                   prev=self._get_target_symbol() if self._add else None,
                                    productOperation=MulOperator(),
                                    sumOperation=AddOperator()))
 
@@ -177,22 +188,27 @@ class MultilinearBuilder(AbstractBuilder):
                                                 shr_mem=self._shr_mem,
                                                 num_threads=self._num_threads))
       elif dest_symbol.stype == SymbolType.Global:
-        # if dest_symbol.name not in self._deferred_stores:
-        #   dest_registers = self._alloc_register_array()
-        #   self._deferred_stores[dest_symbol.name] = dest_registers
-        # dest_registers = self._deferred_stores[dest_symbol.name]
-        self._instructions.append(StoreRegToGlb(context=self._context,
+        if True:
+          if dest_symbol.name not in self._deferred_stores:
+            dest_registers = self._alloc_register_array()
+            self._deferred_stores[dest_symbol.name] = (dest_registers, dest_symbol)
+          dest_registers,_ = self._deferred_stores[dest_symbol.name]
+          self._instructions.append(StoreRegToReg(context=self._context,
+                                                src=self._temp_regs,
+                                                dest=dest_registers,
+                                                num_threads=self._num_threads))
+        else:
+          self._instructions.append(StoreRegToGlb(context=self._context,
+                                                  src=self._temp_regs,
+                                                  dest=dest_symbol,
+                                                  alpha=1,#self._descr.alpha,
+                                                  beta=0,#self._descr.beta,
+                                                  num_threads=self._num_threads))
+      elif dest_symbol.stype == SymbolType.Register:
+        self._instructions.append(StoreRegToReg(context=self._context,
                                                 src=self._temp_regs,
                                                 dest=dest_symbol,
-                                                alpha=1,#self._descr.alpha,
-                                                beta=0,#self._descr.beta,
                                                 num_threads=self._num_threads))
-      elif dest_symbol.stype == SymbolType.Register:
-        pass
-        #self._instructions.append(StoreRegToGlb(context=self._context,
-        #                                        src=self._temp_regs,
-        #                                        dest=dest_symbol,
-        #                                        num_threads=self._num_threads))
       else:
         raise InternalError(f'gemm-builder: `res` must be either in shr. or glb. mem., given: {dest_symbol.stype}')
     else:
@@ -220,3 +236,13 @@ class MultilinearBuilder(AbstractBuilder):
     name = f's{self._counter}'
     self._counter += 1
     return name
+
+  def build_epilogue(self):
+    self._reset()
+    for store_regs, store_global in self._deferred_stores.values():
+      self._instructions.append(StoreRegToGlb(context=self._context,
+                                                  src=store_regs,
+                                                  dest=store_global,
+                                                  alpha=1,#self._descr.alpha,
+                                                  beta=0,#self._descr.beta,
+                                                  num_threads=self._num_threads))

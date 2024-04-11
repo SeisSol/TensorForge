@@ -6,10 +6,75 @@ from kernelforge.backend.data_types import RegMemObject
 from kernelforge.backend.symbol import Symbol, SymbolType, DataView
 from kernelforge.common.exceptions import InternalError
 from kernelforge.backend.writer import Writer
-from . import AbstractShrMemWrite
+from . import AbstractShrMemWrite, MemoryInstruction
 from ..abstract_instruction import AbstractInstruction
 from kernelforge.common.basic_types import FloatingPointType
 
+
+class StoreRegToReg(MemoryInstruction):
+  def __init__(self,
+               context: Context,
+               src: Symbol,
+               dest: Symbol,
+               num_threads: int):
+    super(StoreRegToReg, self).__init__(context)
+
+    if src.stype != SymbolType.Register:
+      raise InternalError('store: operand `src` is not in registers')
+
+    if not isinstance(src.obj, RegMemObject):
+      raise InternalError(f'store: operand `src` is not registers, instead: {type(src.obj)}')
+
+    if dest.stype != SymbolType.Register:
+      raise InternalError('store: operand `dest` is not a register.')
+
+    if not isinstance(dest.obj, RegMemObject):
+      raise InternalError(f'store: operand `dest` is not a matrix, instead: {type(dest.obj)}')
+
+    src.add_user(self)
+    dest.add_user(self)
+
+    self._is_ready = True
+
+    bbox = src.data_view.get_bbox()
+    bbox = BoundingBox([0] * bbox.rank(), bbox.sizes())
+    dest.data_view = DataView(bbox.sizes(),
+                              permute=None,
+                              bbox=bbox)
+
+    self._dest: Symbol = dest
+    self._src: Symbol = src.clone()
+    self._num_threads: int = num_threads
+    view: DataView = self._dest.data_view
+
+  def gen_code_declare(self, writer: Writer):
+    pass
+
+  def gen_code_inner(self, writer: Writer) -> None:
+    dest_view = self._dest.data_view
+    src_bbox = self._src.data_view.get_bbox()
+
+    with writer.If(self.gen_range_mask_threads(begin=src_bbox.lower()[0], end=src_bbox.upper()[0])):
+      loops = []
+      indices = [self._vm.get_lexic().thread_idx_x]
+      for i in range(1, src_bbox.rank()):
+        writer.insert_pragma_unroll()
+        loop = f'int i{i} = 0; i{i} < {dest_view.shape[i]}; ++i{i}'
+        loops += [writer.For(loop)]
+        loops[-1].__enter__()
+        indices += [f'i{i}']
+
+      self._src.load(writer, self._context, 'value', indices, False)
+      self._dest.store(writer, self._context, 'value', indices, False)
+      
+      for loop in reversed(loops):
+        loop.__exit__(None, None, None)
+
+  def get_dest(self) -> Symbol:
+    return self._dest
+
+  def __str__(self) -> str:
+    return f'{self._dest.name} = store{{r>r}}({self._src.name});'
 
 class StoreRegToShr(AbstractShrMemWrite):
   def __init__(self,
@@ -111,8 +176,8 @@ class StoreRegToGlb(AbstractInstruction):
                               permute=None,
                               bbox=dest.obj.get_bbox())
     
-    if dest.data_view.get_dim_size(0) < src.data_view.get_dim_size(0):
-      raise InternalError('store: `src` and `dest` do not match in size aling dim `0`')
+    #if dest.data_view.get_dim_size(0) < src.data_view.get_dim_size(0):
+    #  raise InternalError('store: `src` and `dest` do not match in size aling dim `0`')
 
     self._dest: Symbol = dest
     self._src: Symbol = src.clone()
