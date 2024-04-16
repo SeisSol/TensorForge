@@ -127,6 +127,8 @@ def get_known_arch():
 
   arch['gfx90a'] = deepcopy(arch['gfx908'])
 
+  arch['gfx940'] = deepcopy(arch['gfx90a'])
+  arch['gfx941'] = deepcopy(arch['gfx90a'])
   arch['gfx942'] = deepcopy(arch['gfx90a'])
 
   # https://en.wikipedia.org/wiki/RDNA_(microarchitecture)
@@ -153,12 +155,12 @@ def get_known_arch():
   arch['gfx1200'] = deepcopy(arch['gfx1010'])
 
   # Intel
-  arch['dg1'] = {
-    'vec_unit_length': 64,
-    'max_local_mem_size_per_block': 64 * KB,
+  arch['pvc'] = {
+    'vec_unit_length': 16,
+    'max_local_mem_size_per_block': 128 * KB,
     'max_num_threads': 512,
     'max_reg_per_block': 64 * KB,
-    'max_threads_per_sm': 512,
+    'max_threads_per_sm': 1024,
     'max_block_per_sm': 64,
     'hw_fp_word_size': 4,
     'mem_access_align_size': 32,
@@ -166,12 +168,13 @@ def get_known_arch():
     'name': 'intel',
   }
 
-  arch['pvc'] = {
-    'vec_unit_length': 16,
-    'max_local_mem_size_per_block': 128 * KB,
+  """
+  arch['dg1'] = {
+    'vec_unit_length': 64,
+    'max_local_mem_size_per_block': 64 * KB,
     'max_num_threads': 512,
     'max_reg_per_block': 64 * KB,
-    'max_threads_per_sm': 1024,
+    'max_threads_per_sm': 512,
     'max_block_per_sm': 64,
     'hw_fp_word_size': 4,
     'mem_access_align_size': 32,
@@ -190,6 +193,7 @@ def get_known_arch():
                                   'mem_access_align_size': 32,
                                   'shmem_banks': 32,
                                   'name': 'intel'}
+"""
   return arch
 
 

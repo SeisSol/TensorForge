@@ -44,6 +44,9 @@ class HipLexic(CudaLexic):
 
   def get_headers(self):
     return ["hip/hip_runtime.h"]
+  
+  def get_fptype(self, fptype, length=1):
+    return f'HIP_vector_type<{fptype}, {length}>'
 
   def glb_store(self, lhs, rhs, nontemporal=False):
     if nontemporal and False: # TODO: re-enable once tested

@@ -99,7 +99,7 @@ class TargetLexic(Lexic):
             with file.If(f'{symbol.name}_ptr == nullptr'):
               file(f'{symbol.name}_ptr = reinterpret_cast<decltype({symbol.name}_ptr)>(std::malloc(sizeof({precision}[{symbol.obj.get_real_volume()}]) * bX));')
           if len(batched_symbols_in + batched_symbols_inout) > 0:
-            file(f'#pragma omp target nowait depend(inout: streamobj[0]) map(from: {", ".join(f"{symbol.name}_ptr[0:bX]" for symbol in batched_symbols_in + batched_symbols_inout)}) is_device_ptr({", ".join(symbol.name for symbol in batched_symbols_in + batched_symbols_inout)}) {device}')
+            file(f'#pragma omp target nowait depend(inout: streamobj[0]) map(to:bX) map(from: {", ".join(f"{symbol.name}_ptr[0:bX]" for symbol in batched_symbols_in + batched_symbols_inout)}) is_device_ptr({", ".join(symbol.name for symbol in batched_symbols_in + batched_symbols_inout)}) {device}')
             with file.Scope():
               for symbol in batched_symbols_in + batched_symbols_inout:
                 file('#pragma omp loop nowait collapse(2)')
@@ -108,7 +108,7 @@ class TargetLexic(Lexic):
                     file(f'{symbol.name}_ptr[j][i] = {symbol.name}[j][i];')
           if len(batched_symbols_out + batched_symbols_inout) > 0:
             def epilogue():
-              file(f'#pragma omp target nowait depend(inout: streamobj[0]) map(to: {", ".join(f"{symbol.name}_ptr[0:bX]" for symbol in batched_symbols_out + batched_symbols_inout)}) is_device_ptr({", ".join(symbol.name for symbol in batched_symbols_out + batched_symbols_inout)}) {device}')
+              file(f'#pragma omp target nowait depend(inout: streamobj[0]) map(to:bX) map(to: {", ".join(f"{symbol.name}_ptr[0:bX]" for symbol in batched_symbols_out + batched_symbols_inout)}) is_device_ptr({", ".join(symbol.name for symbol in batched_symbols_out + batched_symbols_inout)}) {device}')
               with file.Scope():
                 for symbol in batched_symbols_out + batched_symbols_inout:
                   file('#pragma omp loop nowait collapse(2)')
@@ -124,7 +124,8 @@ class TargetLexic(Lexic):
           strided_symbols_in_str = f'map(to: {", ".join(f"{symbol.name}[0:{symbol.obj.get_real_volume()}*bX]" for symbol in strided_symbols_in)})' if len(strided_symbols_in) > 0 else ''
           strided_symbols_inout_str = f'map(tofrom: {", ".join(f"{symbol.name}[0:{symbol.obj.get_real_volume()}*bX]" for symbol in strided_symbols_inout)})' if len(strided_symbols_inout) > 0 else ''
           constant_symbols_str = f'map(to: {", ".join(f"{symbol.name}[0:{symbol.obj.get_real_volume()}]" for symbol in constant_symbols)})' if len(constant_symbols) > 0 else ''
-          file(f'#pragma omp target teams nowait num_teams(bX) depend(inout: streamobj[0]) {constant_symbols_str} {strided_symbols_in_str} {strided_symbols_out_str} {strided_symbols_inout_str} {batched_symbols_in_str} {batched_symbols_out_str} {batched_symbols_inout_str} thread_limit({bounds}) {deviceAny}')
+          # TODO: map offsets
+          file(f'#pragma omp target teams nowait num_teams(bX) map(to:tX) depend(inout: streamobj[0]) {constant_symbols_str} {strided_symbols_in_str} {strided_symbols_out_str} {strided_symbols_inout_str} {batched_symbols_in_str} {batched_symbols_out_str} {batched_symbols_inout_str} thread_limit({bounds}) {deviceAny}')
         else:
           device = ''
           file(f'#pragma omp target teams nowait num_teams(bX) depend(inout: streamobj[0]) is_device_ptr({", ".join(symbol.name for symbol in global_symbols if symbol.obj.addressing != Addressing.SCALAR)}) thread_limit({bounds})')

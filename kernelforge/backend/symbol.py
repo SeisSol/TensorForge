@@ -63,11 +63,11 @@ class DataView:
   
   def get_dim_strides(self, mask=[], bbox=False):
     # TODO: permute? Yes or no? Also, unify SPPs.
-    strides = [1] * self.rank()
+    strides = []
     current = 1
     for i, size in enumerate(self.get_bbox().sizes() if bbox else self.shape):
       if i not in mask:
-        strides[i] = current
+        strides += [current]
         current *= size
     return strides
 
@@ -135,14 +135,14 @@ class Immediate:
     self._value = value
     self._type = fptype
   
-  def write(context: Context):
+  def write(self, context: Context):
     return self._type.literal(self._value)
 
 class Variable:
   def __init__(self, name):
     self._name = name
 
-  def write(context: Context):
+  def write(self, context: Context):
     return self._name
 
 class LeadIndex:
@@ -150,8 +150,30 @@ class LeadIndex:
     self._lane = lane
     self._stride = stride
 
-  def write(context: Context):
+  def write(self, context: Context):
     return f'(({context.get_vm().get_lexic().thread_idx_x} % {self._lane}) / {self._stride})'
+
+class LoopDimension:
+  def __init__(self, unroll):
+    pass
+
+  def write(self, context: Context, writer: Writer, inner):
+    if unroll:
+      for value in TODO:
+        inner(Immediate(value, TODO))
+    else:
+      with writer.For(''):
+        inner(Variable('TODO'))
+
+class Loop:
+  def __init__(self, dimensions: List[LoopDimension]):
+    pass
+
+  def write(self, context: Context, writer: Writer, inner):
+    pass
+  
+  def indices(self):
+    pass
 
 class Symbol:
   def __init__(self,

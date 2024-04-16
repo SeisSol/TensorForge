@@ -12,15 +12,14 @@ from kernelforge.common.operation import ReductionOperator
 from typing import Union, List
 from kernelforge.generators.optree import Assignment, writeAssignments
 
-class MultilinearInstruction(ComputeInstruction):
+class ElementwiseInstruction(ComputeInstruction):
     def __init__(self,
                context: Context,
                assignments: List[Assignment],
-               productOperation: ReductionOperator,
-               sumOperation: ReductionOperator,
+               scopes: Scopes,
                prefer_align: bool,
                num_threads: int):
-        super(MultilinearInstruction, self).__init__(context)
+        super(ElementwiseInstruction, self).__init__(context)
         self._assignments = assignments
         self._productOperation = productOperation
         self._sumOperation = sumOperation
@@ -35,13 +34,13 @@ class MultilinearInstruction(ComputeInstruction):
         # TODO: get index list
         seen_tensors = set()
         for assignment in self._assignments:
-          assignment.assignSymbols(self.TODO)
+          assignment.assignSymbols(self.scopes)
           for tensor in assignment.symbols():
             if tensor not in seen_tensors:
               tensor.add_user(self)
               seen_tensors.add(tensor)
               if not isinstance(op.obj, Tensor):
-                raise InternalError('gemm: op1 is not a matrix')
+                raise InternalError('elementwise: op is not a matrix')
 
     def gen_code_inner(self, writer: Writer):
         self._assignment_loop(writer)
@@ -65,4 +64,4 @@ class MultilinearInstruction(ComputeInstruction):
         return self._ops
 
     def __str__(self):
-        return f'{self._dest.name} = {self._sumOperation}({",".join(op.name for op in self._ops)})' # TODO: dimensions
+        return ', '.join(f'{assignment.dest} = {assignment.optree}' for assignment in self._assignments)

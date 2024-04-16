@@ -80,8 +80,11 @@ class CudaLexic(Lexic):
     return []
   
   def get_fptype(self, fptype, length=1):
-    suffix = f'{length}' if length > 1 else ''
-    return f'{fptype}{suffix}'
+    if length <= 4:
+      suffix = f'{length}' if length > 1 else ''
+      return f'{fptype}{suffix}'
+    else:
+      return f'__attribute__ ((vector_size (sizeof({fptype}) * {length}))) {fptype}'
 
   def get_operation(self, op: Operation, fptype, value1, value2):
     fpsuffix = 'f' if fptype == FloatingPointType.FLOAT else ''
@@ -100,6 +103,10 @@ class CudaLexic(Lexic):
       return f'fmin{fpsuffix}({value1}, {value2})'
     elif op == Operation.MAX:
       return f'fmax{fpsuffix}({value1}, {value2})'
+    elif op == Operation.GAMMA:
+      return f'tgamma{fpsuffix}({value1})'
+    elif op == Operation.ERF:
+      return f'erf{fpsuffix}({value1})'
     elif op == Operation.EXP:
       return f'exp{fpsuffix}({value1})' # has __expf
     elif op == Operation.LOG:
@@ -107,6 +114,10 @@ class CudaLexic(Lexic):
     elif op == Operation.SQRT:
       # return f'__{fpprefix}sqrt_rn({value1})'
       return f'sqrt{fpsuffix}({value1})'
+    elif op == Operation.CBRT:
+      return f'cbrt{fpsuffix}({value1})'
+    elif op == Operation.POW:
+      return f'pow{fpsuffix}({value1})'
     elif op == Operation.SIN:
       return f'sin{fpsuffix}({value1})' # has __sinf
     elif op == Operation.COS:
@@ -119,3 +130,15 @@ class CudaLexic(Lexic):
       return f'acos{fpsuffix}({value1})'
     elif op == Operation.ATAN:
       return f'atan{fpsuffix}({value1})'
+    elif op == Operation.SINH:
+      return f'sinh{fpsuffix}({value1})'
+    elif op == Operation.COSH:
+      return f'cosh{fpsuffix}({value1})'
+    elif op == Operation.TANH:
+      return f'tanh{fpsuffix}({value1})'
+    elif op == Operation.ASINH:
+      return f'asinh{fpsuffix}({value1})'
+    elif op == Operation.ACOSH:
+      return f'acosh{fpsuffix}({value1})'
+    elif op == Operation.ATANH:
+      return f'atanh{fpsuffix}({value1})'

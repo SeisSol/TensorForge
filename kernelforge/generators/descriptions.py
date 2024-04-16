@@ -54,7 +54,7 @@ class MultilinearDescr(OperationDescription):
     desttarget = [i for i in range(destdim)]
     return f'{self.dest}{desttarget} = {"×".join(f"{op}{optarget}" for op, optarget in zip(self.ops, self.target))}'
 
-class PointwiseDescr(OperationDescription):
+class ElementwiseDescr(OperationDescription):
   def __init__(self, oplist: List[Assignment],
                 strict_match: bool = False,
                 prefer_align: bool = False):
