@@ -5,6 +5,7 @@ from kernelforge.common.matrix.boundingbox import BoundingBox
 from functools import reduce
 from kernelforge.common.context import Context
 from kernelforge.common.basic_types import FloatingPointType, Addressing
+from .writer import Writer
 
 class SymbolType(enum.Enum):
   Batch = 1
