@@ -41,6 +41,13 @@ import sys
 
 from io import StringIO
 
+class VarAlloc:
+    def __init__(self):
+        self.counter = -1
+    
+    def alloc(self, prefix='v'):
+        self.counter += 1
+        return f'{prefix}{self.counter}'
 
 class NoScope:
   def __enter__(self):
@@ -121,6 +128,11 @@ class Writer:
     self.stream = StringIO()
     self.indent = 0
     self.factor = 2
+    self.alloc = VarAlloc()
+
+  def varalloc(self, prefix='v'):
+    # TODO: maybe move out?
+    return self.alloc.alloc(prefix)
   
   def get_src(self):
     return self.stream.getvalue()

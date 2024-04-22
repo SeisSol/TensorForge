@@ -14,7 +14,9 @@ class SymbolType(enum.Enum):
   Register = 4
   Scratch = 5
   Scalar = 6
-  Data = 7
+  Data = 7,
+  WarpwideSource = 8,
+  WarpwideAccumulator = 9
 
 def determine_dim_index(term, index, shape, permute):
   divpos = reduce(lambda x,y: shape[x]*shape[y], permute[:index], 1)
@@ -89,59 +91,24 @@ class DataView:
   def __str__(self):
     return f'shape: {self.shape}, permute: {self._permute}'
 
-class OldDataView:
-  def __init__(self, rows: int, columns: int, is_transposed: bool, bbox: List[int] = None):
-    self._rows = rows
-    self._columns = columns
-    self.is_transposed = is_transposed
-    if not bbox:
-      bbox = [0, 0, rows, columns]
-    self._bbox = bbox
-    self._lead_dim = self.get_lead_dim()
-    self._offset = self.get_offset()
-
-  def get_bbox(self):
-    return deepcopy(self._bbox)
-
-  def reset_bbox(self, bbox):
-    assert bbox[2] - bbox[0] <= self._rows
-    assert bbox[3] - bbox[1] <= self._columns
-    self._bbox = bbox
-    self._offset = self.get_offset()
-
-  def get_offset(self):
-    return self._bbox[0] + self._bbox[1] * self._lead_dim
-
-  def get_volume(self):
-    return self._rows * self._columns
-
-  def get_lead_dim(self):
-    return self._rows
-
-  def get_dim_size(self, index):
-    assert index >= 0 and index < 2
-    return self._bbox[2 + index] - self._bbox[index]
-
-  def get_address(self, row_idx, column_idx):
-    addr = f'{row_idx} + {column_idx} * {self._lead_dim}'
-    if self._offset:
-      addr = f'{self._offset} + {addr}'
-    return addr
-
-  def __str__(self):
-    return f'rows: {self.rows}, cols: {self.columns}, lid: {self.lead_dim}, trans: {self.is_transposed}'
-
 class Immediate:
   def __init__(self, value, fptype: FloatingPointType):
     self._value = value
     self._type = fptype
   
+  def is_thread_dependent(self):
+    return False
+  
   def write(self, context: Context):
     return self._type.literal(self._value)
 
 class Variable:
-  def __init__(self, name):
+  def __init__(self, name, fptype: FloatingPointType):
     self._name = name
+    self._type = fptype
+
+  def is_thread_dependent(self):
+    return False
 
   def write(self, context: Context):
     return self._name
@@ -150,31 +117,38 @@ class LeadIndex:
   def __init__(self, lane, stride):
     self._lane = lane
     self._stride = stride
+  
+  def is_thread_dependent(self):
+    return True
 
   def write(self, context: Context):
     return f'(({context.get_vm().get_lexic().thread_idx_x} % {self._lane}) / {self._stride})'
 
-class LoopDimension:
-  def __init__(self, unroll):
-    pass
+class Loop:
+  def __init__(self, start, end, step=1, unroll=False):
+    self.start = start
+    self.end = end
+    self.step = step
+    self.unroll = unroll
 
   def write(self, context: Context, writer: Writer, inner):
     if unroll:
-      for value in TODO:
-        inner(Immediate(value, TODO))
+      for value in range(self.start, self.end, self.step):
+        inner(Immediate(value, FloatingPointType.INT))
     else:
-      with writer.For(''):
-        inner(Variable('TODO'))
+      writer.insert_pragma_unroll()
+      var = writer.varalloc('i')
+      with writer.For(f'int {var}={self.start}; {var} < {self.stop}; {var} += {self.step}'):
+        inner(Variable(var, FloatingPointType.INT))
 
-class Loop:
-  def __init__(self, dimensions: List[LoopDimension]):
-    pass
-
-  def write(self, context: Context, writer: Writer, inner):
-    pass
-  
-  def indices(self):
-    pass
+def write_loops(context: Context, writer: Writer, loops: List[Loop], inner):
+  def write_loops_inner(context: Context, writer: Writer, loops: List[Loop], inner, varlist):
+    if len(loops) == 1:
+      inner()
+    else:
+      inner_next = lambda v: write_loops_inner(context, writer, loops[1:], inner, varlist + [v])
+      loops[0].write(context, writer, inner_next)
+  write_loops_inner(context, writer, loops, inner, [])
 
 class Symbol:
   def __init__(self,
@@ -210,7 +184,7 @@ class Symbol:
     else:
       return f'{self.name}'
 
-  def access_address(self, context: Context, index: List[Union[str, int]]):
+  def access_address(self, context: Context, index: List[Union[str, int, Immediate, Variable]]):
     if self.stype == SymbolType.Global or self.stype == SymbolType.Batch or self.stype == SymbolType.SharedMem:
       # lead_dim + nonlead_dim
       dimstr = " + ".join(f"{var} * {stride}" for var, stride in zip(index, self.data_view.get_dim_strides()) if var != 0)
@@ -222,7 +196,7 @@ class Symbol:
       return dimstr if len(dimstr) > 0 else "0"
     raise NotImplementedError('Not supposed to be called')
 
-  def access(self, context: Context, index: List[Union[str, int]]):
+  def access(self, context: Context, index: List[Union[str, int, Immediate, Variable]]):
     if self.stype == SymbolType.Global or self.stype == SymbolType.Batch or self.stype == SymbolType.SharedMem or self.stype == SymbolType.Register or self.stype == SymbolType.Scratch:
       return f'{self.name}[{self.access_address(context, index)}]'
     if self.stype == SymbolType.Scalar:
@@ -267,7 +241,7 @@ class Symbol:
         writer(f'{self.get_fptype(context)} {variable} = {access};')
   
   def store(self, writer, context, variable, index: List[Union[str, int]], nontemp):
-    assert self.stype != SymbolType.Scalar and self.stype != SymbolType.Data
+    assert self.stype != SymbolType.Data
 
     access = self.access(context, index)
 

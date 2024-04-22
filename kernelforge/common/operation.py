@@ -51,8 +51,9 @@ class Operation(Enum):
 
 class OperationType(Enum):
   FLOAT = 0,
-  INTEGER = 1,
-  BOOLEAN = 2
+  SINT = 1,
+  UINT = 2,
+  BOOLEAN = 3
 
 class Operator:
   @abstractmethod
@@ -84,7 +85,7 @@ class AddOperator(ReductionOperator):
     return f'({ops[0]} + {ops[1]})'
   
   def datatype(self):
-    return [OperationType.FLOAT, OperationType.INTEGER]
+    return [OperationType.FLOAT, OperationType.SINT, OperationType.UINT]
   
   def __str__(self):
     return '+'
@@ -98,7 +99,7 @@ class MulOperator(ReductionOperator):
     return f'({ops[0]} * {ops[1]})'
   
   def datatype(self):
-    return [OperationType.FLOAT, OperationType.INTEGER]
+    return [OperationType.FLOAT, OperationType.SINT, OperationType.UINT]
   
   def __str__(self):
     return '*'
@@ -112,7 +113,7 @@ class MinOperator(ReductionOperator):
     return f'min({ops[0]}, {ops[1]})'
   
   def datatype(self):
-    return [OperationType.FLOAT, OperationType.INTEGER]
+    return [OperationType.FLOAT, OperationType.SINT, OperationType.UINT]
   
   def __str__(self):
     return 'min'
@@ -126,7 +127,7 @@ class MaxOperator(ReductionOperator):
     return f'max({ops[0]}, {ops[1]})'
   
   def datatype(self):
-    return [OperationType.FLOAT, OperationType.INTEGER]
+    return [OperationType.FLOAT, OperationType.SINT, OperationType.UINT]
   
   def __str__(self):
     return 'max'
@@ -140,7 +141,7 @@ class AndOperator(ReductionOperator):
     return f'({ops[0]} & {ops[1]})'
   
   def datatype(self):
-    return [OperationType.BOOLEAN, OperationType.INTEGER]
+    return [OperationType.BOOLEAN, OperationType.UINT]
   
   def __str__(self):
     return '&'
@@ -154,10 +155,24 @@ class OrOperator(ReductionOperator):
     return f'({ops[0]} | {ops[1]})'
   
   def datatype(self):
-    return [OperationType.BOOLEAN, OperationType.INTEGER]
+    return [OperationType.BOOLEAN, OperationType.UINT]
   
   def __str__(self):
     return '|'
+
+class XorOperator(ReductionOperator):
+  def neutral(self):
+    return False
+  
+  @abstractmethod
+  def format(self, *ops):
+    return f'({ops[0]} ^ {ops[1]})'
+  
+  def datatype(self):
+    return [OperationType.BOOLEAN, OperationType.UINT]
+  
+  def __str__(self):
+    return '^'
 
 class UnaryOperator(Operator):
   def num_operands(self):
