@@ -6,11 +6,15 @@ from .target_lexic import TargetLexic
 
 
 def lexic_factory(backend, underlying_hardware):
+  if backend == "hipsycl":
+    backend = "acpp"
+  if backend == "dpcpp":
+    backend = "oneapi"
   if backend == "cuda":
     return CudaLexic(backend, underlying_hardware)
   elif backend == "hip":
     return HipLexic(backend, underlying_hardware)
-  elif backend == "hipsycl" or backend == "oneapi":
+  elif backend in ["acpp", "oneapi"]:
     return SyclLexic(backend, underlying_hardware)
   elif backend == "omptarget" or backend == "targetdart":
     return TargetLexic(backend, underlying_hardware)
