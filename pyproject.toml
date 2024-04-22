@@ -7,6 +7,7 @@ authors = [
     { name = "Ravil Dorozhinskii", email = "ravil.aviva.com@gmail.com" },
     { name = "Yakup Budanaz", email = "budanaz.yakup@gmail.com" },
     { name = "David Schneller", email = "david.schneller@tum.de" },
+    { name = "Carsten Uphoff", email = "uphoff@in.tum.com" }
 ]
 maintainers = [
     { name = "David Schneller", email = "david.schneller@tum.de" }
