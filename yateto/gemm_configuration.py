@@ -243,7 +243,7 @@ class KernelForge(CodeGenerator):
     self._threshold = threshold
 
   def _is_arch_supported(self):
-    return self._arch.backend.lower() in {'cuda', 'hip', 'oneapi', 'hipsycl', 'omptarget', 'targetdart'}
+    return self._arch.backend.lower() in {'cuda', 'hip', 'oneapi', 'hipsycl', 'acpp', 'dpcpp', 'omptarget', 'targetdart'}
 
   def supported(self, m, n, k, sparseA, sparseB, transA, transB, alpha,
                 beta, alignedA, alignedC, target):
