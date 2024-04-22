@@ -34,10 +34,13 @@ class Variable(Node):
         pass
 
 class Assignment:
-    def __init__(dest: Variable, optree: Node):
+    def __init__(self, dest: Variable, optree: Node):
         self.dest = dest
         self.optree = optree
     
+    def tensors(self):
+        return [self.dest] + self.optree.tensors()
+
     def assignSymbols(self, scopes: Scopes):
         self.dest.assignSymbols(scopes)
         self.optree.assignSymbols(scopes)

@@ -47,7 +47,7 @@ class Generator:
                gemm_list: List[OperationDescription],
                context: Context,
                thread_block_policy_type: Type[AbstractThreadBlockPolicy] = SimpleThreadBlockPolicy):
-    self.gemm_list: List[OperationDescription] = gemm_list
+    self.descr_list: List[OperationDescription] = gemm_list
     self._context: Context = context
     self._thread_block_policy_type: Type[AbstractThreadBlockPolicy] = thread_block_policy_type
     self._base_kernel_name: Union[str, None] = None
@@ -71,7 +71,7 @@ class Generator:
     self._ir: List[AbstractInstruction] = []
 
     self._check_consistency_with_user_options()
-    self._name_operands(self.gemm_list)
+    self._name_operands(self.descr_list)
 
     self._persistent_threading = False
 
@@ -168,15 +168,15 @@ class Generator:
     self._header = f'{self._generate_launcher_proto(with_defaults=True)};\n'
 
   def _deduce_num_threads(self):
-    for gemm in self.gemm_list:
-      num_threads, num_active_threads = gemm.get_num_threads(self._context)
+    for descr in self.descr_list:
+      num_threads, num_active_threads = descr.get_num_threads(self._context)
 
       self._num_threads = max(num_threads, self._num_threads)
       self._num_active_threads = max(num_active_threads, self._num_active_threads)
 
   def _deduce_accumulator_size(self):
-    for gemm in self.gemm_list:
-      local_acc_size = gemm.get_accumulator_size()
+    for descr in self.descr_list:
+      local_acc_size = descr.get_accumulator_size()
       self._accumulator_size = max(self._accumulator_size, local_acc_size)
 
   def _emit_ir(self):
@@ -209,7 +209,7 @@ class Generator:
     
     # builder.build_prologue()
 
-    for gemm_descr in self.gemm_list:
+    for gemm_descr in self.descr_list:
       builder.build(ops=[self._scopes.get_symbol(op) for op in gemm_descr.ops],
                       dest_obj=gemm_descr.dest,
                       descr=gemm_descr)
@@ -236,10 +236,10 @@ class Generator:
 
   def _check_consistency_with_user_options(self):
     user_options = self._context.get_user_options()
-    for gemm in self.gemm_list:
-      if not gemm.is_strict_match() == user_options.exact_contraction_length:
+    for descr in self.descr_list:
+      if not descr.is_strict_match() == user_options.exact_contraction_length:
         msg = 'gemm list is not consistent with user options. '
-        msg += f'`strict_math` in gemm descr. set to {gemm.is_strict_match()}, '
+        msg += f'`strict_math` in gemm descr. set to {descr.is_strict_match()}, '
         msg += f'but `exact_contraction_length` is set to {user_options.exact_contraction_length}'
         raise RuntimeError(msg)
 
@@ -287,14 +287,14 @@ class Generator:
     for item in global_symbols:
       long_name.append(item.obj.gen_descr())
 
-    for gemm in self.gemm_list:
+    for descr in self.descr_list:
       long_name.extend([
-        str(gemm.dest)
+        str(descr)
       ])
 
     result = hashlib.md5(', '.join(long_name).encode())
     md5encoding = result.hexdigest()
-    self._base_kernel_name = f'cf_gemms_{md5encoding[:Generator.NAME_ENCODING_LENGTH]}'
+    self._base_kernel_name = f'kernel_{md5encoding[:Generator.NAME_ENCODING_LENGTH]}'
 
   def get_base_name(self):
     return self._base_kernel_name
@@ -312,7 +312,7 @@ class Generator:
       writer(f'// {matrix.obj.gen_descr()}')
 
     writer.new_line()
-    for item in self.gemm_list:
+    for item in self.descr_list:
       writer(f'// {item}')
     writer.new_line()
 

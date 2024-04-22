@@ -40,7 +40,9 @@ class MultilinearBuilder(AbstractBuilder):
 
     self._dest_regs = self._temp_regs
 
+    self._use_registers_always = True
     self._deferred_stores = {}
+    self._temporaries = {}
 
   def build(self, ops: List[Symbol], dest_obj: Tensor, descr: MultilinearDescr):
     self._reset()
@@ -150,7 +152,7 @@ class MultilinearBuilder(AbstractBuilder):
     regmem = RegMemObject(name, regsize)
     registers = Symbol(name=name, stype=SymbolType.Register, obj=regmem)
     self._scopes.add_symbol(registers)
-    registerAlloc = RegisterAlloc(self._context, registers, regsize)
+    registerAlloc = RegisterAlloc(self._context, registers, regsize, 0)
     self._instructions.append(registerAlloc)
     return registers
     # self._dest_regs = registers
@@ -188,7 +190,7 @@ class MultilinearBuilder(AbstractBuilder):
                                                 shr_mem=self._shr_mem,
                                                 num_threads=self._num_threads))
       elif dest_symbol.stype == SymbolType.Global:
-        if True:
+        if self._use_registers_always:
           if dest_symbol.name not in self._deferred_stores:
             dest_registers = self._alloc_register_array()
             self._deferred_stores[dest_symbol.name] = (dest_registers, dest_symbol)

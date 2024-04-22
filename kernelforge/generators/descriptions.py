@@ -77,12 +77,10 @@ class ElementwiseDescr(OperationDescription):
     return self._strict_match
   
   def matrix_list(self):
-    return [tensor for op in oplist for tensor in op.tensors()]
+    return [tensor for op in self.oplist for tensor in op.tensors()]
   
   def __str__(self):
-    destdim = len(self.dest.shape)
-    desttarget = [i for i in range(destdim)]
-    return f'{self.dest}{desttarget} = {"×".join(f"{op}{optarget}" for op, optarget in zip(self.ops, self.target))}'
+    return '; '.join(str(op) for op in self.oplist)
 
 class GemmDescr(MultilinearDescr):
   def __init__(self,
