@@ -1,0 +1,57 @@
+#include "kernels.h"
+#include "kernelforge_aux.h"
+#include <device.h>
+#include <chrono>
+#include <iostream>
+#include <vector>
+#include <stddef.h>
+
+using namespace device;
+
+int main () {
+
+  // get sizes of operands
+  {%- for name, descr in zip(names, descriptions) %}
+  size_t {{ name }}_size = {{ get_matrix_size(descr) }};
+  {%- endfor %}
+
+  DeviceInstance &device = DeviceInstance::getInstance();
+  device.api->setDevice(0);
+  device.api->initialize();
+
+  // allocated gpu memory
+  {%- for name in names %}
+  auto* {{ name }} = static_cast<{{ real_type }}*>(device.api->allocGlobMem({{ name }}_size * sizeof({{ real_type }})));
+  {%- endfor %}
+
+  auto start = std::chrono::high_resolution_clock::now();
+
+  // call generated kernels
+  for (size_t repeat = 0; repeat < {{ num_repeats }}; ++repeat) {
+    {%- for launcher_name, params in zip(launcher_names, call_site_params) %}
+    {{ get_call_size( launcher_name, params ) }};
+    {%- endfor %}
+  }
+
+  device.api->synchDevice();
+
+  std::cout << "num. elements: " << {{ batchSize }} << std::endl;
+  std::cout << "num. repeats: " << {{ num_repeats }} << std::endl;
+
+  auto end = std::chrono::high_resolution_clock::now();
+  std::chrono::duration<double, std::nano> elapsed_time = end - start;
+  std::cout << "elapsed time: " << elapsed_time.count() << ", ns" << std::endl;
+
+  auto batchSize = static_cast<double>({{ batchSize }});
+  auto flops = static_cast<double>({{ flops_per_op }});
+  double gflops = {{ num_repeats }} * batchSize * flops / elapsed_time.count();
+  std::cout << "GFLOP/s: " << gflops << std::endl;
+
+  // deallocate gpu memory
+  {%- for name in names %}
+  device.api->freeMem({{ name }});
+  {%- endfor %}
+
+  device.api->finalize();
+  return 0;
+}

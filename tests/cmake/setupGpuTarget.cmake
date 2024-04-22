@@ -1,0 +1,10 @@
+if(${DEVICE_BACKEND} STREQUAL "cuda")
+    include(${CMAKE_CURRENT_LIST_DIR}/cuda.cmake)
+elseif(${DEVICE_BACKEND} STREQUAL "hip")
+    include(${CMAKE_CURRENT_LIST_DIR}/hip.cmake)
+elseif((${DEVICE_BACKEND} STREQUAL "oneapi") OR (${DEVICE_BACKEND} STREQUAL "hipsycl"))
+    include(${CMAKE_CURRENT_LIST_DIR}/sycl.cmake)
+endif()
+
+target_compile_definitions(${GPU_TARGET} PUBLIC DEVICE_${DEVICE_BACKEND}_LANG REAL_SIZE=${REAL_SIZE})
+target_include_directories(${GPU_TARGET} PRIVATE ${GPU_TARGET_INCLUDE_DIRS})
