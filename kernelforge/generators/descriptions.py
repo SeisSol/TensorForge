@@ -62,8 +62,9 @@ class ElementwiseDescr(OperationDescription):
     self._strict_match = False
 
     for op in oplist:
-      op.dest.set_data_flow_direction(DataFlowDirection.SINK)
-      for tensor in op.optree.tensors():
+      for tensor in op.tensors(outtensors=True, intensors=False):
+        tensor.set_data_flow_direction(DataFlowDirection.SINK)
+      for tensor in op.tensors(outtensors=False, intensors=True):
         tensor.set_data_flow_direction(DataFlowDirection.SOURCE)
 
   def get_num_threads(self, context: Context):

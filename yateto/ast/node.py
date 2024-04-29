@@ -9,6 +9,7 @@ class Node(ABC):
     self.indices = None
     self._children = []
     self._eqspp = None
+    self.datatype = None
   
   def size(self):
     return self.indices.size()
@@ -254,6 +255,84 @@ class ScalarMultiplication(UnaryOp):
   
   def __str__(self):
     return '{}: {}'.format(super().__str__(), str(self._scalar))
+
+# TODO: temporary.
+class ScalarOp(Op):
+  def __init__(self, optype, *ops):
+    super().__init__(*ops)
+    self.optype = optype
+    self.indices = ops[0].indices
+    for op in ops[1:]:
+      self.indices = self.indices | op.indices
+  
+  def computeSparsityPattern(self, *spps):
+    if len(spps) == 0:
+      spps = [node.eqspp() for node in self]
+    permute_summand = lambda i: self.permute(self[i].indices, spps[i])
+    spp = permute_summand(0)
+    for i in range(1, len(spps)):
+      add_spp = permute_summand(i)
+      spp = aspp.add(spp, add_spp)
+    return spp
+  
+  def nonZeroFlops(self):
+    return 0
+
+class ScalarRegion(Op):
+  def __init__(self, ops, data):
+    super().__init__(*ops)
+    self.data = data
+    self.indices = ops[0].indices
+    for op in ops[1:]:
+      common = self.indices & op.indices
+      self.indices = self.indices.merged(op.indices - common)
+  
+  def computeSparsityPattern(self, *spps):
+    if len(spps) == 0:
+      spps = [node.eqspp() for node in self]
+    permute_summand = lambda i: self.permute(self[i].indices, spps[i])
+    spp = permute_summand(0)
+    for i in range(1, len(spps)):
+      add_spp = permute_summand(i)
+      spp = aspp.add(spp, add_spp)
+    return spp
+  
+  def nonZeroFlops(self):
+    return 0
+
+class Conditional(Op):
+  def __init__(self, condition, yesop, noop):
+    super().__init__(condition, yesop, noop)
+  
+  def computeSparsityPattern(self, *spps):
+    if len(spps) == 0:
+      spps = [node.eqspp() for node in self]
+    permute_summand = lambda i: self.permute(self[i].indices, spps[i])
+    spp = permute_summand(0)
+    for i in range(1, len(spps)):
+      add_spp = permute_summand(i)
+      spp = aspp.add(spp, add_spp)
+    return spp
+  
+  def nonZeroFlops(self):
+    return self._children[0].nonZeroFlops() # TODO: add more?
+
+class Loop(Op):
+  def __init__(self, condition, update):
+    super().__init__(condition, update)
+  
+  def computeSparsityPattern(self, *spps):
+    if len(spps) == 0:
+      spps = [node.eqspp() for node in self]
+    permute_summand = lambda i: self.permute(self[i].indices, spps[i])
+    spp = permute_summand(0)
+    for i in range(1, len(spps)):
+      add_spp = permute_summand(i)
+      spp = aspp.add(spp, add_spp)
+    return spp
+  
+  def nonZeroFlops(self):
+    return self._children[0].nonZeroFlops() # TODO: add more?
 
 class BinOp(Op):
   def __init__(self, lTerm, rTerm):

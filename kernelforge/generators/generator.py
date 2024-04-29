@@ -1,7 +1,7 @@
 from typing import List, Union, Type
 from copy import deepcopy
 import hashlib
-from kernelforge.generators.descriptions import OperationDescription
+from kernelforge.generators.descriptions import OperationDescription, MultilinearDescr, ElementwiseDescr
 from kernelforge.common.context import Context
 from kernelforge.common.basic_types import Addressing, GeneralLexicon, DataFlowDirection
 from kernelforge.common.aux import get_extra_offset_name
@@ -10,6 +10,7 @@ from kernelforge.backend.opt import OptimizationStage
 from kernelforge.backend.scopes import Scopes
 from kernelforge.backend.symbol import Symbol, SymbolType
 from kernelforge.backend.instructions.abstract_instruction import AbstractInstruction
+from kernelforge.backend.instructions.compute.elementwise import ElementwiseInstruction
 from kernelforge.backend.instructions.builders.multilinear_builder import MultilinearBuilder
 from kernelforge.backend.instructions.builders.ptr_manip_builder import GetElementPtrBuilder
 from kernelforge.backend.instructions.builders.allocator_builder import ShrMemAllocBuilder, RegistersAllocBuilder
@@ -206,14 +207,16 @@ class Generator:
                           self._scopes.get_symbol(self._register_array_obj),
                           self._scopes.get_symbol(self._shr_mem_obj),
                           self._num_threads)
-    
     # builder.build_prologue()
 
     for gemm_descr in self.descr_list:
-      builder.build(ops=[self._scopes.get_symbol(op) for op in gemm_descr.ops],
-                      dest_obj=gemm_descr.dest,
-                      descr=gemm_descr)
-      self._ir.extend(builder.get_instructions())
+      if isinstance(gemm_descr, MultilinearDescr):
+        builder.build(ops=[self._scopes.get_symbol(op) for op in gemm_descr.ops],
+                        dest_obj=gemm_descr.dest,
+                        descr=gemm_descr)
+        self._ir.extend(builder.get_instructions())
+      if isinstance(gemm_descr, ElementwiseDescr):
+        self._ir.append(ElementwiseInstruction(self._context, gemm_descr.oplist, self._scopes, False, self._num_threads))
     
     builder.build_epilogue()
     self._ir.extend(builder.get_instructions())

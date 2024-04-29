@@ -103,6 +103,9 @@ class DeduceIndices(Transformer):
 
     return node
 
+  def visit_ScalarRegion(self, node, bound):
+    return node
+
 ### Optimal binary tree
 
 class StrengthReduction(Transformer):
@@ -182,6 +185,11 @@ class EquivalentSparsityPattern(Transformer):
     return node
 
   def visit_Add(self, node):
+    self.generic_visit(node)
+    node.setEqspp( node.computeSparsityPattern() )
+    return node
+
+  def visit_ScalarOp(self, node):
     self.generic_visit(node)
     node.setEqspp( node.computeSparsityPattern() )
     return node

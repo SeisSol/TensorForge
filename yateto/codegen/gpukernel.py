@@ -1,5 +1,6 @@
 from .factory import KernelFactory
-from kernelforge.generators.descriptions import MultilinearDescr
+from kernelforge.generators.descriptions import MultilinearDescr, ElementwiseDescr
+from kernelforge.generators.optree import Assignment, OpNode, TensorVar
 from common import *
 
 from .common import TensorDescription, IndexedTensorDescription, BatchedOperationsAux
@@ -23,14 +24,31 @@ class GpuKernelGenerator:
     self._descr_list = []
 
   def add_operation(self, dest, ops, target, permute, add):
-      self._cache_matrices(dest, ops, target, permute)
-      can_be_aligned = self._can_be_aligned(dest, ops, target, permute)
-      self._descr_list.append(MultilinearDescr(self._cache[dest.name],
-                                [self._cache[op.name() if isinstance(op, Scalar) else op.name] for op in ops],
-                                target, permute, add=add,
-                                 strict_match=False,
-                                 prefer_align=can_be_aligned))
-      return 0# self._descr_list[-1].get_flops()
+    self._cache_matrices(dest, ops, target, permute)
+    can_be_aligned = self._can_be_aligned(dest, ops, target, permute)
+    self._descr_list.append(MultilinearDescr(self._cache[dest.name],
+                              [self._cache[op.name() if isinstance(op, Scalar) else op.name] for op in ops],
+                              target, permute, add=add,
+                                strict_match=False,
+                                prefer_align=can_be_aligned))
+    return 0# self._descr_list[-1].get_flops()
+
+  def add_scalar(self, ops, statements, indices):
+    indicesIndexed = {}
+    for i,op in enumerate(ops):
+      self.make_tensor(op, False, None)
+      indicesIndexed[op.name() if isinstance(op, Scalar) else op.name] = indices[i]
+    
+    def assigner(pretensor):
+      return self._cache[pretensor.name()], indicesIndexed[pretensor.name()]
+    
+    for statement in statements:
+      statement.assignTensor(assigner)
+    
+    self._descr_list.append(ElementwiseDescr(statements,
+                                strict_match=False,
+                                prefer_align=False))
+    return 0
 
   def generate(self, cpp, routineCache):
     context = Context(arch=self._arch.name,
@@ -55,42 +73,42 @@ class GpuKernelGenerator:
     
     return aligned
 
+  def make_tensor(self, op, can_be_aligned, dims):
+    if isinstance(op, Scalar):
+      entry = self._add_scalar(op)
+      entry_name = op.name()
+    else:
+      # TODO: refine
+      currentPreShape = list(BoundingBox.fromSpp(op.eqspp))
+      if can_be_aligned:
+        for i, dim in enumerate(dims):
+          if i == 0 and op.memoryLayout.alignedStride(): # previously: dim == 0
+            currentPreShape[i] = currentPreShape[i].aligned(self._arch)
+      currentShape = [b.stop for b in currentPreShape]
+      currentRange = list(BoundingBox(Range(0, b) for b in currentShape))
+            
+      entry = self._get_kernelforge_matrix(tensor=op,
+                                          tensor_variable=op,
+                                          shape=currentShape,
+                                          bboxrange=currentRange)
+      entry_name = op.name
+
+    if not (entry_name in self._cache and entry.is_same(self._cache[entry_name])):
+      self._cache[entry_name] = entry
+
   def _cache_matrices(self, dest, ops, target, permute):
     can_be_aligned = self._can_be_aligned(dest, ops, target, permute)
-
-    def make_tensor(op, dims):
-      if isinstance(op, Scalar):
-        entry = self._add_scalar(op)
-        entry_name = op.name()
-      else:
-        # TODO: refine
-        currentPreShape = list(BoundingBox.fromSpp(op.eqspp))
-        if can_be_aligned:
-          for i, dim in enumerate(dims):
-            if i == 0 and op.memoryLayout.alignedStride(): # previously: dim == 0
-              currentPreShape[i] = currentPreShape[i].aligned(self._arch)
-        currentShape = [b.stop for b in currentPreShape]
-        currentRange = list(BoundingBox(Range(0, b) for b in currentShape))
-              
-        entry = self._get_kernelforge_matrix(tensor=op,
-                                            tensor_variable=op,
-                                            shape=currentShape,
-                                            bboxrange=currentRange)
-        entry_name = op.name
-
-      if not (entry_name in self._cache and entry.is_same(self._cache[entry_name])):
-        self._cache[entry_name] = entry
     
     # no add onto a matrix that doesn't exist (TODO: check if that's always the case)
     assert not(dest.is_temporary and dest in ops)
 
     for op, optarget in zip(ops, target):
-      make_tensor(op, optarget)
+      self.make_tensor(op, can_be_aligned, optarget)
 
     if dest.is_temporary: # (dest is never a scalar---for the time being)
       self._cache[dest.name] = self._gen_tmp_matix(ops, target, permute, dest.name)
     else:
-      make_tensor(dest, [i for i in range(len(dest.indices))])
+      self.make_tensor(dest, can_be_aligned, [i for i in range(len(dest.indices))])
 
   def _add_scalar(self, scalar):
     tensor = Tensor([], Addressing.SCALAR, alias=scalar.name())
@@ -189,27 +207,33 @@ class GpuKernelFactory(KernelFactory):
   
   def create_LoopOverGEMM(self, node, result, arguments, add, scalar, prefetchName, routineCache, gemm_cfg):
     assert len(arguments) == 2
-    return self.handle(IndexedTensorDescription.fromNode(result, node), [IndexedTensorDescription.fromNode(arguments[0], node.leftTerm()), IndexedTensorDescription.fromNode(arguments[1], node.rightTerm())], add, scalar, node.transA(), node.transB())
+    return self.handleLinear(IndexedTensorDescription.fromNode(result, node), [IndexedTensorDescription.fromNode(arguments[0], node.leftTerm()), IndexedTensorDescription.fromNode(arguments[1], node.rightTerm())], add, scalar, node.transA(), node.transB())
   
   def create_IndexSum(self, node, result, arguments, add, scalar, prefetchName, routineCache, gemm_cfg):
     assert len(arguments) == 1
-    return self.handle(IndexedTensorDescription.fromNode(result, node), [IndexedTensorDescription.fromNode(arguments[0], node.term())], add, scalar, False, False)
+    return self.handleLinear(IndexedTensorDescription.fromNode(result, node), [IndexedTensorDescription.fromNode(arguments[0], node.term())], add, scalar, False, False)
   
   def create_Product(self, node, result, arguments, add, scalar, prefetchName, routineCache, gemm_cfg):
     assert len(arguments) == 2
-    return self.handle(IndexedTensorDescription.fromNode(result, node), [IndexedTensorDescription.fromNode(arguments[0], node.leftTerm()), IndexedTensorDescription.fromNode(arguments[1], node.rightTerm())], add, scalar, False, False)
+    return self.handleLinear(IndexedTensorDescription.fromNode(result, node), [IndexedTensorDescription.fromNode(arguments[0], node.leftTerm()), IndexedTensorDescription.fromNode(arguments[1], node.rightTerm())], add, scalar, False, False)
 
   def create_Permute(self, node, result, arguments, add, scalar, prefetchName, routineCache, gemm_cfg):
     term = arguments[0]
-    return self.handle(IndexedTensorDescription(str(result), node.indices, result.memoryLayout(), result.eqspp()), [IndexedTensorDescription(str(term), node.term().indices, term.memoryLayout(), term.eqspp())], add, scalar, False, False)
+    return self.handleLinear(IndexedTensorDescription(str(result), node.indices, result.memoryLayout(), result.eqspp()), [IndexedTensorDescription(str(term), node.term().indices, term.memoryLayout(), term.eqspp())], add, scalar, False, False)
   
   def simple(self, result, term, add, scalar, routineCache):
-    return self.handle(IndexedTensorDescription(str(result), self._indices(result), result.memoryLayout(), result.eqspp()), [IndexedTensorDescription(str(term), self._indices(term), term.memoryLayout(), term.eqspp())], add, scalar, False, False)
+    return self.handleLinear(IndexedTensorDescription(str(result), self._indices(result), result.memoryLayout(), result.eqspp()), [IndexedTensorDescription(str(term), self._indices(term), term.memoryLayout(), term.eqspp())], add, scalar, False, False)
   
-  def handle(self, dest, ops, add, scalar, transposeA, transposeB):
-    # convert indices to loop numbers
+  def create_ScalarRegion(self, node, result, arguments, add, scalar, prefetchName, routineCache, gemm_cfg):
+    terms = [IndexedTensorDescription.fromNode(arg, terms) for arg, terms in zip(arguments, node)]
+    target, permute = self.getIndices(None, terms)
+    return self.generator.add_scalar(terms, node.data, target)
 
-    target_indices = dest.indices
+  def getIndices(self, dest, ops):
+    if dest is None:
+      target_indices = []
+    else:
+      target_indices = dest.indices
 
     indexindex = {index:i for i, index in enumerate(target_indices)}
     contract_counter = -1
@@ -222,6 +246,13 @@ class GpuKernelFactory(KernelFactory):
 
     target = [[indexindex[index] for index in op.indices] for op in ops]
     permute = [[i for i,_ in enumerate(op.indices)] for op in ops]
+
+    return target, permute
+
+  def handleLinear(self, dest, ops, add, scalar, transposeA, transposeB):
+    # convert indices to loop numbers
+
+    target, permute = self.getIndices(dest, ops)
     
     if not (scalar == 1 or scalar == 1.0):
       ops += [scalar]

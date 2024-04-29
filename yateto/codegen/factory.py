@@ -195,6 +195,12 @@ class UnitTestFactory(KernelFactory):
     termTerm = self._formatTerm(arguments[0], node.term().indices)
     return self._simpleBody(resultTerm, termTerm, add, scalar, node.indices)
 
+  def create_ScalarOp(self, node, result, arguments, add, scalar, prefetchName, routineCache, gemm_cfg):
+    return 0
+
+  def create_ScalarRegion(self, node, result, arguments, add, scalar, prefetchName, routineCache, gemm_cfg):
+    return 0
+
   def _simpleBody(self, resultTerm, termTerm, add, scalar, indices):
     ranges = {idx: Range(0, indices.indexSize(idx)) for idx in indices}
 
