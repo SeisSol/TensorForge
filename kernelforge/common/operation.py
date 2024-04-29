@@ -17,6 +17,8 @@ class Operation(Enum):
   MOD = 10,
   NEG = 11,
   RCP = 12,
+  RSQRT = 13,
+  RCBRT = 13,
   CEIL = 30,
   FLOOR = 31,
   ROUND = 32,
