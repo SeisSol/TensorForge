@@ -103,6 +103,10 @@ class CudaLexic(Lexic):
       return f'fmin{fpsuffix}({value1}, {value2})'
     elif op == Operation.MAX:
       return f'fmax{fpsuffix}({value1}, {value2})'
+    elif op == Operation.ABS:
+      return f'fabs{fpsuffix}({value1})'
+    elif op == Operation.NEG:
+      return f'(-{value1})'
     elif op == Operation.GAMMA:
       return f'tgamma{fpsuffix}({value1})'
     elif op == Operation.ERF:
@@ -142,3 +146,29 @@ class CudaLexic(Lexic):
       return f'acosh{fpsuffix}({value1})'
     elif op == Operation.ATANH:
       return f'atanh{fpsuffix}({value1})'
+    elif op == Operation.NOT and fptype == FloatingPointType.BOOL:
+      return f'(!{value1})'
+    elif op == Operation.NOT and fptype != FloatingPointType.BOOL:
+      return f'(~{value1})'
+    elif op == Operation.AND and fptype == FloatingPointType.BOOL:
+      return f'({value1} && {value2})'
+    elif op == Operation.OR and fptype == FloatingPointType.BOOL:
+      return f'({value1} || {value2})'
+    elif op == Operation.AND and fptype != FloatingPointType.BOOL:
+      return f'({value1} & {value2})'
+    elif op == Operation.OR and fptype != FloatingPointType.BOOL:
+      return f'({value1} | {value2})'
+    elif op == Operation.XOR:
+      return f'({value1} ^ {value2})'
+    elif op == Operation.LT:
+      return f'({value1} < {value2})'
+    elif op == Operation.LE:
+      return f'({value1} <= {value2})'
+    elif op == Operation.GT:
+      return f'({value1} > {value2})'
+    elif op == Operation.GE:
+      return f'({value1} >= {value2})'
+    elif op == Operation.EQ:
+      return f'({value1} == {value2})'
+    elif op == Operation.NEQ:
+      return f'({value1} != {value2})'
