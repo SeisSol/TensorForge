@@ -202,6 +202,10 @@ class TargetLexic(Lexic):
       return f'({value1} * {value2})'
     elif op == Operation.DIV:
       return f'({value1} / {value2})'
+    elif op == Operation.ABS:
+      return f'std::fabs{fpsuffix}({value1})'
+    elif op == Operation.NEG:
+      return f'(-{value1})'
     elif op == Operation.MIN:
       return f'std::min({value1}, {value2})'
     elif op == Operation.MAX:
@@ -213,14 +217,52 @@ class TargetLexic(Lexic):
     elif op == Operation.SQRT:
       return f'std::sqrt({value1})'
     elif op == Operation.SIN:
-      return f'std::sin({value1})' # has __sinf
+      return f'std::sin({value1})'
     elif op == Operation.COS:
-      return f'std::cos({value1})' # has __cosf
+      return f'std::cos({value1})'
     elif op == Operation.TAN:
-      return f'std::tan({value1})' # has __tanf
+      return f'std::tan({value1})'
     elif op == Operation.ASIN:
       return f'std::asin({value1})'
     elif op == Operation.ACOS:
       return f'std::acos({value1})'
     elif op == Operation.ATAN:
       return f'std::atan({value1})'
+    elif op == Operation.SINH:
+      return f'std::sinh({value1})'
+    elif op == Operation.COSH:
+      return f'std::cosh({value1})'
+    elif op == Operation.TANH:
+      return f'std::tanh({value1})'
+    elif op == Operation.ASINH:
+      return f'std::asinh({value1})'
+    elif op == Operation.ACOSH:
+      return f'std::acosh({value1})'
+    elif op == Operation.ATANH:
+      return f'std::atanh({value1})'
+    elif op == Operation.NOT and fptype == FloatingPointType.BOOL:
+      return f'(!{value1})'
+    elif op == Operation.NOT and fptype != FloatingPointType.BOOL:
+      return f'(~{value1})'
+    elif op == Operation.AND and fptype == FloatingPointType.BOOL:
+      return f'({value1} && {value2})'
+    elif op == Operation.OR and fptype == FloatingPointType.BOOL:
+      return f'({value1} || {value2})'
+    elif op == Operation.AND and fptype != FloatingPointType.BOOL:
+      return f'({value1} & {value2})'
+    elif op == Operation.OR and fptype != FloatingPointType.BOOL:
+      return f'({value1} | {value2})'
+    elif op == Operation.XOR:
+      return f'({value1} ^ {value2})'
+    elif op == Operation.LT:
+      return f'({value1} < {value2})'
+    elif op == Operation.LE:
+      return f'({value1} <= {value2})'
+    elif op == Operation.GT:
+      return f'({value1} > {value2})'
+    elif op == Operation.GE:
+      return f'({value1} >= {value2})'
+    elif op == Operation.EQ:
+      return f'({value1} == {value2})'
+    elif op == Operation.NEQ:
+      return f'({value1} != {value2})'

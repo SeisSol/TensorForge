@@ -1,9 +1,10 @@
-from typing import List
+from typing import List, Union
 from kernelforge.backend.writer import Writer
 from kernelforge.common.context import Context
 from kernelforge.common.operation import Operation
 from kernelforge.common.basic_types import FloatingPointType
 from kernelforge.backend.scopes import Scopes
+import yateto.ast.node as ytt
 
 class VarAlloc:
     def __init__(self):
@@ -37,6 +38,87 @@ class Node:
 
     def write(self, alloc: VarAlloc, writer: Writer, context: Context):
         pass
+
+    def __add__(self, other):
+        return add(self, other)
+    
+    def __radd__(self, other):
+        return add(other, self)
+    
+    def __sub__(self, other):
+        return sub(self, other)
+    
+    def __rsub__(self, other):
+        return sub(other, self)
+    
+    def __mul__(self, other):
+        return mul(self, other)
+    
+    def __rmul__(self, other):
+        return mul(other, self)
+    
+    def __div__(self, other):
+        return div(self, other)
+    
+    def __rdiv__(self, other):
+        return div(other, self)
+    
+    def __mod__(self, other):
+        return mod(self, other)
+    
+    def __rmod__(self, other):
+        return mod(other, self)
+    
+    def __or__(self, other):
+        return bitor(self, other)
+    
+    def __ror__(self, other):
+        return bitor(other, self)
+    
+    def __and__(self, other):
+        return bitand(self, other)
+    
+    def __rand__(self, other):
+        return bitand(other, self)
+
+    def __xor__(self, other):
+        return bitxor(self, other)
+    
+    def __rxor__(self, other):
+        return bitxor(other, self)
+    
+    def __pow__(self, other):
+        return pow(self, other)
+    
+    def __rpow__(self, other):
+        return pow(other, self)
+    
+    def __lt__(self, other):
+        return complt(self, other)
+    
+    def __le__(self, other):
+        return comple(self, other)
+    
+    def __gt__(self, other):
+        return compgt(self, other)
+    
+    def __ge__(self, other):
+        return compge(self, other)
+    
+    def __eq__(self, other):
+        return compeq(self, other)
+    
+    def __ne__(self, other):
+        return compne(self, other)
+    
+    def __neg__(self):
+        return neg(self)
+    
+    def __pos__(self):
+        return self
+    
+    def __abs__(self):
+        return abs(self)
 
 class Variable(Node):
     def store(self, writer: Writer, context: Context, value: str):
@@ -278,7 +360,11 @@ class OpNode(Node):
 
 class LexicOpNode(OpNode):
     def operation(self, context: Context, var: List[str]):
-        return context.get_vm().get_lexic().get_operation(self.optype, context.fp_type, *(var + ['']))
+        if len(var) == 1:
+            realvar = var + ['']
+        else:
+            realvar = var
+        return context.get_vm().get_lexic().get_operation(self.optype, context.fp_type, *(realvar))
 
 class ConditionalOpNode(OpNode):
     def operation(self, context: Context, var: List[str]):
@@ -406,3 +492,208 @@ def writeAssignments(assignments: List[Statement], writer: Writer, context: Cont
         assignment.declare(alloc, writer, context)
     for assignment in assignments:
         assignment.write(alloc, writer, context)
+
+def scalarblock(statements: List[Statement]):
+    tensors = set()
+    for statement in statements:
+        tensors.update(statement.pretensors())
+    return ytt.ScalarRegion([tensor for tensor in tensors], statements)
+
+BaseType = Union[ytt.Node, Node, float, int, bool]
+
+def assign(target: Union[ytt.Node, TensorVar], source: BaseType):
+    if isinstance(target, ytt.Node):
+        target = tensor(target)
+    return Assignment(target, immc(source))
+
+def conditional(condition: BaseType, subnodes: list[Statement]):
+    return IfNode(immc(condition), subnodes)
+
+def ternary(condition: BaseType, yesnode: BaseType, nonode: BaseType):
+    return ConditionalOpNode([immc(condition), immc(yesnode), immc(nonode)], None)
+
+def loop(condition: BaseType, subnodes: list[Statement]):
+    return WhileNode(immc(condition), subnodes)
+
+def imm(value, fptype):
+    return Immediate(value, fptype)
+
+def tensor(x: ytt.Node, slicing=None):
+    return TensorVar(None, slicing, x)
+
+def immc(x: BaseType):
+    if isinstance(x, float):
+        return imm(x, FloatingPointType.FLOAT)
+    if isinstance(x, int):
+        return imm(x, FloatingPointType.INT)
+    if isinstance(x, bool):
+        return imm(x, FloatingPointType.BOOL)
+    if isinstance(x, ytt.Node):
+        return tensor(x)
+    return x
+
+def cos(x: BaseType):
+    return LexicOpNode([immc(x)], Operation.COS)
+
+def sin(x: BaseType):
+    return LexicOpNode([immc(x)], Operation.SIN)
+
+def tan(x: BaseType):
+    return LexicOpNode([immc(x)], Operation.TAN)
+
+def acos(x: BaseType):
+    return LexicOpNode([immc(x)], Operation.ACOS)
+
+def asin(x: BaseType):
+    return LexicOpNode([immc(x)], Operation.ASIN)
+
+def atan(x: BaseType):
+    return LexicOpNode([immc(x)], Operation.ATAN)
+
+def cosh(x: BaseType):
+    return LexicOpNode([immc(x)], Operation.COSH)
+
+def sinh(x: BaseType):
+    return LexicOpNode([immc(x)], Operation.SINH)
+
+def tanh(x: BaseType):
+    return LexicOpNode([immc(x)], Operation.TANH)
+
+def acosh(x: BaseType):
+    return LexicOpNode([immc(x)], Operation.ACOSH)
+
+def asinh(x: BaseType):
+    return LexicOpNode([immc(x)], Operation.ASINH)
+
+def atanh(x: BaseType):
+    return LexicOpNode([immc(x)], Operation.ATANH)
+
+def sqrt(x: BaseType):
+    return LexicOpNode([immc(x)], Operation.SQRT)
+
+def cbrt(x: BaseType):
+    return LexicOpNode([immc(x)], Operation.CBRT)
+
+def max(x: BaseType, y: BaseType):
+    return LexicOpNode([immc(x), immc(y)], Operation.MAX)
+
+def min(x: BaseType, y: BaseType):
+    return LexicOpNode([immc(x), immc(y)], Operation.MIN)
+
+def add(x: BaseType, y: BaseType):
+    return LexicOpNode([immc(x), immc(y)], Operation.ADD)
+
+def sub(x: BaseType, y: BaseType):
+    return LexicOpNode([immc(x), immc(y)], Operation.SUB)
+
+def neg(x: BaseType):
+    return LexicOpNode([immc(x)], Operation.NEG)
+
+def mul(x: BaseType, y: BaseType):
+    xconv = immc(x)
+    yconv = immc(y)
+    # TODO: move these optimizations to a visitor
+    if isinstance(xconv, Immediate):
+        if xconv.value == 1 or xconv.value == 1.0:
+            return yconv
+    if isinstance(yconv, Immediate):
+        if yconv.value == 1 or yconv.value == 1.0:
+            return xconv
+    return LexicOpNode([xconv, yconv], Operation.MUL)
+
+def div(x: BaseType, y: BaseType):
+    xconv = immc(x)
+    yconv = immc(y)
+    # TODO: move these optimizations to a visitor
+    if isinstance(xconv, Immediate):
+        if xconv.value == 1 or xconv.value == 1.0:
+            return LexicOpNode([yconv], Operation.RCP)
+    if isinstance(yconv, Immediate):
+        if yconv.value == 1 or yconv.value == 1.0:
+            return xconv
+    return LexicOpNode([xconv, yconv], Operation.DIV)
+
+def mod(x: BaseType, y: BaseType):
+    xconv = immc(x)
+    yconv = immc(y)
+    return LexicOpNode([xconv, yconv], Operation.MOD)
+
+def round(x: BaseType):
+    return LexicOpNode([immc(x)], Operation.ROUND)
+
+def neg(x: BaseType):
+    return LexicOpNode([immc(x)], Operation.NEG)
+
+def rcp(x: BaseType):
+    return LexicOpNode([immc(x)], Operation.RCP)
+
+def pow(x: BaseType, y: BaseType):
+    xconv = immc(x)
+    yconv = immc(y)
+    # TODO: move these optimizations to a visitor
+    if isinstance(yconv, Immediate):
+        if yconv.value == 2 or yconv.value == 2.0:
+            return LexicOpNode([xconv, xconv], Operation.MUL)
+        if yconv.value == 0.5:
+            return LexicOpNode([xconv], Operation.SQRT)
+        if yconv.value == -0.5:
+            return LexicOpNode([xconv], Operation.RSQRT)
+        if yconv.value == 1/3:
+            return LexicOpNode([xconv], Operation.CBRT)
+        if yconv.value == -1/3:
+            return LexicOpNode([xconv], Operation.RCBRT)
+        if yconv.value == -1 or yconv.value == -1.0:
+            return LexicOpNode([xconv], Operation.RCP)
+        if yconv.value == 1 or yconv.value == 1.0:
+            return xconv
+    if isinstance(xconv, Immediate):
+        if xconv.value == math.e:
+            return LexicOpNode([immc(y)], Operation.EXP)
+        if xconv.value == 1 or xconv.value == 1.0:
+            return xconv
+    return LexicOpNode([xconv, yconv], Operation.POW)
+
+def exp(x: BaseType):
+    return LexicOpNode([immc(x)], Operation.EXP)
+
+def log(x: BaseType):
+    return LexicOpNode([immc(x)], Operation.LOG)
+
+def temp():
+    return TempVar()
+
+def cast(x: Node, fptype: FloatingPointType):
+    return CastOpNode([immc(x)], fptype)
+
+def bitand(x: BaseType, y: BaseType):
+    return LexicOpNode([immc(x), immc(y)], Operation.AND)
+
+def bitor(x: BaseType, y: BaseType):
+    return LexicOpNode([immc(x), immc(y)], Operation.OR)
+
+def bitxor(x: BaseType, y: BaseType):
+    return LexicOpNode([immc(x), immc(y)], Operation.XOR)
+
+def bitnot(x: BaseType):
+    return LexicOpNode([immc(x)], Operation.NOT)
+
+def complt(x: BaseType, y: BaseType):
+    return LexicOpNode([immc(x), immc(y)], Operation.LT)
+
+def comple(x: BaseType, y: BaseType):
+    return LexicOpNode([immc(x), immc(y)], Operation.LE)
+
+def compgt(x: BaseType, y: BaseType):
+    return LexicOpNode([immc(x), immc(y)], Operation.GT)
+
+def compge(x: BaseType, y: BaseType):
+    return LexicOpNode([immc(x), immc(y)], Operation.GE)
+
+def compeq(x: BaseType, y: BaseType):
+    return LexicOpNode([immc(x), immc(y)], Operation.EQ)
+
+def compne(x: BaseType, y: BaseType):
+    return LexicOpNode([immc(x), immc(y)], Operation.NEQ)
+
+def abs(x: BaseType):
+    return LexicOpNode([immc(x)], Operation.ABS)

@@ -1,6 +1,6 @@
 from kernelforge.common.basic_types import GeneralLexicon
 from .lexic import Lexic, Operation
-
+from kernelforge.backend.writer import MultiBlock
 
 class SyclLexic(Lexic):
   def __init__(self, backend, underlying_hardware):
@@ -41,7 +41,7 @@ class SyclLexic(Lexic):
     else:
       localmem = None
     
-    if self._underlying_hardware['name'] == 'intel':
+    if self._underlying_hardware == 'intel' and self._backend == 'oneapi':
       add_items = '[[intel::reqd_sub_group_size(16)]] [[intel::kernel_args_restrict]]'
     else:
       add_items = ''
@@ -51,9 +51,9 @@ class SyclLexic(Lexic):
     l3 = f"cgh.parallel_for(cl::sycl::nd_range<3>{{{{group_size.get(0), group_size.get(1), group_count.get(0) * group_size.get(2)}}, group_size}}, [=](cl::sycl::nd_item<3> item) {add_items}"
 
     if localmem is None:
-      return MultiBlock(self, [l1, l2, l3], ["", ");", ");"])
+      return MultiBlock(file, [l1, l2, l3], ["", ");", ");"])
     else:
-      return MultiBlock(self, [l1, l2, localmem, l3], ["", ");", "", ");"])
+      return MultiBlock(file, [l1, l2, localmem, l3], ["", ");", "", ");"])
 
   def sync_threads(self):
     return "item.barrier()"
@@ -113,12 +113,18 @@ class SyclLexic(Lexic):
       return f'sycl::min({value1}, {value2})'
     elif op == Operation.MAX:
       return f'sycl::max({value1}, {value2})'
+    elif op == Operation.ABS:
+      return f'sycl::abs({value1})'
+    elif op == Operation.NEG:
+      return f'(-{value1})'
     elif op == Operation.EXP:
       return f'sycl::exp({value1})' # has __expf
     elif op == Operation.LOG:
       return f'sycl::log({value1})' # has __logf
     elif op == Operation.SQRT:
       return f'sycl::sqrt({value1})'
+    elif op == Operation.CBRT:
+      return f'sycl::cbrt({value1})'
     elif op == Operation.SIN:
       return f'sycl::sin({value1})' # has __sinf
     elif op == Operation.COS:
@@ -131,3 +137,41 @@ class SyclLexic(Lexic):
       return f'sycl::acos({value1})'
     elif op == Operation.ATAN:
       return f'sycl::atan({value1})'
+    elif op == Operation.SINH:
+      return f'sycl::sinh({value1})' # has __sinf
+    elif op == Operation.COSH:
+      return f'sycl::cosh({value1})' # has __cosf
+    elif op == Operation.TANH:
+      return f'sycl::tanh({value1})' # has __tanf
+    elif op == Operation.ASINH:
+      return f'sycl::asinh({value1})'
+    elif op == Operation.ACOSH:
+      return f'sycl::acosh({value1})'
+    elif op == Operation.ATANH:
+      return f'sycl::atanh({value1})'
+    elif op == Operation.NOT and fptype == FloatingPointType.BOOL:
+      return f'(!{value1})'
+    elif op == Operation.NOT and fptype != FloatingPointType.BOOL:
+      return f'(~{value1})'
+    elif op == Operation.AND and fptype == FloatingPointType.BOOL:
+      return f'({value1} && {value2})'
+    elif op == Operation.OR and fptype == FloatingPointType.BOOL:
+      return f'({value1} || {value2})'
+    elif op == Operation.AND and fptype != FloatingPointType.BOOL:
+      return f'({value1} & {value2})'
+    elif op == Operation.OR and fptype != FloatingPointType.BOOL:
+      return f'({value1} | {value2})'
+    elif op == Operation.XOR:
+      return f'({value1} ^ {value2})'
+    elif op == Operation.LT:
+      return f'({value1} < {value2})'
+    elif op == Operation.LE:
+      return f'({value1} <= {value2})'
+    elif op == Operation.GT:
+      return f'({value1} > {value2})'
+    elif op == Operation.GE:
+      return f'({value1} >= {value2})'
+    elif op == Operation.EQ:
+      return f'({value1} == {value2})'
+    elif op == Operation.NEQ:
+      return f'({value1} != {value2})'
