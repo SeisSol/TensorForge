@@ -1,41 +1,29 @@
-from kernelforge.common.matrix.dense import DenseMatrix
 from kernelforge.common.context import Context
 from kernelforge.common.aux import generate_tmp_matrix
 from kernelforge.generators.descriptions import GemmDescr
 from kernelforge.common.basic_types import FloatingPointType, Addressing
 from kernelforge.generators.generator import Generator
+from kernelforge.common.matrix.boundingbox import BoundingBox
+from kernelforge.common.matrix.tensor import Tensor
 
 
 # Q = (((A x B) x (C x B)) x D)
-mat_q = DenseMatrix(num_rows=56,
-                    num_cols=9,
-                    addressing=Addressing.STRIDED,
-                    bbox=[0, 0, 56, 9],)
 
-mat_a = DenseMatrix(num_rows=56,
-                    num_cols=56,
-                    addressing=Addressing.STRIDED,
-                    bbox=[0, 0, 56, 56])
+mat_q = Tensor([9, 9], Addressing.STRIDED, BoundingBox([0,0], [9,9]))
 
-mat_b = DenseMatrix(num_rows=56,
-                    num_cols=9,
-                    addressing=Addressing.STRIDED,
-                    bbox=[0, 0, 56, 9])
+mat_a = Tensor([56, 56], Addressing.STRIDED, BoundingBox([0,0], [56,56]))
 
-mat_c = DenseMatrix(num_rows=56,
-                    num_cols=56,
-                    bbox=[0, 0, 56, 56],
-                    addressing=Addressing.STRIDED)
+mat_b = Tensor([56, 9], Addressing.STRIDED, BoundingBox([0,0], [56,9]))
 
-mat_d = DenseMatrix(num_rows=9,
-                    num_cols=9,
-                    bbox=[0, 0, 9, 9],
-                    addressing=Addressing.STRIDED)
+mat_c = Tensor([56, 56], Addressing.STRIDED, BoundingBox([0,0], [56,56]))
+
+mat_d = Tensor([9, 9], Addressing.STRIDED, BoundingBox([0,0], [9,9]))
+
 
 
 tmp0 = generate_tmp_matrix(mat_a, mat_b)
 tmp1 = generate_tmp_matrix(mat_c, mat_b)
-tmp2 = generate_tmp_matrix(tmp0, tmp1)
+tmp2 = generate_tmp_matrix(tmp0, tmp1, trans_a=True)
 
 gemm_list = [GemmDescr(trans_a=False,
                        trans_b=False,
@@ -43,7 +31,7 @@ gemm_list = [GemmDescr(trans_a=False,
              GemmDescr(trans_a=False,
                        trans_b=False,
                        a=mat_c, b=mat_b, c=tmp1),
-             GemmDescr(trans_a=False, trans_b=False,
+             GemmDescr(trans_a=True, trans_b=False,
                        a=tmp0, b=tmp1, c=tmp2),
              GemmDescr(trans_a=False, trans_b=False,
                        a=tmp2, b=mat_d, c=mat_q,

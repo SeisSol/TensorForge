@@ -7,14 +7,15 @@ authors = [
     { name = "Ravil Dorozhinskii", email = "ravil.aviva.com@gmail.com" },
     { name = "Yakup Budanaz", email = "budanaz.yakup@gmail.com" },
     { name = "David Schneller", email = "david.schneller@tum.de" },
-    { name = "Carsten Uphoff", email = "uphoff@in.tum.com" }
+    { name = "Carsten Uphoff", email = "uphoff@in.tum.com" },
+    { name = "Elias Reutelsterz", email = "elias.reutelsterz@tum.de" }
 ]
 maintainers = [
     { name = "David Schneller", email = "david.schneller@tum.de" }
 ]
 classifiers= [
     "Programming Language :: Python :: 3",
-    "License :: OSI Approved :: MIT License",
+    "License :: OSI Approved :: BSD License",
     "Operating System :: OS Independent",
 ]
 dynamic = ["version", "readme", "dependencies"]
@@ -25,7 +26,7 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.dynamic]
 readme = {file = ["README.md"], content-type = "text/markdown"}
-version = {file = ["kernelforge/VERSION"]}
+version = {file = ["tensorforge/VERSION"]}
 dependencies = {file = ["requirements.txt"]}
 
 [tool.setuptools.package-data]

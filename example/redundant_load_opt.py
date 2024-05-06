@@ -1,31 +1,20 @@
-from kernelforge.common import DenseMatrix
 from kernelforge.common.context import Context
 from kernelforge.common.aux import generate_tmp_matrix
 from kernelforge.generators.descriptions import GemmDescr, FloatingPointType, Addressing
 from kernelforge.generators.generator import Generator
+from kernelforge.common.matrix.boundingbox import BoundingBox
+from kernelforge.common.matrix.tensor import Tensor
 
 
 # Q += A * ((A^Trans * B) * C)
-mat_q = DenseMatrix(num_rows=56,
-                    num_cols=56,
-                    addressing=Addressing.STRIDED,
-                    bbox=[0, 0, 20, 8])
 
-mat_a = DenseMatrix(num_rows=56,
-                    num_cols=56,
-                    addressing=Addressing.NONE,
-                    bbox=[0, 0, 20, 8])
+mat_q = Tensor([56, 56], Addressing.STRIDED, BoundingBox([0, 0],[20, 8]))
 
+mat_a = Tensor([56, 56], Addressing.NONE, BoundingBox([0, 0],[20, 8]))
 
-mat_b = DenseMatrix(num_rows=56,
-                    num_cols=56,
-                    addressing=Addressing.STRIDED,
-                    bbox=[0, 0, 20, 8])
+mat_b = Tensor([56, 56], Addressing.STRIDED, BoundingBox([0, 0],[20, 8]))
 
-mat_c = DenseMatrix(num_rows=56,
-                    num_cols=9,
-                    bbox=[0, 0, 8, 8],
-                    addressing=Addressing.NONE)
+mat_c = Tensor([56, 9], Addressing.NONE, BoundingBox([0, 0],[8, 8]))
 
 tmp1 = generate_tmp_matrix(mat_a, mat_b, True, False)
 tmp2 = generate_tmp_matrix(tmp1, mat_c)
@@ -39,7 +28,7 @@ gemm_list = [GemmDescr(trans_a=True,
                        a=tmp1, b=mat_c, c=tmp2),
              GemmDescr(trans_a=False,
                        trans_b=False,
-                       a=mat_b, b=tmp2, c=mat_q,
+                       a=mat_a, b=tmp2, c=mat_q,
                        alpha=1.0,
                        beta=1.0)]
 

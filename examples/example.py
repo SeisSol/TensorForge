@@ -14,6 +14,7 @@ cmdLineParser = argparse.ArgumentParser()
 cmdLineParser.add_argument('--arch', type=str, default='dhsw', help='Architecture (e.g. dsnb for double precision on Sandy Bridge).')
 cmdLineParser.add_argument('--variant', type=str, default='', help='Example specific variant (e.g. onlyblas).')
 cmdLineParser.add_argument('example_script', type=str, help='A yateto example script from the examples folder (without file extension).')
+cmdLineParser.add_argument('--backend', type = str)
 cmdLineArgs = cmdLineParser.parse_args()
 
 exampleSpec = importlib.util.find_spec(cmdLineArgs.example_script)
@@ -33,7 +34,7 @@ except OSError as e:
     pass
 
 # explicitly force CPU target
-arch = useArchitectureIdentifiedBy(cmdLineArgs.arch)
+arch = useArchitectureIdentifiedBy('shsw', cmdLineArgs.arch, cmdLineArgs.backend)
 
 g = Generator(arch)
 example.add(g)

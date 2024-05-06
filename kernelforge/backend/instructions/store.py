@@ -5,8 +5,10 @@ from kernelforge.backend.data_types import RegMemObject
 from kernelforge.backend.symbol import Symbol, SymbolType, DataView
 from kernelforge.common.exceptions import InternalError
 from kernelforge.backend.writer import Writer
-from .abstract_instruction import AbstractInstruction, AbstractShrMemWrite
+from .abstract_instruction import AbstractInstruction
+from kernelforge.backend.instructions.memory.__init__ import AbstractShrMemWrite
 from kernelforge.common.basic_types import FloatingPointType
+import math
 
 
 class StoreRegToShr(AbstractShrMemWrite):
