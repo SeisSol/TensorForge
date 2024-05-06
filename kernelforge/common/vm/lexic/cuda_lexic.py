@@ -41,10 +41,10 @@ class CudaLexic(Lexic):
                         total_shared_mem_size=None, global_symbols=None):
     return file.CudaKernel(base_name, params, kernel_bounds)
 
-  def sync_threads(self):
+  def sync_block(self):
     return "__syncthreads()"
 
-  def sync_vec_unit(self):
+  def sync_simd(self):
     return "__syncwarp()"
 
   def get_sub_group_id(self, sub_group_size):

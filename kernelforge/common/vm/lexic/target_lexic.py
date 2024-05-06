@@ -145,10 +145,10 @@ class TargetLexic(Lexic):
 
     return TargetContext()
 
-  def sync_threads(self):
+  def sync_block(self):
     return "#pragma omp barrier //"
 
-  def sync_vec_unit(self):
+  def sync_simd(self):
     return "#pragma omp barrier //"
 
   def get_sub_group_id(self, sub_group_size):

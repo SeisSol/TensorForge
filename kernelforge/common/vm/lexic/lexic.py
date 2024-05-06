@@ -19,9 +19,6 @@ class Lexic(ABC):
     self.stream_type = None
     self.restrict_kw = None
 
-  def get_tid_counter(self, thread_id, block_dim, block_id):
-    return f'({thread_id} + {block_dim} * {block_id})'
-
   @abstractmethod
   def get_launch_code(self, func_name, grid, block, stream, func_params):
     pass
@@ -39,11 +36,11 @@ class Lexic(ABC):
     return []
 
   @abstractmethod
-  def sync_threads(self):
+  def sync_block(self):
     pass
 
   @abstractmethod
-  def sync_vec_unit(self):
+  def sync_simd(self):
     pass
 
   @abstractmethod

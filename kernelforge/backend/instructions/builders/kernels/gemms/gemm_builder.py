@@ -6,7 +6,7 @@ from kernelforge.backend.instructions.loaders import shm_mem_loader_factory, Abs
 from kernelforge.backend.instructions.loaders.shr_mem_loader import ShrMemLoaderType
 from kernelforge.backend.instructions.clear_registers import ClearRegisters
 from kernelforge.backend.instructions.store import StoreRegToGlb, StoreRegToShr
-from kernelforge.backend.instructions.sync_threads import SyncThreads
+from kernelforge.backend.instructions.sync_block import SyncThreads
 from kernelforge.backend.instructions.dense_dense_gemm import ShrMemBasedDenseGemm, RegisterOnlyDenseGemm
 from kernelforge.backend.instructions.sparse_dense_gemm import ShrMemBasedSparseDenseGemm, RegisterOnlySparseDenseGemm
 from kernelforge.backend.instructions.dense_sparse_gemm import ShrMemBasedDenseSparseGemm, RegisterOnlyDenseSparseGemm
@@ -135,12 +135,12 @@ class DenseGemmBuilder(AbstractBuilder):
 
     self._make_load_op1()
     self._make_load_op2()
-    self._insert_sync_threads()
+    self._insert_sync_block()
     self._check_register_array()
     self._make_gemm()
-    self._insert_sync_threads()
+    self._insert_sync_block()
     self._make_store()
-    self._insert_sync_threads()
+    self._insert_sync_block()
     self._clear_registers()
 
   def _make_load_op1(self):
@@ -261,7 +261,7 @@ class DenseGemmBuilder(AbstractBuilder):
   def _clear_registers(self):
     self._instructions.append(ClearRegisters(context=self._context, src=self._dest_regs))
 
-  def _insert_sync_threads(self):
+  def _insert_sync_block(self):
     self._instructions.append(SyncThreads(context=self._context,
                                           num_threads_per_mult=self._num_threads))
 

@@ -15,9 +15,9 @@ class SyncThreads(AbstractInstruction):
   def __str__(self) -> str:
     lexic = self._vm.get_lexic()
     if self._num_threads > self._vm.get_hw_descr().vec_unit_length:
-      return f'{lexic.sync_threads()};'
+      return f'{lexic.sync_block()};'
     else:
-      return f'{lexic.sync_vec_unit()};'
+      return f'{lexic.sync_simd()};'
 
   def gen_mask_threads(self, num_threads) -> str:
     return ''

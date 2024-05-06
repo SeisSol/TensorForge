@@ -55,10 +55,10 @@ class SyclLexic(Lexic):
     else:
       return MultiBlock(file, [l1, l2, localmem, l3], ["", ");", "", ");"])
 
-  def sync_threads(self):
+  def sync_block(self):
     return "item.barrier()"
 
-  def sync_vec_unit(self):
+  def sync_simd(self):
     return "item.barrier()"
 
   def get_sub_group_id(self, sub_group_size):
@@ -82,15 +82,6 @@ class SyclLexic(Lexic):
 
   def check_error(self):
     return None
-
-  def batch_indexer_gemm(self):
-    return self.get_tid_counter(self.thread_idx_y, self.block_dim_y, self.block_idx_z)
-
-  def batch_indexer_csa(self):
-    return self.get_tid_counter(self.thread_idx_z, self.block_dim_z, self.block_idx_z)
-
-  def batch_indexer_init(self):
-    return self.get_tid_counter(self.thread_idx_z, self.block_dim_z, self.block_idx_z)
 
   def get_headers(self):
     return ['CL/sycl.hpp']

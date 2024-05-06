@@ -7,10 +7,10 @@ class Options:
   def __init__(self,
                exact_contraction_length=False,
                align_shr_mem=True,
-               enable_sync_threads_opt=True):
+               enable_sync_block_opt=True):
     self.exact_contraction_length: bool = exact_contraction_length
     self.align_shr_mem: bool = align_shr_mem
-    self.enable_sync_threads_opt = enable_sync_threads_opt
+    self.enable_sync_block_opt = enable_sync_block_opt
 
 
 class Context:

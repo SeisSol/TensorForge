@@ -1,7 +1,7 @@
 from typing import List
 from kernelforge.backend.instructions.compute import ComputeInstruction
 from kernelforge.backend.instructions.memory import AbstractShrMemWrite
-from kernelforge.backend.instructions.sync_threads import SyncThreads
+from kernelforge.backend.instructions.sync_block import SyncThreads
 from kernelforge.backend.symbol import SymbolType
 from .abstract import AbstractTransformer, Context, AbstractInstruction
 from .mem_region_allocation import Region

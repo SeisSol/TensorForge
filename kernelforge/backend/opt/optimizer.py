@@ -6,7 +6,7 @@ from kernelforge.backend.data_types import ShrMemObject
 from .liveness import LivenessAnalysis
 from .mem_region_allocation import MemoryRegionAllocation, Region
 from .shr_mem_analyzer import ShrMemOpt
-from .sync_threads import SyncThreadsOpt
+from .sync_block import SyncThreadsOpt
 from .remove_redundancy import RemoveRedundancyOpt
 
 
@@ -38,13 +38,13 @@ class OptimizationStage:
                     live_map=live_map)
     opt.apply()
 
-    if self._user_options.enable_sync_threads_opt:
+    if self._user_options.enable_sync_block_opt:
       opt = SyncThreadsOpt(self._context, self._instrs, regions, self._num_threads)
       opt.apply()
       self._instrs = opt.get_instructions()
 
     opt = RemoveRedundancyOpt(self._context, self._instrs)
-    opt.apply()
+    # opt.apply()
     self._instrs = opt.get_instructions()
 
   def get_instructions(self):
