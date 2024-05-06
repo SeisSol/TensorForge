@@ -40,6 +40,9 @@ class GpuKernelGenerator:
       indicesIndexed[op.name() if isinstance(op, Scalar) else op.name] = indices[i]
     
     def assigner(pretensor):
+      if isinstance(pretensor, Scalar):
+        self.make_tensor(pretensor, False, None)
+        indicesIndexed[pretensor.name()] = []
       return self._cache[pretensor.name()], indicesIndexed[pretensor.name()]
     
     for statement in statements:

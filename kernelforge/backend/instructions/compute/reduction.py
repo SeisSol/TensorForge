@@ -44,7 +44,7 @@ class ReductionInstruction(ComputeInstruction):
 
             for loop in loopstack2[::-1]:
                 loop.__exit__(None, None, None)
-                    
+
             res_access = '' if self._dest.obj.size == 1 else '[k]'
             writer(f'{self._dest.name}{res_access} = value;')
 

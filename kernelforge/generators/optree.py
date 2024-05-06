@@ -5,6 +5,7 @@ from kernelforge.common.operation import Operation
 from kernelforge.common.basic_types import FloatingPointType
 from kernelforge.backend.scopes import Scopes
 import yateto.ast.node as ytt
+import yateto.type as yttt
 
 class VarAlloc:
     def __init__(self):
@@ -63,6 +64,12 @@ class Node:
     def __rdiv__(self, other):
         return div(other, self)
     
+    def __truediv__(self, other):
+        return div(self, other)
+    
+    def __rtruediv__(self, other):
+        return div(other, self)
+
     def __mod__(self, other):
         return mod(self, other)
     
@@ -247,6 +254,48 @@ class TensorVar(Variable):
         # assume that we don't have to reload
         self.symbol.store(writer, context, value, [f'n{-i-1}' for i in self.indices], False)
 
+class ScalarVar(Variable):
+    def __init__(self, tensor, slicing, pretensor=None):
+        self.tensor = tensor
+        self.slicing = slicing
+        self.symbol: Union[None, Symbol] = None
+        self.pretensor = pretensor
+        self.variable = None
+        self.indices = None
+    
+    def tensors(self, intensors=True, outtensors=True):
+        return [self.tensor]
+    
+    def pretensors(self, intensors=True, outtensors=True):
+        return []
+    
+    def symbols(self, intensors=True, outtensors=True):
+        return [self.symbol]
+    
+    def getRanges(self, ranges):
+        return ranges
+
+    def assignSymbols(self, scopes: Scopes):
+        if self.symbol is None:
+            self.symbol = scopes.get_symbol(self.tensor)
+
+    def assignTensor(self, assigner):
+        self.tensor, self.indices = assigner(self.pretensor)
+
+    def declare(self, alloc: VarAlloc, writer: Writer, context: Context):
+        pass
+    
+    def write(self, alloc: VarAlloc, writer: Writer, context: Context):
+        # TODO: re-enable caching
+        # if self.variable is None:
+        self.variable = alloc.alloc()
+        self.symbol.load(writer, context, self.variable, [f'n{-i-1}' for i in self.indices], False)
+        return self.variable
+    
+    def store(self, alloc: VarAlloc, writer: Writer, context: Context, value: str):
+        # assume that we don't have to reload
+        self.symbol.store(writer, context, value, [f'n{-i-1}' for i in self.indices], False)
+
 class TempVar(Variable):
     def __init__(self):
         self.variable = None
@@ -315,9 +364,8 @@ class Immediate(Variable):
         pass
 
 class OpNode(Node):
-    def __init__(self, operands: List[Node], optype: Operation):
+    def __init__(self, operands: List[Node]):
         self.operands = operands
-        self.optype = optype
         self.variable = None
     
     def getRanges(self, ranges):
@@ -359,6 +407,10 @@ class OpNode(Node):
         return self.variable
 
 class LexicOpNode(OpNode):
+    def __init__(self, operands: List[Node], optype: Operation):
+        super().__init__(operands)
+        self.optype = optype
+
     def operation(self, context: Context, var: List[str]):
         if len(var) == 1:
             realvar = var + ['']
@@ -372,10 +424,8 @@ class ConditionalOpNode(OpNode):
 
 class CastOpNode(OpNode):
     def __init__(self, operands: List[Node], targetType: FloatingPointType):
-        self.operands = operands
+        super().__init__(operands)
         self.targetType = targetType
-        self.variable = None
-        self.optype = None
     
     def operation(self, context: Context, var: List[str]):
         return 'static_cast<{self.targetType}>({var[0]})'
@@ -506,13 +556,13 @@ def assign(target: Union[ytt.Node, TensorVar], source: BaseType):
         target = tensor(target)
     return Assignment(target, immc(source))
 
-def conditional(condition: BaseType, subnodes: list[Statement]):
+def conditional(condition: BaseType, subnodes: List[Statement]):
     return IfNode(immc(condition), subnodes)
 
 def ternary(condition: BaseType, yesnode: BaseType, nonode: BaseType):
-    return ConditionalOpNode([immc(condition), immc(yesnode), immc(nonode)], None)
+    return ConditionalOpNode([immc(condition), immc(yesnode), immc(nonode)])
 
-def loop(condition: BaseType, subnodes: list[Statement]):
+def loop(condition: BaseType, subnodes: List[Statement]):
     return WhileNode(immc(condition), subnodes)
 
 def imm(value, fptype):
@@ -520,6 +570,9 @@ def imm(value, fptype):
 
 def tensor(x: ytt.Node, slicing=None):
     return TensorVar(None, slicing, x)
+
+def scalar(x: yttt.Scalar):
+    return ScalarVar(None, None, x)
 
 def immc(x: BaseType):
     if isinstance(x, float):
@@ -530,6 +583,8 @@ def immc(x: BaseType):
         return imm(x, FloatingPointType.BOOL)
     if isinstance(x, ytt.Node):
         return tensor(x)
+    if isinstance(x, yttt.Scalar):
+        return scalar(x)
     return x
 
 def cos(x: BaseType):

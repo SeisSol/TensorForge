@@ -61,7 +61,7 @@ class ShrMemBasedDenseGemmBuilder(AbstractBuilder):
     # the matrix multiplication
     self._op2 = self._make_loader_and_symbol(operand=op2, do_transpose=False)
 
-    self._insert_sync_threads()
+    self._insert_sync_block()
 
     gemm_params = {'vm': self._vm,
                    'trans_a': False,
@@ -92,7 +92,7 @@ class ShrMemBasedDenseGemmBuilder(AbstractBuilder):
   def get_srh_mem_loads(self):
     return self._load_instrs
 
-  def _insert_sync_threads(self):
+  def _insert_sync_block(self):
     self._instructions.append(SyncThreads(self._vm, self._num_threads))
 
   def _name_shr_reg(self):
@@ -210,7 +210,7 @@ class  ShrMemBasedSparseDenseGemmBuilder(AbstractBuilder):
 
     self._intermediate_dest = self._make_loader_and_symbol_do_not_load_if_cond(operand=intermediate_dest, do_transpose=False, cond=beta!=0.0)
 
-    self._insert_sync_threads()
+    self._insert_sync_block()
 
     gemm_params = {'vm': self._vm,
                    'trans_a': trans_a,
@@ -272,7 +272,7 @@ class  ShrMemBasedSparseDenseGemmBuilder(AbstractBuilder):
   def get_srh_mem_loads(self):
     return self._load_instrs
 
-  def _insert_sync_threads(self):
+  def _insert_sync_block(self):
     self._instructions.append(SyncThreads(self._vm, self._num_threads))
 
   def _name_shr_reg(self):
@@ -372,7 +372,7 @@ class ShrMemBasedDenseSparseGemmBuilder(AbstractBuilder):
 
 
     if mat_b.get_values() == None or trans_a:
-      self._insert_sync_threads()
+      self._insert_sync_block()
 
     gemm_params = {'vm': self._vm,
                    'trans_a': False,
@@ -404,7 +404,7 @@ class ShrMemBasedDenseSparseGemmBuilder(AbstractBuilder):
   def get_srh_mem_loads(self):
     return self._load_instrs
 
-  def _insert_sync_threads(self):
+  def _insert_sync_block(self):
     self._instructions.append(SyncThreads(self._vm, self._num_threads))
 
   def _name_shr_reg(self):

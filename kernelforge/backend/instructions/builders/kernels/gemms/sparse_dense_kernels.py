@@ -2,7 +2,7 @@ from copy import deepcopy
 from kernelforge.instructions.builders.alloctor_builder import RegistersAllocBuilder
 from kernelforge.instructions.builders.ptr_manip_builder import GetElementPtrBuilder
 from kernelforge.instructions.store import StoreRegToGlb, StoreRegToShrMemColumn, StoreShrMemToGlb
-from kernelforge.instructions.sync_threads import SyncThreads
+from kernelforge.instructions.sync_block import SyncThreads
 from kernelforge.matrix.sparse import SparseMatrix
 from .base_kernel import BaseGemmKernelBuilder
 from kernelforge.instructions.builders import ShrMemAllocBuilder

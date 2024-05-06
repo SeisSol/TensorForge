@@ -6,7 +6,7 @@ from kernelforge.backend.instructions.allocate import RegisterAlloc
 from kernelforge.backend.instructions.memory.load import GlbToShrLoader
 from kernelforge.backend.instructions.clear_registers import ClearRegisters
 from kernelforge.backend.instructions.memory.store import StoreRegToGlb, StoreRegToShr, StoreRegToReg
-from kernelforge.backend.instructions.sync_threads import SyncThreads
+from kernelforge.backend.instructions.sync_block import SyncThreads
 from kernelforge.backend.instructions.compute.multilinear import MultilinearInstruction
 from kernelforge.common.matrix.tensor import Tensor
 from kernelforge.common.exceptions import InternalError
@@ -57,12 +57,12 @@ class MultilinearBuilder(AbstractBuilder):
 
     for i in range(len(self._ops)):
         self._make_load_op(i)
-    self._insert_sync_threads()
+    self._insert_sync_block()
     self._check_register_array()
     self._make_compute()
-    self._insert_sync_threads()
+    self._insert_sync_block()
     self._make_store()
-    self._insert_sync_threads()
+    self._insert_sync_block()
     self._clear_registers()
 
     # TODO: check if we always can allow a direct global memory load
@@ -230,7 +230,7 @@ class MultilinearBuilder(AbstractBuilder):
   def _clear_registers(self):
     self._instructions.append(ClearRegisters(context=self._context, src=self._temp_regs))
 
-  def _insert_sync_threads(self):
+  def _insert_sync_block(self):
     self._instructions.append(SyncThreads(context=self._context,
                                           num_threads_per_mult=self._num_threads))
 
