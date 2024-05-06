@@ -1,11 +1,12 @@
 from kernelforge.common.matrix.dense import DenseMatrix
 from kernelforge.common.context import Context
-from kernelforge.common.aux import generate_tmp_matrix
 from kernelforge.generators.descriptions import GemmDescr
 from kernelforge.common.basic_types import FloatingPointType, Addressing
 from kernelforge.generators.generator import Generator
 from kernelforge.common.exceptions import GenerationError
 import argparse
+from kernelforge.common.matrix.boundingbox import BoundingBox
+from kernelforge.common.matrix.tensor import Tensor
 
 
 parser = argparse.ArgumentParser(description="Specify Backend and Arch of the GPU")
@@ -23,20 +24,12 @@ parser.add_argument("-b",
 
 args = parser.parse_args()
 
-mat_a = DenseMatrix(num_rows=56,
-                    num_cols=18,
-                    addressing=Addressing.STRIDED,
-                    bbox=[0, 0, 56, 18])
+mat_a = Tensor([56, 18], Addressing.STRIDED, BoundingBox([0,0], [56,18]))
 
-mat_b = DenseMatrix(num_rows=18,
-                    num_cols=18,
-                    addressing=Addressing.STRIDED,
-                    bbox=[0, 0, 18, 18])
+mat_b = Tensor([18, 18], Addressing.STRIDED, BoundingBox([0,0], [18,18]))
 
-mat_c = DenseMatrix(num_rows=56,
-                    num_cols=18,
-                    bbox=[0, 0, 56, 18],
-                    addressing=Addressing.STRIDED)
+mat_c = Tensor([56, 18], Addressing.STRIDED, BoundingBox([0,0], [56,18]))
+
 
 try:
   vm = Context(arch=args.arch, backend=args.backend, fp_type=FloatingPointType.FLOAT)

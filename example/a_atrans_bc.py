@@ -1,8 +1,9 @@
-from kernelforge.common import DenseMatrix
 from kernelforge.common.context import Context
 from kernelforge.common.aux import generate_tmp_matrix
 from kernelforge.generators.descriptions import GemmDescr, FloatingPointType, Addressing
 from kernelforge.generators.generator import Generator
+from kernelforge.common.matrix.boundingbox import BoundingBox
+from kernelforge.common.matrix.tensor import Tensor
 
 
 # Q += A x ((A^T x B) x C)
@@ -10,25 +11,13 @@ from kernelforge.generators.generator import Generator
 variants = {'v0': Addressing.STRIDED,
             'v1': Addressing.NONE}
 
-mat_q = DenseMatrix(num_rows=56,
-                    num_cols=56,
-                    addressing=Addressing.STRIDED,
-                    bbox=[0, 0, 20, 9])
+mat_q = Tensor([56, 56], Addressing.STRIDED, BoundingBox([0,0], [20,9]))
 
-mat_a = DenseMatrix(num_rows=56,
-                    num_cols=56,
-                    addressing=variants['v0'],
-                    bbox=[0, 0, 20, 9])
+mat_a = Tensor([56, 56], addressing=variants['v0'], bbox=BoundingBox([0,0], [20,9]))
 
-mat_b = DenseMatrix(num_rows=56,
-                    num_cols=56,
-                    addressing=Addressing.STRIDED,
-                    bbox=[0, 0, 20, 9])
+mat_b = Tensor([56, 56], Addressing.STRIDED, BoundingBox([0,0], [20,9]))
 
-mat_c = DenseMatrix(num_rows=56,
-                    num_cols=9,
-                    bbox=[0, 0, 9, 9],
-                    addressing=Addressing.STRIDED)
+mat_c = Tensor([56, 9], Addressing.STRIDED, BoundingBox([0,0], [9,9]))
 
 
 tmp1 = generate_tmp_matrix(mat_a, mat_b, True, False)
@@ -53,8 +42,11 @@ context = Context(arch='sm_60',
 generator = Generator(gemm_list, context)
 generator.generate()
 
-print(generator.get_launcher())
-print()
-print(generator.get_header())
-print()
-print(generator.get_kernel())
+with_output = True
+if with_output:
+  print(generator.get_header())
+  print(generator.default_generate_call_site())
+  print()
+  print(generator.get_launcher())
+  print()
+  print(generator.get_kernel())

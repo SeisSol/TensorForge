@@ -1,40 +1,26 @@
-from kernelforge.common import DenseMatrix
+from kernelforge.common.matrix.boundingbox import BoundingBox
+from kernelforge.common.matrix.tensor import Tensor
 from kernelforge.common.context import Context
 from kernelforge.common.aux import generate_tmp_matrix
-from kernelforge.generators.descriptions import GemmDescr, FloatingPointType, Addressing
+from kernelforge.generators.descriptions import GemmDescr
+from kernelforge.common.basic_types import FloatingPointType, Addressing
 from kernelforge.generators.generator import Generator
 
-
 # D += A x (B x C)
-mat_d = DenseMatrix(num_rows=56,
-                    num_cols=9,
-                    addressing=Addressing.STRIDED,
-                    bbox=[0, 0, 56, 9])
+mat_d = Tensor([56, 9], Addressing.STRIDED, BoundingBox([0, 0],[56, 9]))
 
-mat_a = DenseMatrix(num_rows=56,
-                    num_cols=56,
-                    addressing=Addressing.STRIDED,
-                    bbox=[0, 0, 56, 56])
+mat_a = Tensor([56, 56], Addressing.STRIDED, BoundingBox([0, 0],[56, 56]))
 
-mat_b = DenseMatrix(num_rows=56,
-                    num_cols=9,
-                    addressing=Addressing.STRIDED,
-                    bbox=[0, 0, 56, 9])
+mat_b = Tensor([56, 9], Addressing.STRIDED, BoundingBox([0, 0],[56, 9]))
 
-mat_c = DenseMatrix(num_rows=9,
-                    num_cols=9,
-                    bbox=[0, 0, 9, 9],
-                    addressing=Addressing.STRIDED)
+mat_c = Tensor([9, 9], Addressing.STRIDED, BoundingBox([0, 0],[9, 9]))
 
 tmp1 = generate_tmp_matrix(mat_b, mat_c)
 
 gemm_list = [GemmDescr(trans_a=False,
                        trans_b=False,
-                       a=mat_b,
-                       b=mat_c,
-                       c=tmp1),
-             GemmDescr(trans_a=False,
-                       trans_b=False,
+                       a=mat_b, b=mat_c, c=tmp1),
+             GemmDescr(trans_a=False, trans_b=False,
                        a=mat_a, b=tmp1, c=mat_d,
                        alpha=1.0,
                        beta=1.0)]
@@ -43,11 +29,18 @@ context = Context(arch='sm_60',
                   backend='cuda',
                   fp_type=FloatingPointType.FLOAT)
 
+# context = Context(arch='sm_60',
+#                   backend='omptarget',
+#                   fp_type=FloatingPointType.FLOAT)
+
 generator = Generator(gemm_list, context)
 generator.generate()
 
-print(generator.get_launcher())
-print()
-print(generator.get_header())
-print()
-print(generator.get_kernel())
+with_output = True
+if with_output:
+  print(generator.get_header())
+  print(generator.default_generate_call_site())
+  print()
+  print(generator.get_launcher())
+  print()
+  print(generator.get_kernel())
