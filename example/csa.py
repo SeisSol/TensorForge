@@ -1,6 +1,7 @@
 from kernelforge import DenseMatrix, GenerationError, CsaGenerator
 from kernelforge.common.vm.vm import vm_factory
 import argparse
+from kernelforge.backend.instructions.csa import CSA
 
 
 parser = argparse.ArgumentParser(description='Specify Backend and Arch of the GPU')

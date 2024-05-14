@@ -2,7 +2,6 @@ from kernelforge.common.matrix.dense import DenseMatrix
 from kernelforge.common.matrix.boundingbox import BoundingBox
 from kernelforge.common.matrix.tensor import Tensor
 from kernelforge.common.context import Context
-from kernelforge.common.aux import generate_tmp_matrix
 from kernelforge.generators.descriptions import MultilinearDescr
 from kernelforge.common.basic_types import FloatingPointType, Addressing
 from kernelforge.generators.generator import Generator

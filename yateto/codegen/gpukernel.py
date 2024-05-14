@@ -1,7 +1,7 @@
 from .factory import KernelFactory
 from kernelforge.generators.descriptions import MultilinearDescr, ElementwiseDescr
 from kernelforge.generators.optree import Assignment, OpNode, TensorVar
-from common import *
+from .common import *
 
 from .common import TensorDescription, IndexedTensorDescription, BatchedOperationsAux
 from ..ast.indices import BoundingBox, Range
