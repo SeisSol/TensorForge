@@ -172,3 +172,26 @@ class CudaLexic(Lexic):
       return f'({value1} == {value2})'
     elif op == Operation.NEQ:
       return f'({value1} != {value2})'
+
+  def reduction(self, optype, fptype, blocks):
+    if fptype == FloatingPointType.BOOL and blocks == [2,4,8,16,32]:
+      if optype == Operation.AND:
+        return f'__all_sync(-1, value)'
+      if optype == Operation.OR:
+        return f'__any_sync(-1, value)'
+      if optype == Operation.XOR:
+        return f'!__and_sync(-1, !value)'
+    for block in blocks:
+      f'__shfl_xor_sync(-1, {block}, value)'
+
+  def glb_store(self, lhs, rhs, nontemporal=False):
+    if nontemporal:
+      return f'__stcg({rhs}, &{lhs});'
+    else:
+      return f'{lhs} = {rhs};'
+  
+  def glb_load(self, lhs, rhs, nontemporal=False):
+    if nontemporal:
+      return f'{lhs} = __ldcg(&{rhs});'
+    else:
+      return f'{lhs} = {rhs};'

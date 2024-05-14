@@ -68,18 +68,6 @@ class Lexic(ABC):
     pass
 
   @abstractmethod
-  def batch_indexer_gemm(self):
-    pass
-
-  @abstractmethod
-  def batch_indexer_csa(self):
-    pass
-
-  @abstractmethod
-  def batch_indexer_init(self):
-    pass
-
-  @abstractmethod
   def get_headers(self):
     pass
 

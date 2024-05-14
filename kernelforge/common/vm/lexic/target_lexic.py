@@ -1,5 +1,6 @@
 from kernelforge.common.basic_types import GeneralLexicon, Addressing, DataFlowDirection
 from .lexic import Lexic, Operation
+from kernelforge.common.basic_types import FloatingPointType
 
 class TargetLexic(Lexic):
   def __init__(self, backend, underlying_hardware):
