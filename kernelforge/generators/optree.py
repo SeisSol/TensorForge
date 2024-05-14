@@ -26,7 +26,7 @@ class Node:
         pass
 
     def getRanges(self, ranges):
-        pass
+        return ranges
 
     def assignSymbols(self, scopes: Scopes):
         pass
@@ -142,7 +142,7 @@ class Statement:
         pass
 
     def getRanges(self, ranges):
-        pass
+        return ranges
 
     def assignSymbols(self, scopes: Scopes):
         pass
@@ -229,7 +229,7 @@ class TensorVar(Variable):
             if self.indices[i] not in ranges:
                 ranges[self.indices[i]] = (self.symbol.data_view.get_bbox().lower()[i], self.symbol.data_view.get_bbox().upper()[i])
             crange = ranges[self.indices[i]]
-            crange = (min(crange[0], self.symbol.data_view.get_bbox().lower()[i]), max(crange[1], self.symbol.data_view.get_bbox().upper()[i]))
+            crange = (max(crange[0], self.symbol.data_view.get_bbox().lower()[i]), min(crange[1], self.symbol.data_view.get_bbox().upper()[i]))
             ranges[self.indices[i]] = crange
         return ranges
 
@@ -428,7 +428,7 @@ class CastOpNode(OpNode):
         self.targetType = targetType
     
     def operation(self, context: Context, var: List[str]):
-        return 'static_cast<{self.targetType}>({var[0]})'
+        return f'static_cast<{self.targetType}>({var[0]})'
 
 class IfNode(Statement):
     def __init__(self, condition: Node, subassignments: List[Statement]):

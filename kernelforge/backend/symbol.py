@@ -274,4 +274,7 @@ class Symbol:
 
   def __str__(self):
     return f'name: {self.name}, type: {self.stype}, lead: {self.lead_dims}'
+  
+  def __repr__(self):
+    return self.__str__()
 

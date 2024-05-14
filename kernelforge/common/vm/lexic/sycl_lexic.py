@@ -1,6 +1,7 @@
 from kernelforge.common.basic_types import GeneralLexicon
 from .lexic import Lexic, Operation
 from kernelforge.backend.writer import MultiBlock
+from kernelforge.common.basic_types import FloatingPointType
 
 class SyclLexic(Lexic):
   def __init__(self, backend, underlying_hardware):
