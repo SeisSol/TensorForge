@@ -278,3 +278,15 @@ class Symbol:
   def __repr__(self):
     return self.__str__()
 
+class SymbolView:
+  def __init__(self, symbol, view = None):
+    self.symbol = symbol
+    self.bbox = view
+    if view is None:
+      self.bbox = symbol.data_view.get_bbox()
+  
+  def __str__(self):
+    return f'{self.symbol} {self.bbox}'
+  
+  def __repr__(self):
+    return self.__str__()

@@ -13,6 +13,7 @@ from kernelforge.common.basic_types import Addressing, FloatingPointType, DataFl
 from kernelforge.common.context import Context
 from kernelforge.common.aux import generate_tmp_tensor
 from kernelforge.common.matrix.tensor import Tensor, TensorWrapper, SubTensor
+from kernelforge.common.matrix.boundingbox import BoundingBox as BBox
 from kernelforge.generators.generator import Generator as KernelForgeGenerator
 
 class GpuKernelGenerator:
@@ -26,12 +27,24 @@ class GpuKernelGenerator:
   def add_operation(self, dest, ops, target, permute, add):
     self._cache_matrices(dest, ops, target, permute)
     can_be_aligned = self._can_be_aligned(dest, ops, target, permute)
-    self._descr_list.append(MultilinearDescr(self._cache[dest.name],
-                              [self._cache[op.name() if isinstance(op, Scalar) else op.name] for op in ops],
+    self._descr_list.append(MultilinearDescr(self.get_tensor(dest, can_be_aligned, [i for i in range(len(dest.indices))]),
+                              [self.get_tensor(op, can_be_aligned, optarget) for op, optarget in zip(ops, target)],
                               target, permute, add=add,
                                 strict_match=False,
                                 prefer_align=can_be_aligned))
     return 0# self._descr_list[-1].get_flops()
+  
+  def get_tensor(self, op, can_be_aligned, dims):
+    if isinstance(op, Scalar):
+      return SubTensor(self._cache[op.name()])
+    else:
+      tensor = self._cache[op.name() if isinstance(op, Scalar) else op.name]
+      currentPreShape = list(BoundingBox.fromSpp(op.eqspp))
+      if can_be_aligned:
+        for i, dim in enumerate(dims):
+          if i == 0 and op.memoryLayout.alignedStride(): # previously: dim == 0
+            currentPreShape[i] = currentPreShape[i].aligned(self._arch)
+      return SubTensor(tensor, BBox([rng.start for rng in currentPreShape], [rng.stop for rng in currentPreShape]))
 
   def add_scalar(self, ops, statements, indices):
     indicesIndexed = {}
@@ -81,21 +94,12 @@ class GpuKernelGenerator:
       entry = self._add_scalar(op)
       entry_name = op.name()
     else:
-      # TODO: refine
-      currentPreShape = list(BoundingBox.fromSpp(op.eqspp))
-      if can_be_aligned:
-        for i, dim in enumerate(dims):
-          if i == 0 and op.memoryLayout.alignedStride(): # previously: dim == 0
-            currentPreShape[i] = currentPreShape[i].aligned(self._arch)
-      currentShape = [b.stop for b in currentPreShape]
-      currentRange = list(BoundingBox(Range(0, b) for b in currentShape))
-            
       entry = self._get_kernelforge_matrix(tensor=op,
                                           tensor_variable=op,
-                                          shape=currentShape,
-                                          bboxrange=currentRange)
+                                          shape=[rng.stop for rng in op.memoryLayout.bbox()],
+                                          bboxrange=op.memoryLayout.bbox())
       entry_name = op.name
-
+    
     if not (entry_name in self._cache and entry.is_same(self._cache[entry_name])):
       self._cache[entry_name] = entry
 
@@ -109,7 +113,7 @@ class GpuKernelGenerator:
       self.make_tensor(op, can_be_aligned, optarget)
 
     if dest.is_temporary: # (dest is never a scalar---for the time being)
-      self._cache[dest.name] = self._gen_tmp_matix(ops, target, permute, dest.name)
+      self._cache[dest.name] = self._gen_tmp_matix(ops, target, permute, dest.name, can_be_aligned)
     else:
       self.make_tensor(dest, can_be_aligned, [i for i in range(len(dest.indices))])
 
@@ -136,10 +140,10 @@ class GpuKernelGenerator:
                                pattern = tensor_variable.eqspp,
                                values = tensor_variable.eqspp)
 
-  def _gen_tmp_matix(self, ops, target, permute, res_name):
+  def _gen_tmp_matix(self, ops, target, permute, res_name, can_be_aligned):
     # TODO: ignore scalars here?
-    tmp_matrix = generate_tmp_tensor(ops=[self._cache[op.name() if isinstance(op, Scalar) else op.name] for op in ops],
-                                     target=target) # permute?
+    tmp_matrix = generate_tmp_tensor(ops=[self.get_tensor(op, can_be_aligned, optarget) for op, optarget in zip(ops, target)],
+                                     target=target, alias=res_name) # permute?
     self._tmp_matrices[res_name] = tmp_matrix
     return tmp_matrix
 
@@ -202,11 +206,6 @@ class GpuKernelFactory(KernelFactory):
   def freeTmp(self, routineCache):
     # generate the kernel and the kernel call here... A tiny bit hacky, but it works
     self.generator.generate(self._cpp, routineCache)
-
-  def create(self, node, *args):
-    method = 'create_' + node.__class__.__name__
-    factory = getattr(self, method, self.generic_create)
-    return factory(node, *args)
   
   def create_LoopOverGEMM(self, node, result, arguments, add, scalar, prefetchName, routineCache, gemm_cfg):
     assert len(arguments) == 2

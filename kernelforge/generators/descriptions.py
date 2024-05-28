@@ -23,12 +23,12 @@ class MultilinearDescr(OperationDescription):
     self._strict_match = False
     self.add = add
 
-    self.dest.set_data_flow_direction(DataFlowDirection.SINK)
+    self.dest.tensor.set_data_flow_direction(DataFlowDirection.SINK)
     for op in self.ops:
-      op.set_data_flow_direction(DataFlowDirection.SOURCE)
+      op.tensor.set_data_flow_direction(DataFlowDirection.SOURCE)
 
   def _lead_dim(self):
-    return self.dest.get_actual_shape()[0]
+    return self.dest.bbox.sizes()[0]
   
   def _analyze(self):
     pass
@@ -39,7 +39,7 @@ class MultilinearDescr(OperationDescription):
 
   def get_accumulator_size(self):
     accsize = 1
-    for s in self.dest.get_actual_shape()[1:]:
+    for s in self.dest.bbox.sizes()[1:]:
       accsize *= s
     return accsize
 
@@ -50,8 +50,7 @@ class MultilinearDescr(OperationDescription):
     return [self.dest] + [op for op in self.ops]
   
   def __str__(self):
-    destdim = len(self.dest.shape)
-    desttarget = [i for i in range(destdim)]
+    desttarget = [i for i in range(self.dest.bbox.rank())]
     return f'{self.dest}{desttarget} = {"×".join(f"{op}{optarget}" for op, optarget in zip(self.ops, self.target))}'
 
 class ElementwiseDescr(OperationDescription):

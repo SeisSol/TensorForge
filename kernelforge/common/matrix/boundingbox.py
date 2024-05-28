@@ -3,8 +3,8 @@ from typing import Union, List
 class BoundingBox:
     def __init__(self, lower: List[int], upper: List[int]):
         assert len(lower) == len(upper)
-        self._lower = lower
-        self._upper = upper
+        self._lower = tuple(lower)
+        self._upper = tuple(upper)
     
     def intersect(self, other):
         return BoundingBox([max(sl, ol) for sl, ol in zip(self.lower, other.lower)], [min(sl, ol) for sl, ol in zip(self.upper, other.upper)])

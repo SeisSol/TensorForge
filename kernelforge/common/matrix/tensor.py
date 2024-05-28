@@ -17,7 +17,7 @@ class Tensor:
         data: Union[List[float], None] = None):
         self.name = None
         self.alias = alias
-        self.shape = shape
+        self.shape = tuple(shape)
         self.is_tmp = is_tmp
         self.direction: Union[DataFlowDirection, None] = None
         self.data = data
@@ -88,7 +88,7 @@ class Tensor:
         return is_similar
 
     def is_same(self, other):
-        return self.is_similar(other) and self.alias == other.alias and self.is_tmp == other.is_tmp
+        return self.is_similar(other) # and self.alias == other.alias and self.is_tmp == other.is_tmp
 
     def __str__(self):
         return self.name
@@ -114,6 +114,8 @@ class SubTensor(TensorWrapper):
         bbox: Union[BoundingBox, None] = None):
         self.tensor = tensor
         self.bbox = bbox
+        if bbox is None:
+            self.bbox = self.tensor.bbox
 
 class FullTensor(TensorWrapper):
     def __init__(self, tensor: Tensor):

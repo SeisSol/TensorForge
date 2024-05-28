@@ -1,7 +1,7 @@
 from typing import Tuple, Dict, Union, List
 from kernelforge.common.context import Context, VM
 from kernelforge.backend.scopes import Scopes
-from kernelforge.backend.symbol import Symbol, SymbolType
+from kernelforge.backend.symbol import Symbol, SymbolType, SymbolView
 from kernelforge.backend.instructions.allocate import RegisterAlloc
 from kernelforge.backend.instructions.memory.load import GlbToShrLoader
 from kernelforge.backend.instructions.clear_registers import ClearRegisters
@@ -40,7 +40,7 @@ class MultilinearBuilder(AbstractBuilder):
 
     self._dest_regs = self._temp_regs
 
-    self._use_registers_always = True
+    self._use_registers_always = False
     self._deferred_stores = {}
     self._temporaries = {}
 
@@ -67,7 +67,7 @@ class MultilinearBuilder(AbstractBuilder):
 
     # TODO: check if we always can allow a direct global memory load
   def _make_load_op(self, i):
-    if self._ops[i].stype == SymbolType.Scalar or self._ops[i].stype == SymbolType.Data:
+    if self._ops[i].symbol.stype == SymbolType.Scalar or self._ops[i].symbol.stype == SymbolType.Data:
       self._mem_regions[i] = self._ops[i]
     else:
       has_lead_dim = 0 in self._descr.target[i]
@@ -76,28 +76,28 @@ class MultilinearBuilder(AbstractBuilder):
         lead_idx = self._descr.target[i].index(0)
 
         # heuristic. We may need to store the L2 load granularity or similar
-        small_lead = self._ops[i].data_view.shape[self._descr.permute[i][lead_idx]] < self._context.get_vm().get_hw_descr().vec_unit_length
+        small_lead = self._ops[i].symbol.data_view.shape[self._descr.permute[i][lead_idx]] < self._context.get_vm().get_hw_descr().vec_unit_length
       else:
         small_lead = False
 
       # This is a heuristics implemented because having too sparse matrices can increase bank conflicts
       # And this heuristical optimization should remain until a better shared memory loader is implemented
-      sparse = self._ops[i].obj.sparsity() < 0.65
+      sparse = self._ops[i].symbol.obj.sparsity() < 0.65
 
-      if self._ops[i].stype == SymbolType.Global:
+      if self._ops[i].symbol.stype == SymbolType.Global:
         if transpose or not has_lead_dim or small_lead:
-          self._mem_regions[i], load_op = self._make_loader_and_symbol(self._ops[i], is_transpose=self._descr.permute[i])
+          self._mem_regions[i], load_op = self._make_loader_and_symbol(self._ops[i].symbol, is_transpose=self._descr.permute[i])
           self._loaders_cache[self._mem_regions[i]] = load_op
           self._instructions.append(load_op)
         else:
           # Note: operand will reside in glb. mem for gemm operation
           self._mem_regions[i] = self._ops[i]
 
-      elif self._ops[i].stype == SymbolType.SharedMem or self._ops[i].stype == SymbolType.Register:
-        if self._ops[i] in self._loaders_cache.keys():
-          # Note: this condition means the symbol `self._ops[i]` has been loaded
+      elif self._ops[i].symbol.stype == SymbolType.SharedMem or self._ops[i].symbol.stype == SymbolType.Register:
+        if self._ops[i].symbol in self._loaders_cache.keys():
+          # Note: this condition means the symbol `self._ops[i].symbol` has been loaded
           # to shr. mem. before. Let's check whether loaded data can be reused
-          prev_loader = self._loaders_cache[self._ops[i]]
+          prev_loader = self._loaders_cache[self._ops[i].symbol]
 
           # we only need to reload/globally load, if we even need a leading dimension
           if self._descr.permute[i] != prev_loader.get_permute() and has_lead_dim:
@@ -105,11 +105,11 @@ class MultilinearBuilder(AbstractBuilder):
               # means: data loaded to shr. mem. cannot be reused. Because `op1` not need to be transposed
               # we don't need to load it to shr. mem. Instead, it will be taken from glb. mem.
               # we don't need delete previous (aliased) symbol
-              self._mem_regions[i] = prev_loader.get_src()
+              self._mem_regions[i] = SymbolView(prev_loader.get_src())
             else:
               # means: data cannot be reused. we need to reload it again and traspose on the fly.
               # additionally, we need to remove aliased symbol to avoid clashes
-              # self._scopes.delete_symbol(self._ops[i])
+              # self._scopes.delete_symbol(self._ops[i].symbol)
               self._scopes.add_scope()
               prev_symbol = prev_loader.get_src()
               self._mem_regions[i], load_op = self._make_loader_and_symbol(prev_symbol, is_transpose=self._descr.permute[i])
@@ -122,7 +122,7 @@ class MultilinearBuilder(AbstractBuilder):
         else:
           self._mem_regions[i] = self._ops[i]
       else:
-        raise InternalError(f'gemm-builder: op{i} ({self._ops[i].name}) must be either in shr or glb mem.')
+        raise InternalError(f'gemm-builder: op{i} ({self._ops[i].symbol.name}) must be either in shr or glb mem.')
 
   def _make_loader_and_symbol(self, operand, is_transpose) -> Tuple[Symbol, GlbToShrLoader]:
     shr_mem_region = Symbol(name=self._name_shr_reg(),
@@ -136,7 +136,7 @@ class MultilinearBuilder(AbstractBuilder):
                                      shr_mem=self._shr_mem,
                                      num_threads=self._num_threads,
                                      permute=is_transpose)
-    return shr_mem_region, load_op
+    return SymbolView(shr_mem_region), load_op
 
   def _name_registers(self):
     name = f'r{self._counter}'
@@ -145,7 +145,7 @@ class MultilinearBuilder(AbstractBuilder):
 
   def _alloc_register_array(self):
     regsize = 1
-    for d, dim in enumerate(self._dest_obj.get_actual_shape()):
+    for d, dim in enumerate(self._dest_obj.bbox.sizes()):
       if d not in [0]: # for now, this is the lead dim
         regsize *= dim
     name = self._name_registers()
@@ -162,7 +162,7 @@ class MultilinearBuilder(AbstractBuilder):
       raise InternalError('gemm-builder: reg_array must be in registers')
 
   def _get_target_symbol(self):
-    dest_symbol = self._scopes.get_symbol(self._dest_obj)
+    dest_symbol = self._scopes.get_symbol(self._dest_obj.tensor)
     if dest_symbol.name in self._deferred_stores:
       dest_registers,_ = self._deferred_stores[dest_symbol.name]
       return dest_registers
@@ -181,8 +181,8 @@ class MultilinearBuilder(AbstractBuilder):
                                    sumOperation=AddOperator()))
 
   def _make_store(self):
-    if self._dest_obj in self._scopes:
-      dest_symbol = self._scopes.get_symbol(self._dest_obj)
+    if self._dest_obj.tensor in self._scopes:
+      dest_symbol = self._scopes.get_symbol(self._dest_obj.tensor)
       if dest_symbol.stype == SymbolType.SharedMem:
         self._instructions.append(StoreRegToShr(context=self._context,
                                                 src=self._temp_regs,
@@ -214,12 +214,13 @@ class MultilinearBuilder(AbstractBuilder):
       else:
         raise InternalError(f'gemm-builder: `res` must be either in shr. or glb. mem., given: {dest_symbol.stype}')
     else:
-      if not self._dest_obj.is_tmp:
+      if not self._dest_obj.tensor.is_tmp:
         raise InternalError(f'gemm-buider: `res` is not in scopes and thus must be tmp')
 
       dest_symbol = Symbol(name=self._name_shr_reg(),
                            stype=SymbolType.SharedMem,
-                           obj=self._dest_obj)
+                           obj=self._dest_obj.tensor)
+
       self._scopes.add_symbol(dest_symbol)
       self._instructions.append(StoreRegToShr(context=self._context,
                                               src=self._temp_regs,
