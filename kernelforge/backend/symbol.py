@@ -74,6 +74,14 @@ class DataView:
         current *= size
     return strides
 
+  def get_dim_offsets(self, mask=[], bbox=False):
+    # TODO: permute? Yes or no? Also, unify SPPs.
+    offsets = []
+    for i, start in enumerate(self.get_bbox().lower() if bbox else [0] * self.rank()):
+      if i not in mask:
+        offsets += [start]
+    return offsets
+
   def get_dimension_addressing(self, lead_dim, nonlead_dim):
     return [determine_dim_index(lead_dim, i, self.shape, self._permute) for i in range(self._lead_dim_len)] + [f'k{i}' for i in range(len(self._permute) - self._lead_dim_len)]
     # + [determine_dim_index(nonlead_dim, i, self.shape, self._permute[self._lead_dim_len:]) for i in range(len(self._permute) - self._lead_dim_len)]
@@ -187,7 +195,8 @@ class Symbol:
   def access_address(self, context: Context, index: List[Union[str, int, Immediate, Variable]]):
     if self.stype == SymbolType.Global or self.stype == SymbolType.Batch or self.stype == SymbolType.SharedMem:
       # lead_dim + nonlead_dim
-      dimstr = " + ".join(f"{var} * {stride}" for var, stride in zip(index, self.data_view.get_dim_strides()) if var != 0)
+      # TODO: really ref self.obj.bbox.lower() here?
+      dimstr = " + ".join(f"({var} - {offset}) * {stride}" for var, offset, stride in zip(index, self.obj.bbox.lower(), self.data_view.get_dim_strides()) if var != 0)
       return dimstr if len(dimstr) > 0 else "0"
     if self.stype == SymbolType.Register or self.stype == SymbolType.Scratch:
       # nonlead_dim only
