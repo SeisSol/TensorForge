@@ -8,7 +8,7 @@ from kernelforge.common.aux import get_extra_offset_name
 from kernelforge.backend.data_types import ShrMemObject, RegMemObject
 from kernelforge.backend.opt import OptimizationStage
 from kernelforge.backend.scopes import Scopes
-from kernelforge.backend.symbol import Symbol, SymbolType
+from kernelforge.backend.symbol import Symbol, SymbolType, SymbolView
 from kernelforge.backend.instructions.abstract_instruction import AbstractInstruction
 from kernelforge.backend.instructions.compute.elementwise import ElementwiseInstruction
 from kernelforge.backend.instructions.builders.multilinear_builder import MultilinearBuilder
@@ -211,7 +211,7 @@ class Generator:
 
     for gemm_descr in self.descr_list:
       if isinstance(gemm_descr, MultilinearDescr):
-        builder.build(ops=[self._scopes.get_symbol(op) for op in gemm_descr.ops],
+        builder.build(ops=[SymbolView(self._scopes.get_symbol(op.tensor), op.bbox) for op in gemm_descr.ops],
                         dest_obj=gemm_descr.dest,
                         descr=gemm_descr)
         self._ir.extend(builder.get_instructions())
@@ -251,13 +251,16 @@ class Generator:
     op_counter = 0
 
     pre_matrix_list = set()
+    pre_submatrix_list = set()
     for gemm in gemm_list:
       local_list = gemm.matrix_list()
 
       # gather all matrices
       for matrix in local_list:
-        pre_matrix_list.add(matrix)
+        pre_matrix_list.add(matrix.tensor)
+        pre_submatrix_list.add(matrix)
     self._matrix_list = list(pre_matrix_list)
+    self._submatrix_list = list(pre_submatrix_list)
 
     for matrix in self._matrix_list:
       if matrix.is_tmp:
@@ -280,9 +283,10 @@ class Generator:
     """
     for matrix in self._matrix_list:
       if matrix not in self._tmp_list:
-        self._scopes.add_to_global(Symbol(obj=matrix,
-                                          name=matrix.name,
-                                          stype=SymbolType.Scalar if matrix.addressing == Addressing.SCALAR else SymbolType.Batch))
+        symbol = Symbol(obj=matrix,
+                      name=matrix.name,
+                      stype=SymbolType.Scalar if matrix.addressing == Addressing.SCALAR else SymbolType.Batch)
+        self._scopes.add_to_global(symbol)
 
   def _generate_kernel_name(self):
     global_symbols = self._scopes.get_global_scope().values()

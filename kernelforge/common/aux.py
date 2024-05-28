@@ -1,10 +1,10 @@
-from kernelforge.common.matrix.tensor import Tensor
+from kernelforge.common.matrix.tensor import Tensor, SubTensor
 from kernelforge.common.basic_types import Addressing, GeneralLexicon
 from kernelforge.common.vm.vm import VM
 from kernelforge.backend.symbol import Symbol
 from typing import List
 
-def generate_tmp_tensor(ops: List[Tensor], target: List[List[int]]):
+def generate_tmp_tensor(ops: List[SubTensor], target: List[List[int]], alias=None):
   rank = 0
   for itarget in target:
     for jtarget in itarget:
@@ -13,11 +13,12 @@ def generate_tmp_tensor(ops: List[Tensor], target: List[List[int]]):
   for i, itarget in enumerate(target):
     for j, jtarget in enumerate(itarget):
       if jtarget >= 0:
-        shape[jtarget] = ops[i].get_actual_shape()[j]
+        shape[jtarget] = ops[i].bbox.sizes()[j]
   res = Tensor(shape=shape,
-                    addressing=Addressing.STRIDED,
+                    addressing=Addressing.PTR_BASED,
                     bbox=None,
-                    is_tmp=True)
+                    is_tmp=True,
+                    alias=alias)
   return res
 
 def generate_tmp_matrix(op1: Tensor, op2: Tensor, trans_a: bool = False, trans_b: bool = False):
