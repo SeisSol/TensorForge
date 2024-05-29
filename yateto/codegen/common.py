@@ -4,7 +4,7 @@ from ..ast.log import splitByDistance
 import kernelforge
 
 class TensorDescription(object):
-  def __init__(self, name, memoryLayout, eqspp, is_compute_constant=False, is_temporary=False):
+  def __init__(self, name, memoryLayout, eqspp, is_compute_constant=False, is_temporary=False, values=None):
     """
 
     Args:
@@ -21,6 +21,7 @@ class TensorDescription(object):
     self.eqspp = eqspp
     self.is_compute_constant = is_compute_constant
     self.is_temporary = is_temporary
+    self.values = values
     BoundingBox(eqspp)
   
   @classmethod
@@ -28,16 +29,19 @@ class TensorDescription(object):
     return cls(name, node.memoryLayout(), node.eqspp())
 
 class IndexedTensorDescription(TensorDescription):
-  def __init__(self, name, indices, memoryLayout, eqspp, is_compute_constant=False, is_temporary=False):
-    super().__init__(name, memoryLayout, eqspp, is_compute_constant, is_temporary)
+  def __init__(self, name, indices, memoryLayout, eqspp, is_compute_constant=False, is_temporary=False, values=None):
+    super().__init__(name, memoryLayout, eqspp, is_compute_constant, is_temporary, values)
     self.indices = indices
 
   @classmethod
   def fromNode(cls, var, node):
     is_const = False
+    values = None
     if hasattr(node, 'tensor'):
       is_const = node.tensor.is_compute_constant()
-    return cls(str(var), node.indices, var.memoryLayout(), node.eqspp(), is_const, var.is_temporary)
+      if is_const:
+        values = node.tensor.values()
+    return cls(str(var), node.indices, var.memoryLayout(), node.eqspp(), is_const, var.is_temporary, values)
 
 def forLoops(cpp, indexNames, ranges, body, pragmaSimd=True, prefix='_', indexNo=None):
   flops = 0

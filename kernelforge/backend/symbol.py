@@ -211,23 +211,24 @@ class Symbol:
     if self.stype == SymbolType.Scalar:
       return f'{self.name}'
     if self.stype == SymbolType.Data:
-      return self.get_fptype.literal(self.obj.value(runIdx))
+      return self.get_fptype(context).literal(self.obj.value(runIdx))
   
   def encode_values(self, pos, runIdx, writer, context: Context, variable, index: List[Union[str, int]], nontemp):
     if pos == len(index):
       value = self.obj.value(runIdx)
       if value is not None:
-        writer(f'{variable} = {self.get_fptype.literal(value)};')
+        writer(f'{variable} = {self.get_fptype(context).literal(value)};')
       # TODO: variable reference if no value present (self.obj.index(runIdx)?)
-    if isinstance(index[pos], int):
-      runIdx[pos] = index[pos]
     else:
-      if True: # sparse/data
-        # TODO: check sparsity pattern here for which ifs are worth it
-        for i in range(self.data_view._shape[pos]):
-          myIndex[pos] = i
-          with writer.If(f'{index[pos]} == {i}'):
-            self.encode_values(pos + 1, runIdx, writer, context, variable, index, nontemp)
+      if isinstance(index[pos], int):
+        runIdx[pos] = index[pos]
+      else:
+        if True: # sparse/data
+          # TODO: check sparsity pattern here for which ifs are worth it
+          for i in range(self.data_view.shape[pos]):
+            runIdx[pos] = i
+            with writer.If(f'{index[pos]} == {i}'):
+              self.encode_values(pos + 1, runIdx, writer, context, variable, index, nontemp)
 
   def load(self, writer, context: Context, variable, index: List[Union[str, int]], nontemp):
     if self.stype == SymbolType.Data:

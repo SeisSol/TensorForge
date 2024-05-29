@@ -54,11 +54,18 @@ class Tensor:
         else:
             self.direction = DataFlowDirection.SOURCESINK
 
+    def has_values(self):
+        return self.data is not None
+
     def get_values(self):
         return self.data
     
     def value(self, index):
-        return self.data[tuple(index)]
+        realindex = tuple(index)
+        if realindex in self.data:
+            return self.data[realindex]
+        else:
+            return None
 
     def get_actual_shape(self):
         return self.bbox.sizes()

@@ -137,8 +137,8 @@ class GpuKernelGenerator:
                                name=tensor_variable.name,
                                is_tmp=tensor_variable.is_temporary,
                                permute=None,
-                               pattern = tensor_variable.eqspp,
-                               values = tensor_variable.eqspp)
+                               pattern = tensor_variable.eqspp.as_ndarray(),
+                               values = tensor_variable.values)
 
   def _gen_tmp_matix(self, ops, target, permute, res_name, can_be_aligned):
     # TODO: ignore scalars here?

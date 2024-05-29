@@ -14,7 +14,13 @@ class GetElementPtrBuilder(AbstractBuilder):
 
   def build(self, src: Symbol, include_extra_offset: bool = True):
     self._reset()
-    if src.stype == SymbolType.Scalar:
+    if src.stype == SymbolType.Data:
+      dest = Symbol(name=f'{GeneralLexicon.GLOBAL_MEM_PREFIX}{src.name}',
+                    stype=SymbolType.Data,
+                    obj=src.obj)
+      dest.data_view = DataView(shape=src.obj.shape, permute=None, bbox=src.obj.get_bbox())
+      self._scopes.add_symbol(dest)
+    elif src.stype == SymbolType.Scalar:
       dest = Symbol(name=f'{GeneralLexicon.GLOBAL_MEM_PREFIX}{src.name}',
                     stype=SymbolType.Scalar,
                     obj=src.obj)
