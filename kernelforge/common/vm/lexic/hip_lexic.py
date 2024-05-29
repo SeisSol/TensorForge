@@ -49,13 +49,13 @@ class HipLexic(CudaLexic):
     return f'HIP_vector_type<{fptype}, {length}>'
 
   def glb_store(self, lhs, rhs, nontemporal=False):
-    if nontemporal:
+    if nontemporal and self._underlying_hardware == 'amd':
       return f'__builtin_nontemporal_store({rhs}, &{lhs});'
     else:
       return f'{lhs} = {rhs};'
   
   def glb_load(self, lhs, rhs, nontemporal=False):
-    if nontemporal:
+    if nontemporal and self._underlying_hardware == 'amd':
       return f'{lhs} = __builtin_nontemporal_load(&{rhs});'
     else:
       return f'{lhs} = {rhs};'
