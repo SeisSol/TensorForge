@@ -36,6 +36,7 @@ class SimpleThreadBlockPolicy(AbstractThreadBlockPolicy):
     super().__init__(context, mem_size_per_mult, num_threads)
 
   def get_num_mults_per_block(self):
+    # return max(self._context.get_vm().get_hw_descr().vec_unit_length // self._num_threads, 1)
     if self._num_threads <= 32:
       return 2
     else:
@@ -283,9 +284,15 @@ class Generator:
     """
     for matrix in self._matrix_list:
       if matrix not in self._tmp_list:
+        if matrix.has_values():
+          stype = SymbolType.Data
+        elif matrix.addressing == Addressing.SCALAR:
+          stype = SymbolType.Scalar
+        else:
+          stype = SymbolType.Batch
         symbol = Symbol(obj=matrix,
                       name=matrix.name,
-                      stype=SymbolType.Scalar if matrix.addressing == Addressing.SCALAR else SymbolType.Batch)
+                      stype=stype)
         self._scopes.add_to_global(symbol)
 
   def _generate_kernel_name(self):

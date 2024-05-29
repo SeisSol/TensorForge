@@ -1,5 +1,6 @@
 from kernelforge.common.matrix.tensor import Tensor, TensorWrapper, SubTensor
 from kernelforge.common.matrix.boundingbox import BoundingBox
+from kernelforge.common.matrix.spp import MaskSPP
 
 class YatetoInterface:
   def __init__(self):
@@ -33,6 +34,14 @@ class YatetoInterface:
                        pattern=None,
                        values=None):
 
+    spp = None
+    if pattern is not None:
+      spp = MaskSPP(pattern)
+    
+    data = None
+    if values is not None:
+      data = values
+
     chainforge_bbox = cls.deduce_bbox(yateto_ranges=yateto_ranges,
                                       mem_layout=yateto_memory_layout_bbox,
                                       permute=permute)
@@ -40,6 +49,8 @@ class YatetoInterface:
                     addressing=addressing,
                     bbox=chainforge_bbox,
                     alias=name,
-                    is_tmp=is_tmp)
+                    is_tmp=is_tmp,
+                    spp=spp,
+                    data=data)
     return tensor
     return SubTensor(tensor, chainforge_bbox)
