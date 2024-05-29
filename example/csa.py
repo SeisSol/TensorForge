@@ -1,4 +1,5 @@
-from kernelforge import DenseMatrix, GenerationError, CsaGenerator
+from kernelforge import GenerationError, CsaGenerator
+from kernelforge.common.matrix.tensor import Tensor
 from kernelforge.common.vm.vm import vm_factory
 import argparse
 from kernelforge.backend.instructions.csa import CSA
@@ -18,13 +19,11 @@ parser.add_argument('-b',
 
 args = parser.parse_args()
 
-mat_a = DenseMatrix(num_rows=9,
-                    num_cols=9,
+mat_a = Tensor(shape=[9, 9],
                     addressing='strided',
                     bbox=[0, 0, 9, 9])
 
-mat_b = DenseMatrix(num_rows=9,
-                    num_cols=9,
+mat_b = Tensor(shape=[9, 9],
                     addressing='strided',
                     bbox=[0, 0, 9, 9])
 

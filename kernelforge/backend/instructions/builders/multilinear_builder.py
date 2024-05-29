@@ -14,6 +14,7 @@ from kernelforge.generators.descriptions import MultilinearDescr
 from kernelforge.backend.instructions.builders.allocator_builder import AbstractBuilder
 from kernelforge.common.operation import AddOperator, MulOperator
 from kernelforge.backend.data_types import RegMemObject
+from kernelforge.backend.instructions.loaders.abstract_loader import AbstractShrMemLoader
 
 class MultilinearBuilder(AbstractBuilder):
   GemmClass = None
@@ -30,6 +31,7 @@ class MultilinearBuilder(AbstractBuilder):
     self._num_threads = num_threads
 
     self._counter = 0
+    self._counter_shr_reg = 0
     self._loaders_cache: Dict[Symbol, AbstractShrMemLoader] = {}
 
     self._ops = None
@@ -236,8 +238,8 @@ class MultilinearBuilder(AbstractBuilder):
                                           num_threads_per_mult=self._num_threads))
 
   def _name_shr_reg(self):
-    name = f's{self._counter}'
-    self._counter += 1
+    name = f's{self._counter_shr_reg}'
+    self._counter_shr_reg += 1
     return name
 
   def build_epilogue(self):

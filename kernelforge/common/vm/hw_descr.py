@@ -1,4 +1,5 @@
-from copy import deepcopy
+import yaml
+import os
 
 
 class HwDecription:
@@ -27,29 +28,37 @@ def hw_descr_factory(arch, backend):
   if backend == "dpcpp":
     backend = "oneapi"
 
-  known_arch = get_known_arch()
+  script_dir = os.path.dirname(os.path.realpath(__file__))
+  db_file_path = os.path.join(script_dir, 'hw_descr_db.yml')
+  with open(db_file_path, 'r') as file:
+    yaml_data = yaml.safe_load(file)
 
-  nvidia_list = retrieve_arch(arch_table=known_arch, vendor='nvidia')
-  amd_list = retrieve_arch(arch_table=known_arch, vendor='amd')
-  intel_list = retrieve_arch(arch_table=known_arch, vendor='intel')
+  arch_dict = {item['arch']: item for item in yaml_data}
+  known_arch = {}
+  for arch_name in arch_dict:
+    known_arch = process_arch(arch_name, arch_dict, known_arch)
+
+  nvidia_map = retrieve_arch(arch_table=known_arch, vendor='nvidia')
+  amd_map = retrieve_arch(arch_table=known_arch, vendor='amd')
+  intel_map = retrieve_arch(arch_table=known_arch, vendor='intel')
 
   if backend == 'cuda':
-    if arch in nvidia_list:
+    if arch in nvidia_map.keys():
       return HwDecription(known_arch[arch], arch, backend)
     else:
       report_error(backend, arch)
   elif backend == 'hip':
-    if arch in nvidia_list or arch in amd_list:
+    if arch in nvidia_map.keys() or arch in amd_map.keys():
       return HwDecription(known_arch[arch], arch, backend)
     else:
       report_error(backend, arch)
   elif backend == 'oneapi' or backend == 'acpp':
-    if arch in nvidia_list or arch in amd_list or arch in intel_list:
+    if arch in nvidia_map.keys() or arch in amd_map.keys() or arch in intel_map.keys():
       return HwDecription(known_arch[arch], arch, backend)
     else:
       report_error(backend, arch)
   elif backend == 'omptarget' or backend == 'targetdart':
-    if arch in nvidia_list or arch in amd_list or arch in intel_list:
+    if arch in nvidia_map.keys() or arch in amd_map.keys() or arch in intel_map.keys():
       return HwDecription(known_arch[arch], arch, backend)
     else:
       report_error(backend, arch)
@@ -57,156 +66,27 @@ def hw_descr_factory(arch, backend):
   raise ValueError(f'Unknown gpu architecture: {backend} {arch}')
 
 
-def get_known_arch():
-  arch = {}
-
-  # Nvidia architecture
-  # from: https://en.wikipedia.org/wiki/CUDA
-  nvidia_warp = 32
-  KB = 1024
-
-  arch['sm_60'] = {
-    'vec_unit_length': nvidia_warp,
-    'max_local_mem_size_per_block': 48 * KB,
-    'max_num_threads': 1024,
-    'max_reg_per_block': 64 * KB,
-    'max_threads_per_sm': 2048,
-    'max_block_per_sm': 32,
-    'hw_fp_word_size': 4,
-    'mem_access_align_size': 32,
-    'shmem_banks': 32,
-    'name': 'nvidia',
-  }
-
-  arch['sm_61'] = deepcopy(arch['sm_60'])
-  arch['sm_62'] = deepcopy(arch['sm_60'])
-
-  arch['sm_70'] = deepcopy(arch['sm_60'])
-  arch['sm_70']['max_local_mem_size_per_block'] = 96 * KB
-  arch['sm_71'] = deepcopy(arch['sm_60'])
-
-  arch['sm_75'] = deepcopy(arch['sm_60'])
-  arch['sm_75']['max_local_mem_size_per_block'] = 64 * KB
-  arch['sm_75']['max_block_per_sm'] = 16
-
-  arch['sm_80'] = deepcopy(arch['sm_60'])
-  arch['sm_80']['max_local_mem_size_per_block'] = 164 * KB
-
-  arch['sm_86'] = deepcopy(arch['sm_60'])
-  arch['sm_86']['max_local_mem_size_per_block'] = 100 * KB
-  arch['sm_86']['max_block_per_sm'] = 16
-  arch['sm_86']['max_threads_per_sm'] = 1536
-
-  arch['sm_89'] = deepcopy(arch['sm_60'])
-
-  arch['sm_90'] = deepcopy(arch['sm_60'])
-  arch['sm_90']['max_local_mem_size_per_block'] = 228 * KB
-
-  # AMD
-  # MI50
-
-  # info:
-  # 1. p31. https://www.olcf.ornl.gov/wp-content/uploads/2019/10/ORNL_Application_Readiness_Workshop-AMD_GPU_Basics.pdf
-  # 2. p16. https://developer.amd.com/wordpress/media/2017/08/Vega_Shader_ISA_28July2017.pdf
-  # 3. https://en.wikipedia.org/wiki/Graphics_Core_Next#CU_scheduler
-  # 4. https://en.wikipedia.org/wiki/Graphics_Core_Next#Compute_units
-
-  amd_gcn_wavefront = 64
-  arch['gfx906'] = {
-    'vec_unit_length': amd_gcn_wavefront,
-    'max_local_mem_size_per_block': 64 * KB,
-    'max_num_threads': 1024,
-    'max_reg_per_block': 256 * KB,
-    'max_threads_per_sm': 40 * amd_gcn_wavefront,
-    'max_block_per_sm': 40,
-    'hw_fp_word_size': 4,
-    'mem_access_align_size': 32,
-    'shmem_banks': 32,
-    'name': 'amd',
-  }
-
-  arch['gfx900'] = deepcopy(arch['gfx906'])
-
-  arch['gfx908'] = deepcopy(arch['gfx906'])
-  arch['gfx908']['max_reg_per_block'] = 512 * KB
-
-  arch['gfx90a'] = deepcopy(arch['gfx908'])
-
-  arch['gfx940'] = deepcopy(arch['gfx90a'])
-  arch['gfx941'] = deepcopy(arch['gfx90a'])
-  arch['gfx942'] = deepcopy(arch['gfx90a'])
-
-  # https://en.wikipedia.org/wiki/RDNA_(microarchitecture)
-  
-  amd_rdna_wavefront = 32
-  arch['gfx1010'] = {
-    'vec_unit_length': amd_rdna_wavefront,
-    'max_local_mem_size_per_block': 64 * KB,
-    'max_num_threads': 1024,
-    'max_reg_per_block': 256 * KB,
-    'max_threads_per_sm': 40 * amd_rdna_wavefront,
-    'max_block_per_sm': 40,
-    'hw_fp_word_size': 4,
-    'mem_access_align_size': 32,
-    'shmem_banks': 32,
-    'name': 'amd',
-  }
-
-  arch['gfx1030'] = deepcopy(arch['gfx1010'])
-  arch['gfx1100'] = deepcopy(arch['gfx1010'])
-  arch['gfx1101'] = deepcopy(arch['gfx1010'])
-  arch['gfx1102'] = deepcopy(arch['gfx1010'])
-  arch['gfx1150'] = deepcopy(arch['gfx1010'])
-  arch['gfx1200'] = deepcopy(arch['gfx1010'])
-
-  # Intel
-  arch['pvc'] = {
-    'vec_unit_length': 16,
-    'max_local_mem_size_per_block': 128 * KB,
-    'max_num_threads': 512,
-    'max_reg_per_block': 64 * KB,
-    'max_threads_per_sm': 1024,
-    'max_block_per_sm': 64,
-    'hw_fp_word_size': 4,
-    'mem_access_align_size': 32,
-    'shmem_banks': 32,
-    'name': 'intel',
-  }
-
-  """
-  arch['dg1'] = {
-    'vec_unit_length': 64,
-    'max_local_mem_size_per_block': 64 * KB,
-    'max_num_threads': 512,
-    'max_reg_per_block': 64 * KB,
-    'max_threads_per_sm': 512,
-    'max_block_per_sm': 64,
-    'hw_fp_word_size': 4,
-    'mem_access_align_size': 32,
-    'shmem_banks': 32,
-    'name': 'intel',
-  }
-
-  for intel_integrated_gpu in ['bdw', 'skl', 'Gen8', 'Gen9', 'Gen11', 'Gen12LP']:
-    arch[intel_integrated_gpu] = {'vec_unit_length': 32,
-                                  'max_local_mem_size_per_block': 48 * KB,
-                                  'max_num_threads': 256,
-                                  'max_reg_per_block': 64 * KB,
-                                  'max_threads_per_sm': 256,
-                                  'max_block_per_sm': 32,
-                                  'hw_fp_word_size': 4,
-                                  'mem_access_align_size': 32,
-                                  'shmem_banks': 32,
-                                  'name': 'intel'}
-"""
-  return arch
-
-
 def retrieve_arch(arch_table, vendor):
-  hardware_list = []
-  for key, value in arch_table.items():
-    if vendor in value['name']:
-      hardware_list.append(key)
+  hardware_map = {}
+  for arch, item in arch_table.items():
 
-  return hardware_list
+    if vendor in item["name"]:
+      hardware_map[arch] =  item
+  return hardware_map
 
+def process_arch(arch, arch_dict, known_arch):
+    # If the architecture has already been processed, return its data
+    if arch in known_arch:
+        return known_arch[arch]
+
+    # If the architecture has a base, process the base first
+    if 'base' in arch_dict[arch]:
+        base_data = process_arch(arch_dict[arch]['base'], arch_dict, known_arch)
+    else:
+        base_data = {}
+
+    # Copy the base data and update it with the architecture's own data
+    data = base_data.copy()
+    data.update(arch_dict[arch])
+    known_arch[arch] = data
+    return known_arch

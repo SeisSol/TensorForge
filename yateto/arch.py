@@ -38,6 +38,8 @@
 #
 
 from .memory import DenseMemoryLayout
+import os
+import yaml
 
 class Architecture(object):
   def __init__(self,
@@ -46,7 +48,8 @@ class Architecture(object):
                alignment,
                enablePrefetch=False,
                backend='cpp',
-               host_name=None):
+               host_name=None,
+               gemmgen={}):
     """
 
     Args:
@@ -86,6 +89,8 @@ class Architecture(object):
     self._tmpStackLimit = 524288
     self.is_accelerator = backend != 'cpp' and self.host_name != None
 
+    self.gemmgen = gemmgen
+
   def setTmpStackLimit(self, tmpStackLimit):
     self._tmpStackLimit = tmpStackLimit
 
@@ -116,32 +121,15 @@ def getArchitectureIdentifiedBy(ident):
   name, precision = _get_name_and_precision(ident)
 
   # NOTE: libxsmm currently supports prefetch only for KNL kernels
-  arch = {
-    'noarch': Architecture(name, precision, 16, False),
-    'wsm': Architecture(name, precision, 16, False),
-    'snb': Architecture(name, precision, 32, False),
-    'hsw': Architecture(name, precision, 32, False),
-    'skx': Architecture(name, precision, 64, True),
-    'knc': Architecture(name, precision, 64, False),
-    'knl': Architecture(name, precision, 64, True),
-    'naples': Architecture(name, precision, 32, False),
-    'rome': Architecture(name, precision, 32, False),
-    'milan': Architecture(name, precision, 32, False),
-    'bergamo': Architecture(name, precision, 64, True),
-    'thunderx2t99': Architecture(name, precision, 16, False),
-    'a64fx': Architecture(name, precision, 64, True),
-    'neon': Architecture(name, precision, 16, False),
-    'apple-m1': Architecture(name, precision, 16, False),
-    'apple-m2': Architecture(name, precision, 16, False),
-    'sve128': Architecture(name, precision, 16, False),
-    'sve256': Architecture(name, precision, 32, False),
-    'sve512': Architecture(name, precision, 64, False),
-    'sve1024': Architecture(name, precision, 128, False),
-    'sve2048': Architecture(name, precision, 256, False),
-    'power9': Architecture(name, precision, 16, False),
-  }
-  return arch[name]
-
+  script_dir = os.path.dirname(os.path.realpath(__file__))
+  db_file_path = os.path.join(script_dir, 'arch_db.yml')
+  with open(db_file_path, 'r') as file:
+    yaml_data = yaml.safe_load(file)
+  arch = next((item for item in yaml_data if item['arch'] == name), None)
+  if 'gemmgen' in arch:
+    return Architecture(name, precision, arch['vectorsize'], arch['enable_prefetch'], gemmgen = arch['gemmgen']) 
+  else:
+    return Architecture(name, precision, arch['vectorsize'], arch['enable_prefetch'])
 
 def getHeterogeneousArchitectureIdentifiedBy(host_arch, device_arch, device_backend):
   device_arch, device_precision = _get_name_and_precision(device_arch)

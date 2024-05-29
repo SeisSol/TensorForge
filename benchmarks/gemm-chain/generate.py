@@ -1,4 +1,5 @@
-from kernelforge import DenseMatrix, GenerationError, GemmGenerator
+from kernelforge import GenerationError, GemmGenerator
+from kernelforge.common.matrix.tensor import Tensor
 from kernelforge.common.vm.vm import vm_factory
 from jinja2 import Environment, FileSystemLoader
 import os
@@ -25,8 +26,7 @@ args = parser.parse_args()
 
 
 def produce_matrix(spec):
-    return DenseMatrix(num_rows=spec['num_rows'],
-                       num_cols=spec['num_cols'],
+    return Tensor(shape = [spec['num_rows'], spec['num_cols']],
                        addressing=spec['addressing'],
                        bbox=spec['bbox'])
 

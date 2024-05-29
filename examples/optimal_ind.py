@@ -28,7 +28,7 @@ def add(g):
             kernel = [  tmp1[i1]  <= B['befl'] * D['cdel'],
                         tmp2[i2]  <= tmp1[i1]  * C['dfjk'],
                         S['abij'] <= tmp2[i2]  * A['acik'] ]
-            g.add('kernel_{}_{}'.format(i1,i2), kernel)
+            g.add('kernel_{}_{}'.format(i1,i2), kernel, target = "gpu")
 
 
 

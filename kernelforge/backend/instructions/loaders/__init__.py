@@ -1,5 +1,5 @@
 from math import ceil
-from kernelforge.common.matrix.dense import Matrix
+from kernelforge.common.matrix.matrix import Matrix
 from kernelforge.common.exceptions import InternalError
 from .shr_mem_loader import ExtendedPatchLoader, ExactPatchLoader
 from .shr_trans_mem_loader import ExtendedTransposePatchLoader, ExactTransposePatchLoader

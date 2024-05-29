@@ -1,6 +1,8 @@
 from typing import List
 from abc import ABC, abstractmethod
 import operator
+import os
+import yaml
 
 class Preference(object):
   HIGHEST = 4
@@ -285,41 +287,43 @@ class GeneratorCollection(object):
 class DefaultGeneratorCollection(GeneratorCollection):
   def __init__(self, arch):
     super().__init__([])
-    libxsmm = LIBXSMM(arch)
-    libxsmm_jit = LIBXSMM_JIT(arch)
-    pspamm = PSpaMM(arch)
-    mkl = MKL(arch)
-    blis = BLIS(arch)
-    openblas = OpenBLAS(arch)
-    eigen = Eigen(arch)
-    forge = KernelForge(arch)
-    defaults = {
-      'snb' : [libxsmm_jit, libxsmm, mkl, blis, eigen],
-      'hsw' : [libxsmm_jit, libxsmm, pspamm, mkl, blis, eigen],
-      'naples' : [libxsmm_jit, libxsmm, pspamm, blis, eigen],
-      'rome' : [libxsmm_jit, libxsmm, pspamm, blis, eigen],
-      'milan' : [libxsmm_jit, libxsmm, pspamm, blis, eigen],
-      'bergamo' : [libxsmm_jit, libxsmm, pspamm, blis, eigen],
-      'knl' : [libxsmm_jit, libxsmm, pspamm, mkl, blis, eigen],
-      'skx' : [libxsmm_jit, libxsmm, pspamm, mkl, blis, eigen],
-      'thunderx2t99' : [libxsmm_jit, pspamm, openblas, blis, eigen],
-      'apple-m1' : [libxsmm_jit, pspamm, openblas, blis, eigen],
-      'apple-m2' : [libxsmm_jit, pspamm, openblas, blis, eigen],
-      'a64fx' : [libxsmm_jit, pspamm, openblas, blis, eigen],
-      'neon' : [libxsmm_jit, pspamm, openblas, blis, eigen],
-      'sve128' : [libxsmm_jit, pspamm, openblas, blis, eigen],
-      'sve256' : [libxsmm_jit, pspamm, openblas, blis, eigen],
-      'sve512' : [libxsmm_jit, pspamm, openblas, blis, eigen],
-      'sve1024' : [pspamm, openblas, blis, eigen],
-      'sve2048' : [pspamm, openblas, blis, eigen],
-      'power9' : [openblas, blis, eigen]
-    }
-
-    if arch.name in defaults:
-      self.gemmTools = defaults[arch.name]
-    elif arch.host_name in defaults:
-      self.gemmTools = defaults[arch.host_name]
+    script_dir = os.path.dirname(os.path.realpath(__file__))
+    db_file_path = os.path.join(script_dir, 'arch_db.yml')
+    with open(db_file_path, 'r') as file:
+      yaml_data = yaml.safe_load(file)
+    arch_dict = next((item for item in yaml_data if item['arch'] == arch.name), None)
+    host_arch_dict = next((item for item in yaml_data if item['arch'] == arch.host_name), None)
+    gemmToolCreated = False
+    if arch_dict is not None:
+      if 'gemmTools' in arch_dict.keys():
+        self.gemmTools = self._create_gemmTools(arch_dict['gemmTools'], arch)
+        gemmToolCreated = True
+    if not gemmToolCreated and host_arch_dict is not None:
+      if 'gemmTools' in host_arch_dict.keys():
+        self.gemmTools = self._create_gemmTools(host_arch_dict['gemmTools'], arch)
+        gemmToolCreated = True
       if arch.is_accelerator:
-        self.gemmTools.extend([forge])
-    else:
+        self.gemmTools.extend([KernelForge(arch)])
+    elif not gemmToolCreated:
       raise Exception("Default generator collection for architecture {} is missing.".format(arch))
+    
+  def _create_gemmTools(self, gemmTools: List[str], arch):
+    tools = []
+    for gemmTool in gemmTools:
+      if gemmTool == 'libxsmm':
+        tools.append(LIBXSMM(arch))
+      elif gemmTool == 'libxsmm_jit':
+        tools.append(LIBXSMM_JIT(arch))
+      elif gemmTool == 'pspamm':
+        tools.append(PSpaMM(arch))
+      elif gemmTool == 'mkl':
+        tools.append(MKL(arch))
+      elif gemmTool == 'blis':
+        tools.append(BLIS(arch))
+      elif gemmTool == 'openblas':
+        tools.append(OpenBLAS(arch))
+      elif gemmTool == 'eigen':
+        tools.append(Eigen(arch))
+      elif gemmTool == 'forge':
+        tools.append(KernelForge(arch))
+    return tools
