@@ -1,4 +1,4 @@
-from kernelforge.common import DenseMatrix
+from kernelforge.common.matrix.tensor import Tensor
 from kernelforge.common.context import Context
 from kernelforge.common.aux import generate_tmp_matrix
 from kernelforge.generators.descriptions import GemmDescr, FloatingPointType, Addressing

@@ -51,9 +51,10 @@ class SyncThreadsOpt(AbstractTransformer):
 
       if isinstance(instr, AbstractShrMemWrite):
         dest = instr.get_dest()
-        if flags[self._get_region_id(dest)]:
-          selected.append(instr)
-          flags = [False] * len(self._regions)
+        if self._get_region_id(dest) is not None:
+          if flags[self._get_region_id(dest)]:
+            selected.append(instr)
+            flags = [False] * len(self._regions)
 
     self._insert_sync_instrs(selected)
 

@@ -90,6 +90,8 @@ class GpuKernelGenerator:
     return aligned
 
   def make_tensor(self, op, can_be_aligned, dims):
+    if isinstance(op, (float, int)):
+      return Tensor([], Addressing.SCALAR, data = op)
     if isinstance(op, Scalar):
       entry = self._add_scalar(op)
       entry_name = op.name()
@@ -167,6 +169,14 @@ class GpuKernelGenerator:
                                         BatchedOperationsAux.NUM_ELEMENTS_NAME,
                                         BatchedOperationsAux.FLAGS_NAME,
                                         BatchedOperationsAux.STREAM_PTR_NAME)
+  
+  def _append_operation(self, op):
+    if isinstance(op, (float, int)):
+      return Tensor([], Addressing.SCALAR, data = op)
+    elif isinstance(op, Scalar):
+      return self._cache[op.name()]
+    else:
+      return self._cache[op.name]
 
 class KernelForgeWriter(GpuRoutineGenerator):
   def __init__(self, kernelforge_generator, headers):

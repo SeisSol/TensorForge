@@ -1,4 +1,3 @@
-from kernelforge.common.matrix.dense import DenseMatrix
 from kernelforge.common.matrix.boundingbox import BoundingBox
 from kernelforge.common.matrix.tensor import Tensor
 from kernelforge.common.context import Context

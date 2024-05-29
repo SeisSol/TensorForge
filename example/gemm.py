@@ -1,4 +1,3 @@
-from kernelforge.common.matrix.dense import DenseMatrix
 from kernelforge.common.context import Context
 from kernelforge.generators.descriptions import GemmDescr
 from kernelforge.common.basic_types import FloatingPointType, Addressing
