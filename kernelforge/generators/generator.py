@@ -284,7 +284,7 @@ class Generator:
     """
     for matrix in self._matrix_list:
       if matrix not in self._tmp_list:
-        if matrix.has_values():
+        if matrix.has_values() and False:
           stype = SymbolType.Data
         elif matrix.addressing == Addressing.SCALAR:
           stype = SymbolType.Scalar
