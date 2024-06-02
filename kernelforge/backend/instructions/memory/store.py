@@ -101,11 +101,11 @@ class StoreRegToShr(AbstractShrMemWrite):
     dest.add_user(self)
     shr_mem.add_user(self)
 
-    bbox = dest.obj.get_bbox()
-    bbox = BoundingBox([0] * bbox.rank(), bbox.sizes())
-    dest.data_view = DataView(bbox.sizes(),
+    # bbox = dest.obj.get_bbox()
+    # bbox = BoundingBox([0] * bbox.rank(), bbox.sizes())
+    dest.data_view = DataView(src.data_view.get_bbox().sizes(),
                               permute=None,
-                              bbox=bbox)
+                              bbox=src.data_view.get_bbox())
 
     self._dest: Symbol = dest
     self._src: Symbol = src.clone()
@@ -126,16 +126,18 @@ class StoreRegToShr(AbstractShrMemWrite):
 
     with writer.If(self.gen_range_mask_threads(begin=src_bbox.lower()[0], end=src_bbox.upper()[0])):
       loops = []
-      indices = [self._vm.get_lexic().thread_idx_x]
+      indicesSrc = [self._vm.get_lexic().thread_idx_x]
+      indicesDest = [self._vm.get_lexic().thread_idx_x]# [f'({self._vm.get_lexic().thread_idx_x} - {src_bbox.lower()[0]})']
       for i in range(1, src_bbox.rank()):
         writer.insert_pragma_unroll()
         loop = f'int i{i} = 0; i{i} < {dest_view.shape[i]}; ++i{i}'
         loops += [writer.For(loop)]
         loops[-1].__enter__()
-        indices += [f'i{i}']
+        indicesSrc += [f'i{i}']
+        indicesDest += [f'i{i}']
 
-      self._src.load(writer, self._context, 'value', indices, False)
-      self._dest.store(writer, self._context, 'value', indices, False)
+      self._src.load(writer, self._context, 'value', indicesSrc, False)
+      self._dest.store(writer, self._context, 'value', indicesDest, False)
       
       for loop in reversed(loops):
         loop.__exit__(None, None, None)

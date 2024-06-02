@@ -77,7 +77,7 @@ class DataView:
   def get_dim_offsets(self, mask=[], bbox=False):
     # TODO: permute? Yes or no? Also, unify SPPs.
     offsets = []
-    for i, start in enumerate(self.get_bbox().lower() if bbox else [0] * self.rank()):
+    for i, start in enumerate(self.get_bbox().lower()):
       if i not in mask:
         offsets += [start]
     return offsets
@@ -196,7 +196,8 @@ class Symbol:
     if self.stype == SymbolType.Global or self.stype == SymbolType.Batch or self.stype == SymbolType.SharedMem:
       # lead_dim + nonlead_dim
       # TODO: really ref self.obj.bbox.lower() here?
-      dimstr = " + ".join(f"({var} - {offset}) * {stride}" for var, offset, stride in zip(index, self.obj.bbox.lower(), self.data_view.get_dim_strides()) if var != 0)
+      # self.obj.bbox.lower()
+      dimstr = " + ".join(f"({var} - {offset}) * {stride}" for var, offset, stride in zip(index, self.data_view.get_dim_offsets(), self.data_view.get_dim_strides()) if var != 0)
       return dimstr if len(dimstr) > 0 else "0"
     if self.stype == SymbolType.Register or self.stype == SymbolType.Scratch:
       # nonlead_dim only

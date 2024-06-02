@@ -11,6 +11,8 @@ from kernelforge.common.context import Context
 from kernelforge.common.operation import ReductionOperator
 from typing import Union, List
 
+#from .primitives.amd import shuffle_broadcast_forall
+
 class MultilinearInstruction(ComputeInstruction):
     def __init__(self,
                context: Context,
@@ -91,6 +93,8 @@ class MultilinearInstruction(ComputeInstruction):
         
         # TODO: handle offsets
         self._dest.data_view = DataView(shape = [u - l for l,u in self._ns], permute=[i for i in range(targetrank)])
+        self._dest.data_view._bbox._lower = [l for l,_ in self._ns]
+        self._dest.data_view._bbox._upper = [u for _,u in self._ns]
 
     def gen_code_inner(self, writer: Writer):
         leading = self._ks[0] if len(self._ns) == 0 else self._ns[0]
@@ -203,8 +207,6 @@ class MultilinearInstruction(ComputeInstruction):
 
         for loop in loopstack[::-1]:
             loop.__exit__(None, None, None)
-
-
 
     def _cublasdx_nonleadim_dim(self, writer: Writer):
         assert self._is_log
