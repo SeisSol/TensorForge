@@ -1,7 +1,7 @@
 from kernelforge.backend.writer import Writer
 from kernelforge.backend.symbol import DataView
-from kernelforge.common.matrix.dense import DenseMatrix
 from .abstract_loader import AbstractShrMemLoader, ShrMemLoaderType
+from kernelforge.common.matrix.tensor import Tensor
 
 
 def _find_next_prime(number):
@@ -34,8 +34,8 @@ class ExtendedTransposePatchLoader(AbstractShrMemLoader):
     super(ExtendedTransposePatchLoader, self).__init__(**kwargs)
 
     optimal_num_cols = _find_next_prime(self._matrix.get_actual_num_cols())
-    if isinstance(self._matrix, DenseMatrix):
-      self._shm_volume = self._matrix.num_rows * optimal_num_cols
+    if isinstance(self._matrix, Tensor):
+      self._shm_volume = self._matrix.get_real_shape[0] * optimal_num_cols
     else:  # Has to be sparse if not dense
       self._shm_volume = self._matrix.get_el_count()
 

@@ -111,6 +111,9 @@ class Tensor:
     
     def __str__(self):
         return self.gen_descr()
+    
+    def __repr__(self):
+        return self.gen_descr()
 
 class TensorWrapper:
     pass

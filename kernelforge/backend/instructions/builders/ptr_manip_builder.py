@@ -1,6 +1,6 @@
 from kernelforge.common.context import Context, VM
 from kernelforge.backend.scopes import Scopes, Symbol
-from kernelforge.common.matrix.dense import Matrix
+from kernelforge.common.matrix.matrix import Matrix
 from kernelforge.backend.symbol import SymbolType, DataView
 from kernelforge.backend.instructions.ptr_manip import GetElementPtr
 from kernelforge.common.exceptions import InternalError

@@ -13,7 +13,7 @@ def add(g):
   
   Q = Tensor('Q', (8, 20, 15))
   I = Tensor('I', (8, 20, 15))
-  g.add('seissol_stiffness', Q['skp'] <= db.kXiTDivM['lk'] * I['slq'] * db.star['qp'])
+  g.add('seissol_stiffness', Q['skp'] <= db.kXiTDivM['lk'] * I['slq'] * db.star['qp'], target = "gpu")
 
   # Reproduces recursive generation of zero blocks in Cauchy-Kowalevski prodedure,
   # described in "Sustained Petascale Performance of Seismic Simulations with SeisSol on SuperMUC",
@@ -29,5 +29,5 @@ def add(g):
     derivativeSum = DeduceIndices('kp').visit(derivativeSum)
     derivativeSum = EquivalentSparsityPattern().visit(derivativeSum)
     dQ = Tensor('dQ({})'.format(i), dQ_shape, spp=derivativeSum.eqspp())
-    g.add('derivative({})'.format(i), dQ['kp'] <= derivativeSum)
+    g.add('derivative({})'.format(i), dQ['kp'] <= derivativeSum, target = "gpu")
     dQ_prev = dQ

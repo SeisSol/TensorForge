@@ -8,6 +8,7 @@ from ...gemm_configuration import BLASlike, CodeGenerator, KernelForge
 from ..common import BatchedOperationsAux
 import importlib.util
 from kernelforge.common.basic_types import Addressing, FloatingPointType, DataFlowDirection
+from yateto.arch import getArchitectureIdentifiedBy
 
 # Optional modules
 import kernelforge
@@ -241,22 +242,14 @@ Stdout: {result.stdout}
 Stderr: {result.stderr}""")
   
   def __call__(self, routineName, fileName):
-    cpu_arch = self._arch.host_name if self._arch.host_name else self._arch.name
+    cpu_arch_name = self._arch.host_name if self._arch.host_name else self._arch.name
+    cpu_arch = getArchitectureIdentifiedBy(cpu_arch_name)
 
     if self._mode == 'pspamm':
-      pspamm_arch = cpu_arch
-      if cpu_arch == 'a64fx':
-        pspamm_arch = 'arm_sve512'
-      elif cpu_arch in ['apple-m1', 'thunderx2t99', 'neon']:
-        pspamm_arch = 'arm'
-      elif cpu_arch.startswith('sve'):
-        pspamm_arch = f'arm_{cpu_arch}' # TODO(David): rename to sveLEN only
-      elif cpu_arch in ['naples', 'rome', 'milan']:
-        # names are Zen1, Zen2, Zen3, respectively
-        # no explicit support for these archs yet, but they have the same instruction sets (AVX2+FMA3) that HSW also needs
-        pspamm_arch = 'hsw'
-      elif cpu_arch in ['bergamo']:
-        pspamm_arch = 'skx'
+      pspamm_arch = cpu_arch_name
+      if 'gemmgen' in cpu_arch:
+        if 'pspamm' in cpu_arch['gemmgen']:
+          pspamm_arch = cpu_arch['gemmgen']['pspamm']
       argList = [
         self._cmd,
         self._gemmDescr['M'],
@@ -281,13 +274,10 @@ Stderr: {result.stderr}""")
       for key, val in self._blockSize.items():
         argList.extend(['--' + key, val])
     else:
-      libxsmm_arch = cpu_arch
-      if cpu_arch in ['naples', 'rome', 'milan']:
-        # names are Zen1, Zen2, Zen3, respectively
-        # no explicit support for these archs yet, but they have the same instruction sets (AVX2+FMA3) that HSW also needs
-        libxsmm_arch = 'hsw'
-      elif cpu_arch in ['bergamo']:
-        libxsmm_arch = 'skx'
+      libxsmm_arch = cpu_arch_name
+      if 'gemmgen' in cpu_arch:
+        if 'libxsmm' in cpu_arch['gemmgen']:
+          libxsmm_arch = cpu_arch['gemmgen']['libxsmm']
       argList = [
         self._cmd,
         'dense',

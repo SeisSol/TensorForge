@@ -15,4 +15,4 @@ def add(g):
 
   Alist = [A[i][alph[13+i] + alph[i]] for i in range(N)]
   hosvd = G[alph[0:N]] <= X[alph[13:13+N]] * reduce(lambda x, y: x * y, Alist)
-  g.add('hosvd', hosvd)
+  g.add('hosvd', hosvd, target = "gpu")

@@ -29,7 +29,7 @@ class BoundingBox:
         return len(self._lower)
 
     def contains(self, index):
-        return all(i >= l and i < u for i,l,u in zip(index, self._lower, self_upper))
+        return all(i >= l and i < u for i,l,u in zip(index, self._lower, self._upper))
     
     def empty(self):
         return all(u >= l for l,u in zip(self._lower, self._upper))

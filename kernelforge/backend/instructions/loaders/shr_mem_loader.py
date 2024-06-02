@@ -1,7 +1,7 @@
 from kernelforge.backend.writer import Writer
 from kernelforge.backend.symbol import DataView
-from kernelforge.common.matrix.dense import DenseMatrix
 from .abstract_loader import AbstractShrMemLoader, ShrMemLoaderType
+from kernelforge.common.matrix.boundingbox import BoundingBox
 
 
 class ExtendedPatchLoader(AbstractShrMemLoader):

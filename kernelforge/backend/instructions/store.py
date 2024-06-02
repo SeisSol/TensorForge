@@ -1,6 +1,6 @@
 from typing import Union
 from kernelforge.common.context import Context
-from kernelforge.common.matrix.dense import Matrix
+from kernelforge.common.matrix.matrix import Matrix
 from kernelforge.backend.data_types import RegMemObject
 from kernelforge.backend.symbol import Symbol, SymbolType, DataView
 from kernelforge.common.exceptions import InternalError

@@ -1,6 +1,7 @@
 import enum
 from typing import Dict, Union
-from kernelforge.common import DenseMatrix, Addressing
+from kernelforge.common import Addressing
+from kernelforge.common.matrix.tensor import Tensor
 
 
 class ObjType(enum.Enum):
@@ -12,7 +13,7 @@ class Attribute:
   def __init__(self, descr):
     self.descr = descr
     self.obj_type = None
-    if isinstance(descr, DenseMatrix):
+    if isinstance(descr, Tensor):
       self.obj_type = ObjType.MATRIX
     elif isinstance(descr, float):
       self.obj_type = ObjType.SCALAR

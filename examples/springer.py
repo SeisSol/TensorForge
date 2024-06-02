@@ -25,7 +25,7 @@ def add_bench(g, descr, sizes):
   B = add_tensor('B', Bind, size)
   C = add_tensor('C', Cind, size)
 
-  g.add(descr.replace('-','_'), C[Cind] <= A[Aind] * B[Bind])
+  g.add(descr.replace('-','_'), C[Cind] <= A[Aind] * B[Bind], target = "gpu")
   _bench_no = _bench_no + 1
 
 def add(g):

@@ -35,10 +35,12 @@ class GpuKernelGenerator:
     return 0# self._descr_list[-1].get_flops()
   
   def get_tensor(self, op, can_be_aligned, dims):
-    if isinstance(op, Scalar):
+    if isinstance(op, (float, int)):
+      return SubTensor(tensor = Tensor([], Addressing.SCALAR, data = [op]))
+    elif isinstance(op, Scalar):
       return SubTensor(self._cache[op.name()])
     else:
-      tensor = self._cache[op.name() if isinstance(op, Scalar) else op.name]
+      tensor = self._cache[op.name]
       currentPreShape = list(BoundingBox.fromSpp(op.eqspp))
       if can_be_aligned:
         for i, dim in enumerate(dims):
@@ -90,6 +92,8 @@ class GpuKernelGenerator:
     return aligned
 
   def make_tensor(self, op, can_be_aligned, dims):
+    if isinstance(op, (float, int)):
+      return Tensor([], Addressing.SCALAR, data = [op])
     if isinstance(op, Scalar):
       entry = self._add_scalar(op)
       entry_name = op.name()
@@ -167,6 +171,14 @@ class GpuKernelGenerator:
                                         BatchedOperationsAux.NUM_ELEMENTS_NAME,
                                         BatchedOperationsAux.FLAGS_NAME,
                                         BatchedOperationsAux.STREAM_PTR_NAME)
+  
+  def _append_operation(self, op):
+    if isinstance(op, (float, int)):
+      return Tensor([], Addressing.SCALAR, data = op)
+    elif isinstance(op, Scalar):
+      return self._cache[op.name()]
+    else:
+      return self._cache[op.name]
 
 class KernelForgeWriter(GpuRoutineGenerator):
   def __init__(self, kernelforge_generator, headers):
