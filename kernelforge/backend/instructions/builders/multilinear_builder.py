@@ -57,15 +57,17 @@ class MultilinearBuilder(AbstractBuilder):
 
     self._mem_regions = [None] * len(self._ops)
 
+
     for i in range(len(self._ops)):
         self._make_load_op(i)
     self._insert_sync_block()
     self._check_register_array()
+    self._temp_regs = self._alloc_register_array()
     self._make_compute()
     self._insert_sync_block()
     self._make_store()
     self._insert_sync_block()
-    self._clear_registers()
+    # self._clear_registers()
 
     # TODO: check if we always can allow a direct global memory load
   def _make_load_op(self, i):
@@ -154,7 +156,7 @@ class MultilinearBuilder(AbstractBuilder):
     regmem = RegMemObject(name, regsize)
     registers = Symbol(name=name, stype=SymbolType.Register, obj=regmem)
     self._scopes.add_symbol(registers)
-    registerAlloc = RegisterAlloc(self._context, registers, regsize, 0)
+    registerAlloc = RegisterAlloc(self._context, registers, regsize, 0.0)
     self._instructions.append(registerAlloc)
     return registers
     # self._dest_regs = registers

@@ -23,7 +23,7 @@ class RegisterAlloc(AbstractInstruction):
   def gen_code(self, writer: Writer):
     if self._dest.obj.size > 0:
       init_values_list = ''
-      if isinstance(self._init_value, float):
+      if isinstance(self._init_value, (float, int, bool)):
         real_literal = self._vm.get_real_literal()
         init_values = ', '.join([f'{str(self._init_value)}{real_literal}'] * self._dest.obj.size)
         init_values_list = f' = {{{init_values}}}'
