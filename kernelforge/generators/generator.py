@@ -191,7 +191,7 @@ class Generator:
 
     # allocate registers
     builder = RegistersAllocBuilder(self._context, self._scopes)
-    builder.build(size=self._accumulator_size, init_value=0.0)
+    builder.build(size=1, init_value=0.0) # self._accumulator_size
     self._register_array_obj = builder.get_resultant_obj()
     self._ir.extend(builder.get_instructions())
 
