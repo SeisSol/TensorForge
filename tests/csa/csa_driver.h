@@ -7,9 +7,11 @@
 #include <tuple>
 #include <vector>
 
-class DenseCsaTest : public ::testing::Test {
+class DenseCsaTest : public ::testing::Test
+{
 protected:
-  void SetUp(int M, int N, int K, int NumElements) {
+  void SetUp(int M, int N, int K, int NumElements)
+  {
     Driver.setParams(M, N, K, NumElements);
     Driver.SetUp();
 
@@ -18,7 +20,8 @@ protected:
     std::tie(DeviceShuffledA, DeviceShuffledB, DeviceShuffledC) = Driver.getShuffledDeviceData();
   }
 
-  void TearDown() {
+  void TearDown()
+  {
     Driver.TearDown();
   }
 
@@ -30,11 +33,11 @@ protected:
   real *DeviceB = nullptr;
   real *DeviceC = nullptr;
 
-  std::vector<real*> DeviceShuffledA{};
-  std::vector<real*> DeviceShuffledB{};
-  std::vector<real*> DeviceShuffledC{};
+  std::vector<real *> DeviceShuffledA{};
+  std::vector<real *> DeviceShuffledB{};
+  std::vector<real *> DeviceShuffledC{};
 
-  kernelforge::dense::TestDriver Driver;
+  tensorforge::dense::TestDriver Driver;
 };
 
-#endif //GEMMS_GEMM_DRIVER_H
+#endif // GEMMS_GEMM_DRIVER_H

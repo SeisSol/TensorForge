@@ -4,7 +4,7 @@
 #include "kernels.h"
 #include "stop_watch.h"
 #include "gemm.h"
-#include "kernelforge_aux.h"
+#include "tensorforge_aux.h"
 #include "yaml-cpp/yaml.h"
 #include <device.h>
 #include <iostream>
@@ -12,13 +12,14 @@
 #include <vector>
 #include <string>
 
-using namespace kernelforge;
+using namespace tensorforge;
 using namespace reference;
 using namespace device;
 
 int estimateNumElements(int SizeA, int SizeB, int SizeC, int SizeD, int SizeTmp, double AllowedSpaceInGB);
 
-int main(int Argc, char* Arcv[]) {
+int main(int Argc, char *Arcv[])
+{
 
   YAML::Node Params = YAML::LoadFile("./params.yaml");
   YAML::Node MatrixASpec = Params["MatA"];
@@ -41,7 +42,7 @@ int main(int Argc, char* Arcv[]) {
   int N = BboxB[3] - BboxB[1];
   int K = BboxA[3] - BboxA[1];
 
-  int SizeTemp = M * N;  // !< required only the exact size
+  int SizeTemp = M * N; // !< required only the exact size
 
   real Alpha = Params["alpha"].as<real>();
   real Beta = Params["beta"].as<real>();
@@ -83,7 +84,6 @@ int main(int Argc, char* Arcv[]) {
   real *DeviceD{};
   std::tie(DeviceC, std::ignore, DeviceD) = FirstDriver.getDeviceRawData();
 
-
   // Check correctness
   std::cout << "INFO: computing on CPU started" << std::endl;
   unsigned NextTmp = SizeTemp;
@@ -103,7 +103,8 @@ int main(int Argc, char* Arcv[]) {
   int Ldd = MatrixDSpec["num_rows"].as<int>();
   int LdTemp = M;
 
-  auto computeOffset = [](const int LidDim, const std::vector<int> &Bbox) {
+  auto computeOffset = [](const int LidDim, const std::vector<int> &Bbox)
+  {
     return LidDim * Bbox[1] + Bbox[0];
   };
 
@@ -113,23 +114,21 @@ int main(int Argc, char* Arcv[]) {
   int OffsetD = computeOffset(Ldd, BboxD);
   int OffsetTemp = 0;
 
+  tensorforge::reference::gemm(TransA, TransB,
+                               M, N, K,
+                               1.0, &HostA[OffsetA], Lda,
+                               &HostB[OffsetB], Ldb,
+                               0.0, HostTmp, LdTemp,
+                               NextA, NextB, NextTmp,
+                               NumElements);
 
-  kernelforge::reference::gemm(TransA, TransB,
-                             M, N, K,
-                             1.0, &HostA[OffsetA], Lda,
-                             &HostB[OffsetB], Ldb,
-                             0.0, HostTmp, LdTemp,
-                             NextA, NextB, NextTmp,
-                             NumElements);
-
-
-  kernelforge::reference::gemm(TransC, reference::LayoutType::NoTrans,
-                             L, N, M,
-                             Alpha, &HostC[OffsetC], Ldc,
-                             HostTmp, M,
-                             Beta, &HostD[OffsetD], Ldd,
-                             NextC, NextTmp, NextD,
-                             NumElements);
+  tensorforge::reference::gemm(TransC, reference::LayoutType::NoTrans,
+                               L, N, M,
+                               Alpha, &HostC[OffsetC], Ldc,
+                               HostTmp, M,
+                               Beta, &HostD[OffsetD], Ldd,
+                               NextC, NextTmp, NextD,
+                               NumElements);
 
   std::cout << "INFO: computing on GPU started" << std::endl;
   callFirstGemm(DeviceA, 0, DeviceB, 0, DeviceTmp, 0, NumElements, nullptr, FirstDriver.getTestStream());
@@ -139,12 +138,14 @@ int main(int Argc, char* Arcv[]) {
 
   std::cout << "INFO: comparsion started" << std::endl;
 
-  SecondDriver.packResults(L,  Ldd, N, OffsetD, SizeD, NumElements);
+  SecondDriver.packResults(L, Ldd, N, OffsetD, SizeD, NumElements);
   bool IsPassed = SecondDriver.isTestPassed<SimpleComparator>();
-  if (IsPassed) {
+  if (IsPassed)
+  {
     std::cout << "INFO: Results are correct" << std::endl;
   }
-  else {
+  else
+  {
     std::cout << "WARNING: Test failed" << std::endl;
   }
 
@@ -152,7 +153,8 @@ int main(int Argc, char* Arcv[]) {
   utils::StopWatch<std::chrono::duration<double, std::chrono::nanoseconds::period>> Timer;
   int NumRepeats = Config["num_repeats"].as<int>();
   Timer.start();
-  for (int Repeat = 0; Repeat < NumRepeats; ++Repeat) {
+  for (int Repeat = 0; Repeat < NumRepeats; ++Repeat)
+  {
     callFirstGemm(DeviceA, 0, DeviceB, 0, DeviceTmp, 0, NumElements, nullptr, FirstDriver.getTestStream());
     callSecondGemm(DeviceC, 0, DeviceTmp, 0, DeviceD, 0, NumElements, nullptr, SecondDriver.getTestStream());
   }
@@ -171,11 +173,10 @@ int main(int Argc, char* Arcv[]) {
   SecondDriver.TearDown();
   device.api->finalize();
   return 0;
-
 }
 
-
-int estimateNumElements(int SizeA, int SizeB, int SizeC, int SizeD, int SizeTmp, double AllowedSpaceInGB) {
+int estimateNumElements(int SizeA, int SizeB, int SizeC, int SizeD, int SizeTmp, double AllowedSpaceInGB)
+{
   // Note: We are going to use only one matrix C. However, memory is going
   // to get allocated for all elements
   long long ElementSizeInBytes = (SizeD + SizeC + SizeTmp + SizeA + SizeB) * sizeof(real);

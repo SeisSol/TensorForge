@@ -25,7 +25,7 @@ if (${BACKEND} STREQUAL "cuda")
                                             ./tmp/kernel.cu
                                             ./common/aux.cpp
                                             ./common/gemm.cpp
-                                            ../kernelforge/include/kernelforge_aux.cu)
+                                            ../tensorforge/include/tensorforge_aux.cu)
   target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE CUDA_UNDERHOOD)
 elseif(${BACKEND} STREQUAL "hip")
   if(NOT DEFINED HIP_PATH)
@@ -45,7 +45,7 @@ elseif(${BACKEND} STREQUAL "hip")
                  ./tmp/kernel.cpp
                  ./common/aux.cpp
                  ./common/gemm.cpp
-                 ../kernelforge/include/kernelforge_aux.hip.cpp)
+                 ../tensorforge/include/tensorforge_aux.hip.cpp)
 
   set_source_files_properties(${DEVICE_SRC} PROPERTIES HIP_SOURCE_PROPERTY_FORMAT 1)
   set(_HIPCC --offload-arch=${ARCH}; -std=c++14; -O3)
@@ -60,7 +60,7 @@ endif()
 
 
 target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE ./common
-                                                         ../kernelforge/include)
+                                                         ../tensorforge/include)
 target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE "CONCRETE_CPU_BACKEND=${REFERENCE_IMPL}"
                                                          "REAL_SIZE=${REAL_SIZE}")
 

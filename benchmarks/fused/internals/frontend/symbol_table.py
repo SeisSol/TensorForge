@@ -1,7 +1,7 @@
 import enum
 from typing import Dict, Union
-from kernelforge.common import Addressing
-from kernelforge.common.matrix.tensor import Tensor
+from tensorforge.common import Addressing
+from tensorforge.common.matrix.tensor import Tensor
 
 
 class ObjType(enum.Enum):

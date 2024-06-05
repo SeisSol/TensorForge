@@ -1,6 +1,6 @@
-from kernelforge import GenerationError, GemmGenerator
-from kernelforge.common.vm.vm import vm_factory
-from kernelforge import constructs
+from tensorforge import GenerationError, GemmGenerator
+from tensorforge.common.vm.vm import vm_factory
+from tensorforge import constructs
 from io import StringIO
 from test_loader import TestLoader
 import os
@@ -62,7 +62,7 @@ with constructs.Cpp(StringIO()) as file:
   file.Include('kernels.h')
   file.Include('gemm.h')
   file.Include('iostream')
-  file('using namespace kernelforge::reference;')
+  file('using namespace tensorforge::reference;')
   file.Emptyline()
   tests_code.write(file.stream.getvalue())
 

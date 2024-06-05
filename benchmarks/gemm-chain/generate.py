@@ -1,6 +1,6 @@
-from kernelforge import GenerationError, GemmGenerator
-from kernelforge.common.matrix.tensor import Tensor
-from kernelforge.common.vm.vm import vm_factory
+from tensorforge import GenerationError, GemmGenerator
+from tensorforge.common.matrix.tensor import Tensor
+from tensorforge.common.vm.vm import vm_factory
 from jinja2 import Environment, FileSystemLoader
 import os
 import yaml

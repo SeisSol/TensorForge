@@ -1,9 +1,10 @@
-from kernelforge import GenerationError, CsaGenerator
-from kernelforge.common.matrix.tensor import Tensor
-from kernelforge.common.vm.vm import vm_factory
+from tensorforge import GenerationError, CsaGenerator
+from tensorforge.common.matrix.tensor import Tensor, SubTensor
+from tensorforge.common.vm.vm import vm_factory
 import argparse
-from kernelforge.backend.instructions.csa import CSA
-
+from tensorforge.backend.instructions.csa import CSA
+from tensorforge.common.basic_types import Addressing
+from tensorforge.common.matrix.boundingbox import BoundingBox
 
 parser = argparse.ArgumentParser(description='Specify Backend and Arch of the GPU')
 parser.add_argument('-a',
@@ -19,13 +20,13 @@ parser.add_argument('-b',
 
 args = parser.parse_args()
 
-mat_a = Tensor(shape=[9, 9],
-                    addressing='strided',
-                    bbox=[0, 0, 9, 9])
+mat_a = SubTensor(Tensor([9, 9],
+                    Addressing.STRIDED,
+                    BoundingBox([0, 0], [9, 9])))
 
-mat_b = Tensor(shape=[9, 9],
-                    addressing='strided',
-                    bbox=[0, 0, 9, 9])
+mat_b = SubTensor(Tensor([9, 9],
+                    Addressing.STRIDED,
+                    BoundingBox([0, 0], [9, 9])))
 
 try:
   vm = vm_factory(backend=args.backend,
