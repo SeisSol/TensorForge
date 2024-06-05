@@ -3,9 +3,9 @@
 import os, errno
 import argparse
 import importlib.util
-from yateto import *
-from yateto.ast.visitor import PrettyPrinter, FindTensors, PrintEquivalentSparsityPatterns
-from yateto.codegen.code import Cpp
+from tensorforge import *
+from tensorforge.ast.visitor import PrettyPrinter, PrintEquivalentSparsityPatterns
+from tensorforge.codegen.code import Cpp
 
 cmdLineParser = argparse.ArgumentParser()
 cmdLineParser.add_argument('--arch', type=str, default='dhsw', help='Architecture (e.g. dsnb for double precision on Sandy Bridge).')

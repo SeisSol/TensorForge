@@ -1,5 +1,5 @@
 [project]
-name = "kernelforge"
+name = "tensorforge"
 description="Small GEMM/GETT generator for GPUs"
 license = {file = "LICENSE"}
 requires-python = ">=3.5"

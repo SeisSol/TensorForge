@@ -1,6 +1,6 @@
-from kernelforge import GenerationError, CsaGenerator
-from kernelforge.common.vm.vm import vm_factory
-from kernelforge import constructs
+from tensorforge import GenerationError, CsaGenerator
+from tensorforge.common.vm.vm import vm_factory
+from tensorforge import constructs
 from io import StringIO
 from test_loader import TestLoader
 import os

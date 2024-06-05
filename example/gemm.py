@@ -1,11 +1,11 @@
-from kernelforge.common.context import Context
-from kernelforge.generators.descriptions import GemmDescr
-from kernelforge.common.basic_types import FloatingPointType, Addressing
-from kernelforge.generators.generator import Generator
-from kernelforge.common.exceptions import GenerationError
+from tensorforge.common.context import Context
+from tensorforge.generators.descriptions import GemmDescr
+from tensorforge.common.basic_types import FloatingPointType, Addressing
+from tensorforge.generators.generator import Generator
+from tensorforge.common.exceptions import GenerationError
 import argparse
-from kernelforge.common.matrix.boundingbox import BoundingBox
-from kernelforge.common.matrix.tensor import Tensor
+from tensorforge.common.matrix.boundingbox import BoundingBox
+from tensorforge.common.matrix.tensor import Tensor, SubTensor
 
 
 parser = argparse.ArgumentParser(description="Specify Backend and Arch of the GPU")
@@ -23,11 +23,11 @@ parser.add_argument("-b",
 
 args = parser.parse_args()
 
-mat_a = Tensor([56, 18], Addressing.STRIDED, BoundingBox([0,0], [56,18]))
+mat_a = SubTensor(Tensor([56, 18], Addressing.STRIDED, BoundingBox([0,0], [56,18])), BoundingBox([0,0], [56,18]))
 
-mat_b = Tensor([18, 18], Addressing.STRIDED, BoundingBox([0,0], [18,18]))
+mat_b = SubTensor(Tensor([18, 18], Addressing.STRIDED, BoundingBox([0,0], [18,18])), BoundingBox([0,0], [18,18]))
 
-mat_c = Tensor([56, 18], Addressing.STRIDED, BoundingBox([0,0], [56,18]))
+mat_c = SubTensor(Tensor([56, 18], Addressing.STRIDED, BoundingBox([0,0], [56,18])), BoundingBox([0,0], [56,18]))
 
 
 try:

@@ -11,23 +11,25 @@
   with Dense x Dense already implemented. The correctness of this test case relies and assumes that Dense x Dense is already correct.
   Furthermore, it does the test by multiplying both the Dense and Sparse version of B.
 */
-namespace kernelforge {
-  namespace sparse_dense {
-    class TestDriver {
+namespace tensorforge
+{
+  namespace sparse_dense
+  {
+    class TestDriver
+    {
     public:
-      TestDriver() {};
-      TestDriver(const TestDriver&) = delete;
+      TestDriver(){};
+      TestDriver(const TestDriver &) = delete;
 
-      TestDriver(int rowA, int colA, int rowB, int colB, int rowC, int colC, int NumElements, std::string matrix_a_type, bool transA) : 
-          m_rowA(rowA), m_colA(colA), 
-          m_rowB(rowB), m_colB(colB), 
-          m_rowC(rowC), m_colC(colC),
-          m_SizeMatA{rowA * colA},
-          m_SizeMatB{rowB * colB},
-          m_NumElements(NumElements),
-          m_matrix_a_type(matrix_a_type),
-          m_transA(transA),
-          m_IsReady(true){}
+      TestDriver(int rowA, int colA, int rowB, int colB, int rowC, int colC, int NumElements, std::string matrix_a_type, bool transA) : m_rowA(rowA), m_colA(colA),
+                                                                                                                                        m_rowB(rowB), m_colB(colB),
+                                                                                                                                        m_rowC(rowC), m_colC(colC),
+                                                                                                                                        m_SizeMatA{rowA * colA},
+                                                                                                                                        m_SizeMatB{rowB * colB},
+                                                                                                                                        m_NumElements(NumElements),
+                                                                                                                                        m_matrix_a_type(matrix_a_type),
+                                                                                                                                        m_transA(transA),
+                                                                                                                                        m_IsReady(true) {}
       ~TestDriver() {}
 
       void setParams(int rowA, int colA, int rowB, int colB, int rowC, int colC, int NumElements, std::string matrix_a_type, bool transA);
@@ -37,35 +39,38 @@ namespace kernelforge {
 
       void *getTestStream();
 
-      std::tuple<real*, real*, real*, real*, real*> getDeviceRawData() {
+      std::tuple<real *, real *, real *, real *, real *> getDeviceRawData()
+      {
         return std::make_tuple(m_DeviceMatA_dense, m_DeviceMatA_sparse, m_DeviceMatB, m_DeviceMatC1, m_DeviceMatC2);
       }
 
-      std::tuple<real*, real*, real*, real*> getHostRawData() {
+      std::tuple<real *, real *, real *, real *> getHostRawData()
+      {
         return std::make_tuple(m_HostMatA_dense, m_HostMatA_sparse, m_HostMatB, m_HostMatC);
       }
 
-      std::tuple<real*, real*, real*> getRawResults();
+      std::tuple<real *, real *, real *> getRawResults();
 
       void retrieveResults(int NumRows,
-                             int LeadDim,
-                             int NumColumns,
-                             int Offset,
-                             int Stride,
-                             int NumElements,
-                             bool sparseResult);
+                           int LeadDim,
+                           int NumColumns,
+                           int Offset,
+                           int Stride,
+                           int NumElements,
+                           bool sparseResult);
 
       bool checkEq(real Eps = 1e-5);
 
-      double getDeviceAllocatedMemSize() {
-        long long Size = (m_SizeMatA + m_SizeMatB*2 + m_SizeMatC) * m_NumElements * sizeof(real);
+      double getDeviceAllocatedMemSize()
+      {
+        long long Size = (m_SizeMatA + m_SizeMatB * 2 + m_SizeMatC) * m_NumElements * sizeof(real);
         double Factor = 1024 * 1024 * 1024;
         return Size / Factor;
       }
 
     protected:
       void initMatrix(real *Matrix, int Size);
-      void initSparseMatrix(real *DenseVersionOfSparseMatrix, real* SparseMatrix, int rowA, int colA, std::string matrix_a_type);
+      void initSparseMatrix(real *DenseVersionOfSparseMatrix, real *SparseMatrix, int rowA, int colA, std::string matrix_a_type);
 
       float sparsity = 0.25;
 
@@ -75,7 +80,7 @@ namespace kernelforge {
       int m_colB{0};
       int m_rowC{0};
       int m_colC{0};
-      
+
       int m_SizeMatA{0};
       int m_SizeMatB{0};
       int m_SizeMatC{0};
@@ -101,29 +106,47 @@ namespace kernelforge {
       bool m_IsSet{false};
 
     public:
-      int infer_sparse_size(int rowA, int colA, std::string matrix_a_type) {
-        if (matrix_a_type == "random"){
-          return (rowA*colA)*sparsity;
-        }else if (matrix_a_type == "band_diagonal"){
+      int infer_sparse_size(int rowA, int colA, std::string matrix_a_type)
+      {
+        if (matrix_a_type == "random")
+        {
+          return (rowA * colA) * sparsity;
+        }
+        else if (matrix_a_type == "band_diagonal")
+        {
           return -1;
-        }else if (matrix_a_type == "single_column"){
+        }
+        else if (matrix_a_type == "single_column")
+        {
           return rowA;
-        }else if (matrix_a_type == "single_row"){
+        }
+        else if (matrix_a_type == "single_row")
+        {
           return colA;
-        }else if (matrix_a_type == "full") {
+        }
+        else if (matrix_a_type == "full")
+        {
           return rowA * colA;
-        }else if (matrix_a_type == "chequered") {
+        }
+        else if (matrix_a_type == "chequered")
+        {
           return -1;
-        }else {
+        }
+        else
+        {
           throw std::runtime_error("Unallowed Matrix B Type!");
         }
       }
 
-      int _2d21d(int i, int j, int rowX, int colX, int Element, bool col_major = true){
-        if (col_major){
-          return Element*rowX*colX + i + j*rowX;
-        }else{
-          return Element*rowX*colX + i*colX + j;
+      int _2d21d(int i, int j, int rowX, int colX, int Element, bool col_major = true)
+      {
+        if (col_major)
+        {
+          return Element * rowX * colX + i + j * rowX;
+        }
+        else
+        {
+          return Element * rowX * colX + i * colX + j;
         }
       }
     };

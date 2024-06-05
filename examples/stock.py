@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
 import math
-from yateto import *
+from tensorforge import *
 
 def gemm_cfg(arch, variant):
   if variant == 'onlyblas':

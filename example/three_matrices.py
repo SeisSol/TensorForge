@@ -1,19 +1,19 @@
-from kernelforge.common.matrix.boundingbox import BoundingBox
-from kernelforge.common.matrix.tensor import Tensor
-from kernelforge.common.context import Context
-from kernelforge.common.aux import generate_tmp_matrix
-from kernelforge.generators.descriptions import GemmDescr
-from kernelforge.common.basic_types import FloatingPointType, Addressing
-from kernelforge.generators.generator import Generator
+from tensorforge.common.matrix.boundingbox import BoundingBox
+from tensorforge.common.matrix.tensor import Tensor, SubTensor
+from tensorforge.common.context import Context
+from tensorforge.common.aux import generate_tmp_matrix
+from tensorforge.generators.descriptions import GemmDescr
+from tensorforge.common.basic_types import FloatingPointType, Addressing
+from tensorforge.generators.generator import Generator
 
 # D += A x (B x C)
-mat_d = Tensor([56, 9], Addressing.STRIDED, BoundingBox([0, 0],[56, 9]))
+mat_d = SubTensor(Tensor([56, 9], Addressing.STRIDED, BoundingBox([0, 0],[56, 9])), BoundingBox([0, 0],[56, 9]))
 
-mat_a = Tensor([56, 56], Addressing.STRIDED, BoundingBox([0, 0],[56, 56]))
+mat_a = SubTensor(Tensor([56, 56], Addressing.STRIDED, BoundingBox([0, 0],[56, 56])), BoundingBox([0, 0],[56, 56]))
 
-mat_b = Tensor([56, 9], Addressing.STRIDED, BoundingBox([0, 0],[56, 9]))
+mat_b = SubTensor(Tensor([56, 9], Addressing.STRIDED, BoundingBox([0, 0],[56, 9])), BoundingBox([0, 0],[56, 9]))
 
-mat_c = Tensor([9, 9], Addressing.STRIDED, BoundingBox([0, 0],[9, 9]))
+mat_c = SubTensor(Tensor([9, 9], Addressing.STRIDED, BoundingBox([0, 0],[9, 9])), BoundingBox([0, 0],[9, 9]))
 
 tmp1 = generate_tmp_matrix(mat_b, mat_c)
 

@@ -6,18 +6,21 @@
 #include <tuple>
 #include <vector>
 
-class SparseXDenseGemmTest : public ::testing::Test {
+class SparseXDenseGemmTest : public ::testing::Test
+{
 protected:
-  void SetUp(int rowA, int colA, int rowB, int colB, int rowC, int colC, int NumElements, std::string matrix_a_type, bool transA) {
+  void SetUp(int rowA, int colA, int rowB, int colB, int rowC, int colC, int NumElements, std::string matrix_a_type, bool transA)
+  {
     Driver.setParams(rowA, colA, rowB, colB, rowC, colC, NumElements, matrix_a_type, transA);
     Driver.SetUp(matrix_a_type);
 
-    std::tie(HostA_dense, HostA_sparse, HostB,  HostC) = Driver.getHostRawData();
+    std::tie(HostA_dense, HostA_sparse, HostB, HostC) = Driver.getHostRawData();
     std::tie(DeviceA_dense, DeviceA_sparse, DeviceB, DeviceC1, DeviceC2) = Driver.getDeviceRawData();
-    //std::tie(DeviceShuffledA, DeviceShuffledB, DeviceShuffledC) = Driver.getShuffledDeviceData();
+    // std::tie(DeviceShuffledA, DeviceShuffledB, DeviceShuffledC) = Driver.getShuffledDeviceData();
   }
 
-  void TearDown() {
+  void TearDown()
+  {
     Driver.TearDown();
   }
 
@@ -32,9 +35,9 @@ protected:
   real *DeviceC1 = nullptr;
   real *DeviceC2 = nullptr;
 
-  //std::vector<real*> DeviceShuffledA{};
-  //std::vector<real*> DeviceShuffledB{};
-  //std::vector<real*> DeviceShuffledC{};
+  // std::vector<real*> DeviceShuffledA{};
+  // std::vector<real*> DeviceShuffledB{};
+  // std::vector<real*> DeviceShuffledC{};
 
-  kernelforge::sparse_dense::TestDriver Driver;
+  tensorforge::sparse_dense::TestDriver Driver;
 };

@@ -1,4 +1,4 @@
-from kernelforge import DenseMatrix
+from tensorforge.common.matrix.tensor import Tensor, SubTensor
 from itertools import product
 import functools
 from copy import deepcopy
@@ -31,10 +31,8 @@ class TestLoader:
             self._gen_test_name(test_params))
 
   def _produce_matrix(self, matrix_spec):
-    return DenseMatrix(num_rows=matrix_spec["rows"],
-                       num_cols=matrix_spec["cols"],
-                       addressing=matrix_spec["addressing"],
-                       bbox=matrix_spec["bbox"])
+    return SubTensor(Tensor([matrix_spec["rows"], matrix_spec["cols"]],
+                            matrix_spec["addressing"], matrix_spec["bbox"]), matrix_spec["bbox"])
 
   def is_param(self, param):
     if isinstance(param, str):

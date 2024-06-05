@@ -1,7 +1,7 @@
-from kernelforge.frontend import Parser, PostProcessor
-from kernelforge.common import FloatingPointType
-from kernelforge.generators.generator import Generator
-from kernelforge.common.context import Context
+from tensorforge.frontend import Parser, PostProcessor
+from tensorforge.common import FloatingPointType
+from tensorforge.generators.generator import Generator
+from tensorforge.common.context import Context
 from internals import BenchGenerator, EnryPointGenerator, Aux
 from os import path, makedirs
 import sys
@@ -98,7 +98,7 @@ def main():
 
   # write kernel, launcher and header to files
   with open(path.join(tmp_dir, f'kernel.{file_suffix}'), 'w') as file:
-    file.write('#include \"kernelforge_aux.h\"\n')
+    file.write('#include \"tensorforge_aux.h\"\n')
     for kernel, launcher in zip(kernels, launchers):
       file.write(kernel)
       file.write(launcher)

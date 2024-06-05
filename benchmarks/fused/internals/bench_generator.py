@@ -1,6 +1,6 @@
 from .gpu_api import GpuAPI
 from .aux import Aux
-from kernelforge.common.basic_types import Addressing
+from tensorforge.common.basic_types import Addressing
 
 
 class BenchGenerator:

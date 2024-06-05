@@ -6,14 +6,14 @@ sys.path.append('..')
 import os, errno
 import argparse
 import importlib.util
-from yateto import *
-from yateto.ast.visitor import PrettyPrinter, FindTensors, PrintEquivalentSparsityPatterns
-from yateto.codegen.code import Cpp
+from tensorforge import *
+from tensorforge.ast.visitor import PrettyPrinter, FindTensors, PrintEquivalentSparsityPatterns
+from tensorforge.codegen.code import Cpp
 
 cmdLineParser = argparse.ArgumentParser()
 cmdLineParser.add_argument('--arch', type=str, default='dhsw', help='Architecture (e.g. dsnb for double precision on Sandy Bridge).')
 cmdLineParser.add_argument('--variant', type=str, default='', help='Example specific variant (e.g. onlyblas).')
-cmdLineParser.add_argument('example_script', type=str, help='A yateto example script from the examples folder (without file extension).')
+cmdLineParser.add_argument('example_script', type=str, help='A tensorforge example script from the examples folder (without file extension).')
 cmdLineParser.add_argument('--backend', type = str)
 cmdLineArgs = cmdLineParser.parse_args()
 
@@ -76,7 +76,7 @@ with Cpp(os.path.join(outDir, 'performance.cpp')) as cpp:
   cpp.include('tensor.h')
   cpp.include('Stopwatch.h')
   cpp.include('Util.h')
-  cpp('using namespace yateto;')
+  cpp('using namespace tensorforge;')
   cpp.functionDeclaration('trashTheCache', arguments='double* trash, int size')
   with cpp.Function('main', arguments='int argc, char** argv', returnType='int'):
     cpp('int _fixedReps = (argc >= 2) ? atoi(argv[1]) : -1;')

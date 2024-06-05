@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-from yateto import *
+from tensorforge import *
 
 def add(g):
   M = 32

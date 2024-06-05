@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 
-from yateto import *
-from yateto.input import parseXMLMatrixFile
-from yateto.ast.node import Add
-from yateto.ast.transformer import DeduceIndices, EquivalentSparsityPattern
+from tensorforge import *
+from tensorforge.input import parseXMLMatrixFile
+from tensorforge.ast.node import Add
+from tensorforge.ast.transformer import DeduceIndices, EquivalentSparsityPattern
 
 def printEqspp():
   return True

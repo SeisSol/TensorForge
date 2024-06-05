@@ -1,18 +1,18 @@
-from kernelforge.common.matrix.boundingbox import BoundingBox
-from kernelforge.common.matrix.tensor import Tensor
-from kernelforge.common.context import Context
-from kernelforge.generators.descriptions import GemmDescr
-from kernelforge.common.basic_types import FloatingPointType, Addressing
-from kernelforge.generators.generator import Generator
+from tensorforge.common.matrix.boundingbox import BoundingBox
+from tensorforge.common.matrix.tensor import Tensor, SubTensor
+from tensorforge.common.context import Context
+from tensorforge.generators.descriptions import GemmDescr
+from tensorforge.common.basic_types import FloatingPointType, Addressing
+from tensorforge.generators.generator import Generator
 
 
 # C += A x b
 
-vec_c = Tensor([56, 1], Addressing.STRIDED, BoundingBox([0, 0],[56, 1]))
+vec_c = SubTensor(Tensor([56, 1], Addressing.STRIDED, BoundingBox([0, 0],[56, 1])), BoundingBox([0, 0],[56, 1]))
 
-mat_a = Tensor([56, 9], Addressing.STRIDED, BoundingBox([0, 0],[56, 9]))
+mat_a = SubTensor(Tensor([56, 9], Addressing.STRIDED, BoundingBox([0, 0],[56, 9])), BoundingBox([0, 0],[56, 9]))
 
-vec_b = Tensor([9, 1], Addressing.STRIDED, BoundingBox([0, 0],[9, 1]))
+vec_b = SubTensor(Tensor([9, 1], Addressing.STRIDED, BoundingBox([0, 0],[9, 1])), BoundingBox([0, 0],[9, 1]))
 
 
 gemm_list = [GemmDescr(trans_a=False,

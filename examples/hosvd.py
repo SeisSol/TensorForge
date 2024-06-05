@@ -2,7 +2,7 @@
 
 from string import ascii_lowercase as alph
 from functools import reduce
-from yateto import *
+from tensorforge import *
 
 def add(g):
   N = 4
