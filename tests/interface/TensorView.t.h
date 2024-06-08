@@ -1,5 +1,5 @@
 #include <cxxtest/TestSuite.h>
-#include <yateto/TensorView.h>
+#include <TensorForge/TensorView.h>
 
 using namespace yateto;
 

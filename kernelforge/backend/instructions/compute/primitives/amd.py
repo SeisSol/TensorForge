@@ -1,4 +1,4 @@
-from kernelforge.common.basic_types import FloatingPointType
+from tensorforge.common.basic_types import FloatingPointType
 
 # TODO: for RDNA, wave-64, use __builtin_amdgcn_permlane16
 
