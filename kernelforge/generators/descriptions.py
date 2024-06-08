@@ -1,7 +1,6 @@
 from kernelforge.common.exceptions import GenerationError
 from kernelforge.common.context import Context
 from kernelforge.common.basic_types import DataFlowDirection, FloatingPointType
-from kernelforge.backend.instructions.builders.kernels.gemms.type import GemmKernelType
 from kernelforge.common.operation import Operation
 from kernelforge.common.matrix.tensor import Tensor
 from kernelforge.common.basic_types import Addressing
@@ -62,9 +61,9 @@ class ElementwiseDescr(OperationDescription):
 
     for op in oplist:
       for tensor in op.tensors(outtensors=True, intensors=False):
-        tensor.set_data_flow_direction(DataFlowDirection.SINK)
+        tensor.tensor.set_data_flow_direction(DataFlowDirection.SINK)
       for tensor in op.tensors(outtensors=False, intensors=True):
-        tensor.set_data_flow_direction(DataFlowDirection.SOURCE)
+        tensor.tensor.set_data_flow_direction(DataFlowDirection.SOURCE)
 
   def get_num_threads(self, context: Context):
     vul = context.get_vm().get_hw_descr().vec_unit_length
@@ -91,7 +90,6 @@ class GemmDescr(MultilinearDescr):
                c,
                alpha=1.0,
                beta=0.0,
-               kernel_type: GemmKernelType = GemmKernelType.AUTO,
                strict_match: bool = False,
                prefer_align: bool = False):
     # target_a = [-1, 0] if trans_a else [0, -1]

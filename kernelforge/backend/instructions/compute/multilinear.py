@@ -4,7 +4,7 @@ import enum
 import math
 from kernelforge.common.matrix.tensor import Tensor
 from . import ComputeInstruction
-from kernelforge.backend.symbol import SymbolType, Symbol, SymbolView, DataView
+from kernelforge.backend.symbol import SymbolType, Symbol, SymbolView, DataView, Loop, write_loops
 from kernelforge.common.exceptions import InternalError
 from kernelforge.backend.writer import Writer
 from kernelforge.common.context import Context
@@ -135,6 +135,7 @@ class MultilinearInstruction(ComputeInstruction):
         # Also, postpone multiplications until necessary
 
         # thread_mask: TODO
+
         # writer(f'int n0 = {self._vm.get_lexic().thread_idx_x} % {self._ns[0]};')
         # writer(f'int n1a = {self._vm.get_lexic().thread_idx_x} / {self._ns[0]};')
         # n1i = self._num_threads // self._ns[0]
@@ -168,7 +169,7 @@ class MultilinearInstruction(ComputeInstruction):
         for loop in loopstack[::-1]:
             loop.__exit__(None, None, None)
 
-    def _nonleading_dim(self, writer: Writer):
+    def _nonleading_dim2(self, writer: Writer):
         loopstack = []
 
         # TODO: preload values where necessary (i.e. no N in there)
@@ -180,33 +181,33 @@ class MultilinearInstruction(ComputeInstruction):
         # n1i = self._num_threads // self._ns[0]
         # writer(f'int n{i} = dimmin + n1a; n{i} < {dimmax}; n{i} += {n1i}')
 
+        loopmap = {}
+
         for i, (dimmin, dimmax) in enumerate(self._ks):
             if -i-1 not in self._lead_dims:
-                writer.insert_pragma_unroll()
-                loop = writer.For(f'int k{i} = {dimmin}; k{i} < {dimmax}; ++k{i}')
-                loop.__enter__()
-                loopstack += [loop]
+                loopmap[f'k{i}'] = len(loopstack)
+                loopstack += [Loop(dimmin, dimmax, 1, unroll=False)]
 
         for i, (dimmin, dimmax) in enumerate(self._ns):
             if i not in self._lead_dims:
-                writer.insert_pragma_unroll()
-                loop = writer.For(f'int n{i} = {dimmin}; n{i} < {dimmax}; ++n{i}')
-                loop.__enter__()
-                loopstack += [loop]
+                loopmap[f'n{i}'] = len(loopstack)
+                loopstack += [Loop(dimmin, dimmax, 1, unroll=False)]
 
-        for i, op in enumerate(self._ops):
-            op.symbol.load(writer, self._context, f'data{i}', [self._vm.get_lexic().thread_idx_x if nk == 'n0' else nk for nk in self._opdim_to_nks[i]], False)
-            if i > 0:
-                writer(f'{self._fp_as_str} prod{i} = {self._productOperation.format(f"prod{i-1}", f"data{i}")};')
-            else:
-                writer(f'{self._fp_as_str} prod{i} = data{i};')
-        if len(self._ops) > 0:
-            self._dest.load(writer, self._context, 'value', [self._vm.get_lexic().thread_idx_x] + [f'n{i+1}' for i,_ in enumerate(self._ns[1:])], False)
-            writer(f'{self._fp_as_str} newvalue = {self._sumOperation.format("value", f"prod{len(self._ops)-1}")};')
-            self._dest.store(writer, self._context, 'newvalue', [self._vm.get_lexic().thread_idx_x] + [f'n{i+1}' for i,_ in enumerate(self._ns[1:])], False)
+        def nonlead_writer(varlist):
+#            for op in enumerate(self._ops):
+#                if op.symbol.
+            for i, op in enumerate(self._ops):
+                op.symbol.load(writer, self._context, f'data{i}', [self._vm.get_lexic().thread_idx_x if nk == 'n0' else varlist[loopmap[nk]] for nk in self._opdim_to_nks[i]], False)
+                if i > 0:
+                    writer(f'{self._fp_as_str} prod{i} = {self._productOperation.format(f"prod{i-1}", f"data{i}")};')
+                else:
+                    writer(f'{self._fp_as_str} prod{i} = data{i};')
+            if len(self._ops) > 0:
+                self._dest.load(writer, self._context, 'value', [self._vm.get_lexic().thread_idx_x] + [varlist[loopmap[f'n{i+1}']] for i,_ in enumerate(self._ns[1:])], False)
+                writer(f'{self._fp_as_str} newvalue = {self._sumOperation.format("value", f"prod{len(self._ops)-1}")};')
+                self._dest.store(writer, self._context, 'newvalue', [self._vm.get_lexic().thread_idx_x] + [varlist[loopmap[f'n{i+1}']] for i,_ in enumerate(self._ns[1:])], False)
 
-        for loop in loopstack[::-1]:
-            loop.__exit__(None, None, None)
+        write_loops(self._context, writer, loopstack, nonlead_writer)
 
     def _cublasdx_nonleadim_dim(self, writer: Writer):
         assert self._is_log

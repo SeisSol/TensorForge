@@ -189,12 +189,6 @@ class Generator:
       builder.build(symbol)
       self._ir.extend(builder.get_instructions())
 
-    # allocate registers
-    builder = RegistersAllocBuilder(self._context, self._scopes)
-    builder.build(size=1, init_value=0.0) # self._accumulator_size
-    self._register_array_obj = builder.get_resultant_obj()
-    self._ir.extend(builder.get_instructions())
-
     # allocate shared memory
     builder = ShrMemAllocBuilder(self._context, self._scopes)
     builder.build(size=None)
@@ -205,7 +199,6 @@ class Generator:
     # generate GEMM and store operations
     builder = MultilinearBuilder(self._context,
                           self._scopes,
-                          self._scopes.get_symbol(self._register_array_obj),
                           self._scopes.get_symbol(self._shr_mem_obj),
                           self._num_threads)
     # builder.build_prologue()
