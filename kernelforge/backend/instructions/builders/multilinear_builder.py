@@ -22,11 +22,9 @@ class MultilinearBuilder(AbstractBuilder):
   def __init__(self,
                context: Context,
                scopes: Scopes,
-               register_array: Symbol,
                shr_mem: Symbol,
                num_threads: int):
     super(MultilinearBuilder, self).__init__(context, scopes)
-    self._temp_regs = register_array
     self._shr_mem = shr_mem
     self._num_threads = num_threads
 
@@ -40,7 +38,8 @@ class MultilinearBuilder(AbstractBuilder):
 
     self._mem_regions = None
 
-    self._dest_regs = self._temp_regs
+    self._temp_regs = None
+    self._dest_regs = None
 
     self._use_registers_always = False
     self._deferred_stores = {}
@@ -61,13 +60,11 @@ class MultilinearBuilder(AbstractBuilder):
     for i in range(len(self._ops)):
         self._make_load_op(i)
     self._insert_sync_block()
-    self._check_register_array()
     self._temp_regs = self._alloc_register_array()
     self._make_compute()
     self._insert_sync_block()
     self._make_store()
     self._insert_sync_block()
-    # self._clear_registers()
 
     # TODO: check if we always can allow a direct global memory load
   def _make_load_op(self, i):
@@ -161,10 +158,6 @@ class MultilinearBuilder(AbstractBuilder):
     return registers
     # self._dest_regs = registers
 
-  def _check_register_array(self):
-    if self._dest_regs.stype != SymbolType.Register:
-      raise InternalError('gemm-builder: reg_array must be in registers')
-
   def _get_target_symbol(self):
     dest_symbol = self._scopes.get_symbol(self._dest_obj.tensor)
     if dest_symbol.name in self._deferred_stores:
@@ -231,9 +224,6 @@ class MultilinearBuilder(AbstractBuilder):
                                               dest=dest_symbol,
                                               shr_mem=self._shr_mem,
                                               num_threads=self._num_threads))
-
-  def _clear_registers(self):
-    self._instructions.append(ClearRegisters(context=self._context, src=self._temp_regs))
 
   def _insert_sync_block(self):
     self._instructions.append(SyncThreads(context=self._context,

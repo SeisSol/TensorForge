@@ -235,7 +235,7 @@ class TensorVar(Variable):
 
     def assignSymbols(self, scopes: Scopes):
         if self.symbol is None:
-            self.symbol = scopes.get_symbol(self.tensor)
+            self.symbol = scopes.get_symbol(self.tensor.tensor)
 
     def assignTensor(self, assigner):
         self.tensor, self.indices = assigner(self.pretensor)
@@ -277,7 +277,7 @@ class ScalarVar(Variable):
 
     def assignSymbols(self, scopes: Scopes):
         if self.symbol is None:
-            self.symbol = scopes.get_symbol(self.tensor)
+            self.symbol = scopes.get_symbol(self.tensor.tensor)
 
     def assignTensor(self, assigner):
         self.tensor, self.indices = assigner(self.pretensor)

@@ -243,13 +243,12 @@ Stderr: {result.stderr}""")
   
   def __call__(self, routineName, fileName):
     cpu_arch_name = self._arch.host_name if self._arch.host_name else self._arch.name
-    cpu_arch = getArchitectureIdentifiedBy(cpu_arch_name)
+    cpu_arch = self._arch
 
     if self._mode == 'pspamm':
       pspamm_arch = cpu_arch_name
-      if 'gemmgen' in cpu_arch:
-        if 'pspamm' in cpu_arch['gemmgen']:
-          pspamm_arch = cpu_arch['gemmgen']['pspamm']
+      if 'pspamm' in cpu_arch.gemmgen:
+        pspamm_arch = cpu_arch.gemmgen['pspamm']
       argList = [
         self._cmd,
         self._gemmDescr['M'],
@@ -275,9 +274,8 @@ Stderr: {result.stderr}""")
         argList.extend(['--' + key, val])
     else:
       libxsmm_arch = cpu_arch_name
-      if 'gemmgen' in cpu_arch:
-        if 'libxsmm' in cpu_arch['gemmgen']:
-          libxsmm_arch = cpu_arch['gemmgen']['libxsmm']
+      if 'libxsmm' in cpu_arch.gemmgen:
+        libxsmm_arch = cpu_arch.gemmgen['libxsmm']
       argList = [
         self._cmd,
         'dense',
