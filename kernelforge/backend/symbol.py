@@ -132,6 +132,32 @@ class LeadIndex:
   def write(self, context: Context):
     return f'(({context.get_vm().get_lexic().thread_idx_x} % {self._lane}) / {self._stride})'
 
+class LeadLoop:
+  def __init__(self, start, end, step, innerblock, outerblock, unroll=False):
+    self.start = start
+    self.end = end
+    self.step = step
+    self.unroll = unroll
+    self.innerblock = innerblock
+    self.outerblock = outerblock
+
+    assert self.outerblock % self.innerblock == 0
+
+  def write(self, context: Context, writer: Writer, inner):
+    if self.unroll:
+      ivar = writer.varalloc()
+      ovar = writer.varalloc()
+      writer(f'auto {ivar} = {context.get_vm().get_lexic().thread_idx_x} % {self.innerblock};')
+      writer(f'auto {ovar} = {context.get_vm().get_lexic().thread_idx_x} / {self.outerblock};')
+      for value in range(self.start, self.end, self.step):
+        #inner(Immediate(value, FloatingPointType.INT))
+        inner(value)
+    else:
+      writer.insert_pragma_unroll()
+      var = writer.varalloc('i')
+      with writer.For(f'int {var}={self.start}; {var} < {self.end}; {var} += {self.step}'):
+        inner(Variable(var, FloatingPointType.INT))
+
 class Loop:
   def __init__(self, start, end, step=1, unroll=False):
     self.start = start
@@ -140,19 +166,22 @@ class Loop:
     self.unroll = unroll
 
   def write(self, context: Context, writer: Writer, inner):
-    if unroll:
+    if self.unroll:
       for value in range(self.start, self.end, self.step):
-        inner(Immediate(value, FloatingPointType.INT))
+        #inner(Immediate(value, FloatingPointType.INT))
+        inner(value)
     else:
       writer.insert_pragma_unroll()
       var = writer.varalloc('i')
-      with writer.For(f'int {var}={self.start}; {var} < {self.stop}; {var} += {self.step}'):
-        inner(Variable(var, FloatingPointType.INT))
+      with writer.For(f'int {var} = {self.start}; {var} < {self.end}; {var} += {self.step}'):
+        #inner(Variable(var, FloatingPointType.INT))
+        inner(var)
 
 def write_loops(context: Context, writer: Writer, loops: List[Loop], inner):
   def write_loops_inner(context: Context, writer: Writer, loops: List[Loop], inner, varlist):
-    if len(loops) == 1:
-      inner()
+    if len(loops) == 0:
+      with writer.Scope():
+        inner(varlist)
     else:
       inner_next = lambda v: write_loops_inner(context, writer, loops[1:], inner, varlist + [v])
       loops[0].write(context, writer, inner_next)
