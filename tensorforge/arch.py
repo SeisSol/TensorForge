@@ -127,9 +127,9 @@ def getArchitectureIdentifiedBy(ident):
     yaml_data = yaml.safe_load(file)
   arch = next((item for item in yaml_data if item['arch'] == name), None)
   if 'gemmgen' in arch:
-    return Architecture(name, precision, arch['vectorsize'], arch['enable_prefetch'], gemmgen = arch['gemmgen']) 
+    return Architecture(name, precision, arch['vectorsize'], arch['enablePrefetch'], gemmgen = arch['gemmgen']) 
   else:
-    return Architecture(name, precision, arch['vectorsize'], arch['enable_prefetch'])
+    return Architecture(name, precision, arch['vectorsize'], arch['enablePrefetch'])
 
 def getHeterogeneousArchitectureIdentifiedBy(host_arch, device_arch, device_backend):
   device_arch, device_precision = _get_name_and_precision(device_arch)
