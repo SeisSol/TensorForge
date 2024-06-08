@@ -1,35 +1,37 @@
-#ifndef KERNELFORGE_REFERENCE_CSA_H
-#define KERNELFORGE_REFERENCE_CSA_H
+#ifndef TENSORFORGE_REFERENCE_CSA_H
+#define TENSORFORGE_REFERENCE_CSA_H
 
 #include "typedef.h"
 #include <iostream>
 
-namespace csagen {
-  namespace reference {
+namespace csagen
+{
+  namespace reference
+  {
     void singleCsa(int M, int N,
                    real Alpha, real *A, int lda,
                    real Beta, real *B, int ldb);
 
     real *findData(real *Data, unsigned Stride, unsigned BlockId);
 
-    template<typename AT, typename BT>
-    void csa( int M, int N,
-              real Alpha, AT A, int lda,
-              real Beta, BT B, int ldb,
-              unsigned OffsetA,
-              unsigned OffsetB,
-              unsigned NumElements) {
+    template <typename AT, typename BT>
+    void csa(int M, int N,
+             real Alpha, AT A, int lda,
+             real Beta, BT B, int ldb,
+             unsigned OffsetA,
+             unsigned OffsetB,
+             unsigned NumElements)
+    {
 
-      for (unsigned Index = 0; Index < NumElements; ++Index) {
+      for (unsigned Index = 0; Index < NumElements; ++Index)
+      {
         real *MatrixA = findData(A, OffsetA, Index);
         real *MatrixB = findData(B, OffsetB, Index);
 
         singleCsa(M, N, Alpha, MatrixA, lda, Beta, MatrixB, ldb);
-
-
       }
     }
   }
 }
 
-#endif //KERNELFORGE_REFERENCE_GEMM_H
+#endif // TENSORFORGE_REFERENCE_GEMM_H

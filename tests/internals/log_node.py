@@ -1,9 +1,9 @@
 import unittest
-from yateto.type import Tensor
-from yateto.ast.node import IndexedTensor, Contraction
-from yateto.ast.indices import Indices
-from yateto.ast.log import LoG
-from yateto.memory import DenseMemoryLayout
+from tensorforge.type import Tensor
+from tensorforge.ast.node import IndexedTensor, Contraction
+from tensorforge.ast.indices import Indices
+from tensorforge.ast.log import LoG
+from tensorforge.memory import DenseMemoryLayout
 
 
 class LogNode(unittest.TestCase):

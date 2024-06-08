@@ -1,5 +1,5 @@
 import os
-import arch
+import tensorforge.arch
 
 vars = Variables()
 vars.AddVariables(

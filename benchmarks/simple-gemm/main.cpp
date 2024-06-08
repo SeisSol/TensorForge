@@ -4,7 +4,7 @@
 #include "kernels.h"
 #include "stop_watch.h"
 #include "gemm.h"
-#include "kernelforge_aux.h"
+#include "tensorforge_aux.h"
 #include "yaml-cpp/yaml.h"
 #include <device.h>
 #include <iostream>
@@ -12,14 +12,14 @@
 #include <vector>
 #include <string>
 
-using namespace kernelforge;
+using namespace tensorforge;
 using namespace reference;
 using namespace device;
 
 int estimateNumElements(int SizeA, int SizeB, int SizeC, double AllowedSpaceInGB);
 
-int main(int Argc, char* Arcv[]) {
-
+int main(int Argc, char *Arcv[])
+{
 
   YAML::Node Params = YAML::LoadFile("./params.yaml");
   YAML::Node MatrixASpec = Params["MatA"];
@@ -64,9 +64,9 @@ int main(int Argc, char* Arcv[]) {
   real *DeviceC{};
   std::tie(DeviceA, DeviceB, DeviceC) = Driver.getDeviceRawData();
 
-  std::vector<real*> ShuffledDeviceA{};
-  std::vector<real*> ShuffledDeviceB{};
-  std::vector<real*> ShuffledDeviceC{};
+  std::vector<real *> ShuffledDeviceA{};
+  std::vector<real *> ShuffledDeviceB{};
+  std::vector<real *> ShuffledDeviceC{};
   std::tie(ShuffledDeviceA, ShuffledDeviceB, ShuffledDeviceC) = Driver.getShuffledDeviceData();
 
   // Check correctness
@@ -82,7 +82,8 @@ int main(int Argc, char* Arcv[]) {
   int Ldb = MatrixBSpec["num_rows"].as<int>();
   int Ldc = MatrixCSpec["num_rows"].as<int>();
 
-  auto computeOffset = [](const int LidDim, const std::vector<int> &Bbox) {
+  auto computeOffset = [](const int LidDim, const std::vector<int> &Bbox)
+  {
     return LidDim * Bbox[1] + Bbox[0];
   };
 
@@ -90,25 +91,27 @@ int main(int Argc, char* Arcv[]) {
   int OffsetB = computeOffset(Ldb, BboxB);
   int OffsetC = computeOffset(Ldc, BboxC);
 
-  kernelforge::reference::gemm(TransA, TransB,
-                             M, N, K,
-                             Alpha, &HostA[OffsetA], Lda,
-                             &HostB[OffsetB], Ldb,
-                             Beta, &HostC[OffsetC], Ldc,
-                             NextA, NextB, NextC,
-                             NumElements);
+  tensorforge::reference::gemm(TransA, TransB,
+                               M, N, K,
+                               Alpha, &HostA[OffsetA], Lda,
+                               &HostB[OffsetB], Ldb,
+                               Beta, &HostC[OffsetC], Ldc,
+                               NextA, NextB, NextC,
+                               NumElements);
 
   std::cout << "INFO: computing on GPU started" << std::endl;
   gemm(DeviceA, 0, DeviceB, 0, DeviceC, 0, NumElements, nullptr, Driver.getTestStream());
   synchDevice(Driver.getTestStream());
 
   std::cout << "INFO: comparsion started" << std::endl;
-  Driver.packResults(M,  Ldc, N, OffsetC, SizeC, NumElements);
+  Driver.packResults(M, Ldc, N, OffsetC, SizeC, NumElements);
   bool IsPassed = Driver.isTestPassed<SimpleComparator>();
-  if (IsPassed) {
+  if (IsPassed)
+  {
     std::cout << "INFO: Results are correct" << std::endl;
   }
-  else {
+  else
+  {
     std::cout << "WARNING: Test failed" << std::endl;
   }
 
@@ -116,7 +119,8 @@ int main(int Argc, char* Arcv[]) {
   utils::StopWatch<std::chrono::duration<double, std::chrono::nanoseconds::period>> Timer;
   int NumRepeats = Config["num_repeats"].as<int>();
   Timer.start();
-  for (int Repeat = 0; Repeat < NumRepeats; ++Repeat) {
+  for (int Repeat = 0; Repeat < NumRepeats; ++Repeat)
+  {
     gemm(DeviceA, 0, DeviceB, 0, DeviceC, 0, NumElements, nullptr, Driver.getTestStream());
   }
   synchDevice(Driver.getTestStream());
@@ -133,8 +137,8 @@ int main(int Argc, char* Arcv[]) {
   return 0;
 }
 
-
-int estimateNumElements(int SizeA, int SizeB, int SizeC, double AllowedSpaceInGB) {
+int estimateNumElements(int SizeA, int SizeB, int SizeC, double AllowedSpaceInGB)
+{
   long long ElementSizeInBytes = (SizeA + SizeB + SizeC) * sizeof(real);
   constexpr double FACTOR = 1024 * 1024 * 1024;
   return int((AllowedSpaceInGB * FACTOR) / ElementSizeInBytes);

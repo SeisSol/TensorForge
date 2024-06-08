@@ -6,8 +6,8 @@ set_property(CACHE SM_ARCH PROPERTY STRINGS sm_60 sm_61 sm_70 sm_75 sm_80 sm_86
     gfx906 gfx908 gfx90a
     dg1 bdw skl Gen8 Gen9 Gen11 Gen12LP)
 
-set(REFERENCE_IMPL "KERNELFORGE" CACHE STRING "size of the floating point data type")
-set_property(CACHE REFERENCE_IMPL PROPERTY STRINGS "KERNELFORGE" "OPENBLAS")
+set(REFERENCE_IMPL "TENSORFORGE" CACHE STRING "size of the floating point data type")
+set_property(CACHE REFERENCE_IMPL PROPERTY STRINGS "TENSORFORGE" "OPENBLAS")
 
 set(DEVICE_BACKEND "cuda" CACHE STRING "type of an interface")
 set_property(CACHE DEVICE_BACKEND PROPERTY STRINGS "cuda" "hip" "oneapi" "hipsycl")

@@ -31,3 +31,5 @@ yateto.egg-info
 
 *.swo
 *.swp
+
+examples/created_code/

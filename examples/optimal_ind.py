@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-from yateto import *
+from tensorforge import *
 from itertools import permutations
 
 def add(g):

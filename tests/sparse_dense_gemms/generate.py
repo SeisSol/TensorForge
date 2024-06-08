@@ -4,13 +4,13 @@ from io import StringIO
 
 import yaml
 
-from kernelforge.backend.instructions.builders.kernels.gemms.type import GemmKernelType
-from kernelforge.generators.generator import GenerationError, Generator
-from kernelforge.backend import writer
-from kernelforge.common.basic_types import FloatingPointType, Addressing
-from kernelforge.common.context import Context
+from tensorforge.backend.instructions.builders.kernels.gemms.type import GemmKernelType
+from tensorforge.generators.generator import GenerationError, Generator
+from tensorforge.backend import writer
+from tensorforge.common.basic_types import FloatingPointType, Addressing
+from tensorforge.common.context import Context
 from test_loader import TestLoader
-from kernelforge.generators.descriptions import GemmDescr
+from tensorforge.generators.descriptions import GemmDescr
 
 parser = argparse.ArgumentParser()
 parser.add_argument('-s', '--specfile', action='store', help='path to a yaml file with a test spec')
@@ -67,7 +67,7 @@ with writer.Writer() as file:
   file.Include('kernels.h')
   file.Include('gemm.h')
   file.Include('iostream')
-  file('using namespace kernelforge::reference;')
+  file('using namespace yateto::reference;')
   file.Emptyline()
   tests_code.write(file.stream.getvalue())
 

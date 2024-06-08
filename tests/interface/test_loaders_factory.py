@@ -1,13 +1,15 @@
 import unittest
-from kernelforge import DenseMatrix
-from kernelforge.common.vm.vm import vm_factory
-from kernelforge.instructions.loaders import shm_mem_loader_factory
-from kernelforge.instructions.loaders import ExactPatchLoader, ExtendedPatchLoader
-from kernelforge.instructions.loaders import ExactTransposePatchLoader
-from kernelforge.instructions.loaders import ExtendedTransposePatchLoader
-from kernelforge.common.basic_types import ShrMemObject
-from kernelforge.symbol_table import Symbol, SymbolType, InverseSymbolTable
-from kernelforge.symbol_table import DataView
+from tensorforge.common.vm.vm import vm_factory
+from tensorforge.backend.instructions.loaders import shm_mem_loader_factory
+from tensorforge.backend.instructions.loaders import ExactPatchLoader, ExtendedPatchLoader
+from tensorforge.backend.instructions.loaders import ExactTransposePatchLoader
+from tensorforge.backend.instructions.loaders import ExtendedTransposePatchLoader
+from tensorforge.backend.data_types import ShrMemObject
+from tensorforge.backend.symbol import Symbol, SymbolType, DataView
+from tensorforge.backend.scopes import InverseSymbolTable
+from tensorforge.common.matrix.tensor import Tensor, SubTensor
+from tensorforge.generators.descriptions import Addressing
+from tensorforge.common.matrix.boundingbox import BoundingBox
 
 
 class TestLoaders(unittest.TestCase):
@@ -49,10 +51,8 @@ class TestLoaders(unittest.TestCase):
 
   def test_extended_loader(self):
     # load a column in one go
-    matrix = DenseMatrix(num_rows=31,
-                         num_cols=56,
-                         addressing='none',
-                         bbox=[0, 0, 15, 20])
+    matrix = SubTensor(Tensor([31, 56], Addressing.NONE, BoundingBox([0, 0], [15, 20])), BoundingBox([0, 0], [15, 20]))
+
     src, dest = self._make_symbols(matrix)
 
     loader = shm_mem_loader_factory(vm=self._vm,
@@ -64,10 +64,8 @@ class TestLoaders(unittest.TestCase):
     self.assertIsInstance(loader, ExtendedPatchLoader)
 
     # multiple hops to load a column
-    matrix = DenseMatrix(num_rows=63,
-                         num_cols=56,
-                         addressing='none',
-                         bbox=[0, 0, 34, 20])
+    matrix = SubTensor(Tensor([63, 56], Addressing.NONE, BoundingBox([0, 0], [34, 20])), BoundingBox([0, 0], [34, 20]))
+
     src, dest = self._make_symbols(matrix)
 
     loader = shm_mem_loader_factory(vm=self._vm,
@@ -80,10 +78,8 @@ class TestLoaders(unittest.TestCase):
 
   def test_exact_loader(self):
     # load a column in one go
-    matrix = DenseMatrix(num_rows=33,
-                         num_cols=56,
-                         addressing='none',
-                         bbox=[0, 0, 15, 20])
+    matrix = SubTensor(Tensor([33, 56], Addressing.NONE, BoundingBox([0, 0], [15, 20])), BoundingBox([0, 0], [15, 20]))
+
     src, dest = self._make_symbols(matrix)
 
     loader = shm_mem_loader_factory(vm=self._vm,
@@ -96,10 +92,8 @@ class TestLoaders(unittest.TestCase):
     self.assertIsInstance(loader, ExactPatchLoader)
 
     # multiple hops to load a column
-    matrix = DenseMatrix(num_rows=65,
-                         num_cols=56,
-                         addressing='none',
-                         bbox=[0, 0, 34, 20])
+    matrix = SubTensor(Tensor([65, 56], Addressing.NONE, BoundingBox([0, 0], [34, 20])), BoundingBox([0, 0], [34, 20]))
+
     src, dest = self._make_symbols(matrix)
 
     loader = shm_mem_loader_factory(vm=self._vm,
@@ -112,10 +106,8 @@ class TestLoaders(unittest.TestCase):
 
   def test_extended_transpose_loader(self):
     # load a column in one go
-    matrix = DenseMatrix(num_rows=31,
-                         num_cols=56,
-                         addressing='none',
-                         bbox=[0, 0, 15, 20])
+    matrix = SubTensor(Tensor([31, 56], Addressing.NONE, BoundingBox([0, 0], [15, 20])), BoundingBox([0, 0], [15, 20]))
+
     src, dest = self._make_symbols(matrix)
 
     loader = shm_mem_loader_factory(vm=self._vm,
@@ -127,10 +119,8 @@ class TestLoaders(unittest.TestCase):
     self.assertIsInstance(loader, ExtendedTransposePatchLoader)
 
     # multiple hops to load a column
-    matrix = DenseMatrix(num_rows=61,
-                         num_cols=56,
-                         addressing='none',
-                         bbox=[0, 0, 34, 20])
+    matrix = SubTensor(Tensor([61, 56], Addressing.NONE, BoundingBox([0, 0], [34, 20])), BoundingBox([0, 0], [34, 20]))
+
     src, dest = self._make_symbols(matrix)
 
     loader = shm_mem_loader_factory(vm=self._vm,
@@ -143,10 +133,8 @@ class TestLoaders(unittest.TestCase):
 
   def test_exact_transpose_loader(self):
     # load a column in one go
-    matrix = DenseMatrix(num_rows=33,
-                         num_cols=56,
-                         addressing='none',
-                         bbox=[0, 0, 15, 20])
+    matrix = SubTensor(Tensor([33, 56], Addressing.NONE, BoundingBox([0, 0], [15, 20])), BoundingBox([0, 0], [15, 20]))
+
     src, dest = self._make_symbols(matrix)
 
     loader = shm_mem_loader_factory(vm=self._vm,
@@ -158,10 +146,8 @@ class TestLoaders(unittest.TestCase):
     self.assertIsInstance(loader, ExactTransposePatchLoader)
 
     # multiple hops to load a column
-    matrix = DenseMatrix(num_rows=65,
-                         num_cols=56,
-                         addressing='none',
-                         bbox=[0, 0, 34, 20])
+    matrix = SubTensor(Tensor([65, 56], Addressing.NONE, BoundingBox([0, 0], [34, 20])), BoundingBox([0, 0], [34, 20]))
+
     src, dest = self._make_symbols(matrix)
 
     loader = shm_mem_loader_factory(vm=self._vm,

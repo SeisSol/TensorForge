@@ -1,7 +1,8 @@
 import os
+from SCons.Script import *
 
-VariantDir('build', '.')
 
+#VariantDir('build', '.')
 env = Environment()
 env['ENV'] = os.environ
 if 'CC' in env['ENV']:

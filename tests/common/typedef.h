@@ -1,5 +1,5 @@
-#ifndef KERNELFORGE_TYPEDEF_H
-#define KERNELFORGE_TYPEDEF_H
+#ifndef TENSORFORGE_TYPEDEF_H
+#define TENSORFORGE_TYPEDEF_H
 
 #include <vector>
 
@@ -8,9 +8,9 @@ typedef double real;
 #elif REAL_SIZE == 4
 typedef float real;
 #else
-#  error REAL_SIZE not supported.
+#error REAL_SIZE not supported.
 #endif
 
 using PackedData = std::vector<std::vector<real>>;
 
-#endif // KERNELFORGE_TYPEDEF_H
+#endif // TENSORFORGE_TYPEDEF_H

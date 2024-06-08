@@ -6,14 +6,14 @@ sys.path.append('..')
 import os, errno
 import argparse
 import importlib.util
-from yateto import *
-from yateto.ast.visitor import PrettyPrinter, FindTensors, PrintEquivalentSparsityPatterns
-from yateto.codegen.code import Cpp
+from tensorforge import *
+from tensorforge.ast.visitor import PrettyPrinter, FindTensors, PrintEquivalentSparsityPatterns
+from tensorforge.codegen.code import Cpp
 
 cmdLineParser = argparse.ArgumentParser()
 cmdLineParser.add_argument('--arch', type=str, default='dhsw', help='Architecture (e.g. dsnb for double precision on Sandy Bridge).')
 cmdLineParser.add_argument('--variant', type=str, default='', help='Example specific variant (e.g. onlyblas).')
-cmdLineParser.add_argument('example_script', type=str, help='A yateto example script from the examples folder (without file extension).')
+cmdLineParser.add_argument('example_script', type=str, help='A tensorforge example script from the examples folder (without file extension).')
 cmdLineParser.add_argument('--backend', type = str)
 cmdLineArgs = cmdLineParser.parse_args()
 
@@ -26,7 +26,7 @@ except:
 targetFlopsPerSec = 40.0e9
 
 variantSuffix = '_' + cmdLineArgs.variant if cmdLineArgs.variant else ''
-outDir = os.path.join(cmdLineArgs.example_script, cmdLineArgs.arch + variantSuffix)
+outDir = os.path.join("created_code/", cmdLineArgs.example_script, cmdLineArgs.arch + variantSuffix)
 try:
   os.makedirs(outDir)
 except OSError as e:
@@ -76,14 +76,14 @@ with Cpp(os.path.join(outDir, 'performance.cpp')) as cpp:
   cpp.include('tensor.h')
   cpp.include('Stopwatch.h')
   cpp.include('Util.h')
-  cpp('using namespace yateto;')
+  cpp('using namespace tensorforge;')
   cpp.functionDeclaration('trashTheCache', arguments='double* trash, int size')
   with cpp.Function('main', arguments='int argc, char** argv', returnType='int'):
     cpp('int _fixedReps = (argc >= 2) ? atoi(argv[1]) : -1;')
     cpp('int _reps, _error;')
     if trashTheCache:
       cpp('double* _trash = new double[{}];'.format(trashSize))
-    cpp('Stopwatch _sw;');
+    cpp('Stopwatch _sw;')
     cpp('double _time, _nzflops, _flops;')
     cpp('printf("kernel,repetitions,time,numnzflop,numflop,nzgflops,gflops\\n");')
     for kernel in g.kernels():

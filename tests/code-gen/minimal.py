@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-from yateto import *
+from tensorforge import *
 
 def add(g):
   N = 8
@@ -10,4 +10,4 @@ def add(g):
   C = Tensor('C', (N, N))
 
   kernel = C['ij'] <= 2.0 * C['ij'] + A['lj'] * B['ikl'] * w['k']
-  g.add('kernel', kernel)
+  g.add('kernel', kernel, target = "gpu")

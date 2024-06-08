@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
 import math
-from yateto import *
+from tensorforge import *
 
 def gemm_cfg(arch, variant):
   if variant == 'onlyblas':
@@ -34,11 +34,11 @@ def add(g):
       ZR = Tensor('ZR' + pqx, (q,p))
 
       stock = R['ijk'] <= S['xyz'] * XL['xl'] * XR['li'] * YL['ym'] * YR['mj'] * ZL['zn'] * ZR['nk']
-      g.add('stock' + pqx, stock)
+      g.add('stock' + pqx, stock, target = "gpu")
 
       stock = R['ijk'] <= S['xyz'] * XLT['lx'] * XRT['il'] * YL['ym'] * YR['mj'] * ZL['zn'] * ZR['nk']
-      g.add('stock{}_trans'.format(pqx), stock)
+      g.add('stock{}_trans'.format(pqx), stock, target = "gpu")
 
       stock = R['ijk'] <= S['xyz'] * XLTP['lx'] * XRTP['il'] * YL['ym'] * YR['mj'] * ZL['zn'] * ZR['nk']
-      g.add('stock{}_trans_pad'.format(pqx), stock)
+      g.add('stock{}_trans_pad'.format(pqx), stock, target = "gpu")
 

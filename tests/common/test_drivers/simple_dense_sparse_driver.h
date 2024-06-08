@@ -7,27 +7,29 @@
 #include <iostream>
 
 /*
-  The sole change of this driver compared to the simple driver is that it compares Dense x Sparse Matrix multiplication 
+  The sole change of this driver compared to the simple driver is that it compares Dense x Sparse Matrix multiplication
   with Dense x Dense already implemented. The correctnesss of this test case relies and assumes that Dense x Dense is already correct.
   Furthermore, it does the test by multiplying both the Dense and Sparse version of B.
 */
-namespace kernelforge {
-  namespace dense_sparse {
-    class TestDriver {
+namespace tensorforge
+{
+  namespace dense_sparse
+  {
+    class TestDriver
+    {
     public:
-      TestDriver() {};
-      TestDriver(const TestDriver&) = delete;
+      TestDriver(){};
+      TestDriver(const TestDriver &) = delete;
 
-      TestDriver(int rowA, int colA, int rowB, int colB, int rowC, int colC, int NumElements, std::string matrix_b_type, bool transB) : 
-          m_rowA(rowA), m_colA(colA), 
-          m_rowB(rowB), m_colB(colB), 
-          m_rowC(rowC), m_colC(colC),
-          m_SizeMatA{rowA * colA},
-          m_SizeMatB{rowB * colB},
-          m_NumElements(NumElements),
-          m_matrix_b_type(matrix_b_type),
-          m_transB(transB),
-          m_IsReady(true){}
+      TestDriver(int rowA, int colA, int rowB, int colB, int rowC, int colC, int NumElements, std::string matrix_b_type, bool transB) : m_rowA(rowA), m_colA(colA),
+                                                                                                                                        m_rowB(rowB), m_colB(colB),
+                                                                                                                                        m_rowC(rowC), m_colC(colC),
+                                                                                                                                        m_SizeMatA{rowA * colA},
+                                                                                                                                        m_SizeMatB{rowB * colB},
+                                                                                                                                        m_NumElements(NumElements),
+                                                                                                                                        m_matrix_b_type(matrix_b_type),
+                                                                                                                                        m_transB(transB),
+                                                                                                                                        m_IsReady(true) {}
       ~TestDriver() {}
 
       void setParams(int rowA, int colA, int rowB, int colB, int rowC, int colC, int NumElements, std::string matrix_b_type, bool transB);
@@ -37,35 +39,38 @@ namespace kernelforge {
 
       void *getTestStream();
 
-      std::tuple<real*, real*, real*, real*, real*> getDeviceRawData() {
+      std::tuple<real *, real *, real *, real *, real *> getDeviceRawData()
+      {
         return std::make_tuple(m_DeviceMatA, m_DeviceMatB_dense, m_DeviceMatB_sparse, m_DeviceMatC1, m_DeviceMatC2);
       }
 
-      std::tuple<real*, real*, real*, real*> getHostRawData() {
+      std::tuple<real *, real *, real *, real *> getHostRawData()
+      {
         return std::make_tuple(m_HostMatA, m_HostMatB_dense, m_HostMatB_sparse, m_HostMatC);
       }
 
-      std::tuple<real*, real*, real*> getRawResults();
+      std::tuple<real *, real *, real *> getRawResults();
 
       void retrieveResults(int NumRows,
-                             int LeadDim,
-                             int NumColumns,
-                             int Offset,
-                             int Stride,
-                             int NumElements,
-                             bool sparseResult);
+                           int LeadDim,
+                           int NumColumns,
+                           int Offset,
+                           int Stride,
+                           int NumElements,
+                           bool sparseResult);
 
       bool checkEq(real Eps = 1e-5);
 
-      double getDeviceAllocatedMemSize() {
-        long long Size = (m_SizeMatA + m_SizeMatB*2 + m_SizeMatC) * m_NumElements * sizeof(real);
+      double getDeviceAllocatedMemSize()
+      {
+        long long Size = (m_SizeMatA + m_SizeMatB * 2 + m_SizeMatC) * m_NumElements * sizeof(real);
         double Factor = 1024 * 1024 * 1024;
         return Size / Factor;
       }
 
     protected:
       void initMatrix(real *Matrix, int Size);
-      void initSparseMatrix(real *DenseVersionOfSparseMatrix, real* SparseMatrix, int rowB, int colB, std::string matrix_b_type);
+      void initSparseMatrix(real *DenseVersionOfSparseMatrix, real *SparseMatrix, int rowB, int colB, std::string matrix_b_type);
 
       float sparsity = 0.25;
 
@@ -75,7 +80,7 @@ namespace kernelforge {
       int m_colB{0};
       int m_rowC{0};
       int m_colC{0};
-      
+
       int m_SizeMatA{0};
       int m_SizeMatB{0};
       int m_SizeMatC{0};
@@ -101,39 +106,60 @@ namespace kernelforge {
       bool m_IsSet{false};
 
     public:
-      int infer_sparse_size(int rowB, int colB, std::string matrix_b_type) {
-        if (matrix_b_type == "random"){
-          return (rowB*colB)*sparsity;
-        }else if (matrix_b_type == "band_diagonal"){
-          return 2 + 2 + (rowB-2)*3;
-        }else if (matrix_b_type == "single_column"){
+      int infer_sparse_size(int rowB, int colB, std::string matrix_b_type)
+      {
+        if (matrix_b_type == "random")
+        {
+          return (rowB * colB) * sparsity;
+        }
+        else if (matrix_b_type == "band_diagonal")
+        {
+          return 2 + 2 + (rowB - 2) * 3;
+        }
+        else if (matrix_b_type == "single_column")
+        {
           return rowB;
-        }else if (matrix_b_type == "single_row"){
+        }
+        else if (matrix_b_type == "single_row")
+        {
           return colB;
-        }else if (matrix_b_type == "full") {
+        }
+        else if (matrix_b_type == "full")
+        {
           return rowB * colB;
-        }else if (matrix_b_type == "chequered") {
-          if (colB % 2 == 0){
+        }
+        else if (matrix_b_type == "chequered")
+        {
+          if (colB % 2 == 0)
+          {
             return static_cast<int>(rowB * colB / 2);
-          }else{
+          }
+          else
+          {
             // 1 row A+1, 1 row A elements
             // Where A == L colB / 2 (rounded down to nearest int)
             // This means colB many white elements per 2 rows
-            if (rowB % 2 == 0){
+            if (rowB % 2 == 0)
+            {
               return static_cast<int>(colB * rowB / 2);
-            } else {
+            }
+            else
+            {
               // Implementation specific of the element orders, in my case first row has +1 element,
               // when unequal then we get 1 too many
               return 1 + static_cast<int>(colB * rowB / 2);
             }
           }
-        }else {
+        }
+        else
+        {
           throw std::runtime_error("Unallowed Matrix B Type!");
         }
       }
 
-      int _2d21d(int i, int j, int rowX, int colX, int Element){
-        return Element*rowX*colX + i + j*rowX;
+      int _2d21d(int i, int j, int rowX, int colX, int Element)
+      {
+        return Element * rowX * colX + i + j * rowX;
       }
     };
   }

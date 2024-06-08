@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-from yateto import *
+from tensorforge import *
 
 def add(g):
   M = 32
@@ -10,7 +10,7 @@ def add(g):
   B = Tensor('B', (K, N))
   C = Tensor('C', (M, N))
 
-  g.add('matmulAB', C['ij'] <= A['ik'] * B['kj'])
-  g.add('matmulATB', C['ij'] <= A['ki'] * B['kj'])
-  g.add('matmulABT', C['ij'] <= A['ik'] * B['jk'])
-  g.add('matmulATBT', C['ij'] <= A['ki'] * B['jk'])
+  g.add('matmulAB', C['ij'] <= A['ik'] * B['kj'], target = 'gpu')
+  g.add('matmulATB', C['ij'] <= A['ki'] * B['kj'], target = 'gpu')
+  g.add('matmulABT', C['ij'] <= A['ik'] * B['jk'], target = 'gpu')
+  g.add('matmulATBT', C['ij'] <= A['ki'] * B['jk'], target = 'gpu')

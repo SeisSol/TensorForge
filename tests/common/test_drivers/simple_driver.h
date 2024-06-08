@@ -4,19 +4,22 @@
 #include <vector>
 #include <assert.h>
 
-namespace kernelforge {
-  namespace dense {
+namespace tensorforge
+{
+  namespace dense
+  {
 
-    class TestDriver {
+    class TestDriver
+    {
     public:
-      TestDriver() {};
-      TestDriver(const TestDriver&) = delete;
+      TestDriver(){};
+      TestDriver(const TestDriver &) = delete;
 
       TestDriver(int SizeMatA, int SizeMatB, int SizeMatC, int NumElements) : m_SizeMatA(SizeMatA),
                                                                               m_SizeMatB{SizeMatB},
                                                                               m_SizeMatC(SizeMatC),
                                                                               m_NumElements(NumElements),
-                                                                              m_IsReady(true){}
+                                                                              m_IsReady(true) {}
       ~TestDriver() {}
 
       void setParams(int SizeMatA, int SizeMatB, int SizeMatC, int NumElements);
@@ -26,24 +29,28 @@ namespace kernelforge {
 
       void *getTestStream();
 
-      std::tuple<real*, real*, real*> getDeviceRawData() {
+      std::tuple<real *, real *, real *> getDeviceRawData()
+      {
         return std::make_tuple(m_DeviceMatA, m_DeviceMatB, m_DeviceMatC);
       }
 
-      std::tuple<real*, real*, real*> getHostRawData() {
+      std::tuple<real *, real *, real *> getHostRawData()
+      {
         return std::make_tuple(m_HostMatA, m_HostMatB, m_HostMatC);
       }
 
-      std::tuple<std::vector<real*>, std::vector<real*>, std::vector<real*>> getShuffledDeviceData();
-      std::tuple<real*, real*> getRawResults();
+      std::tuple<std::vector<real *>, std::vector<real *>, std::vector<real *>> getShuffledDeviceData();
+      std::tuple<real *, real *> getRawResults();
 
       void packResults(int NumRows, int LeadDim, int NumColumns, int Offset, int Stride, int NumElements);
-      std::tuple<PackedData, PackedData> getPackedResults() {
+      std::tuple<PackedData, PackedData> getPackedResults()
+      {
         return std::make_tuple(m_PackedHostResults, m_PackedDeviceResults);
       }
 
       template <class ComparatorType>
-      bool isTestPassed(real Eps = 1e-5) {
+      bool isTestPassed(real Eps = 1e-5)
+      {
         assert(!m_PackedHostResults.empty() != 0 && "Host results has not been packed");
         assert(!m_PackedDeviceResults.empty() && "Device results has not been packed");
         ComparatorType Comparator;
@@ -51,13 +58,15 @@ namespace kernelforge {
       }
 
       template <class ComparatorType>
-      bool isTestPassed(ComparatorType &Comparator, real Eps = 1e-5) {
+      bool isTestPassed(ComparatorType &Comparator, real Eps = 1e-5)
+      {
         assert(!m_PackedHostResults.empty() != 0 && "Host results has not been packed");
         assert(!m_PackedDeviceResults.empty() && "Device results has not been packed");
         return Comparator.compare(m_PackedHostResults, m_PackedDeviceResults, Eps);
       }
 
-      double getDeviceAllocatedMemSize() {
+      double getDeviceAllocatedMemSize()
+      {
         long long Size = (m_SizeMatA + m_SizeMatB + m_SizeMatC) * m_NumElements * sizeof(real);
         double Factor = 1024 * 1024 * 1024;
         return Size / Factor;
@@ -86,7 +95,6 @@ namespace kernelforge {
       std::string m_Log{};
       bool m_IsReady{false};
       bool m_IsSet{false};
-
     };
   }
 }

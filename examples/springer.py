@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
-from yateto import *
-from yateto.gemm_configuration import *
+from tensorforge import *
+from tensorforge.gemm_configuration import *
 import re
 
 def gemm_cfg(arch, variant):

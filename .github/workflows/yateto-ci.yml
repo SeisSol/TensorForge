@@ -1,4 +1,4 @@
-name: Yateto CI
+name: TensorForge CI
 
 on: push
 
@@ -10,9 +10,9 @@ jobs:
     steps:
     - uses: actions/checkout@v2
 
-    - name: Install Yateto
+    - name: Install TensorForge
       run: |
-        pip3 install -e .
+        pip3 install .
     
     - name: Python Tests
       run: |
@@ -43,7 +43,7 @@ jobs:
     steps:
     - uses: actions/checkout@v2
 
-    - name: Install Yateto
+    - name: Install TensorForge
       run: |
         pip3 install -e .
 

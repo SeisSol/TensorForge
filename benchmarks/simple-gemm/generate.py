@@ -1,7 +1,7 @@
-from kernelforge import GenerationError
-from kernelforge.common.matrix.tensor import Tensor
-from kernelforge import GemmGenerator, GemmKernelType
-from kernelforge.common.vm.vm import vm_factory
+from tensorforge import GenerationError
+from tensorforge.common.matrix.tensor import Tensor
+from tensorforge import GemmGenerator, GemmKernelType
+from tensorforge.common.vm.vm import vm_factory
 import os
 import yaml
 import argparse

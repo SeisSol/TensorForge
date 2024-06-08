@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
-from yateto import *
-from yateto.gemm_configuration import *
+from tensorforge import *
+from tensorforge.gemm_configuration import *
 
 def gemm_cfg(arch, variant):
   return GeneratorCollection([MKL(arch)])
@@ -25,10 +25,10 @@ def add(g):
   B2 = Tensor('T', (V, V, V, V))
 
   kernel = S['abij'] <= A['acik'] * B['befl'] * C['dfjk'] * D['cdel']
-  g.add('tce1', kernel)
+  g.add('tce1', kernel, target = "gpu")
 
   kernel = B2['abcd'] <= C1['sd'] * C2['rc'] * C3['qb'] * C4['pa'] * A2['pqrs']
-  g.add('tce2', kernel)
+  g.add('tce2', kernel, target = "gpu")
 
   kernel = B2['abcd'] <= C1['sd'] * C2['rc'] * C3['qb'] * C4T['ap'] * A2['pqrs']
-  g.add('tce2_trans', kernel)
+  g.add('tce2_trans', kernel, target = "gpu")
