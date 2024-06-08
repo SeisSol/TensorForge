@@ -6,7 +6,7 @@ stages:
 
 
 image:
-  name: ravilmobile/kernelforge-nvidia:latest
+  name: ravilmobile/tensorforge-nvidia:latest
   entrypoint: [""]
 
 

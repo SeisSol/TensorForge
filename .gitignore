@@ -5,7 +5,7 @@ tmp
 .vscode
 .graphs
 
-kernelforge.egg-info
+tensorforge.egg-info
 venv
 __pycache__
 *.pyc
