@@ -5,6 +5,8 @@ on: push
 jobs:
   general:
     runs-on: ubuntu-22.04
+    container: 
+      image: ravilmobile/yateto-env:latest
     steps:
 
     - name: setup-python
@@ -44,7 +46,7 @@ jobs:
         generator: [Eigen, LIBXSMM, LIBXSMM_JIT, OpenBLAS]
         
     steps:
-      
+
     - name: setup-python
       uses: actions/setup-python@v4
       with:
