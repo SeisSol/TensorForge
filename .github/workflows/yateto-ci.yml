@@ -5,8 +5,6 @@ on: push
 jobs:
   general:
     runs-on: ubuntu-22.04
-    container: 
-      image: ravilmobile/yateto-env:latest
     steps:
 
     - name: setup-python
@@ -20,7 +18,7 @@ jobs:
     - name: pip-tensorforge
       run: |
         pip install .
-      
+
     - name: Python Tests
       run: |
         python3 -m unittest tests/internals/*.py
@@ -39,8 +37,6 @@ jobs:
 
   codegen:
     runs-on: ubuntu-22.04
-    container: 
-      image: ravilmobile/yateto-env:latest
     env:
       CTEST_OUTPUT_ON_FAILURE: 1
     strategy:
@@ -60,6 +56,10 @@ jobs:
     - name: pip-tensorforge
       run: |
         pip install .
+
+    - name: install_cxxtest
+      run: |
+        sudo apt install -y cxxtest
 
     - name: Codegen Tests
       run: |
