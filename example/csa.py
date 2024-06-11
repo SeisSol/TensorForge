@@ -1,10 +1,16 @@
-from tensorforge import GenerationError, CsaGenerator
+import sys
+sys.path.append('..')
+
 from tensorforge.common.matrix.tensor import Tensor, SubTensor
-from tensorforge.common.vm.vm import vm_factory
 import argparse
-from tensorforge.backend.instructions.csa import CSA
 from tensorforge.common.basic_types import Addressing
 from tensorforge.common.matrix.boundingbox import BoundingBox
+from tensorforge.common.matrix.tensor import Tensor
+from tensorforge.common.context import Context
+from tensorforge.generators.descriptions import GemmDescr, FloatingPointType, Addressing
+from tensorforge.generators.generator import Generator
+from tensorforge.common.matrix.boundingbox import BoundingBox
+from tensorforge.common.matrix.tensor import Tensor, SubTensor
 
 parser = argparse.ArgumentParser(description='Specify Backend and Arch of the GPU')
 parser.add_argument('-a',
@@ -22,24 +28,35 @@ args = parser.parse_args()
 
 mat_a = SubTensor(Tensor([9, 9],
                     Addressing.STRIDED,
-                    BoundingBox([0, 0], [9, 9])))
+                    BoundingBox([0, 0], [9, 9])), BoundingBox([0, 0], [9, 9]))
 
 mat_b = SubTensor(Tensor([9, 9],
                     Addressing.STRIDED,
-                    BoundingBox([0, 0], [9, 9])))
+                    BoundingBox([0, 0], [9, 9])), BoundingBox([0, 0], [9, 9]))
 
-try:
-  vm = vm_factory(backend=args.backend,
-                  arch=args.arch,
-                  fp_type='float')
-  
-  gen = CsaGenerator(vm)
-  gen.set(mat_a, mat_b, alpha=13, beta=0)
-  gen.generate()
-  print(gen.get_kernel())
-  print(gen.get_launcher())
-  print(gen.get_launcher_header())
+mat_c = SubTensor(Tensor([9, 9],
+                    Addressing.STRIDED,
+                    BoundingBox([0, 0], [9, 9])), BoundingBox([0, 0], [9, 9]))
 
-except GenerationError as err:
-  print('ERROR: {}'.format(err))
-  raise err
+
+gemm_list = [GemmDescr(trans_a=False,
+                       trans_b=False,
+                       a=mat_a, b=mat_b, c=mat_c,
+                       alpha=13.0,
+                       beta=0.0)]
+
+context = Context(arch=args.arch,
+                  backend=args.backend,
+                  fp_type=FloatingPointType.FLOAT)
+
+generator = Generator(gemm_list, context)
+generator.generate()
+
+with_output = True
+if with_output:
+  print(generator.get_header())
+  print(generator.default_generate_call_site())
+  print()
+  print(generator.get_launcher())
+  print()
+  print(generator.get_kernel())
