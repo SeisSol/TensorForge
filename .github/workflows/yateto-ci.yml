@@ -4,16 +4,21 @@ on: push
 
 jobs:
   general:
-    runs-on: ubuntu-latest
-    container: 
-      image: ravilmobile/yateto-env:latest
+    runs-on: ubuntu-22.04
     steps:
-    - uses: actions/checkout@v2
 
-    - name: Install TensorForge
+    - name: setup-python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+
+    - name: checkout-tensorforge
+      uses: actions/checkout@v4
+
+    - name: pip-tensorforge
       run: |
-        pip3 install .
-    
+        pip install .
+
     - name: Python Tests
       run: |
         python3 -m unittest tests/internals/*.py
@@ -31,9 +36,7 @@ jobs:
         done
 
   codegen:
-    runs-on: ubuntu-latest
-    container: 
-      image: ravilmobile/yateto-env:latest
+    runs-on: ubuntu-22.04
     env:
       CTEST_OUTPUT_ON_FAILURE: 1
     strategy:
@@ -41,11 +44,18 @@ jobs:
         generator: [Eigen, LIBXSMM, LIBXSMM_JIT, OpenBLAS]
         
     steps:
-    - uses: actions/checkout@v2
+      
+    - name: setup-python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
 
-    - name: Install TensorForge
+    - name: checkout-tensorforge
+      uses: actions/checkout@v4
+
+    - name: pip-tensorforge
       run: |
-        pip3 install -e .
+        pip install .
 
     - name: Codegen Tests
       run: |
