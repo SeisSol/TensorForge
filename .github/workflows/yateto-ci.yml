@@ -60,6 +60,7 @@ jobs:
     - name: install_cxxtest
       run: |
         sudo apt install -y cxxtest
+        sudo apt install libeigen3-dev
 
     - name: Codegen Tests
       run: |
