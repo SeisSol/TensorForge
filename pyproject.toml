@@ -30,3 +30,6 @@ dependencies = {file = ["requirements.txt"]}
 
 [tool.setuptools.package-data]
 "*" = ["*.*"]
+
+[tool.setuptools]
+py-modules = ['tensorforge']
