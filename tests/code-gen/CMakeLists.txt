@@ -103,6 +103,7 @@ foreach(EXAMPLE ${EXAMPLES})
     # compile source code
     add_executable(${EXAMPLE}-target ${TEST_RUNNER} ${GENERATED_SRC})
 
+    # GPU specific code generation
     set(GENERATED_GPU_SRC ${GEN_DIR}/gpulike_subroutine.cpp)
     enable_language(CUDA)
     set(CMAKE_CUDA_STANDARD 17)
