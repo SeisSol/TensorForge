@@ -1,5 +1,6 @@
 # Use Ubuntu 24.04 as the base image
-FROM ubuntu:24.04
+# FROM ubuntu:24.04
+FROM nvidia/cuda:12.5.0-base-ubuntu22.04
 ENV TZ=UTC
 
 # Install necessary packages
@@ -39,13 +40,6 @@ RUN apt-get update -y && apt-get upgrade -y && \
     apt-get install -y --no-install-recommends --fix-missing \
     libopenblas-dev && \
     rm -rf /var/lib/apt/lists/*
-
-# Install CUDA
-RUN wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2004/x86_64/cuda-keyring.gpg && \
-    mv cuda-keyring.gpg /usr/share/keyrings/ && \
-    echo "deb [signed-by=/usr/share/keyrings/cuda-keyring.gpg] https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2004/x86_64/ /" > /etc/apt/sources.list.d/cuda.list && \
-    echo "deb [signed-by=/usr/share/keyrings/cuda-keyring.gpg] https://developer.download.nvidia.com/compute/machine-learning/repos/ubuntu2004/x86_64/ /" > /etc/apt/sources.list.d/nvidia-ml.list
-RUN apt-get update && apt-get install -y --no-install-recommends cuda-toolkit-11-2
 
 
 # Clone and install libxsmm
