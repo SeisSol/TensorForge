@@ -103,14 +103,14 @@ foreach(EXAMPLE ${EXAMPLES})
     # compile source code
     add_executable(${EXAMPLE}-target ${TEST_RUNNER} ${GENERATED_SRC})
 
-    # set(GENERATED_GPU_SRC ${GEN_DIR}/gpulike_subroutine.cpp)
-    # enable_language(CUDA)
-    # set(CMAKE_CUDA_STANDARD 17)
-    # add_library(${EXAMPLE}-target-gpu SHARED ${GENERATED_GPU_SRC})
-    # target_link_libraries(${EXAMPLE}-target PUBLIC ${EXAMPLE}-target-gpu)
-    # set_target_properties(${EXAMPLE}-target-gpu PROPERTIES POSITION_INDEPENDENT_CODE ON)
-    # set_source_files_properties(${GENERATED_GPU_SRC} PROPERTIES LANGUAGE_CUDA)
-    # set_target_properties(${EXAMPLE}-target-gpu PROPERTIES CUDA_ARCHITECTURES 'sm_60')
+    set(GENERATED_GPU_SRC ${GEN_DIR}/gpulike_subroutine.cpp)
+    enable_language(CUDA)
+    set(CMAKE_CUDA_STANDARD 17)
+    add_library(${EXAMPLE}-target-gpu SHARED ${GENERATED_GPU_SRC})
+    target_link_libraries(${EXAMPLE}-target PUBLIC ${EXAMPLE}-target-gpu)
+    set_target_properties(${EXAMPLE}-target-gpu PROPERTIES POSITION_INDEPENDENT_CODE ON)
+    set_source_files_properties(${GENERATED_GPU_SRC} PROPERTIES LANGUAGE_CUDA)
+    set_target_properties(${EXAMPLE}-target-gpu PROPERTIES CUDA_ARCHITECTURES 'sm_60')
     
     # attach necessary include dirs
     target_include_directories(${EXAMPLE}-target PUBLIC ${CMAKE_SOURCE_DIR}/common
