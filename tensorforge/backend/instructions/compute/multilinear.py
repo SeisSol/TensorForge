@@ -99,7 +99,6 @@ class MultilinearInstruction(ComputeInstruction):
             ifguard = writer.If(self.gen_range_mask_threads(0, leading[1]))
         else:
             ifguard = writer.If(self.gen_range_mask_threads(leading[0], leading[1]))
-        
         with ifguard:
             self._nonleading_dim(writer)
         if len(self._ns) == 0:

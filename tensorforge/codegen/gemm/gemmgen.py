@@ -168,7 +168,8 @@ class GemmGen(object):
         'beta':         self._beta(d.beta),
         'alignedA':     int(d.alignedA),
         'alignedC':     int(d.alignedC),
-        'prefetch':     'BL2viaC' if self._arch.enablePrefetch and d.prefetchName is not None else 'pfsigonly',
+        # 'prefetch':     'BL2viaC' if self._arch.enablePrefetch and d.prefetchName is not None else 'pfsigonly',
+        'prefetch':     'BL2viaC' if self._arch.enablePrefetch and d.prefetchName is not None else 'nopf',
         'transA': d.transA,
         'transB': d.transB,
 

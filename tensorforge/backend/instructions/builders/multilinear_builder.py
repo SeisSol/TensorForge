@@ -14,7 +14,8 @@ from tensorforge.generators.descriptions import MultilinearDescr
 from tensorforge.backend.instructions.builders.allocator_builder import AbstractBuilder
 from tensorforge.common.operation import AddOperator, MulOperator
 from tensorforge.backend.data_types import RegMemObject
-from tensorforge.backend.instructions.loaders.abstract_loader import AbstractShrMemLoader
+from tensorforge.backend.instructions.abstract_instruction import AbstractInstruction
+
 
 class MultilinearBuilder(AbstractBuilder):
   GemmClass = None
@@ -30,7 +31,7 @@ class MultilinearBuilder(AbstractBuilder):
 
     self._counter = 0
     self._counter_shr_reg = 0
-    self._loaders_cache: Dict[Symbol, AbstractShrMemLoader] = {}
+    self._loaders_cache: Dict[Symbol, AbstractInstruction] = {}
 
     self._ops = None
     self._dest_obj = None

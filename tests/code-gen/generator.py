@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
 
+import sys
+sys.path.append('../..')
+
 import os, errno
 import argparse
 import importlib.util
@@ -9,10 +12,10 @@ from tensorforge.codegen.code import Cpp
 
 cmdLineParser = argparse.ArgumentParser()
 cmdLineParser.add_argument('--arch', type=str, default='dhsw', help='Architecture (e.g. dsnb for double precision on Sandy Bridge).')
-cmdLineParser.add_argument('--variant', type=str, default='', help='Example specific variant OpenBLAS, LIBXSMM.')
+cmdLineParser.add_argument('--variant', type=str, default='Eigen', help='Example specific variant OpenBLAS, LIBXSMM.')
 cmdLineParser.add_argument('--output_dir', type=str, default='./', help='output directory for gen. code')
 cmdLineParser.add_argument('example_script', type=str, help='A tensorforge example script from the examples folder (without file extension).')
-cmdLineParser.add_argument('--backend', type = str)
+cmdLineParser.add_argument('--backend', type = str, help='Backend (e.g. cuda).')
 cmdLineArgs = cmdLineParser.parse_args()
 
 exampleSpec = importlib.util.find_spec(cmdLineArgs.example_script)
@@ -35,11 +38,36 @@ except OSError as e:
     if e.errno == errno.EEXIST:
       pass
 
-#Currently shsw as host_arch
-arch = useArchitectureIdentifiedBy('shsw', cmdLineArgs.arch, cmdLineArgs.backend)
 
-g = Generator(arch)
-example.add(g)
+script_dir = os.path.dirname(os.path.realpath(__file__))
+print('script_dir: ', script_dir)
+db_file_path = os.path.join(script_dir, '../../tensorforge/arch_db.yml')
+with open(db_file_path, 'r') as file:
+  yaml_data = yaml.safe_load(file)
+cpu_archs = [item['arch'] for item in yaml_data]
+
+if any(substring in cmdLineArgs.arch for substring in cpu_archs):
+  target = 'cpu'
+else:
+  target = 'gpu'
+
+if cmdLineArgs.backend:
+  #Currently shsw as host_arch
+  if cmdLineArgs.arch[0] == 's':
+    arch = useArchitectureIdentifiedBy('shsw', cmdLineArgs.arch, cmdLineArgs.backend)
+  else:
+    arch = useArchitectureIdentifiedBy('dhsw', cmdLineArgs.arch, cmdLineArgs.backend)
+elif target == 'cpu':
+  if cmdLineArgs.arch[0] == 's':
+    arch = useArchitectureIdentifiedBy('shsw', cmdLineArgs.arch, 'cpp')
+  else:
+    arch = useArchitectureIdentifiedBy('dhsw', cmdLineArgs.arch, 'cpp')
+else:
+  arch = useArchitectureIdentifiedBy(cmdLineArgs.arch, cmdLineArgs.arch, 'cuda')
+
+g = Generator(arch, target)
+example.add(g, target)
+
 
 gemm_cfg = example.gemm_cfg(arch, cmdLineArgs.variant) if hasattr(example, 'gemm_cfg') else None
 g.generate(outDir, gemm_cfg=gemm_cfg)
@@ -131,3 +159,4 @@ with Cpp(os.path.join(outDir, 'performance.cpp')) as cpp:
     if trashTheCache:
       cpp('delete[] _trash;')
     cpp('return 0;')
+

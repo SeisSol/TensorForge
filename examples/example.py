@@ -33,12 +33,24 @@ except OSError as e:
   if e.errno == errno.EEXIST:
     pass
 
+script_dir = os.path.dirname(os.path.realpath(__file__))
+print('script_dir: ', script_dir)
+db_file_path = os.path.join(script_dir, '../tensorforge/arch_db.yml')
+with open(db_file_path, 'r') as file:
+  yaml_data = yaml.safe_load(file)
+cpu_archs = [item['arch'] for item in yaml_data]
+
+if any(substring in cmdLineArgs.arch for substring in cpu_archs):
+  target = 'cpu'
+else:
+  target = 'gpu'
+
 # explicitly force CPU target
 arch = useArchitectureIdentifiedBy('shsw', cmdLineArgs.arch, cmdLineArgs.backend)
 
-g = Generator(arch)
-example.add(g)
-gemm_cfg = example.gemm_cfg(arch, cmdLineArgs.variant) if hasattr(example, 'gemm_cfg') else None
+g = Generator(arch, target)
+example.add(g, target)
+gemm_cfg = example.gemm_cfg(arch, cmdLineArgs.variant) if hasattr(example, 'gemm_cfg') and cmdLineArgs.variant != '' else None
 g.generate(outDir, gemm_cfg=gemm_cfg)
 
 for kernel in g.kernels():

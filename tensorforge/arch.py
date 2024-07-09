@@ -116,6 +116,13 @@ class Architecture(object):
 def _get_name_and_precision(ident):
   return ident[1:], ident[0].upper()
 
+def _get_vectorsize(arch_name):
+  script_dir = os.path.dirname(os.path.realpath(__file__))
+  db_file_path = os.path.join(script_dir, 'arch_db.yml')
+  with open(db_file_path, 'r') as file:
+    yaml_data = yaml.safe_load(file)
+  vectorsize = next((item['vectorsize'] for item in yaml_data if item['arch'] == arch_name), None)
+  return vectorsize
 
 def getArchitectureIdentifiedBy(ident):
   name, precision = _get_name_and_precision(ident)
@@ -139,16 +146,17 @@ def getHeterogeneousArchitectureIdentifiedBy(host_arch, device_arch, device_back
     raise ValueError(f'Precision of host and compute arch. must be the same. '
                      f'Given: {host_arch}, {device_arch}')
 
+  alignment = _get_vectorsize(device_arch)
   if 'sm_' in device_arch:
     alignment = 64
   elif 'gfx' in device_arch: 
     alignment = 128
   elif device_arch in ['dg1', 'bdw', 'skl', 'Gen8', 'Gen9', 'Gen11', 'Gen12LP']:
     alignment = 32
-  else:
+  if not alignment:
     raise ValueError(f'Unknown device arch: {device_arch}')
-
-  return Architecture(device_arch, device_precision, alignment, False, device_backend, host_name)
+  else:
+    return Architecture(device_arch, device_precision, alignment, False, device_backend, host_name)
 
 
 def useArchitectureIdentifiedBy(host_arch, device_arch=None, device_backend=None):

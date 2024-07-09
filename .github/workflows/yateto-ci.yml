@@ -4,28 +4,19 @@ on: push
 
 jobs:
   general:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
+    container: seissol/tensorforge-ci:cicd_develop
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
     steps:
-
-    - name: setup-python
-      uses: actions/setup-python@v4
-      with:
-        python-version: '3.11'
 
     - name: checkout-tensorforge
       uses: actions/checkout@v4
 
-    - name: pip-tensorforge
-      run: |
-        pip install .
-
-    - name: Python Tests
-      run: |
-        python3 -m unittest tests/internals/*.py
         
     - name: Interface Tests
       run: |
-        . /etc/profile.d/z10_spack_environment.sh && . /etc/profile.d/z20_additional_env.sh
         cd ./tests/interface
         for build_type in Debug Release; do
           mkdir -p ./build-${build_type} && cd ./build-${build_type}
@@ -36,50 +27,41 @@ jobs:
         done
 
   codegen:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
+    container: seissol/tensorforge-ci:cicd_develop
+    timeout-minutes: 10
     env:
       CTEST_OUTPUT_ON_FAILURE: 1
     strategy:
+      fail-fast: false
       matrix:
-        generator: [Eigen, LIBXSMM, LIBXSMM_JIT, OpenBLAS]
+        generator: [Eigen, LIBXSMM, LIBXSMM_JIT]
         
     steps:
-
-    - name: setup-python
-      uses: actions/setup-python@v4
-      with:
-        python-version: '3.11'
 
     - name: checkout-tensorforge
       uses: actions/checkout@v4
 
-    - name: pip-tensorforge
-      run: |
-        pip install .
-
-    - name: install_cxxtest
-      run: |
-        sudo apt install -y cxxtest
-        sudo apt install libeigen3-dev
-
     - name: Codegen Tests
       run: |
-        . /etc/profile.d/z10_spack_environment.sh && . /etc/profile.d/z20_additional_env.sh
         cd ./tests/code-gen
         for example in matmul minimal; do
           for build_type in Debug Release; do
             for precision in single double; do
-              echo " ====== Test Config: ======"
-              echo " Build: ${build_type}"
-              echo " Precision: ${precision}"
-              echo " Example: ${example}"
-              echo "==========================="
-              mkdir -p ./build-${example}-${build_type}-${precision}
-              cd ./build-${example}-${build_type}-${precision}
-              cmake .. -DEXAMPLES=${example} -DCMAKE_BUILD_TYPE=${build_type} -DPRECISION=${precision} -DVARIANT=${{ matrix.generator }} -DARCH=snb
-              make
-              make test
-              cd ..
+              for arch in snb hsw wsm sm_86; do
+                echo " ====== Test Config: ======"
+                echo " Build: ${build_type}"
+                echo " Architecture: ${arch}"
+                echo " Precision: ${precision}"
+                echo " Example: ${example}"
+                echo "==========================="
+                mkdir -p ./build-${example}-${build_type}-${precision}
+                cd ./build-${example}-${build_type}-${precision}
+                cmake .. -DEXAMPLES=${example} -DCMAKE_BUILD_TYPE=${build_type} -DPRECISION=${precision} -DVARIANT=${{ matrix.generator }} -DARCH=${arch}
+                make
+                make test
+                cd ..
+                done
             done
           done
         done

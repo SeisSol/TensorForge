@@ -410,8 +410,9 @@ class OptimisedKernelGenerator(KernelGenerator):
 class UnitTestGenerator(KernelGenerator):
   KERNEL_VAR = 'krnl'
   
-  def __init__(self, arch):
+  def __init__(self, arch, target):
     super().__init__(arch)
+    self._target = target
 
   def deduce_single_scalar(self, scalar):
     if scalar is None:
@@ -468,7 +469,12 @@ class UnitTestGenerator(KernelGenerator):
     variables = SortedGlobalsList().visit(cfg)
     kernel_prefix = '{}::'.format(namespace) if namespace else ''
     with cpp.Function(**testFramework.functionArgs(testName)):
-      factory = UnitTestFactory(cpp, self._arch, self._name, testFramework)
+
+      if self._target == 'gpu':
+        cpp(f'int {BatchedOperationsAux.NUM_ELEMENTS_NAME} = 1;')
+        cpp(f'yateto::LinearAllocatorT<{self._arch.typename}> linearAllocator;')
+
+      factory = UnitTestFactory(cpp, self._arch, self._name, testFramework, self._target)
 
       for i,scalar in enumerate(scalars):
         cpp('{} {} = {};'.format(self._arch.typename, self._tensorNameS(scalar), float(i+2)))
@@ -504,10 +510,21 @@ class UnitTestGenerator(KernelGenerator):
         cpp.emptyline()
 
       cpp( '{}{}::{} {};'.format(kernel_prefix, OptimisedKernelGenerator.NAMESPACE, kernelClass, self.KERNEL_VAR) )
-      for var in scalars:
-        cpp( '{}.{}{} = {};'.format(self.KERNEL_VAR, var.baseName(), self._groupIndex(var), self._tensorNameS(var)) )
-      for var in variables:
-        cpp( '{}.{}{} = {};'.format(self.KERNEL_VAR, var.tensor.baseName(), self._groupIndex(var.tensor), self._tensorName(var)) )
+      if self._target == 'gpu':
+        cpp(f'{self.KERNEL_VAR}.numElements = numElements;')
+        cpp(f'{self.KERNEL_VAR}.streamPtr = nullptr;')
+        for var in scalars:
+          cpp(f'const {self._arch.typename}* temp{var.baseName()} = {var.baseName()};')
+          cpp( '{}.{}{} = {};'.format(self.KERNEL_VAR, var.baseName(), self._groupIndex(var), '&temp' + self._tensorNameS(var)) )
+        for var in variables[0:-1]:
+          cpp(f'const {self._arch.typename}* temp{var.tensor.baseName()} = {var.tensor.baseName()};')
+          cpp( '{}.{}{} = {};'.format(self.KERNEL_VAR, var.tensor.baseName(), self._groupIndex(var.tensor), '&temp' + self._tensorName(var)) )
+        cpp( '{}.{}{} = {};'.format(self.KERNEL_VAR, variables[-1].tensor.baseName(), self._groupIndex(variables[-1].tensor), '&' + self._tensorName(variables[-1])) ) 
+      else:
+        for var in scalars:
+          cpp( '{}.{}{} = {};'.format(self.KERNEL_VAR, var.baseName(), self._groupIndex(var), self._tensorNameS(var)) )
+        for var in variables:
+          cpp( '{}.{}{} = {};'.format(self.KERNEL_VAR, var.tensor.baseName(), self._groupIndex(var.tensor), self._tensorName(var)) )
 
       cpp( '{}.{}();'.format(self.KERNEL_VAR, OptimisedKernelGenerator.EXECUTE_NAME + (str(index) if index is not None else '')) )
       cpp.emptyline()

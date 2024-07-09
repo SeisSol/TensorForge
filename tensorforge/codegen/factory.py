@@ -152,8 +152,8 @@ class OptimisedKernelFactory(KernelFactory):
     return generator.generate(self._cpp, routineCache)
 
 class UnitTestFactory(KernelFactory):
-  def __init__(self, cpp, arch, nameFun, testFramework):
-    super().__init__(cpp, arch, target='cpu')
+  def __init__(self, cpp, arch, nameFun, testFramework, target):
+    super().__init__(cpp, arch, target=target)
     self._name = nameFun
     self._rand = 0
     self._testFramework = testFramework
