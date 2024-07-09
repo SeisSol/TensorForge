@@ -2,6 +2,7 @@
 # FROM ubuntu:24.04
 FROM nvidia/cuda:12.5.0-base-ubuntu22.04
 ENV TZ=UTC
+ENV DEBIAN_FRONTEND=noninteractive
 
 # Install necessary packages
 RUN apt-get update -y && apt-get upgrade -y && apt-get install -y software-properties-common && \
