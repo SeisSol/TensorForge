@@ -56,5 +56,5 @@ WORKDIR /app
 COPY . /app
 
 # Install the application
-RUN pip install . --break-system-packages
+RUN pip install . --ignore-installed
 
