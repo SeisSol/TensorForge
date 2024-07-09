@@ -106,8 +106,17 @@ foreach(EXAMPLE ${EXAMPLES})
     # GPU specific code generation
     set(GENERATED_GPU_SRC ${GEN_DIR}/gpulike_subroutine.cpp)
     enable_language(CUDA REQUIRED)
-    include_directories(${CUDA_TOOLKIT_ROOT_DIR}/include)
-    link_directories(${CUDA_TOOLKIT_ROOT_DIR}/lib64)
+    # Attempt to find the CUDA Toolkit path from an environment variable
+    if(NOT DEFINED CUDA_TOOLKIT_ROOT_DIR)
+        if(DEFINED ENV{CUDA_TOOLKIT_ROOT_DIR})
+            set(CUDA_TOOLKIT_ROOT_DIR $ENV{CUDA_TOOLKIT_ROOT_DIR})
+        else()
+            message(FATAL_ERROR "CUDA_TOOLKIT_ROOT_DIR is not set. Please define the environment variable CUDA_TOOLKIT_ROOT_DIR pointing to your CUDA Toolkit installation.")
+        endif()
+    endif()
+
+    # Now that CUDA_TOOLKIT_ROOT_DIR is set, you can proceed to find the CUDA package
+    find_package(CUDAToolkit REQUIRED)
     set(CMAKE_CUDA_STANDARD 17)
     add_library(${EXAMPLE}-target-gpu SHARED ${GENERATED_GPU_SRC})
     target_link_libraries(${EXAMPLE}-target PUBLIC ${EXAMPLE}-target-gpu)
