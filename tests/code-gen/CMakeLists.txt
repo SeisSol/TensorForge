@@ -105,7 +105,9 @@ foreach(EXAMPLE ${EXAMPLES})
 
     # GPU specific code generation
     set(GENERATED_GPU_SRC ${GEN_DIR}/gpulike_subroutine.cpp)
-    enable_language(CUDA)
+    enable_language(CUDA REQUIRED)
+    include_directories(${CUDA_TOOLKIT_ROOT_DIR}/include)
+    link_directories(${CUDA_TOOLKIT_ROOT_DIR}/lib64)
     set(CMAKE_CUDA_STANDARD 17)
     add_library(${EXAMPLE}-target-gpu SHARED ${GENERATED_GPU_SRC})
     target_link_libraries(${EXAMPLE}-target PUBLIC ${EXAMPLE}-target-gpu)
