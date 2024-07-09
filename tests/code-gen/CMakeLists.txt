@@ -105,7 +105,7 @@ foreach(EXAMPLE ${EXAMPLES})
 
    # GPU specific code generation
     set(GENERATED_GPU_SRC ${GEN_DIR}/gpulike_subroutine.cpp)
-    enable_language(CUDA REQUIRED)
+    
     # Attempt to find the CUDA Toolkit path from an environment variable
     if(NOT DEFINED CUDAToolkit_ROOT)
         if(DEFINED ENV{CUDAToolkit_ROOT})
@@ -117,6 +117,8 @@ foreach(EXAMPLE ${EXAMPLES})
 
     # Now that CUDAToolkit_ROOT is set, you can proceed to find the CUDA package
     find_package(CUDAToolkit REQUIRED)
+
+    enable_language(CUDA REQUIRED)
     set(CMAKE_CUDA_STANDARD 17)
     add_library(${EXAMPLE}-target-gpu SHARED ${GENERATED_GPU_SRC})
     target_link_libraries(${EXAMPLE}-target PUBLIC ${EXAMPLE}-target-gpu)
