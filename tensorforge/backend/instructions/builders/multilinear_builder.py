@@ -123,7 +123,7 @@ class MultilinearBuilder(AbstractBuilder):
         else:
           self._mem_regions[i] = self._ops[i]
       else:
-        raise InternalError(f'gemm-builder: op{i} ({self._ops[i].symbol.name}) must be either in shr or glb mem.')
+        raise InternalError(f'gemm-builder: op{i} ({self._ops[i].symbol.name}) must be either in shr or glb mem, given: {self._ops[i].symbol.stype}')
 
   def _make_loader_and_symbol(self, operand, is_transpose) -> Tuple[Symbol, GlbToShrLoader]:
     shr_mem_region = Symbol(name=self._name_shr_reg(),
@@ -149,14 +149,16 @@ class MultilinearBuilder(AbstractBuilder):
     for d, dim in enumerate(self._dest_obj.bbox.sizes()):
       if d not in [0]: # for now, this is the lead dim
         regsize *= dim
+      else:
+        regsize *= (dim + self._num_threads - 1) // self._num_threads
     name = self._name_registers()
     regmem = RegMemObject(name, regsize)
     registers = Symbol(name=name, stype=SymbolType.Register, obj=regmem)
+    registers.num_threads = self._num_threads
     self._scopes.add_symbol(registers)
     registerAlloc = RegisterAlloc(self._context, registers, regsize, 0.0)
     self._instructions.append(registerAlloc)
     return registers
-    # self._dest_regs = registers
 
   def _get_target_symbol(self):
     dest_symbol = self._scopes.get_symbol(self._dest_obj.tensor)
@@ -188,14 +190,7 @@ class MultilinearBuilder(AbstractBuilder):
                                                 num_threads=self._num_threads))
       elif dest_symbol.stype == SymbolType.Global:
         if self._use_registers_always:
-          if dest_symbol.name not in self._deferred_stores:
-            dest_registers = self._alloc_register_array()
-            self._deferred_stores[dest_symbol.name] = (dest_registers, dest_symbol)
-          dest_registers,_ = self._deferred_stores[dest_symbol.name]
-          self._instructions.append(StoreRegToReg(context=self._context,
-                                                src=self._temp_regs,
-                                                dest=dest_registers,
-                                                num_threads=self._num_threads))
+          self._deferred_stores[dest_symbol.name] = (self._temp_regs, dest_symbol)
         else:
           self._instructions.append(StoreRegToGlb(context=self._context,
                                                   src=self._temp_regs,

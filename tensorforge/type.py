@@ -206,6 +206,9 @@ class TensorView:
   
   def __getitem__(self, indexNames):
     return IndexedTensor(self.tensor, indexNames, self.start, self.end)
+  
+  def __str__(self):
+    return '{}: {} .. {}'.format(self.tensor.name, self.start, self.end)
 
 class Collection(object):
   def update(self, collection):

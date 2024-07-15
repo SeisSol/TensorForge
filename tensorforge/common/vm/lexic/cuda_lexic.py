@@ -10,29 +10,50 @@ class CudaLexic(Lexic):
     self.thread_idx_x = "threadIdx.x"
     self.thread_idx_z = "threadIdx.z"
     self.block_idx_x = "blockIdx.x"
+    self.block_dim_x = "blockDim.x"
     self.block_dim_y = "blockDim.y"
     self.block_dim_z = "blockDim.z"
     self.grid_dim_x = "gridDim.x"
     self.stream_type = "cudaStream_t"
     self.restrict_kw = "__restrict__"
 
-  def get_launch_size(self, func_name, block):
+  def get_launch_size(self, func_name, block, shmem):
     return f"""static int gridsize = -1;
     if (gridsize <= 0) {{
       int device, smCount, blocksPerSM;
       cudaGetDevice(&device);
+      CHECK_ERR;
       cudaDeviceGetAttribute(&smCount, cudaDevAttrMultiProcessorCount, device);
-      cudaOccupancyMaxActiveBlocksPerMultiprocessor(&blocksPerSM, {func_name}, {block}.x * {block}.y * {block}.z, 0);
-      gridsize = smCount * blocksPerSM;
+      CHECK_ERR;
+      cudaOccupancyMaxActiveBlocksPerMultiprocessor(&blocksPerSM, {func_name}, {block}.x * {block}.y * {block}.z, {shmem});
+      CHECK_ERR;
+      if (blocksPerSM > 0) {{
+        gridsize = smCount * blocksPerSM;
+      }}
+      else {{
+        gridsize = smCount;
+      }}
     }}
     """
 
-  def get_launch_code(self, func_name, grid, block, stream, func_params):
-    return "{}<<<{},{},0,{}>>>({})".format(func_name, grid, block, stream, func_params)
+  def set_shmem_size(self, func_name, shmem):
+    return f"""static bool shmemsizeset = false;
+    if (!shmemsizeset) {{
+      cudaFuncSetAttribute({func_name}, cudaFuncAttributeMaxDynamicSharedMemorySize, {shmem});
+      CHECK_ERR;
+      shmemsizeset = true;
+    }}
+    """
+
+  def get_launch_code(self, func_name, grid, block, stream, func_params, shmem):
+    return f"{func_name}<<<{grid},{block},{shmem},{stream}>>>({func_params})"
 
   def declare_shared_memory_inline(self, name, precision, size, alignment):
     return f"__shared__  __align__({alignment}) {precision} {name}[{size}]"
   
+  def declare_shared_memory(self, name, precision):
+    return f'extern __shared__ {precision} {name}[]'
+
   def get_launch_bounds(self, total_num_threads_per_block, min_blocks_per_mp=None):
     params = [str(item) for item in [total_num_threads_per_block, min_blocks_per_mp] if item]
     return f'__launch_bounds__({", ".join(params)})'
@@ -186,12 +207,13 @@ class CudaLexic(Lexic):
 
   def glb_store(self, lhs, rhs, nontemporal=False):
     if nontemporal:
-      return f'__stcg({rhs}, &{lhs});'
+      return f'__stcg(&{lhs}, {rhs});'
     else:
       return f'{lhs} = {rhs};'
   
   def glb_load(self, lhs, rhs, nontemporal=False):
     if nontemporal:
+      # return f'{lhs} = __ldg(&{rhs});'
       return f'{lhs} = __ldcg(&{rhs});'
     else:
       return f'{lhs} = {rhs};'

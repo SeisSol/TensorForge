@@ -59,9 +59,10 @@ class GpuKernelGenerator:
       if isinstance(pretensor, Scalar):
         self.make_tensor(pretensor, False, None)
         indicesIndexed[pretensor.name()] = []
-      
-      currentPreShape = list(BoundingBox.fromSpp(op.eqspp))
-      subTensor = SubTensor(self._cache[pretensor.name()], BBox([rng.start for rng in currentPreShape], [rng.stop for rng in currentPreShape]))
+        subTensor = SubTensor(self._cache[pretensor.name()], BBox([], []))
+      else:
+        currentPreShape = list(BoundingBox.fromSpp(pretensor.eqspp()))
+        subTensor = SubTensor(self._cache[pretensor.name()], BBox([rng.start for rng in currentPreShape], [rng.stop for rng in currentPreShape]))
       return subTensor, indicesIndexed[pretensor.name()]
     
     for statement in statements:

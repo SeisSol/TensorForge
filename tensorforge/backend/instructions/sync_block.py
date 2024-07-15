@@ -20,3 +20,19 @@ class SyncThreads(AbstractInstruction):
 
   def gen_mask_threads(self, num_threads) -> str:
     return ''
+
+class SyncBlock(AbstractInstruction):
+  def __init__(self, context: Context, num_threads_per_mult):
+    super().__init__(context)
+    self._num_threads = num_threads_per_mult
+    self._is_ready = True
+
+  def gen_code(self, writer):
+    writer(f'{self.__str__()}')
+
+  def __str__(self) -> str:
+    lexic = self._vm.get_lexic()
+    return f'{lexic.sync_block()};'
+
+  def gen_mask_threads(self, num_threads) -> str:
+    return ''

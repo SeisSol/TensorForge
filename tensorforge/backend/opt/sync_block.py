@@ -43,7 +43,7 @@ class SyncThreadsOpt(AbstractTransformer):
     for index, instr in enumerate(self._instrs):
       if isinstance(instr, ComputeInstruction):
         for src in instr.get_operands():
-          if src.stype == SymbolType.SharedMem:
+          if src.stype == SymbolType.SharedMem and self._get_region_id(src) is not None:
             flags[self._get_region_id(src)] = True
 
       if isinstance(instr, SyncThreads):
