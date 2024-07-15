@@ -7,6 +7,8 @@ from tensorforge.backend.scopes import Scopes
 import tensorforge.ast.node as ytt
 import tensorforge.type as yttt
 
+import numpy as np
+
 class VarAlloc:
     def __init__(self):
         self.counter = -1
@@ -214,6 +216,7 @@ class TensorVar(Variable):
         self.pretensor = pretensor
         self.variable = None
         self.indices = None
+        self.offset = None
     
     def tensors(self, intensors=True, outtensors=True):
         return [self.tensor]
@@ -227,9 +230,11 @@ class TensorVar(Variable):
     def getRanges(self, ranges):
         for i in range(len(self.indices)):
             if self.indices[i] not in ranges:
-                ranges[self.indices[i]] = (self.symbol.data_view.get_bbox().lower()[i], self.symbol.data_view.get_bbox().upper()[i])
+                #ranges[self.indices[i]] = (self.tensor.bbox.lower()[i], self.tensor.bbox.upper()[i])
+                ranges[self.indices[i]] = (0, self.tensor.bbox.size(i))
             crange = ranges[self.indices[i]]
-            crange = (max(crange[0], self.symbol.data_view.get_bbox().lower()[i]), min(crange[1], self.symbol.data_view.get_bbox().upper()[i]))
+            crange = (0, np.minimum(crange[1], self.tensor.bbox.size(i)))
+            #crange = (np.maximum(crange[0], self.tensor.bbox.lower()[i]), np.minimum(crange[1], self.tensor.bbox.upper()[i]))
             ranges[self.indices[i]] = crange
         return ranges
 
@@ -239,6 +244,7 @@ class TensorVar(Variable):
 
     def assignTensor(self, assigner):
         self.tensor, self.indices = assigner(self.pretensor)
+        self.offset = list(self.tensor.bbox.lower())
 
     def declare(self, alloc: VarAlloc, writer: Writer, context: Context):
         pass
@@ -247,12 +253,12 @@ class TensorVar(Variable):
         # TODO: re-enable caching
         # if self.variable is None:
         self.variable = alloc.alloc()
-        self.symbol.load(writer, context, self.variable, [f'n{-i-1}' for i in self.indices], False)
+        self.symbol.load(writer, context, self.variable, [f'(n{-i-1} + {o})' for i,o in zip(self.indices, self.offset)], False)
         return self.variable
     
     def store(self, alloc: VarAlloc, writer: Writer, context: Context, value: str):
         # assume that we don't have to reload
-        self.symbol.store(writer, context, value, [f'n{-i-1}' for i in self.indices], False)
+        self.symbol.store(writer, context, value, [f'(n{-i-1} + {o})' for i,o in zip(self.indices, self.offset)], False)
 
 class ScalarVar(Variable):
     def __init__(self, tensor, slicing, pretensor=None):
@@ -287,9 +293,9 @@ class ScalarVar(Variable):
     
     def write(self, alloc: VarAlloc, writer: Writer, context: Context):
         # TODO: re-enable caching
-        # if self.variable is None:
-        self.variable = alloc.alloc()
-        self.symbol.load(writer, context, self.variable, [f'n{-i-1}' for i in self.indices], False)
+        if self.variable is None:
+            self.variable = alloc.alloc()
+            self.symbol.load(writer, context, self.variable, [f'n{-i-1}' for i in self.indices], False)
         return self.variable
     
     def store(self, alloc: VarAlloc, writer: Writer, context: Context, value: str):
@@ -400,10 +406,10 @@ class OpNode(Node):
     def write(self, alloc: VarAlloc, writer: Writer, context: Context):
         if self.variable is None:
             self.variable = alloc.alloc()
-        var = [0] * len(self.operands)
-        for i, op in enumerate(self.operands):
-            var[i] = op.write(alloc, writer, context)
-        writer(f'const auto {self.variable} = {self.operation(context, var)};')
+            var = [0] * len(self.operands)
+            for i, op in enumerate(self.operands):
+                var[i] = op.write(alloc, writer, context)
+            writer(f'const auto {self.variable} = {self.operation(context, var)};')
         return self.variable
 
 class LexicOpNode(OpNode):
@@ -752,3 +758,9 @@ def compne(x: BaseType, y: BaseType):
 
 def abs(x: BaseType):
     return LexicOpNode([immc(x)], Operation.ABS)
+
+def matmul(x: BaseType, y: BaseType):
+    pass
+
+def einsum(op: str, *args):
+    pass

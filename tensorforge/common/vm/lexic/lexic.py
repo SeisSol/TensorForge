@@ -24,7 +24,15 @@ class Lexic(ABC):
     pass
 
   @abstractmethod
+  def set_shmem_size(self, func_name, shmem):
+    pass
+
+  @abstractmethod
   def declare_shared_memory_inline(self, name, precision, size, alignment):
+    pass
+
+  @abstractmethod
+  def declare_shared_memory(self, name, precision):
     pass
 
   @abstractmethod

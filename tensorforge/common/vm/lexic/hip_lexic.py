@@ -9,24 +9,42 @@ class HipLexic(CudaLexic):
     self.thread_idx_x = "hipThreadIdx_x"
     self.thread_idx_z = "hipThreadIdx_z"
     self.block_idx_x = "hipBlockIdx_x"
+    self.block_dim_x = "hipBlockDim_x"
     self.block_dim_y = "hipBlockDim_y"
     self.block_dim_z = "hipBlockDim_z"
     self.grid_dim_x = "gridDim.x"
     self.stream_type = "hipStream_t"
 
-  def get_launch_size(self, func_name, block):
+  def get_launch_size(self, func_name, block, shmem):
     return f"""static int gridsize = -1;
     if (gridsize <= 0) {{
       int device, smCount, blocksPerSM;
       hipGetDevice(&device);
+      CHECK_ERR;
       hipDeviceGetAttribute(&smCount, hipDeviceAttributeMultiprocessorCount, device);
-      hipOccupancyMaxActiveBlocksPerMultiprocessor(&blocksPerSM, {func_name}, {block}.x * {block}.y * {block}.z, 0);
-      gridsize = smCount * blocksPerSM;
+      CHECK_ERR;
+      hipOccupancyMaxActiveBlocksPerMultiprocessor(&blocksPerSM, {func_name}, {block}.x * {block}.y * {block}.z, {shmem});
+      CHECK_ERR;
+      if (blocksPerSM > 0) {{
+        gridsize = smCount * blocksPerSM;
+      }}
+      else {{
+        gridsize = smCount;
+      }}
     }}
     """
 
-  def get_launch_code(self, func_name, grid, block, stream, func_params):
-    return f"hipLaunchKernelGGL({func_name}, {grid}, {block}, 0, {stream}, {func_params})"
+  def set_shmem_size(self, func_name, shmem):
+    return f"""static bool shmemsizeset = false;
+    if (!shmemsizeset) {{
+      hipFuncSetAttribute({func_name}, hipFuncAttributeMaxDynamicSharedMemorySize, {shmem});
+      CHECK_ERR;
+      shmemsizeset = true;
+    }}
+    """
+
+  def get_launch_code(self, func_name, grid, block, stream, func_params, shmem):
+    return f"hipLaunchKernelGGL({func_name}, {grid}, {block}, {shmem}, {stream}, {func_params})"
 
   def sync_simd(self):
     # RoCM (AMD) currently doesn't support __syncwarp

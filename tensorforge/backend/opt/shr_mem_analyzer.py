@@ -58,8 +58,8 @@ class ShrMemOpt(AbstractOptStage):
     for offset, region in zip(offsets, self._regions):
       for symbol in region:
         shr_mem_instr = symbol.get_first_user()
-        shr_mem_instr.set_shr_mem_offset(offset, True)
+        shr_mem_instr.set_shr_mem_offset(offset, True, False)
 
         for user in symbol.get_user_list()[1:]:
           if isinstance(user, AbstractShrMemWrite):
-            user.set_shr_mem_offset(offset, False)
+            user.set_shr_mem_offset(offset, False, False)

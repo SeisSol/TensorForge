@@ -11,36 +11,43 @@ from tensorforge.backend.scopes import Scopes
 from tensorforge.backend.symbol import Symbol, SymbolType, SymbolView
 from tensorforge.backend.instructions.abstract_instruction import AbstractInstruction
 from tensorforge.backend.instructions.compute.elementwise import ElementwiseInstruction
+from tensorforge.backend.instructions.builders.loader_builder import GlobalLoaderBuilder
 from tensorforge.backend.instructions.builders.multilinear_builder import MultilinearBuilder
 from tensorforge.backend.instructions.builders.ptr_manip_builder import GetElementPtrBuilder
-from tensorforge.backend.instructions.builders.allocator_builder import ShrMemAllocBuilder, RegistersAllocBuilder
+from tensorforge.backend.instructions.builders.allocator_builder import ShrMemAllocBuilder
+from tensorforge.backend.instructions.sync_block import SyncThreads, SyncBlock
 from tensorforge.backend.writer import Writer
 from tensorforge.common.exceptions import GenerationError
 
 class AbstractThreadBlockPolicy:
-  def __init__(self, context: Context, mem_per_mult: int, num_threads: int):
+  def __init__(self, context: Context, global_mem: int, mem_per_mult: int, num_threads: int):
     self._context: Context = context
     self._mem_per_mult: int = mem_per_mult
+    self._global_mem: int = global_mem
     self._num_threads: int = num_threads
 
     vm = self._context.get_vm()
     self._max_blocks = vm.get_hw_descr().max_block_per_sm
     self._max_allowed_mem = vm.get_hw_descr().max_local_mem_size_per_block
+    self._max_threads = vm.get_hw_descr().max_threads_per_block
 
   def get_num_mults_per_block(self):
     pass
 
 
-class SimpleThreadBlockPolicy(AbstractThreadBlockPolicy):
-  def __init__(self, context, mem_size_per_mult, num_threads):
-    super().__init__(context, mem_size_per_mult, num_threads)
+class RegmaxBlockPolicy(AbstractThreadBlockPolicy):
+  def __init__(self, context, global_mem, mem_size_per_mult, num_threads):
+    super().__init__(context, global_mem, mem_size_per_mult, num_threads)
 
   def get_num_mults_per_block(self):
-    # return max(self._context.get_vm().get_hw_descr().vec_unit_length // self._num_threads, 1)
-    if self._num_threads <= 32:
-      return 2
+    # the //2 is a heuristic
+    # self._max_threads // self._num_threads // 2
+    max_thread_mults = 256 // self._num_threads
+    if self._mem_per_mult == 0:
+      return max_thread_mults
     else:
-      return 1
+      max_mem_mults = (self._max_allowed_mem - self._global_mem * self._context.fp_type.size()) // (self._mem_per_mult * self._context.fp_type.size())
+      return min(max_mem_mults, max_thread_mults)
 
 class Generator:
   NAME_ENCODING_LENGTH = 10
@@ -48,7 +55,7 @@ class Generator:
   def __init__(self,
                gemm_list: List[OperationDescription],
                context: Context,
-               thread_block_policy_type: Type[AbstractThreadBlockPolicy] = SimpleThreadBlockPolicy):
+               thread_block_policy_type: Type[AbstractThreadBlockPolicy] = RegmaxBlockPolicy):
     self.descr_list: List[OperationDescription] = gemm_list
     self._context: Context = context
     self._thread_block_policy_type: Type[AbstractThreadBlockPolicy] = thread_block_policy_type
@@ -68,14 +75,15 @@ class Generator:
     self._accumulator_size: int = 0
 
     self._shr_mem_obj: Union[ShrMemObject, None] = None
-    self._register_array_obj: Union[RegMemObject, None] = None
 
     self._ir: List[AbstractInstruction] = []
+    self._global_ir: List[AbstractInstruction] = []
 
     self._check_consistency_with_user_options()
     self._name_operands(self.descr_list)
 
-    self._persistent_threading = False
+    self._persistent_threading = True
+    self._preload_globals = True
 
   def set_kernel_name(self, name):
     self._base_kernel_name = name
@@ -87,12 +95,17 @@ class Generator:
       self._generate_kernel_name()
     self._is_registerd = True
 
+  def _set_threadconfig(self):
+    for instr in self._global_ir:
+      instr.set_threadconfig_pre(self._num_threads, self._shr_mem_obj.get_mults_per_block())
+
   def generate(self):
     if not self._is_registerd:
       self.register()
 
     self._deduce_num_threads()
     self._deduce_accumulator_size()
+    self._emit_global_ir()
     self._emit_ir()
     opt = OptimizationStage(context=self._context,
                             shr_mem=self._shr_mem_obj,
@@ -100,7 +113,13 @@ class Generator:
                             num_threads=self._num_threads)
     opt.optimize()
     self._ir = opt.get_instructions()
+
+    # add final sync for persistent threads
+    if self._persistent_threading:
+      self._ir += [SyncThreads(self._context, self._num_threads)]
+
     self._deduce_mults_per_block()
+    self._set_threadconfig()
 
     self._generate_kernel()
     self._generate_launcher()
@@ -117,6 +136,11 @@ class Generator:
         mapped_kw, real_kw, type = kw
         writer(f'const {type} {mapped_kw} = {real_kw};')
 
+      for instruction in self._global_ir:
+        if instruction.is_ready():
+          instruction.gen_code(writer)
+        else:
+          raise GenerationError(f'instr is not ready to be generated: {instruction}')
       if not self._persistent_threading:
         writer(f'unsigned {GeneralLexicon.BATCH_ID_NAME} = {self._get_2d_block_id()};')
         with writer.If(f'{self._get_element_size_guard()}'):
@@ -145,13 +169,17 @@ class Generator:
     with writer.Block(f'{proto}'):
       kernel_name = f'kernel_{self._base_kernel_name}'
 
+      shmemsize = f'{self._shr_mem_obj.get_total_size()} * sizeof({self._context.fp_as_str()})'
+
       writer(f'{lexic.kernel_range_object("block", f"{self._num_threads}, {mults_per_block}, 1")};')
       if not self._persistent_threading:
         num_blocks = f'({GeneralLexicon.NUM_ELEMENTS} + {mults_per_block} - 1) / {mults_per_block}'
       else:
-        writer(f'{lexic.get_launch_size(kernel_name, "block")}')
+        writer(f'{lexic.get_launch_size(kernel_name, "block", shmemsize)}')
         num_blocks = 'gridsize'
       writer(f'{lexic.kernel_range_object("grid", f"{num_blocks}, 1, 1")};')
+
+      writer(lexic.set_shmem_size(kernel_name, shmemsize))
 
       lexic.get_stream_via_pointer(writer, 'stream', GeneralLexicon.STREAM_PTR_STR)
 
@@ -161,7 +189,8 @@ class Generator:
                                         grid='grid',
                                         block='block',
                                         stream='stream',
-                                        func_params=args)
+                                        func_params=args,
+                                        shmem=shmemsize)#
       writer(f'{call_site};')
       writer('CHECK_ERR;')
     self._launcher = writer.get_src()
@@ -175,25 +204,47 @@ class Generator:
 
       self._num_threads = max(num_threads, self._num_threads)
       self._num_active_threads = max(num_active_threads, self._num_active_threads)
+    
+    # self._num_threads = 32
 
   def _deduce_accumulator_size(self):
     for descr in self.descr_list:
       local_acc_size = descr.get_accumulator_size()
       self._accumulator_size = max(self._accumulator_size, local_acc_size)
 
+  def _emit_global_ir(self):
+    shmbuilder = ShrMemAllocBuilder(self._context, self._scopes)
+
+    self._scopes.add_scope()
+    # allocate shared memory
+    shmbuilder.build(size=None)
+    self._shr_mem_obj = shmbuilder.get_resultant_obj()
+    self._global_ir.extend(shmbuilder.get_instructions())
+
+    # load globals to shared memory (maybe)
+    if self._preload_globals:
+      builder = GetElementPtrBuilder(self._context, self._scopes)
+      for symbol in self._scopes.get_global_scope().values():
+        if symbol.obj.addressing == Addressing.SCALAR or (symbol.obj.addressing == Addressing.NONE and symbol.stype == SymbolType.Data):
+          builder.build(symbol)
+          self._global_ir.extend(builder.get_instructions())
+
+      builder = GlobalLoaderBuilder(self._context, self._scopes, self._shr_mem_obj, self._num_threads)
+      for symbol in self._scopes.get_global_scope().values():
+        if symbol.obj.addressing == Addressing.NONE and symbol.stype != SymbolType.Data:
+          builder.build(symbol)
+          self._global_ir.extend(builder.get_instructions())
+      
+      self._global_ir.append(SyncBlock(self._context, self._num_threads))
+
   def _emit_ir(self):
     # find local data from batches
     builder = GetElementPtrBuilder(self._context, self._scopes)
     self._scopes.add_scope()
     for symbol in self._scopes.get_global_scope().values():
-      builder.build(symbol)
-      self._ir.extend(builder.get_instructions())
-
-    # allocate shared memory
-    builder = ShrMemAllocBuilder(self._context, self._scopes)
-    builder.build(size=None)
-    self._shr_mem_obj = builder.get_resultant_obj()
-    self._ir.extend(builder.get_instructions())
+      if not self._preload_globals or not (symbol.obj.addressing == Addressing.NONE or symbol.obj.addressing == Addressing.SCALAR):
+        builder.build(symbol)
+        self._ir.extend(builder.get_instructions())
 
     self._scopes.add_scope()
     # generate GEMM and store operations
@@ -217,6 +268,7 @@ class Generator:
 
   def _deduce_mults_per_block(self):
     policy = self._thread_block_policy_type(self._context,
+                                            self._shr_mem_obj.get_global_size(),
                                             self._shr_mem_obj.get_size_per_mult(),
                                             self._num_threads)
     num_mults_per_block = policy.get_num_mults_per_block()
@@ -395,6 +447,9 @@ class Generator:
 
   def get_helper_headers(self):
     headerset = set()
+    for irinst in self._global_ir:
+      for header in irinst.get_headers():
+        headerset.add(header)
     for irinst in self._ir:
       for header in irinst.get_headers():
         headerset.add(header)

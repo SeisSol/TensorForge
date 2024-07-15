@@ -25,7 +25,7 @@ class SyclLexic(Lexic):
     }}
     """
 
-  def get_launch_code(self, func_name, grid, block, stream, func_params):
+  def get_launch_code(self, func_name, grid, block, stream, func_params, shmem):
     return f"{func_name}({stream}, {grid}, {block}, {func_params})"
 
   def declare_shared_memory_inline(self, name, precision, size, alignment):

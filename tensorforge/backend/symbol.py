@@ -7,6 +7,8 @@ from tensorforge.common.context import Context
 from tensorforge.common.basic_types import FloatingPointType, Addressing
 from .writer import Writer
 
+import numpy as np
+
 class SymbolType(enum.Enum):
   Batch = 1
   Global = 2
@@ -107,6 +109,9 @@ class Immediate:
   def is_thread_dependent(self):
     return False
   
+  def write_nonlead(self):
+    return self._type.literal(self._value)
+
   def write(self, context: Context):
     return self._type.literal(self._value)
 
@@ -118,64 +123,112 @@ class Variable:
   def is_thread_dependent(self):
     return False
 
+  def write_nonlead(self):
+    return self._name
+
   def write(self, context: Context):
     return self._name
 
 class LeadIndex:
-  def __init__(self, lane, stride):
-    self._lane = lane
-    self._stride = stride
+  # TODO: make nonlead a variable
+  def __init__(self, nonlead, block):
+    self._nonlead = nonlead
+    self._block = block
   
   def is_thread_dependent(self):
     return True
+  
+  def write_nonlead(self):
+    return f'{self._nonlead}'
 
   def write(self, context: Context):
-    return f'(({context.get_vm().get_lexic().thread_idx_x} % {self._lane}) / {self._stride})'
+    return f'({context.get_vm().get_lexic().thread_idx_x} % {self._block}) + {self._nonlead} * {self._block}'
 
 class LeadLoop:
-  def __init__(self, start, end, step, innerblock, outerblock, unroll=False):
+  def __init__(self, name, start, end, threads, unroll=False):
     self.start = start
     self.end = end
-    self.step = step
     self.unroll = unroll
-    self.innerblock = innerblock
-    self.outerblock = outerblock
-
-    assert self.outerblock % self.innerblock == 0
+    self.threads = threads
+    self.var = name
 
   def write(self, context: Context, writer: Writer, inner):
-    if self.unroll:
-      ivar = writer.varalloc()
-      ovar = writer.varalloc()
-      writer(f'auto {ivar} = {context.get_vm().get_lexic().thread_idx_x} % {self.innerblock};')
-      writer(f'auto {ovar} = {context.get_vm().get_lexic().thread_idx_x} / {self.outerblock};')
-      for value in range(self.start, self.end, self.step):
-        #inner(Immediate(value, FloatingPointType.INT))
-        inner(value)
+    actualstart = self.start // self.threads
+    realstart = (self.start + self.threads - 1) // self.threads
+    realend = (self.end) // self.threads
+    actualend = (self.end + self.threads - 1) // self.threads
+
+    if actualstart >= actualend:
+      pass
+    if actualstart == realend:
+      index = LeadIndex(actualstart, self.threads)
+      with writer.If(f'{context.get_vm().get_lexic().thread_idx_x} >= {self.start - actualstart * self.threads} && {context.get_vm().get_lexic().thread_idx_x} < {self.end - realend * self.threads}'):
+        inner([index])
     else:
-      writer.insert_pragma_unroll()
-      var = writer.varalloc('i')
-      with writer.For(f'int {var}={self.start}; {var} < {self.end}; {var} += {self.step}'):
-        inner(Variable(var, FloatingPointType.INT))
+      if self.start % self.threads != 0:
+        index = LeadIndex(actualstart, self.threads)
+        with writer.If(f'{context.get_vm().get_lexic().thread_idx_x} >= {self.start - actualstart}'):
+          inner([index])
+      if self.unroll:
+        for value in range(realstart, realend):
+          index = LeadIndex(value, self.threads)
+          inner([index])
+      else:
+        # writer.insert_pragma_unroll()
+        var = self.var
+        with writer.For(f'int {var} = {realstart}; {var} < {realend}; {var} += 1'):
+          index = LeadIndex(var, self.threads)
+          inner([index])
+      if self.end % self.threads != 0:
+        index = LeadIndex(actualend - 1, self.threads)
+        with writer.If(f'{context.get_vm().get_lexic().thread_idx_x} < {self.end - realend * self.threads}'):
+          inner([index])
 
 class Loop:
-  def __init__(self, start, end, step=1, unroll=False):
+  def __init__(self, name, start, end, step=1, unroll=False):
     self.start = start
     self.end = end
     self.step = step
     self.unroll = unroll
+    self.var = name
 
   def write(self, context: Context, writer: Writer, inner):
     if self.unroll:
       for value in range(self.start, self.end, self.step):
         #inner(Immediate(value, FloatingPointType.INT))
-        inner(value)
+        inner([value])
     else:
-      writer.insert_pragma_unroll()
-      var = writer.varalloc('i')
+      # writer.insert_pragma_unroll()
+      var = self.var
       with writer.For(f'int {var} = {self.start}; {var} < {self.end}; {var} += {self.step}'):
         #inner(Variable(var, FloatingPointType.INT))
-        inner(var)
+        inner([var])
+
+# TODO: add leading
+class LinearizedLoop:
+  def __init__(self, loops):
+    self.loops = loops
+  
+  def write(self, context: Context, writer: Writer, inner):
+    totalloopsize = 1
+    multiplies = [0] * len(self.loops)
+    loopsize = [0] * len(self.loops)
+    for i, loop in enumerate(self.loops):
+      multiplies[i] = totalloopsize
+      loopsize[i] = (loop.end - loop.start) // loop.step
+      totalloopsize *= loopsize[i]
+    
+    loopvar = 'var'
+    with writer.For(f'int {loopvar} = 0; {loopvar} < {totalloopsize}; ++{loopvar}'):
+      for i, loop in enumerate(self.loops):
+        writer(f'int {loop.var} = (({loopvar} / {multiplies[i]}) % {loopsize[i]}) * {loop.step} + {loop.start};')
+      inner([loop.var for loop in self.loops])
+
+class MultiLoop:
+  pass
+
+class SparseLoop:
+  pass
 
 def write_loops(context: Context, writer: Writer, loops: List[Loop], inner):
   def write_loops_inner(context: Context, writer: Writer, loops: List[Loop], inner, varlist):
@@ -183,7 +236,7 @@ def write_loops(context: Context, writer: Writer, loops: List[Loop], inner):
       with writer.Scope():
         inner(varlist)
     else:
-      inner_next = lambda v: write_loops_inner(context, writer, loops[1:], inner, varlist + [v])
+      inner_next = lambda v: write_loops_inner(context, writer, loops[1:], inner, varlist + v)
       loops[0].write(context, writer, inner_next)
   write_loops_inner(context, writer, loops, inner, [])
 
@@ -197,6 +250,7 @@ class Symbol:
     self.obj = obj
     self.data_view: Union[DataView, None] = None
     self.fptype: Union[FloatingPointType, None] = None
+    self.num_threads = None
     self.lead_dims = [0] # has only an effect for register storage
     self._users = []
   
@@ -221,21 +275,31 @@ class Symbol:
     else:
       return f'{self.name}'
 
-  def access_address(self, context: Context, index: List[Union[str, int, Immediate, Variable]]):
+  def access_address(self, context: Context, index: List[Union[str, int, Immediate, Variable, LeadIndex]]):
     if self.stype == SymbolType.Global or self.stype == SymbolType.Batch or self.stype == SymbolType.SharedMem:
+      writevar = lambda var: f'{var}' if isinstance(var, (str, int, float, np.int64)) else var.write(context)
       # lead_dim + nonlead_dim
       # TODO: really ref self.obj.bbox.lower() here?
       # self.obj.bbox.lower()
-      dimstr = " + ".join(f"({var} - {offset}) * {stride}" for var, offset, stride in zip(index, self.data_view.get_dim_offsets(), self.data_view.get_dim_strides()) if var != 0)
+      writeOffset = lambda i,var,offset,stride: f"({writevar(var)} - {offset}) * {stride}"
+      dimstr = " + ".join(writeOffset(i,var,offset,stride) for i, (var, offset, stride) in enumerate(zip(index, self.data_view.get_dim_offsets(), self.data_view.get_dim_strides())))
       return dimstr if len(dimstr) > 0 else "0"
     if self.stype == SymbolType.Register or self.stype == SymbolType.Scratch:
-      # nonlead_dim only
-      filtered_index = map(lambda x: x[1], filter(lambda x: x[0] not in self.lead_dims, enumerate(index)))
-      dimstr = " + ".join(f"{var} * {stride}" for var, stride in zip(filtered_index, self.data_view.get_dim_strides(self.lead_dims, True)) if var != 0)
+      writevar = lambda var: f'{var}' if isinstance(var, (str, int, float, np.int64)) else var.write_nonlead()
+      writeOffset = lambda i,var,offset,stride: f"({writevar(var)} - {offset}) * {stride}"
+      strides = [0] * self.data_view.rank()
+      stride = 1
+      for i in range(self.data_view.rank()):
+        strides[i] = stride
+        if isinstance(index[i], LeadIndex):
+          stride *= (self.data_view.shape[i] + self.num_threads - 1) // self.num_threads
+        else:
+          stride *= self.data_view.shape[i]
+      dimstr = " + ".join(writeOffset(i,var,offset,stride) for i, (var, offset, stride) in enumerate(zip(index, self.data_view.get_dim_offsets(), strides)))
       return dimstr if len(dimstr) > 0 else "0"
     raise NotImplementedError('Not supposed to be called')
 
-  def access(self, context: Context, index: List[Union[str, int, Immediate, Variable]]):
+  def access(self, context: Context, index: List[Union[str, int, Immediate, Variable, LeadIndex]]):
     if self.stype == SymbolType.Global or self.stype == SymbolType.Batch or self.stype == SymbolType.SharedMem or self.stype == SymbolType.Register or self.stype == SymbolType.Scratch:
       return f'{self.name}[{self.access_address(context, index)}]'
     if self.stype == SymbolType.Scalar:
@@ -243,7 +307,7 @@ class Symbol:
     if self.stype == SymbolType.Data:
       return self.get_fptype(context).literal(self.obj.value(runIdx))
   
-  def encode_values(self, pos, runIdx, writer, context: Context, variable, index: List[Union[str, int]], nontemp):
+  def encode_values(self, pos, runIdx, writer, context: Context, variable, index: List[Union[str, int, Immediate, Variable, LeadIndex]], nontemp):
     if pos == len(index):
       value = self.obj.value(runIdx)
       if value is not None:
@@ -252,15 +316,20 @@ class Symbol:
     else:
       if isinstance(index[pos], int):
         runIdx[pos] = index[pos]
+        self.encode_values(pos + 1, runIdx, writer, context, variable, index, nontemp)
+      elif isinstance(index[pos], Immediate):
+        runIdx[pos] = index[pos]._value
+        self.encode_values(pos + 1, runIdx, writer, context, variable, index, nontemp)
       else:
         if True: # sparse/data
           # TODO: check sparsity pattern here for which ifs are worth it
           for i in range(self.data_view.shape[pos]):
             runIdx[pos] = i
-            with writer.If(f'{index[pos]} == {i}'):
+            strindex = f'{index[pos]}' if isinstance(index[pos], (str, int, float, np.int64)) else index[pos].write(context)
+            with writer.If(f'{strindex} == {i}'):
               self.encode_values(pos + 1, runIdx, writer, context, variable, index, nontemp)
 
-  def load(self, writer, context: Context, variable, index: List[Union[str, int]], nontemp):
+  def load(self, writer, context: Context, variable, index: List[Union[str, int, Immediate, Variable, LeadIndex]], nontemp):
     if self.stype == SymbolType.Data:
       writer(f'{self.get_fptype(context)} {variable} = {self.get_fptype(context).literal(0)};')
       self.encode_values(0, [0] * len(index), writer, context, variable, index, nontemp)
@@ -268,7 +337,7 @@ class Symbol:
       pre_access = self.access(context, index)
       if self.stype == SymbolType.Register or self.stype == SymbolType.Scratch:
         assert len(self.lead_dims) == 1
-        if index[self.lead_dims[0]] != context.get_vm().get_lexic().thread_idx_x:
+        if not isinstance(index[self.lead_dims[0]], LeadIndex):
           access = context.get_vm().get_lexic().broadcast_sync(pre_access, index[self.lead_dims[0]], -1)
         else:
           access = pre_access
@@ -280,7 +349,7 @@ class Symbol:
       else:
         writer(f'{self.get_fptype(context)} {variable} = {access};')
   
-  def store(self, writer, context, variable, index: List[Union[str, int]], nontemp):
+  def store(self, writer, context, variable, index: List[Union[str, int, Immediate, Variable, LeadIndex]], nontemp):
     assert self.stype != SymbolType.Data
 
     access = self.access(context, index)
@@ -291,7 +360,7 @@ class Symbol:
       assign = f'{access} = {variable};'
     if self.stype == SymbolType.Register or self.stype == SymbolType.Scratch:
       assert len(self.lead_dims) == 1
-      if index[self.lead_dims[0]] == context.get_vm().get_lexic().thread_idx_x:
+      if isinstance(index[self.lead_dims[0]], LeadIndex):
         writer(assign)
       else:
         with writer.If(f'{context.get_vm().get_lexic().thread_idx_x} == {index[self.lead_dims[0]]}'):

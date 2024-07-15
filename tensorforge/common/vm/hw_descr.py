@@ -1,15 +1,30 @@
 import yaml
 import os
 
+def parseBytes(string):
+  if isinstance(string, int):
+    return string
+  else:
+    suffix = ''
+    while string[-1].isalpha():
+      suffix = string[-1] + suffix
+      string = string[:-1]
+    count = int(string)
+    if suffix == 'B':
+      return count
+    elif suffix == 'kB':
+      return count * 1024
+    elif suffix == 'MB':
+      return count * 1024**2
 
 class HwDecription:
   def __init__(self, param_table, arch, backend):
     self.vec_unit_length = param_table['vec_unit_length']
     self.hw_fp_word_size = param_table['hw_fp_word_size']
     self.mem_access_align_size = param_table['mem_access_align_size']
-    self.max_local_mem_size_per_block = param_table['max_local_mem_size_per_block']
+    self.max_local_mem_size_per_block = parseBytes(param_table['max_local_mem_size_per_block'])
     self.max_threads_per_block = param_table['max_num_threads']
-    self.max_reg_per_block = param_table['max_reg_per_block']
+    self.max_reg_per_block = parseBytes(param_table['max_reg_per_block'])
     self.max_threads_per_sm = param_table['max_threads_per_sm']
     self.max_block_per_sm = param_table['max_block_per_sm']
     self.manufacturer = param_table['name']

@@ -1,7 +1,7 @@
 from typing import Union
 import math
 from . import ComputeInstruction
-from tensorforge.backend.symbol import SymbolType, Symbol, SymbolView, DataView, Loop, write_loops
+from tensorforge.backend.symbol import SymbolType, Symbol, SymbolView, DataView, Loop, LeadLoop, write_loops, LeadIndex
 from tensorforge.common.exceptions import InternalError
 from tensorforge.backend.writer import Writer
 from tensorforge.common.context import Context
@@ -94,38 +94,11 @@ class MultilinearInstruction(ComputeInstruction):
         self._dest.data_view._bbox._upper = [u for _,u in self._ns]
 
     def gen_code_inner(self, writer: Writer):
-        leading = self._ks[0] if len(self._ns) == 0 else self._ns[0]
-        if self._prefer_align:
-            ifguard = writer.If(self.gen_range_mask_threads(0, leading[1]))
-        else:
-            ifguard = writer.If(self.gen_range_mask_threads(leading[0], leading[1]))
-        
-        with ifguard:
-            self._nonleading_dim(writer)
+        self._nonleading_dim(writer)
         if len(self._ns) == 0:
             self._leading_dim(writer)
-        with ifguard:    
-            if self._prev is not None:
-                self._add_to_prev(writer)
-        
-    
-    def _add_to_prev(self, writer: Writer):
-        loopstack = []
-
-        for i, (dimmin, dimmax) in enumerate(self._ns):
-            if i not in self._lead_dims:
-                writer.insert_pragma_unroll()
-                loop = writer.For(f'int n{i} = {dimmin}; n{i} < {dimmax}; ++n{i}')
-                loop.__enter__()
-                loopstack += [loop]
-
-        self._dest.load(writer, self._context, 'value', [self._vm.get_lexic().thread_idx_x] + [f'n{i+1}' for i,_ in enumerate(self._ns[1:])], False)
-        self._prev.load(writer, self._context, 'oldvalue', [self._vm.get_lexic().thread_idx_x] + [f'n{i+1}' for i,_ in enumerate(self._ns[1:])], False)
-        writer(f'{self._fp_as_str} newvalue = {self._sumOperation.format("value", "oldvalue")};')
-        self._dest.store(writer, self._context, 'newvalue', [self._vm.get_lexic().thread_idx_x] + [f'n{i+1}' for i,_ in enumerate(self._ns[1:])], False)
-
-        for loop in loopstack[::-1]:
-            loop.__exit__(None, None, None)
+        if self._prev is not None:
+            self._add_to_prev(writer)
 
     def _nonleading_dim(self, writer: Writer):
         loopstack = []
@@ -134,77 +107,61 @@ class MultilinearInstruction(ComputeInstruction):
         # Also, postpone multiplications until necessary
 
         # thread_mask: TODO
-
         # writer(f'int n0 = {self._vm.get_lexic().thread_idx_x} % {self._ns[0]};')
         # writer(f'int n1a = {self._vm.get_lexic().thread_idx_x} / {self._ns[0]};')
         # n1i = self._num_threads // self._ns[0]
         # writer(f'int n{i} = dimmin + n1a; n{i} < {dimmax}; n{i} += {n1i}')
 
-        for i, (dimmin, dimmax) in enumerate(self._ks):
-            if -i-1 not in self._lead_dims:
-                writer.insert_pragma_unroll()
-                loop = writer.For(f'int k{i} = {dimmin}; k{i} < {dimmax}; ++k{i}')
-                loop.__enter__()
-                loopstack += [loop]
-
-        for i, (dimmin, dimmax) in enumerate(self._ns):
-            if i not in self._lead_dims:
-                writer.insert_pragma_unroll()
-                loop = writer.For(f'int n{i} = {dimmin}; n{i} < {dimmax}; ++n{i}')
-                loop.__enter__()
-                loopstack += [loop]
-
-        for i, op in enumerate(self._ops):
-            op.symbol.load(writer, self._context, f'data{i}', [self._vm.get_lexic().thread_idx_x if nk == 'n0' else nk for nk in self._opdim_to_nks[i]], False)
-            if i > 0:
-                writer(f'{self._fp_as_str} prod{i} = {self._productOperation.format(f"prod{i-1}", f"data{i}")};')
-            else:
-                writer(f'{self._fp_as_str} prod{i} = data{i};')
-        if len(self._ops) > 0:
-            self._dest.load(writer, self._context, 'value', [self._vm.get_lexic().thread_idx_x] + [f'n{i+1}' for i,_ in enumerate(self._ns[1:])], False)
-            writer(f'{self._fp_as_str} newvalue = {self._sumOperation.format("value", f"prod{len(self._ops)-1}")};')
-            self._dest.store(writer, self._context, 'newvalue', [self._vm.get_lexic().thread_idx_x] + [f'n{i+1}' for i,_ in enumerate(self._ns[1:])], False)
-
-        for loop in loopstack[::-1]:
-            loop.__exit__(None, None, None)
-
-    def _nonleading_dim2(self, writer: Writer):
-        loopstack = []
-
-        # TODO: preload values where necessary (i.e. no N in there)
-        # Also, postpone multiplications until necessary
-
-        # thread_mask: TODO
-        # writer(f'int n0 = {self._vm.get_lexic().thread_idx_x} % {self._ns[0]};')
-        # writer(f'int n1a = {self._vm.get_lexic().thread_idx_x} / {self._ns[0]};')
-        # n1i = self._num_threads // self._ns[0]
-        # writer(f'int n{i} = dimmin + n1a; n{i} < {dimmax}; n{i} += {n1i}')
+        matrixK = 1
 
         loopmap = {}
 
+        # TODO: linearize
         for i, (dimmin, dimmax) in enumerate(self._ks):
+            loopmap[f'k{i}'] = len(loopstack)
             if -i-1 not in self._lead_dims:
-                loopmap[f'k{i}'] = len(loopstack)
-                loopstack += [Loop(dimmin, dimmax, 1, unroll=False)]
+                step = matrixK if i == len(self._ks) - 1 else 1
+                loopstack += [Loop(f'k{i}', dimmin, dimmax, step, unroll=False)]
 
         for i, (dimmin, dimmax) in enumerate(self._ns):
+            loopmap[f'n{i}'] = len(loopstack)
             if i not in self._lead_dims:
-                loopmap[f'n{i}'] = len(loopstack)
-                loopstack += [Loop(dimmin, dimmax, 1, unroll=False)]
+                loopstack += [Loop(f'n{i}', dimmin, dimmax, 1, unroll=False)]
+            else:
+                loopstack += [LeadLoop(f'n{i}', dimmin, dimmax, self._num_threads, unroll=False)]
 
         def nonlead_writer(varlist):
 #            for op in enumerate(self._ops):
 #                if op.symbol.
             for i, op in enumerate(self._ops):
-                op.symbol.load(writer, self._context, f'data{i}', [self._vm.get_lexic().thread_idx_x if nk == 'n0' else varlist[loopmap[nk]] for nk in self._opdim_to_nks[i]], False)
+                op.symbol.load(writer, self._context, f'data{i}', [varlist[loopmap[nk]] for nk in self._opdim_to_nks[i]], False)
                 if i > 0:
                     writer(f'{self._fp_as_str} prod{i} = {self._productOperation.format(f"prod{i-1}", f"data{i}")};')
                 else:
                     writer(f'{self._fp_as_str} prod{i} = data{i};')
             if len(self._ops) > 0:
-                self._dest.load(writer, self._context, 'value', [self._vm.get_lexic().thread_idx_x] + [varlist[loopmap[f'n{i+1}']] for i,_ in enumerate(self._ns[1:])], False)
+                self._dest.load(writer, self._context, 'value', [varlist[loopmap[f'n{i}']] for i,_ in enumerate(self._ns)], False)
                 writer(f'{self._fp_as_str} newvalue = {self._sumOperation.format("value", f"prod{len(self._ops)-1}")};')
-                self._dest.store(writer, self._context, 'newvalue', [self._vm.get_lexic().thread_idx_x] + [varlist[loopmap[f'n{i+1}']] for i,_ in enumerate(self._ns[1:])], False)
+                self._dest.store(writer, self._context, 'newvalue', [varlist[loopmap[f'n{i}']] for i,_ in enumerate(self._ns)], False)
+
+        write_loops(self._context, writer, loopstack, nonlead_writer)
+
+    def _add_to_prev(self, writer: Writer):
+        loopstack = []
+        loopmap = {}
+
+        for i, (dimmin, dimmax) in enumerate(self._ns):
+            loopmap[f'n{i}'] = len(loopstack)
+            if i not in self._lead_dims:
+                loopstack += [Loop(f'n{i}', dimmin, dimmax, 1, unroll=False)]
+            else:
+                loopstack += [LeadLoop(f'n{i}', dimmin, dimmax, self._num_threads, unroll=False)]
+
+        def nonlead_writer(varlist):
+            self._dest.load(writer, self._context, 'value', [varlist[loopmap[f'n{i}']] for i,_ in enumerate(self._ns)], False)
+            self._prev.load(writer, self._context, 'oldvalue', [varlist[loopmap[f'n{i}']] for i,_ in enumerate(self._ns)], False)
+            writer(f'{self._fp_as_str} newvalue = {self._sumOperation.format("value", "oldvalue")};')
+            self._dest.store(writer, self._context, 'newvalue', [varlist[loopmap[f'n{i}']] for i,_ in enumerate(self._ns)], False)
 
         write_loops(self._context, writer, loopstack, nonlead_writer)
 

@@ -24,18 +24,22 @@
   max_block_per_sm: 16
 - arch: sm_80
   base: sm_60
-  max_local_mem_size_per_block: 164kB
+  max_local_mem_size_per_block: 163kB
 - arch: sm_86
   base: sm_60
-  max_local_mem_size_per_block: 100kB
+  max_local_mem_size_per_block: 99kB
   max_block_per_sm: 16
   max_threads_per_sm: 1536
+- arch: sm_87
+  max_local_mem_size_per_block: 163kB
+  base: sm_60
 - arch: sm_89
+  max_local_mem_size_per_block: 99kB
   base: sm_60
 - arch: sm_90
   base: sm_60
-  max_local_mem_size_per_block: 228kB
-- arch: gfx906
+  max_local_mem_size_per_block: 227kB
+- arch: gfx900
   vec_unit_length: 64
   max_local_mem_size_per_block: 64kB
   max_num_threads: 1024
@@ -46,10 +50,10 @@
   mem_access_align_size: 32
   shmem_banks: 32
   name: 'amd'
-- arch: gfx900
-  base: gfx906
+- arch: gfx906
+  base: gfx900
 - arch: gfx908
-  base: gfx906
+  base: gfx900
   max_reg_per_block: 512kB
 - arch: gfx90a
   base: gfx908
@@ -61,14 +65,14 @@
   base: gfx90a
 - arch: gfx1010
   vec_unit_length: 32
-  max_local_mem_size_per_block: 64kB
+  max_local_mem_size_per_block: 128kB # assume WGP mode
   max_num_threads: 1024
   max_reg_per_block: 256kB
   max_threads_per_sm: 1280
   max_block_per_sm: 40
   hw_fp_word_size: 4
   mem_access_align_size: 32
-  shmem_banks: 32
+  shmem_banks: 64
   name: 'amd'
 - arch: gfx1030
   base: gfx1010

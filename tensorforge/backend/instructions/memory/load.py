@@ -2,7 +2,7 @@ from typing import Union
 import math
 from tensorforge.common.matrix.tensor import Tensor
 from . import AbstractShrMemWrite, MemoryInstruction
-from tensorforge.backend.symbol import SymbolType, Symbol, DataView
+from tensorforge.backend.symbol import SymbolType, Symbol, DataView, LeadIndex
 from tensorforge.common.exceptions import InternalError
 from tensorforge.backend.writer import Writer
 from tensorforge.common.matrix.boundingbox import BoundingBox
@@ -25,6 +25,16 @@ class GlbToShrLoader(AbstractShrMemWrite):
     self._permute: None = kwargs['permute']
     self._manual_unroll_threshold = 4
 
+    if 'max_load_offset' in kwargs:
+      self._max_load_offset = kwargs['max_load_offset']
+    else:
+      self._max_load_offset = self._num_threads
+    
+    if 'blockwide' in kwargs:
+      self._blockwide = kwargs['blockwide']
+    else:
+      self._blockwide = False
+
     self._check()
     self._lid_dim: Union[int, None] = None
     self._align_shm_volume: Union[int, None] = None
@@ -44,8 +54,19 @@ class GlbToShrLoader(AbstractShrMemWrite):
 
     self._get_bounding_box_dense()
 
+  def set_threadconfig_pre(self, num_threads, mults):
+    if self._blockwide:
+      self._num_threads = num_threads * mults
+
   def _next_size(self, size):
     return _find_next_coprime(size, self._context.get_vm().get_hw_descr().shmem_banks)
+
+  def _linear_idx(self):
+    lexic = self._context.get_vm().get_lexic()
+    if self._blockwide:
+      return f'({lexic.thread_idx_x} + {lexic.thread_idx_y} * {lexic.block_dim_x})'
+    else:
+      return f'{lexic.thread_idx_x}'
 
   def _get_bounding_box_dense(self):
     self._src.data_view = DataView(shape=self._tensor.shape,
@@ -53,17 +74,19 @@ class GlbToShrLoader(AbstractShrMemWrite):
                                    bbox=self._tensor.get_bbox())
 
     src_real_shape = self._tensor.bbox.sizes()
-    dst_bbox = BoundingBox([0] * len(self._tensor.shape), src_real_shape)
+    dst_bbox = self._tensor.get_bbox() # BoundingBox([0] * len(self._tensor.shape), src_real_shape)
     dst_shape = []
     read_shape = []
     loop_indices = []
     offset = 0
     loadsize = 1
     need_transpose = True
+
+    # TODO: remove distinction between tensor shape and real shape
     for i in range(len(src_real_shape)):
-      offset += self._tensor.shape[i] - src_real_shape[i]
-      if offset < self._num_threads:
-        readshape = self._tensor.shape[i]
+      # offset += self._tensor.shape[i] - src_real_shape[i]
+      if offset <= self._max_load_offset:
+        readshape = src_real_shape[i] # self._tensor.shape[i]
       else:
         readshape = src_real_shape[i]
         loop_indices += [i]
@@ -92,30 +115,22 @@ class GlbToShrLoader(AbstractShrMemWrite):
     for dsts in dst_shape:
       self._shm_volume *= dsts
 
-  def gen_code_declare(self, writer: Writer) -> None:
-    writer.new_line()
-    lhs = f'{self._fp_as_str}* {self._vm.get_lexic().restrict_kw} {self._dest.name}'
-    rhs = f'{self._shr_mem.name}[{self._shr_mem_offset}]'
-    writer(f'{lhs} = &{rhs};')
-
   def gen_code_inner(self, writer: Writer) -> None:
     allow_nontemporal = len(self._src.get_user_list()) == 1
 
-    src_offset = 0#self._src.data_view.get_offset()
+    src_bbox = self._src.data_view.get_bbox()
 
     if self._needs_reorder:
-      loops = [writer.For(f'int i{i} = 0; i{i} < {self._dest.data_view.shape[i]}; ++i{i}') for i in range(1, len(self._dest.data_view.shape))]
-      index = [0] * len(self._dest.data_view.shape)
-      for li in self._loop_indices:
-        index[li] = f'i{li}'
-      index[0] = self._vm.get_lexic().thread_idx_x
+      loops = []
+      loops += [LeadLoop('i0', src_bbox.lower()[0], src_bbox.upper()[0], self._num_threads)]
+      for i in range(1, src_bbox.rank()):
+        loops += [Loop(f'i{i}', src_bbox.lower()[i], src_bbox.upper()[i], 1)]
 
-      for loop in loops:
-        loop.__enter__()
-      self._src.load(writer, self._context, 'value', index, allow_nontemporal)
-      self._dest.store(writer, self._context, 'value', index, False)
-      for loop in loops[::-1]:
-        loop.__exit__(None, None, None)
+      def inner(indices):
+        self._src.load(writer, self._context, 'value', indices, allow_nontemporal)
+        self._dest.store(writer, self._context, 'value', indices, False)
+      
+      write_loops(self._context, writer, loops, inner)
     else:
       loops = [writer.For(f'int i{i} = 0; i{i} < {self._dest.data_view.shape[i]}; ++i{i}') for i in self._loop_indices]
 
@@ -123,7 +138,7 @@ class GlbToShrLoader(AbstractShrMemWrite):
         writer.insert_pragma_unroll()
         loop.__enter__()
       
-      index = [0] * len(self._dest.data_view.shape)
+      index = list(self._dest.data_view.get_dim_offsets())
       for li in self._loop_indices:
         index[li] = f'i{li}'
       
@@ -135,35 +150,40 @@ class GlbToShrLoader(AbstractShrMemWrite):
     #if False:
     #  writer('cooperative_groups::wait(cooperative_groups::this_thread_block());')
 
-  def _write_datatransfer(self, writer, src_offset, dst_offset, index, length, nontemporal):
+  def _write_datatransfer(self, writer, src_offset, dst_offset, index, length, nontemporal, linscale=None):
     if not self._use_cuda_memcpy:
       pos = 0
       for vecsize in [1]:
         if src_offset % vecsize == 0:
           num_hops = ((length - pos * self._num_threads) // (self._num_threads * vecsize)) * vecsize
-          self._write_hop(writer, src_offset, dst_offset, index, pos, pos + num_hops, vecsize, nontemporal)
+          self._write_hop(writer, src_offset, dst_offset, index, pos, pos + num_hops, vecsize, nontemporal, linscale)
           pos += num_hops
       rest = length % self._num_threads
       if rest > 0:
-        with writer.If(f'{self._vm.get_lexic().thread_idx_x} < {rest}'):
-          self._write_hop(writer, src_offset, dst_offset, index, pos, pos+1, 1, nontemporal)
+        with writer.If(f'{self._linear_idx()} < {rest}'):
+          self._write_hop(writer, src_offset, dst_offset, index, pos, pos+1, 1, nontemporal, linscale)
     else:
       dest_access_index = self._dest.access_address(self._context, index)
       src_access_index = self._src.access_address(self._context, index)
-      writer(f'cooperative_groups::memcpy_async(cooperative_groups::this_thread_block(), &{self._dest.name}[{dst_offset} + {dest_access_index}], &{self._src.name}[{src_offset} + {src_access_index}], {length * self._dest.get_fptype(self._context).size()});')
+      with writer.If(f'{self._linear_idx()} == 0'):
+        writer(f'cooperative_groups::memcpy_async(cooperative_groups::this_thread_block(), &{self._dest.name}[{dst_offset} + {dest_access_index}], &{self._src.name}[{src_offset} + {src_access_index}], {length * self._dest.get_fptype(self._context).size()});')
 
-  def _write_hop(self, writer, src_offset, dst_offset, index, start, end, increment, nontemporal):
+  def _write_hop(self, writer, src_offset, dst_offset, index, start, end, increment, nontemporal, linscale):
     if end > start:
       if increment > 1:
         vectortype = self._vm.get_lexic().get_fptype(self._dest.get_fptype(self._context), increment)
         typeprefix = f'*({vectortype}*)&'
       else:
         typeprefix = ''
+      if linscale is None:
+        indexwrapper = lambda x: x
+      else:
+        indexwrapper = lambda x: f'({x} / {linscale[0]}) * {linscale[1]} + ({x} % {linscale[0]})'
       if (end - start) / increment > self._manual_unroll_threshold:
         # load using a for-loop
         writer.insert_pragma_unroll()
         with writer.For(f'int i = {start}; i < {end}; i += {increment}'):
-          contiguous_index = f'{increment} * {self._vm.get_lexic().thread_idx_x} + i * {self._num_threads}'
+          contiguous_index = indexwrapper(f'{increment} * {self._linear_idx()} + i * {self._num_threads}')
           dest_access_index = self._dest.access_address(self._context, index)
           src_access_index = self._src.access_address(self._context, index)
           lhs = f'{typeprefix}{self._dest.name}[{dst_offset} + {dest_access_index} + {contiguous_index}]'
@@ -172,7 +192,7 @@ class GlbToShrLoader(AbstractShrMemWrite):
       else:
         # load using manual loop unrolling
         for counter in range(start, end, increment):
-          contiguous_index = f'{increment} * {self._vm.get_lexic().thread_idx_x} + {counter * self._num_threads}'
+          contiguous_index = indexwrapper(f'{increment} * {self._linear_idx()} + {counter * self._num_threads}')
           dest_access_index = self._dest.access_address(self._context, index)
           src_access_index = self._src.access_address(self._context, index)
           lhs = f'{typeprefix}{self._dest.name}[{dst_offset} + {dest_access_index} + {contiguous_index}]'
@@ -243,7 +263,7 @@ class GlbToRegLoader(MemoryInstruction):
     #   raise InternalError('store: `src` and `dest` do not match in size aling dim `0`')
 
     self._dest: Symbol = dest
-    self._src: Symbol = src.clone()
+    self._src: Symbol = src#.clone()
     self._alpha = alpha
     self._beta = beta
     self._num_threads: int = num_threads
@@ -257,21 +277,17 @@ class GlbToRegLoader(MemoryInstruction):
 
     writer(f'// {self}')
     src_bbox = self._src.data_view.get_bbox()
-    with writer.If(self.gen_range_mask_threads(begin=src_bbox.lower()[0], end=src_bbox.upper()[0])):
-      loops = []
-      indices = [self._vm.get_lexic().thread_idx_x]
-      for i in range(1, src_bbox.rank()):
-        writer.insert_pragma_unroll()
-        loop = f'int i{i} = 0; i{i} < {dest_view.shape[i]}; ++i{i}'
-        loops += [writer.For(loop)]
-        loops[-1].__enter__()
-        indices += [f'i{i}']
 
-      self._src.load(writer, self._context, 'value', indices, False)
-      self._dest.store(writer, self._context, 'value', indices, allow_nontemporal)
-      
-      for loop in reversed(loops):
-        loop.__exit__(None, None, None)
+    loops = []
+    loops += [LeadLoop('i0', src_bbox.lower()[0], src_bbox.upper()[0], self._num_threads)]
+    for i in range(1, src_bbox.rank()):
+      loops += [Loop(f'i{i}', src_bbox.lower()[i], src_bbox.upper()[i], 1)]
+
+    def inner(indices):
+      self._src.load(writer, self._context, 'value', indices, allow_nontemporal)
+      self._dest.store(writer, self._context, 'value', indices, False)
+    
+    write_loops(self._context, writer, loops, inner)
 
   def __str__(self) -> str:
     return f'{self._dest.name} = store{{g>r}}({self._src.name});'

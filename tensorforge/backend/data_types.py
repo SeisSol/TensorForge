@@ -3,6 +3,12 @@ class ShrMemObject:
     self.name = name
     self._size_per_mult = size
     self._mults_per_block = mults_per_block
+    self._global_size = 0
+
+  def alloc_global(self, size):
+    startpoint = self._global_size
+    self._global_size += size
+    return startpoint
 
   def set_size_per_mult(self, size):
     self._size_per_mult = size
@@ -15,9 +21,12 @@ class ShrMemObject:
 
   def get_mults_per_block(self):
     return self._mults_per_block
+  
+  def get_global_size(self):
+    return self._global_size
 
   def get_total_size(self):
-    return self._size_per_mult * self._mults_per_block
+    return self._size_per_mult * self._mults_per_block + self._global_size
 
   def get_total_size_as_str(self):
     if self._size_per_mult and self._mults_per_block:
@@ -28,7 +37,6 @@ class ShrMemObject:
   def __str__(self) -> str:
     total_size = self.get_total_size_as_str()
     return f'name {self.name}: total size = {total_size}'
-
 
 class RegMemObject:
   def __init__(self, name, size=None):
