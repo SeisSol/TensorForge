@@ -255,7 +255,7 @@ class Symbol:
     self.stype = stype
     self.obj = obj
     self.data_view: Union[DataView, None] = None
-    self.fptype: Union[FloatingPointType, None] = None
+    self.datatype: Union[FloatingPointType, None] = None
     self.num_threads = None
     self.lead_dims = [0] # has only an effect for register storage
     self._users = []
@@ -263,15 +263,17 @@ class Symbol:
   def clone(self):
     cloned = Symbol(self.name, self.stype, self.obj)
     cloned.data_view = deepcopy(self.data_view)
-    cloned.fptype = self.fptype
+    cloned.datatype = self.datatype
     cloned._users = [user for user in self._users]
     cloned.lead_dims = [ld for ld in self.lead_dims]
     return cloned
 
   def get_fptype(self, context: Context):
     # TODO: make obsolete
-    if self.fptype is not None:
-      return self.fptype
+    if self.datatype is not None:
+      return self.datatype
+    elif self.obj is not None and self.obj.datatype is not None:
+      return self.obj.datatype
     else:
       return context.fp_type
 
