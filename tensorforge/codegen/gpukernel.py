@@ -104,7 +104,6 @@ class GpuKernelGenerator:
       entry_name = op.name()
     else:
       entry = self._get_tensorforge_matrix(tensor=op,
-                                          tensor_variable=op,
                                           shape=[rng.stop for rng in op.memoryLayout.bbox()],
                                           bboxrange=op.memoryLayout.bbox())
       entry_name = op.name
@@ -127,27 +126,28 @@ class GpuKernelGenerator:
       self.make_tensor(dest, can_be_aligned, [i for i in range(len(dest.indices))])
 
   def _add_scalar(self, scalar):
-    tensor = Tensor([], Addressing.SCALAR, alias=scalar.name())
+    tensor = Tensor([], Addressing.SCALAR, alias=scalar.name(), datatype=scalar.datatype)
     self._tmp_matrices[scalar.name()] = tensor # SubTensor(tensor, tensor.bbox)
     return self._tmp_matrices[scalar.name()]
 
-  def _get_tensorforge_matrix(self, tensor, tensor_variable, shape, bboxrange):
-    addr_mode = self._batch_aux.deduce_addresing(tensor)
-    if tensor_variable.is_temporary:
-      if not tensor_variable.name in self._tmp_matrices:
-        raise RuntimeError(f'expected tmp. tensor {tensor_variable.name} to be cached '
+  def _get_tensorforge_matrix(self, tensor, shape, bboxrange):
+    addr_mode = self._batch_aux.deduce_addresing(tensor) if tensor.addressing is None else tensor.addressing
+    if tensor.is_temporary:
+      if not tensor.name in self._tmp_matrices:
+        raise RuntimeError(f'expected tmp. tensor {tensor.name} to be cached '
                            f'while code generation for fused-gemms')
       else:
-        return self._tmp_matrices[tensor_variable.name]
+        return self._tmp_matrices[tensor.name]
 
     return yi.gen_matrix(shape,
                                bboxrange,
                                addressing=addr_mode,
-                               name=tensor_variable.name,
-                               is_tmp=tensor_variable.is_temporary,
+                               name=tensor.name,
+                               is_tmp=tensor.is_temporary,
                                permute=None,
-                               pattern = tensor_variable.eqspp.as_ndarray(),
-                               values = tensor_variable.values)
+                               pattern = tensor.eqspp.as_ndarray(),
+                               values = tensor.values,
+                               datatype = tensor.datatype)
 
   def _gen_tmp_matix(self, ops, target, permute, res_name, can_be_aligned):
     # TODO: ignore scalars here?
@@ -161,7 +161,8 @@ class GpuKernelGenerator:
     offset_name_map = {}
     for name, matrix in self._cache.items():
       if matrix.direction == DataFlowDirection.SOURCE and matrix.addressing != Addressing.SCALAR:
-        ptr_type = f'const {self._arch.typename}{Addressing.addr2ptr_type(matrix.addressing)}'
+        datatype = FloatingPointType.str2enum(self._arch.typename) if matrix.datatype is None else matrix.datatype
+        ptr_type = f'const {datatype}{Addressing.addr2ptr_type(matrix.addressing)}'
         mat_name_map[name] = f'const_cast<{ptr_type}>({name})'
       else:
         mat_name_map[name] = name

@@ -303,8 +303,9 @@ class ScalarVar(Variable):
         self.symbol.store(writer, context, value, [f'n{-i-1}' for i in self.indices], False)
 
 class TempVar(Variable):
-    def __init__(self):
+    def __init__(self, datatype=None):
         self.variable = None
+        self.datatype = datatype
 
     def tensors(self, intensors=True, outtensors=True):
         return []
@@ -326,7 +327,8 @@ class TempVar(Variable):
     
     def declare(self, alloc: VarAlloc, writer: Writer, context: Context):
         self.variable = alloc.alloc()
-        writer(f'{context.fp_as_str()} {self.variable};')
+        datatype = context.fp_type if self.datatype is None else self.datatype
+        writer(f'{datatype} {self.variable};')
     
     def write(self, alloc: VarAlloc, writer: Writer, context: Context):
         assert self.variable is not None

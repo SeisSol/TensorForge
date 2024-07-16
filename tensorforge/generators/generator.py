@@ -377,15 +377,15 @@ class Generator:
     writer.new_line()
 
   def _generate_base_params_list(self, symbol_list, with_types=True, with_defaults=False):
-    fp_as_str = self._context.fp_as_str()
     params = []
     for symbol in symbol_list:
+      datatype = self._context.fp_type if symbol.obj.datatype is None else symbol.obj.datatype
       if symbol.obj.addressing == Addressing.SCALAR:
-        params.extend([f'{fp_as_str} {symbol.name}' if with_types else f'{symbol.name}'])
+        params.extend([f'{datatype} {symbol.name}' if with_types else f'{symbol.name}'])
       else:
         ptr_type = Addressing.addr2ptr_type(symbol.obj.addressing)
         const_modifier = 'const ' if symbol.obj.direction == DataFlowDirection.SOURCE else ''
-        batch_type = f'{const_modifier}{fp_as_str}{ptr_type}' if with_types else ''
+        batch_type = f'{const_modifier}{datatype}{ptr_type}' if with_types else ''
         offset_type = 'unsigned' if with_types else ''
         params.extend([f'{batch_type} {symbol.name}',
                       f'{offset_type} {get_extra_offset_name(symbol)}'])

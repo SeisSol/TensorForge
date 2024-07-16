@@ -225,7 +225,6 @@ class StoreShrMemToGlb(AbstractInstruction):
     
     dest_name = self._dest.name
     src_name = self._src.name
-    precision = self._vm.fp_as_str()
     vec_unit_length = self._vm._hw_descr.vec_unit_length
 
     thread_idx_x = self._vm.get_lexic().thread_idx_x

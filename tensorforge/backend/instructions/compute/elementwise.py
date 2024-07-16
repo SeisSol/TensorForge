@@ -6,6 +6,7 @@ from tensorforge.common.context import Context
 from typing import List
 from tensorforge.generators.optree import Assignment, writeAssignments
 from tensorforge.backend.scopes import Scopes
+from tensorforge.backend.symbol import Loop, LeadLoop, write_loops, LeadIndex
 
 class ElementwiseInstruction(ComputeInstruction):
     def __init__(self,
@@ -49,23 +50,18 @@ class ElementwiseInstruction(ComputeInstruction):
     def _assignment_loop(self, writer: Writer):
         loopstack = []
 
-        if len(self._ks) > 0:
-            writer(f'int n0 = {self._context.get_vm().get_lexic().thread_idx_x};')
         for i, (dimmin, dimmax) in enumerate(self._ks):
             if i not in self._lead_dims:
-                writer.insert_pragma_unroll()
-                loop = writer.For(f'int n{i} = {dimmin}; n{i} < {dimmax}; ++n{i}')
-                loop.__enter__()
-                loopstack += [loop]
+                loopstack += [Loop(f'k{i}', dimmin, dimmax, 1, unroll=False)]
             else:
-                loop = writer.If(f'n{i} >= {dimmin} && n{i} < {dimmax}')
-                loop.__enter__()
-                loopstack += [loop]
+                loopstack += [LeadLoop(f'k{i}', dimmin, dimmax, self._num_threads, unroll=False)]
 
-        writeAssignments(self._assignments, writer, self._context)
-
-        for loop in loopstack[::-1]:
-            loop.__exit__(None, None, None)
+        def inner(varlist):
+            for i,_ in enumerate(self._ks):
+                writer(f'auto n{i} = {varlist[i].write(self._context)};')
+            writeAssignments(self._assignments, writer, self._context)
+        
+        write_loops(self._context, writer, loopstack, inner)
 
     def get_operands(self):
         return [] # TODO: for now
