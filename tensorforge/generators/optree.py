@@ -292,10 +292,8 @@ class ScalarVar(Variable):
         pass
     
     def write(self, alloc: VarAlloc, writer: Writer, context: Context):
-        # TODO: re-enable caching
-        if self.variable is None:
-            self.variable = alloc.alloc()
-            self.symbol.load(writer, context, self.variable, [f'n{-i-1}' for i in self.indices], False)
+        self.variable = alloc.alloc()
+        self.symbol.load(writer, context, self.variable, [f'n{-i-1}' for i in self.indices], False)
         return self.variable
     
     def store(self, alloc: VarAlloc, writer: Writer, context: Context, value: str):
