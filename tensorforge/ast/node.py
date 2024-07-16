@@ -300,8 +300,8 @@ class ScalarRegion(Op):
   def __init__(self, ops, data):
     super().__init__(*ops)
     self.data = data
-    self.indices = ops[0].indices
-    for op in ops[1:]:
+    self.indices = Indices()
+    for op in ops:
       common = self.indices & op.indices
       self.indices = self.indices.merged(op.indices - common)
   

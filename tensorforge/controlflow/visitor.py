@@ -78,6 +78,13 @@ class AST2ControlFlow(Visitor):
   def visit_IndexedTensor(self, node):
     return Variable(node.name(), node.name() in self._writable, self._ml(node), node.eqspp(), node.tensor)
   
+  def visit_ScalarRegion(self, node):
+    # make everything writeable for now
+    for child in node:
+      self.updateWritable(child.name())
+    
+    return self.generic_visit(node)
+
   def _addAction(self, action):
     self._cfg.append(ProgramPoint(action))
 
