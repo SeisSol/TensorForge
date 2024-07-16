@@ -40,6 +40,12 @@ class Addressing(enum.Enum):
            Addressing.PTR_BASED: 'pointer_based',
            Addressing.SCALAR: 'scalar'}
     return map[addr]
+  
+  def __str__(self):
+    return self.addr2str(self)
+  
+  def to_pointer(self):
+    return self.addr2ptr_type(self)
 
 class FloatingPointType(enum.Enum):
   FLOAT = 0

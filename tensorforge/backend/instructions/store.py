@@ -56,7 +56,8 @@ class StoreRegToShr(AbstractShrMemWrite):
   def gen_code(self, writer: Writer) -> None:
     writer.new_line()
     writer(f' // writing to shr mem: from {self._src.name} to {self._dest.name}')
-    lhs = f'{self._fp_as_str}* {self._vm.get_lexic().restrict_kw} {self._dest.name}'
+    datatype = self._context.fp_type if self._src.obj.datatype is None else self._src.obj.datatype
+    lhs = f'{datatype}* {self._vm.get_lexic().restrict_kw} {self._dest.name}'
     rhs = f'&{self._shr_mem.name}[{self._shr_mem_offset}]'
     writer(f'{lhs} = {rhs};')
 
@@ -205,7 +206,6 @@ class StoreShrMemToGlb(AbstractInstruction):
     
     dest_name = self._dest.name
     src_name = self._src.name
-    precision = self._vm.fp_as_str()
     vec_unit_length = self._vm._hw_descr.vec_unit_length
     #nearest_multiple_of_vec_unti_length = round_up_to_nearest_vec_length(n=self._num_threads, vec_length=vec_unit_length)
 

@@ -18,12 +18,13 @@ class IdentifiedType(AbstractType):
   GROUP_INDICES = r'\(({0}(,{0})*)\)'.format(GROUP_INDEX)
   VALID_NAME = r'^{}({})?$'.format(BASE_NAME, GROUP_INDICES)
 
-  def __init__(self, name, namespace=None):
+  def __init__(self, name, namespace=None, datatype=None):
     if not self.isValidName(name):
       raise ValueError('Invalid name (must match regexp {}): {}'.format(self.VALID_NAME, name))
     
     self._name = name
     self.namespace = namespace
+    self.datatype = datatype
   
   def __str__(self):
     return self._name
@@ -68,8 +69,8 @@ class IdentifiedType(AbstractType):
     return hash(self._name)
 
 class Scalar(IdentifiedType):  
-  def __init__(self, name, namespace=None):
-    super().__init__(name, namespace=namespace)
+  def __init__(self, name, namespace=None, datatype=None):
+    super().__init__(name, namespace=namespace, datatype=datatype)
   
   def __hash__(self):
     return hash(self._name)
@@ -81,8 +82,10 @@ class Tensor(IdentifiedType):
                spp=None,
                memoryLayoutClass=DenseMemoryLayout,
                alignStride=False,
-               namespace=None):
-    super().__init__(name, namespace=namespace)
+               namespace=None,
+               datatype=None,
+               addressing=None):
+    super().__init__(name, namespace=namespace, datatype=datatype)
     if not isinstance(shape, tuple):
       raise ValueError('shape must be a tuple')
     
@@ -95,6 +98,7 @@ class Tensor(IdentifiedType):
     self._name = name
     self._shape = shape
     self._values = None
+    self.addressing = addressing
 
     if namespace is None:
       self.namespace = ''

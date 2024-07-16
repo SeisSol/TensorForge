@@ -3,7 +3,7 @@ from ..ast.log import splitByDistance
 import tensorforge
 
 class TensorDescription(object):
-  def __init__(self, name, memoryLayout, eqspp, is_compute_constant=False, is_temporary=False, values=None):
+  def __init__(self, name, memoryLayout, eqspp, is_compute_constant=False, is_temporary=False, values=None, datatype=None, addressing=None):
     """
 
     Args:
@@ -21,6 +21,8 @@ class TensorDescription(object):
     self.is_compute_constant = is_compute_constant
     self.is_temporary = is_temporary
     self.values = values
+    self.datatype = datatype
+    self.addressing = addressing
     BoundingBox(eqspp)
   
   @classmethod
@@ -28,19 +30,23 @@ class TensorDescription(object):
     return cls(name, node.memoryLayout(), node.eqspp())
 
 class IndexedTensorDescription(TensorDescription):
-  def __init__(self, name, indices, memoryLayout, eqspp, is_compute_constant=False, is_temporary=False, values=None):
-    super().__init__(name, memoryLayout, eqspp, is_compute_constant, is_temporary, values)
+  def __init__(self, name, indices, memoryLayout, eqspp, is_compute_constant=False, is_temporary=False, values=None, datatype=None, addressing=None):
+    super().__init__(name, memoryLayout, eqspp, is_compute_constant, is_temporary, values, datatype, addressing)
     self.indices = indices
 
   @classmethod
   def fromNode(cls, var, node):
     is_const = False
     values = None
+    datatype = None
+    addressing = None
     if hasattr(node, 'tensor'):
       is_const = node.tensor.is_compute_constant()
       if is_const:
         values = node.tensor.values()
-    return cls(str(var), node.indices, var.memoryLayout(), node.eqspp(), is_const, var.is_temporary, values)
+      datatype = node.tensor.datatype
+      addressing = node.tensor.addressing
+    return cls(str(var), node.indices, var.memoryLayout(), node.eqspp(), is_const, var.is_temporary, values, datatype, addressing)
 
 def forLoops(cpp, indexNames, ranges, body, pragmaSimd=True, prefix='_', indexNo=None):
   flops = 0
@@ -120,7 +126,8 @@ class BatchedOperationsAux:
     if as_const:
       addressing = self.deduce_addresing(term)
       ptr = self._get_ptr_type(addressing)
-      const_ptr_type = f'const {self.underlying_data_type} {ptr}'
+      datatype = self.underlying_data_type if term.datatype is None else term.datatype
+      const_ptr_type = f'const {datatype} {ptr}'
       return f'const_cast<{const_ptr_type}>({term.name}), {extra_offset}'
     else:
       return f'{term.name}, {extra_offset}'

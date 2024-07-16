@@ -32,7 +32,8 @@ class YatetoInterface:
                        is_tmp,
                        permute,
                        pattern=None,
-                       values=None):
+                       values=None,
+                       datatype=None):
 
     spp = None
     if pattern is not None:
@@ -51,6 +52,7 @@ class YatetoInterface:
                     alias=name,
                     is_tmp=is_tmp,
                     spp=spp,
-                    data=data)
+                    data=data,
+                    datatype=datatype)
     return tensor
     return SubTensor(tensor, chainforge_bbox)

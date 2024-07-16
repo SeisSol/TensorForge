@@ -25,6 +25,8 @@ class GetElementPtr(AbstractInstruction):
       extra_offset = f' + {get_extra_offset_name(self._src)}'
     else:
       extra_offset = ''
+    
+    datatype = self._vm._fp_type if self._src.obj.datatype is None else self._src.obj.datatype
 
     address = ''
     if batch_addressing == Addressing.STRIDED:
@@ -33,7 +35,7 @@ class GetElementPtr(AbstractInstruction):
       address = f'{main_offset} + {sub_offset}{extra_offset}'
       rhs = f'&{self._src.name}[{address}]'
       lhs = 'const ' if self._src.obj.direction == DataFlowDirection.SOURCE else ''
-      lhs += f'{self._vm.fp_as_str()} * const {self._vm.get_lexic().restrict_kw} {self._dest.name}'
+      lhs += f'{datatype} * const {self._vm.get_lexic().restrict_kw} {self._dest.name}'
     elif batch_addressing == Addressing.PTR_BASED:
       main_offset = f'{GeneralLexicon.BATCH_ID_NAME}'
       sub_offset = f'{batch_obj.get_offset_to_first_element()}'
@@ -41,15 +43,15 @@ class GetElementPtr(AbstractInstruction):
       src_suffix = '_ptr' if self._vm.get_lexic()._backend == 'targetdart' else ''
       rhs = f'&{self._src.name}{src_suffix}[{address}]'
       lhs = 'const ' if self._src.obj.direction == DataFlowDirection.SOURCE else ''
-      lhs += f'{self._vm.fp_as_str()} * const {self._vm.get_lexic().restrict_kw} {self._dest.name}'
+      lhs += f'{datatype} * const {self._vm.get_lexic().restrict_kw} {self._dest.name}'
     elif batch_addressing == Addressing.NONE:
       address = f'{batch_obj.get_offset_to_first_element()}{extra_offset}'
       rhs = f'&{self._src.name}[{address}]'
       lhs = 'const ' if self._src.obj.direction == DataFlowDirection.SOURCE else ''
-      lhs += f'{self._vm.fp_as_str()} * const {self._vm.get_lexic().restrict_kw} {self._dest.name}'
+      lhs += f'{datatype} * const {self._vm.get_lexic().restrict_kw} {self._dest.name}'
     elif batch_addressing == Addressing.SCALAR:
       rhs = f'{self._src.name}'
-      lhs = f'{self._vm.fp_as_str()} {self._dest.name}'
+      lhs = f'{datatype} {self._dest.name}'
     else:
       GenerationError(f'unknown addressing of {self._src.name}, given {batch_addressing}')
 

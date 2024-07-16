@@ -162,8 +162,14 @@ class LeadLoop:
       pass
     if actualstart == realend:
       index = LeadIndex(actualstart, self.threads)
-      with writer.If(f'{context.get_vm().get_lexic().thread_idx_x} >= {self.start - actualstart * self.threads} && {context.get_vm().get_lexic().thread_idx_x} < {self.end - realend * self.threads}'):
-        inner([index])
+      startIdx = self.start - actualstart * self.threads
+      endIdx = self.end - realend * self.threads
+      if startIdx > 0:
+        with writer.If(f'{context.get_vm().get_lexic().thread_idx_x} >= {startIdx} && {context.get_vm().get_lexic().thread_idx_x} < {self.end - realend * self.threads}'):
+          inner([index])
+      else:
+        with writer.If(f'{context.get_vm().get_lexic().thread_idx_x} < {self.end - realend * self.threads}'):
+          inner([index])
     else:
       if self.start % self.threads != 0:
         index = LeadIndex(actualstart, self.threads)
@@ -195,14 +201,14 @@ class Loop:
   def write(self, context: Context, writer: Writer, inner):
     if self.unroll:
       for value in range(self.start, self.end, self.step):
-        #inner(Immediate(value, FloatingPointType.INT))
-        inner([value])
+        inner([Immediate(value, FloatingPointType.INT)])
+        #inner([value])
     else:
       # writer.insert_pragma_unroll()
       var = self.var
       with writer.For(f'int {var} = {self.start}; {var} < {self.end}; {var} += {self.step}'):
-        #inner(Variable(var, FloatingPointType.INT))
-        inner([var])
+        inner([Variable(var, FloatingPointType.INT)])
+        #inner([var])
 
 # TODO: add leading
 class LinearizedLoop:

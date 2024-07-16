@@ -123,7 +123,10 @@ class OptimisedKernelGenerator(KernelGenerator):
                  function,
                  tmp_mem_size,
                  is_compute_constant_tensors,
-                 target):
+                 target,
+                 datatypeTensor,
+                 datatypeScalar,
+                 tensorAddressing):
 
       self.nonZeroFlops = nonZeroFlops
       self.hwFlops = hwFlops
@@ -135,6 +138,9 @@ class OptimisedKernelGenerator(KernelGenerator):
       self.tmp_mem_size = tmp_mem_size
       self.is_compute_constant_tensors = is_compute_constant_tensors
       self.target = target
+      self.datatypeTensor = datatypeTensor
+      self.datatypeScalar = datatypeScalar
+      self.tensorAddressing = tensorAddressing
 
     @classmethod
     def _addTensor(cls, tensor, tensors):
@@ -155,11 +161,17 @@ class OptimisedKernelGenerator(KernelGenerator):
     writable = dict()
     is_compute_constant_tensors = dict()
     scalars = collections.OrderedDict()
+    datatypeTensor = dict()
+    datatypeScalar = dict()
+    tensorAddressing = dict()
     for scalar in scalarsP:
       self.KernelOutline._addTensor(scalar, scalars)
+      datatypeScalar[scalar.baseNameWithNamespace()] = scalar.datatype
     for var in variables:
       self.KernelOutline._addTensor(var.tensor, tensors)
       bn = var.tensor.baseNameWithNamespace()
+      datatypeTensor[bn] = var.tensor.datatype
+      tensorAddressing[bn] = var.tensor.addressing
 
       if bn in writable:
         if var.writable:
@@ -197,7 +209,10 @@ class OptimisedKernelGenerator(KernelGenerator):
                               function,
                               tmp_memory,
                               is_compute_constant_tensors,
-                              target)
+                              target,
+                              datatypeTensor,
+                              datatypeScalar,
+                              tensorAddressing)
 
   @classmethod
   def _addFromKO(cls, koEntries, entries):
@@ -207,12 +222,19 @@ class OptimisedKernelGenerator(KernelGenerator):
       else:
         entries[key] = entries[key] | value
     
+  @classmethod
+  def _addFromKO2(cls, koEntries, entries):
+    for key, value in koEntries.items():
+      entries[key] = value
 
   def generate(self, cpp, header, name, kernelOutlines, familyStride=None):
     tensors = collections.OrderedDict()
     prefetch = collections.OrderedDict()
     writable = dict()
     scalars = collections.OrderedDict()
+    datatypeTensor = dict()
+    datatypeScalar = dict()
+    tensorAddressing = dict()
     is_compute_constant_tensors = dict()
     for ko in kernelOutlines:
       if ko:
@@ -221,6 +243,9 @@ class OptimisedKernelGenerator(KernelGenerator):
         self._addFromKO(ko.writable, writable)
         self._addFromKO(ko.prefetch, prefetch)
         self._addFromKO(ko.is_compute_constant_tensors, is_compute_constant_tensors)
+        self._addFromKO2(ko.datatypeTensor, datatypeTensor)
+        self._addFromKO2(ko.datatypeScalar, datatypeScalar)
+        self._addFromKO2(ko.tensorAddressing, tensorAddressing)
 
     target = kernelOutlines[-1].target
     is_same_target = True
@@ -276,10 +301,16 @@ class OptimisedKernelGenerator(KernelGenerator):
 
         header.emptyline()
 
-        def kernelArgs(base_name_with_namespace, groups, writable, is_constant, target):
+        def kernelArgs(base_name_with_namespace, groups, writable, is_constant, datatype, addressing, target):
           prefix, base_name = Tensor.splitBasename(base_name_with_namespace)
-          typ = self._arch.typename
-          ptr_type = '**' if not is_constant and target == 'gpu' else '*'
+          
+          typ = self._arch.typename if datatype is None else str(datatype)
+
+          if addressing is None:
+            ptr_type = '**' if not is_constant and target == 'gpu' else '*'
+          else:
+            ptr_type = addressing.to_pointer()
+
           if not writable:
             typ += ' const'
           if len(next(iter(groups))) > 0:
@@ -289,9 +320,9 @@ class OptimisedKernelGenerator(KernelGenerator):
           else:
             header(f'{typ}{ptr_type} {base_name}{{}};')
         
-        def scalarArgs(base_name_with_namespace, groups):
+        def scalarArgs(base_name_with_namespace, groups, datatype):
           prefix, base_name = Tensor.splitBasename(base_name_with_namespace)
-          typ = self._arch.typename
+          typ = self._arch.typename if datatype is None else str(datatype)
           if len(next(iter(groups))) > 0:
             class_name = f'{prefix}{InitializerGenerator.TENSOR_NAMESPACE}::{base_name}'
             container_type = f'{InitializerGenerator.CONTAINER_CLASS_NAME}<{typ}>'
@@ -301,12 +332,15 @@ class OptimisedKernelGenerator(KernelGenerator):
 
         for baseName, groups in scalars.items():
           scalarArgs(baseName,
-                     groups)
+                     groups,
+                     datatypeScalar[baseName])
         for baseName, groups in tensors.items():
           kernelArgs(baseName,
                      groups,
                      writable[baseName],
                      is_compute_constant_tensors[baseName],
+                     datatypeTensor[baseName],
+                     tensorAddressing[baseName],
                      target)
         header.emptyline()
 
@@ -334,7 +368,7 @@ class OptimisedKernelGenerator(KernelGenerator):
         if len(prefetch) > 0:
           with header.Struct(self.PREFETCHSTRUCT_NAME):
             for baseName, groups in prefetch.items():
-              kernelArgs(baseName, groups, writable=False, is_constant=False, target='any')
+              kernelArgs(baseName, groups, writable=False, is_constant=False, datatype=None, addressing=None, target='any')
           header('{} {};'.format(self.PREFETCHSTRUCT_NAME, self.PREFETCHVAR_NAME))
           header.emptyline()
 

@@ -39,9 +39,10 @@ class ShrMemObject:
     return f'name {self.name}: total size = {total_size}'
 
 class RegMemObject:
-  def __init__(self, name, size=None):
+  def __init__(self, name, size=None, datatype=None):
     self.name = name
     self.size = size
+    self.datatype = datatype
 
   def __str__(self):
     return f'name: {self.name}; size = {self.size}'

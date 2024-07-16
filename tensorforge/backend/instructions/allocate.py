@@ -26,7 +26,8 @@ class RegisterAlloc(AbstractInstruction):
         real_literal = self._vm.get_real_literal()
         init_values = ', '.join([f'{str(self._init_value)}{real_literal}'] * self._dest.obj.size)
         init_values_list = f' = {{{init_values}}}'
-      result = f'{self._context.fp_as_str()} {self._dest.obj.name}[{self._dest.obj.size}]{init_values_list};'
+      datatype = self._context.fp_type if self._dest.obj.datatype is None else self._dest.obj.datatype
+      result = f'{datatype} {self._dest.obj.name}[{self._dest.obj.size}]{init_values_list};'
       writer(result)
 
   def __str__(self) -> str:

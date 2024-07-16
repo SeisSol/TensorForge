@@ -67,6 +67,7 @@ class ElementwiseDescr(OperationDescription):
 
   def get_num_threads(self, context: Context):
     vul = context.get_vm().get_hw_descr().vec_unit_length
+    vul = 64 # FIXME:
     return vul, vul
 
   def get_accumulator_size(self):

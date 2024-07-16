@@ -34,7 +34,8 @@ class AbstractShrMemLoader(AbstractShrMemWrite):
 
   def gen_code(self, writer) -> None:
     writer.new_line()
-    lhs = f'{self._fp_as_str}* {self._vm.get_lexic().restrict_kw} {self._dest.name}'
+    datatype = self._context.fp_type if self._dest.obj.datatype is None else self._dest.obj.datatype
+    lhs = f'{datatype}* {self._vm.get_lexic().restrict_kw} {self._dest.name}'
     rhs = f'{self._shr_mem.name}[{self._shr_mem_offset}]'
     writer(f'{lhs} = &{rhs};')
 
