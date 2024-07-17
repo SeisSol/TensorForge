@@ -1,7 +1,7 @@
 from .abstract_instruction import AbstractInstruction
 from tensorforge.common.vm.vm import VM
 from tensorforge.common.aux import get_extra_offset_name, Addressing
-from tensorforge.common.basic_types import GeneralLexicon, DataFlowDirection
+from tensorforge.common.basic_types import GeneralLexicon, DataFlowDirection, StridedAddressing
 from tensorforge.common.exceptions import GenerationError
 
 class GetElementPtr(AbstractInstruction):
@@ -29,6 +29,13 @@ class GetElementPtr(AbstractInstruction):
     datatype = self._vm._fp_type if self._src.obj.datatype is None else self._src.obj.datatype
 
     address = ''
+    if isinstance(batch_addressing, StridedAddressing):
+      main_offset = f'{GeneralLexicon.BATCH_ID_NAME} * {batch_addressing.stride}'
+      sub_offset = f'{batch_obj.get_offset_to_first_element()}'
+      address = f'{main_offset} + {batch_addressing.offset} + {sub_offset}{extra_offset}'
+      rhs = f'&{self._src.name}[{address}]'
+      lhs = 'const ' if self._src.obj.direction == DataFlowDirection.SOURCE else ''
+      lhs += f'{datatype} * const {self._vm.get_lexic().restrict_kw} {self._dest.name}'
     if batch_addressing == Addressing.STRIDED:
       main_offset = f'{GeneralLexicon.BATCH_ID_NAME} * {batch_obj.get_real_volume()}'
       sub_offset = f'{batch_obj.get_offset_to_first_element()}'

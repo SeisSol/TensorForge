@@ -429,11 +429,12 @@ class OptimisedKernelGenerator(KernelGenerator):
             cpp(f'assert(!std::isnan({base_name}));')
         for base_name_with_namespace, groups in kernelOutline.tensors.items():
           base_name = Tensor.splitBasename(base_name_with_namespace)[-1]
-          if len(next(iter(groups))) > 0:
-            for gis in groups:
-              cpp('assert({}({}) != nullptr);'.format(base_name, ','.join(str(gi) for gi in gis)))
-          else:
-            cpp(f'assert({base_name} != nullptr);')
+          if kernelOutline.tensorAddressing[base_name_with_namespace] is None or kernelOutline.tensorAddressing[base_name_with_namespace].to_pointer() != '':
+            if len(next(iter(groups))) > 0:
+              for gis in groups:
+                cpp('assert({}({}) != nullptr);'.format(base_name, ','.join(str(gi) for gi in gis)))
+            else:
+              cpp(f'assert({base_name} != nullptr);')
 
         if target == 'gpu':
           cpp(f'assert({BatchedOperationsAux.NUM_ELEMENTS_NAME} != 0);')

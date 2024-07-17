@@ -162,7 +162,7 @@ class GpuKernelGenerator:
     for name, matrix in self._cache.items():
       if matrix.direction == DataFlowDirection.SOURCE and matrix.addressing != Addressing.SCALAR:
         datatype = FloatingPointType.str2enum(self._arch.typename) if matrix.datatype is None else matrix.datatype
-        ptr_type = f'const {datatype}{Addressing.addr2ptr_type(matrix.addressing)}'
+        ptr_type = f'const {datatype}{matrix.addressing.to_pointer()}'
         mat_name_map[name] = f'const_cast<{ptr_type}>({name})'
       else:
         mat_name_map[name] = name

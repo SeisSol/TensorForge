@@ -32,11 +32,8 @@ class Tensor:
         else:
             self.bbox = BoundingBox([0] * len(shape), shape)
 
-        if isinstance(addressing, Addressing):
-            self.addressing = addressing
-            self.ptr_type = Addressing.addr2ptr_type(self.addressing)
-        else:
-            raise ValueError(f'Invalid matrix addressing type, given: {type(addressing)}')
+        self.addressing = addressing
+        self.ptr_type = self.addressing.to_pointer()
         
         if self.addressing == Addressing.SCALAR:
             # allow higher-order tensors, if they're effectively a scalar anyways
