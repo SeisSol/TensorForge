@@ -47,6 +47,17 @@ class Addressing(enum.Enum):
   def to_pointer(self):
     return self.addr2ptr_type(self)
 
+class StridedAddressing:
+  def __init__(self, offset, stride=None):
+    self.offset = offset
+    self.stride = stride
+
+  def to_pointer(self):
+    return Addressing.STRIDED.to_pointer()
+  
+  def __req__(self, other):
+    return other == Addressing.STRIDED
+
 class FloatingPointType(enum.Enum):
   FLOAT = 0
   DOUBLE = 1

@@ -383,7 +383,7 @@ class Generator:
       if symbol.obj.addressing == Addressing.SCALAR:
         params.extend([f'{datatype} {symbol.name}' if with_types else f'{symbol.name}'])
       else:
-        ptr_type = Addressing.addr2ptr_type(symbol.obj.addressing)
+        ptr_type = symbol.obj.addressing.to_pointer()
         const_modifier = 'const ' if symbol.obj.direction == DataFlowDirection.SOURCE else ''
         batch_type = f'{const_modifier}{datatype}{ptr_type}' if with_types else ''
         offset_type = 'unsigned' if with_types else ''
