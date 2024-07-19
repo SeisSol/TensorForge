@@ -2,7 +2,7 @@ from tensorforge.common.exceptions import GenerationError
 from tensorforge.common.context import Context
 from tensorforge.common.basic_types import DataFlowDirection, FloatingPointType
 from tensorforge.common.operation import Operation
-from tensorforge.common.matrix.tensor import Tensor
+from tensorforge.common.matrix.tensor import Tensor, SubTensor
 from tensorforge.common.basic_types import Addressing
 from .optree import Assignment
 
@@ -104,7 +104,7 @@ class GemmDescr(MultilinearDescr):
     if alpha == 1.0:
       super(GemmDescr, self).__init__(c, [a, b], [target_a, target_b], [permute_a, permute_b], strict_match, prefer_align)
     else:
-      alpha_tensor = Tensor([], Addressing.SCALAR, data=[alpha] if isinstance(alpha, (float, int)) else None)
+      alpha_tensor = SubTensor(Tensor([], Addressing.SCALAR, data=[alpha] if isinstance(alpha, (float, int)) else None))
       super(GemmDescr, self).__init__(c, [a, b, alpha_tensor], [target_a, target_b, []], [permute_a, permute_b, []], strict_match, prefer_align)
 
 class ForDescr:

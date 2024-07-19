@@ -17,8 +17,8 @@ set(PRECISION "double" CACHE STRING "floating point type: double/single")
 set(PRECISION_OPTIONS "double" "single")
 set_property(CACHE PRECISION PROPERTY STRINGS ${PRECISION_OPTIONS})
 
-set(ARCH "hsw" CACHE STRING "floating point type: double/single")
-set(ARCH_OPTIONS snb hsw skx thunderx2t99 nvidia)
+set(ARCH "snb" CACHE STRING "architecture to run the tests on")
+set(ARCH_OPTIONS snb hsw skx thunderx2t99 nvidia wsm)
 set_property(CACHE ARCH PROPERTY STRINGS ${ARCH_OPTIONS})
 
 # adjust cli arg. for the code gen.
@@ -36,6 +36,17 @@ if (${ARCH} STREQUAL "thunderx2t99")
 endif()
 
 find_package(CxxTest REQUIRED)
+
+# Configuration for local tests if CxxTest Package not found
+# find_path(CXXTEST_INCLUDE_DIR NAMES cxxtest/TestSuite.h PATHS /opt/homebrew/opt/cxxtest/include)
+# find_program(CXXTEST_PYTHON_TESTGEN_EXECUTABLE NAMES cxxtestgen PATHS /opt/homebrew/opt/cxxtest/bin)
+# if(CXXTEST_INCLUDE_DIR)
+#     include_directories(${CXXTEST_INCLUDE_DIR})
+# else()
+#     message(FATAL_ERROR "CxxTest headers not found.")
+# endif()
+
+
 # attach all necessary external libs
 set(CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/cmake" ${CMAKE_MODULE_PATH})
 if (VARIANT STREQUAL "OpenBLAS")
@@ -48,6 +59,7 @@ elseif(VARIANT STREQUAL "LIBXSMM_JIT")
     set(EXTRA_INCLUDES ${LIBXSMM_INCLUDE_DIRS} ${BLAS_INCLUDE_DIRS})
     set(EXTRA_LIBS ${LIBXSMM_LIBRARIES} ${BLAS_LIBRARIES})
 elseif(VARIANT STREQUAL "LIBXSMM")
+    set(CPU_ARCH_FLAGS "-mavx" PARENT_SCOPE)
     find_package(Libxsmm_executable REQUIRED)
 elseif(VARIANT STREQUAL "Eigen")
     find_package(Eigen3 REQUIRED)
@@ -62,7 +74,7 @@ foreach(EXAMPLE ${EXAMPLES})
     set(GENERATED_SRC ${GEN_DIR}/subroutine.cpp
                       ${GEN_DIR}/init.cpp
                       ${GEN_DIR}/kernel.cpp
-                      ${GEN_DIR}/tensor.cpp)
+                      ${GEN_DIR}/tensor.cpp)  
 
     # execute code generator
     add_custom_command(COMMAND
@@ -91,14 +103,25 @@ foreach(EXAMPLE ${EXAMPLES})
     # compile source code
     add_executable(${EXAMPLE}-target ${TEST_RUNNER} ${GENERATED_SRC})
 
+    # set(GENERATED_GPU_SRC ${GEN_DIR}/gpulike_subroutine.cpp)
+    # enable_language(CUDA)
+    # set(CMAKE_CUDA_STANDARD 17)
+    # add_library(${EXAMPLE}-target-gpu SHARED ${GENERATED_GPU_SRC})
+    # target_link_libraries(${EXAMPLE}-target PUBLIC ${EXAMPLE}-target-gpu)
+    # set_target_properties(${EXAMPLE}-target-gpu PROPERTIES POSITION_INDEPENDENT_CODE ON)
+    # set_source_files_properties(${GENERATED_GPU_SRC} PROPERTIES LANGUAGE_CUDA)
+    # set_target_properties(${EXAMPLE}-target-gpu PROPERTIES CUDA_ARCHITECTURES 'sm_60')
+    
     # attach necessary include dirs
     target_include_directories(${EXAMPLE}-target PUBLIC ${CMAKE_SOURCE_DIR}/common
-                                                      ${CMAKE_SOURCE_DIR}/../../include
+                                                      ${CMAKE_SOURCE_DIR}/../../tensorforge/include
                                                       ${GEN_DIR}
                                                       ${EXTRA_INCLUDES}
                                                       ${CXXTEST_INCLUDE_DIRS}
                                                       ${OpenBLAS_INCLUDE_DIRS})
+                                           
     target_link_libraries(${EXAMPLE}-target PUBLIC ${EXTRA_LIBS})
     target_compile_options(${EXAMPLE}-target PUBLIC ${CPU_FLAGS})
     add_test(${EXAMPLE}-test ${EXAMPLE}-target)
 endforeach()
+

@@ -8,12 +8,12 @@ from tensorforge.ast.transformer import DeduceIndices, EquivalentSparsityPattern
 def printEqspp():
   return True
 
-def add(g):
+def add(g, target_input):
   db = parseXMLMatrixFile('seissol_matrices.xml')
   
   Q = Tensor('Q', (8, 20, 15))
   I = Tensor('I', (8, 20, 15))
-  g.add('seissol_stiffness', Q['skp'] <= db.kXiTDivM['lk'] * I['slq'] * db.star['qp'], target = "gpu")
+  g.add('seissol_stiffness', Q['skp'] <= db.kXiTDivM['lk'] * I['slq'] * db.star['qp'], target = target_input)
 
   # Reproduces recursive generation of zero blocks in Cauchy-Kowalevski prodedure,
   # described in "Sustained Petascale Performance of Seismic Simulations with SeisSol on SuperMUC",
@@ -29,5 +29,20 @@ def add(g):
     derivativeSum = DeduceIndices('kp').visit(derivativeSum)
     derivativeSum = EquivalentSparsityPattern().visit(derivativeSum)
     dQ = Tensor('dQ({})'.format(i), dQ_shape, spp=derivativeSum.eqspp())
-    g.add('derivative({})'.format(i), dQ['kp'] <= derivativeSum, target = "gpu")
+    g.add('derivative({})'.format(i), dQ['kp'] <= derivativeSum, target = target_input)
     dQ_prev = dQ
+
+def gemm_cfg(arch, variant):
+  if variant == 'Eigen':
+    return GeneratorCollection([Eigen(arch)])
+  elif variant == 'LIBXSMM':
+    return GeneratorCollection([LIBXSMM(arch)])
+  elif variant == 'LIBXSMM_JIT':
+    return GeneratorCollection([LIBXSMM_JIT(arch)])
+  elif variant == 'OpenBLAS':
+    return GeneratorCollection([OpenBLAS(arch)])
+  elif variant == 'PSpaMM':
+    return GeneratorCollection([PSpaMM(arch)])
+  else:
+    raise ValueError(f'given unsupported variant: '
+                     f'{variant}. Use Eigen, LIBXSMM, LIBXSMM_JIT, or OpenBLAS.')

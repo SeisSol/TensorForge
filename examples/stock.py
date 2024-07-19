@@ -4,11 +4,21 @@ import math
 from tensorforge import *
 
 def gemm_cfg(arch, variant):
-  if variant == 'onlyblas':
-    return GeneratorCollection([MKL(arch)])
-  return GeneratorCollection([LIBXSMM(arch), MKL(arch)])
+  if variant == 'Eigen':
+    return GeneratorCollection([Eigen(arch)])
+  elif variant == 'LIBXSMM':
+    return GeneratorCollection([LIBXSMM(arch)])
+  elif variant == 'LIBXSMM_JIT':
+    return GeneratorCollection([LIBXSMM_JIT(arch)])
+  elif variant == 'OpenBLAS':
+    return GeneratorCollection([OpenBLAS(arch)])
+  elif variant == 'PSpaMM':
+    return GeneratorCollection([PSpaMM(arch)])
+  else:
+    raise ValueError(f'given unsupported variant: '
+                     f'{variant}. Use Eigen, LIBXSMM, LIBXSMM_JIT, or OpenBLAS.')
 
-def add(g):
+def add(g, target_input):
   for ep in range(2,7):
     p = 8*ep
     px = '{}p'.format(p)
@@ -34,11 +44,11 @@ def add(g):
       ZR = Tensor('ZR' + pqx, (q,p))
 
       stock = R['ijk'] <= S['xyz'] * XL['xl'] * XR['li'] * YL['ym'] * YR['mj'] * ZL['zn'] * ZR['nk']
-      g.add('stock' + pqx, stock, target = "gpu")
+      g.add('stock' + pqx, stock, target = target_input)
 
       stock = R['ijk'] <= S['xyz'] * XLT['lx'] * XRT['il'] * YL['ym'] * YR['mj'] * ZL['zn'] * ZR['nk']
-      g.add('stock{}_trans'.format(pqx), stock, target = "gpu")
+      g.add('stock{}_trans'.format(pqx), stock, target = target_input)
 
       stock = R['ijk'] <= S['xyz'] * XLTP['lx'] * XRTP['il'] * YL['ym'] * YR['mj'] * ZL['zn'] * ZR['nk']
-      g.add('stock{}_trans_pad'.format(pqx), stock, target = "gpu")
+      g.add('stock{}_trans_pad'.format(pqx), stock, target = target_input)
 
