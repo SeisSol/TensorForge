@@ -142,7 +142,7 @@ class CudaLexic(Lexic):
     elif op == Operation.CBRT:
       return f'cbrt{fpsuffix}({value1})'
     elif op == Operation.POW:
-      return f'pow{fpsuffix}({value1})'
+      return f'pow{fpsuffix}({value1}, {value2})'
     elif op == Operation.SIN:
       return f'sin{fpsuffix}({value1})' # has __sinf
     elif op == Operation.COS:
