@@ -28,6 +28,9 @@ class AbstractInstruction(ABC):
   def __str__(self) -> str:
     pass
 
+  def set_threadconfig_pre(self, num_threads, mults):
+    pass
+
   def gen_mask_threads(self, num_threads) -> str:
     return f'{self._vm.get_lexic().thread_idx_x} < {num_threads}'
 
