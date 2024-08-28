@@ -17,6 +17,9 @@ class TargetLexic(Lexic):
     self.stream_type = "int"
     self.restrict_kw = "__restrict"
 
+  def multifile(self):
+    return False
+
   def get_launch_code(self, func_name, grid, block, stream, func_params, shmem):
     return f"{func_name}({stream}, {grid}[0], {block}[0], {block}[1], {func_params})"
 
@@ -203,6 +206,8 @@ class TargetLexic(Lexic):
       return f'({value1} * {value2})'
     elif op == Operation.DIV:
       return f'({value1} / {value2})'
+    elif op == Operation.RCP:
+      return f'(1 / {value1})'
     elif op == Operation.ABS:
       return f'std::fabs{fpsuffix}({value1})'
     elif op == Operation.NEG:
@@ -211,6 +216,8 @@ class TargetLexic(Lexic):
       return f'std::min({value1}, {value2})'
     elif op == Operation.MAX:
       return f'std::max({value1}, {value2})'
+    elif op == Operation.POW:
+      return f'std::pow({value1}, {value2})'
     elif op == Operation.EXP:
       return f'std::exp({value1})' # has __expf
     elif op == Operation.LOG:
@@ -267,3 +274,5 @@ class TargetLexic(Lexic):
       return f'({value1} == {value2})'
     elif op == Operation.NEQ:
       return f'({value1} != {value2})'
+    
+    raise NotImplementedError()

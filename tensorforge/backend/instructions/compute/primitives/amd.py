@@ -1,4 +1,5 @@
 from tensorforge.common.basic_types import FloatingPointType
+from tensorforge.backend.writer import Writer
 
 # TODO: for RDNA, wave-64, use __builtin_amdgcn_permlane16
 

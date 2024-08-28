@@ -204,8 +204,14 @@ class Generator:
 
       self._num_threads = max(num_threads, self._num_threads)
       self._num_active_threads = max(num_active_threads, self._num_active_threads)
-    
-    # self._num_threads = 32
+
+    compress = True
+    for gemm_descr in self.descr_list:
+      if isinstance(gemm_descr, ElementwiseDescr):
+        compress = False
+        break
+    if compress:
+      self._num_threads = 32
 
   def _deduce_accumulator_size(self):
     for descr in self.descr_list:

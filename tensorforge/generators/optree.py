@@ -657,9 +657,13 @@ def mul(x: BaseType, y: BaseType):
     if isinstance(xconv, Immediate):
         if xconv.value == 1 or xconv.value == 1.0:
             return yconv
+        if xconv.value == -1 or xconv.value == -1.0:
+            return neg(yconv)
     if isinstance(yconv, Immediate):
         if yconv.value == 1 or yconv.value == 1.0:
             return xconv
+        if yconv.value == -1 or yconv.value == -1.0:
+            return neg(xconv)
     return LexicOpNode([xconv, yconv], Operation.MUL)
 
 def div(x: BaseType, y: BaseType):
@@ -669,9 +673,13 @@ def div(x: BaseType, y: BaseType):
     if isinstance(xconv, Immediate):
         if xconv.value == 1 or xconv.value == 1.0:
             return LexicOpNode([yconv], Operation.RCP)
+        if xconv.value == -1 or xconv.value == -1.0:
+            return LexicOpNode([neg(yconv)], Operation.RCP)
     if isinstance(yconv, Immediate):
         if yconv.value == 1 or yconv.value == 1.0:
             return xconv
+        if yconv.value == -1 or yconv.value == -1.0:
+            return neg(xconv)
     return LexicOpNode([xconv, yconv], Operation.DIV)
 
 def mod(x: BaseType, y: BaseType):

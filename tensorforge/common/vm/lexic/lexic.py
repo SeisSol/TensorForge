@@ -20,6 +20,10 @@ class Lexic(ABC):
     self.restrict_kw = None
 
   @abstractmethod
+  def multifile(self):
+    pass
+
+  @abstractmethod
   def get_launch_code(self, func_name, grid, block, stream, func_params):
     pass
 
@@ -54,14 +58,6 @@ class Lexic(ABC):
   @abstractmethod
   def get_sub_group_id(self, sub_group_size):
     return None
-
-  @abstractmethod
-  def active_sub_group_mask(self):
-    return None
-
-  @abstractmethod
-  def broadcast_sync(self, variable, lane, mask):
-    pass
 
   @abstractmethod
   def kernel_range_object(self, name, values):

@@ -212,8 +212,9 @@ class Loop:
 
 # TODO: add leading
 class LinearizedLoop:
-  def __init__(self, loops):
+  def __init__(self, loops, blocksize = 1):
     self.loops = loops
+    self.blocksize = blocksize
   
   def write(self, context: Context, writer: Writer, inner):
     totalloopsize = 1
@@ -225,10 +226,16 @@ class LinearizedLoop:
       totalloopsize *= loopsize[i]
     
     loopvar = 'var'
-    with writer.For(f'int {loopvar} = 0; {loopvar} < {totalloopsize}; ++{loopvar}'):
+    loopvar2 = 'var2'
+    # writer.insert_pragma_unroll()
+    with writer.For(f'int {loopvar} = 0; {loopvar} < {totalloopsize}; {loopvar} += {self.blocksize}'):
+      if self.blocksize == 1:
+        writer(f'int {loopvar2} = {loopvar};')
+      else:
+        writer(f'int {loopvar2} = {loopvar} + ({context.get_vm().get_lexic().thread_idx_x} % {self.blocksize});')
       for i, loop in enumerate(self.loops):
-        writer(f'int {loop.var} = (({loopvar} / {multiplies[i]}) % {loopsize[i]}) * {loop.step} + {loop.start};')
-      inner([loop.var for loop in self.loops])
+        writer(f'int {loop.var} = (({loopvar2} / {multiplies[i]}) % {loopsize[i]}) * {loop.step} + {loop.start};')
+      inner([Variable(loop.var, FloatingPointType.INT) for loop in self.loops])
 
 class MultiLoop:
   pass
