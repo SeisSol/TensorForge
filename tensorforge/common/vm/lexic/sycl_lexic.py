@@ -18,6 +18,9 @@ class SyclLexic(Lexic):
     self.stream_type = "cl::sycl::queue"
     self.restrict_kw = "__restrict__"
 
+  def multifile(self):
+    return False
+
   def get_launch_size(self, func_name, block):
     return f"""static int gridsize = -1;
     if (gridsize <= 0) {{
@@ -167,3 +170,5 @@ class SyclLexic(Lexic):
       return f'({value1} == {value2})'
     elif op == Operation.NEQ:
       return f'({value1} != {value2})'
+    
+    raise NotImplementedError()

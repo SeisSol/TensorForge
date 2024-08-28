@@ -34,6 +34,11 @@ class GlbToShrLoader(AbstractShrMemWrite):
       self._blockwide = kwargs['blockwide']
     else:
       self._blockwide = False
+    
+    if 'alignment' in kwargs:
+      self._alignment = kwargs['alignment']
+    else:
+      self._alignment = 1
 
     self._check()
     self._lid_dim: Union[int, None] = None
@@ -96,6 +101,11 @@ class GlbToShrLoader(AbstractShrMemWrite):
         dstshape = self._next_size(readshape)
       else:
         dstshape = readshape
+      
+      # TODO: move somewhere else?
+      if i == 0:
+        dstshape = ((dstshape + self._alignment - 1) // self._alignment) * self._alignment
+
       dst_shape += [dstshape]
       read_shape += [readshape]
       if len(loop_indices) <= 1:
@@ -108,6 +118,9 @@ class GlbToShrLoader(AbstractShrMemWrite):
     self._dest.data_view = DataView(shape=dst_shape,
                                     permute=None,
                                     bbox=dst_bbox)
+
+    self._read_shape = read_shape
+    self._dst_shape = dst_shape
 
     self._loop_indices = loop_indices
     self._loadsize = loadsize
@@ -142,7 +155,11 @@ class GlbToShrLoader(AbstractShrMemWrite):
       for li in self._loop_indices:
         index[li] = f'i{li}'
       
-      self._write_datatransfer(writer, 0, 0, index, self._loadsize, allow_nontemporal)
+      linscale = None
+      if self._dst_shape[0] != self._read_shape[0]:
+        linscale = (self._read_shape[0], self._dst_shape[0])
+      
+      self._write_datatransfer(writer, 0, 0, index, self._loadsize, allow_nontemporal, linscale)
 
       for loop in loops[::-1]:
         loop.__exit__(None, None, None)
@@ -178,7 +195,7 @@ class GlbToShrLoader(AbstractShrMemWrite):
       if linscale is None:
         indexwrapper = lambda x: x
       else:
-        indexwrapper = lambda x: f'({x} / {linscale[0]}) * {linscale[1]} + ({x} % {linscale[0]})'
+        indexwrapper = lambda x: f'((({x}) / {linscale[0]}) * {linscale[1]} + (({x}) % {linscale[0]}))'
       if (end - start) / increment > self._manual_unroll_threshold:
         # load using a for-loop
         writer.insert_pragma_unroll()

@@ -15,6 +15,9 @@ class OpenCLLexic(Lexic):
     self.stream_type = "clqueue_t"
     self.restrict_kw = "__restrict__"
 
+  def multifile(self):
+    return True
+
   def get_launch_size(self, func_name, block):
     return None
 

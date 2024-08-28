@@ -15,6 +15,9 @@ class HipLexic(CudaLexic):
     self.grid_dim_x = "gridDim.x"
     self.stream_type = "hipStream_t"
 
+  def multifile(self):
+    return False
+
   def get_launch_size(self, func_name, block, shmem):
     return f"""static int gridsize = -1;
     if (gridsize <= 0) {{

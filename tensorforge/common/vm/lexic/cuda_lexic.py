@@ -17,6 +17,9 @@ class CudaLexic(Lexic):
     self.stream_type = "cudaStream_t"
     self.restrict_kw = "__restrict__"
 
+  def multifile(self):
+    return False
+
   def get_launch_size(self, func_name, block, shmem):
     return f"""static int gridsize = -1;
     if (gridsize <= 0) {{
@@ -120,6 +123,8 @@ class CudaLexic(Lexic):
       return f'({value1} * {value2})'
     elif op == Operation.DIV:
       return f'({value1} / {value2})'
+    elif op == Operation.RCP:
+      return f'(1 / {value1})'
     elif op == Operation.MIN:
       return f'fmin{fpsuffix}({value1}, {value2})'
     elif op == Operation.MAX:
@@ -193,6 +198,8 @@ class CudaLexic(Lexic):
       return f'({value1} == {value2})'
     elif op == Operation.NEQ:
       return f'({value1} != {value2})'
+    
+    raise NotImplementedError()
 
   def reduction(self, optype, fptype, blocks):
     if fptype == FloatingPointType.BOOL and blocks == [2,4,8,16,32]:
