@@ -43,6 +43,7 @@ class MultilinearBuilder(AbstractBuilder):
     self._dest_regs = None
 
     self._use_registers_always = False
+    self._temporary_registers = False
     self._deferred_stores = {}
     self._temporaries = {}
 
@@ -211,15 +212,18 @@ class MultilinearBuilder(AbstractBuilder):
         raise InternalError(f'gemm-buider: `res` is not in scopes and thus must be tmp')
 
       dest_symbol = Symbol(name=self._name_shr_reg(),
-                           stype=SymbolType.SharedMem,
-                           obj=self._dest_obj.tensor)
+                            stype=SymbolType.SharedMem,
+                            obj=self._dest_obj.tensor)
 
-      self._scopes.add_symbol(dest_symbol)
-      self._instructions.append(StoreRegToShr(context=self._context,
-                                              src=self._temp_regs,
-                                              dest=dest_symbol,
-                                              shr_mem=self._shr_mem,
-                                              num_threads=self._num_threads))
+      if self._temporary_registers:
+        self._deferred_stores[dest_symbol.name] = (self._temp_regs, dest_symbol)
+      else:
+        self._scopes.add_symbol(dest_symbol)
+        self._instructions.append(StoreRegToShr(context=self._context,
+                                                src=self._temp_regs,
+                                                dest=dest_symbol,
+                                                shr_mem=self._shr_mem,
+                                                num_threads=self._num_threads))
 
   def _insert_sync_block(self):
     self._instructions.append(SyncThreads(context=self._context,
@@ -233,7 +237,8 @@ class MultilinearBuilder(AbstractBuilder):
   def build_epilogue(self):
     self._reset()
     for store_regs, store_global in self._deferred_stores.values():
-      self._instructions.append(StoreRegToGlb(context=self._context,
+      if store_global.stype == SymbolType.Global:
+        self._instructions.append(StoreRegToGlb(context=self._context,
                                                   src=store_regs,
                                                   dest=store_global,
                                                   alpha=1,#self._descr.alpha,

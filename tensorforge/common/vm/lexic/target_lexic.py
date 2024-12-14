@@ -11,6 +11,7 @@ class TargetLexic(Lexic):
     self.thread_idx_z = "tz"
     self.block_idx_x = "bx"
     self.block_idx_z = "bz"
+    self.block_dim_x = "tX"
     self.block_dim_y = "tY"
     self.block_dim_z = "tZ"
     self.grid_dim_x = "omp_get_num_teams()"
@@ -20,10 +21,19 @@ class TargetLexic(Lexic):
   def multifile(self):
     return False
 
+  def get_launch_size(self, func_name, block, shmem):
+    return ''
+
+  def set_shmem_size(self, func_name, shmem):
+    return ''
+
   def get_launch_code(self, func_name, grid, block, stream, func_params, shmem):
     return f"{func_name}({stream}, {grid}[0], {block}[0], {block}[1], {func_params})"
 
   def declare_shared_memory_inline(self, name, precision, size, alignment):
+    return ""
+  
+  def declare_shared_memory(self, name, precision):
     return ""
 
   def kernel_definition(self, file, kernel_bounds, base_name, params, precision=None, total_shared_mem_size=None, global_symbols=None):
@@ -106,7 +116,7 @@ class TargetLexic(Lexic):
             file(f'#pragma omp target nowait depend(inout: streamobj[0]) map(to:bX) map(from: {", ".join(f"{symbol.name}_ptr[0:bX]" for symbol in batched_symbols_in + batched_symbols_inout)}) is_device_ptr({", ".join(symbol.name for symbol in batched_symbols_in + batched_symbols_inout)}) {device}')
             with file.Scope():
               for symbol in batched_symbols_in + batched_symbols_inout:
-                file('#pragma omp loop nowait collapse(2)')
+                file('#pragma omp loop collapse(2)')
                 with file.For(f'int j = 0; j < bX; ++j'):
                   with file.For(f'int i = 0; i < {symbol.obj.get_real_volume()}; ++i'):
                     file(f'{symbol.name}_ptr[j][i] = {symbol.name}[j][i];')
@@ -115,11 +125,13 @@ class TargetLexic(Lexic):
               file(f'#pragma omp target nowait depend(inout: streamobj[0]) map(to:bX) map(to: {", ".join(f"{symbol.name}_ptr[0:bX]" for symbol in batched_symbols_out + batched_symbols_inout)}) is_device_ptr({", ".join(symbol.name for symbol in batched_symbols_out + batched_symbols_inout)}) {device}')
               with file.Scope():
                 for symbol in batched_symbols_out + batched_symbols_inout:
-                  file('#pragma omp loop nowait collapse(2)')
+                  file('#pragma omp loop collapse(2)')
                   with file.For(f'int j = 0; j < bX; ++j'):
                     with file.For(f'int i = 0; i < {symbol.obj.get_real_volume()}; ++i'):
                       file(f'{symbol.name}[j][i] = {symbol.name}_ptr[j][i];')
             self.epilogue = epilogue
+          else:
+            self.epilogue = lambda: None
           
           batched_symbols_out_str = f'map(from: {", ".join(f"{symbol.name}_ptr[0:bX]" for symbol in batched_symbols_out)})' if len(batched_symbols_out) > 0 else ''
           batched_symbols_in_str = f'map(to: {", ".join(f"{symbol.name}_ptr[0:bX]" for symbol in batched_symbols_in)})' if len(batched_symbols_in) > 0 else ''
@@ -196,6 +208,8 @@ class TargetLexic(Lexic):
     return f'__attribute__ ((vector_size (sizeof({fptype}) * {length}))) {fptype}'
 
   def get_operation(self, op: Operation, fptype, value1, value2):
+    fpsuffix = 'f' if fptype == FloatingPointType.FLOAT else ''
+    fpprefix = 'f' if fptype == FloatingPointType.FLOAT else 'd'
     if op == Operation.COPY:
       return value1
     elif op == Operation.ADD:
