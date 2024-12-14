@@ -39,6 +39,9 @@
 - arch: sm_90
   base: sm_60
   max_local_mem_size_per_block: 227kB
+- arch: sm_100
+  base: sm_60
+  max_local_mem_size_per_block: 227kB
 - arch: gfx900
   vec_unit_length: 64
   max_local_mem_size_per_block: 64kB
@@ -63,6 +66,9 @@
   base: gfx90a
 - arch: gfx942
   base: gfx90a
+- arch: gfx950
+  base: gfx90a
+  max_local_mem_size_per_block: 160kB
 - arch: gfx1010
   vec_unit_length: 32
   max_local_mem_size_per_block: 128kB # assume WGP mode

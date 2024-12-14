@@ -23,7 +23,7 @@ class ShrMemOpt(AbstractOptStage):
     self._check_regions()
 
     max_memory, mem_per_region = self._compute_total_shr_mem_size()
-    self._shr_mem_obj.set_size_per_mult(max_memory)
+    self._shr_mem_obj.set_size_per_mult(max_memory) # TODO:
 
     offsets = self._compute_start_addresses(mem_per_region)
     self._assign_offsets(offsets)
