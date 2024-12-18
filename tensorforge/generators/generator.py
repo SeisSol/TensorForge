@@ -40,9 +40,10 @@ class RegmaxBlockPolicy(AbstractThreadBlockPolicy):
     super().__init__(context, global_mem, mem_size_per_mult, num_threads)
 
   def get_num_mults_per_block(self):
+    return 1
     # the //2 is a heuristic
     # self._max_threads // self._num_threads // 2
-    max_thread_mults = 256 // self._num_threads
+    # max_thread_mults = 256 // self._num_threads
     if self._mem_per_mult == 0:
       return max_thread_mults
     else:
@@ -210,8 +211,8 @@ class Generator:
       if isinstance(gemm_descr, ElementwiseDescr):
         compress = False
         break
-    if compress:
-      self._num_threads = 32
+    # if compress:
+    #   self._num_threads = 32
 
   def _deduce_accumulator_size(self):
     for descr in self.descr_list:
@@ -232,13 +233,13 @@ class Generator:
       builder = GetElementPtrBuilder(self._context, self._scopes)
       for symbol in self._scopes.get_global_scope().values():
         if symbol.obj.addressing == Addressing.SCALAR or (symbol.obj.addressing == Addressing.NONE and symbol.stype == SymbolType.Data):
-          builder.build(symbol)
+          builder.build(symbol, symbol.obj.addressing == Addressing.PTR_BASED)
           self._global_ir.extend(builder.get_instructions())
 
       builder = GlobalLoaderBuilder(self._context, self._scopes, self._shr_mem_obj, self._num_threads)
       for symbol in self._scopes.get_global_scope().values():
         if symbol.obj.addressing == Addressing.NONE and symbol.stype != SymbolType.Data:
-          builder.build(symbol)
+          builder.build(symbol, symbol.obj.addressing == Addressing.PTR_BASED)
           self._global_ir.extend(builder.get_instructions())
       
       self._global_ir.append(SyncBlock(self._context, self._num_threads))
@@ -249,7 +250,7 @@ class Generator:
     self._scopes.add_scope()
     for symbol in self._scopes.get_global_scope().values():
       if not self._preload_globals or not (symbol.obj.addressing == Addressing.NONE or symbol.obj.addressing == Addressing.SCALAR):
-        builder.build(symbol)
+        builder.build(symbol, symbol.obj.addressing == Addressing.PTR_BASED)
         self._ir.extend(builder.get_instructions())
 
     self._scopes.add_scope()
@@ -474,7 +475,7 @@ class Generator:
     for symbol in symbols:
       if symbol.obj.alias in mat_name_map:
         args.append(mat_name_map[symbol.obj.alias])
-        if symbol.obj.addressing != Addressing.SCALAR:
+        if symbol.obj.addressing == Addressing.PTR_BASED:
           args.append(offset_name_map[symbol.obj.alias])
 
     # add num. elements
@@ -499,7 +500,8 @@ class Generator:
     return f'{GeneralLexicon.BATCH_ID_NAME} < {GeneralLexicon.NUM_ELEMENTS}'
 
   def _get_flag_guard(self, writer):
-    writer(f'bool isFlagsProvided = ({GeneralLexicon.FLAGS_NAME} != nullptr);')
-    flag_value = f'static_cast<bool>({GeneralLexicon.FLAGS_NAME}[{GeneralLexicon.BATCH_ID_NAME}])'
-    writer(f'bool allowed = isFlagsProvided ? {flag_value} : true;')
+    writer(f'bool allowed = true;')
+    # with writer.If('{GeneralLexicon.FLAGS_NAME} != nullptr'):
+    #   flag_value = f'static_cast<bool>({GeneralLexicon.FLAGS_NAME}[{GeneralLexicon.BATCH_ID_NAME}])'
+    #   writer(f'allowed = {flag_value};')
     return 'allowed'

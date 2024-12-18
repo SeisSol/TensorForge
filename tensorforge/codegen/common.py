@@ -119,15 +119,15 @@ class BatchedOperationsAux:
 
   def deduce_arg(self, term, as_const=False):
     if term.is_compute_constant or term.is_temporary:
-      extra_offset = '0'
+      extra_offset = ''
     else:
-      extra_offset = f'{self.EXTRA_OFFSET_NAME}_{term.name}'
+      extra_offset = f', {self.EXTRA_OFFSET_NAME}_{term.name}'
 
     if as_const:
       addressing = self.deduce_addresing(term)
       ptr = self._get_ptr_type(addressing)
       datatype = self.underlying_data_type if term.datatype is None else term.datatype
       const_ptr_type = f'const {datatype} {ptr}'
-      return f'const_cast<{const_ptr_type}>({term.name}), {extra_offset}'
+      return f'const_cast<{const_ptr_type}>({term.name}){extra_offset}'
     else:
-      return f'{term.name}, {extra_offset}'
+      return f'{term.name}{extra_offset}'
