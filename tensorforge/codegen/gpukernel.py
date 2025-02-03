@@ -211,6 +211,16 @@ class TensorForgeWriter(GpuRoutineGenerator):
 
     return self._generator.get_header()
 
+class GpuKernelRoutineGenerator:
+  def __init__(self, arch):
+    self.generator = GpuKernelGenerator(arch)
+
+  def generate(self, cpp, cache):
+    self.generator.generate(cpp, cache)
+
+  def add_operation(self, dest, ops, target, permute, add):
+    self.generator.add_operation(dest, ops, target, permute, add)
+
 
 class GpuKernelFactory(KernelFactory):
   def __init__(self, cpp, arch, target):
