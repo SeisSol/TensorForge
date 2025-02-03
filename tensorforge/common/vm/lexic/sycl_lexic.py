@@ -22,17 +22,19 @@ class SyclLexic(Lexic):
     return False
 
   def get_launch_size(self, func_name, block):
-    return f"""static int gridsize = -1;
-    if (gridsize <= 0) {{
-      cudaOccupancyMaxActiveBlocksPerMultiprocessor(&gridsize, {func_name}, {block}.x * {block}.y * {block}.z, 0);
-    }}
-    """
+    return f"""""" # TODO:
+  
+  def set_shmem_size(self, func_name, shmem):
+    return ''
 
   def get_launch_code(self, func_name, grid, block, stream, func_params, shmem):
     return f"{func_name}({stream}, {grid}, {block}, {func_params})"
 
   def declare_shared_memory_inline(self, name, precision, size, alignment):
-    return None
+    return ""
+  
+  def declare_shared_memory(self, name, precision):
+    return ""
 
   def kernel_definition(self, file, kernel_bounds, base_name, params, precision=None, total_shared_mem_size=None, global_symbols=None):
     if total_shared_mem_size is not None and precision is not None:
@@ -104,10 +106,16 @@ class SyclLexic(Lexic):
       return f'({value1} * {value2})'
     elif op == Operation.DIV:
       return f'({value1} / {value2})'
+    elif op == Operation.RCP:
+      return f'(1 / {value1})'
+    elif op == Operation.ABS:
+      return f'sycl::fabs({value1})'
     elif op == Operation.MIN:
-      return f'sycl::min({value1}, {value2})'
+      return f'sycl::min({fptype}({value1}), {fptype}({value2}))'
     elif op == Operation.MAX:
-      return f'sycl::max({value1}, {value2})'
+      return f'sycl::max({fptype}({value1}), {fptype}({value2}))'
+    elif op == Operation.POW:
+      return f'sycl::pow({value1}, {value2})'
     elif op == Operation.ABS:
       return f'sycl::abs({value1})'
     elif op == Operation.NEG:
@@ -116,6 +124,10 @@ class SyclLexic(Lexic):
       return f'sycl::exp({value1})' # has __expf
     elif op == Operation.LOG:
       return f'sycl::log({value1})' # has __logf
+    elif op == Operation.EXPM1:
+      return f'sycl::expm1({value1})'
+    elif op == Operation.LOGP1:
+      return f'sycl::logp1({value1})'
     elif op == Operation.SQRT:
       return f'sycl::sqrt({value1})'
     elif op == Operation.CBRT:
@@ -171,4 +183,4 @@ class SyclLexic(Lexic):
     elif op == Operation.NEQ:
       return f'({value1} != {value2})'
     
-    raise NotImplementedError()
+    raise NotImplementedError(f'{op}')

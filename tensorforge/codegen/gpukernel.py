@@ -216,6 +216,9 @@ class GpuKernelFactory(KernelFactory):
   def __init__(self, cpp, arch, target):
     super().__init__(cpp, arch, target)
     self.generator = GpuKernelGenerator(arch)
+  
+  def allocate_temporary(self):
+    return False
 
   def temporary(self, bufname, size, iniZero=False, memory=list()):
     # disabled for GPU kernels

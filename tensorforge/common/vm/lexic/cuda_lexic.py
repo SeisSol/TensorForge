@@ -141,6 +141,10 @@ class CudaLexic(Lexic):
       return f'exp{fpsuffix}({value1})' # has __expf
     elif op == Operation.LOG:
       return f'log{fpsuffix}({value1})' # has __logf
+    elif op == Operation.EXPM1:
+      return f'expm1{fpsuffix}({value1})'
+    elif op == Operation.LOGP1:
+      return f'logp1{fpsuffix}({value1})'
     elif op == Operation.SQRT:
       # return f'__{fpprefix}sqrt_rn({value1})'
       return f'sqrt{fpsuffix}({value1})'
@@ -199,7 +203,7 @@ class CudaLexic(Lexic):
     elif op == Operation.NEQ:
       return f'({value1} != {value2})'
     
-    raise NotImplementedError()
+    raise NotImplementedError(f'{op}')
 
   def reduction(self, optype, fptype, blocks):
     if fptype == FloatingPointType.BOOL and blocks == [2,4,8,16,32]:
