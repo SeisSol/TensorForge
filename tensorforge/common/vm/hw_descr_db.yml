@@ -40,8 +40,11 @@
   base: sm_60
   max_local_mem_size_per_block: 227kB
 - arch: sm_100
-  base: sm_60
-  max_local_mem_size_per_block: 227kB
+  base: sm_90
+- arch: sm_101
+  base: sm_90
+- arch: sm_120
+  base: sm_90
 - arch: gfx900
   vec_unit_length: 64
   max_local_mem_size_per_block: 64kB

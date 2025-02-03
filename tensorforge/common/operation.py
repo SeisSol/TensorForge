@@ -25,6 +25,8 @@ class Operation(Enum):
   ROUND = 32,
   SIGN = 33,
   TRUNC = 34,
+  LOGP1 = 94,
+  EXPM1 = 95,
   GAMMA = 96,
   ERF = 97,
   LOG = 98,

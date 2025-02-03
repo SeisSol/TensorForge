@@ -1,14 +1,15 @@
 from typing import Union
 import math
 from . import ComputeInstruction
-from tensorforge.backend.symbol import SymbolType, Symbol, SymbolView, DataView, Loop, LeadLoop, write_loops, LeadIndex
+from tensorforge.backend.symbol import SymbolType, Symbol, SymbolView, DataView, Loop, LeadLoop, write_loops, LeadIndex, LinearizedLoop
 from tensorforge.common.exceptions import InternalError
 from tensorforge.backend.writer import Writer
 from tensorforge.common.context import Context
 from tensorforge.common.operation import ReductionOperator
 from typing import Union, List
 
-#from .primitives.amd import shuffle_broadcast_forall
+from .primitives.amd import shuffle_broadcast_forall
+# from .primitives import nvidia as nv
 
 class MultilinearInstruction(ComputeInstruction):
     def __init__(self,
@@ -116,15 +117,19 @@ class MultilinearInstruction(ComputeInstruction):
 
         loopmap = {}
 
+        outerLoops = []
+
         # TODO: linearize
         for i, (dimmin, dimmax) in enumerate(self._ks):
-            loopmap[f'k{i}'] = len(loopstack)
+            loopmap[f'k{i}'] = len(outerLoops)
             if -i-1 not in self._lead_dims:
                 step = matrixK if i == len(self._ks) - 1 else 1
-                loopstack += [Loop(f'k{i}', dimmin, dimmax, step, unroll=False)]
+                outerLoops += [Loop(f'k{i}', dimmin, dimmax, step, unroll=False)]
+
+        loopstack += [LinearizedLoop(outerLoops)]
 
         for i, (dimmin, dimmax) in enumerate(self._ns):
-            loopmap[f'n{i}'] = len(loopstack)
+            loopmap[f'n{i}'] = len(loopstack) + len(outerLoops) - 1
             if i not in self._lead_dims:
                 loopstack += [Loop(f'n{i}', dimmin, dimmax, 1, unroll=False)]
             else:
@@ -143,6 +148,70 @@ class MultilinearInstruction(ComputeInstruction):
                 self._dest.load(writer, self._context, 'value', [varlist[loopmap[f'n{i}']] for i,_ in enumerate(self._ns)], False)
                 writer(f'{self._fp_as_str} newvalue = {self._sumOperation.format("value", f"prod{len(self._ops)-1}")};')
                 self._dest.store(writer, self._context, 'newvalue', [varlist[loopmap[f'n{i}']] for i,_ in enumerate(self._ns)], False)
+
+        write_loops(self._context, writer, loopstack, nonlead_writer)
+
+    def _nonleading_dim2(self, writer: Writer):
+        loopstack = []
+
+        # TODO: preload values where necessary (i.e. no N in there)
+        # Also, postpone multiplications until necessary
+
+        # thread_mask: TODO
+        # writer(f'int n0 = {self._vm.get_lexic().thread_idx_x} % {self._ns[0]};')
+        # writer(f'int n1a = {self._vm.get_lexic().thread_idx_x} / {self._ns[0]};')
+        # n1i = self._num_threads // self._ns[0]
+        # writer(f'int n{i} = dimmin + n1a; n{i} < {dimmax}; n{i} += {n1i}')
+
+        matrixK = 1
+
+        loopmap = {}
+
+        outerLoops = []
+
+        # TODO: linearize
+        for i, (dimmin, dimmax) in enumerate(self._ks):
+            loopmap[f'k{i}'] = len(outerLoops)
+            if -i-1 not in self._lead_dims:
+                step = matrixK if i == len(self._ks) - 1 else 1
+                outerLoops += [Loop(f'k{i}', dimmin, dimmax, step, unroll=False)]
+
+        loopstack += [LinearizedLoop(outerLoops, self._vm.get_hw_descr().vec_unit_length)]
+
+        for i, (dimmin, dimmax) in enumerate(self._ns):
+            loopmap[f'n{i}'] = len(loopstack) + len(outerLoops) - 1
+            if i not in self._lead_dims:
+                loopstack += [Loop(f'n{i}', dimmin, dimmax, 1, unroll=False)]
+            else:
+                loopstack += [LeadLoop(f'n{i}', dimmin, dimmax, self._num_threads, unroll=False)]
+
+        
+        if self._num_threads <= self._vm.get_hw_descr().vec_unit_length:
+            assert self._vm.get_hw_descr().vec_unit_length % self._num_threads == 0
+            block = self._num_threads
+        else:
+            block = self._vm.get_hw_descr().vec_unit_length
+
+        def nonlead_writer(varlist):
+#            for op in enumerate(self._ops):
+#                if op.symbol.
+            for i, op in enumerate(self._ops):
+                op.symbol.load(writer, self._context, f'predata{i}', [varlist[loopmap[nk]] for nk in self._opdim_to_nks[i]], False)
+            
+            def nonlead_inner(variable):
+                for i, op in enumerate(self._ops):
+                    if i > 0:
+                        writer(f'{self._fp_as_str} prod{i} = {self._productOperation.format(f"prod{i-1}", f"data{i}")};')
+                    else:
+                        writer(f'{self._fp_as_str} prod{i} = data{i};')
+                if len(self._ops) > 0:
+                    self._dest.load(writer, self._context, 'value', [varlist[loopmap[f'n{i}']] for i,_ in enumerate(self._ns)], False)
+                    writer(f'{self._fp_as_str} newvalue = {self._sumOperation.format("value", f"prod{len(self._ops)-1}")};')
+                    self._dest.store(writer, self._context, 'newvalue', [varlist[loopmap[f'n{i}']] for i,_ in enumerate(self._ns)], False)
+            
+            nonlead_inner(None)
+            # for v in range(self._vm.get_hw_descr().vec_unit_length):
+                # shuffle_broadcast_forall(writer, FloatingPointType.FLOAT, 1, [], lambda _: True, nonlead_inner, 1, block)
 
         write_loops(self._context, writer, loopstack, nonlead_writer)
 

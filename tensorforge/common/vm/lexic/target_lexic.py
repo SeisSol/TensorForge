@@ -227,17 +227,23 @@ class TargetLexic(Lexic):
     elif op == Operation.NEG:
       return f'(-{value1})'
     elif op == Operation.MIN:
-      return f'std::min({value1}, {value2})'
+      return f'std::min({fptype}({value1}), {fptype}({value2}))'
     elif op == Operation.MAX:
-      return f'std::max({value1}, {value2})'
+      return f'std::max({fptype}({value1}), {fptype}({value2}))'
     elif op == Operation.POW:
       return f'std::pow({value1}, {value2})'
     elif op == Operation.EXP:
       return f'std::exp({value1})' # has __expf
     elif op == Operation.LOG:
       return f'std::log({value1})' # has __logf
+    elif op == Operation.EXPM1:
+      return f'std::expm1({value1})'
+    elif op == Operation.LOGP1:
+      return f'std::logp1({value1})'
     elif op == Operation.SQRT:
       return f'std::sqrt({value1})'
+    elif op == Operation.CBRT:
+      return f'std::cbrt({value1})'
     elif op == Operation.SIN:
       return f'std::sin({value1})'
     elif op == Operation.COS:
@@ -289,4 +295,4 @@ class TargetLexic(Lexic):
     elif op == Operation.NEQ:
       return f'({value1} != {value2})'
     
-    raise NotImplementedError()
+    raise NotImplementedError(f'{op}')

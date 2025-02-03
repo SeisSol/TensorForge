@@ -728,6 +728,12 @@ def exp(x: BaseType):
 def log(x: BaseType):
     return LexicOpNode([immc(x)], Operation.LOG)
 
+def expm1(x: BaseType):
+    return LexicOpNode([immc(x)], Operation.EXPM1)
+
+def logp1(x: BaseType):
+    return LexicOpNode([immc(x)], Operation.LOGP1)
+
 def temp():
     return TempVar()
 
