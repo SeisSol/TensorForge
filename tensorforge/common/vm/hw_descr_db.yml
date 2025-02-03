@@ -44,7 +44,7 @@
 - arch: sm_101
   base: sm_90
 - arch: sm_120
-  base: sm_90
+  base: sm_89
 - arch: gfx900
   vec_unit_length: 64
   max_local_mem_size_per_block: 64kB
