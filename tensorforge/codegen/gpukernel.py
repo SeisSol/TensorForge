@@ -34,10 +34,14 @@ class GpuKernelGenerator:
                                 prefer_align=can_be_aligned))
     return 0# self._descr_list[-1].get_flops()
   
+  def is_scalar(self, op):
+    # a bit hacky...
+    return not hasattr(op, 'memoryLayout') and not isinstance(op, (float, int)) #TODO: isinstance(op, Scalar):
+
   def get_tensor(self, op, can_be_aligned, dims):
     if isinstance(op, (float, int)):
       return SubTensor(tensor = Tensor([], Addressing.SCALAR, data = [op]))
-    elif isinstance(op, Scalar):
+    elif self.is_scalar(op):
       return SubTensor(self._cache[op.name()])
     else:
       tensor = self._cache[op.name]
@@ -99,7 +103,7 @@ class GpuKernelGenerator:
   def make_tensor(self, op, can_be_aligned, dims):
     if isinstance(op, (float, int)):
       return Tensor([], Addressing.SCALAR, data = [op])
-    if isinstance(op, Scalar):
+    if self.is_scalar(op):
       entry = self._add_scalar(op)
       entry_name = op.name()
     else:
@@ -181,7 +185,7 @@ class GpuKernelGenerator:
   def _append_operation(self, op):
     if isinstance(op, (float, int)):
       return Tensor([], Addressing.SCALAR, data = op)
-    elif isinstance(op, Scalar):
+    elif self.is_scalar(op):
       return self._cache[op.name()]
     else:
       return self._cache[op.name]
@@ -191,6 +195,9 @@ class TensorForgeWriter(GpuRoutineGenerator):
     self._headers = list(headers) + list(tensorforge_generator.get_helper_headers())
     self._generator = tensorforge_generator
     self._basename = self._generator.get_base_name()
+  
+  def target(self):
+    return 'gpu'
 
   def __eq__(self, other):
     if isinstance(other, TensorForgeWriter):
@@ -218,8 +225,8 @@ class GpuKernelRoutineGenerator:
   def generate(self, cpp, cache):
     self.generator.generate(cpp, cache)
 
-  def add_operation(self, dest, ops, target, permute, add):
-    self.generator.add_operation(dest, ops, target, permute, add)
+  def add_linear_operation(self, dest, ops, target, permute, add):
+    return self.generator.add_operation(dest, ops, target, permute, add)
 
 
 class GpuKernelFactory(KernelFactory):
