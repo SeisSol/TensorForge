@@ -6,7 +6,7 @@ string(REGEX REPLACE "\n$" "" TENSORFORGE_PATH "${TENSORFORGE_PATH}")
 
 set(TensorForge_INCLUDE_DIRS "${TENSORFORGE_PATH}/include")
 
-set(TensorForge_ALLOWED "cuda" "hip" "oneapi" "hipsycl" "omptarget" "targetdart")
+set(TensorForge_ALLOWED "cuda" "hip" "oneapi" "hipsycl" "acpp" "omptarget" "targetdart")
 if(NOT DEFINED DEVICE_BACKEND)
   set(DEVICE_BACKEND "cuda" CACHE STRING "type of an interface")
   set_property(CACHE DEVICE_BACKEND PROPERTY STRINGS ${TensorForge_ALLOWED})
@@ -40,3 +40,11 @@ endif()
 find_package_handle_standard_args(TensorForge
                                   TensorForge_INCLUDE_DIRS
                                   TensorForge_SOURCES)
+
+if(NOT TARGET TensorForge::TensorForge)
+    add_library(TensorForge::TensorForge INTERFACE IMPORTED)
+    set_target_properties(TensorForge::TensorForge PROPERTIES
+        INTERFACE_INCLUDE_DIRECTORIES "${TensorForge_INCLUDE_DIRS}"
+        INTERFACE_SOURCES "${TensorForge_SOURCES}"
+    )
+endif()

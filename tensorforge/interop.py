@@ -4,7 +4,7 @@ def get_cmake_path():
     return os.path.join(mydir, 'share', 'cmake')
 
 def print_cmake_path():
-    print(get_cmake_path())
+    print(get_cmake_path(), end='')
 
 def get_routine_generator(yateto):
     import tensorforge.codegen.gpukernel as gk
@@ -13,8 +13,8 @@ def get_routine_generator(yateto):
 def get_version():
     import os
     mydir = os.path.dirname(os.path.realpath(__file__))
-    with file(os.path.join(mydir, 'VERSION')):
+    with open(os.path.join(mydir, 'VERSION')) as file:
         return file.read()
 
 def print_version():
-    print(get_version())
+    print(get_version(), end='')
