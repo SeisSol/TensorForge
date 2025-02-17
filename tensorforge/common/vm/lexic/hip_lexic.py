@@ -40,7 +40,7 @@ class HipLexic(CudaLexic):
   def set_shmem_size(self, func_name, shmem):
     return f"""static bool shmemsizeset = false;
     if (!shmemsizeset) {{
-      hipFuncSetAttribute({func_name}, hipFuncAttributeMaxDynamicSharedMemorySize, {shmem});
+      hipFuncSetAttribute(static_cast<const void*>(&{func_name}), hipFuncAttributeMaxDynamicSharedMemorySize, {shmem});
       CHECK_ERR;
       shmemsizeset = true;
     }}
