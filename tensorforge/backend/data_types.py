@@ -33,6 +33,9 @@ class ShrMemObject:
       return self.get_total_size()
     else:
       return 'not yet defined'
+    
+  def is_dense(self):
+    return True
 
   def __str__(self) -> str:
     total_size = self.get_total_size_as_str()
@@ -46,3 +49,6 @@ class RegMemObject:
 
   def __str__(self):
     return f'name: {self.name}; size = {self.size}'
+
+  def is_dense(self):
+    return True

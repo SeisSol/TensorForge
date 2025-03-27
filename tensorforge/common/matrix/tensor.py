@@ -64,6 +64,10 @@ class Tensor:
             return self.data[realindex]
         else:
             return None
+    
+    def linear_index(self, index):
+        realindex = tuple(index)
+        return self.spp.linear_index(realindex)
 
     def get_actual_shape(self):
         return self.bbox.sizes()
@@ -102,10 +106,13 @@ class Tensor:
         return f'{self.name} {"×".join(str(d) for d in self.shape)}({"×".join(str(d) for d in self.bbox.sizes())}) {self.bbox} {self.addressing}'
 
     def density(self):
-        return self.spp.count_nz() / self.get_actual_volume()
+        return self.spp.count_nz() / self.get_real_volume()
     
     def sparsity(self):
         return 1 - self.density()
+    
+    def is_dense(self):
+        return self.spp.count_nz() == self.get_real_volume()
     
     def __str__(self):
         return self.gen_descr()
