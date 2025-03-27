@@ -149,7 +149,7 @@ class GpuKernelGenerator:
                                name=tensor.name,
                                is_tmp=tensor.is_temporary,
                                permute=None,
-                               pattern = tensor.eqspp.as_ndarray(),
+                               pattern = None, #if tensor.eqspp.is_dense() else tensor.eqspp.as_ndarray(),
                                values = tensor.values,
                                datatype = tensor.datatype)
 
