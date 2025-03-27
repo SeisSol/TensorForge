@@ -52,7 +52,7 @@ class GetElementPtr(AbstractInstruction):
       lhs = 'const ' if self._src.obj.direction == DataFlowDirection.SOURCE else ''
       lhs += f'{datatype} * const {self._vm.get_lexic().restrict_kw} {self._dest.name}'
     elif batch_addressing == Addressing.NONE:
-      address = f'{batch_obj.get_offset_to_first_element()}{extra_offset}'
+      address = f'{batch_obj.get_offset_to_first_element()}'
       rhs = f'&{self._src.name}[{address}]'
       lhs = 'const ' if self._src.obj.direction == DataFlowDirection.SOURCE else ''
       lhs += f'{datatype} * const {self._vm.get_lexic().restrict_kw} {self._dest.name}'
