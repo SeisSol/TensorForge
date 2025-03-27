@@ -393,8 +393,9 @@ class Generator:
         const_modifier = 'const ' if symbol.obj.direction == DataFlowDirection.SOURCE else ''
         batch_type = f'{const_modifier}{datatype}{ptr_type}' if with_types else ''
         offset_type = 'unsigned' if with_types else ''
-        params.extend([f'{batch_type} {symbol.name}',
-                      f'{offset_type} {get_extra_offset_name(symbol)}'])
+        params.extend([f'{batch_type} {symbol.name}'])
+        if symbol.obj.addressing != Addressing.NONE:
+          params.extend([f'{offset_type} {get_extra_offset_name(symbol)}'])
 
     batch_size_type = 'size_t' if with_types else ''
     params.append(f'{batch_size_type} {GeneralLexicon.NUM_ELEMENTS}')
@@ -474,7 +475,7 @@ class Generator:
     for symbol in symbols:
       if symbol.obj.alias in mat_name_map:
         args.append(mat_name_map[symbol.obj.alias])
-        if symbol.obj.addressing != Addressing.SCALAR:
+        if symbol.obj.addressing not in [Addressing.SCALAR, Addressing.NONE]:
           args.append(offset_name_map[symbol.obj.alias])
 
     # add num. elements

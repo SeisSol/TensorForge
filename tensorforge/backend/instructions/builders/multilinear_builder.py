@@ -70,6 +70,9 @@ class MultilinearBuilder(AbstractBuilder):
 
     # TODO: check if we always can allow a direct global memory load
   def _make_load_op(self, i):
+    if self._ops[i].symbol.name in self._deferred_stores:
+      self._ops[i].symbol, _ = self._deferred_stores[self._ops[i].symbol.name]
+
     if self._ops[i].symbol.stype == SymbolType.Scalar or self._ops[i].symbol.stype == SymbolType.Data:
       self._mem_regions[i] = self._ops[i]
     else:
@@ -85,7 +88,7 @@ class MultilinearBuilder(AbstractBuilder):
 
       # This is a heuristics implemented because having too sparse matrices can increase bank conflicts
       # And this heuristical optimization should remain until a better shared memory loader is implemented
-      sparse = self._ops[i].symbol.obj.sparsity() < 0.65
+      # sparse = self._ops[i].symbol.obj.sparsity() < 0.65
 
       if self._ops[i].symbol.stype == SymbolType.Global:
         if transpose or not has_lead_dim or small_lead:
@@ -148,11 +151,14 @@ class MultilinearBuilder(AbstractBuilder):
 
   def _alloc_register_array(self):
     regsize = 1
+    threads = self._num_threads
+    lead_dim = [0] # [t for t in self._descr.target[0] if t >= 0]
     for d, dim in enumerate(self._dest_obj.bbox.sizes()):
-      if d not in [0]: # for now, this is the lead dim
+      if d not in lead_dim or threads == 0:
         regsize *= dim
       else:
-        regsize *= (dim + self._num_threads - 1) // self._num_threads
+        regsize *= (dim + threads - 1) // threads
+        threads //= dim
     name = self._name_registers()
     regmem = RegMemObject(name, regsize)
     registers = Symbol(name=name, stype=SymbolType.Register, obj=regmem)
@@ -215,10 +221,10 @@ class MultilinearBuilder(AbstractBuilder):
                             stype=SymbolType.SharedMem,
                             obj=self._dest_obj.tensor)
 
+      self._scopes.add_symbol(dest_symbol)
       if self._temporary_registers:
         self._deferred_stores[dest_symbol.name] = (self._temp_regs, dest_symbol)
       else:
-        self._scopes.add_symbol(dest_symbol)
         self._instructions.append(StoreRegToShr(context=self._context,
                                                 src=self._temp_regs,
                                                 dest=dest_symbol,
