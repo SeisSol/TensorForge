@@ -35,7 +35,6 @@ class MultilinearInstruction(ComputeInstruction):
         self._gemm_meta_data = None
         self._num_threads = num_threads
         self._blockcount = blockcount
-        self._lead_dims = [0]
         self._prev = prev
 
         assert num_threads % blockcount == 0
@@ -94,6 +93,8 @@ class MultilinearInstruction(ComputeInstruction):
         self._dest.data_view._bbox._lower = [l for l,_ in self._ns]
         self._dest.data_view._bbox._upper = [u for _,u in self._ns]
 
+        self._lead_dims = [0]#[t for t in self._target[0] if t >= 0]
+
     def gen_code_inner(self, writer: Writer):
         self._nonleading_dim(writer)
         if len(self._ns) == 0:
@@ -128,12 +129,16 @@ class MultilinearInstruction(ComputeInstruction):
 
         loopstack += [LinearizedLoop(outerLoops)]
 
+        stride = 1
+        threads = self._num_threads
         for i, (dimmin, dimmax) in enumerate(self._ns):
             loopmap[f'n{i}'] = len(loopstack) + len(outerLoops) - 1
-            if i not in self._lead_dims:
+            if i not in self._lead_dims or threads == 0:
                 loopstack += [Loop(f'n{i}', dimmin, dimmax, 1, unroll=False)]
             else:
-                loopstack += [LeadLoop(f'n{i}', dimmin, dimmax, self._num_threads, unroll=False)]
+                loopstack += [LeadLoop(f'n{i}', dimmin, dimmax, threads, stride, unroll=False)]
+                threads //= dimmax - dimmin
+                stride *= dimmax - dimmin
 
         def nonlead_writer(varlist):
 #            for op in enumerate(self._ops):
@@ -178,13 +183,16 @@ class MultilinearInstruction(ComputeInstruction):
 
         loopstack += [LinearizedLoop(outerLoops, self._vm.get_hw_descr().vec_unit_length)]
 
+        stride = 1
+        threads = self._num_threads
         for i, (dimmin, dimmax) in enumerate(self._ns):
             loopmap[f'n{i}'] = len(loopstack) + len(outerLoops) - 1
-            if i not in self._lead_dims:
+            if i not in self._lead_dims or threads == 0:
                 loopstack += [Loop(f'n{i}', dimmin, dimmax, 1, unroll=False)]
             else:
-                loopstack += [LeadLoop(f'n{i}', dimmin, dimmax, self._num_threads, unroll=False)]
-
+                loopstack += [LeadLoop(f'n{i}', dimmin, dimmax, threads, stride, unroll=False)]
+                threads //= dimmax - dimmin
+                stride *= dimmax - dimmin
         
         if self._num_threads <= self._vm.get_hw_descr().vec_unit_length:
             assert self._vm.get_hw_descr().vec_unit_length % self._num_threads == 0
@@ -219,12 +227,16 @@ class MultilinearInstruction(ComputeInstruction):
         loopstack = []
         loopmap = {}
 
+        stride = 1
+        threads = self._num_threads
         for i, (dimmin, dimmax) in enumerate(self._ns):
             loopmap[f'n{i}'] = len(loopstack)
-            if i not in self._lead_dims:
+            if i not in self._lead_dims or threads == 0:
                 loopstack += [Loop(f'n{i}', dimmin, dimmax, 1, unroll=False)]
             else:
-                loopstack += [LeadLoop(f'n{i}', dimmin, dimmax, self._num_threads, unroll=False)]
+                loopstack += [LeadLoop(f'n{i}', dimmin, dimmax, threads, stride, unroll=False)]
+                threads //= dimmax - dimmin
+                stride *= dimmax - dimmin
 
         def nonlead_writer(varlist):
             self._dest.load(writer, self._context, 'value', [varlist[loopmap[f'n{i}']] for i,_ in enumerate(self._ns)], False)

@@ -51,7 +51,7 @@ class StoreRegToReg(MemoryInstruction):
     src_bbox = self._src.data_view.get_bbox()
 
     loops = []
-    loops += [LeadLoop('i0', src_bbox.lower()[0], src_bbox.upper()[0], self._num_threads)]
+    loops += [LeadLoop('i0', src_bbox.lower()[0], src_bbox.upper()[0], self._num_threads, 1)]
     for i in range(1, src_bbox.rank()):
       loops += [Loop(f'i{i}', src_bbox.lower()[i], src_bbox.upper()[i], 1)]
 
@@ -111,7 +111,7 @@ class StoreRegToShr(AbstractShrMemWrite):
     src_bbox = self._src.data_view.get_bbox()
 
     loops = []
-    loops += [LeadLoop('i0', src_bbox.lower()[0], src_bbox.upper()[0], self._num_threads)]
+    loops += [LeadLoop('i0', src_bbox.lower()[0], src_bbox.upper()[0], self._num_threads, 1)]
     for i in range(1, src_bbox.rank()):
       loops += [Loop(f'i{i}', src_bbox.lower()[i], src_bbox.upper()[i], 1)]
 
@@ -177,7 +177,7 @@ class StoreRegToGlb(AbstractInstruction):
     src_bbox = self._src.data_view.get_bbox()
     with writer.Scope():
       loops = []
-      loops += [LeadLoop('i0', src_bbox.lower()[0], src_bbox.upper()[0], self._num_threads)]
+      loops += [LeadLoop('i0', src_bbox.lower()[0], src_bbox.upper()[0], self._num_threads, 1)]
       for i in range(1, src_bbox.rank()):
         loops += [Loop(f'i{i}', src_bbox.lower()[i], src_bbox.upper()[i], 1)]
 

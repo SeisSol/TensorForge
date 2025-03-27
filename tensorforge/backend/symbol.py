@@ -131,9 +131,10 @@ class Variable:
 
 class LeadIndex:
   # TODO: make nonlead a variable
-  def __init__(self, nonlead, block):
+  def __init__(self, nonlead, block, stride):
     self._nonlead = nonlead
     self._block = block
+    self._stride = stride
   
   def is_thread_dependent(self):
     return True
@@ -142,15 +143,19 @@ class LeadIndex:
     return f'{self._nonlead}'
 
   def write(self, context: Context):
-    return f'({context.get_vm().get_lexic().thread_idx_x} % {self._block}) + {self._nonlead} * {self._block}'
+    if self._block > 1:
+      return f'(({context.get_vm().get_lexic().thread_idx_x} / {self._stride}) % {self._block}) + {self._nonlead} * {self._block}'
+    elif self._block == 1:
+      return f'{self._nonlead}'
 
 class LeadLoop:
-  def __init__(self, name, start, end, threads, unroll=False):
+  def __init__(self, name, start, end, threads, stride, unroll=False):
     self.start = start
     self.end = end
     self.unroll = unroll
     self.threads = threads
     self.var = name
+    self.stride = stride
 
   def write(self, context: Context, writer: Writer, inner):
     actualstart = self.start // self.threads
@@ -158,36 +163,38 @@ class LeadLoop:
     realend = (self.end) // self.threads
     actualend = (self.end + self.threads - 1) // self.threads
 
+    leadExpr = f'({context.get_vm().get_lexic().thread_idx_x} / {self.stride}) % {self.threads}'
+
     if actualstart >= actualend:
       pass
     if actualstart == realend:
-      index = LeadIndex(actualstart, self.threads)
+      index = LeadIndex(actualstart, self.threads, self.stride)
       startIdx = self.start - actualstart * self.threads
       endIdx = self.end - realend * self.threads
       if startIdx > 0:
-        with writer.If(f'{context.get_vm().get_lexic().thread_idx_x} >= {startIdx} && {context.get_vm().get_lexic().thread_idx_x} < {self.end - realend * self.threads}'):
+        with writer.If(f'{leadExpr} >= {startIdx} && {leadExpr} < {self.end - realend * self.threads}'):
           inner([index])
       else:
-        with writer.If(f'{context.get_vm().get_lexic().thread_idx_x} < {self.end - realend * self.threads}'):
+        with writer.If(f'{leadExpr} < {self.end - realend * self.threads}'):
           inner([index])
     else:
       if self.start % self.threads != 0:
-        index = LeadIndex(actualstart, self.threads)
-        with writer.If(f'{context.get_vm().get_lexic().thread_idx_x} >= {self.start - actualstart}'):
+        index = LeadIndex(actualstart, self.threads, self.stride)
+        with writer.If(f'{leadExpr} >= {self.start - actualstart}'):
           inner([index])
       if self.unroll:
         for value in range(realstart, realend):
-          index = LeadIndex(value, self.threads)
+          index = LeadIndex(value, self.threads, self.stride)
           inner([index])
-      else:
+      elif realstart < realend:
         # writer.insert_pragma_unroll()
         var = self.var
         with writer.For(f'int {var} = {realstart}; {var} < {realend}; {var} += 1'):
-          index = LeadIndex(var, self.threads)
+          index = LeadIndex(var, self.threads, self.stride)
           inner([index])
       if self.end % self.threads != 0:
-        index = LeadIndex(actualend - 1, self.threads)
-        with writer.If(f'{context.get_vm().get_lexic().thread_idx_x} < {self.end - realend * self.threads}'):
+        index = LeadIndex(actualend - 1, self.threads, self.stride)
+        with writer.If(f'{leadExpr} < {self.end - realend * self.threads}'):
           inner([index])
 
 class Loop:
@@ -203,7 +210,7 @@ class Loop:
       for value in range(self.start, self.end, self.step):
         inner([Immediate(value, FloatingPointType.INT)])
         #inner([value])
-    else:
+    elif self.start < self.end:
       # writer.insert_pragma_unroll()
       var = self.var
       with writer.For(f'int {var} = {self.start}; {var} < {self.end}; {var} += {self.step}'):
@@ -227,6 +234,8 @@ class LinearizedLoop:
     
     loopvar = 'var'
     loopvar2 = 'var2'
+
+    # the pragma bears great control over the application speed. And the compile time.
     # writer.insert_pragma_unroll()
     with writer.For(f'int {loopvar} = 0; {loopvar} < {totalloopsize}; {loopvar} += {self.blocksize}'):
       if self.blocksize == 1:
@@ -302,15 +311,19 @@ class Symbol:
     if self.stype == SymbolType.Register or self.stype == SymbolType.Scratch:
       writevar = lambda var: f'{var}' if isinstance(var, (str, int, float, np.int64)) else var.write_nonlead()
       writeOffset = lambda i,var,offset,stride: f"({writevar(var)} - {offset}) * {stride}"
+      writeNoOffset = lambda i,var,offset,stride: f"{writevar(var)} * {stride}"
+      writers = [0] * self.data_view.rank()
       strides = [0] * self.data_view.rank()
       stride = 1
       for i in range(self.data_view.rank()):
         strides[i] = stride
         if isinstance(index[i], LeadIndex):
           stride *= (self.data_view.shape[i] + self.num_threads - 1) // self.num_threads
+          writers[i] = writeNoOffset
         else:
           stride *= self.data_view.shape[i]
-      dimstr = " + ".join(writeOffset(i,var,offset,stride) for i, (var, offset, stride) in enumerate(zip(index, self.data_view.get_dim_offsets(), strides)))
+          writers[i] = writeOffset
+      dimstr = " + ".join(writer(i,var,offset,stride) for i, (var, offset, stride, writer) in enumerate(zip(index, self.data_view.get_dim_offsets(), strides, writers)))
       return dimstr if len(dimstr) > 0 else "0"
     raise NotImplementedError('Not supposed to be called')
 
@@ -324,10 +337,15 @@ class Symbol:
   
   def encode_values(self, pos, runIdx, writer, context: Context, variable, index: List[Union[str, int, Immediate, Variable, LeadIndex]], nontemp):
     if pos == len(index):
-      value = self.obj.value(runIdx)
-      if value is not None:
-        writer(f'{variable} = {self.get_fptype(context).literal(value)};')
-      # TODO: variable reference if no value present (self.obj.index(runIdx)?)
+      if self.stype == SymbolType.Data:
+        value = self.obj.value(runIdx)
+        if value is not None:
+          writer(f'{variable} = {self.get_fptype(context).literal(value)};')
+      else:
+        # TODO: unite with access_address
+        value = self.obj.linear_index(runIdx)
+        if value is not None:
+          writer(f'{variable} = {self.name}[{value}];')
     else:
       if isinstance(index[pos], int):
         runIdx[pos] = index[pos]
@@ -345,15 +363,17 @@ class Symbol:
               self.encode_values(pos + 1, runIdx, writer, context, variable, index, nontemp)
 
   def load(self, writer, context: Context, variable, index: List[Union[str, int, Immediate, Variable, LeadIndex]], nontemp):
-    if self.stype == SymbolType.Data:
+    if self.stype == SymbolType.Data or not self.obj.is_dense():
       writer(f'{self.get_fptype(context)} {variable} = {self.get_fptype(context).literal(0)};')
       self.encode_values(0, [0] * len(index), writer, context, variable, index, nontemp)
     else:
       pre_access = self.access(context, index)
       if self.stype == SymbolType.Register or self.stype == SymbolType.Scratch:
         assert len(self.lead_dims) == 1
-        if not isinstance(index[self.lead_dims[0]], LeadIndex):
-          access = context.get_vm().get_lexic().broadcast_sync(pre_access, index[self.lead_dims[0]], -1)
+        idx = index[self.lead_dims[0]]
+        if not isinstance(idx, LeadIndex):
+          writevar = lambda var: f'{var}' if isinstance(var, (str, int, float, np.int64)) else var.write(context)
+          access = context.get_vm().get_lexic().broadcast_sync(pre_access, writevar(idx), -1)
         else:
           access = pre_access
       else:
