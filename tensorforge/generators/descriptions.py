@@ -82,6 +82,35 @@ class ElementwiseDescr(OperationDescription):
   def __str__(self):
     return '; '.join(str(op) for op in self.oplist)
 
+class ElementwiseDescrSingular(ElementwiseDescr):
+  def __init__(self, dest: Tensor, ops: List[Tensor]):
+    super().__init__(oplist=[Assignment(dest, )])
+
+class ReductionDescr(OperationDescription):
+  def __init__(self, dest: Tensor, var: Tensor, dims: List[int], op):
+    self.dest = dest
+    self.var = var
+    self._strict_match = False
+
+    var.set_data_flow_direction(DataFlowDirection.SOURCE)
+    dest.set_data_flow_direction(DataFlowDirection.SINK)
+
+  def get_num_threads(self, context: Context):
+    vul = context.get_vm().get_hw_descr().vec_unit_length
+    return vul, vul
+
+  def get_accumulator_size(self):
+    return 0
+
+  def is_strict_match(self):
+    return self._strict_match
+  
+  def matrix_list(self):
+    return [self.var, self.dest]
+  
+  def __str__(self):
+    return f'{self.var} -> {self.dest}'
+
 class GemmDescr(MultilinearDescr):
   def __init__(self,
                trans_a,

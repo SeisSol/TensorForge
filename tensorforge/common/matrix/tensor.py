@@ -68,6 +68,9 @@ class Tensor:
     def linear_index(self, index):
         realindex = tuple(index)
         return self.spp.linear_index(realindex)
+    
+    def memory(self):
+        return self.spp.count_nz()
 
     def get_actual_shape(self):
         return self.bbox.sizes()

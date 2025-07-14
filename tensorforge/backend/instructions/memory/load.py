@@ -87,33 +87,44 @@ class GlbToShrLoader(AbstractShrMemWrite):
     loadsize = 1
     need_transpose = True
 
-    # TODO: remove distinction between tensor shape and real shape
-    for i in range(len(src_real_shape)):
-      # offset += self._tensor.shape[i] - src_real_shape[i]
-      if offset <= self._max_load_offset:
-        readshape = src_real_shape[i] # self._tensor.shape[i]
-      else:
-        readshape = src_real_shape[i]
-        loop_indices += [i]
-      if self._permute[i] == 0: # TODO: not ideal
-        need_transpose = False
-      if need_transpose:
-        dstshape = self._next_size(readshape)
-      else:
-        dstshape = readshape
-      
-      # TODO: move somewhere else?
-      if i == 0:
-        dstshape = ((dstshape + self._alignment - 1) // self._alignment) * self._alignment
+    if self._tensor.is_dense():
 
-      dst_shape += [dstshape]
-      read_shape += [readshape]
-      if len(loop_indices) <= 1:
-        loadsize *= readshape
-    
-    # cap the first loop index, we're still contiguous there
-    if len(loop_indices) > 0:
-      loop_indices = loop_indices[1:]
+      # TODO: remove distinction between tensor shape and real shape
+      for i in range(len(src_real_shape)):
+        # offset += self._tensor.shape[i] - src_real_shape[i]
+        if offset <= self._max_load_offset:
+          readshape = src_real_shape[i] # self._tensor.shape[i]
+        else:
+          readshape = src_real_shape[i]
+          loop_indices += [i]
+        if self._permute[i] == 0: # TODO: not ideal
+          need_transpose = False
+        if need_transpose:
+          dstshape = self._next_size(readshape)
+        else:
+          dstshape = readshape
+        
+        # TODO: move somewhere else?
+        if i == 0:
+          dstshape = ((dstshape + self._alignment - 1) // self._alignment) * self._alignment
+
+        dst_shape += [dstshape]
+        read_shape += [readshape]
+        if len(loop_indices) <= 1:
+          loadsize *= readshape
+      
+      # cap the first loop index, we're still contiguous there
+      if len(loop_indices) > 0:
+        loop_indices = loop_indices[1:]
+
+      self._shm_volume = 1
+      for dsts in dst_shape:
+        self._shm_volume *= dsts
+    else:
+      loadsize = self._tensor.memory()
+      self._shm_volume = loadsize
+      read_shape = list(src_real_shape)
+      dst_shape = list(src_real_shape)
 
     self._dest.data_view = DataView(shape=dst_shape,
                                     permute=None,
@@ -124,16 +135,13 @@ class GlbToShrLoader(AbstractShrMemWrite):
 
     self._loop_indices = loop_indices
     self._loadsize = loadsize
-    self._shm_volume = 1
-    for dsts in dst_shape:
-      self._shm_volume *= dsts
 
   def gen_code_inner(self, writer: Writer) -> None:
     allow_nontemporal = len(self._src.get_user_list()) == 1
 
-    src_bbox = self._src.data_view.get_bbox()
 
     if self._needs_reorder:
+      src_bbox = self._src.data_view.get_bbox()
       loops = []
       loops += [LeadLoop('i0', src_bbox.lower()[0], src_bbox.upper()[0], self._num_threads, 1)]
       for i in range(1, src_bbox.rank()):

@@ -24,14 +24,11 @@ class FullSPP(SparsityPattern):
             stride *= s
         return index
 
-class BoundingBoxSPP(SparsityPattern):
-    pass
-
 class MaskSPP(SparsityPattern):
     def __init__(self, mask):
         self.mask = mask
 
-        self.indexmask = np.zeros(self.mask.shape, dtype=np.int64)
+        self.indexmask = np.zeros(self.mask.shape, dtype=np.int64, order='F')
 
         # cf. e.g. https://numpy.org/doc/2.1/reference/arrays.nditer.html
         i = 0
@@ -40,6 +37,8 @@ class MaskSPP(SparsityPattern):
                 if x:
                     i += 1
                     y[...] = i
+        #print(self.mask)
+        #print(self.indexmask)
     
     def is_nz(self, index):
         return self.mask[tuple(index)]
@@ -48,5 +47,8 @@ class MaskSPP(SparsityPattern):
         return np.count_nonzero(self.mask)
     
     def linear_index(self, tupleindex):
-        preindex = self.indexmask[tupleindex]
-        return preindex - 1 if preindex > 0 else None
+        if all(ti < ims for ti, ims in zip(tupleindex, self.indexmask.shape)):
+            preindex = self.indexmask[tupleindex]
+            return preindex - 1 if preindex > 0 else None
+        else:
+            return None

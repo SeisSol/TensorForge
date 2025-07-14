@@ -9,7 +9,7 @@ from tensorforge.generators.descriptions import ElementwiseDescr
 from tensorforge.generators.generator import Generator as TensorForgeGenerator
 from tensorforge.generators.descriptions import MultilinearDescr
 
-class GpuKernelGenerator:
+class GpuKernelGeneratorV1:
   def __init__(self, arch):
     self._arch = arch
     self._cache = {}
@@ -19,6 +19,17 @@ class GpuKernelGenerator:
   def add_operation(self, dest, ops, target, permute, add):
     self._cache_matrices(dest, ops, target, permute)
     can_be_aligned = self._can_be_aligned(dest, ops, target, permute)
+    self._descr_list.append(MultilinearDescr(self.get_tensor(dest, can_be_aligned, [i for i in range(len(dest.indices))]),
+                              [self.get_tensor(op, can_be_aligned, optarget) for op, optarget in zip(ops, target)],
+                              target, permute, add=add,
+                                strict_match=False,
+                                prefer_align=can_be_aligned))
+    return 0# self._descr_list[-1].get_flops()
+  
+  def add_operation_new(self, dest, ops, target, permute, add):
+    self._cache_matrices(dest, ops, target, permute)
+    can_be_aligned = self._can_be_aligned(dest, ops, target, permute)
+    # ElementwiseDescr()
     self._descr_list.append(MultilinearDescr(self.get_tensor(dest, can_be_aligned, [i for i in range(len(dest.indices))]),
                               [self.get_tensor(op, can_be_aligned, optarget) for op, optarget in zip(ops, target)],
                               target, permute, add=add,
@@ -153,7 +164,7 @@ class GpuKernelGenerator:
                                name=tensor.name,
                                is_tmp=tensor.is_temporary,
                                permute=None,
-                               pattern = None, #if tensor.eqspp.is_dense() else tensor.eqspp.as_ndarray(),
+                               pattern=None if type(tensor.memoryLayout).__name__ == 'DenseMemoryLayout' else tensor.eqspp.as_ndarray(),
                                values = tensor.values,
                                datatype = tensor.datatype)
 
@@ -224,7 +235,7 @@ class TensorForgeWriter:
 
 class YatetoFrontend:
   def __init__(self, arch):
-    self.generator = GpuKernelGenerator(arch)
+    self.generator = GpuKernelGeneratorV1(arch)
 
   def generate(self, cpp, cache):
     self.generator.generate(cpp, cache)
@@ -233,5 +244,5 @@ class YatetoFrontend:
     # legacy gateway
     return self.generator.add_operation(dest, ops, target, permute, add)
   
-  def add_operation(self):
+  def add_operation(self, op):
     pass
