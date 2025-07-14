@@ -1,10 +1,4 @@
-from .factory import KernelFactory
 
-from .common import *
-
-from .common import IndexedTensorDescription, BatchedOperationsAux
-from ..ast.indices import BoundingBox
-from .cache import GpuRoutineGenerator
 from tensorforge.interface import YatetoInterface as yi
 from tensorforge.common.basic_types import Addressing, FloatingPointType, DataFlowDirection
 from tensorforge.common.context import Context
@@ -18,7 +12,6 @@ from tensorforge.generators.descriptions import MultilinearDescr
 class GpuKernelGenerator:
   def __init__(self, arch):
     self._arch = arch
-    self._batch_aux = BatchedOperationsAux(self._arch.typename)
     self._cache = {}
     self._tmp_matrices = {}
     self._descr_list = []
@@ -44,12 +37,17 @@ class GpuKernelGenerator:
       return SubTensor(self._cache[op.name()])
     else:
       tensor = self._cache[op.name]
-      currentPreShape = list(BoundingBox.fromSpp(op.eqspp))
+      currentPreShape = BBox([s for s, _ in op.eqspp.nnzbounds()], [e+1 for _, e in op.eqspp.nnzbounds()])
       if can_be_aligned:
         for i, dim in enumerate(dims):
           if i == 0 and op.memoryLayout.alignedStride(): # previously: dim == 0
-            currentPreShape[i] = currentPreShape[i].aligned(self._arch)
-      return SubTensor(tensor, BBox([rng.start for rng in currentPreShape], [rng.stop for rng in currentPreShape]))
+            # a bit hacky right now...
+            newLower = self._arch.alignedLower(currentPreShape._lower[i])
+            newUpper = self._arch.alignedUpper(currentPreShape._upper[i])
+
+            currentPreShape._lower = tuple([newLower] + list(currentPreShape._lower[1:]))
+            currentPreShape._upper = tuple([newUpper] + list(currentPreShape._upper[1:]))
+      return SubTensor(tensor, currentPreShape)
 
   def add_scalar(self, ops, statements, indices):
     indicesIndexed = {}
@@ -63,8 +61,8 @@ class GpuKernelGenerator:
         indicesIndexed[pretensor.name()] = []
         subTensor = SubTensor(self._cache[pretensor.name()], BBox([], []))
       else:
-        currentPreShape = list(BoundingBox.fromSpp(pretensor.eqspp()))
-        subTensor = SubTensor(self._cache[pretensor.name()], BBox([rng.start for rng in currentPreShape], [rng.stop for rng in currentPreShape]))
+        bbox = BBox([s for s, _ in pretensor.eqspp().nnzbounds()], [e+1 for _, e in pretensor.eqspp().nnzbounds()])
+        subTensor = SubTensor(self._cache[pretensor.name()], bbox)
       return subTensor, indicesIndexed[pretensor.name()]
     
     for statement in statements:
@@ -131,9 +129,17 @@ class GpuKernelGenerator:
     tensor = Tensor([], Addressing.SCALAR, alias=scalar.name(), datatype=scalar.datatype)
     self._tmp_matrices[scalar.name()] = tensor # SubTensor(tensor, tensor.bbox)
     return self._tmp_matrices[scalar.name()]
+  
+  def deduce_addresing(self, term):
+    if term.is_compute_constant:
+      return Addressing.NONE
+    if term.is_temporary:
+      return Addressing.STRIDED
+    else:
+      return Addressing.PTR_BASED
 
   def _get_tensorforge_matrix(self, tensor, shape, bboxrange):
-    addr_mode = self._batch_aux.deduce_addresing(tensor) if tensor.addressing is None else tensor.addressing
+    addr_mode = self.deduce_addresing(tensor) if tensor.addressing is None else tensor.addressing
     if tensor.is_temporary:
       if not tensor.name in self._tmp_matrices:
         raise RuntimeError(f'expected tmp. tensor {tensor.name} to be cached '
@@ -172,13 +178,13 @@ class GpuKernelGenerator:
       if matrix.is_tmp or matrix.addressing == Addressing.NONE:
         offset_name_map[name] = '0'
       else:
-        offset_name_map[name] = f'{BatchedOperationsAux.EXTRA_OFFSET_NAME}_{name}'
+        offset_name_map[name] = f'extraOffset_{name}'
     
     return generator.generate_call_site(mat_name_map,
                                         offset_name_map,
-                                        BatchedOperationsAux.NUM_ELEMENTS_NAME,
-                                        BatchedOperationsAux.FLAGS_NAME,
-                                        BatchedOperationsAux.STREAM_PTR_NAME)
+                                        'numElements',
+                                        'flags',
+                                        'streamPtr')
   
   def _append_operation(self, op):
     if isinstance(op, (float, int)):
@@ -188,7 +194,7 @@ class GpuKernelGenerator:
     else:
       return self._cache[op.name]
 
-class TensorForgeWriter(GpuRoutineGenerator):
+class TensorForgeWriter:
   def __init__(self, tensorforge_generator, headers):
     self._headers = list(headers) + list(tensorforge_generator.get_helper_headers())
     self._generator = tensorforge_generator

@@ -4,10 +4,15 @@ from tensorforge.common.context import Context
 from tensorforge.common.operation import Operation
 from tensorforge.common.basic_types import FloatingPointType
 from tensorforge.backend.scopes import Scopes
-import tensorforge.ast.node as ytt
-import tensorforge.type as yttt
 
 import numpy as np
+
+class ytt:
+    class Node:
+        pass
+class yttt:
+    class Scalar:
+        pass
 
 class VarAlloc:
     def __init__(self):
