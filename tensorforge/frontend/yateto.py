@@ -4,7 +4,6 @@ from .common import *
 
 from .common import IndexedTensorDescription, BatchedOperationsAux
 from ..ast.indices import BoundingBox
-from ..type import Scalar
 from .cache import GpuRoutineGenerator
 from tensorforge.interface import YatetoInterface as yi
 from tensorforge.common.basic_types import Addressing, FloatingPointType, DataFlowDirection
@@ -53,14 +52,13 @@ class GpuKernelGenerator:
       return SubTensor(tensor, BBox([rng.start for rng in currentPreShape], [rng.stop for rng in currentPreShape]))
 
   def add_scalar(self, ops, statements, indices):
-    
     indicesIndexed = {}
     for i,op in enumerate(ops):
       self.make_tensor(op, False, None)
-      indicesIndexed[op.name() if isinstance(op, Scalar) else op.name] = indices[i]
+      indicesIndexed[op.name() if self.is_scalar(op) else op.name] = indices[i]
     
     def assigner(pretensor):
-      if isinstance(pretensor, Scalar):
+      if self.is_scalar(pretensor):
         self.make_tensor(pretensor, False, None)
         indicesIndexed[pretensor.name()] = []
         subTensor = SubTensor(self._cache[pretensor.name()], BBox([], []))
@@ -218,7 +216,7 @@ class TensorForgeWriter(GpuRoutineGenerator):
 
     return self._generator.get_header()
 
-class GpuKernelRoutineGenerator:
+class YatetoFrontend:
   def __init__(self, arch):
     self.generator = GpuKernelGenerator(arch)
 
@@ -226,77 +224,8 @@ class GpuKernelRoutineGenerator:
     self.generator.generate(cpp, cache)
 
   def add_linear_operation(self, dest, ops, target, permute, add):
+    # legacy gateway
     return self.generator.add_operation(dest, ops, target, permute, add)
-
-
-class GpuKernelFactory(KernelFactory):
-  def __init__(self, cpp, arch, target):
-    super().__init__(cpp, arch, target)
-    self.generator = GpuKernelGenerator(arch)
   
-  def allocate_temporary(self):
-    return False
-
-  def temporary(self, bufname, size, iniZero=False, memory=list()):
-    # disabled for GPU kernels
-    self._cpp('{}* {};'.format(self._arch.typename, bufname))
-
-  def freeTmp(self, routineCache):
-    # generate the kernel and the kernel call here... A tiny bit hacky, but it works
-    self.generator.generate(self._cpp, routineCache)
-  
-  def create_LoopOverGEMM(self, node, result, arguments, add, scalar, prefetchName, routineCache, gemm_cfg):
-    assert len(arguments) == 2
-    return self.handleLinear(IndexedTensorDescription.fromNode(result, node), [IndexedTensorDescription.fromNode(arguments[0], node.leftTerm()), IndexedTensorDescription.fromNode(arguments[1], node.rightTerm())], add, scalar, node.transA(), node.transB())
-  
-  def create_IndexSum(self, node, result, arguments, add, scalar, prefetchName, routineCache, gemm_cfg):
-    assert len(arguments) == 1
-    return self.handleLinear(IndexedTensorDescription.fromNode(result, node), [IndexedTensorDescription.fromNode(arguments[0], node.term())], add, scalar, False, False)
-  
-  def create_Product(self, node, result, arguments, add, scalar, prefetchName, routineCache, gemm_cfg):
-    assert len(arguments) == 2
-    return self.handleLinear(IndexedTensorDescription.fromNode(result, node), [IndexedTensorDescription.fromNode(arguments[0], node.leftTerm()), IndexedTensorDescription.fromNode(arguments[1], node.rightTerm())], add, scalar, False, False)
-
-  def create_Permute(self, node, result, arguments, add, scalar, prefetchName, routineCache, gemm_cfg):
-    term = arguments[0]
-    return self.handleLinear(IndexedTensorDescription(str(result), node.indices, result.memoryLayout(), result.eqspp()), [IndexedTensorDescription(str(term), node.term().indices, term.memoryLayout(), term.eqspp())], add, scalar, False, False)
-  
-  def simple(self, result, term, add, scalar, routineCache):
-    return self.handleLinear(IndexedTensorDescription(str(result), self._indices(result), result.memoryLayout(), result.eqspp()), [IndexedTensorDescription(str(term), self._indices(term), term.memoryLayout(), term.eqspp())], add, scalar, False, False)
-  
-  def create_ScalarRegion(self, node, result, arguments, add, scalar, prefetchName, routineCache, gemm_cfg):
-    terms = [IndexedTensorDescription.fromNode(arg, terms) for arg, terms in zip(arguments, node)]
-    target, permute = self.getIndices(None, terms)
-    return self.generator.add_scalar(terms, node.data, target)
-
-  def getIndices(self, dest, ops):
-    if dest is None:
-      target_indices = []
-    else:
-      target_indices = dest.indices
-
-    indexindex = {index:i for i, index in enumerate(target_indices)}
-    contract_counter = -1
-
-    for op in ops:
-      for index in op.indices:
-        if index not in indexindex:
-          indexindex[index] = contract_counter
-          contract_counter -= 1
-
-    target = [[indexindex[index] for index in op.indices] for op in ops]
-    permute = [[i for i,_ in enumerate(op.indices)] for op in ops]
-
-    return target, permute
-
-  def handleLinear(self, dest, ops, add, scalar, transposeA, transposeB):
-    # convert indices to loop numbers
-
-    target, permute = self.getIndices(dest, ops)
-    
-    if not (scalar == 1 or scalar == 1.0):
-      ops += [scalar]
-      target += [[]]
-      permute += [[]]
-    
-    return self.generator.add_operation(dest, ops, target, permute, add)
+  def add_operation(self):
+    pass

@@ -7,8 +7,8 @@ def print_cmake_path():
     print(get_cmake_path(), end='')
 
 def get_routine_generator(yateto):
-    import tensorforge.codegen.gpukernel as gk
-    return gk.GpuKernelRoutineGenerator
+    import tensorforge.frontend.yateto as fe
+    return fe.YatetoFrontend
 
 def get_version():
     import os
