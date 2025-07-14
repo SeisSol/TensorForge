@@ -1,3 +1,4 @@
+
 build
 cmake-build-debug
 tmp
@@ -26,10 +27,3 @@ dist
 
 test-deployment
 
-yateto.egg-info
-.spack-env/
-
-*.swo
-*.swp
-
-examples/created_code/
