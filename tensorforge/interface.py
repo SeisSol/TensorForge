@@ -1,6 +1,6 @@
 from tensorforge.common.matrix.tensor import Tensor, SubTensor
 from tensorforge.common.matrix.boundingbox import BoundingBox
-from tensorforge.common.matrix.spp import MaskSPP
+from tensorforge.common.matrix.spp import ListSPP
 
 class YatetoInterface:
   def __init__(self):
@@ -37,7 +37,7 @@ class YatetoInterface:
 
     spp = None
     if pattern is not None:
-      spp = MaskSPP(pattern)
+      spp = ListSPP(pattern, tuple([yateto_ranges[i] for i in range(len(yateto_ranges))]))
     
     data = None
     if values is not None:

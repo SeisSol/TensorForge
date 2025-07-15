@@ -82,8 +82,8 @@ class Generator:
     self._check_consistency_with_user_options()
     self._name_operands(self.descr_list)
 
-    self._persistent_threading = False
-    self._preload_globals = False
+    self._persistent_threading = True
+    self._preload_globals = True
 
   def set_kernel_name(self, name):
     self._base_kernel_name = name

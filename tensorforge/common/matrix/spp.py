@@ -52,3 +52,27 @@ class MaskSPP(SparsityPattern):
             return preindex - 1 if preindex > 0 else None
         else:
             return None
+
+class ListSPP(SparsityPattern):
+    def __init__(self, lst, shape):
+        self.list = lst
+
+        self.indexmask = np.zeros(shape, dtype=np.int64, order='F')
+
+        i = 0
+        for entry in self.list:
+            i += 1
+            self.indexmask[tuple(entry)] = i
+
+    def is_nz(self, index):
+        return self.indexmask[tuple(index)] > 0
+    
+    def count_nz(self):
+        return np.count_nonzero(self.indexmask)
+    
+    def linear_index(self, tupleindex):
+        if all(ti < ims for ti, ims in zip(tupleindex, self.indexmask.shape)):
+            preindex = self.indexmask[tupleindex]
+            return preindex - 1 if preindex > 0 else None
+        else:
+            return None

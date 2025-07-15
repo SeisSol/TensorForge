@@ -134,6 +134,12 @@ class SubTensor(TensorWrapper):
         self.bbox = bbox
         if bbox is None:
             self.bbox = self.tensor.bbox
+    
+    def __str__(self):
+        return f'{self.tensor}({self.bbox})'
+    
+    def __repr__(self):
+        return f'{self.tensor}({self.bbox})'
 
 class FullTensor(TensorWrapper):
     def __init__(self, tensor: Tensor):

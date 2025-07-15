@@ -26,7 +26,19 @@ class GpuKernelGeneratorV1:
                                 prefer_align=can_be_aligned))
     return 0# self._descr_list[-1].get_flops()
   
-  def add_operation_new(self, dest, ops, target, permute, add):
+  def add_operation_new(self, d):
+    result = self.make_tensor_new(d['result'])
+    args = [self.make_tensor_new(arg) for arg in d['args']]
+    condition = self.make_tensor_new(d['condition'])
+    alpha = self.make_tensor_new(d['linear']['alpha'])
+    if d['type'] == 'reduction':
+      assert len(args) == 1
+      op = self.convert_op(d['optype'])
+    if d['type'] == 'elementwise':
+      op = self.convert_op(d['optype'])
+    if d['type'] == 'multilinear':
+      pass
+
     self._cache_matrices(dest, ops, target, permute)
     can_be_aligned = self._can_be_aligned(dest, ops, target, permute)
     # ElementwiseDescr()
@@ -122,6 +134,18 @@ class GpuKernelGeneratorV1:
     if not (entry_name in self._cache and entry.is_same(self._cache[entry_name])):
       self._cache[entry_name] = entry
 
+  def make_tensor_new(self, d):
+    shape = d['shape']
+    addressing = d['addressing']
+    datatype = d['datatype']
+
+    # TODO: match reversely
+    storagedata = d['storage']['data']
+    storagevalues = d['storage']['data']
+
+    sppdata = d['spp']['data']
+    sppvalues = d['spp']['values']
+
   def _cache_matrices(self, dest, ops, target, permute):
     can_be_aligned = self._can_be_aligned(dest, ops, target, permute)
     
@@ -132,7 +156,8 @@ class GpuKernelGeneratorV1:
       self.make_tensor(op, can_be_aligned, optarget)
 
     if dest.is_temporary: # (dest is never a scalar---for the time being)
-      self._cache[dest.name] = self._gen_tmp_matix(ops, target, permute, dest.name, can_be_aligned)
+      if dest.name not in self._tmp_matrices:
+        self._cache[dest.name] = self._gen_tmp_matix(ops, target, permute, dest.name, can_be_aligned)
     else:
       self.make_tensor(dest, can_be_aligned, [i for i in range(len(dest.indices))])
 
@@ -158,13 +183,22 @@ class GpuKernelGeneratorV1:
       else:
         return self._tmp_matrices[tensor.name]
 
+    if type(tensor.memoryLayout).__name__ == 'DenseMemoryLayout':
+      pattern = None
+    else:
+      rowRange = range(tensor.memoryLayout.bbox()[0].start, tensor.memoryLayout.bbox()[0].stop)
+      colRange = range(tensor.memoryLayout.bbox()[1].start, tensor.memoryLayout.bbox()[1].stop)
+      pattern = tensor.memoryLayout.entries(rowRange, colRange)
+      # incorrect:
+      # pattern = tensor.eqspp.as_ndarray()
+
     return yi.gen_matrix(shape,
                                bboxrange,
                                addressing=addr_mode,
                                name=tensor.name,
                                is_tmp=tensor.is_temporary,
                                permute=None,
-                               pattern=None if type(tensor.memoryLayout).__name__ == 'DenseMemoryLayout' else tensor.eqspp.as_ndarray(),
+                               pattern=pattern,
                                values = tensor.values,
                                datatype = tensor.datatype)
 
@@ -244,5 +278,5 @@ class YatetoFrontend:
     # legacy gateway
     return self.generator.add_operation(dest, ops, target, permute, add)
   
-  def add_operation(self, op):
-    pass
+  def add_operation(self, description):
+    return self.generator.add_operation_new(description)

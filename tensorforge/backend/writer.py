@@ -65,12 +65,12 @@ class Block:
 
   def __enter__(self):
     space = ' ' if self.argument else ''
-    self.writer(self.argument + space + '{')
+    self.writer.speculate(self.argument + space + '{')
     self.writer.indent += 1
 
   def __exit__(self, type, value, traceback):
     self.writer.indent -= 1
-    self.writer('}' + self.foot)
+    self.writer.speculateClear('}' + self.foot)
   
   def __call__(self, line):
     self.writer(line)
@@ -129,6 +129,7 @@ class Writer:
     self.indent = 0
     self.factor = 2
     self.alloc = VarAlloc()
+    self.stack = []
 
   def varalloc(self, prefix='v'):
     # TODO: maybe move out?
@@ -148,8 +149,25 @@ class Writer:
 
   def __call__(self, code):
     white_spaces = (' ' * self.factor) * self.indent
+    for substack in self.stack:
+      for deferred in substack:
+        self.stream.write(deferred)
+    self.stack = []
     for line in code.splitlines():
       self.stream.write(white_spaces + line + '\n')
+  
+  def speculate(self, code):
+    white_spaces = (' ' * self.factor) * self.indent
+    substack = []
+    for line in code.splitlines():
+      substack += [white_spaces + line + '\n']
+    self.stack += [substack]
+
+  def speculateClear(self, code):
+    if len(self.stack) > 0:
+      self.stack.pop()
+    else:
+      self(code)
 
   def mv_left(self):
     self.indent -= 1

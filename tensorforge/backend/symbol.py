@@ -236,7 +236,7 @@ class LinearizedLoop:
     loopvar2 = 'var2'
 
     # the pragma bears great control over the application speed. And the compile time.
-    # writer.insert_pragma_unroll()
+    writer.insert_pragma_unroll()
     with writer.For(f'int {loopvar} = 0; {loopvar} < {totalloopsize}; {loopvar} += {self.blocksize}'):
       if self.blocksize == 1:
         writer(f'int {loopvar2} = {loopvar};')
@@ -335,7 +335,7 @@ class Symbol:
     if self.stype == SymbolType.Data:
       return self.get_fptype(context).literal(self.obj.value(runIdx))
   
-  def encode_values(self, pos, runIdx, writer, context: Context, variable, index: List[Union[str, int, Immediate, Variable, LeadIndex]], nontemp):
+  def encode_values(self, pos, runIdx, writer, context: Context, variable, index: List[Union[str, int, Immediate, Variable, LeadIndex]], nontemp, leadidx):
     if pos == len(index):
       if self.stype == SymbolType.Data:
         value = self.obj.value(runIdx)
@@ -343,29 +343,79 @@ class Symbol:
           writer(f'{variable} = {self.get_fptype(context).literal(value)};')
       else:
         # TODO: unite with access_address
-        value = self.obj.linear_index(runIdx)
-        if value is not None:
-          writer(f'{variable} = {self.name}[{value}];')
+        if leadidx is None:
+          value = self.obj.linear_index(runIdx)
+          if value is not None:
+            writer(f'{variable} = {self.name}[{value}];')
+        else:
+          strindex = index[leadidx].write(context)
+          rngs = []
+          rng = None
+          startValue = None
+          for i in range(self.data_view.shape[leadidx]):
+            runIdx[leadidx] = i
+            value = self.obj.linear_index(runIdx)
+            if value is not None:
+              if rng is None:
+                rng = i
+                startValue = value
+              elif rng is not None and (value - startValue) != (i - rng) * index[leadidx]._stride:
+                rngs += [(rng, i)]
+                rng = i
+                startValue = value
+            elif value is None and rng is not None:
+              rngs += [(rng, i)]
+              rng = None
+              startValue = None
+          if rng is not None:
+            rngs += [(rng, self.data_view.shape[leadidx])]
+
+          if len(rngs) > 0:
+            idxvar = writer.varalloc()
+            writer(f'const int {idxvar} = {strindex};')
+            for rngS, rngE in rngs:
+              runIdx[leadidx] = rngS
+              value = self.obj.linear_index(runIdx)
+              with writer.If(f'{idxvar} >= {rngS} && {idxvar} < {rngE}'):
+                writer(f'{variable} = {self.name}[{value - rngS} + {idxvar}];')
     else:
       if isinstance(index[pos], int):
         runIdx[pos] = index[pos]
-        self.encode_values(pos + 1, runIdx, writer, context, variable, index, nontemp)
+        self.encode_values(pos + 1, runIdx, writer, context, variable, index, nontemp, leadidx)
       elif isinstance(index[pos], Immediate):
         runIdx[pos] = index[pos]._value
-        self.encode_values(pos + 1, runIdx, writer, context, variable, index, nontemp)
+        self.encode_values(pos + 1, runIdx, writer, context, variable, index, nontemp, leadidx)
+      elif pos == leadidx:
+        self.encode_values(pos + 1, runIdx, writer, context, variable, index, nontemp, leadidx)
       else:
+        # TODO: move block sparsity one level up
+        strindex = f'{index[pos]}' if isinstance(index[pos], (str, int, float, np.int64)) else index[pos].write(context)
         if True: # sparse/data
           # TODO: check sparsity pattern here for which ifs are worth it
           for i in range(self.data_view.shape[pos]):
             runIdx[pos] = i
-            strindex = f'{index[pos]}' if isinstance(index[pos], (str, int, float, np.int64)) else index[pos].write(context)
             with writer.If(f'{strindex} == {i}'):
-              self.encode_values(pos + 1, runIdx, writer, context, variable, index, nontemp)
+              self.encode_values(pos + 1, runIdx, writer, context, variable, index, nontemp, leadidx)
 
   def load(self, writer, context: Context, variable, index: List[Union[str, int, Immediate, Variable, LeadIndex]], nontemp):
     if self.stype == SymbolType.Data or not self.obj.is_dense():
       writer(f'{self.get_fptype(context)} {variable} = {self.get_fptype(context).literal(0)};')
-      self.encode_values(0, [0] * len(index), writer, context, variable, index, nontemp)
+
+      # treat the lead index last for better sparsity handling
+      leadidx = None
+      for i,idx in enumerate(index):
+        if isinstance(idx, LeadIndex):
+          if leadidx is None:
+            leadidx = idx
+          else:
+            leadidx = None
+            break
+
+      if leadidx is not None:
+        leadidxidx = index.index(leadidx)
+      else:
+        leadidxidx = None
+      self.encode_values(0, [0] * len(index), writer, context, variable, index, nontemp, leadidxidx)
     else:
       pre_access = self.access(context, index)
       if self.stype == SymbolType.Register or self.stype == SymbolType.Scratch:
