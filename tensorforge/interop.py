@@ -18,3 +18,6 @@ def get_version():
 
 def print_version():
     print(get_version(), end='')
+
+def use_fusedgemm_cost():
+    return True
