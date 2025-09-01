@@ -137,6 +137,21 @@ class FloatingPointType(enum.Enum):
            'unsigned int': FloatingPointType.UINT,
            'unsigned long': FloatingPointType.ULONG}
     return map[as_str]
+  
+  @classmethod
+  def ytt2enum(cls, as_str: str):
+    map = {'f32': FloatingPointType.FLOAT,
+           'f64': FloatingPointType.DOUBLE,
+           'f16': FloatingPointType.HALF,
+           'bf16': FloatingPointType.BFLOAT16,
+           'bool': FloatingPointType.BOOL,
+           'i8': FloatingPointType.INT,
+           'i16': FloatingPointType.INT,
+           'i32': FloatingPointType.INT,
+           'i64': FloatingPointType.LONG,
+           'u32': FloatingPointType.UINT,
+           'u64': FloatingPointType.ULONG}
+    return map[as_str]
 
 
 class GeneralLexicon:

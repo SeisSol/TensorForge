@@ -1,0 +1,3 @@
+
+class Vectormul:
+    pass

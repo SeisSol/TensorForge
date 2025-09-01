@@ -24,6 +24,25 @@ class FullSPP(SparsityPattern):
             stride *= s
         return index
 
+class BoundingBoxSPP(SparsityPattern):
+    def __init__(self, bbox):
+        self.bbox = bbox
+    
+    def is_nz(self, index):
+        return self.bbox.contains(index)
+    
+    def count_nz(self):
+        return reduce(lambda x,y: x*y, self.bbox.sizes(), 1)
+    
+    def linear_index(self, tupleindex):
+        stride = 1
+        index = 0
+        for x,l,u in zip(tupleindex, self.bbox.lower(), self.bbox.upper()):
+            assert x >= l and x < u
+            index += (x - l) * stride
+            stride *= (u - l)
+        return index
+
 class MaskSPP(SparsityPattern):
     def __init__(self, mask):
         self.mask = mask

@@ -8,6 +8,7 @@ from tensorforge.backend.instructions.clear_registers import ClearRegisters
 from tensorforge.backend.instructions.memory.store import StoreRegToGlb, StoreRegToShr, StoreRegToReg
 from tensorforge.backend.instructions.sync_block import SyncThreads
 from tensorforge.backend.instructions.compute.multilinear import MultilinearInstruction
+from tensorforge.backend.instructions.compute.multilinearmulti import MultilinearMultiInstruction
 from tensorforge.common.matrix.tensor import Tensor
 from tensorforge.common.exceptions import InternalError
 from tensorforge.generators.descriptions import MultilinearDescr
@@ -68,16 +69,26 @@ class MultilinearBuilder(AbstractBuilder):
     self._make_store()
     self._insert_sync_block()
 
-    # TODO: check if we always can allow a direct global memory load
+  # TODO: check if we always can allow a direct global memory load
   def _make_load_op(self, i):
+    has_lead_dim = 0 in self._descr.target[i]
+    transpose = self._descr.permute[i] != [j for j in range(len(self._descr.target[i]))]
+
     if self._ops[i].symbol.name in self._deferred_stores:
-      self._ops[i].symbol, _ = self._deferred_stores[self._ops[i].symbol.name]
+      if not has_lead_dim or transpose:
+        src, dest = self._deferred_stores[self._ops[i].symbol.name]
+        self._instructions.append(StoreRegToShr(context=self._context,
+                                                src=src,
+                                                dest=dest,
+                                                shr_mem=self._shr_mem,
+                                                num_threads=self._num_threads))
+      else:
+        self._ops[i].symbol, _ = self._deferred_stores[self._ops[i].symbol.name]
 
     if self._ops[i].symbol.stype == SymbolType.Scalar or self._ops[i].symbol.stype == SymbolType.Data:
       self._mem_regions[i] = self._ops[i]
     else:
-      has_lead_dim = 0 in self._descr.target[i]
-      transpose = self._descr.permute[i] != [j for j in range(len(self._descr.target[i]))]
+      
       if has_lead_dim:
         lead_idx = self._descr.target[i].index(0)
 
@@ -221,15 +232,9 @@ class MultilinearBuilder(AbstractBuilder):
                             stype=SymbolType.SharedMem,
                             obj=self._dest_obj.tensor)
 
+      # do not swap matrix layout in global memory until we need to
       self._scopes.add_symbol(dest_symbol)
-      if self._temporary_registers:
-        self._deferred_stores[dest_symbol.name] = (self._temp_regs, dest_symbol)
-      else:
-        self._instructions.append(StoreRegToShr(context=self._context,
-                                                src=self._temp_regs,
-                                                dest=dest_symbol,
-                                                shr_mem=self._shr_mem,
-                                                num_threads=self._num_threads))
+      self._deferred_stores[dest_symbol.name] = (self._temp_regs, dest_symbol)
 
   def _insert_sync_block(self):
     self._instructions.append(SyncThreads(context=self._context,

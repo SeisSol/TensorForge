@@ -1,6 +1,6 @@
 from tensorforge.common.context import Context
 from tensorforge.backend.scopes import Scopes, Symbol
-from tensorforge.common.matrix.matrix import Matrix
+from tensorforge.common.matrix.tensor import Tensor
 from tensorforge.backend.symbol import SymbolType, DataView
 from tensorforge.backend.instructions.ptr_manip import GetElementPtr
 from tensorforge.common.exceptions import InternalError
@@ -31,7 +31,7 @@ class GetElementPtrBuilder(AbstractBuilder):
       if src.stype != SymbolType.Batch:
         raise InternalError("src operand is not in a batch")
 
-      if issubclass(Matrix, type(src.obj)):
+      if not issubclass(Tensor, type(src.obj)):
         raise InternalError(f'src operand is not a matrix. Instead: {type(src.obj)}')
 
       dest = Symbol(name=f'{GeneralLexicon.GLOBAL_MEM_PREFIX}{src.name}',

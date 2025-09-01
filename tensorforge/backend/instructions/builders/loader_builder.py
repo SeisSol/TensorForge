@@ -1,6 +1,5 @@
 from tensorforge.common.context import Context
 from tensorforge.backend.scopes import Scopes, Symbol
-from tensorforge.common.matrix.matrix import Matrix
 from tensorforge.backend.symbol import SymbolType, DataView
 from tensorforge.backend.instructions.memory.load import GlbToShrLoader
 from tensorforge.common.exceptions import InternalError

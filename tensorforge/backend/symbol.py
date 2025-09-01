@@ -7,6 +7,8 @@ from tensorforge.common.context import Context
 from tensorforge.common.basic_types import FloatingPointType, Addressing
 from .writer import Writer
 
+from tensorforge.common.matrix.spp import BoundingBoxSPP
+
 import numpy as np
 
 class SymbolType(enum.Enum):
@@ -398,7 +400,7 @@ class Symbol:
               self.encode_values(pos + 1, runIdx, writer, context, variable, index, nontemp, leadidx)
 
   def load(self, writer, context: Context, variable, index: List[Union[str, int, Immediate, Variable, LeadIndex]], nontemp):
-    if self.stype == SymbolType.Data or not self.obj.is_dense():
+    if self.stype == SymbolType.Data or (not self.obj.is_dense() and not isinstance(self.obj.spp, BoundingBoxSPP)):
       writer(f'{self.get_fptype(context)} {variable} = {self.get_fptype(context).literal(0)};')
 
       # treat the lead index last for better sparsity handling

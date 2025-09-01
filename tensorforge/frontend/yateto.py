@@ -4,17 +4,29 @@ from tensorforge.common.basic_types import Addressing, FloatingPointType, DataFl
 from tensorforge.common.context import Context
 from tensorforge.common.aux import generate_tmp_tensor
 from tensorforge.common.matrix.tensor import Tensor, SubTensor
+from tensorforge.common.matrix.spp import FullSPP, BoundingBoxSPP, ListSPP
 from tensorforge.common.matrix.boundingbox import BoundingBox as BBox
 from tensorforge.generators.descriptions import ElementwiseDescr
 from tensorforge.generators.generator import Generator as TensorForgeGenerator
 from tensorforge.generators.descriptions import MultilinearDescr
+
+from tensorforge.ir.data.variable import TensorView, TensorAlloc
+from tensorforge.ir.data.variable import TensorData
+from tensorforge.ir.logical.compute import Multilinear
+from tensorforge.ir.type import BaseDatatype
+from tensorforge.ir.data.memory import Logical
 
 class GpuKernelGeneratorV1:
   def __init__(self, arch):
     self._arch = arch
     self._cache = {}
     self._tmp_matrices = {}
+
+    # to be replaced by the IR list
     self._descr_list = []
+
+    self._ir_list = []
+    self._tensor_list = {}
 
   def add_operation(self, dest, ops, target, permute, add):
     self._cache_matrices(dest, ops, target, permute)
@@ -27,28 +39,57 @@ class GpuKernelGeneratorV1:
     return 0# self._descr_list[-1].get_flops()
   
   def add_operation_new(self, d):
-    result = self.make_tensor_new(d['result'])
-    args = [self.make_tensor_new(arg) for arg in d['args']]
-    condition = self.make_tensor_new(d['condition'])
-    alpha = self.make_tensor_new(d['linear']['alpha'])
+    result = self.tensor_ref(d['result'])
+    args = [self.tensor_ref(arg) for arg in d['args']]
+
+    condition_raw = d['condition']
+    condition = [self.tensor_ref(var) for clause in condition_raw for var in clause]
+    # condition = self.tensor_ref(d['condition'])
+
     if d['type'] == 'reduction':
       assert len(args) == 1
       op = self.convert_op(d['optype'])
+
+
     if d['type'] == 'elementwise':
       op = self.convert_op(d['optype'])
-    if d['type'] == 'multilinear':
+
+    if d['type'] == 'matmul':
       pass
 
-    self._cache_matrices(dest, ops, target, permute)
-    can_be_aligned = self._can_be_aligned(dest, ops, target, permute)
-    # ElementwiseDescr()
-    self._descr_list.append(MultilinearDescr(self.get_tensor(dest, can_be_aligned, [i for i in range(len(dest.indices))]),
-                              [self.get_tensor(op, can_be_aligned, optarget) for op, optarget in zip(ops, target)],
+    if 'linear' in d['type']:
+      alpha = self.tensor_ref(d['linear']['alpha'])
+      add = d['linear']['add']
+
+    if d['type'] == 'multilinear':
+      target = d['target']
+      permute = d['permute']
+    
+      # TODO
+
+      alpha = self.tensor_ref(d['linear']['alpha'])
+      add = d['linear']['add']
+
+      # ElementwiseDescr()
+      self._descr_list.append(MultilinearDescr(result,
+                              args,
                               target, permute, add=add,
                                 strict_match=False,
-                                prefer_align=can_be_aligned))
+                                prefer_align=False))
+      
+      result = self.tensor_ref_new(d['result'])
+      args = [self.tensor_ref_new(arg) for arg in d['args']]
+
+      condition_raw = d['condition']
+      condition = [self.tensor_ref_new(var) for clause in condition_raw for var in clause]
+      
+      self._ir_list.append(Multilinear(result, None, None, args, target, add))
+
     return 0# self._descr_list[-1].get_flops()
   
+  def convert_op(self):
+    pass
+
   def is_scalar(self, op):
     # a bit hacky...
     return not hasattr(op, 'memoryLayout') and not isinstance(op, (float, int)) #TODO: isinstance(op, Scalar):
@@ -97,9 +138,16 @@ class GpuKernelGeneratorV1:
     return 0
 
   def generate(self, cpp, routineCache):
+    if hasattr(self._arch, 'typename'):
+      fptype = FloatingPointType.str2enum(self._arch.typename)
+    else:
+      fptype = FloatingPointType.FLOAT
+
     context = Context(arch=self._arch.name,
                       backend=self._arch.backend,
-                      fp_type=FloatingPointType.str2enum(self._arch.typename))
+                      fp_type=fptype)
+
+    # print(self._ir_list)
 
     tensorforge_generator = TensorForgeGenerator(self._descr_list, context)
     tensorforge_generator.register()
@@ -133,18 +181,65 @@ class GpuKernelGeneratorV1:
     
     if not (entry_name in self._cache and entry.is_same(self._cache[entry_name])):
       self._cache[entry_name] = entry
+  
+  def tensor_ref(self, d):
+    name = d['name']
+    eqspp = d['spp']
 
-  def make_tensor_new(self, d):
-    shape = d['shape']
-    addressing = d['addressing']
-    datatype = d['datatype']
+    assert(name in self._cache)
 
-    # TODO: match reversely
-    storagedata = d['storage']['data']
-    storagevalues = d['storage']['data']
+    return SubTensor(self._cache[name], self._cache[name].bbox)
+  
+  def tensor_ref_new(self, d):
+    name = d['name']
+    eqspp = d['spp']
 
-    sppdata = d['spp']['data']
-    sppvalues = d['spp']['values']
+    assert(name in self._cache)
+
+    # TODO: bbox
+
+    return TensorAlloc(name, self._tensor_list[name], Logical())
+
+  def add_tensor(self, d):
+    name = d['name']
+    datatype = FloatingPointType.ytt2enum(d['datatype'])
+
+    datatype_new = BaseDatatype.ytt2enum(d['datatype'])
+
+    shape = d['storage']['shape']
+    storagetype = d['storage']['type']
+    
+    addressingStr = d['addressing']
+    if addressingStr == '&':
+      addressing = Addressing.NONE
+    elif addressingStr == 'n*N+o&':
+      addressing = Addressing.STRIDED
+    elif addressingStr == 'n&+o&':
+      addressing = Addressing.PTR_BASED
+    elif addressingStr == '':
+      addressing = Addressing.SCALAR
+
+    if storagetype == 'full':
+      spp = FullSPP(shape)
+      bbox = None
+    if storagetype == 'bbox':
+      starts = d['storage']['start']
+      sizes = d['storage']['sizes']
+      lower = list(starts)
+      upper = [start + size for start, size in zip(starts, sizes)]
+      bbox = BBox(lower, upper)
+      spp = FullSPP(shape)#BoundingBoxSPP(bbox)
+    if storagetype == 'spp':
+      bbox = None
+      spp = ListSPP(d['storage']['entries'])
+    
+    values = d['values']
+    is_temporary = d['flags']['temporary']
+    is_constant = d['flags']['constant']
+
+    self._cache[name] = Tensor(shape, addressing, bbox, name, is_temporary, spp, values, datatype)
+
+    self._tensor_list[name] = TensorData(datatype_new, shape, spp, values=values)
 
   def _cache_matrices(self, dest, ops, target, permute):
     can_be_aligned = self._can_be_aligned(dest, ops, target, permute)
@@ -277,6 +372,9 @@ class YatetoFrontend:
   def add_linear_operation(self, dest, ops, target, permute, add):
     # legacy gateway
     return self.generator.add_operation(dest, ops, target, permute, add)
-  
+
   def add_operation(self, description):
     return self.generator.add_operation_new(description)
+
+  def add_tensor(self, tensor):
+    return self.generator.add_tensor(tensor)
