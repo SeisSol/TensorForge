@@ -82,6 +82,8 @@ class MultilinearBuilder(AbstractBuilder):
                                                 dest=dest,
                                                 shr_mem=self._shr_mem,
                                                 num_threads=self._num_threads))
+        del self._deferred_stores[self._ops[i].symbol.name]
+        self._ops[i].symbol = dest
       else:
         self._ops[i].symbol, _ = self._deferred_stores[self._ops[i].symbol.name]
 
