@@ -211,7 +211,7 @@ class Generator:
         compress = False
         break
     if compress:
-      self._num_threads = 32
+      self._num_threads = min(32, self._num_threads)
 
   def _deduce_accumulator_size(self):
     for descr in self.descr_list:
