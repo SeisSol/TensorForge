@@ -34,6 +34,18 @@ class MultilinearDescr(OperationDescription):
 
   def get_num_threads(self, context: Context):
     num_threads = context.align(num=self._lead_dim())
+    if self._lead_dim() <= 32:
+      num_threads = 32
+    if self._lead_dim() <= 16:
+      num_threads = 16
+    if self._lead_dim() <= 8:
+      num_threads = 8
+    if self._lead_dim() <= 4:
+      num_threads = 4
+    if self._lead_dim() <= 2:
+      num_threads = 2
+    if self._lead_dim() <= 1:
+      num_threads = 1
     return num_threads, self._lead_dim()
 
   def get_accumulator_size(self):
