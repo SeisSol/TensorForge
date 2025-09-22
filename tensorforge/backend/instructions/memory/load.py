@@ -164,7 +164,7 @@ class GlbToShrLoader(AbstractShrMemWrite):
         index[li] = f'i{li}'
       
       linscale = None
-      if self._dst_shape[0] != self._read_shape[0]:
+      if len(self._dst_shape) > 0 and self._dst_shape[0] != self._read_shape[0]:
         linscale = (self._read_shape[0], self._dst_shape[0])
       
       self._write_datatransfer(writer, 0, 0, index, self._loadsize, allow_nontemporal, linscale)
