@@ -1,9 +1,10 @@
 # TensorForge
 
-(formerly known as gemmforge and chainforge)
+A code generator for small matrix multiplications on GPUs.
 
 ## Installation
-TensorForge is a Python package, i.e. you can do
+TensorForge is a Python package, i.e. you may run
 ```
 pip install .
 ```
+to install it.
