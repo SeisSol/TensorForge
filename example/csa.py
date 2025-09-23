@@ -1,0 +1,62 @@
+import sys
+sys.path.append('..')
+
+from tensorforge.common.matrix.tensor import Tensor, SubTensor
+import argparse
+from tensorforge.common.basic_types import Addressing
+from tensorforge.common.matrix.boundingbox import BoundingBox
+from tensorforge.common.matrix.tensor import Tensor
+from tensorforge.common.context import Context
+from tensorforge.generators.descriptions import GemmDescr, FloatingPointType, Addressing
+from tensorforge.generators.generator import Generator
+from tensorforge.common.matrix.boundingbox import BoundingBox
+from tensorforge.common.matrix.tensor import Tensor, SubTensor
+
+parser = argparse.ArgumentParser(description='Specify Backend and Arch of the GPU')
+parser.add_argument('-a',
+                    '--arch',
+                    action='store',
+                    help='Arch of the GPU, e.g sm_60 for Nvidia or gfx906 for AMD',
+                    default='sm_60')
+parser.add_argument('-b',
+                    '--backend',
+                    action='store',
+                    help='Name of the Backend, currently cuda, hip, hipsycl and oneapi are supported',
+                    default='cuda')
+
+args = parser.parse_args()
+
+mat_a = SubTensor(Tensor([9, 9],
+                    Addressing.STRIDED,
+                    BoundingBox([0, 0], [9, 9])), BoundingBox([0, 0], [9, 9]))
+
+mat_b = SubTensor(Tensor([9, 9],
+                    Addressing.STRIDED,
+                    BoundingBox([0, 0], [9, 9])), BoundingBox([0, 0], [9, 9]))
+
+mat_c = SubTensor(Tensor([9, 9],
+                    Addressing.STRIDED,
+                    BoundingBox([0, 0], [9, 9])), BoundingBox([0, 0], [9, 9]))
+
+
+gemm_list = [GemmDescr(trans_a=False,
+                       trans_b=False,
+                       a=mat_a, b=mat_b, c=mat_c,
+                       alpha=13.0,
+                       beta=0.0)]
+
+context = Context(arch=args.arch,
+                  backend=args.backend,
+                  fp_type=FloatingPointType.FLOAT)
+
+generator = Generator(gemm_list, context)
+generator.generate()
+
+with_output = True
+if with_output:
+  print(generator.get_header())
+  print(generator.default_generate_call_site())
+  print()
+  print(generator.get_launcher())
+  print()
+  print(generator.get_kernel())

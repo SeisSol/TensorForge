@@ -1,0 +1,32 @@
+[project]
+name = "tensorforge"
+description="Small GEMM/GETT generator for GPUs"
+license = {file = "LICENSE"}
+requires-python = ">=3.5"
+authors = [
+    { name = "Ravil Dorozhinskii", email = "ravil.aviva.com@gmail.com" },
+    { name = "Yakup Budanaz", email = "budanaz.yakup@gmail.com" },
+    { name = "David Schneller", email = "david.schneller@tum.de" },
+    { name = "Elias Reutelsterz", email = "elias.reutelsterz@tum.de" }
+]
+maintainers = [
+    { name = "David Schneller", email = "david.schneller@tum.de" }
+]
+classifiers= [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: BSD License",
+    "Operating System :: OS Independent",
+]
+dynamic = ["version", "readme", "dependencies"]
+
+[build-system]
+requires = ["setuptools>=61.0.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.dynamic]
+readme = {file = ["README.md"], content-type = "text/markdown"}
+version = {file = ["tensorforge/VERSION"]}
+dependencies = {file = ["requirements.txt"]}
+
+[tool.setuptools.package-data]
+"*" = ["*.*"]
