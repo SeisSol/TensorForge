@@ -189,7 +189,7 @@ class LeadLoop:
           index = LeadIndex(value, self.threads, self.stride)
           inner([index])
       elif realstart < realend:
-        # writer.insert_pragma_unroll()
+        writer.insert_pragma_unroll() # TODO: move up?
         var = self.var
         with writer.For(f'int {var} = {realstart}; {var} < {realend}; {var} += 1'):
           index = LeadIndex(var, self.threads, self.stride)
@@ -213,7 +213,7 @@ class Loop:
         inner([Immediate(value, FloatingPointType.INT)])
         #inner([value])
     elif self.start < self.end:
-      # writer.insert_pragma_unroll()
+      writer.insert_pragma_unroll() # TODO: move up?
       var = self.var
       with writer.For(f'int {var} = {self.start}; {var} < {self.end}; {var} += {self.step}'):
         inner([Variable(var, FloatingPointType.INT)])

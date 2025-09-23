@@ -171,7 +171,7 @@ class StoreRegToGlb(AbstractInstruction):
     writer.new_line()
     dest_view = self._dest.data_view
 
-    allow_nontemporal = self._src.get_last_user() is self
+    allow_nontemporal = len(self._src.get_user_list()) == 1 # self._src.get_last_user() is self
 
     writer(f'// {self}')
     src_bbox = self._src.data_view.get_bbox()
