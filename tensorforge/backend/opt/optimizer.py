@@ -32,10 +32,15 @@ class OptimizationStage:
     opt.apply()
     regions: List[Region] = opt.get_regions()
 
+    overhead = self._num_threads % self._context.get_vm().get_hw_descr().shmem_banks
+    overhead //= 4
+    overhead *= 4
+
     opt = ShrMemOpt(context=self._context,
                     shr_mem_obj=self._shr_mem,
                     regions=regions,
-                    live_map=live_map)
+                    live_map=live_map,
+                    thread_overhead=overhead)
     opt.apply()
 
     if self._user_options.enable_sync_block_opt:
