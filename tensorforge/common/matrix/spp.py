@@ -23,6 +23,9 @@ class FullSPP(SparsityPattern):
             index += x * stride
             stride *= s
         return index
+    
+    def dimrange(self, dim):
+        return (0, self.shape[dim])
 
 class BoundingBoxSPP(SparsityPattern):
     def __init__(self, bbox):
@@ -42,6 +45,9 @@ class BoundingBoxSPP(SparsityPattern):
             index += (x - l) * stride
             stride *= (u - l)
         return index
+    
+    def dimrange(self, dim):
+        return (self.bbox.lower()[dim], self.bbox.upper()[dim])
 
 class MaskSPP(SparsityPattern):
     def __init__(self, mask):
@@ -71,6 +77,9 @@ class MaskSPP(SparsityPattern):
             return preindex - 1 if preindex > 0 else None
         else:
             return None
+    
+    def dimrange(self, dim):
+        return None
 
 class ListSPP(SparsityPattern):
     def __init__(self, lst, shape):
@@ -95,3 +104,6 @@ class ListSPP(SparsityPattern):
             return preindex - 1 if preindex > 0 else None
         else:
             return None
+    
+    def dimrange(self, dim):
+        return None

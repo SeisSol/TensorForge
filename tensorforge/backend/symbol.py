@@ -320,10 +320,10 @@ class Symbol:
       for i in range(self.data_view.rank()):
         strides[i] = stride
         if isinstance(index[i], LeadIndex):
-          stride *= (self.data_view.shape[i] + self.num_threads - 1) // self.num_threads
+          stride *= (self.data_view.get_dim_size(i) + self.num_threads - 1) // self.num_threads
           writers[i] = writeNoOffset
         else:
-          stride *= self.data_view.shape[i]
+          stride *= self.data_view.get_dim_size(i)
           writers[i] = writeOffset
       dimstr = " + ".join(writer(i,var,offset,stride) for i, (var, offset, stride, writer) in enumerate(zip(index, self.data_view.get_dim_offsets(), strides, writers)))
       return dimstr if len(dimstr) > 0 else "0"
@@ -354,7 +354,7 @@ class Symbol:
           rngs = []
           rng = None
           startValue = None
-          for i in range(self.data_view.shape[leadidx]):
+          for i in range(self.data_view.get_dim_size(leadidx)):
             runIdx[leadidx] = i
             value = self.obj.linear_index(runIdx)
             if value is not None:
@@ -370,7 +370,7 @@ class Symbol:
               rng = None
               startValue = None
           if rng is not None:
-            rngs += [(rng, self.data_view.shape[leadidx])]
+            rngs += [(rng, self.data_view.get_dim_size(leadidx))]
 
           if len(rngs) > 0:
             idxvar = writer.varalloc()
@@ -381,6 +381,7 @@ class Symbol:
               with writer.If(f'{idxvar} >= {rngS} && {idxvar} < {rngE}'):
                 writer(f'{variable} = {self.name}[{value - rngS} + {idxvar}];')
     else:
+      offset = self.data_view.get_dim_offsets()[pos]
       if isinstance(index[pos], int):
         runIdx[pos] = index[pos]
         self.encode_values(pos + 1, runIdx, writer, context, variable, index, nontemp, leadidx)
@@ -394,9 +395,9 @@ class Symbol:
         strindex = f'{index[pos]}' if isinstance(index[pos], (str, int, float, np.int64)) else index[pos].write(context)
         if True: # sparse/data
           # TODO: check sparsity pattern here for which ifs are worth it
-          for i in range(self.data_view.shape[pos]):
+          for i in range(self.data_view.get_dim_size(pos)):
             runIdx[pos] = i
-            with writer.If(f'{strindex} == {i}'):
+            with writer.If(f'({strindex} - {offset}) == {runIdx[pos]}'):
               self.encode_values(pos + 1, runIdx, writer, context, variable, index, nontemp, leadidx)
 
   def load(self, writer, context: Context, variable, index: List[Union[str, int, Immediate, Variable, LeadIndex]], nontemp):
