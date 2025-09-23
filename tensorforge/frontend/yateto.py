@@ -102,12 +102,18 @@ class GpuKernelGeneratorV1:
     else:
       tensor = self._cache[op.name]
       currentPreShape = BBox([s for s, _ in op.eqspp.nnzbounds()], [e+1 for _, e in op.eqspp.nnzbounds()])
+      if type(op.memoryLayout).__name__ == 'MemoryLayoutView':
+        relidx = op.memoryLayout.relidx([0] * len(currentPreShape._lower))
+        currentPreShape = BBox([x + relidx[i] for i, x in enumerate(currentPreShape._lower)], [x + relidx[i] for i, x in enumerate(currentPreShape._upper)])
       if can_be_aligned:
         for i, dim in enumerate(dims):
           if i == 0 and op.memoryLayout.alignedStride(): # previously: dim == 0
             # a bit hacky right now...
             newLower = self._arch.alignedLower(currentPreShape._lower[i])
             newUpper = self._arch.alignedUpper(currentPreShape._upper[i])
+
+            # TODO: check this condition again
+            newUpper = min(newUpper, op.memoryLayout.bbox()[0].stop)
 
             currentPreShape._lower = tuple([newLower] + list(currentPreShape._lower[1:]))
             currentPreShape._upper = tuple([newUpper] + list(currentPreShape._upper[1:]))
@@ -270,6 +276,10 @@ class GpuKernelGeneratorV1:
       return Addressing.PTR_BASED
 
   def _get_tensorforge_matrix(self, tensor, shape, bboxrange):
+    tml = tensor.memoryLayout
+    if type(tml).__name__ == 'MemoryLayoutView':
+      tml = tml.storage()
+
     addr_mode = self.deduce_addresing(tensor) if tensor.addressing is None else tensor.addressing
     if tensor.is_temporary:
       if not tensor.name in self._tmp_matrices:
@@ -278,12 +288,12 @@ class GpuKernelGeneratorV1:
       else:
         return self._tmp_matrices[tensor.name]
 
-    if type(tensor.memoryLayout).__name__ == 'DenseMemoryLayout':
+    if type(tml).__name__ == 'DenseMemoryLayout':
       pattern = None
     else:
-      rowRange = range(tensor.memoryLayout.bbox()[0].start, tensor.memoryLayout.bbox()[0].stop)
-      colRange = range(tensor.memoryLayout.bbox()[1].start, tensor.memoryLayout.bbox()[1].stop)
-      pattern = tensor.memoryLayout.entries(rowRange, colRange)
+      rowRange = range(tml.bbox()[0].start, tml.bbox()[0].stop)
+      colRange = range(tml.bbox()[1].start, tml.bbox()[1].stop)
+      pattern = tml.entries(rowRange, colRange)
       # incorrect:
       # pattern = tensor.eqspp.as_ndarray()
 
