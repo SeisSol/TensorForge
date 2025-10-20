@@ -302,17 +302,16 @@ class Generator:
     tmp_counter = 0
     op_counter = 0
 
-    pre_matrix_list = set()
-    pre_submatrix_list = set()
+    pre_matrix_list = {}
     for gemm in gemm_list:
       local_list = gemm.matrix_list()
 
       # gather all matrices
       for matrix in local_list:
-        pre_matrix_list.add(matrix.tensor)
-        pre_submatrix_list.add(matrix)
-    self._matrix_list = list(pre_matrix_list)
-    self._submatrix_list = list(pre_submatrix_list)
+        # dict preserves ordering starting with 3.7
+        pre_matrix_list[matrix.tensor] = None
+
+    self._matrix_list = list(pre_matrix_list.keys())
 
     for matrix in self._matrix_list:
       if matrix.is_tmp:
