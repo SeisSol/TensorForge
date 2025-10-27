@@ -50,7 +50,6 @@ class GpuKernelGeneratorV1:
       assert len(args) == 1
       op = self.convert_op(d['optype'])
 
-
     if d['type'] == 'elementwise':
       op = self.convert_op(d['optype'])
 
@@ -102,21 +101,27 @@ class GpuKernelGeneratorV1:
     else:
       tensor = self._cache[op.name]
       currentPreShape = BBox([s for s, _ in op.eqspp.nnzbounds()], [e+1 for _, e in op.eqspp.nnzbounds()])
+
+      tml = op.memoryLayout
       if type(op.memoryLayout).__name__ == 'MemoryLayoutView':
         relidx = op.memoryLayout.relidx([0] * len(currentPreShape._lower))
         currentPreShape = BBox([x + relidx[i] for i, x in enumerate(currentPreShape._lower)], [x + relidx[i] for i, x in enumerate(currentPreShape._upper)])
+
+        tml = tml.storage()
+
       if can_be_aligned:
         for i, dim in enumerate(dims):
-          if i == 0 and op.memoryLayout.alignedStride(): # previously: dim == 0
+          if i == 0 and tml.alignedStride(): # previously: dim == 0
             # a bit hacky right now...
             newLower = self._arch.alignedLower(currentPreShape._lower[i])
             newUpper = self._arch.alignedUpper(currentPreShape._upper[i])
 
             # TODO: check this condition again
-            newUpper = min(newUpper, op.memoryLayout.bbox()[0].stop)
+            newUpper = min(newUpper, tml.bbox()[0].stop)
 
             currentPreShape._lower = tuple([newLower] + list(currentPreShape._lower[1:]))
             currentPreShape._upper = tuple([newUpper] + list(currentPreShape._upper[1:]))
+
       return SubTensor(tensor, currentPreShape)
 
   def add_scalar(self, ops, statements, indices):
@@ -181,8 +186,8 @@ class GpuKernelGeneratorV1:
       entry_name = op.name()
     else:
       entry = self._get_tensorforge_matrix(tensor=op,
-                                          shape=[rng.stop for rng in op.memoryLayout.bbox()],
-                                          bboxrange=op.memoryLayout.bbox())
+                                          shape=[rng.stop for rng in self._storage(op.memoryLayout).bbox()],
+                                          bboxrange=self._storage(op.memoryLayout).bbox())
       entry_name = op.name
     
     if not (entry_name in self._cache and entry.is_same(self._cache[entry_name])):
@@ -274,11 +279,14 @@ class GpuKernelGeneratorV1:
       return Addressing.STRIDED
     else:
       return Addressing.PTR_BASED
+  
+  def _storage(self, tml):
+    if type(tml).__name__ == 'MemoryLayoutView':
+      return tml.storage()
+    return tml
 
   def _get_tensorforge_matrix(self, tensor, shape, bboxrange):
-    tml = tensor.memoryLayout
-    if type(tml).__name__ == 'MemoryLayoutView':
-      tml = tml.storage()
+    tml = self._storage(tensor.memoryLayout)
 
     addr_mode = self.deduce_addresing(tensor) if tensor.addressing is None else tensor.addressing
     if tensor.is_temporary:

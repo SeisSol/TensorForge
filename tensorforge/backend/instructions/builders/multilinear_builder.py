@@ -204,11 +204,12 @@ class MultilinearBuilder(AbstractBuilder):
     if self._dest_obj.tensor in self._scopes:
       dest_symbol = self._scopes.get_symbol(self._dest_obj.tensor)
       if dest_symbol.stype == SymbolType.SharedMem:
-        self._instructions.append(StoreRegToShr(context=self._context,
-                                                src=self._temp_regs,
-                                                dest=dest_symbol,
-                                                shr_mem=self._shr_mem,
-                                                num_threads=self._num_threads))
+        #self._instructions.append(StoreRegToShr(context=self._context,
+        #                                        src=self._temp_regs,
+        #                                        dest=dest_symbol,
+        #                                        shr_mem=self._shr_mem,
+        #                                        num_threads=self._num_threads))
+        pass # see note below
       elif dest_symbol.stype == SymbolType.Global:
         if self._use_registers_always:
           self._deferred_stores[dest_symbol.name] = (self._temp_regs, dest_symbol)
