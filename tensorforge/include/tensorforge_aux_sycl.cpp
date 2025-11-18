@@ -1,5 +1,5 @@
 #include <iostream>
-#include <CL/sycl.hpp>
+#include <sycl/sycl.hpp>
 
 namespace tensorforge
 {
@@ -9,9 +9,10 @@ namespace tensorforge
 
   void synchDevice(void *stream)
   {
-    if (stream == nullptr)
+    if (stream == nullptr) {
       throw std::invalid_argument("cant sync device without queue!");
+    }
 
-    ((cl::sycl::queue *)stream)->wait();
+    ((sycl::queue *)stream)->wait();
   }
 }
