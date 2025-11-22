@@ -43,6 +43,8 @@
   base: sm_90
 - arch: sm_101
   base: sm_90
+- arch: sm_110
+  base: sm_90
 - arch: sm_120
   base: sm_89
 - arch: gfx900
@@ -91,9 +93,15 @@
   base: gfx1010
 - arch: gfx1102
   base: gfx1010
+- arch: gfx1103
+  base: gfx1010
 - arch: gfx1150
   base: gfx1010
 - arch: gfx1200
+  base: gfx1010
+- arch: gfx1201
+  base: gfx1010
+- arch: gfx1250
   base: gfx1010
 - arch: pvc
   vec_unit_length: 16
