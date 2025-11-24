@@ -1,4 +1,4 @@
-from .aux import Aux
+from .helper import Aux
 
 
 class EnryPointGenerator:

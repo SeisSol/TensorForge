@@ -1,5 +1,5 @@
 #include "simple_sparse_dense_driver.h"
-#include "aux.h"
+#include "helper.h"
 #include "tensorforge_aux.h"
 #include <device.h>
 #include <iostream>

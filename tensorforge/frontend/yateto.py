@@ -2,7 +2,7 @@
 from tensorforge.interface import YatetoInterface as yi
 from tensorforge.common.basic_types import Addressing, FloatingPointType, DataFlowDirection
 from tensorforge.common.context import Context
-from tensorforge.common.aux import generate_tmp_tensor
+from tensorforge.common.helper import generate_tmp_tensor
 from tensorforge.common.matrix.tensor import Tensor, SubTensor
 from tensorforge.common.matrix.spp import FullSPP, BoundingBoxSPP, ListSPP
 from tensorforge.common.matrix.boundingbox import BoundingBox as BBox

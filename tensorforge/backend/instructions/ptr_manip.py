@@ -1,6 +1,6 @@
 from .abstract_instruction import AbstractInstruction
 from tensorforge.common.vm.vm import VM
-from tensorforge.common.aux import get_extra_offset_name, Addressing
+from tensorforge.common.helper import get_extra_offset_name, Addressing
 from tensorforge.common.basic_types import GeneralLexicon, DataFlowDirection, StridedAddressing
 from tensorforge.common.exceptions import GenerationError
 

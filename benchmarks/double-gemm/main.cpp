@@ -1,6 +1,6 @@
-#include "aux.h"
 #include "comparators.h"
 #include "gemm.h"
+#include "helper.h"
 #include "kernels.h"
 #include "simple_driver.h"
 #include "stop_watch.h"

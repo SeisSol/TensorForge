@@ -1,5 +1,5 @@
 from tensorforge.common.context import Context
-from tensorforge.common.aux import generate_tmp_matrix
+from tensorforge.common.helper import generate_tmp_matrix
 from tensorforge.generators.descriptions import GemmDescr
 from tensorforge.common.basic_types import FloatingPointType, Addressing
 from tensorforge.generators.generator import Generator

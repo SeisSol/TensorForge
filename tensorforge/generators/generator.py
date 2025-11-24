@@ -4,7 +4,7 @@ import hashlib
 from tensorforge.generators.descriptions import OperationDescription, MultilinearDescr, ElementwiseDescr
 from tensorforge.common.context import Context
 from tensorforge.common.basic_types import Addressing, GeneralLexicon, DataFlowDirection
-from tensorforge.common.aux import get_extra_offset_name
+from tensorforge.common.helper import get_extra_offset_name
 from tensorforge.backend.data_types import ShrMemObject, RegMemObject
 from tensorforge.backend.opt import OptimizationStage
 from tensorforge.backend.scopes import Scopes

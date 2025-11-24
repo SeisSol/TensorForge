@@ -1,5 +1,5 @@
 from .gpu_api import GpuAPI
-from .aux import Aux
+from .helper import Aux
 from tensorforge.common.basic_types import Addressing
 
 

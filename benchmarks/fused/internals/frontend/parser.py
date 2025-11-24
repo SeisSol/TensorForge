@@ -4,7 +4,7 @@ from .nodes import ScalarNode, MatrixNode, DeadNode
 from .nodes import AssignNode, AddNode, MultNode
 from .nodes import StatementsNode
 from .symbol_table import SymbolTable, ObjType
-from .aux import VarFactory
+from .helper import VarFactory
 
 
 class CustomTransformer(Transformer):

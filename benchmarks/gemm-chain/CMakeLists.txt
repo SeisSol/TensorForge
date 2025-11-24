@@ -5,7 +5,7 @@ project(gemm-chain)
 include(${CMAKE_SOURCE_DIR}/gen_code/config.cmake)
 
 set(TARGET ${CMAKE_PROJECT_NAME})
-set(TARGET_SOURCE_FILES common/aux.cpp)
+set(TARGET_SOURCE_FILES common/helper.cpp)
 
 set(TARGET_INCLUDE_DIRS gen_code
                         common

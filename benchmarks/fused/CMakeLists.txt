@@ -23,7 +23,7 @@ if (${BACKEND} STREQUAL "cuda")
 
   cuda_add_executable(${CMAKE_PROJECT_NAME} ./tmp/main.cu
                                             ./tmp/kernel.cu
-                                            ./common/aux.cpp
+                                            ./common/helper.cpp
                                             ./common/gemm.cpp
                                             ../tensorforge/include/tensorforge_aux.cu)
   target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE CUDA_UNDERHOOD)
@@ -43,7 +43,7 @@ elseif(${BACKEND} STREQUAL "hip")
   find_package(HIP REQUIRED)
   set(DEVICE_SRC ./tmp/main.cpp
                  ./tmp/kernel.cpp
-                 ./common/aux.cpp
+                 ./common/helper.cpp
                  ./common/gemm.cpp
                  ../tensorforge/include/tensorforge_aux.hip.cpp)
 

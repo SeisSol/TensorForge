@@ -1,5 +1,5 @@
 #include "simple_driver.h"
-#include "aux.h"
+#include "helper.h"
 #include "tensorforge_aux.h"
 #include <device.h>
 #include <iostream>

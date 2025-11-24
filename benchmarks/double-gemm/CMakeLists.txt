@@ -8,7 +8,7 @@ set(TARGET_SOURCE_FILES main.cpp
                         common/gemm.cpp
                         main.cpp
                         common/gemm.cpp
-                        common/aux.cpp
+                        common/helper.cpp
                         common/test_drivers/simple_comparator.cpp)
 
 set(TARGET_INCLUDE_DIRS gen_code

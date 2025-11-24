@@ -3,7 +3,7 @@ project(csa-tests)
 
 set(TARGET ${CMAKE_PROJECT_NAME})
 set(TARGET_SOURCE_FILES main.cpp
-        common/aux.cpp
+        common/helper.cpp
         common/csa.cpp
         common/test_drivers/simple_comparator.cpp
         gen_code/test.cpp)
