@@ -160,7 +160,7 @@ except GenerationError as err:
     print('ERROR: {}'.format(err))
 
 
-env = Environment(loader=FileSystemLoader(searchpath=os.path.dirname(__file__)))
+env = Environment(loader=FileSystemLoader(searchpath=os.path.dirname(__file__)), autoescape=True)
 env.globals.update(zip=zip)
 template = env.get_template("bench.tmpl")
 

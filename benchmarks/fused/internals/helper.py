@@ -9,7 +9,7 @@ class Aux:
   @classmethod
   def read_template(self, template_name):
     file_path = os.path.join(os.path.dirname(__file__), './templates')
-    env = Environment(loader=FileSystemLoader(searchpath=file_path))
+    env = Environment(loader=FileSystemLoader(searchpath=file_path), autoescape=True)
     return env.get_template(template_name)
 
   @classmethod

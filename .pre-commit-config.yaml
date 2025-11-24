@@ -55,12 +55,12 @@ repos:
 #        files: ^(?!preprocessing|postprocessing)
 #        args: ["--profile", "black"]
 #        name: '[PYTHON] isort'
-#-   repo: https://github.com/pycqa/bandit
-#    rev: 1.8.6
-#    hooks:
-#    -   id: bandit
-#        args: ["--confidence-level", "high", "--severity-level", "high"]
-#        name: '[PYTHON] bandit'
+-   repo: https://github.com/pycqa/bandit
+    rev: 1.8.6
+    hooks:
+    -   id: bandit
+        args: ["--confidence-level", "high", "--severity-level", "high"]
+        name: '[PYTHON] bandit'
 #-   repo: https://github.com/pycqa/flake8
 #    rev: '7.3.0'
 #    hooks:

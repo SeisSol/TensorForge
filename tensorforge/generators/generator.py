@@ -374,8 +374,9 @@ class Generator:
         str(descr)
       ])
 
-    result = hashlib.md5(', '.join(long_name).encode())
-    md5encoding = result.hexdigest()
+    sha = hashlib.new('md5', usedforsecurity=False)
+    sha.update(', '.join(long_name).encode())
+    md5encoding = sha.hexdigest()
     self._base_kernel_name = f'kernel_{md5encoding[:Generator.NAME_ENCODING_LENGTH]}'
 
   def get_base_name(self):
