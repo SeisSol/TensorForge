@@ -27,7 +27,7 @@ class HwDecription:
     self.max_reg_per_block = parseBytes(param_table['max_reg_per_block'])
     self.max_threads_per_sm = param_table['max_threads_per_sm']
     self.max_block_per_sm = param_table['max_block_per_sm']
-    self.manufacturer = param_table['name']
+    self.vendor = param_table['name']
     self.shmem_banks = param_table['shmem_banks']
     self.model = arch
     self.backend = backend

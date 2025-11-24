@@ -53,7 +53,7 @@ def vm_factory(arch: str,
                backend: str,
                fp_type: str):
   descr = hw_descr_factory(arch, backend)
-  lexic = lexic_factory(backend=backend, underlying_hardware=descr.manufacturer)
+  lexic = lexic_factory(backend=backend, underlying_hardware=descr.vendor)
   return VM(hw_descr=descr,
             lexic=lexic,
             fp_type=fp_type)

@@ -71,11 +71,13 @@ class MultilinearBuilder(AbstractBuilder):
 
   # TODO: check if we always can allow a direct global memory load
   def _make_load_op(self, i):
+    prefer_broadcast = self._context.get_hw_descr().vendor == 'amd'
+
     has_lead_dim = 0 in self._descr.target[i]
     transpose = self._descr.permute[i] != [j for j in range(len(self._descr.target[i]))]
 
     if self._ops[i].symbol.name in self._deferred_stores:
-      if not has_lead_dim or transpose:
+      if (not has_lead_dim or transpose) and not prefer_broadcast:
         src, dest = self._deferred_stores[self._ops[i].symbol.name]
         self._instructions.append(StoreRegToShr(context=self._context,
                                                 src=src,
@@ -104,7 +106,7 @@ class MultilinearBuilder(AbstractBuilder):
       # sparse = self._ops[i].symbol.obj.sparsity() < 0.65
 
       if self._ops[i].symbol.stype == SymbolType.Global:
-        if transpose or not has_lead_dim or small_lead:
+        if (transpose or not has_lead_dim or small_lead) and not prefer_broadcast:
           self._mem_regions[i], load_op = self._make_loader_and_symbol(self._ops[i].symbol, is_transpose=self._descr.permute[i])
           self._loaders_cache[self._mem_regions[i]] = load_op
           self._instructions.append(load_op)
