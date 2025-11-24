@@ -111,8 +111,8 @@ class CudaLexic(Lexic):
       return f'__attribute__ ((vector_size (sizeof({fptype}) * {length}))) {fptype}'
 
   def get_operation(self, op: Operation, fptype, value1, value2):
-    fpsuffix = 'f' if fptype == FloatingPointType.FLOAT else ''
-    fpprefix = 'f' if fptype == FloatingPointType.FLOAT else 'd'
+    fpsuffix = 'f' if fptype == FloatingPointType.F32 else ''
+    fpprefix = 'f' if fptype == FloatingPointType.F32 else 'd'
     if op == Operation.COPY:
       return value1
     elif op == Operation.ADD:

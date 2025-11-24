@@ -210,13 +210,13 @@ class Loop:
   def write(self, context: Context, writer: Writer, inner):
     if self.unroll:
       for value in range(self.start, self.end, self.step):
-        inner([Immediate(value, FloatingPointType.INT)])
+        inner([Immediate(value, FloatingPointType.I32)])
         #inner([value])
     elif self.start < self.end:
       writer.insert_pragma_unroll() # TODO: move up?
       var = self.var
       with writer.For(f'int {var} = {self.start}; {var} < {self.end}; {var} += {self.step}'):
-        inner([Variable(var, FloatingPointType.INT)])
+        inner([Variable(var, FloatingPointType.I32)])
         #inner([var])
 
 # TODO: add leading
@@ -246,7 +246,7 @@ class LinearizedLoop:
         writer(f'int {loopvar2} = {loopvar} + ({context.get_vm().get_lexic().thread_idx_x} % {self.blocksize});')
       for i, loop in enumerate(self.loops):
         writer(f'int {loop.var} = (({loopvar2} / {multiplies[i]}) % {loopsize[i]}) * {loop.step} + {loop.start};')
-      inner([Variable(loop.var, FloatingPointType.INT) for loop in self.loops])
+      inner([Variable(loop.var, FloatingPointType.I32) for loop in self.loops])
 
 class MultiLoop:
   pass

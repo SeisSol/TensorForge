@@ -21,23 +21,23 @@ def full_reduction(writer: Writer, operation, dtype, target, source):
         writer(f'{target} = __all_sync(-1, {source});')
     elif dtype == FloatingPointType.BOOL and operation == Operation.OR:
         writer(f'{target} = __any_sync(-1, {source});')
-    elif dtype in [FloatingPointType.INT, FloatingPointType.UINT] and ARCH > sm80 and operation == Operation.MIN:
+    elif dtype in [FloatingPointType.I32, FloatingPointType.I32] and ARCH > sm80 and operation == Operation.MIN:
         writer(f'{target} = __reduction_min_sync(-1, {source});')
-    elif dtype in [FloatingPointType.INT, FloatingPointType.UINT] and ARCH > sm80 and operation == Operation.MAX:
+    elif dtype in [FloatingPointType.I32, FloatingPointType.I32] and ARCH > sm80 and operation == Operation.MAX:
         writer(f'{target} = __reduction_max_sync(-1, {source});')
-    elif dtype == FloatingPointType.FLOAT and ARCH > sm80 and operation in [Operation.MIN, Operation.MAX]:
+    elif dtype == FloatingPointType.F32 and ARCH > sm80 and operation in [Operation.MIN, Operation.MAX]:
         minmaxfloatint(writer, operation, target, source)
-    elif dtype in [FloatingPointType.UINT] and ARCH > sm80 and operation == Operation.AND:
+    elif dtype in [FloatingPointType.I32] and ARCH > sm80 and operation == Operation.AND:
         writer(f'{target} = __reduction_and_sync(-1, {source});')
-    elif dtype in [FloatingPointType.UINT] and ARCH > sm80 and operation == Operation.OR:
+    elif dtype in [FloatingPointType.I32] and ARCH > sm80 and operation == Operation.OR:
         writer(f'{target} = __reduction_or_sync(-1, {source});')
-    elif dtype in [FloatingPointType.UINT] and ARCH > sm80 and operation == Operation.XOR:
+    elif dtype in [FloatingPointType.I32] and ARCH > sm80 and operation == Operation.XOR:
         writer(f'{target} = __reduction_xor_sync(-1, {source});')
-    elif dtype in [FloatingPointType.ULONG] and ARCH > sm80 and operation == Operation.AND:
+    elif dtype in [FloatingPointType.I64] and ARCH > sm80 and operation == Operation.AND:
         writer(f'{target} = __reduction_and_sync(-1, {source});')
-    elif dtype in [FloatingPointType.ULONG] and ARCH > sm80 and operation == Operation.OR:
+    elif dtype in [FloatingPointType.I64] and ARCH > sm80 and operation == Operation.OR:
         writer(f'{target} = __reduction_or_sync(-1, {source});')
-    elif dtype in [FloatingPointType.ULONG] and ARCH > sm80 and operation == Operation.XOR:
+    elif dtype in [FloatingPointType.I64] and ARCH > sm80 and operation == Operation.XOR:
         writer(f'{target} = __reduction_xor_sync(-1, {source});')
     # TODO: __reduction_xor_and_or_sync for uint and ulong
     else:
@@ -188,12 +188,12 @@ class CUTEAtom:
                 writer(f'mma.fma({Cstr},{Astr},{Bstr},{Cstr});')
 
 ATOMS = [
-    # CUTEAtom(16,4,2,1,FloatingPointType.FLOAT,'SM80_16x8x4_F32TF32TF32F32_TN', True),
-    # CUTEAtom(16,4,4,1,FloatingPointType.FLOAT,'SM80_16x8x8_F32TF32TF32F32_TN', True),
-    CUTEAtom(16,4,4,1,FloatingPointType.FLOAT,'SM80_16x8x4_F32TF32TF32F32_TN', CUTEMode.TF32),
-    CUTEAtom(16,4,8,1,FloatingPointType.FLOAT,'SM80_16x8x8_F32TF32TF32F32_TN', CUTEMode.TF32),
-    CUTEAtom(8,8,4,1,FloatingPointType.DOUBLE,'SM80_8x8x4_F64F64F64F64_TN', CUTEMode.DIRECT),
-    CUTEAtom(16,8,4,1,FloatingPointType.DOUBLE,'SM90_16x8x4_F64F64F64F64_TN', CUTEMode.DIRECT),
-    CUTEAtom(16,8,8,1,FloatingPointType.DOUBLE,'SM90_16x8x8_F64F64F64F64_TN', CUTEMode.DIRECT),
-    CUTEAtom(16,8,16,1,FloatingPointType.DOUBLE,'SM90_16x8x8_F64F64F64F64_TN', CUTEMode.DIRECT),
+    # CUTEAtom(16,4,2,1,FloatingPointType.F32,'SM80_16x8x4_F32TF32TF32F32_TN', True),
+    # CUTEAtom(16,4,4,1,FloatingPointType.F32,'SM80_16x8x8_F32TF32TF32F32_TN', True),
+    CUTEAtom(16,4,4,1,FloatingPointType.F32,'SM80_16x8x4_F32TF32TF32F32_TN', CUTEMode.TF32),
+    CUTEAtom(16,4,8,1,FloatingPointType.F32,'SM80_16x8x8_F32TF32TF32F32_TN', CUTEMode.TF32),
+    CUTEAtom(8,8,4,1,FloatingPointType.F64,'SM80_8x8x4_F64F64F64F64_TN', CUTEMode.DIRECT),
+    CUTEAtom(16,8,4,1,FloatingPointType.F64,'SM90_16x8x4_F64F64F64F64_TN', CUTEMode.DIRECT),
+    CUTEAtom(16,8,8,1,FloatingPointType.F64,'SM90_16x8x8_F64F64F64F64_TN', CUTEMode.DIRECT),
+    CUTEAtom(16,8,16,1,FloatingPointType.F64,'SM90_16x8x8_F64F64F64F64_TN', CUTEMode.DIRECT),
 ]

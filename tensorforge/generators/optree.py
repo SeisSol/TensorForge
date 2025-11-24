@@ -587,9 +587,9 @@ def scalar(x: yttt.Scalar):
 
 def immc(x: BaseType):
     if isinstance(x, float):
-        return imm(x, FloatingPointType.FLOAT)
+        return imm(x, FloatingPointType.F32)
     if isinstance(x, int):
-        return imm(x, FloatingPointType.INT)
+        return imm(x, FloatingPointType.I32)
     if isinstance(x, bool):
         return imm(x, FloatingPointType.BOOL)
     if isinstance(x, ytt.Node):

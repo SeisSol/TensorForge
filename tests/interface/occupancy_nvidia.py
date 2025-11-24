@@ -21,7 +21,7 @@ class TestOccupancyNvidia(unittest.TestCase):
   def setUp(self):
     self._context = Context(arch='sm_60',
                   backend='cuda',
-                  fp_type=FloatingPointType.FLOAT)
+                  fp_type=FloatingPointType.F32)
 
   def tearDown(self):
     pass

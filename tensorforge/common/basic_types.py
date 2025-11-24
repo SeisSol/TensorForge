@@ -59,98 +59,104 @@ class StridedAddressing:
     return other == Addressing.STRIDED
 
 class FloatingPointType(enum.Enum):
-  FLOAT = 0
-  DOUBLE = 1
-  HALF = 2
-  BFLOAT16 = 3
+  F32 = 0
+  F64 = 1
+  F16 = 2
+  BF16 = 3
+  F128 = 4
   BOOL = 10
-  INT = 20
-  UINT = 21
-  LONG = 22
-  ULONG = 23
+  I8 = 20
+  I16 = 21
+  I32 = 22
+  I64 = 23
 
   def size(self):
-    if self == self.FLOAT:
+    if self == self.F32:
       return 4
-    elif self == self.DOUBLE:
+    elif self == self.F64:
       return 8
-    elif self == self.HALF:
+    elif self == self.F128:
+      return 16
+    elif self == self.F16:
       return 2
-    elif self == self.BFLOAT16:
+    elif self == self.BF16:
       return 2
     elif self == self.BOOL:
       return 1 # ?
-    elif self == self.INT:
+    elif self == self.I32:
       return 4
-    elif self == self.UINT:
-      return 4
-    elif self == self.LONG:
-      return 8
-    elif self == self.ULONG:
+    elif self == self.I8:
+      return 1
+    elif self == self.I16:
+      return 2
+    elif self == self.I64:
       return 8
 
   def __str__(self):
     return self.as_str(self)
 
   def literal(self, value):
-    if self == self.FLOAT:
+    if self == self.F32:
       return f'{float(value):.16}f'
-    elif self == self.DOUBLE:
+    elif self == self.F64:
       return f'{float(value):.16}'
-    elif self == self.HALF:
+    elif self == self.F16:
       return f'static_cast<__half>({float(value):.16})'
-    elif self == self.BFLOAT16:
+    elif self == self.BF16:
       return f'static_cast<__bfloat16>({float(value):.16})'
+    elif self == self.F128:
+      return f'{float(value):.32}q'
     elif self == self.BOOL:
       return 'true' if value else 'false'
-    elif self == self.INT:
-      return f'{int(value)}'
-    elif self == self.UINT:
-      return f'{int(value)}u'
-    elif self == self.LONG:
-      return f'{int(value)}L'
-    elif self == self.ULONG:
-      return f'{int(value)}UL'
+    elif self == self.I8:
+      return f'static_cast<int8_t>({int(value)}LL)'
+    elif self == self.I16:
+      return f'static_cast<int16_t>({int(value)}LL)'
+    elif self == self.I32:
+      return f'static_cast<int32_t>({int(value)}LL)'
+    elif self == self.I64:
+      return f'static_cast<int64_t>({int(value)}LL)'
 
   @classmethod
   def as_str(cls, fp):
-    map = {FloatingPointType.FLOAT: 'float',
-           FloatingPointType.DOUBLE: 'double',
+    map = {FloatingPointType.F32: 'float',
+           FloatingPointType.F64: 'double',
+           FloatingPointType.F128: 'quad',
            FloatingPointType.HALF: 'half',
            FloatingPointType.BFLOAT16: 'bfloat16',
            FloatingPointType.BOOL: 'bool',
-           FloatingPointType.INT: 'int',
-           FloatingPointType.LONG: 'long',
-           FloatingPointType.UINT: 'unsigned int',
-           FloatingPointType.ULONG: 'unsigned long',}
+           FloatingPointType.I8: 'int8_t',
+           FloatingPointType.F16: 'int16_t',
+           FloatingPointType.I32: 'int32_t',
+           FloatingPointType.I64: 'int64_t',}
     return map[fp]
 
   @classmethod
   def str2enum(cls, as_str: str):
-    map = {'float': FloatingPointType.FLOAT,
-           'double': FloatingPointType.DOUBLE,
-           'half': FloatingPointType.HALF,
-           'bfloat16': FloatingPointType.BFLOAT16,
+    map = {'float': FloatingPointType.F32,
+           'double': FloatingPointType.F64,
+           'half': FloatingPointType.F16,
+           'bfloat16': FloatingPointType.BF16,
+           'quad': FloatingPointType.F128,
            'bool': FloatingPointType.BOOL,
-           'int': FloatingPointType.INT,
-           'long': FloatingPointType.LONG,
-           'unsigned int': FloatingPointType.UINT,
-           'unsigned long': FloatingPointType.ULONG}
+           'int8_t': FloatingPointType.I8,
+           'int16_t': FloatingPointType.I16,
+           'int32_t': FloatingPointType.I32,
+           'int64_t': FloatingPointType.I64}
     return map[as_str]
 
   @classmethod
   def ytt2enum(cls, as_str: str):
-    map = {'f32': FloatingPointType.FLOAT,
-           'f64': FloatingPointType.DOUBLE,
-           'f16': FloatingPointType.HALF,
-           'bf16': FloatingPointType.BFLOAT16,
+    map = {'f32': FloatingPointType.F32,
+           'f64': FloatingPointType.F64,
+           'f16': FloatingPointType.F16,
+           'f128': FloatingPointType.F128,
+           'bf16': FloatingPointType.BF16,
            'bool': FloatingPointType.BOOL,
-           'i8': FloatingPointType.INT,
-           'i16': FloatingPointType.INT,
-           'i32': FloatingPointType.INT,
-           'i64': FloatingPointType.LONG,
-           'u32': FloatingPointType.UINT,
-           'u64': FloatingPointType.ULONG}
+           'i8': FloatingPointType.I8,
+           'i16': FloatingPointType.I16,
+           'i32': FloatingPointType.I32,
+           'i64': FloatingPointType.I64}
     return map[as_str]
 
 

@@ -152,7 +152,7 @@ class GpuKernelGeneratorV1:
     if hasattr(self._arch, 'typename'):
       fptype = FloatingPointType.str2enum(self._arch.typename)
     else:
-      fptype = FloatingPointType.FLOAT
+      fptype = FloatingPointType.F32
 
     context = Context(arch=self._arch.name,
                       backend=self._arch.backend,

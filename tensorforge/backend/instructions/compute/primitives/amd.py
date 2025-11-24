@@ -102,9 +102,9 @@ def shuffle_swap(writer, dtype, target, source, block):
             mylane = f'(__lane_id() ^ {blockswap})'
             writefun = lambda s,t: writer(f'{t} = __builtin_amdgcn_ds_bpermute(4 * {mylane}, {s});')
 
-        if dtype == FloatingPointType.FLOAT or dtype == FloatingPointType.INT or dtype == FloatingPointType.UINT:
+        if dtype == FloatingPointType.F32 or dtype == FloatingPointType.I32 or dtype == FloatingPointType.I32:
             writefun(f'*(int*)&{target}', f'*(int*)&{source}')
-        if dtype == FloatingPointType.DOUBLE or dtype == FloatingPointType.LONG or dtype == FloatingPointType.ULONG:
+        if dtype == FloatingPointType.F64 or dtype == FloatingPointType.I64 or dtype == FloatingPointType.I64:
             writefun(f'*(((int*)&{target}) + 0)', f'*(((int*)&{source}) + 0)')
             writefun(f'*(((int*)&{target}) + 1)', f'*(((int*)&{source}) + 1)')
 
@@ -136,9 +136,9 @@ def shuffle_mirror(writer, dtype, target, source, block):
             mylane = f'(__lane_id() ^ {blockswap})'
             writefun = lambda s,t: writer(f'{t} = __builtin_amdgcn_ds_bpermute(4 * {mylane}, {s});')
 
-        if dtype == FloatingPointType.FLOAT or dtype == FloatingPointType.INT or dtype == FloatingPointType.UINT:
+        if dtype == FloatingPointType.F32 or dtype == FloatingPointType.I32 or dtype == FloatingPointType.I32:
             writefun(f'*(int*)&{target}', f'*(int*)&{source}')
-        if dtype == FloatingPointType.DOUBLE or dtype == FloatingPointType.LONG or dtype == FloatingPointType.ULONG:
+        if dtype == FloatingPointType.F64 or dtype == FloatingPointType.I64 or dtype == FloatingPointType.I64:
             writefun(f'*(((int*)&{target}) + 0)', f'*(((int*)&{source}) + 0)')
             writefun(f'*(((int*)&{target}) + 1)', f'*(((int*)&{source}) + 1)')
 
@@ -220,9 +220,9 @@ def shuffle_broadcast(writer, dtype, target, source, lane, subblock, block):
             mylane = f'((__lane_id() % {subblock}) + {subblock * lane})'
             writefun = lambda s,t: writer(f'{t} = __builtin_amdgcn_ds_bpermute(4 * {mylane}, {s});')
 
-        if dtype == FloatingPointType.FLOAT or dtype == FloatingPointType.INT or dtype == FloatingPointType.UINT:
+        if dtype == FloatingPointType.F32 or dtype == FloatingPointType.I32 or dtype == FloatingPointType.I32:
             writefun(f'*(int*)&{target}', f'*(int*)&{source}')
-        if dtype == FloatingPointType.DOUBLE or dtype == FloatingPointType.LONG or dtype == FloatingPointType.ULONG:
+        if dtype == FloatingPointType.F64 or dtype == FloatingPointType.I64 or dtype == FloatingPointType.I64:
             writefun(f'*(((int*)&{target}) + 0)', f'*(((int*)&{source}) + 0)')
             writefun(f'*(((int*)&{target}) + 1)', f'*(((int*)&{source}) + 1)')
 
@@ -292,18 +292,18 @@ class MatrixCore:
 
 matrixcores = {
     'cdna1': [
-        MatrixCore(16, 16, 1, 4, FloatingPointType.FLOAT, '__builtin_amdgcn_mfma_f32_16x16x1f32'),
-        MatrixCore(4, 4, 1, 16, FloatingPointType.FLOAT, '__builtin_amdgcn_mfma_f32_4x4x1f32')
+        MatrixCore(16, 16, 1, 4, FloatingPointType.F32, '__builtin_amdgcn_mfma_f32_16x16x1f32'),
+        MatrixCore(4, 4, 1, 16, FloatingPointType.F32, '__builtin_amdgcn_mfma_f32_4x4x1f32')
     ],
     'cdna2': [
-        MatrixCore(16, 16, 1, 4, FloatingPointType.FLOAT, '__builtin_amdgcn_mfma_f32_16x16x1f32'),
-        MatrixCore(4, 4, 1, 16, FloatingPointType.FLOAT, '__builtin_amdgcn_mfma_f32_4x4x1f32'),
-        MatrixCore(16, 16, 4, 1, FloatingPointType.DOUBLE, '__builtin_amdgcn_mfma_f64_16x16x4f64'),
-        MatrixCore(4, 4, 4, 4, FloatingPointType.DOUBLE, '__builtin_amdgcn_mfma_f64_4x4x4f64')
+        MatrixCore(16, 16, 1, 4, FloatingPointType.F32, '__builtin_amdgcn_mfma_f32_16x16x1f32'),
+        MatrixCore(4, 4, 1, 16, FloatingPointType.F32, '__builtin_amdgcn_mfma_f32_4x4x1f32'),
+        MatrixCore(16, 16, 4, 1, FloatingPointType.F64, '__builtin_amdgcn_mfma_f64_16x16x4f64'),
+        MatrixCore(4, 4, 4, 4, FloatingPointType.F64, '__builtin_amdgcn_mfma_f64_4x4x4f64')
     ],
     'cdna3': [
-        MatrixCore(16, 16, 1, 4, FloatingPointType.FLOAT, '__builtin_amdgcn_mfma_f32_16x16x1f32_b4'),
-        MatrixCore(4, 4, 1, 16, FloatingPointType.FLOAT, '__builtin_amdgcn_mfma_f32_4x4x1f32_b16')
+        MatrixCore(16, 16, 1, 4, FloatingPointType.F32, '__builtin_amdgcn_mfma_f32_16x16x1f32_b4'),
+        MatrixCore(4, 4, 1, 16, FloatingPointType.F32, '__builtin_amdgcn_mfma_f32_4x4x1f32_b16')
     ]
 }
 

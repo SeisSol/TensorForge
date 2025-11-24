@@ -43,7 +43,7 @@ else:
 
 vm = Context(backend=args.backend,
                 arch=args.arch,
-                fp_type=FloatingPointType.FLOAT if args.realsize == 4 else FloatingPointType.DOUBLE)
+                fp_type=FloatingPointType.F32 if args.realsize == 4 else FloatingPointType.F64)
 
 stream = open(args.specfile, 'r')
 suites = yaml.safe_load(stream)['test_suites']

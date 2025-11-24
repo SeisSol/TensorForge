@@ -31,7 +31,7 @@ mat_c = SubTensor(Tensor([56, 18], Addressing.STRIDED, BoundingBox([0,0], [56,18
 
 
 try:
-  vm = Context(arch=args.arch, backend=args.backend, fp_type=FloatingPointType.FLOAT)
+  vm = Context(arch=args.arch, backend=args.backend, fp_type=FloatingPointType.F32)
 
   gen = Generator([GemmDescr(trans_a=False,
                        trans_b=False,

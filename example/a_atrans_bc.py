@@ -37,7 +37,7 @@ gemm_list = [GemmDescr(trans_a=True,
 
 context = Context(arch='sm_60',
                   backend='cuda',
-                  fp_type=FloatingPointType.FLOAT)
+                  fp_type=FloatingPointType.F32)
 
 generator = Generator(gemm_list, context)
 generator.generate()
