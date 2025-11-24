@@ -64,7 +64,7 @@ class HipLexic(CudaLexic):
 
   def get_headers(self):
     return ["hip/hip_runtime.h", "tensorforge_device/hip.h"]
-  
+
   def get_fptype(self, fptype, length=1):
     return f'HIP_vector_type<{fptype}, {length}>'
 
@@ -73,7 +73,7 @@ class HipLexic(CudaLexic):
       return f'__builtin_nontemporal_store({rhs}, &{lhs});'
     else:
       return f'{lhs} = {rhs};'
-  
+
   def glb_load(self, lhs, rhs, nontemporal=False):
     if nontemporal and self._underlying_hardware == 'amd':
       return f'{lhs} = __builtin_nontemporal_load(&{rhs});'

@@ -21,7 +21,7 @@ class ShrMemObject:
 
   def get_mults_per_block(self):
     return self._mults_per_block
-  
+
   def get_global_size(self):
     return self._global_size
 
@@ -33,7 +33,7 @@ class ShrMemObject:
       return self.get_total_size()
     else:
       return 'not yet defined'
-    
+
   def is_dense(self):
     return True
 

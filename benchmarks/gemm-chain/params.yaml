@@ -28,4 +28,3 @@ a_plus:
   num_cols: 9
   addressing: "strided"
   bbox: [0, 0, 9, 9]
-

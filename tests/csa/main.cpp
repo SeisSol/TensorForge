@@ -1,5 +1,5 @@
-#include "gtest/gtest.h"
 #include "device.h"
+#include "gtest/gtest.h"
 #include <iostream>
 
 using namespace device;

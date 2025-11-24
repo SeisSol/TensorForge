@@ -8,4 +8,3 @@ Gm = {rows: 9, cols: 9, addr: strided, bbox: [0, 0, 9, 9]};
 Hm = {rows: 48, cols: 55, addr: none, bbox: [0, 0, 48, 55]};
 
 Dm = Dm + (Cm * (Am * Bm)) + (Fm * (Am * Em)) + (Hm * (Am * Gm)) -> kernel;
-

@@ -12,10 +12,10 @@ class FullSPP(SparsityPattern):
 
     def is_nz(self, index):
         return True
-    
+
     def count_nz(self):
         return reduce(lambda x,y: x*y, self.shape, 1)
-    
+
     def linear_index(self, tupleindex):
         stride = 1
         index = 0
@@ -23,20 +23,20 @@ class FullSPP(SparsityPattern):
             index += x * stride
             stride *= s
         return index
-    
+
     def dimrange(self, dim):
         return (0, self.shape[dim])
 
 class BoundingBoxSPP(SparsityPattern):
     def __init__(self, bbox):
         self.bbox = bbox
-    
+
     def is_nz(self, index):
         return self.bbox.contains(index)
-    
+
     def count_nz(self):
         return reduce(lambda x,y: x*y, self.bbox.sizes(), 1)
-    
+
     def linear_index(self, tupleindex):
         stride = 1
         index = 0
@@ -45,7 +45,7 @@ class BoundingBoxSPP(SparsityPattern):
             index += (x - l) * stride
             stride *= (u - l)
         return index
-    
+
     def dimrange(self, dim):
         return (self.bbox.lower()[dim], self.bbox.upper()[dim])
 
@@ -64,20 +64,20 @@ class MaskSPP(SparsityPattern):
                     y[...] = i
         #print(self.mask)
         #print(self.indexmask)
-    
+
     def is_nz(self, index):
         return self.mask[tuple(index)]
-    
+
     def count_nz(self):
         return np.count_nonzero(self.mask)
-    
+
     def linear_index(self, tupleindex):
         if all(ti < ims for ti, ims in zip(tupleindex, self.indexmask.shape)):
             preindex = self.indexmask[tupleindex]
             return preindex - 1 if preindex > 0 else None
         else:
             return None
-    
+
     def dimrange(self, dim):
         return None
 
@@ -94,16 +94,16 @@ class ListSPP(SparsityPattern):
 
     def is_nz(self, index):
         return self.indexmask[tuple(index)] > 0
-    
+
     def count_nz(self):
         return np.count_nonzero(self.indexmask)
-    
+
     def linear_index(self, tupleindex):
         if all(ti < ims for ti, ims in zip(tupleindex, self.indexmask.shape)):
             preindex = self.indexmask[tupleindex]
             return preindex - 1 if preindex > 0 else None
         else:
             return None
-    
+
     def dimrange(self, dim):
         return None

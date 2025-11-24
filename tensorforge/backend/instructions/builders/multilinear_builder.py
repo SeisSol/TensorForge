@@ -90,7 +90,7 @@ class MultilinearBuilder(AbstractBuilder):
     if self._ops[i].symbol.stype == SymbolType.Scalar or self._ops[i].symbol.stype == SymbolType.Data:
       self._mem_regions[i] = self._ops[i]
     else:
-      
+
       if has_lead_dim:
         lead_idx = self._descr.target[i].index(0)
 

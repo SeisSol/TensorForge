@@ -220,4 +220,3 @@ with open(os.path.join(dir_name, 'config.cmake'), 'w') as file:
   file.write(f'set(SM_ARCH {args.arch})\n')
   file.write(f'set(REAL_SIZE_IN_BYTES {real_size})\n')
   file.write(f'set(REAL_SIZE {real_size})\n')
-

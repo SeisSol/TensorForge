@@ -37,7 +37,7 @@ class GpuKernelGeneratorV1:
                                 strict_match=False,
                                 prefer_align=can_be_aligned))
     return 0# self._descr_list[-1].get_flops()
-  
+
   def add_operation_new(self, d):
     result = self.tensor_ref(d['result'])
     args = [self.tensor_ref(arg) for arg in d['args']]
@@ -63,7 +63,7 @@ class GpuKernelGeneratorV1:
     if d['type'] == 'multilinear':
       target = d['target']
       permute = d['permute']
-    
+
       # TODO
 
       alpha = self.tensor_ref(d['linear']['alpha'])
@@ -75,17 +75,17 @@ class GpuKernelGeneratorV1:
                               target, permute, add=add,
                                 strict_match=False,
                                 prefer_align=False))
-      
+
       result = self.tensor_ref_new(d['result'])
       args = [self.tensor_ref_new(arg) for arg in d['args']]
 
       condition_raw = d['condition']
       condition = [self.tensor_ref_new(var) for clause in condition_raw for var in clause]
-      
+
       self._ir_list.append(Multilinear(result, None, None, args, target, add))
 
     return 0# self._descr_list[-1].get_flops()
-  
+
   def convert_op(self):
     pass
 
@@ -129,7 +129,7 @@ class GpuKernelGeneratorV1:
     for i,op in enumerate(ops):
       self.make_tensor(op, False, None)
       indicesIndexed[op.name() if self.is_scalar(op) else op.name] = indices[i]
-    
+
     def assigner(pretensor):
       if self.is_scalar(pretensor):
         self.make_tensor(pretensor, False, None)
@@ -139,10 +139,10 @@ class GpuKernelGeneratorV1:
         bbox = BBox([s for s, _ in pretensor.eqspp().nnzbounds()], [e+1 for _, e in pretensor.eqspp().nnzbounds()])
         subTensor = SubTensor(self._cache[pretensor.name()], bbox)
       return subTensor, indicesIndexed[pretensor.name()]
-    
+
     for statement in statements:
       statement.assignTensor(assigner)
-    
+
     self._descr_list.append(ElementwiseDescr(statements,
                                 strict_match=False,
                                 prefer_align=False))
@@ -175,7 +175,7 @@ class GpuKernelGeneratorV1:
     for i, op in enumerate(ops):
       if 0 in target[i]:
         aligned &= dest.memoryLayout.alignedStride() and permute[i][0] == 0
-    
+
     return aligned
 
   def make_tensor(self, op, can_be_aligned, dims):
@@ -189,10 +189,10 @@ class GpuKernelGeneratorV1:
                                           shape=[rng.stop for rng in self._storage(op.memoryLayout).bbox()],
                                           bboxrange=self._storage(op.memoryLayout).bbox())
       entry_name = op.name
-    
+
     if not (entry_name in self._cache and entry.is_same(self._cache[entry_name])):
       self._cache[entry_name] = entry
-  
+
   def tensor_ref(self, d):
     name = d['name']
     eqspp = d['spp']
@@ -200,7 +200,7 @@ class GpuKernelGeneratorV1:
     assert(name in self._cache)
 
     return SubTensor(self._cache[name], self._cache[name].bbox)
-  
+
   def tensor_ref_new(self, d):
     name = d['name']
     eqspp = d['spp']
@@ -219,7 +219,7 @@ class GpuKernelGeneratorV1:
 
     shape = d['storage']['shape']
     storagetype = d['storage']['type']
-    
+
     addressingStr = d['addressing']
     if addressingStr == '&':
       addressing = Addressing.NONE
@@ -243,7 +243,7 @@ class GpuKernelGeneratorV1:
     if storagetype == 'spp':
       bbox = None
       spp = ListSPP(d['storage']['entries'])
-    
+
     values = d['values']
     is_temporary = d['flags']['temporary']
     is_constant = d['flags']['constant']
@@ -254,7 +254,7 @@ class GpuKernelGeneratorV1:
 
   def _cache_matrices(self, dest, ops, target, permute):
     can_be_aligned = self._can_be_aligned(dest, ops, target, permute)
-    
+
     # no add onto a matrix that doesn't exist (TODO: check if that's always the case)
     assert not(dest.is_temporary and dest in ops)
 
@@ -271,7 +271,7 @@ class GpuKernelGeneratorV1:
     tensor = Tensor([], Addressing.SCALAR, alias=scalar.name(), datatype=scalar.datatype)
     self._tmp_matrices[scalar.name()] = tensor # SubTensor(tensor, tensor.bbox)
     return self._tmp_matrices[scalar.name()]
-  
+
   def deduce_addresing(self, term):
     if term.is_compute_constant:
       return Addressing.NONE
@@ -279,7 +279,7 @@ class GpuKernelGeneratorV1:
       return Addressing.STRIDED
     else:
       return Addressing.PTR_BASED
-  
+
   def _storage(self, tml):
     if type(tml).__name__ == 'MemoryLayoutView':
       return tml.storage()
@@ -337,13 +337,13 @@ class GpuKernelGeneratorV1:
         offset_name_map[name] = '0'
       else:
         offset_name_map[name] = f'extraOffset_{name}'
-    
+
     return generator.generate_call_site(mat_name_map,
                                         offset_name_map,
                                         'numElements',
                                         'flags',
                                         'streamPtr')
-  
+
   def _append_operation(self, op):
     if isinstance(op, (float, int)):
       return Tensor([], Addressing.SCALAR, data = op)
@@ -357,7 +357,7 @@ class TensorForgeWriter:
     self._headers = list(headers) + list(tensorforge_generator.get_helper_headers())
     self._generator = tensorforge_generator
     self._basename = self._generator.get_base_name()
-  
+
   def target(self):
     return 'gpu'
 

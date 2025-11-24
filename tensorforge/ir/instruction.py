@@ -21,7 +21,7 @@ class Instruction:
     # TODO: keep that one here?
     def condition(self):
         return True
-    
+
     def __repr__(self):
         return f'{type(self).__name__}: {",".join(str(var) for var in self.invar())} -> {",".join(str(var) for var in self.outvar())}'
 
@@ -34,4 +34,3 @@ class Block(Instruction):
 
     def can_emit(self):
         return all(instr.can_emit() for instr in self.instructions)
-

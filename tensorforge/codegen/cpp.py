@@ -25,7 +25,7 @@ class CppBaseDatatype(Enum):
             F32: 'float',
             F64: 'double',
         }[self]
-    
+
     def literal(self, value):
         return {
             I8: lambda x: f'static_cast<int8_t>({x}LL)',
@@ -44,10 +44,10 @@ class CppVectorDatatype:
     def __init__(self, base, count):
         self.base = base
         self.count = count
-    
+
     def cpp(self):
         return 'TODO'
-    
+
     def literal(self, value):
         pass
 
@@ -131,7 +131,7 @@ class CppFunctionDefinition:
 class CppBlock:
     def __init__(self, parts):
         self.parts = parts
-    
+
     def cpp(self):
         return ';\n'.join([part.cpp() for part in self.parts])
 
@@ -139,7 +139,7 @@ class CppIf(CppBlock):
     def __init__(self, parts, condition):
         self.condition = condition
         super().__init__(parts)
-    
+
     def cpp(self):
         return f"""if ({self.condition}) {{ {super().cpp()} }}"""
 
@@ -150,7 +150,6 @@ class CppFor(CppBlock):
         self.end = end
         self.step = step
         super().__init__(parts)
-    
+
     def cpp(self):
         return f"""for ({self.variable} = {self.start}; {self.variable} < {self.end}; {self.variable} += {self.step}) {{ {super().cpp()} }}"""
-

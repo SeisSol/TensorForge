@@ -10,7 +10,7 @@ class ComputeInstruction(AbstractInstruction):
   @abstractmethod
   def gen_code_inner(self, writer: Writer):
     pass
-  
+
   def gen_code(self, writer: Writer):
     with writer.Scope():
       writer.Comment(self.__str__())

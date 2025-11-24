@@ -16,7 +16,7 @@ class ThreadConfig:
 
     def inwarp(self):
         return self.threadcount <= self.warpsize
-    
+
     def superwarp(self):
         return self.threadcount > self.warpsize
 
@@ -25,7 +25,7 @@ class ThreadConfig:
 
     def multiples_per_warp(self):
         return self.warpsize // self.threadcount
-    
+
     def blocksize(self):
         return self.threadcount * self.multiples
 

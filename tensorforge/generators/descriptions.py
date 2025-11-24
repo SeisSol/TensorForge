@@ -28,7 +28,7 @@ class MultilinearDescr(OperationDescription):
 
   def _lead_dim(self):
     return self.dest.bbox.sizes()[0]
-  
+
   def _analyze(self):
     pass
 
@@ -56,10 +56,10 @@ class MultilinearDescr(OperationDescription):
 
   def is_strict_match(self):
     return self._strict_match
-  
+
   def matrix_list(self):
     return [self.dest] + [op for op in self.ops]
-  
+
   def __str__(self):
     desttarget = [i for i in range(self.dest.bbox.rank())]
     return f'{self.dest}{desttarget} = {"×".join(f"{op}{optarget}" for op, optarget in zip(self.ops, self.target))}'
@@ -87,10 +87,10 @@ class ElementwiseDescr(OperationDescription):
 
   def is_strict_match(self):
     return self._strict_match
-  
+
   def matrix_list(self):
     return [tensor for op in self.oplist for tensor in op.tensors()]
-  
+
   def __str__(self):
     return '; '.join(str(op) for op in self.oplist)
 
@@ -116,10 +116,10 @@ class ReductionDescr(OperationDescription):
 
   def is_strict_match(self):
     return self._strict_match
-  
+
   def matrix_list(self):
     return [self.var, self.dest]
-  
+
   def __str__(self):
     return f'{self.var} -> {self.dest}'
 

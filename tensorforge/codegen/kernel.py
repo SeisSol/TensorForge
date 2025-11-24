@@ -14,7 +14,7 @@ class Kernel:
 
     def launcher(self):
         raise NotImplementedError()
-    
+
     def cpp(self):
         pass
 

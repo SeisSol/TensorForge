@@ -25,7 +25,7 @@ class GetElementPtr(AbstractInstruction):
       extra_offset = f' + {get_extra_offset_name(self._src)}'
     else:
       extra_offset = ''
-    
+
     datatype = self._vm._fp_type if self._src.obj.datatype is None else self._src.obj.datatype
 
     address = ''

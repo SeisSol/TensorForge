@@ -19,13 +19,13 @@ class ReductionInstruction(ComputeInstruction):
         pass
 
     def _analyze(self):
-        
+
         pass
 
     def gen_code_inner(self, writer: Writer):
         self._nonlead_reduction()
         self._lead_reduction()
-    
+
     def _nonlead_reduction(self, writer: Writer):
         with writer.If(self.gen_mask_threads(self._op.data_view.get_lead_dim())):
             loopstack1 = []
@@ -36,7 +36,7 @@ class ReductionInstruction(ComputeInstruction):
                     loop = writer.For(f'int k{i} = 0; k{i} < {dimlen}; ++k{i}')
                     loop.__enter__()
                     loopstack1 += [loop]
-            
+
             writer(f'{self._fp_as_str} value = 0;')
 
             for i, dimlen in enumerate(self._op.data_view.get_nonlead_dims()):
@@ -44,7 +44,7 @@ class ReductionInstruction(ComputeInstruction):
                     loop = writer.For(f'int k{i} = 0; k{i} < {dimlen}; ++k{i}')
                     loop.__enter__()
                     loopstack2 += [loop]
-            
+
             address = self._op.data_view.get_address(lead_idx=self._vm.get_lexic().thread_idx_x, nonlead_idx=['k{i}' for i in range(len(self._op.data_view.get_nonlead_dims()))])
             writer(f'{self._fp_as_str} input = {self._op.name}[{address}]')
             writer(f'value = {self._operation.write("value", "input")};')

@@ -33,7 +33,7 @@ class LivenessAnalysis(AbstractOptStage):
         self._check_use(backward_map, index, instr)
       if isinstance(instr, StoreShrMemToGlb):
         self._check_store(backward_map, index, instr)
-    
+
     self._map = {}
 
     for index, instr in list(enumerate(self._instrs)):
@@ -52,6 +52,6 @@ class LivenessAnalysis(AbstractOptStage):
 
   def _check_define(self, map, index, instr) -> None:
     map[index].add(instr.get_dest())
-  
+
   def _check_store(self, map, index, instr) -> None:
     map[index].add(instr.get_src())

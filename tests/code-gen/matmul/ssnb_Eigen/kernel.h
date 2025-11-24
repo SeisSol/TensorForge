@@ -1,69 +1,65 @@
 #ifndef YATETO_KERNEL_H_
 #define YATETO_KERNEL_H_
+#include "tensor.h"
+#include "yateto.h"
 #include <cmath>
 #include <limits>
-#include "yateto.h"
-#include "tensor.h"
 namespace yateto {
-  namespace kernel {
-    struct matmulAB {
-      constexpr static unsigned long const NonZeroFlops = 64512;
-      constexpr static unsigned long const HardwareFlops = 65536;
-      constexpr static unsigned long const TmpMemRequiredInBytes = 0;
-      constexpr static unsigned long const TmpMaxMemRequiredInBytes = 0;
+namespace kernel {
+struct matmulAB {
+  constexpr static unsigned long const NonZeroFlops = 64512;
+  constexpr static unsigned long const HardwareFlops = 65536;
+  constexpr static unsigned long const TmpMemRequiredInBytes = 0;
+  constexpr static unsigned long const TmpMaxMemRequiredInBytes = 0;
 
-      float const* A{};
-      float const* B{};
-      float* C{};
+  float const *A{};
+  float const *B{};
+  float *C{};
 
+  void execute();
+};
+} // namespace kernel
+namespace kernel {
+struct matmulATB {
+  constexpr static unsigned long const NonZeroFlops = 64512;
+  constexpr static unsigned long const HardwareFlops = 65536;
+  constexpr static unsigned long const TmpMemRequiredInBytes = 0;
+  constexpr static unsigned long const TmpMaxMemRequiredInBytes = 0;
 
-      void execute();
-    };
-  } // namespace kernel
-  namespace kernel {
-    struct matmulATB {
-      constexpr static unsigned long const NonZeroFlops = 64512;
-      constexpr static unsigned long const HardwareFlops = 65536;
-      constexpr static unsigned long const TmpMemRequiredInBytes = 0;
-      constexpr static unsigned long const TmpMaxMemRequiredInBytes = 0;
+  float const *A{};
+  float const *B{};
+  float *C{};
 
-      float const* A{};
-      float const* B{};
-      float* C{};
+  void execute();
+};
+} // namespace kernel
+namespace kernel {
+struct matmulABT {
+  constexpr static unsigned long const NonZeroFlops = 64512;
+  constexpr static unsigned long const HardwareFlops = 65536;
+  constexpr static unsigned long const TmpMemRequiredInBytes = 0;
+  constexpr static unsigned long const TmpMaxMemRequiredInBytes = 0;
 
+  float const *A{};
+  float const *B{};
+  float *C{};
 
-      void execute();
-    };
-  } // namespace kernel
-  namespace kernel {
-    struct matmulABT {
-      constexpr static unsigned long const NonZeroFlops = 64512;
-      constexpr static unsigned long const HardwareFlops = 65536;
-      constexpr static unsigned long const TmpMemRequiredInBytes = 0;
-      constexpr static unsigned long const TmpMaxMemRequiredInBytes = 0;
+  void execute();
+};
+} // namespace kernel
+namespace kernel {
+struct matmulATBT {
+  constexpr static unsigned long const NonZeroFlops = 64512;
+  constexpr static unsigned long const HardwareFlops = 65536;
+  constexpr static unsigned long const TmpMemRequiredInBytes = 4096;
+  constexpr static unsigned long const TmpMaxMemRequiredInBytes = 4096;
 
-      float const* A{};
-      float const* B{};
-      float* C{};
+  float const *A{};
+  float const *B{};
+  float *C{};
 
-
-      void execute();
-    };
-  } // namespace kernel
-  namespace kernel {
-    struct matmulATBT {
-      constexpr static unsigned long const NonZeroFlops = 64512;
-      constexpr static unsigned long const HardwareFlops = 65536;
-      constexpr static unsigned long const TmpMemRequiredInBytes = 4096;
-      constexpr static unsigned long const TmpMaxMemRequiredInBytes = 4096;
-
-      float const* A{};
-      float const* B{};
-      float* C{};
-
-
-      void execute();
-    };
-  } // namespace kernel
+  void execute();
+};
+} // namespace kernel
 } // namespace yateto
 #endif

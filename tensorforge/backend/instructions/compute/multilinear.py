@@ -93,10 +93,10 @@ class MultilinearInstruction(ComputeInstruction):
         loads = []
         reductions = []
         self._is_log = False
-        
+
         # TODO: do not really optimize here anything any more (on a higher level)... Just generate code
         # i.e.: what can be loaded in early/late, do
-        
+
         # TODO: handle offsets
         self._dest.data_view = DataView(shape = [u - l for l,u in self._ns], permute=[i for i in range(targetrank)])
         self._dest.data_view._bbox._lower = [l for l,_ in self._ns]
@@ -242,7 +242,7 @@ class MultilinearInstruction(ComputeInstruction):
             # self._butterfly_reduction_loop(writer, max_array_length = 32, amd = False)
             #writer(f'{self._fp_as_str} newvalue = shmAddr[{sublane_address}];')
             self._dest.store(writer, self._context, 'value', [self._vm.get_lexic().thread_idx_x] + [f'n{i+1}' for i,_ in enumerate(self._ns[1:])], False)
-            
+
             for loop in loopstack[::-1]:
                 loop.__exit__(None, None, None)
 
@@ -269,7 +269,7 @@ class MultilinearInstruction(ComputeInstruction):
 
     def _sycl_reduction(self, writer: Writer):
         writer(f'sycl::reduction();')
-    
+
     def _omp_reduction(self, writer: Writer):
         writer(f'#pragma omp for reduction({self._sumOperation}: shmAddr[0:{self._total_shm_size}])')
         with writer.For(f'int i = 0; i < TODO; ++i'):

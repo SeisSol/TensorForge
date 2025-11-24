@@ -81,6 +81,6 @@ class Lexic(ABC):
 
   def glb_store(self, lhs, rhs, nontemporal=False):
     return f'{lhs} = {rhs};'
-  
+
   def glb_load(self, lhs, rhs, nontemporal=False):
     return f'{lhs} = {rhs};'

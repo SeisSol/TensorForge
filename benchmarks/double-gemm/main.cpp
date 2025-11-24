@@ -1,25 +1,25 @@
 #include "aux.h"
 #include "comparators.h"
-#include "simple_driver.h"
-#include "kernels.h"
-#include "stop_watch.h"
 #include "gemm.h"
+#include "kernels.h"
+#include "simple_driver.h"
+#include "stop_watch.h"
 #include "tensorforge_aux.h"
 #include "yaml-cpp/yaml.h"
 #include <device.h>
 #include <iostream>
+#include <string>
 #include <tuple>
 #include <vector>
-#include <string>
 
 using namespace tensorforge;
 using namespace reference;
 using namespace device;
 
-int estimateNumElements(int SizeA, int SizeB, int SizeC, int SizeD, int SizeTmp, double AllowedSpaceInGB);
+int estimateNumElements(int SizeA, int SizeB, int SizeC, int SizeD, int SizeTmp,
+                        double AllowedSpaceInGB);
 
-int main(int Argc, char *Arcv[])
-{
+int main(int Argc, char *Arcv[]) {
 
   YAML::Node Params = YAML::LoadFile("./params.yaml");
   YAML::Node MatrixASpec = Params["MatA"];
@@ -27,10 +27,14 @@ int main(int Argc, char *Arcv[])
   YAML::Node MatrixCSpec = Params["MatC"];
   YAML::Node MatrixDSpec = Params["MatD"];
 
-  int SizeA = MatrixASpec["num_rows"].as<int>() * MatrixASpec["num_cols"].as<int>();
-  int SizeB = MatrixBSpec["num_rows"].as<int>() * MatrixBSpec["num_cols"].as<int>();
-  int SizeC = MatrixCSpec["num_rows"].as<int>() * MatrixCSpec["num_cols"].as<int>();
-  int SizeD = MatrixDSpec["num_rows"].as<int>() * MatrixDSpec["num_cols"].as<int>();
+  int SizeA =
+      MatrixASpec["num_rows"].as<int>() * MatrixASpec["num_cols"].as<int>();
+  int SizeB =
+      MatrixBSpec["num_rows"].as<int>() * MatrixBSpec["num_cols"].as<int>();
+  int SizeC =
+      MatrixCSpec["num_rows"].as<int>() * MatrixCSpec["num_cols"].as<int>();
+  int SizeD =
+      MatrixDSpec["num_rows"].as<int>() * MatrixDSpec["num_cols"].as<int>();
 
   std::vector<int> BboxA = MatrixASpec["bbox"].as<std::vector<int>>();
   std::vector<int> BboxB = MatrixBSpec["bbox"].as<std::vector<int>>();
@@ -48,7 +52,8 @@ int main(int Argc, char *Arcv[])
   real Beta = Params["beta"].as<real>();
 
   YAML::Node Config = YAML::LoadFile("./config.yaml");
-  int NumElements = estimateNumElements(SizeA, SizeB, SizeC, SizeD, SizeTemp, Config["allocate_mem"].as<double>());
+  int NumElements = estimateNumElements(SizeA, SizeB, SizeC, SizeD, SizeTemp,
+                                        Config["allocate_mem"].as<double>());
 
   long long FlopCounter = computeNumFlops(M, N, K, 1.0, 0.0);
   FlopCounter += computeNumFlops(L, N, M, Alpha, Beta);
@@ -59,7 +64,8 @@ int main(int Argc, char *Arcv[])
 
   dense::TestDriver FirstDriver(SizeA, SizeB, SizeTemp, NumElements);
   dense::TestDriver SecondDriver(SizeC, SizeTemp, SizeTemp, NumElements);
-  auto TotalMem = FirstDriver.getDeviceAllocatedMemSize() + SecondDriver.getDeviceAllocatedMemSize();
+  auto TotalMem = FirstDriver.getDeviceAllocatedMemSize() +
+                  SecondDriver.getDeviceAllocatedMemSize();
 
   std::cout << "Allocated Device Mem. GB: " << TotalMem << std::endl;
 
@@ -89,13 +95,25 @@ int main(int Argc, char *Arcv[])
   unsigned NextTmp = SizeTemp;
   unsigned NextD = SizeD;
 
-  unsigned NextA = MatrixASpec["addressing"].as<std::string>() == std::string("strided") ? SizeA : 0;
-  unsigned NextB = MatrixBSpec["addressing"].as<std::string>() == std::string("strided") ? SizeB : 0;
-  unsigned NextC = MatrixCSpec["addressing"].as<std::string>() == std::string("strided") ? SizeC : 0;
+  unsigned NextA =
+      MatrixASpec["addressing"].as<std::string>() == std::string("strided")
+          ? SizeA
+          : 0;
+  unsigned NextB =
+      MatrixBSpec["addressing"].as<std::string>() == std::string("strided")
+          ? SizeB
+          : 0;
+  unsigned NextC =
+      MatrixCSpec["addressing"].as<std::string>() == std::string("strided")
+          ? SizeC
+          : 0;
 
-  LayoutType TransA = Params["trans_a"].as<bool>() ? LayoutType::Trans : LayoutType::NoTrans;
-  LayoutType TransB = Params["trans_b"].as<bool>() ? LayoutType::Trans : LayoutType::NoTrans;
-  LayoutType TransC = Params["trans_c"].as<bool>() ? LayoutType::Trans : LayoutType::NoTrans;
+  LayoutType TransA =
+      Params["trans_a"].as<bool>() ? LayoutType::Trans : LayoutType::NoTrans;
+  LayoutType TransB =
+      Params["trans_b"].as<bool>() ? LayoutType::Trans : LayoutType::NoTrans;
+  LayoutType TransC =
+      Params["trans_c"].as<bool>() ? LayoutType::Trans : LayoutType::NoTrans;
 
   int Lda = MatrixASpec["num_rows"].as<int>();
   int Ldb = MatrixBSpec["num_rows"].as<int>();
@@ -103,8 +121,7 @@ int main(int Argc, char *Arcv[])
   int Ldd = MatrixDSpec["num_rows"].as<int>();
   int LdTemp = M;
 
-  auto computeOffset = [](const int LidDim, const std::vector<int> &Bbox)
-  {
+  auto computeOffset = [](const int LidDim, const std::vector<int> &Bbox) {
     return LidDim * Bbox[1] + Bbox[0];
   };
 
@@ -114,25 +131,20 @@ int main(int Argc, char *Arcv[])
   int OffsetD = computeOffset(Ldd, BboxD);
   int OffsetTemp = 0;
 
-  tensorforge::reference::gemm(TransA, TransB,
-                               M, N, K,
-                               1.0, &HostA[OffsetA], Lda,
-                               &HostB[OffsetB], Ldb,
-                               0.0, HostTmp, LdTemp,
-                               NextA, NextB, NextTmp,
-                               NumElements);
+  tensorforge::reference::gemm(TransA, TransB, M, N, K, 1.0, &HostA[OffsetA],
+                               Lda, &HostB[OffsetB], Ldb, 0.0, HostTmp, LdTemp,
+                               NextA, NextB, NextTmp, NumElements);
 
-  tensorforge::reference::gemm(TransC, reference::LayoutType::NoTrans,
-                               L, N, M,
-                               Alpha, &HostC[OffsetC], Ldc,
-                               HostTmp, M,
-                               Beta, &HostD[OffsetD], Ldd,
-                               NextC, NextTmp, NextD,
+  tensorforge::reference::gemm(TransC, reference::LayoutType::NoTrans, L, N, M,
+                               Alpha, &HostC[OffsetC], Ldc, HostTmp, M, Beta,
+                               &HostD[OffsetD], Ldd, NextC, NextTmp, NextD,
                                NumElements);
 
   std::cout << "INFO: computing on GPU started" << std::endl;
-  callFirstGemm(DeviceA, 0, DeviceB, 0, DeviceTmp, 0, NumElements, nullptr, FirstDriver.getTestStream());
-  callSecondGemm(DeviceC, 0, DeviceTmp, 0, DeviceD, 0, NumElements, nullptr, SecondDriver.getTestStream());
+  callFirstGemm(DeviceA, 0, DeviceB, 0, DeviceTmp, 0, NumElements, nullptr,
+                FirstDriver.getTestStream());
+  callSecondGemm(DeviceC, 0, DeviceTmp, 0, DeviceD, 0, NumElements, nullptr,
+                 SecondDriver.getTestStream());
   synchDevice(FirstDriver.getTestStream());
   synchDevice(SecondDriver.getTestStream());
 
@@ -140,23 +152,23 @@ int main(int Argc, char *Arcv[])
 
   SecondDriver.packResults(L, Ldd, N, OffsetD, SizeD, NumElements);
   bool IsPassed = SecondDriver.isTestPassed<SimpleComparator>();
-  if (IsPassed)
-  {
+  if (IsPassed) {
     std::cout << "INFO: Results are correct" << std::endl;
-  }
-  else
-  {
+  } else {
     std::cout << "WARNING: Test failed" << std::endl;
   }
 
   // Measure performance
-  utils::StopWatch<std::chrono::duration<double, std::chrono::nanoseconds::period>> Timer;
+  utils::StopWatch<
+      std::chrono::duration<double, std::chrono::nanoseconds::period>>
+      Timer;
   int NumRepeats = Config["num_repeats"].as<int>();
   Timer.start();
-  for (int Repeat = 0; Repeat < NumRepeats; ++Repeat)
-  {
-    callFirstGemm(DeviceA, 0, DeviceB, 0, DeviceTmp, 0, NumElements, nullptr, FirstDriver.getTestStream());
-    callSecondGemm(DeviceC, 0, DeviceTmp, 0, DeviceD, 0, NumElements, nullptr, SecondDriver.getTestStream());
+  for (int Repeat = 0; Repeat < NumRepeats; ++Repeat) {
+    callFirstGemm(DeviceA, 0, DeviceB, 0, DeviceTmp, 0, NumElements, nullptr,
+                  FirstDriver.getTestStream());
+    callSecondGemm(DeviceC, 0, DeviceTmp, 0, DeviceD, 0, NumElements, nullptr,
+                   SecondDriver.getTestStream());
   }
   synchDevice(FirstDriver.getTestStream());
   synchDevice(SecondDriver.getTestStream());
@@ -167,7 +179,9 @@ int main(int Argc, char *Arcv[])
   std::cout << "Num repeats: " << NumRepeats << std::endl;
   std::cout << "Computed Flops: " << NumRepeats * FlopCounter << std::endl;
   std::cout << "Spent time: " << Timer.getTime() << std::endl;
-  std::cout << "GFLOPS: " << NumRepeats * FlopCounter / (Timer.getTime() / NumElements) << std::endl;
+  std::cout << "GFLOPS: "
+            << NumRepeats * FlopCounter / (Timer.getTime() / NumElements)
+            << std::endl;
 
   FirstDriver.TearDown();
   SecondDriver.TearDown();
@@ -175,11 +189,12 @@ int main(int Argc, char *Arcv[])
   return 0;
 }
 
-int estimateNumElements(int SizeA, int SizeB, int SizeC, int SizeD, int SizeTmp, double AllowedSpaceInGB)
-{
+int estimateNumElements(int SizeA, int SizeB, int SizeC, int SizeD, int SizeTmp,
+                        double AllowedSpaceInGB) {
   // Note: We are going to use only one matrix C. However, memory is going
   // to get allocated for all elements
-  long long ElementSizeInBytes = (SizeD + SizeC + SizeTmp + SizeA + SizeB) * sizeof(real);
+  long long ElementSizeInBytes =
+      (SizeD + SizeC + SizeTmp + SizeA + SizeB) * sizeof(real);
   constexpr double FACTOR = 1024 * 1024 * 1024;
   return int((AllowedSpaceInGB * FACTOR) / ElementSizeInBytes);
 }

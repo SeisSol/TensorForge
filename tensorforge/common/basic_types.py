@@ -40,10 +40,10 @@ class Addressing(enum.Enum):
            Addressing.PTR_BASED: 'pointer_based',
            Addressing.SCALAR: 'scalar'}
     return map[addr]
-  
+
   def __str__(self):
     return self.addr2str(self)
-  
+
   def to_pointer(self):
     return self.addr2ptr_type(self)
 
@@ -54,7 +54,7 @@ class StridedAddressing:
 
   def to_pointer(self):
     return Addressing.STRIDED.to_pointer()
-  
+
   def __req__(self, other):
     return other == Addressing.STRIDED
 
@@ -91,7 +91,7 @@ class FloatingPointType(enum.Enum):
 
   def __str__(self):
     return self.as_str(self)
-  
+
   def literal(self, value):
     if self == self.FLOAT:
       return f'{float(value):.16}f'
@@ -137,7 +137,7 @@ class FloatingPointType(enum.Enum):
            'unsigned int': FloatingPointType.UINT,
            'unsigned long': FloatingPointType.ULONG}
     return map[as_str]
-  
+
   @classmethod
   def ytt2enum(cls, as_str: str):
     map = {'f32': FloatingPointType.FLOAT,

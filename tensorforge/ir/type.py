@@ -62,7 +62,7 @@ class BaseDatatype(Datatype, Enum):
 class PointerDatatype(Datatype):
     def __init__(self, base):
         self.base = base
-    
+
     def __repr__(self):
         return f'{self.base}*'
 
@@ -70,6 +70,6 @@ class VectorDatatype(Datatype):
     def __init__(self, base, count):
         self.base = base
         self.count = count
-    
+
     def __repr__(self):
         return f'{self.base}[{self.count}]'

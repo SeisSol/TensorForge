@@ -29,12 +29,12 @@ class GlbToShrLoader(AbstractShrMemWrite):
       self._max_load_offset = kwargs['max_load_offset']
     else:
       self._max_load_offset = self._num_threads
-    
+
     if 'blockwide' in kwargs:
       self._blockwide = kwargs['blockwide']
     else:
       self._blockwide = False
-    
+
     if 'alignment' in kwargs:
       self._alignment = kwargs['alignment']
     else:
@@ -54,7 +54,7 @@ class GlbToShrLoader(AbstractShrMemWrite):
 
     if self._permute is None:
       self._permute = [i for i in range(len(self._src.obj.shape))]
-    
+
     self._needs_reorder = self._permute != [i for i in range(len(self._src.obj.shape))]
 
     self._get_bounding_box_dense()
@@ -103,7 +103,7 @@ class GlbToShrLoader(AbstractShrMemWrite):
           dstshape = self._next_size(readshape)
         else:
           dstshape = readshape
-        
+
         # TODO: move somewhere else?
         if i == 0:
           dstshape = ((dstshape + self._alignment - 1) // self._alignment) * self._alignment
@@ -112,7 +112,7 @@ class GlbToShrLoader(AbstractShrMemWrite):
         read_shape += [readshape]
         if len(loop_indices) <= 1:
           loadsize *= readshape
-      
+
       # cap the first loop index, we're still contiguous there
       if len(loop_indices) > 0:
         loop_indices = loop_indices[1:]
@@ -150,7 +150,7 @@ class GlbToShrLoader(AbstractShrMemWrite):
       def inner(indices):
         self._src.load(writer, self._context, 'value', indices, allow_nontemporal)
         self._dest.store(writer, self._context, 'value', indices, False)
-      
+
       write_loops(self._context, writer, loops, inner)
     else:
       loops = [writer.For(f'int i{i} = 0; i{i} < {self._dest.data_view.shape[i]}; ++i{i}') for i in self._loop_indices]
@@ -158,20 +158,20 @@ class GlbToShrLoader(AbstractShrMemWrite):
       for loop in loops:
         writer.insert_pragma_unroll()
         loop.__enter__()
-      
+
       index = list(self._dest.data_view.get_dim_offsets())
       for li in self._loop_indices:
         index[li] = f'i{li}'
-      
+
       linscale = None
       if len(self._dst_shape) > 0 and self._dst_shape[0] != self._read_shape[0]:
         linscale = (self._read_shape[0], self._dst_shape[0])
-      
+
       self._write_datatransfer(writer, 0, 0, index, self._loadsize, allow_nontemporal, linscale)
 
       for loop in loops[::-1]:
         loop.__exit__(None, None, None)
-    
+
     #if False:
     #  writer('cooperative_groups::wait(cooperative_groups::this_thread_block());')
 
@@ -283,7 +283,7 @@ class GlbToRegLoader(MemoryInstruction):
     dest.data_view = DataView(shape=dest.obj.shape,
                               permute=None,
                               bbox=dest.obj.get_bbox())
-    
+
     # if dest.data_view.get_dim_size(0) > src.data_view.get_dim_size(0):
     #   raise InternalError('store: `src` and `dest` do not match in size aling dim `0`')
 
@@ -311,7 +311,7 @@ class GlbToRegLoader(MemoryInstruction):
     def inner(indices):
       self._src.load(writer, self._context, 'value', indices, allow_nontemporal)
       self._dest.store(writer, self._context, 'value', indices, False)
-    
+
     write_loops(self._context, writer, loops, inner)
 
   def __str__(self) -> str:

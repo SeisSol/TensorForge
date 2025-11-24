@@ -53,7 +53,7 @@ class CudaLexic(Lexic):
 
   def declare_shared_memory_inline(self, name, precision, size, alignment):
     return f"__shared__  __align__({alignment}) {precision} {name}[{size}]"
-  
+
   def declare_shared_memory(self, name, precision):
     return f'extern __shared__ {precision} {name}[]'
 
@@ -102,7 +102,7 @@ class CudaLexic(Lexic):
 
   def get_headers(self):
     return ["tensorforge_device/cuda.h"]
-  
+
   def get_fptype(self, fptype, length=1):
     if length <= 4:
       suffix = f'{length}' if length > 1 else ''
@@ -202,7 +202,7 @@ class CudaLexic(Lexic):
       return f'({value1} == {value2})'
     elif op == Operation.NEQ:
       return f'({value1} != {value2})'
-    
+
     raise NotImplementedError(f'{op}')
 
   def reduction(self, optype, fptype, blocks):
@@ -221,7 +221,7 @@ class CudaLexic(Lexic):
       return f'__stcg(&{lhs}, {rhs});'
     else:
       return f'{lhs} = {rhs};'
-  
+
   def glb_load(self, lhs, rhs, nontemporal=False):
     if nontemporal:
       # return f'{lhs} = __ldg(&{rhs});'

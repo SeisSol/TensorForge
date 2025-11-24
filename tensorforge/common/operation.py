@@ -71,7 +71,7 @@ class Operator:
   @abstractmethod
   def datatype(self) -> List[OperationType]:
     return []
-  
+
   @abstractmethod
   def format(self, *ops):
     pass
@@ -80,105 +80,105 @@ class ReductionOperator(Operator):
   @abstractmethod
   def neutral(self):
     pass
-  
+
   def num_operands(self):
     return 2
 
 class AddOperator(ReductionOperator):
   def neutral(self):
     return 0
-  
+
   @abstractmethod
   def format(self, *ops):
     return f'({ops[0]} + {ops[1]})'
-  
+
   def datatype(self):
     return [OperationType.FLOAT, OperationType.SINT, OperationType.UINT]
-  
+
   def __str__(self):
     return '+'
 
 class MulOperator(ReductionOperator):
   def neutral(self):
     return 1
-  
+
   @abstractmethod
   def format(self, *ops):
     return f'({ops[0]} * {ops[1]})'
-  
+
   def datatype(self):
     return [OperationType.FLOAT, OperationType.SINT, OperationType.UINT]
-  
+
   def __str__(self):
     return '*'
 
 class MinOperator(ReductionOperator):
   def neutral(self):
     return math.inf
-  
+
   @abstractmethod
   def format(self, *ops):
     return f'min({ops[0]}, {ops[1]})'
-  
+
   def datatype(self):
     return [OperationType.FLOAT, OperationType.SINT, OperationType.UINT]
-  
+
   def __str__(self):
     return 'min'
 
 class MaxOperator(ReductionOperator):
   def neutral(self):
     return -math.inf
-  
+
   @abstractmethod
   def format(self, *ops):
     return f'max({ops[0]}, {ops[1]})'
-  
+
   def datatype(self):
     return [OperationType.FLOAT, OperationType.SINT, OperationType.UINT]
-  
+
   def __str__(self):
     return 'max'
 
 class AndOperator(ReductionOperator):
   def neutral(self):
     return True
-  
+
   @abstractmethod
   def format(self, *ops):
     return f'({ops[0]} & {ops[1]})'
-  
+
   def datatype(self):
     return [OperationType.BOOLEAN, OperationType.UINT]
-  
+
   def __str__(self):
     return '&'
 
 class OrOperator(ReductionOperator):
   def neutral(self):
     return False
-  
+
   @abstractmethod
   def format(self, *ops):
     return f'({ops[0]} | {ops[1]})'
-  
+
   def datatype(self):
     return [OperationType.BOOLEAN, OperationType.UINT]
-  
+
   def __str__(self):
     return '|'
 
 class XorOperator(ReductionOperator):
   def neutral(self):
     return False
-  
+
   @abstractmethod
   def format(self, *ops):
     return f'({ops[0]} ^ {ops[1]})'
-  
+
   def datatype(self):
     return [OperationType.BOOLEAN, OperationType.UINT]
-  
+
   def __str__(self):
     return '^'
 

@@ -8,7 +8,7 @@ class TensorData:
         self.shape = tuple(shape)
         self.spp = spp
         self.values = values
-    
+
     def __repr__(self):
         return ''
 
@@ -17,7 +17,7 @@ class TensorAlloc:
         self.name = name
         self.data = data
         self.memoryspace = memoryspace
-    
+
     def __repr__(self):
         return f'{self.name}{"{"}{self.data} :: {self.memoryspace}{"}"}'
 
@@ -25,7 +25,7 @@ class TensorView:
     def __init__(self, alloc: TensorAlloc, bbox):
         self.alloc = alloc
         self.bbox = bbox
-    
+
     def __repr__(self):
         return f'{self.alloc}[{self.bbox}]'
 

@@ -20,9 +20,9 @@ class YatetoInterface:
       (list): bounding box in GemmForge format
     """
     # TODO: permute, mem_layout
-    
+
     return BoundingBox([rng.start for rng in mem_layout], [rng.stop for rng in mem_layout])
-  
+
   @classmethod
   def gen_matrix(cls,
                        yateto_ranges,
@@ -38,7 +38,7 @@ class YatetoInterface:
     spp = None
     if pattern is not None:
       spp = ListSPP(pattern, tuple([yateto_ranges[i] for i in range(len(yateto_ranges))]))
-    
+
     data = None
     if values is not None:
       data = values

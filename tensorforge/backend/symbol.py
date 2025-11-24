@@ -67,7 +67,7 @@ class DataView:
   def get_dim_size(self, index):
     assert index >= 0 and index < len(self.shape)
     return self._bbox.size(index)
-  
+
   def get_dim_strides(self, mask=[], bbox=False):
     # TODO: permute? Yes or no? Also, unify SPPs.
     strides = []
@@ -107,10 +107,10 @@ class Immediate:
   def __init__(self, value, fptype: FloatingPointType):
     self._value = value
     self._type = fptype
-  
+
   def is_thread_dependent(self):
     return False
-  
+
   def write_nonlead(self):
     return self._type.literal(self._value)
 
@@ -137,10 +137,10 @@ class LeadIndex:
     self._nonlead = nonlead
     self._block = block
     self._stride = stride
-  
+
   def is_thread_dependent(self):
     return True
-  
+
   def write_nonlead(self):
     return f'{self._nonlead}'
 
@@ -224,7 +224,7 @@ class LinearizedLoop:
   def __init__(self, loops, blocksize = 1):
     self.loops = loops
     self.blocksize = blocksize
-  
+
   def write(self, context: Context, writer: Writer, inner):
     totalloopsize = 1
     multiplies = [0] * len(self.loops)
@@ -233,7 +233,7 @@ class LinearizedLoop:
       multiplies[i] = totalloopsize
       loopsize[i] = (loop.end - loop.start) // loop.step
       totalloopsize *= loopsize[i]
-    
+
     loopvar = 'var'
     loopvar2 = 'var2'
 
@@ -277,7 +277,7 @@ class Symbol:
     self.num_threads = None
     self.lead_dims = [0] # has only an effect for register storage
     self._users = []
-  
+
   def clone(self):
     cloned = Symbol(self.name, self.stype, self.obj)
     cloned.data_view = deepcopy(self.data_view)
@@ -336,7 +336,7 @@ class Symbol:
       return f'{self.name}'
     if self.stype == SymbolType.Data:
       return self.get_fptype(context).literal(self.obj.value(runIdx))
-  
+
   def encode_values(self, pos, runIdx, writer, context: Context, variable, index: List[Union[str, int, Immediate, Variable, LeadIndex]], nontemp, leadidx):
     if pos == len(index):
       if self.stype == SymbolType.Data:
@@ -436,7 +436,7 @@ class Symbol:
         writer(context.get_vm().get_lexic().glb_load(variable, access, nontemp))
       else:
         writer(f'{self.get_fptype(context)} {variable} = {access};')
-  
+
   def store(self, writer, context, variable, index: List[Union[str, int, Immediate, Variable, LeadIndex]], nontemp):
     assert self.stype != SymbolType.Data
 
@@ -465,13 +465,13 @@ class Symbol:
 
   def get_first_user(self):
     return self._users[0]
-  
+
   def get_last_user(self):
     return self._users[-1]
 
   def __str__(self):
     return f'name: {self.name}, type: {self.stype}, lead: {self.lead_dims}'
-  
+
   def __repr__(self):
     return self.__str__()
 
@@ -481,9 +481,9 @@ class SymbolView:
     self.bbox = view
     if view is None:
       self.bbox = symbol.data_view.get_bbox()
-  
+
   def __str__(self):
     return f'{self.symbol} {self.bbox}'
-  
+
   def __repr__(self):
     return self.__str__()

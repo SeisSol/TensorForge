@@ -60,7 +60,7 @@ class ElementwiseInstruction(ComputeInstruction):
             for i,_ in enumerate(self._ks):
                 writer(f'auto n{i} = {varlist[i].write(self._context)};')
             writeAssignments(self._assignments, writer, self._context)
-        
+
         write_loops(self._context, writer, loopstack, inner)
 
     def get_operands(self):

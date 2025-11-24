@@ -17,7 +17,7 @@ class yttt:
 class VarAlloc:
     def __init__(self):
         self.counter = -1
-    
+
     def alloc(self):
         self.counter += 1
         return f'v{self.counter}'
@@ -28,7 +28,7 @@ class Node:
 
     def pretensors(self, intensors=True, outtensors=True):
         pass
-    
+
     def symbols(self, intensors=True, outtensors=True):
         pass
 
@@ -37,10 +37,10 @@ class Node:
 
     def assignSymbols(self, scopes: Scopes):
         pass
-    
+
     def assignTensor(self, assigner):
         pass
-    
+
     def declare(self, alloc: VarAlloc, writer: Writer, context: Context):
         pass
 
@@ -49,88 +49,88 @@ class Node:
 
     def __add__(self, other):
         return add(self, other)
-    
+
     def __radd__(self, other):
         return add(other, self)
-    
+
     def __sub__(self, other):
         return sub(self, other)
-    
+
     def __rsub__(self, other):
         return sub(other, self)
-    
+
     def __mul__(self, other):
         return mul(self, other)
-    
+
     def __rmul__(self, other):
         return mul(other, self)
-    
+
     def __div__(self, other):
         return div(self, other)
-    
+
     def __rdiv__(self, other):
         return div(other, self)
-    
+
     def __truediv__(self, other):
         return div(self, other)
-    
+
     def __rtruediv__(self, other):
         return div(other, self)
 
     def __mod__(self, other):
         return mod(self, other)
-    
+
     def __rmod__(self, other):
         return mod(other, self)
-    
+
     def __or__(self, other):
         return bitor(self, other)
-    
+
     def __ror__(self, other):
         return bitor(other, self)
-    
+
     def __and__(self, other):
         return bitand(self, other)
-    
+
     def __rand__(self, other):
         return bitand(other, self)
 
     def __xor__(self, other):
         return bitxor(self, other)
-    
+
     def __rxor__(self, other):
         return bitxor(other, self)
-    
+
     def __pow__(self, other):
         return pow(self, other)
-    
+
     def __rpow__(self, other):
         return pow(other, self)
-    
+
     def __lt__(self, other):
         return complt(self, other)
-    
+
     def __le__(self, other):
         return comple(self, other)
-    
+
     def __gt__(self, other):
         return compgt(self, other)
-    
+
     def __ge__(self, other):
         return compge(self, other)
-    
+
     def __eq__(self, other):
         return compeq(self, other)
-    
+
     def __ne__(self, other):
         return compne(self, other)
-    
+
     def __neg__(self):
         return neg(self)
-    
+
     def __pos__(self):
         return self
-    
+
     def __abs__(self):
         return abs(self)
 
@@ -144,7 +144,7 @@ class Statement:
 
     def pretensors(self, intensors=True, outtensors=True):
         pass
-    
+
     def symbols(self, intensors=True, outtensors=True):
         pass
 
@@ -156,7 +156,7 @@ class Statement:
 
     def assignTensor(self, assigner):
         pass
-    
+
     def declare(self, alloc: VarAlloc, writer: Writer, context: Context):
         pass
 
@@ -183,7 +183,7 @@ class Assignment(Statement):
         if outtensors:
             tensorlist += self.dest.tensors(intensors, outtensors)
         return tensorlist
-    
+
     def pretensors(self, intensors=True, outtensors=True):
         tensorlist = []
         if intensors:
@@ -191,7 +191,7 @@ class Assignment(Statement):
         if outtensors:
             tensorlist += self.dest.pretensors(intensors, outtensors)
         return tensorlist
-    
+
     def getRanges(self, ranges):
         ranges = self.dest.getRanges(ranges)
         ranges = self.optree.getRanges(ranges)
@@ -222,16 +222,16 @@ class TensorVar(Variable):
         self.variable = None
         self.indices = None
         self.offset = None
-    
+
     def tensors(self, intensors=True, outtensors=True):
         return [self.tensor]
-    
+
     def pretensors(self, intensors=True, outtensors=True):
         return [self.pretensor]
-    
+
     def symbols(self, intensors=True, outtensors=True):
         return [self.symbol]
-    
+
     def getRanges(self, ranges):
         for i in range(len(self.indices)):
             if self.indices[i] not in ranges:
@@ -253,14 +253,14 @@ class TensorVar(Variable):
 
     def declare(self, alloc: VarAlloc, writer: Writer, context: Context):
         pass
-    
+
     def write(self, alloc: VarAlloc, writer: Writer, context: Context):
         # TODO: re-enable caching
         # if self.variable is None:
         self.variable = alloc.alloc()
         self.symbol.load(writer, context, self.variable, [f'(n{-i-1} + {o})' for i,o in zip(self.indices, self.offset)], False)
         return self.variable
-    
+
     def store(self, alloc: VarAlloc, writer: Writer, context: Context, value: str):
         # assume that we don't have to reload
         self.symbol.store(writer, context, value, [f'(n{-i-1} + {o})' for i,o in zip(self.indices, self.offset)], False)
@@ -273,16 +273,16 @@ class ScalarVar(Variable):
         self.pretensor = pretensor
         self.variable = None
         self.indices = None
-    
+
     def tensors(self, intensors=True, outtensors=True):
         return [self.tensor]
-    
+
     def pretensors(self, intensors=True, outtensors=True):
         return []
-    
+
     def symbols(self, intensors=True, outtensors=True):
         return [self.symbol]
-    
+
     def getRanges(self, ranges):
         return ranges
 
@@ -295,12 +295,12 @@ class ScalarVar(Variable):
 
     def declare(self, alloc: VarAlloc, writer: Writer, context: Context):
         pass
-    
+
     def write(self, alloc: VarAlloc, writer: Writer, context: Context):
         self.variable = alloc.alloc()
         self.symbol.load(writer, context, self.variable, [f'n{-i-1}' for i in self.indices], False)
         return self.variable
-    
+
     def store(self, alloc: VarAlloc, writer: Writer, context: Context, value: str):
         # assume that we don't have to reload
         self.symbol.store(writer, context, value, [f'n{-i-1}' for i in self.indices], False)
@@ -312,10 +312,10 @@ class TempVar(Variable):
 
     def tensors(self, intensors=True, outtensors=True):
         return []
-    
+
     def symbols(self, intensors=True, outtensors=True):
         return []
-    
+
     def pretensors(self, intensors=True, outtensors=True):
         return []
 
@@ -327,16 +327,16 @@ class TempVar(Variable):
 
     def getRanges(self, ranges):
         return ranges
-    
+
     def declare(self, alloc: VarAlloc, writer: Writer, context: Context):
         self.variable = alloc.alloc()
         datatype = context.fp_type if self.datatype is None else self.datatype
         writer(f'{datatype} {self.variable};')
-    
+
     def write(self, alloc: VarAlloc, writer: Writer, context: Context):
         assert self.variable is not None
         return self.variable
-    
+
     def store(self, alloc: VarAlloc, writer: Writer, context: Context, value: str):
         if self.variable is None:
             self.variable = alloc.alloc()
@@ -349,28 +349,28 @@ class Immediate(Variable):
 
     def tensors(self, intensors=True, outtensors=True):
         return []
-    
+
     def symbols(self, intensors=True, outtensors=True):
         return []
-    
+
     def pretensors(self, intensors=True, outtensors=True):
         return []
-    
+
     def getRanges(self, ranges):
         return ranges
 
     def assignSymbols(self, scopes: Scopes):
         pass
-    
+
     def assignTensor(self, assigner):
         pass
 
     def declare(self, alloc: VarAlloc, writer: Writer, context: Context):
         pass
-    
+
     def write(self, alloc: VarAlloc, writer: Writer, context: Context):
         return self.fptype.literal(self.value)
-    
+
     def store(self, alloc: VarAlloc, writer: Writer, context: Context, value: str):
         pass
 
@@ -378,7 +378,7 @@ class OpNode(Node):
     def __init__(self, operands: List[Node]):
         self.operands = operands
         self.variable = None
-    
+
     def getRanges(self, ranges):
         for op in self.operands:
             ranges = op.getRanges(ranges)
@@ -386,13 +386,13 @@ class OpNode(Node):
 
     def tensors(self, intensors=True, outtensors=True):
         return [tensor for operand in self.operands for tensor in operand.tensors()]
-    
+
     def pretensors(self, intensors=True, outtensors=True):
         return [tensor for operand in self.operands for tensor in operand.pretensors()]
-    
+
     def symbols(self, intensors=True, outtensors=True):
         return [symbol for operand in self.operands for symbol in operand.symbols()]
-    
+
     def assignSymbols(self, scopes: Scopes):
         for op in self.operands:
             op.assignSymbols(scopes)
@@ -437,7 +437,7 @@ class CastOpNode(OpNode):
     def __init__(self, operands: List[Node], targetType: FloatingPointType):
         super().__init__(operands)
         self.targetType = targetType
-    
+
     def operation(self, context: Context, var: List[str]):
         return f'static_cast<{self.targetType}>({var[0]})'
 
@@ -467,7 +467,7 @@ class IfNode(Statement):
         if intensors:
             tensorlist += self.condition.tensors(intensors, outtensors)
         return tensorlist + [tensor for operand in self.subassignments for tensor in operand.tensors(intensors, outtensors)]
-    
+
     def pretensors(self, intensors=True, outtensors=True):
         tensorlist = []
         if intensors:
@@ -479,7 +479,7 @@ class IfNode(Statement):
         if intensors:
             tensorlist += self.condition.symbols(intensors, outtensors)
         return tensorlist + [tensor for operand in self.subassignments for tensor in operand.symbols(intensors, outtensors)]
-    
+
     def declare(self, alloc: VarAlloc, writer: Writer, context: Context):
         self.condition.declare(alloc, writer, context)
         for subassignment in self.subassignments:
@@ -518,7 +518,7 @@ class WhileNode(Statement):
         if intensors:
             tensorlist += self.condition.tensors(intensors, outtensors)
         return tensorlist + [tensor for operand in self.subassignments for tensor in operand.tensors(intensors, outtensors)]
-    
+
     def pretensors(self, intensors=True, outtensors=True):
         tensorlist = []
         if intensors:

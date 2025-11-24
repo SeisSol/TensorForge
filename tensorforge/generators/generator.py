@@ -257,7 +257,7 @@ class Generator:
         self._global_ir += load_ir
         self._global_ir.append(SyncBlock(self._context, self._num_threads))
         return True
-    
+
     return False
 
   def _emit_ir(self):
@@ -285,7 +285,7 @@ class Generator:
         self._ir.extend(builder.get_instructions())
       if isinstance(gemm_descr, ElementwiseDescr):
         self._ir.append(ElementwiseInstruction(self._context, gemm_descr.oplist, self._scopes, False, self._num_threads))
-    
+
     builder.build_epilogue()
     self._ir.extend(builder.get_instructions())
 

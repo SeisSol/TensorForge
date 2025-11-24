@@ -23,7 +23,7 @@ class SyclLexic(Lexic):
 
   def get_launch_size(self, func_name, block):
     return f"""""" # TODO:
-  
+
   def set_shmem_size(self, func_name, shmem):
     return ''
 
@@ -32,7 +32,7 @@ class SyclLexic(Lexic):
 
   def declare_shared_memory_inline(self, name, precision, size, alignment):
     return ""
-  
+
   def declare_shared_memory(self, name, precision):
     return ""
 
@@ -46,7 +46,7 @@ class SyclLexic(Lexic):
       localmem += f' {GeneralLexicon.TOTAL_SHR_MEM} ({total_shared_mem_size}, cgh);'
     else:
       localmem = None
-    
+
     if self._underlying_hardware == 'intel' and self._backend == 'oneapi':
       add_items = '[[intel::reqd_sub_group_size(16)]] [[intel::kernel_args_restrict]]'
     else:
@@ -91,7 +91,7 @@ class SyclLexic(Lexic):
 
   def get_headers(self):
     return ['sycl/sycl.hpp']
-  
+
   def get_fptype(self, fptype, length=1):
     return f'sycl::vec<{fptype}, {length}>'
 
@@ -182,5 +182,5 @@ class SyclLexic(Lexic):
       return f'({value1} == {value2})'
     elif op == Operation.NEQ:
       return f'({value1} != {value2})'
-    
+
     raise NotImplementedError(f'{op}')

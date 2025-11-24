@@ -101,7 +101,7 @@ def shuffle_swap(writer, dtype, target, source, block):
             blockswap = block >> 1
             mylane = f'(__lane_id() ^ {blockswap})'
             writefun = lambda s,t: writer(f'{t} = __builtin_amdgcn_ds_bpermute(4 * {mylane}, {s});')
-    
+
         if dtype == FloatingPointType.FLOAT or dtype == FloatingPointType.INT or dtype == FloatingPointType.UINT:
             writefun(f'*(int*)&{target}', f'*(int*)&{source}')
         if dtype == FloatingPointType.DOUBLE or dtype == FloatingPointType.LONG or dtype == FloatingPointType.ULONG:
@@ -135,7 +135,7 @@ def shuffle_mirror(writer, dtype, target, source, block):
             blockswap = 63
             mylane = f'(__lane_id() ^ {blockswap})'
             writefun = lambda s,t: writer(f'{t} = __builtin_amdgcn_ds_bpermute(4 * {mylane}, {s});')
-    
+
         if dtype == FloatingPointType.FLOAT or dtype == FloatingPointType.INT or dtype == FloatingPointType.UINT:
             writefun(f'*(int*)&{target}', f'*(int*)&{source}')
         if dtype == FloatingPointType.DOUBLE or dtype == FloatingPointType.LONG or dtype == FloatingPointType.ULONG:
@@ -219,7 +219,7 @@ def shuffle_broadcast(writer, dtype, target, source, lane, subblock, block):
             # no block offset needed (since (block == 64) anyways)
             mylane = f'((__lane_id() % {subblock}) + {subblock * lane})'
             writefun = lambda s,t: writer(f'{t} = __builtin_amdgcn_ds_bpermute(4 * {mylane}, {s});')
-    
+
         if dtype == FloatingPointType.FLOAT or dtype == FloatingPointType.INT or dtype == FloatingPointType.UINT:
             writefun(f'*(int*)&{target}', f'*(int*)&{source}')
         if dtype == FloatingPointType.DOUBLE or dtype == FloatingPointType.LONG or dtype == FloatingPointType.ULONG:
@@ -263,7 +263,7 @@ class MatrixCore:
         assert n >= self.n
         assert m >= self.m
         # TODO: add shuffle, if needed
-    
+
     def horizontal_kernel(self, writer, logbA, logbB, A, B, C):
         assert self.k == 1
 

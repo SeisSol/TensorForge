@@ -34,7 +34,7 @@ class Tensor:
 
         self.addressing = addressing
         self.ptr_type = self.addressing.to_pointer()
-        
+
         if self.addressing == Addressing.SCALAR:
             # allow higher-order tensors, if they're effectively a scalar anyways
             assert all(d == 1 for d in self.shape)
@@ -57,18 +57,18 @@ class Tensor:
 
     def get_values(self):
         return self.data
-    
+
     def value(self, index):
         realindex = tuple(index)
         if realindex in self.data:
             return self.data[realindex]
         else:
             return None
-    
+
     def linear_index(self, index):
         realindex = tuple(index)
         return self.spp.linear_index(realindex)
-    
+
     def memory(self):
         return self.spp.count_nz()
 
@@ -77,7 +77,7 @@ class Tensor:
 
     def get_actual_volume(self):
         return reduce(lambda x,y:x*y, self.get_actual_shape(), 1)
-    
+
     def get_real_shape(self):
         return self.shape
 
@@ -110,16 +110,16 @@ class Tensor:
 
     def density(self):
         return self.spp.count_nz() / self.get_real_volume()
-    
+
     def sparsity(self):
         return 1 - self.density()
-    
+
     def is_dense(self):
         return self.spp.count_nz() == self.get_real_volume()
-    
+
     def __str__(self):
         return self.gen_descr()
-    
+
     def __repr__(self):
         return self.gen_descr()
 
@@ -134,14 +134,13 @@ class SubTensor(TensorWrapper):
         self.bbox = bbox
         if bbox is None:
             self.bbox = self.tensor.bbox
-    
+
     def __str__(self):
         return f'{self.tensor}({self.bbox})'
-    
+
     def __repr__(self):
         return f'{self.tensor}({self.bbox})'
 
 class FullTensor(TensorWrapper):
     def __init__(self, tensor: Tensor):
         self.tensor = tensor
-

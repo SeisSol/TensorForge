@@ -2,7 +2,8 @@
 #include <iostream>
 #include <sstream>
 
-bool L1NormComparator::compare(const PackedData &Host, const PackedData &Device, real Eps) {
+bool L1NormComparator::compare(const PackedData &Host, const PackedData &Device,
+                               real Eps) {
   bool IsEqual = true;
 
   std::stringstream Stream{};
@@ -19,7 +20,6 @@ bool L1NormComparator::compare(const PackedData &Host, const PackedData &Device,
                << "Host: " << Host[Element][Index] << "; "
                << "Device: " << Device[Element][Index] << "; "
                << "Diff.: " << Difference << "\n";
-
       }
     }
   }
@@ -30,4 +30,3 @@ bool L1NormComparator::compare(const PackedData &Host, const PackedData &Device,
 
   return IsEqual;
 }
-

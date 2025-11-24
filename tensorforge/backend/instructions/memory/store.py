@@ -58,7 +58,7 @@ class StoreRegToReg(MemoryInstruction):
     def inner(indices):
       self._src.load(writer, self._context, 'value', indices, False)
       self._dest.store(writer, self._context, 'value', indices, False)
-    
+
     write_loops(self._context, writer, loops, inner)
 
   def get_dest(self) -> Symbol:
@@ -118,7 +118,7 @@ class StoreRegToShr(AbstractShrMemWrite):
     def inner(indices):
       self._src.load(writer, self._context, 'value', indices, False)
       self._dest.store(writer, self._context, 'value', indices, False)
-    
+
     write_loops(self._context, writer, loops, inner)
 
   def get_dest(self) -> Symbol:
@@ -156,7 +156,7 @@ class StoreRegToGlb(AbstractInstruction):
     dest.data_view = DataView(shape=dest.obj.shape,
                               permute=None,
                               bbox=dest.obj.get_bbox())
-    
+
     #if dest.data_view.get_dim_size(0) < src.data_view.get_dim_size(0):
     #  raise InternalError('store: `src` and `dest` do not match in size aling dim `0`')
 
@@ -184,7 +184,7 @@ class StoreRegToGlb(AbstractInstruction):
       def inner(indices):
         self._src.load(writer, self._context, 'value', indices, False)
         self._dest.store(writer, self._context, 'value', indices, allow_nontemporal)
-      
+
       write_loops(self._context, writer, loops, inner)
 
   def __str__(self) -> str:
@@ -222,7 +222,7 @@ class StoreShrMemToGlb(AbstractInstruction):
 
   def gen_code(self, writer):
     dest_matrix = self._dest.obj
-    
+
     dest_name = self._dest.name
     src_name = self._src.name
     vec_unit_length = self._vm._hw_descr.vec_unit_length

@@ -6,4 +6,4 @@ class KernelLauncher:
     # TODO: how to launch
 
     def cpp(self):
-        return 
+        return

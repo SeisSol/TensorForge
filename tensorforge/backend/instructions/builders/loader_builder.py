@@ -24,7 +24,7 @@ class GlobalLoaderBuilder(AbstractBuilder):
                     stype=SymbolType.Global,
                     obj=src.obj)
     predest.data_view = DataView(shape=src.obj.shape, permute=None, bbox=src.obj.get_bbox())
-    
+
     self._scopes.add_symbol(predest)
     self._instructions.append(GetElementPtr(self._context, src, predest, True))
 
@@ -43,4 +43,3 @@ class GlobalLoaderBuilder(AbstractBuilder):
     loader.set_shr_mem_offset(offset, True, True)
 
     return loader.compute_shared_mem_size()
-

@@ -5,7 +5,7 @@ class BoundingBox:
         assert len(lower) == len(upper)
         self._lower = tuple(lower)
         self._upper = tuple(upper)
-    
+
     def intersect(self, other):
         return BoundingBox([max(sl, ol) for sl, ol in zip(self.lower, other.lower)], [min(sl, ol) for sl, ol in zip(self.upper, other.upper)])
 
@@ -24,13 +24,13 @@ class BoundingBox:
 
     def __eq__(self, other):
         return self._lower == other._lower and self._upper == other._upper
-    
+
     def rank(self):
         return len(self._lower)
 
     def contains(self, index):
         return all(i >= l and i < u for i,l,u in zip(index, self._lower, self._upper))
-    
+
     def empty(self):
         return all(u >= l for l,u in zip(self._lower, self._upper))
 
@@ -39,10 +39,10 @@ class BoundingBox:
 
     def upper(self):
         return self._upper
-    
+
     def size(self, dim):
         return self._upper[dim] - self._lower[dim]
-    
+
     def sizes(self):
         return [u - l for l,u in zip(self._lower, self._upper)]
 

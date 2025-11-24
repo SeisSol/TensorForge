@@ -13,7 +13,7 @@ class MemoryInstruction(AbstractInstruction):
   @abstractmethod
   def gen_code_inner(self, writer: Writer):
     pass
-  
+
   def gen_code_declare(self, writer: Writer):
     pass
 
@@ -31,7 +31,7 @@ class AbstractShrMemWrite(MemoryInstruction):
     self._shr_mem_offset: Union[int, None] = 0
     self._declare = False
     self._global_offset = False
-  
+
   def gen_code_declare(self, writer: Writer) -> None:
     if self._declare:
       lhs = f'{self._fp_as_str}* {self._vm.get_lexic().restrict_kw} {self._dest.name}'

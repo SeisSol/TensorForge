@@ -17,7 +17,7 @@ class AbstractInstruction(ABC):
   @abstractmethod
   def gen_code(self, writer: Writer) -> None:
     return None
-  
+
   def get_headers(self) -> List[str]:
     return []
 
@@ -41,7 +41,7 @@ class AbstractInstruction(ABC):
       return f'{tid} < {end}'
     else:
       return f'({tid} >= {begin}) && ({tid} < {end})'
-  
+
   # @abstractmethod
   def get_perfdata(self):
     pass

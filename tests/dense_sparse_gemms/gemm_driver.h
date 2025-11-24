@@ -1,29 +1,28 @@
 #ifndef GEMMS_GEMM_DRIVER_H
 #define GEMMS_GEMM_DRIVER_H
 
-#include "typedef.h"
 #include "simple_dense_sparse_driver.h"
+#include "typedef.h"
 #include "gtest/gtest.h"
 #include <tuple>
 #include <vector>
 
-class DenseXSparseGemmTest : public ::testing::Test
-{
+class DenseXSparseGemmTest : public ::testing::Test {
 protected:
-  void SetUp(int rowA, int colA, int rowB, int colB, int rowC, int colC, int NumElements, std::string matrix_b_type, bool transB)
-  {
-    Driver.setParams(rowA, colA, rowB, colB, rowC, colC, NumElements, matrix_b_type, transB);
+  void SetUp(int rowA, int colA, int rowB, int colB, int rowC, int colC,
+             int NumElements, std::string matrix_b_type, bool transB) {
+    Driver.setParams(rowA, colA, rowB, colB, rowC, colC, NumElements,
+                     matrix_b_type, transB);
     Driver.SetUp(matrix_b_type);
 
     std::tie(HostA, HostB_dense, HostB_sparse, HostC) = Driver.getHostRawData();
-    std::tie(DeviceA, DeviceB_dense, DeviceB_sparse, DeviceC1, DeviceC2) = Driver.getDeviceRawData();
-    // std::tie(DeviceShuffledA, DeviceShuffledB, DeviceShuffledC) = Driver.getShuffledDeviceData();
+    std::tie(DeviceA, DeviceB_dense, DeviceB_sparse, DeviceC1, DeviceC2) =
+        Driver.getDeviceRawData();
+    // std::tie(DeviceShuffledA, DeviceShuffledB, DeviceShuffledC) =
+    // Driver.getShuffledDeviceData();
   }
 
-  void TearDown()
-  {
-    Driver.TearDown();
-  }
+  void TearDown() { Driver.TearDown(); }
 
   real *HostA = nullptr;
   real *HostB_dense = nullptr;

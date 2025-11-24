@@ -86,13 +86,13 @@ for suite in suites:
 
       T = "T"
       NT = ""
-      
+
 
       generator1 = Generator([GemmDescr(trans_a=trans_a,
                        trans_b=trans_b,
                        a=mat_a, b=mat_b, c=mat_c, alpha=alpha, beta=beta)], vm)
 
-      
+
       generator1.generate()
       src.write(generator1.get_kernel())
       src.write(generator1.get_launcher())

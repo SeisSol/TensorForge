@@ -8,13 +8,13 @@ using SimpleComparator = class L1NormComparator;
 
 class L1NormComparator {
 public:
-  bool compare(const PackedData &Host, const PackedData &Device, real Eps = 1e-5);
+  bool compare(const PackedData &Host, const PackedData &Device,
+               real Eps = 1e-5);
 };
-
 
 class GoogleComparator {
 public:
   bool compare(const PackedData &Host, const PackedData &Device);
 };
 
-#endif //GEMMS_COMPARATORS_H
+#endif // GEMMS_COMPARATORS_H

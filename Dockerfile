@@ -53,4 +53,3 @@ COPY . /app
 
 # Install the application
 RUN pip install . --break-system-packages
-

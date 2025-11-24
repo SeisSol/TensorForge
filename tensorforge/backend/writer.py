@@ -44,7 +44,7 @@ from io import StringIO
 class VarAlloc:
     def __init__(self):
         self.counter = -1
-    
+
     def alloc(self, prefix='v'):
         self.counter += 1
         return f'{prefix}{self.counter}'
@@ -71,7 +71,7 @@ class Block:
   def __exit__(self, type, value, traceback):
     self.writer.indent -= 1
     self.writer.speculateClear('}' + self.foot)
-  
+
   def __call__(self, line):
     self.writer(line)
 
@@ -134,7 +134,7 @@ class Writer:
   def varalloc(self, prefix='v'):
     # TODO: maybe move out?
     return self.alloc.alloc(prefix)
-  
+
   def get_src(self):
     return self.stream.getvalue()
 
@@ -155,7 +155,7 @@ class Writer:
     self.stack = []
     for line in code.splitlines():
       self.stream.write(white_spaces + line + '\n')
-  
+
   def speculate(self, code):
     white_spaces = (' ' * self.factor) * self.indent
     substack = []
@@ -183,7 +183,7 @@ class Writer:
 
   def Emptyline(self):
     self.stream.write('\n')
-  
+
   def Block(self, text):
     return Block(self, text)
 

@@ -34,7 +34,7 @@ else()
 endif()
 
 # set up common compiler flags
-set(HIPCC_FLAGS ${HIPCC_FLAGS} 
+set(HIPCC_FLAGS ${HIPCC_FLAGS}
                 -DREAL_SIZE=${REAL_SIZE};
                 -std=c++11;
                 -O3)

@@ -32,7 +32,7 @@ class TargetLexic(Lexic):
 
   def declare_shared_memory_inline(self, name, precision, size, alignment):
     return ""
-  
+
   def declare_shared_memory(self, name, precision):
     return ""
 
@@ -58,7 +58,7 @@ class TargetLexic(Lexic):
         self.teamloop1.__exit__(type, value, traceback)
         self.blockloop.__exit__(type, value, traceback)
         self.function.__exit__(type, value, traceback)
-    
+
     class TargetContext:
       def __init__(self):
         self.function = file.Function(f'kernel_{base_name}', f'{stream_type}* streamobj, int bX, int tX, int tY, {bounds}')
@@ -132,7 +132,7 @@ class TargetLexic(Lexic):
             self.epilogue = epilogue
           else:
             self.epilogue = lambda: None
-          
+
           batched_symbols_out_str = f'map(from: {", ".join(f"{symbol.name}_ptr[0:bX]" for symbol in batched_symbols_out)})' if len(batched_symbols_out) > 0 else ''
           batched_symbols_in_str = f'map(to: {", ".join(f"{symbol.name}_ptr[0:bX]" for symbol in batched_symbols_in)})' if len(batched_symbols_in) > 0 else ''
           batched_symbols_inout_str = f'map(tofrom: {", ".join(f"{symbol.name}_ptr[0:bX]" for symbol in batched_symbols_inout)})' if len(batched_symbols_inout) > 0 else ''
@@ -294,5 +294,5 @@ class TargetLexic(Lexic):
       return f'({value1} == {value2})'
     elif op == Operation.NEQ:
       return f'({value1} != {value2})'
-    
+
     raise NotImplementedError(f'{op}')
