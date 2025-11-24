@@ -238,11 +238,11 @@ class StoreShrMemToGlb(AbstractInstruction):
     writer('// {self}')
 
     writer.Pragma("unroll")
-    with writer.For(f'int k = 0; k < {dest_data_view.columns}; ++k'):
+    with writer.For(f'int32_t k = 0; k < {dest_data_view.columns}; ++k'):
       num_hops = int(dest_data_view.lead_dim / self._num_threads)
       if num_hops > 0:
         writer.Pragma("unroll")
-        with writer.For(f'int counter = 0; counter < {num_hops}; ++counter'):
+        with writer.For(f'int32_t counter = 0; counter < {num_hops}; ++counter'):
           shr_mem_addr = f'{thread_idx_x}'
           shr_mem_addr += f' + counter * {self._num_threads} + k * {dest_data_view.lead_dim}'
 

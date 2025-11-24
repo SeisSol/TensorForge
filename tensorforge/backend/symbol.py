@@ -191,7 +191,7 @@ class LeadLoop:
       elif realstart < realend:
         writer.insert_pragma_unroll() # TODO: move up?
         var = self.var
-        with writer.For(f'int {var} = {realstart}; {var} < {realend}; {var} += 1'):
+        with writer.For(f'int32_t {var} = {realstart}; {var} < {realend}; {var} += 1'):
           index = LeadIndex(var, self.threads, self.stride)
           inner([index])
       if self.end % self.threads != 0:
@@ -215,7 +215,7 @@ class Loop:
     elif self.start < self.end:
       writer.insert_pragma_unroll() # TODO: move up?
       var = self.var
-      with writer.For(f'int {var} = {self.start}; {var} < {self.end}; {var} += {self.step}'):
+      with writer.For(f'int32_t {var} = {self.start}; {var} < {self.end}; {var} += {self.step}'):
         inner([Variable(var, FloatingPointType.I32)])
         #inner([var])
 
@@ -239,13 +239,13 @@ class LinearizedLoop:
 
     # the pragma bears great control over the application speed. And the compile time.
     writer.insert_pragma_unroll()
-    with writer.For(f'int {loopvar} = 0; {loopvar} < {totalloopsize}; {loopvar} += {self.blocksize}'):
+    with writer.For(f'int32_t {loopvar} = 0; {loopvar} < {totalloopsize}; {loopvar} += {self.blocksize}'):
       if self.blocksize == 1:
-        writer(f'int {loopvar2} = {loopvar};')
+        writer(f'int32_t {loopvar2} = {loopvar};')
       else:
-        writer(f'int {loopvar2} = {loopvar} + ({context.get_vm().get_lexic().thread_idx_x} % {self.blocksize});')
+        writer(f'int32_t {loopvar2} = {loopvar} + ({context.get_vm().get_lexic().thread_idx_x} % {self.blocksize});')
       for i, loop in enumerate(self.loops):
-        writer(f'int {loop.var} = (({loopvar2} / {multiplies[i]}) % {loopsize[i]}) * {loop.step} + {loop.start};')
+        writer(f'int32_t {loop.var} = (({loopvar2} / {multiplies[i]}) % {loopsize[i]}) * {loop.step} + {loop.start};')
       inner([Variable(loop.var, FloatingPointType.I32) for loop in self.loops])
 
 class MultiLoop:
@@ -374,7 +374,7 @@ class Symbol:
 
           if len(rngs) > 0:
             idxvar = writer.varalloc()
-            writer(f'const int {idxvar} = {strindex};')
+            writer(f'const int32_t {idxvar} = {strindex};')
             for rngS, rngE in rngs:
               runIdx[leadidx] = rngS
               value = self.obj.linear_index(runIdx)

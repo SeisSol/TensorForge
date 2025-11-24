@@ -109,13 +109,13 @@ class FloatingPointType(enum.Enum):
     elif self == self.BOOL:
       return 'true' if value else 'false'
     elif self == self.I8:
-      return f'static_cast<int8_t>({int(value)}LL)'
+      return f'{int(value)}_i8'
     elif self == self.I16:
-      return f'static_cast<int16_t>({int(value)}LL)'
+      return f'{int(value)}_i16'
     elif self == self.I32:
-      return f'static_cast<int32_t>({int(value)}LL)'
+      return f'{int(value)}_i32'
     elif self == self.I64:
-      return f'static_cast<int64_t>({int(value)}LL)'
+      return f'{int(value)}_i64'
 
   @classmethod
   def as_str(cls, fp):

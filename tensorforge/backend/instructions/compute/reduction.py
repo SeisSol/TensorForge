@@ -33,7 +33,7 @@ class ReductionInstruction(ComputeInstruction):
             for i, dimlen in enumerate(self._op.data_view.get_nonlead_dims()):
                 if i not in self._dims:
                     writer.insert_pragma_unroll()
-                    loop = writer.For(f'int k{i} = 0; k{i} < {dimlen}; ++k{i}')
+                    loop = writer.For(f'int32_t k{i} = 0; k{i} < {dimlen}; ++k{i}')
                     loop.__enter__()
                     loopstack1 += [loop]
 
@@ -41,7 +41,7 @@ class ReductionInstruction(ComputeInstruction):
 
             for i, dimlen in enumerate(self._op.data_view.get_nonlead_dims()):
                 if i in self._dims:
-                    loop = writer.For(f'int k{i} = 0; k{i} < {dimlen}; ++k{i}')
+                    loop = writer.For(f'int32_t k{i} = 0; k{i} < {dimlen}; ++k{i}')
                     loop.__enter__()
                     loopstack2 += [loop]
 

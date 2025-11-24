@@ -22,7 +22,7 @@ class ClearRegisters(AbstractInstruction):
     writer.new_line()
     writer(f'// clear registers')
     writer.insert_pragma_unroll()
-    with writer.For(f'int i = 0; i < {self._src.obj.size}; ++i'):
+    with writer.For(f'int32_t i = 0; i < {self._src.obj.size}; ++i'):
       writer(f'{self._src.name}[i] = {self._context.fp_type.literal(0)};')
 
   def __str__(self) -> str:

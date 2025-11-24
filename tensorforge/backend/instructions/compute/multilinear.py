@@ -118,10 +118,10 @@ class MultilinearInstruction(ComputeInstruction):
         # Also, postpone multiplications until necessary
 
         # thread_mask: TODO
-        # writer(f'int n0 = {self._vm.get_lexic().thread_idx_x} % {self._ns[0]};')
-        # writer(f'int n1a = {self._vm.get_lexic().thread_idx_x} / {self._ns[0]};')
+        # writer(f'int32_t n0 = {self._vm.get_lexic().thread_idx_x} % {self._ns[0]};')
+        # writer(f'int32_t n1a = {self._vm.get_lexic().thread_idx_x} / {self._ns[0]};')
         # n1i = self._num_threads // self._ns[0]
-        # writer(f'int n{i} = dimmin + n1a; n{i} < {dimmax}; n{i} += {n1i}')
+        # writer(f'int32_t n{i} = dimmin + n1a; n{i} < {dimmax}; n{i} += {n1i}')
 
         matrixK = 1
 
@@ -232,7 +232,7 @@ class MultilinearInstruction(ComputeInstruction):
             loopstack = []
             for i, (dimmin, dimmax) in enumerate(self._ns[1:]):
                 writer.insert_pragma_unroll()
-                loop = writer.For(f'int n{i+1} = {dimmin}; n{i+1} < {dimmax}; ++n{i}')
+                loop = writer.For(f'int32_t n{i+1} = {dimmin}; n{i+1} < {dimmax}; ++n{i}')
                 loop.__enter__()
                 loopstack += [loop]
 
@@ -251,7 +251,7 @@ class MultilinearInstruction(ComputeInstruction):
 
     def _butterfly_reduction_loop(self, writer: Writer, max_array_length: int, amd: bool):
         with writer.Scope():
-            loop = writer.For(f'int n = {max_array_length}; n >= 1; n /= 2')
+            loop = writer.For(f'int32_t n = {max_array_length}; n >= 1; n /= 2')
             loop.__enter__()
             if amd:
                 writer(f'{self._fp_as_str} rvalue = __shfl_xor(value, n);') # TODO: check if swizzle is used here (or DPP). DONE: it isn't. It's all permute.
@@ -272,7 +272,7 @@ class MultilinearInstruction(ComputeInstruction):
 
     def _omp_reduction(self, writer: Writer):
         writer(f'#pragma omp for reduction({self._sumOperation}: shmAddr[0:{self._total_shm_size}])')
-        with writer.For(f'int i = 0; i < TODO; ++i'):
+        with writer.For(f'int32_t i = 0; i < TODO; ++i'):
             writer(f'shmAddr[i] = {self._sumOperation.format("shmAddr[i]", f"value")};')
 
     def get_operands(self):

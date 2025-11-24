@@ -148,7 +148,7 @@ class Generator:
         else:
           raise GenerationError(f'instr is not ready to be generated: {instruction}')
       if not self._persistent_threading:
-        writer(f'unsigned {GeneralLexicon.BATCH_ID_NAME} = {self._get_2d_block_id()};')
+        writer(f'const size_t {GeneralLexicon.BATCH_ID_NAME} = {self._get_2d_block_id()};')
         with writer.If(f'{self._get_element_size_guard()}'):
           with writer.If(f'{self._get_flag_guard(writer)}'):
             for instruction in self._ir:
@@ -157,7 +157,7 @@ class Generator:
               else:
                 raise GenerationError(f'instr is not ready to be generated: {instruction}')
       else:
-        with writer.For(f'unsigned {GeneralLexicon.BATCH_ID_NAME} = {self._get_2d_block_id()}; {GeneralLexicon.BATCH_ID_NAME} < {GeneralLexicon.NUM_ELEMENTS}; {GeneralLexicon.BATCH_ID_NAME} += {vm.get_lexic().grid_dim_x} * {vm.get_lexic().block_dim_y}'):
+        with writer.For(f'size_t {GeneralLexicon.BATCH_ID_NAME} = {self._get_2d_block_id()}; {GeneralLexicon.BATCH_ID_NAME} < {GeneralLexicon.NUM_ELEMENTS}; {GeneralLexicon.BATCH_ID_NAME} += {vm.get_lexic().grid_dim_x} * {vm.get_lexic().block_dim_y}'):
           with writer.If(f'{self._get_flag_guard(writer)}'):
             for instruction in self._ir:
               if instruction.is_ready():
@@ -524,7 +524,7 @@ class Generator:
     return f'{GeneralLexicon.BATCH_ID_NAME} < {GeneralLexicon.NUM_ELEMENTS}'
 
   def _get_flag_guard(self, writer):
-    writer(f'bool isFlagsProvided = ({GeneralLexicon.FLAGS_NAME} != nullptr);')
-    flag_value = f'static_cast<bool>({GeneralLexicon.FLAGS_NAME}[{GeneralLexicon.BATCH_ID_NAME}])'
-    writer(f'bool allowed = isFlagsProvided ? {flag_value} : true;')
+    writer(f'bool allowed = true;')
+    with writer.If(f'{GeneralLexicon.FLAGS_NAME} != nullptr'):
+      wrtier(f'allowed = static_cast<bool>({GeneralLexicon.FLAGS_NAME}[{GeneralLexicon.BATCH_ID_NAME}]);')
     return 'allowed'
