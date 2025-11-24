@@ -515,26 +515,6 @@ __device__ __forceinline__ bool ballotReduction(bool value) {
   }
 }
 
-template <typename Op, std::size_t Block, std::size_t Subblock>
-__device__ __forceinline__ bool ballotReduction(bool value) {
-  const auto ballot = __ballot_sync(warpSize, value ? 1 : 0);
-  const auto thread = (threadIdx.x / Block) * Block;
-  const auto subthread = Subblock == 1 ? 0 : (threadIdx.x % Subblock);
-  constexpr auto basemask = 1;
-
-  const auto mask = (basemask << subthread) << thread;
-
-  if constexpr (Op::Op == Operation::And) {
-    return (mask & ballot) == mask;
-  }
-  if constexpr (Op::Op == Operation::Or) {
-    return (mask & ballot) != 0;
-  }
-  if constexpr (Op::Op == Operation::Xor) {
-    return (__popc((mask & ballot)) & 1) == 0;
-  }
-}
-
 template <Operation Op, std::size_t Block, std::size_t Subblock, typename T>
 __device__ __forceinline__ T reduction(const T &value) {
   if constexpr (Block == Subblock) {

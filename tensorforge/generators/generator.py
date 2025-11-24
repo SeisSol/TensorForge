@@ -244,6 +244,8 @@ class Generator:
       load_ir = []
       shmem_load = 0
 
+      self._scopes.add_scope()
+
       builder = GlobalLoaderBuilder(self._context, self._scopes, self._shr_mem_obj, self._num_threads)
       for symbol in self._scopes.get_global_scope().values():
         if symbol.obj.addressing == Addressing.NONE and symbol.stype != SymbolType.Data:
@@ -257,6 +259,10 @@ class Generator:
         self._global_ir += load_ir
         self._global_ir.append(SyncBlock(self._context, self._num_threads))
         return True
+      else:
+        # make sure to clean up all new symbols that didn't get added
+        self._scopes.remove_scope()
+        self._preload_globals = False
 
     return False
 
@@ -265,7 +271,8 @@ class Generator:
     builder = GetElementPtrBuilder(self._context, self._scopes)
     self._scopes.add_scope()
     for symbol in self._scopes.get_global_scope().values():
-      if not (symbol.obj.addressing == Addressing.NONE or symbol.obj.addressing == Addressing.SCALAR):
+      firstptr = symbol.obj.addressing == Addressing.SCALAR or (symbol.obj.addressing == Addressing.NONE and symbol.stype == SymbolType.Data)
+      if not firstptr and not (self._preload_globals and symbol.obj.addressing == Addressing.NONE):
         builder.build(symbol)
         self._ir.extend(builder.get_instructions())
 
