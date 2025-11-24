@@ -73,8 +73,8 @@ class SyclLexic(Lexic):
   def active_sub_group_mask(self):
     return f'item.get_sub_group()'
 
-  def broadcast_sync(self, variable, lane, mask):
-    return f'group_broadcast({mask}, {variable}, {lane})'
+  def broadcast(self, variable, lane):
+    return f'group_broadcast(-1, {variable}, {lane})'
 
   def kernel_range_object(self, name, values):
     return f"sycl::range<3> {name} ({values})"

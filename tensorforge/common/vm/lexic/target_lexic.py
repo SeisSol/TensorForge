@@ -173,7 +173,7 @@ class TargetLexic(Lexic):
   def active_sub_group_mask(self):
     return f''
 
-  def broadcast_sync(self, variable, lane, mask):
+  def broadcast(self, variable, lane):
     return 'NOTSUPPORTED' #f'__builtin_shufflevector()'
 
   def kernel_range_object(self, name, values):

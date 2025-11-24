@@ -77,8 +77,8 @@ class CudaLexic(Lexic):
   def active_sub_group_mask(self):
     return "__activemask()"
 
-  def broadcast_sync(self, variable, lane, mask):
-    return f'__shfl_sync({mask}, {variable}, {lane})'
+  def broadcast(self, variable, lane):
+    return f'tensorforge::broadcast<{lane}, 1, 0>({variable})'
 
   def kernel_range_object(self, name, values):
     return f"dim3 {name} ({values})"
@@ -101,7 +101,7 @@ class CudaLexic(Lexic):
     return self.get_tid_counter(self.thread_idx_y, self.block_dim_y, self.block_idx_x)
 
   def get_headers(self):
-    return []
+    return ["tensorforge_device/cuda.h"]
   
   def get_fptype(self, fptype, length=1):
     if length <= 4:

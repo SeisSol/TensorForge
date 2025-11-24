@@ -5,13 +5,13 @@ class HipLexic(CudaLexic):
   def __init__(self, backend, underlying_hardware):
     super().__init__(backend, underlying_hardware)
     self._backend = backend
-    self.thread_idx_y = "hipThreadIdx_y"
-    self.thread_idx_x = "hipThreadIdx_x"
-    self.thread_idx_z = "hipThreadIdx_z"
-    self.block_idx_x = "hipBlockIdx_x"
-    self.block_dim_x = "hipBlockDim_x"
-    self.block_dim_y = "hipBlockDim_y"
-    self.block_dim_z = "hipBlockDim_z"
+    self.thread_idx_y = "threadIdx.y"
+    self.thread_idx_x = "threadIdx.x"
+    self.thread_idx_z = "threadIdx.z"
+    self.block_idx_x = "blockIdx.x"
+    self.block_dim_x = "blockDim.x"
+    self.block_dim_y = "blockDim.y"
+    self.block_dim_z = "blockDim.z"
     self.grid_dim_x = "gridDim.x"
     self.stream_type = "hipStream_t"
 
@@ -50,8 +50,8 @@ class HipLexic(CudaLexic):
     return f"hipLaunchKernelGGL({func_name}, {grid}, {block}, {shmem}, {stream}, {func_params})"
 
   def sync_simd(self):
-    # RoCM (AMD) currently doesn't support __syncwarp
-    return "__syncthreads()"
+    # noop
+    return ""
 
   def get_sub_group_id(self, sub_group_size):
     return f'{self.thread_idx_x} % {sub_group_size}'
@@ -59,11 +59,11 @@ class HipLexic(CudaLexic):
   def active_sub_group_mask(self):
     return None
 
-  def broadcast_sync(self, variable, lane, mask):
-    return f'__shfl({variable}, {lane})'
+  def broadcast(self, variable, lane, mask):
+    return f'tensorforge::broadcast<{lane}, 1, 0>({variable})'
 
   def get_headers(self):
-    return ["hip/hip_runtime.h"]
+    return ["hip/hip_runtime.h", "tensorforge_device/hip.h"]
   
   def get_fptype(self, fptype, length=1):
     return f'HIP_vector_type<{fptype}, {length}>'

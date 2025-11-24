@@ -82,8 +82,10 @@ class Generator:
     self._check_consistency_with_user_options()
     self._name_operands(self.descr_list)
 
-    self._persistent_threading = False
-    self._preload_globals = False
+    prefer_persistent = context.get_vm().get_hw_descr().manufacturer == 'amd'
+
+    self._persistent_threading = prefer_persistent
+    self._preload_globals = prefer_persistent
 
   def set_kernel_name(self, name):
     self._base_kernel_name = name
@@ -105,7 +107,7 @@ class Generator:
 
     self._deduce_num_threads()
     self._deduce_accumulator_size()
-    self._emit_global_ir()
+    loaded_globals = self._emit_global_ir()
     self._emit_ir()
     opt = OptimizationStage(context=self._context,
                             shr_mem=self._shr_mem_obj,
@@ -113,6 +115,10 @@ class Generator:
                             num_threads=self._num_threads)
     opt.optimize()
     self._ir = opt.get_instructions()
+
+    # TODO: not always
+    if not loaded_globals:
+      self._persistent_threading = False
 
     # add final sync for persistent threads
     if self._persistent_threading:
@@ -227,28 +233,39 @@ class Generator:
     self._shr_mem_obj = shmbuilder.get_resultant_obj()
     self._global_ir.extend(shmbuilder.get_instructions())
 
-    # load globals to shared memory (maybe)
+    builder = GetElementPtrBuilder(self._context, self._scopes)
+    for symbol in self._scopes.get_global_scope().values():
+      if symbol.obj.addressing == Addressing.SCALAR or (symbol.obj.addressing == Addressing.NONE and symbol.stype == SymbolType.Data):
+        builder.build(symbol)
+        self._global_ir.extend(builder.get_instructions())
+
+    # load globals to shared memory (if requested)
     if self._preload_globals:
-      builder = GetElementPtrBuilder(self._context, self._scopes)
-      for symbol in self._scopes.get_global_scope().values():
-        if symbol.obj.addressing == Addressing.SCALAR or (symbol.obj.addressing == Addressing.NONE and symbol.stype == SymbolType.Data):
-          builder.build(symbol)
-          self._global_ir.extend(builder.get_instructions())
+      load_ir = []
+      shmem_load = 0
 
       builder = GlobalLoaderBuilder(self._context, self._scopes, self._shr_mem_obj, self._num_threads)
       for symbol in self._scopes.get_global_scope().values():
         if symbol.obj.addressing == Addressing.NONE and symbol.stype != SymbolType.Data:
-          builder.build(symbol)
-          self._global_ir.extend(builder.get_instructions())
-      
-      self._global_ir.append(SyncBlock(self._context, self._num_threads))
+          shmem_load += builder.build(symbol)
+          load_ir.extend(builder.get_instructions())
+
+      vm = self._context.get_vm()
+      shmem_cap = vm.get_hw_descr().max_local_mem_size_per_block
+
+      if shmem_load < shmem_cap:
+        self._global_ir += load_ir
+        self._global_ir.append(SyncBlock(self._context, self._num_threads))
+        return True
+    
+    return False
 
   def _emit_ir(self):
     # find local data from batches
     builder = GetElementPtrBuilder(self._context, self._scopes)
     self._scopes.add_scope()
     for symbol in self._scopes.get_global_scope().values():
-      if not self._preload_globals or not (symbol.obj.addressing == Addressing.NONE or symbol.obj.addressing == Addressing.SCALAR):
+      if not (symbol.obj.addressing == Addressing.NONE or symbol.obj.addressing == Addressing.SCALAR):
         builder.build(symbol)
         self._ir.extend(builder.get_instructions())
 

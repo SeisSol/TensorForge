@@ -42,3 +42,5 @@ class GlobalLoaderBuilder(AbstractBuilder):
     offset = self.shrmem_obj.alloc_global(loader.compute_shared_mem_size())
     loader.set_shr_mem_offset(offset, True, True)
 
+    return loader.compute_shared_mem_size()
+

@@ -1,18 +1,14 @@
 #include <iostream>
 #include <sycl/sycl.hpp>
 
-namespace tensorforge
-{
-  void checkErr(const std::string &File, int Line)
-  {
+namespace tensorforge {
+void checkErr(const std::string &File, int Line) {}
+
+void synchDevice(void *stream) {
+  if (stream == nullptr) {
+    throw std::invalid_argument("cant sync device without queue!");
   }
 
-  void synchDevice(void *stream)
-  {
-    if (stream == nullptr) {
-      throw std::invalid_argument("cant sync device without queue!");
-    }
-
-    ((sycl::queue *)stream)->wait();
-  }
+  ((sycl::queue *)stream)->wait();
 }
+} // namespace tensorforge
