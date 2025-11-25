@@ -62,7 +62,7 @@ class HipLexic(CudaLexic):
       return f'tensorforge::readlane({variable}, {lane})'
     else:
       if subblock is None:
-        subblock = block
+        subblock = 1
       return f'tensorforge::broadcast<{block}, {subblock}, {lane}>({variable})'
 
   def get_headers(self):
