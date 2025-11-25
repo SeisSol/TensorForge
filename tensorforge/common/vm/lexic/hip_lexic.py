@@ -60,7 +60,7 @@ class HipLexic(CudaLexic):
     return None
 
   def broadcast(self, variable, lane):
-    return f'tensorforge::broadcast<{lane}, 1, 0>({variable})'
+    return f'tensorforge::readlane({variable}, {lane})'
 
   def get_headers(self):
     return ["hip/hip_runtime.h", "tensorforge_device/hip.h"]
