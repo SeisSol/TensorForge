@@ -496,7 +496,7 @@ __device__ __forceinline__ void fma16h(T &c, T a, T b) {
 
 template <typename Op, std::size_t Block, std::size_t Subblock>
 __device__ __forceinline__ bool ballotReduction(bool value) {
-  const auto ballot = __ballot(warpSize, value ? 1 : 0);
+  const auto ballot = __ballot(value ? 1 : 0);
   const auto thread = (threadIdx.x / Block) * Block;
   const auto subthread = Subblock == 1 ? 0 : (threadIdx.x % Subblock);
   constexpr auto basemask = 1;
