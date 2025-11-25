@@ -434,7 +434,7 @@ class Symbol:
           assert not isinstance(idx, Variable)
 
           index2 = list(index)
-          index2[self.lead_dims[0]] = Immediate(idx._value // self.num_threads, idx._type)
+          index2[self.lead_dims[0]] = LeadIndex(idx._value // self.num_threads, self.num_threads, 1)
           pre_access = self.access(context, index2)
 
           writevar = idx._value % self.num_threads
