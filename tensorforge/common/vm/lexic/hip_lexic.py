@@ -59,7 +59,7 @@ class HipLexic(CudaLexic):
   def active_sub_group_mask(self):
     return None
 
-  def broadcast(self, variable, lane, mask):
+  def broadcast(self, variable, lane):
     return f'tensorforge::broadcast<{lane}, 1, 0>({variable})'
 
   def get_headers(self):
