@@ -8,22 +8,22 @@
 namespace tensorforge {
 
 #ifdef __gfx900__
-static constexpr AsmVersion = 9000;
+static constexpr int AsmVersion = 9000;
 #endif
 #ifdef __gfx906__
-static constexpr AsmVersion = 9006;
+static constexpr int AsmVersion = 9006;
 #endif
 #ifdef __gfx908__
-static constexpr AsmVersion = 9008;
+static constexpr int AsmVersion = 9008;
 #endif
 #ifdef __gfx90a__
-static constexpr AsmVersion = 9010;
+static constexpr int AsmVersion = 9010;
 #endif
 #ifdef __gfx942__
-static constexpr AsmVersion = 9402;
+static constexpr int AsmVersion = 9402;
 #endif
 #ifdef __gfx950__
-static constexpr AsmVersion = 9500;
+static constexpr int AsmVersion = 9500;
 #endif
 
 template <typename T> union IntType {
@@ -135,9 +135,7 @@ __device__ __forceinline__ T broadcast(T value) {
 
 template <std::size_t Block, typename T>
 __device__ __forceinline__ T swap(T value) {
-  static_assert(Block % Subblock == 0, "");
-  static_assert(Lane * Subblock < Block, "");
-  if constexpr (Block == Subblock) {
+  if constexpr (Block == 1) {
     return value;
   } else if constexpr (Block == 64) {
     const auto blockvar = __lane_id() / 32;
@@ -197,7 +195,8 @@ template <int Row>
 __device__ __forceinline__ void fmacdpp16(double &c, double a, double b);
 
 #if defined(__gfx906__) || defined(__gfx908__) || defined(__gfx90a__) ||       \
-    defined(__gfx940__) || defined(__gfx941__) || defined(__gfx942__)
+    defined(__gfx940__) || defined(__gfx941__) || defined(__gfx942__) ||       \
+    defined(__gfx950__)
 constexpr bool HasFmacDpp4 = true;
 
 template <>
@@ -377,22 +376,22 @@ __device__ __forceinline__ void fma4h(T &c, T a, T b) {
     }
   } else {
     if constexpr (End >= 0) {
-      const aa =
+      const T aa =
           dpp<(0 << 6) | (0 << 4) | (0 << 2) | (0 << 0), 0xf, 0xf, true>(a);
       c += aa * b;
     }
     if constexpr (End >= 1) {
-      const aa =
+      const T aa =
           dpp<(1 << 6) | (1 << 4) | (1 << 2) | (1 << 0), 0xf, 0xf, true>(a);
       c += aa * b;
     }
     if constexpr (End >= 2) {
-      const aa =
+      const T aa =
           dpp<(2 << 6) | (2 << 4) | (2 << 2) | (2 << 0), 0xf, 0xf, true>(a);
       c += aa * b;
     }
     if constexpr (End >= 3) {
-      const aa =
+      const T aa =
           dpp<(3 << 6) | (3 << 4) | (3 << 2) | (3 << 0), 0xf, 0xf, true>(a);
       c += aa * b;
     }
@@ -452,24 +451,24 @@ __device__ __forceinline__ void fma16h(T &c, T a, T b) {
     }
   } else if constexpr (HasFmacDpp4 && std::is_same_v<T, float>) {
     if constexpr (End >= 0) {
-      const aa = dpp<0x118, 0xc, 0xf, true>(a);
+      const T aa = dpp<0x118, 0xc, 0xf, true>(a);
       {
-        const aaa = dpp<0x114, 0xa, 0xf, true>(a);
+        const T aaa = dpp<0x114, 0xa, 0xf, true>(a);
         fma4h<T, End>(c, aaa, b);
       }
       if constexpr (End >= 4) {
-        const aaa = dpp<0x104, 0x5, 0xf, true>(a);
+        const T aaa = dpp<0x104, 0x5, 0xf, true>(a);
         fma4h<T, End - 4>(c, aaa, b);
       }
     }
     if constexpr (End >= 8) {
-      const aa = dpp<0x108, 0x3, 0xf, true>(a);
+      const T aa = dpp<0x108, 0x3, 0xf, true>(a);
       {
-        const aaa = dpp<0x114, 0xa, 0xf, true>(a);
+        const T aaa = dpp<0x114, 0xa, 0xf, true>(a);
         fma4h<T, End - 8>(c, aaa, b);
       }
       if constexpr (End >= 4) {
-        const aaa = dpp<0x104, 0x5, 0xf, true>(a);
+        const T aaa = dpp<0x104, 0x5, 0xf, true>(a);
         fma4h<T, End - 12>(c, aaa, b);
       }
     }
@@ -497,7 +496,7 @@ __device__ __forceinline__ void fma16h(T &c, T a, T b) {
 
 template <typename Op, std::size_t Block, std::size_t Subblock>
 __device__ __forceinline__ bool ballotReduction(bool value) {
-  const auto ballot = __ballot_sync(warpSize, value ? 1 : 0);
+  const auto ballot = __ballot(warpSize, value ? 1 : 0);
   const auto thread = (threadIdx.x / Block) * Block;
   const auto subthread = Subblock == 1 ? 0 : (threadIdx.x % Subblock);
   constexpr auto basemask = 1;
@@ -515,7 +514,7 @@ __device__ __forceinline__ bool ballotReduction(bool value) {
   }
 }
 
-template <Operation Op, std::size_t Block, std::size_t Subblock, typename T>
+template <typename Op, std::size_t Block, std::size_t Subblock, typename T>
 __device__ __forceinline__ T reduction(const T &value) {
   if constexpr (Block == Subblock) {
     return value;
