@@ -338,17 +338,20 @@ class Symbol:
       return self.get_fptype(context).literal(self.obj.value(runIdx))
 
   def encode_values(self, pos, runIdx, writer, context: Context, variable, index: List[Union[str, int, Immediate, Variable, LeadIndex]], nontemp, leadidx):
+    wrote = False
     if pos == len(index):
       if self.stype == SymbolType.Data:
         value = self.obj.value(runIdx)
         if value is not None:
           writer(f'{variable} = {self.get_fptype(context).literal(value)};')
+          wrote = True
       else:
         # TODO: unite with access_address
         if leadidx is None:
           value = self.obj.linear_index(runIdx)
           if value is not None:
             writer(f'{variable} = {self.name}[{value}];')
+            wrote = True
         else:
           strindex = index[leadidx].write(context)
           rngs = []
@@ -380,16 +383,17 @@ class Symbol:
               value = self.obj.linear_index(runIdx)
               with writer.If(f'{idxvar} >= {rngS} && {idxvar} < {rngE}'):
                 writer(f'{variable} = {self.name}[{value - rngS} + {idxvar}];')
+                wrote = True
     else:
       offset = self.data_view.get_dim_offsets()[pos]
       if isinstance(index[pos], int):
         runIdx[pos] = index[pos]
-        self.encode_values(pos + 1, runIdx, writer, context, variable, index, nontemp, leadidx)
+        wrote |= self.encode_values(pos + 1, runIdx, writer, context, variable, index, nontemp, leadidx)
       elif isinstance(index[pos], Immediate):
         runIdx[pos] = index[pos]._value
-        self.encode_values(pos + 1, runIdx, writer, context, variable, index, nontemp, leadidx)
+        wrote |= self.encode_values(pos + 1, runIdx, writer, context, variable, index, nontemp, leadidx)
       elif pos == leadidx:
-        self.encode_values(pos + 1, runIdx, writer, context, variable, index, nontemp, leadidx)
+        wrote |= self.encode_values(pos + 1, runIdx, writer, context, variable, index, nontemp, leadidx)
       else:
         # TODO: move block sparsity one level up
         strindex = f'{index[pos]}' if isinstance(index[pos], (str, int, float, np.int64)) else index[pos].write(context)
@@ -398,7 +402,8 @@ class Symbol:
           for i in range(self.data_view.get_dim_size(pos)):
             runIdx[pos] = i
             with writer.If(f'({strindex} - {offset}) == {runIdx[pos]}'):
-              self.encode_values(pos + 1, runIdx, writer, context, variable, index, nontemp, leadidx)
+              wrote |= self.encode_values(pos + 1, runIdx, writer, context, variable, index, nontemp, leadidx)
+    return wrote
 
   def load(self, writer, context: Context, variable, index: List[Union[str, int, Immediate, Variable, LeadIndex]], nontemp):
     if self.stype == SymbolType.Data or (not self.obj.is_dense() and not isinstance(self.obj.spp, BoundingBoxSPP)):
@@ -418,7 +423,7 @@ class Symbol:
         leadidxidx = index.index(leadidx)
       else:
         leadidxidx = None
-      self.encode_values(0, [0] * len(index), writer, context, variable, index, nontemp, leadidxidx)
+      return self.encode_values(0, [0] * len(index), writer, context, variable, index, nontemp, leadidxidx)
     else:
       pre_access = self.access(context, index)
       if self.stype == SymbolType.Register or self.stype == SymbolType.Scratch:
@@ -436,6 +441,7 @@ class Symbol:
         writer(context.get_vm().get_lexic().glb_load(variable, access, nontemp))
       else:
         writer(f'{self.get_fptype(context)} {variable} = {access};')
+      return True
 
   def store(self, writer, context, variable, index: List[Union[str, int, Immediate, Variable, LeadIndex]], nontemp):
     assert self.stype != SymbolType.Data

@@ -135,7 +135,7 @@ class MultilinearInstruction(ComputeInstruction):
             if -i-1 not in self._lead_dims:
                 step = matrixK if i == len(self._ks) - 1 else 1
                 loop = [Loop(f'k{i}', dimmin, dimmax, step, unroll=self._sparseK[i])]
-                if self._sparseK[i] and False:
+                if self._sparseK[i]:# and False:
                     loopstack += loop
                 else:
                     outerLoops += loop
@@ -156,15 +156,135 @@ class MultilinearInstruction(ComputeInstruction):
         def nonlead_writer(varlist):
 #            for op in enumerate(self._ops):
 #                if op.symbol.
+            prod = []
             for i, op in enumerate(self._ops):
-                op.symbol.load(writer, self._context, f'data{i}', [varlist[loopmap[nk]] for nk in self._opdim_to_nks[i]], False)
+                loaded = op.symbol.load(writer, self._context, f'data{i}', [varlist[loopmap[nk]] for nk in self._opdim_to_nks[i]], False)
+                if not loaded: break
                 if i > 0:
-                    writer(f'{self._fp_as_str} prod{i} = {self._productOperation.format(f"prod{i-1}", f"data{i}")};')
+                    prod += [f'{self._fp_as_str} prod{i} = {self._productOperation.format(f"prod{i-1}", f"data{i}")};']
                 else:
-                    writer(f'{self._fp_as_str} prod{i} = data{i};')
-            if len(self._ops) > 0:
+                    prod += [f'{self._fp_as_str} prod{i} = data{i};']
+            if len(self._ops) > 0 and len(prod) == len(self._ops):
+                for p in prod:
+                    writer(p)
                 self._dest.load(writer, self._context, 'value', [varlist[loopmap[f'n{i}']] for i,_ in enumerate(self._ns)], False)
                 writer(f'{self._fp_as_str} newvalue = {self._sumOperation.format("value", f"prod{len(self._ops)-1}")};')
+                self._dest.store(writer, self._context, 'newvalue', [varlist[loopmap[f'n{i}']] for i,_ in enumerate(self._ns)], False)
+
+        write_loops(self._context, writer, loopstack, nonlead_writer)
+
+    def _nonleading_dim2(self, writer: Writer):
+
+        # TODO: preload values where necessary (i.e. no N in there)
+        # Also, postpone multiplications until necessary
+
+        # thread_mask: TODO
+        # writer(f'int32_t n0 = {self._vm.get_lexic().thread_idx_x} % {self._ns[0]};')
+        # writer(f'int32_t n1a = {self._vm.get_lexic().thread_idx_x} / {self._ns[0]};')
+        # n1i = self._num_threads // self._ns[0]
+        # writer(f'int32_t n{i} = dimmin + n1a; n{i} < {dimmax}; n{i} += {n1i}')
+
+        matrixK = 1
+
+        strides = [None] * len(self._ops)
+
+        localmaps = [None] * len(self._ops)
+
+        for iop, op in enumerate(self._ops):
+            size = 1
+            stri = {}
+
+            loopstack = []
+            localmap = {}
+
+            loopmap = {}
+
+            # TODO: linearize
+            for i, (dimmin, dimmax) in enumerate(self._ks):
+                loopmap[f'k{i}'] = len(loopstack)
+                if -i-1 not in self._lead_dims and f'k{i}' in self._opdim_to_nks[iop]:
+                    step = matrixK if i == len(self._ks) - 1 else 1
+                    loop = [Loop(f'k{i}', dimmin, dimmax, step, unroll=True)]
+                    stri[f'k{i}'] = size
+                    size *= dimmax - dimmin
+                    loopstack += loop
+
+            stride = 1
+            threads = self._num_threads
+            for i, (dimmin, dimmax) in enumerate(self._ns):
+                loopmap[f'n{i}'] = len(loopstack)
+                if f'n{i}' in self._opdim_to_nks[iop]:
+                    stri[f'n{i}'] = size
+                    if i not in self._lead_dims or threads == 0:
+                        loopstack += [Loop(f'n{i}', dimmin, dimmax, 1, unroll=True)]
+                        size *= dimmax - dimmin
+                    else:
+                        loopstack += [LeadLoop(f'n{i}', dimmin, dimmax, threads, stride, unroll=True)]
+                        threads //= dimmax - dimmin
+                        stride *= dimmax - dimmin
+
+            writer(f'{self._fp_as_str} op{iop}[{size}];')
+
+            def nonlead_writer(varlist):
+                index = ' + '.join(f'{varlist[loopmap[var]].write_nonlead()} * {stri[var]}' for var in self._opdim_to_nks[iop])
+                loaded = op.symbol.load(writer, self._context, f'tmp', [varlist[loopmap[nk]] for nk in self._opdim_to_nks[iop]], False)
+                if loaded:
+                    pos = len(localmap)
+                    localmap[index] = pos
+                    writer(f'op{iop}[{pos}] = tmp;')
+
+            write_loops(self._context, writer, loopstack, nonlead_writer)
+
+            strides[iop] = stri
+            localmaps[iop] = localmap
+
+        loopstack = []
+
+        loopmap = {}
+
+        outerLoops = []
+
+        # TODO: linearize
+        for i, (dimmin, dimmax) in enumerate(self._ks):
+            loopmap[f'k{i}'] = len(outerLoops)
+            if -i-1 not in self._lead_dims:
+                step = matrixK if i == len(self._ks) - 1 else 1
+                loop = [Loop(f'k{i}', dimmin, dimmax, step, unroll=self._sparseK[i])]
+                if self._sparseK[i]:
+                    loopstack += loop
+                else:
+                    outerLoops += loop
+
+        loopstack += [LinearizedLoop(outerLoops)]
+
+        stride = 1
+        threads = self._num_threads
+        for i, (dimmin, dimmax) in enumerate(self._ns):
+            loopmap[f'n{i}'] = len(loopstack) + len(outerLoops) - 1
+            if i not in self._lead_dims or threads == 0:
+                loopstack += [Loop(f'n{i}', dimmin, dimmax, 1, unroll=self._sparseN[i])]
+            else:
+                loopstack += [LeadLoop(f'n{i}', dimmin, dimmax, threads, stride, unroll=self._sparseN[i])]
+                threads //= dimmax - dimmin
+                stride *= dimmax - dimmin
+
+        def nonlead_writer(varlist):
+            prodc = 0
+            prods = []
+            for i, op in enumerate(self._ops):
+                index = ' + '.join(f'{varlist[loopmap[var]].write_nonlead()} * {strides[i][var]}' for var in self._opdim_to_nks[i])
+                if index in localmaps[i]:
+                    data = f'op{i}[{localmaps[i][index]}]'
+                    if prodc > 0:
+                        prods += [f'const {self._fp_as_str} prod{prodc} = {self._productOperation.format(f"prod{prodc-1}", f"{data}")};']
+                    else:
+                        prods += [f'const {self._fp_as_str} prod{prodc} = {data};']
+                    prodc += 1
+            if prodc == len(self._ops):
+                for prod in prods:
+                    writer(prod)
+                self._dest.load(writer, self._context, 'value', [varlist[loopmap[f'n{i}']] for i,_ in enumerate(self._ns)], False)
+                writer(f'{self._fp_as_str} newvalue = {self._sumOperation.format("value", f"prod{prodc - 1}")};')
                 self._dest.store(writer, self._context, 'newvalue', [varlist[loopmap[f'n{i}']] for i,_ in enumerate(self._ns)], False)
 
         write_loops(self._context, writer, loopstack, nonlead_writer)

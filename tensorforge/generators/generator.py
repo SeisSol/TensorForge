@@ -526,5 +526,5 @@ class Generator:
   def _get_flag_guard(self, writer):
     writer(f'bool allowed = true;')
     with writer.If(f'{GeneralLexicon.FLAGS_NAME} != nullptr'):
-      wrtier(f'allowed = static_cast<bool>({GeneralLexicon.FLAGS_NAME}[{GeneralLexicon.BATCH_ID_NAME}]);')
+      writer(f'allowed = static_cast<bool>({GeneralLexicon.FLAGS_NAME}[{GeneralLexicon.BATCH_ID_NAME}]);')
     return 'allowed'

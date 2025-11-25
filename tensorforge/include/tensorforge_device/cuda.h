@@ -49,10 +49,10 @@ __device__ __forceinline__ T reduction(const T &value) {
     return value;
   } else if constexpr (std::is_same_v<T, bool> && Op::Op == Operation::And &&
                        Block == 32 && Subblock == 1) {
-    return __all_sync(-1, value ? 1 : 0) != 0;
+    return __all_sync(warpSize, value ? 1 : 0) != 0;
   } else if constexpr (std::is_same_v<T, bool> && Op::Op == Operation::Or &&
                        Block == 32 && Subblock == 1) {
-    return __any_sync(-1, value ? 1 : 0) != 0;
+    return __any_sync(warpSize, value ? 1 : 0) != 0;
   } else if constexpr (std::is_same_v<T, bool>) {
     return ballotReduction<Op, Block, Subblock>(value);
   } else {
