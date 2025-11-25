@@ -430,12 +430,15 @@ class Symbol:
         assert len(self.lead_dims) == 1
         idx = index[self.lead_dims[0]]
         if not isinstance(idx, LeadIndex):
+          # doesn't work
+          assert not isinstance(idx, Variable)
+
           index2 = list(index)
-          index2[self.lead_dims[0]] = idx % self.num_threads
+          index2[self.lead_dims[0]] = Immediate(idx._value // self.num_threads, idx._type)
           pre_access = self.access(context, index2)
 
-          writevar = lambda var: f'{var % self.num_threads}' if isinstance(var, (str, int, float, np.int64)) else var.write_nonlead()
-          access = context.get_vm().get_lexic().broadcast(pre_access, writevar(idx), self.num_threads)
+          writevar = idx._value % self.num_threads
+          access = context.get_vm().get_lexic().broadcast(pre_access, writevar, self.num_threads)
         else:
           access = pre_access
       else:
