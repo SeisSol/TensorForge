@@ -123,6 +123,9 @@ class MultilinearInstruction(ComputeInstruction):
         # n1i = self._num_threads // self._ns[0]
         # writer(f'int32_t n{i} = dimmin + n1a; n{i} < {dimmax}; n{i} += {n1i}')
 
+        # (for broadcasting)
+        force_unroll = self._context.get_vm().get_hw_descr().vendor == 'amd'
+
         matrixK = 1
 
         loopmap = {}
@@ -134,8 +137,8 @@ class MultilinearInstruction(ComputeInstruction):
             loopmap[f'k{i}'] = len(outerLoops)
             if -i-1 not in self._lead_dims:
                 step = matrixK if i == len(self._ks) - 1 else 1
-                loop = [Loop(f'k{i}', dimmin, dimmax, step, unroll=self._sparseK[i])]
-                if self._sparseK[i]:# and False:
+                loop = [Loop(f'k{i}', dimmin, dimmax, step, unroll=self._sparseK[i] or force_unroll)]
+                if self._sparseK[i] or force_unroll:# and False:
                     loopstack += loop
                 else:
                     outerLoops += loop
@@ -147,9 +150,9 @@ class MultilinearInstruction(ComputeInstruction):
         for i, (dimmin, dimmax) in enumerate(self._ns):
             loopmap[f'n{i}'] = len(loopstack) + len(outerLoops) - 1
             if i not in self._lead_dims or threads == 0:
-                loopstack += [Loop(f'n{i}', dimmin, dimmax, 1, unroll=self._sparseN[i])]
+                loopstack += [Loop(f'n{i}', dimmin, dimmax, 1, unroll=self._sparseN[i] or force_unroll)]
             else:
-                loopstack += [LeadLoop(f'n{i}', dimmin, dimmax, threads, stride, unroll=self._sparseN[i])]
+                loopstack += [LeadLoop(f'n{i}', dimmin, dimmax, threads, stride, unroll=self._sparseN[i] or force_unroll)]
                 threads //= dimmax - dimmin
                 stride *= dimmax - dimmin
 

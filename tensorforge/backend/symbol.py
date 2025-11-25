@@ -431,7 +431,7 @@ class Symbol:
         idx = index[self.lead_dims[0]]
         if not isinstance(idx, LeadIndex):
           writevar = lambda var: f'{var}' if isinstance(var, (str, int, float, np.int64)) else var.write(context)
-          access = context.get_vm().get_lexic().broadcast(pre_access, writevar(idx))
+          access = context.get_vm().get_lexic().broadcast(pre_access, writevar(idx), self.num_threads)
         else:
           access = pre_access
       else:

@@ -77,8 +77,13 @@ class CudaLexic(Lexic):
   def active_sub_group_mask(self):
     return "__activemask()"
 
-  def broadcast(self, variable, lane):
-    return f'tensorforge::broadcast<{lane}, 1, 0>({variable})'
+  def broadcast(self, variable, lane, block=None, subblock=1):
+    if block is None:
+      return f'tensorforge::readlane({variable}, {lane})'
+    else:
+      if subblock is None:
+        subblock = block
+      return f'tensorforge::broadcast<{block}, {subblock}, {lane}>({variable})'
 
   def kernel_range_object(self, name, values):
     return f"dim3 {name} ({values})"

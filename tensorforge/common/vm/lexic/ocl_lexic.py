@@ -43,7 +43,7 @@ class OpenCLLexic(Lexic):
   def active_sub_group_mask(self):
     return f'item.get_sub_group()'
 
-  def broadcast(self, variable, lane):
+  def broadcast(self, variable, lane, block=None, subblock=None):
     return f'group_broadcast(-1, {variable}, {lane})'
 
   def kernel_range_object(self, name, values):

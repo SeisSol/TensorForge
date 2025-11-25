@@ -57,8 +57,13 @@ class HipLexic(CudaLexic):
   def active_sub_group_mask(self):
     return None
 
-  def broadcast(self, variable, lane):
-    return f'tensorforge::readlane({variable}, {lane})'
+  def broadcast(self, variable, lane, block=None, subblock=None):
+    if block is None:
+      return f'tensorforge::readlane({variable}, {lane})'
+    else:
+      if subblock is None:
+        subblock = block
+      return f'tensorforge::broadcast<{block}, {subblock}, {lane}>({variable})'
 
   def get_headers(self):
     return ["hip/hip_runtime.h", "tensorforge_device/hip.h"]
