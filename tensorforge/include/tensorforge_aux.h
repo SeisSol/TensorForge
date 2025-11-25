@@ -5,6 +5,12 @@
 
 #define CHECK_ERR tensorforge::checkErr(__FILE__, __LINE__)
 
+#if 0
+#define CHECK_RES(call) tensorforge::checkRes(__FILE__, __LINE__, (call))
+#else
+#define CHECK_RES(call) (void)(call);
+#endif
+
 namespace tensorforge {
 
 void checkErr(const std::string &file, int line);

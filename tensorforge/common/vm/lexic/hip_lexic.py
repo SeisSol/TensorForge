@@ -22,11 +22,9 @@ class HipLexic(CudaLexic):
     return f"""static int gridsize = -1;
     if (gridsize <= 0) {{
       int device, smCount, blocksPerSM;
-      hipGetDevice(&device);
-      CHECK_ERR;
-      hipDeviceGetAttribute(&smCount, hipDeviceAttributeMultiprocessorCount, device);
-      CHECK_ERR;
-      hipOccupancyMaxActiveBlocksPerMultiprocessor(&blocksPerSM, {func_name}, {block}.x * {block}.y * {block}.z, {shmem});
+      CHECK_RES(hipGetDevice(&device));
+      CHECK_RES(hipDeviceGetAttribute(&smCount, hipDeviceAttributeMultiprocessorCount, device));
+      CHECK_RES(hipOccupancyMaxActiveBlocksPerMultiprocessor(&blocksPerSM, {func_name}, {block}.x * {block}.y * {block}.z, {shmem}));
       CHECK_ERR;
       if (blocksPerSM > 0) {{
         gridsize = smCount * blocksPerSM;
@@ -40,7 +38,7 @@ class HipLexic(CudaLexic):
   def set_shmem_size(self, func_name, shmem):
     return f"""static bool shmemsizeset = false;
     if (!shmemsizeset) {{
-      hipFuncSetAttribute(reinterpret_cast<const void*>(&{func_name}), hipFuncAttributeMaxDynamicSharedMemorySize, {shmem});
+      CHECK_RES(hipFuncSetAttribute(reinterpret_cast<const void*>(&{func_name}), hipFuncAttributeMaxDynamicSharedMemorySize, {shmem}));
       CHECK_ERR;
       shmemsizeset = true;
     }}
