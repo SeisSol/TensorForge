@@ -9,21 +9,18 @@ namespace tensorforge {
 
 #ifdef __gfx900__
 static constexpr int AsmVersion = 9000;
-#endif
-#ifdef __gfx906__
+#elif defined(__gfx906__)
 static constexpr int AsmVersion = 9006;
-#endif
-#ifdef __gfx908__
+#elif defined(__gfx908__)
 static constexpr int AsmVersion = 9008;
-#endif
-#ifdef __gfx90a__
+#elif defined(__gfx90a__)
 static constexpr int AsmVersion = 9010;
-#endif
-#ifdef __gfx942__
+#elif defined(__gfx942__)
 static constexpr int AsmVersion = 9402;
-#endif
-#ifdef __gfx950__
+#elif defined(__gfx950__)
 static constexpr int AsmVersion = 9500;
+#else
+static constexpr int AsmVersion = 0;
 #endif
 
 template <typename T> union IntType {
