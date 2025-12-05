@@ -55,7 +55,8 @@ class CudaLexic(Lexic):
     return f"__shared__  __align__({alignment}) {precision} {name}[{size}]"
 
   def declare_shared_memory(self, name, precision):
-    return f'extern __shared__ {precision} {name}[]'
+    #return f'extern __shared__ void* {name}Ptr; auto* {name} = reinterpret_cast<{precision}*>({name}Ptr);'
+    return f'extern __shared__ char {name}Ptr[]; auto* {name} = reinterpret_cast<{precision}*>({name}Ptr);'
 
   def get_launch_bounds(self, total_num_threads_per_block, min_blocks_per_mp=None):
     params = [str(item) for item in [total_num_threads_per_block, min_blocks_per_mp] if item]
@@ -78,7 +79,7 @@ class CudaLexic(Lexic):
     return "__activemask()"
 
   def broadcast(self, variable, lane, block=None, subblock=1):
-    if block is None:
+    if block is None or block == 32:
       return f'tensorforge::readlane({variable}, {lane})'
     else:
       if subblock is None:

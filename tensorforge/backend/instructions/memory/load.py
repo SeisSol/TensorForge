@@ -153,10 +153,9 @@ class GlbToShrLoader(AbstractShrMemWrite):
 
       write_loops(self._context, writer, loops, inner)
     else:
-      loops = [writer.For(f'int32_t i{i} = 0; i{i} < {self._dest.data_view.shape[i]}; ++i{i}') for i in self._loop_indices]
+      loops = [writer.For(f'int32_t i{i} = 0; i{i} < {self._dest.data_view.shape[i]}; ++i{i}', True) for i in self._loop_indices]
 
       for loop in loops:
-        writer.insert_pragma_unroll()
         loop.__enter__()
 
       index = list(self._dest.data_view.get_dim_offsets())
@@ -206,8 +205,7 @@ class GlbToShrLoader(AbstractShrMemWrite):
         indexwrapper = lambda x: f'((({x}) / {linscale[0]}) * {linscale[1]} + (({x}) % {linscale[0]}))'
       if (end - start) / increment > self._manual_unroll_threshold:
         # load using a for-loop
-        writer.insert_pragma_unroll()
-        with writer.For(f'int32_t i = {start}; i < {end}; i += {increment}'):
+        with writer.For(f'int32_t i = {start}; i < {end}; i += {increment}', True):
           contiguous_index = indexwrapper(f'{increment} * {self._linear_idx()} + i * {self._num_threads}')
           dest_access_index = self._dest.access_address(self._context, index)
           src_access_index = self._src.access_address(self._context, index)

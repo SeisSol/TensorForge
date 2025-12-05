@@ -243,8 +243,7 @@ class MultilinearMultiInstruction(ComputeInstruction):
         with writer.Scope():
             loopstack = []
             for i, (dimmin, dimmax) in enumerate(self._ns[1:]):
-                writer.insert_pragma_unroll()
-                loop = writer.For(f'int32_t n{i+1} = {dimmin}; n{i+1} < {dimmax}; ++n{i}')
+                loop = writer.For(f'int32_t n{i+1} = {dimmin}; n{i+1} < {dimmax}; ++n{i}', True)
                 loop.__enter__()
                 loopstack += [loop]
 

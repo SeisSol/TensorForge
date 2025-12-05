@@ -178,9 +178,6 @@ class Writer:
   def new_line(self):
     self.__call__('')
 
-  def insert_pragma_unroll(self):
-    self.__call__(f'#pragma unroll')
-
   def Emptyline(self):
     self.stream.write('\n')
 
@@ -193,8 +190,11 @@ class Writer:
   def If(self, expression):
     return Block(self, 'if ({})'.format(expression))
 
-  def For(self, argument):
-    return Block(self, 'for ({})'.format(argument))
+  def For(self, argument, unroll=False):
+    if unroll:
+      return Block(self, '#pragma unroll\nfor ({})'.format(argument))
+    else:
+      return Block(self, 'for ({})'.format(argument))
 
   def While(self, argument):
     return Block(self, 'while ({})'.format(argument))

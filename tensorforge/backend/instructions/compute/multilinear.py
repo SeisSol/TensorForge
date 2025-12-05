@@ -160,19 +160,23 @@ class MultilinearInstruction(ComputeInstruction):
 #            for op in enumerate(self._ops):
 #                if op.symbol.
             prod = []
+            allLoaded = True
             for i, op in enumerate(self._ops):
-                loaded = op.symbol.load(writer, self._context, f'data{i}', [varlist[loopmap[nk]] for nk in self._opdim_to_nks[i]], False)
-                if not loaded: break
-                if i > 0:
-                    prod += [f'{self._fp_as_str} prod{i} = {self._productOperation.format(f"prod{i-1}", f"data{i}")};']
-                else:
-                    prod += [f'{self._fp_as_str} prod{i} = data{i};']
-            if len(self._ops) > 0 and len(prod) == len(self._ops):
-                for p in prod:
-                    writer(p)
-                self._dest.load(writer, self._context, 'value', [varlist[loopmap[f'n{i}']] for i,_ in enumerate(self._ns)], False)
-                writer(f'{self._fp_as_str} newvalue = {self._sumOperation.format("value", f"prod{len(self._ops)-1}")};')
-                self._dest.store(writer, self._context, 'newvalue', [varlist[loopmap[f'n{i}']] for i,_ in enumerate(self._ns)], False)
+                allLoaded &= op.symbol.load(Writer(), self._context, f'data{i}', [varlist[loopmap[nk]] for nk in self._opdim_to_nks[i]], False)
+            if allLoaded and len(self._ops) > 0:
+                for i, op in enumerate(self._ops):
+                    loaded = op.symbol.load(writer, self._context, f'data{i}', [varlist[loopmap[nk]] for nk in self._opdim_to_nks[i]], False)
+                    if not loaded: break
+                    if i > 0:
+                        prod += [f'{self._fp_as_str} prod{i} = {self._productOperation.format(f"prod{i-1}", f"data{i}")};']
+                    else:
+                        prod += [f'{self._fp_as_str} prod{i} = data{i};']
+                if len(self._ops) > 0 and len(prod) == len(self._ops):
+                    for p in prod:
+                        writer(p)
+                    self._dest.load(writer, self._context, 'value', [varlist[loopmap[f'n{i}']] for i,_ in enumerate(self._ns)], False)
+                    writer(f'{self._fp_as_str} newvalue = {self._sumOperation.format("value", f"prod{len(self._ops)-1}")};')
+                    self._dest.store(writer, self._context, 'newvalue', [varlist[loopmap[f'n{i}']] for i,_ in enumerate(self._ns)], False)
 
         write_loops(self._context, writer, loopstack, nonlead_writer)
 
@@ -354,14 +358,14 @@ class MultilinearInstruction(ComputeInstruction):
         with writer.Scope():
             loopstack = []
             for i, (dimmin, dimmax) in enumerate(self._ns[1:]):
-                writer.insert_pragma_unroll()
-                loop = writer.For(f'int32_t n{i+1} = {dimmin}; n{i+1} < {dimmax}; ++n{i}')
+                loop = writer.For(f'int32_t n{i+1} = {dimmin}; n{i+1} < {dimmax}; ++n{i}', True)
                 loop.__enter__()
                 loopstack += [loop]
 
             self._dest.load(writer, self._context, 'value', [self._vm.get_lexic().thread_idx_x] + [f'n{i+1}' for i,_ in enumerate(self._ns[1:])], False)
             #writer(f'auto* shmAddr = &{self._shr_mem.name}[{self._shr_mem_offset}];')
-            write(f'value = tensorforge::reduction<tensorforge::ReductionOperation<{self._fp_as_str}, tensorforge::Op::Sum>, 32, 1, {self._fp_as_str}>(value);')
+            self._reduction(writer)
+            write(f'value = tensorforge::reduction<tensorforge::ReductionOperation<{self._fp_as_str}, tensorforge::Op::Sum>, {self._num_threads}, 1, {self._fp_as_str}>(value);')
             # self._butterfly_reduction_loop(writer, max_array_length = 32, amd = False)
             #writer(f'{self._fp_as_str} newvalue = shmAddr[{sublane_address}];')
             self._dest.store(writer, self._context, 'value', [self._vm.get_lexic().thread_idx_x] + [f'n{i+1}' for i,_ in enumerate(self._ns[1:])], False)
@@ -369,29 +373,11 @@ class MultilinearInstruction(ComputeInstruction):
             for loop in loopstack[::-1]:
                 loop.__exit__(None, None, None)
 
-    def _reduction(self, writer: Writer, blocks):
-        pass
-
-    def _butterfly_reduction_loop(self, writer: Writer, max_array_length: int, amd: bool):
-        with writer.Scope():
-            loop = writer.For(f'int32_t n = {max_array_length}; n >= 1; n /= 2')
-            loop.__enter__()
-            if amd:
-                writer(f'{self._fp_as_str} rvalue = __shfl_xor(value, n);') # TODO: check if swizzle is used here (or DPP). DONE: it isn't. It's all permute.
-                    # __builtin_amdgcn_ds_shuffle() # <-- for wave permute
-                    # __amdgcn_move_dpp(int src, int dpp_ctrl, int row_mask, int bank_mask, bool bound_ctrl)
-                    # __int_as_float(__amdgcn_move_dpp(__float_as_int(value), 0x12{i}, 0, 0, false)) # 1-8, float
-                    # use xor/permute for everything else :(
-                    # TODO: look at __builtin_amdgcn_ds_permute for active mask (it's more general than then __shfls)
-            else:
-                writer(f'{self._fp_as_str} rvalue = __shfl_xor_sync(-1, value, n);')
-            writer(f'value = {self._sumOperation.format("value", f"rvalue")};')
-            # CUDA: __reduce_OP_sync(mask, value) (if: sm_80 or higher; 32 bit)
-            #writer(f'atomicAdd(&shmAddr[{sublane_address}], value);')
-            loop.__exit__(None, None, None)
+    def _reduction(self, var, writer: Writer):
+        write(f'{var} = tensorforge::reduction<tensorforge::ReductionOperation<{self._fp_as_str}, tensorforge::Op::Sum>, {self._num_threads}, 1, {self._fp_as_str}>({var});')
 
     def _sycl_reduction(self, writer: Writer):
-        writer(f'sycl::reduction();')
+        writer(f'{var} = sycl::reduction({var});')
 
     def _omp_reduction(self, writer: Writer):
         writer(f'#pragma omp for reduction({self._sumOperation}: shmAddr[0:{self._total_shm_size}])')

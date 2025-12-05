@@ -189,9 +189,9 @@ class LeadLoop:
           index = LeadIndex(value, self.threads, self.stride)
           inner([index])
       elif realstart < realend:
-        writer.insert_pragma_unroll() # TODO: move up?
+        # TODO: move unroll up?
         var = self.var
-        with writer.For(f'int32_t {var} = {realstart}; {var} < {realend}; {var} += 1'):
+        with writer.For(f'int32_t {var} = {realstart}; {var} < {realend}; {var} += 1', True):
           index = LeadIndex(var, self.threads, self.stride)
           inner([index])
       if self.end % self.threads != 0:
@@ -213,9 +213,9 @@ class Loop:
         inner([Immediate(value, FloatingPointType.I32)])
         #inner([value])
     elif self.start < self.end:
-      writer.insert_pragma_unroll() # TODO: move up?
+      # TODO: move unroll up?
       var = self.var
-      with writer.For(f'int32_t {var} = {self.start}; {var} < {self.end}; {var} += {self.step}'):
+      with writer.For(f'int32_t {var} = {self.start}; {var} < {self.end}; {var} += {self.step}', True):
         inner([Variable(var, FloatingPointType.I32)])
         #inner([var])
 
@@ -238,8 +238,7 @@ class LinearizedLoop:
     loopvar2 = 'var2'
 
     # the pragma bears great control over the application speed. And the compile time.
-    writer.insert_pragma_unroll()
-    with writer.For(f'int32_t {loopvar} = 0; {loopvar} < {totalloopsize}; {loopvar} += {self.blocksize}'):
+    with writer.For(f'int32_t {loopvar} = 0; {loopvar} < {totalloopsize}; {loopvar} += {self.blocksize}', True):
       if self.blocksize == 1:
         writer(f'int32_t {loopvar2} = {loopvar};')
       else:
@@ -378,12 +377,22 @@ class Symbol:
           if len(rngs) > 0:
             idxvar = writer.varalloc()
             writer(f'const int32_t {idxvar} = {strindex};')
+
+            lead = index[leadidx]
+            bndS = lead._nonlead * lead._block
+            bndE = (lead._nonlead + 1) * lead._block
+
             for rngS, rngE in rngs:
               runIdx[leadidx] = rngS
               value = self.obj.linear_index(runIdx)
-              with writer.If(f'{idxvar} >= {rngS} && {idxvar} < {rngE}'):
+
+              if rngS <= bndS and rngE >= bndE:
                 writer(f'{variable} = {self.name}[{value - rngS} + {idxvar}];')
                 wrote = True
+              elif rngE > bndS and rngS < bndE:
+                with writer.If(f'{idxvar} >= {rngS} && {idxvar} < {rngE}'):
+                  writer(f'{variable} = {self.name}[{value - rngS} + {idxvar}];')
+                  wrote = True
     else:
       offset = self.data_view.get_dim_offsets()[pos]
       if isinstance(index[pos], int):
@@ -431,14 +440,17 @@ class Symbol:
         idx = index[self.lead_dims[0]]
         if not isinstance(idx, LeadIndex):
           # doesn't work
-          assert not isinstance(idx, Variable)
+          if isinstance(idx, Variable):
+            writevar = idx.write_nonlead()
+            pre_access = self.access(context, index)
+            access = context.get_vm().get_lexic().broadcast(pre_access, writevar, self.num_threads)
+          else:
+            index2 = list(index)
+            index2[self.lead_dims[0]] = LeadIndex(idx._value // self.num_threads, self.num_threads, 1)
+            pre_access = self.access(context, index2)
 
-          index2 = list(index)
-          index2[self.lead_dims[0]] = LeadIndex(idx._value // self.num_threads, self.num_threads, 1)
-          pre_access = self.access(context, index2)
-
-          writevar = idx._value % self.num_threads
-          access = context.get_vm().get_lexic().broadcast(pre_access, writevar, self.num_threads)
+            writevar = idx._value % self.num_threads
+            access = context.get_vm().get_lexic().broadcast(pre_access, writevar, self.num_threads)
         else:
           access = pre_access
       else:

@@ -299,9 +299,10 @@ class GpuKernelGeneratorV1:
     if type(tml).__name__ == 'DenseMemoryLayout':
       pattern = None
     else:
-      rowRange = range(tml.bbox()[0].start, tml.bbox()[0].stop)
-      colRange = range(tml.bbox()[1].start, tml.bbox()[1].stop)
-      pattern = tml.entries(rowRange, colRange)
+      ranges = []
+      for i in range(len(shape)):
+        ranges += [range(tml.bbox()[i].start, tml.bbox()[i].stop)]
+      pattern = tml.entries(*ranges)
       # incorrect:
       # pattern = tensor.eqspp.as_ndarray()
 
