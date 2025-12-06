@@ -103,8 +103,11 @@ class GpuKernelGeneratorV1:
       currentPreShape = BBox([s for s, _ in op.eqspp.nnzbounds()], [e+1 for _, e in op.eqspp.nnzbounds()])
 
       tml = op.memoryLayout
-      if type(op.memoryLayout).__name__ == 'MemoryLayoutView':
-        relidx = op.memoryLayout.relidx([0] * len(currentPreShape._lower))
+      if type(tml).__name__ == 'MemoryLayoutView':
+        relidx = [0] * len(currentPreShape._lower)
+        while tml != tml.storage():
+          relidx = tml.relidx(relidx)
+          tml = tml.base
         currentPreShape = BBox([x + relidx[i] for i, x in enumerate(currentPreShape._lower)], [x + relidx[i] for i, x in enumerate(currentPreShape._upper)])
 
         tml = tml.storage()
@@ -185,9 +188,7 @@ class GpuKernelGeneratorV1:
       entry = self._add_scalar(op)
       entry_name = op.name()
     else:
-      entry = self._get_tensorforge_matrix(tensor=op,
-                                          shape=[rng.stop for rng in self._storage(op.memoryLayout).bbox()],
-                                          bboxrange=self._storage(op.memoryLayout).bbox())
+      entry = self._get_tensorforge_matrix(op)
       entry_name = op.name
 
     if not (entry_name in self._cache and entry.is_same(self._cache[entry_name])):
@@ -262,10 +263,12 @@ class GpuKernelGeneratorV1:
       self.make_tensor(op, can_be_aligned, optarget)
 
     if dest.is_temporary: # (dest is never a scalar---for the time being)
-      if dest.name not in self._tmp_matrices:
-        self._cache[dest.name] = self._gen_tmp_matix(ops, target, permute, dest.name, can_be_aligned)
+      self.make_tensor(dest, can_be_aligned, [i for i in range(len(dest.indices))])
+      self._tmp_matrices[dest.name] = self._cache[dest.name]
     else:
       self.make_tensor(dest, can_be_aligned, [i for i in range(len(dest.indices))])
+
+
 
   def _add_scalar(self, scalar):
     tensor = Tensor([], Addressing.SCALAR, alias=scalar.name(), datatype=scalar.datatype)
@@ -285,16 +288,15 @@ class GpuKernelGeneratorV1:
       return tml.storage()
     return tml
 
-  def _get_tensorforge_matrix(self, tensor, shape, bboxrange):
+  def _get_tensorforge_matrix(self, tensor):
     tml = self._storage(tensor.memoryLayout)
 
+    shape=[rng.stop for rng in tml.bbox()]
+    bboxrange=tml.bbox()
+
     addr_mode = self.deduce_addresing(tensor) if tensor.addressing is None else tensor.addressing
-    if tensor.is_temporary:
-      if not tensor.name in self._tmp_matrices:
-        raise RuntimeError(f'expected tmp. tensor {tensor.name} to be cached '
-                           f'while code generation for fused-gemms')
-      else:
-        return self._tmp_matrices[tensor.name]
+    if tensor.is_temporary and tensor.name in self._tmp_matrices:
+      return self._tmp_matrices[tensor.name]
 
     if type(tml).__name__ == 'DenseMemoryLayout':
       pattern = None
@@ -315,13 +317,6 @@ class GpuKernelGeneratorV1:
                                pattern=pattern,
                                values = tensor.values,
                                datatype = tensor.datatype)
-
-  def _gen_tmp_matix(self, ops, target, permute, res_name, can_be_aligned):
-    # TODO: ignore scalars here?
-    tmp_matrix = generate_tmp_tensor(ops=[self.get_tensor(op, can_be_aligned, optarget) for op, optarget in zip(ops, target)],
-                                     target=target, alias=res_name) # permute?
-    self._tmp_matrices[res_name] = tmp_matrix
-    return tmp_matrix
 
   def _gen_call_site(self, generator):
     mat_name_map = {}

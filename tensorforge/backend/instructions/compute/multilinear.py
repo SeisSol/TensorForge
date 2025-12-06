@@ -104,6 +104,9 @@ class MultilinearInstruction(ComputeInstruction):
 
         self._lead_dims = [0]#[t for t in self._target[0] if t >= 0]
 
+    def gen_ir(self, writer):
+        pass
+
     def gen_code_inner(self, writer: Writer):
         self._nonleading_dim(writer)
         if len(self._ns) == 0:
