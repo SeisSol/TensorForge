@@ -129,11 +129,13 @@ class TensorWrapper:
 class SubTensor(TensorWrapper):
     def __init__(self,
         tensor: Tensor,
-        bbox: Union[BoundingBox, None] = None):
+        bbox: Union[BoundingBox, None] = None,
+        offset: Union[list[int], None] = None):
         self.tensor = tensor
         self.bbox = bbox
         if bbox is None:
             self.bbox = self.tensor.bbox
+        self.offset = offset or ([0] * self.bbox.rank())
 
     def __str__(self):
         return f'{self.tensor}({self.bbox})'

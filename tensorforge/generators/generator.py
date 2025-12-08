@@ -286,7 +286,7 @@ class Generator:
 
     for gemm_descr in self.descr_list:
       if isinstance(gemm_descr, MultilinearDescr):
-        builder.build(ops=[SymbolView(self._scopes.get_symbol(op.tensor), op.bbox) for op in gemm_descr.ops],
+        builder.build(ops=[SymbolView(self._scopes.get_symbol(op.tensor), op.bbox, op.offset) for op in gemm_descr.ops],
                         dest_obj=gemm_descr.dest,
                         descr=gemm_descr)
         self._ir.extend(builder.get_instructions())
@@ -380,6 +380,11 @@ class Generator:
       long_name.extend([
         str(descr)
       ])
+
+    # needed for type differences (but same names)
+    global_symbols = self._scopes.get_global_scope().values()
+    params = self._generate_base_params_list(symbol_list=global_symbols, with_types=True)
+    long_name.extend(params)
 
     sha = hashlib.new('md5', usedforsecurity=False)
     sha.update(', '.join(long_name).encode())

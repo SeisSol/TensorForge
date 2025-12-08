@@ -103,8 +103,8 @@ class GpuKernelGeneratorV1:
       currentPreShape = BBox([s for s, _ in op.eqspp.nnzbounds()], [e+1 for _, e in op.eqspp.nnzbounds()])
 
       tml = op.memoryLayout
+      relidx = [0] * currentPreShape.rank()
       if type(tml).__name__ == 'MemoryLayoutView':
-        relidx = [0] * len(currentPreShape._lower)
         while tml != tml.storage():
           relidx = tml.relidx(relidx)
           tml = tml.base
@@ -125,7 +125,7 @@ class GpuKernelGeneratorV1:
             currentPreShape._lower = tuple([newLower] + list(currentPreShape._lower[1:]))
             currentPreShape._upper = tuple([newUpper] + list(currentPreShape._upper[1:]))
 
-      return SubTensor(tensor, currentPreShape)
+      return SubTensor(tensor, currentPreShape, relidx)
 
   def add_scalar(self, ops, statements, indices):
     indicesIndexed = {}
@@ -155,7 +155,7 @@ class GpuKernelGeneratorV1:
     if hasattr(self._arch, 'typename'):
       fptype = FloatingPointType.str2enum(self._arch.typename)
     else:
-      fptype = FloatingPointType.F32
+      fptype = None
 
     context = Context(arch=self._arch.name,
                       backend=self._arch.backend,

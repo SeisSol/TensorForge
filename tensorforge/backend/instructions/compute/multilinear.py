@@ -1,7 +1,7 @@
 from typing import Union
 import math
 from . import ComputeInstruction
-from tensorforge.backend.symbol import SymbolType, Symbol, SymbolView, DataView, Loop, LeadLoop, write_loops, LeadIndex, LinearizedLoop
+from tensorforge.backend.symbol import SymbolType, add_offset, Symbol, SymbolView, DataView, Loop, LeadLoop, write_loops, LeadIndex, LinearizedLoop
 from tensorforge.common.exceptions import InternalError
 from tensorforge.backend.writer import Writer
 from tensorforge.common.context import Context
@@ -68,15 +68,21 @@ class MultilinearInstruction(ComputeInstruction):
         for i, op in enumerate(self._ops):
             opdim = [''] * op.bbox.rank()
             for j in range(op.bbox.rank()):
+                # TODO: check adding the data_view box here again
+                lower = op.bbox.lower()[j] #+ op.symbol.data_view._bbox.lower()[j]
+                upper = op.bbox.upper()[j] #+ op.symbol.data_view._bbox.lower()[j]
+                #if self._target[i][j] != 0:
+                #    lower -= op.offset[j]
+                #    upper -= op.offset[j]
                 if self._target[i][j] < 0:
                     if self._target[i][j] not in preKs:
-                        preKs[self._target[i][j]] = (op.bbox.lower()[j], op.bbox.upper()[j])
+                        preKs[self._target[i][j]] = (lower, upper)
                         sparseK[self._target[i][j]] = False
-                    preKs[self._target[i][j]] = (max(preKs[self._target[i][j]][0], op.bbox.lower()[j]), min(preKs[self._target[i][j]][1], op.bbox.upper()[j]))
+                    preKs[self._target[i][j]] = (max(preKs[self._target[i][j]][0], lower), min(preKs[self._target[i][j]][1], upper))
                     opdim[j] = f'k{-self._target[i][j] - 1}'
                     sparseK[self._target[i][j]] |= op.symbol is not None and op.symbol.obj is not None and not op.symbol.obj.is_dense()
                 else:
-                    self._ns[self._target[i][j]] = (max(self._ns[self._target[i][j]][0], op.bbox.lower()[j]), min(self._ns[self._target[i][j]][1], op.bbox.upper()[j]))
+                    self._ns[self._target[i][j]] = (max(self._ns[self._target[i][j]][0], lower), min(self._ns[self._target[i][j]][1], upper))
                     opdim[j] = f'n{self._target[i][j]}'
                     self._sparseN[self._target[i][j]] |= op.symbol is not None and op.symbol.obj is not None and not op.symbol.obj.is_dense()
 
@@ -141,17 +147,17 @@ class MultilinearInstruction(ComputeInstruction):
             if -i-1 not in self._lead_dims:
                 step = matrixK if i == len(self._ks) - 1 else 1
                 loop = [Loop(f'k{i}', dimmin, dimmax, step, unroll=self._sparseK[i] or force_unroll)]
-                if self._sparseK[i] or force_unroll:# and False:
+                if self._sparseK[i] or force_unroll or True:# and False:
                     loopstack += loop
                 else:
                     outerLoops += loop
 
-        loopstack += [LinearizedLoop(outerLoops)]
+        #loopstack += [LinearizedLoop(outerLoops)]
 
         stride = 1
         threads = self._num_threads
         for i, (dimmin, dimmax) in enumerate(self._ns):
-            loopmap[f'n{i}'] = len(loopstack) + len(outerLoops) - 1
+            loopmap[f'n{i}'] = len(loopstack) + len(outerLoops) #- 1
             if i not in self._lead_dims or threads == 0:
                 loopstack += [Loop(f'n{i}', dimmin, dimmax, 1, unroll=self._sparseN[i] or force_unroll)]
             else:
@@ -160,15 +166,14 @@ class MultilinearInstruction(ComputeInstruction):
                 stride *= dimmax - dimmin
 
         def nonlead_writer(varlist):
-#            for op in enumerate(self._ops):
-#                if op.symbol.
             prod = []
             allLoaded = True
             for i, op in enumerate(self._ops):
-                allLoaded &= op.symbol.load(Writer(), self._context, f'data{i}', [varlist[loopmap[nk]] for nk in self._opdim_to_nks[i]], False)
+                # self._ops[i].offset[j]
+                allLoaded &= op.symbol.load(Writer(), self._context, f'data{i}', [add_offset(varlist[loopmap[nk]], 0) for j,nk in enumerate(self._opdim_to_nks[i])], False)
             if allLoaded and len(self._ops) > 0:
                 for i, op in enumerate(self._ops):
-                    loaded = op.symbol.load(writer, self._context, f'data{i}', [varlist[loopmap[nk]] for nk in self._opdim_to_nks[i]], False)
+                    loaded = op.symbol.load(writer, self._context, f'data{i}', [add_offset(varlist[loopmap[nk]], 0) for j,nk in enumerate(self._opdim_to_nks[i])], False)
                     if not loaded: break
                     if i > 0:
                         prod += [f'{self._fp_as_str} prod{i} = {self._productOperation.format(f"prod{i-1}", f"data{i}")};']

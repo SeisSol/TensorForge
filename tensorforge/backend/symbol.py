@@ -150,6 +150,34 @@ class LeadIndex:
     elif self._block == 1:
       return f'{self._nonlead}'
 
+class VarOffset:
+  def __init__(self, variable, offset):
+    self.variable = variable
+    self.offset = offset
+
+  def is_thread_dependent(self):
+    return self.variable.is_thread_dependent()
+
+  def write_nonlead(self):
+    # TODO: lead
+    return f'({self.variable.write_nonlead()} + {self.offset})'
+
+  def write(self, context: Context):
+    # TODO: lead
+    return f'({self.variable.write(context)} + {self.offset})'
+
+def add_offset(x, offset):
+  if offset == 0:
+    return x
+  elif isinstance(x, (float, int, np.int64)):
+    return x + offset
+  elif isinstance(x, Immediate):
+    return Immediate(x._value + offset, x._type)
+  elif isinstance(x, VarOffset):
+    return VarOffset(x.variable, x.offset + offset)
+  else:
+    return VarOffset(x, offset)
+
 class LeadLoop:
   def __init__(self, name, start, end, threads, stride, unroll=False):
     self.start = start
@@ -312,7 +340,7 @@ class Symbol:
     if self.stype == SymbolType.Register or self.stype == SymbolType.Scratch:
       writevar = lambda var: f'{var}' if isinstance(var, (str, int, float, np.int64)) else var.write_nonlead()
       writeOffset = lambda i,var,offset,stride: f"({writevar(var)} - {offset}) * {stride}"
-      writeNoOffset = lambda i,var,offset,stride: f"{writevar(var)} * {stride}"
+      writeLeadOffset = lambda i,var,offset,stride: f"({writevar(var)} - {offset // self.num_threads}) * {stride}"
       writers = [0] * self.data_view.rank()
       strides = [0] * self.data_view.rank()
       stride = 1
@@ -320,7 +348,7 @@ class Symbol:
         strides[i] = stride
         if isinstance(index[i], LeadIndex):
           stride *= (self.data_view.get_dim_size(i) + self.num_threads - 1) // self.num_threads
-          writers[i] = writeNoOffset
+          writers[i] = writeLeadOffset
         else:
           stride *= self.data_view.get_dim_size(i)
           writers[i] = writeOffset
@@ -438,7 +466,7 @@ class Symbol:
       if self.stype == SymbolType.Register or self.stype == SymbolType.Scratch:
         assert len(self.lead_dims) == 1
         idx = index[self.lead_dims[0]]
-        if not isinstance(idx, LeadIndex):
+        if not idx.is_thread_dependent():
           # doesn't work
           if isinstance(idx, Variable):
             writevar = idx.write_nonlead()
@@ -501,11 +529,12 @@ class Symbol:
     return self.__str__()
 
 class SymbolView:
-  def __init__(self, symbol, view = None):
+  def __init__(self, symbol, view = None, offset = None):
     self.symbol = symbol
     self.bbox = view
     if view is None:
       self.bbox = symbol.data_view.get_bbox()
+    self.offset = offset or ([0] * self.bbox.rank())
 
   def __str__(self):
     return f'{self.symbol} {self.bbox}'
