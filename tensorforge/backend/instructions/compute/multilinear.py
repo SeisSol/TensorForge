@@ -133,7 +133,7 @@ class MultilinearInstruction(ComputeInstruction):
         # writer(f'int32_t n{i} = dimmin + n1a; n{i} < {dimmax}; n{i} += {n1i}')
 
         # (for broadcasting)
-        force_unroll = self._context.get_vm().get_hw_descr().vendor == 'amd'
+        force_unroll = False #self._context.get_vm().get_hw_descr().vendor == 'amd'
 
         matrixK = 1
 
