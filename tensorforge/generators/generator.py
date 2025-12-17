@@ -416,7 +416,8 @@ class Generator:
     for symbol in symbol_list:
       datatype = self._context.fp_type if symbol.obj.datatype is None else symbol.obj.datatype
       if symbol.obj.addressing == Addressing.SCALAR:
-        params.extend([f'{datatype} {symbol.name}' if with_types else f'{symbol.name}'])
+        if not symbol.stype == SymbolType.Data:
+          params.extend([f'{datatype} {symbol.name}' if with_types else f'{symbol.name}'])
       else:
         ptr_type = symbol.obj.addressing.to_pointer()
         const_modifier = 'const ' if symbol.obj.direction == DataFlowDirection.SOURCE else ''
