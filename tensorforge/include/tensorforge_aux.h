@@ -3,6 +3,8 @@
 
 #include <string>
 
+#include "tensorforge_device/base.h"
+
 #define CHECK_ERR tensorforge::checkErr(__FILE__, __LINE__)
 
 #if 0
