@@ -56,6 +56,22 @@ __device__ __forceinline__ auto dpp(T value) -> T {
   return ot.value;
 }
 
+template <int Dpp1, int Dpp2, int Dpp3, bool Dpp4, typename T>
+__device__ __forceinline__ auto dppUpdate(T value, T prev) -> T {
+  IntType<T> it;
+  IntType<T> pt;
+  IntType<T> ot;
+
+  it.value = value;
+  pt.value = prev;
+#pragma unroll
+  for (int i = 0; i < IntType<T>::IntCount; ++i) {
+    ot.ints[i] = __builtin_amdgcn_update_dpp(it.ints[i], pt.ints[i], Dpp1, Dpp2,
+                                             Dpp3, Dpp4);
+  }
+  return ot.value;
+}
+
 template <int MaskAnd, int MaskOr, int MaskXor, typename T>
 __device__ __forceinline__ auto swizzle(T value) -> T {
   IntType<T> it;
@@ -546,6 +562,30 @@ template <typename T>
 __device__ __forceinline__ void transpose4x4b32(T &w1, T &w2, T &w3, T &w4,
                                                 const T &v1, const T &v2,
                                                 const T &v3, const T &v4);
+
+template <typename T>
+__device__ __forceinline__ void
+transpose16x16b32(T &w1, T &w2, T &w3, T &w4, T &w5, T &w6, T &w7, T &w8, T &w9,
+                  T &w10, T &w11, T &w12, T &w13, T &w14, T &w15, T &w16) {
+
+  T v1, v2, v3, v4;
+  T v5, v6, v7, v8;
+  T v9, v10, v11, v12;
+  T v13, v14, v15, v16;
+
+  // transpose 4x4
+
+  transpose4x4b32(v1, v2, v3, v4, w1, w2, w3, w4);
+  transpose4x4b32(v5, v6, v7, v8, w5, w6, w7, w8);
+  transpose4x4b32(v9, v10, v11, v12, w9, w10, w11, w12);
+  transpose4x4b32(v13, v14, v15, v16, w13, w14, w15, w16);
+
+  // transpose 8x8
+
+  // DPP and row control suffice here
+
+  // const T u1 = dppUpdate<0x128, 0b1010, 0b1111, true>(v1, v5);
+}
 
 #if defined(__gfx908__) || defined(__gfx90a__) || defined(__gfx942__) ||       \
     defined(__gfx950__)

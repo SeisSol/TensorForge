@@ -84,8 +84,8 @@ class MultilinearInstruction(ComputeInstruction):
             opdim = [''] * op.bbox.rank()
             for j in range(op.bbox.rank()):
                 # TODO: check adding the data_view box here again
-                lower = op.bbox.lower()[j] + op.symbol.data_view._bbox.lower()[j]
-                upper = op.bbox.upper()[j] + op.symbol.data_view._bbox.lower()[j]
+                lower = op.bbox.lower()[j] #+ op.symbol.data_view._bbox.lower()[j]
+                upper = op.bbox.upper()[j] #+ op.symbol.data_view._bbox.lower()[j]
                 #if self._target[i][j] != 0:
                 #    lower -= op.offset[j]
                 #    upper -= op.offset[j]
@@ -222,34 +222,39 @@ class MultilinearInstruction(ComputeInstruction):
                 N *= mx - mi
             N *= -(-(self._ns[0][1] - self._ns[0][0]) // self._num_threads)
 
-            def unwindK(k, j, full):
-                nidx = unwindJ(j)
-                idx = []
-                for nk in self._opdim_to_nks[1]:
-                    if nk[0] == 'k':
-                        mi, mx = self._ks[int(nk[1:])]
-
-                        size = mx - mi
-
-                        if nk == 'k0' and not full:
-                            size = -(-size // self._num_threads)
-                            idx += [LeadIndex(k % size, self._num_threads, 1)]
-                        else:
-                            idx += [k % size]
-
-                        k //= size
-                    else:
-                        idx += [nidx[int(nk[1:])]]
-                return idx
-
             def unwindJ(j):
                 size = -(-(self._ns[0][1] - self._ns[0][0]) // self._num_threads)
-                idx = [LeadIndex(j % size, self._num_threads, 1)]
+                idx = [LeadIndex(j % size + self._ns[0][0] // self._num_threads, self._num_threads, 1)]
                 j //= size
                 for mi, mx in self._ns[1:]:
                     size = mx - mi
-                    idx += [j % size]
+                    idx += [j % size + mi]
                     j //= size
+                return idx
+
+            def unwindK(k, full):
+                size = self._ks[0][1] - self._ks[0][0]
+                if full:
+                    idx = [k % size + self._ks[0][0]]
+                else:
+                    sizeL = -(-size // self._num_threads)
+                    idx = [LeadIndex(k % sizeL + self._ks[0][0] // self._num_threads, self._num_threads, 1)]
+                k //= size
+                for mi, mx in self._ks[1:]:
+                    size = mx - mi
+                    idx += [k % size + mi]
+                    k //= size
+                return idx
+
+            def unwindOp(k, j, opid, full):
+                jidx = unwindJ(j)
+                kidx = unwindK(k, full)
+                idx = []
+                for nk in self._opdim_to_nks[opid]:
+                    if nk[0] == 'k':
+                        idx += [kidx[int(nk[1:])]]
+                    else:
+                        idx += [jidx[int(nk[1:])]]
                 return idx
 
             def C(writer, var, j):
@@ -257,23 +262,23 @@ class MultilinearInstruction(ComputeInstruction):
 
             if self._ops[1].symbol.obj and (not self._ops[1].symbol.obj.is_dense() or self._ops[1].symbol.data_view.shape[0] < 16):
                 def sparse(k, j):
-                    return self._ops[1].symbol.load(Writer(), self._context, '', unwindK(k, j, True), False)
+                    return self._ops[1].symbol.load(Writer(), self._context, '', unwindOp(k, j, 1, True), False)
             else:
                 sparse = None
 
-            def B(writer, var, k, j):
+            def B(writer, var, j, k):
                 if sparse:
                     self._ops[1].symbol.load_linear(writer, self._context, var, k)
                     return True
-                res = self._ops[1].symbol.load(Writer(), self._context, var, unwindK(k, j, False), False)
+                res = self._ops[1].symbol.load(Writer(), self._context, var, unwindOp(k, j, 1, False), False)
                 if res:
-                    self._ops[1].symbol.load(writer, self._context, var, unwindK(k, j, False), False)
+                    self._ops[1].symbol.load(writer, self._context, var, unwindOp(k, j, 1, False), False)
                 return res
 
-            def A(writer, var, j):
-                res = self._ops[0].symbol.load(Writer(), self._context, var, unwindJ(j), False)
+            def A(writer, var, k):
+                res = self._ops[0].symbol.load(Writer(), self._context, var, unwindOp(k, 0, 0, True), False)
                 if res:
-                    self._ops[0].symbol.load(writer, self._context, var, unwindJ(j), False)
+                    self._ops[0].symbol.load(writer, self._context, var, unwindOp(k, 0, 0, True), False)
                 return res
 
             amd.matmul(writer, C, A, B, float('inf'), N, K, self._num_threads, self._dest.datatype, sparse)
