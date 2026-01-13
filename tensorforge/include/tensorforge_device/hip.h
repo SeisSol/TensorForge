@@ -217,7 +217,7 @@ constexpr bool HasFmacDpp4 = false;
 #endif
 
 #if defined(__gfx90a__) || defined(__gfx940__) || defined(__gfx941__) ||       \
-    defined(__gfx942__)
+    defined(__gfx942__) || defined(__gfx950__)
 constexpr bool HasFmacDpp16 = true;
 
 template <>
@@ -529,6 +529,78 @@ __device__ __forceinline__ T reduction(const T &value) {
   const auto result = Op::applyOperation(value, other);
   return reduction<Op, T, Block, (Subblock << 1)>(result);
 }
+
+constexpr std::size_t GlobalMemspace = 1;
+constexpr std::size_t ConstantMemspace = 4;
+
+template <typename T, std::size_t N>
+using VectorT = __attribute__((__vector_size__(N * sizeof(T)))) T;
+
+template <typename T, std::size_t Space>
+using SpacePtr = __attribute__((address_space(Space))) T *;
+
+template <typename T, std::size_t Space>
+using SpacePtrRestrict = __attribute__((address_space(Space))) T *__restrict;
+
+template <typename T>
+__device__ __forceinline__ void transpose4x4b32(T &w1, T &w2, T &w3, T &w4,
+                                                const T &v1, const T &v2,
+                                                const T &v3, const T &v4);
+
+#if defined(__gfx908__) || defined(__gfx90a__) || defined(__gfx942__) ||       \
+    defined(__gfx950__)
+
+#define CMVCC ", vcc"
+
+#define CM4STR(p1, p2, p3, p4, c, a, b)                                        \
+  "v_cndmask_b32_dpp " c ", " a ", " b CMVCC " quad_perm:[" STR(p1) "," STR(   \
+      p2) "," STR(p3) "," STR(p4) "] row_mask:0xf bank_mask:0xf bound_ctrl:1"
+#define CMRSTR(cnt, c, a, b)                                                   \
+  "v_cndmask_b32_dpp " c ", " a ", " b CMVCC                                   \
+  " row_ror:" STR(cnt) " row_mask:0xf bank_mask:0xf bound_ctrl:1"
+
+template <typename T>
+__device__ __forceinline__ void transpose4x4b32(T &w1, T &w2, T &w3, T &w4,
+                                                const T &v1, const T &v2,
+                                                const T &v3, const T &v4) {
+  const uint64_t mask1a = 0x5555555555555555ULL;
+  const uint64_t mask1b = 0xaaaaaaaaaaaaaaaaULL;
+  const uint64_t mask2a = 0x3333333333333333ULL;
+  const uint64_t mask2b = 0xccccccccccccccccULL;
+
+  T u1, u2, u3, u4;
+
+  __asm("s_mov_b64 vcc, %[mask] \n\t" CM4STR(
+            0, 0, 2, 2, "%[u1]", "%[v2]",
+            "%[v1]") "\n\t" CM4STR(0, 0, 2, 2, "%[u3]", "%[v4]", "%[v3]") "\n\t"
+        : [u1] "=v"(u1), [u3] "=v"(u3)
+        : [mask] "s"(mask1a), [v1] "v"(v1), [v2] "v"(v2), [v3] "v"(v3),
+          [v4] "v"(v4)
+        : "vcc");
+  __asm("s_mov_b64 vcc, %[mask] \n\t" CM4STR(
+            1, 1, 3, 3, "%[u2]", "%[v1]",
+            "%[v2]") "\n\t" CM4STR(1, 1, 3, 3, "%[u4]", "%[v3]", "%[v4]") "\n\t"
+        : [u2] "=v"(u2), [u4] "=v"(u4)
+        : [mask] "s"(mask1b), [v1] "v"(v1), [v2] "v"(v2), [v3] "v"(v3),
+          [v4] "v"(v4)
+        : "vcc");
+  __asm("s_mov_b64 vcc, %[mask] \n\t" CM4STR(
+            0, 1, 0, 1, "%[w1]", "%[u3]",
+            "%[u1]") "\n\t" CM4STR(0, 1, 0, 1, "%[w2]", "%[u4]", "%[u2]") "\n\t"
+        : [w1] "=v"(w1), [w2] "=v"(w2)
+        : [mask] "s"(mask2a), [u1] "v"(u1), [u2] "v"(u2), [u3] "v"(u3),
+          [u4] "v"(u4)
+        : "vcc");
+  __asm("s_mov_b64 vcc, %[mask] \n\t" CM4STR(
+            2, 3, 2, 3, "%[w3]", "%[u1]",
+            "%[u3]") "\n\t" CM4STR(2, 3, 2, 3, "%[w4]", "%[u2]", "%[u4]")
+        : [w3] "=v"(w3), [w4] "=v"(w4)
+        : [mask] "s"(mask2b), [u1] "v"(u1), [u2] "v"(u2), [u3] "v"(u3),
+          [u4] "v"(u4)
+        : "vcc");
+}
+
+#endif
 
 /*
 class Buffer {

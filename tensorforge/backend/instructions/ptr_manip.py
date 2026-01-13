@@ -50,7 +50,10 @@ class GetElementPtr(AbstractInstruction):
       src_suffix = '_ptr' if self._vm.get_lexic()._backend == 'targetdart' else ''
       rhs = f'&{self._src.name}{src_suffix}[{address}]'
       lhs = 'const ' if self._src.obj.direction == DataFlowDirection.SOURCE else ''
-      lhs += f'{datatype} * const {self._vm.get_lexic().restrict_kw} {self._dest.name}'
+      #lhs += f'{datatype} * const {self._vm.get_lexic().restrict_kw} {self._dest.name}'
+      lhs += f'{datatype}'
+      rhs = f'(tensorforge::SpacePtrRestrict<{lhs}, tensorforge::GlobalMemspace>){rhs}'
+      lhs = f'auto {self._dest.name}'
     elif batch_addressing == Addressing.NONE:
       address = f'{batch_obj.get_offset_to_first_element()}'
       rhs = f'&{self._src.name}[{address}]'

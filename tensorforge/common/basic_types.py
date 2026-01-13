@@ -121,7 +121,7 @@ class FloatingPointType(enum.Enum):
   def as_str(cls, fp):
     map = {FloatingPointType.F32: 'float',
            FloatingPointType.F64: 'double',
-           FloatingPointType.F128: 'quad',
+           FloatingPointType.F128: '__float128',
            FloatingPointType.F16: 'half',
            FloatingPointType.BF16: 'bfloat16',
            FloatingPointType.BOOL: 'bool',

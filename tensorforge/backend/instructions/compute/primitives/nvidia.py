@@ -1,3 +1,5 @@
+from tensorforge.common.basic_types import FloatingPointType
+from tensorforge.backend.writer import Writer
 
 def reduction_generic(writer: Writer, operation, blocks):
     var = value
@@ -135,6 +137,7 @@ class CUTEMode:
     DIRECT = 0
     TF32 = 1
     BF16 = 2
+    I8 = 3
 
 class CUTEAtom:
     def __init__(self, n, m, k, b, d, name, compress):
@@ -147,7 +150,7 @@ class CUTEAtom:
         self.compress = compress
 
     def headers(self):
-        return ['']
+        return ['cute.hpp']
 
     def generate(self, writer, context, A, B, C):
         Cstr = ','.join(f'{c}' for c in C)
@@ -197,3 +200,7 @@ ATOMS = [
     CUTEAtom(16,8,8,1,FloatingPointType.F64,'SM90_16x8x8_F64F64F64F64_TN', CUTEMode.DIRECT),
     CUTEAtom(16,8,16,1,FloatingPointType.F64,'SM90_16x8x8_F64F64F64F64_TN', CUTEMode.DIRECT),
 ]
+
+def matmul(writer, stream, shmptr, shmsize):
+
+    pass

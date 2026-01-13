@@ -82,7 +82,7 @@ class Generator:
     self._check_consistency_with_user_options()
     self._name_operands(self.descr_list)
 
-    prefer_persistent = False # context.get_vm().get_hw_descr().vendor == 'amd'
+    prefer_persistent = context.get_vm().get_hw_descr().vendor == 'amd'
 
     self._persistent_threading = prefer_persistent
     self._preload_globals = prefer_persistent

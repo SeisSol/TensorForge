@@ -442,6 +442,13 @@ class Symbol:
               wrote |= self.encode_values(pos + 1, runIdx, writer, context, variable, index, nontemp, leadidx)
     return wrote
 
+  def load_linear(self, writer, context: Context, variable, index):
+    if self.stype == SymbolType.Register:
+      access = f'{self.name}[{index}]'
+    else:
+      access = f'{self.name}[{index} + threadIdx.x]'
+    writer(f'{self.get_fptype(context)} {variable} = {access};')
+
   def load(self, writer, context: Context, variable, index: List[Union[str, int, Immediate, Variable, LeadIndex]], nontemp):
     if self.stype == SymbolType.Data or (not self.obj.is_dense() and not isinstance(self.obj.spp, BoundingBoxSPP)):
       writer(f'{self.get_fptype(context)} {variable} = {self.get_fptype(context).literal(0)};')

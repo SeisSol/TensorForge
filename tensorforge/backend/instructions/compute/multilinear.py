@@ -7,9 +7,11 @@ from tensorforge.backend.writer import Writer
 from tensorforge.common.context import Context
 from tensorforge.common.operation import ReductionOperator
 from typing import Union, List
+from tensorforge.common.basic_types import FloatingPointType
+from tensorforge.backend.writer import Writer
 
-from .primitives.amd import shuffle_broadcast_forall
-# from .primitives import nvidia as nv
+from .primitives import nvidia as nv
+from .primitives import amd as amd
 
 class MultilinearInstruction(ComputeInstruction):
     def __init__(self,
@@ -49,6 +51,19 @@ class MultilinearInstruction(ComputeInstruction):
             op.symbol.add_user(self)
         dest.add_user(self)
 
+        self._scalar = []
+        ops2 = []
+        target2 = []
+        for op, target in zip(self._ops, self._target):
+            if len(target) == 0:
+                self._scalar += [op]
+            else:
+                ops2 += [op]
+                target2 += [target]
+
+        self._ops = ops2
+        self._target = target2
+
         self._analyze()
 
     def _choose_lead_dim(self):
@@ -69,8 +84,8 @@ class MultilinearInstruction(ComputeInstruction):
             opdim = [''] * op.bbox.rank()
             for j in range(op.bbox.rank()):
                 # TODO: check adding the data_view box here again
-                lower = op.bbox.lower()[j] #+ op.symbol.data_view._bbox.lower()[j]
-                upper = op.bbox.upper()[j] #+ op.symbol.data_view._bbox.lower()[j]
+                lower = op.bbox.lower()[j] + op.symbol.data_view._bbox.lower()[j]
+                upper = op.bbox.upper()[j] + op.symbol.data_view._bbox.lower()[j]
                 #if self._target[i][j] != 0:
                 #    lower -= op.offset[j]
                 #    upper -= op.offset[j]
@@ -114,9 +129,12 @@ class MultilinearInstruction(ComputeInstruction):
         pass
 
     def gen_code_inner(self, writer: Writer):
-        self._nonleading_dim(writer)
+        if not self._nonleading_dim_test(writer):
+            self._nonleading_dim(writer)
         if len(self._ns) == 0:
             self._leading_dim(writer)
+        if self._scalar:
+            self._apply_scalar(writer)
         if self._prev is not None:
             self._add_to_prev(writer)
 
@@ -187,6 +205,80 @@ class MultilinearInstruction(ComputeInstruction):
                     self._dest.store(writer, self._context, 'newvalue', [varlist[loopmap[f'n{i}']] for i,_ in enumerate(self._ns)], False)
 
         write_loops(self._context, writer, loopstack, nonlead_writer)
+
+    def _nonleading_dim_test(self, writer: Writer):
+        can_use = self._context.get_vm().get_hw_descr().vendor == 'amd'
+        can_use &= len(self._ops) == 2
+
+        if can_use:
+            Mx = 1
+            K = 1
+            N = 1
+
+            for mi, mx in self._ks:
+                K *= mx - mi
+
+            for mi, mx in self._ns[1:]:
+                N *= mx - mi
+            N *= -(-(self._ns[0][1] - self._ns[0][0]) // self._num_threads)
+
+            def unwindK(k, j, full):
+                nidx = unwindJ(j)
+                idx = []
+                for nk in self._opdim_to_nks[1]:
+                    if nk[0] == 'k':
+                        mi, mx = self._ks[int(nk[1:])]
+
+                        size = mx - mi
+
+                        if nk == 'k0' and not full:
+                            size = -(-size // self._num_threads)
+                            idx += [LeadIndex(k % size, self._num_threads, 1)]
+                        else:
+                            idx += [k % size]
+
+                        k //= size
+                    else:
+                        idx += [nidx[int(nk[1:])]]
+                return idx
+
+            def unwindJ(j):
+                size = -(-(self._ns[0][1] - self._ns[0][0]) // self._num_threads)
+                idx = [LeadIndex(j % size, self._num_threads, 1)]
+                j //= size
+                for mi, mx in self._ns[1:]:
+                    size = mx - mi
+                    idx += [j % size]
+                    j //= size
+                return idx
+
+            def C(writer, var, j):
+                self._dest.store(writer, self._context, var, unwindJ(j), False)
+
+            if self._ops[1].symbol.obj and (not self._ops[1].symbol.obj.is_dense() or self._ops[1].symbol.data_view.shape[0] < 16):
+                def sparse(k, j):
+                    return self._ops[1].symbol.load(Writer(), self._context, '', unwindK(k, j, True), False)
+            else:
+                sparse = None
+
+            def B(writer, var, k, j):
+                if sparse:
+                    self._ops[1].symbol.load_linear(writer, self._context, var, k)
+                    return True
+                res = self._ops[1].symbol.load(Writer(), self._context, var, unwindK(k, j, False), False)
+                if res:
+                    self._ops[1].symbol.load(writer, self._context, var, unwindK(k, j, False), False)
+                return res
+
+            def A(writer, var, j):
+                res = self._ops[0].symbol.load(Writer(), self._context, var, unwindJ(j), False)
+                if res:
+                    self._ops[0].symbol.load(writer, self._context, var, unwindJ(j), False)
+                return res
+
+            amd.matmul(writer, C, A, B, float('inf'), N, K, self._num_threads, self._dest.datatype, sparse)
+            return True
+        return False
 
     def _nonleading_dim2(self, writer: Writer):
 
@@ -304,6 +396,38 @@ class MultilinearInstruction(ComputeInstruction):
 
         write_loops(self._context, writer, loopstack, nonlead_writer)
 
+    def _apply_scalar(self, writer: Writer):
+        scalar = writer.varalloc()
+        writer(f'{self._fp_as_str} {scalar}{"{}"};')
+        with writer.AnonymousScope():
+            self._scalar[0].symbol.load(writer, self._context, 'value', [], False)
+            writer(f'{scalar} = value;')
+        for scalar in self._scalar[1:]:
+            with writer.AnonymousScope():
+                scalar.symbol.load(writer, self._context, 'value', [], False)
+                writer(f'{scalar} = {self._productOperation.format("value", f"{scalar}")};')
+
+        loopstack = []
+        loopmap = {}
+
+        stride = 1
+        threads = self._num_threads
+        for i, (dimmin, dimmax) in enumerate(self._ns):
+            loopmap[f'n{i}'] = len(loopstack)
+            if i not in self._lead_dims or threads == 0:
+                loopstack += [Loop(f'n{i}', dimmin, dimmax, 1, unroll=False)]
+            else:
+                loopstack += [LeadLoop(f'n{i}', dimmin, dimmax, threads, stride, unroll=False)]
+                threads //= dimmax - dimmin
+                stride *= dimmax - dimmin
+
+        def nonlead_writer(varlist):
+            self._dest.load(writer, self._context, 'value', [varlist[loopmap[f'n{i}']] for i,_ in enumerate(self._ns)], False)
+            writer(f'{self._fp_as_str} newvalue = {self._productOperation.format("value", f"{scalar}")};')
+            self._dest.store(writer, self._context, 'newvalue', [varlist[loopmap[f'n{i}']] for i,_ in enumerate(self._ns)], False)
+
+        write_loops(self._context, writer, loopstack, nonlead_writer)
+
     def _add_to_prev(self, writer: Writer):
         loopstack = []
         loopmap = {}
@@ -350,7 +474,6 @@ class MultilinearInstruction(ComputeInstruction):
 
             # gemm_traits += [f'LeadingDimension<A,B,C>']
 
-            # TODO: modify, if there are problems with the Blackwell arch name
             sm = self._vm.get_hw_descr().model[3:]
             smprint = f'{sm}0'
             gemm_traits += [f'SM<{smprint}>']
@@ -360,7 +483,7 @@ class MultilinearInstruction(ComputeInstruction):
             writer(f'using GemmType = decltype({traittype});')
 
             # currently, the alpha, beta are handled when storing back to global memory
-            writer(f'GemmType().execute(1, {self._op1.name}, {self._op2.name}, 1, {self._dest.name})')
+            writer(f'GemmType().execute(1, {self._op1.name}, {self._op2.name}, 1, {self._dest.name});')
 
     def _leading_dim(self, writer: Writer):
         with writer.Scope():

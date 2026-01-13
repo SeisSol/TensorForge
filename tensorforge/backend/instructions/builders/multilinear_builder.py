@@ -43,8 +43,7 @@ class MultilinearBuilder(AbstractBuilder):
     self._temp_regs = None
     self._dest_regs = None
 
-    self._use_registers_always = False
-    self._temporary_registers = False
+    self._use_registers_always = self._context.get_vm().get_hw_descr().vendor == 'amd' # False
     self._deferred_stores = {}
     self._temporaries = {}
 
@@ -72,7 +71,7 @@ class MultilinearBuilder(AbstractBuilder):
   # TODO: check if we always can allow a direct global memory load
   def _make_load_op(self, i):
 
-    prefer_broadcast = False # self._context.get_vm().get_hw_descr().vendor == 'amd'
+    prefer_broadcast = self._context.get_vm().get_hw_descr().vendor == 'amd'
 
     has_lead_dim = 0 in self._descr.target[i]
     transpose = self._descr.permute[i] != [j for j in range(len(self._descr.target[i]))]
