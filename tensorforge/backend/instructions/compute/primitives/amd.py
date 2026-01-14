@@ -355,6 +355,12 @@ def reduction(writer: Writer, source, target, operation, blocks):
             writer(f'{value} = {operation.format("newvalue", {value})}')
             var = tempvar
 
+def cdna1(arch):
+    return arch in ('gfx908', 'gfx90a', 'gfx942', 'gfx950')
+
+def cdna2(arch):
+    return arch in ('gfx90a', 'gfx942', 'gfx950')
+
 def mfma_emu_bf16_f32(writer: Writer, C, B, A, c, a, b):
     A1 = writer.varalloc()
     A2 = writer.varalloc()
@@ -371,14 +377,6 @@ def mfma_emu_bf16_f32(writer: Writer, C, B, A, c, a, b):
     writer(f'{C} = __builtin_amdgcn_mfma_f32_4x4x4bf16({A3}, {B1}, {C}, {c}, {a}, {b})')
 
 def matmul32(writer: Writer, C, B, A, M, N, K, threads):
-    scale = {
-        64: 4,
-        32: 3,
-        16: 2,
-        8: 1,
-        4: 0
-    }[threads]
-
     with writer.AnonymousScope():
 
         # transpose A
@@ -386,7 +384,25 @@ def matmul32(writer: Writer, C, B, A, M, N, K, threads):
         tmpB = writer.varalloc()
         tmpacc = writer.varalloc()
 
-        def write_matmul(block, start):
+        def write_matmul(block, start, cap):
+            scale = {
+                4: {
+                    64: 4,
+                    32: 3,
+                    16: 2,
+                    8: 1,
+                    4: 0
+                }[threads],
+                16: {
+                    64: 2,
+                    32: 1,
+                    16: 0
+                }[threads],
+                32: {
+                    64: 1,
+                    32: 0
+                }[threads]
+            }[block]
             fn = {
                 4: '__builtin_amdgcn_mfma_f32_4x4x1f32',
                 16: '__builtin_amdgcn_mfma_f32_16x16x1f32',
@@ -399,37 +415,39 @@ def matmul32(writer: Writer, C, B, A, M, N, K, threads):
             }[block]
 
             # C <- C + B@A
-            for j in range(start, N, block):
-                with writer.AnonymousScope():
-                    writer(f'tensorforge::VectorT<float, {block}> {tmpacc}{"{}"};')
-                    for k in range(0, K, threads):
-                        with writer.AnonymousScope():
-                            for jj in range(min(block, N - j)):
-                                A(writer, f'{tmpA}_{jj}', j + jj, k // threads)
-                            for jj in range(min(block, N - j), block):
-                                writer(f'float {tmpA}_{jj} = 0;')
-                            writer(f'{tp};')
-                            dk = min(threads, K - k)
-                            for kk in range(0, dk, block):
-                                with writer.AnonymousScope():
-                                    fB = [False] * block
-                                    for kkk in range(min(block, dk - kk)):
-                                        fB[kkk] = B(writer, f'{tmpB}_{kkk}', k + kk + kkk)
-                                    for kkk in range(min(block, dk - kk)):
-                                        if fB[kkk]:
-                                            writer(f'{tmpacc} = {fn}({tmpA}_{kkk},{tmpB}_{kkk},{tmpacc},{scale},{kk // block},0);')
+            end = ((N // block) * block) if cap else N
+            for j in range(start, end, block):
+                for i in range(0, M):
+                    with writer.AnonymousScope():
+                        writer(f'tensorforge::VectorT<float, {block}> {tmpacc}{"{}"};')
+                        for k in range(0, K, threads):
+                            with writer.AnonymousScope():
+                                for jj in range(min(block, N - j)):
+                                    A(writer, f'{tmpA}_{jj}', j + jj, k // threads)
+                                for jj in range(min(block, N - j), block):
+                                    writer(f'float {tmpA}_{jj} = 0;')
+                                writer(f'{tp};')
+                                dk = min(threads, K - k)
+                                for kk in range(0, dk, block):
+                                    with writer.AnonymousScope():
+                                        fB = [False] * block
+                                        for kkk in range(min(block, dk - kk)):
+                                            fB[kkk] = B(writer, f'{tmpB}_{kkk}', i, k + kk + kkk)
+                                        for kkk in range(min(block, dk - kk)):
+                                            if fB[kkk]:
+                                                writer(f'{tmpacc} = {fn}({tmpA}_{kkk},{tmpB}_{kkk},{tmpacc},{scale},{kk // block},0);')
 
-                    for jj in range(min(block, N - j)):
-                        C(writer, f'{tmpacc}[{jj}]', j + jj)
+                        for jj in range(min(block, N - j)):
+                            C(writer, f'{tmpacc}[{jj}]', i, j + jj)
 
         start = 0
         #if N >= 32 and threads >= 32:
         #    write_matmul(32, start)
         #    start += (N // 32) * 32
         #if N >= 16 and threads >= 16:
-        #    write_matmul(16, start)
+        #    write_matmul(16, start, True)
         #    start += (N // 16) * 16
-        write_matmul(4, start)
+        write_matmul(4, start, False)
 
 def fmadpp16(writer, C, A, B, row):
     writer(f'tensorforge::fmacdpp16<{row}>({C}, {A}, {B});')
@@ -440,7 +458,7 @@ def fmadpp8(writer, C, A, B, row):
 def fmadpp4(writer, C, A, B, row):
     writer(f'tensorforge::fmacdpp4<{row}>({C}, {A}, {B});')
 
-def hfma(writer: Writer, C, A, B, datatype, threads):
+def hfma(writer: Writer, C, A, B, repeat, datatype, threads):
     step = 1
     if threads >= 4 and datatype == FloatingPointType.F32:
         step = 4
@@ -448,7 +466,7 @@ def hfma(writer: Writer, C, A, B, datatype, threads):
         step = 8
     if threads >= 16 and datatype == FloatingPointType.F32 and False: # RDNA
         step = 16
-    if threads >= 16 and True: # CDNA 2+
+    if threads >= 16 and cdna2('gfx942'): # CDNA 2+
         step = 16
 
     func = {
@@ -458,47 +476,55 @@ def hfma(writer: Writer, C, A, B, datatype, threads):
         16: fmadpp16
     }[step]
 
-    for i in range(0, len(B), step):
+    for i in range(0, len(B) // repeat, step):
         if step == threads:
             a = A
         else:
             a = writer.varalloc()
             writer(f'const auto {a} = tensorforge::broadcast<{threads}, {step}, {i // step}>({A});')
-        for j in range(min(len(B[i:]), step)):
-            b = B[j + i]
-            c = C[j + i]
-            if b is not None:
-                func(writer, c, a, b, j)
+        for j in range(min(len(B[i*repeat:]) // repeat, step)):
+            for jj in range(repeat):
+                # TODO: switch to broadcast at some point for repeat to large
+                idx = (j + i) * repeat
+                b = B[idx + jj]
+                c = C[idx + jj]
+                if b is not None:
+                    func(writer, c, a, b, j)
 
 def matmul(writer, C, A, B, M, N, K, threads, dtype, sparse):
-    # CDNA 1+
-    if True and not sparse: # dtype == FloatingPointType.F32 and
+    if cdna1('gfx942') and not sparse: # dtype == FloatingPointType.F32 and
         matmul32(writer, C, A, B, M, N, K, threads)
     else:
         ab = []
         for k in range(K):
-            var = writer.varalloc()
-            res = A(writer, var, k)
-            if res:
-                ab += [var]
+            for i in range(M):
+                var = writer.varalloc()
+                res = A(writer, var, i, k)
+                if res:
+                    ab += [var]
         cx = []
         ax = []
         cb = []
         for j in range(N):
-            vC = writer.varalloc()
-            cb += [vC]
-            writer(f'float {vC}{"{}"};') # {dtype.ctype()}
+            cbl = []
+            for i in range(M):
+                vC = writer.varalloc()
+                cb += [vC]
+                cbl += [vC]
+                writer(f'float {vC}{"{}"};') # {dtype.ctype()}
             for k in range(K):
-                if not sparse or sparse(k, j):
-                    cx += [vC]
-                    ax += [ab[k]]
+                for i in range(M):
+                    if not sparse or sparse(k, j):
+                        cx += [cbl[i]]
+                        ax += [ab[k * M + i]]
 
-        for kj in range(0, len(cx), threads):
+        for kj in range(0, len(cx), threads*M):
             vB = writer.varalloc()
             B(writer, vB, None, kj)
-            vA = ax[kj: min(kj + threads, len(cx))]
-            vC = cx[kj: min(kj + threads, len(cx))]
-            hfma(writer, vC, vB, vA, dtype, threads)
+            vA = ax[kj: min(kj + threads*M, len(cx))]
+            vC = cx[kj: min(kj + threads*M, len(cx))]
+            hfma(writer, vC, vB, vA, M, dtype, threads)
 
         for j in range(N):
-            C(writer, cb[j], j)
+            for i in range(M):
+                C(writer, cb[j], i, j)

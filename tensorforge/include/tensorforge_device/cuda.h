@@ -66,7 +66,7 @@ template <typename T> __device__ __forceinline__ T readlane(T value, int lane) {
 
 template <std::size_t Block, std::size_t Subblock, std::size_t Lane, typename T>
 __device__ __forceinline__ T broadcast(T value) {
-  if constexpr (Block == 1) {
+  if constexpr (Block == 1 || Block == Subblock) {
     return value;
   } else {
     const auto subblockvar = lane_id() % Subblock;
