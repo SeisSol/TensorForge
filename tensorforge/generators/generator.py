@@ -182,7 +182,7 @@ class Generator:
         num_blocks = f'({GeneralLexicon.NUM_ELEMENTS} + {mults_per_block} - 1) / {mults_per_block}'
       else:
         writer(f'{lexic.get_launch_size(kernel_name, "block", shmemsize)}')
-        num_blocks = 'gridsize'
+        num_blocks = 'std::min(gridsize, numElements)'
       writer(f'{lexic.kernel_range_object("grid", f"{num_blocks}, 1, 1")};')
 
       writer(lexic.set_shmem_size(kernel_name, shmemsize))

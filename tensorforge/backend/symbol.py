@@ -423,7 +423,7 @@ class Symbol:
                   wrote = True
     else:
       offset = self.data_view.get_dim_offsets()[pos]
-      if isinstance(index[pos], int):
+      if isinstance(index[pos], (int, np.int32, np.int64)):
         runIdx[pos] = index[pos]
         wrote |= self.encode_values(pos + 1, runIdx, writer, context, variable, index, nontemp, leadidx)
       elif isinstance(index[pos], Immediate):

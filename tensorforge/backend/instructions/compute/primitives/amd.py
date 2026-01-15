@@ -414,6 +414,8 @@ def matmul32(writer: Writer, C, B, A, M, N, K, threads):
                 32: f'tensorforge::transpose32x32b32({", ".join(f"{tmpA}_{i}" for i in range(32))})'
             }[block]
 
+            # TODO: use Bctrl for threads in (16, 32)
+
             # C <- C + B@A
             end = ((N // block) * block) if cap else N
             for j in range(start, end, block):

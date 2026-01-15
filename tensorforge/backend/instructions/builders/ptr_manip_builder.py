@@ -24,7 +24,11 @@ class GetElementPtrBuilder(AbstractBuilder):
                     stype=dstype,
                     obj=src.obj)
 
-    dest.data_view = DataView(shape=src.obj.shape, permute=None)
+    if dstype == SymbolType.Batch:
+      # TODO: remove this code path
+      dest.data_view = DataView(shape=src.obj.shape, permute=None, bbox=src.obj.get_bbox())
+    else:
+      dest.data_view = DataView(shape=src.obj.shape, permute=None)
     self._scopes.add_symbol(dest)
 
     if src.stype != SymbolType.Data:

@@ -19,8 +19,8 @@ class HipLexic(CudaLexic):
     return False
 
   def get_launch_size(self, func_name, block, shmem):
-    return f"""static int gridsize = -1;
-    if (gridsize <= 0) {{
+    return f"""static std::size_t gridsize = 0;
+    if (gridsize == 0) {{
       int device, smCount, blocksPerSM;
       CHECK_RES(hipGetDevice(&device));
       CHECK_RES(hipDeviceGetAttribute(&smCount, hipDeviceAttributeMultiprocessorCount, device));
