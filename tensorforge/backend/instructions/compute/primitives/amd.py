@@ -522,7 +522,7 @@ def matmul(writer, C, A, B, M, N, K, threads, dtype, sparse):
 
         for kj in range(0, len(cx), threads*M):
             vB = writer.varalloc()
-            B(writer, vB, None, kj)
+            B(writer, vB, None, kj // M)
             vA = ax[kj: min(kj + threads*M, len(cx))]
             vC = cx[kj: min(kj + threads*M, len(cx))]
             hfma(writer, vC, vB, vA, M, dtype, threads)
