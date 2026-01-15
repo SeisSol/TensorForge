@@ -529,4 +529,4 @@ def matmul(writer, C, A, B, M, N, K, threads, dtype, sparse):
 
         for j in range(N):
             for i in range(M):
-                C(writer, cb[j], i, j)
+                C(writer, cb[j*M+i], i, j)
