@@ -133,10 +133,7 @@ class MultilinearInstruction(ComputeInstruction):
             self._nonleading_dim(writer)
         if len(self._ns) == 0:
             self._leading_dim(writer)
-        if self._scalar:
-            self._apply_scalar(writer)
-        if self._prev is not None:
-            self._add_to_prev(writer)
+        self._apply_linear(writer)
 
     def _nonleading_dim(self, writer: Writer):
         loopstack = []
@@ -415,16 +412,21 @@ class MultilinearInstruction(ComputeInstruction):
 
         write_loops(self._context, writer, loopstack, nonlead_writer)
 
-    def _apply_scalar(self, writer: Writer):
-        scalar = writer.varalloc()
-        writer(f'{self._fp_as_str} {scalar}{"{}"};')
-        with writer.AnonymousScope():
-            self._scalar[0].symbol.load(writer, self._context, 'value', [], False)
-            writer(f'{scalar} = value;')
-        for scalar in self._scalar[1:]:
+    def _apply_linear(self, writer: Writer):
+        if len(self._scalar) == 0 and self._prev is None:
+            # no linear needed
+            return
+
+        if len(self._scalar) > 0:
+            scalar = writer.varalloc()
+            writer(f'{self._fp_as_str} {scalar}{"{}"};')
             with writer.AnonymousScope():
-                scalar.symbol.load(writer, self._context, 'value', [], False)
-                writer(f'{scalar} = {self._productOperation.format("value", f"{scalar}")};')
+                self._scalar[0].symbol.load(writer, self._context, 'value', [], False)
+                writer(f'{scalar} = value;')
+            for scalar in self._scalar[1:]:
+                with writer.AnonymousScope():
+                    scalar.symbol.load(writer, self._context, 'value', [], False)
+                    writer(f'{scalar} = {self._productOperation.format("value", f"{scalar}")};')
 
         loopstack = []
         loopmap = {}
@@ -442,31 +444,15 @@ class MultilinearInstruction(ComputeInstruction):
 
         def nonlead_writer(varlist):
             self._dest.load(writer, self._context, 'value', [varlist[loopmap[f'n{i}']] for i,_ in enumerate(self._ns)], False)
-            writer(f'{self._fp_as_str} newvalue = {self._productOperation.format("value", f"{scalar}")};')
-            self._dest.store(writer, self._context, 'newvalue', [varlist[loopmap[f'n{i}']] for i,_ in enumerate(self._ns)], False)
-
-        write_loops(self._context, writer, loopstack, nonlead_writer)
-
-    def _add_to_prev(self, writer: Writer):
-        loopstack = []
-        loopmap = {}
-
-        stride = 1
-        threads = self._num_threads
-        for i, (dimmin, dimmax) in enumerate(self._ns):
-            loopmap[f'n{i}'] = len(loopstack)
-            if i not in self._lead_dims or threads == 0:
-                loopstack += [Loop(f'n{i}', dimmin, dimmax, 1, unroll=False)]
-            else:
-                loopstack += [LeadLoop(f'n{i}', dimmin, dimmax, threads, stride, unroll=False)]
-                threads //= dimmax - dimmin
-                stride *= dimmax - dimmin
-
-        def nonlead_writer(varlist):
-            self._dest.load(writer, self._context, 'value', [varlist[loopmap[f'n{i}']] for i,_ in enumerate(self._ns)], False)
-            self._prev.load(writer, self._context, 'oldvalue', [varlist[loopmap[f'n{i}']] for i,_ in enumerate(self._ns)], False)
-            writer(f'{self._fp_as_str} newvalue = {self._sumOperation.format("value", "oldvalue")};')
-            self._dest.store(writer, self._context, 'newvalue', [varlist[loopmap[f'n{i}']] for i,_ in enumerate(self._ns)], False)
+            valvar = 'value'
+            if len(self._scalar) > 0:
+                writer(f'const {self._fp_as_str} newvalue1 = {self._productOperation.format("value", f"{scalar}")};')
+                valvar = 'newvalue1'
+            if self._prev is not None:
+                self._prev.load(writer, self._context, 'oldvalue', [varlist[loopmap[f'n{i}']] for i,_ in enumerate(self._ns)], False)
+                writer(f'const {self._fp_as_str} newvalue2 = {self._sumOperation.format("oldvalue", valvar)};')
+                valvar = 'newvalue2'
+            self._dest.store(writer, self._context, valvar, [varlist[loopmap[f'n{i}']] for i,_ in enumerate(self._ns)], False)
 
         write_loops(self._context, writer, loopstack, nonlead_writer)
 
