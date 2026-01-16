@@ -477,7 +477,7 @@ def matmul32(writer: Writer, C, B, A, M, N, K, threads):
                                             fB[kkk] = B(writer, f'{tmpB}_{kkk}', i, k + kk + kkk)
                                         for kkk in range(min(block, dk - kk)):
                                             if fB[kkk]:
-                                                writer(f'{tmpacc} = {fn}({tmpA}_{k//threads}_{kkk},{tmpB}_{kkk},{tmpacc},{scale},{kk // block},0);')
+                                                writer(f'{tmpacc} = {fn}({tmpA}_{k//threads}_{kkk}, {tmpB}_{kkk}, {tmpacc}, {scale}, {kk // block}, 0);')
 
                             for jj in range(min(block, N - j)):
                                 C(writer, f'{tmpacc}[{jj}]', i, j + jj)
