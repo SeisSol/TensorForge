@@ -119,9 +119,12 @@ class MultilinearInstruction(ComputeInstruction):
         # i.e.: what can be loaded in early/late, do
 
         # TODO: handle offsets
-        self._dest.data_view = DataView(shape = [u - l for l,u in self._ns], permute=[i for i in range(targetrank)])
-        self._dest.data_view._bbox._lower = [l for l,_ in self._ns]
-        self._dest.data_view._bbox._upper = [u for _,u in self._ns]
+        if self._prev is not None:
+            self._dest.data_view = self._prev.data_view
+        if self._dest.data_view is None:
+            self._dest.data_view = DataView(shape = [u - l for l,u in self._ns], permute=[i for i in range(targetrank)])
+            self._dest.data_view._bbox._lower = [l for l,_ in self._ns]
+            self._dest.data_view._bbox._upper = [u for _,u in self._ns]
 
         self._lead_dims = [0]#[t for t in self._target[0] if t >= 0]
 
@@ -431,10 +434,13 @@ class MultilinearInstruction(ComputeInstruction):
         loopstack = []
         loopmap = {}
 
+        # TODO: not fully ideal; might need only a copy paritally (i.e. use the original dimmin/dimmax)
         stride = 1
         threads = self._num_threads
         for i, (dimmin, dimmax) in enumerate(self._ns):
             loopmap[f'n{i}'] = len(loopstack)
+            dimmin = self._dest.data_view.get_bbox().lower()[i]
+            dimmax = self._dest.data_view.get_bbox().upper()[i]
             if i not in self._lead_dims or threads == 0:
                 loopstack += [Loop(f'n{i}', dimmin, dimmax, 1, unroll=False)]
             else:
