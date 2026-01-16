@@ -211,7 +211,6 @@ class MultilinearInstruction(ComputeInstruction):
         can_use &= len(self._ops) == 2
 
         if can_use:
-            Mx = 1
             K = 1
             N = 1
             M = 1

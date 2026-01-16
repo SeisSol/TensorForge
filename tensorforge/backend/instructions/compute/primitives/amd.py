@@ -361,6 +361,36 @@ def cdna1(arch):
 def cdna2(arch):
     return arch in ('gfx90a', 'gfx942', 'gfx950')
 
+def mfma_emu_int8(writer: Writer, C, B, A, c, a, b):
+    # cf. the Ozaki II paper
+    const = [256, 255, 253, 251, 247, 239, 233, 229, 227, 223, 217, 211, 199, 197, 193, 191]
+    constM = 1
+    for x in const:
+        constM *= x
+    constI = [pow(constM // const[i], -1, const[i]) for i in range(len(const))]
+    const2 = [(constM // const[i]) * constI[i] for i in range(len(const))]
+    acc = len(const)
+
+    Aa = writer.varalloc()
+    Ba = writer.varalloc()
+    Ca = writer.varalloc()
+    writer(f'int64x4_t {Aa} {"{}"};')
+    writer(f'int64x4_t {Ba} {"{}"};')
+    writer(f'int64x4_t {Ca} {"{}"};')
+
+    # TODO: scale
+
+    for x,y in zip(const, const2):
+        a = writer.varalloc()
+        b = writer.varalloc()
+        c = writer.varalloc()
+        writer(f'const auto {a} = static_cast<uint8x4_t>({Aa} % {x});')
+        writer(f'const auto {b} = static_cast<uint8x4_t>({Ba} % {x});')
+        writer(f'{c} = __builtin_amdgcn_mfma_i32_4x4x4i8(get_native_vector({a}), get_native_vector({b}), 0, {c}, {a}, {b});')
+        writer(f'{Ca} += {c} * {y};')
+
+    # TODO: scale back
+
 def mfma_emu_bf16_f32(writer: Writer, C, B, A, c, a, b):
     A1 = writer.varalloc()
     A2 = writer.varalloc()
@@ -368,13 +398,22 @@ def mfma_emu_bf16_f32(writer: Writer, C, B, A, c, a, b):
     B1 = writer.varalloc()
     B2 = writer.varalloc()
     B3 = writer.varalloc()
-    # TODO: split to BF16
-    writer(f'{C} = __builtin_amdgcn_mfma_f32_4x4x4bf16({A1}, {B1}, {C}, {c}, {a}, {b})')
-    writer(f'{C} = __builtin_amdgcn_mfma_f32_4x4x4bf16({A1}, {B2}, {C}, {c}, {a}, {b})')
-    writer(f'{C} = __builtin_amdgcn_mfma_f32_4x4x4bf16({A1}, {B3}, {C}, {c}, {a}, {b})')
-    writer(f'{C} = __builtin_amdgcn_mfma_f32_4x4x4bf16({A2}, {B1}, {C}, {c}, {a}, {b})')
-    writer(f'{C} = __builtin_amdgcn_mfma_f32_4x4x4bf16({A2}, {B2}, {C}, {c}, {a}, {b})')
-    writer(f'{C} = __builtin_amdgcn_mfma_f32_4x4x4bf16({A3}, {B1}, {C}, {c}, {a}, {b})')
+    Ar = writer.varalloc()
+    Br = writer.varalloc()
+    writer(f'const bfloat16x4 {A1} = bfloat16x4({A});')
+    writer(f'const bfloat16x4 {B1} = bfloat16x4({B});')
+    writer(f'const bfloat16x4 {Ar} = {A} - {A1};')
+    writer(f'const bfloat16x4 {Br} = {B} - {B1};')
+    writer(f'const bfloat16x4 {A2} = bfloat16x4({Ar});')
+    writer(f'const bfloat16x4 {B2} = bfloat16x4({Br});')
+    writer(f'const bfloat16x4 {A3} = bfloat16x4({Ar} - {A2});')
+    writer(f'const bfloat16x4 {B3} = bfloat16x4({Br} - {B2});')
+    writer(f'{C} = __builtin_amdgcn_mfma_f32_4x4x4bf16(get_native_vector({A1}), get_native_vector({B1}), {C}, {c}, {a}, {b});')
+    writer(f'{C} = __builtin_amdgcn_mfma_f32_4x4x4bf16(get_native_vector({A1}), get_native_vector({B2}), {C}, {c}, {a}, {b});')
+    writer(f'{C} = __builtin_amdgcn_mfma_f32_4x4x4bf16(get_native_vector({A1}), get_native_vector({B3}), {C}, {c}, {a}, {b});')
+    writer(f'{C} = __builtin_amdgcn_mfma_f32_4x4x4bf16(get_native_vector({A2}), get_native_vector({B1}), {C}, {c}, {a}, {b});')
+    writer(f'{C} = __builtin_amdgcn_mfma_f32_4x4x4bf16(get_native_vector({A2}), get_native_vector({B2}), {C}, {c}, {a}, {b});')
+    writer(f'{C} = __builtin_amdgcn_mfma_f32_4x4x4bf16(get_native_vector({A3}), get_native_vector({B1}), {C}, {c}, {a}, {b});')
 
 def matmul32(writer: Writer, C, B, A, M, N, K, threads):
     with writer.AnonymousScope():
@@ -409,9 +448,9 @@ def matmul32(writer: Writer, C, B, A, M, N, K, threads):
                 32: '__builtin_amdgcn_mfma_f32_32x32x1f32'
             }[block]
             tp = {
-                4: f'tensorforge::transpose4x4b32({tmpA}_0, {tmpA}_1, {tmpA}_2, {tmpA}_3, {tmpA}_0, {tmpA}_1, {tmpA}_2, {tmpA}_3)',
-                16: f'tensorforge::transpose16x16b32({", ".join(f"{tmpA}_{i}" for i in range(16))})',
-                32: f'tensorforge::transpose32x32b32({", ".join(f"{tmpA}_{i}" for i in range(32))})'
+                4: lambda tmpA: f'tensorforge::transpose4x4b32({tmpA}_0, {tmpA}_1, {tmpA}_2, {tmpA}_3, {tmpA}_0, {tmpA}_1, {tmpA}_2, {tmpA}_3)',
+                16: lambda tmpA: f'tensorforge::transpose16x16b32({", ".join(f"{tmpA}_{i}" for i in range(16))})',
+                32: lambda tmpA: f'tensorforge::transpose32x32b32({", ".join(f"{tmpA}_{i}" for i in range(32))})'
             }[block]
 
             # TODO: use Bctrl for threads in (16, 32)
@@ -419,16 +458,17 @@ def matmul32(writer: Writer, C, B, A, M, N, K, threads):
             # C <- C + B@A
             end = ((N // block) * block) if cap else N
             for j in range(start, end, block):
-                for i in range(0, M):
-                    with writer.AnonymousScope():
-                        writer(f'tensorforge::VectorT<float, {block}> {tmpacc}{"{}"};')
-                        for k in range(0, K, threads):
-                            with writer.AnonymousScope():
-                                for jj in range(min(block, N - j)):
-                                    A(writer, f'{tmpA}_{jj}', j + jj, k // threads)
-                                for jj in range(min(block, N - j), block):
-                                    writer(f'float {tmpA}_{jj} = 0;')
-                                writer(f'{tp};')
+                with writer.AnonymousScope():
+                    for k in range(0, K, threads):
+                        for jj in range(min(block, N - j)):
+                            A(writer, f'{tmpA}_{k // threads}_{jj}', j + jj, k // threads)
+                        for jj in range(min(block, N - j), block):
+                            writer(f'float {tmpA}_{k // threads}_{jj} = 0;')
+                        writer(f'{tp(f"{tmpA}_{k // threads}")};')
+                    for i in range(0, M):
+                        with writer.AnonymousScope():
+                            writer(f'tensorforge::VectorT<float, {block}> {tmpacc}{"{}"};')
+                            for k in range(0, K, threads):
                                 dk = min(threads, K - k)
                                 for kk in range(0, dk, block):
                                     with writer.AnonymousScope():
@@ -437,10 +477,10 @@ def matmul32(writer: Writer, C, B, A, M, N, K, threads):
                                             fB[kkk] = B(writer, f'{tmpB}_{kkk}', i, k + kk + kkk)
                                         for kkk in range(min(block, dk - kk)):
                                             if fB[kkk]:
-                                                writer(f'{tmpacc} = {fn}({tmpA}_{kkk},{tmpB}_{kkk},{tmpacc},{scale},{kk // block},0);')
+                                                writer(f'{tmpacc} = {fn}({tmpA}_{k//threads}_{kkk},{tmpB}_{kkk},{tmpacc},{scale},{kk // block},0);')
 
-                        for jj in range(min(block, N - j)):
-                            C(writer, f'{tmpacc}[{jj}]', i, j + jj)
+                            for jj in range(min(block, N - j)):
+                                C(writer, f'{tmpacc}[{jj}]', i, j + jj)
 
         start = 0
         #if N >= 32 and threads >= 32:

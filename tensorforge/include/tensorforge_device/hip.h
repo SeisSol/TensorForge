@@ -129,6 +129,9 @@ __device__ __forceinline__ T broadcast(T value) {
   } else if constexpr (Block == 16 && Subblock == 8 && false) {
     // TODO: row mask
     return dpp<0x128, 0xf, 0xf, true>(value);
+  } else if constexpr (Block == 8 && Subblock == 4 && false) {
+    // TODO: row mask
+    return dpp<0x124 + Lane * 8, 0xf, 0xf, true>(value);
   } else if constexpr (Block == 4 && Subblock == 1) {
     return dpp<(Lane << 6) | (Lane << 4) | (Lane << 2) | (Lane << 0), 0xf, 0xf,
                true>(value);
