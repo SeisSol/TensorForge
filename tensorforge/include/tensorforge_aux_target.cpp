@@ -11,7 +11,7 @@ void checkErr(const std::string &File, int Line) {
 #endif
 }
 
-void synchDevice(void *stream) {
+void syncDevice(void *stream) {
   auto *realstream = static_cast<int *>(stream);
 #pragma omp taskwait depend(inout : realstream[0])
   checkErr(__FILE__, __LINE__);

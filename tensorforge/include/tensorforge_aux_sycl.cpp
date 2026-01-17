@@ -4,7 +4,7 @@
 namespace tensorforge {
 void checkErr(const std::string &File, int Line) {}
 
-void synchDevice(void *stream) {
+void syncDevice(void *stream) {
   if (stream == nullptr) {
     throw std::invalid_argument("cant sync device without queue!");
   }

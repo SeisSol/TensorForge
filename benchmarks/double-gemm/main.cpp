@@ -145,8 +145,8 @@ int main(int Argc, char *Arcv[]) {
                 FirstDriver.getTestStream());
   callSecondGemm(DeviceC, 0, DeviceTmp, 0, DeviceD, 0, NumElements, nullptr,
                  SecondDriver.getTestStream());
-  synchDevice(FirstDriver.getTestStream());
-  synchDevice(SecondDriver.getTestStream());
+  syncDevice(FirstDriver.getTestStream());
+  syncDevice(SecondDriver.getTestStream());
 
   std::cout << "INFO: comparsion started" << std::endl;
 
@@ -170,8 +170,8 @@ int main(int Argc, char *Arcv[]) {
     callSecondGemm(DeviceC, 0, DeviceTmp, 0, DeviceD, 0, NumElements, nullptr,
                    SecondDriver.getTestStream());
   }
-  synchDevice(FirstDriver.getTestStream());
-  synchDevice(SecondDriver.getTestStream());
+  syncDevice(FirstDriver.getTestStream());
+  syncDevice(SecondDriver.getTestStream());
 
   Timer.stop();
 

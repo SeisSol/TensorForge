@@ -33,7 +33,7 @@ int main () {
     {%- endfor %}
   }
 
-  device.api->synchDevice();
+  device.api->syncDevice();
 
   std::cout << "num. elements: " << {{ batchSize }} << std::endl;
   std::cout << "num. repeats: " << {{ num_repeats }} << std::endl;

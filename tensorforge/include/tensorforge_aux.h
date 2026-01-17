@@ -16,7 +16,7 @@
 namespace tensorforge {
 
 void checkErr(const std::string &file, int line);
-void synchDevice(void *stream = nullptr);
+void syncDevice(void *stream = nullptr);
 
 } // namespace tensorforge
 

@@ -111,7 +111,7 @@ int main(int Argc, char *Arcv[]) {
   std::cout << "INFO: computing on GPU started" << std::endl;
   gemm(DeviceA, 0, DeviceB, 0, DeviceC, 0, NumElements, nullptr,
        Driver.getTestStream());
-  synchDevice(Driver.getTestStream());
+  syncDevice(Driver.getTestStream());
 
   std::cout << "INFO: comparsion started" << std::endl;
   Driver.packResults(M, Ldc, N, OffsetC, SizeC, NumElements);
@@ -132,7 +132,7 @@ int main(int Argc, char *Arcv[]) {
     gemm(DeviceA, 0, DeviceB, 0, DeviceC, 0, NumElements, nullptr,
          Driver.getTestStream());
   }
-  synchDevice(Driver.getTestStream());
+  syncDevice(Driver.getTestStream());
   Timer.stop();
 
   std::cout << "Num elements: " << NumElements << std::endl;

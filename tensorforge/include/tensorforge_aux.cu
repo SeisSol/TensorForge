@@ -23,8 +23,8 @@ void checkErr(const std::string &File, int Line) {
 #endif
 }
 
-void synchDevice(void *stream) {
-  cudaDeviceSynchronize();
+void syncDevice(void *stream) {
+  CHECK_RES(cudaDeviceSynchronize());
   checkErr(__FILE__, __LINE__);
 }
 } // namespace tensorforge
