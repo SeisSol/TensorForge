@@ -180,6 +180,7 @@ class MultilinearBuilder(AbstractBuilder):
     regmem = RegMemObject(name, regsize)
     registers = Symbol(name=name, stype=SymbolType.Register, obj=regmem)
     registers.num_threads = self._num_threads
+    registers.datatype = self._context.fp_type
     self._scopes.add_symbol(registers)
     registerAlloc = RegisterAlloc(self._context, registers, regsize, 0.0)
     self._instructions.append(registerAlloc)

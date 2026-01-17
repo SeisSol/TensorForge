@@ -534,7 +534,7 @@ def hfma(writer: Writer, C, A, B, repeat, datatype, threads):
                     func(writer, c, a, b, j)
 
 def matmul(writer, C, A, B, M, N, K, threads, dtype, sparse):
-    if cdna1('gfx942') and not sparse: # dtype == Datatype.F32 and
+    if cdna1('gfx942') and not sparse and dtype == Datatype.F32:
         matmul32(writer, C, A, B, M, N, K, threads)
     else:
         ab = []
@@ -553,7 +553,7 @@ def matmul(writer, C, A, B, M, N, K, threads, dtype, sparse):
                 vC = writer.varalloc()
                 cb += [vC]
                 cbl += [vC]
-                writer(f'float {vC}{"{}"};') # {dtype.ctype()}
+                writer(f'{dtype.ctype()} {vC}{"{}"};')
             for k in range(K):
                 for i in range(M):
                     if not sparse or sparse(k, j):

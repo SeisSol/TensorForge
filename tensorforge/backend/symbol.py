@@ -313,14 +313,14 @@ class Symbol:
     cloned.lead_dims = [ld for ld in self.lead_dims]
     return cloned
 
-  def get_fptype(self, context: Context):
+  def get_fptype(self):
     # TODO: make obsolete
     if self.datatype is not None:
       return self.datatype
     elif self.obj is not None and self.obj.datatype is not None:
       return self.obj.datatype
     else:
-      return context.fp_type
+      assert False
 
   def address(self):
     if self.stype == SymbolType.Scalar:
@@ -362,7 +362,7 @@ class Symbol:
     if self.stype == SymbolType.Scalar:
       return f'{self.name}'
     if self.stype == SymbolType.Data:
-      return self.get_fptype(context).literal(self.obj.value(runIdx))
+      return self.get_fptype().literal(self.obj.value(runIdx))
 
   def encode_values(self, pos, runIdx, writer, context: Context, variable, index: List[Union[str, int, Immediate, Variable, LeadIndex]], nontemp, leadidx):
     wrote = False
@@ -370,7 +370,7 @@ class Symbol:
       if self.stype == SymbolType.Data:
         value = self.obj.value(runIdx)
         if value is not None:
-          writer(f'{variable} = {self.get_fptype(context).literal(value)};')
+          writer(f'{variable} = {self.get_fptype().literal(value)};')
           wrote = True
       else:
         # TODO: unite with access_address
@@ -447,11 +447,11 @@ class Symbol:
       access = f'{self.name}[{index}]'
     else:
       access = f'{self.name}[{index} + threadIdx.x]'
-    writer(f'{self.get_fptype(context)} {variable} = {access};')
+    writer(f'{self.get_fptype()} {variable} = {access};')
 
   def load(self, writer, context: Context, variable, index: List[Union[str, int, Immediate, Variable, LeadIndex]], nontemp):
     if self.stype == SymbolType.Data or (not self.obj.is_dense() and not isinstance(self.obj.spp, BoundingBoxSPP)):
-      writer(f'{self.get_fptype(context)} {variable} = {self.get_fptype(context).literal(0)};')
+      writer(f'{self.get_fptype()} {variable} = {self.get_fptype().literal(0)};')
 
       # treat the lead index last for better sparsity handling
       leadidx = None
@@ -491,10 +491,10 @@ class Symbol:
       else:
         access = pre_access
       if self.stype == SymbolType.Global:
-        writer(f'{self.get_fptype(context)} {variable};')
+        writer(f'{self.get_fptype()} {variable};')
         writer(context.get_vm().get_lexic().glb_load(variable, access, nontemp))
       else:
-        writer(f'{self.get_fptype(context)} {variable} = {access};')
+        writer(f'{self.get_fptype()} {variable} = {access};')
       return True
 
   def store(self, writer, context, variable, index: List[Union[str, int, Immediate, Variable, LeadIndex]], nontemp):

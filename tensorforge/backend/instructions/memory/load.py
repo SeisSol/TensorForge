@@ -190,12 +190,12 @@ class GlbToShrLoader(AbstractShrMemWrite):
       dest_access_index = self._dest.access_address(self._context, index)
       src_access_index = self._src.access_address(self._context, index)
       with writer.If(f'{self._linear_idx()} == 0'):
-        writer(f'cooperative_groups::memcpy_async(cooperative_groups::this_thread_block(), &{self._dest.name}[{dst_offset} + {dest_access_index}], &{self._src.name}[{src_offset} + {src_access_index}], {length * self._dest.get_fptype(self._context).size()});')
+        writer(f'cooperative_groups::memcpy_async(cooperative_groups::this_thread_block(), &{self._dest.name}[{dst_offset} + {dest_access_index}], &{self._src.name}[{src_offset} + {src_access_index}], {length * self._dest.get_fptype().size()});')
 
   def _write_hop(self, writer, src_offset, dst_offset, index, start, end, increment, nontemporal, linscale):
     if end > start:
       if increment > 1:
-        vectortype = self._vm.get_lexic().get_fptype(self._dest.get_fptype(self._context), increment)
+        vectortype = self._vm.get_lexic().get_fptype(self._dest.get_fptype(), increment)
         typeprefix = f'*({vectortype}*)&'
       else:
         typeprefix = ''

@@ -151,6 +151,20 @@ class GpuKernelGeneratorV1:
                                 prefer_align=False))
     return 0
 
+  def _datatype(self, source):
+    if hasattr(source, 'datatype'):
+      stype = Datatype.ytt2enum(source.datatype)
+    else:
+      stype = None
+    if hasattr(self._arch, 'typename'):
+      fptype = Datatype.str2enum(self._arch.typename)
+    else:
+      fptype = None
+
+    assert not (stype is None and fptype is None)
+
+    return stype if stype is not None else fptype
+
   def generate(self, cpp, routineCache):
     if hasattr(self._arch, 'typename'):
       fptype = Datatype.str2enum(self._arch.typename)
@@ -271,7 +285,7 @@ class GpuKernelGeneratorV1:
 
 
   def _add_scalar(self, scalar):
-    tensor = Tensor([], Addressing.SCALAR, alias=scalar.name(), datatype=scalar.datatype)
+    tensor = Tensor([], Addressing.SCALAR, alias=scalar.name(), datatype=self._datatype(scalar.datatype))
     self._tmp_matrices[scalar.name()] = tensor # SubTensor(tensor, tensor.bbox)
     return self._tmp_matrices[scalar.name()]
 
@@ -316,14 +330,15 @@ class GpuKernelGeneratorV1:
                                permute=None,
                                pattern=pattern,
                                values = tensor.values,
-                               datatype = tensor.datatype)
+                               datatype = self._datatype(tensor.datatype))
 
   def _gen_call_site(self, generator):
     mat_name_map = {}
     offset_name_map = {}
     for name, matrix in self._cache.items():
       if matrix.direction == DataFlowDirection.SOURCE and matrix.addressing != Addressing.SCALAR:
-        datatype = Datatype.str2enum(self._arch.typename) if matrix.datatype is None else matrix.datatype
+        datatype = matrix.datatype
+        assert datatype is not None
         ptr_type = f'const {datatype}{matrix.addressing.to_pointer()}'
         mat_name_map[name] = f'const_cast<{ptr_type}>({name})'
       else:

@@ -452,11 +452,11 @@ class MultilinearInstruction(ComputeInstruction):
             self._dest.load(writer, self._context, 'value', [varlist[loopmap[f'n{i}']] for i,_ in enumerate(self._ns)], False)
             valvar = 'value'
             if len(self._scalar) > 0:
-                writer(f'const {self._fp_as_str} newvalue1 = {self._productOperation.format("value", f"{scalar}")};')
+                writer(f'const {self._dest.get_fptype()} newvalue1 = {self._productOperation.format("value", f"{scalar}")};')
                 valvar = 'newvalue1'
             if self._prev is not None:
                 self._prev.load(writer, self._context, 'oldvalue', [varlist[loopmap[f'n{i}']] for i,_ in enumerate(self._ns)], False)
-                writer(f'const {self._fp_as_str} newvalue2 = {self._sumOperation.format("oldvalue", valvar)};')
+                writer(f'const {self._dest.get_fptype()} newvalue2 = {self._sumOperation.format("oldvalue", valvar)};')
                 valvar = 'newvalue2'
             self._dest.store(writer, self._context, valvar, [varlist[loopmap[f'n{i}']] for i,_ in enumerate(self._ns)], False)
 

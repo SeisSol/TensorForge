@@ -28,10 +28,6 @@ class VM:
     if VM._is_valid_type(fp_type):
       self._fp_type = fp_type
 
-  def bytes_per_real(self):
-    map = {'double': 8, 'float': 4}
-    return map[self._fp_type]
-
   def fp_as_str(self):
     return self._fp_type
 
