@@ -1,6 +1,6 @@
 from tensorforge.common.exceptions import GenerationError
 from tensorforge.common.context import Context
-from tensorforge.common.basic_types import DataFlowDirection, FloatingPointType
+from tensorforge.common.basic_types import DataFlowDirection, Datatype
 from tensorforge.common.operation import Operation
 from tensorforge.common.matrix.tensor import Tensor, SubTensor
 from tensorforge.common.basic_types import Addressing

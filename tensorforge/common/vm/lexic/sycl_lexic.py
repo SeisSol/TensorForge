@@ -1,7 +1,7 @@
 from tensorforge.common.basic_types import GeneralLexicon
 from .lexic import Lexic, Operation
 from tensorforge.backend.writer import MultiBlock
-from tensorforge.common.basic_types import FloatingPointType
+from tensorforge.common.basic_types import Datatype
 
 class SyclLexic(Lexic):
   def __init__(self, backend, underlying_hardware):
@@ -156,17 +156,17 @@ class SyclLexic(Lexic):
       return f'sycl::acosh({value1})'
     elif op == Operation.ATANH:
       return f'sycl::atanh({value1})'
-    elif op == Operation.NOT and fptype == FloatingPointType.BOOL:
+    elif op == Operation.NOT and fptype == Datatype.BOOL:
       return f'(!{value1})'
-    elif op == Operation.NOT and fptype != FloatingPointType.BOOL:
+    elif op == Operation.NOT and fptype != Datatype.BOOL:
       return f'(~{value1})'
-    elif op == Operation.AND and fptype == FloatingPointType.BOOL:
+    elif op == Operation.AND and fptype == Datatype.BOOL:
       return f'({value1} && {value2})'
-    elif op == Operation.OR and fptype == FloatingPointType.BOOL:
+    elif op == Operation.OR and fptype == Datatype.BOOL:
       return f'({value1} || {value2})'
-    elif op == Operation.AND and fptype != FloatingPointType.BOOL:
+    elif op == Operation.AND and fptype != Datatype.BOOL:
       return f'({value1} & {value2})'
-    elif op == Operation.OR and fptype != FloatingPointType.BOOL:
+    elif op == Operation.OR and fptype != Datatype.BOOL:
       return f'({value1} | {value2})'
     elif op == Operation.XOR:
       return f'({value1} ^ {value2})'

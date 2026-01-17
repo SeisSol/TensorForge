@@ -1,6 +1,6 @@
 from tensorforge.common.context import Context
 from tensorforge.generators.descriptions import GemmDescr
-from tensorforge.common.basic_types import FloatingPointType, Addressing
+from tensorforge.common.basic_types import Datatype, Addressing
 from tensorforge.generators.generator import Generator
 from tensorforge.common.exceptions import GenerationError
 import argparse
@@ -31,7 +31,7 @@ mat_c = SubTensor(Tensor([56, 18], Addressing.STRIDED, BoundingBox([0,0], [56,18
 
 
 try:
-  vm = Context(arch=args.arch, backend=args.backend, fp_type=FloatingPointType.F32)
+  vm = Context(arch=args.arch, backend=args.backend, fp_type=Datatype.F32)
 
   gen = Generator([GemmDescr(trans_a=False,
                        trans_b=False,

@@ -1,4 +1,4 @@
-from tensorforge.common.basic_types import FloatingPointType
+from tensorforge.common.basic_types import Datatype
 from tensorforge.backend.writer import Writer
 
 # TODO: for RDNA, wave-64, use __builtin_amdgcn_permlane16
@@ -102,9 +102,9 @@ def shuffle_swap(writer, dtype, target, source, block):
             mylane = f'(__lane_id() ^ {blockswap})'
             writefun = lambda s,t: writer(f'{t} = __builtin_amdgcn_ds_bpermute(4 * {mylane}, {s});')
 
-        if dtype == FloatingPointType.F32 or dtype == FloatingPointType.I32 or dtype == FloatingPointType.I32:
+        if dtype == Datatype.F32 or dtype == Datatype.I32 or dtype == Datatype.I32:
             writefun(f'*(int*)&{target}', f'*(int*)&{source}')
-        if dtype == FloatingPointType.F64 or dtype == FloatingPointType.I64 or dtype == FloatingPointType.I64:
+        if dtype == Datatype.F64 or dtype == Datatype.I64 or dtype == Datatype.I64:
             writefun(f'*(((int*)&{target}) + 0)', f'*(((int*)&{source}) + 0)')
             writefun(f'*(((int*)&{target}) + 1)', f'*(((int*)&{source}) + 1)')
 
@@ -136,9 +136,9 @@ def shuffle_mirror(writer, dtype, target, source, block):
             mylane = f'(__lane_id() ^ {blockswap})'
             writefun = lambda s,t: writer(f'{t} = __builtin_amdgcn_ds_bpermute(4 * {mylane}, {s});')
 
-        if dtype == FloatingPointType.F32 or dtype == FloatingPointType.I32 or dtype == FloatingPointType.I32:
+        if dtype == Datatype.F32 or dtype == Datatype.I32 or dtype == Datatype.I32:
             writefun(f'*(int*)&{target}', f'*(int*)&{source}')
-        if dtype == FloatingPointType.F64 or dtype == FloatingPointType.I64 or dtype == FloatingPointType.I64:
+        if dtype == Datatype.F64 or dtype == Datatype.I64 or dtype == Datatype.I64:
             writefun(f'*(((int*)&{target}) + 0)', f'*(((int*)&{source}) + 0)')
             writefun(f'*(((int*)&{target}) + 1)', f'*(((int*)&{source}) + 1)')
 
@@ -220,9 +220,9 @@ def shuffle_broadcast(writer, dtype, target, source, lane, subblock, block):
             mylane = f'((__lane_id() % {subblock}) + {subblock * lane})'
             writefun = lambda s,t: writer(f'{t} = __builtin_amdgcn_ds_bpermute(4 * {mylane}, {s});')
 
-        if dtype == FloatingPointType.F32 or dtype == FloatingPointType.I32 or dtype == FloatingPointType.I32:
+        if dtype == Datatype.F32 or dtype == Datatype.I32 or dtype == Datatype.I32:
             writefun(f'*(int*)&{target}', f'*(int*)&{source}')
-        if dtype == FloatingPointType.F64 or dtype == FloatingPointType.I64 or dtype == FloatingPointType.I64:
+        if dtype == Datatype.F64 or dtype == Datatype.I64 or dtype == Datatype.I64:
             writefun(f'*(((int*)&{target}) + 0)', f'*(((int*)&{source}) + 0)')
             writefun(f'*(((int*)&{target}) + 1)', f'*(((int*)&{source}) + 1)')
 
@@ -250,7 +250,7 @@ def shuffle_broadcast_forall(writer, dtype, size, source, filter, callback, subb
     shuffle_broadcast_forall(block, source)
 
 class MatrixCore:
-    def __init__(self, n: int, m: int, k: int, b: int, d: FloatingPointType, instr: str):
+    def __init__(self, n: int, m: int, k: int, b: int, d: Datatype, instr: str):
         self.n = n
         self.m = m
         self.k = k
@@ -292,18 +292,18 @@ class MatrixCore:
 
 matrixcores = {
     'cdna1': [
-        MatrixCore(16, 16, 1, 4, FloatingPointType.F32, '__builtin_amdgcn_mfma_f32_16x16x1f32'),
-        MatrixCore(4, 4, 1, 16, FloatingPointType.F32, '__builtin_amdgcn_mfma_f32_4x4x1f32')
+        MatrixCore(16, 16, 1, 4, Datatype.F32, '__builtin_amdgcn_mfma_f32_16x16x1f32'),
+        MatrixCore(4, 4, 1, 16, Datatype.F32, '__builtin_amdgcn_mfma_f32_4x4x1f32')
     ],
     'cdna2': [
-        MatrixCore(16, 16, 1, 4, FloatingPointType.F32, '__builtin_amdgcn_mfma_f32_16x16x1f32'),
-        MatrixCore(4, 4, 1, 16, FloatingPointType.F32, '__builtin_amdgcn_mfma_f32_4x4x1f32'),
-        MatrixCore(16, 16, 4, 1, FloatingPointType.F64, '__builtin_amdgcn_mfma_f64_16x16x4f64'),
-        MatrixCore(4, 4, 4, 4, FloatingPointType.F64, '__builtin_amdgcn_mfma_f64_4x4x4f64')
+        MatrixCore(16, 16, 1, 4, Datatype.F32, '__builtin_amdgcn_mfma_f32_16x16x1f32'),
+        MatrixCore(4, 4, 1, 16, Datatype.F32, '__builtin_amdgcn_mfma_f32_4x4x1f32'),
+        MatrixCore(16, 16, 4, 1, Datatype.F64, '__builtin_amdgcn_mfma_f64_16x16x4f64'),
+        MatrixCore(4, 4, 4, 4, Datatype.F64, '__builtin_amdgcn_mfma_f64_4x4x4f64')
     ],
     'cdna3': [
-        MatrixCore(16, 16, 1, 4, FloatingPointType.F32, '__builtin_amdgcn_mfma_f32_16x16x1f32_b4'),
-        MatrixCore(4, 4, 1, 16, FloatingPointType.F32, '__builtin_amdgcn_mfma_f32_4x4x1f32_b16')
+        MatrixCore(16, 16, 1, 4, Datatype.F32, '__builtin_amdgcn_mfma_f32_16x16x1f32_b4'),
+        MatrixCore(4, 4, 1, 16, Datatype.F32, '__builtin_amdgcn_mfma_f32_4x4x1f32_b16')
     ]
 }
 
@@ -502,11 +502,11 @@ def fmadpp4(writer, C, A, B, row):
 
 def hfma(writer: Writer, C, A, B, repeat, datatype, threads):
     step = 1
-    if threads >= 4 and datatype == FloatingPointType.F32:
+    if threads >= 4 and datatype == Datatype.F32:
         step = 4
-    if threads >= 8 and datatype == FloatingPointType.F32 and False: # RDNA
+    if threads >= 8 and datatype == Datatype.F32 and False: # RDNA
         step = 8
-    if threads >= 16 and datatype == FloatingPointType.F32 and False: # RDNA
+    if threads >= 16 and datatype == Datatype.F32 and False: # RDNA
         step = 16
     if threads >= 16 and cdna2('gfx942'): # CDNA 2+
         step = 16
@@ -534,7 +534,7 @@ def hfma(writer: Writer, C, A, B, repeat, datatype, threads):
                     func(writer, c, a, b, j)
 
 def matmul(writer, C, A, B, M, N, K, threads, dtype, sparse):
-    if cdna1('gfx942') and not sparse: # dtype == FloatingPointType.F32 and
+    if cdna1('gfx942') and not sparse: # dtype == Datatype.F32 and
         matmul32(writer, C, A, B, M, N, K, threads)
     else:
         ab = []

@@ -1,5 +1,5 @@
 from tensorforge.frontend import Parser, PostProcessor
-from tensorforge.common import FloatingPointType
+from tensorforge.common import Datatype
 from tensorforge.generators.generator import Generator
 from tensorforge.common.context import Context
 from internals import BenchGenerator, EnryPointGenerator, Aux
@@ -63,7 +63,7 @@ def main():
   config = yaml.safe_load(stream)
   context = Context(arch=args.arch,
                     backend=args.backend,
-                    fp_type=FloatingPointType.str2enum(config['fp_type']))
+                    fp_type=Datatype.str2enum(config['fp_type']))
 
   kernels = []; launchers = []; headers = []
   benchmarks_src = []; benchmarks_names = []

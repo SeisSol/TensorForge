@@ -2,7 +2,7 @@ from .spp import SparsityPattern, FullSPP
 from .boundingbox import BoundingBox
 from functools import reduce
 from typing import List, Union
-from ..basic_types import Addressing, DataFlowDirection, FloatingPointType
+from ..basic_types import Addressing, DataFlowDirection, Datatype
 from tensorforge.common.exceptions import GenerationError
 
 class Tensor:
@@ -14,7 +14,7 @@ class Tensor:
         is_tmp: bool = False,
         spp: SparsityPattern = None,
         data: Union[List[float], None] = None,
-        datatype: FloatingPointType = None):
+        datatype: Datatype = None):
         self.name = None
         self.alias = alias
         self.shape = tuple(shape)

@@ -3,7 +3,7 @@ from tensorforge.common.matrix.tensor import Tensor, SubTensor
 from tensorforge.common.matrix.boundingbox import BoundingBox
 from tensorforge.common.vm.vm import vm_factory
 from tensorforge import *
-from tensorforge.common.basic_types import FloatingPointType, Addressing
+from tensorforge.common.basic_types import Datatype, Addressing
 from tensorforge.common.context import Context
 from tensorforge.generators.descriptions import GemmDescr
 
@@ -21,7 +21,7 @@ class TestOccupancyNvidia(unittest.TestCase):
   def setUp(self):
     self._context = Context(arch='sm_60',
                   backend='cuda',
-                  fp_type=FloatingPointType.F32)
+                  fp_type=Datatype.F32)
 
   def tearDown(self):
     pass

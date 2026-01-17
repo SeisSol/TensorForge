@@ -1,5 +1,5 @@
 from .lexic import Lexic, Operation
-from tensorforge.common.basic_types import FloatingPointType
+from tensorforge.common.basic_types import Datatype
 
 class CudaLexic(Lexic):
 
@@ -116,8 +116,8 @@ class CudaLexic(Lexic):
       return f'__attribute__ ((vector_size (sizeof({fptype}) * {length}))) {fptype}'
 
   def get_operation(self, op: Operation, fptype, value1, value2):
-    fpsuffix = 'f' if fptype == FloatingPointType.F32 else ''
-    fpprefix = 'f' if fptype == FloatingPointType.F32 else 'd'
+    fpsuffix = 'f' if fptype == Datatype.F32 else ''
+    fpprefix = 'f' if fptype == Datatype.F32 else 'd'
     if op == Operation.COPY:
       return value1
     elif op == Operation.ADD:
@@ -181,17 +181,17 @@ class CudaLexic(Lexic):
       return f'acosh{fpsuffix}({value1})'
     elif op == Operation.ATANH:
       return f'atanh{fpsuffix}({value1})'
-    elif op == Operation.NOT and fptype == FloatingPointType.BOOL:
+    elif op == Operation.NOT and fptype == Datatype.BOOL:
       return f'(!{value1})'
-    elif op == Operation.NOT and fptype != FloatingPointType.BOOL:
+    elif op == Operation.NOT and fptype != Datatype.BOOL:
       return f'(~{value1})'
-    elif op == Operation.AND and fptype == FloatingPointType.BOOL:
+    elif op == Operation.AND and fptype == Datatype.BOOL:
       return f'({value1} && {value2})'
-    elif op == Operation.OR and fptype == FloatingPointType.BOOL:
+    elif op == Operation.OR and fptype == Datatype.BOOL:
       return f'({value1} || {value2})'
-    elif op == Operation.AND and fptype != FloatingPointType.BOOL:
+    elif op == Operation.AND and fptype != Datatype.BOOL:
       return f'({value1} & {value2})'
-    elif op == Operation.OR and fptype != FloatingPointType.BOOL:
+    elif op == Operation.OR and fptype != Datatype.BOOL:
       return f'({value1} | {value2})'
     elif op == Operation.XOR:
       return f'({value1} ^ {value2})'
@@ -211,7 +211,7 @@ class CudaLexic(Lexic):
     raise NotImplementedError(f'{op}')
 
   def reduction(self, optype, fptype, blocks):
-    if fptype == FloatingPointType.BOOL and blocks == [2,4,8,16,32]:
+    if fptype == Datatype.BOOL and blocks == [2,4,8,16,32]:
       if optype == Operation.AND:
         return f'__all_sync(-1, value)'
       if optype == Operation.OR:

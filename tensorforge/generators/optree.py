@@ -2,7 +2,7 @@ from typing import List, Union
 from tensorforge.backend.writer import Writer
 from tensorforge.common.context import Context
 from tensorforge.common.operation import Operation
-from tensorforge.common.basic_types import FloatingPointType
+from tensorforge.common.basic_types import Datatype
 from tensorforge.backend.scopes import Scopes
 
 import numpy as np
@@ -343,7 +343,7 @@ class TempVar(Variable):
         writer(f'{self.variable} = {value};')
 
 class Immediate(Variable):
-    def __init__(self, value, fptype: FloatingPointType):
+    def __init__(self, value, fptype: Datatype):
         self.value = value
         self.fptype = fptype
 
@@ -434,7 +434,7 @@ class ConditionalOpNode(OpNode):
         return f'({var[0]}) ? ({var[1]}) : ({var[2]})'
 
 class CastOpNode(OpNode):
-    def __init__(self, operands: List[Node], targetType: FloatingPointType):
+    def __init__(self, operands: List[Node], targetType: Datatype):
         super().__init__(operands)
         self.targetType = targetType
 
@@ -587,11 +587,11 @@ def scalar(x: yttt.Scalar):
 
 def immc(x: BaseType):
     if isinstance(x, float):
-        return imm(x, FloatingPointType.F32)
+        return imm(x, Datatype.F32)
     if isinstance(x, int):
-        return imm(x, FloatingPointType.I32)
+        return imm(x, Datatype.I32)
     if isinstance(x, bool):
-        return imm(x, FloatingPointType.BOOL)
+        return imm(x, Datatype.BOOL)
     if isinstance(x, ytt.Node):
         return tensor(x)
     if isinstance(x, yttt.Scalar):
@@ -742,7 +742,7 @@ def logp1(x: BaseType):
 def temp():
     return TempVar()
 
-def cast(x: Node, fptype: FloatingPointType):
+def cast(x: Node, fptype: Datatype):
     return CastOpNode([immc(x)], fptype)
 
 def bitand(x: BaseType, y: BaseType):

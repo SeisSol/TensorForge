@@ -7,7 +7,7 @@ from tensorforge.backend.writer import Writer
 from tensorforge.common.context import Context
 from tensorforge.common.operation import ReductionOperator
 from typing import Union, List
-from tensorforge.common.basic_types import FloatingPointType
+from tensorforge.common.basic_types import Datatype
 from tensorforge.backend.writer import Writer
 
 from .primitives import nvidia as nv

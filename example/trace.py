@@ -4,7 +4,7 @@ from tensorforge.common.matrix.boundingbox import BoundingBox
 from tensorforge.common.matrix.tensor import Tensor, SubTensor
 from tensorforge.common.context import Context
 from tensorforge.generators.descriptions import MultilinearDescr
-from tensorforge.common.basic_types import FloatingPointType, Addressing
+from tensorforge.common.basic_types import Datatype, Addressing
 from tensorforge.generators.generator import Generator
 
 
@@ -18,7 +18,7 @@ gemm_list = [MultilinearDescr(mat_b, [mat_a], [[-1, -1]], [[0, 1]])]
 
 context = Context(arch='sm_60',
                   backend='cuda',
-                  fp_type=FloatingPointType.F32)
+                  fp_type=Datatype.F32)
 
 generator = Generator(gemm_list, context)
 generator.generate()

@@ -1,6 +1,6 @@
 from math import ceil
 from tensorforge.common.vm.vm import VM, vm_factory
-from tensorforge.common.basic_types import FloatingPointType
+from tensorforge.common.basic_types import Datatype
 
 
 class Options:
@@ -17,17 +17,17 @@ class Context:
   def __init__(self,
                arch: str,
                backend: str,
-               fp_type: FloatingPointType,
+               fp_type: Datatype,
                options: Options = Options()):
-    self._vm: VM = vm_factory(arch, backend, FloatingPointType.as_str(fp_type))
+    self._vm: VM = vm_factory(arch, backend, Datatype.as_str(fp_type))
     self.fp_type = fp_type
     self._options = options
 
-  def set_fp_type(self, fp_type: FloatingPointType):
+  def set_fp_type(self, fp_type: Datatype):
     self.fp_type = fp_type
 
   def fp_as_str(self):
-    return FloatingPointType.as_str(self.fp_type)
+    return Datatype.as_str(self.fp_type)
 
   def get_vm(self):
     return self._vm

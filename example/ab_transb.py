@@ -1,6 +1,6 @@
 from tensorforge.common.context import Context
 from tensorforge.common.helper import generate_tmp_matrix
-from tensorforge.generators.descriptions import GemmDescr, FloatingPointType, Addressing
+from tensorforge.generators.descriptions import GemmDescr, Datatype, Addressing
 from tensorforge.generators.generator import Generator
 from tensorforge.common.matrix.boundingbox import BoundingBox
 from tensorforge.common.matrix.tensor import Tensor, SubTensor
@@ -27,7 +27,7 @@ gemm_list = [GemmDescr(trans_a=False,
 
 context = Context(arch='sm_60',
                   backend='cuda',
-                  fp_type=FloatingPointType.F32)
+                  fp_type=Datatype.F32)
 
 generator = Generator(gemm_list, context)
 generator.generate()

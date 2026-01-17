@@ -58,7 +58,7 @@ class StridedAddressing:
   def __req__(self, other):
     return other == Addressing.STRIDED
 
-class FloatingPointType(enum.Enum):
+class Datatype(enum.Enum):
   F32 = 0
   F64 = 1
   F16 = 2
@@ -119,44 +119,44 @@ class FloatingPointType(enum.Enum):
 
   @classmethod
   def as_str(cls, fp):
-    map = {FloatingPointType.F32: 'float',
-           FloatingPointType.F64: 'double',
-           FloatingPointType.F128: '__float128',
-           FloatingPointType.F16: 'half',
-           FloatingPointType.BF16: 'bfloat16',
-           FloatingPointType.BOOL: 'bool',
-           FloatingPointType.I8: 'int8_t',
-           FloatingPointType.F16: 'int16_t',
-           FloatingPointType.I32: 'int32_t',
-           FloatingPointType.I64: 'int64_t',}
+    map = {Datatype.F32: 'float',
+           Datatype.F64: 'double',
+           Datatype.F128: '__float128',
+           Datatype.F16: 'half',
+           Datatype.BF16: 'bfloat16',
+           Datatype.BOOL: 'bool',
+           Datatype.I8: 'int8_t',
+           Datatype.F16: 'int16_t',
+           Datatype.I32: 'int32_t',
+           Datatype.I64: 'int64_t',}
     return map[fp]
 
   @classmethod
   def str2enum(cls, as_str: str):
-    map = {'float': FloatingPointType.F32,
-           'double': FloatingPointType.F64,
-           'half': FloatingPointType.F16,
-           'bfloat16': FloatingPointType.BF16,
-           'quad': FloatingPointType.F128,
-           'bool': FloatingPointType.BOOL,
-           'int8_t': FloatingPointType.I8,
-           'int16_t': FloatingPointType.I16,
-           'int32_t': FloatingPointType.I32,
-           'int64_t': FloatingPointType.I64}
+    map = {'float': Datatype.F32,
+           'double': Datatype.F64,
+           'half': Datatype.F16,
+           'bfloat16': Datatype.BF16,
+           'quad': Datatype.F128,
+           'bool': Datatype.BOOL,
+           'int8_t': Datatype.I8,
+           'int16_t': Datatype.I16,
+           'int32_t': Datatype.I32,
+           'int64_t': Datatype.I64}
     return map[as_str]
 
   @classmethod
   def ytt2enum(cls, as_str: str):
-    map = {'f32': FloatingPointType.F32,
-           'f64': FloatingPointType.F64,
-           'f16': FloatingPointType.F16,
-           'f128': FloatingPointType.F128,
-           'bf16': FloatingPointType.BF16,
-           'bool': FloatingPointType.BOOL,
-           'i8': FloatingPointType.I8,
-           'i16': FloatingPointType.I16,
-           'i32': FloatingPointType.I32,
-           'i64': FloatingPointType.I64}
+    map = {'f32': Datatype.F32,
+           'f64': Datatype.F64,
+           'f16': Datatype.F16,
+           'f128': Datatype.F128,
+           'bf16': Datatype.BF16,
+           'bool': Datatype.BOOL,
+           'i8': Datatype.I8,
+           'i16': Datatype.I16,
+           'i32': Datatype.I32,
+           'i64': Datatype.I64}
     return map[as_str]
 
 

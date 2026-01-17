@@ -9,7 +9,7 @@ import numpy as np
 
 from tensorforge.common.matrix.dense import DenseMatrix
 from tensorforge.common.matrix.sparse import SparseMatrix
-from tensorforge.common.basic_types import FloatingPointType, Addressing
+from tensorforge.common.basic_types import Datatype, Addressing
 
 first = True
 writes = 0

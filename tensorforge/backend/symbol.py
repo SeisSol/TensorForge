@@ -4,7 +4,7 @@ from copy import deepcopy
 from tensorforge.common.matrix.boundingbox import BoundingBox
 from functools import reduce
 from tensorforge.common.context import Context
-from tensorforge.common.basic_types import FloatingPointType, Addressing
+from tensorforge.common.basic_types import Datatype, Addressing
 from .writer import Writer
 
 from tensorforge.common.matrix.spp import BoundingBoxSPP
@@ -104,7 +104,7 @@ class DataView:
     return f'shape: {self.shape}, permute: {self._permute}'
 
 class Immediate:
-  def __init__(self, value, fptype: FloatingPointType):
+  def __init__(self, value, fptype: Datatype):
     self._value = value
     self._type = fptype
 
@@ -118,7 +118,7 @@ class Immediate:
     return self._type.literal(self._value)
 
 class Variable:
-  def __init__(self, name, fptype: FloatingPointType):
+  def __init__(self, name, fptype: Datatype):
     self._name = name
     self._type = fptype
 
@@ -238,13 +238,13 @@ class Loop:
   def write(self, context: Context, writer: Writer, inner):
     if self.unroll:
       for value in range(self.start, self.end, self.step):
-        inner([Immediate(value, FloatingPointType.I32)])
+        inner([Immediate(value, Datatype.I32)])
         #inner([value])
     elif self.start < self.end:
       # TODO: move unroll up?
       var = self.var
       with writer.For(f'int32_t {var} = {self.start}; {var} < {self.end}; {var} += {self.step}', True):
-        inner([Variable(var, FloatingPointType.I32)])
+        inner([Variable(var, Datatype.I32)])
         #inner([var])
 
 # TODO: add leading
@@ -273,7 +273,7 @@ class LinearizedLoop:
         writer(f'int32_t {loopvar2} = {loopvar} + ({context.get_vm().get_lexic().thread_idx_x} % {self.blocksize});')
       for i, loop in enumerate(self.loops):
         writer(f'int32_t {loop.var} = (({loopvar2} / {multiplies[i]}) % {loopsize[i]}) * {loop.step} + {loop.start};')
-      inner([Variable(loop.var, FloatingPointType.I32) for loop in self.loops])
+      inner([Variable(loop.var, Datatype.I32) for loop in self.loops])
 
 class MultiLoop:
   pass
@@ -300,7 +300,7 @@ class Symbol:
     self.stype = stype
     self.obj = obj
     self.data_view: Union[DataView, None] = None
-    self.datatype: Union[FloatingPointType, None] = None
+    self.datatype: Union[Datatype, None] = None
     self.num_threads = None
     self.lead_dims = [0] # has only an effect for register storage
     self._users = []

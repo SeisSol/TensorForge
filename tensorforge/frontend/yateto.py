@@ -1,6 +1,6 @@
 
 from tensorforge.interface import YatetoInterface as yi
-from tensorforge.common.basic_types import Addressing, FloatingPointType, DataFlowDirection
+from tensorforge.common.basic_types import Addressing, Datatype, DataFlowDirection
 from tensorforge.common.context import Context
 from tensorforge.common.helper import generate_tmp_tensor
 from tensorforge.common.matrix.tensor import Tensor, SubTensor
@@ -153,7 +153,7 @@ class GpuKernelGeneratorV1:
 
   def generate(self, cpp, routineCache):
     if hasattr(self._arch, 'typename'):
-      fptype = FloatingPointType.str2enum(self._arch.typename)
+      fptype = Datatype.str2enum(self._arch.typename)
     else:
       fptype = None
 
@@ -214,7 +214,7 @@ class GpuKernelGeneratorV1:
 
   def add_tensor(self, d):
     name = d['name']
-    datatype = FloatingPointType.ytt2enum(d['datatype'])
+    datatype = Datatype.ytt2enum(d['datatype'])
 
     datatype_new = BaseDatatype.ytt2enum(d['datatype'])
 
@@ -323,7 +323,7 @@ class GpuKernelGeneratorV1:
     offset_name_map = {}
     for name, matrix in self._cache.items():
       if matrix.direction == DataFlowDirection.SOURCE and matrix.addressing != Addressing.SCALAR:
-        datatype = FloatingPointType.str2enum(self._arch.typename) if matrix.datatype is None else matrix.datatype
+        datatype = Datatype.str2enum(self._arch.typename) if matrix.datatype is None else matrix.datatype
         ptr_type = f'const {datatype}{matrix.addressing.to_pointer()}'
         mat_name_map[name] = f'const_cast<{ptr_type}>({name})'
       else:

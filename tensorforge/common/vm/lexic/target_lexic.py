@@ -1,6 +1,6 @@
 from tensorforge.common.basic_types import GeneralLexicon, Addressing, DataFlowDirection
 from .lexic import Lexic, Operation
-from tensorforge.common.basic_types import FloatingPointType
+from tensorforge.common.basic_types import Datatype
 
 class TargetLexic(Lexic):
   def __init__(self, backend, underlying_hardware):
@@ -208,8 +208,8 @@ class TargetLexic(Lexic):
     return f'__attribute__ ((vector_size (sizeof({fptype}) * {length}))) {fptype}'
 
   def get_operation(self, op: Operation, fptype, value1, value2):
-    fpsuffix = 'f' if fptype == FloatingPointType.F32 else ''
-    fpprefix = 'f' if fptype == FloatingPointType.F32 else 'd'
+    fpsuffix = 'f' if fptype == Datatype.F32 else ''
+    fpprefix = 'f' if fptype == Datatype.F32 else 'd'
     if op == Operation.COPY:
       return value1
     elif op == Operation.ADD:
@@ -268,17 +268,17 @@ class TargetLexic(Lexic):
       return f'std::acosh({value1})'
     elif op == Operation.ATANH:
       return f'std::atanh({value1})'
-    elif op == Operation.NOT and fptype == FloatingPointType.BOOL:
+    elif op == Operation.NOT and fptype == Datatype.BOOL:
       return f'(!{value1})'
-    elif op == Operation.NOT and fptype != FloatingPointType.BOOL:
+    elif op == Operation.NOT and fptype != Datatype.BOOL:
       return f'(~{value1})'
-    elif op == Operation.AND and fptype == FloatingPointType.BOOL:
+    elif op == Operation.AND and fptype == Datatype.BOOL:
       return f'({value1} && {value2})'
-    elif op == Operation.OR and fptype == FloatingPointType.BOOL:
+    elif op == Operation.OR and fptype == Datatype.BOOL:
       return f'({value1} || {value2})'
-    elif op == Operation.AND and fptype != FloatingPointType.BOOL:
+    elif op == Operation.AND and fptype != Datatype.BOOL:
       return f'({value1} & {value2})'
-    elif op == Operation.OR and fptype != FloatingPointType.BOOL:
+    elif op == Operation.OR and fptype != Datatype.BOOL:
       return f'({value1} | {value2})'
     elif op == Operation.XOR:
       return f'({value1} ^ {value2})'

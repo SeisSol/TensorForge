@@ -7,7 +7,7 @@ import yaml
 from tensorforge.backend.instructions.builders.kernels.gemms.type import GemmKernelType
 from tensorforge.generators.generator import GenerationError, Generator
 from tensorforge.backend import writer
-from tensorforge.common.basic_types import FloatingPointType, Addressing
+from tensorforge.common.basic_types import Datatype, Addressing
 from tensorforge.common.context import Context
 from test_loader import TestLoader
 from tensorforge.generators.descriptions import GemmDescr
@@ -43,7 +43,7 @@ else:
 
 vm = Context(backend=args.backend,
                 arch=args.arch,
-                fp_type=FloatingPointType.F32 if args.realsize == 4 else FloatingPointType.F64)
+                fp_type=Datatype.F32 if args.realsize == 4 else Datatype.F64)
 
 stream = open(args.specfile, 'r')
 suites = yaml.safe_load(stream)['test_suites']
