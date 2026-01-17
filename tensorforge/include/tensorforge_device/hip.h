@@ -608,56 +608,28 @@ transpose16x16b32(T &w1, T &w2, T &w3, T &w4, T &w5, T &w6, T &w7, T &w8, T &w9,
 template <typename T>
 __device__ __forceinline__ void transpose4x4b32(T &w1, T &w2, T &w3, T &w4,
                                                 T v1, T v2, T v3, T v4) {
-  const uint64_t mask1a = 0x5555555555555555ULL;
-  const uint64_t mask1b = 0xaaaaaaaaaaaaaaaaULL;
-  const uint64_t mask2a = 0x3333333333333333ULL;
-  const uint64_t mask2b = 0xccccccccccccccccULL;
+  // REMARK: we could combine DPP with cndmask (I tried it with inline assembly;
+  // but it didn't work w/o errors alas)
 
-  T u1, u2, u3, u4;
+  const auto vv2 = dpp<0xa0, 0xf, 0xf, true>(v2);
+  const auto vv4 = dpp<0xa0, 0xf, 0xf, true>(v4);
+  const auto vv1 = dpp<0xf5, 0xf, 0xf, true>(v1);
+  const auto vv3 = dpp<0xf5, 0xf, 0xf, true>(v3);
 
-  // a bit suboptimal: we four more s_movs than specified
-  // (otherwise there was the danger of a register override)
+  const auto u1 = __lane_id() % 2 == 0 ? v1 : vv2;
+  const auto u2 = __lane_id() % 2 == 1 ? v2 : vv1;
+  const auto u3 = __lane_id() % 2 == 0 ? v3 : vv4;
+  const auto u4 = __lane_id() % 2 == 1 ? v4 : vv3;
 
-  __asm("s_mov_b64 vcc, %[mask] \n\t" CM4STR(0, 0, 2, 2, "%[u1]", "%[v2]",
-                                             "%[v1]")
-        : [u1] "=v"(u1)
-        : [mask] "s"(mask1a), [v1] "v"(v1), [v2] "v"(v2)
-        : "vcc");
-  __asm("s_mov_b64 vcc, %[mask] \n\t" CM4STR(0, 0, 2, 2, "%[u3]", "%[v4]",
-                                             "%[v3]")
-        : [u3] "=v"(u3)
-        : [mask] "s"(mask1a), [v3] "v"(v3), [v4] "v"(v4)
-        : "vcc");
-  __asm("s_mov_b64 vcc, %[mask] \n\t" CM4STR(1, 1, 3, 3, "%[u2]", "%[v1]",
-                                             "%[v2]")
-        : [u2] "=v"(u2)
-        : [mask] "s"(mask1b), [v1] "v"(v1), [v2] "v"(v2)
-        : "vcc");
-  __asm("s_mov_b64 vcc, %[mask] \n\t" CM4STR(1, 1, 3, 3, "%[u4]", "%[v3]",
-                                             "%[v4]")
-        : [u4] "=v"(u4)
-        : [mask] "s"(mask1b), [v3] "v"(v3), [v4] "v"(v4)
-        : "vcc");
-  __asm("s_mov_b64 vcc, %[mask] \n\t" CM4STR(0, 1, 0, 1, "%[w1]", "%[u3]",
-                                             "%[u1]")
-        : [w1] "=v"(w1)
-        : [mask] "s"(mask2a), [u1] "v"(u1), [u3] "v"(u3)
-        : "vcc");
-  __asm("s_mov_b64 vcc, %[mask] \n\t" CM4STR(0, 1, 0, 1, "%[w2]", "%[u4]",
-                                             "%[u2]")
-        : [w2] "=v"(w2)
-        : [mask] "s"(mask2a), [u2] "v"(u2), [u4] "v"(u4)
-        : "vcc");
-  __asm("s_mov_b64 vcc, %[mask] \n\t" CM4STR(2, 3, 2, 3, "%[w3]", "%[u1]",
-                                             "%[u3]")
-        : [w3] "=v"(w3)
-        : [mask] "s"(mask2b), [u1] "v"(u1), [u3] "v"(u3)
-        : "vcc");
-  __asm("s_mov_b64 vcc, %[mask] \n\t" CM4STR(2, 3, 2, 3, "%[w4]", "%[u2]",
-                                             "%[u4]")
-        : [w4] "=v"(w4)
-        : [mask] "s"(mask2b), [u2] "v"(u2), [u4] "v"(u4)
-        : "vcc");
+  const auto uu1 = dpp<0xee, 0xf, 0xf, true>(u1);
+  const auto uu2 = dpp<0xee, 0xf, 0xf, true>(u2);
+  const auto uu3 = dpp<0x44, 0xf, 0xf, true>(u3);
+  const auto uu4 = dpp<0x44, 0xf, 0xf, true>(u4);
+
+  w1 = __lane_id() % 4 < 2 ? u1 : uu3;
+  w2 = __lane_id() % 4 < 2 ? u2 : uu4;
+  w3 = __lane_id() % 4 >= 2 ? u3 : uu1;
+  w4 = __lane_id() % 4 >= 2 ? u4 : uu2;
 }
 
 /*
