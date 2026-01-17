@@ -131,6 +131,9 @@ class Datatype(enum.Enum):
            Datatype.I64: 'int64_t',}
     return map[fp]
 
+  def ctype(self):
+    return self.as_str(self)
+
   @classmethod
   def str2enum(cls, as_str: str):
     map = {'float': Datatype.F32,

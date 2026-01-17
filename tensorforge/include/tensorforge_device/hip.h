@@ -571,8 +571,7 @@ using SpacePtrRestrict = __attribute__((address_space(Space))) T *__restrict;
 
 template <typename T>
 __device__ __forceinline__ void transpose4x4b32(T &w1, T &w2, T &w3, T &w4,
-                                                const T &v1, const T &v2,
-                                                const T &v3, const T &v4);
+                                                T v1, T v2, T v3, T v4);
 
 template <typename T>
 __device__ __forceinline__ void
@@ -608,8 +607,7 @@ transpose16x16b32(T &w1, T &w2, T &w3, T &w4, T &w5, T &w6, T &w7, T &w8, T &w9,
 
 template <typename T>
 __device__ __forceinline__ void transpose4x4b32(T &w1, T &w2, T &w3, T &w4,
-                                                const T &v1, const T &v2,
-                                                const T &v3, const T &v4) {
+                                                T v1, T v2, T v3, T v4) {
   const uint64_t mask1a = 0x5555555555555555ULL;
   const uint64_t mask1b = 0xaaaaaaaaaaaaaaaaULL;
   const uint64_t mask2a = 0x3333333333333333ULL;
@@ -617,33 +615,48 @@ __device__ __forceinline__ void transpose4x4b32(T &w1, T &w2, T &w3, T &w4,
 
   T u1, u2, u3, u4;
 
-  __asm("s_mov_b64 vcc, %[mask] \n\t" CM4STR(
-            0, 0, 2, 2, "%[u1]", "%[v2]",
-            "%[v1]") "\n\t" CM4STR(0, 0, 2, 2, "%[u3]", "%[v4]", "%[v3]") "\n\t"
-        : [u1] "=v"(u1), [u3] "=v"(u3)
-        : [mask] "s"(mask1a), [v1] "v"(v1), [v2] "v"(v2), [v3] "v"(v3),
-          [v4] "v"(v4)
+  // a bit suboptimal: we four more s_movs than specified
+  // (otherwise there was the danger of a register override)
+
+  __asm("s_mov_b64 vcc, %[mask] \n\t" CM4STR(0, 0, 2, 2, "%[u1]", "%[v2]",
+                                             "%[v1]")
+        : [u1] "=v"(u1)
+        : [mask] "s"(mask1a), [v1] "v"(v1), [v2] "v"(v2)
         : "vcc");
-  __asm("s_mov_b64 vcc, %[mask] \n\t" CM4STR(
-            1, 1, 3, 3, "%[u2]", "%[v1]",
-            "%[v2]") "\n\t" CM4STR(1, 1, 3, 3, "%[u4]", "%[v3]", "%[v4]") "\n\t"
-        : [u2] "=v"(u2), [u4] "=v"(u4)
-        : [mask] "s"(mask1b), [v1] "v"(v1), [v2] "v"(v2), [v3] "v"(v3),
-          [v4] "v"(v4)
+  __asm("s_mov_b64 vcc, %[mask] \n\t" CM4STR(0, 0, 2, 2, "%[u3]", "%[v4]",
+                                             "%[v3]")
+        : [u3] "=v"(u3)
+        : [mask] "s"(mask1a), [v3] "v"(v3), [v4] "v"(v4)
         : "vcc");
-  __asm("s_mov_b64 vcc, %[mask] \n\t" CM4STR(
-            0, 1, 0, 1, "%[w1]", "%[u3]",
-            "%[u1]") "\n\t" CM4STR(0, 1, 0, 1, "%[w2]", "%[u4]", "%[u2]") "\n\t"
-        : [w1] "=v"(w1), [w2] "=v"(w2)
-        : [mask] "s"(mask2a), [u1] "v"(u1), [u2] "v"(u2), [u3] "v"(u3),
-          [u4] "v"(u4)
+  __asm("s_mov_b64 vcc, %[mask] \n\t" CM4STR(1, 1, 3, 3, "%[u2]", "%[v1]",
+                                             "%[v2]")
+        : [u2] "=v"(u2)
+        : [mask] "s"(mask1b), [v1] "v"(v1), [v2] "v"(v2)
         : "vcc");
-  __asm("s_mov_b64 vcc, %[mask] \n\t" CM4STR(
-            2, 3, 2, 3, "%[w3]", "%[u1]",
-            "%[u3]") "\n\t" CM4STR(2, 3, 2, 3, "%[w4]", "%[u2]", "%[u4]")
-        : [w3] "=v"(w3), [w4] "=v"(w4)
-        : [mask] "s"(mask2b), [u1] "v"(u1), [u2] "v"(u2), [u3] "v"(u3),
-          [u4] "v"(u4)
+  __asm("s_mov_b64 vcc, %[mask] \n\t" CM4STR(1, 1, 3, 3, "%[u4]", "%[v3]",
+                                             "%[v4]")
+        : [u4] "=v"(u4)
+        : [mask] "s"(mask1b), [v3] "v"(v3), [v4] "v"(v4)
+        : "vcc");
+  __asm("s_mov_b64 vcc, %[mask] \n\t" CM4STR(0, 1, 0, 1, "%[w1]", "%[u3]",
+                                             "%[u1]")
+        : [w1] "=v"(w1)
+        : [mask] "s"(mask2a), [u1] "v"(u1), [u3] "v"(u3)
+        : "vcc");
+  __asm("s_mov_b64 vcc, %[mask] \n\t" CM4STR(0, 1, 0, 1, "%[w2]", "%[u4]",
+                                             "%[u2]")
+        : [w2] "=v"(w2)
+        : [mask] "s"(mask2a), [u2] "v"(u2), [u4] "v"(u4)
+        : "vcc");
+  __asm("s_mov_b64 vcc, %[mask] \n\t" CM4STR(2, 3, 2, 3, "%[w3]", "%[u1]",
+                                             "%[u3]")
+        : [w3] "=v"(w3)
+        : [mask] "s"(mask2b), [u1] "v"(u1), [u3] "v"(u3)
+        : "vcc");
+  __asm("s_mov_b64 vcc, %[mask] \n\t" CM4STR(2, 3, 2, 3, "%[w4]", "%[u2]",
+                                             "%[u4]")
+        : [w4] "=v"(w4)
+        : [mask] "s"(mask2b), [u2] "v"(u2), [u4] "v"(u4)
         : "vcc");
 }
 
