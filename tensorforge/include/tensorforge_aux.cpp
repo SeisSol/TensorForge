@@ -1,3 +1,5 @@
+#include "tensorforge_aux.h"
+
 #include <hip/hip_runtime.h>
 #include <iostream>
 

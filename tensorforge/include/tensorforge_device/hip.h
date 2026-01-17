@@ -172,6 +172,14 @@ __device__ __forceinline__ T swap(T value) {
   return value;
 }
 
+#ifdef __GFX9__
+#define CMVCC ", vcc"
+#define CMFI ""
+#else
+#define CMVCC ""
+#define CMFI " fi:1 "
+#endif
+
 // FMAC_DPP inline assembly
 // !! MAY DISREGARD WAIT STATES !!
 
@@ -179,19 +187,19 @@ __device__ __forceinline__ T swap(T value) {
 #define STR(x) ISTRINGIFY(x)
 #define FMADPP4(pos, c, a, b)                                                  \
   __asm("v_fmac_f32_dpp %0, %1, %2 quad_perm:[" STR(pos) "," STR(pos) "," STR( \
-            pos) "," STR(pos) "] row_mask:0xf bank_mask:0xf bound_ctrl:1"      \
+            pos) "," STR(pos) "] row_mask:0xf bank_mask:0xf bound_ctrl:1" CMFI \
         : "+v"(c)                                                              \
         : "v"(a), "v"(b)                                                       \
         :)
 #define FMADPP16(pos, c, a, b)                                                 \
   __asm("v_fmac_f32_dpp %0, %1, %2 row_newbcast:" STR(                         \
-            pos) " row_mask:0xf bank_mask:0xf bound_ctrl:1"                    \
+            pos) " row_mask:0xf bank_mask:0xf bound_ctrl:1" CMFI               \
         : "+v"(c)                                                              \
         : "v"(a), "v"(b)                                                       \
         :)
 #define DMADPP16(pos, c, a, b)                                                 \
   __asm("v_fmac_f64_dpp %0, %1, %2 row_newbcast:" STR(                         \
-            pos) " row_mask:0xf bank_mask:0xf bound_ctrl:1"                    \
+            pos) " row_mask:0xf bank_mask:0xf bound_ctrl:1" CMFI               \
         : "+v"(c)                                                              \
         : "v"(a), "v"(b)                                                       \
         :)
@@ -590,17 +598,13 @@ transpose16x16b32(T &w1, T &w2, T &w3, T &w4, T &w5, T &w6, T &w7, T &w8, T &w9,
   // const T u1 = dppUpdate<0x128, 0b1010, 0b1111, true>(v1, v5);
 }
 
-#if defined(__gfx908__) || defined(__gfx90a__) || defined(__gfx942__) ||       \
-    defined(__gfx950__)
-
-#define CMVCC ", vcc"
-
 #define CM4STR(p1, p2, p3, p4, c, a, b)                                        \
-  "v_cndmask_b32_dpp " c ", " a ", " b CMVCC " quad_perm:[" STR(p1) "," STR(   \
-      p2) "," STR(p3) "," STR(p4) "] row_mask:0xf bank_mask:0xf bound_ctrl:1"
+  "v_cndmask_b32_dpp " c ", " a ", " b CMVCC                                   \
+  " quad_perm:[" STR(p1) "," STR(p2) "," STR(p3) "," STR(                      \
+      p4) "] row_mask:0xf bank_mask:0xf bound_ctrl:1" CMFI
 #define CMRSTR(cnt, c, a, b)                                                   \
   "v_cndmask_b32_dpp " c ", " a ", " b CMVCC                                   \
-  " row_ror:" STR(cnt) " row_mask:0xf bank_mask:0xf bound_ctrl:1"
+  " row_ror:" STR(cnt) " row_mask:0xf bank_mask:0xf bound_ctrl:1" CMFI
 
 template <typename T>
 __device__ __forceinline__ void transpose4x4b32(T &w1, T &w2, T &w3, T &w4,
@@ -642,8 +646,6 @@ __device__ __forceinline__ void transpose4x4b32(T &w1, T &w2, T &w3, T &w4,
           [u4] "v"(u4)
         : "vcc");
 }
-
-#endif
 
 /*
 class Buffer {

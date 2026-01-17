@@ -1,3 +1,5 @@
+#include "tensorforge_aux.h"
+
 #include <iostream>
 #include <sycl/sycl.hpp>
 
