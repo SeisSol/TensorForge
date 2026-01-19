@@ -250,6 +250,9 @@ class MultilinearInstruction(ComputeInstruction):
                     k //= size
                 return idx
 
+            # TODO: remove
+            kx = self._ks[0][0]
+
             def unwindOp(i, j, k, opid, full):
                 iidx = unwindI(i)
                 jidx = unwindJ(j)
@@ -295,7 +298,7 @@ class MultilinearInstruction(ComputeInstruction):
                     self._ops[0].symbol.load(writer, self._context, var, unwindOp(i, 0, k, 0, True), False)
                 return res
 
-            amd.matmul(writer, C, A, B, M, N, K, self._num_threads, self._dest.datatype, sparse)
+            amd.matmul(writer, C, A, B, M, N, K, kx, self._num_threads, self._dest.datatype, sparse)
             return True
         return False
 

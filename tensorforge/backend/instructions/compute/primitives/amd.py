@@ -415,7 +415,7 @@ def mfma_emu_bf16_f32(writer: Writer, C, B, A, c, a, b):
     writer(f'{C} = __builtin_amdgcn_mfma_f32_4x4x4bf16(get_native_vector({A2}), get_native_vector({B2}), {C}, {c}, {a}, {b});')
     writer(f'{C} = __builtin_amdgcn_mfma_f32_4x4x4bf16(get_native_vector({A3}), get_native_vector({B1}), {C}, {c}, {a}, {b});')
 
-def matmul32(writer: Writer, C, B, A, M, N, K, threads):
+def matmul32(writer: Writer, C, B, A, M, N, K, kx, threads):
     with writer.AnonymousScope():
 
         # transpose A
@@ -459,7 +459,7 @@ def matmul32(writer: Writer, C, B, A, M, N, K, threads):
             end = ((N // block) * block) if cap else N
             for j in range(start, end, block):
                 with writer.AnonymousScope():
-                    for k in range(0, K, threads):
+                    for k in range(0, K + kx, threads):
                         for jj in range(min(block, N - j)):
                             A(writer, f'{tmpA}_{k // threads}_{jj}', j + jj, k // threads)
                         for jj in range(min(block, N - j), block):
@@ -477,7 +477,12 @@ def matmul32(writer: Writer, C, B, A, M, N, K, threads):
                                             fB[kkk] = B(writer, f'{tmpB}_{kkk}', i, k + kk + kkk)
                                         for kkk in range(min(block, dk - kk)):
                                             if fB[kkk]:
-                                                writer(f'{tmpacc} = {fn}({tmpA}_{k//threads}_{kkk}, {tmpB}_{kkk}, {tmpacc}, {scale}, {kk // block}, 0);')
+                                                trueK = k + kk + kkk + kx
+                                                km = trueK // threads
+                                                kkm = ((trueK % threads) // block)
+                                                kkkm = trueK % block
+                                                # the index for tmpB is correct
+                                                writer(f'{tmpacc} = {fn}({tmpA}_{km}_{kkkm}, {tmpB}_{kkk}, {tmpacc}, {scale}, {kkm}, 0);')
 
                             for jj in range(min(block, N - j)):
                                 C(writer, f'{tmpacc}[{jj}]', i, j + jj)
@@ -533,9 +538,9 @@ def hfma(writer: Writer, C, A, B, repeat, datatype, threads):
                 if b is not None:
                     func(writer, c, a, b, j)
 
-def matmul(writer, C, A, B, M, N, K, threads, dtype, sparse):
+def matmul(writer, C, A, B, M, N, K, kx, threads, dtype, sparse):
     if cdna1('gfx942') and not sparse and dtype == Datatype.F32:
-        matmul32(writer, C, A, B, M, N, K, threads)
+        matmul32(writer, C, A, B, M, N, K, kx, threads)
     else:
         ab = []
         for k in range(K):
