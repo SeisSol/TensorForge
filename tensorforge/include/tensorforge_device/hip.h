@@ -608,12 +608,13 @@ transpose16x16b32(T &w1, T &w2, T &w3, T &w4, T &w5, T &w6, T &w7, T &w8, T &w9,
 template <typename T>
 __device__ __forceinline__ void transpose4x4b32(T &w1, T &w2, T &w3, T &w4,
                                                 T v1, T v2, T v3, T v4) {
+
   const uint64_t mask1a = 0x5555555555555555ULL;
   const uint64_t mask1b = 0xaaaaaaaaaaaaaaaaULL;
   const uint64_t mask2a = 0x3333333333333333ULL;
   const uint64_t mask2b = 0xccccccccccccccccULL;
 
-  T u1, u2, u3, u4;
+  // T u1, u2, u3, u4;
 
   // 11 12 13 14
   // 21 22 23 24
@@ -632,6 +633,7 @@ __device__ __forceinline__ void transpose4x4b32(T &w1, T &w2, T &w3, T &w4,
 
   // clang-format off
 
+  /*
   __asm("s_mov_b64 vcc, %[mask] \n\t"
   CM4STR(0, 0, 2, 2, "%[u1]", "%[v2]", "%[v1]") "\n\t"
   CM4STR(0, 0, 2, 2, "%[u3]", "%[v4]", "%[v3]")
@@ -656,12 +658,12 @@ __device__ __forceinline__ void transpose4x4b32(T &w1, T &w2, T &w3, T &w4,
   : [w3] "=&v" (w3), [w4] "=&v" (w4)
   : [mask] "s" (mask2b), [u1] "v" (u1), [u2] "v" (u2), [u3] "v" (u3), [u4] "v" (u4)
   : "vcc");
+  */
 
   // clang-format on
 
   // code w/o inline assembly (doesn't combine cndmask and dpp)
 
-  /*
   const auto vv2 = dpp<0xa0, 0xf, 0xf, true>(v2);
   const auto vv4 = dpp<0xa0, 0xf, 0xf, true>(v4);
   const auto vv1 = dpp<0xf5, 0xf, 0xf, true>(v1);
@@ -681,7 +683,6 @@ __device__ __forceinline__ void transpose4x4b32(T &w1, T &w2, T &w3, T &w4,
   w2 = __lane_id() % 4 < 2 ? u2 : uu4;
   w3 = __lane_id() % 4 >= 2 ? u3 : uu1;
   w4 = __lane_id() % 4 >= 2 ? u4 : uu2;
-  */
 }
 
 /*
