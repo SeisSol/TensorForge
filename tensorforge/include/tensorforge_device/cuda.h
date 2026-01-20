@@ -1,8 +1,14 @@
 #pragma once
 
+#include <optional>
 #include <type_traits>
 
 #include "base.h"
+
+#include <cooperative_groups.h>
+
+#include <cuda/pipeline>
+#include <cuda/ptx>
 
 namespace tensorforge {
 
@@ -73,5 +79,72 @@ __device__ __forceinline__ T broadcast(T value) {
     return __shfl_sync(warpSize, value, Subblock * Lane + subblockvar, Block);
   }
 }
+
+// #if __CUDA_ARCH__ >= 1000
+// cf. the new CUDA programming guide 4.12
+// declare this one as __shared__
+struct ClusterLaunchCtrl {
+private:
+  uint4 result_;
+  uint64_t barrier_;
+
+public:
+  __device__ __forceinline__ void init() {
+    namespace cg = cooperative_groups;
+    namespace ptx = cuda::ptx;
+
+    if (cg::thread_block::thread_rank() == 0) {
+      result_ = {};
+      barrier_ = {};
+      ptx::mbarrier_init(&barrier_, 1);
+    }
+  }
+
+  __device__ __forceinline__ void setupNext() {
+    namespace cg = cooperative_groups;
+    namespace ptx = cuda::ptx;
+
+    __syncthreads();
+
+    if (cg::thread_block::thread_rank() == 0) {
+      ptx::fence_proxy_async_generic_sync_restrict(
+          ptx::sem_acquire, ptx::space_cluster, ptx::scope_cluster);
+
+      cg::invoke_one(cg::coalesced_threads(), [&]() {
+        ptx::clusterlaunchcontrol_try_cancel(&result_, &barrier_);
+      });
+
+      ptx::mbarrier_arrive_expect_tx(ptx::sem_relaxed, ptx::scope_cta,
+                                     ptx::space_shared, &barrier_,
+                                     sizeof(uint4));
+    }
+  }
+
+  __device__ __forceinline__ std::optional<int> queryNext(int phase) {
+    namespace cg = cooperative_groups;
+    namespace ptx = cuda::ptx;
+
+    while (!ptx::mbarrier_try_wait_parity(ptx::sem_acquire, ptx::scope_cta,
+                                          &barrier_, phase)) {
+    }
+    phase ^= 1;
+
+    const bool success =
+        ptx::clusterlaunchcontrol_query_cancel_is_canceled(result_);
+    if (!success) {
+      return {};
+    }
+
+    // we only use blockIdx.x
+    const auto nextBlock =
+        ptx::clusterlaunchcontrol_query_cancel_get_first_ctaid_x<int>(result_);
+
+    ptx::fence_proxy_async_generic_sync_restrict(
+        ptx::sem_release, ptx::space_shared, ptx::scope_cluster);
+
+    return nextBlock;
+  }
+};
+// #endif
 
 } // namespace tensorforge

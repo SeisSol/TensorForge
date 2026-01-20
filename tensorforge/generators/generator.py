@@ -83,9 +83,12 @@ class Generator:
     self._name_operands(self.descr_list)
 
     prefer_persistent = context.get_vm().get_hw_descr().vendor == 'amd'
+    prefer_launchcontrol = context.get_vm().get_hw_descr().vendor == 'nvidia' and int(context.get_vm().get_hw_descr().model[3:]) >= 100
 
     self._persistent_threading = prefer_persistent
     self._preload_globals = prefer_persistent
+
+    self._clusterlaunchcontrol = prefer_launchcontrol
 
   def set_kernel_name(self, name):
     self._base_kernel_name = name
@@ -147,23 +150,35 @@ class Generator:
           instruction.gen_code(writer)
         else:
           raise GenerationError(f'instr is not ready to be generated: {instruction}')
-      if not self._persistent_threading:
+
+      def generate_inner():
+        with writer.If(f'{self._get_flag_guard(writer)}'):
+          for instruction in self._ir:
+            if instruction.is_ready():
+              instruction.gen_code(writer)
+            else:
+              raise GenerationError(f'instr is not ready to be generated: {instruction}')
+
+      if self._persistent_threading:
+        with writer.For(f'size_t {GeneralLexicon.BATCH_ID_NAME} = {self._get_2d_block_id()}; {GeneralLexicon.BATCH_ID_NAME} < {GeneralLexicon.NUM_ELEMENTS}; {GeneralLexicon.BATCH_ID_NAME} += {vm.get_lexic().grid_dim_x} * {vm.get_lexic().block_dim_y}'):
+          generate_inner()
+      elif self._clusterlaunchcontrol:
+        writer(f'__shared__ tensorforge::ClusterLaunchCtrl launchctrl;')
+        writer(f'int phase = 0;')
+        writer(f'launchctrl.init();')
+        writer(f'size_t {GeneralLexicon.BATCH_ID_NAME} = {self._get_2d_block_id()};')
+        with writer.While(f'true'):
+          writer('launchctrl.setupNext();')
+          with writer.If(f'{self._get_element_size_guard()}'):
+            generate_inner()
+          writer('const auto nextBlock = launchctrl.queryNext(phase);')
+          with writer.If('!nextBlock.has_value()'):
+            writer('break;')
+          writer(f'{GeneralLexicon.BATCH_ID_NAME} = {self._get_2d_block_id("nextBlock.value()")};')
+      else:
         writer(f'const size_t {GeneralLexicon.BATCH_ID_NAME} = {self._get_2d_block_id()};')
         with writer.If(f'{self._get_element_size_guard()}'):
-          with writer.If(f'{self._get_flag_guard(writer)}'):
-            for instruction in self._ir:
-              if instruction.is_ready():
-                instruction.gen_code(writer)
-              else:
-                raise GenerationError(f'instr is not ready to be generated: {instruction}')
-      else:
-        with writer.For(f'size_t {GeneralLexicon.BATCH_ID_NAME} = {self._get_2d_block_id()}; {GeneralLexicon.BATCH_ID_NAME} < {GeneralLexicon.NUM_ELEMENTS}; {GeneralLexicon.BATCH_ID_NAME} += {vm.get_lexic().grid_dim_x} * {vm.get_lexic().block_dim_y}'):
-          with writer.If(f'{self._get_flag_guard(writer)}'):
-            for instruction in self._ir:
-              if instruction.is_ready():
-                instruction.gen_code(writer)
-              else:
-                raise GenerationError(f'instr is not ready to be generated: {instruction}')
+          generate_inner()
 
     self._kernel = writer.get_src()
 
@@ -522,9 +537,11 @@ class Generator:
     args = ', '.join(args)
     return f'launcher_{self._base_kernel_name}({args});'
 
-  def _get_2d_block_id(self):
+  def _get_2d_block_id(self, block=None):
     lexic = self._context.get_vm().get_lexic()
-    return f'{lexic.thread_idx_y} + {lexic.block_dim_y} * {lexic.block_idx_x}'
+    if block is None:
+      block = lexic.block_idx_x
+    return f'{lexic.thread_idx_y} + {lexic.block_dim_y} * ({block})'
 
   def _get_element_size_guard(self):
     return f'{GeneralLexicon.BATCH_ID_NAME} < {GeneralLexicon.NUM_ELEMENTS}'
