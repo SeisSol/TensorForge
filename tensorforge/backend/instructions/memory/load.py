@@ -50,12 +50,14 @@ class GlbToShrLoader(AbstractShrMemWrite):
     self._shr_mem.add_user(self)
     self._is_ready: bool = False
 
-    self._use_cuda_memcpy = False
+    self._use_cuda_memcpy = False #self._context.get_vm().get_hw_descr().vendor == 'nvidia'
 
     if self._permute is None:
       self._permute = [i for i in range(len(self._src.obj.shape))]
 
     self._needs_reorder = self._permute != [i for i in range(len(self._src.obj.shape))]
+
+    self._pipeline = 'pipeline'
 
     self._get_bounding_box_dense()
 
@@ -153,6 +155,9 @@ class GlbToShrLoader(AbstractShrMemWrite):
 
       write_loops(self._context, writer, loops, inner)
     else:
+      if self._use_cuda_memcpy:
+        writer(f'{self._pipeline}.producer_acquire();')
+
       loops = [writer.For(f'int32_t i{i} = 0; i{i} < {self._dest.data_view.shape[i]}; ++i{i}', True) for i in self._loop_indices]
 
       for loop in loops:
@@ -171,11 +176,14 @@ class GlbToShrLoader(AbstractShrMemWrite):
       for loop in loops[::-1]:
         loop.__exit__(None, None, None)
 
+      if self._use_cuda_memcpy:
+        writer(f'{self._pipeline}.producer_commit();')
+
     #if False:
     #  writer('cooperative_groups::wait(cooperative_groups::this_thread_block());')
 
   def _write_datatransfer(self, writer, src_offset, dst_offset, index, length, nontemporal, linscale=None):
-    if not self._use_cuda_memcpy:
+    if not self._use_cuda_memcpy or linscale is not None or True:
       pos = 0
       for vecsize in [1]:
         if src_offset % vecsize == 0:
@@ -189,8 +197,7 @@ class GlbToShrLoader(AbstractShrMemWrite):
     else:
       dest_access_index = self._dest.access_address(self._context, index)
       src_access_index = self._src.access_address(self._context, index)
-      with writer.If(f'{self._linear_idx()} == 0'):
-        writer(f'cooperative_groups::memcpy_async(cooperative_groups::this_thread_block(), &{self._dest.name}[{dst_offset} + {dest_access_index}], &{self._src.name}[{src_offset} + {src_access_index}], {length * self._dest.get_fptype().size()});')
+      writer(f'cuda::memcpy_async(cooperative_groups::this_thread_block(), &{self._dest.name}[{dst_offset} + {dest_access_index}], &{self._src.name}[{src_offset} + {src_access_index}], cuda::aligned_size_t<{self._dest.get_fptype().size()}>({length * self._dest.get_fptype().size()}), {self._pipeline});')
 
   def _write_hop(self, writer, src_offset, dst_offset, index, start, end, increment, nontemporal, linscale):
     if end > start:
@@ -199,10 +206,20 @@ class GlbToShrLoader(AbstractShrMemWrite):
         typeprefix = f'*({vectortype}*)&'
       else:
         typeprefix = ''
+
+      if self._use_cuda_memcpy:
+        elsize = self._dest.get_fptype().size() * increment
+        def write_load(lhs, rhs):
+          writer(f'cuda::memcpy_async(&{lhs}, &{rhs}, cuda::aligned_size_t<{elsize}>({elsize}), {self._pipeline});')
+      else:
+        def write_load(lhs, rhs):
+          writer(self._context.get_vm().get_lexic().glb_load(lhs, rhs, nontemporal=nontemporal))
+
       if linscale is None:
         indexwrapper = lambda x: x
       else:
         indexwrapper = lambda x: f'((({x}) / {linscale[0]}) * {linscale[1]} + (({x}) % {linscale[0]}))'
+
       if (end - start) / increment > self._manual_unroll_threshold:
         # load using a for-loop
         with writer.For(f'int32_t i = {start}; i < {end}; i += {increment}', True):
@@ -211,7 +228,7 @@ class GlbToShrLoader(AbstractShrMemWrite):
           src_access_index = self._src.access_address(self._context, index)
           lhs = f'{typeprefix}{self._dest.name}[{dst_offset} + {dest_access_index} + {contiguous_index}]'
           rhs = f'{typeprefix}{self._src.name}[{src_offset} + {src_access_index} + {contiguous_index}]'
-          writer(self._context.get_vm().get_lexic().glb_load(lhs, rhs, nontemporal=nontemporal))
+          write_load(lhs, rhs)
       else:
         # load using manual loop unrolling
         for counter in range(start, end, increment):
@@ -220,7 +237,7 @@ class GlbToShrLoader(AbstractShrMemWrite):
           src_access_index = self._src.access_address(self._context, index)
           lhs = f'{typeprefix}{self._dest.name}[{dst_offset} + {dest_access_index} + {contiguous_index}]'
           rhs = f'{typeprefix}{self._src.name}[{src_offset} + {src_access_index} + {contiguous_index}]'
-          writer(self._context.get_vm().get_lexic().glb_load(lhs, rhs, nontemporal=nontemporal))
+          write_load(lhs, rhs)
 
   def get_src(self) -> Symbol:
     return self._src
