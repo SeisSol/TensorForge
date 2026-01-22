@@ -43,7 +43,7 @@ class MultilinearBuilder(AbstractBuilder):
     self._temp_regs = None
     self._dest_regs = None
 
-    self._use_registers_always = self._context.get_vm().get_hw_descr().vendor == 'amd' # False
+    self._use_registers_always = self._context.get_vm().get_hw_descr().vendor in ['amd']
     self._deferred_stores = {}
     self._temporaries = {}
 

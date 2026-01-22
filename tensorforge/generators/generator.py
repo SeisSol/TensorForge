@@ -82,8 +82,8 @@ class Generator:
     self._check_consistency_with_user_options()
     self._name_operands(self.descr_list)
 
-    prefer_persistent = context.get_vm().get_hw_descr().vendor == 'amd'
     prefer_launchcontrol = context.get_vm().get_hw_descr().vendor == 'nvidia' and int(context.get_vm().get_hw_descr().model[3:]) >= 100
+    prefer_persistent = context.get_vm().get_hw_descr().vendor in ['amd', 'nvidia'] and not prefer_launchcontrol
 
     self._persistent_threading = prefer_persistent
     self._preload_globals = prefer_persistent
