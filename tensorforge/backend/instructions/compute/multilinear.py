@@ -161,7 +161,7 @@ class MultilinearInstruction(ComputeInstruction):
 
         # TODO: linearize
         for i, (dimmin, dimmax) in enumerate(self._ks):
-            loopmap[f'k{i}'] = len(outerLoops)
+            loopmap[f'k{i}'] = len(loopstack) + len(outerLoops)
             if -i-1 not in self._lead_dims:
                 step = matrixK if i == len(self._ks) - 1 else 1
                 loop = [Loop(f'k{i}', dimmin, dimmax, step, unroll=self._sparseK[i] or force_unroll)]
