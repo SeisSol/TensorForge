@@ -424,15 +424,15 @@ class MultilinearInstruction(ComputeInstruction):
             return
 
         if len(self._scalar) > 0:
-            scalar = writer.varalloc()
-            writer(f'{self._fp_as_str} {scalar}{"{}"};')
+            scalar_var = writer.varalloc()
+            writer(f'{self._fp_as_str} {scalar_var}{"{}"};')
             with writer.AnonymousScope():
                 self._scalar[0].symbol.load(writer, self._context, 'value', [], False)
-                writer(f'{scalar} = value;')
+                writer(f'{scalar_var} = value;')
             for scalar in self._scalar[1:]:
                 with writer.AnonymousScope():
                     scalar.symbol.load(writer, self._context, 'value', [], False)
-                    writer(f'{scalar} = {self._productOperation.format("value", f"{scalar}")};')
+                    writer(f'{scalar_var} = {self._productOperation.format("value", f"{scalar_var}")};')
 
         loopstack = []
         loopmap = {}
