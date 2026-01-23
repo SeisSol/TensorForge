@@ -44,7 +44,7 @@ class HipLexic(CudaLexic):
     }}
     """
 
-  def get_launch_code(self, func_name, grid, block, stream, func_params, shmem):
+  def get_launch_code(self, func_name, grid, block, stream, func_params, shmem, coop):
     return f"hipLaunchKernelGGL({func_name}, {grid}, {block}, {shmem}, {stream}, {func_params})"
 
   def sync_simd(self):

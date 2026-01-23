@@ -44,9 +44,6 @@ class Lexic(ABC):
                         total_shared_mem_size=None, global_symbols=None):
     pass
 
-  def get_mapped_keywords(self):
-    return []
-
   @abstractmethod
   def sync_block(self):
     pass

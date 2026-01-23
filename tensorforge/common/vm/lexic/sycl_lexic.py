@@ -27,7 +27,7 @@ class SyclLexic(Lexic):
   def set_shmem_size(self, func_name, shmem):
     return ''
 
-  def get_launch_code(self, func_name, grid, block, stream, func_params, shmem):
+  def get_launch_code(self, func_name, grid, block, stream, func_params, shmem, coop):
     return f"{func_name}({stream}, {grid}, {block}, {func_params})"
 
   def declare_shared_memory_inline(self, name, precision, size, alignment):
@@ -65,7 +65,11 @@ class SyclLexic(Lexic):
     return "item.barrier()"
 
   def sync_simd(self):
-    return "item.barrier()"
+    return "item.barrier()" # TODO make better
+
+  def sync_grid(self):
+    raise NotImplementedError() # TODO
+    #return "item.barrier()"
 
   def get_sub_group_id(self, sub_group_size):
     return f'item.get_sub_group().get_local_id()[0]'

@@ -27,7 +27,7 @@ class TargetLexic(Lexic):
   def set_shmem_size(self, func_name, shmem):
     return ''
 
-  def get_launch_code(self, func_name, grid, block, stream, func_params, shmem):
+  def get_launch_code(self, func_name, grid, block, stream, func_params, shmem, coop):
     return f"{func_name}({stream}, {grid}[0], {block}[0], {block}[1], {func_params})"
 
   def declare_shared_memory_inline(self, name, precision, size, alignment):
@@ -166,6 +166,9 @@ class TargetLexic(Lexic):
 
   def sync_simd(self):
     return "#pragma omp barrier //"
+
+  def sync_grid(self):
+    return ""
 
   def get_sub_group_id(self, sub_group_size):
     return f'{self.thread_idx_x} % {sub_group_size}'

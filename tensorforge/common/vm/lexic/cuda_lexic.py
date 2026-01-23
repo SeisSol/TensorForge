@@ -48,8 +48,14 @@ class CudaLexic(Lexic):
     }}
     """
 
-  def get_launch_code(self, func_name, grid, block, stream, func_params, shmem):
-    return f"{func_name}<<<{grid},{block},{shmem},{stream}>>>({func_params})"
+  def get_launch_code(self, func_name, grid, block, stream, func_params, shmem, coop):
+    if coop:
+      return f"""
+  auto args = argsPtrs({func_params});
+  cudaLaunchCooperativeKernel({func_name}, {grid}, {block}, args.data(), {shmem}, {stream});
+"""
+    else:
+      return f"{func_name}<<<{grid},{block},{shmem},{stream}>>>({func_params})"
 
   def declare_shared_memory_inline(self, name, precision, size, alignment):
     return f"__shared__  __align__({alignment}) {precision} {name}[{size}]"
@@ -70,6 +76,9 @@ class CudaLexic(Lexic):
 
   def sync_simd(self):
     return "__syncwarp()"
+
+  def sync_grid(self):
+    return "cooperative_groups::this_grid().sync()"
 
   def get_sub_group_id(self, sub_group_size):
     return f'{self.thread_idx_x} % {sub_group_size}'

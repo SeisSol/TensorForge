@@ -84,9 +84,10 @@ class Generator:
 
     prefer_launchcontrol = context.get_vm().get_hw_descr().vendor == 'nvidia' and int(context.get_vm().get_hw_descr().model[3:]) >= 100
     prefer_persistent = context.get_vm().get_hw_descr().vendor in ['amd', 'nvidia'] and not prefer_launchcontrol
+    prefer_preload = context.get_vm().get_hw_descr().vendor in ['amd'] and not prefer_launchcontrol
 
     self._persistent_threading = prefer_persistent
-    self._preload_globals = prefer_persistent
+    self._preload_globals = prefer_preload
 
     self._clusterlaunchcontrol = prefer_launchcontrol
 
@@ -110,6 +111,8 @@ class Generator:
 
     self._deduce_num_threads()
     self._deduce_accumulator_size()
+
+
     loaded_globals = self._emit_global_ir()
     self._emit_ir()
     opt = OptimizationStage(context=self._context,
@@ -139,12 +142,6 @@ class Generator:
     with self._generate_kernel_proto(writer):
       self._write_kernel_meta_data(writer)
 
-      vm = self._context.get_vm()
-      mapped_keywords = vm.get_lexic().get_mapped_keywords()
-      for kw in mapped_keywords:
-        mapped_kw, real_kw, type = kw
-        writer(f'const {type} {mapped_kw} = {real_kw};')
-
       for instruction in self._global_ir:
         if instruction.is_ready():
           instruction.gen_code(writer)
@@ -160,6 +157,7 @@ class Generator:
               raise GenerationError(f'instr is not ready to be generated: {instruction}')
 
       if self._persistent_threading:
+        # TODO: OMP target
         with writer.For(f'size_t {GeneralLexicon.BATCH_ID_NAME} = {self._get_2d_block_id()}; {GeneralLexicon.BATCH_ID_NAME} < {GeneralLexicon.NUM_ELEMENTS}; {GeneralLexicon.BATCH_ID_NAME} += {vm.get_lexic().grid_dim_x} * {vm.get_lexic().block_dim_y}'):
           generate_inner()
       elif self._clusterlaunchcontrol:
@@ -211,7 +209,8 @@ class Generator:
                                         block='block',
                                         stream='stream',
                                         func_params=args,
-                                        shmem=shmemsize)#
+                                        shmem=shmemsize,
+                                        coop=False)#
       writer(f'{call_site};')
       writer('CHECK_ERR;')
     self._launcher = writer.get_src()
@@ -272,7 +271,7 @@ class Generator:
 
       if shmem_load < shmem_cap:
         self._global_ir += load_ir
-        self._global_ir.append(SyncBlock(self._context, self._num_threads))
+        self._global_ir.append(SyncBlock(self._context))
         return True
       else:
         # make sure to clean up all new symbols that didn't get added

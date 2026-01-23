@@ -158,3 +158,9 @@ class IfDescr:
 
 class ConsecutiveDescr:
   pass
+
+class GridFenceDescr(OperationDescription):
+  pass
+
+class GridBarrierDescr(OperationDescription):
+  pass
