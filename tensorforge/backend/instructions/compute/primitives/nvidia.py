@@ -201,6 +201,5 @@ ATOMS = [
     CUTEAtom(16,8,16,1,Datatype.F64,'SM90_16x8x8_F64F64F64F64_TN', CUTEMode.DIRECT),
 ]
 
-def matmul(writer, stream, shmptr, shmsize):
-
+def matmul(writer, C, A, B, M, N, K, kx, threads, dtype, sparse, shmptr, shmsize):
     pass

@@ -298,7 +298,12 @@ class MultilinearInstruction(ComputeInstruction):
                     self._ops[0].symbol.load(writer, self._context, var, unwindOp(i, 0, k, 0, True), False)
                 return res
 
-            amd.matmul(writer, C, A, B, M, N, K, kx, self._num_threads, self._dest.datatype, sparse)
+            if self._context.get_vm().get_hw_descr().vendor == 'amd':
+                amd.matmul(writer, C, A, B, M, N, K, kx, self._num_threads, self._dest.datatype, sparse)
+            elif self._context.get_vm().get_hw_descr().vendor == 'nvidia':
+                if sparse:
+                    return False
+                nvidia.matmul(writer, C, A, B, M, N, K, kx, self._num_threads, self._dest.datatype, sparse, 'TODO', 0)
             return True
         return False
 
@@ -503,7 +508,7 @@ class MultilinearInstruction(ComputeInstruction):
         with writer.Scope():
             loopstack = []
             for i, (dimmin, dimmax) in enumerate(self._ns[1:]):
-                loop = writer.For(f'int32_t n{i+1} = {dimmin}; n{i+1} < {dimmax}; ++n{i}', True)
+                loop = writer.For(f'int32_t n{i+1} = {dimmin}; n{i+1} < {dimmax}; ++n{i+1}', True)
                 loop.__enter__()
                 loopstack += [loop]
 
