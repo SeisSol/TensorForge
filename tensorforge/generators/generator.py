@@ -113,7 +113,7 @@ class Generator:
     self._deduce_accumulator_size()
 
 
-    loaded_globals = self._emit_global_ir()
+    self._emit_global_ir()
     self._emit_ir()
     opt = OptimizationStage(context=self._context,
                             shr_mem=self._shr_mem_obj,
@@ -121,10 +121,6 @@ class Generator:
                             num_threads=self._num_threads)
     opt.optimize()
     self._ir = opt.get_instructions()
-
-    # TODO: not always
-    if not loaded_globals:
-      self._persistent_threading = False
 
     # add final sync for persistent threads
     if self._persistent_threading:
@@ -138,6 +134,8 @@ class Generator:
     self._generate_header()
 
   def _generate_kernel(self):
+    vm = self._context.get_vm()
+
     writer = Writer()
     with self._generate_kernel_proto(writer):
       self._write_kernel_meta_data(writer)
@@ -190,12 +188,16 @@ class Generator:
 
       shmemsize = f'{self._shr_mem_obj.get_total_size()} * sizeof({self._context.fp_as_str()})'
 
+      coop = False
+
       writer(f'{lexic.kernel_range_object("block", f"{self._num_threads}, {mults_per_block}, 1")};')
       if not self._persistent_threading:
+        assert not coop
         num_blocks = f'({GeneralLexicon.NUM_ELEMENTS} + {mults_per_block} - 1) / {mults_per_block}'
       else:
         writer(f'{lexic.get_launch_size(kernel_name, "block", shmemsize)}')
-        num_blocks = 'std::min(gridsize, numElements)'
+        if not coop:
+          num_blocks = 'std::min(gridsize, numElements)'
       writer(f'{lexic.kernel_range_object("grid", f"{num_blocks}, 1, 1")};')
 
       writer(lexic.set_shmem_size(kernel_name, shmemsize))
@@ -210,7 +212,7 @@ class Generator:
                                         stream='stream',
                                         func_params=args,
                                         shmem=shmemsize,
-                                        coop=False)#
+                                        coop=coop)
       writer(f'{call_site};')
       writer('CHECK_ERR;')
     self._launcher = writer.get_src()

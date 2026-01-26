@@ -156,11 +156,16 @@ class IfDescr:
     self.condition = condition
     self.subdescr = subdescr
 
+  def __str__(self):
+    return f'if ({self.condition}): {self.subdescr}'
+
 class ConsecutiveDescr:
   pass
 
 class GridFenceDescr(OperationDescription):
-  pass
+  def __str__(self):
+    return 'fence'
 
 class GridBarrierDescr(OperationDescription):
-  pass
+  def __str__(self):
+    return 'barrier'

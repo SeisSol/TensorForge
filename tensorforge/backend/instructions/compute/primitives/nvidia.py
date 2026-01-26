@@ -121,8 +121,8 @@ def prefer_rowload():
 
 def tfconvert(writer: Writer, variables):
     for variable in variables:
-        writer('const auto {variable}u = __float_to_tf32({variable});')
-        writer('const auto {variable}l = __float_to_tf32({variable} - {variable}u);')
+        writer(f'const auto {variable}u = __float_to_tf32({variable});')
+        writer(f'const auto {variable}l = __float_to_tf32({variable} - {variable}u);')
     return [(f'{v}u', f'{v}l') for v in variables]
 
 def bfconvert(writer: Writer, variables):
@@ -150,7 +150,7 @@ class CUTEAtom:
         self.compress = compress
 
     def headers(self):
-        return ['cute.hpp']
+        return ['cute/atom.hpp']
 
     def generate(self, writer, context, A, B, C):
         Cstr = ','.join(f'{c}' for c in C)
@@ -191,8 +191,6 @@ class CUTEAtom:
                 writer(f'mma.fma({Cstr},{Astr},{Bstr},{Cstr});')
 
 ATOMS = [
-    # CUTEAtom(16,4,2,1,Datatype.F32,'SM80_16x8x4_F32TF32TF32F32_TN', True),
-    # CUTEAtom(16,4,4,1,Datatype.F32,'SM80_16x8x8_F32TF32TF32F32_TN', True),
     CUTEAtom(16,4,4,1,Datatype.F32,'SM80_16x8x4_F32TF32TF32F32_TN', CUTEMode.TF32),
     CUTEAtom(16,4,8,1,Datatype.F32,'SM80_16x8x8_F32TF32TF32F32_TN', CUTEMode.TF32),
     CUTEAtom(8,8,4,1,Datatype.F64,'SM80_8x8x4_F64F64F64F64_TN', CUTEMode.DIRECT),
@@ -201,5 +199,28 @@ ATOMS = [
     CUTEAtom(16,8,16,1,Datatype.F64,'SM90_16x8x8_F64F64F64F64_TN', CUTEMode.DIRECT),
 ]
 
-def matmul(writer, C, A, B, M, N, K, kx, threads, dtype, sparse, shmptr, shmsize):
-    pass
+def matmul(writer, C, A, B, M, N, K, kx, threads, dtype, sparse, ctx, shmptr, shmsize):
+    if sparse:
+        return False
+
+    atom = ATOMS[1]
+
+    Areg = writer.varalloc()
+    Breg = writer.varalloc()
+    Creg = writer.varalloc()
+
+    for ix in range(0, M):
+        for j in range(0, N, atom.n):
+            for i in range(0, threads, atom.m):
+                writer(f'{atom.d.ctype()} {Creg}[]{"{}"};')
+                for k in range(0, K, atom.k):
+                    writer(f'{atom.d.ctype()} {Areg}[]{"{}"};')
+                    writer(f'{atom.d.ctype()} {Breg}[]{"{}"};')
+
+                    atom.generate(writer, ctx, [], [], [])
+            for i in range(0, threads):
+                for jj in range(0, atom.n):
+                    C(writer, f'{Creg}', ix * threads + i, j + jj)
+
+
+    return False

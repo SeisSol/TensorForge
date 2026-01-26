@@ -24,9 +24,6 @@ class OpenCLLexic(Lexic):
   def get_launch_code(self, func_name, grid, block, stream, func_params, shmem, coop):
     return f"{func_name}({stream}, {grid}, {block}, {func_params})"
 
-  def declare_shared_memory_inline(self, name, precision, size, alignment):
-    return None
-
   def kernel_definition(self, file, kernel_bounds, base_name, params, precision=None, total_shared_mem_size=None, global_symbols=None):
     pass
   #__kernel __attribute__(( reqd_work_group_size({kernel_bounds}) ))

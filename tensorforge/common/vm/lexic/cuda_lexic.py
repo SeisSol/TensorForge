@@ -1,5 +1,7 @@
 from .lexic import Lexic, Operation
 from tensorforge.common.basic_types import Datatype
+from tensorforge.common.basic_types import GeneralLexicon
+from tensorforge.backend.writer import MultiBlock
 
 class CudaLexic(Lexic):
 
@@ -57,11 +59,8 @@ class CudaLexic(Lexic):
     else:
       return f"{func_name}<<<{grid},{block},{shmem},{stream}>>>({func_params})"
 
-  def declare_shared_memory_inline(self, name, precision, size, alignment):
-    return f"__shared__  __align__({alignment}) {precision} {name}[{size}]"
-
   def declare_shared_memory(self, name, precision):
-    return f'extern __shared__ char {name}Ptr[]; auto* {name} = reinterpret_cast<{precision}*>({name}Ptr);'
+    return f'auto* {name} = reinterpret_cast<{precision}*>({GeneralLexicon.TOTAL_SHR_MEM}Ptr)'
 
   def get_launch_bounds(self, total_num_threads_per_block, min_blocks_per_mp=None):
     params = [str(item) for item in [total_num_threads_per_block, min_blocks_per_mp] if item]
@@ -69,7 +68,12 @@ class CudaLexic(Lexic):
 
   def kernel_definition(self, file, kernel_bounds, base_name, params, precision=None,
                         total_shared_mem_size=None, global_symbols=None):
-    return file.CudaKernel(base_name, params, kernel_bounds)
+    #return file.CudaKernel(base_name, params, kernel_bounds)
+    args = [str(item) for item in kernel_bounds]
+    bounds = f"\n__launch_bounds__({', '.join(args)})\n"
+    header = f'__global__ void {bounds} kernel_{base_name}({params})'
+    shmdef = f'extern __shared__ char {GeneralLexicon.TOTAL_SHR_MEM}Ptr[];\n'
+    return MultiBlock(file, [header, shmdef])
 
   def sync_block(self):
     return "__syncthreads()"

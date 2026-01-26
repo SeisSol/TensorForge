@@ -299,11 +299,9 @@ class MultilinearInstruction(ComputeInstruction):
                 return res
 
             if self._context.get_vm().get_hw_descr().vendor == 'amd':
-                amd.matmul(writer, C, A, B, M, N, K, kx, self._num_threads, self._dest.datatype, sparse)
+                amd.matmul(writer, C, A, B, M, N, K, kx, self._num_threads, self._dest.datatype, sparse, self._context)
             elif self._context.get_vm().get_hw_descr().vendor == 'nvidia':
-                if sparse:
-                    return False
-                nvidia.matmul(writer, C, A, B, M, N, K, kx, self._num_threads, self._dest.datatype, sparse, 'TODO', 0)
+                return nvidia.matmul(writer, C, A, B, M, N, K, kx, self._num_threads, self._dest.datatype, sparse, self._context, 'TODO', 0)
             return True
         return False
 
@@ -460,7 +458,7 @@ class MultilinearInstruction(ComputeInstruction):
             self._dest.load(writer, self._context, 'value', [varlist[loopmap[f'n{i}']] for i,_ in enumerate(self._ns)], False)
             valvar = 'value'
             if len(self._scalar) > 0:
-                writer(f'const {self._dest.get_fptype()} newvalue1 = {self._productOperation.format("value", f"{scalar}")};')
+                writer(f'const {self._dest.get_fptype()} newvalue1 = {self._productOperation.format("value", f"{scalar_var}")};')
                 valvar = 'newvalue1'
             if self._prev is not None:
                 self._prev.load(writer, self._context, 'oldvalue', [varlist[loopmap[f'n{i}']] for i,_ in enumerate(self._ns)], False)
@@ -535,10 +533,11 @@ class MultilinearInstruction(ComputeInstruction):
             writer(f'shmAddr[i] = {self._sumOperation.format("shmAddr[i]", f"value")};')
 
     def get_operands(self):
+        inops = [op.symbol for op in self._ops] + [op.symbol for op in self._scalar]
         if self._prev is None:
-            return [op.symbol for op in self._ops]
+            return inops
         else:
-            return [op.symbol for op in self._ops] + [self._prev]
+            return inops + [self._prev]
 
     def __str__(self):
         return f'{self._dest.name} = {self._sumOperation}({f" {self._productOperation} ".join(op.symbol.name for op in self._ops)}) {self._sumOperation} {self._prev}' # TODO: dimensions

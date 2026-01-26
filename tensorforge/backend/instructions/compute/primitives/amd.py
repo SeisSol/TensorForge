@@ -355,11 +355,17 @@ def reduction(writer: Writer, source, target, operation, blocks):
             writer(f'{value} = {operation.format("newvalue", {value})}')
             var = tempvar
 
-def cdna1(arch):
+def cdna1(ctx):
+    arch = ctx.get_vm().get_hw_descr().name
     return arch in ('gfx908', 'gfx90a', 'gfx942', 'gfx950')
 
-def cdna2(arch):
+def cdna2(ctx):
+    arch = ctx.get_vm().get_hw_descr().name
     return arch in ('gfx90a', 'gfx942', 'gfx950')
+
+def amdarch(ctx):
+    archstr = ctx.get_vm().get_hw_descr().name
+    return int(arch[3:], base=16)
 
 def mfma_emu_int8(writer: Writer, C, B, A, c, a, b):
     # cf. the Ozaki II paper
@@ -505,15 +511,15 @@ def fmadpp8(writer, C, A, B, row):
 def fmadpp4(writer, C, A, B, row):
     writer(f'tensorforge::fmacdpp4<{row}>({C}, {A}, {B});')
 
-def hfma(writer: Writer, C, A, B, repeat, datatype, threads):
+def hfma(writer: Writer, C, A, B, repeat, datatype, threads, ctx):
     step = 1
     if threads >= 4 and datatype == Datatype.F32:
         step = 4
-    if threads >= 8 and datatype == Datatype.F32 and False: # RDNA
+    if threads >= 8 and datatype == Datatype.F32 and amdarch(ctx) >= 0x1000: # RDNA
         step = 8
-    if threads >= 16 and datatype == Datatype.F32 and False: # RDNA
+    if threads >= 16 and datatype == Datatype.F32 and amdarch(ctx) >= 0x1000: # RDNA
         step = 16
-    if threads >= 16 and cdna2('gfx942'): # CDNA 2+
+    if threads >= 16 and amdarch(ctx) < 0x1000 and amdarch(ctx) >= 0x90a: # CDNA 2+
         step = 16
 
     func = {
@@ -538,8 +544,8 @@ def hfma(writer: Writer, C, A, B, repeat, datatype, threads):
                 if b is not None:
                     func(writer, c, a, b, j)
 
-def matmul(writer, C, A, B, M, N, K, kx, threads, dtype, sparse):
-    if cdna1('gfx942') and not sparse and dtype == Datatype.F32:
+def matmul(writer, C, A, B, M, N, K, kx, threads, dtype, sparse, ctx):
+    if cdna1(ctx) and not sparse and dtype == Datatype.F32:
         matmul32(writer, C, A, B, M, N, K, kx, threads)
     else:
         ab = []
@@ -570,7 +576,7 @@ def matmul(writer, C, A, B, M, N, K, kx, threads, dtype, sparse):
             B(writer, vB, None, kj // M)
             vA = ax[kj: min(kj + threads*M, len(cx))]
             vC = cx[kj: min(kj + threads*M, len(cx))]
-            hfma(writer, vC, vB, vA, M, dtype, threads)
+            hfma(writer, vC, vB, vA, M, dtype, threads, ctx)
 
         for j in range(N):
             for i in range(M):

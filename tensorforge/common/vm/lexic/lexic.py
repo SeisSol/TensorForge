@@ -32,10 +32,6 @@ class Lexic(ABC):
     pass
 
   @abstractmethod
-  def declare_shared_memory_inline(self, name, precision, size, alignment):
-    pass
-
-  @abstractmethod
   def declare_shared_memory(self, name, precision):
     pass
 

@@ -30,9 +30,6 @@ class TargetLexic(Lexic):
   def get_launch_code(self, func_name, grid, block, stream, func_params, shmem, coop):
     return f"{func_name}({stream}, {grid}[0], {block}[0], {block}[1], {func_params})"
 
-  def declare_shared_memory_inline(self, name, precision, size, alignment):
-    return ""
-
   def declare_shared_memory(self, name, precision):
     return ""
 
