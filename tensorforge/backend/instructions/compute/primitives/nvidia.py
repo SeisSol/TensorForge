@@ -155,7 +155,7 @@ class CUTEAtom:
     def generate(self, writer, context, A, B, C):
         Cstr = ','.join(f'{c}' for c in C)
         with writer.Scope():
-            writer(f'auto mma = MMA_Atom<{self.name}>{{}};')
+            writer(f'auto mma = cute::MMA_Atom<{self.name}>{{}};')
             if self.mode == CUTEMode.BF16:
                 Abf16 = bfconvert(writer, A)
                 Bbf16 = bfconvert(writer, B)
@@ -205,9 +205,24 @@ def matmul(writer, C, A, B, M, N, K, kx, threads, dtype, sparse, ctx, shmptr, sh
 
     atom = ATOMS[1]
 
+    mma = writer.varalloc()
+    mmaT = writer.varalloc()
+
+    Ashm = writer.varalloc()
+    Bshm = writer.varalloc()
+
+    Acopy = writer.varalloc()
+    Bcopy = writer.varalloc()
+
     Areg = writer.varalloc()
     Breg = writer.varalloc()
     Creg = writer.varalloc()
+
+    # for now, assume that we're warp level
+    assert threads == 32
+
+    writer(f'const auto {mma} = cute::make_tiled_mma(cute::UniversalFMA<{dtype.ctype()}, {dtype.ctype()}, {dtype.ctype()}>(), cute::Layout<cute::Shape<cute::_16, cute::_16, cute::_16>>);')
+    writer(f'const auto {mmaT} = {mma}.get_slice(threadIdx.x);')
 
     for ix in range(0, M):
         for j in range(0, N, atom.n):
@@ -218,9 +233,11 @@ def matmul(writer, C, A, B, M, N, K, kx, threads, dtype, sparse, ctx, shmptr, sh
                     writer(f'{atom.d.ctype()} {Breg}[]{"{}"};')
 
                     atom.generate(writer, ctx, [], [], [])
+                    writer(f'cute::copy({Acopy}, {Areg}, {Ashm});')
+                    writer(f'cute::copy({Bcopy}, {Breg}, {Bshm});')
+                    writer(f'cute::gemm({mma}, {Areg}, {Breg}, {Creg});')
             for i in range(0, threads):
                 for jj in range(0, atom.n):
                     C(writer, f'{Creg}', ix * threads + i, j + jj)
-
 
     return False

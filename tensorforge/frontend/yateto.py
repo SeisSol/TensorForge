@@ -178,11 +178,10 @@ class GpuKernelGeneratorV1:
     # print(self._ir_list)
 
     tensorforge_generator = TensorForgeGenerator(self._descr_list, context)
-    tensorforge_generator.register()
+    tensorforge_generator.generate()
 
     cpp(f'{self._gen_call_site(tensorforge_generator)}')
     routine_name = tensorforge_generator.get_base_name()
-    tensorforge_generator.generate()
 
     routineCache.addRoutine(routine_name, TensorForgeWriter(tensorforge_generator, context.get_vm().get_headers()))
 

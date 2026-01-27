@@ -15,7 +15,7 @@ from tensorforge.backend.instructions.builders.loader_builder import GlobalLoade
 from tensorforge.backend.instructions.builders.multilinear_builder import MultilinearBuilder
 from tensorforge.backend.instructions.builders.ptr_manip_builder import GetElementPtrBuilder
 from tensorforge.backend.instructions.builders.allocator_builder import ShrMemAllocBuilder
-from tensorforge.backend.instructions.sync_block import SyncThreads, SyncBlock
+from tensorforge.backend.instructions.sync_block import SyncThreads, SyncBlock, SyncGrid
 from tensorforge.backend.writer import Writer
 from tensorforge.common.exceptions import GenerationError
 
@@ -49,6 +49,14 @@ class RegmaxBlockPolicy(AbstractThreadBlockPolicy):
       max_mem_mults = (self._max_allowed_mem - self._global_mem * self._context.fp_type.size()) // (self._mem_per_mult * self._context.fp_type.size())
       return min(max_mem_mults, max_thread_mults)
 
+class Section:
+  def __init__(self):
+    self.ir: List[AbstractInstruction] = []
+    self.global_ir: List[AbstractInstruction] = []
+    self.shr_mem_obj: Union[ShrMemObject, None] = None
+    self.scopes: Scopes = Scopes()
+    self.barrier = False
+
 class Generator:
   NAME_ENCODING_LENGTH = 10
 
@@ -72,14 +80,10 @@ class Generator:
 
     self._num_threads: int = 0
     self._num_active_threads: int = 0
-    self._accumulator_size: int = 0
 
-    self._shr_mem_obj: Union[ShrMemObject, None] = None
+    self._section: Section = Section()
+    self._sections: List[Section] = []
 
-    self._ir: List[AbstractInstruction] = []
-    self._global_ir: List[AbstractInstruction] = []
-
-    self._check_consistency_with_user_options()
     self._name_operands(self.descr_list)
 
     prefer_launchcontrol = context.get_vm().get_hw_descr().vendor == 'nvidia' and int(context.get_vm().get_hw_descr().model[3:]) >= 100
@@ -97,37 +101,50 @@ class Generator:
   def register(self):
     self._collect_tmp_matrices()
     self._populate_global_scope()
-    if not self._base_kernel_name:
-      self._generate_kernel_name()
-    self._is_registerd = True
 
   def _set_threadconfig(self):
-    for instr in self._global_ir:
-      instr.set_threadconfig_pre(self._num_threads, self._shr_mem_obj.get_mults_per_block())
+    for instr in self._section.global_ir:
+      instr.set_threadconfig_pre(self._num_threads, self._section.shr_mem_obj.get_mults_per_block())
 
   def generate(self):
-    if not self._is_registerd:
-      self.register()
+    self.register()
 
     self._deduce_num_threads()
-    self._deduce_accumulator_size()
 
+    descrlist = []
+    currlist = []
+    for descr in self.descr_list:
+      if descr.barrier():
+        descrlist += [currlist]
+        currlist = []
+      else:
+        currlist += [descr]
+    if len(currlist) > 0:
+      descrlist += [currlist]
 
-    self._emit_global_ir()
-    self._emit_ir()
-    opt = OptimizationStage(context=self._context,
-                            shr_mem=self._shr_mem_obj,
-                            instructions=self._ir,
-                            num_threads=self._num_threads)
-    opt.optimize()
-    self._ir = opt.get_instructions()
+    for codesection in descrlist:
+      self._section = Section()
 
-    # add final sync for persistent threads
-    if self._persistent_threading:
-      self._ir += [SyncThreads(self._context, self._num_threads)]
+      self._emit_global_ir()
+      self._emit_ir(codesection)
+      opt = OptimizationStage(context=self._context,
+                              shr_mem=self._section.shr_mem_obj,
+                              instructions=self._section.ir,
+                              num_threads=self._num_threads)
+      opt.optimize()
+      self._section.ir = opt.get_instructions()
 
-    self._deduce_mults_per_block()
-    self._set_threadconfig()
+      # add final sync for persistent threads
+      if self._persistent_threading or self._clusterlaunchcontrol:
+        self._section.ir += [SyncThreads(self._context, self._num_threads)]
+
+      self._deduce_mults_per_block()
+      self._set_threadconfig()
+
+      self._sections += [self._section]
+
+    if not self._base_kernel_name:
+      self._generate_kernel_name()
 
     self._generate_kernel()
     self._generate_launcher()
@@ -140,64 +157,67 @@ class Generator:
     with self._generate_kernel_proto(writer):
       self._write_kernel_meta_data(writer)
 
-      for instruction in self._global_ir:
-        if instruction.is_ready():
-          instruction.gen_code(writer)
-        else:
-          raise GenerationError(f'instr is not ready to be generated: {instruction}')
-
-      def generate_inner():
-        with writer.If(f'{self._get_flag_guard(writer)}'):
-          for instruction in self._ir:
+      for i,section in enumerate(self._sections):
+        with writer.AnonymousScope():
+          for instruction in section.global_ir:
             if instruction.is_ready():
               instruction.gen_code(writer)
             else:
               raise GenerationError(f'instr is not ready to be generated: {instruction}')
 
-      if self._persistent_threading:
-        # TODO: OMP target
-        with writer.For(f'size_t {GeneralLexicon.BATCH_ID_NAME} = {self._get_2d_block_id()}; {GeneralLexicon.BATCH_ID_NAME} < {GeneralLexicon.NUM_ELEMENTS}; {GeneralLexicon.BATCH_ID_NAME} += {vm.get_lexic().grid_dim_x} * {vm.get_lexic().block_dim_y}'):
-          generate_inner()
-      elif self._clusterlaunchcontrol:
-        writer(f'__shared__ tensorforge::ClusterLaunchCtrl launchctrl;')
-        writer(f'int phase = 0;')
-        writer(f'launchctrl.init();')
-        writer(f'size_t {GeneralLexicon.BATCH_ID_NAME} = {self._get_2d_block_id()};')
-        with writer.While(f'true'):
-          writer('launchctrl.setupNext();')
-          with writer.If(f'{self._get_element_size_guard()}'):
-            generate_inner()
-          writer('const auto nextBlock = launchctrl.queryNext(phase);')
-          with writer.If('!nextBlock.has_value()'):
-            writer('break;')
-          writer(f'{GeneralLexicon.BATCH_ID_NAME} = {self._get_2d_block_id("nextBlock.value()")};')
-      else:
-        writer(f'const size_t {GeneralLexicon.BATCH_ID_NAME} = {self._get_2d_block_id()};')
-        with writer.If(f'{self._get_element_size_guard()}'):
-          generate_inner()
+          def generate_inner():
+            with writer.If(f'{self._get_flag_guard(writer, i)}'):
+              for instruction in section.ir:
+                if instruction.is_ready():
+                  instruction.gen_code(writer)
+                else:
+                  raise GenerationError(f'instr is not ready to be generated: {instruction}')
+
+          if self._persistent_threading:
+            # TODO: OMP target
+            with writer.For(f'size_t {GeneralLexicon.BATCH_ID_NAME} = {self._get_2d_block_id()}; {GeneralLexicon.BATCH_ID_NAME} < {GeneralLexicon.NUM_ELEMENTS}{i}; {GeneralLexicon.BATCH_ID_NAME} += {vm.get_lexic().grid_dim_x} * {vm.get_lexic().block_dim_y}'):
+              generate_inner()
+          elif self._clusterlaunchcontrol:
+            writer(f'__shared__ tensorforge::ClusterLaunchCtrl launchctrl;')
+            writer(f'int phase = 0;')
+            writer(f'launchctrl.init();')
+            writer(f'size_t {GeneralLexicon.BATCH_ID_NAME} = {self._get_2d_block_id()};')
+            with writer.While(f'true'):
+              writer('launchctrl.setupNext();')
+              with writer.If(f'{self._get_element_size_guard(i)}'):
+                generate_inner()
+              writer('const auto nextBlock = launchctrl.queryNext(phase);')
+              with writer.If('!nextBlock.has_value()'):
+                writer('break;')
+              writer(f'{GeneralLexicon.BATCH_ID_NAME} = {self._get_2d_block_id("nextBlock.value()")};')
+          else:
+            writer(f'const size_t {GeneralLexicon.BATCH_ID_NAME} = {self._get_2d_block_id()};')
+            with writer.If(f'{self._get_element_size_guard(i)}'):
+              generate_inner()
 
     self._kernel = writer.get_src()
 
   def _generate_launcher(self):
     writer = Writer()
     proto = self._generate_launcher_proto(with_defaults=False)
-    mults_per_block = self._shr_mem_obj.get_mults_per_block()
+    mults_per_block = self._section.shr_mem_obj.get_mults_per_block()
     lexic = self._context.get_vm().get_lexic()
     with writer.Block(f'{proto}'):
       kernel_name = f'kernel_{self._base_kernel_name}'
 
-      shmemsize = f'{self._shr_mem_obj.get_total_size()} * sizeof({self._context.fp_as_str()})'
+      shmemsize = f'{self._section.shr_mem_obj.get_total_size()} * sizeof({self._context.fp_as_str()})'
 
-      coop = False
+      # TODO: allow multi-kernel approach instead
+      coop = len(self._sections) > 1 # FIXME: not really; only if we have a grid barrier
 
       writer(f'{lexic.kernel_range_object("block", f"{self._num_threads}, {mults_per_block}, 1")};')
       if not self._persistent_threading:
         assert not coop
-        num_blocks = f'({GeneralLexicon.NUM_ELEMENTS} + {mults_per_block} - 1) / {mults_per_block}'
+        num_blocks = f'({GeneralLexicon.NUM_ELEMENTS}0 + {mults_per_block} - 1) / {mults_per_block}'
       else:
         writer(f'{lexic.get_launch_size(kernel_name, "block", shmemsize)}')
         if not coop:
-          num_blocks = 'std::min(gridsize, numElements)'
+          num_blocks = f'std::min(gridsize, {GeneralLexicon.NUM_ELEMENTS}0)'
       writer(f'{lexic.kernel_range_object("grid", f"{num_blocks}, 1, 1")};')
 
       writer(lexic.set_shmem_size(kernel_name, shmemsize))
@@ -235,34 +255,35 @@ class Generator:
     if compress:
       self._num_threads = min(32, self._num_threads)
 
-  def _deduce_accumulator_size(self):
-    for descr in self.descr_list:
-      local_acc_size = descr.get_accumulator_size()
-      self._accumulator_size = max(self._accumulator_size, local_acc_size)
-
   def _emit_global_ir(self):
+    nonfirst_block = len(self._sections) > 0
+    last_barrier = len(self._sections) > 0 and self._sections[-1].barrier
+
     shmbuilder = ShrMemAllocBuilder(self._context, self._scopes)
 
     self._scopes.add_scope()
     # allocate shared memory
     shmbuilder.build(size=None)
-    self._shr_mem_obj = shmbuilder.get_resultant_obj()
-    self._global_ir.extend(shmbuilder.get_instructions())
+    self._section.shr_mem_obj = shmbuilder.get_resultant_obj()
+    self._section.global_ir.extend(shmbuilder.get_instructions())
 
     builder = GetElementPtrBuilder(self._context, self._scopes)
     for symbol in self._scopes.get_global_scope().values():
       if symbol.obj.addressing == Addressing.SCALAR or (symbol.obj.addressing == Addressing.NONE and symbol.stype == SymbolType.Data):
         builder.build(symbol)
-        self._global_ir.extend(builder.get_instructions())
+        self._section.global_ir.extend(builder.get_instructions())
 
     # load globals to shared memory (if requested)
     if self._preload_globals:
       load_ir = []
       shmem_load = 0
 
+      if nonfirst_block:
+        load_ir.append(SyncBlock(self._context))
+
       self._scopes.add_scope()
 
-      builder = GlobalLoaderBuilder(self._context, self._scopes, self._shr_mem_obj, self._num_threads)
+      builder = GlobalLoaderBuilder(self._context, self._scopes, self._section.shr_mem_obj, self._num_threads)
       for symbol in self._scopes.get_global_scope().values():
         if symbol.obj.addressing == Addressing.NONE and symbol.stype != SymbolType.Data:
           shmem_load += builder.build(symbol)
@@ -272,17 +293,26 @@ class Generator:
       shmem_cap = vm.get_hw_descr().max_local_mem_size_per_block
 
       if shmem_load < shmem_cap:
-        self._global_ir += load_ir
-        self._global_ir.append(SyncBlock(self._context))
+        self._section.global_ir += load_ir
+        if last_barrier:
+          self._section.global_ir.append(SyncGrid(self._context))
+        else:
+          self._section.global_ir.append(SyncBlock(self._context))
         return True
       else:
         # make sure to clean up all new symbols that didn't get added
         self._scopes.remove_scope()
         self._preload_globals = False
 
+    if not self._preload_globals:
+      if last_barrier:
+        self._section.global_ir.append(SyncGrid(self._context))
+      elif nonfirst_block:
+        self._section.global_ir.append(SyncBlock(self._context))
+
     return False
 
-  def _emit_ir(self):
+  def _emit_ir(self, descr_list):
     # find local data from batches
     builder = GetElementPtrBuilder(self._context, self._scopes)
     self._scopes.add_scope()
@@ -290,35 +320,35 @@ class Generator:
       firstptr = symbol.obj.addressing == Addressing.SCALAR or (symbol.obj.addressing == Addressing.NONE and symbol.stype == SymbolType.Data)
       if not firstptr and not (self._preload_globals and symbol.obj.addressing == Addressing.NONE):
         builder.build(symbol)
-        self._ir.extend(builder.get_instructions())
+        self._section.ir.extend(builder.get_instructions())
 
     self._scopes.add_scope()
     # generate GEMM and store operations
     builder = MultilinearBuilder(self._context,
                           self._scopes,
-                          self._scopes.get_symbol(self._shr_mem_obj),
+                          self._scopes.get_symbol(self._section.shr_mem_obj),
                           self._num_threads)
     # builder.build_prologue()
 
-    for gemm_descr in self.descr_list:
+    for gemm_descr in descr_list:
       if isinstance(gemm_descr, MultilinearDescr):
         builder.build(ops=[SymbolView(self._scopes.get_symbol(op.tensor), op.bbox, op.offset) for op in gemm_descr.ops],
                         dest_obj=gemm_descr.dest,
                         descr=gemm_descr)
-        self._ir.extend(builder.get_instructions())
+        self._section.ir.extend(builder.get_instructions())
       if isinstance(gemm_descr, ElementwiseDescr):
-        self._ir.append(ElementwiseInstruction(self._context, gemm_descr.oplist, self._scopes, False, self._num_threads))
+        self._section.ir.append(ElementwiseInstruction(self._context, gemm_descr.oplist, self._scopes, False, self._num_threads))
 
     builder.build_epilogue()
-    self._ir.extend(builder.get_instructions())
+    self._section.ir.extend(builder.get_instructions())
 
   def _deduce_mults_per_block(self):
     policy = self._thread_block_policy_type(self._context,
-                                            self._shr_mem_obj.get_global_size(),
-                                            self._shr_mem_obj.get_size_per_mult(),
+                                            self._section.shr_mem_obj.get_global_size(),
+                                            self._section.shr_mem_obj.get_size_per_mult(),
                                             self._num_threads)
     num_mults_per_block = policy.get_num_mults_per_block()
-    self._shr_mem_obj.set_mults_per_block(num_mults_per_block)
+    self._section.shr_mem_obj.set_mults_per_block(num_mults_per_block)
 
   def get_kernel(self):
     return self._kernel
@@ -328,15 +358,6 @@ class Generator:
 
   def get_header(self):
     return self._header
-
-  def _check_consistency_with_user_options(self):
-    user_options = self._context.get_user_options()
-    for descr in self.descr_list:
-      if not descr.is_strict_match() == user_options.exact_contraction_length:
-        msg = 'gemm list is not consistent with user options. '
-        msg += f'`strict_math` in gemm descr. set to {descr.is_strict_match()}, '
-        msg += f'but `exact_contraction_length` is set to {user_options.exact_contraction_length}'
-        raise RuntimeError(msg)
 
   def _name_operands(self, gemm_list: List[OperationDescription]):
     tmp_counter = 0
@@ -410,12 +431,6 @@ class Generator:
   def get_base_name(self):
     return self._base_kernel_name
 
-  def _get_scalar_name(self, scalar, default_name):
-    scalar_type = type(scalar)
-    is_pritable = scalar_type.__str__ is not object.__str__
-    is_string = scalar_type == str
-    return scalar if is_pritable or is_string else default_name
-
   def _write_kernel_meta_data(self, writer):
     writer('// meta data:')
     glb_matrices = self._scopes.get_global_scope().values()
@@ -444,11 +459,16 @@ class Generator:
           params.extend([f'{offset_type} {get_extra_offset_name(symbol)}'])
 
     batch_size_type = 'size_t' if with_types else ''
-    params.append(f'{batch_size_type} {GeneralLexicon.NUM_ELEMENTS}')
+
+    for i, section in enumerate(self._sections):
+      params.append(f'{batch_size_type} {GeneralLexicon.NUM_ELEMENTS}{i}')
 
     flags_type = 'unsigned*' if with_types else ''
     default_flags_value = '= nullptr' if with_defaults else ''
-    params.append(f'{flags_type} {GeneralLexicon.FLAGS_NAME} {default_flags_value}')
+
+    for i, section in enumerate(self._sections):
+      params.append(f'{flags_type} {GeneralLexicon.FLAGS_NAME}{i} {default_flags_value}')
+
     return params
 
   def _generate_kernel_base_args(self):
@@ -461,14 +481,14 @@ class Generator:
 
     params = self._generate_base_params_list(symbol_list=global_symbols, with_types=True)
     str_params = ', '.join(params)
-    total_num_threads_per_block = self._num_threads * self._shr_mem_obj.get_mults_per_block()
+    total_num_threads_per_block = self._num_threads * self._section.shr_mem_obj.get_mults_per_block()
 
     lexic = self._context.get_vm().get_lexic()
 
     launch_bounds = (total_num_threads_per_block,)
 
     return lexic.kernel_definition(writer, launch_bounds, self._base_kernel_name, str_params, self._context.fp_as_str(),
-                                         self._shr_mem_obj.get_total_size(), global_symbols)
+                                         self._section.shr_mem_obj.get_total_size(), global_symbols)
 
   def _generate_launcher_proto(self, with_defaults=True):
     global_symbols = self._scopes.get_global_scope().values()
@@ -500,12 +520,13 @@ class Generator:
 
   def get_helper_headers(self):
     headerset = set()
-    for irinst in self._global_ir:
-      for header in irinst.get_headers():
-        headerset.add(header)
-    for irinst in self._ir:
-      for header in irinst.get_headers():
-        headerset.add(header)
+    for section in self._sections:
+      for irinst in section.global_ir:
+        for header in irinst.get_headers():
+          headerset.add(header)
+      for irinst in section.ir:
+        for header in irinst.get_headers():
+          headerset.add(header)
     return list(headerset)
 
   def generate_call_site(self,
@@ -544,11 +565,11 @@ class Generator:
       block = lexic.block_idx_x
     return f'{lexic.thread_idx_y} + {lexic.block_dim_y} * ({block})'
 
-  def _get_element_size_guard(self):
-    return f'{GeneralLexicon.BATCH_ID_NAME} < {GeneralLexicon.NUM_ELEMENTS}'
+  def _get_element_size_guard(self, i):
+    return f'{GeneralLexicon.BATCH_ID_NAME} < {GeneralLexicon.NUM_ELEMENTS}{i}'
 
-  def _get_flag_guard(self, writer):
+  def _get_flag_guard(self, writer, i):
     writer(f'bool allowed = true;')
-    with writer.If(f'{GeneralLexicon.FLAGS_NAME} != nullptr'):
-      writer(f'allowed = static_cast<bool>({GeneralLexicon.FLAGS_NAME}[{GeneralLexicon.BATCH_ID_NAME}]);')
+    with writer.If(f'{GeneralLexicon.FLAGS_NAME}{i} != nullptr'):
+      writer(f'allowed = static_cast<bool>({GeneralLexicon.FLAGS_NAME}{i}[{GeneralLexicon.BATCH_ID_NAME}]);')
     return 'allowed'

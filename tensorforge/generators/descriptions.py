@@ -9,7 +9,8 @@ from .optree import Assignment
 from typing import List
 
 class OperationDescription:
-  pass
+  def barrier(self):
+    return False
 
 class MultilinearDescr(OperationDescription):
   def __init__(self, dest: Tensor, ops: List[Tensor], target, permute, add: bool = False,
@@ -162,10 +163,14 @@ class IfDescr:
 class ConsecutiveDescr:
   pass
 
-class GridFenceDescr(OperationDescription):
+class BarrierDescription(OperationDescription):
+  def barrier(self):
+    return True
+
+class GridFenceDescr(BarrierDescription):
   def __str__(self):
     return 'fence'
 
-class GridBarrierDescr(OperationDescription):
+class GridBarrierDescr(BarrierDescription):
   def __str__(self):
     return 'barrier'
