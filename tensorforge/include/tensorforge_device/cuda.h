@@ -147,4 +147,11 @@ public:
 };
 // #endif
 
+__device__ __forceinline__ void splitFloatTF32(uint32_t &upper, uint32_t &lower,
+                                               float value) {
+  asm("cvt.rna.tf32.f32 %0, %1;\n" : "=r"(upper) : "f"(value));
+  const auto upperF = *reinterpret_cast<float *>(&upper);
+  asm("cvt.rna.tf32.f32 %0, %1;\n" : "=r"(lower) : "f"(value - upperF));
+}
+
 } // namespace tensorforge

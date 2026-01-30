@@ -275,8 +275,6 @@ class GlbToRegLoader(MemoryInstruction):
                context: Context,
                src: Symbol,
                dest: Symbol,
-               alpha: float,
-               beta: float,
                num_threads: int):
     super(GlbToRegLoader, self).__init__(context)
 
@@ -304,8 +302,6 @@ class GlbToRegLoader(MemoryInstruction):
 
     self._dest: Symbol = dest
     self._src: Symbol = src#.clone()
-    self._alpha = alpha
-    self._beta = beta
     self._num_threads: int = num_threads
     self._is_ready: bool = True
 
