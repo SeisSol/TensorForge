@@ -10,7 +10,7 @@ from typing import Union, List
 from tensorforge.common.basic_types import Datatype
 from tensorforge.backend.writer import Writer
 
-from .primitives import nvidia as nv
+from .primitives import nvidia as nvidia
 from .primitives import amd as amd
 
 class MultilinearInstruction(ComputeInstruction):
@@ -65,10 +65,6 @@ class MultilinearInstruction(ComputeInstruction):
         self._target = target2
 
         self._analyze()
-
-    def _choose_lead_dim(self):
-        self._shm_volume = 0
-        pass
 
     def _analyze(self):
         targetrank = 0
@@ -207,7 +203,7 @@ class MultilinearInstruction(ComputeInstruction):
         write_loops(self._context, writer, loopstack, nonlead_writer)
 
     def _nonleading_dim_test(self, writer: Writer):
-        can_use = self._context.get_vm().get_hw_descr().vendor == 'amd'
+        can_use = self._context.get_vm().get_hw_descr().vendor in ['amd']
         can_use &= len(self._ops) == 2
 
         if can_use:
@@ -222,6 +218,7 @@ class MultilinearInstruction(ComputeInstruction):
                 N *= mx - mi
 
             M *= -(-(self._ns[0][1] - self._ns[0][0]) // self._num_threads)
+            Mx = (self._ns[0][1] - self._ns[0][0])
 
             def unwindJ(j):
                 idx = [None]
@@ -236,12 +233,15 @@ class MultilinearInstruction(ComputeInstruction):
                 idx = [LeadIndex(i % size + self._ns[0][0] // self._num_threads, self._num_threads, 1)]
                 return idx
 
+            # TODO: remove
+            kx = self._ks[0][0]
+
             def unwindK(k, full):
                 size = self._ks[0][1] - self._ks[0][0]
                 if full:
                     idx = [k % size + self._ks[0][0]]
                 else:
-                    sizeL = -(-size // self._num_threads)
+                    sizeL = -(-(size + kx) // self._num_threads)
                     idx = [LeadIndex(k % sizeL + self._ks[0][0] // self._num_threads, self._num_threads, 1)]
                 k //= size
                 for mi, mx in self._ks[1:]:
@@ -249,9 +249,6 @@ class MultilinearInstruction(ComputeInstruction):
                     idx += [k % size + mi]
                     k //= size
                 return idx
-
-            # TODO: remove
-            kx = self._ks[0][0]
 
             def unwindOp(i, j, k, opid, full):
                 iidx = unwindI(i)
@@ -301,7 +298,7 @@ class MultilinearInstruction(ComputeInstruction):
             if self._context.get_vm().get_hw_descr().vendor == 'amd':
                 amd.matmul(writer, C, A, B, M, N, K, kx, self._num_threads, self._dest.datatype, sparse, self._context)
             elif self._context.get_vm().get_hw_descr().vendor == 'nvidia':
-                return nvidia.matmul(writer, C, A, B, M, N, K, kx, self._num_threads, self._dest.datatype, sparse, self._context, 'TODO', 0)
+                return nvidia.matmul(writer, C, A, B, Mx, N, K, kx, self._num_threads, self._dest.datatype, sparse, self._context, 'TODO', 0)
             return True
         return False
 

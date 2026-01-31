@@ -447,7 +447,7 @@ def matmul(writer, C, A, B, M, N, K, kx, threads, dtype, sparse, ctx, shmptr, sh
                     B(writer, f'{Breg}_{k//threads}_{jj}', j + jj, k // threads)
                 for jj in range(min(atom.n, N - j), atom.n):
                     writer(f'{atom.d.ctype()} {Breg}_{k//threads}_{jj}{"{}"};')
-            for ix in range(0, M):
+            for i in range(0, M, threads):
                 with writer.AnonymousScope():
                     writer(f'{atom.d.ctype()} {Creg}[{cregs}][{threads // atom.m}]{"{}"};')
                     for k in range(0, K, threads):
@@ -471,40 +471,40 @@ def matmul(writer, C, A, B, M, N, K, kx, threads, dtype, sparse, ctx, shmptr, sh
                                             writer(f'{atom.d.ctype()} {Breg2}_{kkk + jj * kregs} = {shmptr}[{boffs} + (threadIdx.x % {ktile}) + (threadIdx.x / {ktile} + {jj * ntile}) * {atom.k} + {kkk * ktile}];')
 
                                     for kkk in range(0, min(atom.k, K - k - kk)):
-                                        A(writer, f'{Areg}_{kkk}', ix, k + kk + kkk)
+                                        A(writer, f'{Areg}_{kkk}', i // threads, k + kk + kkk)
                                     for kkk in range(min(atom.k, K - k - kk), atom.k):
                                         writer(f'{atom.d.ctype()} {Areg}_{kkk}{"{}"};')
 
-                                    for iix in range(0, threads, atom.m):
+                                    for ii in range(0, min(threads, M - i), atom.m):
                                         with writer.AnonymousScope():
                                             writer('__syncwarp();')
-                                            with threadrange(iix, atom.m):
+                                            with threadrange(ii, atom.m):
                                                 for kkk in range(0, atom.k):
-                                                    writer(f'{shmptr}[{aoffs} + (threadIdx.x - {iix}) % {atom.m} + {kkk * atom.m}] = {Areg}_{kkk};')
+                                                    writer(f'{shmptr}[{aoffs} + (threadIdx.x - {ii}) % {atom.m} + {kkk * atom.m}] = {Areg}_{kkk};')
                                             writer('__syncwarp();')
 
                                             for kk in range(0, kregs):
-                                                for ii in range(0, mregs):
-                                                    writer(f'{atom.d.ctype()} {Areg2}_{ii + kk * mregs} = {shmptr}[{aoffs} + (threadIdx.x / {ktile}) + (threadIdx.x % {ktile} + {kk * ktile}) * {atom.m} + {ii * mtile}];')
+                                                for iii in range(0, mregs):
+                                                    writer(f'{atom.d.ctype()} {Areg2}_{iii + kk * mregs} = {shmptr}[{aoffs} + (threadIdx.x / {ktile}) + (threadIdx.x % {ktile} + {kk * ktile}) * {atom.m} + {iii * mtile}];')
 
-                                            atom.generate(writer, ctx, [f'{Areg2}_{i}' for i in range (aregs)], [f'{Breg2}_{i}' for i in range (bregs)], [f'{Creg}[{i}][{iix // atom.m}]' for i in range (cregs)])
+                                            atom.generate(writer, ctx, [f'{Areg2}_{i}' for i in range (aregs)], [f'{Breg2}_{i}' for i in range (bregs)], [f'{Creg}[{i}][{ii // atom.m}]' for i in range (cregs)])
 
                     for jj in range(0, atom.n):
                         writer(f'{atom.d.ctype()} {Creg}_{jj}{"{}"};')
 
-                    for i in range(0, threads, atom.m):
+                    for ii in range(0, threads, atom.m):
                         with writer.AnonymousScope():
                             for jj in range(0, nregs * 2):
-                                for ii in range(0, mregs):
-                                    writer(f'{shmptr}[{coffs} + threadIdx.x * 2 + {ii} + {jj * 64}] = {Creg}[{ii + mregs * jj}][{i // atom.m}];')
+                                for iii in range(0, mregs):
+                                    writer(f'{shmptr}[{coffs} + threadIdx.x * 2 + {iii} + {jj * 64}] = {Creg}[{iii + mregs * jj}][{ii // atom.m}];')
 
                             writer('__syncwarp();')
-                            with threadrange(i, atom.m):
+                            with threadrange(ii, atom.m):
                                 for jj in range(0, atom.n):
                                     writer(f'{Creg}_{jj} = {shmptr}[{coffs} + (threadIdx.x % {atom.m}) * {atom.n} + {jj}];')
                             writer('__syncwarp();')
 
                     for jj in range(0, min(atom.n, N - j)):
-                        C(writer, f'{Creg}_{jj}', ix, j + jj)
+                        C(writer, f'{Creg}_{jj}', i // threads, j + jj)
 
     return True
