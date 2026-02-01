@@ -357,11 +357,12 @@ def matmul(writer, C, A, B, M, N, K, kx, threads, dtype, sparse, ctx, shmptr, sh
 
 def shmsize(stages):
     atom = INSTRS[1]
-    nregs = atom.n // 4
-    mregs = atom.m // 8
-    kregs = atom.k // 4
+    threads = 32
+    aregs = (atom.m * atom.k) // threads
+    bregs = (atom.n * atom.k) // threads
+    cregs = (atom.m * atom.n) // threads
 
-    return 256
+    return 32 * max(aregs + bregs, cregs)
 
 class MMAWrapper:
     def headers(self):
@@ -433,8 +434,7 @@ def matmul(writer, C, A, B, M, N, K, kx, threads, dtype, sparse, ctx, shmptr, sh
     bregs = (atom.n * atom.k) // threads
     cregs = (atom.m * atom.n) // threads
 
-    shmptr = writer.varalloc()
-    writer(f'__shared__ {atom.d.ctype()} {shmptr}[{32 * max(aregs + bregs, cregs)}];')
+    assert 32 * max(aregs + bregs, cregs) <= shmsize
 
     aoffs = 0
     boffs = aregs * 32

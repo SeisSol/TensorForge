@@ -36,11 +36,16 @@ class OptimizationStage:
     overhead //= 4
     overhead *= 4
 
+    tmp_overhead = 0
+    for instr in self._instrs:
+      tmp_overhead = max(tmp_overhead, instr.temp_shmem())
+
     opt = ShrMemOpt(context=self._context,
                     shr_mem_obj=self._shr_mem,
                     regions=regions,
                     live_map=live_map,
-                    thread_overhead=overhead)
+                    thread_overhead=overhead,
+                    tmp_overhead=tmp_overhead)
     opt.apply()
 
     if self._user_options.enable_sync_block_opt:

@@ -4,6 +4,7 @@ class ShrMemObject:
     self._size_per_mult = size
     self._mults_per_block = mults_per_block
     self._global_size = 0
+    self._temp_offset = 0
 
   def alloc_global(self, size):
     startpoint = self._global_size
@@ -33,6 +34,12 @@ class ShrMemObject:
       return self.get_total_size()
     else:
       return 'not yet defined'
+
+  def set_temp_offset(self, offset):
+    self._temp_offset = offset
+
+  def get_temp_offset(self):
+    return self._temp_offset
 
   def is_dense(self):
     return True

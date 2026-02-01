@@ -13,13 +13,14 @@ class ShrMemOpt(AbstractOptStage):
                shr_mem_obj: ShrMemObject,
                regions: List[Region],
                live_map: Dict[int, Set[Symbol]],
-               thread_overhead: int):
+               thread_overhead: int,
+               tmp_overhead: int):
     super(ShrMemOpt, self).__init__(context)
 
     self._shr_mem_obj: ShrMemObject = shr_mem_obj
     self._regions: List[Region] = regions
     self._live_map: Dict[int, Set[Symbol]] = live_map
-    self._overhead = thread_overhead
+    self._overhead = thread_overhead + tmp_overhead
 
   def apply(self) -> None:
     self._check_regions()
@@ -27,6 +28,7 @@ class ShrMemOpt(AbstractOptStage):
     max_memory, mem_per_region = self._compute_total_shr_mem_size()
     # add overhead to avoid shmem bank conflicts
     self._shr_mem_obj.set_size_per_mult(max_memory + self._overhead)
+    self._shr_mem_obj.set_temp_offset(max_memory)
 
     offsets = self._compute_start_addresses(mem_per_region)
     self._assign_offsets(offsets)

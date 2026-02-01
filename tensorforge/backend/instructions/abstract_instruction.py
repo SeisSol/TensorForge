@@ -45,3 +45,6 @@ class AbstractInstruction(ABC):
   # @abstractmethod
   def get_perfdata(self):
     pass
+
+  def temp_shmem(self):
+    return 0

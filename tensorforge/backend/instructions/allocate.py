@@ -57,6 +57,7 @@ class ShrMemAlloc(AbstractInstruction):
 
       address = f'{shrmem_obj.get_size_per_mult()} * {self._vm.get_lexic().thread_idx_y} + {shrmem_obj.get_global_size()}'
       writer(f'{self._fp_as_str}* {shrmem_obj.name} = &{common_shrmem}[{address}];')
+      writer(f'{self._fp_as_str}* tempShrMem = &{shrmem_obj.name}[{shrmem_obj.get_temp_offset()}];')
 
   def is_ready(self):
     shrmem_obj = self._dest.obj

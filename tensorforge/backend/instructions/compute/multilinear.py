@@ -202,9 +202,14 @@ class MultilinearInstruction(ComputeInstruction):
 
         write_loops(self._context, writer, loopstack, nonlead_writer)
 
-    def _nonleading_dim_test(self, writer: Writer):
+    def _is_matmul(self):
         can_use = self._context.get_vm().get_hw_descr().vendor in ['amd']
         can_use &= len(self._ops) == 2
+        return can_use
+
+
+    def _nonleading_dim_test(self, writer: Writer):
+        can_use = self._is_matmul()
 
         if can_use:
             K = 1
@@ -298,7 +303,7 @@ class MultilinearInstruction(ComputeInstruction):
             if self._context.get_vm().get_hw_descr().vendor == 'amd':
                 amd.matmul(writer, C, A, B, M, N, K, kx, self._num_threads, self._dest.datatype, sparse, self._context)
             elif self._context.get_vm().get_hw_descr().vendor == 'nvidia':
-                return nvidia.matmul(writer, C, A, B, Mx, N, K, kx, self._num_threads, self._dest.datatype, sparse, self._context, 'TODO', 0)
+                return nvidia.matmul(writer, C, A, B, Mx, N, K, kx, self._num_threads, self._dest.datatype, sparse, self._context, 'tempShrMem', self.temp_shmem())
             return True
         return False
 
@@ -538,3 +543,8 @@ class MultilinearInstruction(ComputeInstruction):
 
     def __str__(self):
         return f'{self._dest.name} = {self._sumOperation}({f" {self._productOperation} ".join(op.symbol.name for op in self._ops)}) {self._sumOperation} {self._prev}' # TODO: dimensions
+
+    def temp_shmem(self):
+        if self._is_matmul() and self._context.get_vm().get_hw_descr().vendor in ['nvidia']:
+            return nvidia.shmsize(1)
+        return 0
