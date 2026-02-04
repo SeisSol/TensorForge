@@ -167,10 +167,25 @@ class BarrierDescription(OperationDescription):
   def barrier(self):
     return True
 
+  def trueBarrier(self):
+    return False
+
+  def matrix_list(self):
+    return []
+
+  def get_num_threads(self, ctx):
+    return 32, 32
+
 class GridFenceDescr(BarrierDescription):
   def __str__(self):
     return 'fence'
 
+  def trueBarrier(self):
+    return False
+
 class GridBarrierDescr(BarrierDescription):
   def __str__(self):
     return 'barrier'
+
+  def trueBarrier(self):
+    return True

@@ -113,16 +113,25 @@ class Generator:
 
     descrlist = []
     currlist = []
+    barrier = []
     for descr in self.descr_list:
       if descr.barrier():
-        descrlist += [currlist]
+        # avoid empty sections
+        if len(currlist) > 0:
+          descrlist += [currlist]
+          barrier += [descr.trueBarrier()]
+        elif len(barrier) > 0:
+          barrier[-1] = barrier[-1] or descr.trueBarrier()
         currlist = []
       else:
         currlist += [descr]
     if len(currlist) > 0:
       descrlist += [currlist]
+      barrier += [False]
 
-    for codesection in descrlist:
+    for codesection, lastbarrier in zip(descrlist, barrier):
+      scopecnt = self._scopes.get_num_scopes()
+      self._scopes.add_scope()
       self._section = Section()
 
       self._emit_global_ir()
@@ -141,6 +150,11 @@ class Generator:
       self._deduce_mults_per_block()
       self._set_threadconfig()
 
+      if lastbarrier:
+        self._section.barrier = True
+
+      while scopecnt < self._scopes.get_num_scopes():
+        self._scopes.remove_scope()
       self._sections += [self._section]
 
     if not self._base_kernel_name:
@@ -208,7 +222,7 @@ class Generator:
       shmemsize = f'{self._section.shr_mem_obj.get_total_size()} * sizeof({self._context.fp_as_str()})'
 
       # TODO: allow multi-kernel approach instead
-      coop = len(self._sections) > 1 # FIXME: not really; only if we have a grid barrier
+      coop = any(section.barrier for section in self._sections)
 
       writer(f'{lexic.kernel_range_object("block", f"{self._num_threads}, {mults_per_block}, 1")};')
       if not self._persistent_threading:
@@ -216,7 +230,9 @@ class Generator:
         num_blocks = f'({GeneralLexicon.NUM_ELEMENTS}0 + {mults_per_block} - 1) / {mults_per_block}'
       else:
         writer(f'{lexic.get_launch_size(kernel_name, "block", shmemsize)}')
-        if not coop:
+        if coop:
+          num_blocks = 'gridsize'
+        else:
           num_blocks = f'std::min(gridsize, {GeneralLexicon.NUM_ELEMENTS}0)'
       writer(f'{lexic.kernel_range_object("grid", f"{num_blocks}, 1, 1")};')
 
@@ -481,14 +497,18 @@ class Generator:
 
     params = self._generate_base_params_list(symbol_list=global_symbols, with_types=True)
     str_params = ', '.join(params)
-    total_num_threads_per_block = self._num_threads * self._section.shr_mem_obj.get_mults_per_block()
+
+    mults_per_block = min(section.shr_mem_obj.get_mults_per_block() for section in self._sections)
+    shr_total_size = max(section.shr_mem_obj.get_total_size() for section in self._sections)
+
+    total_num_threads_per_block = self._num_threads * mults_per_block
 
     lexic = self._context.get_vm().get_lexic()
 
     launch_bounds = (total_num_threads_per_block,)
 
     return lexic.kernel_definition(writer, launch_bounds, self._base_kernel_name, str_params, self._context.fp_as_str(),
-                                         self._section.shr_mem_obj.get_total_size(), global_symbols)
+                                         shr_total_size, global_symbols)
 
   def _generate_launcher_proto(self, with_defaults=True):
     global_symbols = self._scopes.get_global_scope().values()

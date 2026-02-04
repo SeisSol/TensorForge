@@ -1,6 +1,7 @@
 #ifndef TENSORFORGE_INTERNALS_H
 #define TENSORFORGE_INTERNALS_H
 
+#include <array>
 #include <string>
 
 #include "tensorforge_device/base.h"

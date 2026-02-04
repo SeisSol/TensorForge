@@ -53,7 +53,7 @@ class CudaLexic(Lexic):
   def get_launch_code(self, func_name, grid, block, stream, func_params, shmem, coop):
     if coop:
       return f"""
-  auto args = argsPtrs({func_params});
+  auto args = tensorforge::argsPtrs({func_params});
   cudaLaunchCooperativeKernel({func_name}, {grid}, {block}, args.data(), {shmem}, {stream});
 """
     else:

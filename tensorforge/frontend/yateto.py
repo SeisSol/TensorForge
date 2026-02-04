@@ -6,9 +6,8 @@ from tensorforge.common.helper import generate_tmp_tensor
 from tensorforge.common.matrix.tensor import Tensor, SubTensor
 from tensorforge.common.matrix.spp import FullSPP, BoundingBoxSPP, ListSPP
 from tensorforge.common.matrix.boundingbox import BoundingBox as BBox
-from tensorforge.generators.descriptions import ElementwiseDescr
 from tensorforge.generators.generator import Generator as TensorForgeGenerator
-from tensorforge.generators.descriptions import MultilinearDescr
+from tensorforge.generators.descriptions import MultilinearDescr, ElementwiseDescr, GridBarrierDescr, GridFenceDescr
 
 from tensorforge.ir.data.variable import TensorView, TensorAlloc
 from tensorforge.ir.data.variable import TensorData
@@ -362,6 +361,12 @@ class GpuKernelGeneratorV1:
     else:
       return self._cache[op.name]
 
+  def switch_region(self, barrier):
+    if barrier:
+      self._descr_list += [GridBarrierDescr()]
+    else:
+      self._descr_list += [GridFenceDescr()]
+
 class TensorForgeWriter:
   def __init__(self, tensorforge_generator, headers):
     self._headers = list(headers) + list(tensorforge_generator.get_helper_headers())
@@ -400,6 +405,10 @@ class YatetoFrontend:
   def add_linear_operation(self, dest, ops, target, permute, add):
     # legacy gateway
     return self.generator.add_operation(dest, ops, target, permute, add)
+
+  def region_switch(self, barrier):
+    self.generator.switch_region(barrier)
+    return 0
 
   def add_operation(self, description):
     return self.generator.add_operation_new(description)
