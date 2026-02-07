@@ -7,7 +7,7 @@ from tensorforge.common.matrix.tensor import Tensor, SubTensor
 from tensorforge.common.matrix.spp import FullSPP, BoundingBoxSPP, ListSPP
 from tensorforge.common.matrix.boundingbox import BoundingBox as BBox
 from tensorforge.generators.generator import Generator as TensorForgeGenerator
-from tensorforge.generators.descriptions import MultilinearDescr, ElementwiseDescr, GridBarrierDescr, GridFenceDescr
+from tensorforge.generators.descriptions import MultilinearDescr, ElementwiseDescr, GridBarrierDescr, GridFenceDescr, RegionDescription
 
 from tensorforge.ir.data.variable import TensorView, TensorAlloc
 from tensorforge.ir.data.variable import TensorData
@@ -26,6 +26,9 @@ class GpuKernelGeneratorV1:
 
     self._ir_list = []
     self._tensor_list = {}
+
+    # TODO: maybe remove again
+    self._prefix = ""
 
   def add_operation(self, dest, ops, target, permute, add):
     self._cache_matrices(dest, ops, target, permute)
@@ -96,9 +99,9 @@ class GpuKernelGeneratorV1:
     if isinstance(op, (float, int)):
       return SubTensor(tensor = Tensor([], Addressing.SCALAR, data = [op]))
     elif self.is_scalar(op):
-      return SubTensor(self._cache[op.name()])
+      return SubTensor(self._cache[f'{self._prefix}{op.name()}'])
     else:
-      tensor = self._cache[op.name]
+      tensor = self._cache[f'{self._prefix}{op.name}']
       currentPreShape = BBox([s for s, _ in op.eqspp.nnzbounds()], [e+1 for _, e in op.eqspp.nnzbounds()])
 
       tml = op.memoryLayout
@@ -136,10 +139,10 @@ class GpuKernelGeneratorV1:
       if self.is_scalar(pretensor):
         self.make_tensor(pretensor, False, None)
         indicesIndexed[pretensor.name()] = []
-        subTensor = SubTensor(self._cache[pretensor.name()], BBox([], []))
+        subTensor = SubTensor(self._cache[f'{self._prefix}{pretensor.name()}'], BBox([], []))
       else:
         bbox = BBox([s for s, _ in pretensor.eqspp().nnzbounds()], [e+1 for _, e in pretensor.eqspp().nnzbounds()])
-        subTensor = SubTensor(self._cache[pretensor.name()], bbox)
+        subTensor = SubTensor(self._cache[f'{self._prefix}{pretensor.name()}'], bbox)
       return subTensor, indicesIndexed[pretensor.name()]
 
     for statement in statements:
@@ -203,12 +206,16 @@ class GpuKernelGeneratorV1:
       entry = self._get_tensorforge_matrix(op)
       entry_name = op.name
 
+    entry_name = f'{self._prefix}{entry_name}'
+
     if not (entry_name in self._cache and entry.is_same(self._cache[entry_name])):
       self._cache[entry_name] = entry
 
   def tensor_ref(self, d):
     name = d['name']
     eqspp = d['spp']
+
+    name = f'{self._prefix}{name}'
 
     assert(name in self._cache)
 
@@ -226,6 +233,8 @@ class GpuKernelGeneratorV1:
 
   def add_tensor(self, d):
     name = d['name']
+    name = f'{self._prefix}{name}'
+
     datatype = Datatype.ytt2enum(d['datatype'])
 
     datatype_new = BaseDatatype.ytt2enum(d['datatype'])
@@ -276,16 +285,17 @@ class GpuKernelGeneratorV1:
 
     if dest.is_temporary: # (dest is never a scalar---for the time being)
       self.make_tensor(dest, can_be_aligned, [i for i in range(len(dest.indices))])
-      self._tmp_matrices[dest.name] = self._cache[dest.name]
+      self._tmp_matrices[f'{self._prefix}{dest.name}'] = self._cache[f'{self._prefix}{dest.name}']
     else:
       self.make_tensor(dest, can_be_aligned, [i for i in range(len(dest.indices))])
 
 
 
   def _add_scalar(self, scalar):
-    tensor = Tensor([], Addressing.SCALAR, alias=scalar.name(), datatype=self._datatype(scalar.datatype))
-    self._tmp_matrices[scalar.name()] = tensor # SubTensor(tensor, tensor.bbox)
-    return self._tmp_matrices[scalar.name()]
+    name = f'{self._prefix}{scalar.name()}'
+    tensor = Tensor([], Addressing.SCALAR, alias=name, datatype=self._datatype(scalar.datatype))
+    self._tmp_matrices[name] = tensor # SubTensor(tensor, tensor.bbox)
+    return self._tmp_matrices[name]
 
   def deduce_addresing(self, term):
     if term.is_compute_constant:
@@ -323,7 +333,7 @@ class GpuKernelGeneratorV1:
     return yi.gen_matrix(shape,
                                bboxrange,
                                addressing=addr_mode,
-                               name=tensor.name,
+                               name=f'{self._prefix}{tensor.name}',
                                is_tmp=tensor.is_temporary,
                                permute=None,
                                pattern=pattern,
@@ -345,27 +355,34 @@ class GpuKernelGeneratorV1:
       if matrix.is_tmp or matrix.addressing == Addressing.NONE:
         offset_name_map[name] = '0'
       else:
-        offset_name_map[name] = f'extraOffset_{name}'
+        parts = name.split('.')
+        assert len(parts) <= 2
+        varname = f'extraOffset_{parts[-1]}'
+        if len(parts) == 2:
+          offset_name_map[name] = f'{parts[0]}.{varname}'
+        else:
+          offset_name_map[name] = varname
 
     return generator.generate_call_site(mat_name_map,
-                                        offset_name_map,
-                                        'numElements',
-                                        'flags',
-                                        'streamPtr')
+                                        offset_name_map)
 
   def _append_operation(self, op):
     if isinstance(op, (float, int)):
       return Tensor([], Addressing.SCALAR, data = op)
     elif self.is_scalar(op):
-      return self._cache[op.name()]
+      return self._cache[f'{self._prefix}{op.name()}']
     else:
-      return self._cache[op.name]
+      return self._cache[f'{self._prefix}{op.name}']
 
   def switch_region(self, barrier):
     if barrier:
       self._descr_list += [GridBarrierDescr()]
     else:
       self._descr_list += [GridFenceDescr()]
+
+  def set_region_name(self, name):
+    self._prefix = f"{name}."
+    self._descr_list += [RegionDescription(name)]
 
 class TensorForgeWriter:
   def __init__(self, tensorforge_generator, headers):
@@ -409,6 +426,9 @@ class YatetoFrontend:
   def region_switch(self, barrier):
     self.generator.switch_region(barrier)
     return 0
+
+  def set_region_name(self, name):
+    self.generator.set_region_name(name)
 
   def add_operation(self, description):
     return self.generator.add_operation_new(description)

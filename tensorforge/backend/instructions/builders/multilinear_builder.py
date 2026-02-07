@@ -3,7 +3,7 @@ from tensorforge.common.context import Context
 from tensorforge.backend.scopes import Scopes
 from tensorforge.backend.symbol import Symbol, SymbolType, SymbolView
 from tensorforge.backend.instructions.allocate import RegisterAlloc
-from tensorforge.backend.instructions.memory.load import GlbToShrLoader
+from tensorforge.backend.instructions.memory.load import GlbToShrLoader, GlbToRegLoader
 from tensorforge.backend.instructions.clear_registers import ClearRegisters
 from tensorforge.backend.instructions.memory.store import StoreRegToGlb, StoreRegToShr, StoreRegToReg
 from tensorforge.backend.instructions.sync_block import SyncThreads
@@ -19,8 +19,6 @@ from tensorforge.backend.instructions.abstract_instruction import AbstractInstru
 
 
 class MultilinearBuilder(AbstractBuilder):
-  GemmClass = None
-
   def __init__(self,
                context: Context,
                scopes: Scopes,
@@ -44,6 +42,7 @@ class MultilinearBuilder(AbstractBuilder):
     self._dest_regs = None
 
     self._use_registers_always = self._context.get_vm().get_hw_descr().vendor in ['amd']
+    self._preload_registers = False
     self._deferred_stores = {}
     self._temporaries = {}
 
@@ -71,7 +70,7 @@ class MultilinearBuilder(AbstractBuilder):
   # TODO: check if we always can allow a direct global memory load
   def _make_load_op(self, i):
 
-    prefer_broadcast = self._context.get_vm().get_hw_descr().vendor == 'amd'
+    prefer_broadcast = self._context.get_vm().get_hw_descr().vendor in ['amd']
 
     has_lead_dim = 0 in self._descr.target[i]
     transpose = self._descr.permute[i] != [j for j in range(len(self._descr.target[i]))]
@@ -113,8 +112,13 @@ class MultilinearBuilder(AbstractBuilder):
           self._loaders_cache[self._mem_regions[i]] = load_op
           self._instructions.append(load_op)
         else:
-          # Note: operand will reside in glb. mem for gemm operation
-          self._mem_regions[i] = self._ops[i]
+          if self._preload_registers:
+            self._mem_regions[i], load_op = self._make_loader_and_symbol_reg(self._ops[i].symbol, is_transpose=self._descr.permute[i])
+            self._loaders_cache[self._mem_regions[i]] = load_op
+            self._instructions.append(load_op)
+          else:
+            # Note: operand will reside in glb. mem for gemm operation
+            self._mem_regions[i] = self._ops[i]
 
       elif self._ops[i].symbol.stype == SymbolType.SharedMem or self._ops[i].symbol.stype == SymbolType.Register:
         if self._ops[i].symbol in self._loaders_cache.keys():
@@ -147,6 +151,32 @@ class MultilinearBuilder(AbstractBuilder):
       else:
         raise InternalError(f'gemm-builder: op{i} ({self._ops[i].symbol.name}) must be either in shr or glb mem, given: {self._ops[i].symbol.stype}')
 
+  def _make_loader_and_symbol_reg(self, operand, is_transpose) -> Tuple[Symbol, GlbToRegLoader]:
+    regsize = 1
+    threads = self._num_threads
+    lead_dim = [0] # [t for t in self._descr.target[0] if t >= 0]
+
+    for d, dim in enumerate(operand.bbox.sizes()):
+      if d not in lead_dim or threads == 0:
+        regsize *= dim
+      else:
+        regsize *= (dim + threads - 1) // threads
+        threads //= dim
+    name = self._name_registers()
+    regmem = RegMemObject(name, regsize)
+    registers = Symbol(name=name, stype=SymbolType.Register, obj=regmem)
+    registers.num_threads = self._num_threads
+    registers.datatype = self._context.fp_type
+    self._scopes.add_symbol(registers)
+    registerAlloc = RegisterAlloc(self._context, registers, regsize, 0.0)
+    self._instructions.append(registerAlloc)
+
+    load_op = GlbToRegLoader(context=self._context,
+                                     dest=registers,
+                                     src=operand,
+                                     num_threads=self._num_threads)
+    return SymbolView(registers), load_op
+
   def _make_loader_and_symbol(self, operand, is_transpose) -> Tuple[Symbol, GlbToShrLoader]:
     shr_mem_region = Symbol(name=self._name_shr_reg(),
                             stype=SymbolType.SharedMem,
@@ -170,7 +200,14 @@ class MultilinearBuilder(AbstractBuilder):
     regsize = 1
     threads = self._num_threads
     lead_dim = [0] # [t for t in self._descr.target[0] if t >= 0]
-    for d, dim in enumerate(self._dest_obj.bbox.sizes()):
+
+    # TODO: shrink to enumerate(self._dest_obj.bbox.sizes())
+    if self._add:
+      sizes = self._get_target_symbol().data_view._bbox.sizes()
+    else:
+      sizes = self._dest_obj.bbox.sizes()
+
+    for d, dim in enumerate(sizes):
       if d not in lead_dim or threads == 0:
         regsize *= dim
       else:

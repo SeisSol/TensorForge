@@ -444,7 +444,7 @@ class Symbol:
 
   def load_linear(self, writer, context: Context, variable, index):
     if self.stype == SymbolType.Register:
-      access = f'{self.name}[{index}]'
+      access = f'{self.name}[{index // 32}]' # TODO
     else:
       access = f'{self.name}[{index} + threadIdx.x]'
     writer(f'{self.get_fptype()} {variable} = {access};')

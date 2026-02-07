@@ -1,6 +1,9 @@
 #pragma once
 
 #include <hip/hip_runtime.h>
+
+#include <hip/hip_cooperative_groups.h>
+
 #include <type_traits>
 
 #include "base.h"
@@ -19,6 +22,14 @@ static constexpr int AsmVersion = 9010;
 static constexpr int AsmVersion = 9402;
 #elif defined(__gfx950__)
 static constexpr int AsmVersion = 9500;
+#elif defined(__GFX10__)
+static constexpr int AsmVersion = 10000;
+#elif defined(__GFX11__)
+static constexpr int AsmVersion = 11000;
+#elif defined(__GFX12__)
+static constexpr int AsmVersion = 12000;
+#elif defined(__GFX13__)
+static constexpr int AsmVersion = 13000;
 #else
 static constexpr int AsmVersion = 0;
 #endif
@@ -110,6 +121,21 @@ __device__ __forceinline__ auto bpermute(T value, int lane) -> T {
   return ot.value;
 }
 
+template <bool fi, bool bctrl, typename T>
+__device__ __forceinline__ auto permlanex16(T value, uint64_t p) -> T {
+  IntType<T> it;
+  IntType<T> ot;
+
+  it.value = value;
+#pragma unroll
+  for (int i = 0; i < IntType<T>::IntCount; ++i) {
+    ot.ints[i] =
+        __builtin_amdgcn_permlanex16(0, it.ints[i], static_cast<uint32_t>(p),
+                                     static_cast<uint32_t>(p >> 32), fi, bctrl);
+  }
+  return ot.value;
+}
+
 template <typename T>
 __device__ __forceinline__ T broadcast_warp(T value, int lane) {
   return readlane(value, lane);
@@ -123,6 +149,13 @@ __device__ __forceinline__ T broadcast(T value) {
     return value;
   } else if constexpr (Block == 64 && Subblock == 1) {
     return broadcast_warp(value, Lane);
+  } else if constexpr (Block == 32 && Subblock == 1 && AsmVersion >= 10000) {
+    return broadcast_warp(value, Lane);
+  } else if constexpr (Block == 32 && Subblock == 16 && AsmVersion >= 10000) {
+    constexpr uint64_t LaneBcst = 0xfedcba9876543210_u64;
+    return (__lane_id() / 16) != Lane
+               ? permlanex16<true, false>(value, LaneBcst)
+               : value;
   } else if constexpr (Block == 16 && Subblock == 1 && AsmVersion >= 9010 &&
                        AsmVersion < 10000) {
     return dpp<0x150 + Lane, 0xf, 0xf, true>(value);
@@ -148,6 +181,52 @@ __device__ __forceinline__ T broadcast(T value) {
   }
   return value;
 }
+
+/*
+#ifdef __gfx950__
+template <typename T>
+__device__ __forceinline__ auto permlane32(T value) -> T {
+  IntType<T> it;
+  IntType<T> ot;
+
+  it.value = value;
+#pragma unroll
+  for (int i = 0; i < IntType<T>::IntCount; ++i) {
+    ot.ints[i] = __builtin_amdgcn_permlane32_swap(it.ints[i], CompleteMask);
+  }
+  return ot.value;
+}
+
+template <typename T>
+__device__ __forceinline__ auto permlane16(T value) -> T {
+  IntType<T> it;
+  IntType<T> ot;
+
+  it.value = value;
+#pragma unroll
+  for (int i = 0; i < IntType<T>::IntCount; ++i) {
+    ot.ints[i] = __builtin_amdgcn_permlane16_swap(it.ints[i], CompleteMask);
+  }
+  return ot.value;
+}
+#else
+template <typename T>
+__device__ __forceinline__ auto permlane32(T value) -> T {
+  const auto blockvar = __lane_id() / 32;
+  const auto subblockvar = __lane_id() % 32;
+  return bpermute(value, subblockvar + (1 - blockvar) * 32);
+}
+
+template <typename T>
+__device__ __forceinline__ auto permlane16(T value) -> T {
+  constexpr auto Block = 32;
+  constexpr auto AndMask = 0x1f;
+  constexpr auto OrMask = 0x0;
+  constexpr auto XorMask = Block - 1;
+  return swizzle<AndMask, OrMask, XorMask>(value);
+}
+#endif
+*/
 
 template <std::size_t Block, typename T>
 __device__ __forceinline__ T swap(T value) {
@@ -183,6 +262,13 @@ __device__ __forceinline__ T swap(T value) {
 // FMAC_DPP inline assembly
 // !! MAY DISREGARD WAIT STATES !!
 
+#if defined(__GFX10__) || defined(__GFX11__) || defined(__GFX12__) ||          \
+    defined(__GFX13__)
+#define ROW_BCST16 "row_share"
+#else
+#define ROW_BCST16 "row_newbcast"
+#endif
+
 #define ISTRINGIFY(x) #x
 #define STR(x) ISTRINGIFY(x)
 #define FMADPP4(pos, c, a, b)                                                  \
@@ -192,14 +278,14 @@ __device__ __forceinline__ T swap(T value) {
         : "v"(a), "v"(b)                                                       \
         :)
 #define FMADPP16(pos, c, a, b)                                                 \
-  __asm("v_fmac_f32_dpp %0, %1, %2 row_newbcast:" STR(                         \
-            pos) " row_mask:0xf bank_mask:0xf bound_ctrl:1" CMFI               \
+  __asm("v_fmac_f32_dpp %0, %1, %2 " ROW_BCST16                                \
+        ":" STR(pos) " row_mask:0xf bank_mask:0xf bound_ctrl:1" CMFI           \
         : "+v"(c)                                                              \
         : "v"(a), "v"(b)                                                       \
         :)
 #define DMADPP16(pos, c, a, b)                                                 \
-  __asm("v_fmac_f64_dpp %0, %1, %2 row_newbcast:" STR(                         \
-            pos) " row_mask:0xf bank_mask:0xf bound_ctrl:1" CMFI               \
+  __asm("v_fmac_f64_dpp %0, %1, %2 " ROW_BCST16                                \
+        ":" STR(pos) " row_mask:0xf bank_mask:0xf bound_ctrl:1" CMFI           \
         : "+v"(c)                                                              \
         : "v"(a), "v"(b)                                                       \
         :)
@@ -218,9 +304,7 @@ __device__ __forceinline__ void fmacdpp16(float &c, float a, float b);
 template <int Row>
 __device__ __forceinline__ void fmacdpp16(double &c, double a, double b);
 
-#if defined(__gfx906__) || defined(__gfx908__) || defined(__gfx90a__) ||       \
-    defined(__gfx940__) || defined(__gfx941__) || defined(__gfx942__) ||       \
-    defined(__gfx950__)
+#if !defined(__gfx900__)
 constexpr bool HasFmacDpp4 = true;
 
 template <>
@@ -244,7 +328,8 @@ constexpr bool HasFmacDpp4 = false;
 #endif
 
 #if defined(__gfx90a__) || defined(__gfx940__) || defined(__gfx941__) ||       \
-    defined(__gfx942__) || defined(__gfx950__)
+    defined(__gfx942__) || defined(__gfx950__) || defined(__GFX10__) ||        \
+    defined(__GFX11__) || defined(__GFX12__) || defined(__GFX13__)
 constexpr bool HasFmacDpp16 = true;
 
 template <>

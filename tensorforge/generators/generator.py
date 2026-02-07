@@ -1,7 +1,7 @@
 from typing import List, Union, Type
 from copy import deepcopy
 import hashlib
-from tensorforge.generators.descriptions import OperationDescription, MultilinearDescr, ElementwiseDescr
+from tensorforge.generators.descriptions import OperationDescription, MultilinearDescr, ElementwiseDescr, RegionDescription
 from tensorforge.common.context import Context
 from tensorforge.common.basic_types import Addressing, GeneralLexicon, DataFlowDirection
 from tensorforge.common.helper import get_extra_offset_name
@@ -189,7 +189,21 @@ class Generator:
 
           if self._persistent_threading:
             # TODO: OMP target
-            with writer.For(f'size_t {GeneralLexicon.BATCH_ID_NAME} = {self._get_2d_block_id()}; {GeneralLexicon.BATCH_ID_NAME} < {GeneralLexicon.NUM_ELEMENTS}{i}; {GeneralLexicon.BATCH_ID_NAME} += {vm.get_lexic().grid_dim_x} * {vm.get_lexic().block_dim_y}'):
+            offset = []
+            idx = i - 1
+            for ssection in reversed(self._sections[:i]):
+              if ssection.barrier:
+                break
+              offset += [f'{GeneralLexicon.NUM_ELEMENTS}{idx}']
+              idx -= 1
+
+            stride = f'({vm.get_lexic().grid_dim_x} * {vm.get_lexic().block_dim_y})'
+            if len(offset) == 0:
+              start = self._get_2d_block_id()
+            else:
+              start = f'({self._get_2d_block_id()} + {" + ".join(offset)}) % {stride}'
+
+            with writer.For(f'size_t {GeneralLexicon.BATCH_ID_NAME} = {start}; {GeneralLexicon.BATCH_ID_NAME} < {GeneralLexicon.NUM_ELEMENTS}{i}; {GeneralLexicon.BATCH_ID_NAME} += {stride}'):
               generate_inner()
           elif self._clusterlaunchcontrol:
             writer(f'__shared__ tensorforge::ClusterLaunchCtrl launchctrl;')
@@ -551,10 +565,7 @@ class Generator:
 
   def generate_call_site(self,
                          mat_name_map,
-                         offset_name_map,
-                         num_element,
-                         flags=None,
-                         stream=None):
+                         offset_name_map):
     args = []
 
     # add tensors
@@ -565,16 +576,18 @@ class Generator:
         if symbol.obj.addressing not in [Addressing.SCALAR, Addressing.NONE]:
           args.append(offset_name_map[symbol.obj.alias])
 
-    # add num. elements
-    args.append(num_element)
+    flags = []
+    for desc in self.descr_list:
+      if isinstance(desc, RegionDescription):
+        args.append(f'{desc.name}.numElements')
+        flags.append(f'{desc.name}.flags')
+    if len(flags) == 0:
+      args.append(f'numElements')
+      flags.append(f'flags')
 
-    # add flags
-    if flags:
-      args.append(flags)
+    args += flags
 
-    # add streams
-    if stream:
-      args.append(stream)
+    args.append('streamPtr')
 
     args = ', '.join(args)
     return f'launcher_{self._base_kernel_name}({args});'

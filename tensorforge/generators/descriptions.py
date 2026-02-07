@@ -189,3 +189,16 @@ class GridBarrierDescr(BarrierDescription):
 
   def trueBarrier(self):
     return True
+
+class RegionDescription(OperationDescription):
+  def __init__(self, name):
+    self.name = name
+
+  def matrix_list(self):
+    return []
+
+  def get_num_threads(self, ctx):
+    return 32, 32
+
+  def __str__(self):
+    return f'region "{self.name}"'

@@ -356,16 +356,16 @@ def reduction(writer: Writer, source, target, operation, blocks):
             var = tempvar
 
 def cdna1(ctx):
-    arch = ctx.get_vm().get_hw_descr().name
+    arch = ctx.get_vm().get_hw_descr().model
     return arch in ('gfx908', 'gfx90a', 'gfx942', 'gfx950')
 
 def cdna2(ctx):
-    arch = ctx.get_vm().get_hw_descr().name
+    arch = ctx.get_vm().get_hw_descr().model
     return arch in ('gfx90a', 'gfx942', 'gfx950')
 
 def amdarch(ctx):
-    archstr = ctx.get_vm().get_hw_descr().name
-    return int(arch[3:], base=16)
+    archstr = ctx.get_vm().get_hw_descr().model
+    return int(archstr[3:], base=16)
 
 def mfma_emu_int8(writer: Writer, C, B, A, c, a, b):
     # cf. the Ozaki II paper
@@ -416,10 +416,10 @@ def mfma_emu_bf16_f32(writer: Writer, C, B, A, c, a, b):
     writer(f'const bfloat16x4 {B3} = bfloat16x4({Br} - {B2});')
     writer(f'{C} = __builtin_amdgcn_mfma_f32_4x4x4bf16(get_native_vector({A1}), get_native_vector({B1}), {C}, {c}, {a}, {b});')
     writer(f'{C} = __builtin_amdgcn_mfma_f32_4x4x4bf16(get_native_vector({A1}), get_native_vector({B2}), {C}, {c}, {a}, {b});')
-    writer(f'{C} = __builtin_amdgcn_mfma_f32_4x4x4bf16(get_native_vector({A1}), get_native_vector({B3}), {C}, {c}, {a}, {b});')
     writer(f'{C} = __builtin_amdgcn_mfma_f32_4x4x4bf16(get_native_vector({A2}), get_native_vector({B1}), {C}, {c}, {a}, {b});')
-    writer(f'{C} = __builtin_amdgcn_mfma_f32_4x4x4bf16(get_native_vector({A2}), get_native_vector({B2}), {C}, {c}, {a}, {b});')
+    writer(f'{C} = __builtin_amdgcn_mfma_f32_4x4x4bf16(get_native_vector({A1}), get_native_vector({B3}), {C}, {c}, {a}, {b});')
     writer(f'{C} = __builtin_amdgcn_mfma_f32_4x4x4bf16(get_native_vector({A3}), get_native_vector({B1}), {C}, {c}, {a}, {b});')
+    writer(f'{C} = __builtin_amdgcn_mfma_f32_4x4x4bf16(get_native_vector({A2}), get_native_vector({B2}), {C}, {c}, {a}, {b});')
 
 def matmul32(writer: Writer, C, B, A, M, N, K, kx, threads):
     with writer.AnonymousScope():
@@ -544,8 +544,39 @@ def hfma(writer: Writer, C, A, B, repeat, datatype, threads, ctx):
                 if b is not None:
                     func(writer, c, a, b, j)
 
+def wmma3atom(threads):
+    assert threads == 32
+
+    N = 16
+    M = 16
+    K = 16
+
+    for i in range(N):
+        writer(f'const auto {a}_{i} = tensorforge::broadcast<32, 16, 0>({A}_{i});')
+    for j in range(N):
+        writer(f'const auto {b}_{j} = tensorforge::broadcast<32, 16, 0>({B}_{j});')
+
+    writer(f'tensorforge::transpose16x16({",".join(f"{b}_{i}" for i in range(N))});')
+
+    writer(f'VectorT<short, 16> {a}_p1;')
+    writer(f'VectorT<short, 16> {a}_p2;')
+    writer(f'VectorT<short, 16> {a}_p3;')
+    writer(f'VectorT<short, 16> {b}_p1;')
+    writer(f'VectorT<short, 16> {b}_p2;')
+    writer(f'VectorT<short, 16> {b}_p3;')
+
+    writer(f'VectorT<float, 8> {c}{"{}"};')
+    writer(f'{c} = __builtin_amdgcn_wmma_f32_16x16x16_bf16_w32({a}_p1, {b}_p1, {c});')
+    writer(f'{c} = __builtin_amdgcn_wmma_f32_16x16x16_bf16_w32({a}_p2, {b}_p1, {c});')
+    writer(f'{c} = __builtin_amdgcn_wmma_f32_16x16x16_bf16_w32({a}_p1, {b}_p2, {c});')
+    writer(f'{c} = __builtin_amdgcn_wmma_f32_16x16x16_bf16_w32({a}_p3, {b}_p1, {c});')
+    writer(f'{c} = __builtin_amdgcn_wmma_f32_16x16x16_bf16_w32({a}_p1, {b}_p3, {c});')
+    writer(f'{c} = __builtin_amdgcn_wmma_f32_16x16x16_bf16_w32({a}_p2, {b}_p2, {c});')
+
+    # TODO: gfx1200, f'__builtin_amdgcn_wmma_f32_16x16x16_bf16_w32_gfx12'
+
 def matmul(writer, C, A, B, M, N, K, kx, threads, dtype, sparse, ctx):
-    if cdna1(ctx) and not sparse and dtype == Datatype.F32:
+    if amdarch(ctx) >= 0x908 and amdarch(ctx) < 0x1000 and not sparse and dtype == Datatype.F32:
         matmul32(writer, C, A, B, M, N, K, kx, threads)
     else:
         ab = []
