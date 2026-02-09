@@ -544,34 +544,51 @@ def hfma(writer: Writer, C, A, B, repeat, datatype, threads, ctx):
                 if b is not None:
                     func(writer, c, a, b, j)
 
-def wmma3atom(threads):
+def wmma3atom(writer, A, B, C, threads):
+
+    a = writer.varalloc()
+    b = writer.varalloc()
+    c = writer.varalloc()
+
     assert threads == 32
 
     N = 16
     M = 16
     K = 16
 
-    for i in range(N):
-        writer(f'const auto {a}_{i} = tensorforge::broadcast<32, 16, 0>({A}_{i});')
-    for j in range(N):
-        writer(f'const auto {b}_{j} = tensorforge::broadcast<32, 16, 0>({B}_{j});')
+    for m in range(2):
+        with writer.AnonymousScope():
+            for i in range(N):
+                writer(f'const auto {a}_{i} = tensorforge::broadcast<32, 16, {m}>({A}_{i});')
+            for j in range(N):
+                writer(f'const auto {b}_{j} = tensorforge::broadcast<32, 16, {m}>({B}_{j});')
 
-    writer(f'tensorforge::transpose16x16({",".join(f"{b}_{i}" for i in range(N))});')
+            writer(f'tensorforge::transpose16x16({",".join(f"{b}_{i}" for i in range(N))});')
 
-    writer(f'VectorT<short, 16> {a}_p1;')
-    writer(f'VectorT<short, 16> {a}_p2;')
-    writer(f'VectorT<short, 16> {a}_p3;')
-    writer(f'VectorT<short, 16> {b}_p1;')
-    writer(f'VectorT<short, 16> {b}_p2;')
-    writer(f'VectorT<short, 16> {b}_p3;')
+            writer(f'VectorT<short, 16> {a}_p1{"{}"};')
+            writer(f'VectorT<short, 16> {a}_p2{"{}"};')
+            writer(f'VectorT<short, 16> {a}_p3{"{}"};')
+            writer(f'VectorT<short, 16> {b}_p1{"{}"};')
+            writer(f'VectorT<short, 16> {b}_p2{"{}"};')
+            writer(f'VectorT<short, 16> {b}_p3{"{}"};')
 
-    writer(f'VectorT<float, 8> {c}{"{}"};')
-    writer(f'{c} = __builtin_amdgcn_wmma_f32_16x16x16_bf16_w32({a}_p1, {b}_p1, {c});')
-    writer(f'{c} = __builtin_amdgcn_wmma_f32_16x16x16_bf16_w32({a}_p2, {b}_p1, {c});')
-    writer(f'{c} = __builtin_amdgcn_wmma_f32_16x16x16_bf16_w32({a}_p1, {b}_p2, {c});')
-    writer(f'{c} = __builtin_amdgcn_wmma_f32_16x16x16_bf16_w32({a}_p3, {b}_p1, {c});')
-    writer(f'{c} = __builtin_amdgcn_wmma_f32_16x16x16_bf16_w32({a}_p1, {b}_p3, {c});')
-    writer(f'{c} = __builtin_amdgcn_wmma_f32_16x16x16_bf16_w32({a}_p2, {b}_p2, {c});')
+            for i in range(N):
+                writer(f'[{a}_p1[{i}], {a}_p2[{i}], {a}_p3[{i}]] = splitFloatBF16({a}_{i});')
+            for i in range(N):
+                writer(f'[{b}_p1[{i}], {b}_p2[{i}], {b}_p3[{i}]] = splitFloatBF16({b}_{i});')
+
+            writer(f'VectorT<float, 8> {c}{"{}"};')
+            writer(f'{c} = __builtin_amdgcn_wmma_f32_16x16x16_bf16_w32({a}_p1, {b}_p1, {c});')
+            writer(f'{c} = __builtin_amdgcn_wmma_f32_16x16x16_bf16_w32({a}_p2, {b}_p1, {c});')
+            writer(f'{c} = __builtin_amdgcn_wmma_f32_16x16x16_bf16_w32({a}_p1, {b}_p2, {c});')
+            writer(f'{c} = __builtin_amdgcn_wmma_f32_16x16x16_bf16_w32({a}_p3, {b}_p1, {c});')
+            writer(f'{c} = __builtin_amdgcn_wmma_f32_16x16x16_bf16_w32({a}_p1, {b}_p3, {c});')
+            writer(f'{c} = __builtin_amdgcn_wmma_f32_16x16x16_bf16_w32({a}_p2, {b}_p2, {c});')
+
+            for j in range(N):
+                writer(f'const auto {c}_{j} = tensorforge::broadcast<32, 16, {m}>({c}[{j}]);')
+
+
 
     # TODO: gfx1200, f'__builtin_amdgcn_wmma_f32_16x16x16_bf16_w32_gfx12'
 

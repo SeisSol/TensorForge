@@ -5,6 +5,7 @@
 #include <hip/hip_cooperative_groups.h>
 
 #include <type_traits>
+#include <utility>
 
 #include "base.h"
 
@@ -806,5 +807,17 @@ public:
     void start();
 };
 */
+
+std::tuple<short, short, short> splitFloatBF16(float input) {
+  const auto i1 = static_cast<__bf16>(input);
+  const auto i1r = input - static_cast<float>(i1);
+  const auto i2 = static_cast<__bf16>(i1r);
+  const auto i2r = i1r - static_cast<float>(i2);
+  const auto i3 = static_cast<__bf16>(i2r);
+  const auto r1 = *reinterpret_cast<const short *>(&i1);
+  const auto r2 = *reinterpret_cast<const short *>(&i2);
+  const auto r3 = *reinterpret_cast<const short *>(&i3);
+  return {r1, r2, r3};
+}
 
 } // namespace tensorforge
