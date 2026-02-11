@@ -2,11 +2,12 @@ from typing import Union
 import math
 from tensorforge.common.matrix.tensor import Tensor
 from . import AbstractShrMemWrite, MemoryInstruction
-from tensorforge.backend.symbol import SymbolType, Symbol, DataView, LeadIndex
+from tensorforge.backend.symbol import Symbol, SymbolType, DataView, LeadIndex, write_loops, LeadLoop, Loop
 from tensorforge.common.exceptions import InternalError
 from tensorforge.backend.writer import Writer
 from tensorforge.common.matrix.boundingbox import BoundingBox
 from tensorforge.common.context import Context
+from tensorforge.backend.data_types import RegMemObject
 from typing import Union, List
 
 # to find a number coprime to the number of shared memory banks
@@ -278,24 +279,24 @@ class GlbToRegLoader(MemoryInstruction):
                num_threads: int):
     super(GlbToRegLoader, self).__init__(context)
 
-    if src.stype != SymbolType.Register:
-      raise InternalError('store: operand `src` is not in reg mem')
+    if dest.stype != SymbolType.Register:
+      raise InternalError('store: operand `dest` is not in reg mem')
 
-    if not isinstance(src.obj, RegMemObject):
-      raise InternalError(f'store: operand `src` is registers, instead: {type(src.obj)}')
+    if not isinstance(dest.obj, RegMemObject):
+      raise InternalError(f'store: operand `dest` is registers, instead: {type(dest.obj)}')
 
-    if dest.stype != SymbolType.Global:
-      raise InternalError('store: operand `dest` is not in global memory.')
+    if src.stype != SymbolType.Global:
+      raise InternalError('store: operand `src` is not in global memory.')
 
-    if not isinstance(dest.obj, Tensor):
-      raise InternalError('store: operand `dest` is not a matrix')
+    if not isinstance(src.obj, Tensor):
+      raise InternalError('store: operand `src` is not a matrix')
 
     src.add_user(self)
     dest.add_user(self)
 
-    dest.data_view = DataView(shape=dest.obj.shape,
+    dest.data_view = DataView(shape=src.obj.shape,
                               permute=None,
-                              bbox=dest.obj.get_bbox())
+                              bbox=src.obj.get_bbox())
 
     # if dest.data_view.get_dim_size(0) > src.data_view.get_dim_size(0):
     #   raise InternalError('store: `src` and `dest` do not match in size aling dim `0`')
@@ -305,13 +306,12 @@ class GlbToRegLoader(MemoryInstruction):
     self._num_threads: int = num_threads
     self._is_ready: bool = True
 
-  def gen_code(self, writer: Writer) -> None:
+  def gen_code_inner(self, writer: Writer) -> None:
     writer.new_line()
     dest_view = self._dest.data_view
 
     allow_nontemporal = len(self._src.get_user_list()) == 1
 
-    writer(f'// {self}')
     src_bbox = self._src.data_view.get_bbox()
 
     loops = []
@@ -326,4 +326,4 @@ class GlbToRegLoader(MemoryInstruction):
     write_loops(self._context, writer, loops, inner)
 
   def __str__(self) -> str:
-    return f'{self._dest.name} = store{{g>r}}({self._src.name});'
+    return f'{self._dest.name} = load{{g>r}}({self._src.name});'

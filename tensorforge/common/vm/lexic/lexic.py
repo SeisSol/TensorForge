@@ -18,6 +18,7 @@ class Lexic(ABC):
     self.block_idx_x = None
     self.stream_type = None
     self.restrict_kw = None
+    self.simd_mode = False
 
   @abstractmethod
   def multifile(self):

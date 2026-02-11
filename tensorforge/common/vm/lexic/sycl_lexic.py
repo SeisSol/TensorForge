@@ -18,6 +18,8 @@ class SyclLexic(Lexic):
     self.stream_type = "sycl::queue"
     self.restrict_kw = "__restrict__"
 
+    self.simd_mode = self._underlying_hardware == 'intel' and self._backend == 'oneapi'
+
   def multifile(self):
     return False
 
@@ -45,7 +47,10 @@ class SyclLexic(Lexic):
       localmem = None
 
     if self._underlying_hardware == 'intel' and self._backend == 'oneapi':
-      add_items = '[[intel::reqd_sub_group_size(16)]] [[intel::kernel_args_restrict]]'
+      if self.simd_mode:
+        add_items = '[[intel::sycl_explicit_simd]] [[intel::kernel_args_restrict]]'
+      else:
+        add_items = '[[intel::reqd_sub_group_size(16)]] [[intel::kernel_args_restrict]]'
     else:
       add_items = ''
 
@@ -62,7 +67,10 @@ class SyclLexic(Lexic):
     return "item.barrier()"
 
   def sync_simd(self):
-    return "item.barrier()" # TODO make better
+    if self.simd_mode:
+      return ""
+    else:
+      return "item.barrier()" # TODO make better
 
   def sync_grid(self):
     raise NotImplementedError() # TODO
@@ -74,8 +82,11 @@ class SyclLexic(Lexic):
   def active_sub_group_mask(self):
     return f'item.get_sub_group()'
 
-  def broadcast(self, variable, lane, block=None, subblock=None):
-    return f'group_broadcast(-1, {variable}, {lane})'
+  def broadcast(self, variable, lane, block=None, subblock=1):
+    if self.simd_mode:
+      return f'{variable}.select<{block}, {subblock}>({lane})'
+    else:
+      return f'group_broadcast(-1, {variable}, {lane})'
 
   def kernel_range_object(self, name, values):
     return f"sycl::range<3> {name} ({values})"
@@ -95,6 +106,9 @@ class SyclLexic(Lexic):
 
   def get_fptype(self, fptype, length=1):
     return f'sycl::vec<{fptype}, {length}>'
+
+  def get_simd(self, fptype, size):
+    return f'tensorforge::intel_esimd::simd<{fptype}, {size}>'
 
   def get_operation(self, op: Operation, fptype, value1, value2):
     if op == Operation.COPY:

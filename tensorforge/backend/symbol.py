@@ -145,7 +145,9 @@ class LeadIndex:
     return f'{self._nonlead}'
 
   def write(self, context: Context):
-    if self._block > 1:
+    if context.get_vm().get_lexic().simd_mode:
+      return f'({self._nonlead} * {self._block})'
+    elif self._block > 1:
       return f'(({context.get_vm().get_lexic().thread_idx_x} / {self._stride}) % {self._block}) + {self._nonlead} * {self._block}'
     elif self._block == 1:
       return f'{self._nonlead}'
@@ -443,11 +445,14 @@ class Symbol:
     return wrote
 
   def load_linear(self, writer, context: Context, variable, index):
-    if self.stype == SymbolType.Register:
-      access = f'{self.name}[{index // 32}]' # TODO
+    if context.get_vm().get_lexic().simd_mode:
+      writer(f'{context.get_vm().get_lexic().simd(self.get_fptype(), 16)} {variable}({index});')
     else:
-      access = f'{self.name}[{index} + threadIdx.x]'
-    writer(f'{self.get_fptype()} {variable} = {access};')
+      if self.stype == SymbolType.Register:
+        access = f'{self.name}[{index // 32}]' # TODO
+      else:
+        access = f'{self.name}[{index} + threadIdx.x]'
+      writer(f'{self.get_fptype()} {variable} = {access};')
 
   def load(self, writer, context: Context, variable, index: List[Union[str, int, Immediate, Variable, LeadIndex]], nontemp):
     if self.stype == SymbolType.Data or (not self.obj.is_dense() and not isinstance(self.obj.spp, BoundingBoxSPP)):
@@ -473,7 +478,9 @@ class Symbol:
       if self.stype == SymbolType.Register or self.stype == SymbolType.Scratch:
         assert len(self.lead_dims) == 1
         idx = index[self.lead_dims[0]]
-        if not idx.is_thread_dependent():
+        if isinstance(idx, (float, int, np.int32)) or not idx.is_thread_dependent():
+          if isinstance(idx, (float, int, np.int32)):
+            idx = Immediate(idx, Datatype.I32)
           # doesn't work
           if isinstance(idx, Variable):
             writevar = idx.write_nonlead()
@@ -490,7 +497,9 @@ class Symbol:
           access = pre_access
       else:
         access = pre_access
-      if self.stype == SymbolType.Global:
+      if context.get_vm().get_lexic().simd_mode:
+        writer(f'{context.get_vm().get_lexic().simd(self.get_fptype(), 16)} {variable}({access});')
+      elif self.stype == SymbolType.Global:
         writer(f'{self.get_fptype()} {variable};')
         writer(context.get_vm().get_lexic().glb_load(variable, access, nontemp))
       else:
@@ -502,19 +511,26 @@ class Symbol:
 
     access = self.access(context, index)
 
-    if self.stype == SymbolType.Global:
-      assign = context.get_vm().get_lexic().glb_store(access, variable, nontemp)
-    else:
-      assign = f'{access} = {variable};'
-    if self.stype == SymbolType.Register or self.stype == SymbolType.Scratch:
-      assert len(self.lead_dims) == 1
-      if isinstance(index[self.lead_dims[0]], LeadIndex):
-        writer(assign)
+    if context.get_vm().get_lexic().simd_mode:
+      if self.stype == SymbolType.Global:
+        writer(f'{variable}.copy_to({access});')
       else:
-        with writer.If(f'{context.get_vm().get_lexic().thread_idx_x} == {index[self.lead_dims[0]]}'):
-          writer(assign)
+        writer(f'{variable} = {access};')
     else:
-      writer(assign)
+      if self.stype == SymbolType.Global:
+        assign = context.get_vm().get_lexic().glb_store(access, variable, nontemp)
+      else:
+        assign = f'{access} = {variable};'
+
+      if self.stype == SymbolType.Register or self.stype == SymbolType.Scratch:
+        assert len(self.lead_dims) == 1
+        if isinstance(index[self.lead_dims[0]], LeadIndex):
+          writer(assign)
+        else:
+          with writer.If(f'{context.get_vm().get_lexic().thread_idx_x} == {index[self.lead_dims[0]]}'):
+            writer(assign)
+      else:
+        writer(assign)
 
   def add_user(self, user):
     self._users.append(user)

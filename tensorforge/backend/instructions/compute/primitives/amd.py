@@ -374,7 +374,7 @@ def mfma_emu_int8(writer: Writer, C, B, A, c, a, b):
     for x in const:
         constM *= x
     constI = [pow(constM // const[i], -1, const[i]) for i in range(len(const))]
-    const2 = [(constM // const[i]) * constI[i] for i in range(len(const))]
+    const2 = [float((constM // const[i]) * constI[i]) for i in range(len(const))]
     acc = len(const)
 
     Aa = writer.varalloc()
