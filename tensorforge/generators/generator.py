@@ -360,9 +360,13 @@ class Generator:
                           self._num_threads)
     # builder.build_prologue()
 
+    def get_symbol_view(op):
+      symbol = self._scopes.get_symbol(op.tensor)
+      return SymbolView(symbol, op.bbox, op.offset)
+
     for gemm_descr in descr_list:
       if isinstance(gemm_descr, MultilinearDescr):
-        builder.build(ops=[SymbolView(self._scopes.get_symbol(op.tensor), op.bbox, op.offset) for op in gemm_descr.ops],
+        builder.build(ops=[get_symbol_view(op) for op in gemm_descr.ops],
                         dest_obj=gemm_descr.dest,
                         descr=gemm_descr)
         self._section.ir.extend(builder.get_instructions())

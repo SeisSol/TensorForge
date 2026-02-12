@@ -3,7 +3,7 @@ from tensorforge.common.context import Context
 from tensorforge.common.matrix.tensor import Tensor
 from tensorforge.common.matrix.boundingbox import BoundingBox
 from tensorforge.backend.data_types import RegMemObject
-from tensorforge.backend.symbol import Symbol, SymbolType, DataView, LeadIndex, write_loops, LeadLoop, Loop
+from tensorforge.backend.symbol import Symbol, SymbolType, DataView, LeadIndex, write_loops, LeadLoop, Loop, Immediate
 from tensorforge.common.exceptions import InternalError
 from tensorforge.backend.writer import Writer
 from . import AbstractShrMemWrite, MemoryInstruction
@@ -175,15 +175,25 @@ class StoreRegToGlb(AbstractInstruction):
 
     writer(f'// {self}')
     src_bbox = self._src.data_view.get_bbox()
+    dest_bbox = self._dest.data_view.get_bbox()
     with writer.Scope():
+      manual = [False]
       loops = []
       loops += [LeadLoop('i0', src_bbox.lower()[0], src_bbox.upper()[0], self._num_threads, 1)]
       for i in range(1, src_bbox.rank()):
-        loops += [Loop(f'i{i}', src_bbox.lower()[i], src_bbox.upper()[i], 1)]
+        unroll = (src_bbox.lower()[i], src_bbox.upper()[i]) != (dest_bbox.lower()[i], dest_bbox.upper()[i])
+        lower = min(src_bbox.lower()[i], dest_bbox.lower()[i])
+        upper = max(src_bbox.upper()[i], dest_bbox.upper()[i])
+        loops += [Loop(f'i{i}', lower, upper, 1, unroll)]
+        manual += [unroll]
 
       def inner(indices):
-        self._src.load(writer, self._context, 'value', indices, False)
-        self._dest.store(writer, self._context, 'value', indices, allow_nontemporal)
+        needsLoad = all(not isinstance(index, Immediate) or (src_bbox.lower()[i] <= index._value and src_bbox.upper()[i] > index._value) for i,index in enumerate(indices))
+        if needsLoad:
+          self._src.load(writer, self._context, 'value', indices, False)
+          self._dest.store(writer, self._context, 'value', indices, allow_nontemporal)
+        else:
+          self._dest.store(writer, self._context, '0', indices, allow_nontemporal)
 
       write_loops(self._context, writer, loops, inner)
 

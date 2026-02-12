@@ -10,6 +10,8 @@ from typing import Union, List
 from tensorforge.common.basic_types import Datatype
 from tensorforge.backend.writer import Writer
 
+from tensorforge.common.matrix.tensor import Tensor
+
 from .primitives import nvidia as nvidia
 from .primitives import amd as amd
 
@@ -80,8 +82,11 @@ class MultilinearInstruction(ComputeInstruction):
             opdim = [''] * op.bbox.rank()
             for j in range(op.bbox.rank()):
                 # TODO: check adding the data_view box here again
-                lower = op.bbox.lower()[j] #+ op.symbol.data_view._bbox.lower()[j]
-                upper = op.bbox.upper()[j] #+ op.symbol.data_view._bbox.lower()[j]
+                lower = op.bbox.lower()[j] + op.symbol.data_view._bbox.lower()[j]
+                upper = op.bbox.upper()[j] + op.symbol.data_view._bbox.lower()[j]
+                if op.symbol.obj and isinstance(op.symbol.obj, Tensor):
+                    lower -= op.symbol.obj.get_bbox().lower()[j]
+                    upper -= op.symbol.obj.get_bbox().lower()[j]
                 #if self._target[i][j] != 0:
                 #    lower -= op.offset[j]
                 #    upper -= op.offset[j]

@@ -42,7 +42,7 @@ class MultilinearBuilder(AbstractBuilder):
     self._dest_regs = None
 
     self._use_registers_always = self._context.get_vm().get_hw_descr().vendor in ['amd']
-    self._preload_registers = False
+    self._preload_registers = False #self._context.get_vm().get_hw_descr().vendor in ['amd']
     self._deferred_stores = {}
     self._temporaries = {}
 
@@ -112,9 +112,10 @@ class MultilinearBuilder(AbstractBuilder):
           self._loaders_cache[self._mem_regions[i]] = load_op
           self._instructions.append(load_op)
         else:
-          if self._preload_registers:
+          if self._preload_registers and self._ops[i].symbol.obj.is_dense() and not (self._ops[i].symbol in self._loaders_cache.keys()):
+            # only register-preload dense matrices for now
             self._mem_regions[i], load_op = self._make_loader_and_symbol_reg(self._ops[i].symbol, is_transpose=self._descr.permute[i])
-            self._loaders_cache[self._mem_regions[i]] = load_op
+            self._loaders_cache[self._ops[i].symbol] = load_op
             self._instructions.append(load_op)
           else:
             # Note: operand will reside in glb. mem for gemm operation
@@ -156,7 +157,7 @@ class MultilinearBuilder(AbstractBuilder):
     threads = self._num_threads
     lead_dim = [0] # [t for t in self._descr.target[0] if t >= 0]
 
-    for d, dim in enumerate(operand.bbox.sizes()):
+    for d, dim in enumerate(operand.data_view._bbox.sizes()):
       if d not in lead_dim or threads == 0:
         regsize *= dim
       else:
@@ -251,7 +252,8 @@ class MultilinearBuilder(AbstractBuilder):
         #                                        dest=dest_symbol,
         #                                        shr_mem=self._shr_mem,
         #                                        num_threads=self._num_threads))
-        pass # see note below
+        # see note below (but update to the new temp regs)
+        self._deferred_stores[dest_symbol.name] = (self._temp_regs, dest_symbol)
       elif dest_symbol.stype == SymbolType.Global:
         if self._use_registers_always:
           self._deferred_stores[dest_symbol.name] = (self._temp_regs, dest_symbol)
