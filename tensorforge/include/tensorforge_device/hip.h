@@ -78,7 +78,7 @@ __device__ __forceinline__ auto dppUpdate(T value, T prev) -> T {
   pt.value = prev;
 #pragma unroll
   for (int i = 0; i < IntType<T>::IntCount; ++i) {
-    ot.ints[i] = __builtin_amdgcn_update_dpp(it.ints[i], pt.ints[i], Dpp1, Dpp2,
+    ot.ints[i] = __builtin_amdgcn_update_dpp(pt.ints[i], it.ints[i], Dpp1, Dpp2,
                                              Dpp3, Dpp4);
   }
   return ot.value;
@@ -676,11 +676,49 @@ transpose16x16b32(T &w1, T &w2, T &w3, T &w4, T &w5, T &w6, T &w7, T &w8, T &w9,
   transpose4x4b32(v9, v10, v11, v12, w9, w10, w11, w12);
   transpose4x4b32(v13, v14, v15, v16, w13, w14, w15, w16);
 
+  // from here on: DPP and row control suffice
+
   // transpose 8x8
 
-  // DPP and row control suffice here
+  const T u1 = dppUpdate<0x124, 0b1111, 0b1010, true>(v5, v1);
+  const T u2 = dppUpdate<0x124, 0b1111, 0b1010, true>(v6, v2);
+  const T u3 = dppUpdate<0x124, 0b1111, 0b1010, true>(v7, v3);
+  const T u4 = dppUpdate<0x124, 0b1111, 0b1010, true>(v8, v4);
 
-  // const T u1 = dppUpdate<0x128, 0b1010, 0b1111, true>(v1, v5);
+  const T u5 = dppUpdate<0x12c, 0b1111, 0b0101, true>(v1, v5);
+  const T u6 = dppUpdate<0x12c, 0b1111, 0b0101, true>(v2, v6);
+  const T u7 = dppUpdate<0x12c, 0b1111, 0b0101, true>(v3, v7);
+  const T u8 = dppUpdate<0x12c, 0b1111, 0b0101, true>(v4, v8);
+
+  const T u9 = dppUpdate<0x124, 0b1111, 0b1010, true>(v13, v9);
+  const T u10 = dppUpdate<0x124, 0b1111, 0b1010, true>(v14, v10);
+  const T u11 = dppUpdate<0x124, 0b1111, 0b1010, true>(v15, v11);
+  const T u12 = dppUpdate<0x124, 0b1111, 0b1010, true>(v16, v12);
+
+  const T u13 = dppUpdate<0x12c, 0b1111, 0b0101, true>(v9, v13);
+  const T u14 = dppUpdate<0x12c, 0b1111, 0b0101, true>(v10, v14);
+  const T u15 = dppUpdate<0x12c, 0b1111, 0b0101, true>(v11, v15);
+  const T u16 = dppUpdate<0x12c, 0b1111, 0b0101, true>(v12, v16);
+
+  // transpose 16x16
+
+  w1 = dppUpdate<0x128, 0b1111, 0b1100, true>(u9, u1);
+  w2 = dppUpdate<0x128, 0b1111, 0b1100, true>(u10, u2);
+  w3 = dppUpdate<0x128, 0b1111, 0b1100, true>(u11, u3);
+  w4 = dppUpdate<0x128, 0b1111, 0b1100, true>(u12, u4);
+  w5 = dppUpdate<0x128, 0b1111, 0b1100, true>(u13, u5);
+  w6 = dppUpdate<0x128, 0b1111, 0b1100, true>(u14, u6);
+  w7 = dppUpdate<0x128, 0b1111, 0b1100, true>(u15, u7);
+  w8 = dppUpdate<0x128, 0b1111, 0b1100, true>(u16, u8);
+
+  w9 = dppUpdate<0x128, 0b1111, 0b0011, true>(u1, u9);
+  w10 = dppUpdate<0x128, 0b1111, 0b0011, true>(u2, u10);
+  w11 = dppUpdate<0x128, 0b1111, 0b0011, true>(u3, u11);
+  w12 = dppUpdate<0x128, 0b1111, 0b0011, true>(u4, u12);
+  w13 = dppUpdate<0x128, 0b1111, 0b0011, true>(u5, u13);
+  w14 = dppUpdate<0x128, 0b1111, 0b0011, true>(u6, u14);
+  w15 = dppUpdate<0x128, 0b1111, 0b0011, true>(u7, u15);
+  w16 = dppUpdate<0x128, 0b1111, 0b0011, true>(u8, u16);
 }
 
 #define CM4STR(p1, p2, p3, p4, c, a, b)                                        \
