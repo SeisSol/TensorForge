@@ -16,10 +16,6 @@ class MoveLoads(AbstractTransformer):
     instrsOut = []
     stored = []
     for instr in reversed(self._instrs):
-        if not isinstance(instr, ComputeInstruction):
-            while len(stored) > 0:
-                delayed = stored.pop()
-                instrsOut += [delayed]
         if isinstance(instr, LoadInstruction):
             instrsOut += [LoadWait(instr)]
             while len(stored) > 0:
@@ -27,6 +23,10 @@ class MoveLoads(AbstractTransformer):
                 instrsOut += [delayed]
             stored.append(instr)
         else:
+            if not isinstance(instr, ComputeInstruction):
+                while len(stored) > 0:
+                    delayed = stored.pop()
+                    instrsOut += [delayed]
             instrsOut += [instr]
     instrsOut += stored[::-1]
 
