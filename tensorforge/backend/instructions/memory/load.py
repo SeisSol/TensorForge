@@ -16,7 +16,10 @@ def _find_next_coprime(number, conumber):
     if math.gcd(i, conumber) == 1:
       return i
 
-class GlbToShrLoader(AbstractShrMemWrite):
+class LoadInstruction:
+  pass
+
+class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
   def __init__(self, **kwargs):
     super(GlbToShrLoader, self).__init__(kwargs['context'])
     self._dest = kwargs['dest']
@@ -51,7 +54,7 @@ class GlbToShrLoader(AbstractShrMemWrite):
     self._shr_mem.add_user(self)
     self._is_ready: bool = False
 
-    self._use_cuda_memcpy = False #self._context.get_vm().get_hw_descr().vendor == 'nvidia'
+    self._use_cuda_memcpy = self._context.get_vm().get_hw_descr().vendor == 'nvidia'
 
     if self._permute is None:
       self._permute = [i for i in range(len(self._src.obj.shape))]
@@ -178,6 +181,7 @@ class GlbToShrLoader(AbstractShrMemWrite):
         loop.__exit__(None, None, None)
 
       if self._use_cuda_memcpy:
+        writer(f'__syncwarp();')
         writer(f'{self._pipeline}.producer_commit();')
 
     #if False:
@@ -271,7 +275,7 @@ class GlbToShrLoader(AbstractShrMemWrite):
   def __str__(self):
     return f'{self._dest.name} = load{{g>s}}({self._src.name}[{", ".join(str(p) for p in self._permute)}])'
 
-class GlbToRegLoader(MemoryInstruction):
+class GlbToRegLoader(MemoryInstruction, LoadInstruction):
   def __init__(self,
                context: Context,
                src: Symbol,
@@ -327,3 +331,18 @@ class GlbToRegLoader(MemoryInstruction):
 
   def __str__(self) -> str:
     return f'{self._dest.name} = load{{g>r}}({self._src.name});'
+
+class LoadWait(MemoryInstruction, LoadInstruction):
+  def __init__(self, instr):
+    super(LoadWait, self).__init__(instr._context)
+    self._instr = instr
+    self._is_ready = True
+
+  def gen_code_inner(self, writer: Writer) -> None:
+    if isinstance(self._instr, GlbToShrLoader):
+      if self._instr._use_cuda_memcpy:
+        writer(f'{self._instr._pipeline}.consumer_wait();')
+        writer(f'{self._instr._pipeline}.consumer_release();')
+
+  def __str__(self) -> str:
+    return f'wait({self._instr});'

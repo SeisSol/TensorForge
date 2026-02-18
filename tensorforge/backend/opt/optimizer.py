@@ -8,7 +8,7 @@ from .mem_region_allocation import MemoryRegionAllocation, Region
 from .shr_mem_analyzer import ShrMemOpt
 from .sync_block import SyncThreadsOpt
 from .remove_redundancy import RemoveRedundancyOpt
-
+from .memmove import MoveLoads
 
 class OptimizationStage:
   def __init__(self,
@@ -24,6 +24,10 @@ class OptimizationStage:
     self._num_threads = num_threads
 
   def optimize(self):
+    opt = MoveLoads(self._context, self._instrs)
+    opt.apply()
+    self._instrs = opt.get_instructions()
+
     opt = LivenessAnalysis(self._context, self._instrs)
     opt.apply()
     live_map: Dict[int, Set[Symbol]] = opt.get_live_map()

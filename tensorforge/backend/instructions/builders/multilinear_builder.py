@@ -42,7 +42,7 @@ class MultilinearBuilder(AbstractBuilder):
     self._dest_regs = None
 
     self._use_registers_always = self._context.get_vm().get_hw_descr().vendor in ['amd']
-    self._preload_registers = False #self._context.get_vm().get_hw_descr().vendor in ['amd']
+    self._preload_registers = self._context.get_vm().get_hw_descr().vendor in ['amd']
     self._deferred_stores = {}
     self._temporaries = {}
 
@@ -112,10 +112,10 @@ class MultilinearBuilder(AbstractBuilder):
           self._loaders_cache[self._mem_regions[i]] = load_op
           self._instructions.append(load_op)
         else:
-          if self._preload_registers and self._ops[i].symbol.obj.is_dense() and not (self._ops[i].symbol in self._loaders_cache.keys()):
+          if self._preload_registers and self._ops[i].symbol.obj.is_dense():
             # only register-preload dense matrices for now
             self._mem_regions[i], load_op = self._make_loader_and_symbol_reg(self._ops[i].symbol, is_transpose=self._descr.permute[i])
-            self._loaders_cache[self._ops[i].symbol] = load_op
+            self._deferred_stores[self._ops[i].symbol.name] = self._mem_regions[i].symbol, self._mem_regions[i].symbol
             self._instructions.append(load_op)
           else:
             # Note: operand will reside in glb. mem for gemm operation
@@ -204,16 +204,19 @@ class MultilinearBuilder(AbstractBuilder):
 
     # TODO: shrink to enumerate(self._dest_obj.bbox.sizes())
     if self._add:
-      sizes = self._get_target_symbol().data_view._bbox.sizes()
+      bbox = self._get_target_symbol().data_view._bbox
     else:
-      sizes = self._dest_obj.bbox.sizes()
+      bbox = self._dest_obj.bbox
 
-    for d, dim in enumerate(sizes):
+    for d in range(bbox.rank()):
+      dim = bbox.size(d)
       if d not in lead_dim or threads == 0:
         regsize *= dim
       else:
-        regsize *= (dim + threads - 1) // threads
-        threads //= dim
+        r_start = bbox.lower()[d] // threads
+        r_end = (bbox.upper()[d] + threads - 1) // threads
+        regsize *= r_end - r_start
+        threads //= dim # TODO?
     name = self._name_registers()
     regmem = RegMemObject(name, regsize)
     registers = Symbol(name=name, stype=SymbolType.Register, obj=regmem)

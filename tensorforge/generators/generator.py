@@ -181,6 +181,8 @@ class Generator:
 
           def generate_inner():
             with writer.If(f'{self._get_flag_guard(writer, i)}'):
+              if self._context.get_vm().get_hw_descr().vendor == 'nvidia':
+                writer(f'cuda::pipeline<cuda::thread_scope_thread> pipeline = cuda::make_pipeline();')
               for instruction in section.ir:
                 if instruction.is_ready():
                   instruction.gen_code(writer)
@@ -430,7 +432,7 @@ class Generator:
     for matrix in self._matrix_list:
       if matrix not in self._tmp_list:
         # temporary. For now, take only the selector matrices
-        if matrix.has_values() and len(matrix.get_values()) < 16:
+        if matrix.has_values() and len(matrix.get_values()) < 16 and False:
           stype = SymbolType.Data
         elif matrix.addressing == Addressing.SCALAR:
           stype = SymbolType.Scalar
