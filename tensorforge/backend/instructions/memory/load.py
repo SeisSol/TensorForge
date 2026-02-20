@@ -326,8 +326,8 @@ class GlbToRegLoader(MemoryInstruction, LoadInstruction):
         total_size *= dim
 
       for i in range(0, total_size, self._num_threads):
-        self._src.load_linear(writer, self._context, 'value', i)
-        self._dest.store_linear(writer, self._context, 'value', i)
+        self._src.load_linear(writer, self._context, f'v{i}', i)
+        self._dest.store_linear(writer, self._context, f'v{i}', i)
 
     else:
       loops = []
