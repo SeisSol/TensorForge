@@ -362,7 +362,7 @@ class GlbToRegLoader(MemoryInstruction, LoadInstruction):
           sidx = i // lead_count
           ridx = i % lead_count
           index = sidx * lead_size + ridx * self._num_threads
-          writer(f'const auto v{i} = *(tensorforge::VectorT<{prec}, {g}>*)&{self._src.name}[{index} + f{g}idx];')
+          writer(f'const auto v{i} = __builtin_nontemporal_load((tensorforge::VectorT<{prec}, {g}>*)&{self._src.name}[{index} + f{g}idx]);')
 
           args2 = ', '.join(f'v{i}[{k}]' for k in range(g))
 
