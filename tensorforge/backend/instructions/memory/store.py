@@ -195,7 +195,10 @@ class StoreRegToGlb(AbstractInstruction):
         else:
           self._dest.store(writer, self._context, '0', indices, allow_nontemporal)
 
-      write_loops(self._context, writer, loops, inner)
+      if not any(manual) and self._context.get_vm().get_hw_descr().vendor in ['amd'] and False:
+        pass
+      else:
+        write_loops(self._context, writer, loops, inner)
 
   def __str__(self) -> str:
     return f'{self._dest.name} = store{{r>g}}({self._src.name});'

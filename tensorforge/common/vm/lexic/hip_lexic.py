@@ -69,7 +69,7 @@ class HipLexic(CudaLexic):
     return ["hip/hip_runtime.h", "tensorforge_device/hip.h"]
 
   def get_fptype(self, fptype, length=1):
-    return f'HIP_vector_type<{fptype}, {length}>'
+    return f'tensorforge::VectorT<{fptype}, {length}>'
 
   def glb_store(self, lhs, rhs, nontemporal=False):
     if nontemporal and self._underlying_hardware == 'amd':

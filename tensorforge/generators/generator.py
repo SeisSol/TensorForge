@@ -191,6 +191,8 @@ class Generator:
 
           if self._persistent_threading:
             # TODO: OMP target
+            # TODO: maybe iterate over adjacent elements? (for indirect pointers)
+
             offset = []
             idx = i - 1
             for ssection in reversed(self._sections[:i]):
@@ -299,12 +301,6 @@ class Generator:
     self._section.shr_mem_obj = shmbuilder.get_resultant_obj()
     self._section.global_ir.extend(shmbuilder.get_instructions())
 
-    builder = GetElementPtrBuilder(self._context, self._scopes)
-    for symbol in self._scopes.get_global_scope().values():
-      if symbol.obj.addressing == Addressing.SCALAR or (symbol.obj.addressing == Addressing.NONE and symbol.stype == SymbolType.Data):
-        builder.build(symbol)
-        self._section.global_ir.extend(builder.get_instructions())
-
     # load globals to shared memory (if requested)
     if self._preload_globals:
       load_ir = []
@@ -336,6 +332,17 @@ class Generator:
         self._scopes.remove_scope()
         self._preload_globals = False
 
+    builder = GetElementPtrBuilder(self._context, self._scopes)
+    for symbol in self._scopes.get_global_scope().values():
+      if symbol.obj.addressing == Addressing.SCALAR or (symbol.obj.addressing == Addressing.NONE and (symbol.stype == SymbolType.Data or not self._preload_globals)):
+        builder.build(symbol)
+        self._section.global_ir.extend(builder.get_instructions())
+
+    # pipelines
+    for symbol in self._scopes.get_global_scope().values():
+      if symbol.obj.addressing in [Addressing.STRIDED, Addressing.PTR_BASED]:
+        pass
+
     if not self._preload_globals:
       if last_barrier:
         self._section.global_ir.append(SyncGrid(self._context))
@@ -349,8 +356,8 @@ class Generator:
     builder = GetElementPtrBuilder(self._context, self._scopes)
     self._scopes.add_scope()
     for symbol in self._scopes.get_global_scope().values():
-      firstptr = symbol.obj.addressing == Addressing.SCALAR or (symbol.obj.addressing == Addressing.NONE and symbol.stype == SymbolType.Data)
-      if not firstptr and not (self._preload_globals and symbol.obj.addressing == Addressing.NONE):
+      firstptr = symbol.obj.addressing == Addressing.SCALAR or symbol.obj.addressing == Addressing.NONE
+      if not firstptr:
         builder.build(symbol)
         self._section.ir.extend(builder.get_instructions())
 

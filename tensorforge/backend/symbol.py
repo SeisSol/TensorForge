@@ -444,17 +444,21 @@ class Symbol:
               wrote |= self.encode_values(pos + 1, runIdx, writer, context, variable, index, nontemp, leadidx)
     return wrote
 
-  def load_linear(self, writer, context: Context, variable, index):
+  def load_linear(self, writer, context: Context, variable, index, vec = 1):
     if context.get_vm().get_lexic().simd_mode:
       writer(f'{context.get_vm().get_lexic().simd(self.get_fptype(), self.num_threads)} {variable}({index});')
     else:
       if self.stype == SymbolType.Register:
         access = f'{self.name}[{index // self.num_threads}]'
       else:
-        access = f'{self.name}[{index} + threadIdx.x]'
-      writer(f'{self.get_fptype()} {variable} = {access};')
+        access = f'{self.name}[{index} + threadIdx.x * {vec}]'
 
-  def store_linear(self, writer, context: Context, variable, index):
+      if vec == 1:
+        writer(f'{self.get_fptype()} {variable} = {access};')
+      else:
+        writer(f'tensorforge::VectorT<{self.get_fptype()}, {vec}> {variable} = *(tensorforge::VectorT<{self.get_fptype()}, {vec}>*)&{access};')
+
+  def store_linear(self, writer, context: Context, variable, index, vec = 1):
     if context.get_vm().get_lexic().simd_mode:
       pass
       # TODO:
@@ -463,8 +467,13 @@ class Symbol:
       if self.stype == SymbolType.Register:
         access = f'{self.name}[{index // self.num_threads}]'
       else:
-        access = f'{self.name}[{index} + threadIdx.x]'
-      writer(f'{access} = {variable};')
+        access = f'{self.name}[{index} + threadIdx.x * {vec}]'
+
+      if vec == 1:
+        writer(f'{access} = {variable};')
+      else:
+        convert = f'*(tensorforge::VectorT<{self.get_fptype()}, {vec}>*)&'
+        writer(f'{convert}{access} = {convert}{variable};')
 
   def load(self, writer, context: Context, variable, index: List[Union[str, int, Immediate, Variable, LeadIndex]], nontemp):
     if self.stype == SymbolType.Data or (not self.obj.is_dense() and not isinstance(self.obj.spp, BoundingBoxSPP)):

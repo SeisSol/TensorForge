@@ -184,25 +184,23 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
         writer(f'__syncwarp();')
         writer(f'{self._pipeline}.producer_commit();')
 
-    #if False:
-    #  writer('cooperative_groups::wait(cooperative_groups::this_thread_block());')
-
   def _write_datatransfer(self, writer, src_offset, dst_offset, index, length, nontemporal, linscale=None):
-    if not self._use_cuda_memcpy or linscale is not None or True:
-      pos = 0
-      for vecsize in [1]:
-        if src_offset % vecsize == 0:
-          num_hops = ((length - pos * self._num_threads) // (self._num_threads * vecsize)) * vecsize
-          self._write_hop(writer, src_offset, dst_offset, index, pos, pos + num_hops, vecsize, nontemporal, linscale)
-          pos += num_hops
-      rest = length % self._num_threads
-      if rest > 0:
-        with writer.If(f'{self._linear_idx()} < {rest}'):
-          self._write_hop(writer, src_offset, dst_offset, index, pos, pos+1, 1, nontemporal, linscale)
+    pos = 0
+
+    if self._use_cuda_memcpy:
+      granularities = [1]
     else:
-      dest_access_index = self._dest.access_address(self._context, index)
-      src_access_index = self._src.access_address(self._context, index)
-      writer(f'cuda::memcpy_async(cooperative_groups::this_thread_block(), &{self._dest.name}[{dst_offset} + {dest_access_index}], &{self._src.name}[{src_offset} + {src_access_index}], cuda::aligned_size_t<{self._dest.get_fptype().size()}>({length * self._dest.get_fptype().size()}), {self._pipeline});')
+      granularities = [4, 2, 1]
+
+    for vecsize in granularities:
+      if src_offset % vecsize == 0:
+        num_hops = ((length - pos * self._num_threads) // (self._num_threads * vecsize)) * vecsize
+        self._write_hop(writer, src_offset, dst_offset, index, pos, pos + num_hops, vecsize, nontemporal, linscale)
+        pos += num_hops
+    rest = length % self._num_threads
+    if rest > 0:
+      with writer.If(f'{self._linear_idx()} < {rest}'):
+        self._write_hop(writer, src_offset, dst_offset, index, pos, pos+1, 1, nontemporal, linscale)
 
   def _write_hop(self, writer, src_offset, dst_offset, index, start, end, increment, nontemporal, linscale):
     if end > start:
@@ -325,9 +323,66 @@ class GlbToRegLoader(MemoryInstruction, LoadInstruction):
       for dim in src_bbox.sizes():
         total_size *= dim
 
-      for i in range(0, total_size, self._num_threads):
-        self._src.load_linear(writer, self._context, f'v{i}', i)
-        self._dest.store_linear(writer, self._context, f'v{i}', i)
+      start = 0
+      for g in [1]: #[4, 2, 1]:
+        granularity = self._num_threads * g
+        for i in range(start, total_size, granularity):
+          self._src.load_linear(writer, self._context, f'v{i}', i, g)
+          self._dest.store_linear(writer, self._context, f'v{i}', i, g)
+
+        start = (total_size // granularity) * granularity
+
+    elif self._context.get_vm().get_hw_descr().vendor in ['amd']:
+
+      # float4 load
+
+      # for now: use  0 1 2 3, transpose4x4
+
+      # TODO: sort into 4x4x4 blocks
+
+      lead_size = src_bbox.size(0)
+      lead_count = (lead_size + self._num_threads - 1) // self._num_threads
+
+      total_count = lead_count
+      for dim in src_bbox.sizes()[1:]:
+        total_count *= dim
+
+      start = 0
+
+      prec = 'float'
+
+      for g in [4, 2, 1]: # [4, 3, 2, 1]
+        # 4x4
+        # writer(f'const auto f{g}idx = (threadIdx.x % {g}) * {self._num_threads} + (threadIdx.x / {g}) * {g};')
+
+        writer(f'const auto f{g}idx = ((threadIdx.x / {16 // g}) % {g}) * {self._num_threads} + (threadIdx.x % {16 // g}) * {g} + (threadIdx.x / 16) * 16;')
+
+        total_count_g = (total_count // g) * g
+        for i in range(start, total_count_g, g):
+          sidx = i // lead_count
+          ridx = i % lead_count
+          index = sidx * lead_size + ridx * self._num_threads
+          writer(f'const auto v{i} = *(tensorforge::VectorT<{prec}, {g}>*)&{self._src.name}[{index} + f{g}idx];')
+
+          args2 = ', '.join(f'v{i}[{k}]' for k in range(g))
+
+          for k in range(g):
+            writer(f'{prec} v{i}w{k} = 0;')
+
+          args1 = ', '.join(f'v{i}w{k}' for k in range(g))
+
+          if g == 4:
+            writer(f'tensorforge::transpose16x4({args1}, {args2});')
+          if g == 2:
+            writer(f'tensorforge::transpose16x2({args1}, {args2});')
+          if g == 1:
+            writer(f'{args1} = {args2};')
+
+          # TODO: generalize
+          for k in range(g):
+            writer(f'{self._dest.name}[{i + k}] = v{i}w{k};')
+
+        start = total_count_g
 
     else:
       loops = []

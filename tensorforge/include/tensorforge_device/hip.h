@@ -721,6 +721,24 @@ transpose16x16b32(T &w1, T &w2, T &w3, T &w4, T &w5, T &w6, T &w7, T &w8, T &w9,
   w16 = dppUpdate<0x128, 0b1111, 0b0011, true>(u8, u16);
 }
 
+template <typename T>
+__device__ __forceinline__ void transpose16x2(T &w1, T &w2, T v1, T v2) {
+  w1 = dppUpdate<0x128, 0b1111, 0b1100, true>(v2, v1);
+  w2 = dppUpdate<0x128, 0b1111, 0b0011, true>(v1, v2);
+}
+
+template <typename T>
+__device__ __forceinline__ void transpose16x4(T &w1, T &w2, T &w3, T &w4, T v1,
+                                              T v2, T v3, T v4) {
+  const T u1 = dppUpdate<0x124, 0b1111, 0b1010, true>(v2, v1);
+  const T u2 = dppUpdate<0x12c, 0b1111, 0b0101, true>(v1, v2);
+  const T u3 = dppUpdate<0x124, 0b1111, 0b1010, true>(v4, v3);
+  const T u4 = dppUpdate<0x12c, 0b1111, 0b0101, true>(v3, v4);
+
+  transpose16x2(w1, w3, u1, u3);
+  transpose16x2(w2, w4, u2, u4);
+}
+
 #define CM4STR(p1, p2, p3, p4, c, a, b)                                        \
   "v_cndmask_b32_dpp " c ", " a ", " b CMVCC                                   \
   " quad_perm:[" STR(p1) "," STR(p2) "," STR(p3) "," STR(                      \
