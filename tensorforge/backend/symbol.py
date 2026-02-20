@@ -446,13 +446,25 @@ class Symbol:
 
   def load_linear(self, writer, context: Context, variable, index):
     if context.get_vm().get_lexic().simd_mode:
-      writer(f'{context.get_vm().get_lexic().simd(self.get_fptype(), 16)} {variable}({index});')
+      writer(f'{context.get_vm().get_lexic().simd(self.get_fptype(), self.num_threads)} {variable}({index});')
     else:
       if self.stype == SymbolType.Register:
-        access = f'{self.name}[{index // 32}]' # TODO
+        access = f'{self.name}[{index // self.num_threads}]'
       else:
         access = f'{self.name}[{index} + threadIdx.x]'
       writer(f'{self.get_fptype()} {variable} = {access};')
+
+  def store_linear(self, writer, context: Context, variable, index):
+    if context.get_vm().get_lexic().simd_mode:
+      pass
+      # TODO:
+      # writer(f'{context.get_vm().get_lexic().simd(self.get_fptype(), self.num_threads)} {variable}({index});')
+    else:
+      if self.stype == SymbolType.Register:
+        access = f'{self.name}[{index // self.num_threads}]'
+      else:
+        access = f'{self.name}[{index} + threadIdx.x]'
+      writer(f'{access} = {variable};')
 
   def load(self, writer, context: Context, variable, index: List[Union[str, int, Immediate, Variable, LeadIndex]], nontemp):
     if self.stype == SymbolType.Data or (not self.obj.is_dense() and not isinstance(self.obj.spp, BoundingBoxSPP)):

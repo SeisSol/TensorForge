@@ -280,7 +280,8 @@ class GlbToRegLoader(MemoryInstruction, LoadInstruction):
                context: Context,
                src: Symbol,
                dest: Symbol,
-               num_threads: int):
+               num_threads: int,
+               linearize: bool):
     super(GlbToRegLoader, self).__init__(context)
 
     if dest.stype != SymbolType.Register:
@@ -309,6 +310,7 @@ class GlbToRegLoader(MemoryInstruction, LoadInstruction):
     self._src: Symbol = src#.clone()
     self._num_threads: int = num_threads
     self._is_ready: bool = True
+    self._linearize = linearize
 
   def gen_code_inner(self, writer: Writer) -> None:
     writer.new_line()
@@ -318,16 +320,26 @@ class GlbToRegLoader(MemoryInstruction, LoadInstruction):
 
     src_bbox = self._src.data_view.get_bbox()
 
-    loops = []
-    loops += [LeadLoop('i0', src_bbox.lower()[0], src_bbox.upper()[0], self._num_threads, 1)]
-    for i in range(1, src_bbox.rank()):
-      loops += [Loop(f'i{i}', src_bbox.lower()[i], src_bbox.upper()[i], 1)]
+    if self._linearize:
+      total_size = 1
+      for dim in src_bbox.sizes():
+        total_size *= dim
 
-    def inner(indices):
-      self._src.load(writer, self._context, 'value', indices, allow_nontemporal)
-      self._dest.store(writer, self._context, 'value', indices, False)
+      for i in range(0, total_size, self._num_threads):
+        self._src.load_linear(writer, self._context, 'value', i)
+        self._dest.store_linear(writer, self._context, 'value', i)
 
-    write_loops(self._context, writer, loops, inner)
+    else:
+      loops = []
+      loops += [LeadLoop('i0', src_bbox.lower()[0], src_bbox.upper()[0], self._num_threads, 1)]
+      for i in range(1, src_bbox.rank()):
+        loops += [Loop(f'i{i}', src_bbox.lower()[i], src_bbox.upper()[i], 1)]
+
+      def inner(indices):
+        self._src.load(writer, self._context, 'value', indices, allow_nontemporal)
+        self._dest.store(writer, self._context, 'value', indices, False)
+
+      write_loops(self._context, writer, loops, inner)
 
   def __str__(self) -> str:
     return f'{self._dest.name} = load{{g>r}}({self._src.name});'

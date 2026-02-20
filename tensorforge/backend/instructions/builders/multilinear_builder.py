@@ -76,6 +76,7 @@ class MultilinearBuilder(AbstractBuilder):
     transpose = self._descr.permute[i] != [j for j in range(len(self._descr.target[i]))]
 
     needs_reload = (transpose or not has_lead_dim) and not prefer_broadcast
+    needs_reload2 = transpose or not has_lead_dim
 
     if self._ops[i].symbol.name in self._deferred_stores:
       if needs_reload:
@@ -112,9 +113,9 @@ class MultilinearBuilder(AbstractBuilder):
           self._loaders_cache[self._mem_regions[i]] = load_op
           self._instructions.append(load_op)
         else:
-          if self._preload_registers and self._ops[i].symbol.obj.is_dense():
+          if self._preload_registers:
             # only register-preload dense matrices for now
-            self._mem_regions[i], load_op = self._make_loader_and_symbol_reg(self._ops[i].symbol, is_transpose=self._descr.permute[i])
+            self._mem_regions[i], load_op = self._make_loader_and_symbol_reg(self._ops[i].symbol, linearize=needs_reload2)
             self._deferred_stores[self._ops[i].symbol.name] = self._mem_regions[i].symbol, self._mem_regions[i].symbol
             self._instructions.append(load_op)
           else:
@@ -140,7 +141,7 @@ class MultilinearBuilder(AbstractBuilder):
               # self._scopes.delete_symbol(self._ops[i].symbol)
               self._scopes.add_scope()
               prev_symbol = prev_loader.get_src()
-              self._mem_regions[i], load_op = self._make_loader_and_symbol(prev_symbol, is_transpose=self._descr.permute[i])
+              self._mem_regions[i], load_op = self._make_loader_and_symbol(prev_symbol)
               self._loaders_cache[self._mem_regions[i]] = load_op
               self._instructions.append(load_op)
           else:
@@ -152,7 +153,7 @@ class MultilinearBuilder(AbstractBuilder):
       else:
         raise InternalError(f'gemm-builder: op{i} ({self._ops[i].symbol.name}) must be either in shr or glb mem, given: {self._ops[i].symbol.stype}')
 
-  def _make_loader_and_symbol_reg(self, operand, is_transpose) -> Tuple[Symbol, GlbToRegLoader]:
+  def _make_loader_and_symbol_reg(self, operand, linearize) -> Tuple[Symbol, GlbToRegLoader]:
     regsize = 1
     threads = self._num_threads
     lead_dim = [0] # [t for t in self._descr.target[0] if t >= 0]
@@ -175,7 +176,8 @@ class MultilinearBuilder(AbstractBuilder):
     load_op = GlbToRegLoader(context=self._context,
                                      dest=registers,
                                      src=operand,
-                                     num_threads=self._num_threads)
+                                     num_threads=self._num_threads,
+                                     linearize = linearize)
     return SymbolView(registers), load_op
 
   def _make_loader_and_symbol(self, operand, is_transpose) -> Tuple[Symbol, GlbToShrLoader]:
@@ -232,6 +234,11 @@ class MultilinearBuilder(AbstractBuilder):
     if dest_symbol.name in self._deferred_stores:
       dest_registers,_ = self._deferred_stores[dest_symbol.name]
       return dest_registers
+    elif self._preload_registers and dest_symbol.stype == SymbolType.Global:
+      symbol, load_op = self._make_loader_and_symbol_reg(dest_symbol, False)
+      self._deferred_stores[dest_symbol.name] = symbol.symbol, symbol.symbol
+      self._instructions.append(load_op)
+      return symbol.symbol
     else:
       return dest_symbol
 
