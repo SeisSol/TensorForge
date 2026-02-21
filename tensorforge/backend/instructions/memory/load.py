@@ -332,7 +332,7 @@ class GlbToRegLoader(MemoryInstruction, LoadInstruction):
 
         start = (total_size // granularity) * granularity
 
-    elif self._context.get_vm().get_hw_descr().vendor in ['amd']:
+    elif self._context.get_vm().get_hw_descr().vendor in ['amd'] and False:
 
       # float4 load
 
@@ -354,10 +354,11 @@ class GlbToRegLoader(MemoryInstruction, LoadInstruction):
       for g in [4, 2, 1]: # [4, 3, 2, 1]
         # 4x4
         # writer(f'const auto f{g}idx = (threadIdx.x % {g}) * {self._num_threads} + (threadIdx.x / {g}) * {g};')
-
-        writer(f'const auto f{g}idx = ((threadIdx.x / {16 // g}) % {g}) * {self._num_threads} + (threadIdx.x % {16 // g}) * {g} + (threadIdx.x / 16) * 16;')
-
         total_count_g = (total_count // g) * g
+
+        if start != total_count_g:
+          writer(f'const auto f{g}idx = ((threadIdx.x / {16 // g}) % {g}) * {self._num_threads} + (threadIdx.x % {16 // g}) * {g} + (threadIdx.x / 16) * 16;')
+
         for i in range(start, total_count_g, g):
           sidx = i // lead_count
           ridx = i % lead_count

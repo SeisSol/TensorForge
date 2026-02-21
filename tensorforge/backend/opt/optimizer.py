@@ -9,6 +9,7 @@ from .shr_mem_analyzer import ShrMemOpt
 from .sync_block import SyncThreadsOpt
 from .remove_redundancy import RemoveRedundancyOpt
 from .memmove import MoveLoads
+from .multibuffer import MultiBuffer
 
 class OptimizationStage:
   def __init__(self,
@@ -19,6 +20,7 @@ class OptimizationStage:
     self._context = context
     self._shr_mem: ShrMemObject = shr_mem
     self._instrs: List[AbstractInstruction] = instructions
+    self._global_instrs: List[AbstractInstruction] = []
     self._num_instrs: int = len(instructions)
     self._user_options = context.get_user_options()
     self._num_threads = num_threads
@@ -27,6 +29,11 @@ class OptimizationStage:
     opt = MoveLoads(self._context, self._instrs)
     opt.apply()
     self._instrs = opt.get_instructions()
+
+    opt = MultiBuffer(self._context, self._instrs)
+    opt.apply()
+    self._instrs = opt.get_instructions()
+    self._global_instrs = opt._global_instrs
 
     opt = LivenessAnalysis(self._context, self._instrs)
     opt.apply()
@@ -63,3 +70,6 @@ class OptimizationStage:
 
   def get_instructions(self):
     return self._instrs
+
+  def get_global_instructions(self):
+    return self._global_instrs

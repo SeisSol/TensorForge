@@ -142,6 +142,7 @@ class Generator:
                               num_threads=self._num_threads)
       opt.optimize()
       self._section.ir = opt.get_instructions()
+      self._section.global_ir += opt.get_global_instructions()
 
       # add final sync for persistent threads
       if self._persistent_threading or self._clusterlaunchcontrol:
@@ -173,6 +174,24 @@ class Generator:
 
       for i,section in enumerate(self._sections):
         with writer.AnonymousScope():
+
+          offset = []
+          idx = i - 1
+          for ssection in reversed(self._sections[:i]):
+            if ssection.barrier:
+              break
+            offset += [f'{GeneralLexicon.NUM_ELEMENTS}{idx}']
+            idx -= 1
+
+          stride = f'({vm.get_lexic().grid_dim_x} * {vm.get_lexic().block_dim_y})'
+          if len(offset) == 0:
+            start = self._get_2d_block_id()
+          else:
+            start = f'({self._get_2d_block_id()} + {" + ".join(offset)}) % {stride}'
+
+          writer(f'const auto {GeneralLexicon.BATCH_ID_NAME}_start = {start};')
+          writer(f'const auto {GeneralLexicon.BATCH_ID_NAME}1 = {GeneralLexicon.BATCH_ID_NAME}_start < {GeneralLexicon.NUM_ELEMENTS}{i} ? {GeneralLexicon.BATCH_ID_NAME}_start : 0;')
+
           for instruction in section.global_ir:
             if instruction.is_ready():
               instruction.gen_code(writer)
@@ -193,27 +212,14 @@ class Generator:
             # TODO: OMP target
             # TODO: maybe iterate over adjacent elements? (for indirect pointers)
 
-            offset = []
-            idx = i - 1
-            for ssection in reversed(self._sections[:i]):
-              if ssection.barrier:
-                break
-              offset += [f'{GeneralLexicon.NUM_ELEMENTS}{idx}']
-              idx -= 1
-
-            stride = f'({vm.get_lexic().grid_dim_x} * {vm.get_lexic().block_dim_y})'
-            if len(offset) == 0:
-              start = self._get_2d_block_id()
-            else:
-              start = f'({self._get_2d_block_id()} + {" + ".join(offset)}) % {stride}'
-
-            with writer.For(f'size_t {GeneralLexicon.BATCH_ID_NAME} = {start}; {GeneralLexicon.BATCH_ID_NAME} < {GeneralLexicon.NUM_ELEMENTS}{i}; {GeneralLexicon.BATCH_ID_NAME} += {stride}'):
+            with writer.For(f'size_t {GeneralLexicon.BATCH_ID_NAME}0 = {start}; {GeneralLexicon.BATCH_ID_NAME}0 < {GeneralLexicon.NUM_ELEMENTS}{i}; {GeneralLexicon.BATCH_ID_NAME}0 += {stride}'):
+              writer(f'const auto {GeneralLexicon.BATCH_ID_NAME}1 = {GeneralLexicon.BATCH_ID_NAME}0 + {stride} < {GeneralLexicon.NUM_ELEMENTS}{i} ? {GeneralLexicon.BATCH_ID_NAME}0 + {stride} : {GeneralLexicon.BATCH_ID_NAME}0;')
               generate_inner()
           elif self._clusterlaunchcontrol:
             writer(f'__shared__ tensorforge::ClusterLaunchCtrl launchctrl;')
             writer(f'int phase = 0;')
             writer(f'launchctrl.init();')
-            writer(f'size_t {GeneralLexicon.BATCH_ID_NAME} = {self._get_2d_block_id()};')
+            writer(f'size_t {GeneralLexicon.BATCH_ID_NAME}0 = {self._get_2d_block_id()};')
             with writer.While(f'true'):
               writer('launchctrl.setupNext();')
               with writer.If(f'{self._get_element_size_guard(i)}'):
@@ -221,9 +227,9 @@ class Generator:
               writer('const auto nextBlock = launchctrl.queryNext(phase);')
               with writer.If('!nextBlock.has_value()'):
                 writer('break;')
-              writer(f'{GeneralLexicon.BATCH_ID_NAME} = {self._get_2d_block_id("nextBlock.value()")};')
+              writer(f'{GeneralLexicon.BATCH_ID_NAME}0 = {self._get_2d_block_id("nextBlock.value()")};')
           else:
-            writer(f'const size_t {GeneralLexicon.BATCH_ID_NAME} = {self._get_2d_block_id()};')
+            writer(f'const size_t {GeneralLexicon.BATCH_ID_NAME}0 = {self._get_2d_block_id()};')
             with writer.If(f'{self._get_element_size_guard(i)}'):
               generate_inner()
 
@@ -612,10 +618,10 @@ class Generator:
     return f'{lexic.thread_idx_y} + {lexic.block_dim_y} * ({block})'
 
   def _get_element_size_guard(self, i):
-    return f'{GeneralLexicon.BATCH_ID_NAME} < {GeneralLexicon.NUM_ELEMENTS}{i}'
+    return f'{GeneralLexicon.BATCH_ID_NAME}0 < {GeneralLexicon.NUM_ELEMENTS}{i}'
 
   def _get_flag_guard(self, writer, i):
     writer(f'bool allowed = true;')
     with writer.If(f'{GeneralLexicon.FLAGS_NAME}{i} != nullptr'):
-      writer(f'allowed = static_cast<bool>({GeneralLexicon.FLAGS_NAME}{i}[{GeneralLexicon.BATCH_ID_NAME}]);')
+      writer(f'allowed = static_cast<bool>({GeneralLexicon.FLAGS_NAME}{i}[{GeneralLexicon.BATCH_ID_NAME}0]);')
     return 'allowed'

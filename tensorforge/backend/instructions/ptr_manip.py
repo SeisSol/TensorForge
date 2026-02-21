@@ -1,20 +1,22 @@
 from .abstract_instruction import AbstractInstruction
-from tensorforge.common.vm.vm import VM
+from tensorforge.common.context import Context
 from tensorforge.common.helper import get_extra_offset_name, Addressing
 from tensorforge.common.basic_types import GeneralLexicon, DataFlowDirection, StridedAddressing
 from tensorforge.common.exceptions import GenerationError
 
 class GetElementPtr(AbstractInstruction):
   def __init__(self,
-               vm: VM,
+               context: Context,
                src,
                dest,
-               include_extra_offset=True):
-    super(GetElementPtr, self).__init__(vm)
+               include_extra_offset=True,
+               batch_offset=0):
+    super(GetElementPtr, self).__init__(context)
     self._src = src
     self._dest = dest
     self._include_extra_offset = include_extra_offset
     self._is_ready = True
+    self._batch_offset = batch_offset
 
   def gen_code(self, writer):
 
@@ -30,21 +32,21 @@ class GetElementPtr(AbstractInstruction):
 
     address = ''
     if isinstance(batch_addressing, StridedAddressing):
-      main_offset = f'{GeneralLexicon.BATCH_ID_NAME} * {batch_addressing.stride}'
+      main_offset = f'{GeneralLexicon.BATCH_ID_NAME}{self._batch_offset} * {batch_addressing.stride}'
       sub_offset = f'{batch_obj.get_offset_to_first_element()}'
       address = f'{main_offset} + {batch_addressing.offset} + {sub_offset}{extra_offset}'
       rhs = f'&{self._src.name}[{address}]'
       lhs = 'const ' if self._src.obj.direction == DataFlowDirection.SOURCE else ''
       lhs += f'{datatype} * const {self._vm.get_lexic().restrict_kw} {self._dest.name}'
     if batch_addressing == Addressing.STRIDED:
-      main_offset = f'{GeneralLexicon.BATCH_ID_NAME} * {batch_obj.get_real_volume()}'
+      main_offset = f'{GeneralLexicon.BATCH_ID_NAME}{self._batch_offset} * {batch_obj.get_real_volume()}'
       sub_offset = f'{batch_obj.get_offset_to_first_element()}'
       address = f'{main_offset} + {sub_offset}{extra_offset}'
       rhs = f'&{self._src.name}[{address}]'
       lhs = 'const ' if self._src.obj.direction == DataFlowDirection.SOURCE else ''
       lhs += f'{datatype} * const {self._vm.get_lexic().restrict_kw} {self._dest.name}'
     elif batch_addressing == Addressing.PTR_BASED:
-      main_offset = f'{GeneralLexicon.BATCH_ID_NAME}'
+      main_offset = f'{GeneralLexicon.BATCH_ID_NAME}{self._batch_offset}'
       sub_offset = f'{batch_obj.get_offset_to_first_element()}'
       address = f'{main_offset}][{sub_offset}{extra_offset}'
       src_suffix = '_ptr' if self._vm.get_lexic()._backend == 'targetdart' else ''

@@ -12,7 +12,7 @@ class GetElementPtrBuilder(AbstractBuilder):
   def __init__(self, context: Context, scopes: Scopes):
     super(GetElementPtrBuilder, self).__init__(context, scopes)
 
-  def build(self, src: Symbol, include_extra_offset: bool = True):
+  def build(self, src: Symbol, include_extra_offset: bool = True, batch_offset = 0):
     self._reset()
 
     dstype = src.stype
@@ -32,6 +32,6 @@ class GetElementPtrBuilder(AbstractBuilder):
     self._scopes.add_symbol(dest)
 
     if src.stype != SymbolType.Data:
-      self._instructions.append(GetElementPtr(self._context, src, dest, include_extra_offset))
+      self._instructions.append(GetElementPtr(self._context, src, dest, include_extra_offset, batch_offset))
 
     src.add_user(self)
