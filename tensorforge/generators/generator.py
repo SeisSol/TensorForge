@@ -139,7 +139,8 @@ class Generator:
       opt = OptimizationStage(context=self._context,
                               shr_mem=self._section.shr_mem_obj,
                               instructions=self._section.ir,
-                              num_threads=self._num_threads)
+                              num_threads=self._num_threads,
+                              scopes = self._scopes)
       opt.optimize()
       self._section.ir = opt.get_instructions()
       self._section.global_ir += opt.get_global_instructions()
@@ -191,6 +192,7 @@ class Generator:
 
           writer(f'const auto {GeneralLexicon.BATCH_ID_NAME}_start = {start};')
           writer(f'const auto {GeneralLexicon.BATCH_ID_NAME}1 = {GeneralLexicon.BATCH_ID_NAME}_start < {GeneralLexicon.NUM_ELEMENTS}{i} ? {GeneralLexicon.BATCH_ID_NAME}_start : 0;')
+          writer(f'const auto {GeneralLexicon.BATCH_ID_NAME}2 = {GeneralLexicon.BATCH_ID_NAME}1 + {stride} < {GeneralLexicon.NUM_ELEMENTS}{i} ? {GeneralLexicon.BATCH_ID_NAME}1 + {stride} : {GeneralLexicon.BATCH_ID_NAME}1;')
 
           for instruction in section.global_ir:
             if instruction.is_ready():
@@ -214,6 +216,7 @@ class Generator:
 
             with writer.For(f'size_t {GeneralLexicon.BATCH_ID_NAME}0 = {start}; {GeneralLexicon.BATCH_ID_NAME}0 < {GeneralLexicon.NUM_ELEMENTS}{i}; {GeneralLexicon.BATCH_ID_NAME}0 += {stride}'):
               writer(f'const auto {GeneralLexicon.BATCH_ID_NAME}1 = {GeneralLexicon.BATCH_ID_NAME}0 + {stride} < {GeneralLexicon.NUM_ELEMENTS}{i} ? {GeneralLexicon.BATCH_ID_NAME}0 + {stride} : {GeneralLexicon.BATCH_ID_NAME}0;')
+              writer(f'const auto {GeneralLexicon.BATCH_ID_NAME}2 = {GeneralLexicon.BATCH_ID_NAME}1 + {stride} < {GeneralLexicon.NUM_ELEMENTS}{i} ? {GeneralLexicon.BATCH_ID_NAME}1 + {stride} : {GeneralLexicon.BATCH_ID_NAME}1;')
               generate_inner()
           elif self._clusterlaunchcontrol:
             writer(f'__shared__ tensorforge::ClusterLaunchCtrl launchctrl;')
@@ -621,7 +624,10 @@ class Generator:
     return f'{GeneralLexicon.BATCH_ID_NAME}0 < {GeneralLexicon.NUM_ELEMENTS}{i}'
 
   def _get_flag_guard(self, writer, i):
-    writer(f'bool allowed = true;')
-    with writer.If(f'{GeneralLexicon.FLAGS_NAME}{i} != nullptr'):
-      writer(f'allowed = static_cast<bool>({GeneralLexicon.FLAGS_NAME}{i}[{GeneralLexicon.BATCH_ID_NAME}0]);')
-    return 'allowed'
+    if False:
+      writer(f'bool allowed = true;')
+      with writer.If(f'{GeneralLexicon.FLAGS_NAME}{i} != nullptr'):
+        writer(f'allowed = static_cast<bool>({GeneralLexicon.FLAGS_NAME}{i}[{GeneralLexicon.BATCH_ID_NAME}0]);')
+      return 'allowed'
+    else:
+      return 'true'

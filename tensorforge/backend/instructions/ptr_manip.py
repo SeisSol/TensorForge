@@ -10,13 +10,17 @@ class GetElementPtr(AbstractInstruction):
                src,
                dest,
                include_extra_offset=True,
-               batch_offset=0):
+               batch_offset=0,
+               update_dest=None,
+               pipeline = False):
     super(GetElementPtr, self).__init__(context)
     self._src = src
     self._dest = dest
     self._include_extra_offset = include_extra_offset
     self._is_ready = True
     self._batch_offset = batch_offset
+    self._update_dest = update_dest
+    self._pipeline = pipeline
 
   def gen_code(self, writer):
 
@@ -30,6 +34,8 @@ class GetElementPtr(AbstractInstruction):
 
     datatype = self._vm._fp_type if self._src.obj.datatype is None else self._src.obj.datatype
 
+    const_mod = '' if self._pipeline else 'const'
+
     address = ''
     if isinstance(batch_addressing, StridedAddressing):
       main_offset = f'{GeneralLexicon.BATCH_ID_NAME}{self._batch_offset} * {batch_addressing.stride}'
@@ -37,14 +43,14 @@ class GetElementPtr(AbstractInstruction):
       address = f'{main_offset} + {batch_addressing.offset} + {sub_offset}{extra_offset}'
       rhs = f'&{self._src.name}[{address}]'
       lhs = 'const ' if self._src.obj.direction == DataFlowDirection.SOURCE else ''
-      lhs += f'{datatype} * const {self._vm.get_lexic().restrict_kw} {self._dest.name}'
+      lhs += f'{datatype} *{const_mod} {self._vm.get_lexic().restrict_kw} {self._dest.name}'
     if batch_addressing == Addressing.STRIDED:
       main_offset = f'{GeneralLexicon.BATCH_ID_NAME}{self._batch_offset} * {batch_obj.get_real_volume()}'
       sub_offset = f'{batch_obj.get_offset_to_first_element()}'
       address = f'{main_offset} + {sub_offset}{extra_offset}'
       rhs = f'&{self._src.name}[{address}]'
       lhs = 'const ' if self._src.obj.direction == DataFlowDirection.SOURCE else ''
-      lhs += f'{datatype} * const {self._vm.get_lexic().restrict_kw} {self._dest.name}'
+      lhs += f'{datatype} *{const_mod} {self._vm.get_lexic().restrict_kw} {self._dest.name}'
     elif batch_addressing == Addressing.PTR_BASED:
       main_offset = f'{GeneralLexicon.BATCH_ID_NAME}{self._batch_offset}'
       sub_offset = f'{batch_obj.get_offset_to_first_element()}'
@@ -57,19 +63,23 @@ class GetElementPtr(AbstractInstruction):
         rhs = f'(tensorforge::SpacePtrRestrict<{lhs}, tensorforge::GlobalMemspace>){rhs}'
         lhs = f'auto {self._dest.name}'
       else:
-        lhs += f'{datatype} * const {self._vm.get_lexic().restrict_kw} {self._dest.name}'
+        lhs += f'{datatype} *{const_mod} {self._vm.get_lexic().restrict_kw} {self._dest.name}'
     elif batch_addressing == Addressing.NONE:
       address = f'{batch_obj.get_offset_to_first_element()}'
       rhs = f'&{self._src.name}[{address}]'
       lhs = 'const ' if self._src.obj.direction == DataFlowDirection.SOURCE else ''
-      lhs += f'{datatype} * const {self._vm.get_lexic().restrict_kw} {self._dest.name}'
+      lhs += f'{datatype} *{const_mod} {self._vm.get_lexic().restrict_kw} {self._dest.name}'
     elif batch_addressing == Addressing.SCALAR:
       rhs = f'{self._src.name}'
       lhs = f'{datatype} {self._dest.name}'
     else:
       GenerationError(f'unknown addressing of {self._src.name}, given {batch_addressing}')
 
-    writer(f'{lhs} = {rhs};')
+    if self._update_dest:
+      writer(f'const auto {self._update_dest.name} = {self._dest.name};')
+      writer(f'{self._dest.name} = {rhs};')
+    else:
+      writer(f'{lhs} = {rhs};')
 
   def __str__(self) -> str:
     return f'{self._dest.name} = getelementptr_b2g {self._src.name};'

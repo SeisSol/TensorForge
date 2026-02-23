@@ -28,6 +28,7 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
     self._num_threads = kwargs['num_threads']
     self._permute: None = kwargs['permute']
     self._manual_unroll_threshold = 4
+    self._no_memcpy = kwargs['no_memcpy'] if 'no_memcpy' in kwargs else False
 
     if 'max_load_offset' in kwargs:
       self._max_load_offset = kwargs['max_load_offset']
@@ -54,7 +55,7 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
     self._shr_mem.add_user(self)
     self._is_ready: bool = False
 
-    self._use_cuda_memcpy = self._context.get_vm().get_hw_descr().vendor == 'nvidia'
+    self._use_cuda_memcpy = self._context.get_vm().get_hw_descr().vendor == 'nvidia' and not self._no_memcpy
 
     if self._permute is None:
       self._permute = [i for i in range(len(self._src.obj.shape))]
@@ -252,8 +253,8 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
     return self._permute
 
   def _check(self) -> None:
-    if self._src.stype != SymbolType.Global:
-      raise InternalError('shr-load: `src` operand is not in global mem.')
+    #if self._src.stype != SymbolType.Global:
+    #  raise InternalError('shr-load: `src` operand is not in global mem.')
 
     if not isinstance(self._src.obj, Tensor):
       raise InternalError(f'shr-load: `src` operand is not a tensor, instead: {self._src.obj}')

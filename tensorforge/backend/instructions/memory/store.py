@@ -211,10 +211,7 @@ class StoreShrMemToGlb(AbstractInstruction):
                context: Context,
                src: Symbol,
                dest: Symbol,
-               alpha: float,
-               beta: float,
-               num_compute_threads: int,
-               num_active_threads: int):
+               num_threads: int):
     super(StoreShrMemToGlb, self).__init__(context)
 
     #if src.stype != SymbolType.SharedMem:
@@ -225,8 +222,6 @@ class StoreShrMemToGlb(AbstractInstruction):
 
     self._dest = dest
     self._src = src
-    self._alpha = alpha
-    self._beta = beta
     self._num_threads = num_active_threads
     self._is_ready = True
 
