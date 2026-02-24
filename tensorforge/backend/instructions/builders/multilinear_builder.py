@@ -43,6 +43,7 @@ class MultilinearBuilder(AbstractBuilder):
 
     self._use_registers_always = self._context.get_vm().get_hw_descr().vendor in ['amd']
     self._preload_registers = self._context.get_vm().get_hw_descr().vendor in ['amd']
+    self._atomic_update = self._context.get_vm().get_hw_descr().vendor in ['amd']
     self._deferred_stores = {}
     self._temporaries = {}
 
@@ -80,7 +81,7 @@ class MultilinearBuilder(AbstractBuilder):
 
     if self._ops[i].symbol.name in self._deferred_stores:
       if needs_reload:
-        src, dest = self._deferred_stores[self._ops[i].symbol.name]
+        src, dest, _ = self._deferred_stores[self._ops[i].symbol.name]
         self._instructions.append(StoreRegToShr(context=self._context,
                                                 src=src,
                                                 dest=dest,
@@ -89,7 +90,7 @@ class MultilinearBuilder(AbstractBuilder):
         del self._deferred_stores[self._ops[i].symbol.name]
         self._ops[i].symbol = dest
       else:
-        self._ops[i].symbol, _ = self._deferred_stores[self._ops[i].symbol.name]
+        self._ops[i].symbol, _, _ = self._deferred_stores[self._ops[i].symbol.name]
 
     if self._ops[i].symbol.stype == SymbolType.Scalar or self._ops[i].symbol.stype == SymbolType.Data:
       self._mem_regions[i] = self._ops[i]
@@ -116,7 +117,7 @@ class MultilinearBuilder(AbstractBuilder):
           if self._preload_registers:
             # only register-preload dense matrices for now
             self._mem_regions[i], load_op = self._make_loader_and_symbol_reg(self._ops[i].symbol, linearize=needs_reload2)
-            self._deferred_stores[self._ops[i].symbol.name] = self._mem_regions[i].symbol, self._mem_regions[i].symbol
+            self._deferred_stores[self._ops[i].symbol.name] = self._mem_regions[i].symbol, self._mem_regions[i].symbol, None
             self._instructions.append(load_op)
           else:
             # Note: operand will reside in glb. mem for gemm operation
@@ -229,14 +230,16 @@ class MultilinearBuilder(AbstractBuilder):
     self._instructions.append(registerAlloc)
     return registers
 
-  def _get_target_symbol(self):
+  def _get_target_symbol(self, prev=False):
     dest_symbol = self._scopes.get_symbol(self._dest_obj.tensor)
     if dest_symbol.name in self._deferred_stores:
-      dest_registers,_ = self._deferred_stores[dest_symbol.name]
+      dest_registers,_,_ = self._deferred_stores[dest_symbol.name]
       return dest_registers
-    elif self._preload_registers and dest_symbol.stype == SymbolType.Global:
+    elif self._atomic_update and prev:
+      return None
+    elif self._preload_registers and dest_symbol.stype == SymbolType.Global and not self._atomic_update:
       symbol, load_op = self._make_loader_and_symbol_reg(dest_symbol, False)
-      self._deferred_stores[dest_symbol.name] = symbol.symbol, symbol.symbol
+      self._deferred_stores[dest_symbol.name] = symbol.symbol, symbol.symbol, None
       self._instructions.append(load_op)
       return symbol.symbol
     else:
@@ -249,7 +252,7 @@ class MultilinearBuilder(AbstractBuilder):
                                    dest=self._temp_regs,
                                    prefer_align=False,#self._descr.prefer_align,
                                    num_threads=self._num_threads,
-                                   prev=self._get_target_symbol() if self._add else None,
+                                   prev=self._get_target_symbol(True) if self._add else None,
                                    productOperation=MulOperator(),
                                    sumOperation=AddOperator()))
 
@@ -263,17 +266,18 @@ class MultilinearBuilder(AbstractBuilder):
         #                                        shr_mem=self._shr_mem,
         #                                        num_threads=self._num_threads))
         # see note below (but update to the new temp regs)
-        self._deferred_stores[dest_symbol.name] = (self._temp_regs, dest_symbol)
+        self._deferred_stores[dest_symbol.name] = (self._temp_regs, dest_symbol, None)
       elif dest_symbol.stype == SymbolType.Global:
-        if self._use_registers_always:
-          self._deferred_stores[dest_symbol.name] = (self._temp_regs, dest_symbol)
+        can_use_atomic = self._atomic_update and self._add and (dest_symbol.name not in self._deferred_stores or self._deferred_stores[dest_symbol.name][2] is not None)
+        if self._use_registers_always or can_use_atomic:
+          update = True if can_use_atomic else None
+          self._deferred_stores[dest_symbol.name] = (self._temp_regs, dest_symbol, update)
         else:
           self._instructions.append(StoreRegToGlb(context=self._context,
                                                   src=self._temp_regs,
                                                   dest=dest_symbol,
-                                                  alpha=1,#self._descr.alpha,
-                                                  beta=0,#self._descr.beta,
-                                                  num_threads=self._num_threads))
+                                                  num_threads=self._num_threads,
+                                                  atomic=None))
       elif dest_symbol.stype == SymbolType.Register:
         self._instructions.append(StoreRegToReg(context=self._context,
                                                 src=self._temp_regs,
@@ -291,7 +295,7 @@ class MultilinearBuilder(AbstractBuilder):
 
       # do not swap matrix layout in global memory until we need to
       self._scopes.add_symbol(dest_symbol)
-      self._deferred_stores[dest_symbol.name] = (self._temp_regs, dest_symbol)
+      self._deferred_stores[dest_symbol.name] = (self._temp_regs, dest_symbol, None)
 
   def _insert_sync_block(self):
     self._instructions.append(SyncThreads(context=self._context,
@@ -304,11 +308,10 @@ class MultilinearBuilder(AbstractBuilder):
 
   def build_epilogue(self):
     self._reset()
-    for store_regs, store_global in self._deferred_stores.values():
+    for store_regs, store_global, update in self._deferred_stores.values():
       if store_global.stype == SymbolType.Global:
         self._instructions.append(StoreRegToGlb(context=self._context,
                                                   src=store_regs,
                                                   dest=store_global,
-                                                  alpha=1,#self._descr.alpha,
-                                                  beta=0,#self._descr.beta,
-                                                  num_threads=self._num_threads))
+                                                  num_threads=self._num_threads,
+                                                  atomic=update))

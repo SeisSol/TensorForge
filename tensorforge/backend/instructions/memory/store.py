@@ -133,9 +133,8 @@ class StoreRegToGlb(AbstractInstruction):
                context: Context,
                src: Symbol,
                dest: Symbol,
-               alpha: float,
-               beta: float,
-               num_threads: int):
+               num_threads: int,
+               atomic):
     super(StoreRegToGlb, self).__init__(context)
 
     if src.stype != SymbolType.Register:
@@ -162,10 +161,9 @@ class StoreRegToGlb(AbstractInstruction):
 
     self._dest: Symbol = dest
     self._src: Symbol = src#.clone()
-    self._alpha = alpha
-    self._beta = beta
     self._num_threads: int = num_threads
     self._is_ready: bool = True
+    self._atomic = atomic
 
   def gen_code(self, writer: Writer) -> None:
     writer.new_line()
@@ -191,9 +189,9 @@ class StoreRegToGlb(AbstractInstruction):
         needsLoad = all(not isinstance(index, Immediate) or (src_bbox.lower()[i] <= index._value and src_bbox.upper()[i] > index._value) for i,index in enumerate(indices))
         if needsLoad:
           self._src.load(writer, self._context, 'value', indices, False)
-          self._dest.store(writer, self._context, 'value', indices, allow_nontemporal)
+          self._dest.store(writer, self._context, 'value', indices, allow_nontemporal, self._atomic)
         else:
-          self._dest.store(writer, self._context, '0', indices, allow_nontemporal)
+          self._dest.store(writer, self._context, '0', indices, allow_nontemporal, self._atomic)
 
       if not any(manual) and self._context.get_vm().get_hw_descr().vendor in ['amd'] and False:
         pass

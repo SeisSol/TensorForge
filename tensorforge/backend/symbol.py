@@ -527,7 +527,7 @@ class Symbol:
         writer(f'{self.get_fptype()} {variable} = {access};')
       return True
 
-  def store(self, writer, context, variable, index: List[Union[str, int, Immediate, Variable, LeadIndex]], nontemp):
+  def store(self, writer, context, variable, index: List[Union[str, int, Immediate, Variable, LeadIndex]], nontemp, atomic=None):
     assert self.stype != SymbolType.Data
 
     access = self.access(context, index)
@@ -539,7 +539,11 @@ class Symbol:
         writer(f'{variable} = {access};')
     else:
       if self.stype == SymbolType.Global:
-        assign = context.get_vm().get_lexic().glb_store(access, variable, nontemp)
+        if atomic:
+          # TODO: __builtin_amdgcn_global_atomic_fadd_f32
+          assign = f'atomicAdd(({self.get_fptype()}*)&{access}, {variable});'
+        else:
+          assign = context.get_vm().get_lexic().glb_store(access, variable, nontemp)
       else:
         assign = f'{access} = {variable};'
 
