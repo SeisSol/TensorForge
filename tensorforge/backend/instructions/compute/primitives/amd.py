@@ -495,8 +495,8 @@ def matmul32(writer: Writer, C, B, A, M, N, K, kx, threads):
                                                     kkm = ((trueK % threads) // block)
                                                     kkkm = trueK % block
 
-                                                    assert km == k
-                                                    assert kkm == kk
+                                                    assert km == k // threads
+                                                    assert kkm == kk // block
                                                     assert kkkm == kkk
                                                     # the index for tmpB is correct
                                                     writer(f'{tmpacc} = {fn}({tmpA}_{km}_{kkkm}, {tmpB}_{kkk}, {tmpacc}, {scale}, {kkm}, 0);')
