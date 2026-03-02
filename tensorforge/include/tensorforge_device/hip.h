@@ -864,7 +864,8 @@ public:
 };
 */
 
-std::tuple<short, short, short> splitFloatBF16(float input) {
+__device__ __forceinline__ std::tuple<short, short, short>
+splitFloatBF16(float input) {
   const auto i1 = static_cast<__bf16>(input);
   const auto i1r = input - static_cast<float>(i1);
   const auto i2 = static_cast<__bf16>(i1r);
@@ -874,6 +875,18 @@ std::tuple<short, short, short> splitFloatBF16(float input) {
   const auto r2 = *reinterpret_cast<const short *>(&i2);
   const auto r3 = *reinterpret_cast<const short *>(&i3);
   return {r1, r2, r3};
+}
+
+__device__ __forceinline__
+    std::tuple<VectorT<short, 4>, VectorT<short, 4>, VectorT<short, 4>>
+    splitFloatx4BF16(float i1, float i2, float i3, float i4) {
+  const auto [i1p0, i1p1, i1p2] = splitFloatBF16(i1);
+  const auto [i2p0, i2p1, i2p2] = splitFloatBF16(i2);
+  const auto [i3p0, i3p1, i3p2] = splitFloatBF16(i3);
+  const auto [i4p0, i4p1, i4p2] = splitFloatBF16(i4);
+  return {VectorT<short, 4>{i1p0, i2p0, i3p0, i4p0},
+          VectorT<short, 4>{i1p1, i2p1, i3p1, i4p1},
+          VectorT<short, 4>{i1p2, i2p2, i3p2, i4p2}};
 }
 
 } // namespace tensorforge
