@@ -232,6 +232,8 @@ class MultilinearBuilder(AbstractBuilder):
 
   def _get_target_symbol(self, prev=False):
     dest_symbol = self._scopes.get_symbol(self._dest_obj.tensor)
+    if dest_symbol is None:
+      return None
     if dest_symbol.name in self._deferred_stores:
       dest_registers,_,_ = self._deferred_stores[dest_symbol.name]
       return dest_registers
@@ -253,6 +255,7 @@ class MultilinearBuilder(AbstractBuilder):
                                    prefer_align=False,#self._descr.prefer_align,
                                    num_threads=self._num_threads,
                                    prev=self._get_target_symbol(True) if self._add else None,
+                                   next=self._get_target_symbol(True),
                                    productOperation=MulOperator(),
                                    sumOperation=AddOperator()))
 

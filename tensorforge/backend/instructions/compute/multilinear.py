@@ -15,6 +15,8 @@ from tensorforge.common.matrix.tensor import Tensor
 from .primitives import nvidia as nvidia
 from .primitives import amd as amd
 
+from copy import copy
+
 class MultilinearInstruction(ComputeInstruction):
     def __init__(self,
                context: Context,
@@ -22,6 +24,7 @@ class MultilinearInstruction(ComputeInstruction):
                ops: List[SymbolView],
                target: List[List[int]],
                prev: Union[None, Symbol],
+               next: Union[None, Symbol],
                productOperation: ReductionOperator,
                sumOperation: ReductionOperator,
                prefer_align: bool,
@@ -40,6 +43,7 @@ class MultilinearInstruction(ComputeInstruction):
         self._num_threads = num_threads
         self._blockcount = blockcount
         self._prev = prev
+        self._next = next
 
         assert num_threads % blockcount == 0
 
@@ -120,12 +124,18 @@ class MultilinearInstruction(ComputeInstruction):
         # i.e.: what can be loaded in early/late, do
 
         # TODO: handle offsets
+
+        self._idest = copy(self._dest)
+        self._idest.data_view = DataView(shape = [u - l for l,u in self._ns], permute=[i for i in range(targetrank)])
+        self._idest.data_view._bbox._lower = [l for l,_ in self._ns]
+        self._idest.data_view._bbox._upper = [u for _,u in self._ns]
+
         if self._prev is not None:
             self._dest.data_view = self._prev.data_view
+        if self._next is not None:
+            self._dest.data_view = self._next.data_view
         if self._dest.data_view is None:
-            self._dest.data_view = DataView(shape = [u - l for l,u in self._ns], permute=[i for i in range(targetrank)])
-            self._dest.data_view._bbox._lower = [l for l,_ in self._ns]
-            self._dest.data_view._bbox._upper = [u for _,u in self._ns]
+            self._dest.data_view = self._idest.data_view
 
         self._lead_dims = [0]#[t for t in self._target[0] if t >= 0]
 
@@ -201,9 +211,9 @@ class MultilinearInstruction(ComputeInstruction):
                 if len(self._ops) > 0 and len(prod) == len(self._ops):
                     for p in prod:
                         writer(p)
-                    self._dest.load(writer, self._context, 'value', [varlist[loopmap[f'n{i}']] for i,_ in enumerate(self._ns)], False)
+                    self._idest.load(writer, self._context, 'value', [varlist[loopmap[f'n{i}']] for i,_ in enumerate(self._ns)], False)
                     writer(f'{self._fp_as_str} newvalue = {self._sumOperation.format("value", f"prod{len(self._ops)-1}")};')
-                    self._dest.store(writer, self._context, 'newvalue', [varlist[loopmap[f'n{i}']] for i,_ in enumerate(self._ns)], False)
+                    self._idest.store(writer, self._context, 'newvalue', [varlist[loopmap[f'n{i}']] for i,_ in enumerate(self._ns)], False)
 
         write_loops(self._context, writer, loopstack, nonlead_writer)
 
@@ -280,7 +290,7 @@ class MultilinearInstruction(ComputeInstruction):
                 return idx
 
             def C(writer, var, i, j):
-                self._dest.store(writer, self._context, var, unwindOp(i, j, 0, None, False), False)
+                self._idest.store(writer, self._context, var, unwindOp(i, j, 0, None, False), False)
 
             if self._ops[1].symbol.obj and (not self._ops[1].symbol.obj.is_dense() or self._ops[1].symbol.data_view.shape[0] < 16):
                 def sparse(k, j):
@@ -306,9 +316,9 @@ class MultilinearInstruction(ComputeInstruction):
                 return res
 
             if self._context.get_vm().get_hw_descr().vendor == 'amd':
-                amd.matmul(writer, C, A, B, M, N, K, kx, self._num_threads, self._dest.datatype, sparse, self._context)
+                amd.matmul(writer, C, A, B, M, N, K, kx, self._num_threads, self._idest.datatype, sparse, self._context)
             elif self._context.get_vm().get_hw_descr().vendor == 'nvidia':
-                return nvidia.matmul(writer, C, A, B, Mx, N, K, kx, self._num_threads, self._dest.datatype, sparse, self._context, 'tempShrMem', self.temp_shmem())
+                return nvidia.matmul(writer, C, A, B, Mx, N, K, kx, self._num_threads, self._idest.datatype, sparse, self._context, 'tempShrMem', self.temp_shmem())
             return True
         return False
 
@@ -422,9 +432,9 @@ class MultilinearInstruction(ComputeInstruction):
             if prodc == len(self._ops):
                 for prod in prods:
                     writer(prod)
-                self._dest.load(writer, self._context, 'value', [varlist[loopmap[f'n{i}']] for i,_ in enumerate(self._ns)], False)
+                self._idest.load(writer, self._context, 'value', [varlist[loopmap[f'n{i}']] for i,_ in enumerate(self._ns)], False)
                 writer(f'{self._fp_as_str} newvalue = {self._sumOperation.format("value", f"prod{prodc - 1}")};')
-                self._dest.store(writer, self._context, 'newvalue', [varlist[loopmap[f'n{i}']] for i,_ in enumerate(self._ns)], False)
+                self._idest.store(writer, self._context, 'newvalue', [varlist[loopmap[f'n{i}']] for i,_ in enumerate(self._ns)], False)
 
         write_loops(self._context, writer, loopstack, nonlead_writer)
 
@@ -517,13 +527,13 @@ class MultilinearInstruction(ComputeInstruction):
                 loop.__enter__()
                 loopstack += [loop]
 
-            self._dest.load(writer, self._context, 'value', [self._vm.get_lexic().thread_idx_x] + [f'n{i+1}' for i,_ in enumerate(self._ns[1:])], False)
+            self._idest.load(writer, self._context, 'value', [self._vm.get_lexic().thread_idx_x] + [f'n{i+1}' for i,_ in enumerate(self._ns[1:])], False)
             #writer(f'auto* shmAddr = &{self._shr_mem.name}[{self._shr_mem_offset}];')
             self._reduction(writer)
             write(f'value = tensorforge::reduction<tensorforge::ReductionOperation<{self._fp_as_str}, tensorforge::Op::Sum>, {self._num_threads}, 1, {self._fp_as_str}>(value);')
             # self._butterfly_reduction_loop(writer, max_array_length = 32, amd = False)
             #writer(f'{self._fp_as_str} newvalue = shmAddr[{sublane_address}];')
-            self._dest.store(writer, self._context, 'value', [self._vm.get_lexic().thread_idx_x] + [f'n{i+1}' for i,_ in enumerate(self._ns[1:])], False)
+            self._idest.store(writer, self._context, 'value', [self._vm.get_lexic().thread_idx_x] + [f'n{i+1}' for i,_ in enumerate(self._ns[1:])], False)
 
             for loop in loopstack[::-1]:
                 loop.__exit__(None, None, None)
