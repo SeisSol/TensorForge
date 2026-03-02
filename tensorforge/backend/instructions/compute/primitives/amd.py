@@ -483,7 +483,7 @@ def matmul32(writer: Writer, C, B, A, M, N, K, kx, threads):
                                             Ar = [f'{tmpA}_{k // threads}_{kkk}' for kkk in range(4)]
                                             Br = [f'{tmpB}_{kkk}' for kkk in range(4)]
                                             mfma_emu_bf16_f32(writer, tmpacc, Br, Ar, scale, kk // 4, 0)
-                                        elif True:
+                                        elif False:
                                             Ar = [f'{tmpA}_{k // threads}_{kkk}' for kkk in range(4)]
                                             Br = [f'{tmpB}_{kkk}' for kkk in range(4)]
                                             mfma_emu_f16_f32(writer, tmpacc, Br, Ar, scale, kk // 4, 0)
