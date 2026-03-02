@@ -889,4 +889,23 @@ __device__ __forceinline__
           VectorT<short, 4>{i1p2, i2p2, i3p2, i4p2}};
 }
 
+__device__ __forceinline__ std::tuple<_Float16, _Float16>
+splitFloatF16(float input) {
+  const auto i1 = static_cast<_Float16>(input);
+  const auto i1r = input - static_cast<float>(i1);
+  const auto i2 = static_cast<_Float16>(i1r);
+  return {i1, i2};
+}
+
+__device__
+    __forceinline__ std::tuple<VectorT<_Float16, 4>, VectorT<_Float16, 4>>
+    splitFloatx4F16(float i1, float i2, float i3, float i4) {
+  const auto [i1p0, i1p1] = splitFloatF16(i1);
+  const auto [i2p0, i2p1] = splitFloatF16(i2);
+  const auto [i3p0, i3p1] = splitFloatF16(i3);
+  const auto [i4p0, i4p1] = splitFloatF16(i4);
+  return {VectorT<_Float16, 4>{i1p0, i2p0, i3p0, i4p0},
+          VectorT<_Float16, 4>{i1p1, i2p1, i3p1, i4p1}};
+}
+
 } // namespace tensorforge

@@ -408,18 +408,11 @@ def mfma_emu_bf16_f32(writer: Writer, C, B, A, c, a, b):
     writer(f'{C} = __builtin_amdgcn_mfma_f32_4x4x4bf16_1k({A[0]}_p1, {B[0]}_p1, {C}, {c}, {a}, {b});')
 
 def mfma_emu_f16_f32(writer: Writer, C, B, A, c, a, b):
-    Ar = writer.varalloc()
-    A1 = writer.varalloc()
-    A2 = writer.varalloc()
-    Br = writer.varalloc()
-    B1 = writer.varalloc()
-    B2 = writer.varalloc()
-    writer(f'const f16x4 {Ar} = f16x4({A});')
-    writer(f'const f16x4 {Br} = f16x4({B});')
-    writer(f'const f16x4 {A1} = f16x4({A});')
-    writer(f'const f16x4 {B1} = f16x4({B});')
-    writer(f'const f16x4 {A2} = f16x4({A} - {A1});')
-    writer(f'const f16x4 {B2} = f16x4({B} - {B1});')
+    writer(f'const auto [{A[0]}_p0, {A[0]}_p1] = tensorforge::splitFloatx4F16({A[0]}, {A[1]}, {A[2]}, {A[3]});')
+    writer(f'const auto [{B[0]}_p0, {B[0]}_p1] = tensorforge::splitFloatx4F16({B[0]}, {B[1]}, {B[2]}, {B[3]});')
+    writer(f'{C} = __builtin_amdgcn_mfma_f32_4x4x4f16({A[0]}_p0, {B[0]}_p0, {C}, {c}, {a}, {b});')
+    writer(f'{C} = __builtin_amdgcn_mfma_f32_4x4x4f16({A[0]}_p1, {B[0]}_p0, {C}, {c}, {a}, {b});')
+    writer(f'{C} = __builtin_amdgcn_mfma_f32_4x4x4f16({A[0]}_p0, {B[0]}_p1, {C}, {c}, {a}, {b});')
 
 def matmul32(writer: Writer, C, B, A, M, N, K, kx, threads):
     with writer.AnonymousScope():
@@ -486,10 +479,14 @@ def matmul32(writer: Writer, C, B, A, M, N, K, kx, threads):
                                             fB[kkk] = B(writer, f'{tmpB}_{kkk}', i, k + kk + kkk)
                                         for kkk in range(dkk, block):
                                             writer(f'float {tmpB}_{kkk} = 0;')
-                                        if True:
+                                        if False:
                                             Ar = [f'{tmpA}_{k // threads}_{kkk}' for kkk in range(4)]
                                             Br = [f'{tmpB}_{kkk}' for kkk in range(4)]
                                             mfma_emu_bf16_f32(writer, tmpacc, Br, Ar, scale, kk // 4, 0)
+                                        elif True:
+                                            Ar = [f'{tmpA}_{k // threads}_{kkk}' for kkk in range(4)]
+                                            Br = [f'{tmpB}_{kkk}' for kkk in range(4)]
+                                            mfma_emu_f16_f32(writer, tmpacc, Br, Ar, scale, kk // 4, 0)
                                         else:
                                             for kkk in range(dkk):
                                                 if fB[kkk]:
