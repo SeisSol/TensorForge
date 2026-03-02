@@ -382,6 +382,7 @@ class Symbol:
             writer(f'{variable} = {self.name}[{value}];')
             wrote = True
         else:
+          offset = self.data_view.get_dim_offsets()[leadidx]
           strindex = index[leadidx].write(context)
           rngs = []
           rng = None
@@ -406,7 +407,7 @@ class Symbol:
 
           if len(rngs) > 0:
             idxvar = writer.varalloc()
-            writer(f'const int32_t {idxvar} = {strindex};')
+            writer(f'const int32_t {idxvar} = {strindex} - {offset};')
 
             lead = index[leadidx]
             bndS = lead._nonlead * lead._block
@@ -424,7 +425,6 @@ class Symbol:
                   writer(f'{variable} = {self.name}[{value - rngS} + {idxvar}];')
                   wrote = True
     else:
-      offset = self.data_view.get_dim_offsets()[pos]
       if isinstance(index[pos], (int, np.int32, np.int64)):
         runIdx[pos] = index[pos]
         wrote |= self.encode_values(pos + 1, runIdx, writer, context, variable, index, nontemp, leadidx)
