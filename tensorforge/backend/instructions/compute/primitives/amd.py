@@ -414,7 +414,7 @@ def mfma_emu_f16_f32(writer: Writer, C, B, A, c, a, b):
     writer(f'{C} = __builtin_amdgcn_mfma_f32_4x4x4f16({A[0]}_p1, {B[0]}_p0, {C}, {c}, {a}, {b});')
     writer(f'{C} = __builtin_amdgcn_mfma_f32_4x4x4f16({A[0]}_p0, {B[0]}_p1, {C}, {c}, {a}, {b});')
 
-def matmul32(writer: Writer, C, B, A, M, N, K, kx, threads):
+def matmul32(writer: Writer, C, B, A, M, N, K, kx, threads, dtype, sparse, ctx):
     with writer.AnonymousScope():
 
         # transpose A
@@ -511,8 +511,9 @@ def matmul32(writer: Writer, C, B, A, M, N, K, kx, threads):
         #if N >= 16 and threads >= 16:
         #    write_matmul(16, start, True)
         #    start += (N // 16) * 16
-        cap4 = False #N % 4 < 2
+        cap4 = N % 4 < 2
         write_matmul(4, start, cap4)
+        matmuldpp(writer, (N // 4) * 4, C, B, A, M, N, K, kx, threads, dtype, sparse, ctx)
         # write_matmul(1, )
 
 def fmadpp16(writer, C, A, B, row):
@@ -605,55 +606,59 @@ def wmma3atom(writer, A, B, C, threads):
 
     # TODO: gfx1200, f'__builtin_amdgcn_wmma_f32_16x16x16_bf16_w32_gfx12'
 
-def matmul(writer, C, A, B, M, N, K, kx, threads, dtype, sparse, ctx):
-    if amdarch(ctx) >= 0x908 and amdarch(ctx) < 0x1000 and not sparse and dtype == Datatype.F32:
-        matmul32(writer, C, A, B, M, N, K, kx, threads)
-    else:
-        ab = {}
-        for k in range(K):
+def matmuldpp(writer, start, C, A, B, M, N, K, kx, threads, dtype, sparse, ctx):
+    ab = {}
+    for k in range(K):
+        for i in range(M):
+            var = writer.varalloc()
+            res = A(writer, var, i, k)
+            if res:
+                ab[(i, k + kx)] = var
+    cx = []
+    ax = []
+    cb = []
+    for j in range(start, N):
+        cbl = []
+        for i in range(M):
+            vC = writer.varalloc()
+            cb += [vC]
+            cbl += [vC]
+            writer(f'{dtype.ctype()} {vC}{"{}"};')
+        for k in range(K + kx):
             for i in range(M):
-                var = writer.varalloc()
-                res = A(writer, var, i, k)
-                if res:
-                    ab[(i, k + kx)] = var
-        cx = []
-        ax = []
-        cb = []
-        for j in range(N):
-            cbl = []
-            for i in range(M):
-                vC = writer.varalloc()
-                cb += [vC]
-                cbl += [vC]
-                writer(f'{dtype.ctype()} {vC}{"{}"};')
-            for k in range(K + kx):
-                for i in range(M):
-                    if (not sparse or sparse(k, j)) and (i,k) in ab:
-                        cx += [cbl[i]]
-                        ax += [ab[(i, k)]]
-                    elif not sparse:
-                        cx += [None]
-                        ax += [None]
+                if (not sparse or sparse(k, j)) and (i,k) in ab:
+                    cx += [cbl[i]]
+                    ax += [ab[(i, k)]]
+                elif not sparse:
+                    cx += [None]
+                    ax += [None]
 
-        if sparse:
-            stride = threads*M
-            for kj in range(0, len(cx), stride):
+    if sparse:
+        stride = threads*M
+        for kj in range(0, len(cx), stride):
+            vB = writer.varalloc()
+            B(writer, vB, None, kj // M)
+            vA = ax[kj: min(kj + stride, len(cx))]
+            vC = cx[kj: min(kj + stride, len(cx))]
+            hfma(writer, vC, vB, vA, M, dtype, threads, ctx)
+    else:
+        for j in range(start, N):
+            for k in range(0, K + kx, threads):
                 vB = writer.varalloc()
-                B(writer, vB, None, kj // M)
+                B(writer, vB, j, k // threads)
+                kj = (K + kx) * (j-start) + k
+                stride = min(threads, K + kx - k)
                 vA = ax[kj: min(kj + stride, len(cx))]
                 vC = cx[kj: min(kj + stride, len(cx))]
                 hfma(writer, vC, vB, vA, M, dtype, threads, ctx)
-        else:
-            for j in range(0, N):
-                for k in range(0, K + kx, threads):
-                    vB = writer.varalloc()
-                    B(writer, vB, j, k // threads)
-                    kj = (K + kx) * j + k
-                    stride = min(threads, K + kx - k)
-                    vA = ax[kj: min(kj + stride, len(cx))]
-                    vC = cx[kj: min(kj + stride, len(cx))]
-                    hfma(writer, vC, vB, vA, M, dtype, threads, ctx)
 
-        for j in range(N):
-            for i in range(M):
-                C(writer, cb[j*M+i], i, j)
+    for j in range(start, N):
+        for i in range(M):
+            C(writer, cb[(j-start)*M+i], i, j)
+
+
+def matmul(writer, C, A, B, M, N, K, kx, threads, dtype, sparse, ctx):
+    if amdarch(ctx) >= 0x908 and amdarch(ctx) < 0x1000 and not sparse and dtype == Datatype.F32:
+        matmul32(writer, C, A, B, M, N, K, kx, threads, dtype, sparse, ctx)
+    else:
+        matmuldpp(writer, 0, C, A, B, M, N, K, kx, threads, dtype, sparse, ctx)
