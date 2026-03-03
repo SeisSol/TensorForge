@@ -609,13 +609,13 @@ def matmul(writer, C, A, B, M, N, K, kx, threads, dtype, sparse, ctx):
     if amdarch(ctx) >= 0x908 and amdarch(ctx) < 0x1000 and not sparse and dtype == Datatype.F32:
         matmul32(writer, C, A, B, M, N, K, kx, threads)
     else:
-        ab = []
+        ab = {}
         for k in range(K):
             for i in range(M):
                 var = writer.varalloc()
                 res = A(writer, var, i, k)
                 if res:
-                    ab += [var]
+                    ab[(i, k + kx)] = var
         cx = []
         ax = []
         cb = []
@@ -626,18 +626,33 @@ def matmul(writer, C, A, B, M, N, K, kx, threads, dtype, sparse, ctx):
                 cb += [vC]
                 cbl += [vC]
                 writer(f'{dtype.ctype()} {vC}{"{}"};')
-            for k in range(K):
+            for k in range(K + kx):
                 for i in range(M):
-                    if not sparse or sparse(k, j):
+                    if (not sparse or sparse(k, j)) and (i,k) in ab:
                         cx += [cbl[i]]
-                        ax += [ab[k * M + i]]
+                        ax += [ab[(i, k)]]
+                    elif not sparse:
+                        cx += [None]
+                        ax += [None]
 
-        for kj in range(0, len(cx), threads*M):
-            vB = writer.varalloc()
-            B(writer, vB, None, kj // M)
-            vA = ax[kj: min(kj + threads*M, len(cx))]
-            vC = cx[kj: min(kj + threads*M, len(cx))]
-            hfma(writer, vC, vB, vA, M, dtype, threads, ctx)
+        if sparse:
+            stride = threads*M
+            for kj in range(0, len(cx), stride):
+                vB = writer.varalloc()
+                B(writer, vB, None, kj // M)
+                vA = ax[kj: min(kj + stride, len(cx))]
+                vC = cx[kj: min(kj + stride, len(cx))]
+                hfma(writer, vC, vB, vA, M, dtype, threads, ctx)
+        else:
+            for j in range(0, N):
+                for k in range(0, K + kx, threads):
+                    vB = writer.varalloc()
+                    B(writer, vB, j, k // threads)
+                    kj = (K + kx) * j + k
+                    stride = min(threads, K + kx - k)
+                    vA = ax[kj: min(kj + stride, len(cx))]
+                    vC = cx[kj: min(kj + stride, len(cx))]
+                    hfma(writer, vC, vB, vA, M, dtype, threads, ctx)
 
         for j in range(N):
             for i in range(M):
