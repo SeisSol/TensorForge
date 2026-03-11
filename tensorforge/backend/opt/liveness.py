@@ -4,6 +4,7 @@ from collections import OrderedDict
 from tensorforge.backend.symbol import Symbol
 from tensorforge.backend.instructions.compute import ComputeInstruction
 from tensorforge.backend.instructions.memory import AbstractShrMemWrite
+from tensorforge.backend.instructions.memory.load import ShrToShrLoader
 from tensorforge.backend.instructions.memory.store import StoreShrMemToGlb
 from tensorforge.backend.symbol import SymbolType
 from .abstract import AbstractOptStage, Context, AbstractInstruction
@@ -31,7 +32,7 @@ class LivenessAnalysis(AbstractOptStage):
       backward_map[index] = copy(backward_map[index + 1])
       if isinstance(instr, ComputeInstruction):
         self._check_use(backward_map, index, instr)
-      if isinstance(instr, StoreShrMemToGlb):
+      if isinstance(instr, (StoreShrMemToGlb, ShrToShrLoader)):
         self._check_store(backward_map, index, instr)
 
     self._map = {}

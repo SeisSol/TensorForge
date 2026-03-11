@@ -1,5 +1,6 @@
 from typing import Tuple, Dict, List
 from tensorforge.common.context import Context
+from tensorforge.common.basic_types import Addressing
 from tensorforge.backend.scopes import Scopes
 from tensorforge.backend.symbol import Symbol, SymbolType, SymbolView
 from tensorforge.backend.instructions.allocate import RegisterAlloc
@@ -41,9 +42,9 @@ class MultilinearBuilder(AbstractBuilder):
     self._temp_regs = None
     self._dest_regs = None
 
-    self._use_registers_always = self._context.get_vm().get_hw_descr().vendor in ['amd']
-    self._preload_registers = self._context.get_vm().get_hw_descr().vendor in ['amd']
-    self._atomic_update = self._context.get_vm().get_hw_descr().vendor in ['amd']
+    self._use_registers_always = self._context.get_vm().get_hw_descr().vendor in ['amd', 'nvidia']
+    self._preload_registers = self._context.get_vm().get_hw_descr().vendor in ['amd', 'nvidia']
+    self._atomic_update = self._context.get_vm().get_hw_descr().vendor in ['amd'] # , 'nvidia' # ?
     self._deferred_stores = {}
     self._temporaries = {}
 
@@ -114,7 +115,7 @@ class MultilinearBuilder(AbstractBuilder):
           self._loaders_cache[self._mem_regions[i]] = load_op
           self._instructions.append(load_op)
         else:
-          if self._preload_registers:
+          if self._preload_registers and self._ops[i].symbol.obj.addressing != Addressing.NONE:
             # only register-preload dense matrices for now
             self._mem_regions[i], load_op = self._make_loader_and_symbol_reg(self._ops[i].symbol, linearize=needs_reload2)
             self._deferred_stores[self._ops[i].symbol.name] = self._mem_regions[i].symbol, self._mem_regions[i].symbol, None

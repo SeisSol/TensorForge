@@ -2,7 +2,7 @@ from typing import List
 from .abstract import AbstractTransformer, Context, AbstractInstruction
 from tensorforge.backend.instructions.compute import ComputeInstruction
 from tensorforge.backend.instructions.memory import AbstractShrMemWrite, MemoryInstruction
-from tensorforge.backend.instructions.memory.load import LoadInstruction, LoadWait, GlbToRegLoader, GlbToShrLoader
+from tensorforge.backend.instructions.memory.load import LoadInstruction, LoadWait, GlbToRegLoader, GlbToShrLoader, ShrToShrLoader
 from tensorforge.backend.instructions.memory.store import StoreRegToReg, StoreShrMemToGlb
 from tensorforge.backend.instructions.ptr_manip import GetElementPtr
 from tensorforge.backend.instructions.allocate import RegisterAlloc
@@ -63,10 +63,11 @@ class MultiBuffer(AbstractTransformer):
             globalinstrs += [newload1]
             newinstrs += [GetElementPtr(self._context, epmap[instr._src.name], newsym, batch_offset=1)]
             newinstrs += [LoadWait(newload1)]
-            newinstrs += [GlbToShrLoader(context=self._context, src=newshrsym, dest=instr._dest, shr_mem=self._shm_symbol, num_threads=instr._num_threads, permute=None, no_memcpy=True)]
+            newinstrs += [ShrToShrLoader(context=self._context, src=newshrsym, dest=instr._dest, shr_mem=self._shm_symbol, num_threads=instr._num_threads, permute=None)]
             newinstrs += [newload2]
         elif isinstance(instr, GetElementPtr) or isinstance(instr, RegisterAlloc) or isinstance(instr, LoadWait):
-            newinstrs += [instr]
+            if not isinstance(instr, LoadWait):
+                newinstrs += [instr]
 
             # hack
             if isinstance(instr, GetElementPtr):

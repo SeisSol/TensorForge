@@ -33,11 +33,10 @@ class OptimizationStage:
     opt.apply()
     self._instrs = opt.get_instructions()
 
-    if self._context.get_vm().get_hw_descr().vendor == 'amd':
-      opt = MultiBuffer(self._context, self._instrs, self._shr_mem, self._scopes)
-      opt.apply()
-      self._instrs = opt.get_instructions()
-      self._global_instrs = opt._global_instrs
+    opt = MultiBuffer(self._context, self._instrs, self._shr_mem, self._scopes)
+    opt.apply()
+    self._instrs = opt.get_instructions()
+    self._global_instrs = opt._global_instrs
 
     opt = PtrPipe(self._context, self._instrs)
     opt.apply()

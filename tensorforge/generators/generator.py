@@ -175,6 +175,8 @@ class Generator:
 
       for i,section in enumerate(self._sections):
         with writer.AnonymousScope():
+          if self._context.get_vm().get_hw_descr().vendor == 'nvidia':
+            writer(f'cuda::pipeline<cuda::thread_scope_thread> pipeline = cuda::make_pipeline();')
 
           offset = []
           idx = i - 1
@@ -202,8 +204,6 @@ class Generator:
 
           def generate_inner():
             with writer.If(f'{self._get_flag_guard(writer, i)}'):
-              if self._context.get_vm().get_hw_descr().vendor == 'nvidia':
-                writer(f'cuda::pipeline<cuda::thread_scope_thread> pipeline = cuda::make_pipeline();')
               for instruction in section.ir:
                 if instruction.is_ready():
                   instruction.gen_code(writer)

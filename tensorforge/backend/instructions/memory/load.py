@@ -274,6 +274,17 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
   def __str__(self):
     return f'{self._dest.name} = load{{g>s}}({self._src.name}[{", ".join(str(p) for p in self._permute)}])'
 
+class ShrToShrLoader(GlbToShrLoader):
+  def __init__(self, **kwargs):
+    super().__init__(no_memcpy=True, **kwargs)
+
+  def __str__(self):
+    return f'{self._dest.name} = load{{s>s}}({self._src.name}[{", ".join(str(p) for p in self._permute)}])'
+
+  def set_shr_mem_offset(self, offset: int, first: bool, global_offset: bool) -> None:
+    # TODO: refactor users instead
+    super().set_shr_mem_offset(offset, True, global_offset)
+
 class GlbToRegLoader(MemoryInstruction, LoadInstruction):
   def __init__(self,
                context: Context,
