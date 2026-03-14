@@ -86,7 +86,8 @@ class Generator:
 
     self._name_operands(self.descr_list)
 
-    prefer_launchcontrol = context.get_vm().get_hw_descr().vendor == 'nvidia' and int(context.get_vm().get_hw_descr().model[3:]) >= 100
+    # launch control is (still) broken
+    prefer_launchcontrol = False # context.get_vm().get_hw_descr().vendor == 'nvidia' and int(context.get_vm().get_hw_descr().model[3:]) >= 100
     prefer_persistent = context.get_vm().get_hw_descr().vendor in ['amd', 'nvidia'] and not prefer_launchcontrol
     prefer_preload = context.get_vm().get_hw_descr().vendor in ['amd'] and not prefer_launchcontrol
 
