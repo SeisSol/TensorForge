@@ -27,7 +27,6 @@ class MultilinearInstruction(ComputeInstruction):
                next: Union[None, Symbol],
                productOperation: ReductionOperator,
                sumOperation: ReductionOperator,
-               prefer_align: bool,
                num_threads: int,
                blockcount: int=1):
         super(MultilinearInstruction, self).__init__(context)
@@ -36,7 +35,6 @@ class MultilinearInstruction(ComputeInstruction):
         self._target = target
         self._productOperation = productOperation
         self._sumOperation = sumOperation
-        self._prefer_align = prefer_align
         self._is_ready = True
         self._user_options = context.get_user_options()
         self._gemm_meta_data = None
@@ -253,16 +251,23 @@ class MultilinearInstruction(ComputeInstruction):
                 idx = [LeadIndex(i % size + self._ns[0][0] // self._num_threads, self._num_threads, 1)]
                 return idx
 
-            # TODO: remove
-            kx = self._ks[0][0]
+            if len(self._ks) == 0:
+                # outer product
+                kx = 0
+            else:
+                # TODO: remove
+                kx = self._ks[0][0]
 
             def unwindK(k, full):
-                size = self._ks[0][1] - self._ks[0][0]
+                ks00 = self._ks[0][0] if len(self._ks) > 0 else 0
+                ks01 = self._ks[0][1] if len(self._ks) > 0 else 1
+
+                size = ks01 - ks00
                 if full:
-                    idx = [k % size + self._ks[0][0]]
+                    idx = [k % size + ks00]
                 else:
                     sizeL = -(-(size + kx) // self._num_threads)
-                    idx = [LeadIndex(k % sizeL + self._ks[0][0] // self._num_threads, self._num_threads, 1)]
+                    idx = [LeadIndex(k % sizeL + ks00 // self._num_threads, self._num_threads, 1)]
                 k //= size
                 for mi, mx in self._ks[1:]:
                     size = mx - mi

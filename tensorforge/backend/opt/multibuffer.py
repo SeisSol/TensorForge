@@ -57,8 +57,8 @@ class MultiBuffer(AbstractTransformer):
             newsym.data_view = instr._src.data_view
             newsym.num_threads = instr._src.num_threads
             newsym.datatype = instr._src.datatype
-            newload1 = GlbToShrLoader(context=self._context, src=newsym, dest=newshrsym, shr_mem=self._shm_symbol, num_threads=instr._num_threads, permute=None)
-            newload2 = GlbToShrLoader(context=self._context, src=newsym, dest=newshrsym, shr_mem=self._shm_symbol, num_threads=instr._num_threads, permute=None)
+            newload1 = GlbToShrLoader(context=self._context, src=newsym, dest=newshrsym, shr_mem=self._shm_symbol, num_threads=instr._num_threads, permute=instr._permute)
+            newload2 = GlbToShrLoader(context=self._context, src=newsym, dest=newshrsym, shr_mem=self._shm_symbol, num_threads=instr._num_threads, permute=instr._permute)
             globalinstrs += [GetElementPtr(self._context, epmap[instr._src.name], newsym, batch_offset=1)]
             globalinstrs += [newload1]
             newinstrs += [GetElementPtr(self._context, epmap[instr._src.name], newsym, batch_offset=1)]

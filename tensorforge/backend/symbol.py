@@ -499,8 +499,8 @@ class Symbol:
       if self.stype == SymbolType.Register or self.stype == SymbolType.Scratch:
         assert len(self.lead_dims) == 1
         idx = index[self.lead_dims[0]]
-        if isinstance(idx, (float, int, np.int32)) or not idx.is_thread_dependent():
-          if isinstance(idx, (float, int, np.int32)):
+        if isinstance(idx, (float, int, np.int32, np.int64)) or not idx.is_thread_dependent():
+          if isinstance(idx, (float, int, np.int32, np.int64)):
             idx = Immediate(idx, Datatype.I32)
           # doesn't work
           if isinstance(idx, Variable):

@@ -191,7 +191,7 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
     if self._use_cuda_memcpy:
       granularities = [1]
     else:
-      granularities = [4, 2, 1]
+      granularities = [m for m in [4, 2, 1] if m * self._dest.get_fptype().size() <= 16]
 
     for vecsize in granularities:
       if src_offset % vecsize == 0:

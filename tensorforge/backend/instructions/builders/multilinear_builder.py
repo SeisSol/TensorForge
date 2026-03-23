@@ -44,6 +44,7 @@ class MultilinearBuilder(AbstractBuilder):
 
     self._use_registers_always = self._context.get_vm().get_hw_descr().vendor in ['amd', 'nvidia']
     self._preload_registers = self._context.get_vm().get_hw_descr().vendor in ['amd', 'nvidia']
+    self._preload_shmem = self._context.get_vm().get_hw_descr().vendor in [] #['nvidia']
     self._atomic_update = self._context.get_vm().get_hw_descr().vendor in ['amd'] # , 'nvidia' # ?
     self._deferred_stores = {}
     self._temporaries = {}
@@ -118,6 +119,11 @@ class MultilinearBuilder(AbstractBuilder):
           if self._preload_registers and self._ops[i].symbol.obj.addressing != Addressing.NONE:
             # only register-preload dense matrices for now
             self._mem_regions[i], load_op = self._make_loader_and_symbol_reg(self._ops[i].symbol, linearize=needs_reload2)
+            self._deferred_stores[self._ops[i].symbol.name] = self._mem_regions[i].symbol, self._mem_regions[i].symbol, None
+            self._instructions.append(load_op)
+          elif self._preload_shmem and self._ops[i].symbol.obj.addressing != Addressing.NONE:
+            # only register-preload dense matrices for now
+            self._mem_regions[i], load_op = self._make_loader_and_symbol(self._ops[i].symbol, None)
             self._deferred_stores[self._ops[i].symbol.name] = self._mem_regions[i].symbol, self._mem_regions[i].symbol, None
             self._instructions.append(load_op)
           else:
@@ -245,6 +251,11 @@ class MultilinearBuilder(AbstractBuilder):
       self._deferred_stores[dest_symbol.name] = symbol.symbol, symbol.symbol, None
       self._instructions.append(load_op)
       return symbol.symbol
+    elif self._preload_shmem and dest_symbol.stype == SymbolType.Global and not self._atomic_update:
+      symbol, load_op = self._make_loader_and_symbol(dest_symbol, None)
+      self._deferred_stores[dest_symbol.name] = symbol.symbol, symbol.symbol, None
+      self._instructions.append(load_op)
+      return symbol.symbol
     else:
       return dest_symbol
 
@@ -253,7 +264,6 @@ class MultilinearBuilder(AbstractBuilder):
                                    ops=self._mem_regions,
                                    target=self._descr.target,
                                    dest=self._temp_regs,
-                                   prefer_align=False,#self._descr.prefer_align,
                                    num_threads=self._num_threads,
                                    prev=self._get_target_symbol(True) if self._add else None,
                                    next=self._get_target_symbol(True),
