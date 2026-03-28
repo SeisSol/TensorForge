@@ -117,6 +117,12 @@ class Immediate:
   def write(self, context: Context):
     return self._type.literal(self._value)
 
+  def nonlead(self):
+    return self._value
+
+  def lead(self):
+    return self._value
+
 class Variable:
   def __init__(self, name, fptype: Datatype):
     self._name = name
@@ -151,6 +157,12 @@ class LeadIndex:
       return f'(({context.get_vm().get_lexic().thread_idx_x} / {self._stride}) % {self._block}) + {self._nonlead} * {self._block}'
     elif self._block == 1:
       return f'{self._nonlead}'
+
+  def nonlead(self):
+    return self._nonlead
+
+  def lead(self):
+    return self._nonlead * self._block
 
 class VarOffset:
   def __init__(self, variable, offset):

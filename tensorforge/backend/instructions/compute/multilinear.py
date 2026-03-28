@@ -1,7 +1,7 @@
 from typing import Union
 import math
 from . import ComputeInstruction
-from tensorforge.backend.symbol import SymbolType, add_offset, Symbol, SymbolView, DataView, Loop, LeadLoop, write_loops, LeadIndex, LinearizedLoop
+from tensorforge.backend.symbol import SymbolType, add_offset, Symbol, SymbolView, DataView, Loop, LeadLoop, write_loops, LeadIndex, LinearizedLoop, Immediate
 from tensorforge.common.exceptions import InternalError
 from tensorforge.backend.writer import Writer
 from tensorforge.common.context import Context
@@ -14,6 +14,8 @@ from tensorforge.common.matrix.tensor import Tensor
 
 from .primitives import nvidia as nvidia
 from .primitives import amd as amd
+
+import numpy as np
 
 from copy import copy
 
@@ -124,9 +126,15 @@ class MultilinearInstruction(ComputeInstruction):
         # TODO: handle offsets
 
         self._idest = copy(self._dest)
+        self._idest.name = f'i{self._dest.name}'
         self._idest.data_view = DataView(shape = [u - l for l,u in self._ns], permute=[i for i in range(targetrank)])
         self._idest.data_view._bbox._lower = [l for l,_ in self._ns]
         self._idest.data_view._bbox._upper = [u for _,u in self._ns]
+        self._iregs = 1
+        if len(self._ns) > 0:
+            self._iregs = -(-self._ns[0][1] // self._num_threads) - self._ns[0][0] // self._num_threads
+        for l,u in self._ns[1:]:
+            self._iregs *= u - l
 
         if self._prev is not None:
             self._dest.data_view = self._prev.data_view
@@ -141,6 +149,10 @@ class MultilinearInstruction(ComputeInstruction):
         pass
 
     def gen_code_inner(self, writer: Writer):
+        if len(self._scalar) == 0 and self._prev is None:
+            writer(f'auto& {self._idest.name} = {self._dest.name};')
+        else:
+            writer(f'{self._dest.get_fptype()} {self._idest.name}[{self._iregs}]{"{}"};')
         if not self._nonleading_dim_test(writer):
             self._nonleading_dim(writer)
         if len(self._ns) == 0:
@@ -222,6 +234,9 @@ class MultilinearInstruction(ComputeInstruction):
 
 
     def _nonleading_dim_test(self, writer: Writer):
+        # if len(self._ks) == 0 and len(self._ops) == 1:
+        #     return False
+
         can_use = self._is_matmul()
 
         if can_use:
@@ -469,18 +484,27 @@ class MultilinearInstruction(ComputeInstruction):
             loopmap[f'n{i}'] = len(loopstack)
             dimmin = self._dest.data_view.get_bbox().lower()[i]
             dimmax = self._dest.data_view.get_bbox().upper()[i]
+
+            dimmini = self._idest.data_view.get_bbox().lower()[i]
+            dimmaxi = self._idest.data_view.get_bbox().upper()[i]
+
+            unroll = dimmini != dimmin or dimmaxi != dimmax
             if i not in self._lead_dims or threads == 0:
-                loopstack += [Loop(f'n{i}', dimmin, dimmax, 1, unroll=False)]
+                loopstack += [Loop(f'n{i}', dimmin, dimmax, 1, unroll=unroll)]
             else:
-                loopstack += [LeadLoop(f'n{i}', dimmin, dimmax, threads, stride, unroll=False)]
+                loopstack += [LeadLoop(f'n{i}', dimmin, dimmax, threads, stride, unroll=unroll)]
                 threads //= dimmax - dimmin
                 stride *= dimmax - dimmin
 
         def nonlead_writer(varlist):
-            self._dest.load(writer, self._context, 'value', [varlist[loopmap[f'n{i}']] for i,_ in enumerate(self._ns)], False)
-            valvar = 'value'
-            if len(self._scalar) > 0:
-                writer(f'const {self._dest.get_fptype()} newvalue1 = {self._productOperation.format("value", f"{scalar_var}")};')
+            needsLoad = all(not isinstance(varlist[loopmap[f'n{i}']], (Immediate, LeadIndex)) or isinstance(varlist[loopmap[f'n{i}']].nonlead(), (str,)) or (self._idest.data_view.get_bbox().lower()[i] <= int(varlist[loopmap[f'n{i}']].lead()) and self._idest.data_view.get_bbox().upper()[i] > int(varlist[loopmap[f'n{i}']].lead())) for i,_ in enumerate(self._ns))
+            if needsLoad:
+                self._idest.load(writer, self._context, 'value', [varlist[loopmap[f'n{i}']] for i,_ in enumerate(self._ns)], False)
+                valvar = 'value'
+            else:
+                valvar = '0'
+            if len(self._scalar) > 0 and valvar != '0':
+                writer(f'const {self._dest.get_fptype()} newvalue1 = {self._productOperation.format(valvar, f"{scalar_var}")};')
                 valvar = 'newvalue1'
             if self._prev is not None:
                 self._prev.load(writer, self._context, 'oldvalue', [varlist[loopmap[f'n{i}']] for i,_ in enumerate(self._ns)], False)

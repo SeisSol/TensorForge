@@ -291,6 +291,13 @@ __device__ __forceinline__ T swap(T value) {
         : "v"(a), "v"(b)                                                       \
         :)
 
+#define MOV64DPP16(pos, c, a)                                                  \
+  __asm("v_mov_b64_dpp %0, %1 " ROW_BCST16                                     \
+        ":" STR(pos) " row_mask:0xf bank_mask:0xf bound_ctrl:1" CMFI           \
+        : "+v"(c)                                                              \
+        : "v"(a)                                                               \
+        :)
+
 // format:
 // c: accumulator
 // a: DPP-broadcasted register
@@ -304,6 +311,13 @@ __device__ __forceinline__ void fmacdpp16(float &c, float a, float b);
 
 template <int Row>
 __device__ __forceinline__ void fmacdpp16(double &c, double a, double b);
+
+template <int Row>
+__device__ __forceinline__ void movdpp16(float2 &c, float2 a);
+
+template <int Row> __device__ __forceinline__ void movdpp16(float &c, float a) {
+  c = dpp<0x150 + Row, 0xf, 0xf, true>(a);
+}
 
 #if !defined(__gfx900__)
 constexpr bool HasFmacDpp4 = true;
@@ -464,6 +478,58 @@ __device__ __forceinline__ void fmacdpp16<14>(double &c, double a, double b) {
 template <>
 __device__ __forceinline__ void fmacdpp16<15>(double &c, double a, double b) {
   DMADPP16(0xf, c, a, b);
+}
+
+template <int row>
+__device__ __forceinline__ void movdpp16(float2 &c, float2 a);
+
+template <> __device__ __forceinline__ void movdpp16<0>(float2 &c, float2 a) {
+  MOV64DPP16(0x0, c, a);
+}
+template <> __device__ __forceinline__ void movdpp16<1>(float2 &c, float2 a) {
+  MOV64DPP16(0x1, c, a);
+}
+template <> __device__ __forceinline__ void movdpp16<2>(float2 &c, float2 a) {
+  MOV64DPP16(0x2, c, a);
+}
+template <> __device__ __forceinline__ void movdpp16<3>(float2 &c, float2 a) {
+  MOV64DPP16(0x3, c, a);
+}
+template <> __device__ __forceinline__ void movdpp16<4>(float2 &c, float2 a) {
+  MOV64DPP16(0x4, c, a);
+}
+template <> __device__ __forceinline__ void movdpp16<5>(float2 &c, float2 a) {
+  MOV64DPP16(0x5, c, a);
+}
+template <> __device__ __forceinline__ void movdpp16<6>(float2 &c, float2 a) {
+  MOV64DPP16(0x6, c, a);
+}
+template <> __device__ __forceinline__ void movdpp16<7>(float2 &c, float2 a) {
+  MOV64DPP16(0x7, c, a);
+}
+template <> __device__ __forceinline__ void movdpp16<8>(float2 &c, float2 a) {
+  MOV64DPP16(0x8, c, a);
+}
+template <> __device__ __forceinline__ void movdpp16<9>(float2 &c, float2 a) {
+  MOV64DPP16(0x9, c, a);
+}
+template <> __device__ __forceinline__ void movdpp16<10>(float2 &c, float2 a) {
+  MOV64DPP16(0xa, c, a);
+}
+template <> __device__ __forceinline__ void movdpp16<11>(float2 &c, float2 a) {
+  MOV64DPP16(0xb, c, a);
+}
+template <> __device__ __forceinline__ void movdpp16<12>(float2 &c, float2 a) {
+  MOV64DPP16(0xc, c, a);
+}
+template <> __device__ __forceinline__ void movdpp16<13>(float2 &c, float2 a) {
+  MOV64DPP16(0xd, c, a);
+}
+template <> __device__ __forceinline__ void movdpp16<14>(float2 &c, float2 a) {
+  MOV64DPP16(0xe, c, a);
+}
+template <> __device__ __forceinline__ void movdpp16<15>(float2 &c, float2 a) {
+  MOV64DPP16(0xf, c, a);
 }
 #else
 constexpr bool HasFmacDpp16 = false;

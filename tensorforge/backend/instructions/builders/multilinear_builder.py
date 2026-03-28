@@ -237,7 +237,7 @@ class MultilinearBuilder(AbstractBuilder):
     self._instructions.append(registerAlloc)
     return registers
 
-  def _get_target_symbol(self, prev=False):
+  def _get_target_symbol(self, prev=False, next=False):
     dest_symbol = self._scopes.get_symbol(self._dest_obj.tensor)
     if dest_symbol is None:
       return None
@@ -246,12 +246,12 @@ class MultilinearBuilder(AbstractBuilder):
       return dest_registers
     elif self._atomic_update and prev:
       return None
-    elif self._preload_registers and dest_symbol.stype == SymbolType.Global and not self._atomic_update:
+    elif self._preload_registers and dest_symbol.stype == SymbolType.Global and not self._atomic_update and not next:
       symbol, load_op = self._make_loader_and_symbol_reg(dest_symbol, False)
       self._deferred_stores[dest_symbol.name] = symbol.symbol, symbol.symbol, None
       self._instructions.append(load_op)
       return symbol.symbol
-    elif self._preload_shmem and dest_symbol.stype == SymbolType.Global and not self._atomic_update:
+    elif self._preload_shmem and dest_symbol.stype == SymbolType.Global and not self._atomic_update and not next:
       symbol, load_op = self._make_loader_and_symbol(dest_symbol, None)
       self._deferred_stores[dest_symbol.name] = symbol.symbol, symbol.symbol, None
       self._instructions.append(load_op)
@@ -266,7 +266,7 @@ class MultilinearBuilder(AbstractBuilder):
                                    dest=self._temp_regs,
                                    num_threads=self._num_threads,
                                    prev=self._get_target_symbol(True) if self._add else None,
-                                   next=self._get_target_symbol(True),
+                                   next=self._get_target_symbol(True, True),
                                    productOperation=MulOperator(),
                                    sumOperation=AddOperator()))
 
