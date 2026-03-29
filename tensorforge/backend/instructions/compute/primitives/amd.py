@@ -525,7 +525,7 @@ def fmadpp8(writer, C, A, B, row):
 def fmadpp4(writer, C, A, B, row):
     writer(f'tensorforge::fmacdpp4<{row}>({C}, {A}, {B});')
 
-def hfma(writer: Writer, C, A, B, repeat, datatype, threads, ctx):
+def hfma(writer: Writer, Cs, As, Bs, repeat, datatype, threads, ctx):
     step = 1
     if threads >= 4 and datatype == Datatype.F32:
         step = 4
@@ -543,20 +543,27 @@ def hfma(writer: Writer, C, A, B, repeat, datatype, threads, ctx):
         16: fmadpp16
     }[step]
 
-    for i in range(0, len(B) // repeat, step):
-        if step == threads:
-            a = A
-        else:
-            a = writer.varalloc()
-            writer(f'const auto {a} = tensorforge::broadcast<{threads}, {step}, {i // step}>({A});')
-        for j in range(min(len(B[i*repeat:]) // repeat, step)):
-            for jj in range(repeat):
-                # TODO: switch to broadcast at some point for repeat to large
-                idx = (j + i) * repeat
-                b = B[idx + jj]
-                c = C[idx + jj]
-                if b is not None:
-                    func(writer, c, a, b, j)
+    bcstmin = 3 # if amdarch(ctx) < 0x1000 and amdarch(ctx) >= 0x90a else 2
+    bcst = datatype == Datatype.F32 and repeat * 2 >= bcstmin and amdarch(ctx) >= 0x90a
+    bcststep = 2 if datatype == Datatype.F32 and amdarch(ctx) < 0x1000 and amdarch(ctx) >= 0x90a else 1
+
+    for b in range(0, len(Cs), bcststep):
+        A = As[b]
+        B = Bs[b]
+        C = Cs[b]
+        for i in range(0, len(B) // repeat, step):
+            if step == threads:
+                a = A
+            else:
+                a = writer.varalloc()
+                writer(f'const auto {a} = tensorforge::broadcast<{threads}, {step}, {i // step}>({A});')
+            for j in range(min(len(B[i*repeat:]) // repeat, step)):
+                for jj in range(repeat):
+                    idx = (j + i) * repeat
+                    b = B[idx + jj]
+                    c = C[idx + jj]
+                    if b is not None:
+                        func(writer, c, a, b, j)
 
 def wmma3atom(writer, A, B, C, threads):
 
@@ -640,22 +647,21 @@ def matmuldpp(writer, start, C, A, B, M, N, K, kx, threads, dtype, sparse, ctx):
             B(writer, vB, None, kj // M)
             vA = ax[kj: min(kj + stride, len(cx))]
             vC = cx[kj: min(kj + stride, len(cx))]
-            hfma(writer, vC, vB, vA, M, dtype, threads, ctx)
+            hfma(writer, [vC], [vB], [vA], M, dtype, threads, ctx)
     else:
         for j in range(start, N):
             for k in range(0, K + kx, threads):
                 vB = writer.varalloc()
                 B(writer, vB, j, k // threads)
-                kj = (K + kx) * (j-start) + k
-                stride = min(threads, K + kx - k)
+                kj = ((K + kx) * (j-start) + k) * M
+                stride = min(threads, K + kx - k) * M
                 vA = ax[kj: min(kj + stride, len(cx))]
                 vC = cx[kj: min(kj + stride, len(cx))]
-                hfma(writer, vC, vB, vA, M, dtype, threads, ctx)
+                hfma(writer, [vC], [vB], [vA], M, dtype, threads, ctx)
 
     for j in range(start, N):
         for i in range(M):
             C(writer, cb[(j-start)*M+i], i, j)
-
 
 def matmul(writer, C, A, B, M, N, K, kx, threads, dtype, sparse, ctx):
     if amdarch(ctx) >= 0x908 and amdarch(ctx) < 0x1000 and not sparse and dtype == Datatype.F32:

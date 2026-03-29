@@ -1,4 +1,5 @@
 from . import CudaLexic
+from tensorforge.common.basic_types import Datatype
 
 
 class HipLexic(CudaLexic):
@@ -82,3 +83,14 @@ class HipLexic(CudaLexic):
       return f'{lhs} = __builtin_nontemporal_load(&{rhs});'
     else:
       return f'{lhs} = {rhs};'
+
+  def atomic_store(self, access, variable, op, datatype):
+    # those sometimes are faster
+    if datatype == Datatype.F32:
+      return f'__builtin_amdgcn_global_atomic_fadd_f32(&{access}, {variable});'
+    if datatype == Datatype.F64:
+      return f'__builtin_amdgcn_global_atomic_fadd_f64(&{access}, {variable});'
+    return f'atomicAdd(&{access}, {variable});'
+
+  def has_atomic_store(self, op, datatype):
+    return True

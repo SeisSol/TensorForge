@@ -246,3 +246,6 @@ class CudaLexic(Lexic):
       return f'{lhs} = __ldcg(&{rhs});'
     else:
       return f'{lhs} = {rhs};'
+
+  def atomic_store(self, access, variable, datatype):
+    return f'atomicAdd(&{access}, {variable});'

@@ -552,8 +552,7 @@ class Symbol:
     else:
       if self.stype == SymbolType.Global:
         if atomic:
-          # TODO: __builtin_amdgcn_global_atomic_fadd_f32
-          assign = f'atomicAdd(({self.get_fptype()}*)&{access}, {variable});'
+          assign = context.get_vm().get_lexic().atomic_store(access, variable, None, self.get_fptype())
         else:
           assign = context.get_vm().get_lexic().glb_store(access, variable, nontemp)
       else:
