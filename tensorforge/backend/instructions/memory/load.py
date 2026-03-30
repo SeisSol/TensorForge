@@ -331,9 +331,8 @@ class GlbToRegLoader(MemoryInstruction, LoadInstruction):
     src_bbox = self._src.data_view.get_bbox()
 
     if self._linearize:
-      total_size = 1
-      for dim in src_bbox.sizes():
-        total_size *= dim
+      # TODO: box better?
+      total_size = self._src.obj.spp.count_nz()
 
       start = 0
       for g in [1]: #[4, 2, 1]:

@@ -640,7 +640,7 @@ def matmuldpp(writer, start, C, A, B, M, N, K, kx, threads, dtype, sparse, ctx):
                     cx += [None]
                     ax += [None]
 
-    if sparse:
+    if sparse is not None:
         stride = threads*M
         for kj in range(0, len(cx), stride):
             vB = writer.varalloc()

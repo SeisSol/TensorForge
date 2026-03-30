@@ -49,13 +49,19 @@ class ShrMemObject:
     return f'name {self.name}: total size = {total_size}'
 
 class RegMemObject:
-  def __init__(self, name, size=None, datatype=None):
+  def __init__(self, name, size=None, datatype=None, spp=None):
     self.name = name
     self.size = size
     self.datatype = datatype
+    self.spp = spp
 
   def __str__(self):
     return f'name: {self.name}; size = {self.size}'
 
   def is_dense(self):
-    return True
+    return self.spp is None
+
+  def linear_index(self, index):
+    # TODO: remove?
+    realindex = tuple(index)
+    return self.spp.linear_index(realindex)

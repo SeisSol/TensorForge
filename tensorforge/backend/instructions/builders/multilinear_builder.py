@@ -173,7 +173,7 @@ class MultilinearBuilder(AbstractBuilder):
         regsize *= (dim + threads - 1) // threads
         threads //= dim
     name = self._name_registers()
-    regmem = RegMemObject(name, regsize)
+    regmem = RegMemObject(name, regsize, spp=None if operand.obj.is_dense() else operand.obj.spp)
     registers = Symbol(name=name, stype=SymbolType.Register, obj=regmem)
     registers.num_threads = self._num_threads
     registers.datatype = self._context.fp_type
