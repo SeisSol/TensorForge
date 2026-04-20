@@ -450,6 +450,7 @@ class Symbol:
         strindex = f'{index[pos]}' if isinstance(index[pos], (str, int, float, np.int64)) else index[pos].write(context)
         if True: # sparse/data
           # TODO: check sparsity pattern here for which ifs are worth it
+          offset = self.data_view.get_dim_offsets()[pos]
           for i in range(self.data_view.get_dim_size(pos)):
             runIdx[pos] = i
             with writer.If(f'({strindex} - {offset}) == {runIdx[pos]}'):

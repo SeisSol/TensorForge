@@ -17,3 +17,6 @@ def load(writer, C):
 def matmul(writer, C, A, B, M, N, K, kx, threads, dtype, sparse, ctx):
     rc = 8
     sd = 8
+
+    dtstr = dtype.ctype()
+    writer(f'tensorforge::intel_esimd::simd<{dtstr}, 32> {C};')

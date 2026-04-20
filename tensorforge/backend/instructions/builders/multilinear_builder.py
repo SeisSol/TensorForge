@@ -245,6 +245,7 @@ class MultilinearBuilder(AbstractBuilder):
       dest_registers,_,_ = self._deferred_stores[dest_symbol.name]
       return dest_registers
     elif self._atomic_update and prev:
+      # should be found in the previous step already
       return None
     elif self._preload_registers and dest_symbol.stype == SymbolType.Global and not self._atomic_update and not next:
       symbol, load_op = self._make_loader_and_symbol_reg(dest_symbol, False)

@@ -33,15 +33,15 @@ class OptimizationStage:
     opt.apply()
     self._instrs = opt.get_instructions()
 
-    opt = MultiBuffer(self._context, self._instrs, self._shr_mem, self._scopes)
-    opt.apply()
-    self._instrs = opt.get_instructions()
-    self._global_instrs = opt._global_instrs
+    # opt = MultiBuffer(self._context, self._instrs, self._shr_mem, self._scopes)
+    # opt.apply()
+    # self._instrs = opt.get_instructions()
+    # self._global_instrs = opt._global_instrs
 
-    opt = PtrPipe(self._context, self._instrs)
-    opt.apply()
-    self._instrs = opt.get_instructions()
-    self._global_instrs += opt._global_instrs
+    # opt = PtrPipe(self._context, self._instrs)
+    # opt.apply()
+    # self._instrs = opt.get_instructions()
+    # self._global_instrs += opt._global_instrs
 
     opt = LivenessAnalysis(self._context, self._global_instrs + self._instrs)
     opt.apply()

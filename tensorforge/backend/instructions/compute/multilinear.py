@@ -14,6 +14,7 @@ from tensorforge.common.matrix.tensor import Tensor
 
 from .primitives import nvidia as nvidia
 from .primitives import amd as amd
+from .primitives import intel as intel
 
 import numpy as np
 
@@ -86,11 +87,12 @@ class MultilinearInstruction(ComputeInstruction):
             opdim = [''] * op.bbox.rank()
             for j in range(op.bbox.rank()):
                 # TODO: check adding the data_view box here again
-                lower = op.bbox.lower()[j] + op.symbol.data_view._bbox.lower()[j]
-                upper = op.bbox.upper()[j] + op.symbol.data_view._bbox.lower()[j]
-                if op.symbol.obj and isinstance(op.symbol.obj, Tensor):
-                    lower -= op.symbol.obj.get_bbox().lower()[j]
-                    upper -= op.symbol.obj.get_bbox().lower()[j]
+                lower = op.bbox.lower()[j] #+ op.symbol.data_view._bbox.lower()[j]
+                upper = op.bbox.upper()[j] #+ op.symbol.data_view._bbox.lower()[j]
+                #if op.symbol.obj and isinstance(op.symbol.obj, Tensor):
+                #    lower -= op.symbol.obj.get_bbox().lower()[j]
+                #    upper -= op.symbol.obj.get_bbox().lower()[j]
+
                 #if self._target[i][j] != 0:
                 #    lower -= op.offset[j]
                 #    upper -= op.offset[j]
@@ -149,7 +151,9 @@ class MultilinearInstruction(ComputeInstruction):
         pass
 
     def gen_code_inner(self, writer: Writer):
-        if len(self._scalar) == 0 and self._prev is None:
+        writer(f'// {self._ns} {self._ks}')
+
+        if len(self._scalar) == 0 and self._prev is None and self._next is None:
             writer(f'auto& {self._idest.name} = {self._dest.name};')
         else:
             writer(f'{self._dest.get_fptype()} {self._idest.name}[{self._iregs}]{"{}"};')
@@ -339,6 +343,8 @@ class MultilinearInstruction(ComputeInstruction):
                 amd.matmul(writer, C, A, B, M, N, K, kx, self._num_threads, self._idest.datatype, sparse, self._context)
             elif self._context.get_vm().get_hw_descr().vendor == 'nvidia':
                 return nvidia.matmul(writer, C, A, B, Mx, N, K, kx, self._num_threads, self._idest.datatype, sparse, self._context, 'tempShrMem', self.temp_shmem())
+            elif self._context.get_vm().get_hw_descr().vendor == 'intel':
+                return intel.matmul(writer, C, A, B, Mx, N, K, kx, self._num_threads, self._idest.datatype, sparse, self._context)
             return True
         return False
 
@@ -459,7 +465,7 @@ class MultilinearInstruction(ComputeInstruction):
         write_loops(self._context, writer, loopstack, nonlead_writer)
 
     def _apply_linear(self, writer: Writer):
-        if len(self._scalar) == 0 and self._prev is None:
+        if len(self._scalar) == 0 and self._prev is None and self._next is None:
             # no linear needed
             return
 
