@@ -19,6 +19,8 @@ from tensorforge.backend.instructions.sync_block import SyncThreads, SyncBlock, 
 from tensorforge.backend.writer import Writer
 from tensorforge.common.exceptions import GenerationError
 
+import tensorforge.interop as interop
+
 class AbstractThreadBlockPolicy:
   def __init__(self, context: Context, global_mem: int, mem_per_mult: int, num_threads: int):
     self._context: Context = context
@@ -485,6 +487,7 @@ class Generator:
     return self._base_kernel_name
 
   def _write_kernel_meta_data(self, writer):
+    writer(f'// generated with TensorForge. Version: {interop.get_version()}')
     writer('// meta data:')
     glb_matrices = self._scopes.get_global_scope().values()
     for matrix in glb_matrices:
@@ -625,7 +628,7 @@ class Generator:
     return f'{GeneralLexicon.BATCH_ID_NAME}0 < {GeneralLexicon.NUM_ELEMENTS}{i}'
 
   def _get_flag_guard(self, writer, i):
-    if False:
+    if True:
       writer(f'bool allowed = true;')
       with writer.If(f'{GeneralLexicon.FLAGS_NAME}{i} != nullptr'):
         writer(f'allowed = static_cast<bool>({GeneralLexicon.FLAGS_NAME}{i}[{GeneralLexicon.BATCH_ID_NAME}0]);')
