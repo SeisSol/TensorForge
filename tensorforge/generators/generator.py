@@ -478,8 +478,11 @@ class Generator:
     params = self._generate_base_params_list(symbol_list=global_symbols, with_types=True)
     long_name.extend(params)
 
+    descrs = '\n'.join(f'{descr}' for descr in self.descr_list)
+
     sha = hashlib.new('md5', usedforsecurity=False)
     sha.update(', '.join(long_name).encode())
+    sha.update(descrs.encode())
     md5encoding = sha.hexdigest()
     self._base_kernel_name = f'kernel_{md5encoding[:Generator.NAME_ENCODING_LENGTH]}'
 

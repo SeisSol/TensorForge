@@ -63,7 +63,7 @@ class MultilinearDescr(OperationDescription):
 
   def __str__(self):
     desttarget = [i for i in range(self.dest.bbox.rank())]
-    return f'{self.dest}{desttarget} = {"×".join(f"{op}{optarget}" for op, optarget in zip(self.ops, self.target))}'
+    return f'{self.dest}{desttarget} {"+" if self.add else ""}= {"×".join(f"{op}{optarget}" for op, optarget in zip(self.ops, self.target))}'
 
 class ElementwiseDescr(OperationDescription):
   def __init__(self, oplist: List[Assignment],
