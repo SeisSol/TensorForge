@@ -218,14 +218,17 @@ class LeadLoop:
       if startIdx > 0:
         with writer.If(f'{leadExpr} >= {startIdx} && {leadExpr} < {self.end - realend * self.threads}'):
           inner([index])
+        writer(f'{context.get_vm().get_lexic().sync_simd()};')
       else:
         with writer.If(f'{leadExpr} < {self.end - realend * self.threads}'):
           inner([index])
+        writer(f'{context.get_vm().get_lexic().sync_simd()};')
     else:
       if self.start % self.threads != 0:
         index = LeadIndex(actualstart, self.threads, self.stride)
         with writer.If(f'{leadExpr} >= {self.start - actualstart}'):
           inner([index])
+        writer(f'{context.get_vm().get_lexic().sync_simd()};')
       if self.unroll:
         for value in range(realstart, realend):
           index = LeadIndex(value, self.threads, self.stride)
@@ -240,6 +243,7 @@ class LeadLoop:
         index = LeadIndex(actualend - 1, self.threads, self.stride)
         with writer.If(f'{leadExpr} < {self.end - realend * self.threads}'):
           inner([index])
+        writer(f'{context.get_vm().get_lexic().sync_simd()};')
 
 class Loop:
   def __init__(self, name, start, end, step=1, unroll=False):
