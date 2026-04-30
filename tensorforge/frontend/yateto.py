@@ -333,6 +333,8 @@ class GpuKernelGeneratorV1:
       # incorrect:
       # pattern = tensor.eqspp.as_ndarray()
 
+    alignment = 16 if tensor.memoryLayout.alignedStride() else 0
+
     return yi.gen_matrix(shape,
                                bboxrange,
                                addressing=addr_mode,
@@ -341,7 +343,8 @@ class GpuKernelGeneratorV1:
                                permute=None,
                                pattern=pattern,
                                values = tensor.values,
-                               datatype = self._datatype(tensor.datatype))
+                               datatype = self._datatype(tensor.datatype),
+                               alignment = alignment)
 
   def _gen_call_site(self, generator):
     mat_name_map = {}

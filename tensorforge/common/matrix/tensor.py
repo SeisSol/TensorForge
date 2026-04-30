@@ -14,7 +14,8 @@ class Tensor:
         is_tmp: bool = False,
         spp: SparsityPattern = None,
         data: Union[List[float], None] = None,
-        datatype: Datatype = None):
+        datatype: Datatype = None,
+        alignment: int = 0):
         self.name = None
         self.alias = alias
         self.shape = tuple(shape)
@@ -23,6 +24,7 @@ class Tensor:
         self.data = data
         self.spp = spp
         self.datatype = datatype
+        self.alignment = alignment
 
         if self.spp is None:
             self.spp = FullSPP(self.shape)

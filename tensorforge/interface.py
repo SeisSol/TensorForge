@@ -33,7 +33,8 @@ class YatetoInterface:
                        permute,
                        pattern=None,
                        values=None,
-                       datatype=None):
+                       datatype=None,
+                       alignment=0):
 
     spp = None
     if pattern is not None:
@@ -53,6 +54,7 @@ class YatetoInterface:
                     is_tmp=is_tmp,
                     spp=spp,
                     data=data,
-                    datatype=datatype)
+                    datatype=datatype,
+                    alignment=alignment)
     return tensor
     return SubTensor(tensor, chainforge_bbox)

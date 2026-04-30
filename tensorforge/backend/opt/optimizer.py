@@ -51,9 +51,10 @@ class OptimizationStage:
     opt.apply()
     regions: List[Region] = opt.get_regions()
 
+    alignment = 16 // self._context.fp_type.size()
     overhead = self._num_threads % self._context.get_vm().get_hw_descr().shmem_banks
-    overhead //= 4
-    overhead *= 4
+    overhead //= alignment
+    overhead *= alignment
 
     tmp_overhead = 0
     for instr in self._instrs:

@@ -56,6 +56,7 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
     self._is_ready: bool = False
 
     self._use_cuda_memcpy = self._context.get_vm().get_hw_descr().vendor == 'nvidia' and not self._no_memcpy
+    self._use_tma_memcpy = False
 
     if self._permute is None:
       self._permute = [i for i in range(len(self._src.obj.shape))]
@@ -184,24 +185,32 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
       if self._use_cuda_memcpy:
         writer(f'__syncwarp();')
         writer(f'{self._pipeline}.producer_commit();')
+      if self._use_tma_memcpy:
+        writer(f'__syncwarp();')
+        writer(f'cuda::device::barrier_arrive_tx(mbarrier, 1, {self._loadsize});')
 
   def _write_datatransfer(self, writer, src_offset, dst_offset, index, length, nontemporal, linscale=None):
     pos = 0
 
-    if self._use_cuda_memcpy:
+    if self._use_cuda_memcpy and self._src.obj.alignment < 16:
       granularities = [1]
     else:
       granularities = [m for m in [4, 2, 1] if m * self._dest.get_fptype().size() <= 16]
 
-    for vecsize in granularities:
-      if src_offset % vecsize == 0:
-        num_hops = ((length - pos * self._num_threads) // (self._num_threads * vecsize)) * vecsize
-        self._write_hop(writer, src_offset, dst_offset, index, pos, pos + num_hops, vecsize, nontemporal, linscale)
-        pos += num_hops
-    rest = length % self._num_threads
-    if rest > 0:
-      with writer.If(f'{self._linear_idx()} < {rest}'):
-        self._write_hop(writer, src_offset, dst_offset, index, pos, pos+1, 1, nontemporal, linscale)
+    if self._use_tma_memcpy:
+      dest_access_index = self._dest.access_address(self._context, index)
+      src_access_index = self._src.access_address(self._context, index)
+      writer(f'cuda::device::memcpy_async_tx(&{self._dest.name}[{dest_access_index}], &{self._src.name}[{src_access_index}], cuda::aligned_size_t<16>({length}), mbarrier);')
+    else:
+      for vecsize in granularities:
+        if src_offset % vecsize == 0:
+          num_hops = ((length - pos * self._num_threads) // (self._num_threads * vecsize)) * vecsize
+          self._write_hop(writer, src_offset, dst_offset, index, pos, pos + num_hops, vecsize, nontemporal, linscale)
+          pos += num_hops
+      rest = length % self._num_threads
+      if rest > 0:
+        with writer.If(f'{self._linear_idx()} < {rest}'):
+          self._write_hop(writer, src_offset, dst_offset, index, pos, pos+1, 1, nontemporal, linscale)
 
   def _write_hop(self, writer, src_offset, dst_offset, index, start, end, increment, nontemporal, linscale):
     if end > start:
