@@ -111,7 +111,7 @@ class MultilinearBuilder(AbstractBuilder):
       # sparse = self._ops[i].symbol.obj.sparsity() < 0.65
 
       if self._ops[i].symbol.stype == SymbolType.Global:
-        if needs_reload:
+        if needs_reload and self._ops[i].symbol.obj.addressing != Addressing.NONE:
           self._mem_regions[i], load_op = self._make_loader_and_symbol(self._ops[i].symbol, is_transpose=self._descr.permute[i])
           self._loaders_cache[self._mem_regions[i]] = load_op
           self._instructions.append(load_op)
@@ -269,7 +269,8 @@ class MultilinearBuilder(AbstractBuilder):
                                    prev=self._get_target_symbol(True) if self._add else None,
                                    next=self._get_target_symbol(True, True),
                                    productOperation=MulOperator(),
-                                   sumOperation=AddOperator()))
+                                   sumOperation=AddOperator(),
+                                   dest_obj=self._dest_obj))
 
   def _make_store(self):
     if self._dest_obj.tensor in self._scopes:

@@ -30,6 +30,7 @@ class MultilinearInstruction(ComputeInstruction):
                next: Union[None, Symbol],
                productOperation: ReductionOperator,
                sumOperation: ReductionOperator,
+               dest_obj,
                num_threads: int,
                blockcount: int=1):
         super(MultilinearInstruction, self).__init__(context)
@@ -45,6 +46,7 @@ class MultilinearInstruction(ComputeInstruction):
         self._blockcount = blockcount
         self._prev = prev
         self._next = next
+        self._dest_obj = dest_obj
 
         assert num_threads % blockcount == 0
 
@@ -110,6 +112,9 @@ class MultilinearInstruction(ComputeInstruction):
 
             self._opdim_to_nks += [opdim]
 
+        for i in range(len(self._ns)):
+            self._ns[i] = (self._ns[i][0], self._ns[i][0] + min(self._ns[i][1] - self._ns[i][0], self._dest_obj.bbox.sizes()[i]))
+
         self._ks = [0] * len(preKs)
         self._sparseK = [False] * len(preKs)
         for i in range(len(preKs)):
@@ -153,7 +158,7 @@ class MultilinearInstruction(ComputeInstruction):
     def gen_code_inner(self, writer: Writer):
         writer(f'// {self._ns} {self._ks}')
 
-        if len(self._scalar) == 0 and self._prev is None and self._next is None:
+        if len(self._scalar) == 0 and self._prev is None and self._next is None and self._idest.data_view == self._dest.data_view:
             writer(f'auto& {self._idest.name} = {self._dest.name};')
         else:
             writer(f'{self._dest.get_fptype()} {self._idest.name}[{self._iregs}]{"{}"};')
@@ -465,7 +470,7 @@ class MultilinearInstruction(ComputeInstruction):
         write_loops(self._context, writer, loopstack, nonlead_writer)
 
     def _apply_linear(self, writer: Writer):
-        if len(self._scalar) == 0 and self._prev is None and self._next is None:
+        if len(self._scalar) == 0 and self._prev is None and self._next is None and self._idest.data_view == self._dest.data_view:
             # no linear needed
             return
 
