@@ -457,6 +457,13 @@ class Generator:
           stype = SymbolType.Scalar
         else:
           stype = SymbolType.Batch
+        # If the tensor was constructed without an explicit datatype,
+        # inherit the context's. This makes Symbol.get_fptype()'s
+        # resolution path well-defined for the common case where a
+        # user-facing description (csa.py, four_matrices.py, …) only
+        # specifies dtype on the Context.
+        if getattr(matrix, 'datatype', None) is None:
+          matrix.datatype = self._context.fp_type
         symbol = Symbol(obj=matrix,
                       name=matrix.name,
                       stype=stype)

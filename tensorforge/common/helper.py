@@ -14,11 +14,21 @@ def generate_tmp_tensor(ops: List[SubTensor], target: List[List[int]], alias=Non
     for j, jtarget in enumerate(itarget):
       if jtarget >= 0:
         shape[jtarget] = ops[i].bbox.sizes()[j]
+  # Inherit datatype from the first operand that carries one. Without
+  # this, a tmp tensor goes through the symbol table without a dtype
+  # and triggers Symbol.get_fptype's GenerationError.
+  inferred_dtype = None
+  for op in ops:
+    underlying = op.tensor if hasattr(op, 'tensor') else op
+    if getattr(underlying, 'datatype', None) is not None:
+      inferred_dtype = underlying.datatype
+      break
   res = Tensor(shape=shape,
                     addressing=Addressing.PTR_BASED,
                     bbox=None,
                     is_tmp=True,
-                    alias=alias)
+                    alias=alias,
+                    datatype=inferred_dtype)
   return res
 
 def generate_tmp_matrix(op1: Tensor, op2: Tensor, trans_a: bool = False, trans_b: bool = False):

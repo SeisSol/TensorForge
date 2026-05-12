@@ -5,6 +5,7 @@ from tensorforge.common.matrix.boundingbox import BoundingBox
 from functools import reduce
 from tensorforge.common.context import Context
 from tensorforge.common.basic_types import Datatype, Addressing
+from tensorforge.common.exceptions import GenerationError
 from .writer import Writer
 
 from tensorforge.common.matrix.spp import BoundingBoxSPP
@@ -332,13 +333,32 @@ class Symbol:
     return cloned
 
   def get_fptype(self):
-    # TODO: make obsolete
+    """Resolve this symbol's floating-point type.
+
+    .. deprecated::
+        Callers should pass an explicit :class:`Datatype` through their
+        own context rather than reaching into the symbol. This wrapper
+        will be removed once the backend's instruction templates have
+        been threaded with explicit dtype arguments.
+
+    Resolution order is ``self.datatype`` first, then the underlying
+    tensor object's ``datatype``. A missing datatype now raises a
+    descriptive error instead of an opaque ``assert False`` — that
+    case almost always means a synthetic operand (e.g. the scalar
+    constructed inside ``GemmDescr.__init__`` for ``alpha != 1``) was
+    built without a ``datatype=`` keyword.
+    """
     if self.datatype is not None:
       return self.datatype
-    elif self.obj is not None and self.obj.datatype is not None:
+    if self.obj is not None and getattr(self.obj, 'datatype', None) is not None:
       return self.obj.datatype
-    else:
-      assert False
+    obj_descr = repr(self.obj) if self.obj is not None else 'None'
+    raise GenerationError(
+        f"Symbol {self.name!r} has no datatype set. "
+        f"Underlying object: {obj_descr}. "
+        f"Either pass datatype= when constructing the Tensor or set "
+        f"Symbol.datatype explicitly before code generation."
+    )
 
   def address(self):
     if self.stype == SymbolType.Scalar:
@@ -463,7 +483,7 @@ class Symbol:
 
   def load_linear(self, writer, context: Context, variable, index, vec = 1):
     if context.get_vm().get_lexic().simd_mode:
-      writer(f'{context.get_vm().get_lexic().simd(self.get_fptype(), self.num_threads)} {variable}({index});')
+      writer(f'{context.get_vm().get_lexic().get_simd(self.get_fptype(), self.num_threads)} {variable}({index});')
     else:
       if self.stype == SymbolType.Register:
         access = f'{self.name}[{index // self.num_threads}]'
@@ -479,7 +499,7 @@ class Symbol:
     if context.get_vm().get_lexic().simd_mode:
       pass
       # TODO:
-      # writer(f'{context.get_vm().get_lexic().simd(self.get_fptype(), self.num_threads)} {variable}({index});')
+      # writer(f'{context.get_vm().get_lexic().get_simd(self.get_fptype(), self.num_threads)} {variable}({index});')
     else:
       if self.stype == SymbolType.Register:
         access = f'{self.name}[{index // self.num_threads}]'
@@ -536,7 +556,7 @@ class Symbol:
       else:
         access = pre_access
       if context.get_vm().get_lexic().simd_mode:
-        writer(f'{context.get_vm().get_lexic().simd(self.get_fptype(), 16)} {variable}({access});')
+        writer(f'{context.get_vm().get_lexic().get_simd(self.get_fptype(), 16)} {variable}({access});')
       elif self.stype == SymbolType.Global:
         writer(f'{self.get_fptype()} {variable};')
         writer(context.get_vm().get_lexic().glb_load(variable, access, nontemp))
