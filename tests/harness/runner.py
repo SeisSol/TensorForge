@@ -94,8 +94,13 @@ def run_case(case, target: Target, cache_root: Path,
 
     # Build or fetch cached executable.
     driver_src = driver_emit.emit(gen, target.backend, default_batch=batch)
+
+    includes_src = "\n".join(f'#include "{header}"' for header in ctx.get_vm().get_headers())
+    includes_src += "\n".join(f'#include "{header}"' for header in gen.get_helper_headers())
+
     bi = BuildInputs(
         workdir=cache_root,
+        includes_src=includes_src,
         kernel_src=gen.get_kernel(),
         header_src=gen.get_header(),
         launcher_src=gen.get_launcher(),
@@ -196,7 +201,7 @@ def run_case(case, target: Target, cache_root: Path,
             detail_dir.mkdir(parents=True, exist_ok=True)
             np.save(detail_dir / "expected.npy", np.asarray(expected))
             np.save(detail_dir / "got.npy", np.asarray(got_view))
-            (detail_dir / "kernel.cu").write_text(gen.get_kernel())
+            (detail_dir / "kernel.cpp").write_text(gen.get_kernel())
             return RunResult(False, max_abs, max_rel, f"mismatch; see {detail_dir}")
 
         return RunResult(True, max_abs, max_rel, "")

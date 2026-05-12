@@ -154,6 +154,7 @@ def discover_targets(gpus: List[DetectedGPU], scratch: Path,
 class BuildInputs:
     """Everything the emit stage produced, plus metadata needed to build."""
     workdir: Path
+    includes_src: str           # from gen.get_helper_headers()
     kernel_src: str             # from gen.get_kernel()
     header_src: str             # from gen.get_header()
     launcher_src: str           # from gen.get_launcher()
@@ -165,7 +166,7 @@ class BuildInputs:
 def _cache_hash(b: BuildInputs) -> str:
     h = hashlib.sha256()
     h.update(b.target.id.encode())
-    for part in (b.kernel_src, b.header_src, b.launcher_src, b.driver_src):
+    for part in (b.includes_src, b.kernel_src, b.header_src, b.launcher_src, b.driver_src):
         h.update(part.encode())
     return h.hexdigest()[:16]
 
@@ -194,12 +195,12 @@ def build(b: BuildInputs, cache_root: Path) -> Path:
 
     if b.target.backend == "cuda":
         kernel_file = out_dir / "kernels.cu"
-        kernel_file.write_text(b.kernel_src + "\n" + b.launcher_src)
+        kernel_file.write_text(b.includes_src + "\n" + b.kernel_src + "\n" + b.launcher_src)
         driver_file = out_dir / "main.cu"
         _compile_cuda(b, kernel_file, driver_file, exe)
     elif b.target.backend == "hip":
         kernel_file = out_dir / "kernels.cpp"
-        kernel_file.write_text(b.kernel_src + "\n" + b.launcher_src)
+        kernel_file.write_text(b.includes_src + "\n" + b.kernel_src + "\n" + b.launcher_src)
         driver_file = out_dir / "main.cpp"
         _compile_hip(b, kernel_file, driver_file, exe)
     elif b.target.backend in ("oneapi", "acpp"):
@@ -208,7 +209,7 @@ def build(b: BuildInputs, cache_root: Path) -> Path:
         # source itself is plain SYCL C++. Both go in one TU.
         kernel_file.write_text(
             "#include <sycl/sycl.hpp>\n#include \"kernels.h\"\n"
-            + b.kernel_src + "\n" + b.launcher_src
+            + b.includes_src + "\n" + b.kernel_src + "\n" + b.launcher_src
         )
         driver_file = out_dir / "main.cpp"
         _compile_sycl(b, kernel_file, driver_file, exe)
