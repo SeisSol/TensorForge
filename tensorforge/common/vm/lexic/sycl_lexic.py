@@ -48,7 +48,7 @@ class SyclLexic(Lexic):
 
     if self._underlying_hardware == 'intel' and self._backend == 'oneapi':
       if self.simd_mode:
-        add_items = '[[intel::sycl_explicit_simd]] [[intel::kernel_args_restrict]]'
+        add_items = '[[intel::sycl_explicit_simd]] [[intel::grf_size(256)]] [[intel::kernel_args_restrict]]'
       else:
         add_items = '[[intel::reqd_sub_group_size(16)]] [[intel::kernel_args_restrict]]'
     else:
