@@ -1,3 +1,0 @@
-#ifndef YATETO_SUBROUTINE_H_
-#define YATETO_SUBROUTINE_H_
-#endif
