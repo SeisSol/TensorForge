@@ -355,17 +355,22 @@ def reduction(writer: Writer, source, target, operation, blocks):
             writer(f'{value} = {operation.format("newvalue", {value})}')
             var = tempvar
 
-def cdna1(ctx):
-    arch = ctx.get_vm().get_hw_descr().model
-    return arch in ('gfx908', 'gfx90a', 'gfx942', 'gfx950')
-
-def cdna2(ctx):
-    arch = ctx.get_vm().get_hw_descr().model
-    return arch in ('gfx90a', 'gfx942', 'gfx950')
-
 def amdarch(ctx):
     archstr = ctx.get_vm().get_hw_descr().model
     return int(archstr[3:], base=16)
+
+def cdna2(ctx):
+    return amdarch(ctx) < 0x1000 and amdarch(ctx) >= 0x90a
+
+def cdna1(ctx):
+    return cdna2(ctx) or amdarch(ctx) == 0x908
+
+def vega7nm(ctx):
+    return cdna1(ctx) or amdarch(ctx) == 0x906
+
+def rdna(ctx):
+    # TODO: gfx1250 ?
+    return amdarch(ctx) >= 0x1000 and amdarch(ctx) < 0x1250
 
 def mfma_emu_int8(writer: Writer, C, B, A, c, a, b):
     # cf. the Ozaki II paper
@@ -529,11 +534,11 @@ def hfma(writer: Writer, Cs, As, Bs, repeat, datatype, threads, ctx):
     step = 1
     if threads >= 4 and datatype == Datatype.F32:
         step = 4
-    if threads >= 8 and datatype == Datatype.F32 and amdarch(ctx) >= 0x1000: # RDNA
+    if threads >= 8 and datatype == Datatype.F32 and rdna(ctx): # RDNA
         step = 8
-    if threads >= 16 and datatype == Datatype.F32 and amdarch(ctx) >= 0x1000: # RDNA
+    if threads >= 16 and datatype == Datatype.F32 and rdna(ctx): # RDNA
         step = 16
-    if threads >= 16 and amdarch(ctx) < 0x1000 and amdarch(ctx) >= 0x90a: # CDNA 2+
+    if threads >= 16 and cdna2(ctx): # CDNA 2+
         step = 16
 
     func = {
@@ -543,27 +548,33 @@ def hfma(writer: Writer, Cs, As, Bs, repeat, datatype, threads, ctx):
         16: fmadpp16
     }[step]
 
-    bcstmin = 3 # if amdarch(ctx) < 0x1000 and amdarch(ctx) >= 0x90a else 2
-    bcst = datatype == Datatype.F32 and repeat * 2 >= bcstmin and amdarch(ctx) >= 0x90a
-    bcststep = 2 if datatype == Datatype.F32 and amdarch(ctx) < 0x1000 and amdarch(ctx) >= 0x90a else 1
+    bcstmin = 3 # if cdna2(ctx) else 2
+    bcst = datatype == Datatype.F32 and repeat * 2 >= bcstmin and (cdna2(ctx) or rdna(ctx))
+    bcststep = 2 if datatype == Datatype.F32 and cdna2(ctx) and False else 1
+
+    assert bcststep == 1
 
     for b in range(0, len(Cs), bcststep):
-        A = As[b]
-        B = Bs[b]
-        C = Cs[b]
-        for i in range(0, len(B) // repeat, step):
+        A = [As[bb] for bb in range(b, min(b + bcststep, len(Cs)))]
+        B = [Bs[bb] for bb in range(b, min(b + bcststep, len(Cs)))]
+        C = [Cs[bb] for bb in range(b, min(b + bcststep, len(Cs)))]
+
+        for i in range(0, len(B[0]) // repeat, step):
             if step == threads:
                 a = A
             else:
-                a = writer.varalloc()
-                writer(f'const auto {a} = tensorforge::broadcast<{threads}, {step}, {i // step}>({A});')
-            for j in range(min(len(B[i*repeat:]) // repeat, step)):
+                a = []
+                for aa in A:
+                    a += [writer.varalloc()]
+                    writer(f'const auto {a[-1]} = tensorforge::broadcast<{threads}, {step}, {i // step}>({aa});')
+
+            for j in range(min(len(B[0][i*repeat:]) // repeat, step)):
                 for jj in range(repeat):
                     idx = (j + i) * repeat
-                    b = B[idx + jj]
-                    c = C[idx + jj]
+                    b = B[0][idx + jj]
+                    c = C[0][idx + jj]
                     if b is not None:
-                        func(writer, c, a, b, j)
+                        func(writer, c, a[0], b, j)
 
 def wmma3atom(writer, A, B, C, threads):
 
@@ -649,22 +660,25 @@ def matmuldpp(writer, start, C, A, B, M, N, K, kx, threads, dtype, sparse, ctx):
             vC = cx[kj: min(kj + stride, len(cx))]
             hfma(writer, [vC], [vB], [vA], M, dtype, threads, ctx)
     else:
+        vA = []
+        vB = []
+        vC = []
         for j in range(start, N):
             for k in range(0, K + kx, threads):
-                vB = writer.varalloc()
-                B(writer, vB, j, k // threads)
+                vB += [writer.varalloc()]
+                B(writer, vB[-1], j, k // threads)
                 kj = ((K + kx) * (j-start) + k) * M
                 stride = min(threads, K + kx - k) * M
-                vA = ax[kj: min(kj + stride, len(cx))]
-                vC = cx[kj: min(kj + stride, len(cx))]
-                hfma(writer, [vC], [vB], [vA], M, dtype, threads, ctx)
+                vA += [ax[kj: min(kj + stride, len(cx))]]
+                vC += [cx[kj: min(kj + stride, len(cx))]]
+        hfma(writer, vC, vB, vA, M, dtype, threads, ctx)
 
     for j in range(start, N):
         for i in range(M):
             C(writer, cb[(j-start)*M+i], i, j)
 
 def matmul(writer, C, A, B, M, N, K, kx, threads, dtype, sparse, ctx):
-    if amdarch(ctx) >= 0x908 and amdarch(ctx) < 0x1000 and not sparse and dtype == Datatype.F32:
+    if cdna1(ctx) and not sparse and dtype == Datatype.F32:
         matmul32(writer, C, A, B, M, N, K, kx, threads, dtype, sparse, ctx)
     else:
         matmuldpp(writer, 0, C, A, B, M, N, K, kx, threads, dtype, sparse, ctx)
