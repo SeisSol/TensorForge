@@ -534,11 +534,11 @@ def hfma(writer: Writer, Cs, As, Bs, repeat, datatype, threads, ctx):
     step = 1
     if threads >= 4 and datatype == Datatype.F32:
         step = 4
-    if threads >= 8 and datatype == Datatype.F32 and rdna(ctx): # RDNA
+    if threads >= 8 and datatype == Datatype.F32 and rdna(ctx):
         step = 8
-    if threads >= 16 and datatype == Datatype.F32 and rdna(ctx): # RDNA
+    if threads >= 16 and datatype == Datatype.F32 and rdna(ctx):
         step = 16
-    if threads >= 16 and cdna2(ctx): # CDNA 2+
+    if threads >= 16 and cdna2(ctx) and datatype in (Datatype.F32, Datatype.F64):
         step = 16
 
     func = {

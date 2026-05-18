@@ -13,16 +13,12 @@ class VM:
     self._lexic = lexic
     self._fp_type = None
     self.set_fp_type(fp_type)
-    self._real_literal = 'f' if self._fp_type == 'float' else ''
 
   def get_hw_descr(self):
     return self._hw_descr
 
   def get_lexic(self):
     return self._lexic
-
-  def get_real_literal(self):
-    return self._real_literal
 
   def set_fp_type(self, fp_type: str):
     if VM._is_valid_type(fp_type):
@@ -39,7 +35,7 @@ class VM:
 
   @classmethod
   def _is_valid_type(self, fp_type: str):
-    allowed = ['double', 'float']
+    allowed = ['__float128', 'double', 'float']
     if fp_type not in allowed:
       raise RuntimeError(f'unknown fp_type. Allowed {", ".join(allowed)}, given {fp_type}')
     return True

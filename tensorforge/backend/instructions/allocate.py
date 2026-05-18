@@ -21,12 +21,16 @@ class RegisterAlloc(AbstractInstruction):
 
   def gen_code(self, writer: Writer):
     if self._dest.obj.size > 0:
+      datatype = self._context.fp_type if self._dest.obj.datatype is None else self._dest.obj.datatype
+
       init_values_list = ''
       if isinstance(self._init_value, (float, int, bool)):
-        real_literal = self._vm.get_real_literal()
-        init_values = ', '.join([f'{str(self._init_value)}{real_literal}'] * self._dest.obj.size)
-        init_values_list = f' = {{{init_values}}}'
-      datatype = self._context.fp_type if self._dest.obj.datatype is None else self._dest.obj.datatype
+        if self._init_value == 0:
+          init_values_list = "{}"
+        else:
+          real_literal = self._vm.get_real_literal()
+          init_values = ', '.join([datatype.literal(self._init_value)] * self._dest.obj.size)
+          init_values_list = f' = {{{init_values}}}'
       result = f'{datatype} {self._dest.obj.name}[{self._dest.obj.size}]{init_values_list};'
       writer(result)
 
