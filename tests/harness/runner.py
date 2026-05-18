@@ -114,23 +114,43 @@ def run_case(case, target: Target, cache_root: Path,
     ops_meta = driver_emit.collect_operands(gen)
     rng = np.random.default_rng(abs(hash((case.NAME, target.arch))) & 0xFFFFFFFF)
 
+    # Optional case-side input domain shaping. The kernel sees the
+    # transformed values; the reference reads them from
+    # ``inputs_by_alias`` and must therefore use the same domain. The
+    # transform writes back through the view, which aliases ``flat`` (see
+    # layout.as_strided), so the bytes shipped to the GPU are also the
+    # post-transform values. Typical use: clamp away from zero for
+    # ``rcp``, force positivity for ``sqrt``/``log``.
+    input_transform = getattr(case, "INPUT_TRANSFORM", {})
+
     inputs_by_alias: Dict[str, np.ndarray] = {}
     flats: Dict[str, np.ndarray] = {}          # kernel_name -> flat buffer
     dest_alias = None
     dest_in_view = None
     for op in ops_meta:
         key = op.alias or op.kernel_name
+        # Batch-constant operands (Addressing.NONE) live in one shared
+        # storage block, not (batch, *shape). We still keep the leading
+        # ``1`` axis in NumPy so the reference can broadcast it against
+        # other (batch, *shape) operands without special-casing.
+        op_batch = 1 if op.addressing == "none" else batch
         if op.is_sink and not op.is_source:
             # pure output: init to zero so reference can read a defined C_in
-            view, flat = layout.zeros_batch(op.shape, batch, dt)
+            view, flat = layout.zeros_batch(op.shape, op_batch, dt)
             dest_alias = key
             dest_in_view = np.array(view, copy=True)       # snapshot pre-kernel
         elif op.is_source and not op.is_sink:
-            view, flat = layout.make_batch(rng, op.shape, batch, dt)
+            view, flat = layout.make_batch(rng, op.shape, op_batch, dt)
+            if key in input_transform:
+                view[...] = input_transform[key](np.asarray(view)).astype(
+                    layout.np_dtype(dt), copy=False)
             inputs_by_alias[key] = np.array(view, copy=True)
         else:
             # SOURCESINK: acts as both input and initial accumulator (beta!=0).
-            view, flat = layout.make_batch(rng, op.shape, batch, dt)
+            view, flat = layout.make_batch(rng, op.shape, op_batch, dt)
+            if key in input_transform:
+                view[...] = input_transform[key](np.asarray(view)).astype(
+                    layout.np_dtype(dt), copy=False)
             inputs_by_alias[key] = np.array(view, copy=True)
             dest_alias = key
             dest_in_view = np.array(view, copy=True)

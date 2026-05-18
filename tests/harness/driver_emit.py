@@ -254,10 +254,10 @@ def emit(generator, backend: str, default_batch: int) -> str:
     for op in ops:
         if op.is_scalar:
             continue
-        if op.addressing != "strided":
+        if op.addressing not in ("strided", "none"):
             raise NotImplementedError(
                 f"operand {op.kernel_name} uses {op.addressing!r} addressing; "
-                f"MVP harness only handles STRIDED"
+                f"harness handles 'strided', 'none' and 'scalar'"
             )
 
     # --- per-operand blocks ----------------------------------------------
@@ -266,7 +266,16 @@ def emit(generator, backend: str, default_batch: int) -> str:
         if op.is_scalar:
             continue       # scalars don't allocate, they're literals at the call site
         elem_bytes = 4 if op.ctype == "float" else 8
-        total_expr = f"(size_t){op.volume}u * batch * {elem_bytes}"
+
+        # Batch-constant (Addressing.NONE) operands share one storage
+        # block across all batch elements — see ptr_manip.py:67-71 where
+        # the kernel-side pointer skips the ``batchId * volume`` term.
+        # The driver therefore allocates a single ``volume`` worth of
+        # bytes, independent of the batch size.
+        if op.addressing == "none":
+            total_expr = f"(size_t){op.volume}u * {elem_bytes}"
+        else:
+            total_expr = f"(size_t){op.volume}u * batch * {elem_bytes}"
 
         allocs_host.append(
             f"    void* h_{op.kernel_name} = std::malloc({total_expr});\n"
@@ -310,7 +319,11 @@ def emit(generator, backend: str, default_batch: int) -> str:
             call_args.append(f"({op.ctype}){op.scalar_value!r}{suffix}")
         else:
             call_args.append(f"d_{op.kernel_name}")
-            call_args.append("0u")           # extraOffset; always zero here
+            # The launcher only takes an ``extraOffset`` for STRIDED
+            # operands; NONE-addressed bindings drop it (see the
+            # launcher signature in generator output).
+            if op.addressing != "none":
+                call_args.append("0u")
     call_args.append("batch")
     call_args.append("nullptr")          # flags0
     call_args.append("DEV_STREAM_PTR(stream)")

@@ -105,10 +105,21 @@ def pytest_report_header(config):
 def pytest_generate_tests(metafunc):
     if "case" in metafunc.fixturenames:
         cases = _discover_cases()
-        metafunc.parametrize(
-            "case", cases,
-            ids=[c.NAME for c in cases],
-        )
+        params = []
+        for c in cases:
+            marks = []
+            # Cases that hit known-broken pipeline paths set XFAIL=True
+            # with a docstring-style XFAIL_REASON. Using ``strict=True``
+            # turns the xpass into a hard failure once the path lights
+            # up — a deliberate signal to drop the marker from the case.
+            if getattr(c, "XFAIL", False):
+                marks.append(pytest.mark.xfail(
+                    reason=getattr(c, "XFAIL_REASON", "marked XFAIL by case"),
+                    strict=True,
+                    run=True,
+                ))
+            params.append(pytest.param(c, marks=marks, id=c.NAME))
+        metafunc.parametrize("case", params)
     if "target" in metafunc.fixturenames:
         targets = _discover_targets_session(metafunc.config)
         if not targets:
