@@ -54,7 +54,7 @@ class ElementwiseInstruction(ComputeInstruction):
             if i not in self._lead_dims:
                 loopstack += [Loop(f'k{i}', dimmin, dimmax, 1, unroll=False)]
             else:
-                loopstack += [LeadLoop(f'k{i}', dimmin, dimmax, self._num_threads, unroll=False)]
+                loopstack += [LeadLoop(f'k{i}', dimmin, dimmax, self._num_threads, 1, unroll=False)]
 
         def inner(varlist):
             for i,_ in enumerate(self._ks):

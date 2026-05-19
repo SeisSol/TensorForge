@@ -277,32 +277,20 @@ has a deterministic reproducer in the suite:
    rather than replaced with handling. Any `beta != 0` produces the
    same kernel as `beta == 0`. Reproducer: `beta_nonzero.py` (XFAIL).
 
-3. **`ElementwiseInstruction._assignment_loop` calls `LeadLoop` without
-   `stride`** — every `cases/elementwise/*` case crashes generation with
-   `TypeError: LeadLoop.__init__() missing 1 required positional
-   argument: 'stride'` (`elementwise.py:57` vs.\\ `symbol.py:196`).
-
-4. **`Operation.TANH` aliases `Operation.TAN`** (and the same for
-   `sinh`/`sin`, `cosh`/`cos`, `asinh`/`asin`, `acosh`/`acos`,
-   `atanh`/`atan`) — duplicate-valued `enum.Enum` members collapse, so
-   `optree.tanh(x)` lowers to a `TAN` node and the CUDA lexic emits
-   `tanf`. Reproducer: `cases/elementwise/tanh.py` will fail
-   numerically once generation works.
-
-5. **`ReductionDescr` and `ReductionInstruction` are scaffold-only** —
+3. **`ReductionDescr` and `ReductionInstruction` are scaffold-only** —
    `ReductionDescr.__init__` stores neither `dims` nor `op`;
    `ReductionInstruction.__init__` is literally `pass`; the
    `Generator` does not dispatch on `ReductionDescr` at all (no
    `isinstance` branch in `generator.py`). Reproducer: every
    `cases/reduction/*` (all XFAIL).
 
-6. **PTR_BASED needs harness driver work** — the generator emits
+4. **PTR_BASED needs harness driver work** — the generator emits
    correct device code, but `tests/harness/driver_emit.py:257` only
    handles `strided`, `none`, and `scalar`. Reproducer:
    `addressing_ptr_based.py` (XFAIL).
 
 The order of fixes that turns the most XFAIL cases green at once is
-roughly 3 → 5 → 4 → 2 → 1 → 6.
+roughly 3 → 2 → 1 → 4.
 
 ## Backends
 
