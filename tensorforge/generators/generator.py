@@ -1,7 +1,7 @@
 from typing import List, Union, Type
 from copy import deepcopy
 import hashlib
-from tensorforge.generators.descriptions import OperationDescription, MultilinearDescr, ElementwiseDescr, RegionDescription
+from tensorforge.generators.descriptions import OperationDescription, MultilinearDescr, ElementwiseDescr, RegionDescription, ReductionDescr
 from tensorforge.common.context import Context
 from tensorforge.common.basic_types import Addressing, GeneralLexicon, DataFlowDirection
 from tensorforge.common.helper import get_extra_offset_name
@@ -11,6 +11,7 @@ from tensorforge.backend.scopes import Scopes
 from tensorforge.backend.symbol import Symbol, SymbolType, SymbolView
 from tensorforge.backend.instructions.abstract_instruction import AbstractInstruction
 from tensorforge.backend.instructions.compute.elementwise import ElementwiseInstruction
+from tensorforge.backend.instructions.compute.reduction import ReductionInstruction
 from tensorforge.backend.instructions.builders.loader_builder import GlobalLoaderBuilder
 from tensorforge.backend.instructions.builders.multilinear_builder import MultilinearBuilder
 from tensorforge.backend.instructions.builders.ptr_manip_builder import GetElementPtrBuilder
@@ -393,6 +394,8 @@ class Generator:
         self._section.ir.extend(builder.get_instructions())
       if isinstance(gemm_descr, ElementwiseDescr):
         self._section.ir.append(ElementwiseInstruction(self._context, gemm_descr.oplist, self._scopes, False, self._num_threads))
+      if isinstance(gemm_descr, ReductionDescr):
+        self._section.ir.append(ReductionInstruction(self._context, gemm_descr.oplist, self._scopes, False, self._num_threads))
 
     builder.build_epilogue()
     self._section.ir.extend(builder.get_instructions())

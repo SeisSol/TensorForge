@@ -20,7 +20,6 @@ class MultilinearDescr(OperationDescription):
     self.ops = ops
     self.target = target
     self.permute = permute
-    self._strict_match = False
     self.add = add
 
     self.dest.tensor.set_data_flow_direction(DataFlowDirection.SINK)
@@ -49,15 +48,6 @@ class MultilinearDescr(OperationDescription):
       num_threads = 1
     return num_threads, self._lead_dim()
 
-  def get_accumulator_size(self):
-    accsize = 1
-    for s in self.dest.bbox.sizes()[1:]:
-      accsize *= s
-    return accsize
-
-  def is_strict_match(self):
-    return self._strict_match
-
   def matrix_list(self):
     return [self.dest] + [op for op in self.ops]
 
@@ -70,7 +60,6 @@ class ElementwiseDescr(OperationDescription):
                 strict_match: bool = False,
                 prefer_align: bool = False):
     self.oplist = oplist
-    self._strict_match = False
 
     for op in oplist:
       for tensor in op.tensors(outtensors=True, intensors=False):
@@ -82,12 +71,6 @@ class ElementwiseDescr(OperationDescription):
     vul = context.get_vm().get_hw_descr().vec_unit_length
     vul = 64 # FIXME:
     return vul, vul
-
-  def get_accumulator_size(self):
-    return 0
-
-  def is_strict_match(self):
-    return self._strict_match
 
   def matrix_list(self):
     return [tensor for op in self.oplist for tensor in op.tensors()]
@@ -103,7 +86,7 @@ class ReductionDescr(OperationDescription):
   def __init__(self, dest: Tensor, var: Tensor, dims: List[int], op):
     self.dest = dest
     self.var = var
-    self._strict_match = False
+    self.op = op
 
     var.set_data_flow_direction(DataFlowDirection.SOURCE)
     dest.set_data_flow_direction(DataFlowDirection.SINK)
@@ -111,12 +94,6 @@ class ReductionDescr(OperationDescription):
   def get_num_threads(self, context: Context):
     vul = context.get_vm().get_hw_descr().vec_unit_length
     return vul, vul
-
-  def get_accumulator_size(self):
-    return 0
-
-  def is_strict_match(self):
-    return self._strict_match
 
   def matrix_list(self):
     return [self.var, self.dest]
@@ -143,8 +120,12 @@ class GemmDescr(MultilinearDescr):
     permute_b = [1, 0] if trans_b else [0, 1]
     # assert beta == 0.0
     # super(GemmDescr, self).__init__(c, [a, b, alpha, beta], [target_a, target_b, [], []], strict_match, prefer_align)
+    add = True if beta == 1 else False
+
+    assert beta in (0, 1)
+
     if alpha == 1.0:
-      super(GemmDescr, self).__init__(c, [a, b], [target_a, target_b], [permute_a, permute_b], strict_match, prefer_align)
+      super(GemmDescr, self).__init__(c, [a, b], [target_a, target_b], [permute_a, permute_b], add, strict_match, prefer_align)
     else:
       # Inherit datatype from the destination so the synthetic scalar
       # always has a concrete type. Without this, Symbol.get_fptype()
@@ -155,7 +136,7 @@ class GemmDescr(MultilinearDescr):
           data=[alpha] if isinstance(alpha, (float, int)) else None,
           datatype=dest_dtype,
       ))
-      super(GemmDescr, self).__init__(c, [a, b, alpha_tensor], [target_a, target_b, []], [permute_a, permute_b, []], strict_match, prefer_align)
+      super(GemmDescr, self).__init__(c, [a, b, alpha_tensor], [target_a, target_b, []], [permute_a, permute_b, []], add, strict_match, prefer_align)
 
 class ForDescr:
   pass
