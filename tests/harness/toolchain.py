@@ -5,8 +5,6 @@ Two things gate a test ``Target``: the GPU is present (from
 :mod:`gpu_detect`) *and* a toolchain exists that can target its arch.
 A probe compile is done once per ``(backend, arch)`` and cached in
 memory for the session.
-
-Only CUDA is wired up for the MVP; HIP/SYCL live as extension stubs.
 """
 
 from __future__ import annotations

@@ -25,12 +25,14 @@ from tensorforge.common.basic_types import Datatype
 
 
 _DTYPE_MAP = {
+    Datatype.F16: np.float16,
     Datatype.F32: np.float32,
     Datatype.F64: np.float64,
     Datatype.F128: np.float128,
 }
 
 _CTYPE_MAP = {
+    Datatype.F16: "__half",
     Datatype.F32: "float",
     Datatype.F64: "double",
     Datatype.F128: "__float128",

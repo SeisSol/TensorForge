@@ -265,7 +265,13 @@ def emit(generator, backend: str, default_batch: int) -> str:
     for op in ops:
         if op.is_scalar:
             continue       # scalars don't allocate, they're literals at the call site
-        elem_bytes = 4 if op.ctype == "float" else 8
+
+        elem_bytes = {
+            "__half": 2,
+            "float": 4,
+            "double": 8,
+            "__float128": 16,
+        }[op.ctype]
 
         # Batch-constant (Addressing.NONE) operands share one storage
         # block across all batch elements — see ptr_manip.py:67-71 where
