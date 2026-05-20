@@ -38,7 +38,7 @@
   base: sm_60
 - arch: sm_90
   base: sm_60
-  max_local_mem_size_per_block: 227kB
+  max_local_mem_size_per_block: 227kB # shared with L1; together 256 kiB
 - arch: sm_100
   base: sm_90
 - arch: sm_101
@@ -103,6 +103,9 @@
   base: gfx1010
 - arch: gfx1250
   base: gfx1010
+  max_local_mem_size_per_block: 384kB # WGP(?) mode. With L1 together: 448 kiB
+- arch: gfx1251
+  base: gfx1250
 - arch: pvc
   vec_unit_length: 16
   max_local_mem_size_per_block: 128kB

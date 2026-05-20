@@ -682,7 +682,9 @@ def matmuldpp(writer, start, C, A, B, M, N, K, kx, threads, dtype, sparse, ctx):
             C(writer, cb[(j-start)*M+i], i, j)
 
 def matmul(writer, C, A, B, M, N, K, kx, threads, dtype, sparse, ctx):
-    if cdna1(ctx) and not sparse and dtype == Datatype.F32:
+    if cdna1(ctx) and not gfx1251(ctx) and not sparse and dtype == Datatype.F32:
+        # 4x4 matmuls are (probably) only available for CDNA 1-4
         matmul32(writer, C, A, B, M, N, K, kx, threads, dtype, sparse, ctx)
     else:
+        # DPP matmul
         matmuldpp(writer, 0, C, A, B, M, N, K, kx, threads, dtype, sparse, ctx)
