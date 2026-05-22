@@ -9,7 +9,6 @@ from tensorforge.backend.instructions.clear_registers import ClearRegisters
 from tensorforge.backend.instructions.memory.store import StoreRegToGlb, StoreRegToShr, StoreRegToReg
 from tensorforge.backend.instructions.sync_block import SyncThreads
 from tensorforge.backend.instructions.compute.multilinear import MultilinearInstruction
-from tensorforge.backend.instructions.compute.multilinearmulti import MultilinearMultiInstruction
 from tensorforge.common.matrix.tensor import Tensor
 from tensorforge.common.exceptions import InternalError
 from tensorforge.generators.descriptions import MultilinearDescr
