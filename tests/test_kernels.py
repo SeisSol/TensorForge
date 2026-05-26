@@ -331,3 +331,118 @@ def test_sparsity_band_uses_maskspp_and_generates():
     assert sparse_ops, "sparsity_band case: no sparse operand"
     Generator(descrs, Context(arch="sm_86", backend="cuda",
                               fp_type=mod.DTYPE)).generate()
+
+
+# ---------------------------------------------------------------------- #
+# Barrier cases — multi-section kernels.
+
+def test_barriers_cases_construct_and_generate():
+    """Each barriers case must produce a multi-section kernel.
+
+    The host-only assertion: after generation, ``gen._sections`` has
+    length ≥ 2 — otherwise the barrier didn't actually split the descr
+    list and the case isn't testing what it claims. For the
+    ``GridBarrierDescr`` variant we additionally require
+    ``persistent_threading`` to be on (cooperative launch).
+    """
+    from pathlib import Path
+    import importlib.util
+
+    from tensorforge.common.context import Context
+    from tensorforge.generators.generator import Generator
+
+    cases_dir = Path(__file__).parent / "cases" / "barriers"
+    case_files = sorted(p for p in cases_dir.glob("*.py")
+                        if not p.name.startswith("_"))
+    assert case_files, "expected at least one barriers case"
+
+    for path in case_files:
+        spec = importlib.util.spec_from_file_location(
+            f"_smoke_{path.stem}", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+
+        ctx = Context(arch="sm_86", backend="cuda", fp_type=mod.DTYPE)
+        gen = Generator(mod.descr_list(), ctx)
+        gen.generate()
+
+        assert len(gen._sections) >= 2, (
+            f"{path.name}: only {len(gen._sections)} section(s) — the "
+            "barrier didn't split the descr list")
+
+        # GridBarrierDescr is the cooperative variant; recognise by name.
+        # We assert on the kernel content rather than the descr class so
+        # the test stays valid if either class gets renamed.
+        if "barrier" in path.stem:
+            assert any(s.barrier for s in gen._sections), (
+                f"{path.name}: GridBarrierDescr but no section.barrier set")
+            assert "cudaLaunchCooperativeKernel" in gen.get_launcher(), (
+                f"{path.name}: cooperative launch not selected")
+
+
+# ---------------------------------------------------------------------- #
+# Yateto frontend — host-only construction smoke.
+
+def test_yateto_frontend_imports_and_constructs():
+    """``YatetoFrontend`` imports without ``yateto`` installed and a
+    bare instance carries an empty descr list.
+
+    This is the minimum smoke we can run host-only: ``YatetoFrontend``
+    only depends on tensorforge's own ``interface`` / ``ir`` packages,
+    not on the upstream ``yateto`` Python package. A regression in
+    those internal interfaces shows up as an import-time error and
+    this test catches it before SeisSol integration breaks. End-to-end
+    tests that actually feed yateto-emitted descriptions are out of
+    scope for the in-repo suite; SeisSol's CI is the right place for
+    those.
+    """
+    from tensorforge.frontend.yateto import YatetoFrontend, GpuKernelGeneratorV1
+
+    fe = YatetoFrontend(arch="sm_86")
+    assert isinstance(fe.generator, GpuKernelGeneratorV1)
+    assert fe.generator._descr_list == [], (
+        "fresh YatetoFrontend should have empty descr list")
+
+
+# ---------------------------------------------------------------------- #
+# F64 variants — sanity that the dtype propagates.
+
+def test_f64_variant_cases_use_double_precision():
+    """Every ``*_f64`` case (top-level or in a subdirectory) declares
+    ``DTYPE = Datatype.F64`` and constructs operands with that dtype.
+
+    Catches the most common copy-paste mistake when adding an F64
+    variant: forgetting to switch ``DTYPE`` in the operand tensors
+    while changing the module-level constant. The kernel would then
+    be emitted as F32 and the test would pass against a F64 reference
+    only by accident (and would silently mask any F64-specific bug
+    we wanted to catch).
+    """
+    from pathlib import Path
+    import importlib.util
+
+    from tensorforge.common.basic_types import Datatype
+
+    cases_root = Path(__file__).parent / "cases"
+    f64_files = [p for p in cases_root.rglob("*_f64.py")
+                 if not p.name.startswith("_")]
+    assert f64_files, "expected at least one *_f64 case"
+
+    for path in f64_files:
+        spec = importlib.util.spec_from_file_location(
+            f"_smoke_{path.stem}", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        assert mod.DTYPE == Datatype.F64, (
+            f"{path.name}: module-level DTYPE is {mod.DTYPE}, expected F64")
+        for d in mod.descr_list():
+            for op in d.matrix_list():
+                # tensor.datatype may be None on synthetic scalars built
+                # by GemmDescr — skip those, but every real operand
+                # must be F64.
+                if op.tensor.datatype is None:
+                    continue
+                assert op.tensor.datatype == Datatype.F64, (
+                    f"{path.name}: operand {op.tensor.alias} carries "
+                    f"{op.tensor.datatype}, not F64 — kernel will be "
+                    "generated at the wrong precision")

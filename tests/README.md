@@ -31,6 +31,7 @@ Cases live under `cases/`, grouped by feature:
 | Elementwise           | `cases/elementwise/`  | `ElementwiseDescr` with exactly one nonlinear unary op per `Assignment` (sqrt, exp, …)  |
 | Slicing               | `cases/slicing/`      | non-trivial `BoundingBox` inside larger `Tensor.shape` (sub-region GEMMs)               |
 | Reductions            | `cases/reduction/`    | `ReductionDescr` for sum/min/max/prod outside the multilinear lowering (XFAIL on dev2)  |
+| Barriers              | `cases/barriers/`     | `GridFenceDescr` / `GridBarrierDescr` between descrs (multi-section, cooperative launch)|
 
 Top-level `cases/*.py` also include the *single-feature* coverage
 cases — `trans_b`, `add_true`, `beta_nonzero`, `addressing_none`,
@@ -49,11 +50,10 @@ failure, which is the signal to drop the marker.
 
 Currently XFAIL:
 
-* every `cases/reduction/*` — `ReductionDescr`
-and `ReductionInstruction` are scaffold-only on `dev2`
+* every `cases/reduction/*` — `ReductionDescr` and
+`ReductionInstruction` are scaffold-only on `dev2`
 
-* `cases/beta_nonzero.py` — `GemmDescr` silently
-drops the `beta` argument
+* `cases/beta_nonzero.py` — `GemmDescr` silently drops the `beta` argument
 
 * `cases/addressing_ptr_based.py` — the test driver
 doesn't yet emit `T**`-style allocations
@@ -209,6 +209,36 @@ Coverage today: `inner_region` (offset bbox in larger storage),
 `example/abb_trans.py`), and `chain` (two-step chain over sliced inputs,
 catches a regression where one GEMM in the middle loses the offset).
 
+### Barriers
+
+`GridFenceDescr` and `GridBarrierDescr` split the descr list into
+multiple sections; the generator emits *one* kernel that contains all
+sections, with a section boundary inside it. Two cases under
+`cases/barriers/`:
+
+* `fence_two_gemms` — `GridFenceDescr.trueBarrier()` returns `False`;
+  two sections inside one kernel, plain `<<<...>>>` launch.
+* `barrier_two_gemms` — `GridBarrierDescr.trueBarrier()` returns
+  `True`; switches the generator into persistent-threading mode and
+  emits `cudaLaunchCooperativeKernel`. Brings in
+  `tensorforge_aux.h::argsPtrs` plus `cooperative_groups.h`; both are
+  routed through `gen.get_helper_headers()` / `toolchain.py`'s include
+  path.
+
+The cross-section dataflow is verified by the comparison: the second
+GEMM reads what the first wrote, so a fence/barrier that doesn't
+actually synchronise produces a numerically-wrong result.
+
+#### Multi-section dispatch in the driver
+
+The launcher signature carries one `numElements{i}` and one
+`flags{i}` parameter per section (see
+`generator.py:_generate_base_params_list:529,535`). `driver_emit.py`
+detects the section count via `len(gen._sections)` and emits the
+right number of arguments at the call site — older builds of the
+driver hardcoded a single pair and would have produced an arity
+mismatch the moment any barrier-using case landed.
+
 ### Reduction cases (currently XFAIL)
 
 `ReductionDescr` and its sibling `ReductionInstruction` are
@@ -224,16 +254,43 @@ handling of non-SubTensor operands.
 
 The five cases reflect the operator space:
 
-* `sum_axis` — `AddOperator` (numerically equivalent to `cases/trace.py`
-which uses `MultilinearDescr`);
+* `sum_axis` — `AddOperator` (numerically equivalent to
+`cases/trace.py` which uses `MultilinearDescr`);
 
-* `max_axis`, `min_axis` — the cases that genuinely need `ReductionDescr`
-(max/min aren't multilinear);
+* `max_axis`, `min_axis` — the cases that genuinely
+need `ReductionDescr` (max/min aren't multilinear);
 
-* `max_all` — full reduction to a single-element sink (rank-0 sink edge case);
+* `max_all` — full reduction to a single-element
+sink (rank-0 sink edge case);
 
-* `prod_axis` — `MulOperator` with neutral element 1
-(constrained-domain inputs to avoid overflow).
+* `prod_axis` — `MulOperator` with neutral element
+1 (constrained-domain inputs to avoid overflow).
+
+### F64 variants
+
+Each new feature axis gets one F64 sibling: `add_true_f64`,
+`addressing_none_f64`, `slicing/inner_region_f64`,
+`elementwise/sqrt_f64`, `sparsity_band_f64`. They exist because
+several emit paths split on dtype — `sqrtf` vs `sqrt`, `0.0f` vs `0.0`
+in the sparsity unrolled sequences, dtype-dependent literals in the
+`NONE`/`PTR_BASED` offset arithmetic — and a regression that only
+breaks F64 is invisible to the F32 cases.
+
+A host-only check (`test_f64_variant_cases_use_double_precision`)
+asserts that every `*_f64.py` actually carries `Datatype.F64` on its
+operand tensors, catching the copy-paste mistake of changing the
+module-level `DTYPE` constant but forgetting the per-tensor argument.
+
+### Yateto frontend
+
+`tensorforge.frontend.yateto.YatetoFrontend` is the production entry
+point used by SeisSol. The in-repo suite carries one host-only smoke
+(`test_yateto_frontend_imports_and_constructs`) that imports
+`YatetoFrontend` and constructs an instance — enough to catch
+interface drift in `tensorforge.interface` / `tensorforge.ir` that
+would break SeisSol's import path. End-to-end tests that actually
+feed yateto-emitted descriptions are out of scope for this suite;
+SeisSol's CI is the right place for those.
 
 ### Cases that target a single feature
 
@@ -277,20 +334,32 @@ has a deterministic reproducer in the suite:
    rather than replaced with handling. Any `beta != 0` produces the
    same kernel as `beta == 0`. Reproducer: `beta_nonzero.py` (XFAIL).
 
-3. **`ReductionDescr` and `ReductionInstruction` are scaffold-only** —
+3. **`ElementwiseInstruction._assignment_loop` calls `LeadLoop` without
+   `stride`** — every `cases/elementwise/*` case crashes generation with
+   `TypeError: LeadLoop.__init__() missing 1 required positional
+   argument: 'stride'` (`elementwise.py:57` vs.\\ `symbol.py:196`).
+
+4. **`Operation.TANH` aliases `Operation.TAN`** (and the same for
+   `sinh`/`sin`, `cosh`/`cos`, `asinh`/`asin`, `acosh`/`acos`,
+   `atanh`/`atan`) — duplicate-valued `enum.Enum` members collapse, so
+   `optree.tanh(x)` lowers to a `TAN` node and the CUDA lexic emits
+   `tanf`. Reproducer: `cases/elementwise/tanh.py` will fail
+   numerically once generation works.
+
+5. **`ReductionDescr` and `ReductionInstruction` are scaffold-only** —
    `ReductionDescr.__init__` stores neither `dims` nor `op`;
    `ReductionInstruction.__init__` is literally `pass`; the
    `Generator` does not dispatch on `ReductionDescr` at all (no
    `isinstance` branch in `generator.py`). Reproducer: every
    `cases/reduction/*` (all XFAIL).
 
-4. **PTR_BASED needs harness driver work** — the generator emits
+6. **PTR_BASED needs harness driver work** — the generator emits
    correct device code, but `tests/harness/driver_emit.py:257` only
    handles `strided`, `none`, and `scalar`. Reproducer:
    `addressing_ptr_based.py` (XFAIL).
 
 The order of fixes that turns the most XFAIL cases green at once is
-roughly 3 → 2 → 1 → 4.
+roughly 3 → 5 → 4 → 2 → 1 → 6.
 
 ## Backends
 
@@ -313,11 +382,14 @@ setting `TF_TEST_FAKE_GPUS=sm_86,gfx90a`. The probe still requires a
 real toolchain — that's the point: catch a generator change that
 produces uncompilable C++ before it reaches a hardware runner.
 
-The five host-only tests (`test_layout_roundtrip`,
+The host-only tests (`test_layout_roundtrip`,
 `test_reference_matches_einsum`, `test_elementwise_descr_constructs`,
 `test_slicing_cases_construct_and_generate`,
-`test_reduction_descr_constructs`) plus the six per-feature smoke
-tests are completely independent of any GPU or toolchain — they catch
+`test_reduction_descr_constructs`,
+`test_barriers_cases_construct_and_generate`,
+`test_yateto_frontend_imports_and_constructs`,
+`test_f64_variant_cases_use_double_precision`) plus the six per-feature
+smokes are completely independent of any GPU or toolchain — they catch
 regressions in the case-level descriptors themselves.
 
 ## Extending

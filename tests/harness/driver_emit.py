@@ -330,8 +330,17 @@ def emit(generator, backend: str, default_batch: int) -> str:
             # launcher signature in generator output).
             if op.addressing != "none":
                 call_args.append("0u")
-    call_args.append("batch")
-    call_args.append("nullptr")          # flags0
+    # The launcher signature has one ``numElements{i}`` and one
+    # ``flags{i}`` parameter per section (see
+    # generator.py:_generate_base_params_list at 529 / 535). With a
+    # single descr or only fence-less chains the section count is 1 —
+    # the default. ``GridFenceDescr`` / ``GridBarrierDescr`` between
+    # descrs split sections, raising the count.
+    num_sections = len(getattr(generator, "_sections", [None]))
+    for _ in range(num_sections):
+        call_args.append("batch")
+    for _ in range(num_sections):
+        call_args.append("nullptr")        # flags{i}: no skip-flags in tests
     call_args.append("DEV_STREAM_PTR(stream)")
     launcher_call = f"{launcher_fn}({', '.join(call_args)})"
 
