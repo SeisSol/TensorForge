@@ -20,10 +20,6 @@ make this case green, the harness needs:
    pointers and passed in place of the current ``T*``.
 3. Symmetric handling for reads and writes (the case below tests both
    SOURCE and SINK in PTR_BASED).
-
-The case is marked ``XFAIL`` with ``strict=True``; once the harness
-gains PTR_BASED support, the marker becomes an xpass-strict failure
-that calls for dropping it.
 """
 
 import numpy as np
@@ -37,15 +33,6 @@ NAME = "gemm_addressing_ptr_based"
 DTYPE = Datatype.F32
 BATCH = 4
 TOL = (1e-5, 1e-5)
-
-XFAIL = True
-XFAIL_REASON = (
-    "PTR_BASED addressing is not yet supported by the test driver "
-    "(driver_emit.py:257 raises NotImplementedError). Generation itself "
-    "works; the case becomes green once the harness emits per-batch "
-    "allocations and a T** indirection array."
-)
-
 
 def descr_list():
     a = SubTensor(Tensor([16, 16], Addressing.PTR_BASED,

@@ -254,7 +254,7 @@ def emit(generator, backend: str, default_batch: int) -> str:
     for op in ops:
         if op.is_scalar:
             continue
-        if op.addressing not in ("strided", "none", "ptr_based"):
+        if op.addressing not in ("strided", "none", "pointer_based"):
             raise NotImplementedError(
                 f"operand {op.kernel_name} uses {op.addressing!r} addressing; "
                 f"harness handles 'strided', 'none' and 'scalar'"
@@ -296,6 +296,26 @@ def emit(generator, backend: str, default_batch: int) -> str:
             f"    {op.ctype}* d_{op.kernel_name} = nullptr;\n"
             f"    DEV_MALLOC(d_{op.kernel_name}, {total_expr});"
         )
+        if op.addressing == "pointer_based":
+            ptr_size = f"(batch * sizeof(void*))"
+
+            allocs_host.append(
+                f"    void** h_p_{op.kernel_name} = (void**)std::malloc({ptr_size});\n"
+                f"    if (!h_p_{op.kernel_name}) die(\"host alloc\");"
+            )
+
+            base_typestr = f"{op.ctype}" if op.is_sink else f"const {op.ctype}"
+            allocs_dev.append(
+                f"    {base_typestr}** d_p_{op.kernel_name} = nullptr;\n"
+                f"    DEV_MALLOC(d_p_{op.kernel_name}, {ptr_size});"
+            )
+            # TODO: move to maybe a section of its own?
+            h2d.append(
+                f"    for (size_t i = 0; i < batch; ++i) h_p_{op.kernel_name}[i] = d_{op.kernel_name} + i;"
+            )
+            h2d.append(
+                f"    DEV_MEMCPY_H2D(d_p_{op.kernel_name}, h_p_{op.kernel_name}, {ptr_size});"
+            )
         # SOURCE and SOURCESINK both need H2D (SINK is also copied so the
         # kernel observes a defined initial value when beta != 0).
         h2d.append(
@@ -324,7 +344,10 @@ def emit(generator, backend: str, default_batch: int) -> str:
             suffix = "f" if op.ctype == "float" else ""
             call_args.append(f"({op.ctype}){op.scalar_value!r}{suffix}")
         else:
-            call_args.append(f"d_{op.kernel_name}")
+            if op.addressing == "pointer_based":
+                call_args.append(f"d_p_{op.kernel_name}")
+            else:
+                call_args.append(f"d_{op.kernel_name}")
             # The launcher only takes an ``extraOffset`` for STRIDED
             # operands; NONE-addressed bindings drop it (see the
             # launcher signature in generator output).
