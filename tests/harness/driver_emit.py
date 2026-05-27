@@ -127,15 +127,15 @@ _PREAMBLE_HIP = r"""
 #include <cstdlib>
 #include <cstring>
 #include <hip/hip_runtime.h>
-#define DEV_MALLOC(p, n)       hipMalloc(&(p), (n))
-#define DEV_FREE(p)            hipFree((p))
-#define DEV_MEMCPY_H2D(d,h,n)  hipMemcpy((d),(h),(n),hipMemcpyHostToDevice)
-#define DEV_MEMCPY_D2H(h,d,n)  hipMemcpy((h),(d),(n),hipMemcpyDeviceToHost)
+#define DEV_MALLOC(p, n)       (void)hipMalloc(&(p), (n))
+#define DEV_FREE(p)            (void)hipFree((p))
+#define DEV_MEMCPY_H2D(d,h,n)  (void)hipMemcpy((d),(h),(n),hipMemcpyHostToDevice)
+#define DEV_MEMCPY_D2H(h,d,n)  (void)hipMemcpy((h),(d),(n),hipMemcpyDeviceToHost)
 #define DEV_STREAM_T           hipStream_t
-#define DEV_STREAM_CREATE(s)   hipStreamCreate(&(s))
-#define DEV_STREAM_DESTROY(s)  hipStreamDestroy((s))
-#define DEV_STREAM_SYNC(s)     hipStreamSynchronize((s))
-#define DEV_SET_DEVICE(i)      hipSetDevice((i))
+#define DEV_STREAM_CREATE(s)   (void)hipStreamCreate(&(s))
+#define DEV_STREAM_DESTROY(s)  (void)hipStreamDestroy((s))
+#define DEV_STREAM_SYNC(s)     (void)hipStreamSynchronize((s))
+#define DEV_SET_DEVICE(i)      (void)hipSetDevice((i))
 #define DEV_STREAM_PTR(s)      ((void*)(s))
 """
 
@@ -254,7 +254,7 @@ def emit(generator, backend: str, default_batch: int) -> str:
     for op in ops:
         if op.is_scalar:
             continue
-        if op.addressing not in ("strided", "none"):
+        if op.addressing not in ("strided", "none", "ptr_based"):
             raise NotImplementedError(
                 f"operand {op.kernel_name} uses {op.addressing!r} addressing; "
                 f"harness handles 'strided', 'none' and 'scalar'"
