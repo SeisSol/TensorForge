@@ -333,7 +333,7 @@ class GpuKernelGeneratorV1:
       # incorrect:
       # pattern = tensor.eqspp.as_ndarray()
 
-    alignment = 16 if tensor.memoryLayout.alignedStride() else 0
+    alignment = 16 if len(tensor.memoryLayout.shape()) > 0 and tensor.memoryLayout.alignedStride() else 0
 
     return yi.gen_matrix(shape,
                                bboxrange,
