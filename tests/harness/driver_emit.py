@@ -341,8 +341,13 @@ def emit(generator, backend: str, default_batch: int) -> str:
         if op.is_scalar:
             # Bake the constant in. The literal needs the type suffix so
             # we don't accidentally widen/narrow at the call site.
-            suffix = "f" if op.ctype == "float" else ""
-            call_args.append(f"({op.ctype}){op.scalar_value!r}{suffix}")
+            suffix = {
+                "float": "f",
+                "double": "",
+                "__float128": "q",
+            }.get(op.ctype) or ""
+
+            call_args.append(f"static_cast<{op.ctype}>({op.scalar_value!r}{suffix})")
         else:
             if op.addressing == "pointer_based":
                 call_args.append(f"d_p_{op.kernel_name}")

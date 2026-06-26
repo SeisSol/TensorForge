@@ -23,12 +23,22 @@ import numpy as np
 
 from tensorforge.common.basic_types import Datatype
 
+#from numpy_quaddtype import QuadPrecDType
 
 _DTYPE_MAP = {
     Datatype.F16: np.float16,
     Datatype.F32: np.float32,
     Datatype.F64: np.float64,
     Datatype.F128: np.float128,
+}
+
+# maintain a different set of datatypes for export/import
+# (to support more variants)
+_DTYPE_EXPORT_MAP = {
+    Datatype.F16: np.float16,
+    Datatype.F32: np.float32,
+    Datatype.F64: np.float64,
+    Datatype.F128: np.float128,#QuadPrecDType(),
 }
 
 _CTYPE_MAP = {
@@ -43,6 +53,10 @@ def np_dtype(dt: Datatype) -> np.dtype:
         raise NotImplementedError(f"dtype {dt!r} not wired in the MVP harness")
     return np.dtype(_DTYPE_MAP[dt])
 
+def np_export_dtype(dt: Datatype) -> np.dtype:
+    if dt not in _DTYPE_EXPORT_MAP:
+        raise NotImplementedError(f"dtype {dt!r} not wired in the MVP harness")
+    return np.dtype(_DTYPE_EXPORT_MAP[dt])
 
 def ctype(dt: Datatype) -> str:
     if dt not in _CTYPE_MAP:
@@ -81,6 +95,8 @@ def make_batch(rng: np.random.Generator,
     Keeping both around explicitly avoids the ``as_strided`` ``.base``
     aliasing pitfalls and makes host<->device transfers obviously correct.
     """
+
+    # need to cast explicitly, since standard_normal only supports F32 and F64
     flat = rng.standard_normal(batch * volume(shape)).astype(np_dtype(dt), copy=False)
     return _strided_view(flat, shape, batch), flat
 

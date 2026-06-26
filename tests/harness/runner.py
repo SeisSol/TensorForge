@@ -170,7 +170,7 @@ def run_case(case, target: Target, cache_root: Path,
         for op in ops_meta:
             if op.is_source:
                 (in_dir / f"in_{op.kernel_name}.bin").write_bytes(
-                    flats[op.kernel_name].tobytes()
+                    flats[op.kernel_name].astype(layout.np_export_dtype(dt)).tobytes()
                 )
             # SINK that is also SOURCE (beta != 0): the kernel needs the
             # initial C on device, so dump it under the input name too.
@@ -205,7 +205,7 @@ def run_case(case, target: Target, cache_root: Path,
         # Read back the sink's buffer.
         sink_op = next(o for o in ops_meta if o.is_sink)
         got_bytes = (out_dir / f"out_{sink_op.kernel_name}.bin").read_bytes()
-        got_flat = np.frombuffer(got_bytes, dtype=layout.np_dtype(dt))
+        got_flat = np.frombuffer(got_bytes, dtype=layout.np_export_dtype(dt)).astype(layout.np_dtype(dt))
         got_view = layout.view_of(got_flat, sink_op.shape, batch)
 
         abs_err = np.abs(np.asarray(got_view) - np.asarray(expected))

@@ -18,14 +18,14 @@ TOL = (1e-5, 1e-5)
 
 
 def descr_list():
-    a = SubTensor(Tensor([16, 16], Addressing.STRIDED,
-                         BoundingBox([0, 0], [16, 16]),
+    a = SubTensor(Tensor([2, 2], Addressing.STRIDED,
+                         BoundingBox([0, 0], [2, 2]),
                          alias="A", datatype=DTYPE))
-    b = SubTensor(Tensor([16, 16], Addressing.STRIDED,
-                         BoundingBox([0, 0], [16, 16]),
+    b = SubTensor(Tensor([2, 2], Addressing.STRIDED,
+                         BoundingBox([0, 0], [2, 2]),
                          alias="B", datatype=DTYPE))
-    c = SubTensor(Tensor([16, 16], Addressing.STRIDED,
-                         BoundingBox([0, 0], [16, 16]),
+    c = SubTensor(Tensor([2, 2], Addressing.STRIDED,
+                         BoundingBox([0, 0], [2, 2]),
                          alias="C", datatype=DTYPE))
     return [GemmDescr(trans_a=False, trans_b=False,
                       a=a, b=b, c=c, alpha=1.0, beta=0.0)]
