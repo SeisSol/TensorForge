@@ -173,7 +173,11 @@ __device__ __forceinline__ T broadcast(T value) {
     return dpp<((Lane + 1) << 6) | (Lane << 4) | ((Lane + 1) << 2) |
                    (Lane << 0),
                0xf, 0xf, true>(value);
-  } else if constexpr (Block == 8 || Block == 16 || Block == 32) {
+  } else if constexpr (Block == 2 && Subblock == 1) {
+    return dpp<((Lane + 2) << 6) | ((Lane + 2) << 4) | (Lane << 2) |
+                   (Lane << 0),
+               0xf, 0xf, true>(value);
+  } else if constexpr (Block < 64) {
     return swizzle_bcst<Block, Subblock, Lane>(value);
   } else {
     const auto blockoffset = Block == 64 ? 0 : (__lane_id() / Block) * Block;
@@ -934,13 +938,76 @@ __device__ __forceinline__ void transpose4x4b32(T &w1, T &w2, T &w3, T &w4,
 }
 
 /*
+// forward declares for structured buffer accessors
+// (for "canonical" float4 loads)
+
+using OldBufferRsrc = VectorT<std::int32_t, 4>;
+
+extern "C" {
+
+__device__ int
+llvm_struct_buffer_load_i32(OldBufferRsrc, int, int, int,
+                            int) __asm("llvm.amdgcn.struct.buffer.load.i32");
+__device__ VectorT<int, 2> llvm_struct_buffer_load_v2i32(
+    OldBufferRsrc, int, int, int,
+    int) __asm("llvm.amdgcn.struct.buffer.load.v2i32");
+__device__ VectorT<int, 3> llvm_struct_buffer_load_v3i32(
+    OldBufferRsrc, int, int, int,
+    int) __asm("llvm.amdgcn.struct.buffer.load.v3i32");
+__device__ VectorT<int, 4> llvm_struct_buffer_load_v4i32(
+    OldBufferRsrc, int, int, int,
+    int) __asm("llvm.amdgcn.struct.buffer.load.v4i32");
+
+__device__ float
+llvm_struct_buffer_load_f32(OldBufferRsrc, int, int, int,
+                            int) __asm("llvm.amdgcn.struct.buffer.load.f32");
+__device__ VectorT<float, 2> llvm_struct_buffer_load_v2f32(
+    OldBufferRsrc, int, int, int,
+    int) __asm("llvm.amdgcn.struct.buffer.load.v2f32");
+__device__ VectorT<float, 3> llvm_struct_buffer_load_v3f32(
+    OldBufferRsrc, int, int, int,
+    int) __asm("llvm.amdgcn.struct.buffer.load.v3f32");
+__device__ VectorT<float, 4> llvm_struct_buffer_load_v4f32(
+    OldBufferRsrc, int, int, int,
+    int) __asm("llvm.amdgcn.struct.buffer.load.v4f32");
+
+__device__ int
+llvm_struct_buffer_load_u8(OldBufferRsrc, int, int, int,
+                           int) __asm("llvm.amdgcn.struct.buffer.load.i8");
+__device__ int
+llvm_struct_buffer_load_u16(OldBufferRsrc, int, int, int,
+                            int) __asm("llvm.amdgcn.struct.buffer.load.i16");
+
+__device__ void
+llvm_struct_buffer_store_i32(int, OldBufferRsrc, int, int, int,
+                             int) __asm("llvm.amdgcn.struct.buffer.store.i32");
+__device__ void llvm_struct_buffer_store_v4i32(
+    VectorT<int, 4>, OldBufferRsrc, int, int, int,
+    int) __asm("llvm.amdgcn.struct.buffer.store.v4i32");
+__device__ void
+llvm_struct_buffer_store_f32(float, OldBufferRsrc, int, int, int,
+                             int) __asm("llvm.amdgcn.struct.buffer.store.f32");
+__device__ void llvm_struct_buffer_store_v4f32(
+    VectorT<float, 4>, OldBufferRsrc, int, int, int,
+    int) __asm("llvm.amdgcn.struct.buffer.store.v4f32");
+
+} // extern "C"
+*/
+/*
+
+enum BufferHints {
+
+  Swizzled = 1 << 3
+};
+
+template<typename T>
 class Buffer {
 public:
     Buffer() {
         descriptor = __builtin_amdgcn_make_buffer_rsrc();
     }
 
-    template<typename T>
+    template<typename T, BufferHints Hints>
     T load(std::size_t offset) {
         if constexpr (sizeof(T) == 16) {
             __builtin_amdgcn_raw_buffer_store_b128
@@ -952,21 +1019,12 @@ public:
 
     }
 
-    void copy() {
+    template<typename T>
+    T atomic() {
 
     }
 private:
     __amdgpu_buffer_rsrc_t descriptor;
-};
-
-template<typename T>
-class Tensor {
-
-};
-
-class Loader {
-public:
-    void start();
 };
 */
 
