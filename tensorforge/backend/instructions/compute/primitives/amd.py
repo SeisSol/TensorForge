@@ -363,6 +363,10 @@ def gfx1251(ctx): # no details known yet about the name
     # gfx1251 supports DPP64 (inferred by the LLVM tests)
     return amdarch(ctx) == 0x1251
 
+def gfx1250(ctx): # no details known yet about the name
+    # gfx1251 supports DPP64 (inferred by the LLVM tests)
+    return amdarch(ctx) == 0x1250
+
 def cdna2(ctx):
     return (amdarch(ctx) < 0x1000 and amdarch(ctx) >= 0x90a) or gfx1251(ctx)
 
@@ -535,33 +539,51 @@ def fmadpp4(writer, C, A, B, row):
     writer(f'tensorforge::fmacdpp4<{row}>({C}, {A}, {B});')
 
 def hfma(writer: Writer, Cs, As, Bs, repeat, datatype, threads, ctx):
-    step = 1
+    """
+    Strategy:
+
+    * gfx906: shuffle over 4 threads; but use DPP over 16 to broadcast blocks of 4 (already encoded)
+    * gfx908+ / CDNA+ and RDNA+: use DPP 16 with broadcasting. Fuse for F32 and little users (to harness pkd math on RDNA 3+).
+    * gfx90a+ / CDNA2+: use DPP64 for F64 and broadcasting if 2 or more rows and lots of users.
+    """
+
+    step = 4
     if threads >= 4 and datatype == Datatype.F32:
         step = 4
-    if threads >= 8 and datatype == Datatype.F32 and rdna(ctx):
+    if threads >= 8 and datatype == Datatype.F32 and (rdna(ctx) or gfx1251(ctx) or gfx1250(ctx)):
         step = 8
-    if threads >= 16 and datatype == Datatype.F32 and rdna(ctx):
+    if threads >= 16 and datatype == Datatype.F32 and (rdna(ctx) or gfx1251(ctx) or gfx1250(ctx)):
         step = 16
-    if threads >= 16 and cdna2(ctx) and datatype in (Datatype.F32, Datatype.F64):
+    if threads >= 16 and (cdna2(ctx) or gfx1251(ctx)) and datatype in (Datatype.F32, Datatype.F64):
         step = 16
 
+    fma = lambda writer, c, a, b, j: writer(f'{c} += {a} * {b};')
     func = {
-        1: lambda writer, c, a, b, j: writer(f'{c} += {a} * {b};'),
+        1: fma,
         4: fmadpp4,
         8: fmadpp8,
         16: fmadpp16
     }[step]
 
     bcstmin = 3 # if cdna2(ctx) else 2
-    bcst = datatype == Datatype.F32 and repeat * 2 >= bcstmin and (cdna2(ctx) or rdna(ctx))
-    bcststep = 2 if datatype == Datatype.F32 and cdna2(ctx) and False else 1
+    bcststep = 2 if datatype == Datatype.F32 and (cdna2(ctx) or gfx1251(ctx)) else 1
+    bcst = datatype == Datatype.F32 and repeat * bcststep >= bcstmin and (cdna2(ctx) or rdna(ctx))
 
-    assert bcststep == 1
+    # disable for now
+    bcst = False
+    bcststep = 1
 
     for b in range(0, len(Cs), bcststep):
         A = [As[bb] for bb in range(b, min(b + bcststep, len(Cs)))]
         B = [Bs[bb] for bb in range(b, min(b + bcststep, len(Cs)))]
         C = [Cs[bb] for bb in range(b, min(b + bcststep, len(Cs)))]
+
+        # assert all(len(B[0]) == len(b) for b in B)
+
+        localstep = len(B)
+
+        #vtype = f'tensorforge::VectorT<{datatype.ctype()}, {localstep}>' if localstep > 1 else datatype.ctype()
+        vtype = 'float2' if localstep > 1 else datatype.ctype()
 
         for i in range(0, len(B[0]) // repeat, step):
             if step == threads:
@@ -573,12 +595,32 @@ def hfma(writer: Writer, Cs, As, Bs, repeat, datatype, threads, ctx):
                     writer(f'const auto {a[-1]} = tensorforge::broadcast<{threads}, {step}, {i // step}>({aa});')
 
             for j in range(min(len(B[0][i*repeat:]) // repeat, step)):
+                idx = (j + i) * repeat
+
+                ax = []
+
+                if bcst and all((B[bx][idx + jj] if idx + jj < len(B[bx]) else None) is not None for bx in range(localstep) for jj in range(repeat)):
+                    aa = writer.varalloc()
+                    aa2 = writer.varalloc()
+                    writer(f'const {vtype} {aa}{"{"}{",".join(f"{aax}" for aax in a)}{"}"};')
+                    writer(f'const {vtype} {aa2} = tensorforge::movdpp16<{j}>({aa});')
+                    ax = [f'{aa2}[{bx}]' for bx in range(localstep)] if localstep > 1 else [f'{aa2}']
+                    usebcst = True
+                else:
+                    ax = a
+                    usebcst = False
+
                 for jj in range(repeat):
-                    idx = (j + i) * repeat
-                    b = B[0][idx + jj]
-                    c = C[0][idx + jj]
-                    if b is not None:
-                        func(writer, c, a[0], b, j)
+                    for bx in range(localstep):
+                        if idx + jj < len(B[bx]):
+                            b = B[bx][idx + jj]
+                            c = C[bx][idx + jj]
+                            if b is not None:
+                                if usebcst:
+                                    fma(writer, c, ax[bx], b, j)
+                                else:
+                                    func(writer, c, ax[bx], b, j)
+
 
 def wmma3atom(writer, A, B, C, threads):
 
