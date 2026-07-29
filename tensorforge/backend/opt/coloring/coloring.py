@@ -40,6 +40,22 @@ class GraphColoring:
     while self._coarse_graph():
       pass
 
+    # Chaitin simplify is done.  It stops either because the residual graph
+    # has no edges (the intended bottom case) *or* because no vertex has
+    # degree < k -- the spill case.  Colouring the latter with a single
+    # colour silently aliases two simultaneously-live buffers, so assert
+    # instead.  For a straight-line instruction list the interference graph
+    # is an interval graph, hence chordal, hence k = max|liveset| always
+    # suffices; this fires only if that premise breaks (e.g. once loops
+    # carry live ranges).
+    residual = [v for v in self._graph if v.get_neighbors()]
+    if residual:
+      raise RuntimeError(
+          f'graph colouring failed to simplify: {len(residual)} vertices of '
+          f'degree >= {self._max_num_colors} remain '
+          f'({", ".join(str(v.get_id()) for v in residual)}). Colouring them '
+          f'alike would alias live shared-memory buffers.')
+
     # it is the bottom case i.e., a graph consists of only nodes without edges
     for vertex in self._graph:
       free_color = self._colors[0]
@@ -62,7 +78,7 @@ class GraphColoring:
 
   def _coarse_graph(self) -> bool:
     for index, vertex in enumerate(self._graph):
-      if not vertex.get_neighbors() == set():
+      if vertex.get_neighbors():
         if self._max_num_colors > vertex.get_num_neighbours():
           candidate = self._graph.pop(index)
           self._stack.add_edges(candidate)
@@ -87,7 +103,11 @@ class GraphColoring:
       assigned_color = self._vertex2color_map[neighbour]
       occupied_colors.add(assigned_color)
     free_colors = self._allowed_color_set - occupied_colors
-    self._vertex2color_map[vertex] = free_colors.pop()
+    if not free_colors:
+      raise RuntimeError(f'no free colour for vertex {vertex.get_id()}')
+    # min(), not set.pop(): make the choice explicit rather than relying on
+    # CPython's small-int set ordering
+    self._vertex2color_map[vertex] = min(free_colors)
 
   def _add_edges_to_graph(self, vertex) -> None:
     for neighbour in vertex.get_neighbors():

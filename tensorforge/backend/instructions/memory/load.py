@@ -426,6 +426,19 @@ class LoadWait(MemoryInstruction, LoadInstruction):
     self._instr = instr
     self._is_ready = True
 
+  # A wait completes the awaited transfer, so from a data-flow point of view
+  # it *is* the write.  Consumers must therefore be ordered after the wait,
+  # not after the issuing load.  Once async/wait carries a real token this
+  # becomes a use of that token instead.
+  def awaited(self):
+    return self._instr
+
+  def defs(self):
+    return self._instr.defs()
+
+  def uses(self):
+    return ()
+
   def gen_code_inner(self, writer: Writer) -> None:
     if isinstance(self._instr, GlbToShrLoader):
       if self._instr._use_cuda_memcpy:

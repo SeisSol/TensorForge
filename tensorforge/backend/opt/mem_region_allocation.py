@@ -1,5 +1,6 @@
 from collections import OrderedDict
 from copy import copy
+from tensorforge.common.ordered import OrderedSet
 from typing import Dict, Set, Union, List, Tuple
 from tensorforge.backend.symbol import Symbol
 from .abstract import AbstractOptStage, Context
@@ -30,7 +31,7 @@ class MemoryRegionAllocation(AbstractOptStage):
   def __init__(self, context: Context, live_map):
     super(MemoryRegionAllocation, self).__init__(context)
 
-    self._live_map: Dict[int, Set[Symbol]] = live_map
+    self._live_map: Dict[int, OrderedSet] = live_map
     self._vertex_counter: int = 0
     self._adj_list: List[Vertex] = []
     self._objects2vertices_map: Union[Dict[Symbol, Vertex], None] = None

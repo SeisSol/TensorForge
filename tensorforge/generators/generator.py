@@ -144,7 +144,8 @@ class Generator:
                               shr_mem=self._section.shr_mem_obj,
                               instructions=self._section.ir,
                               num_threads=self._num_threads,
-                              scopes = self._scopes)
+                              scopes = self._scopes,
+                              global_ir = self._section.global_ir)
       opt.optimize()
       self._section.ir = opt.get_instructions()
       self._section.global_ir += opt.get_global_instructions()

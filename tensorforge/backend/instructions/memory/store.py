@@ -226,6 +226,15 @@ class StoreShrMemToGlb(AbstractInstruction):
     src.add_user(self)
     dest.add_user(self)
 
+  # NOTE: LivenessAnalysis._check_store already called get_src() on this
+  # class, which never had it -- latent AttributeError, dormant only because
+  # nothing constructs StoreShrMemToGlb today.
+  def get_src(self) -> Symbol:
+    return self._src
+
+  def get_dest(self) -> Symbol:
+    return self._dest
+
   def gen_code(self, writer):
     dest_matrix = self._dest.obj
 

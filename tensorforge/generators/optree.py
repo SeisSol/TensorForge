@@ -26,6 +26,15 @@ class Node:
     def tensors(self, intensors=True, outtensors=True):
         pass
 
+    def __str__(self):
+        # NOTE: every node must render address-free -- these strings end up
+        # verbatim in the emitted source as comments, and a default __repr__
+        # embeds a heap address, which makes codegen non-reproducible and
+        # defeats ccache.
+        return f'{type(self).__name__.lower()}'
+
+    __repr__ = __str__
+
     def pretensors(self, intensors=True, outtensors=True):
         pass
 
@@ -142,6 +151,11 @@ class Statement:
     def tensors(self, intensors=True, outtensors=True):
         pass
 
+    def __str__(self):
+        return f'{type(self).__name__.lower()}'
+
+    __repr__ = __str__
+
     def pretensors(self, intensors=True, outtensors=True):
         pass
 
@@ -167,6 +181,9 @@ class Assignment(Statement):
     def __init__(self, dest: Variable, optree: Node):
         self.dest = dest
         self.optree = optree
+
+    def __str__(self):
+        return f'{self.dest} = {self.optree}'
 
     def symbols(self, intensors=True, outtensors=True):
         tensorlist = []
@@ -223,6 +240,11 @@ class TensorVar(Variable):
         self.indices = None
         self.offset = None
 
+    def __str__(self):
+        name = getattr(self.tensor, 'alias', None) or 'tensor'
+        idx = '' if self.indices is None else f'[{",".join(str(i) for i in self.indices)}]'
+        return f'{name}{idx}'
+
     def tensors(self, intensors=True, outtensors=True):
         return [self.tensor]
 
@@ -274,6 +296,9 @@ class ScalarVar(Variable):
         self.variable = None
         self.indices = None
 
+    def __str__(self):
+        return f'{getattr(self.tensor, "alias", None) or "scalar"}'
+
     def tensors(self, intensors=True, outtensors=True):
         return [self.tensor]
 
@@ -309,6 +334,9 @@ class TempVar(Variable):
     def __init__(self, datatype=None):
         self.variable = None
         self.datatype = datatype
+
+    def __str__(self):
+        return f'{self.variable}' if isinstance(self.variable, str) else '%tmp'
 
     def tensors(self, intensors=True, outtensors=True):
         return []
@@ -347,6 +375,9 @@ class Immediate(Variable):
         self.value = value
         self.fptype = fptype
 
+    def __str__(self):
+        return f'{self.value}'
+
     def tensors(self, intensors=True, outtensors=True):
         return []
 
@@ -378,6 +409,12 @@ class OpNode(Node):
     def __init__(self, operands: List[Node]):
         self.operands = operands
         self.variable = None
+
+    def _opname(self):
+        return type(self).__name__.removesuffix('OpNode').lower() or 'op'
+
+    def __str__(self):
+        return f'{self._opname()}({", ".join(str(o) for o in self.operands)})'
 
     def getRanges(self, ranges):
         for op in self.operands:
@@ -422,6 +459,10 @@ class LexicOpNode(OpNode):
         super().__init__(operands)
         self.optype = optype
 
+    def _opname(self):
+        name = getattr(self.optype, 'name', None)
+        return str(name).lower() if name else str(self.optype)
+
     def operation(self, context: Context, var: List[str]):
         if len(var) == 1:
             realvar = var + ['']
@@ -438,6 +479,9 @@ class CastOpNode(OpNode):
         super().__init__(operands)
         self.targetType = targetType
 
+    def _opname(self):
+        return f'cast<{self.targetType}>'
+
     def operation(self, context: Context, var: List[str]):
         return f'static_cast<{self.targetType}>({var[0]})'
 
@@ -445,6 +489,10 @@ class IfNode(Statement):
     def __init__(self, condition: Node, subassignments: List[Statement]):
         self.condition = condition
         self.subassignments = subassignments
+
+    def __str__(self):
+        body = '; '.join(str(a) for a in self.subassignments)
+        return f'if ({self.condition}) {{ {body} }}'
 
     def getRanges(self, ranges):
         ranges = self.condition.getRanges(ranges)
@@ -496,6 +544,10 @@ class WhileNode(Statement):
         self.condition = condition
         self.subassignments = subassignments
         self.conditionVar = TempVar()
+
+    def __str__(self):
+        body = '; '.join(str(a) for a in self.subassignments)
+        return f'while ({self.condition}) {{ {body} }}'
 
     def getRanges(self, ranges):
         ranges = self.condition.getRanges(ranges)

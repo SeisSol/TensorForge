@@ -18,6 +18,15 @@ class ClearRegisters(AbstractInstruction):
     self._src = src
     src.add_user(self)
 
+  # `_src` is the *target* here despite the name: clearing writes it.  The
+  # generic adapter would classify it as a read, which would let a pass
+  # reorder a clear past a consumer.
+  def defs(self):
+    return (self._src,)
+
+  def uses(self):
+    return ()
+
   def gen_code(self, writer: Writer):
     writer.new_line()
     writer(f'// clear registers')

@@ -64,7 +64,28 @@ class ElementwiseInstruction(ComputeInstruction):
         write_loops(self._context, writer, loopstack, inner)
 
     def get_operands(self):
-        return [] # TODO: for now
+        # NOTE: deliberately still empty. LivenessAnalysis and SyncThreadsOpt
+        # key on get_operands(), so filling it in here *changes barrier
+        # placement* for every elementwise kernel. That is very likely a fix
+        # -- an elementwise op reading a shared-memory buffer currently gets
+        # no barrier -- but it is a behavioural change and belongs in its own
+        # commit, not in the data-flow interface. Use defs()/uses() below.
+        return []
+
+    def _symbols(self, intensors: bool, outtensors: bool):
+        seen, out = set(), []
+        for assignment in self._assignments:
+            for sym in assignment.symbols(intensors, outtensors):
+                if sym is not None and id(sym) not in seen:
+                    seen.add(id(sym))
+                    out.append(sym)
+        return tuple(out)
+
+    def defs(self):
+        return self._symbols(intensors=False, outtensors=True)
+
+    def uses(self):
+        return self._symbols(intensors=True, outtensors=False)
 
     def __str__(self):
         return ', '.join(str(assignment) for assignment in self._assignments)

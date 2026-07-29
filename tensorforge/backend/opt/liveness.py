@@ -1,6 +1,6 @@
-from typing import List, Dict, Set, Union
-from copy import copy
+from typing import List, Dict, Union
 from collections import OrderedDict
+from tensorforge.common.ordered import OrderedSet
 from tensorforge.backend.symbol import Symbol
 from tensorforge.backend.instructions.compute import ComputeInstruction
 from tensorforge.backend.instructions.memory import AbstractShrMemWrite
@@ -15,21 +15,21 @@ class LivenessAnalysis(AbstractOptStage):
     super(LivenessAnalysis, self).__init__(context)
 
     self._instrs: List[AbstractInstruction] = instructions
-    self._map: Dict[int, Set[Symbol]] = OrderedDict()
-    self._live_map: Union[Dict[int, Set[Symbol]], None] = None
+    self._map: Dict[int, OrderedSet] = OrderedDict()
+    self._live_map: Union[Dict[int, OrderedSet], None] = None
 
   def apply(self) -> None:
-    forward_map = {-1: set()}
+    forward_map = {-1: OrderedSet()}
 
     for index, instr in list(enumerate(self._instrs)):
-      forward_map[index] = copy(forward_map[index - 1])
+      forward_map[index] = forward_map[index - 1].copy()
       if isinstance(instr, AbstractShrMemWrite):
         self._check_define(forward_map, index, instr)
 
-    backward_map = {len(self._instrs): set()}
+    backward_map = {len(self._instrs): OrderedSet()}
 
     for index, instr in reversed(list(enumerate(self._instrs))):
-      backward_map[index] = copy(backward_map[index + 1])
+      backward_map[index] = backward_map[index + 1].copy()
       if isinstance(instr, ComputeInstruction):
         self._check_use(backward_map, index, instr)
       if isinstance(instr, (StoreShrMemToGlb, ShrToShrLoader)):
@@ -42,7 +42,7 @@ class LivenessAnalysis(AbstractOptStage):
 
     self._live_map = OrderedDict(reversed(list(self._map.items())))
 
-  def get_live_map(self) -> Dict[int, Set[Symbol]]:
+  def get_live_map(self) -> Dict[int, OrderedSet]:
     return self._live_map
 
   def _check_use(self, map, index, instr: ComputeInstruction) -> None:

@@ -1,18 +1,24 @@
 from typing import Set, TypeVar, Generic
+from tensorforge.common.ordered import OrderedSet
 VertexType = TypeVar('VertexType')
 
 
 class Vertex(Generic[VertexType]):
   def __init__(self, vid: int):
     self._id: int = vid
-    self._neighbours: Set[VertexType] = set()
+    # ordered: the colouring walks neighbours, so iteration order leaks
+    # into the emitted shared-memory offsets
+    self._neighbours: OrderedSet = OrderedSet()
 
   def add_neighbor(self, vertex: VertexType) -> None:
     if not (vertex == self):
       self._neighbours.add(vertex)
 
-  def get_neighbors(self) -> Set[VertexType]:
+  def get_neighbors(self) -> OrderedSet:
     return self._neighbours
+
+  def has_neighbours(self) -> bool:
+    return bool(self._neighbours)
 
   def remove_neighbour(self, vertex: VertexType) -> None:
     self._neighbours.remove(vertex)

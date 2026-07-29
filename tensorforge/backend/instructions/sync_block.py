@@ -1,5 +1,5 @@
 from tensorforge.common.context import Context
-from .abstract_instruction import AbstractInstruction
+from .abstract_instruction import AbstractInstruction, BarrierScope
 
 
 class SyncThreads(AbstractInstruction):
@@ -7,6 +7,16 @@ class SyncThreads(AbstractInstruction):
     super().__init__(context)
     self._num_threads = num_threads_per_mult
     self._is_ready = True
+
+  def barrier_scope(self) -> BarrierScope:
+    # same predicate __str__ uses to pick sync_block vs sync_simd -- resolved
+    # once, here, so that passes and verify() can see the scope
+    if self._num_threads > self._vm.get_hw_descr().vec_unit_length:
+      return BarrierScope.GROUP
+    return BarrierScope.SIMD
+
+  def accesses(self):
+    return ()
 
   def gen_code(self, writer):
     writer(f'{self.__str__()}')
@@ -26,6 +36,12 @@ class SyncBlock(AbstractInstruction):
     super().__init__(context)
     self._is_ready = True
 
+  def barrier_scope(self) -> BarrierScope:
+    return BarrierScope.GROUP
+
+  def accesses(self):
+    return ()
+
   def gen_code(self, writer):
     writer(f'{self.__str__()}')
 
@@ -40,6 +56,12 @@ class SyncGrid(AbstractInstruction):
   def __init__(self, context: Context):
     super().__init__(context)
     self._is_ready = True
+
+  def barrier_scope(self) -> BarrierScope:
+    return BarrierScope.GRID
+
+  def accesses(self):
+    return ()
 
   def gen_code(self, writer):
     writer(f'{self.__str__()}')

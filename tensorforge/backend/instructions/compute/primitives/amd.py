@@ -436,24 +436,15 @@ def matmul32(writer: Writer, C, B, A, M, N, K, kx, threads, dtype, sparse, ctx):
         tmpacc = writer.varalloc()
 
         def write_matmul(block, start, cap):
+            # NOTE: subscript by `block` *first*.  Indexing each inner map by
+            # `threads` inline builds all three of them eagerly, so e.g.
+            # block=4/threads=16 used to die with KeyError(16) raised by the
+            # unrelated 32-entry.
             scale = {
-                4: {
-                    64: 4,
-                    32: 3,
-                    16: 2,
-                    8: 1,
-                    4: 0
-                }[threads],
-                16: {
-                    64: 2,
-                    32: 1,
-                    16: 0
-                }[threads],
-                32: {
-                    64: 1,
-                    32: 0
-                }[threads]
-            }[block]
+                4: {64: 4, 32: 3, 16: 2, 8: 1, 4: 0},
+                16: {64: 2, 32: 1, 16: 0},
+                32: {64: 1, 32: 0},
+            }[block][threads]
             fn = {
                 1: f'fmacdpp16<0>()',
                 4: '__builtin_amdgcn_mfma_f32_4x4x1f32',
