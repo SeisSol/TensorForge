@@ -22,19 +22,22 @@ have the whole-kernel view that those decisions need.  ``Op.ALLOC`` is the
 seam between the two.
 """
 
-from .core import (ANY_EFFECT, BOOL, INDEX, Access, BufferType, Effect, IRError,
-                   MemSpace, Op, Operand, Region, ScalarType, Stmt, Value,
-                   accesses_conflict, collect_accesses, collect_effect, def_use,
-                   defined_within, dump, free_values, may_alias, walk)
+from .core import (ANY_EFFECT, BOOL, INDEX, TOKEN, Access, BufferType, Effect,
+                   IRError, MemSpace, Op, Operand, Region, ScalarType, Stmt,
+                   TokenType, Value, accesses_conflict, collect_accesses,
+                   collect_effect, def_use, defined_within, dump, free_values,
+                   may_alias, walk)
+from .asyncmem import check_tokens, schedule_async
 from .build import IRBuilder, access_of
 from .passes import cse, dce, licm, optimize, substitute, verify
 from .emit import Emitter, emit
 
 __all__ = [
-    'ANY_EFFECT', 'BOOL', 'INDEX', 'Access', 'BufferType', 'Effect', 'Emitter',
-    'IRBuilder', 'IRError', 'MemSpace', 'Op', 'Operand', 'Region', 'ScalarType',
-    'Stmt', 'Value', 'access_of', 'accesses_conflict', 'collect_accesses',
-    'collect_effect', 'cse', 'dce', 'def_use', 'defined_within', 'dump', 'emit',
-    'free_values', 'licm', 'may_alias', 'optimize', 'substitute', 'verify',
+    'ANY_EFFECT', 'BOOL', 'INDEX', 'TOKEN', 'Access', 'BufferType', 'Effect',
+    'Emitter', 'IRBuilder', 'IRError', 'MemSpace', 'Op', 'Operand', 'Region',
+    'ScalarType', 'Stmt', 'TokenType', 'Value', 'access_of',
+    'accesses_conflict', 'check_tokens', 'collect_accesses', 'collect_effect',
+    'cse', 'dce', 'def_use', 'defined_within', 'dump', 'emit', 'free_values',
+    'licm', 'may_alias', 'optimize', 'schedule_async', 'substitute', 'verify',
     'walk',
 ]

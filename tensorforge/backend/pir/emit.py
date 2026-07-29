@@ -22,11 +22,26 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 from tensorforge.common.basic_types import Datatype
 
 from .core import (Access, BufferType, Effect, IRError, MemSpace, Op, Operand,
-                   Region, ScalarType, Stmt, Value)
+                   Region, ScalarType, Stmt, TokenType, Value, walk)
+
+def _sm_at_least(model: str, minimum: int) -> bool:
+    digits = ''.join(c for c in str(model)[3:] if c.isdigit())
+    return str(model).startswith('sm_') and bool(digits) and int(digits) >= minimum
+
+
+# Which architectures actually have the asynchronous global -> shared path.
+# The lexic knows how the call *looks*; this table knows whether it *exists*.
+_ASYNC_ARCH = {
+    'nvidia': lambda m: _sm_at_least(m, 80),                    # cp.async
+    'amd': lambda m: str(m) in ('gfx90a', 'gfx940', 'gfx941',   # global_load_lds
+                                'gfx942', 'gfx950'),
+}
+
 
 # generic pure ops -> infix C++ operators
 _INFIX = {
     'add': '+', 'sub': '-', 'mul': '*', 'div': '/',
+    'rem': '%', 'bitand': '&', 'bitor': '|', 'shl': '<<', 'shr': '>>',
     'lt': '<', 'le': '<=', 'gt': '>', 'ge': '>=', 'eq': '==', 'ne': '!=',
     'and': '&&', 'or': '||',
 }
@@ -38,6 +53,9 @@ class Emitter:
         self.context = context
         self._names: Dict[int, str] = {}
         self._consts: Dict[int, str] = {}
+        self._async_lex = None
+        self._async_note = ''
+        self._pending: Dict[int, str] = {}   # load.async token id -> C++ name
 
     # -- naming ------------------------------------------------------------ #
 
@@ -59,9 +77,15 @@ class Emitter:
     # -- types ------------------------------------------------------------- #
 
     def ctype(self, t) -> str:
+        if isinstance(t, TokenType):
+            raise IRError('a completion token has no C++ representation; it '
+                          'must not escape into generated code')
         if isinstance(t, ScalarType):
             if t.length is None:
                 return t.base.ctype()
+            lex = self._lexic()
+            if lex is not None:
+                return lex.get_fptype(t.base.ctype(), t.length)
             return f'{t.base.ctype()}{t.length}'
         if isinstance(t, BufferType):
             return t.elem.ctype()
@@ -69,18 +93,28 @@ class Emitter:
 
     # -- lexic ------------------------------------------------------------- #
 
-    def _lexic(self):
+    def _vm(self):
+        """Accepts either a ``Context`` or a ``VM`` as ``context``."""
         if self.context is None:
             return None
-        try:
-            return self.context.get_vm().get_lexic()
-        except Exception:
-            return None
+        if hasattr(self.context, 'get_vm'):
+            return self.context.get_vm()
+        if hasattr(self.context, 'get_lexic'):
+            return self.context
+        return None
+
+    def _lexic(self):
+        vm = self._vm()
+        return None if vm is None else vm.get_lexic()
+
+    def _hw(self):
+        vm = self._vm()
+        return None if vm is None else vm.get_hw_descr()
 
     def _sync(self) -> str:
         lex = self._lexic()
-        if lex is not None and hasattr(lex, 'sync_threads'):
-            return f'{lex.sync_threads()};'
+        if lex is not None:
+            return f'{lex.sync_block()};'
         return '__syncthreads();'
 
     def _thread_idx(self, axis: str) -> str:
@@ -112,6 +146,61 @@ class Emitter:
             addr = f'{idx[i]} + {shape[i]} * ({addr})'
         return addr
 
+    def elem_size(self, base: Operand) -> int:
+        if isinstance(base, Value) and isinstance(base.type, BufferType):
+            return base.type.elem.size()
+        dt = getattr(base, 'datatype', None)
+        return dt.size() if dt is not None else 4
+
+    def _decide_async(self, body: Tuple[Stmt, ...]) -> None:
+        """One decision per kernel body, not per copy.
+
+        The wait counters are a single hardware resource: if even one copy has
+        to take the synchronous fallback, the counting no longer describes what
+        is in flight, so the whole body goes synchronous.  Mixed mode would be
+        silently wrong rather than merely slow.
+        """
+        self._async_lex = None
+        copies = [s for s, _ in walk(body) if s.op == Op.COPY_ASYNC]
+        if not copies:
+            return
+
+        lex, hw = self._lexic(), self._hw()
+        if lex is None or hw is None:
+            self._async_note = 'no hardware description available'
+            return
+        supported = _ASYNC_ARCH.get(getattr(hw, 'vendor', None))
+        if supported is None or not supported(getattr(hw, 'model', '')):
+            self._async_note = f'{getattr(hw, "model", "?")} has no async copy path'
+            return
+
+        sizes = lex.copy_async_sizes()
+        for c in copies:
+            nbytes = c.attr('elems', 1) * self.elem_size(c.copy_dst)
+            if nbytes not in sizes:
+                self._async_note = (f'{nbytes} B per thread is not one of '
+                                    f'{sizes} on {hw.model}')
+                return
+        self._async_lex = lex
+
+    def zero(self, t) -> str:
+        return t.base.literal(0)
+
+    def declare(self, v: Value, expr: str, s: Stmt, name: str = None) -> None:
+        """Emit `Ty name = expr;`, folding a predicate into a select.
+
+        A predicated statement that produces a value must *not* be wrapped in a
+        guard block --- the declaration would be scoped inside it and the value
+        would be unusable afterwards.  Lowering to a select also keeps the
+        statement hoistable, which a guard region never is.
+        """
+        if s.predicate is not None:
+            other = s.attr('other')
+            other = (self.operand(other) if other is not None
+                     else self.zero(v.type))
+            expr = f'{self.operand(s.predicate)} ? ({expr}) : ({other})'
+        self.writer(f'{self.ctype(v.type)} {name or self.name(v)} = {expr};')
+
     def base_name(self, base: Operand) -> str:
         if isinstance(base, Value):
             return self.name(base)
@@ -120,17 +209,23 @@ class Emitter:
     # -- driver ------------------------------------------------------------ #
 
     def run(self, body: Tuple[Stmt, ...]) -> None:
+        self._decide_async(body)
+        if self._async_lex is None and self._async_note:
+            self.writer.Comment(f'async copies lowered synchronously: '
+                                f'{self._async_note}')
         self._emit_body(body, ())
 
-    def _emit_body(self, body: Tuple[Stmt, ...], yield_to: Tuple[str, ...]) -> None:
+    def _emit_body(self, body: Tuple[Stmt, ...],
+                   yield_to: Tuple[Optional[str], ...]) -> None:
         for s in body:
-            if s.predicate is not None and s.op not in (Op.YIELD,):
+            declares = s.op in Op.DECLARING or (s.target and not s.regions)
+            if s.predicate is not None and s.op != Op.YIELD and not declares:
                 with self.writer.If(self.operand(s.predicate)):
                     self._emit_stmt(s, yield_to)
             else:
                 self._emit_stmt(s, yield_to)
 
-    def _emit_stmt(self, s: Stmt, yield_to: Tuple[str, ...]) -> None:
+    def _emit_stmt(self, s: Stmt, yield_to: Tuple[Optional[str], ...]) -> None:
         w = self.writer
         op = s.op
 
@@ -142,6 +237,8 @@ class Emitter:
 
         if op == Op.YIELD:
             for target, val in zip(yield_to, s.args):
+                if target is None:      # token: lives only in the IR
+                    continue
                 src = self.operand(val)
                 if src != target:
                     w(f'{target} = {src};')
@@ -154,7 +251,7 @@ class Emitter:
         if op == Op.RAWEXPR:
             v = s.target[0]
             text = s.text.format(*[self.operand(a) for a in s.args])
-            w(f'{self.ctype(v.type)} {self.name(v)} = {text};')
+            self.declare(v, text, s)
             return
 
         if op == Op.RAWBLOCK:
@@ -182,13 +279,72 @@ class Emitter:
         if op == Op.LOAD:
             v = s.target[0]
             addr = self.address(s.args[0], s.args[1:])
-            w(f'{self.ctype(v.type)} {self.name(v)} = '
-              f'{self.base_name(s.args[0])}[{addr}];')
+            self.declare(v, f'{self.base_name(s.args[0])}[{addr}]', s)
+            return
+
+        if op == Op.LOAD_ASYNC:
+            tok = s.target[0]
+            t = s.attr('types', ())[0]
+            name = f'v{tok.id}_{s.attr("hint", "ld")}'
+            self._pending[tok.id] = name
+            addr = self.address(s.load_base, s.load_index)
+            # On AMD this is an ordinary global_load whose s_waitcnt we place
+            # ourselves; on NVIDIA the scoreboard stalls at the first use and
+            # the matching wait lowers to nothing.
+            self.declare(Value(tok.id, t), f'{self.base_name(s.load_base)}[{addr}]',
+                         s, name=name)
             return
 
         if op == Op.STORE:
             addr = self.address(s.args[0], s.args[2:])
             w(f'{self.base_name(s.args[0])}[{addr}] = {self.operand(s.args[1])};')
+            return
+
+        if op == Op.COPY_ASYNC:
+            dst_b = self.base_name(s.copy_dst)
+            src_b = self.base_name(s.copy_src)
+            dst_a = self.address(s.copy_dst, s.copy_dst_index)
+            src_a = self.address(s.copy_src, s.copy_src_index)
+            elems = s.attr('elems', 1)
+            if self._async_lex is not None:
+                nbytes = elems * self.elem_size(s.copy_dst)
+                w(self._async_lex.copy_async(f'&{dst_b}[{dst_a}]',
+                                             f'&{src_b}[{src_a}]', nbytes))
+                commit = self._async_lex.commit_async()
+                if commit:
+                    w(commit)
+            elif elems == 1:
+                w(f'{dst_b}[{dst_a}] = {src_b}[{src_a}];')
+            else:
+                c = f'c{s.target[0].id}'
+                w(f'for (int {c} = 0; {c} < {elems}; ++{c}) '
+                  f'{{ {dst_b}[({dst_a}) + {c}] = {src_b}[({src_a}) + {c}]; }}')
+            return
+
+        if op == Op.WAIT:
+            # released values simply alias the variable the issue declared
+            tok = s.waited
+            if tok is not None and tok.id in self._pending:
+                for v in s.target:
+                    self.bind(v, self._pending[tok.id])
+            lex = self._lexic()
+            if lex is None:
+                return
+            cls = s.attr('counter', 'copy')
+            # AMD counts both classes in one vmcnt -- but only while the copy
+            # path is actually the hardware one; if copies fell back to plain
+            # assignments they are not in flight and must not be counted.
+            unified = (self._async_lex is not None and
+                       getattr(self._hw(), 'vendor', None) == 'amd')
+            n = s.attr('prior_unified' if unified else 'prior', 0)
+            texts = []
+            if cls in ('load', 'all'):
+                texts.append(lex.wait_async_regs(n))
+            if cls in ('copy', 'all') and self._async_lex is not None:
+                texts.append(lex.wait_async(n))
+            for txt in texts:
+                if txt:
+                    w(txt)
             return
 
         if op == Op.CALL:
@@ -199,7 +355,7 @@ class Emitter:
                 return
             v = s.target[0]
             args = ', '.join(self.operand(a) for a in s.args)
-            w(f'{self.ctype(v.type)} {self.name(v)} = {callee}({args});')
+            self.declare(v, f'{callee}({args})', s)
             return
 
         if op == Op.FOR:
@@ -224,7 +380,7 @@ class Emitter:
                 expr = f'-{args[0]}'
             else:
                 expr = f'{op}({", ".join(args)})'
-            w(f'{self.ctype(v.type)} {self.name(v)} = {expr};')
+            self.declare(v, expr, s)
             return
 
         raise IRError(f'no lowering for op {op!r}')
@@ -238,8 +394,13 @@ class Emitter:
 
         # iter_args and results share one C++ variable: no copy at the latch,
         # and the loop reads like an ordinary accumulator loop.
-        targets: List[str] = []
+        targets: List[Optional[str]] = []
         for arg, init, res in zip(s.iter_args, s.loop_inits, s.target):
+            if isinstance(arg.type, TokenType):
+                # a carried token is pure bookkeeping; the hardware counter is
+                # what actually crosses the back edge
+                targets.append(None)
+                continue
             nm = self.name(arg)
             self.bind(res, nm)
             w(f'{self.ctype(arg.type)} {nm} = {self.operand(init)};')
@@ -256,8 +417,11 @@ class Emitter:
 
     def _emit_if(self, s: Stmt) -> None:
         w = self.writer
-        targets: List[str] = []
+        targets: List[Optional[str]] = []
         for res in s.target:
+            if isinstance(res.type, TokenType):
+                targets.append(None)
+                continue
             nm = self.name(res)
             w(f'{self.ctype(res.type)} {nm};')
             targets.append(nm)

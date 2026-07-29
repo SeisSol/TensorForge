@@ -124,7 +124,24 @@ class BufferType:
         return f'buffer<{dims}x{self.elem}, {self.space.name.lower()}>'
 
 
-IRType = Union[ScalarType, BufferType]
+@dataclass(frozen=True)
+class TokenType:
+    """Completion token of an asynchronous memory operation.
+
+    A token is an ordinary SSA value, so "this wait belongs to that copy" is a
+    def-use edge rather than a side channel.  Carrying a token through a
+    ``for`` loop's iter_args is exactly how a double-buffered pipeline is
+    expressed: the copy issued in iteration k is waited in iteration k+1.
+    """
+
+    def __repr__(self):
+        return 'token'
+
+
+TOKEN = TokenType()
+
+
+IRType = Union[ScalarType, BufferType, TokenType]
 
 BOOL = ScalarType(Datatype.BOOL)
 INDEX = ScalarType(Datatype.I32)
@@ -140,6 +157,7 @@ class Effect(IntFlag):
     WRITE = auto()      # writes memory
     ATOMIC = auto()     # read-modify-write
     BARRIER = auto()    # block-wide / wave-wide synchronisation
+    ASYNC = auto()      # issued here, completes only at a matching `wait`
     UNKNOWN = auto()    # opaque raw text: assume it does everything
 
     @property
@@ -147,7 +165,8 @@ class Effect(IntFlag):
         return bool(self & Effect.UNKNOWN)
 
 
-ANY_EFFECT = Effect.READ | Effect.WRITE | Effect.ATOMIC | Effect.BARRIER | Effect.UNKNOWN
+ANY_EFFECT = (Effect.READ | Effect.WRITE | Effect.ATOMIC | Effect.BARRIER |
+              Effect.ASYNC | Effect.UNKNOWN)
 
 
 @dataclass(frozen=True)
@@ -266,6 +285,9 @@ class Op:
     ALLOC = 'alloc'
     LOAD = 'load'
     STORE = 'store'
+    COPY_ASYNC = 'copy.async'   # global -> shared, completes at its wait
+    LOAD_ASYNC = 'load.async'   # global -> register, ditto
+    WAIT = 'wait'
     BARRIER = 'barrier'
     CALL = 'call'
     # legacy escape hatches
@@ -275,6 +297,10 @@ class Op:
 
     CONTROL = frozenset({IF, FOR, RAWBLOCK})
     RAW = frozenset({RAWEXPR, RAWSTMT, RAWBLOCK})
+    ASYNC = frozenset({COPY_ASYNC, LOAD_ASYNC})
+    # statements that lower to a C++ declaration and therefore handle a
+    # predicate themselves (as a select) rather than through a guard block
+    DECLARING = frozenset({RAWEXPR, LOAD, LOAD_ASYNC, CALL})
 
 
 @dataclass(frozen=True)
@@ -324,7 +350,8 @@ class Stmt:
     @property
     def has_side_effects(self) -> bool:
         return bool(self.effect & (Effect.WRITE | Effect.ATOMIC |
-                                   Effect.BARRIER | Effect.UNKNOWN))
+                                   Effect.BARRIER | Effect.ASYNC |
+                                   Effect.UNKNOWN))
 
     def writes(self) -> Tuple[Access, ...]:
         return tuple(a for a in self.accesses if a.writes)
@@ -355,6 +382,55 @@ class Stmt:
     def iter_args(self) -> Tuple[Value, ...]:
         assert self.op == Op.FOR
         return self.regions[0].args[1:]
+
+    # copy.async: args = (dst, src, *dst_index, *src_index); the split is in
+    # the `ndst` attribute so that the positional convention stays local.
+
+    @property
+    def copy_dst(self) -> Operand:
+        assert self.op == Op.COPY_ASYNC
+        return self.args[0]
+
+    @property
+    def copy_src(self) -> Operand:
+        assert self.op == Op.COPY_ASYNC
+        return self.args[1]
+
+    @property
+    def copy_dst_index(self) -> Tuple[Operand, ...]:
+        assert self.op == Op.COPY_ASYNC
+        return self.args[2:2 + self.attr('ndst', 0)]
+
+    @property
+    def copy_src_index(self) -> Tuple[Operand, ...]:
+        assert self.op == Op.COPY_ASYNC
+        return self.args[2 + self.attr('ndst', 0):]
+
+    @property
+    def load_base(self) -> Operand:
+        assert self.op == Op.LOAD_ASYNC
+        return self.args[0]
+
+    @property
+    def load_index(self) -> Tuple[Operand, ...]:
+        assert self.op == Op.LOAD_ASYNC
+        return self.args[1:]
+
+    @property
+    def counter(self) -> str:
+        """Which completion counter this async statement belongs to.
+
+        AMD tracks global->LDS and global->VGPR in the same `vmcnt`; NVIDIA
+        has a group counter for `cp.async` and hardware scoreboarding for
+        register loads.  Keeping the classes apart lets the emitter decide.
+        """
+        return self.attr('counter', 'copy')
+
+    @property
+    def waited(self) -> Optional[Value]:
+        """The token this `wait` consumes; None means "drain everything"."""
+        assert self.op == Op.WAIT
+        return self.args[0] if self.args else None
 
 
 # --------------------------------------------------------------------------- #

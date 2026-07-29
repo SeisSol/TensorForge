@@ -16,9 +16,10 @@ from dataclasses import replace
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from .core import (Access, BufferType, Effect, IRError, MemSpace, Op, Operand,
-                   Region, ScalarType, Stmt, Value, accesses_conflict,
-                   collect_accesses, collect_effect, def_use, defined_within,
-                   walk)
+                   Region, ScalarType, Stmt, TokenType, Value,
+                   accesses_conflict, collect_accesses, collect_effect,
+                   def_use, defined_within, walk)
+from .asyncmem import check_tokens, schedule_async
 
 
 # --------------------------------------------------------------------------- #
@@ -36,7 +37,8 @@ def verify(body: Tuple[Stmt, ...], strict: bool = True) -> List[str]:
     diag: List[str] = []
 
     try:
-        def_use(body)           # single-assignment / single-binding
+        defs, uses = def_use(body)  # single-assignment / single-binding
+        diag.extend(check_tokens(body, defs, uses))
     except IRError as e:
         diag.append(str(e))
 
@@ -144,6 +146,30 @@ def _check_scope(body: Tuple[Stmt, ...], live: set, diag: List[str],
         elif s.op in (Op.LOAD, Op.STORE):
             if not s.accesses:
                 diag.append(f'{s.op}: must declare at least one access')
+
+        elif s.op == Op.LOAD_ASYNC:
+            if len(s.target) != 1 or not isinstance(s.target[0].type, TokenType):
+                diag.append('load.async: must produce exactly one token')
+            if not s.accesses:
+                diag.append('load.async: must declare its read')
+            if not (s.effect & Effect.ASYNC):
+                diag.append('load.async: must carry Effect.ASYNC')
+
+        elif s.op == Op.COPY_ASYNC:
+            if len(s.target) != 1 or not isinstance(s.target[0].type, TokenType):
+                diag.append('copy.async: must produce exactly one token')
+            if len(s.args) < 2:
+                diag.append('copy.async: needs a destination and a source')
+            if len(s.accesses) < 2:
+                diag.append('copy.async: must declare the read and the write')
+            if not (s.effect & Effect.ASYNC):
+                diag.append('copy.async: must carry Effect.ASYNC')
+
+        elif s.op == Op.WAIT:
+            if len(s.args) > 1:
+                diag.append('wait: takes at most one token')
+            if s.args and not isinstance(_typeof(s.args[0]), TokenType):
+                diag.append('wait: argument must be a completion token')
 
         # -- recurse ------------------------------------------------------- #
         if s.regions:
@@ -350,11 +376,22 @@ def _split_invariant(loop: Stmt) -> Tuple[List[Stmt], Tuple[Stmt, ...]]:
 # Convenience pipeline
 # --------------------------------------------------------------------------- #
 
-def optimize(body: Tuple[Stmt, ...], dump_hook=None) -> Tuple[Stmt, ...]:
-    """The default pipeline.  ``dump_hook(name, body)`` sees every stage."""
+def optimize(body: Tuple[Stmt, ...], dump_hook=None,
+             diagnostics: Optional[List[str]] = None) -> Tuple[Stmt, ...]:
+    """The default pipeline.  ``dump_hook(name, body)`` sees every stage.
+
+    ``schedule_async`` runs last on purpose: the wait counts depend on the
+    final issue order, so anything that may still move statements has to have
+    happened already.
+    """
     stages = (('cse', cse), ('licm', licm), ('cse2', cse), ('dce', dce))
     for name, fn in stages:
         body = fn(body)
         if dump_hook is not None:
             dump_hook(name, body)
+    body, diag = schedule_async(body)
+    if diagnostics is not None:
+        diagnostics.extend(diag)
+    if dump_hook is not None:
+        dump_hook('async', body)
     return body

@@ -78,3 +78,31 @@ class Lexic(ABC):
 
   def glb_load(self, lhs, rhs, nontemporal=False):
     return f'{lhs} = {rhs};'
+
+  # --- asynchronous global -> shared copies --------------------------------
+  # A backend without a hardware path returns None; the caller then emits a
+  # synchronous fallback, so correctness never depends on these being present.
+  # All three are *per thread*: every lane copies `nbytes` bytes.
+
+  def copy_async_sizes(self):
+    """Per-thread copy sizes in bytes the hardware path accepts."""
+    return ()
+
+  def copy_async(self, dst, src, nbytes):
+    return None
+
+  def commit_async(self):
+    return None
+
+  def wait_async(self, prior):
+    """Wait until at most `prior` issued copies are still in flight."""
+    return None
+
+  def wait_async_regs(self, prior):
+    """Same, for global -> register loads.
+
+    Separate from `wait_async` because the two are not the same counter
+    everywhere: AMD tracks both in `vmcnt`, while NVIDIA scoreboards register
+    loads in hardware and needs no instruction at all (hence None).
+    """
+    return None

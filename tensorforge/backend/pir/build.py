@@ -24,8 +24,9 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 from tensorforge.common.basic_types import Datatype
 
-from .core import (BOOL, INDEX, Access, BufferType, Effect, IRError, MemSpace,
-                   Op, Operand, Region, ScalarType, Stmt, Value, dump)
+from .core import (BOOL, INDEX, TOKEN, Access, BufferType, Effect, IRError,
+                   MemSpace, Op, Operand, Region, ScalarType, Stmt, TokenType,
+                   Value, dump)
 
 
 def access_of(symbol: Any, kind: Effect) -> Access:
@@ -51,6 +52,13 @@ class IRBuilder:
         self._stack: List[_Scope] = [_Scope(kind='root')]
         self._fptype = fptype
         self.context = context
+        # token id -> the accesses its copy performs, so that `wait` can carry
+        # the same ones without the caller having to repeat them.
+        self._token_accesses: Dict[int, Tuple[Access, ...]] = {}
+        # token id -> types of the values its `wait` releases (empty for a
+        # copy, one entry per loaded value for `load.async`)
+        self._token_results: Dict[int, Tuple[Any, ...]] = {}
+        self._token_uniform: Dict[int, bool] = {}
 
     # -- values ------------------------------------------------------------ #
 
@@ -134,7 +142,9 @@ class IRBuilder:
         return v
 
     def load(self, base: Any, *indices: Operand, type_=None, hint: str = '',
-             space: Optional[MemSpace] = None, uniform: Optional[bool] = None) -> Value:
+             space: Optional[MemSpace] = None, uniform: Optional[bool] = None,
+             predicate: Optional[Value] = None,
+             other: Optional[Operand] = None) -> Value:
         if space is None:
             space = (base.type.space if isinstance(base, Value)
                      and isinstance(base.type, BufferType)
@@ -146,9 +156,12 @@ class IRBuilder:
         if uniform is None:
             uniform = all(i.uniform for i in indices if isinstance(i, Value))
         v = self.value(type_, hint=hint or 'ld', uniform=uniform)
+        attrs = (('other', other),) if other is not None else ()
         self._emit_op(Op.LOAD, (v,), (base,) + tuple(indices),
-                      pure=False, movable=True, effect=Effect.READ,
-                      accesses=(Access(Effect.READ, space, base),))
+                      predicate=predicate, pure=False, movable=True,
+                      effect=Effect.READ,
+                      accesses=(Access(Effect.READ, space, base),),
+                      attrs=attrs)
         return v
 
     def store(self, base: Any, value: Operand, *indices: Operand,
@@ -160,6 +173,111 @@ class IRBuilder:
         return self._emit_op(Op.STORE, (), (base, value) + tuple(indices),
                              pure=False, movable=True, effect=Effect.WRITE,
                              accesses=(Access(Effect.WRITE, space, base),))
+
+    def copy_async(self, dst: Any, src: Any, *,
+                   dst_index: Sequence[Operand] = (),
+                   src_index: Sequence[Operand] = (),
+                   elems: int = 1,
+                   dst_space: Optional[MemSpace] = None,
+                   src_space: Optional[MemSpace] = None,
+                   hint: str = 'cp') -> Value:
+        """Issue an asynchronous copy ``src -> dst``; returns its token.
+
+        The write to ``dst`` is not observable until the matching :meth:`wait`.
+        Copy and wait carry the *same* accesses, which is what keeps any read
+        of ``dst`` from being hoisted above the wait --- the reorder machinery
+        needs no notion of asynchrony beyond that.
+        """
+        dst_space = dst_space if dst_space is not None else self._space_of(dst)
+        src_space = src_space if src_space is not None else self._space_of(src)
+        accesses = (Access(Effect.READ, src_space, src),
+                    Access(Effect.WRITE, dst_space, dst))
+
+        tok = self.value(TOKEN, hint=hint)
+        self._emit_op(Op.COPY_ASYNC, (tok,),
+                      (dst, src) + tuple(dst_index) + tuple(src_index),
+                      pure=False, movable=True,
+                      effect=Effect.READ | Effect.WRITE | Effect.ASYNC,
+                      accesses=accesses,
+                      attrs=(('ndst', len(tuple(dst_index))), ('elems', elems),
+                             ('counter', 'copy')))
+        self._token_accesses[tok.id] = accesses
+        self._token_results[tok.id] = ()
+        return tok
+
+    def load_async(self, base: Any, *indices: Operand, type_=None,
+                   hint: str = 'ld', space: Optional[MemSpace] = None,
+                   predicate: Optional[Value] = None,
+                   other: Optional[Operand] = None,
+                   uniform: Optional[bool] = None) -> Value:
+        """Issue a global -> register load; returns its token.
+
+        The loaded value does not exist until :meth:`wait` releases it, so the
+        use-after-wait ordering is plain SSA and needs no extra rule.  On AMD
+        this is an ordinary `global_load` whose `s_waitcnt` we place ourselves;
+        on NVIDIA the hardware scoreboard does it, and the wait lowers to
+        nothing --- the op is still worth having there because it expresses how
+        far the load may be hoisted.
+        """
+        if space is None:
+            space = self._space_of(base)
+        if type_ is None:
+            type_ = (ScalarType(base.type.elem)
+                     if isinstance(base, Value) and isinstance(base.type, BufferType)
+                     else ScalarType(self._fptype))
+        if uniform is None:
+            uniform = all(i.uniform for i in indices if isinstance(i, Value))
+
+        accesses = (Access(Effect.READ, space, base),)
+        tok = self.value(TOKEN, hint=hint)
+        attrs: Tuple[Tuple[str, Any], ...] = (
+            ('counter', 'load'), ('types', (type_,)), ('uniform', uniform),
+            ('hint', hint))
+        if other is not None:
+            attrs += (('other', other),)
+        self._emit_op(Op.LOAD_ASYNC, (tok,), (base,) + tuple(indices),
+                      predicate=predicate, pure=False, movable=True,
+                      effect=Effect.READ | Effect.ASYNC,
+                      accesses=accesses, attrs=attrs)
+        self._token_accesses[tok.id] = accesses
+        self._token_results[tok.id] = (type_,)
+        self._token_uniform[tok.id] = uniform
+        return tok
+
+    def wait(self, token: Optional[Value] = None) -> Stmt:
+        """Wait for ``token`` (or, with ``None``, drain every outstanding copy).
+
+        The concrete counter value (``vmcnt(N)`` / ``wait_prior(N)``) is not
+        decided here --- ``schedule_async`` derives it from the outstanding set
+        once the schedule is final.
+        """
+        if token is None:
+            accesses = (Access(Effect.READ | Effect.WRITE, MemSpace.UNKNOWN, None),)
+        else:
+            accesses = self._token_accesses.get(
+                token.id,
+                (Access(Effect.READ | Effect.WRITE, MemSpace.UNKNOWN, None),))
+        results: Tuple[Value, ...] = ()
+        if token is not None:
+            types = self._token_results.get(token.id, ())
+            results = tuple(self.value(t, hint=token.hint or 'ld',
+                                       uniform=self._token_uniform.get(token.id, True))
+                            for t in types)
+        stmt = self._emit_op(Op.WAIT, results,
+                             () if token is None else (token,),
+                             pure=False, movable=True,
+                             effect=Effect.READ | Effect.WRITE | Effect.ASYNC,
+                             accesses=accesses)
+        if len(results) == 1:
+            return results[0]
+        if results:
+            return results
+        return stmt
+
+    def _space_of(self, base: Any) -> MemSpace:
+        if isinstance(base, Value) and isinstance(base.type, BufferType):
+            return base.type.space
+        return MemSpace.from_symbol_type(getattr(base, 'stype', None))
 
     def barrier(self, scope: str = 'block') -> Stmt:
         return self._emit_op(Op.BARRIER, (), (), pure=False, movable=False,
@@ -350,6 +468,14 @@ class _ForHandle:
         self.iter_args = tuple(builder.value(t, hint=f'acc{i}')
                                for i, t in enumerate(types))
         self.results: Tuple[Value, ...] = ()
+        # a token carried through the loop keeps the accesses of its copy
+        for arg, init in zip(self.iter_args, inits):
+            if isinstance(arg.type, TokenType) and isinstance(init, Value):
+                acc = builder._token_accesses.get(init.id)
+                if acc is not None:
+                    builder._token_accesses[arg.id] = acc
+                builder._token_results[arg.id] = builder._token_results.get(init.id, ())
+                builder._token_uniform[arg.id] = builder._token_uniform.get(init.id, True)
 
     def __enter__(self) -> '_ForHandle':
         self.builder.push((self.induction,) + self.iter_args, kind='for')
@@ -361,6 +487,14 @@ class _ForHandle:
             return False
         self.results = tuple(self.builder.value(t, hint=f'res{i}')
                              for i, t in enumerate(self._types))
+        for res, y in zip(self.results, region.yielded):
+            if isinstance(res.type, TokenType) and isinstance(y, Value):
+                acc = self.builder._token_accesses.get(y.id)
+                if acc is not None:
+                    self.builder._token_accesses[res.id] = acc
+                b = self.builder
+                b._token_results[res.id] = b._token_results.get(y.id, ())
+                b._token_uniform[res.id] = b._token_uniform.get(y.id, True)
         attrs = (('unroll', True),) if self._unroll else ()
         self.builder.emit(Stmt(op=Op.FOR, target=self.results, args=self._args,
                                regions=(region,), pure=False, movable=False,

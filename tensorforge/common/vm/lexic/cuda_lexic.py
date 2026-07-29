@@ -119,7 +119,22 @@ class CudaLexic(Lexic):
     return self.get_tid_counter(self.thread_idx_y, self.block_dim_y, self.block_idx_x)
 
   def get_headers(self):
-    return ["tensorforge_device/cuda.h"]
+    return ["tensorforge_device/cuda.h", "cuda_pipeline.h"]
+
+  # cp.async: sm_80 and newer.  Gating on the architecture happens in the
+  # caller (pir.emit), which has the hardware descriptor; the lexic only
+  # knows how the text looks.
+  def copy_async_sizes(self):
+    return (4, 8, 16)
+
+  def copy_async(self, dst, src, nbytes):
+    return f'__pipeline_memcpy_async({dst}, {src}, {nbytes});'
+
+  def commit_async(self):
+    return '__pipeline_commit();'
+
+  def wait_async(self, prior):
+    return f'__pipeline_wait_prior({prior});'
 
   def get_fptype(self, fptype, length=1):
     if length <= 4:

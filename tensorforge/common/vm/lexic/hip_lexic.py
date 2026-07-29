@@ -69,6 +69,45 @@ class HipLexic(CudaLexic):
   def get_headers(self):
     return ["hip/hip_runtime.h", "tensorforge_device/hip.h"]
 
+  # CDNA has no __pipeline_*; the equivalent is a direct global->LDS load
+  # plus an explicit vmcnt wait.  gfx90a/gfx94x accept 1, 2 and 4 bytes per
+  # lane, gfx950 additionally 12 and 16.
+  def copy_async_sizes(self):
+    if self._underlying_hardware != 'amd':
+      return super().copy_async_sizes()
+    return (1, 2, 4)
+
+  def copy_async(self, dst, src, nbytes):
+    if self._underlying_hardware != 'amd':
+      return super().copy_async(dst, src, nbytes)
+    
+    # TODO: use address space templates from tensorforge_device/hip.h
+    return (f'__builtin_amdgcn_global_load_lds('
+            f'(const __attribute__((address_space(1))) uint32_t*)({src}), '
+            f'(__attribute__((address_space(3))) uint32_t*)({dst}), '
+            f'{nbytes}, 0, 0);')
+
+  def commit_async(self):
+    if self._underlying_hardware != 'amd':
+      return super().commit_async()
+    return ''
+
+  def wait_async(self, prior):
+    if self._underlying_hardware != 'amd':
+      return super().wait_async(prior)
+    # Let the assembler encode vmcnt: the encoding is split across
+    # non-contiguous bits on gfx9 and moved again on gfx10+, and
+    # __builtin_amdgcn_s_waitcnt takes the *encoded* immediate.
+    # TODO: remove again (and rely implicitly), replace by async waits (cf. latest LLVM)
+    return f'__asm__ volatile("s_waitcnt vmcnt({prior})" ::: "memory");'
+
+  def wait_async_regs(self, prior):
+    # Same counter as the LDS path: on CDNA every vector memory operation,
+    # global->VGPR included, decrements vmcnt.
+    if self._underlying_hardware != 'amd':
+      return super().wait_async_regs(prior)
+    return self.wait_async(prior)
+
   def get_fptype(self, fptype, length=1):
     return f'tensorforge::VectorT<{fptype}, {length}>'
 

@@ -15,8 +15,10 @@ from __future__ import annotations
 from tensorforge.common.basic_types import Datatype
 from tensorforge.backend.writer import Writer
 from tensorforge.backend import pir
-from tensorforge.backend.pir import (BOOL, Effect, IRBuilder, MemSpace, Op,
-                                     ScalarType, dump, emit, optimize, verify)
+from tensorforge.backend.pir import (BOOL, INDEX, TOKEN, Effect, IRBuilder,
+                                     MemSpace, Op, ScalarType, dump, emit,
+                                     optimize, schedule_async, verify)
+from tensorforge.common.vm.vm import vm_factory
 
 F32 = ScalarType(Datatype.F32)
 K = 35
@@ -118,6 +120,106 @@ def build_select():
     return b.finish(), st
 
 
+TILES = 8
+TILE = 64
+
+
+def build_pipeline():
+    """Double-buffered global -> LDS pipeline, the reason tokens exist.
+
+    The copy issued in iteration k is waited in iteration k+1; the token rides
+    through the loop's iter_args next to the accumulator.
+    """
+    b = IRBuilder(fptype=Datatype.F32)
+    # leading dimension first (DataView convention): the thread index is the
+    # fastest-varying axis, so lanes stay coalesced and the buffer index picks
+    # the half of the double buffer.
+    glb = b.alloc(Datatype.F32, (TILE, TILES), MemSpace.GLOBAL, hint='glb')
+    lds = b.alloc(Datatype.F32, (TILE, 2), MemSpace.SHARED, hint='lds')
+    tid = b.thread_id('x')
+    zero = b.const(0.0)
+
+    # prologue: fill buffer 0
+    t0 = b.copy_async(lds, glb, dst_index=(tid, 0), src_index=(tid, 0))
+
+    loop = b.for_(0, TILES - 1, 1, inits=(t0, zero), types=(TOKEN, F32), hint='k')
+    with loop:
+        k = loop.induction
+        tok, acc = loop.iter_args
+        nxt = b.op('add', INDEX, k, 1, hint='kn')
+        par = b.op('rem', INDEX, nxt, 2, hint='par')
+        cur = b.op('rem', INDEX, k, 2, hint='cur')
+        # issue k+1 first, then wait for k: that is what buys the overlap
+        t1 = b.copy_async(lds, glb, dst_index=(tid, par), src_index=(tid, nxt))
+        b.wait(tok)
+        b.barrier()
+        x = b.load(lds, tid, cur, hint='x')
+        acc2 = b.op('add', F32, acc, x, hint='sum')
+        b.barrier()
+        loop.yield_(t1, acc2)
+
+    b.wait(loop.results[0])
+    return b.finish(), loop
+
+
+def build_reg_prefetch(depth=4):
+    """Global -> register prefetch: issue `depth` loads, consume them in order.
+
+    The classic AMD idiom --- each wait only needs the loads issued after it to
+    stay in flight, so the counts run 3, 2, 1, 0.
+    """
+    b = IRBuilder(fptype=Datatype.F32)
+    glb = b.alloc(Datatype.F32, (TILE, TILES), MemSpace.GLOBAL, hint='glb')
+    tid = b.thread_id('x')
+    toks = [b.load_async(glb, tid, i, hint=f'p{i}') for i in range(depth)]
+    acc = b.const(0.0)
+    for t in toks:
+        v = b.wait(t)
+        acc = b.op('add', F32, acc, v, hint='s')
+    return b.finish()
+
+
+def build_masked():
+    """A predicated load must become a select, not a guard block."""
+    b = IRBuilder(fptype=Datatype.F32)
+    glb = b.alloc(Datatype.F32, (TILE, TILES), MemSpace.GLOBAL, hint='glb')
+    tid = b.thread_id('x')
+    ok = b.op('lt', BOOL, tid, 9, hint='ok')
+    x = b.load(glb, tid, 0, hint='x', predicate=ok)
+    b.op('mul', F32, x, x, hint='y')
+    return b.finish()
+
+
+def build_mixed():
+    """One copy and one register load in flight at once."""
+    b = IRBuilder(fptype=Datatype.F32)
+    glb = b.alloc(Datatype.F32, (TILE, TILES), MemSpace.GLOBAL, hint='glb')
+    lds = b.alloc(Datatype.F32, (TILE, 2), MemSpace.SHARED, hint='lds')
+    tid = b.thread_id('x')
+    tc = b.copy_async(lds, glb, dst_index=(tid, 0), src_index=(tid, 0))
+    tl = b.load_async(glb, tid, 1, hint='r')
+    b.wait(tc)
+    b.wait(tl)
+    return b.finish()
+
+
+def build_carried_load():
+    """Carrying a load.async token across the back edge must be rejected."""
+    b = IRBuilder(fptype=Datatype.F32)
+    glb = b.alloc(Datatype.F32, (TILE, TILES), MemSpace.GLOBAL, hint='glb')
+    tid = b.thread_id('x')
+    t0 = b.load_async(glb, tid, 0, hint='p')
+    loop = b.for_(0, TILES - 1, 1, inits=(t0,), types=(TOKEN,), hint='k')
+    with loop:
+        k = loop.induction
+        nxt = b.op('add', INDEX, k, 1, hint='kn')
+        t1 = b.load_async(glb, tid, nxt, hint='p')
+        b.wait(loop.iter_args[0])
+        loop.yield_(t1)
+    b.wait(loop.results[0])
+    return b.finish()
+
+
 def _count(body, op):
     return sum(1 for s, _ in pir.walk(body) if s.op == op)
 
@@ -183,6 +285,74 @@ def main():
     emit(sel, sw)
     print('\n=== if/else with results ===')
     print(sw.get_src())
+
+    # -- async pipeline ---------------------------------------------------- #
+    pipe, _ = build_pipeline()
+    verify(pipe)
+    pipe, adiag = schedule_async(pipe)
+    assert not adiag, adiag
+    waits = [s for s, _ in pir.walk(pipe) if s.op == Op.WAIT]
+    assert [x.attr('prior') for x in waits] == [1, 0], \
+        [x.attr('prior') for x in waits]
+    print('\n=== async pipeline (prior counts derived) ===')
+    print(dump(pipe))
+
+    for arch, backend in (('sm_80', 'cuda'), ('gfx942', 'hip'), ('sm_70', 'cuda')):
+        pw = Writer()
+        emit(pipe, pw, vm_factory(arch, backend, 'float'))
+        print(f'\n--- {arch}/{backend} ---')
+        print(pw.get_src())
+
+    # an unwaited copy is reported
+    b2 = IRBuilder(fptype=Datatype.F32)
+    g2 = b2.alloc(Datatype.F32, (4,), MemSpace.GLOBAL, hint='g')
+    l2 = b2.alloc(Datatype.F32, (4,), MemSpace.SHARED, hint='l')
+    b2.copy_async(l2, g2, dst_index=(0,), src_index=(0,))
+    leaked = b2.finish()
+    assert any('never' in m for m in verify(leaked, strict=False))
+
+    # -- global -> register prefetch --------------------------------------- #
+    regs = build_reg_prefetch()
+    verify(regs)
+    regs, rdiag = schedule_async(regs)
+    assert not rdiag, rdiag
+    priors = [x.attr('prior') for x, _ in pir.walk(regs) if x.op == Op.WAIT]
+    assert priors == [3, 2, 1, 0], priors
+    for arch, backend in (('gfx942', 'hip'), ('sm_80', 'cuda')):
+        rw = Writer()
+        emit(regs, rw, vm_factory(arch, backend, 'float'))
+        print(f'\n=== register prefetch, {arch}/{backend} ===')
+        print(rw.get_src())
+
+    # -- one counter or two ------------------------------------------------ #
+    mix = build_mixed()
+    verify(mix)
+    mix, _ = schedule_async(mix)
+    waits = {x.attr('counter'): x for x, _ in pir.walk(mix) if x.op == Op.WAIT}
+    # the copy is waited first, with the register load still in flight: same
+    # class -> 0, any class -> 1.  AMD must use the latter or it under-waits.
+    assert waits['copy'].attr('prior') == 0
+    assert waits['copy'].attr('prior_unified') == 1
+    mw = Writer()
+    emit(mix, mw, vm_factory('gfx942', 'hip', 'float'))
+    assert 'vmcnt(1)' in mw.get_src(), mw.get_src()
+    mw = Writer()
+    emit(mix, mw, vm_factory('sm_80', 'cuda', 'float'))
+    assert '__pipeline_wait_prior(0);' in mw.get_src(), mw.get_src()
+
+    # -- masked load ------------------------------------------------------- #
+    msk = build_masked()
+    verify(msk)
+    kw = Writer()
+    emit(msk, kw, vm_factory('gfx942', 'hip', 'float'))
+    src = kw.get_src()
+    assert '?' in src and 'if (' not in src, src
+    print('\n=== masked load ===')
+    print(src)
+
+    # -- carried load token is rejected ------------------------------------ #
+    car = build_carried_load()
+    assert any('back edge' in m for m in verify(car, strict=False))
 
     # -- lowering --------------------------------------------------------- #
     writer = Writer()
