@@ -126,7 +126,7 @@ class Datatype(enum.Enum):
            Datatype.BF16: 'bfloat16',
            Datatype.BOOL: 'bool',
            Datatype.I8: 'int8_t',
-           Datatype.F16: 'int16_t',
+           Datatype.I16: 'int16_t',
            Datatype.I32: 'int32_t',
            Datatype.I64: 'int64_t',}
     return map[fp]
