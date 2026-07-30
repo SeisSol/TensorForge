@@ -16,6 +16,11 @@ class VarAlloc:
         self.counter += 1
         return f'{prefix}{self.counter}'
 
+    def next_index(self):
+        """Hand out a raw index, so an IRBuilder can share this counter."""
+        self.counter += 1
+        return self.counter
+
 class Block:
   def __init__(self, writer, argument, foot=''):
     self.writer = writer

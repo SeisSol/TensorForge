@@ -47,9 +47,17 @@ class _Scope:
 
 
 class IRBuilder:
-    def __init__(self, fptype: Datatype = Datatype.F32, context: Any = None):
+    def __init__(self, fptype: Datatype = Datatype.F32, context: Any = None,
+                 alloc: Any = None):
         # -1 so the first value is v0, matching writer.VarAlloc: a mechanism
         # swap should not show up as a diff in generated source.
+        #
+        # `alloc` is a shared name allocator (a `writer.VarAlloc`).  Value names
+        # have to be unique across the whole generated file, not just within
+        # one instruction body -- two bodies emitting into the same C++ scope
+        # would otherwise both start at v0.  That uniqueness is file-scoped
+        # state, and it lives on the Writer.
+        self._alloc = alloc
         self._counter = -1
         self._stack: List[_Scope] = [_Scope(kind='root')]
         self._fptype = fptype
@@ -65,8 +73,12 @@ class IRBuilder:
     # -- values ------------------------------------------------------------ #
 
     def value(self, type_, hint: str = '', uniform: bool = True) -> Value:
-        self._counter += 1
-        return Value(id=self._counter, type=type_, uniform=uniform, hint=hint)
+        if self._alloc is not None:
+            ident = self._alloc.next_index()
+        else:
+            self._counter += 1
+            ident = self._counter
+        return Value(id=ident, type=type_, uniform=uniform, hint=hint)
 
     def varalloc(self, prefix: str = 'v') -> Value:
         """Drop-in for ``Writer.varalloc``.

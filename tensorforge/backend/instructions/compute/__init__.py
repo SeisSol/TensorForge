@@ -12,6 +12,8 @@ class ComputeInstruction(AbstractInstruction):
     pass
 
   def gen_code(self, writer: Writer):
-    with writer.Scope():
-      writer.Comment(self.__str__())
-      self.gen_code_inner(writer)
+    def build(sink):
+      with sink.Scope():
+        sink.Comment(self.__str__())
+        self.gen_ir(sink)
+    self.through_pir(writer, build)

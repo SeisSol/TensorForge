@@ -258,13 +258,22 @@ class Loop:
     if self.unroll:
       for value in range(self.start, self.end, self.step):
         inner([Immediate(value, Datatype.I32)])
-        #inner([value])
     elif self.start < self.end:
-      # TODO: move unroll up?
-      var = self.var
-      with writer.For(f'int32_t {var} = {self.start}; {var} < {self.end}; {var} += {self.step}', True):
-        inner([Variable(var, Datatype.I32)])
-        #inner([var])
+      # a real `for` region instead of a text block.
+      # The body stays raw for now -- `inner` interpolates the induction
+      # variable into strings -- but the loop itself is now a node the passes
+      # can reason about, and every loader and store that goes through
+      # `write_loops` gets it at once.
+      if hasattr(writer, 'for_'):
+        loop = writer.for_(self.start, self.end, self.step,
+                           unroll=True, hint=self.var)
+        with loop:
+          inner([Variable(str(loop.induction), Datatype.I32)])
+      else:
+        var = self.var
+        with writer.For(f'int32_t {var} = {self.start}; {var} < {self.end}; '
+                        f'{var} += {self.step}', True):
+          inner([Variable(var, Datatype.I32)])
 
 # TODO: add leading
 class LinearizedLoop:

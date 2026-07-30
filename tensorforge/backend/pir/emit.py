@@ -409,13 +409,20 @@ class Emitter:
             w(f'{self.ctype(arg.type)} {nm} = {self.operand(init)};')
             targets.append(nm)
 
-        if s.attr('unroll'):
-            w('#pragma unroll')
         i = self.name(ind)
         cmp_ = '<' if not isinstance(step, int) or step > 0 else '>'
-        with w.For(f'int {i} = {self.operand(lo)}; '
-                   f'{i} {cmp_} {self.operand(hi)}; '
-                   f'{i} += {self.operand(step)}'):
+        if step == 1:
+            advance = f'++{i}'
+        elif step == -1:
+            advance = f'--{i}'
+        else:
+            advance = f'{i} += {self.operand(step)}'
+        head = (f'{self.ctype(ind.type)} {i} = {self.operand(lo)}; '
+                f'{i} {cmp_} {self.operand(hi)}; {advance}')
+        # unroll goes through Writer.For, which folds the pragma into the block
+        # head; a separate statement would flush the enclosing speculation and
+        # defeat empty-block elision.
+        with w.For(head, unroll=bool(s.attr('unroll'))):
             self._emit_body(s.regions[0].body, tuple(targets))
 
     def _emit_if(self, s: Stmt) -> None:

@@ -4,6 +4,9 @@ from typing import List, Tuple
 from tensorforge.common.context import Context, VM
 from tensorforge.backend.writer import Writer
 from tensorforge.common.exceptions import InternalError
+import os
+
+from tensorforge.backend import pir
 from tensorforge.backend.pir.core import Access, Effect, MemSpace
 
 
@@ -149,6 +152,51 @@ class AbstractInstruction(ABC):
   @abstractmethod
   def gen_code(self, writer: Writer) -> None:
     return None
+
+  # ---- pseudo-IR routing ------------------------------------------------ #
+  #
+  # An instruction builds its body into an `IRBuilder` instead of writing text
+  # straight into the `Writer`.  Because `IRBuilder` is call-compatible with
+  # `Writer`, an un-migrated instruction produces opaque `raw*` nodes and comes
+  # out byte-identical; a migrated one overrides `gen_ir` and uses the
+  # structured constructors, at which point the passes have something to work
+  # with.  Progress is countable: the number of `raw*` nodes left.
+  #
+  # Set False on a subclass to bypass the IR entirely -- useful for bisecting a
+  # suspected emitter difference.
+  _use_pir: bool = True
+
+  def gen_ir(self, builder) -> None:
+    """Build this instruction's body.  Default: forward to the string path."""
+    inner = getattr(self, 'gen_code_inner', None)
+    if inner is None:
+      raise InternalError(
+          f'{type(self).__name__} defines neither gen_ir nor gen_code_inner')
+    inner(builder)
+
+  def through_pir(self, writer: Writer, build) -> None:
+    """Route ``build(sink)`` through the pseudo-IR into ``writer``.
+
+    ``build`` takes the emission sink so that the same closure serves both
+    paths; nothing about it knows which one it got.
+    """
+    if not self._use_pir:
+      build(writer)
+      return
+
+    builder = pir.IRBuilder(fptype=self._context.fp_type, context=self._context,
+                            alloc=getattr(writer, 'alloc', None))
+    build(builder)
+    body = builder.finish()
+
+    if os.environ.get('TF_IR_DEBUG'):
+      diag = pir.verify(body, strict=False)
+      if diag:
+        print(f'pir diagnostics in {type(self).__name__}:')
+        for d in diag:
+          print(f'  {d}')
+
+    pir.emit(pir.optimize(body), writer, self._context)
 
   def get_headers(self) -> List[str]:
     return []

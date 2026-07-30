@@ -241,6 +241,12 @@ def _dce_body(body: Tuple[Stmt, ...], uses) -> Tuple[Stmt, ...]:
         if s.op == Op.YIELD or s.has_side_effects:
             out.append(s)
             continue
+        if s.text is not None:
+            # A raw statement is output by construction -- a Comment has no
+            # target, no region and no effect, and dropping it would silently
+            # change the generated source.
+            out.append(s)
+            continue
         if s.regions and collect_effect(s.regions[0].body) & (
                 Effect.WRITE | Effect.ATOMIC | Effect.BARRIER | Effect.UNKNOWN):
             out.append(s)
