@@ -80,7 +80,7 @@ class HipLexic(CudaLexic):
   def copy_async(self, dst, src, nbytes):
     if self._underlying_hardware != 'amd':
       return super().copy_async(dst, src, nbytes)
-    
+
     # TODO: use address space templates from tensorforge_device/hip.h
     return (f'__builtin_amdgcn_global_load_lds('
             f'(const __attribute__((address_space(1))) uint32_t*)({src}), '
