@@ -64,6 +64,10 @@ class OperationType(Enum):
   BOOLEAN = 3
 
 class Operator:
+  def irop(self):
+    """Name of the matching pseudo-IR op, or None to fall back to `format`."""
+    return None
+
   @abstractmethod
   def num_operands(self) -> Union[None, int]:
     pass
@@ -85,6 +89,9 @@ class ReductionOperator(Operator):
     return 2
 
 class AddOperator(ReductionOperator):
+  def irop(self):
+    return 'add'
+
   def neutral(self):
     return 0
 
@@ -99,6 +106,9 @@ class AddOperator(ReductionOperator):
     return '+'
 
 class MulOperator(ReductionOperator):
+  def irop(self):
+    return 'mul'
+
   def neutral(self):
     return 1
 
@@ -113,6 +123,9 @@ class MulOperator(ReductionOperator):
     return '*'
 
 class MinOperator(ReductionOperator):
+  def irop(self):
+    return 'min'
+
   def neutral(self):
     return math.inf
 
@@ -127,6 +140,9 @@ class MinOperator(ReductionOperator):
     return 'min'
 
 class MaxOperator(ReductionOperator):
+  def irop(self):
+    return 'max'
+
   def neutral(self):
     return -math.inf
 

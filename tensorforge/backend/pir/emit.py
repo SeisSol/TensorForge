@@ -318,6 +318,8 @@ class Emitter:
         if op == Op.RAWSTMT:
             if s.attr('bare_newline'):
                 self.writer.Emptyline()
+            elif s.attr('fmt'):
+                w(s.text.format(*[self.operand(a) for a in s.args]))
             else:
                 w(s.text)
             return

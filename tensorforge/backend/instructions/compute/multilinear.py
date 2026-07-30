@@ -210,15 +210,46 @@ class MultilinearInstruction(ComputeInstruction):
                 threads //= dimmax - dimmin
                 stride *= dimmax - dimmin
 
-        def nonlead_writer(varlist):
-            # `speculative` replaces the old probe-then-re-emit dance: the
-            # loads used to be emitted into a throw-away Writer just to find
-            # out whether they would succeed, and then emitted again for real.
+        def nonlead_structured(varlist):
+            """Fully structured: loads hand back values, products and the
+            accumulation are IR ops, no name leaves the block.  Returns False
+            if any operand cannot produce a value (the sparse path declares
+            and then conditionally assigns a named variable, which is not SSA);
+            the caller then falls back."""
+            from tensorforge.backend.pir.core import ScalarType
+            ftype = ScalarType(self._idest.get_fptype())
+            data = []
+            for i, op in enumerate(self._ops):
+                v = op.symbol.load(writer, self._context, None,
+                                   [add_offset(varlist[loopmap[nk]], 0)
+                                    for j, nk in enumerate(self._opdim_to_nks[i])],
+                                   False)
+                if v is None:
+                    return False
+                data.append(v)
+            if len(data) != len(self._ops) or not data:
+                return False
+            prod = data[0]
+            for i in range(1, len(data)):
+                prod = self._emit_binop(writer, ftype, self._productOperation,
+                                        prod, data[i])
+            ns = [varlist[loopmap[f'n{i}']] for i, _ in enumerate(self._ns)]
+            value = self._idest.load(writer, self._context, None, ns, False)
+            if value is None:
+                return False
+            total = self._emit_binop(writer, ftype, self._sumOperation,
+                                     value, prod)
+            self._idest.store(writer, self._context, total, ns, False)
+            return True
+
+        def nonlead_named(varlist):
+            """The original path, for operands the structured one cannot take."""
             prod = []
             with writer.speculative() as spec:
                 allLoaded = len(self._ops) > 0
                 for i, op in enumerate(self._ops):
-                    allLoaded &= op.symbol.load(writer, self._context, f'data{i}', [add_offset(varlist[loopmap[nk]], 0) for j,nk in enumerate(self._opdim_to_nks[i])], False)
+                    allLoaded &= op.symbol.load(writer, self._context, f'data{i}',
+                        [add_offset(varlist[loopmap[nk]], 0) for j, nk in enumerate(self._opdim_to_nks[i])], False)
                     if not allLoaded:
                         break
                 if allLoaded:
@@ -229,13 +260,30 @@ class MultilinearInstruction(ComputeInstruction):
                             prod += [f'{self._fp_as_str} prod{i} = data{i};']
                     for p in prod:
                         writer(p)
-                    self._idest.load(writer, self._context, 'value', [varlist[loopmap[f'n{i}']] for i,_ in enumerate(self._ns)], False)
+                    ns = [varlist[loopmap[f'n{i}']] for i, _ in enumerate(self._ns)]
+                    self._idest.load(writer, self._context, 'value', ns, False)
                     writer(f'{self._fp_as_str} newvalue = {self._sumOperation.format("value", f"prod{len(self._ops)-1}")};')
-                    self._idest.store(writer, self._context, 'newvalue', [varlist[loopmap[f'n{i}']] for i,_ in enumerate(self._ns)], False)
+                    self._idest.store(writer, self._context, 'newvalue', ns, False)
                 else:
                     spec.discard()
 
+        def nonlead_writer(varlist):
+            with writer.speculative() as spec:
+                if not nonlead_structured(varlist):
+                    spec.discard()
+                else:
+                    return
+            nonlead_named(varlist)
+
         write_loops(self._context, writer, loopstack, nonlead_writer)
+
+    def _emit_binop(self, writer, ftype, operator, a, b):
+        """`operator` as an IR op if it has one, else its format string."""
+        name = operator.irop()
+        if name is not None:
+            return writer.op(name, ftype, a, b, hint='p')
+        return writer.rawexpr(operator.format('{0}', '{1}'), a, b,
+                              type_=ftype, hint='p', pure=True, movable=True)
 
     def _is_matmul(self):
         can_use = self._context.get_vm().get_hw_descr().vendor in ['amd']

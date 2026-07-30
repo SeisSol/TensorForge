@@ -386,6 +386,12 @@ def write_loops(context: Context, writer: Writer, loops: List[Loop], inner):
       loops[0].write(context, writer, inner_next)
   write_loops_inner(context, writer, loops, inner, [])
 
+def _operands(variable, addrs):
+  # the stored value first: it is what `{0}` refers to
+  out = [variable] if not isinstance(variable, (str, int, float, type(None))) else []
+  return tuple(out + [a for a in addrs if not isinstance(a, (int, str))])
+
+
 class Symbol:
   def __init__(self,
                name: str,
@@ -627,7 +633,7 @@ class Symbol:
         access = f'{self.name}[{index} + threadIdx.x * {vec}]'
 
       if vec == 1:
-        writer.access_stmt(f'{self.get_fptype()} {variable} = {access};', self, Effect.READ, args=tuple(a for a in addrs if not isinstance(a, (int, str))))
+        writer.access_stmt(f'{self.get_fptype()} {variable} = {access};', self, Effect.READ, args=_operands(variable, addrs))
       else:
         writer(f'tensorforge::VectorT<{self.get_fptype()}, {vec}> {variable} = *(tensorforge::VectorT<{self.get_fptype()}, {vec}>*)&{access};')
 
@@ -644,14 +650,18 @@ class Symbol:
         access = f'{self.name}[{index} + threadIdx.x * {vec}]'
 
       if vec == 1:
-        writer.access_stmt(f'{access} = {variable};', self, Effect.WRITE, args=tuple(a for a in addrs if not isinstance(a, (int, str))))
+        writer.access_stmt(f'{access} = {variable};', self, Effect.WRITE, args=_operands(variable, addrs))
       else:
         convert = f'*(tensorforge::VectorT<{self.get_fptype()}, {vec}>*)&'
-        writer.access_stmt(f'{convert}{access} = {convert}{variable};', self, Effect.WRITE, args=tuple(a for a in addrs if not isinstance(a, (int, str))))
+        writer.access_stmt(f'{convert}{access} = {convert}{variable};', self, Effect.WRITE, args=_operands(variable, addrs))
 
   def load(self, writer, context: Context, variable, index: List[Union[str, int, Immediate, Variable, LeadIndex]], nontemp):
     addrs = []
     if self.stype == SymbolType.Data or (not self.obj.is_dense() and not isinstance(self.obj.spp, BoundingBoxSPP)):
+      if variable is None:
+        # the sparse path writes into a caller-named variable and reports
+        # success as a bool -- it has no value to hand back
+        return None
       writer(f'{self.get_fptype()} {variable} = {self.get_fptype().literal(0)};')
 
       # treat the lead index last for better sparsity handling
@@ -693,13 +703,23 @@ class Symbol:
           access = pre_access
       else:
         access = pre_access
+      if variable is None:
+        # structured: the consumer takes the value, not a name
+        from tensorforge.backend.pir.core import ScalarType
+        lex = context.get_vm().get_lexic()
+        if lex.simd_mode or self.stype == SymbolType.Global:
+          return None
+        return writer.load_expr(
+            access, ScalarType(self.get_fptype()), self,
+            args=_operands(variable, addrs),
+            hint='data')
       if context.get_vm().get_lexic().simd_mode:
         writer(f'{context.get_vm().get_lexic().get_simd(self.get_fptype(), 16)} {variable}({access});')
       elif self.stype == SymbolType.Global:
         writer(f'{self.get_fptype()} {variable};')
-        writer.access_stmt(context.get_vm().get_lexic().glb_load(variable, access, nontemp), self, Effect.READ, args=tuple(a for a in addrs if not isinstance(a, (int, str))))
+        writer.access_stmt(context.get_vm().get_lexic().glb_load(variable, access, nontemp), self, Effect.READ, args=_operands(variable, addrs))
       else:
-        writer.access_stmt(f'{self.get_fptype()} {variable} = {access};', self, Effect.READ, args=tuple(a for a in addrs if not isinstance(a, (int, str))))
+        writer.access_stmt(f'{self.get_fptype()} {variable} = {access};', self, Effect.READ, args=_operands(variable, addrs))
       return True
 
   def store(self, writer, context, variable, index: List[Union[str, int, Immediate, Variable, LeadIndex]], nontemp, atomic=None):
@@ -708,6 +728,8 @@ class Symbol:
 
     access = self.access(context, index, writer, addrs)
 
+    fmt = not isinstance(variable, (str, int, float))
+    var = '{0}' if fmt else variable
     if context.get_vm().get_lexic().simd_mode:
       if self.stype == SymbolType.Global:
         writer(f'{variable}.copy_to({access});')
@@ -720,17 +742,17 @@ class Symbol:
         else:
           assign = context.get_vm().get_lexic().glb_store(access, variable, nontemp)
       else:
-        assign = f'{access} = {variable};'
+        assign = f'{access} = {var};'
 
       if self.stype == SymbolType.Register or self.stype == SymbolType.Scratch:
         assert len(self.lead_dims) == 1
         if isinstance(index[self.lead_dims[0]], LeadIndex):
-          writer.access_stmt(assign, self, Effect.WRITE, args=tuple(a for a in addrs if not isinstance(a, (int, str))))
+          writer.access_stmt(assign, self, Effect.WRITE, args=_operands(variable, addrs), fmt=fmt)
         else:
           with writer.If(f'{context.get_vm().get_lexic().thread_idx_x} == {index[self.lead_dims[0]]}'):
-            writer.access_stmt(assign, self, Effect.WRITE, args=tuple(a for a in addrs if not isinstance(a, (int, str))))
+            writer.access_stmt(assign, self, Effect.WRITE, args=_operands(variable, addrs), fmt=fmt)
       else:
-        writer.access_stmt(assign, self, Effect.WRITE, args=tuple(a for a in addrs if not isinstance(a, (int, str))))
+        writer.access_stmt(assign, self, Effect.WRITE, args=_operands(variable, addrs), fmt=fmt)
 
   def add_user(self, user):
     self._users.append(user)

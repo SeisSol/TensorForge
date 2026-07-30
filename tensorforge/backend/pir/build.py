@@ -432,7 +432,8 @@ class IRBuilder:
                              attrs=(('bare_newline', True),))
 
     def access_stmt(self, text: str, base: Any, kind: Effect,
-                    args: Sequence[Operand] = (), movable: bool = True) -> Stmt:
+                    args: Sequence[Operand] = (), movable: bool = True,
+                    fmt: bool = False) -> Stmt:
         """Raw statement text whose memory effect is *known*.
 
         The migration end state for a memory access is not that the text
@@ -447,9 +448,30 @@ class IRBuilder:
         statement above the computation it reads.
         """
         space = self._space_of(base)
+        # `fmt`: the text carries `{0}`.. placeholders that the emitter fills
+        # in.  Baking a value's *name* into the text at build time would defeat
+        # the emitter's decision to inline it -- the name would be gone.
         return self._emit_op(Op.RAWSTMT, (), tuple(args),
                              pure=False, movable=movable, effect=kind,
-                             accesses=(Access(kind, space, base),), text=text)
+                             accesses=(Access(kind, space, base),), text=text,
+                             attrs=(('fmt', True),) if fmt else ())
+
+    def load_expr(self, text: str, type_, base: Any, *,
+                  kind: Effect = Effect.READ,
+                  args: Sequence[Operand] = (), hint: str = 'ld') -> Value:
+        """A declaration whose right-hand side is still text, but whose result
+        is a real SSA value.
+
+        The bridge for migrating a body from the inside out: the access itself
+        may stay a vendor-specific string, while everything that consumes it
+        becomes structured.
+        """
+        v = self.value(type_, hint=hint)
+        self._emit_op(Op.RAWEXPR, (v,), tuple(args), pure=False, movable=True,
+                      effect=kind,
+                      accesses=(Access(kind, self._space_of(base), base),),
+                      text=text)
+        return v
 
     def Comment(self, text: str) -> Stmt:
         return self._emit_op(Op.RAWSTMT, (), (), pure=False, movable=True,
