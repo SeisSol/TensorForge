@@ -572,6 +572,96 @@ def _split_invariant(loop: Stmt) -> Tuple[List[Stmt], Tuple[Stmt, ...]]:
 
 
 # --------------------------------------------------------------------------- #
+# Register pressure
+# --------------------------------------------------------------------------- #
+
+def _index(body: Tuple[Stmt, ...], start: int = 0):
+    """Number every statement in pre-order and record each one's span.
+
+    A statement that owns regions spans everything inside it, which is what
+    makes a value used inside a loop live for the whole loop rather than only
+    up to the one textual use.
+    """
+    order: List[Stmt] = []
+    span: Dict[int, Tuple[int, int]] = {}
+
+    def walk_(stmts):
+        for st in stmts:
+            i = len(order)
+            order.append(st)
+            for r in st.regions:
+                walk_(r.body)
+            span[i] = (i, len(order) - 1)
+
+    walk_(body)
+    return order, span
+
+
+def pressure(body: Tuple[Stmt, ...]) -> int:
+    """Peak number of simultaneously live SSA values.
+
+    The bound every scheduling decision needs: hoisting a load away from its
+    use, unrolling further, or deepening a software pipeline all buy latency
+    with live values, and on CDNA the occupancy cliff arrives well before the
+    latency win does.
+
+    Loop-carried values are handled by extending a value's live range to the
+    end of the outermost region that contains a use but not its definition ---
+    a value read inside a loop is live across every iteration, not just at the
+    one statement that mentions it.
+    """
+    order, span = _index(body)
+    pos: Dict[int, int] = {}          # statement identity -> index
+    for i, st in enumerate(order):
+        pos[id(st)] = i
+
+    define: Dict[int, int] = {}
+    last: Dict[int, int] = {}
+    owner: Dict[int, int] = {}        # value id -> index of its defining stmt
+
+    for i, st in enumerate(order):
+        for r in st.regions:
+            for a in r.args:          # induction variable, iter_args
+                define[a.id] = i
+                owner[a.id] = i
+                last[a.id] = span[i][1]
+        for t in st.target:
+            define[t.id] = i
+            owner[t.id] = i
+            last.setdefault(t.id, i)
+
+    # extend each use to the end of the outermost region enclosing the use but
+    # not the definition
+    enclosing: Dict[int, List[int]] = {}
+    def collect(stmts, chain):
+        for st in stmts:
+            i = pos[id(st)]
+            enclosing[i] = chain
+            for r in st.regions:
+                collect(r.body, chain + [i])
+    collect(body, [])
+
+    for i, st in enumerate(order):
+        for v in st.operands():
+            d = define.get(v.id)
+            if d is None:
+                continue
+            end = i
+            for anc in enclosing.get(i, []):
+                if anc >= d and not (span[anc][0] <= d <= span[anc][1]):
+                    end = max(end, span[anc][1])
+                elif span[anc][0] > d:
+                    end = max(end, span[anc][1])
+            last[v.id] = max(last.get(v.id, d), end)
+
+    peak = 0
+    for i in range(len(order)):
+        live = sum(1 for vid, d in define.items() if d <= i <= last.get(vid, d))
+        peak = max(peak, live)
+    return peak
+
+
+# --------------------------------------------------------------------------- #
 # Scope flattening
 # --------------------------------------------------------------------------- #
 

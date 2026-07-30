@@ -29,7 +29,7 @@ from .core import (ANY_EFFECT, BOOL, INDEX, TOKEN, Access, BufferType, Effect,
                    may_alias, walk)
 from .asyncmem import check_tokens, schedule_async
 from .build import IRBuilder, access_of
-from .passes import flatten_scopes, cse, dce, fold, licm, optimize, substitute, verify
+from .passes import flatten_scopes, pressure, cse, dce, fold, licm, optimize, substitute, verify
 from .emit import Emitter, emit
 
 __all__ = [
@@ -37,7 +37,7 @@ __all__ = [
     'Emitter', 'IRBuilder', 'IRError', 'MemSpace', 'Op', 'Operand', 'Region',
     'ScalarType', 'Stmt', 'TokenType', 'Value', 'access_of',
     'accesses_conflict', 'check_tokens', 'collect_accesses', 'collect_effect',
-    'cse', 'dce', 'flatten_scopes', 'def_use', 'defined_within', 'dump', 'emit', 'fold',
+    'cse', 'dce', 'flatten_scopes', 'pressure', 'def_use', 'defined_within', 'dump', 'emit', 'fold',
     'free_values', 'licm', 'may_alias', 'optimize', 'schedule_async',
     'substitute', 'verify',
     'walk',

@@ -296,6 +296,34 @@ def check_linearized_loop():
     return src
 
 
+def check_pressure():
+    """Peak live values, including the ones a loop carries across iterations."""
+    b = IRBuilder(fptype=Datatype.F32)
+    A = b.alloc(Datatype.F32, (16,), MemSpace.REGISTER, hint='A')
+    z = b.const(0.0)
+    loop = b.for_(0, 8, 1, inits=(z,), types=(F32,), hint='k')
+    with loop:
+        x = b.load(A, loop.induction, hint='x')
+        y = b.op('mul', F32, x, x, hint='y')
+        loop.yield_(b.op('add', F32, loop.iter_args[0], y, hint='s'))
+    b.store(A, loop.result, 0)
+    body = b.finish()
+    assert not verify(body, strict=False)
+    tight = pir.pressure(body)
+
+    # four independent prefetches must cost more live values than one
+    b2 = IRBuilder(fptype=Datatype.F32)
+    G = b2.alloc(Datatype.F32, (64,), MemSpace.GLOBAL, hint='g')
+    toks = [b2.load_async(G, i, hint=f'p{i}') for i in range(4)]
+    acc = b2.const(0.0)
+    for t in toks:
+        acc = b2.op('add', F32, acc, b2.wait(t), hint='s')
+    b2.store(G, acc, 0)
+    deep = pir.pressure(b2.finish())
+    assert deep > tight, (deep, tight)
+    return tight, deep
+
+
 def _count(body, op):
     return sum(1 for s, _ in pir.walk(body) if s.op == op)
 
@@ -429,6 +457,10 @@ def main():
     # -- carried load token is rejected ------------------------------------ #
     car = build_carried_load()
     assert any('back edge' in m for m in verify(car, strict=False))
+
+    tight, deep = check_pressure()
+    print(f'\n=== Registerdruck: enge Schleife {tight}, '
+          f'vierfacher Prefetch {deep} ===')
 
     lin = check_linearized_loop()
     print('\n=== LinearizedLoop (kein Testfall deckt ihn ab) ===')

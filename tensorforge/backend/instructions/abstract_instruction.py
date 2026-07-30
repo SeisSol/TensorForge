@@ -201,7 +201,11 @@ class AbstractInstruction(ABC):
         for d in diag:
           print(f'  {d}')
 
-    pir.emit(pir.optimize(body), writer, self._context)
+    body = pir.optimize(body)
+    if os.environ.get('TF_IR_STATS'):
+      print(f'{type(self).__name__}: {sum(1 for _ in pir.walk(body))} Knoten, '
+            f'Registerdruck {pir.pressure(body)}')
+    pir.emit(body, writer, self._context)
 
   def get_headers(self) -> List[str]:
     return []
