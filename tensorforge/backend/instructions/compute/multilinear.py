@@ -500,23 +500,35 @@ class MultilinearInstruction(ComputeInstruction):
                 stride *= dimmax - dimmin
 
         def nonlead_writer(varlist):
-            prodc = 0
-            prods = []
+            from tensorforge.backend.pir.core import MemSpace, ScalarType
+            ftype = ScalarType(self._idest.get_fptype())
+            data = []
             for i, op in enumerate(self._ops):
                 index = ' + '.join(f'{varlist[loopmap[var]].write_nonlead()} * {strides[i][var]}' for var in self._opdim_to_nks[i])
                 if index in localmaps[i]:
-                    data = f'op{i}[{localmaps[i][index]}]'
-                    if prodc > 0:
-                        prods += [f'const {self._fp_as_str} prod{prodc} = {self._productOperation.format(f"prod{prodc-1}", f"{data}")};']
-                    else:
-                        prods += [f'const {self._fp_as_str} prod{prodc} = {data};']
-                    prodc += 1
-            if prodc == len(self._ops):
-                for prod in prods:
-                    writer(prod)
-                self._idest.load(writer, self._context, 'value', [varlist[loopmap[f'n{i}']] for i,_ in enumerate(self._ns)], False)
-                writer(f'{self._fp_as_str} newvalue = {self._sumOperation.format("value", f"prod{prodc - 1}")};')
-                self._idest.store(writer, self._context, 'newvalue', [varlist[loopmap[f'n{i}']] for i,_ in enumerate(self._ns)], False)
+                    # a preloaded register tile: not a Symbol, so name the array
+                    # itself as the alias base rather than claim purity
+                    data.append(writer.load_expr(
+                        f'op{i}[{localmaps[i][index]}]', ftype, f'op{i}',
+                        space=MemSpace.REGISTER, hint='data'))
+            if len(data) == len(self._ops):
+                prod = data[0]
+                for i in range(1, len(data)):
+                    prod = self._emit_binop(writer, ftype,
+                                            self._productOperation, prod, data[i])
+                ns = [varlist[loopmap[f'n{i}']] for i, _ in enumerate(self._ns)]
+                with writer.speculative() as spec:
+                    value = self._idest.load(writer, self._context, None, ns, False)
+                    if value is None:
+                        spec.discard()
+                if value is None:
+                    self._idest.load(writer, self._context, 'value', ns, False)
+                    writer(f'{self._fp_as_str} newvalue = {self._sumOperation.format("value", str(writer.pin(prod)))};')
+                    self._idest.store(writer, self._context, 'newvalue', ns, False)
+                else:
+                    total = self._emit_binop(writer, ftype, self._sumOperation,
+                                             value, prod)
+                    self._idest.store(writer, self._context, total, ns, False)
 
         write_loops(self._context, writer, loopstack, nonlead_writer)
 

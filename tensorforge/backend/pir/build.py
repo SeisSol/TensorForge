@@ -457,7 +457,7 @@ class IRBuilder:
                              attrs=(('fmt', True),) if fmt else ())
 
     def load_expr(self, text: str, type_, base: Any, *,
-                  kind: Effect = Effect.READ,
+                  kind: Effect = Effect.READ, space: Optional[MemSpace] = None,
                   args: Sequence[Operand] = (), hint: str = 'ld') -> Value:
         """A declaration whose right-hand side is still text, but whose result
         is a real SSA value.
@@ -469,7 +469,9 @@ class IRBuilder:
         v = self.value(type_, hint=hint)
         self._emit_op(Op.RAWEXPR, (v,), tuple(args), pure=False, movable=True,
                       effect=kind,
-                      accesses=(Access(kind, self._space_of(base), base),),
+                      accesses=(Access(kind,
+                                       self._space_of(base) if space is None
+                                       else space, base),),
                       text=text)
         return v
 

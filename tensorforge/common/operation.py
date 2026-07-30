@@ -157,6 +157,10 @@ class MaxOperator(ReductionOperator):
     return 'max'
 
 class AndOperator(ReductionOperator):
+  def irop(self):
+    # bitwise, not logical: `and` would render as `&&`
+    return 'bitand'
+
   def neutral(self):
     return True
 
@@ -171,6 +175,10 @@ class AndOperator(ReductionOperator):
     return '&'
 
 class OrOperator(ReductionOperator):
+  def irop(self):
+    # bitwise, not logical: `and` would render as `&&`
+    return 'bitor'
+
   def neutral(self):
     return False
 
@@ -185,6 +193,10 @@ class OrOperator(ReductionOperator):
     return '|'
 
 class XorOperator(ReductionOperator):
+  def irop(self):
+    # bitwise, not logical: `and` would render as `&&`
+    return 'bitxor'
+
   def neutral(self):
     return False
 

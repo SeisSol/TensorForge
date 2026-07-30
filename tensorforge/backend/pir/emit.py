@@ -61,7 +61,7 @@ _ASYNC_ARCH = {
 # generic pure ops -> infix C++ operators
 _INFIX = {
     'add': '+', 'sub': '-', 'mul': '*', 'div': '/',
-    'rem': '%', 'bitand': '&', 'bitor': '|', 'shl': '<<', 'shr': '>>',
+    'rem': '%', 'bitand': '&', 'bitor': '|', 'bitxor': '^', 'shl': '<<', 'shr': '>>',
     'lt': '<', 'le': '<=', 'gt': '>', 'ge': '>=', 'eq': '==', 'ne': '!=',
     'and': '&&', 'or': '||',
 }
