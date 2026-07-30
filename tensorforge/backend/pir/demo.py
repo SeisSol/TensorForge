@@ -220,6 +220,56 @@ def build_carried_load():
     return b.finish()
 
 
+def check_writer_parity():
+    """The acceptance criterion for swapping `gen_code_inner` to `gen_ir`.
+
+    The same legacy call sequence, once straight into a ``Writer`` and once
+    through ``IRBuilder`` + ``emit``, must produce byte-identical source.  Until
+    that holds, migrating an instruction is not a refactor but a rewrite: the
+    diff on the generated kernel would hide whatever the change actually did.
+    """
+    import difflib
+    from tensorforge.backend.writer import Writer as W
+
+    def sequence(w):
+        a = w.varalloc()
+        w(f'float {a} = 0.0f;')
+        w.Comment('accumulate')
+        with w.Scope():
+            with w.For('int i = 0; i < 8; ++i', unroll=True):
+                b = w.varalloc()
+                w(f'float {b} = data[i];')
+                with w.If(f'{b} > 0'):
+                    w(f'{a} += {b};')
+            with w.While('cond'):
+                w('spin();')
+        w.Pragma('nounroll')
+        w.new_line()
+        with w.AnonymousScope():          # empty -> must elide entirely
+            pass
+        with w.Scope():
+            with w.For('int j = 0; j < 4; ++j', unroll=True):
+                pass                      # empty unrolled loop -> must elide
+        w('done();')
+
+    ref = W()
+    sequence(ref)
+
+    b = IRBuilder(fptype=Datatype.F32)
+    sequence(b)
+    body = b.finish()
+    assert not verify(body, strict=False)
+    got = W()
+    emit(body, got)
+
+    if ref.get_src() != got.get_src():
+        raise AssertionError('writer parity lost:\n' + '\n'.join(
+            difflib.unified_diff(ref.get_src().splitlines(),
+                                 got.get_src().splitlines(),
+                                 'Writer', 'IRBuilder', lineterm='')))
+    return body
+
+
 def _count(body, op):
     return sum(1 for s, _ in pir.walk(body) if s.op == op)
 
@@ -353,6 +403,12 @@ def main():
     # -- carried load token is rejected ------------------------------------ #
     car = build_carried_load()
     assert any('back edge' in m for m in verify(car, strict=False))
+
+    # -- writer parity ----------------------------------------------------- #
+    legacy_body = check_writer_parity()
+    raw = sum(1 for x, _ in pir.walk(legacy_body) if x.op in Op.RAW)
+    total = sum(1 for _ in pir.walk(legacy_body))
+    print(f'\n=== writer parity: identical; {raw}/{total} nodes still raw ===')
 
     # -- lowering --------------------------------------------------------- #
     writer = Writer()

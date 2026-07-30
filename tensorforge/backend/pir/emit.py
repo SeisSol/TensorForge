@@ -245,7 +245,10 @@ class Emitter:
             return
 
         if op == Op.RAWSTMT:
-            w(s.text)
+            if s.attr('bare_newline'):
+                self.writer.Emptyline()
+            else:
+                w(s.text)
             return
 
         if op == Op.RAWEXPR:

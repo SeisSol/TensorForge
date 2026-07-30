@@ -48,7 +48,9 @@ class _Scope:
 
 class IRBuilder:
     def __init__(self, fptype: Datatype = Datatype.F32, context: Any = None):
-        self._counter = 0
+        # -1 so the first value is v0, matching writer.VarAlloc: a mechanism
+        # swap should not show up as a diff in generated source.
+        self._counter = -1
         self._stack: List[_Scope] = [_Scope(kind='root')]
         self._fptype = fptype
         self.context = context
@@ -371,6 +373,25 @@ class IRBuilder:
                       effect=Effect.NONE if pure else Effect.UNKNOWN, text=text)
         return v
 
+    def tempvar(self, prefix: str = 'tmp') -> Value:
+        """What ``primitives/{nvidia,amd}.py`` already call.
+
+        ``Writer`` never defined it, so every DPP / shuffle path that reaches
+        ``writer.tempvar()`` raises ``AttributeError`` today.
+        """
+        return self.varalloc(prefix)
+
+    def new_line(self) -> Stmt:
+        # Writer.new_line() is __call__(''), which writes no line but *does*
+        # flush the pending block head -- keep the side effect.
+        return self._emit_op(Op.RAWSTMT, (), (), pure=False, movable=False,
+                             effect=Effect.NONE, text='')
+
+    def Emptyline(self) -> Stmt:
+        return self._emit_op(Op.RAWSTMT, (), (), pure=False, movable=False,
+                             effect=Effect.NONE, text='',
+                             attrs=(('bare_newline', True),))
+
     def Comment(self, text: str) -> Stmt:
         return self._emit_op(Op.RAWSTMT, (), (), pure=False, movable=True,
                              effect=Effect.NONE, text=f'// {text}')
@@ -405,8 +426,9 @@ class IRBuilder:
         return _RawBlock(self, f'if ({expression})')
 
     def For(self, argument, unroll: bool = False) -> '_RawBlock':
-        head = f'for ({argument})'
-        return _RawBlock(self, head, pragma='unroll' if unroll else None)
+        if unroll:
+            return _RawBlock(self, f'#pragma unroll\nfor ({argument})')
+        return _RawBlock(self, f'for ({argument})')
 
     def While(self, argument) -> '_RawBlock':
         return _RawBlock(self, f'while ({argument})')
