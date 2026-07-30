@@ -210,30 +210,20 @@ class LeadLoop:
     is the one non-uniform source, so everything derived from it is marked
     non-uniform and the barrier-in-divergent-region check becomes live.
     """
-    if hasattr(writer, 'op'):
-      tid = writer.thread_id('x')
-      lane = writer.op('div', INDEX, tid, self.stride, hint='lane')
-      return writer.op('rem', INDEX, lane, self.threads, hint='lead')
-    lex = context.get_vm().get_lexic()
-    return f'({lex.thread_idx_x} / {self.stride}) % {self.threads}'
+    tid = writer.thread_id('x')
+    lane = writer.op('div', INDEX, tid, self.stride, hint='lane')
+    return writer.op('rem', INDEX, lane, self.threads, hint='lead')
 
   def _guard(self, writer, lead, lo, hi):
     """`lead >= lo && lead < hi`, with either bound optional."""
-    if hasattr(writer, 'op'):
-      cond = None
-      if lo is not None:
-        cond = writer.op('ge', BOOL, lead, lo, hint='g')
-      if hi is not None:
-        upper = writer.op('lt', BOOL, lead, hi, hint='g')
-        cond = upper if cond is None else writer.op('and', BOOL, cond, upper,
-                                                    hint='g')
-      return writer.if_(cond)
-    parts = []
+    cond = None
     if lo is not None:
-      parts.append(f'{lead} >= {lo}')
+      cond = writer.op('ge', BOOL, lead, lo, hint='g')
     if hi is not None:
-      parts.append(f'{lead} < {hi}')
-    return writer.If(' && '.join(parts))
+      upper = writer.op('lt', BOOL, lead, hi, hint='g')
+      cond = upper if cond is None else writer.op('and', BOOL, cond, upper,
+                                                  hint='g')
+    return writer.if_(cond)
 
   def write(self, context: Context, writer: Writer, inner):
     actualstart = self.start // self.threads
@@ -260,15 +250,9 @@ class LeadLoop:
         for value in range(realstart, realend):
           inner([LeadIndex(value, self.threads, self.stride)])
       elif realstart < realend:
-        if hasattr(writer, 'for_'):
-          loop = writer.for_(realstart, realend, 1, unroll=True, hint=self.var)
-          with loop:
-            inner([LeadIndex(str(loop.induction), self.threads, self.stride)])
-        else:
-          var = self.var
-          with writer.For(f'int32_t {var} = {realstart}; {var} < {realend}; '
-                          f'{var} += 1', True):
-            inner([LeadIndex(var, self.threads, self.stride)])
+        loop = writer.for_(realstart, realend, 1, unroll=True, hint=self.var)
+        with loop:
+          inner([LeadIndex(str(loop.induction), self.threads, self.stride)])
       if self.end % self.threads != 0:
         index = LeadIndex(actualend - 1, self.threads, self.stride)
         with self._guard(writer, lead, None, tail):
@@ -292,16 +276,10 @@ class Loop:
       # variable into strings -- but the loop itself is now a node the passes
       # can reason about, and every loader and store that goes through
       # `write_loops` gets it at once.
-      if hasattr(writer, 'for_'):
-        loop = writer.for_(self.start, self.end, self.step,
-                           unroll=True, hint=self.var)
-        with loop:
-          inner([Variable(str(loop.induction), Datatype.I32)])
-      else:
-        var = self.var
-        with writer.For(f'int32_t {var} = {self.start}; {var} < {self.end}; '
-                        f'{var} += {self.step}', True):
-          inner([Variable(var, Datatype.I32)])
+      loop = writer.for_(self.start, self.end, self.step,
+                         unroll=True, hint=self.var)
+      with loop:
+        inner([Variable(str(loop.induction), Datatype.I32)])
 
 # TODO: add leading
 class LinearizedLoop:

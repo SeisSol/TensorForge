@@ -33,7 +33,7 @@ class GetElementPtr(AbstractInstruction):
       return self._batch_offset
     return f'{GeneralLexicon.BATCH_ID_NAME}{self._batch_offset}'
 
-  def gen_code(self, writer):
+  def gen_ir(self, writer):
 
     batch_obj = self._src.obj
     batch_addressing = batch_obj.addressing

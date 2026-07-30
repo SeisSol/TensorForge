@@ -17,16 +17,14 @@ class MemoryInstruction(AbstractInstruction):
   def gen_code_declare(self, writer: Writer):
     pass
 
-  def gen_code(self, writer: Writer):
-    def build(sink):
-      # The declaration belongs outside the scope: the symbol it declares is
-      # consumed by later instructions.
-      if self._declare:
-        self.gen_code_declare(sink)
-      with sink.Scope():
-        sink.Comment(self.__str__())
-        self.gen_ir(sink)
-    self.through_pir(writer, build)
+  def gen_ir(self, sink):
+    # The declaration belongs outside the scope: the symbol it declares is
+    # consumed by later instructions.
+    if self._declare:
+      self.gen_code_declare(sink)
+    with sink.Scope():
+      sink.Comment(self.__str__())
+      self.gen_code_inner(sink)
 
 class AbstractShrMemWrite(MemoryInstruction):
   def __init__(self, context: Context):

@@ -211,25 +211,29 @@ class MultilinearInstruction(ComputeInstruction):
                 stride *= dimmax - dimmin
 
         def nonlead_writer(varlist):
+            # `speculative` replaces the old probe-then-re-emit dance: the
+            # loads used to be emitted into a throw-away Writer just to find
+            # out whether they would succeed, and then emitted again for real.
             prod = []
-            allLoaded = True
-            for i, op in enumerate(self._ops):
-                # self._ops[i].offset[j]
-                allLoaded &= op.symbol.load(Writer(), self._context, f'data{i}', [add_offset(varlist[loopmap[nk]], 0) for j,nk in enumerate(self._opdim_to_nks[i])], False)
-            if allLoaded and len(self._ops) > 0:
+            with writer.speculative() as spec:
+                allLoaded = len(self._ops) > 0
                 for i, op in enumerate(self._ops):
-                    loaded = op.symbol.load(writer, self._context, f'data{i}', [add_offset(varlist[loopmap[nk]], 0) for j,nk in enumerate(self._opdim_to_nks[i])], False)
-                    if not loaded: break
-                    if i > 0:
-                        prod += [f'{self._fp_as_str} prod{i} = {self._productOperation.format(f"prod{i-1}", f"data{i}")};']
-                    else:
-                        prod += [f'{self._fp_as_str} prod{i} = data{i};']
-                if len(self._ops) > 0 and len(prod) == len(self._ops):
+                    allLoaded &= op.symbol.load(writer, self._context, f'data{i}', [add_offset(varlist[loopmap[nk]], 0) for j,nk in enumerate(self._opdim_to_nks[i])], False)
+                    if not allLoaded:
+                        break
+                if allLoaded:
+                    for i, op in enumerate(self._ops):
+                        if i > 0:
+                            prod += [f'{self._fp_as_str} prod{i} = {self._productOperation.format(f"prod{i-1}", f"data{i}")};']
+                        else:
+                            prod += [f'{self._fp_as_str} prod{i} = data{i};']
                     for p in prod:
                         writer(p)
                     self._idest.load(writer, self._context, 'value', [varlist[loopmap[f'n{i}']] for i,_ in enumerate(self._ns)], False)
                     writer(f'{self._fp_as_str} newvalue = {self._sumOperation.format("value", f"prod{len(self._ops)-1}")};')
                     self._idest.store(writer, self._context, 'newvalue', [varlist[loopmap[f'n{i}']] for i,_ in enumerate(self._ns)], False)
+                else:
+                    spec.discard()
 
         write_loops(self._context, writer, loopstack, nonlead_writer)
 
@@ -330,15 +334,17 @@ class MultilinearInstruction(ComputeInstruction):
                 if sparse:
                     self._ops[1].symbol.load_linear(writer, self._context, var, k)
                     return True
-                res = self._ops[1].symbol.load(Writer(), self._context, var, unwindOp(0, j, k, 1, False), False)
-                if res:
-                    self._ops[1].symbol.load(writer, self._context, var, unwindOp(0, j, k, 1, False), False)
+                with writer.speculative() as spec:
+                    res = self._ops[1].symbol.load(writer, self._context, var, unwindOp(0, j, k, 1, False), False)
+                    if not res:
+                        spec.discard()
                 return res
 
             def A(writer, var, i, k):
-                res = self._ops[0].symbol.load(Writer(), self._context, var, unwindOp(i, 0, k, 0, True), False)
-                if res:
-                    self._ops[0].symbol.load(writer, self._context, var, unwindOp(i, 0, k, 0, True), False)
+                with writer.speculative() as spec:
+                    res = self._ops[0].symbol.load(writer, self._context, var, unwindOp(i, 0, k, 0, True), False)
+                    if not res:
+                        spec.discard()
                 return res
 
             if self._context.get_vm().get_hw_descr().vendor == 'amd':

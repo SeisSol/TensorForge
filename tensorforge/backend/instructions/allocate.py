@@ -19,7 +19,7 @@ class RegisterAlloc(AbstractInstruction):
     self._is_ready = True
     dest.add_user(self)
 
-  def gen_code(self, writer: Writer):
+  def gen_ir(self, writer: Writer):
     if self._dest.obj.size > 0:
       datatype = self._context.fp_type if self._dest.obj.datatype is None else self._dest.obj.datatype
 
@@ -48,7 +48,7 @@ class ShrMemAlloc(AbstractInstruction):
 
     dest.add_user(self)
 
-  def gen_code(self, writer: Writer):
+  def gen_ir(self, writer: Writer):
     shrmem_obj = self._dest.obj
     common_shrmem = f'{GeneralLexicon.TOTAL_SHR_MEM}'
     common_shrmem_size = shrmem_obj.get_total_size()

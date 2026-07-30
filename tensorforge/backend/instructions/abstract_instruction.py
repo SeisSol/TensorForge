@@ -149,9 +149,15 @@ class AbstractInstruction(ABC):
       eff |= Effect.BARRIER
     return eff
 
-  @abstractmethod
   def gen_code(self, writer: Writer) -> None:
-    return None
+    """Route this instruction's body through the pseudo-IR.
+
+    Concrete now, not abstract: `gen_ir` is the single hook an instruction
+    overrides, and routing is the same for all of them.  `BatchLoop` still
+    overrides this, because it drives child instructions that route
+    themselves.
+    """
+    self.through_pir(writer, self.gen_ir)
 
   # ---- pseudo-IR routing ------------------------------------------------ #
   #
@@ -167,12 +173,11 @@ class AbstractInstruction(ABC):
   _use_pir: bool = True
 
   def gen_ir(self, builder) -> None:
-    """Build this instruction's body.  Default: forward to the string path."""
+    """Build this instruction's body.  Overriding this is the only hook an
+    instruction needs; `gen_code` routes it through the IR."""
     inner = getattr(self, 'gen_code_inner', None)
-    if inner is None:
-      raise InternalError(
-          f'{type(self).__name__} defines neither gen_ir nor gen_code_inner')
-    inner(builder)
+    if inner is not None:
+      inner(builder)
 
   def through_pir(self, writer: Writer, build) -> None:
     """Route ``build(sink)`` through the pseudo-IR into ``writer``.

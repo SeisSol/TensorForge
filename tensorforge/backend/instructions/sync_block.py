@@ -18,7 +18,7 @@ class SyncThreads(AbstractInstruction):
   def accesses(self):
     return ()
 
-  def gen_code(self, writer):
+  def gen_ir(self, writer):
     writer(f'{self.__str__()}')
 
   def __str__(self) -> str:
@@ -42,7 +42,7 @@ class SyncBlock(AbstractInstruction):
   def accesses(self):
     return ()
 
-  def gen_code(self, writer):
+  def gen_ir(self, writer):
     writer(f'{self.__str__()}')
 
   def __str__(self) -> str:
@@ -63,7 +63,7 @@ class SyncGrid(AbstractInstruction):
   def accesses(self):
     return ()
 
-  def gen_code(self, writer):
+  def gen_ir(self, writer):
     writer(f'{self.__str__()}')
 
   def __str__(self) -> str:

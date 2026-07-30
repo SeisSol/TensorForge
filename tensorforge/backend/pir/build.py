@@ -344,21 +344,26 @@ class IRBuilder:
         scope = self._stack[-1]
         mark = len(scope.body)
         counter = self._counter
+        names = getattr(self._alloc, 'counter', None)
         depth = len(self._stack)
         spec = _Speculation()
         try:
             yield spec
         except Exception:
-            del scope.body[mark:]
-            self._counter = counter
-            del self._stack[depth:]
+            self._rollback(scope, mark, counter, names, depth)
             raise
         if spec.discarded:
-            del scope.body[mark:]
-            self._counter = counter
-            del self._stack[depth:]
+            self._rollback(scope, mark, counter, names, depth)
         elif len(self._stack) != depth:
             raise IRError('speculative block left the scope stack unbalanced')
+
+    def _rollback(self, scope, mark, counter, names, depth):
+        del scope.body[mark:]
+        self._counter = counter
+        if names is not None:
+            # a discarded probe must not burn names either
+            self._alloc.counter = names
+        del self._stack[depth:]
 
     # -- legacy Writer facade ---------------------------------------------- #
 

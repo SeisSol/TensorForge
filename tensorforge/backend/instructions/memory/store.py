@@ -165,7 +165,7 @@ class StoreRegToGlb(AbstractInstruction):
     self._is_ready: bool = True
     self._atomic = atomic
 
-  def gen_code(self, writer: Writer) -> None:
+  def gen_ir(self, writer: Writer) -> None:
     writer.new_line()
     dest_view = self._dest.data_view
 
@@ -235,7 +235,7 @@ class StoreShrMemToGlb(AbstractInstruction):
   def get_dest(self) -> Symbol:
     return self._dest
 
-  def gen_code(self, writer):
+  def gen_ir(self, writer):
     dest_matrix = self._dest.obj
 
     dest_name = self._dest.name

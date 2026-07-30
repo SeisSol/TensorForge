@@ -27,7 +27,7 @@ class ClearRegisters(AbstractInstruction):
   def uses(self):
     return ()
 
-  def gen_code(self, writer: Writer):
+  def gen_ir(self, writer: Writer):
     writer.new_line()
     writer(f'// clear registers')
     with writer.For(f'int32_t i = 0; i < {self._src.obj.size}; ++i', True):
