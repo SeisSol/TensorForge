@@ -22,8 +22,7 @@ from .manager import (LegacyAnalysis, LegacyTransform, PassContext, PassManager,
                       PassScope)
 from .mem_region_allocation import MemoryRegionAllocation
 from .memmove import MoveLoads
-from .multibuffer import MultiBuffer
-from .ptrpipe import PtrPipe
+from .pipeline import Pipeline
 from .shr_mem_analyzer import ShrMemOpt
 from .sync_block import SyncThreadsOpt
 
@@ -62,18 +61,20 @@ class OptimizationStage:
         lambda pc, instrs: MoveLoads(pc.context, instrs),
         scope=PassScope.PER_REGION))
 
-    # Software pipelining.  Both are disabled: they publish a prologue
-    # through `_global_instrs`, i.e. a second list the rest of the pipeline
-    # does not index, so definition and use end up in different streams.
-    # Reviving them needs a real loop op first -- see multibuffer.py.
+    # Software pipelining, one pass where there used to be two (MultiBuffer
+    # and PtrPipe were the same transform at two granularities).  Whole nest:
+    # the peeled iteration has to land outside the loop.
+    #
+    # Off by default. The pointer-advance half is implemented; buffer rotation
+    # raises with the precise reason (see pipeline.py) rather than emitting
+    # something plausible.
     pm.add(LegacyTransform(
-        'MultiBuffer',
-        lambda pc, instrs: MultiBuffer(pc.context, instrs, pc.shr_mem, pc.scopes),
-        enabled=lambda pc: getattr(opts, 'enable_multibuffer', False)))
-    pm.add(LegacyTransform(
-        'PtrPipe',
-        lambda pc, instrs: PtrPipe(pc.context, instrs),
-        enabled=lambda pc: getattr(opts, 'enable_ptrpipe', False)))
+        'Pipeline',
+        lambda pc, instrs: Pipeline(
+            pc.context, instrs,
+            depth=getattr(opts, 'pipeline_depth', 2),
+            rotate_buffers=getattr(opts, 'enable_multibuffer', False)),
+        enabled=lambda pc: getattr(opts, 'enable_pipeline', False)))
 
     # Whole nest: a value carried across the loop's back edge is only visible
     # to a fixed point over the region structure.

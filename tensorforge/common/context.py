@@ -7,10 +7,19 @@ class Options:
   def __init__(self,
                exact_contraction_length=False,
                align_shr_mem=True,
-               enable_sync_block_opt=True):
+               enable_sync_block_opt=True,
+               enable_pipeline=False,
+               enable_multibuffer=False,
+               pipeline_depth=2):
     self.exact_contraction_length: bool = exact_contraction_length
     self.align_shr_mem: bool = align_shr_mem
     self.enable_sync_block_opt = enable_sync_block_opt
+    # Software pipelining. `enable_pipeline` advances the address computation;
+    # `enable_multibuffer` additionally rotates the shared-memory buffers and is
+    # not wired up yet -- see backend/opt/pipeline.py.
+    self.enable_pipeline = enable_pipeline
+    self.enable_multibuffer = enable_multibuffer
+    self.pipeline_depth = pipeline_depth
 
 
 class Context:

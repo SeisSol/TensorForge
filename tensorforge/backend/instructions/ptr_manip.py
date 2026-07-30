@@ -18,9 +18,20 @@ class GetElementPtr(AbstractInstruction):
     self._dest = dest
     self._include_extra_offset = include_extra_offset
     self._is_ready = True
+    # int -> `batchId{n}`, the n-th lookahead index bound by the loop.
+    # str -> used verbatim, which is how a peeled iteration names an index that
+    # exists *outside* the loop: `batchId0` is the loop variable and does not
+    # exist in the prologue, and the pre-loop bindings of batchId1/batchId2 mean
+    # something different from the in-loop ones (clamped from batchId_start
+    # rather than from batchId0).
     self._batch_offset = batch_offset
     self._update_dest = update_dest
     self._pipeline = pipeline
+
+  def batch_index(self) -> str:
+    if isinstance(self._batch_offset, str):
+      return self._batch_offset
+    return f'{GeneralLexicon.BATCH_ID_NAME}{self._batch_offset}'
 
   def gen_code(self, writer):
 
@@ -38,21 +49,21 @@ class GetElementPtr(AbstractInstruction):
 
     address = ''
     if isinstance(batch_addressing, StridedAddressing):
-      main_offset = f'{GeneralLexicon.BATCH_ID_NAME}{self._batch_offset} * {batch_addressing.stride}'
+      main_offset = f'{self.batch_index()} * {batch_addressing.stride}'
       sub_offset = f'{batch_obj.get_offset_to_first_element()}'
       address = f'{main_offset} + {batch_addressing.offset} + {sub_offset}{extra_offset}'
       rhs = f'&{self._src.name}[{address}]'
       lhs = 'const ' if self._src.obj.direction == DataFlowDirection.SOURCE else ''
       lhs += f'{datatype} *{const_mod} {self._vm.get_lexic().restrict_kw} {self._dest.name}'
     if batch_addressing == Addressing.STRIDED:
-      main_offset = f'{GeneralLexicon.BATCH_ID_NAME}{self._batch_offset} * {batch_obj.get_real_volume()}'
+      main_offset = f'{self.batch_index()} * {batch_obj.get_real_volume()}'
       sub_offset = f'{batch_obj.get_offset_to_first_element()}'
       address = f'{main_offset} + {sub_offset}{extra_offset}'
       rhs = f'&{self._src.name}[{address}]'
       lhs = 'const ' if self._src.obj.direction == DataFlowDirection.SOURCE else ''
       lhs += f'{datatype} *{const_mod} {self._vm.get_lexic().restrict_kw} {self._dest.name}'
     elif batch_addressing == Addressing.PTR_BASED:
-      main_offset = f'{GeneralLexicon.BATCH_ID_NAME}{self._batch_offset}'
+      main_offset = f'{self.batch_index()}'
       sub_offset = f'{batch_obj.get_offset_to_first_element()}'
       address = f'{main_offset}][{sub_offset}{extra_offset}'
       src_suffix = '_ptr' if self._vm.get_lexic()._backend == 'targetdart' else ''
@@ -81,5 +92,12 @@ class GetElementPtr(AbstractInstruction):
     else:
       writer(f'{lhs} = {rhs};')
 
+  def defs(self):
+    return (self._dest,) if self._update_dest is None else (self._dest, self._update_dest)
+
+  def uses(self):
+    return (self._src,)
+
   def __str__(self) -> str:
-    return f'{self._dest.name} = getelementptr_b2g {self._src.name};'
+    return (f'{self._dest.name} = getelementptr_b2g {self._src.name} '
+            f'[{self.batch_index()}];')

@@ -28,6 +28,7 @@ from typing import List, Optional, Tuple
 
 from tensorforge.common.basic_types import GeneralLexicon
 from tensorforge.common.context import Context
+from tensorforge.common.exceptions import InternalError
 
 from .abstract_instruction import AbstractInstruction, BarrierScope
 
@@ -141,6 +142,26 @@ class BatchLoop(AbstractInstruction):
 
     def _batch(self, n: int = 0) -> str:
         return f'{GeneralLexicon.BATCH_ID_NAME}{n}'
+
+    def index_name(self, lookahead: int = 0) -> str:
+        """The variable holding the element index ``lookahead`` iterations ahead.
+
+        Valid *inside* the region only.  ``index_name(0)`` is the loop variable.
+        """
+        if lookahead > self._lookahead:
+            raise InternalError(
+                f'loop binds {self._lookahead} lookahead indices, '
+                f'{lookahead} requested')
+        return self._batch(lookahead)
+
+    def prologue_index(self) -> str:
+        """The index a peeled iteration should use.
+
+        The loop variable does not exist before the loop, so a peeled iteration
+        cannot name it.  The generator binds ``batchId_start`` ahead of the
+        loop for exactly this.
+        """
+        return f'{GeneralLexicon.BATCH_ID_NAME}_start'
 
     def _num_elements(self) -> str:
         return f'{GeneralLexicon.NUM_ELEMENTS}{self._section_index}'
