@@ -18,6 +18,7 @@ from tensorforge.backend.instructions.builders.multilinear_builder import Multil
 from tensorforge.backend.instructions.builders.ptr_manip_builder import GetElementPtrBuilder
 from tensorforge.backend.instructions.builders.allocator_builder import ShrMemAllocBuilder
 from tensorforge.backend.instructions.sync_block import SyncThreads, SyncBlock, SyncGrid
+from tensorforge.backend.instructions.batch_loop import BatchLoop, LoopMode
 from tensorforge.backend.writer import Writer
 from tensorforge.common.exceptions import GenerationError
 
@@ -172,29 +173,41 @@ class Generator:
     self._generate_launcher()
     self._generate_header()
 
-  def _verify_section(self, section, index: int) -> None:
+  def _verify_section(self, stream, index: int) -> None:
     """Structural check over one section, immediately before emitting it.
 
-    ``section.ir`` is wrapped in the per-element loop, so it is checked with
-    ``inside_batch_loop=True``: that is what catches a grid barrier whose
-    trip count is not grid-uniform, which deadlocks rather than producing a
-    wrong answer.
+    One call over one stream: the per-element loop is a ``BatchLoop``
+    instruction, so ``verify`` recurses into its region and derives the legal
+    barrier scope from ``uniform_scope`` rather than the caller passing a flag.
     """
-    predefined = list(self._scopes.get_global_scope().values())
-    diags = verify(section.global_ir,
-                   inside_batch_loop=False,
-                   predefined=predefined,
+    diags = verify(stream,
+                   predefined=list(self._scopes.get_global_scope().values()),
                    backend=self._context.get_vm().get_lexic()._backend)
-    for instr in section.global_ir:
-      predefined += list(instr.defs())
-    diags += verify(section.ir,
-                    inside_batch_loop=True,
-                    predefined=predefined,
-                    backend=self._context.get_vm().get_lexic()._backend)
     errors = [d for d in diags if d.severity == 'error']
     if errors:
       raise GenerationError(
           f'section {index} cannot be emitted:\n{format_diagnostics(errors)}')
+
+  def _batch_loop_mode(self) -> LoopMode:
+    if self._persistent_threading:
+      return LoopMode.PERSISTENT
+    if self._clusterlaunchcontrol:
+      return LoopMode.LAUNCHCTRL
+    return LoopMode.SINGLE
+
+  def _build_section_stream(self, section, index: int, start: str, stride: str):
+    """``global_ir ++ [BatchLoop(region=ir)]`` -- the section as one stream.
+
+    The prologue and the body were two lists that no pass could relate to each
+    other.  They are one now, with the loop carrying its body as a region.
+    """
+    return list(section.global_ir) + [BatchLoop(
+        context=self._context,
+        section_index=index,
+        mode=self._batch_loop_mode(),
+        start=start,
+        stride=stride,
+        region=section.ir)]
 
   def _generate_kernel(self):
     vm = self._context.get_vm()
@@ -231,41 +244,11 @@ class Generator:
           # check is meaningful.  Previously each instruction was tested one
           # at a time and the first unprepared one aborted, hiding every other
           # problem behind it.
-          self._verify_section(section, i)
+          stream = self._build_section_stream(section, i, start, stride)
+          self._verify_section(stream, i)
 
-          for instruction in section.global_ir:
+          for instruction in stream:
             instruction.gen_code(writer)
-
-          def generate_inner():
-            with writer.If(f'{self._get_flag_guard(writer, i)}'):
-              for instruction in section.ir:
-                instruction.gen_code(writer)
-
-          if self._persistent_threading:
-            # TODO: OMP target
-            # TODO: maybe iterate over adjacent elements? (for indirect pointers)
-
-            with writer.For(f'size_t {GeneralLexicon.BATCH_ID_NAME}0 = {start}; {GeneralLexicon.BATCH_ID_NAME}0 < {GeneralLexicon.NUM_ELEMENTS}{i}; {GeneralLexicon.BATCH_ID_NAME}0 += {stride}'):
-              writer(f'const auto {GeneralLexicon.BATCH_ID_NAME}1 = {GeneralLexicon.BATCH_ID_NAME}0 + {stride} < {GeneralLexicon.NUM_ELEMENTS}{i} ? {GeneralLexicon.BATCH_ID_NAME}0 + {stride} : {GeneralLexicon.BATCH_ID_NAME}0;')
-              writer(f'const auto {GeneralLexicon.BATCH_ID_NAME}2 = {GeneralLexicon.BATCH_ID_NAME}1 + {stride} < {GeneralLexicon.NUM_ELEMENTS}{i} ? {GeneralLexicon.BATCH_ID_NAME}1 + {stride} : {GeneralLexicon.BATCH_ID_NAME}1;')
-              generate_inner()
-          elif self._clusterlaunchcontrol:
-            writer(f'__shared__ tensorforge::ClusterLaunchCtrl launchctrl;')
-            writer(f'int phase = 0;')
-            writer(f'launchctrl.init();')
-            writer(f'size_t {GeneralLexicon.BATCH_ID_NAME}0 = {self._get_2d_block_id()};')
-            with writer.While(f'true'):
-              writer('launchctrl.setupNext();')
-              with writer.If(f'{self._get_element_size_guard(i)}'):
-                generate_inner()
-              writer('const auto nextBlock = launchctrl.queryNext(phase);')
-              with writer.If('!nextBlock.has_value()'):
-                writer('break;')
-              writer(f'{GeneralLexicon.BATCH_ID_NAME}0 = {self._get_2d_block_id("nextBlock.value()")};')
-          else:
-            writer(f'const size_t {GeneralLexicon.BATCH_ID_NAME}0 = {self._get_2d_block_id()};')
-            with writer.If(f'{self._get_element_size_guard(i)}'):
-              generate_inner()
 
     self._kernel = writer.get_src()
 
@@ -678,14 +661,5 @@ class Generator:
       block = lexic.block_idx_x
     return f'{lexic.thread_idx_y} + {lexic.block_dim_y} * ({block})'
 
-  def _get_element_size_guard(self, i):
-    return f'{GeneralLexicon.BATCH_ID_NAME}0 < {GeneralLexicon.NUM_ELEMENTS}{i}'
-
-  def _get_flag_guard(self, writer, i):
-    if True:
-      writer(f'bool allowed = true;')
-      with writer.If(f'{GeneralLexicon.FLAGS_NAME}{i} != nullptr'):
-        writer(f'allowed = static_cast<bool>({GeneralLexicon.FLAGS_NAME}{i}[{GeneralLexicon.BATCH_ID_NAME}0]);')
-      return 'allowed'
-    else:
-      return 'true'
+  # NOTE: _get_element_size_guard and _get_flag_guard moved onto BatchLoop,
+  # which is the only thing that needed them.

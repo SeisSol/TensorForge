@@ -303,6 +303,191 @@ def _cse_body(body: Tuple[Stmt, ...], available: Dict[Any, Tuple[Value, ...]]):
 
 
 # --------------------------------------------------------------------------- #
+# Constant folding and algebraic identities
+# --------------------------------------------------------------------------- #
+
+# Arithmetic that can be evaluated when every operand is a known constant.
+# Deliberately a table rather than `eval`: an op name pir does not know stays
+# untouched, which is what keeps the op set extensible.
+_FOLDABLE: Dict[str, Any] = {
+    'neg': lambda a: -a,
+    'abs': lambda a: abs(a),
+    'add': lambda a, b: a + b,
+    'sub': lambda a, b: a - b,
+    'mul': lambda a, b: a * b,
+    'max': lambda a, b: max(a, b),
+    'min': lambda a, b: min(a, b),
+    'eq': lambda a, b: a == b,
+    'neq': lambda a, b: a != b,
+    'lt': lambda a, b: a < b,
+    'le': lambda a, b: a <= b,
+    'gt': lambda a, b: a > b,
+    'ge': lambda a, b: a >= b,
+    'and': lambda a, b: a and b,
+    'or': lambda a, b: a or b,
+}
+
+
+def _fold_div(a, b):
+    if b == 0:
+        raise ZeroDivisionError
+    return a / b
+
+
+def _fold_rem(a, b):
+    if b == 0:
+        raise ZeroDivisionError
+    return a % b
+
+
+_FOLDABLE['div'] = _fold_div
+_FOLDABLE['rem'] = _fold_rem
+
+
+def fold(body: Tuple[Stmt, ...]) -> Tuple[Stmt, ...]:
+    """Evaluate constant expressions and apply algebraic identities.
+
+    Two jobs in one walk, because each exposes the other: folding
+    ``mul(c1, c2)`` produces a constant that may then make ``add(x, 0)`` an
+    identity, and applying an identity may hand a constant to a foldable op.
+
+    The identities are the ones the frontend used to apply inline while building
+    the expression tree (``optree.mul`` returned its other operand for a
+    multiplication by one, and so on) --- a rewrite that had to happen at
+    construction time because there was no pass to do it later.  They belong
+    here: the caller writes what it means, and the IR simplifies.
+
+    Conservative by construction: only ``pure`` region-free single-target
+    statements are touched, division by a constant zero is left alone rather
+    than folded into a trap, and an op name absent from ``_FOLDABLE`` with no
+    matching identity passes through untouched.
+    """
+    body, mapping = _fold_body(body, {})
+    return substitute(body, mapping) if mapping else body
+
+
+def _as_number(x: Operand, consts: Dict[int, Any]):
+    """The constant behind an operand, or ``None`` if it is not known."""
+    if isinstance(x, Value):
+        return consts.get(x.id)
+    if isinstance(x, (int, float, bool)):
+        return x
+    return None
+
+
+def _is(n, *values) -> bool:
+    return n is not None and not isinstance(n, bool) and any(n == v for v in values)
+
+
+def _identity(s: Stmt, nums: List[Any]) -> Optional[int]:
+    """Index of the operand this statement is equal to, if any.
+
+    Returns ``0``/``1`` to mean "the result is just that operand".
+    """
+    op = s.op
+    a, b = (nums + [None, None])[:2]
+    if len(s.args) != 2:
+        return None
+    if op == 'add':
+        if _is(a, 0):
+            return 1
+        if _is(b, 0):
+            return 0
+    elif op == 'sub':
+        if _is(b, 0):
+            return 0
+    elif op == 'mul':
+        if _is(a, 1):
+            return 1
+        if _is(b, 1):
+            return 0
+    elif op == 'div':
+        if _is(b, 1):
+            return 0
+    elif op in ('and', 'min'):
+        # x and x == x; only safe when both operands are the same value
+        if (isinstance(s.args[0], Value) and isinstance(s.args[1], Value)
+                and s.args[0].id == s.args[1].id):
+            return 0
+    elif op in ('or', 'max'):
+        if (isinstance(s.args[0], Value) and isinstance(s.args[1], Value)
+                and s.args[0].id == s.args[1].id):
+            return 0
+    return None
+
+
+def _resolve(mapping: Dict[int, Value], v: Operand) -> Operand:
+    """Follow a chain of forwardings to its end.
+
+    Identities compose: ``mul(x, 1)`` forwards to ``x`` and a following
+    ``add(that, 0)`` forwards to the *mul's* target, which no longer exists.
+    ``substitute`` rewrites each use once, so the mapping has to be transitive
+    before it is handed over -- otherwise the second forwarding lands on a
+    deleted value and the IR fails to verify with "used before definition".
+    """
+    seen = set()
+    while isinstance(v, Value) and v.id in mapping and v.id not in seen:
+        seen.add(v.id)
+        v = mapping[v.id]
+    return v
+
+
+def _fold_body(body: Tuple[Stmt, ...], consts: Dict[int, Any]):
+    # a copy: constants defined in an enclosing scope are visible here, but
+    # ones defined here must not leak out to a sibling region
+    consts = dict(consts)
+    mapping: Dict[int, Value] = {}
+    out: List[Stmt] = []
+
+    for s in body:
+        if s.regions:
+            regions = []
+            for r in s.regions:
+                inner, inner_map = _fold_body(r.body, consts)
+                regions.append(replace(r, body=substitute(inner, inner_map)))
+            out.append(replace(s, regions=tuple(regions)))
+            continue
+
+        if s.op == Op.CONST and s.target:
+            consts[s.target[0].id] = s.attr('value')
+            out.append(s)
+            continue
+
+        foldable = (s.pure and not s.has_side_effects
+                    and len(s.target) == 1 and s.effect == Effect.NONE
+                    and s.predicate is None)
+        if not foldable:
+            out.append(s)
+            continue
+
+        nums = [_as_number(a, consts) for a in s.args]
+
+        # 1. every operand known -> evaluate
+        fn = _FOLDABLE.get(s.op)
+        if fn is not None and s.args and all(n is not None for n in nums):
+            try:
+                value = fn(*nums)
+            except (ZeroDivisionError, ValueError, OverflowError):
+                out.append(s)
+                continue
+            target = s.target[0]
+            consts[target.id] = value
+            out.append(replace(s, op=Op.CONST, args=(),
+                               attrs=(('value', value),)))
+            continue
+
+        # 2. algebraic identity -> drop and forward the surviving operand
+        keep = _identity(s, nums)
+        if keep is not None and isinstance(s.args[keep], Value):
+            mapping[s.target[0].id] = _resolve(mapping, s.args[keep])
+            continue
+
+        out.append(s)
+
+    return tuple(out), mapping
+
+
+# --------------------------------------------------------------------------- #
 # Loop-invariant code motion
 # --------------------------------------------------------------------------- #
 
@@ -380,11 +565,17 @@ def optimize(body: Tuple[Stmt, ...], dump_hook=None,
              diagnostics: Optional[List[str]] = None) -> Tuple[Stmt, ...]:
     """The default pipeline.  ``dump_hook(name, body)`` sees every stage.
 
+    ``fold`` runs first: it turns expressions into constants and removes
+    identity operations, which gives ``cse`` more equal keys to merge and
+    ``licm`` fewer statements to consider.  It runs a second time after
+    ``licm``, because hoisting can bring two constants into the same scope.
+
     ``schedule_async`` runs last on purpose: the wait counts depend on the
     final issue order, so anything that may still move statements has to have
     happened already.
     """
-    stages = (('cse', cse), ('licm', licm), ('cse2', cse), ('dce', dce))
+    stages = (('fold', fold), ('cse', cse), ('licm', licm),
+              ('fold2', fold), ('cse2', cse), ('dce', dce))
     for name, fn in stages:
         body = fn(body)
         if dump_hook is not None:

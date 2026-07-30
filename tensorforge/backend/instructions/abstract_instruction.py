@@ -89,6 +89,25 @@ class AbstractInstruction(ABC):
   def barrier_scope(self) -> 'BarrierScope':
     return BarrierScope.NONE
 
+  def regions(self) -> Tuple[Tuple['AbstractInstruction', ...], ...]:
+    """Nested instruction streams, e.g. a loop body.
+
+    Empty for everything except control constructs.  Passes and verify walk
+    these, so an instruction that carries a region must report it or its body
+    becomes invisible.
+    """
+    return ()
+
+  def uniform_scope(self) -> 'BarrierScope':
+    """The strongest barrier that may legally appear inside this instruction's
+    regions.
+
+    ``GRID`` means no restriction.  A loop whose trip count differs between
+    blocks returns ``GROUP``: a grid barrier in its body would deadlock, since
+    blocks with fewer iterations exit without arriving.
+    """
+    return BarrierScope.GRID
+
   def accesses(self) -> Tuple[Access, ...]:
     """Localised memory effects, in ``pir``'s vocabulary."""
     if not self.describes_dataflow():

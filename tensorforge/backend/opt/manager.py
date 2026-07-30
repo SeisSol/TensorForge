@@ -186,7 +186,6 @@ class PassManager:
         for instr in pc.global_ir:
             predefined += list(instr.defs())
         diags = verify(stream,
-                       inside_batch_loop=False,
                        predefined=predefined,
                        check_offsets=offsets,
                        # readiness needs the thread-block policy, which runs

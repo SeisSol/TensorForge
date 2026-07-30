@@ -49,25 +49,37 @@ def dump(instrs: Sequence[AbstractInstruction],
          show_dataflow: bool = True) -> str:
     """Render the stream.  Deliberately diffable: no addresses, no ids."""
     lines = [f'--- {title} ({len(instrs)} instructions) ---']
+    _dump_into(lines, instrs, show_dataflow, indent=0)
+    return '\n'.join(lines)
+
+
+def _dump_into(lines: List[str], instrs: Sequence[AbstractInstruction],
+               show_dataflow: bool, indent: int) -> None:
+    pad = '  ' * indent
     width = max((len(str(i)) for i in range(len(instrs))), default=1)
     for index, instr in enumerate(instrs):
         text = str(instr).replace('\n', ' ')
-        lines.append(f'{index:>{width}}  {text}')
-        if not show_dataflow:
-            continue
-        defs = ', '.join(_sym(s) for s in instr.defs())
-        uses = ', '.join(_sym(s) for s in instr.uses())
-        note = f'{" " * (width + 2)}   [{_effect_str(instr)}]'
-        if defs:
-            note += f' def={{{defs}}}'
-        if uses:
-            note += f' use={{{uses}}}'
-        if not instr.describes_dataflow() and instr.barrier_scope() is BarrierScope.NONE:
-            note += '  OPAQUE'
-        if not instr.is_ready():
-            note += '  NOT-READY'
-        lines.append(note)
-    return '\n'.join(lines)
+        lines.append(f'{pad}{index:>{width}}  {text}')
+        if show_dataflow:
+            defs = ', '.join(_sym(s) for s in instr.defs())
+            uses = ', '.join(_sym(s) for s in instr.uses())
+            note = f'{pad}{" " * (width + 2)}   [{_effect_str(instr)}]'
+            if defs:
+                note += f' def={{{defs}}}'
+            if uses:
+                note += f' use={{{uses}}}'
+            if (not instr.describes_dataflow()
+                    and instr.barrier_scope() is BarrierScope.NONE
+                    and not instr.regions()):
+                note += '  OPAQUE'
+            if not instr.is_ready():
+                note += '  NOT-READY'
+            lines.append(note)
+        for region in instr.regions():
+            lines.append(f'{pad}    {{ uniform='
+                         f'{instr.uniform_scope().name.lower()}')
+            _dump_into(lines, region, show_dataflow, indent + 3)
+            lines.append(f'{pad}    }}')
 
 
 # --------------------------------------------------------------------------- #
@@ -97,7 +109,7 @@ _PREDEFINED = (SymbolType.Batch, SymbolType.Global, SymbolType.Scalar,
 
 def verify(instrs: Sequence[AbstractInstruction],
            *,
-           inside_batch_loop: bool = False,
+           max_barrier_scope: BarrierScope = BarrierScope.GRID,
            predefined: Iterable[Any] = (),
            backend: Optional[str] = None,
            check_offsets: bool = True,
@@ -116,9 +128,10 @@ def verify(instrs: Sequence[AbstractInstruction],
                        for the arena size.  So this is an emit-time check,
                        not a between-passes one.
 
-    ``inside_batch_loop`` marks the per-element body (``Section.ir``), which
-    the generator wraps in the persistent-threading ``for``.  That matters
-    for grid barriers -- see below.
+    ``max_barrier_scope`` is the strongest barrier legal at this level.  It
+    used to be a boolean ``inside_batch_loop`` that callers had to set by hand;
+    now the loop is an instruction with a region, so recursion derives it from
+    ``uniform_scope`` and no caller has to know.
 
     ``predefined`` are symbols already live on entry (kernel parameters,
     the shared-memory arena, anything defined by ``Section.global_ir``).
@@ -145,16 +158,16 @@ def verify(instrs: Sequence[AbstractInstruction],
                 f'reads {_sym(sym)} ({getattr(sym, "stype", "?")}) with no '
                 f'preceding definition'))
 
-        # -- 3. grid barriers must not sit inside the batch loop
+        # -- 3. a barrier may not exceed the enclosing constructs' uniformity
         scope = instr.barrier_scope()
-        if scope is BarrierScope.GRID and inside_batch_loop:
+        if scope is not BarrierScope.NONE and scope > max_barrier_scope:
             diags.append(Diagnostic(
                 'error', index,
-                'grid barrier inside the per-element loop. The trip count is '
-                'ceil((numElements - start)/stride) and `start` depends on the '
-                'block id, so it is not grid-uniform: blocks with fewer '
-                'iterations exit without arriving and the kernel deadlocks. '
-                'Grid barriers belong between sections.'))
+                f'{scope.name.lower()} barrier inside a construct whose trip '
+                f'count is only {max_barrier_scope.name.lower()}-uniform. '
+                f'Threads that execute a different number of iterations never '
+                f'arrive at the barrier, so the kernel deadlocks rather than '
+                f'producing a wrong answer.'))
 
         # -- 4. backend actually supports the requested scope
         if scope is BarrierScope.GRID and backend == 'sycl':
@@ -171,6 +184,16 @@ def verify(instrs: Sequence[AbstractInstruction],
                 'info', index,
                 f'{type(instr).__name__} does not describe its data flow; '
                 f'passes must treat it as opaque'))
+
+        # -- 6. recurse into regions, tightening the barrier limit
+        inner_limit = min(max_barrier_scope, instr.uniform_scope())
+        for region in instr.regions():
+            diags.extend(verify(region,
+                                max_barrier_scope=inner_limit,
+                                predefined=list(defined),
+                                backend=backend,
+                                check_offsets=False,
+                                check_ready=check_ready))
 
         for sym in instr.defs():
             defined.add(sym)
@@ -191,7 +214,7 @@ def _check_shared_aliasing(instrs: Sequence[AbstractInstruction]
     diags: List[Diagnostic] = []
     # (symbol -> (offset, size, global_arena)) as far as it is observable
     extents: Dict[int, Tuple[Any, int, int, bool]] = {}
-    for instr in instrs:
+    for instr in _flatten(instrs):
         offset = getattr(instr, '_shr_mem_offset', None)
         size_fn = getattr(instr, 'compute_shared_mem_size', None)
         if offset is None or not callable(size_fn):
@@ -243,9 +266,25 @@ def _live_shared(instrs: Sequence[AbstractInstruction]
     # module, so there is no cycle
     from .liveness import LivenessAnalysis
 
-    analysis = LivenessAnalysis(None, list(instrs))
+    analysis = LivenessAnalysis(None, list(_flatten(instrs)))
     analysis.apply()
     return dict(analysis.get_live_map())
+
+
+def _flatten(instrs: Sequence[AbstractInstruction]
+             ) -> List[AbstractInstruction]:
+    """Depth-first linearisation, for checks that only need an ordering.
+
+    Correct for the shared-memory aliasing check because a region executes
+    where it sits; it is *not* a substitute for a real analysis over the
+    region structure, which loop-carried live ranges will need.
+    """
+    out: List[AbstractInstruction] = []
+    for instr in instrs:
+        out.append(instr)
+        for region in instr.regions():
+            out.extend(_flatten(region))
+    return out
 
 
 def format_diagnostics(diags: Sequence[Diagnostic]) -> str:
