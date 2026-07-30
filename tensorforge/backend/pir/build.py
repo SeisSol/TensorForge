@@ -114,7 +114,7 @@ class IRBuilder:
         return v
 
     def op(self, name: str, type_, *args: Operand,
-           hint: str = '', pure: bool = True) -> Value:
+           hint: str = '', pure: bool = True, escapes: bool = False) -> Value:
         """A generic pure operation (``add``, ``mul``, ``fma``, ``select``...).
 
         Uniformity is propagated: the result is uniform iff every value operand
@@ -123,7 +123,11 @@ class IRBuilder:
         """
         uniform = all(a.uniform for a in args if isinstance(a, Value))
         v = self.value(type_, hint=hint, uniform=uniform)
-        self._emit_op(name, (v,), args, pure=pure)
+        # `escapes`: the name is referenced from raw text, so the value must
+        # neither be eliminated nor folded into its consumer.  Migration
+        # scaffolding -- it disappears once the consumer takes a Value.
+        attrs = (('escapes', True),) if escapes else ()
+        self._emit_op(name, (v,), args, pure=pure, attrs=attrs)
         return v
 
     def call(self, callee: str, type_, *args: Operand, hint: str = '',

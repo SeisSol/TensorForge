@@ -268,7 +268,7 @@ class Emitter:
                     pending.clear()
                 if (s.pure and not s.regions and not s.has_side_effects
                         and s.effect == Effect.NONE and len(s.target) == 1
-                        and s.op != Op.CONST):
+                        and s.op != Op.CONST and not s.attr('escapes')):
                     t = s.target[0]
                     if len(uses.get(t.id, ())) == 1 and here.get(t.id, 0) == 1:
                         pending.add(t.id)

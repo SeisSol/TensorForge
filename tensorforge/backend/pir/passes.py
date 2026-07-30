@@ -241,6 +241,10 @@ def _dce_body(body: Tuple[Stmt, ...], uses) -> Tuple[Stmt, ...]:
         if s.op == Op.YIELD or s.has_side_effects:
             out.append(s)
             continue
+        if s.attr('escapes'):
+            # its name is interpolated into raw text the IR cannot see
+            out.append(s)
+            continue
         if s.text is not None:
             # A raw statement is output by construction -- a Comment has no
             # target, no region and no effect, and dropping it would silently
@@ -461,7 +465,10 @@ def _fold_body(body: Tuple[Stmt, ...], consts: Dict[int, Any]):
 
         foldable = (s.pure and not s.has_side_effects
                     and len(s.target) == 1 and s.effect == Effect.NONE
-                    and s.predicate is None)
+                    and s.predicate is None
+                    # an escaping value is named from raw text, so folding it
+                    # away would leave that text referring to nothing
+                    and not s.attr('escapes'))
         if not foldable:
             out.append(s)
             continue

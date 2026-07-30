@@ -270,6 +270,32 @@ def check_writer_parity():
     return body
 
 
+def check_linearized_loop():
+    """`LinearizedLoop` is reached by no test case, so cover it here.
+
+    Also the first place where the passes visibly earn their keep on migrated
+    code: `threadIdx.x % blocksize` is loop-invariant and LICM hoists it.
+    """
+    from tensorforge.backend.symbol import Loop, LinearizedLoop
+    from tensorforge.backend.writer import Writer as W
+    from tensorforge.common.context import Context
+
+    ctx = Context(arch='sm_86', backend='cuda', fp_type=Datatype.F32)
+    b = IRBuilder(fptype=Datatype.F32, context=ctx)
+    LinearizedLoop([Loop('k0', 0, 9, 1), Loop('k1', 2, 10, 2)],
+                   blocksize=4).write(
+        ctx, b, lambda idx: b(f'use({idx[0]._name}, {idx[1]._name});'))
+    body = b.finish()
+    assert not verify(body, strict=False)
+    w = W()
+    emit(optimize(body), w, ctx)
+    src = w.get_src()
+    # the lane offset left the loop, and no `/ 1`, `* 1` or `+ 0` survives
+    assert src.index('threadIdx.x % 4') < src.index('for ('), src
+    assert '/ 1' not in src and '* 1' not in src and '+ 0' not in src, src
+    return src
+
+
 def _count(body, op):
     return sum(1 for s, _ in pir.walk(body) if s.op == op)
 
@@ -403,6 +429,10 @@ def main():
     # -- carried load token is rejected ------------------------------------ #
     car = build_carried_load()
     assert any('back edge' in m for m in verify(car, strict=False))
+
+    lin = check_linearized_loop()
+    print('\n=== LinearizedLoop (kein Testfall deckt ihn ab) ===')
+    print(lin)
 
     # -- writer parity ----------------------------------------------------- #
     legacy_body = check_writer_parity()
