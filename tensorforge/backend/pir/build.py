@@ -345,9 +345,9 @@ class IRBuilder:
         return _ForHandle(self, lo, hi, step, tuple(inits), tuple(types),
                           unroll, hint)
 
-    def if_(self, cond: Operand) -> '_IfHandle':
+    def if_(self, cond: Operand, attrs: Tuple = ()) -> '_IfHandle':
         """Guard without results --- the common case (bounds checks)."""
-        return _IfHandle(self, cond, ())
+        return _IfHandle(self, cond, (), attrs)
 
     def if_else(self, cond: Operand, types: Sequence[Any]) -> '_IfHandle':
         return _IfHandle(self, cond, tuple(types))
@@ -659,10 +659,11 @@ class _ForHandle:
 
 
 class _IfHandle:
-    def __init__(self, builder, cond, types):
+    def __init__(self, builder, cond, types, attrs=()):
         self.builder = builder
         self.cond = cond
         self._types = types
+        self._attrs = tuple(attrs)
         self._then: Optional[Region] = None
         self._else: Optional[Region] = None
         self.results: Tuple[Value, ...] = ()
@@ -679,7 +680,7 @@ class _IfHandle:
         if exc_type is not None:
             return False
         self.builder.emit(Stmt(op=Op.IF, args=(self.cond,), regions=(region,),
-                               pure=False, movable=False))
+                               pure=False, movable=False, attrs=self._attrs))
         return False
 
     @contextmanager

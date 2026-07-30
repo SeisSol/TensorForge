@@ -239,13 +239,26 @@ def add_offset(x, offset):
     return VarOffset(x, offset)
 
 class LeadLoop:
-  def __init__(self, name, start, end, threads, stride, unroll=False):
+  """Loop over a thread-distributed dimension, with guards for the ragged ends.
+
+  `neutral`, when given, is the value a masked-out lane may contribute instead
+  of being guarded --- so that if-conversion can drop the guard rather than
+  merely predicate what is inside it.  It is a property of the whole
+  consumer chain, not of a single operator: for `sum(prod(...))` it is 0,
+  because 0 absorbs the product *and* is the sum's neutral.  Where no such
+  value exists (a `max` of products, say), it stays None and the guard has to
+  survive.
+  """
+
+  def __init__(self, name, start, end, threads, stride, unroll=False,
+               neutral=None):
     self.start = start
     self.end = end
     self.unroll = unroll
     self.threads = threads
     self.var = name
     self.stride = stride
+    self.neutral = neutral
 
   def _lead(self, context: Context, writer):
     """`(tid / stride) % threads` --- as IR values, or as text on the legacy path.
@@ -267,7 +280,8 @@ class LeadLoop:
       upper = writer.op('lt', BOOL, lead, hi, hint='g')
       cond = upper if cond is None else writer.op('and', BOOL, cond, upper,
                                                   hint='g')
-    return writer.if_(cond)
+    return writer.if_(cond, attrs=(('neutral', self.neutral),)
+                      if self.neutral is not None else ())
 
   def write(self, context: Context, writer: Writer, inner):
     actualstart = self.start // self.threads

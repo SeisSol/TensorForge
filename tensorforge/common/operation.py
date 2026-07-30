@@ -64,6 +64,10 @@ class OperationType(Enum):
   BOOLEAN = 3
 
 class Operator:
+  def absorbing(self):
+    """Value `a` with `op(a, x) == a` for all x, or None if there is none."""
+    return None
+
   def irop(self):
     """Name of the matching pseudo-IR op, or None to fall back to `format`."""
     return None
@@ -106,6 +110,9 @@ class AddOperator(ReductionOperator):
     return '+'
 
 class MulOperator(ReductionOperator):
+  def absorbing(self):
+    return 0
+
   def irop(self):
     return 'mul'
 
@@ -157,6 +164,9 @@ class MaxOperator(ReductionOperator):
     return 'max'
 
 class AndOperator(ReductionOperator):
+  def absorbing(self):
+    return 0
+
   def irop(self):
     # bitwise, not logical: `and` would render as `&&`
     return 'bitand'
