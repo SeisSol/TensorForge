@@ -22,7 +22,27 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 from tensorforge.common.basic_types import Datatype
 
 from .core import (Access, BufferType, Effect, IRError, MemSpace, Op, Operand,
-                   Region, ScalarType, Stmt, TokenType, Value, walk)
+                   Region, ScalarType, Stmt, TokenType, Value, def_use, walk)
+
+_ATOM = __import__('re').compile(r'^(?:[A-Za-z_][A-Za-z0-9_.:]*|\d[\w.]*)$')
+
+
+def _unwrap(expr: str) -> str:
+    """Drop one redundant paren level: `Writer.If` adds its own."""
+    if not (expr.startswith('(') and expr.endswith(')')):
+        return expr
+    depth = 0
+    for i, c in enumerate(expr):
+        depth += (c == '(') - (c == ')')
+        if depth == 0 and i < len(expr) - 1:
+            return expr                 # e.g. "(a) && (b)" -- not a wrapper
+    return expr[1:-1]
+
+
+def _atomic(expr: str) -> bool:
+    """An identifier or literal needs no parentheses when inlined."""
+    return bool(_ATOM.match(expr))
+
 
 def _sm_at_least(model: str, minimum: int) -> bool:
     digits = ''.join(c for c in str(model)[3:] if c.isdigit())
@@ -55,6 +75,7 @@ class Emitter:
         self._consts: Dict[int, str] = {}
         self._async_lex = None
         self._async_note = ''
+        self._inline: set = set()
         self._pending: Dict[int, str] = {}   # load.async token id -> C++ name
 
     # -- naming ------------------------------------------------------------ #
@@ -199,6 +220,9 @@ class Emitter:
             other = (self.operand(other) if other is not None
                      else self.zero(v.type))
             expr = f'{self.operand(s.predicate)} ? ({expr}) : ({other})'
+        if name is None and v.id in self._inline:
+            self.bind(v, _atomic(expr) and expr or f'({expr})')
+            return
         self.writer(f'{self.ctype(v.type)} {name or self.name(v)} = {expr};')
 
     def base_name(self, base: Operand) -> str:
@@ -208,7 +232,54 @@ class Emitter:
 
     # -- driver ------------------------------------------------------------ #
 
+    def _plan_inlining(self, body: Tuple[Stmt, ...]) -> set:
+        """Values that should become expressions rather than declarations.
+
+        A pure single-use value is written straight into its consumer, so a
+        migrated construct emits as compactly as the string it replaces.
+        Without this every structured op leaves a named temporary behind, and
+        the generated source grows with the migration instead of staying
+        comparable to it.
+
+        The use has to sit *directly* in the same region: pushing a
+        computation into a nested loop would change how often it runs.
+        """
+        _, uses = def_use(body)
+        inline: set = set()
+
+        def scan(stmts: Tuple[Stmt, ...]) -> None:
+            here: Dict[int, int] = {}
+            for s in stmts:
+                for v in s.operands():
+                    here[v.id] = here.get(v.id, 0) + 1
+
+            pending: set = set()
+            for s in stmts:
+                for v in s.operands():
+                    if v.id in pending:
+                        inline.add(v.id)
+                        pending.discard(v.id)
+                if s.has_side_effects or s.regions:
+                    # Everything still pending has to materialize here.  The
+                    # arithmetic is pure, so moving it past a wait or a store
+                    # would not change the result -- but it would undo a
+                    # deliberately interleaved schedule, which is the whole
+                    # point of having placed the statement where it is.
+                    pending.clear()
+                if (s.pure and not s.regions and not s.has_side_effects
+                        and s.effect == Effect.NONE and len(s.target) == 1
+                        and s.op != Op.CONST):
+                    t = s.target[0]
+                    if len(uses.get(t.id, ())) == 1 and here.get(t.id, 0) == 1:
+                        pending.add(t.id)
+                for r in s.regions:
+                    scan(r.body)
+
+        scan(body)
+        return inline
+
     def run(self, body: Tuple[Stmt, ...]) -> None:
+        self._inline = self._plan_inlining(body)
         self._decide_async(body)
         if self._async_lex is None and self._async_note:
             self.writer.Comment(f'async copies lowered synchronously: '
@@ -436,7 +507,7 @@ class Emitter:
             w(f'{self.ctype(res.type)} {nm};')
             targets.append(nm)
 
-        with w.If(self.operand(s.cond)):
+        with w.If(_unwrap(self.operand(s.cond))):
             self._emit_body(s.regions[0].body, tuple(targets))
         if len(s.regions) > 1:
             with w.Block('else'):

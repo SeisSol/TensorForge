@@ -7,6 +7,7 @@ from tensorforge.common.context import Context
 from tensorforge.common.basic_types import Datatype, Addressing
 from tensorforge.common.exceptions import GenerationError
 from .writer import Writer
+from tensorforge.backend.pir.core import BOOL, INDEX
 
 from tensorforge.common.matrix.spp import BoundingBoxSPP
 
@@ -202,49 +203,76 @@ class LeadLoop:
     self.var = name
     self.stride = stride
 
+  def _lead(self, context: Context, writer):
+    """`(tid / stride) % threads` --- as IR values, or as text on the legacy path.
+
+    This is where the first thread-dependent value enters the IR: `thread_id`
+    is the one non-uniform source, so everything derived from it is marked
+    non-uniform and the barrier-in-divergent-region check becomes live.
+    """
+    if hasattr(writer, 'op'):
+      tid = writer.thread_id('x')
+      lane = writer.op('div', INDEX, tid, self.stride, hint='lane')
+      return writer.op('rem', INDEX, lane, self.threads, hint='lead')
+    lex = context.get_vm().get_lexic()
+    return f'({lex.thread_idx_x} / {self.stride}) % {self.threads}'
+
+  def _guard(self, writer, lead, lo, hi):
+    """`lead >= lo && lead < hi`, with either bound optional."""
+    if hasattr(writer, 'op'):
+      cond = None
+      if lo is not None:
+        cond = writer.op('ge', BOOL, lead, lo, hint='g')
+      if hi is not None:
+        upper = writer.op('lt', BOOL, lead, hi, hint='g')
+        cond = upper if cond is None else writer.op('and', BOOL, cond, upper,
+                                                    hint='g')
+      return writer.if_(cond)
+    parts = []
+    if lo is not None:
+      parts.append(f'{lead} >= {lo}')
+    if hi is not None:
+      parts.append(f'{lead} < {hi}')
+    return writer.If(' && '.join(parts))
+
   def write(self, context: Context, writer: Writer, inner):
     actualstart = self.start // self.threads
     realstart = (self.start + self.threads - 1) // self.threads
     realend = (self.end) // self.threads
     actualend = (self.end + self.threads - 1) // self.threads
 
-    leadExpr = f'({context.get_vm().get_lexic().thread_idx_x} / {self.stride}) % {self.threads}'
+    lead = self._lead(context, writer)
+    tail = self.end - realend * self.threads
 
     if actualstart >= actualend:
       pass
     if actualstart == realend:
       index = LeadIndex(actualstart, self.threads, self.stride)
       startIdx = self.start - actualstart * self.threads
-      endIdx = self.end - realend * self.threads
-      if startIdx > 0:
-        with writer.If(f'{leadExpr} >= {startIdx} && {leadExpr} < {self.end - realend * self.threads}'):
-          inner([index])
-        #writer(f'{context.get_vm().get_lexic().sync_simd()};')
-      else:
-        with writer.If(f'{leadExpr} < {self.end - realend * self.threads}'):
-          inner([index])
-        #writer(f'{context.get_vm().get_lexic().sync_simd()};')
+      with self._guard(writer, lead, startIdx if startIdx > 0 else None, tail):
+        inner([index])
     else:
       if self.start % self.threads != 0:
         index = LeadIndex(actualstart, self.threads, self.stride)
-        with writer.If(f'{leadExpr} >= {self.start - actualstart}'):
+        with self._guard(writer, lead, self.start - actualstart, None):
           inner([index])
-        #writer(f'{context.get_vm().get_lexic().sync_simd()};')
       if self.unroll:
         for value in range(realstart, realend):
-          index = LeadIndex(value, self.threads, self.stride)
-          inner([index])
+          inner([LeadIndex(value, self.threads, self.stride)])
       elif realstart < realend:
-        # TODO: move unroll up?
-        var = self.var
-        with writer.For(f'int32_t {var} = {realstart}; {var} < {realend}; {var} += 1', True):
-          index = LeadIndex(var, self.threads, self.stride)
-          inner([index])
+        if hasattr(writer, 'for_'):
+          loop = writer.for_(realstart, realend, 1, unroll=True, hint=self.var)
+          with loop:
+            inner([LeadIndex(str(loop.induction), self.threads, self.stride)])
+        else:
+          var = self.var
+          with writer.For(f'int32_t {var} = {realstart}; {var} < {realend}; '
+                          f'{var} += 1', True):
+            inner([LeadIndex(var, self.threads, self.stride)])
       if self.end % self.threads != 0:
         index = LeadIndex(actualend - 1, self.threads, self.stride)
-        with writer.If(f'{leadExpr} < {self.end - realend * self.threads}'):
+        with self._guard(writer, lead, None, tail):
           inner([index])
-        #writer(f'{context.get_vm().get_lexic().sync_simd()};')
 
 class Loop:
   def __init__(self, name, start, end, step=1, unroll=False):
