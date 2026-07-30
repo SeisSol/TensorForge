@@ -659,9 +659,25 @@ class Symbol:
     addrs = []
     if self.stype == SymbolType.Data or (not self.obj.is_dense() and not isinstance(self.obj.spp, BoundingBoxSPP)):
       if variable is None:
-        # the sparse path writes into a caller-named variable and reports
-        # success as a bool -- it has no value to hand back
-        return None
+        # Wrap the whole declare-then-conditionally-assign sequence in a block
+        # with a declared result: the inside stays opaque, but the value has a
+        # unique name and can be an operand.
+        from tensorforge.backend.pir.core import ScalarType
+        blk = writer.value_block(ScalarType(self.get_fptype()), self, hint='data')
+        with blk as v:
+          writer(f'{v} = {self.get_fptype().literal(0)};')
+          leadidx = None
+          for i, idx in enumerate(index):
+            if isinstance(idx, LeadIndex):
+              if leadidx is None:
+                leadidx = idx
+              else:
+                leadidx = None
+                break
+          leadidxidx = index.index(leadidx) if leadidx is not None else None
+          ok = self.encode_values(0, [0] * len(index), writer, context, str(v),
+                                  index, nontemp, leadidxidx)
+        return v if ok else None
       writer(f'{self.get_fptype()} {variable} = {self.get_fptype().literal(0)};')
 
       # treat the lead index last for better sparsity handling
@@ -707,8 +723,17 @@ class Symbol:
         # structured: the consumer takes the value, not a name
         from tensorforge.backend.pir.core import ScalarType
         lex = context.get_vm().get_lexic()
-        if lex.simd_mode or self.stype == SymbolType.Global:
+        if lex.simd_mode:
           return None
+        if self.stype == SymbolType.Global:
+          # glb_load is a declare-then-assign pair, so it needs the same
+          # wrapper as the sparse path to have a single declared result
+          blk = writer.value_block(ScalarType(self.get_fptype()), self,
+                                   hint='data')
+          with blk as v:
+            writer.access_stmt(lex.glb_load(str(v), access, nontemp), self,
+                               Effect.READ, args=_operands(None, addrs))
+          return v
         return writer.load_expr(
             access, ScalarType(self.get_fptype()), self,
             args=_operands(variable, addrs),

@@ -475,6 +475,20 @@ class IRBuilder:
                       text=text)
         return v
 
+    def value_block(self, type_, base: Any = None, *,
+                    kind: Effect = Effect.READ, hint: str = 'v'):
+        """A region that produces one value by assigning to it internally.
+
+        The escape hatch for code that is not SSA and cannot cheaply be made
+        so --- the sparse loader declares a variable and then assigns to it
+        under guards.  Wrapping the whole sequence gives it a *declared
+        result* and a *declared memory effect*, so consumers can take the
+        value as an operand even though the inside stays opaque.  The name
+        comes from the shared allocator, so it no longer needs an enclosing
+        scope to avoid colliding with the next instruction.
+        """
+        return _ValueBlock(self, type_, base, kind, hint)
+
     def Comment(self, text: str) -> Stmt:
         return self._emit_op(Op.RAWSTMT, (), (), pure=False, movable=True,
                              effect=Effect.NONE, text=f'// {text}')
@@ -525,6 +539,32 @@ class IRBuilder:
 
     def dump(self) -> str:
         return dump(tuple(self._stack[0].body))
+
+
+class _ValueBlock:
+    def __init__(self, builder, type_, base, kind, hint):
+        self.builder = builder
+        self._type = type_
+        self._base = base
+        self._kind = kind
+        self.value = builder.value(type_, hint=hint)
+
+    def __enter__(self) -> Value:
+        self.builder.push(kind='valueblock')
+        return self.value
+
+    def __exit__(self, exc_type, exc, tb):
+        region = self.builder.pop()
+        if exc_type is not None:
+            return False
+        acc = ()
+        if self._base is not None:
+            acc = (Access(self._kind, self.builder._space_of(self._base),
+                          self._base),)
+        self.builder.emit(Stmt(op=Op.RAWBLOCK, target=(self.value,),
+                               regions=(region,), text='', pure=False,
+                               movable=False, effect=self._kind, accesses=acc))
+        return False
 
 
 class _Speculation:

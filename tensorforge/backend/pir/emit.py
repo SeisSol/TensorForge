@@ -333,6 +333,8 @@ class Emitter:
         if op == Op.RAWBLOCK:
             if s.attr('pragma'):
                 w(f'#pragma {s.attr("pragma")}')
+            for t in s.target:      # a value-producing block declares it first
+                w(f'{self.ctype(t.type)} {self.name(t)};')
             with w.Block(s.text):
                 self._emit_body(s.regions[0].body, yield_to)
             return
