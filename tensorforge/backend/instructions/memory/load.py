@@ -198,8 +198,8 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
       granularities = [m for m in [4, 2, 1] if m * self._dest.get_fptype().size() <= 16]
 
     if self._use_tma_memcpy:
-      dest_access_index = self._dest.access_address(self._context, index)
-      src_access_index = self._src.access_address(self._context, index)
+      dest_access_index = self._dest.access_address(self._context, index, writer)
+      src_access_index = self._src.access_address(self._context, index, writer)
       writer(f'cuda::device::memcpy_async_tx(&{self._dest.name}[{dest_access_index}], &{self._src.name}[{src_access_index}], cuda::aligned_size_t<16>({length}), mbarrier);')
     else:
       for vecsize in granularities:
@@ -237,8 +237,8 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
         # load using a for-loop
         with writer.For(f'int32_t i = {start}; i < {end}; i += {increment}', True):
           contiguous_index = indexwrapper(f'{increment} * {self._linear_idx()} + i * {self._num_threads}')
-          dest_access_index = self._dest.access_address(self._context, index)
-          src_access_index = self._src.access_address(self._context, index)
+          dest_access_index = self._dest.access_address(self._context, index, writer)
+          src_access_index = self._src.access_address(self._context, index, writer)
           lhs = f'{typeprefix}{self._dest.name}[{dst_offset} + {dest_access_index} + {contiguous_index}]'
           rhs = f'{typeprefix}{self._src.name}[{src_offset} + {src_access_index} + {contiguous_index}]'
           write_load(lhs, rhs)
@@ -246,8 +246,8 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
         # load using manual loop unrolling
         for counter in range(start, end, increment):
           contiguous_index = indexwrapper(f'{increment} * {self._linear_idx()} + {counter * self._num_threads}')
-          dest_access_index = self._dest.access_address(self._context, index)
-          src_access_index = self._src.access_address(self._context, index)
+          dest_access_index = self._dest.access_address(self._context, index, writer)
+          src_access_index = self._src.access_address(self._context, index, writer)
           lhs = f'{typeprefix}{self._dest.name}[{dst_offset} + {dest_access_index} + {contiguous_index}]'
           rhs = f'{typeprefix}{self._src.name}[{src_offset} + {src_access_index} + {contiguous_index}]'
           write_load(lhs, rhs)

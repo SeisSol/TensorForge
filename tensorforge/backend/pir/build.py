@@ -140,6 +140,24 @@ class IRBuilder:
                       accesses=accesses, attrs=(('callee', callee),))
         return v
 
+    def pin(self, value: Operand) -> Operand:
+        """Mark `value`'s producer as escaping.
+
+        For values whose name is interpolated into raw text after the fact, so
+        the caller does not have to know at construction time whether the
+        result will escape.  Searches the innermost scope backwards first: the
+        producer is almost always the statement just emitted.
+        """
+        if not isinstance(value, Value):
+            return value
+        for scope in reversed(self._stack):
+            for i in range(len(scope.body) - 1, -1, -1):
+                st = scope.body[i]
+                if st.target and st.target[0] is value:
+                    scope.body[i] = st.with_attr('escapes', True)
+                    return value
+        return value
+
     def thread_id(self, axis: str = 'x') -> Value:
         """The one intrinsically non-uniform value."""
         v = self.value(INDEX, hint=f'tid{axis}', uniform=False)

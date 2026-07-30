@@ -125,10 +125,21 @@ class Immediate:
   def lead(self):
     return self._value
 
+  def build(self, writer, context: Context):
+    return self._value
+
+  def build_nonlead(self, writer, context: Context):
+    return self._value
+
 class Variable:
-  def __init__(self, name, fptype: Datatype):
+  # `value` is the IR value the name came from.  Carrying it is what lets the
+  # address arithmetic keep a def-use edge to the loop induction variable --
+  # without it a passed-through name looks like a constant to LICM, which
+  # would happily hoist a loop-dependent address out of its loop.
+  def __init__(self, name, fptype: Datatype, value=None):
     self._name = name
     self._type = fptype
+    self._value = value
 
   def is_thread_dependent(self):
     return False
@@ -139,12 +150,19 @@ class Variable:
   def write(self, context: Context):
     return self._name
 
+  def build(self, writer, context: Context):
+    return self._name if self._value is None else self._value
+
+  def build_nonlead(self, writer, context: Context):
+    return self.build(writer, context)
+
 class LeadIndex:
   # TODO: make nonlead a variable
-  def __init__(self, nonlead, block, stride):
+  def __init__(self, nonlead, block, stride, value=None):
     self._nonlead = nonlead
     self._block = block
     self._stride = stride
+    self._value = value
 
   def is_thread_dependent(self):
     return True
@@ -166,6 +184,23 @@ class LeadIndex:
   def lead(self):
     return self._nonlead * self._block
 
+  def build_nonlead(self, writer, context: Context):
+    return self._nonlead if self._value is None else self._value
+
+  def build(self, writer, context: Context):
+    nl = self.build_nonlead(writer, context)
+    if context.get_vm().get_lexic().simd_mode:
+      return writer.op('mul', INDEX, nl, self._block, hint='lead')
+    if self._block > 1:
+      lane = writer.op('rem', INDEX,
+                       writer.op('div', INDEX, writer.thread_id('x'),
+                                 self._stride, hint='lane'),
+                       self._block, hint='lane')
+      return writer.op('add', INDEX, lane,
+                       writer.op('mul', INDEX, nl, self._block, hint='lead'),
+                       hint='lead')
+    return nl
+
 class VarOffset:
   def __init__(self, variable, offset):
     self.variable = variable
@@ -181,6 +216,15 @@ class VarOffset:
   def write(self, context: Context):
     # TODO: lead
     return f'({self.variable.write(context)} + {self.offset})'
+
+  def build(self, writer, context: Context):
+    return writer.op('add', INDEX, self.variable.build(writer, context),
+                     self.offset, hint='off')
+
+  def build_nonlead(self, writer, context: Context):
+    return writer.op('add', INDEX,
+                     self.variable.build_nonlead(writer, context),
+                     self.offset, hint='off')
 
 def add_offset(x, offset):
   if offset == 0:
@@ -252,7 +296,8 @@ class LeadLoop:
       elif realstart < realend:
         loop = writer.for_(realstart, realend, 1, unroll=True, hint=self.var)
         with loop:
-          inner([LeadIndex(str(loop.induction), self.threads, self.stride)])
+          inner([LeadIndex(str(loop.induction), self.threads, self.stride,
+                           loop.induction)])
       if self.end % self.threads != 0:
         index = LeadIndex(actualend - 1, self.threads, self.stride)
         with self._guard(writer, lead, None, tail):
@@ -279,7 +324,7 @@ class Loop:
       loop = writer.for_(self.start, self.end, self.step,
                          unroll=True, hint=self.var)
       with loop:
-        inner([Variable(str(loop.induction), Datatype.I32)])
+        inner([Variable(str(loop.induction), Datatype.I32, loop.induction)])
 
 # TODO: add leading
 class LinearizedLoop:
@@ -322,7 +367,7 @@ class LinearizedLoop:
         for j, (name, operand) in enumerate(steps):
           v = writer.op(name, INDEX, v, operand, hint=loop.var,
                         escapes=(j == len(steps) - 1))
-        idx.append(Variable(str(v), Datatype.I32))
+        idx.append(Variable(str(v), Datatype.I32, v))
       inner(idx)
 
 class MultiLoop:
@@ -397,7 +442,63 @@ class Symbol:
     else:
       return f'{self.name}'
 
-  def access_address(self, context: Context, index: List[Union[str, int, Immediate, Variable, LeadIndex]]):
+  def build_address(self, writer, context: Context, index):
+    """The address as IR values instead of a string.
+
+    Same arithmetic as `access_address` --- sum of `(index - offset) * stride`
+    --- but as nodes, so `fold` removes the `- 0` and `* 1` terms the string
+    path always wrote out, CSE shares subexpressions between the loads of one
+    body, and LICM can lift the loop-invariant part.
+    """
+    def arith(name, a, b, py):
+      # fold right here when both sides are numbers: an address that is fully
+      # static should be a literal in the generated source, not a temporary
+      # that `fold` collapses and `pin` then has to keep alive
+      if isinstance(a, (int, np.integer)) and isinstance(b, (int, np.integer)):
+        return int(py(a, b))
+      return writer.op(name, INDEX, a, b, hint='a')
+
+    def term(var, offset, stride, lead=False):
+      v = (var if isinstance(var, (str, int, float, np.int64))
+           else (var.build_nonlead(writer, context) if lead
+                 else var.build(writer, context)))
+      if offset:
+        v = arith('sub', v, offset, lambda x, y: x - y)
+      if stride != 1:
+        v = arith('mul', v, stride, lambda x, y: x * y)
+      return v
+
+    if self.stype in (SymbolType.Global, SymbolType.Batch, SymbolType.SharedMem):
+      parts = [term(var, off, st) for var, off, st in
+               zip(index, self.data_view.get_dim_offsets(),
+                   self.data_view.get_dim_strides())]
+    elif self.stype in (SymbolType.Register, SymbolType.Scratch):
+      parts = []
+      stride = 1
+      offsets = self.data_view.get_dim_offsets()
+      for i in range(self.data_view.rank()):
+        if isinstance(index[i], LeadIndex):
+          parts.append(term(index[i], offsets[i] // self.num_threads, stride,
+                            lead=True))
+          stride *= ((self.data_view.get_dim_size(i) + self.num_threads - 1)
+                     // self.num_threads)
+        else:
+          parts.append(term(index[i], offsets[i], stride, lead=True))
+          stride *= self.data_view.get_dim_size(i)
+    else:
+      raise NotImplementedError('Not supposed to be called')
+
+    if not parts:
+      return 0
+    total = parts[0]
+    for p in parts[1:]:
+      total = arith('add', total, p, lambda x, y: x + y)
+    return total
+
+  def access_address(self, context: Context, index: List[Union[str, int, Immediate, Variable, LeadIndex]], writer=None):
+    if writer is not None:
+      # the result's name goes into raw text, so pin it against DCE and folding
+      return str(writer.pin(self.build_address(writer, context, index)))
     if self.stype == SymbolType.Global or self.stype == SymbolType.Batch or self.stype == SymbolType.SharedMem:
       writevar = lambda var: f'{var}' if isinstance(var, (str, int, float, np.int64)) else var.write(context)
       # lead_dim + nonlead_dim
@@ -425,9 +526,9 @@ class Symbol:
       return dimstr if len(dimstr) > 0 else "0"
     raise NotImplementedError('Not supposed to be called')
 
-  def access(self, context: Context, index: List[Union[str, int, Immediate, Variable, LeadIndex]]):
+  def access(self, context: Context, index: List[Union[str, int, Immediate, Variable, LeadIndex]], writer=None):
     if self.stype == SymbolType.Global or self.stype == SymbolType.Batch or self.stype == SymbolType.SharedMem or self.stype == SymbolType.Register or self.stype == SymbolType.Scratch:
-      return f'{self.name}[{self.access_address(context, index)}]'
+      return f'{self.name}[{self.access_address(context, index, writer)}]'
     if self.stype == SymbolType.Scalar:
       return f'{self.name}'
     if self.stype == SymbolType.Data:
@@ -563,7 +664,7 @@ class Symbol:
         leadidxidx = None
       return self.encode_values(0, [0] * len(index), writer, context, variable, index, nontemp, leadidxidx)
     else:
-      pre_access = self.access(context, index)
+      pre_access = self.access(context, index, writer)
       if self.stype == SymbolType.Register or self.stype == SymbolType.Scratch:
         assert len(self.lead_dims) == 1
         idx = index[self.lead_dims[0]]
@@ -573,12 +674,12 @@ class Symbol:
           # doesn't work
           if isinstance(idx, Variable):
             writevar = idx.write_nonlead()
-            pre_access = self.access(context, index)
+            pre_access = self.access(context, index, writer)
             access = context.get_vm().get_lexic().broadcast(pre_access, writevar, self.num_threads)
           else:
             index2 = list(index)
             index2[self.lead_dims[0]] = LeadIndex(idx._value // self.num_threads, self.num_threads, 1)
-            pre_access = self.access(context, index2)
+            pre_access = self.access(context, index2, writer)
 
             writevar = idx._value % self.num_threads
             access = context.get_vm().get_lexic().broadcast(pre_access, writevar, self.num_threads)
@@ -598,7 +699,7 @@ class Symbol:
   def store(self, writer, context, variable, index: List[Union[str, int, Immediate, Variable, LeadIndex]], nontemp, atomic=None):
     assert self.stype != SymbolType.Data
 
-    access = self.access(context, index)
+    access = self.access(context, index, writer)
 
     if context.get_vm().get_lexic().simd_mode:
       if self.stype == SymbolType.Global:
