@@ -12,6 +12,7 @@ input it was handed.
 
 from __future__ import annotations
 
+import re
 from dataclasses import replace
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -571,6 +572,52 @@ def _split_invariant(loop: Stmt) -> Tuple[List[Stmt], Tuple[Stmt, ...]]:
 
 
 # --------------------------------------------------------------------------- #
+# Scope flattening
+# --------------------------------------------------------------------------- #
+
+_CDECL = re.compile(r'\b(?:const\s+)?(?:float|double|int32_t|int|auto|bool|'
+                    r'__float128|unsigned|char|short|long|\w+_t)\s+(\w+)\s*[=;\[]')
+
+
+def _declares(body: Tuple[Stmt, ...]) -> bool:
+    """Does any *direct* statement declare a C++ name in raw text?
+
+    Structured values do not count: their names come from the shared
+    allocator and are unique across the whole generated file.
+    """
+    for s in body:
+        if s.text and _CDECL.search(s.text):
+            return True
+    return False
+
+
+def flatten_scopes(body: Tuple[Stmt, ...]) -> Tuple[Stmt, ...]:
+    """Splice away anonymous `{ }` regions that cannot cause a redeclaration.
+
+    One of these used to wrap every instruction body, so that `value` or
+    `data0` from one instruction would not collide with the next.  Once the
+    names come from the shared allocator the braces are pure noise --- and
+    expensive noise: an opaque block head makes the async scheduler give up its
+    state, and nothing can be reordered across one.
+
+    Conservative on purpose: a region that still declares a name in raw text
+    keeps its braces.
+    """
+    out: List[Stmt] = []
+    for s in body:
+        s = replace(s, regions=tuple(replace(r, body=flatten_scopes(r.body))
+                                     for r in s.regions))
+        if (s.op == Op.RAWBLOCK and not s.text and not s.target
+                and not s.attrs and len(s.regions) == 1
+                and not s.regions[0].args
+                and not _declares(s.regions[0].body)):
+            out.extend(s.regions[0].body)
+            continue
+        out.append(s)
+    return tuple(out)
+
+
+# --------------------------------------------------------------------------- #
 # Convenience pipeline
 # --------------------------------------------------------------------------- #
 
@@ -587,7 +634,7 @@ def optimize(body: Tuple[Stmt, ...], dump_hook=None,
     final issue order, so anything that may still move statements has to have
     happened already.
     """
-    stages = (('fold', fold), ('cse', cse), ('licm', licm),
+    stages = (('flatten', flatten_scopes), ('fold', fold), ('cse', cse), ('licm', licm),
               ('fold2', fold), ('cse2', cse), ('dce', dce))
     for name, fn in stages:
         body = fn(body)
