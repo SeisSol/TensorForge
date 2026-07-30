@@ -217,9 +217,13 @@ class Generator:
     instruction, so ``verify`` recurses into its region and derives the legal
     barrier scope from ``uniform_scope`` rather than the caller passing a flag.
     """
+    # `check_ready` needs the thread-block policy, which has run by now: this
+    # is the emit-time call the pass manager's comment defers to, and which
+    # nothing was actually making.
     diags = verify(stream,
                    predefined=list(self._scopes.get_global_scope().values()),
-                   backend=self._context.get_vm().get_lexic()._backend)
+                   backend=self._context.get_vm().get_lexic()._backend,
+                   check_ready=True)
     errors = [d for d in diags if d.severity == 'error']
     if errors:
       raise GenerationError(

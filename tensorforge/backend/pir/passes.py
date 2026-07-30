@@ -16,6 +16,8 @@ import re
 from dataclasses import replace
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+from tensorforge.common.basic_types import Datatype
+
 from .core import (Access, BufferType, Effect, IRError, MemSpace, Op, Operand,
                    Region, ScalarType, Stmt, TokenType, Value,
                    accesses_conflict, collect_accesses, collect_effect,
@@ -26,6 +28,10 @@ from .asyncmem import check_tokens, schedule_async
 # --------------------------------------------------------------------------- #
 # Verifier
 # --------------------------------------------------------------------------- #
+
+_INTEGER_ONLY = frozenset({'bitand', 'bitor', 'bitxor', 'shl', 'shr', 'rem'})
+_FLOAT_TYPES = frozenset({Datatype.F16, Datatype.F32, Datatype.F64})
+
 
 def verify(body: Tuple[Stmt, ...], strict: bool = True) -> List[str]:
     """Structural + SSA + uniformity checks.
@@ -147,6 +153,13 @@ def _check_scope(body: Tuple[Stmt, ...], live: set, diag: List[str],
         elif s.op in (Op.LOAD, Op.STORE):
             if not s.accesses:
                 diag.append(f'{s.op}: must declare at least one access')
+
+        elif s.op in _INTEGER_ONLY:
+            for x in list(s.args) + list(s.target):
+                t = _typeof(x) if not isinstance(x, Value) else x.type
+                if isinstance(t, ScalarType) and t.base in _FLOAT_TYPES:
+                    diag.append(f'{s.op}: bitwise/shift operand {x!r} is '
+                                f'floating point')
 
         elif s.op == Op.LOAD_ASYNC:
             if len(s.target) != 1 or not isinstance(s.target[0].type, TokenType):

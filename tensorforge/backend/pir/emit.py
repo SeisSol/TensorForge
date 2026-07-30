@@ -27,6 +27,21 @@ from .core import (Access, BufferType, Effect, IRError, MemSpace, Op, Operand,
 _ATOM = __import__('re').compile(r'^(?:[A-Za-z_][A-Za-z0-9_.:]*|\d[\w.]*)$')
 
 
+# A predicate becomes a select only where suppressing the statement is not the
+# point.  Reads -- synchronous or asynchronous -- may be evaluated under a
+# ternary; anything that writes, is atomic, synchronises or is opaque has to
+# keep a real branch, or the effect would happen when it must not.  This used
+# to be a test on the *shape* of the statement (does it have a target?), which
+# would silently fold a value-returning atomic into a ternary.
+_MUST_BRANCH = Effect.WRITE | Effect.ATOMIC | Effect.BARRIER | Effect.UNKNOWN
+
+
+def _folds_predicate(s: Stmt) -> bool:
+    if s.effect & _MUST_BRANCH or s.regions:
+        return False
+    return bool(s.target) or s.op in Op.DECLARING
+
+
 def _unwrap(expr: str) -> str:
     """Drop one redundant paren level: `Writer.If` adds its own."""
     if not (expr.startswith('(') and expr.endswith(')')):
@@ -215,7 +230,7 @@ class Emitter:
         would be unusable afterwards.  Lowering to a select also keeps the
         statement hoistable, which a guard region never is.
         """
-        if s.predicate is not None:
+        if s.predicate is not None and _folds_predicate(s):
             other = s.attr('other')
             other = (self.operand(other) if other is not None
                      else self.zero(v.type))
@@ -289,8 +304,8 @@ class Emitter:
     def _emit_body(self, body: Tuple[Stmt, ...],
                    yield_to: Tuple[Optional[str], ...]) -> None:
         for s in body:
-            declares = s.op in Op.DECLARING or (s.target and not s.regions)
-            if s.predicate is not None and s.op != Op.YIELD and not declares:
+            if (s.predicate is not None and s.op != Op.YIELD
+                    and not _folds_predicate(s)):
                 with self.writer.If(self.operand(s.predicate)):
                     self._emit_stmt(s, yield_to)
             else:

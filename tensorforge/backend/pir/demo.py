@@ -324,6 +324,29 @@ def check_pressure():
     return tight, deep
 
 
+def check_predication():
+    """A predicate is a select only where suppressing the effect is not the
+    point.  Reads fold; writes and atomics keep a branch."""
+    from tensorforge.backend.writer import Writer as W
+    b = IRBuilder(fptype=Datatype.F32)
+    G = b.alloc(Datatype.F32, (16,), MemSpace.GLOBAL, hint='g')
+    tid = b.thread_id('x')
+    ok = b.op('lt', BOOL, tid, 9, hint='ok')
+    x = b.load(G, tid, hint='x', predicate=ok)
+    b.store(G, x, 0, predicate=ok)
+    b.store(G, x, 1, predicate=ok, atomic=True)
+    body = b.finish()
+    assert not verify(body, strict=False)
+    w = W()
+    emit(body, w)
+    src = w.get_src()
+    assert '? (' in src, src                       # the read folded
+    assert src.count('if (v2_ok)') == 2, src       # write and atomic branched
+    kinds = [a.kind for s_, _ in pir.walk(body) for a in s_.accesses]
+    assert any(k & Effect.ATOMIC for k in kinds), kinds
+    return src
+
+
 def _count(body, op):
     return sum(1 for s, _ in pir.walk(body) if s.op == op)
 
@@ -457,6 +480,9 @@ def main():
     # -- carried load token is rejected ------------------------------------ #
     car = build_carried_load()
     assert any('back edge' in m for m in verify(car, strict=False))
+
+    print('\n=== Praedikation ===')
+    print(check_predication())
 
     tight, deep = check_pressure()
     print(f'\n=== Registerdruck: enge Schleife {tight}, '

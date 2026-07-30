@@ -769,15 +769,16 @@ class Symbol:
       else:
         assign = f'{access} = {var};'
 
+      kind = Effect.ATOMIC if atomic else Effect.WRITE
       if self.stype == SymbolType.Register or self.stype == SymbolType.Scratch:
         assert len(self.lead_dims) == 1
         if isinstance(index[self.lead_dims[0]], LeadIndex):
-          writer.access_stmt(assign, self, Effect.WRITE, args=_operands(variable, addrs), fmt=fmt)
+          writer.access_stmt(assign, self, kind, args=_operands(variable, addrs), fmt=fmt)
         else:
           with writer.If(f'{context.get_vm().get_lexic().thread_idx_x} == {index[self.lead_dims[0]]}'):
-            writer.access_stmt(assign, self, Effect.WRITE, args=_operands(variable, addrs), fmt=fmt)
+            writer.access_stmt(assign, self, kind, args=_operands(variable, addrs), fmt=fmt)
       else:
-        writer.access_stmt(assign, self, Effect.WRITE, args=_operands(variable, addrs), fmt=fmt)
+        writer.access_stmt(assign, self, kind, args=_operands(variable, addrs), fmt=fmt)
 
   def add_user(self, user):
     self._users.append(user)

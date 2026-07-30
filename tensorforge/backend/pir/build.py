@@ -201,14 +201,18 @@ class IRBuilder:
         return v
 
     def store(self, base: Any, value: Operand, *indices: Operand,
-              space: Optional[MemSpace] = None) -> Stmt:
+              space: Optional[MemSpace] = None,
+              predicate: Optional[Value] = None,
+              atomic: bool = False) -> Stmt:
         if space is None:
             space = (base.type.space if isinstance(base, Value)
                      and isinstance(base.type, BufferType)
                      else MemSpace.from_symbol_type(getattr(base, 'stype', None)))
+        kind = Effect.ATOMIC if atomic else Effect.WRITE
         return self._emit_op(Op.STORE, (), (base, value) + tuple(indices),
-                             pure=False, movable=True, effect=Effect.WRITE,
-                             accesses=(Access(Effect.WRITE, space, base),))
+                             predicate=predicate, pure=False, movable=True,
+                             effect=kind,
+                             accesses=(Access(kind, space, base),))
 
     def copy_async(self, dst: Any, src: Any, *,
                    dst_index: Sequence[Operand] = (),
