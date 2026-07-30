@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: MIT
 """``B[i, j] = A[i, j] ** 3`` — single-(constant-folded)-op ElementwiseDescr.
 
-This case is a bit special: ``optree.pow(x, 3)`` does *not* lower to a
-``POW`` library call. The constant-fold path at ``optree.py:704-728``
+This case exercises a binary elementwise op with a scalar operand:
+``ew.pow(b, a, 3.0)``. The exponent 3.0 matches none of the folding
+special cases (2, ±0.5, ±1/3, ±1), so it does lower to a ``POW``
 only short-circuits exponents ``-1, 0.5, -0.5, 1, 2, 1/3, -1/3`` —
 exponent 3 falls through to ``LexicOpNode([x, 3], Operation.POW)`` and
 will hit ``powf`` in CUDA.
@@ -25,10 +26,8 @@ import numpy as np
 from tensorforge.common.basic_types import Addressing, Datatype
 from tensorforge.common.matrix.boundingbox import BoundingBox
 from tensorforge.common.matrix.tensor import SubTensor, Tensor
-from tensorforge.generators import optree
-from tensorforge.generators.descriptions import ElementwiseDescr
+from tensorforge.generators import elementwise as ew
 
-from harness.optree_helpers import make_tvar
 
 NAME = "elementwise_pow3_16x16"
 DTYPE = Datatype.F32
@@ -45,9 +44,7 @@ def descr_list():
                          alias="B", datatype=DTYPE))
     # 3.0 (float) — using int 3 would still take the POW path, but
     # spelling it as float matches what the runtime sees.
-    return [ElementwiseDescr(
-        [optree.Assignment(make_tvar(b, 2),
-                           optree.pow(make_tvar(a, 2), 3.0))])]
+    return [ew.pow(b, a, 3.0)]
 
 
 def reference(inputs, dest_in):

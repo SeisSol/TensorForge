@@ -24,7 +24,7 @@ import numpy as np
 
 from tensorforge.common.basic_types import Addressing, Datatype
 from tensorforge.common.matrix.boundingbox import BoundingBox
-from tensorforge.common.matrix.tensor import Tensor
+from tensorforge.common.matrix.tensor import SubTensor, Tensor
 from tensorforge.common.operation import MaxOperator
 from tensorforge.generators.descriptions import ReductionDescr
 
@@ -41,12 +41,12 @@ XFAIL_REASON = (
 
 
 def descr_list():
-    a = Tensor([16, 16], Addressing.STRIDED,
+    a = SubTensor(Tensor([16, 16], Addressing.STRIDED,
                BoundingBox([0, 0], [16, 16]),
-               alias="A", datatype=DTYPE)
-    out = Tensor([1], Addressing.STRIDED,
+               alias="A", datatype=DTYPE))
+    out = SubTensor(Tensor([1], Addressing.STRIDED,
                  BoundingBox([0], [1]),
-                 alias="OUT", datatype=DTYPE)
+                 alias="OUT", datatype=DTYPE))
     return [ReductionDescr(out, a, [0, 1], MaxOperator())]
 
 

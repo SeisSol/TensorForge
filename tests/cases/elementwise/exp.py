@@ -14,10 +14,8 @@ import numpy as np
 from tensorforge.common.basic_types import Addressing, Datatype
 from tensorforge.common.matrix.boundingbox import BoundingBox
 from tensorforge.common.matrix.tensor import SubTensor, Tensor
-from tensorforge.generators import optree
-from tensorforge.generators.descriptions import ElementwiseDescr
+from tensorforge.generators import elementwise as ew
 
-from harness.optree_helpers import make_tvar
 
 NAME = "elementwise_exp_16x16"
 DTYPE = Datatype.F32
@@ -32,8 +30,7 @@ def descr_list():
     b = SubTensor(Tensor([16, 16], Addressing.STRIDED,
                          BoundingBox([0, 0], [16, 16]),
                          alias="B", datatype=DTYPE))
-    return [ElementwiseDescr(
-        [optree.Assignment(make_tvar(b, 2), optree.exp(make_tvar(a, 2)))])]
+    return [ew.exp(b, a)]
 
 
 def reference(inputs, dest_in):

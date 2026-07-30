@@ -1,91 +1,135 @@
-from tensorforge.common.matrix.tensor import Tensor
-from . import ComputeInstruction
-from tensorforge.common.exceptions import InternalError
+# SPDX-FileCopyrightText: 2015 SeisSol Group
+#
+# SPDX-License-Identifier: MIT
+
+"""One scalar operation applied pointwise over a tensor.
+"""
+
+from typing import List, Sequence, Union
+
+import numpy as np
+
+from tensorforge.backend.scopes import Scopes
+from tensorforge.backend.symbol import (LeadLoop, Loop, Symbol, SymbolView,
+                                        write_loops)
 from tensorforge.backend.writer import Writer
 from tensorforge.common.context import Context
-from typing import List
-from tensorforge.generators.optree import Assignment, writeAssignments
-from tensorforge.backend.scopes import Scopes
-from tensorforge.backend.symbol import Loop, LeadLoop, write_loops, LeadIndex
+from tensorforge.common.exceptions import InternalError
+from tensorforge.common.matrix.tensor import Tensor
+from tensorforge.common.operation import Operation
+
+from . import ComputeInstruction
+
+
+ScalarLike = (int, float, np.integer, np.floating)
+
 
 class ElementwiseInstruction(ComputeInstruction):
     def __init__(self,
-               context: Context,
-               assignments: List[Assignment],
-               scopes: Scopes,
-               prefer_align: bool,
-               num_threads: int):
+                 context: Context,
+                 op: Operation,
+                 dest: SymbolView,
+                 srcs: Sequence[Union[SymbolView, int, float]],
+                 prefer_align: bool,
+                 num_threads: int):
         super(ElementwiseInstruction, self).__init__(context)
-        self._assignments = assignments
+        self._op = op
+        self._dest = dest
+        self._srcs = list(srcs)
         self._prefer_align = prefer_align
+        self._num_threads = num_threads
         self._is_ready = True
         self._user_options = context.get_user_options()
         self._gemm_meta_data = None
-        self._num_threads = num_threads
-
         self._lead_dims = [0]
-
         self.registers = None
 
-        # TODO: get index list
-        seen_tensors = set()
-        ranges = {}
-        for assignment in self._assignments:
-          assignment.assignSymbols(scopes)
-          ranges = assignment.getRanges(ranges)
-          for tensor in assignment.symbols():
-            if tensor not in seen_tensors:
-              tensor.add_user(self)
-              seen_tensors.add(tensor)
-              if not isinstance(tensor.obj, Tensor):
-                raise InternalError('elementwise: op is not a matrix')
-        self._ks = [None] * len(ranges)
-        for i in range(len(ranges)):
-            assert -i-1 in ranges
-            self._ks[i] = ranges[-i-1]
+        for view in self._tensor_srcs() + [self._dest]:
+            if not isinstance(view.symbol.obj, Tensor):
+                raise InternalError('elementwise: operand is not a tensor')
 
-    def gen_code_inner(self, writer: Writer):
-        self._assignment_loop(writer)
+        # The iteration space is the destination's, not something unified over
+        # a list of assignments: elementwise means the operands share its shape,
+        # which ElementwiseDescr checks at construction.  SymbolView carries
+        # exactly the (symbol, bbox) pair that optree's TensorVar duplicated.
+        bbox = self._dest.bbox
+        self._ks = [(0, bbox.size(i)) for i in range(bbox.rank())]
 
-    def _assignment_loop(self, writer: Writer):
-        loopstack = []
+        seen = set()
+        for view in [self._dest] + self._tensor_srcs():
+            if id(view.symbol) not in seen:
+                seen.add(id(view.symbol))
+                view.symbol.add_user(self)
 
-        for i, (dimmin, dimmax) in enumerate(self._ks):
-            if i not in self._lead_dims:
-                loopstack += [Loop(f'k{i}', dimmin, dimmax, 1, unroll=False)]
-            else:
-                loopstack += [LeadLoop(f'k{i}', dimmin, dimmax, self._num_threads, 1, unroll=False)]
+    # -- data flow ------------------------------------------------------- #
 
-        def inner(varlist):
-            for i,_ in enumerate(self._ks):
-                writer(f'auto n{i} = {varlist[i].write(self._context)};')
-            writeAssignments(self._assignments, writer, self._context)
-
-        write_loops(self._context, writer, loopstack, inner)
-
-    def get_operands(self):
-        # NOTE: deliberately still empty. LivenessAnalysis and SyncThreadsOpt
-        # key on get_operands(), so filling it in here *changes barrier
-        # placement* for every elementwise kernel. That is very likely a fix
-        # -- an elementwise op reading a shared-memory buffer currently gets
-        # no barrier -- but it is a behavioural change and belongs in its own
-        # commit, not in the data-flow interface. Use defs()/uses() below.
-        return []
-
-    def _symbols(self, intensors: bool, outtensors: bool):
-        seen, out = set(), []
-        for assignment in self._assignments:
-            for sym in assignment.symbols(intensors, outtensors):
-                if sym is not None and id(sym) not in seen:
-                    seen.add(id(sym))
-                    out.append(sym)
-        return tuple(out)
+    def _tensor_srcs(self) -> List[SymbolView]:
+        return [s for s in self._srcs if not isinstance(s, ScalarLike)]
 
     def defs(self):
-        return self._symbols(intensors=False, outtensors=True)
+        return (self._dest.symbol,)
 
     def uses(self):
-        return self._symbols(intensors=True, outtensors=False)
+        return tuple(v.symbol for v in self._tensor_srcs())
+
+    def get_operands(self):
+        # Previously this returned [] with a "TODO: for now", which made every
+        # elementwise operand invisible to liveness and to barrier insertion.
+        # It now agrees with uses().
+        return [v.symbol for v in self._tensor_srcs()]
+
+    # -- emission -------------------------------------------------------- #
+
+    def gen_code_inner(self, writer: Writer):
+        loopstack = []
+        for i, (dimmin, dimmax) in enumerate(self._ks):
+            if i in self._lead_dims:
+                loopstack.append(LeadLoop(f'k{i}', dimmin, dimmax,
+                                          self._num_threads, 1, unroll=False))
+            else:
+                loopstack.append(Loop(f'k{i}', dimmin, dimmax, 1, unroll=False))
+
+        write_loops(self._context, writer, loopstack, self._body(writer))
+
+    @staticmethod
+    def _index(view: SymbolView) -> List[str]:
+        # optree's TensorVar emitted `(n{k} + bbox.lower()[k])`; keep that, so
+        # the generated address arithmetic is unchanged.
+        return [f'(n{i} + {o})' for i, o in enumerate(view.bbox.lower())]
+
+    def _body(self, writer: Writer):
+        def inner(varlist):
+            for i, _ in enumerate(self._ks):
+                writer(f'auto n{i} = {varlist[i].write(self._context)};')
+
+            operands: List[str] = []
+            counter = 0
+            for src in self._srcs:
+                if isinstance(src, ScalarLike):
+                    operands.append(self._context.fp_type.literal(src))
+                    continue
+                var = f'v{counter}'
+                counter += 1
+                src.symbol.load(writer, self._context, var,
+                                self._index(src), False)
+                operands.append(var)
+
+            # get_operation always takes two values; unary ops pass '' as the
+            # second, which is what LexicOpNode.operation did.  NOTE: the
+            # concrete lexics take (op, fptype, value1, value2); the abstract
+            # declaration in lexic.py omits fptype and is wrong.
+            padded = operands + [''] if len(operands) == 1 else operands
+            lexic = self._context.get_vm().get_lexic()
+            result = f'v{counter}'
+            writer(f'const auto {result} = '
+                   f'{lexic.get_operation(self._op, self._context.fp_type, *padded)};')
+            self._dest.symbol.store(writer, self._context, result,
+                                    self._index(self._dest), False)
+
+        return inner
 
     def __str__(self):
-        return ', '.join(str(assignment) for assignment in self._assignments)
+        def render(s):
+            return s.symbol.name if isinstance(s, SymbolView) else str(s)
+        args = ', '.join(render(s) for s in self._srcs)
+        return f'{self._dest.symbol.name} = {self._op.name.lower()}({args})'

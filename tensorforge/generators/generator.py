@@ -420,9 +420,23 @@ class Generator:
                         descr=gemm_descr)
         self._section.ir.extend(builder.get_instructions())
       if isinstance(gemm_descr, ElementwiseDescr):
-        self._section.ir.append(ElementwiseInstruction(self._context, gemm_descr.oplist, self._scopes, False, self._num_threads))
+        self._section.ir.append(ElementwiseInstruction(
+            self._context,
+            gemm_descr.op,
+            get_symbol_view(gemm_descr.dest),
+            [s if isinstance(s, (int, float)) else get_symbol_view(s)
+             for s in gemm_descr.srcs],
+            gemm_descr.prefer_align,
+            self._num_threads))
       if isinstance(gemm_descr, ReductionDescr):
-        self._section.ir.append(ReductionInstruction(self._context, gemm_descr.oplist, self._scopes, False, self._num_threads))
+        self._section.ir.append(ReductionInstruction(
+            self._context,
+            get_symbol_view(gemm_descr.dest),
+            get_symbol_view(gemm_descr.var),
+            gemm_descr.dims,
+            gemm_descr.op,
+            gemm_descr.prefer_align,
+            self._num_threads))
 
     builder.build_epilogue()
     self._section.ir.extend(builder.get_instructions())

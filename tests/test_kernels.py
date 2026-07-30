@@ -93,11 +93,9 @@ def test_reference_matches_einsum():
 def test_elementwise_descr_constructs():
     """Every elementwise case can build an ElementwiseDescr without a GPU.
 
-    Catches breakage in :mod:`harness.optree_helpers` or in
-    ``ElementwiseDescr.__init__`` (e.g.\\ the data-flow-direction loop)
-    even on a CI runner that has no toolchain. Generation itself is not
-    exercised here — that needs the LeadLoop-stride fix in
-    ``ElementwiseInstruction`` to land first.
+    Catches breakage in ``generators/elementwise.py`` or in
+    ``ElementwiseDescr.__init__`` (arity check, shape check, the
+    data-flow-direction assignment) even on a CI runner with no toolchain.
     """
     from pathlib import Path
     import importlib.util
@@ -122,13 +120,9 @@ def test_elementwise_descr_constructs():
             f"{path.name}: not an ElementwiseDescr ({type(d).__name__})")
         # ElementwiseDescr.__init__ sets directions on the underlying
         # tensors; assert that side effect actually happened.
-        seen_sink = False
-        seen_source = False
-        for assign in d.oplist:
-            for tv in assign.tensors(intensors=False, outtensors=True):
-                seen_sink |= (tv.tensor.direction == DataFlowDirection.SINK)
-            for tv in assign.tensors(intensors=True, outtensors=False):
-                seen_source |= (tv.tensor.direction == DataFlowDirection.SOURCE)
+        seen_sink = d.dest.tensor.direction == DataFlowDirection.SINK
+        seen_source = any(src.tensor.direction == DataFlowDirection.SOURCE
+                          for src in d.tensor_srcs())
         assert seen_sink, f"{path.name}: no SINK direction set"
         assert seen_source, f"{path.name}: no SOURCE direction set"
 
