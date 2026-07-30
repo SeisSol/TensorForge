@@ -69,6 +69,14 @@ class BatchLoop(AbstractInstruction):
     def regions(self) -> Tuple[Tuple[AbstractInstruction, ...], ...]:
         return (tuple(self._region),)
 
+    def replace_region(self, index: int,
+                       instrs: List[AbstractInstruction]) -> None:
+        assert index == 0, f'BatchLoop has one region, not {index + 1}'
+        self._region = list(instrs)
+
+    def append(self, instr: AbstractInstruction) -> None:
+        self._region.append(instr)
+
     def uniform_scope(self) -> BarrierScope:
         """How far the trip count is uniform, i.e. the strongest barrier that
         may legally appear inside.

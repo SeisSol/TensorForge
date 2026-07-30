@@ -18,7 +18,8 @@ from tensorforge.backend.instructions.abstract_instruction import AbstractInstru
 from tensorforge.backend.data_types import ShrMemObject
 
 from .liveness import LivenessAnalysis
-from .manager import LegacyAnalysis, LegacyTransform, PassContext, PassManager
+from .manager import (LegacyAnalysis, LegacyTransform, PassContext, PassManager,
+                      PassScope)
 from .mem_region_allocation import MemoryRegionAllocation
 from .memmove import MoveLoads
 from .multibuffer import MultiBuffer
@@ -54,9 +55,12 @@ class OptimizationStage:
 
     # Hoist loads away from their uses.  Must run before liveness, since it
     # changes the distance between a definition and its consumers.
+    # Scheduling within a straight-line block: per region, or it would hoist a
+    # load across a loop boundary.
     pm.add(LegacyTransform(
         'MoveLoads',
-        lambda pc: MoveLoads(pc.context, pc.instrs)))
+        lambda pc, instrs: MoveLoads(pc.context, instrs),
+        scope=PassScope.PER_REGION))
 
     # Software pipelining.  Both are disabled: they publish a prologue
     # through `_global_instrs`, i.e. a second list the rest of the pipeline
@@ -64,21 +68,21 @@ class OptimizationStage:
     # Reviving them needs a real loop op first -- see multibuffer.py.
     pm.add(LegacyTransform(
         'MultiBuffer',
-        lambda pc: MultiBuffer(pc.context, pc.instrs, pc.shr_mem, pc.scopes),
-        collects_global=True,
+        lambda pc, instrs: MultiBuffer(pc.context, instrs, pc.shr_mem, pc.scopes),
         enabled=lambda pc: getattr(opts, 'enable_multibuffer', False)))
     pm.add(LegacyTransform(
         'PtrPipe',
-        lambda pc: PtrPipe(pc.context, pc.instrs),
-        collects_global=True,
+        lambda pc, instrs: PtrPipe(pc.context, instrs),
         enabled=lambda pc: getattr(opts, 'enable_ptrpipe', False)))
 
-    # NOTE on `predefined`: Section.global_ir also defines shared-memory
-    # symbols (the preloaded global operators), but those are allocated by
-    # ShrMemObject.alloc_global -- a separate bump allocator in a separate
-    # arena.  Feeding them in here would hand them to the region allocator
-    # as well and they would get two offsets.  Unifying the two allocators
-    # is a deliberate change, not a side effect of this one.
+    # Whole nest: a value carried across the loop's back edge is only visible
+    # to a fixed point over the region structure.
+    #
+    # NOTE on the preloaded globals: the shared-memory symbols defined by the
+    # section prologue are allocated by ShrMemObject.alloc_global -- a separate
+    # bump allocator in a separate arena -- so they are deliberately *not* fed
+    # to the region allocator, which would give them a second offset.  Unifying
+    # the two allocators is its own change.
     pm.add(LegacyAnalysis(
         'LivenessAnalysis',
         lambda pc: LivenessAnalysis(pc.context, pc.local_stream),
@@ -95,12 +99,15 @@ class OptimizationStage:
     pm.add(_AssignShrMemOffsets())
 
     # Barrier insertion keys on region membership, so it must follow the
-    # allocation it depends on.
+    # allocation it depends on.  Per region: "the previous write to this buffer"
+    # must not be read across a loop boundary, where the previous write is the
+    # previous *iteration*.
     pm.add(LegacyTransform(
         'SyncThreadsOpt',
-        lambda pc: SyncThreadsOpt(pc.context, pc.instrs, pc.get('regions'),
-                                  pc.num_threads),
+        lambda pc, instrs: SyncThreadsOpt(pc.context, instrs,
+                                          pc.get('regions'), pc.num_threads),
         preserves=('live_map', 'regions'),
+        scope=PassScope.PER_REGION,
         enabled=lambda pc: opts.enable_sync_block_opt))
 
     # RemoveRedundancyOpt is deliberately absent: its _remove_bottom_instrs
@@ -117,9 +124,6 @@ class OptimizationStage:
 
   def get_instructions(self):
     return self._pc.instrs
-
-  def get_global_instructions(self):
-    return self._pc.produced
 
   def get_timings(self):
     return self._manager.timings
@@ -151,8 +155,9 @@ class _AssignShrMemOffsets(LegacyTransform):
     overhead //= alignment
     overhead *= alignment
 
+    # whole nest: temp_shmem() of a BatchLoop is the max over its body
     tmp_overhead = 0
-    for instr in pc.instrs:
+    for instr in pc.stream:
       tmp_overhead = max(tmp_overhead, instr.temp_shmem())
 
     opt = ShrMemOpt(context=pc.context,

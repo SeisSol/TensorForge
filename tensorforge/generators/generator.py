@@ -56,8 +56,13 @@ class RegmaxBlockPolicy(AbstractThreadBlockPolicy):
 
 class Section:
   def __init__(self):
+    # `global_ir` and `ir` are what the builders author: the section prologue
+    # and the per-element body.  `stream` is the optimised result -- prologue
+    # followed by one BatchLoop carrying the body as its region -- and is what
+    # gets emitted.
     self.ir: List[AbstractInstruction] = []
     self.global_ir: List[AbstractInstruction] = []
+    self.stream: List[AbstractInstruction] = []
     self.shr_mem_obj: Union[ShrMemObject, None] = None
     self.scopes: Scopes = Scopes()
     self.barrier = False
@@ -109,8 +114,12 @@ class Generator:
     self._populate_global_scope()
 
   def _set_threadconfig(self):
-    for instr in self._section.global_ir:
-      instr.set_threadconfig_pre(self._num_threads, self._section.shr_mem_obj.get_mults_per_block())
+    # Top level only, which is the prologue plus the loop itself.  The default
+    # is a no-op; only a blockwide GlbToShrLoader overrides it, and those live
+    # in the prologue.
+    mults = self._section.shr_mem_obj.get_mults_per_block()
+    for instr in self._section.stream:
+      instr.set_threadconfig_pre(self._num_threads, mults)
 
   def generate(self):
     self.register()
@@ -142,19 +151,47 @@ class Generator:
 
       self._emit_global_ir()
       self._emit_ir(codesection)
+
+      # Build the loop *before* optimising, so that the passes see one stream
+      # with the body as a region.  This is what removes the
+      # `_global_instrs` side channel: a pipelining pass that wants a prologue
+      # now peels an iteration into this same list, ahead of the loop, instead
+      # of publishing it through a second list nothing else indexed.
+      index = len(self._sections)
+      start, stride = self._section_traversal(index)
+      loop = BatchLoop(context=self._context,
+                       section_index=index,
+                       mode=self._batch_loop_mode(),
+                       start=start,
+                       stride=stride,
+                       region=self._section.ir)
+
+      # The prologue stays *out* of the rewritable stream.  Its shared-memory
+      # symbols are allocated by ShrMemObject.alloc_global, a separate bump
+      # allocator in a separate arena, so letting them reach the region
+      # allocator gives them a second, conflicting offset -- observable as the
+      # preloaded operators moving from totalShrMem into localShrMem0.  The
+      # optimiser reads the prologue (for symbols live on entry) but never
+      # rewrites it.
+      #
+      # A peeled prologue from a pipelining pass belongs *here*, ahead of the
+      # loop in `instructions`, not in the section prologue.
       opt = OptimizationStage(context=self._context,
                               shr_mem=self._section.shr_mem_obj,
-                              instructions=self._section.ir,
+                              instructions=[loop],
                               num_threads=self._num_threads,
                               scopes = self._scopes,
                               global_ir = self._section.global_ir)
       opt.optimize()
-      self._section.ir = opt.get_instructions()
-      self._section.global_ir += opt.get_global_instructions()
+      self._section.stream = list(self._section.global_ir) + opt.get_instructions()
 
-      # add final sync for persistent threads
+      # Final sync for persistent threads, appended *after* optimisation on
+      # purpose: SyncThreadsOpt drops barriers it considers redundant, and this
+      # one guards the next iteration's writes against the previous
+      # iteration's reads -- a dependency across the back edge that the pass
+      # does not model.  Adding it before optimisation removes it again.
       if self._persistent_threading or self._clusterlaunchcontrol:
-        self._section.ir += [SyncThreads(self._context, self._num_threads)]
+        loop.append(SyncThreads(self._context, self._num_threads))
 
       self._deduce_mults_per_block()
       self._set_threadconfig()
@@ -188,26 +225,35 @@ class Generator:
       raise GenerationError(
           f'section {index} cannot be emitted:\n{format_diagnostics(errors)}')
 
+  def _section_traversal(self, index: int):
+    """``(start, stride)`` for one section's element traversal.
+
+    Sections after a barrier restart at the block id; sections that follow
+    without one are offset by the preceding element counts so that consecutive
+    sections do not all hammer the same elements.
+    """
+    vm = self._context.get_vm()
+    offset = []
+    idx = index - 1
+    for ssection in reversed(self._sections[:index]):
+      if ssection.barrier:
+        break
+      offset += [f'{GeneralLexicon.NUM_ELEMENTS}{idx}']
+      idx -= 1
+
+    stride = f'({vm.get_lexic().grid_dim_x} * {vm.get_lexic().block_dim_y})'
+    if len(offset) == 0:
+      start = self._get_2d_block_id()
+    else:
+      start = f'({self._get_2d_block_id()} + {" + ".join(offset)}) % {stride}'
+    return start, stride
+
   def _batch_loop_mode(self) -> LoopMode:
     if self._persistent_threading:
       return LoopMode.PERSISTENT
     if self._clusterlaunchcontrol:
       return LoopMode.LAUNCHCTRL
     return LoopMode.SINGLE
-
-  def _build_section_stream(self, section, index: int, start: str, stride: str):
-    """``global_ir ++ [BatchLoop(region=ir)]`` -- the section as one stream.
-
-    The prologue and the body were two lists that no pass could relate to each
-    other.  They are one now, with the loop carrying its body as a region.
-    """
-    return list(section.global_ir) + [BatchLoop(
-        context=self._context,
-        section_index=index,
-        mode=self._batch_loop_mode(),
-        start=start,
-        stride=stride,
-        region=section.ir)]
 
   def _generate_kernel(self):
     vm = self._context.get_vm()
@@ -221,33 +267,20 @@ class Generator:
           if self._context.get_vm().get_hw_descr().vendor == 'nvidia':
             writer(f'cuda::pipeline<cuda::thread_scope_thread> pipeline = cuda::make_pipeline();')
 
-          offset = []
-          idx = i - 1
-          for ssection in reversed(self._sections[:i]):
-            if ssection.barrier:
-              break
-            offset += [f'{GeneralLexicon.NUM_ELEMENTS}{idx}']
-            idx -= 1
-
-          stride = f'({vm.get_lexic().grid_dim_x} * {vm.get_lexic().block_dim_y})'
-          if len(offset) == 0:
-            start = self._get_2d_block_id()
-          else:
-            start = f'({self._get_2d_block_id()} + {" + ".join(offset)}) % {stride}'
+          start, stride = self._section_traversal(i)
 
           writer(f'const auto {GeneralLexicon.BATCH_ID_NAME}_start = {start};')
           writer(f'const auto {GeneralLexicon.BATCH_ID_NAME}1 = {GeneralLexicon.BATCH_ID_NAME}_start < {GeneralLexicon.NUM_ELEMENTS}{i} ? {GeneralLexicon.BATCH_ID_NAME}_start : 0;')
           writer(f'const auto {GeneralLexicon.BATCH_ID_NAME}2 = {GeneralLexicon.BATCH_ID_NAME}1 + {stride} < {GeneralLexicon.NUM_ELEMENTS}{i} ? {GeneralLexicon.BATCH_ID_NAME}1 + {stride} : {GeneralLexicon.BATCH_ID_NAME}1;')
 
-          # Everything is in place now (offsets from ShrMemOpt, arena size
-          # from the thread-block policy), so this is the point where the full
-          # check is meaningful.  Previously each instruction was tested one
-          # at a time and the first unprepared one aborted, hiding every other
-          # problem behind it.
-          stream = self._build_section_stream(section, i, start, stride)
-          self._verify_section(stream, i)
+          # Everything is in place now (offsets from ShrMemOpt, arena size from
+          # the thread-block policy), so this is the point where the full check
+          # is meaningful.  Previously each instruction was tested one at a time
+          # and the first unprepared one aborted, hiding every other problem
+          # behind it.
+          self._verify_section(section.stream, i)
 
-          for instruction in stream:
+          for instruction in section.stream:
             instruction.gen_code(writer)
 
     self._kernel = writer.get_src()

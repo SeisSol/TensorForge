@@ -3,6 +3,7 @@ from enum import IntEnum
 from typing import List, Tuple
 from tensorforge.common.context import Context, VM
 from tensorforge.backend.writer import Writer
+from tensorforge.common.exceptions import InternalError
 from tensorforge.backend.pir.core import Access, Effect, MemSpace
 
 
@@ -97,6 +98,17 @@ class AbstractInstruction(ABC):
     becomes invisible.
     """
     return ()
+
+  def replace_region(self, index: int,
+                     instrs: List['AbstractInstruction']) -> None:
+    """Swap out one region's body.
+
+    Needed by per-region passes: the manager rewrites a body and hands the
+    result back.  Anything that reports a region must accept a replacement,
+    otherwise a pass can read it but not transform it.
+    """
+    raise InternalError(
+        f'{type(self).__name__} reports a region but cannot replace it')
 
   def uniform_scope(self) -> 'BarrierScope':
     """The strongest barrier that may legally appear inside this instruction's
