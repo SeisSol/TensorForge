@@ -27,6 +27,12 @@ class ShrMemObject:
     return self._global_size
 
   def get_total_size(self):
+    # ShrMemAlloc.is_ready() calls this and tests the result against None, so
+    # it must not raise before the thread-block policy has set the factors.
+    # get_total_size_as_str() already had this guard; this one did not, and
+    # any caller reaching it early died with a TypeError instead.
+    if self._size_per_mult is None or self._mults_per_block is None:
+      return None
     return self._size_per_mult * self._mults_per_block + self._global_size
 
   def get_total_size_as_str(self):

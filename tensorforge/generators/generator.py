@@ -7,6 +7,7 @@ from tensorforge.common.basic_types import Addressing, GeneralLexicon, DataFlowD
 from tensorforge.common.helper import get_extra_offset_name
 from tensorforge.backend.data_types import ShrMemObject, RegMemObject
 from tensorforge.backend.opt import OptimizationStage
+from tensorforge.backend.opt.inspect import format_diagnostics, verify
 from tensorforge.backend.scopes import Scopes
 from tensorforge.backend.symbol import Symbol, SymbolType, SymbolView
 from tensorforge.backend.instructions.abstract_instruction import AbstractInstruction
@@ -171,6 +172,30 @@ class Generator:
     self._generate_launcher()
     self._generate_header()
 
+  def _verify_section(self, section, index: int) -> None:
+    """Structural check over one section, immediately before emitting it.
+
+    ``section.ir`` is wrapped in the per-element loop, so it is checked with
+    ``inside_batch_loop=True``: that is what catches a grid barrier whose
+    trip count is not grid-uniform, which deadlocks rather than producing a
+    wrong answer.
+    """
+    predefined = list(self._scopes.get_global_scope().values())
+    diags = verify(section.global_ir,
+                   inside_batch_loop=False,
+                   predefined=predefined,
+                   backend=self._context.get_vm().get_lexic()._backend)
+    for instr in section.global_ir:
+      predefined += list(instr.defs())
+    diags += verify(section.ir,
+                    inside_batch_loop=True,
+                    predefined=predefined,
+                    backend=self._context.get_vm().get_lexic()._backend)
+    errors = [d for d in diags if d.severity == 'error']
+    if errors:
+      raise GenerationError(
+          f'section {index} cannot be emitted:\n{format_diagnostics(errors)}')
+
   def _generate_kernel(self):
     vm = self._context.get_vm()
 
@@ -201,19 +226,20 @@ class Generator:
           writer(f'const auto {GeneralLexicon.BATCH_ID_NAME}1 = {GeneralLexicon.BATCH_ID_NAME}_start < {GeneralLexicon.NUM_ELEMENTS}{i} ? {GeneralLexicon.BATCH_ID_NAME}_start : 0;')
           writer(f'const auto {GeneralLexicon.BATCH_ID_NAME}2 = {GeneralLexicon.BATCH_ID_NAME}1 + {stride} < {GeneralLexicon.NUM_ELEMENTS}{i} ? {GeneralLexicon.BATCH_ID_NAME}1 + {stride} : {GeneralLexicon.BATCH_ID_NAME}1;')
 
+          # Everything is in place now (offsets from ShrMemOpt, arena size
+          # from the thread-block policy), so this is the point where the full
+          # check is meaningful.  Previously each instruction was tested one
+          # at a time and the first unprepared one aborted, hiding every other
+          # problem behind it.
+          self._verify_section(section, i)
+
           for instruction in section.global_ir:
-            if instruction.is_ready():
-              instruction.gen_code(writer)
-            else:
-              raise GenerationError(f'instr is not ready to be generated: {instruction}')
+            instruction.gen_code(writer)
 
           def generate_inner():
             with writer.If(f'{self._get_flag_guard(writer, i)}'):
               for instruction in section.ir:
-                if instruction.is_ready():
-                  instruction.gen_code(writer)
-                else:
-                  raise GenerationError(f'instr is not ready to be generated: {instruction}')
+                instruction.gen_code(writer)
 
           if self._persistent_threading:
             # TODO: OMP target

@@ -100,14 +100,21 @@ def verify(instrs: Sequence[AbstractInstruction],
            inside_batch_loop: bool = False,
            predefined: Iterable[Any] = (),
            backend: Optional[str] = None,
-           allocated: bool = True) -> List[Diagnostic]:
+           check_offsets: bool = True,
+           check_ready: bool = True) -> List[Diagnostic]:
     """Structural checks over one instruction stream.
 
-    ``allocated`` says whether shared-memory offsets have been assigned yet.
-    Before ``ShrMemOpt`` runs, ``is_ready()`` is legitimately False on every
-    shared-memory writer and every offset is still the constructor default 0,
-    so the readiness and aliasing checks would report the *absence* of a pass
-    rather than a defect.  They are therefore skipped pre-allocation.
+    Two checks are phase-gated, because "ready to emit" is reached in two
+    steps and reporting either one early describes the *absence* of a later
+    pass rather than a defect:
+
+    ``check_offsets``  needs ``ShrMemOpt``: before it, every offset is still
+                       the constructor default 0 and every pair of buffers
+                       looks like it overlaps.
+    ``check_ready``    needs the thread-block policy, which runs *after* the
+                       optimisation stage -- ``ShrMemAlloc.is_ready()`` asks
+                       for the arena size.  So this is an emit-time check,
+                       not a between-passes one.
 
     ``inside_batch_loop`` marks the per-element body (``Section.ir``), which
     the generator wraps in the persistent-threading ``for``.  That matters
@@ -121,7 +128,7 @@ def verify(instrs: Sequence[AbstractInstruction],
 
     for index, instr in enumerate(instrs):
         # -- 1. readiness: collect them all instead of aborting on the first
-        if allocated and not instr.is_ready():
+        if check_ready and not instr.is_ready():
             diags.append(Diagnostic(
                 'error', index,
                 f'not ready to emit ({type(instr).__name__}); an offset or '
@@ -168,7 +175,7 @@ def verify(instrs: Sequence[AbstractInstruction],
         for sym in instr.defs():
             defined.add(sym)
 
-    if allocated:
+    if check_offsets:
         diags.extend(_check_shared_aliasing(instrs))
     return diags
 
@@ -222,29 +229,23 @@ def _check_shared_aliasing(instrs: Sequence[AbstractInstruction]
 
 def _live_shared(instrs: Sequence[AbstractInstruction]
                  ) -> Dict[int, OrderedSet]:
-    """Live shared-memory symbols per program point, from defs/uses only.
+    """Live shared-memory symbols per program point.
 
-    Unlike ``LivenessAnalysis`` this needs no ``isinstance`` and it *kills*
-    at the last use, so a buffer written twice yields two ranges rather than
-    one merged one.
+    Delegates to ``LivenessAnalysis`` rather than approximating.  An earlier
+    version of this function held a symbol live from its first definition to
+    its last appearance, i.e. without a kill -- the same over-approximation
+    that ``LivenessAnalysis`` used to make.  Once the analysis learned to
+    split ranges, the two disagreed and this check reported overlaps at
+    program points where the real liveness had a hole.  A verifier that
+    reimplements the analysis it is checking will always drift from it.
     """
-    last_use: Dict[int, int] = {}
-    for index, instr in enumerate(instrs):
-        for sym in list(instr.uses()) + list(instr.defs()):
-            if getattr(sym, 'stype', None) is SymbolType.SharedMem:
-                last_use[id(sym)] = index
+    # local import: liveness imports .abstract, which does not import this
+    # module, so there is no cycle
+    from .liveness import LivenessAnalysis
 
-    live: Dict[int, OrderedSet] = {}
-    current: OrderedSet = OrderedSet()
-    for index, instr in enumerate(instrs):
-        for sym in instr.defs():
-            if getattr(sym, 'stype', None) is SymbolType.SharedMem:
-                current.add(sym)
-        live[index] = current.copy()
-        for sym in list(current):
-            if last_use.get(id(sym), -1) <= index:
-                current.discard(sym)
-    return live
+    analysis = LivenessAnalysis(None, list(instrs))
+    analysis.apply()
+    return dict(analysis.get_live_map())
 
 
 def format_diagnostics(diags: Sequence[Diagnostic]) -> str:
