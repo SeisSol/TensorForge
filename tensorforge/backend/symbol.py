@@ -7,7 +7,7 @@ from tensorforge.common.context import Context
 from tensorforge.common.basic_types import Datatype, Addressing
 from tensorforge.common.exceptions import GenerationError
 from .writer import Writer
-from tensorforge.backend.pir.core import BOOL, INDEX
+from tensorforge.backend.pir.core import BOOL, INDEX, Effect
 
 from tensorforge.common.matrix.spp import BoundingBoxSPP
 
@@ -495,10 +495,13 @@ class Symbol:
       total = arith('add', total, p, lambda x, y: x + y)
     return total
 
-  def access_address(self, context: Context, index: List[Union[str, int, Immediate, Variable, LeadIndex]], writer=None):
+  def access_address(self, context: Context, index: List[Union[str, int, Immediate, Variable, LeadIndex]], writer=None, out=None):
     if writer is not None:
       # the result's name goes into raw text, so pin it against DCE and folding
-      return str(writer.pin(self.build_address(writer, context, index)))
+      v = writer.pin(self.build_address(writer, context, index))
+      if out is not None:
+        out.append(v)
+      return str(v)
     if self.stype == SymbolType.Global or self.stype == SymbolType.Batch or self.stype == SymbolType.SharedMem:
       writevar = lambda var: f'{var}' if isinstance(var, (str, int, float, np.int64)) else var.write(context)
       # lead_dim + nonlead_dim
@@ -526,9 +529,9 @@ class Symbol:
       return dimstr if len(dimstr) > 0 else "0"
     raise NotImplementedError('Not supposed to be called')
 
-  def access(self, context: Context, index: List[Union[str, int, Immediate, Variable, LeadIndex]], writer=None):
+  def access(self, context: Context, index: List[Union[str, int, Immediate, Variable, LeadIndex]], writer=None, out=None):
     if self.stype == SymbolType.Global or self.stype == SymbolType.Batch or self.stype == SymbolType.SharedMem or self.stype == SymbolType.Register or self.stype == SymbolType.Scratch:
-      return f'{self.name}[{self.access_address(context, index, writer)}]'
+      return f'{self.name}[{self.access_address(context, index, writer, out)}]'
     if self.stype == SymbolType.Scalar:
       return f'{self.name}'
     if self.stype == SymbolType.Data:
@@ -547,7 +550,7 @@ class Symbol:
         if leadidx is None:
           value = self.obj.linear_index(runIdx)
           if value is not None:
-            writer(f'{variable} = {self.name}[{value}];')
+            writer.access_stmt(f'{variable} = {self.name}[{value}];', self, Effect.READ)
             wrote = True
         else:
           offset = self.data_view.get_dim_offsets()[leadidx]
@@ -586,11 +589,11 @@ class Symbol:
               value = self.obj.linear_index(runIdx)
 
               if rngS <= bndS and rngE >= bndE:
-                writer(f'{variable} = {self.name}[{value - rngS} + {idxvar}];')
+                writer.access_stmt(f'{variable} = {self.name}[{value - rngS} + {idxvar}];', self, Effect.READ)
                 wrote = True
               elif rngE > bndS and rngS < bndE:
                 with writer.If(f'{idxvar} >= {rngS} && {idxvar} < {rngE}'):
-                  writer(f'{variable} = {self.name}[{value - rngS} + {idxvar}];')
+                  writer.access_stmt(f'{variable} = {self.name}[{value - rngS} + {idxvar}];', self, Effect.READ)
                   wrote = True
     else:
       if isinstance(index[pos], (int, np.int32, np.int64)):
@@ -614,6 +617,7 @@ class Symbol:
     return wrote
 
   def load_linear(self, writer, context: Context, variable, index, vec = 1):
+    addrs = []
     if context.get_vm().get_lexic().simd_mode:
       writer(f'{context.get_vm().get_lexic().get_simd(self.get_fptype(), self.num_threads)} {variable}({index});')
     else:
@@ -623,11 +627,12 @@ class Symbol:
         access = f'{self.name}[{index} + threadIdx.x * {vec}]'
 
       if vec == 1:
-        writer(f'{self.get_fptype()} {variable} = {access};')
+        writer.access_stmt(f'{self.get_fptype()} {variable} = {access};', self, Effect.READ, args=tuple(a for a in addrs if not isinstance(a, (int, str))))
       else:
         writer(f'tensorforge::VectorT<{self.get_fptype()}, {vec}> {variable} = *(tensorforge::VectorT<{self.get_fptype()}, {vec}>*)&{access};')
 
   def store_linear(self, writer, context: Context, variable, index, vec = 1):
+    addrs = []
     if context.get_vm().get_lexic().simd_mode:
       pass
       # TODO:
@@ -639,12 +644,13 @@ class Symbol:
         access = f'{self.name}[{index} + threadIdx.x * {vec}]'
 
       if vec == 1:
-        writer(f'{access} = {variable};')
+        writer.access_stmt(f'{access} = {variable};', self, Effect.WRITE, args=tuple(a for a in addrs if not isinstance(a, (int, str))))
       else:
         convert = f'*(tensorforge::VectorT<{self.get_fptype()}, {vec}>*)&'
-        writer(f'{convert}{access} = {convert}{variable};')
+        writer.access_stmt(f'{convert}{access} = {convert}{variable};', self, Effect.WRITE, args=tuple(a for a in addrs if not isinstance(a, (int, str))))
 
   def load(self, writer, context: Context, variable, index: List[Union[str, int, Immediate, Variable, LeadIndex]], nontemp):
+    addrs = []
     if self.stype == SymbolType.Data or (not self.obj.is_dense() and not isinstance(self.obj.spp, BoundingBoxSPP)):
       writer(f'{self.get_fptype()} {variable} = {self.get_fptype().literal(0)};')
 
@@ -664,7 +670,7 @@ class Symbol:
         leadidxidx = None
       return self.encode_values(0, [0] * len(index), writer, context, variable, index, nontemp, leadidxidx)
     else:
-      pre_access = self.access(context, index, writer)
+      pre_access = self.access(context, index, writer, addrs)
       if self.stype == SymbolType.Register or self.stype == SymbolType.Scratch:
         assert len(self.lead_dims) == 1
         idx = index[self.lead_dims[0]]
@@ -674,12 +680,12 @@ class Symbol:
           # doesn't work
           if isinstance(idx, Variable):
             writevar = idx.write_nonlead()
-            pre_access = self.access(context, index, writer)
+            pre_access = self.access(context, index, writer, addrs)
             access = context.get_vm().get_lexic().broadcast(pre_access, writevar, self.num_threads)
           else:
             index2 = list(index)
             index2[self.lead_dims[0]] = LeadIndex(idx._value // self.num_threads, self.num_threads, 1)
-            pre_access = self.access(context, index2, writer)
+            pre_access = self.access(context, index2, writer, addrs)
 
             writevar = idx._value % self.num_threads
             access = context.get_vm().get_lexic().broadcast(pre_access, writevar, self.num_threads)
@@ -691,15 +697,16 @@ class Symbol:
         writer(f'{context.get_vm().get_lexic().get_simd(self.get_fptype(), 16)} {variable}({access});')
       elif self.stype == SymbolType.Global:
         writer(f'{self.get_fptype()} {variable};')
-        writer(context.get_vm().get_lexic().glb_load(variable, access, nontemp))
+        writer.access_stmt(context.get_vm().get_lexic().glb_load(variable, access, nontemp), self, Effect.READ, args=tuple(a for a in addrs if not isinstance(a, (int, str))))
       else:
-        writer(f'{self.get_fptype()} {variable} = {access};')
+        writer.access_stmt(f'{self.get_fptype()} {variable} = {access};', self, Effect.READ, args=tuple(a for a in addrs if not isinstance(a, (int, str))))
       return True
 
   def store(self, writer, context, variable, index: List[Union[str, int, Immediate, Variable, LeadIndex]], nontemp, atomic=None):
+    addrs = []
     assert self.stype != SymbolType.Data
 
-    access = self.access(context, index, writer)
+    access = self.access(context, index, writer, addrs)
 
     if context.get_vm().get_lexic().simd_mode:
       if self.stype == SymbolType.Global:
@@ -718,12 +725,12 @@ class Symbol:
       if self.stype == SymbolType.Register or self.stype == SymbolType.Scratch:
         assert len(self.lead_dims) == 1
         if isinstance(index[self.lead_dims[0]], LeadIndex):
-          writer(assign)
+          writer.access_stmt(assign, self, Effect.WRITE, args=tuple(a for a in addrs if not isinstance(a, (int, str))))
         else:
           with writer.If(f'{context.get_vm().get_lexic().thread_idx_x} == {index[self.lead_dims[0]]}'):
-            writer(assign)
+            writer.access_stmt(assign, self, Effect.WRITE, args=tuple(a for a in addrs if not isinstance(a, (int, str))))
       else:
-        writer(assign)
+        writer.access_stmt(assign, self, Effect.WRITE, args=tuple(a for a in addrs if not isinstance(a, (int, str))))
 
   def add_user(self, user):
     self._users.append(user)

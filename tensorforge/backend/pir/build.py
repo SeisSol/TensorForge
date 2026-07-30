@@ -431,6 +431,26 @@ class IRBuilder:
                              effect=Effect.NONE, text='',
                              attrs=(('bare_newline', True),))
 
+    def access_stmt(self, text: str, base: Any, kind: Effect,
+                    args: Sequence[Operand] = (), movable: bool = True) -> Stmt:
+        """Raw statement text whose memory effect is *known*.
+
+        The migration end state for a memory access is not that the text
+        disappears -- vendor intrinsics and inline assembly will always want
+        text -- but that it stops being opaque.  `Effect.UNKNOWN` conflicts
+        with everything and makes the alias model a no-op; a declared
+        `Access(kind, space, base)` lets two accesses to different symbols be
+        seen as independent.
+
+        `args` carries the value operands the text mentions (the address, in
+        practice) so the dependency is visible and a pass cannot lift the
+        statement above the computation it reads.
+        """
+        space = self._space_of(base)
+        return self._emit_op(Op.RAWSTMT, (), tuple(args),
+                             pure=False, movable=movable, effect=kind,
+                             accesses=(Access(kind, space, base),), text=text)
+
     def Comment(self, text: str) -> Stmt:
         return self._emit_op(Op.RAWSTMT, (), (), pure=False, movable=True,
                              effect=Effect.NONE, text=f'// {text}')
