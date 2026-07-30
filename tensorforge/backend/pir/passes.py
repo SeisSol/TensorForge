@@ -50,9 +50,42 @@ def verify(body: Tuple[Stmt, ...], strict: bool = True) -> List[str]:
         diag.append(str(e))
 
     _check_scope(body, set(), diag, divergent=False)
+    diag.extend(_check_dangling_names(body))
 
     if diag and strict:
         raise IRError('pseudo-IR verification failed:\n  ' + '\n  '.join(diag))
+    return diag
+
+
+_NAMED = re.compile(r'\bv(\d+)_\w*\b')
+
+
+def _check_dangling_names(body: Tuple[Stmt, ...]) -> List[str]:
+    """Raw text must not name a value that no statement defines.
+
+    During migration a value's *name* is often interpolated into text the IR
+    cannot rewrite.  `escapes` protects such a value from being folded,
+    eliminated or inlined --- but a pass that forgets the marker leaves the
+    text pointing at nothing, and the result is generated source that does not
+    compile.  Cheap to check, and it catches the whole class at once.
+    """
+    defined = set()
+    for s, _ in walk(body):
+        for t in s.target:
+            defined.add(t.id)
+        for r in s.regions:
+            for a in r.args:
+                defined.add(a.id)
+    seen, diag = set(), []
+    for s, _ in walk(body):
+        if not s.text:
+            continue
+        for m in _NAMED.finditer(s.text):
+            ident = int(m.group(1))
+            if ident not in defined and m.group(0) not in seen:
+                seen.add(m.group(0))
+                diag.append(f'{s.op}: raw text names {m.group(0)}, which no '
+                            f'statement defines')
     return diag
 
 
@@ -312,7 +345,8 @@ def _cse_body(body: Tuple[Stmt, ...], available: Dict[Any, Tuple[Value, ...]]):
             out.append(replace(s, regions=tuple(regions)))
             continue
 
-        if s.pure and not s.has_side_effects and s.target and s.effect == Effect.NONE:
+        if (s.pure and not s.has_side_effects and s.target
+                and s.effect == Effect.NONE and not s.attr('escapes')):
             key = _cse_key(s)
             prev = available.get(key)
             if prev is not None and len(prev) == len(s.target):
