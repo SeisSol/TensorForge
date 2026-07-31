@@ -157,7 +157,8 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
 
       def inner(indices):
         self._src.load(writer, self._context, 'value', indices, allow_nontemporal)
-        self._dest.store(writer, self._context, 'value', indices, False)
+        self._dest.store(writer, self._context, 'value', indices, False,
+                         base=self.write_base())
 
       write_loops(self._context, writer, loops, inner)
     else:
@@ -200,7 +201,7 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
     if self._use_tma_memcpy:
       dest_access_index = self._dest.access_address(self._context, index, writer)
       src_access_index = self._src.access_address(self._context, index, writer)
-      writer(f'cuda::device::memcpy_async_tx(&{self._dest.name}[{dest_access_index}], &{self._src.name}[{src_access_index}], cuda::aligned_size_t<16>({length}), mbarrier);')
+      writer(f'cuda::device::memcpy_async_tx(&{self.write_base()}[{dest_access_index}], &{self._src.name}[{src_access_index}], cuda::aligned_size_t<16>({length}), mbarrier);')
     else:
       for vecsize in granularities:
         if src_offset % vecsize == 0:
@@ -239,7 +240,7 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
           contiguous_index = indexwrapper(f'{increment} * {self._linear_idx()} + i * {self._num_threads}')
           dest_access_index = self._dest.access_address(self._context, index, writer)
           src_access_index = self._src.access_address(self._context, index, writer)
-          lhs = f'{typeprefix}{self._dest.name}[{dst_offset} + {dest_access_index} + {contiguous_index}]'
+          lhs = f'{typeprefix}{self.write_base()}[{dst_offset} + {dest_access_index} + {contiguous_index}]'
           rhs = f'{typeprefix}{self._src.name}[{src_offset} + {src_access_index} + {contiguous_index}]'
           write_load(lhs, rhs)
       else:
@@ -248,7 +249,7 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
           contiguous_index = indexwrapper(f'{increment} * {self._linear_idx()} + {counter * self._num_threads}')
           dest_access_index = self._dest.access_address(self._context, index, writer)
           src_access_index = self._src.access_address(self._context, index, writer)
-          lhs = f'{typeprefix}{self._dest.name}[{dst_offset} + {dest_access_index} + {contiguous_index}]'
+          lhs = f'{typeprefix}{self.write_base()}[{dst_offset} + {dest_access_index} + {contiguous_index}]'
           rhs = f'{typeprefix}{self._src.name}[{src_offset} + {src_access_index} + {contiguous_index}]'
           write_load(lhs, rhs)
 
@@ -348,7 +349,8 @@ class GlbToRegLoader(MemoryInstruction, LoadInstruction):
         granularity = self._num_threads * g
         for i in range(start, total_size, granularity):
           self._src.load_linear(writer, self._context, f'v{i}', i, g)
-          self._dest.store_linear(writer, self._context, f'v{i}', i, g)
+          self._dest.store_linear(writer, self._context, f'v{i}', i, g,
+                                  base=self.write_base())
 
         start = (total_size // granularity) * granularity
 
@@ -413,7 +415,8 @@ class GlbToRegLoader(MemoryInstruction, LoadInstruction):
 
       def inner(indices):
         self._src.load(writer, self._context, 'value', indices, allow_nontemporal)
-        self._dest.store(writer, self._context, 'value', indices, False)
+        self._dest.store(writer, self._context, 'value', indices, False,
+                         base=self.write_base())
 
       write_loops(self._context, writer, loops, inner)
 

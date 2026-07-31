@@ -212,21 +212,58 @@ class Pipeline(AbstractTransformer):
         if not analysis.candidates:
             return [], list(loop.region)
 
+        prologue, body = self._advance_pointers(loop, analysis)
         if self._rotate:
-            # See the module docstring for what is in place and the note below
-            # for what is not.
-            raise InternalError(
-                'buffer rotation is not wired up yet. The allocation side is '
-                'done -- AbstractShrMemWrite.set_stages reserves every stage '
-                'and the declaration selects one at run time -- but the '
-                'transform needs two *pointers* into that allocation: the '
-                'consumer must read stage k % d while the advanced transfer '
-                'writes stage (k + d - 1) % d, and a GlbToShrLoader writes '
-                'through the single pointer its own declaration emits. That '
-                'needs the declaration split from the write address, which is '
-                'a change to AbstractShrMemWrite, not to this pass.')
+            prologue, body = self._rotate_buffers(loop, analysis, prologue, body)
+        return prologue, body
 
-        return self._advance_pointers(loop, analysis)
+    def _rotate_buffers(self, loop: BatchLoop, analysis: PipelineAnalysis,
+                        prologue, body):
+        """Give each pipelined shared-memory buffer ``depth`` stages.
+
+        Iteration ``k`` consumes stage ``k % d`` and the transfer, whose source
+        pointer ``_advance_pointers`` already moved ``d - 1`` elements ahead,
+        fills stage ``(k + d - 1) % d``.  Both stages are one allocation --
+        ``set_stages`` makes the region allocator reserve all of them -- and the
+        two views are the declared pointer and ``write_base()``.
+
+        Only shared-memory transfers rotate.  A register destination is private
+        to the thread and has no allocation to stage.
+        """
+        d = self._depth
+        k = loop.index_name(0)
+        read = f'{k} % {d}'
+        write = f'({k} + {d - 1}) % {d}'
+
+        rotated = 0
+        for c in analysis.candidates:
+            load = c.load
+            if not isinstance(load, AbstractShrMemWrite):
+                continue
+            load.set_stages(d, read, write)
+            rotated += 1
+
+        if not rotated:
+            return prologue, body
+
+        # The peeled iteration would fill stage 0 here.  It does not exist:
+        # _advance_pointers peels the *pointer* computation, not the transfer,
+        # so nothing writes stage 0 before the loop.  Iteration 0 then consumes
+        # stage 0 % d, which no transfer has filled -- uninitialised shared
+        # memory, and a wrong answer rather than a crash.
+        peeled_fills = [i for i in prologue if isinstance(i, AbstractShrMemWrite)]
+        if not peeled_fills:
+            raise InternalError(
+                f'rotation would leave stage 0 unfilled: {rotated} buffer(s) '
+                f'rotate, but the prologue peels only the address computation, '
+                f'not the transfer, so iteration 0 reads shared memory that no '
+                f'transfer wrote. Peeling the load needs a way to clone a '
+                f'GlbToShrLoader with a different batch index and stage; the '
+                f'declaration/write split it depends on is done and tested.')
+        for instr in peeled_fills:
+            instr.set_stages(d, '0', None)
+
+        return prologue, body
 
     def _advance_pointers(self, loop: BatchLoop, analysis: PipelineAnalysis):
         """Hoist the address computation, leaving the transfers in place.

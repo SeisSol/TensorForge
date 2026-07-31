@@ -10,6 +10,15 @@ class MemoryInstruction(AbstractInstruction):
     super().__init__(context)
     self._declare = True
 
+  def write_base(self) -> str:
+    """The pointer this instruction writes through.
+
+    The symbol's own name for everything except a rotating shared-memory
+    buffer, where the declared pointer addresses the stage consumers read and
+    the transfer fills a different one.
+    """
+    return self._dest.name
+
   @abstractmethod
   def gen_code_inner(self, writer: Writer):
     pass
@@ -24,6 +33,11 @@ class MemoryInstruction(AbstractInstruction):
       self.gen_code_declare(sink)
     with sink.Scope():
       sink.Comment(self.__str__())
+      # A rotating buffer needs its write-side alias here, inside the scope,
+      # so it cannot clash with the consumer's pointer of the same name.
+      gen_write_base = getattr(self, 'gen_write_base', None)
+      if gen_write_base is not None:
+        gen_write_base(sink)
       self.gen_code_inner(sink)
 
 class AbstractShrMemWrite(MemoryInstruction):
@@ -45,6 +59,13 @@ class AbstractShrMemWrite(MemoryInstruction):
     # buffer the consumers knew about.
     self._stages: int = 1
     self._stage_expr: Union[str, None] = None
+    # When a buffer rotates, the stage the *consumer* reads and the stage this
+    # transfer *writes* are different -- iteration k consumes stage k % d while
+    # the advanced transfer fills stage (k + d - 1) % d.  The declaration
+    # emitted by gen_code_declare names the consumer's view, because that is
+    # the pointer every later instruction refers to by symbol name; the write
+    # needs its own base, which `write_base()` provides.
+    self._write_stage_expr: Union[str, None] = None
 
   def stage_size(self) -> int:
     """Size of one stage, i.e. what a single iteration needs."""
@@ -53,29 +74,69 @@ class AbstractShrMemWrite(MemoryInstruction):
       return self._context.align(self._shm_volume)
     return self._shm_volume
 
-  def set_stages(self, stages: int, stage_expr: Union[str, None]) -> None:
+  def set_stages(self, stages: int, stage_expr: Union[str, None],
+                 write_stage_expr: Union[str, None] = None) -> None:
+    """``stage_expr`` selects the stage the declared pointer addresses -- the
+    consumer's view.  ``write_stage_expr`` selects the stage this transfer
+    fills; leave it unset when they coincide, which is every case except an
+    advanced transfer."""
     if stages < 1:
       raise ValueError(f'a buffer needs at least one stage, got {stages}')
     if stages > 1 and not stage_expr:
       raise ValueError('a rotating buffer needs an expression selecting the '
                        'stage; without one every iteration writes stage 0')
+    if write_stage_expr and stages < 2:
+      raise ValueError('a separate write stage makes no sense on a '
+                       'single-stage buffer')
     self._stages = stages
     self._stage_expr = stage_expr
+    self._write_stage_expr = write_stage_expr
 
   def num_stages(self) -> int:
     return self._stages
 
-  def _stage_offset(self) -> str:
-    if self._stages == 1 or not self._stage_expr:
+  def _stage_offset(self, expr: Union[str, None] = None) -> str:
+    expr = expr if expr is not None else self._stage_expr
+    if self._stages == 1 or not expr:
       return f'{self._shr_mem_offset}'
-    return f'{self._shr_mem_offset} + ({self._stage_expr}) * {self.stage_size()}'
+    return f'{self._shr_mem_offset} + ({expr}) * {self.stage_size()}'
+
+  def _arena(self) -> str:
+    return (GeneralLexicon.TOTAL_SHR_MEM if self._global_offset
+            else self._shr_mem.name)
+
+  def rotates(self) -> bool:
+    """Does this transfer fill a different stage than the declaration names?"""
+    return bool(self._write_stage_expr
+                and self._write_stage_expr != self._stage_expr)
+
+  def write_base(self) -> str:
+    """Base pointer this transfer writes through.
+
+    Normally the symbol's own name.  When the buffer rotates, a scope-local
+    alias, because the symbol's declaration addresses the stage the *consumers*
+    read and writing through it would overwrite the data they are about to use.
+    """
+    return f'{self._dest.name}_w' if self.rotates() else self._dest.name
+
+  def gen_write_base(self, writer: Writer) -> None:
+    """Emit the write-side alias.  Call at the top of ``gen_code_inner``.
+
+    ``MemoryInstruction.gen_ir`` puts the declaration outside a ``Scope()`` and
+    the body inside one, so this alias is scope-local and cannot clash with the
+    consumer's pointer of the same buffer.
+    """
+    if not self.rotates():
+      return
+    lhs = (f'{self._fp_as_str}* {self._vm.get_lexic().restrict_kw} '
+           f'{self.write_base()}')
+    writer(f'{lhs} = &{self._arena()}'
+           f'[{self._stage_offset(self._write_stage_expr)}];')
 
   def gen_code_declare(self, writer: Writer) -> None:
     if self._declare:
       lhs = f'{self._fp_as_str}* {self._vm.get_lexic().restrict_kw} {self._dest.name}'
-      arena = (GeneralLexicon.TOTAL_SHR_MEM if self._global_offset
-               else self._shr_mem.name)
-      writer(f'{lhs} = &{arena}[{self._stage_offset()}];')
+      writer(f'{lhs} = &{self._arena()}[{self._stage_offset()}];')
 
   def compute_shared_mem_size(self) -> int:
     # What the region allocator must reserve: every stage at once.  Returning

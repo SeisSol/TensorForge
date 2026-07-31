@@ -549,11 +549,16 @@ class Symbol:
       return dimstr if len(dimstr) > 0 else "0"
     raise NotImplementedError('Not supposed to be called')
 
-  def access(self, context: Context, index: List[Union[str, int, Immediate, Variable, LeadIndex]], writer=None, out=None):
+  def access(self, context: Context, index: List[Union[str, int, Immediate, Variable, LeadIndex]], writer=None, out=None,
+             base: str = None):
+    # `base` overrides the pointer, not the symbol: a rotating shared-memory
+    # buffer declares its pointer at the stage consumers read and is filled at
+    # a different one.  See AbstractShrMemWrite.write_base().
+    name = base or self.name
     if self.stype == SymbolType.Global or self.stype == SymbolType.Batch or self.stype == SymbolType.SharedMem or self.stype == SymbolType.Register or self.stype == SymbolType.Scratch:
-      return f'{self.name}[{self.access_address(context, index, writer, out)}]'
+      return f'{name}[{self.access_address(context, index, writer, out)}]'
     if self.stype == SymbolType.Scalar:
-      return f'{self.name}'
+      return f'{name}'
     if self.stype == SymbolType.Data:
       return self.get_fptype().literal(self.obj.value(runIdx))
 
@@ -651,7 +656,13 @@ class Symbol:
       else:
         writer(f'tensorforge::VectorT<{self.get_fptype()}, {vec}> {variable} = *(tensorforge::VectorT<{self.get_fptype()}, {vec}>*)&{access};')
 
-  def store_linear(self, writer, context: Context, variable, index, vec = 1):
+  def store_linear(self, writer, context: Context, variable, index, vec = 1,
+                   base: str = None):
+    # `base` overrides the pointer written through, without changing the
+    # symbol.  A rotating shared-memory buffer declares its pointer at the
+    # stage consumers read and fills a different one -- see
+    # AbstractShrMemWrite.write_base().
+    name = base or self.name
     addrs = []
     if context.get_vm().get_lexic().simd_mode:
       pass
@@ -659,9 +670,9 @@ class Symbol:
       # writer(f'{context.get_vm().get_lexic().get_simd(self.get_fptype(), self.num_threads)} {variable}({index});')
     else:
       if self.stype == SymbolType.Register:
-        access = f'{self.name}[{index // self.num_threads}]'
+        access = f'{name}[{index // self.num_threads}]'
       else:
-        access = f'{self.name}[{index} + threadIdx.x * {vec}]'
+        access = f'{name}[{index} + threadIdx.x * {vec}]'
 
       if vec == 1:
         writer.access_stmt(f'{access} = {variable};', self, Effect.WRITE, args=_operands(variable, addrs))
@@ -761,11 +772,12 @@ class Symbol:
         writer.access_stmt(f'{self.get_fptype()} {variable} = {access};', self, Effect.READ, args=_operands(variable, addrs))
       return True
 
-  def store(self, writer, context, variable, index: List[Union[str, int, Immediate, Variable, LeadIndex]], nontemp, atomic=None):
+  def store(self, writer, context, variable, index: List[Union[str, int, Immediate, Variable, LeadIndex]], nontemp, atomic=None,
+            base: str = None):
     addrs = []
     assert self.stype != SymbolType.Data
 
-    access = self.access(context, index, writer, addrs)
+    access = self.access(context, index, writer, addrs, base=base)
 
     fmt = not isinstance(variable, (str, int, float))
     var = '{0}' if fmt else variable
