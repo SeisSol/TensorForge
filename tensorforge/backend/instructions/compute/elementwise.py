@@ -11,7 +11,7 @@ import numpy as np
 
 from tensorforge.backend.scopes import Scopes
 from tensorforge.backend.symbol import (LeadLoop, Loop, Symbol, SymbolView,
-                                        write_loops)
+                                        write_loops, VarOffset)
 from tensorforge.backend.writer import Writer
 from tensorforge.common.context import Context
 from tensorforge.common.exceptions import InternalError
@@ -92,41 +92,72 @@ class ElementwiseInstruction(ComputeInstruction):
         write_loops(self._context, writer, loopstack, self._body(writer))
 
     @staticmethod
-    def _index(view: SymbolView) -> List[str]:
-        # optree's TensorVar emitted `(n{k} + bbox.lower()[k])`; keep that, so
-        # the generated address arithmetic is unchanged.
-        return [f'(n{i} + {o})' for i, o in enumerate(view.bbox.lower())]
+    @staticmethod
+    def _index(view: SymbolView, varlist) -> List:
+        # optree emitted `(n{k} + bbox.lower()[k])` as text, which forced a
+        # named `n{k}` variable and left the address arithmetic opaque.  A
+        # `VarOffset` carries the loop value itself, so the offset folds and
+        # the whole address becomes IR.
+        return [VarOffset(varlist[i], o) if o else varlist[i]
+                for i, o in enumerate(view.bbox.lower())]
 
     def _body(self, writer: Writer):
-        def inner(varlist):
-            for i, _ in enumerate(self._ks):
-                writer(f'auto n{i} = {varlist[i].write(self._context)};')
+        from tensorforge.backend.pir.core import ScalarType
 
-            operands: List[str] = []
-            counter = 0
+        def inner(varlist):
+            operands = []
+            args = []
             for src in self._srcs:
                 if isinstance(src, ScalarLike):
                     operands.append(self._context.fp_type.literal(src))
                     continue
-                var = f'v{counter}'
-                counter += 1
-                src.symbol.load(writer, self._context, var,
-                                self._index(src), False)
-                operands.append(var)
+                v = src.symbol.load(writer, self._context, None,
+                                    self._index(src, varlist), False)
+                if v is None:
+                    return self._body_named(writer, varlist)
+                operands.append('{%d}' % len(args))
+                args.append(v)
 
             # get_operation always takes two values; unary ops pass '' as the
-            # second, which is what LexicOpNode.operation did.  NOTE: the
-            # concrete lexics take (op, fptype, value1, value2); the abstract
-            # declaration in lexic.py omits fptype and is wrong.
+            # second.  Handing it placeholders instead of names keeps the
+            # operand order but lets the emitter fill in whatever the value
+            # ends up being called -- or inline it entirely.
             padded = operands + [''] if len(operands) == 1 else operands
             lexic = self._context.get_vm().get_lexic()
-            result = f'v{counter}'
-            writer(f'const auto {result} = '
-                   f'{lexic.get_operation(self._op, self._context.fp_type, *padded)};')
+            text = lexic.get_operation(self._op, self._context.fp_type, *padded)
+            result = writer.rawexpr(text, *args,
+                                    type_=ScalarType(self._context.fp_type),
+                                    hint='e', pure=True, movable=True)
             self._dest.symbol.store(writer, self._context, result,
-                                    self._index(self._dest), False)
+                                    self._index(self._dest, varlist), False)
 
         return inner
+
+    def _body_named(self, writer, varlist):
+        """Fallback for operands that cannot yield a value (sparse loads)."""
+        for i, _ in enumerate(self._ks):
+            writer(f'auto n{i} = {varlist[i].write(self._context)};')
+        operands: List[str] = []
+        counter = 0
+        for src in self._srcs:
+            if isinstance(src, ScalarLike):
+                operands.append(self._context.fp_type.literal(src))
+                continue
+            var = f'v{counter}'
+            counter += 1
+            src.symbol.load(writer, self._context, var,
+                            [f'(n{i} + {o})'
+                             for i, o in enumerate(src.bbox.lower())], False)
+            operands.append(var)
+        padded = operands + [''] if len(operands) == 1 else operands
+        lexic = self._context.get_vm().get_lexic()
+        result = f'v{counter}'
+        writer(f'const auto {result} = '
+               f'{lexic.get_operation(self._op, self._context.fp_type, *padded)};')
+        self._dest.symbol.store(writer, self._context, result,
+                                [f'(n{i} + {o})'
+                                 for i, o in enumerate(self._dest.bbox.lower())],
+                                False)
 
     def __str__(self):
         def render(s):
