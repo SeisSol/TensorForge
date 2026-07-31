@@ -80,22 +80,35 @@ class BatchLoop(AbstractInstruction):
         self._region.append(instr)
 
     def uniform_scope(self) -> BarrierScope:
-        """How far the trip count is uniform, i.e. the strongest barrier that
-        may legally appear inside.
+        """How far the body's execution count is uniform, i.e. the strongest
+        barrier that may legally appear inside.
 
-        ``PERSISTENT``: the count is ``ceil((numElements - start) / stride)``
-        and ``start`` depends on the block id, so blocks disagree.  Threads
-        within a block agree, hence ``GROUP``.  A ``GRID`` barrier here
-        deadlocks: blocks with fewer iterations exit without arriving.
+        The answer is ``SIMD`` for every mode, because the element index is
 
-        ``LAUNCHCTRL``: the queue hands out a different number of elements per
-        block, so likewise ``GROUP``.
+            batchId0 = threadIdx.y + blockDim.y * blockIdx.x
 
-        ``SINGLE``: exactly one iteration everywhere, so anything is fine.
+        so it varies *within* a block, not just between blocks.
+
+        ``PERSISTENT``: the trip count is
+        ``ceil((numElements - batchId0) / stride)``.  Two thread groups in one
+        block start at indices differing by their ``threadIdx.y``, so their trip
+        counts differ by one whenever ``numElements`` is not a multiple of
+        ``gridDim.x * blockDim.y`` -- and ``gridDim.x`` is occupancy-derived
+        (``min(gridsize, numElements0)``), not ``ceil(numElements/blockDim.y)``,
+        so alignment is a coincidence rather than a guarantee.  A block-wide
+        barrier in the body is then reached a different number of times by
+        different thread groups.
+
+        ``SINGLE``: the body sits under ``if (batchId0 < numElements)``, the
+        same non-uniform predicate.  This previously claimed ``GRID`` on the
+        grounds that "exactly one iteration everywhere" -- which ignored the
+        guard.  The tail block skips the body entirely, so a grid barrier there
+        deadlocks.
+
+        ``LAUNCHCTRL``: the queue hands out work per block, and the size guard
+        is the same.
         """
-        if self._mode is LoopMode.SINGLE:
-            return BarrierScope.GRID
-        return BarrierScope.GROUP
+        return BarrierScope.SIMD
 
     # -- data flow ------------------------------------------------------- #
     #
