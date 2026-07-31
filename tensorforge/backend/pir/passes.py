@@ -811,6 +811,80 @@ def if_convert(body: Tuple[Stmt, ...]) -> Tuple[Stmt, ...]:
 
 
 # --------------------------------------------------------------------------- #
+# Load clustering
+# --------------------------------------------------------------------------- #
+
+def _reads_only(s: Stmt) -> bool:
+    return bool(s.effect & Effect.READ) and not (
+        s.effect & (Effect.WRITE | Effect.ATOMIC | Effect.BARRIER | Effect.UNKNOWN))
+
+
+def _can_swap(earlier: Stmt, later: Stmt) -> bool:
+    """May `later` move in front of `earlier`?"""
+    if not later.movable:
+        return False
+    if earlier.effect & (Effect.BARRIER | Effect.UNKNOWN):
+        return False
+    if earlier.regions or later.regions:
+        return False
+    defs = {t.id for t in earlier.target}
+    for r in earlier.regions:
+        defs |= {a.id for a in r.args}
+    if any(v.id in defs for v in later.operands()):
+        return False                      # `later` reads what `earlier` defines
+    ldefs = {t.id for t in later.target}
+    if any(v.id in ldefs for v in earlier.operands()):
+        return False
+    for a in later.accesses:
+        for b in earlier.accesses:
+            if accesses_conflict(a, b):
+                return False
+    return True
+
+
+def cluster_loads(body: Tuple[Stmt, ...], max_pressure: int = 32,
+                  window: int = 64) -> Tuple[Stmt, ...]:
+    """Move memory reads earlier, bounded by register pressure.
+
+    The generated bodies put every load immediately in front of its use, so the
+    memory pipeline never sees more than one or two requests in flight.  This
+    hoists independent reads together, which is the source-level version of the
+    prefetch idiom --- and it is the first pass that has to be *stopped* by
+    something, because every position gained costs a live value.
+
+    Not in the default pipeline: whether it pays depends on what the vendor
+    compiler already does with the same block, and that needs measurement on
+    hardware rather than an argument.
+    """
+    out: List[Stmt] = [replace(s, regions=tuple(
+        replace(r, body=cluster_loads(r.body, max_pressure, window))
+        for r in s.regions)) for s in body]
+    original = list(out)
+    moved: List[Tuple[int, int]] = []
+
+    for i in range(len(out)):
+        s = out[i]
+        if not _reads_only(s) or s.regions:
+            continue
+        j = i
+        while j > 0 and i - j < window and _can_swap(out[j - 1], s):
+            j -= 1
+        if j == i:
+            continue
+        moved.append((j, i))
+        out = out[:j] + [s] + out[j:i] + out[i + 1:]
+
+    # Pressure is checked once for the whole region rather than per hoist:
+    # `pressure` is a full sweep, and calling it inside the loop made the pass
+    # quadratic on bodies with thousands of statements.  If the region ends up
+    # over budget the hoists are undone wholesale, which is coarse but keeps
+    # the pass linear in practice.
+    if moved and pressure(tuple(out)) > max_pressure:
+        return tuple(original)
+    return tuple(out)
+
+
+# --------------------------------------------------------------------------- #
 # Convenience pipeline
 # --------------------------------------------------------------------------- #
 
