@@ -213,6 +213,30 @@ def accesses_conflict(a: Access, b: Access) -> bool:
 # Values
 # --------------------------------------------------------------------------- #
 
+class Uniformity(IntEnum):
+    """How wide a value is the same across.
+
+    The flag used to be a bool: uniform, or "thread-dependent (derived from lane
+    id)".  Two levels cannot express the batch id, which is
+
+        batchId0 = threadIdx.y + blockDim.y * blockIdx.x
+
+    -- the same for every thread working on one multiplication, and different
+    between the multiplications packed into a block.  Calling that uniform lets
+    a pass hoist something out of a per-multiplication scope where it is not
+    invariant; calling it lane-dependent forbids every hoist that would be
+    legal.  So it is a lattice, ordered by "same across more threads".
+
+    Propagation takes the ``min``: a value is only as uniform as its least
+    uniform operand.
+    """
+
+    LANE = 0     # differs per thread -- derived from the lane id
+    MULT = 1     # same within one multiplication, differs between them
+    BLOCK = 2    # same within a thread block
+    GRID = 3     # same everywhere
+
+
 @dataclass(frozen=True, eq=False)
 class Value:
     """An SSA value.
@@ -224,8 +248,22 @@ class Value:
 
     id: int
     type: IRType
-    uniform: bool = True    # False == thread-dependent (derived from lane id)
+    # NOTE: `uniform` below is a *derived* property, kept so that every existing
+    # check kept its exact meaning when the lattice was introduced.  A pass that
+    # wants the extra precision reads `uniformity` instead.
+    uniformity: Uniformity = Uniformity.GRID
     hint: str = ''          # debug-only name fragment, e.g. 'acc' or 'data0'
+
+    @property
+    def uniform(self) -> bool:
+        """Block-uniform, the level the original boolean meant.
+
+        Anything narrower -- a lane index, or a per-multiplication value like
+        the batch id -- reads False here, which is what every existing check
+        expects.  New checks should compare ``uniformity`` against the level
+        they actually need.
+        """
+        return self.uniformity >= Uniformity.BLOCK
 
     def __hash__(self):
         return hash(self.id)
@@ -236,8 +274,9 @@ class Value:
         return f'v{self.id}_{self.hint}' if self.hint else f'v{self.id}'
 
     def __repr__(self):
-        u = '' if self.uniform else '~'
-        return f'%{u}{self}:{self.type!r}'
+        marks = {Uniformity.LANE: '~', Uniformity.MULT: '^',
+                 Uniformity.BLOCK: '', Uniformity.GRID: ''}
+        return f'%{marks[self.uniformity]}{self}:{self.type!r}'
 
 
 # An operand is either an SSA value or an inline literal.  Literals are allowed

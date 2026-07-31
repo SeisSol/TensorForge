@@ -21,7 +21,7 @@ from tensorforge.common.basic_types import Datatype
 from .core import (Access, BufferType, Effect, IRError, MemSpace, Op, Operand,
                    Region, ScalarType, Stmt, TokenType, Value,
                    accesses_conflict, collect_accesses, collect_effect,
-                   def_use, defined_within, walk)
+                   def_use, defined_within, walk, Uniformity)
 from .asyncmem import check_tokens, schedule_async
 
 
@@ -49,7 +49,7 @@ def verify(body: Tuple[Stmt, ...], strict: bool = True) -> List[str]:
     except IRError as e:
         diag.append(str(e))
 
-    _check_scope(body, set(), diag, divergent=False)
+    _check_scope(body, set(), diag, reachable_at=Uniformity.GRID)
     diag.extend(_check_dangling_names(body))
 
     if diag and strict:
@@ -104,7 +104,7 @@ def _same_types(a: Sequence[Operand], b: Sequence[Value]) -> bool:
 
 
 def _check_scope(body: Tuple[Stmt, ...], live: set, diag: List[str],
-                 divergent: bool) -> None:
+                 reachable_at: Uniformity) -> None:
     """``live`` is the set of value ids visible from enclosing scopes."""
     live = set(live)
 
@@ -124,10 +124,22 @@ def _check_scope(body: Tuple[Stmt, ...], live: set, diag: List[str],
         if s.op == Op.YIELD and i != len(body) - 1:
             diag.append('yield must be the last statement of a region')
 
-        # -- barriers must not be reached divergently ---------------------- #
-        if (s.effect & Effect.BARRIER) and divergent:
-            diag.append(f'{s.op}: barrier inside a thread-divergent region '
-                        f'(undefined behaviour on CUDA/HIP)')
+        # -- a barrier may not out-reach the region it sits in -------------- #
+        #
+        # Legal iff every thread the barrier waits for actually gets here.  The
+        # check used to be "is this region divergent at all", which forbade a
+        # multiplication-wide barrier inside a multiplication-wide loop -- a
+        # rendezvous of exactly the threads that agree on the trip count, and
+        # therefore fine.
+        if s.effect & Effect.BARRIER:
+            scope = s.attr('scope')
+            scope = scope if isinstance(scope, Uniformity) else Uniformity.BLOCK
+            if reachable_at < scope:
+                diag.append(
+                    f'{s.op}: {scope.name.lower()}-wide barrier in a region '
+                    f'only reached uniformly at {reachable_at.name.lower()} '
+                    f'level; the threads that took another path never arrive '
+                    f'(deadlock, not a wrong answer)')
 
         # -- op-specific --------------------------------------------------- #
         if s.op == Op.IF:
@@ -220,25 +232,37 @@ def _check_scope(body: Tuple[Stmt, ...], live: set, diag: List[str],
 
         # -- recurse ------------------------------------------------------- #
         if s.regions:
-            inner_div = divergent or _is_divergent(s)
+            inner = min(reachable_at, _entry_uniformity(s))
             for r in s.regions:
-                _check_scope(r.body, live | {a.id for a in r.args}, diag, inner_div)
+                _check_scope(r.body, live | {a.id for a in r.args}, diag, inner)
 
         for t in s.target:
             live.add(t.id)
 
 
-def _is_divergent(s: Stmt) -> bool:
-    """Does entering this statement's regions depend on thread-varying data?"""
+def _operand_uniformity(x) -> Uniformity:
+    return x.uniformity if isinstance(x, Value) else Uniformity.GRID
+
+
+def _entry_uniformity(s: Stmt) -> Uniformity:
+    """Across how many threads is *entering* this statement's regions agreed?
+
+    This replaces a boolean "is it divergent".  Two levels could not express a
+    loop whose trip count is the same for every thread of one multiplication and
+    different between the multiplications sharing a block -- which is what a
+    batch loop is.  Such a loop is not divergent enough to forbid a
+    multiplication-wide barrier, and far too divergent to allow a block-wide
+    one; the boolean had to pick one answer and was wrong for the other.
+    """
     if s.op == Op.IF:
-        c = s.cond
-        return isinstance(c, Value) and not c.uniform
+        return _operand_uniformity(s.cond)
     if s.op == Op.FOR:
-        return any(isinstance(b, Value) and not b.uniform for b in s.loop_bounds)
+        return min((_operand_uniformity(b) for b in s.loop_bounds),
+                   default=Uniformity.GRID)
     if s.op == Op.RAWBLOCK:
         # opaque head text: assume the worst
-        return True
-    return False
+        return Uniformity.LANE
+    return Uniformity.GRID
 
 
 # --------------------------------------------------------------------------- #

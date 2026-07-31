@@ -26,7 +26,7 @@ from tensorforge.common.basic_types import Datatype
 
 from .core import (BOOL, INDEX, TOKEN, Access, BufferType, Effect, IRError,
                    MemSpace, Op, Operand, Region, ScalarType, Stmt, TokenType,
-                   Value, dump)
+                   Value, dump, Uniformity)
 
 
 def access_of(symbol: Any, kind: Effect) -> Access:
@@ -44,6 +44,35 @@ class _Scope:
         self.body: List[Stmt] = []
         self.args = args
         self.kind = kind
+
+
+_BARRIER_ALIASES = {'lane': Uniformity.LANE, 'simd': Uniformity.MULT,
+                    'wave': Uniformity.MULT, 'warp': Uniformity.MULT,
+                    'mult': Uniformity.MULT, 'block': Uniformity.BLOCK,
+                    'group': Uniformity.BLOCK, 'grid': Uniformity.GRID}
+
+
+def _as_barrier_scope(x) -> Uniformity:
+    """Accepts the old strings so existing callers keep working."""
+    if isinstance(x, Uniformity):
+        return x
+    try:
+        return _BARRIER_ALIASES[str(x).lower()]
+    except KeyError:
+        raise IRError(f'unknown barrier scope {x!r}; '
+                      f'expected one of {sorted(_BARRIER_ALIASES)}')
+
+
+def _as_uniformity(x) -> Uniformity:
+    if isinstance(x, Uniformity):
+        return x
+    return Uniformity.GRID if x else Uniformity.LANE
+
+
+def _join(operands) -> Uniformity:
+    """A result is only as uniform as its least uniform operand."""
+    levels = [a.uniformity for a in operands if isinstance(a, Value)]
+    return min(levels) if levels else Uniformity.GRID
 
 
 class IRBuilder:
@@ -72,13 +101,17 @@ class IRBuilder:
 
     # -- values ------------------------------------------------------------ #
 
-    def value(self, type_, hint: str = '', uniform: bool = True) -> Value:
+    def value(self, type_, hint: str = '',
+              uniform: Union[bool, Uniformity] = Uniformity.GRID) -> Value:
+        """``uniform`` accepts a bool for compatibility: True -> GRID,
+        False -> LANE.  New code should pass a :class:`Uniformity`."""
         if self._alloc is not None:
             ident = self._alloc.next_index()
         else:
             self._counter += 1
             ident = self._counter
-        return Value(id=ident, type=type_, uniform=uniform, hint=hint)
+        return Value(id=ident, type=type_, uniformity=_as_uniformity(uniform),
+                     hint=hint)
 
     def varalloc(self, prefix: str = 'v') -> Value:
         """Drop-in for ``Writer.varalloc``.
@@ -91,7 +124,8 @@ class IRBuilder:
         return self.value(ScalarType(self._fptype),
                           hint='' if prefix == 'v' else prefix)
 
-    def index(self, hint: str = '', uniform: bool = True) -> Value:
+    def index(self, hint: str = '',
+              uniform: Union[bool, Uniformity] = Uniformity.GRID) -> Value:
         return self.value(INDEX, hint=hint, uniform=uniform)
 
     # -- emission core ----------------------------------------------------- #
@@ -121,7 +155,7 @@ class IRBuilder:
         is.  That is what lets the verifier reject a barrier under a
         thread-divergent guard.
         """
-        uniform = all(a.uniform for a in args if isinstance(a, Value))
+        uniform = _join(args)
         v = self.value(type_, hint=hint, uniform=uniform)
         # `escapes`: the name is referenced from raw text, so the value must
         # neither be eliminated nor folded into its consumer.  Migration
@@ -134,7 +168,7 @@ class IRBuilder:
              pure: bool = True, effect: Effect = Effect.NONE,
              accesses: Tuple[Access, ...] = ()) -> Value:
         """A lexic primitive: ``tensorforge::broadcast<...>``, shuffles, MFMA."""
-        uniform = all(a.uniform for a in args if isinstance(a, Value))
+        uniform = _join(args)
         v = self.value(type_, hint=hint, uniform=uniform)
         self._emit_op(Op.CALL, (v,), args, pure=pure, effect=effect,
                       accesses=accesses, attrs=(('callee', callee),))
@@ -159,9 +193,26 @@ class IRBuilder:
         return value
 
     def thread_id(self, axis: str = 'x') -> Value:
-        """The one intrinsically non-uniform value."""
-        v = self.value(INDEX, hint=f'tid{axis}', uniform=False)
+        """The lane index: the narrowest thing there is."""
+        v = self.value(INDEX, hint=f'tid{axis}', uniform=Uniformity.LANE)
         self._emit_op(Op.CALL, (v,), (), attrs=(('callee', f'thread_idx_{axis}'),))
+        return v
+
+    def batch_id(self, lookahead: int = 0) -> Value:
+        """The element this multiplication is working on.
+
+        ``MULT``-uniform, not block-uniform: the macro layer emits
+        ``batchId0 = threadIdx.y + blockDim.y * blockIdx.x``, so every thread of
+        one multiplication agrees and the multiplications packed into a block do
+        not.  Declaring it block-uniform would let ``licm`` hoist an address
+        computed from it out of a per-multiplication scope.
+
+        ``lookahead`` names the index the loop binds that many iterations ahead,
+        which is what a peeled or advanced transfer consumes.
+        """
+        v = self.value(INDEX, hint=f'batch{lookahead}', uniform=Uniformity.MULT)
+        self._emit_op(Op.CALL, (v,), (),
+                      attrs=(('callee', f'batch_id_{lookahead}'),))
         return v
 
     def alloc(self, elem: Datatype, shape: Sequence[int], space: MemSpace,
@@ -190,7 +241,7 @@ class IRBuilder:
                      if isinstance(base, Value) and isinstance(base.type, BufferType)
                      else ScalarType(self._fptype))
         if uniform is None:
-            uniform = all(i.uniform for i in indices if isinstance(i, Value))
+            uniform = _join(indices)
         v = self.value(type_, hint=hint or 'ld', uniform=uniform)
         attrs = (('other', other),) if other is not None else ()
         self._emit_op(Op.LOAD, (v,), (base,) + tuple(indices),
@@ -266,7 +317,7 @@ class IRBuilder:
                      if isinstance(base, Value) and isinstance(base.type, BufferType)
                      else ScalarType(self._fptype))
         if uniform is None:
-            uniform = all(i.uniform for i in indices if isinstance(i, Value))
+            uniform = _join(indices)
 
         accesses = (Access(Effect.READ, space, base),)
         tok = self.value(TOKEN, hint=hint)
@@ -319,9 +370,20 @@ class IRBuilder:
             return base.type.space
         return MemSpace.from_symbol_type(getattr(base, 'stype', None))
 
-    def barrier(self, scope: str = 'block') -> Stmt:
+    def barrier(self, scope: Union[str, Uniformity] = Uniformity.BLOCK) -> Stmt:
+        """A rendezvous of every thread that agrees at level ``scope``.
+
+        The scope is on the same lattice as value uniformity, and that is the
+        point: a barrier at level S inside a construct whose entry is only
+        U-uniform deadlocks unless ``U >= S``, because the threads that took the
+        other branch, or ran fewer iterations, never arrive.  Previously the
+        scope was an unchecked string that never reached the emitter -- every
+        barrier came out as sync_block() regardless of what was asked for.
+        """
+        level = _as_barrier_scope(scope)
         return self._emit_op(Op.BARRIER, (), (), pure=False, movable=False,
-                             effect=Effect.BARRIER, attrs=(('scope', scope),))
+                             effect=Effect.BARRIER,
+                             attrs=(('scope', level),))
 
     def yield_(self, *values: Operand) -> Stmt:
         return self._emit_op(Op.YIELD, (), values, pure=False, movable=False)
@@ -410,7 +472,7 @@ class IRBuilder:
         meant the target in ``write()`` but the loop variable in ``For``.)
         """
         type_ = type_ or ScalarType(self._fptype)
-        uniform = all(a.uniform for a in args if isinstance(a, Value))
+        uniform = _join(args)
         v = self.value(type_, hint=hint, uniform=uniform)
         self._emit_op(Op.RAWEXPR, (v,), args, pure=pure, movable=movable,
                       effect=Effect.NONE if pure else Effect.UNKNOWN, text=text)

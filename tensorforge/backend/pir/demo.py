@@ -388,7 +388,9 @@ def main():
     # -- uniformity ------------------------------------------------------- #
     d = build_divergent_barrier()
     diag = verify(d, strict=False)
-    assert any('divergent' in m for m in diag), diag
+    # The diagnostic now names both levels rather than saying "divergent":
+    # a block-wide barrier under a lane-level condition.
+    assert any('barrier' in m and 'never arrive' in m for m in diag), diag
     print('\n=== uniformity diagnostics ===')
     for m in diag:
         print(' ', m)

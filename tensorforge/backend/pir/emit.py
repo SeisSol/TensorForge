@@ -21,6 +21,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from tensorforge.common.basic_types import Datatype
 
+from tensorforge.common.basic_types import GeneralLexicon
 from .core import (Access, BufferType, Effect, IRError, MemSpace, Op, Operand,
                    Region, ScalarType, Stmt, TokenType, Value, def_use, walk)
 
@@ -147,11 +148,19 @@ class Emitter:
         vm = self._vm()
         return None if vm is None else vm.get_hw_descr()
 
-    def _sync(self) -> str:
+    def _sync(self, scope=None) -> str:
+        # The scope used to be an unchecked string that never reached here, so
+        # every barrier came out as sync_block() regardless of what was asked
+        # for.
         lex = self._lexic()
-        if lex is not None:
-            return f'{lex.sync_block()};'
-        return '__syncthreads();'
+        if lex is None:
+            return '__syncthreads();'
+        name = getattr(scope, 'name', 'BLOCK')
+        if name == 'MULT':
+            return f'{lex.sync_simd()};'
+        if name == 'GRID':
+            return f'{lex.sync_grid()};'
+        return f'{lex.sync_block()};'
 
     def _thread_idx(self, axis: str) -> str:
         lex = self._lexic()
@@ -355,7 +364,7 @@ class Emitter:
             return
 
         if op == Op.BARRIER:
-            w(self._sync())
+            w(self._sync(s.attr('scope')))
             return
 
         if op == Op.ALLOC:
@@ -445,6 +454,15 @@ class Emitter:
             if callee is not None and callee.startswith('thread_idx_'):
                 v = s.target[0]
                 self.bind(v, self._thread_idx(callee[-1]))
+                return
+            if callee is not None and callee.startswith('batch_id_'):
+                # Bound, not declared: the macro layer already emits
+                # `batchId{n}` around this body, so the value is a name that
+                # exists rather than a call to make.  This is the seam -- the
+                # micro IR reasons about the batch id as a MULT-uniform value,
+                # the macro IR owns what it is called and how it is computed.
+                v = s.target[0]
+                self.bind(v, f'{GeneralLexicon.BATCH_ID_NAME}{callee[len("batch_id_"):]}')
                 return
             v = s.target[0]
             args = ', '.join(self.operand(a) for a in s.args)
