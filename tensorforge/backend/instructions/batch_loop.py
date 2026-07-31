@@ -23,6 +23,7 @@ states it, so ``verify`` can check it instead of the invariant living in a
 comment.
 """
 
+import os
 from enum import Enum
 from typing import List, Optional, Tuple
 
@@ -192,8 +193,14 @@ class BatchLoop(AbstractInstruction):
 
     def _emit_body(self, writer) -> None:
         with writer.If(self._flag_guard(writer)):
-            for instr in self._region:
-                instr.gen_code(writer)
+            if os.environ.get('TF_IR_WIDE'):
+                # one body for every instruction of the region
+                with AbstractInstruction.shared_body(self._context, writer):
+                    for instr in self._region:
+                        instr.gen_code(writer)
+            else:
+                for instr in self._region:
+                    instr.gen_code(writer)
 
     def gen_code(self, writer) -> None:
         # Deliberately no writer.Scope() and no comment: the loop used to be

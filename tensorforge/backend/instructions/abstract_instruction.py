@@ -5,6 +5,7 @@ from tensorforge.common.context import Context, VM
 from tensorforge.backend.writer import Writer
 from tensorforge.common.exceptions import InternalError
 import os
+from contextlib import contextmanager
 
 from tensorforge.backend import pir
 from tensorforge.backend.pir.core import Access, Effect, MemSpace
@@ -179,6 +180,29 @@ class AbstractInstruction(ABC):
     if inner is not None:
       inner(builder)
 
+  # One shared body may span several instructions.  While such a scope is
+  # open, an instruction builds into it instead of opening its own builder,
+  # which is what lets CSE see across instruction boundaries and lets a
+  # `copy.async` and its `wait` --- issued by two different instructions ---
+  # end up in the same body.
+  _shared_body: List = []
+
+  @classmethod
+  @contextmanager
+  def shared_body(cls, context, writer: Writer):
+    builder = pir.IRBuilder(fptype=context.fp_type, context=context,
+                            alloc=getattr(writer, 'alloc', None))
+    cls._shared_body.append(builder)
+    try:
+      yield builder
+    finally:
+      cls._shared_body.pop()
+    body = builder.finish()
+    if os.environ.get('TF_IR_DEBUG'):
+      for d in pir.verify(body, strict=False):
+        print(f'pir: {d}')
+    pir.emit(pir.optimize(body), writer, context)
+
   def through_pir(self, writer: Writer, build) -> None:
     """Route ``build(sink)`` through the pseudo-IR into ``writer``.
 
@@ -187,6 +211,10 @@ class AbstractInstruction(ABC):
     """
     if not self._use_pir:
       build(writer)
+      return
+
+    if self._shared_body:
+      build(self._shared_body[-1])      # join the enclosing body
       return
 
     builder = pir.IRBuilder(fptype=self._context.fp_type, context=self._context,
