@@ -22,6 +22,12 @@ class LoadInstruction:
 class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
   def __init__(self, **kwargs):
     super(GlbToShrLoader, self).__init__(kwargs['context'])
+    # Kept so the transfer can be cloned.  Software pipelining peels a copy of
+    # this load into the loop prologue with a different source pointer and
+    # stage; re-invoking the constructor is the only way to get every derived
+    # field (data_view, alignment, lid_dim, the user registrations) right --
+    # copying the object would silently share them.
+    self._ctor_kwargs = dict(kwargs)
     self._dest = kwargs['dest']
     self._src = kwargs['src']
     self._shr_mem = kwargs['shr_mem']
@@ -280,6 +286,19 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
       return ['cooperative_groups.h', 'cooperative_groups/memcpy_async.h']
     else:
       return []
+
+  def clone(self, **overrides) -> 'GlbToShrLoader':
+    """A fresh transfer with the same configuration, minus the overrides.
+
+    Software pipelining peels a copy of this load into the loop prologue with a
+    different source pointer and stage.  Re-invoking the constructor is the only
+    way to get every derived field right -- data_view, alignment, lid_dim and
+    the user registrations are all computed there, and copying the object would
+    silently share them.
+    """
+    kwargs = dict(self._ctor_kwargs)
+    kwargs.update(overrides)
+    return type(self)(**kwargs)
 
   def __str__(self):
     return f'{self._dest.name} = load{{g>s}}({self._src.name}[{", ".join(str(p) for p in self._permute)}])'

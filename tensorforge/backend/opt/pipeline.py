@@ -219,51 +219,60 @@ class Pipeline(AbstractTransformer):
 
     def _rotate_buffers(self, loop: BatchLoop, analysis: PipelineAnalysis,
                         prologue, body):
-        """Give each pipelined shared-memory buffer ``depth`` stages.
+        """Give each pipelined shared-memory buffer ``depth`` stages, and move
+        the transfer along with the pointer.
 
-        Iteration ``k`` consumes stage ``k % d`` and the transfer, whose source
-        pointer ``_advance_pointers`` already moved ``d - 1`` elements ahead,
-        fills stage ``(k + d - 1) % d``.  Both stages are one allocation --
-        ``set_stages`` makes the region allocator reserve all of them -- and the
-        two views are the declared pointer and ``write_base()``.
+        Advancing the pointer alone is only address pipelining: the load still
+        happens in iteration k for iteration k, so nothing overlaps.  Rotation
+        moves the transfer too --- iteration k fills stage ``(k + d - 1) % d``
+        with element ``k + d - 1`` while consuming stage ``k % d``, filled
+        ``d - 1`` iterations ago --- which is what needs the two views into one
+        allocation.
 
-        Only shared-memory transfers rotate.  A register destination is private
-        to the thread and has no allocation to stage.
+        The first ``d - 1`` elements have no earlier iteration to fill them, so
+        the prologue peels that many transfers.  With ``d = 2`` that is one:
+        element 0 into stage 0, using the pointer the peeled ``GetElementPtr``
+        already computed.
         """
         d = self._depth
         k = loop.index_name(0)
         read = f'{k} % {d}'
         write = f'({k} + {d - 1}) % {d}'
 
-        rotated = 0
+        peeled: List[AbstractInstruction] = []
         for c in analysis.candidates:
             load = c.load
             if not isinstance(load, AbstractShrMemWrite):
+                # a register destination is private to the thread; there is no
+                # allocation to stage
                 continue
+            rolling = self._advanced_ptr.get(id(load.get_src()))
+            if rolling is None:
+                # the producer was not advanced, so there is no pointer to the
+                # element this iteration should be fetching
+                continue
+
+            # the body transfer now reads through the advanced pointer, i.e.
+            # element k + d - 1, and fills the stage that element belongs to
+            load._src = rolling
             load.set_stages(d, read, write)
-            rotated += 1
 
-        if not rotated:
+            # ... and the prologue fills the stages nobody else will.  The
+            # peeled GetElementPtr left `rolling` pointing at element 0.
+            for stage in range(d - 1):
+                fill = load.clone(src=rolling)
+                # The peeled fill writes stage `stage` through its own view.
+                # It must *not* declare the buffer: the declaration addresses
+                # `k % d` and so mentions the loop variable, which does not
+                # exist in the prologue.  Cloning registers the copy as a later
+                # user of the symbol, so ShrMemOpt leaves declaring to the body
+                # transfer, which is still the first user.
+                fill.set_stages(d, read, str(stage))
+                peeled.append(fill)
+
+        if not peeled:
             return prologue, body
-
-        # The peeled iteration would fill stage 0 here.  It does not exist:
-        # _advance_pointers peels the *pointer* computation, not the transfer,
-        # so nothing writes stage 0 before the loop.  Iteration 0 then consumes
-        # stage 0 % d, which no transfer has filled -- uninitialised shared
-        # memory, and a wrong answer rather than a crash.
-        peeled_fills = [i for i in prologue if isinstance(i, AbstractShrMemWrite)]
-        if not peeled_fills:
-            raise InternalError(
-                f'rotation would leave stage 0 unfilled: {rotated} buffer(s) '
-                f'rotate, but the prologue peels only the address computation, '
-                f'not the transfer, so iteration 0 reads shared memory that no '
-                f'transfer wrote. Peeling the load needs a way to clone a '
-                f'GlbToShrLoader with a different batch index and stage; the '
-                f'declaration/write split it depends on is done and tested.')
-        for instr in peeled_fills:
-            instr.set_stages(d, '0', None)
-
-        return prologue, body
+        return list(prologue) + peeled, body
 
     def _advance_pointers(self, loop: BatchLoop, analysis: PipelineAnalysis):
         """Hoist the address computation, leaving the transfers in place.
@@ -281,6 +290,7 @@ class Pipeline(AbstractTransformer):
         prologue: List[AbstractInstruction] = []
         body = list(loop.region)
         advanced = {id(c.producer) for c in analysis.candidates}
+        advanced_ptr = self._advanced_ptr = {}
 
         for index, instr in enumerate(body):
             if id(instr) not in advanced:
@@ -319,4 +329,5 @@ class Pipeline(AbstractTransformer):
                 batch_offset=loop.index_name(self._depth - 1),
                 update_dest=original,
                 pipeline=True)
+            advanced_ptr[id(original)] = rolling
         return prologue, body
