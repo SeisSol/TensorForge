@@ -20,6 +20,7 @@ from tensorforge.backend.instructions.memory.load import (GlbToRegLoader,
                                                           LoadWait)
 from tensorforge.backend.instructions.ptr_manip import GetElementPtr
 from tensorforge.backend.pir.core import accesses_conflict
+from tensorforge.backend.symbol import Symbol
 from tensorforge.common.exceptions import InternalError
 
 from .abstract import AbstractTransformer, Context
@@ -247,22 +248,38 @@ class Pipeline(AbstractTransformer):
         for index, instr in enumerate(body):
             if id(instr) not in advanced:
                 continue
-            # the peeled copy: same pointer, computed from the pre-loop index
+            original = instr._dest
+            # A *distinct* symbol for the rolling pointer.  Reusing `original`
+            # for both `dest` and `update_dest` emits
+            #     const auto glb_m0 = glb_m0;
+            #     glb_m0 = &m0[...];
+            # -- a self-referential declaration of a name that was also declared
+            # const in the prologue.  The rolling pointer and the value this
+            # iteration reads are two different things and need two names.
+            rolling = Symbol(f'pipe_{original.name}',
+                             original.stype,
+                             original.obj)
+            rolling.data_view = original.data_view
+
+            # Peeled iteration: compute the pointer for the first element, and
+            # declare it mutable (`pipeline=True` drops the const) so the body
+            # can advance it.
             prologue.append(GetElementPtr(
                 self._context,
                 src=instr._src,
-                dest=instr._dest,
+                dest=rolling,
                 include_extra_offset=instr._include_extra_offset,
                 batch_offset=loop.prologue_index(),
                 pipeline=True))
-            # in the loop: advance to the *next* element, keeping the current
-            # value in `update_dest` for this iteration's use
+
+            # In the loop: hand this iteration the pointer computed last time,
+            # then advance to the element `depth - 1` ahead.
             body[index] = GetElementPtr(
                 self._context,
                 src=instr._src,
-                dest=instr._dest,
+                dest=rolling,
                 include_extra_offset=instr._include_extra_offset,
-                batch_offset=loop.index_name(1),
-                update_dest=instr._dest,
+                batch_offset=loop.index_name(self._depth - 1),
+                update_dest=original,
                 pipeline=True)
         return prologue, body
