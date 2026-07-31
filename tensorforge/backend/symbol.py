@@ -789,9 +789,9 @@ class Symbol:
     else:
       if self.stype == SymbolType.Global:
         if atomic:
-          assign = context.get_vm().get_lexic().atomic_store(access, variable, None, self.get_fptype())
+          assign = context.get_vm().get_lexic().atomic_store(access, var, None, self.get_fptype())
         else:
-          assign = context.get_vm().get_lexic().glb_store(access, variable, nontemp)
+          assign = context.get_vm().get_lexic().glb_store(access, var, nontemp)
       else:
         assign = f'{access} = {var};'
 

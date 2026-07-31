@@ -186,6 +186,12 @@ def _check_scope(body: Tuple[Stmt, ...], live: set, diag: List[str],
         elif s.op == Op.RAWSTMT:
             if s.target or s.text is None:
                 diag.append('rawstmt: needs text and no target')
+            if s.attr('fmt') and '{0}' not in (s.text or ''):
+                # `fmt` says the emitter fills the operands in; a text that
+                # baked a value's *name* in instead survives every pass and
+                # then loses its definition to inlining.
+                diag.append('rawstmt: marked fmt but the text has no {0} '
+                            'placeholder')
 
         elif s.op == Op.RAWBLOCK:
             if len(s.regions) != 1 or s.text is None:
