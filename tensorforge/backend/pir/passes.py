@@ -755,6 +755,62 @@ def flatten_scopes(body: Tuple[Stmt, ...]) -> Tuple[Stmt, ...]:
 
 
 # --------------------------------------------------------------------------- #
+# If-conversion
+# --------------------------------------------------------------------------- #
+
+def _convertible(s: Stmt) -> bool:
+    """A guard whose body may carry the predicate statement by statement."""
+    if s.op != Op.IF or s.target or len(s.regions) != 1:
+        return False
+    if not isinstance(s.cond, Value):
+        return False
+    for inner in s.regions[0].body:
+        if inner.regions or inner.predicate is not None:
+            return False
+        # A barrier must not be predicated at all, and an async operation's
+        # completion counter would no longer match.
+        if inner.effect & (Effect.BARRIER | Effect.ASYNC):
+            return False
+        # Raw text that declares a C++ name must keep the shared brace: giving
+        # it its own `if` would scope the declaration inside it.
+        if inner.text and _CDECL.search(inner.text):
+            return False
+    return True
+
+
+def if_convert(body: Tuple[Stmt, ...]) -> Tuple[Stmt, ...]:
+    """Push a guard's condition onto its statements and dissolve the region.
+
+    One rule for everything inside: reads become selects and are free to move,
+    pure arithmetic needs no predicate at all, and anything with a side effect
+    keeps a real branch.  The guarded store therefore stays conditional --- and
+    because it does, the value a masked-out lane loads never reaches memory,
+    so the `other` value only has to be defined, not neutral.
+
+    Not in the default pipeline: it trades one shared brace for one per
+    side-effecting statement, which is only worth it once something actually
+    uses the freedom it buys.
+    """
+    out: List[Stmt] = []
+    for s in body:
+        s = replace(s, regions=tuple(replace(r, body=if_convert(r.body))
+                                     for r in s.regions))
+        if _convertible(s):
+            cond = s.cond
+            for inner in s.regions[0].body:
+                # Pure arithmetic needs no predicate: computing it for a
+                # masked-out lane is harmless, and predicating it anyway
+                # produces a nested select per operation.
+                if inner.pure and not inner.has_side_effects and not inner.accesses:
+                    out.append(inner)
+                else:
+                    out.append(replace(inner, predicate=cond))
+            continue
+        out.append(s)
+    return tuple(out)
+
+
+# --------------------------------------------------------------------------- #
 # Convenience pipeline
 # --------------------------------------------------------------------------- #
 
