@@ -2,7 +2,7 @@ from typing import Union
 import math
 from . import ComputeInstruction
 from tensorforge.backend.symbol import SymbolType, add_offset, Symbol, SymbolView, DataView, Loop, LeadLoop, write_loops, LeadIndex, LinearizedLoop, Immediate
-from tensorforge.common.exceptions import InternalError
+from tensorforge.common.exceptions import InternalError, GenerationError
 from tensorforge.backend.writer import Writer
 from tensorforge.common.context import Context
 from tensorforge.common.operation import ReductionOperator
@@ -79,25 +79,43 @@ class MultilinearInstruction(ComputeInstruction):
         """A slicing offset is a logical->storage shift, never a loop bound.
 
         Global and shared-memory operands build their address from the whole
-        index expression (Symbol.build_address, untyped branch), so the offset
-        can ride along as a VarOffset and is applied at the access site.
-        Registers instead dispatch on `isinstance(index, LeadIndex)`; a wrapped
-        lead index would fall into the non-lead branch and pick up both the
-        wrong divisor and the wrong stride.  GlbToRegLoader therefore consumes
-        the offset while loading and hands back a logical register image --- so
-        reaching this point with a non-zero offset on registers means the
-        absorption was skipped somewhere.
+        index expression, so the offset rides along as a `VarOffset` and needs
+        no further thought.
 
-        The destination needs no check here: `_idest` accumulates in logical
+        Registers distribute the lead dimension across lanes: element `s` sits
+        in lane `s % T`, slot `s // T`.  A shift of `q*T` is a change of slot
+        with the lane untouched and so is expressible as an address; a
+        remainder would move data between lanes and needs a shuffle, which an
+        address cannot do.  `Symbol.build_address` applies the whole-block part
+        via `unwrap_lead`; anything else has to be consumed at load time, which
+        is what GlbToRegLoader does for a fresh staging load.
+
+        The destination needs no check: `_idest` accumulates in logical
         coordinates and StoreRegToGlb folds `dest.offset` in on the way out.
         """
         for op in self._ops:
-            if any(o != 0 for o in op.offset):
-                assert op.symbol.stype in (SymbolType.Global, SymbolType.Batch,
-                                           SymbolType.SharedMem), \
-                    (f'{op.symbol.name}: slicing offset {op.offset} survived on '
-                     f'a {op.symbol.stype} operand --- the staging load should '
-                     f'have consumed it')
+            if all(o == 0 for o in op.offset):
+                continue
+            if op.symbol.stype not in (SymbolType.Register, SymbolType.Scratch):
+                continue
+
+            view = op.symbol.data_view
+            threads = op.symbol.num_threads
+            for j, o in enumerate(op.offset):
+                if self._target[self._ops.index(op)][j] == 0 and o % threads != 0:
+                    raise GenerationError(
+                        f'{op.symbol.name}: lead-dimension slicing offset {o} '
+                        f'is not a multiple of {threads}. Only whole '
+                        f'thread-blocks can be re-indexed on a register-'
+                        f'resident operand; a remainder is a cross-lane move '
+                        f'and has to be consumed by the staging load instead.')
+                lo, hi = op.bbox.lower()[j] + o, op.bbox.upper()[j] + o
+                have = view.get_bbox()
+                if lo < have.lower()[j] or hi > have.upper()[j]:
+                    raise GenerationError(
+                        f'{op.symbol.name}: sliced range [{lo},{hi}) in dim {j} '
+                        f'is not covered by what the registers hold '
+                        f'([{have.lower()[j]},{have.upper()[j]}))')
 
     def _analyze(self):
         self._check_offsets()

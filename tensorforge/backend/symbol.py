@@ -269,6 +269,30 @@ def add_offset(x, offset):
   else:
     return VarOffset(x, offset)
 
+def unwrap_lead(index):
+  """Peel `VarOffset` wrappers and report the accumulated shift.
+
+  Returns `(lead_index, shift)` when a `LeadIndex` sits underneath, else
+  `None`.  `add_offset` wraps a slicing offset around whatever index it is
+  handed, which is exactly right for a global or shared-memory symbol: the
+  address is built from the full index expression, so the shift is just
+  another constant in the sum.
+
+  Registers distribute the lead dimension across lanes --- element `s` lives
+  in lane `s % T`, slot `s // T`.  A shift of `q*T` moves whole blocks and so
+  is a change of slot with the lane untouched; a remainder would move data
+  between lanes, which is a shuffle and not something an address can express.
+  Hence the shift has to be split off here and divided by `T` before it is
+  applied to the block index, and only multiples of `T` are representable.
+  """
+  shift = 0
+  while isinstance(index, VarOffset):
+    shift += index.offset
+    index = index.variable
+  if isinstance(index, LeadIndex):
+    return index, shift
+  return None
+
 class LeadLoop:
   """Loop over a thread-distributed dimension, with guards for the ragged ends.
 
@@ -518,8 +542,12 @@ class Symbol:
       v = (var if isinstance(var, (str, int, float, np.int64))
            else (var.build_nonlead(writer, context) if lead
                  else var.build(writer, context)))
-      if offset:
+      # a slicing offset can push the subtracted constant negative; emitting
+      # `x - -3` is legal C but pointless, so pick the operator to match
+      if offset > 0:
         v = arith('sub', v, offset, lambda x, y: x - y)
+      elif offset < 0:
+        v = arith('add', v, -offset, lambda x, y: x + y)
       if stride != 1:
         v = arith('mul', v, stride, lambda x, y: x * y)
       return v
@@ -533,9 +561,19 @@ class Symbol:
       stride = 1
       offsets = self.data_view.get_dim_offsets()
       for i in range(self.data_view.rank()):
-        if isinstance(index[i], LeadIndex):
-          parts.append(term(index[i], offsets[i] // self.num_threads, stride,
-                            lead=True))
+        lead = unwrap_lead(index[i])
+        if lead is not None:
+          lead_index, shift = lead
+          assert shift % self.num_threads == 0, (
+              f'{self.name}: lead-dimension slicing offset {shift} is not a '
+              f'multiple of {self.num_threads}; only whole thread-blocks can '
+              f'be applied to a register-resident operand')
+          # address = index - lower + shift, and on the lead dimension every
+          # one of those three lives in units of whole blocks
+          parts.append(term(lead_index,
+                            offsets[i] // self.num_threads
+                            - shift // self.num_threads,
+                            stride, lead=True))
           stride *= self.data_view.get_dim_slots(i, self.num_threads)
         else:
           parts.append(term(index[i], offsets[i], stride, lead=True))
@@ -567,20 +605,31 @@ class Symbol:
       return dimstr if len(dimstr) > 0 else "0"
     if self.stype == SymbolType.Register or self.stype == SymbolType.Scratch:
       writevar = lambda var: f'{var}' if isinstance(var, (str, int, float, np.int64)) else var.write_nonlead()
-      writeOffset = lambda i,var,offset,stride: f"({writevar(var)} - {offset}) * {stride}"
-      writeLeadOffset = lambda i,var,offset,stride: f"({writevar(var)} - {offset // self.num_threads}) * {stride}"
-      writers = [0] * self.data_view.rank()
-      strides = [0] * self.data_view.rank()
+      def writeOffset(var, offset, stride):
+        if offset > 0:
+          return f"({writevar(var)} - {offset}) * {stride}"
+        elif offset < 0:
+          return f"({writevar(var)} + {-offset}) * {stride}"
+        return f"({writevar(var)}) * {stride}"
+      terms = []
       stride = 1
+      offsets = self.data_view.get_dim_offsets()
       for i in range(self.data_view.rank()):
-        strides[i] = stride
-        if isinstance(index[i], LeadIndex):
+        lead = unwrap_lead(index[i])
+        if lead is not None:
+          lead_index, shift = lead
+          assert shift % self.num_threads == 0, (
+              f'{self.name}: lead-dimension slicing offset {shift} is not a '
+              f'multiple of {self.num_threads}; only whole thread-blocks can '
+              f'be applied to a register-resident operand')
+          terms.append(writeOffset(lead_index,
+                                   offsets[i] // self.num_threads
+                                   - shift // self.num_threads, stride))
           stride *= self.data_view.get_dim_slots(i, self.num_threads)
-          writers[i] = writeLeadOffset
         else:
+          terms.append(writeOffset(index[i], offsets[i], stride))
           stride *= self.data_view.get_dim_size(i)
-          writers[i] = writeOffset
-      dimstr = " + ".join(writer(i,var,offset,stride) for i, (var, offset, stride, writer) in enumerate(zip(index, self.data_view.get_dim_offsets(), strides, writers)))
+      dimstr = " + ".join(terms)
       return dimstr if len(dimstr) > 0 else "0"
     raise NotImplementedError('Not supposed to be called')
 

@@ -81,4 +81,49 @@ lanes = sorted(x % 32 for x in covered(1, 22, 32))
 print(f'\nmask example: LeadLoop(1, 22, T=32) -> lanes {lanes[0]}..{lanes[-1]} '
       f'({len(lanes)} of 32 active)')
 
+
+# --- register addressing under a slicing offset ---------------------------
+# A register operand distributes the lead dimension across lanes, so only
+# whole thread-blocks can be re-indexed by an address; non-lead dimensions
+# take any offset.  `access_address` with writer=None exercises the string
+# path, which needs no Writer or Context for register symbols.
+from tensorforge.backend.symbol import (Symbol, SymbolType, LeadIndex,
+                                        add_offset)
+from tensorforge.backend.data_types import RegMemObject
+from tensorforge.common.exceptions import GenerationError
+
+print('\n--- register addressing with slicing offset')
+
+
+def reg_symbol(lower, upper, threads):
+    shape = [u for u in upper]
+    sym = Symbol(name='r', stype=SymbolType.Register,
+                 obj=RegMemObject('r', 1))
+    sym.num_threads = threads
+    sym.data_view = DataView(shape=shape, permute=None,
+                             bbox=BoundingBox(list(lower), list(upper)))
+    return sym
+
+
+T = 32
+sym = reg_symbol([0, 0], [64, 8], T)          # 2 lead slots, 8 non-lead
+
+base = sym.access_address(None, [LeadIndex('nl', T, 1), 3])
+lead_block = sym.access_address(None,
+                                [add_offset(LeadIndex('nl', T, 1), T), 3])
+nonlead = sym.access_address(None, [LeadIndex('nl', T, 1), add_offset(3, 4)])
+
+check('lead offset of one whole block shifts the block index by 1',
+      lead_block, base.replace('(nl)', '(nl + 1)'))
+check('non-lead offset shifts the plain index',
+      nonlead, base.replace('(3)', '(7)'))
+
+try:
+    sym.access_address(None, [add_offset(LeadIndex('nl', T, 1), 5), 3])
+    check('lead offset of 5 (not a multiple of 32) is rejected', 'accepted',
+          'rejected')
+except AssertionError:
+    check('lead offset of 5 (not a multiple of 32) is rejected', 'rejected',
+          'rejected')
+
 sys.exit(1 if fail else 0)
