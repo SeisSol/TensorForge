@@ -111,12 +111,14 @@ class MultilinearBuilder(AbstractBuilder):
 
       if self._ops[i].symbol.stype == SymbolType.Global:
         if needs_reload and self._ops[i].symbol.obj.addressing != Addressing.NONE:
+          self._assert_stageable(i)
           self._mem_regions[i], load_op = self._make_loader_and_symbol(self._ops[i].symbol, is_transpose=self._descr.permute[i])
           self._loaders_cache[self._mem_regions[i]] = load_op
           self._instructions.append(load_op)
         else:
           if self._preload_registers and self._ops[i].symbol.obj.addressing != Addressing.NONE:
             # only register-preload dense matrices for now
+            self._assert_stageable(i)
             self._mem_regions[i], load_op = self._make_loader_and_symbol_reg(self._ops[i].symbol, linearize=needs_reload2)
             self._deferred_stores[self._ops[i].symbol.name] = self._mem_regions[i].symbol, self._mem_regions[i].symbol, None
             self._instructions.append(load_op)
@@ -159,6 +161,19 @@ class MultilinearBuilder(AbstractBuilder):
           self._mem_regions[i] = self._ops[i]
       else:
         raise InternalError(f'gemm-builder: op{i} ({self._ops[i].symbol.name}) must be either in shr or glb mem, given: {self._ops[i].symbol.stype}')
+
+  def _assert_stageable(self, i):
+    """Both staging paths return `SymbolView(dest)` --- no bbox, no offset.
+
+    The view falls back to the destination symbol's own data view, so whatever
+    the frontend attached to this operand is discarded here.  That is only
+    harmless for a zero offset.  Teaching GlbToShrLoader/GlbToRegLoader to read
+    at `x + offset` and write at `x` is step (D); until then, refuse loudly.
+    """
+    assert all(o == 0 for o in self._ops[i].offset), \
+        (f'{self._ops[i].symbol.name}: operand carries slicing offset '
+         f'{self._ops[i].offset} and needs staging, but the loaders do not '
+         f'absorb offsets yet')
 
   def _make_loader_and_symbol_reg(self, operand, linearize) -> Tuple[Symbol, GlbToRegLoader]:
     regsize = 1

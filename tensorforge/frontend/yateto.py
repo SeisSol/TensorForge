@@ -104,30 +104,54 @@ class GpuKernelGeneratorV1:
       tensor = self._cache[f'{self._prefix}{op.name}']
       currentPreShape = BBox([s for s, _ in op.eqspp.nnzbounds()], [e+1 for _, e in op.eqspp.nnzbounds()])
 
+      # Two shifts act on a yateto tensor, in opposite directions, and they must
+      # not be conflated:
+      #
+      #   * the memory bounding box (`tml.bbox()`) restricts what is *stored*.
+      #     It lives in storage coordinates and is subtracted when an address is
+      #     formed (see Symbol.access_address).
+      #   * a MemoryLayoutView adds a slicing offset: the view's own index space
+      #     is [0, end-start), mapped to the base by `relidx`.
+      #
+      # `currentPreShape` is derived from eqspp, which is defined over the
+      # *view* shape --- so it is already in logical coordinates and stays
+      # there.  Bounding boxes become loop ranges and are intersected across
+      # operands (MultilinearInstruction._analyze); that intersection is only
+      # meaningful if every operand contributes it in the same, shared logical
+      # index space.  The offset is a pure addressing constant and is applied at
+      # the access site only.
       tml = op.memoryLayout
-      relidx = [0] * currentPreShape.rank()
-      if type(tml).__name__ == 'MemoryLayoutView':
-        while tml != tml.storage():
-          relidx = tml.relidx(relidx)
-          tml = tml.base
-        currentPreShape = BBox([x + relidx[i] for i, x in enumerate(currentPreShape._lower)], [x + relidx[i] for i, x in enumerate(currentPreShape._upper)])
+      offset = [0] * currentPreShape.rank()
+      while type(tml).__name__ == 'MemoryLayoutView':
+        # relidx() adds this view's `start` in the one dimension it slices;
+        # nested views compose, so this accumulates the full logical->storage shift
+        offset = list(tml.relidx(offset))
+        tml = tml.base
+      tml = tml.storage()
 
-        tml = tml.storage()
+      if can_be_aligned and currentPreShape.rank() > 0 and tml.alignedStride():
+        # Alignment is a property of the *address*, so snap in storage
+        # coordinates and pull the result back into logical ones.  Widening is
+        # sound because the entries gained are zero by eqspp; it must not,
+        # however, reach past what is actually stored.
+        storeRange = tml.bbox()[0]
+        newLower = max(self._arch.alignedLower(currentPreShape._lower[0] + offset[0]),
+                       storeRange.start)
+        newUpper = min(self._arch.alignedUpper(currentPreShape._upper[0] + offset[0]),
+                       storeRange.stop)
 
-      if can_be_aligned:
-        for i, dim in enumerate(dims):
-          if i == 0 and tml.alignedStride(): # previously: dim == 0
-            # a bit hacky right now...
-            newLower = self._arch.alignedLower(currentPreShape._lower[i])
-            newUpper = self._arch.alignedUpper(currentPreShape._upper[i])
+        currentPreShape._lower = tuple([newLower - offset[0]] + list(currentPreShape._lower[1:]))
+        currentPreShape._upper = tuple([newUpper - offset[0]] + list(currentPreShape._upper[1:]))
 
-            # TODO: check this condition again
-            newUpper = min(newUpper, tml.bbox()[0].stop)
+      # invariant tying the two coordinate systems together: bbox + offset must
+      # land inside what the storage layout actually holds
+      storeBox = tml.bbox()
+      for j, (lo, hi) in enumerate(zip(currentPreShape.lower(), currentPreShape.upper())):
+        assert lo >= hi or (storeBox[j].start <= lo + offset[j] and hi + offset[j] <= storeBox[j].stop), \
+            f'{op.name}: logical bbox [{lo},{hi}) + offset {offset[j]} escapes ' \
+            f'storage [{storeBox[j].start},{storeBox[j].stop}) in dim {j}'
 
-            currentPreShape._lower = tuple([newLower] + list(currentPreShape._lower[1:]))
-            currentPreShape._upper = tuple([newUpper] + list(currentPreShape._upper[1:]))
-
-      return SubTensor(tensor, currentPreShape, relidx)
+      return SubTensor(tensor, currentPreShape, offset)
 
   def add_scalar(self, ops, statements, indices):
     indicesIndexed = {}

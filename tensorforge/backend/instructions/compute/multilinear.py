@@ -75,7 +75,31 @@ class MultilinearInstruction(ComputeInstruction):
 
         self._analyze()
 
+    def _check_offsets(self):
+        """A slicing offset is a logical->storage shift, never a loop bound.
+
+        It may therefore only reach an operand whose address is formed from the
+        full index expression --- i.e. a global one.  Shared-memory and register
+        operands got here through a staging load, and those loaders do not yet
+        absorb the offset (they drop the SymbolView's bbox and offset outright),
+        so anything but zero would silently miscompile.  Same for the
+        destination: StoreRegToGlb indexes `src` and `dest` with one and the
+        same index list, so a shifted destination needs the offset folded into
+        the store first.
+        """
+        for i, op in enumerate(self._ops):
+            if any(o != 0 for o in op.offset):
+                assert op.symbol.stype in (SymbolType.Global, SymbolType.Batch), \
+                    (f'{op.symbol.name}: slicing offset {op.offset} on a '
+                     f'{op.symbol.stype} operand --- staging loads must absorb '
+                     f'the offset before it reaches the compute site')
+        assert all(o == 0 for o in self._dest_obj.offset), \
+            (f'{self._dest_obj.tensor}: slicing offset {self._dest_obj.offset} on '
+             f'the destination --- StoreRegToGlb has to fold it in first')
+
     def _analyze(self):
+        self._check_offsets()
+
         targetrank = 0
         for i, op in enumerate(self._ops):
             for j in range(op.bbox.rank()):
@@ -88,16 +112,11 @@ class MultilinearInstruction(ComputeInstruction):
         for i, op in enumerate(self._ops):
             opdim = [''] * op.bbox.rank()
             for j in range(op.bbox.rank()):
-                # TODO: check adding the data_view box here again
-                lower = op.bbox.lower()[j] #+ op.symbol.data_view._bbox.lower()[j]
-                upper = op.bbox.upper()[j] #+ op.symbol.data_view._bbox.lower()[j]
-                #if op.symbol.obj and isinstance(op.symbol.obj, Tensor):
-                #    lower -= op.symbol.obj.get_bbox().lower()[j]
-                #    upper -= op.symbol.obj.get_bbox().lower()[j]
-
-                #if self._target[i][j] != 0:
-                #    lower -= op.offset[j]
-                #    upper -= op.offset[j]
+                # logical coordinates on both sides --- op.offset deliberately
+                # does not appear here, and neither does the storage bbox: both
+                # are addressing concerns, resolved in Symbol.access_address.
+                lower = op.bbox.lower()[j]
+                upper = op.bbox.upper()[j]
                 if self._target[i][j] < 0:
                     if self._target[i][j] not in preKs:
                         preKs[self._target[i][j]] = (lower, upper)
@@ -113,7 +132,11 @@ class MultilinearInstruction(ComputeInstruction):
             self._opdim_to_nks += [opdim]
 
         for i in range(len(self._ns)):
-            self._ns[i] = (self._ns[i][0], self._ns[i][0] + min(self._ns[i][1] - self._ns[i][0], self._dest_obj.bbox.sizes()[i]))
+            # honest intersection with the destination's range.  The previous
+            # form clamped a *size* against a range, which only coincides with
+            # this one while dest.bbox.lower() == 0.
+            self._ns[i] = (max(self._ns[i][0], self._dest_obj.bbox.lower()[i]),
+                           min(self._ns[i][1], self._dest_obj.bbox.upper()[i]))
 
         self._ks = [0] * len(preKs)
         self._sparseK = [False] * len(preKs)
@@ -221,7 +244,7 @@ class MultilinearInstruction(ComputeInstruction):
             data = []
             for i, op in enumerate(self._ops):
                 v = op.symbol.load(writer, self._context, None,
-                                   [add_offset(varlist[loopmap[nk]], 0)
+                                   [add_offset(varlist[loopmap[nk]], op.offset[j])
                                     for j, nk in enumerate(self._opdim_to_nks[i])],
                                    False)
                 if v is None:
@@ -249,7 +272,7 @@ class MultilinearInstruction(ComputeInstruction):
                 allLoaded = len(self._ops) > 0
                 for i, op in enumerate(self._ops):
                     allLoaded &= op.symbol.load(writer, self._context, f'data{i}',
-                        [add_offset(varlist[loopmap[nk]], 0) for j, nk in enumerate(self._opdim_to_nks[i])], False)
+                        [add_offset(varlist[loopmap[nk]], op.offset[j]) for j, nk in enumerate(self._opdim_to_nks[i])], False)
                     if not allLoaded:
                         break
                 if allLoaded:
@@ -365,6 +388,11 @@ class MultilinearInstruction(ComputeInstruction):
                         idx += [kidx[int(nk[1:])]]
                     else:
                         idx += [jidx[int(nk[1:])]]
+                if opid is not None:
+                    # same rule as the loop path: logical index in, storage
+                    # index out.  add_offset folds the (usual) zero away.
+                    idx = [add_offset(x, self._ops[opid].offset[d])
+                           for d, x in enumerate(idx)]
                 return idx
 
             def C(writer, var, i, j):

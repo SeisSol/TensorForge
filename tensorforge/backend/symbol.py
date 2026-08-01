@@ -70,6 +70,22 @@ class DataView:
     assert index >= 0 and index < len(self.shape)
     return self._bbox.size(index)
 
+  def get_dim_slots(self, index, num_threads):
+    """Per-thread slots a thread-distributed dimension occupies.
+
+    `ceil(u/T) - floor(l/T)`, i.e. whole thread-blocks are rebased away and the
+    ragged ends survive as predicates (see LeadLoop.write).  This is *not*
+    `ceil((u-l)/T)` as soon as [l,u) straddles a block boundary --- for
+    l=31, u=33, T=32 the two give 2 and 1 --- and the allocation side
+    (MultilinearInstruction._iregs, MultilinearBuilder._alloc_register_array)
+    has always used the former.  Addressing has to agree with allocation, or
+    the next dimension aliases onto this one.
+    """
+    assert index >= 0 and index < len(self.shape)
+    lower = self._bbox.lower()[index]
+    upper = self._bbox.upper()[index]
+    return -(-upper // num_threads) - lower // num_threads
+
   def get_dim_strides(self, mask=[], bbox=False):
     # TODO: permute? Yes or no? Also, unify SPPs.
     strides = []
@@ -302,7 +318,12 @@ class LeadLoop:
     else:
       if self.start % self.threads != 0:
         index = LeadIndex(actualstart, self.threads, self.stride)
-        with self._guard(writer, lead, self.start - actualstart, None):
+        # the guard compares against a *lane*, so the bound has to be the
+        # in-block remainder.  Without the `* self.threads` this only happened
+        # to be right while actualstart == 0, i.e. start < threads; for
+        # start=37, threads=32 it read `lead >= 36` and dropped the head block.
+        with self._guard(writer, lead,
+                         self.start - actualstart * self.threads, None):
           inner([index])
       if self.unroll:
         for value in range(realstart, realend):
@@ -500,8 +521,7 @@ class Symbol:
         if isinstance(index[i], LeadIndex):
           parts.append(term(index[i], offsets[i] // self.num_threads, stride,
                             lead=True))
-          stride *= ((self.data_view.get_dim_size(i) + self.num_threads - 1)
-                     // self.num_threads)
+          stride *= self.data_view.get_dim_slots(i, self.num_threads)
         else:
           parts.append(term(index[i], offsets[i], stride, lead=True))
           stride *= self.data_view.get_dim_size(i)
@@ -540,7 +560,7 @@ class Symbol:
       for i in range(self.data_view.rank()):
         strides[i] = stride
         if isinstance(index[i], LeadIndex):
-          stride *= (self.data_view.get_dim_size(i) + self.num_threads - 1) // self.num_threads
+          stride *= self.data_view.get_dim_slots(i, self.num_threads)
           writers[i] = writeLeadOffset
         else:
           stride *= self.data_view.get_dim_size(i)
