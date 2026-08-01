@@ -51,6 +51,9 @@ class MultilinearBuilder(AbstractBuilder):
     # can tell whether reusing it is sound: position `r` of the image holds
     # tensor element `r + shift`, for `r` inside `covered`.
     self._staged_view = {}
+    # tensor symbol name -> union of every operand access, in tensor
+    # storage coordinates.  Filled by plan(); see there.
+    self._operand_union = {}
     self._temporaries = {}
 
   def build(self, ops: List[Symbol], dest_obj: Tensor, descr: MultilinearDescr):
@@ -118,25 +121,28 @@ class MultilinearBuilder(AbstractBuilder):
 
       if self._ops[i].symbol.stype == SymbolType.Global:
         if needs_reload and self._ops[i].symbol.obj.addressing != Addressing.NONE:
-          self._mem_regions[i], load_op = self._make_loader_and_symbol(self._ops[i], is_transpose=self._descr.permute[i])
+          staged, load_op = self._make_loader_and_symbol(self._stage_view(i), is_transpose=self._descr.permute[i])
+          self._mem_regions[i] = self._staged_region(i, staged)
           self._loaders_cache[self._mem_regions[i]] = load_op
           self._instructions.append(load_op)
         else:
           if self._preload_registers and self._ops[i].symbol.obj.addressing != Addressing.NONE:
             # only register-preload dense matrices for now
-            self._mem_regions[i], load_op = self._make_loader_and_symbol_reg(self._ops[i], linearize=needs_reload2)
+            staged, load_op = self._make_loader_and_symbol_reg(self._stage_view(i), linearize=needs_reload2)
+            self._mem_regions[i] = self._staged_region(i, staged)
             self._deferred_stores[self._ops[i].symbol.name] = self._mem_regions[i].symbol, self._mem_regions[i].symbol, None
             self._record_staged(self._ops[i].symbol.name,
                                 self._mem_regions[i].symbol.data_view.get_bbox(),
-                                self._ops[i].offset)
+                                [0] * self._ops[i].bbox.rank())
             self._instructions.append(load_op)
           elif self._preload_shmem and self._ops[i].symbol.obj.addressing != Addressing.NONE:
             # only register-preload dense matrices for now
-            self._mem_regions[i], load_op = self._make_loader_and_symbol(self._ops[i], None)
+            staged, load_op = self._make_loader_and_symbol(self._stage_view(i), None)
+            self._mem_regions[i] = self._staged_region(i, staged)
             self._deferred_stores[self._ops[i].symbol.name] = self._mem_regions[i].symbol, self._mem_regions[i].symbol, None
             self._record_staged(self._ops[i].symbol.name,
                                 self._mem_regions[i].symbol.data_view.get_bbox(),
-                                self._ops[i].offset)
+                                [0] * self._ops[i].bbox.rank())
             self._instructions.append(load_op)
           else:
             # Note: operand will reside in glb. mem for gemm operation
@@ -178,6 +184,58 @@ class MultilinearBuilder(AbstractBuilder):
           self._mem_regions[i] = self._ops[i]
       else:
         raise InternalError(f'gemm-builder: op{i} ({self._ops[i].symbol.name}) must be either in shr or glb mem, given: {self._ops[i].symbol.stype}')
+
+  def plan(self, descr_list):
+    """Size every staging to the union of the slices that will read it.
+
+    A tensor's staging is created by whichever operation touches it first and,
+    because `_deferred_stores` is keyed by name and lives for the whole kernel,
+    is then handed to every later operation on that tensor.  Sizing it to the
+    first consumer's slice therefore starves all the others --- which is what
+    `_resolve_reuse` had to refuse.  The full descriptor list is known before
+    codegen, so the union can simply be taken up front.
+
+    The union is kept in *tensor storage* coordinates and the staged image is
+    indexed the same way.  That makes the mapping the identity: every consumer
+    keeps the offset it already states against the tensor, nothing is rebased,
+    and containment holds by construction.
+
+    Destinations are deliberately not counted --- they are produced, not
+    staged, and their range is whatever `_analyze` intersects it down to.
+    """
+    self._operand_union = {}
+    for descr in descr_list:
+      if not isinstance(descr, MultilinearDescr):
+        continue
+      for op in descr.ops:
+        tensor = getattr(op, 'tensor', None)
+        if tensor is None:
+          continue
+        symbol = self._scopes.get_symbol(tensor)
+        if symbol is None:
+          continue
+        lower = [l + o for l, o in zip(op.bbox.lower(), op.offset)]
+        upper = [u + o for u, o in zip(op.bbox.upper(), op.offset)]
+        prev = self._operand_union.get(symbol.name)
+        if prev is not None:
+          lower = [min(a, b) for a, b in zip(prev.lower(), lower)]
+          upper = [max(a, b) for a, b in zip(prev.upper(), upper)]
+        self._operand_union[symbol.name] = BoundingBox(lower, upper)
+
+  def _stage_view(self, i):
+    """The operand as the staging load should see it: the whole union, in
+    storage coordinates, so the copy is an identity mapping."""
+    view = self._ops[i]
+    union = self._operand_union.get(view.symbol.name)
+    if union is None:
+      union = BoundingBox([l + o for l, o in zip(view.bbox.lower(), view.offset)],
+                          [u + o for u, o in zip(view.bbox.upper(), view.offset)])
+    return SymbolView(view.symbol, union, [0] * union.rank())
+
+  def _staged_region(self, i, staged):
+    """The staged symbol as the *compute* site should see it: this operand's
+    own logical box and its own offset, unchanged."""
+    return SymbolView(staged.symbol, self._ops[i].bbox, self._ops[i].offset)
 
   def _resolve_reuse(self, i, name):
     """Decide whether the already-staged image can serve this operand.
