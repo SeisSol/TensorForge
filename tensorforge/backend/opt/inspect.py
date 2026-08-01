@@ -200,6 +200,7 @@ def verify(instrs: Sequence[AbstractInstruction],
 
     if check_offsets:
         diags.extend(_check_shared_aliasing(instrs))
+    diags.extend(_check_async_depth(instrs))
     return diags
 
 
@@ -269,6 +270,82 @@ def _live_shared(instrs: Sequence[AbstractInstruction]
     analysis = LivenessAnalysis(None, list(_flatten(instrs)))
     analysis.apply()
     return dict(analysis.get_live_map())
+
+
+def async_depth(instrs: Sequence[AbstractInstruction]) -> int:
+    """Peak number of asynchronous transfers outstanding at once.
+
+    This is the stage count the section's ``cuda::pipeline`` must provide.
+    """
+    from tensorforge.backend.instructions.memory.load import (GlbToShrLoader,
+                                                              LoadWait)
+
+    def is_async(instr) -> bool:
+        return (isinstance(instr, GlbToShrLoader)
+                and getattr(instr, '_use_cuda_memcpy', False))
+
+    level = sum(1 for i in instrs if is_async(i))
+    peak = level
+    for instr in instrs:
+        for region in instr.regions():
+            # two laps: the first reaches the steady state, the second measures
+            # it, so a transfer carried across the back edge is counted
+            for _ in range(2):
+                for inner in region:
+                    if isinstance(inner, LoadWait) and is_async(inner.awaited()):
+                        level -= 1
+                    elif is_async(inner):
+                        level += 1
+                    peak = max(peak, level)
+    return peak
+
+
+def _check_async_depth(instrs: Sequence[AbstractInstruction]
+                       ) -> List[Diagnostic]:
+    """How many asynchronous transfers may be outstanding at once.
+
+    There is one ``cuda::pipeline`` per section and it is a FIFO with a fixed
+    number of stages.  ``cuda::make_pipeline()`` gives a thread-scope pipeline
+    with one, so a second ``producer_acquire()`` before the matching
+    ``consumer_wait()`` blocks on a slot that never frees -- a hang, not a wrong
+    answer, and one that only appears once two transfers are in flight.
+
+    That happens for two independent reasons: software pipelining commits a
+    peeled transfer before the loop, and a loop body containing two
+    shared-memory loads commits twice before waiting.  The second predates
+    pipelining entirely.
+    """
+    from tensorforge.backend.instructions.memory.load import (GlbToShrLoader,
+                                                              LoadWait)
+
+    def is_async(instr) -> bool:
+        return (isinstance(instr, GlbToShrLoader)
+                and getattr(instr, '_use_cuda_memcpy', False))
+
+    level = 0
+    for instr in instrs:
+        if is_async(instr):
+            level += 1
+
+    diags: List[Diagnostic] = []
+    for index, instr in enumerate(instrs):
+        for region in instr.regions():
+            peak, level = level, level
+            # two laps: the first reaches the steady state, the second measures
+            # it, so a value carried across the back edge is counted
+            for _ in range(2):
+                for inner in region:
+                    if isinstance(inner, LoadWait) and is_async(inner.awaited()):
+                        level -= 1
+                    elif is_async(inner):
+                        level += 1
+                    peak = max(peak, level)
+            if peak > 1:
+                diags.append(Diagnostic(
+                    'info', index,
+                    f'{peak} asynchronous transfers may be outstanding at once; '
+                    f'the section pipeline must provide that many stages'))
+    return diags
 
 
 def _flatten(instrs: Sequence[AbstractInstruction]

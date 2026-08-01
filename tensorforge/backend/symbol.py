@@ -809,6 +809,21 @@ class Symbol:
   def add_user(self, user):
     self._users.append(user)
 
+  def replace_user(self, old, new) -> bool:
+    """Swap a user in place, keeping its position in the list.
+
+    Position matters: ShrMemOpt sizes a region from get_first_user() and lets
+    that instruction emit the declaration.  A pass that rewrites an instruction
+    by appending its replacement leaves the *replaced* one first, so the region
+    is sized from a stale object -- observably, a rotating buffer sized for one
+    stage and then overlapping its neighbour.
+    """
+    for i, user in enumerate(self._users):
+      if user is old:
+        self._users[i] = new
+        return True
+    return False
+
   def get_user_list(self):
     # set by instructions
     return self._users

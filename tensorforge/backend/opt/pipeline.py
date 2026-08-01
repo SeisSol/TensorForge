@@ -252,10 +252,54 @@ class Pipeline(AbstractTransformer):
                 # element this iteration should be fetching
                 continue
 
-            # the body transfer now reads through the advanced pointer, i.e.
-            # element k + d - 1, and fills the stage that element belongs to
-            load._src = rolling
-            load.set_stages(d, read, write)
+            # The body transfer now reads through the advanced pointer, i.e.
+            # element k + d - 1, and fills the stage that element belongs to.
+            replacement = load.clone(src=rolling)
+            replacement.set_stages(d, read, write)
+            body[body.index(load)] = replacement
+            # clone() registered the replacement as a *new* user; the symbol
+            # must forget the object that is no longer in the stream, or
+            # ShrMemOpt sizes the region from it and the extra stages are never
+            # reserved.  Order matters: drop the appended duplicate first, then
+            # substitute, because list.remove() takes the earliest match and
+            # would otherwise delete the entry at the replaced position.
+            for sym in (replacement.get_dest(), replacement.get_src()):
+                users = sym.get_user_list()
+                while replacement in users:
+                    users.remove(replacement)
+                if not sym.replace_user(load, replacement):
+                    users.append(replacement)
+
+            # Move the wait *ahead* of the transfer.
+            #
+            # There is one cuda::pipeline per section and it is a FIFO.  With
+            # the wait after the commit, the batch this iteration issues and the
+            # one the previous iteration issued are both outstanding at
+            # producer_acquire(), which needs two stages -- more than the
+            # thread-scope pipeline from cuda::make_pipeline() has, so iteration
+            # 0 blocks on a slot that only frees further down.  That is why the
+            # NVIDIA path hung while AMD, which emits no pipeline object at all,
+            # was fine.
+            #
+            # Putting the wait first fixes it without giving up memcpy_async:
+            # FIFO order means consumer_wait() retires the batch issued in
+            # iteration k-1 -- exactly the stage this iteration reads -- and
+            # release happens before the next acquire, so only one batch is ever
+            # in flight.  The transfer for element k + d - 1 is still issued
+            # before the compute on element k, so the overlap is unchanged.
+            #
+            # This is what the token in the async pir instructions states
+            # explicitly: the wait consumes the token of the *previous*
+            # iteration.  Here the FIFO supplies that implicitly.
+            waits = [j for j, o in enumerate(body)
+                     if isinstance(o, LoadWait) and o.awaited() is load]
+            here = body.index(replacement)
+            for j in waits:
+                body[j] = LoadWait(replacement)
+            for j in sorted(waits, reverse=True):
+                if j > here:
+                    body.insert(here, body.pop(j))
+            load = replacement
 
             # ... and the prologue fills the stages nobody else will.  The
             # peeled GetElementPtr left `rolling` pointing at element 0.
