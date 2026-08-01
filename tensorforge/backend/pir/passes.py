@@ -391,6 +391,108 @@ def _cse_body(body: Tuple[Stmt, ...], available: Dict[Any, Tuple[Value, ...]]):
 
 
 # --------------------------------------------------------------------------- #
+# Redundant load elimination
+# --------------------------------------------------------------------------- #
+
+def load_cse(body: Tuple[Stmt, ...]) -> Tuple[Stmt, ...]:
+    """Reuse a load whose location provably has not been written since.
+
+    `cse` hash-conses only statements with `Effect.NONE`, and rightly so: two
+    pure operations on the same operands give the same result *by definition*,
+    no analysis needed.  A load is not like that --- reading ``r0[3]`` twice
+    yields the same value only if nothing wrote ``r0`` in between --- so it
+    needs an availability analysis, which is what this pass adds.
+
+    Until it exists, every `Access` the builder declares is inert: the model
+    is there, but the gate in `cse` rejects anything with a memory effect
+    before alias information is ever consulted, so declaring an access more
+    precisely changes nothing.  This is the pass that consumes the model.
+
+    Availability is killed by any conflicting write (`accesses_conflict`) and,
+    for everything that is not thread-private, additionally by a barrier or an
+    async wait: those publish *other* threads' writes, which a per-thread
+    access model cannot see.  Loads whose name escapes into raw text are left
+    alone --- deleting them would leave the text referring to a variable that
+    is no longer declared.
+    """
+    body, mapping = _load_cse_body(body, {})
+    return substitute(body, mapping) if mapping else body
+
+
+def _reusable_load(s: Stmt) -> bool:
+    """A pure read with a fully declared location, and nothing else."""
+    return (bool(s.target) and not s.regions and not s.attr('escapes')
+            and s.effect == Effect.READ and bool(s.accesses)
+            and all(a.kind == Effect.READ and a.space is not MemSpace.UNKNOWN
+                    for a in s.accesses))
+
+
+def _load_key(s: Stmt):
+    """`_cse_key` plus the buffer identity the text may not distinguish."""
+    return (_cse_key(s),
+            tuple((a.space, None if a.base is None else id(a.base))
+                  for a in s.accesses))
+
+
+def _kill(available: Dict[Any, Any], accesses: Tuple[Access, ...],
+          effect: Effect) -> Dict[Any, Any]:
+    if effect & (Effect.BARRIER | Effect.ASYNC):
+        # only thread-private state survives a barrier or a wait
+        available = {k: v for k, v in available.items()
+                     if all(a.space is MemSpace.REGISTER for a in v[1])}
+    if not accesses:
+        # an undeclared side effect has to be assumed to hit everything
+        if effect & (Effect.WRITE | Effect.ATOMIC | Effect.UNKNOWN):
+            return {}
+        return available
+    if not any(a.writes for a in accesses):
+        return available
+    return {k: v for k, v in available.items()
+            if not any(accesses_conflict(w, a)
+                       for w in accesses for a in v[1])}
+
+
+def _load_cse_body(body: Tuple[Stmt, ...], available: Dict[Any, Any]):
+    available = dict(available)
+    mapping: Dict[int, Value] = {}
+    out: List[Stmt] = []
+
+    for s in body:
+        if s.regions:
+            # A loop body runs again, so its own writes have to kill *before*
+            # the descent as well as after it; doing both with one kill keeps
+            # the fixed point trivial.
+            inner = tuple(a for r in s.regions
+                          for a in collect_accesses(r.body))
+            eff = s.effect
+            for r in s.regions:
+                eff |= collect_effect(r.body)
+            available = _kill(available, inner + s.accesses, eff)
+            regions = []
+            for r in s.regions:
+                sub, sub_map = _load_cse_body(r.body, available)
+                regions.append(replace(r, body=substitute(sub, sub_map)))
+            out.append(replace(s, regions=tuple(regions)))
+            continue
+
+        if _reusable_load(s):
+            key = _load_key(s)
+            prev = available.get(key)
+            if prev is not None and len(prev[0]) == len(s.target):
+                for old, new in zip(s.target, prev[0]):
+                    mapping[old.id] = new
+                continue
+            available[key] = (s.target, s.accesses)
+            out.append(s)
+            continue
+
+        available = _kill(available, s.accesses, s.effect)
+        out.append(s)
+
+    return tuple(out), mapping
+
+
+# --------------------------------------------------------------------------- #
 # Constant folding and algebraic identities
 # --------------------------------------------------------------------------- #
 
@@ -927,11 +1029,17 @@ def optimize(body: Tuple[Stmt, ...], dump_hook=None,
     ``licm`` fewer statements to consider.  It runs a second time after
     ``licm``, because hoisting can bring two constants into the same scope.
 
+    ``load_cse`` runs after ``cse`` and before ``licm``: it removes the loads
+    that would otherwise be hoisting candidates, so ``licm`` sees fewer
+    statements.  A second run after ``cse2`` was measured and removes nothing
+    on the current corpus, so it is not in the pipeline.
+
     ``schedule_async`` runs last on purpose: the wait counts depend on the
     final issue order, so anything that may still move statements has to have
     happened already.
     """
-    stages = (('flatten', flatten_scopes), ('fold', fold), ('cse', cse), ('licm', licm),
+    stages = (('flatten', flatten_scopes), ('fold', fold), ('cse', cse),
+              ('loads', load_cse), ('licm', licm),
               ('fold2', fold), ('cse2', cse), ('dce', dce))
     for name, fn in stages:
         body = fn(body)
