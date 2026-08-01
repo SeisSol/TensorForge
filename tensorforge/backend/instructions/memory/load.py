@@ -480,7 +480,15 @@ class LoadWait(MemoryInstruction, LoadInstruction):
     return self._instr.defs()
 
   def uses(self):
-    return ()
+    # ...but the destination buffer is occupied from the moment the copy is
+    # *issued*: the DMA writes into it while it is in flight.  Reporting the
+    # def alone makes this instruction kill the issuing loader's live range,
+    # leaving a hole over [issue, wait) in which the region allocator happily
+    # hands the very same offset to another buffer --- which then overwrites
+    # the transfer as it lands.  Naming it here as well re-establishes
+    # liveness backwards past the wait, so the range runs from the issue to
+    # the last consumer, while `defs` keeps ordering consumers after us.
+    return self._instr.defs()
 
   def gen_code_inner(self, writer: Writer) -> None:
     if isinstance(self._instr, GlbToShrLoader):
