@@ -538,7 +538,7 @@ def hfma(writer: Writer, Cs, As, Bs, repeat, datatype, threads, ctx):
     * gfx90a+ / CDNA2+: use DPP64 for F64 and broadcasting if 2 or more rows and lots of users.
     """
 
-    step = 4
+    step = 1
     if threads >= 4 and datatype == Datatype.F32:
         step = 4
     if threads >= 8 and datatype == Datatype.F32 and (rdna(ctx) or gfx1251(ctx) or gfx1250(ctx)):
