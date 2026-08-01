@@ -10,7 +10,8 @@ from tensorforge.backend.instructions.memory.store import StoreRegToGlb, StoreRe
 from tensorforge.backend.instructions.sync_block import SyncThreads
 from tensorforge.backend.instructions.compute.multilinear import MultilinearInstruction
 from tensorforge.common.matrix.tensor import Tensor
-from tensorforge.common.exceptions import InternalError
+from tensorforge.common.exceptions import InternalError, GenerationError
+from tensorforge.common.matrix.boundingbox import BoundingBox
 from tensorforge.generators.descriptions import MultilinearDescr
 from tensorforge.backend.instructions.builders.allocator_builder import AbstractBuilder
 from tensorforge.common.operation import AddOperator, MulOperator
@@ -46,6 +47,10 @@ class MultilinearBuilder(AbstractBuilder):
     self._preload_shmem = self._context.get_vm().get_hw_descr().vendor in [] #['nvidia']
     self._atomic_update = self._context.get_vm().get_hw_descr().vendor in ['amd'] # , 'nvidia' # ?
     self._deferred_stores = {}
+    # what each deferred/staged image actually holds, so a later consumer
+    # can tell whether reusing it is sound: position `r` of the image holds
+    # tensor element `r + shift`, for `r` inside `covered`.
+    self._staged_view = {}
     self._temporaries = {}
 
   def build(self, ops: List[Symbol], dest_obj: Tensor, descr: MultilinearDescr):
@@ -63,6 +68,7 @@ class MultilinearBuilder(AbstractBuilder):
     for i in range(len(self._ops)):
         self._make_load_op(i)
     self._insert_sync_block()
+    self._theta = self._lead_origin_shift()
     self._temp_regs = self._alloc_register_array()
     self._make_compute()
     self._insert_sync_block()
@@ -80,18 +86,19 @@ class MultilinearBuilder(AbstractBuilder):
     needs_reload = (transpose or not has_lead_dim) and not prefer_broadcast
     needs_reload2 = transpose or not has_lead_dim
 
-    if self._ops[i].symbol.name in self._deferred_stores:
+    name = self._ops[i].symbol.name
+    if name in self._deferred_stores and self._resolve_reuse(i, name):
       if needs_reload:
-        src, dest, _ = self._deferred_stores[self._ops[i].symbol.name]
+        src, dest, _ = self._deferred_stores[name]
         self._instructions.append(StoreRegToShr(context=self._context,
                                                 src=src,
                                                 dest=dest,
                                                 shr_mem=self._shr_mem,
                                                 num_threads=self._num_threads))
-        del self._deferred_stores[self._ops[i].symbol.name]
+        del self._deferred_stores[name]
         self._ops[i].symbol = dest
       else:
-        self._ops[i].symbol, _, _ = self._deferred_stores[self._ops[i].symbol.name]
+        self._ops[i].symbol, _, _ = self._deferred_stores[name]
 
     if self._ops[i].symbol.stype == SymbolType.Scalar or self._ops[i].symbol.stype == SymbolType.Data:
       self._mem_regions[i] = self._ops[i]
@@ -119,11 +126,17 @@ class MultilinearBuilder(AbstractBuilder):
             # only register-preload dense matrices for now
             self._mem_regions[i], load_op = self._make_loader_and_symbol_reg(self._ops[i], linearize=needs_reload2)
             self._deferred_stores[self._ops[i].symbol.name] = self._mem_regions[i].symbol, self._mem_regions[i].symbol, None
+            self._record_staged(self._ops[i].symbol.name,
+                                self._mem_regions[i].symbol.data_view.get_bbox(),
+                                self._ops[i].offset)
             self._instructions.append(load_op)
           elif self._preload_shmem and self._ops[i].symbol.obj.addressing != Addressing.NONE:
             # only register-preload dense matrices for now
             self._mem_regions[i], load_op = self._make_loader_and_symbol(self._ops[i], None)
             self._deferred_stores[self._ops[i].symbol.name] = self._mem_regions[i].symbol, self._mem_regions[i].symbol, None
+            self._record_staged(self._ops[i].symbol.name,
+                                self._mem_regions[i].symbol.data_view.get_bbox(),
+                                self._ops[i].offset)
             self._instructions.append(load_op)
           else:
             # Note: operand will reside in glb. mem for gemm operation
@@ -165,6 +178,107 @@ class MultilinearBuilder(AbstractBuilder):
           self._mem_regions[i] = self._ops[i]
       else:
         raise InternalError(f'gemm-builder: op{i} ({self._ops[i].symbol.name}) must be either in shr or glb mem, given: {self._ops[i].symbol.stype}')
+
+  def _resolve_reuse(self, i, name):
+    """Decide whether the already-staged image can serve this operand.
+
+    `_deferred_stores` is keyed by the global symbol's name and lives for the
+    whole kernel, so any later operation on the same tensor inherits the
+    earlier staging regardless of which slice it asks for.  Two things follow.
+
+    The image is indexed in *its own* coordinates --- position `r` holds tensor
+    element `r + shift` --- while the operand states its offset against the
+    tensor, so it has to be rebased before the symbol is swapped underneath it.
+
+    And the image only covers what its producer happened to stage.  When a
+    consumer wants a different part, what can be done depends on where the
+    authoritative copy lives:
+
+      * a *preload* of a global input (`src is dest`, both the staged symbol):
+        global memory still holds the value, so the entry is simply dropped and
+        the ordinary path stages the range that is actually wanted;
+      * a *pending store* of a temporary (`dest` is the global symbol): the
+        value exists only in registers and the missing part was produced by
+        some other instruction, so there is nothing to fall back on.
+
+    Sizing the staging to the union of all consumers would avoid the second
+    case entirely; until then it is refused loudly rather than miscompiled.
+    """
+    covered, shift = self._staged_view.get(name, (None, None))
+    view = self._ops[i]
+    if covered is None:
+      if any(o != 0 for o in view.offset):
+        raise GenerationError(
+            f'{name}: reusing a staged image whose covered range was not '
+            f'recorded, with a non-zero slicing offset {view.offset}')
+      return True
+
+    for j in range(view.bbox.rank()):
+      lo = view.bbox.lower()[j] + view.offset[j] - shift[j]
+      hi = view.bbox.upper()[j] + view.offset[j] - shift[j]
+      if lo < covered.lower()[j] or hi > covered.upper()[j]:
+        _, staged_dest, _ = self._deferred_stores[name]
+        if staged_dest.stype != SymbolType.Global:
+          # preload of a global input: drop it and stage afresh
+          del self._deferred_stores[name]
+          self._staged_view.pop(name, None)
+          return False
+        raise GenerationError(
+            f'{name}: operand wants [{lo},{hi}) in dim {j} but the staged '
+            f'image only covers [{covered.lower()[j]},{covered.upper()[j]}), '
+            f'and the value exists only in registers. Serving several '
+            f'disjoint slices of one tensor needs the staging sized to their '
+            f'union.')
+
+    view.offset = [o - s for o, s in zip(view.offset, shift)]
+    return True
+
+  def _record_staged(self, name, covered, shift):
+    self._staged_view[name] = (covered, list(shift))
+
+  def _lead_origin_shift(self):
+    """Pick the origin of the lead loop.
+
+    `n0` is an internal loop variable of this instruction; its absolute origin
+    is arbitrary and only the offsets of the participants *relative* to each
+    other matter.  A register-resident operand is the exception: its lane
+    assignment is already fixed --- element `s` lives in lane `s % T` --- so it
+    pins the origin modulo T.  Choosing that origin makes the slicing offset
+    vanish in lane terms, at a cost of at most one extra slot per non-lead
+    element, where the alternative is a cross-lane shuffle on every read.
+
+    Two register participants that disagree modulo T cannot both be satisfied;
+    that genuinely needs a shuffle and is refused here.  It takes two operands
+    carrying the lead index and both register-resident, which no kernel in the
+    test suite produces.
+    """
+    threads = self._num_threads
+    if not threads:
+      return 0
+    pins = {}
+    for i, view in enumerate(self._mem_regions):
+      if view is None or 0 not in self._descr.target[i]:
+        continue
+      if view.symbol.stype not in (SymbolType.Register, SymbolType.Scratch):
+        continue
+      j = self._descr.target[i].index(0)
+      pins.setdefault(view.offset[j] % threads, []).append(view.symbol.name)
+    if self._add:
+      # accumulating into an array that already exists: its lane assignment is
+      # fixed too, so it pins the origin exactly like an operand does
+      target = self._get_target_symbol()
+      if target is not None and target.stype in (SymbolType.Register,
+                                                 SymbolType.Scratch):
+        pins.setdefault(self._dest_obj.offset[0] % threads,
+                        []).append(target.name)
+    if len(pins) > 1:
+      raise GenerationError(
+          'lead-dimension slicing offsets of register operands disagree modulo '
+          f'{threads}: ' +
+          ', '.join(f'{n} -> {r}' for r, ns in pins.items() for n in ns) +
+          '. Reconciling them needs a cross-lane shuffle, which is not '
+          'implemented; stage one of them separately instead.')
+    return next(iter(pins), 0)
 
   def _make_loader_and_symbol_reg(self, opview, linearize) -> Tuple[Symbol, GlbToRegLoader]:
     operand = opview.symbol
@@ -253,8 +367,11 @@ class MultilinearBuilder(AbstractBuilder):
       if d not in lead_dim or threads == 0:
         regsize *= dim
       else:
-        r_start = bbox.lower()[d] // threads
-        r_end = (bbox.upper()[d] + threads - 1) // threads
+        # the accumulator is indexed in the shifted origin, so the slot count
+        # follows the shifted range.  Straddling one more block boundary is
+        # exactly the price of not needing a shuffle.
+        r_start = (bbox.lower()[d] + self._theta) // threads
+        r_end = (bbox.upper()[d] + self._theta + threads - 1) // threads
         regsize *= r_end - r_start
         threads //= dim # TODO?
     name = self._name_registers()
@@ -281,12 +398,18 @@ class MultilinearBuilder(AbstractBuilder):
       symbol, load_op = self._make_loader_and_symbol_reg(
           SymbolView(dest_symbol, self._dest_obj.bbox, self._dest_obj.offset), False)
       self._deferred_stores[dest_symbol.name] = symbol.symbol, symbol.symbol, None
+      self._record_staged(dest_symbol.name,
+                          symbol.symbol.data_view.get_bbox(),
+                          self._dest_obj.offset)
       self._instructions.append(load_op)
       return symbol.symbol
     elif self._preload_shmem and dest_symbol.stype == SymbolType.Global and not self._atomic_update and not next:
       symbol, load_op = self._make_loader_and_symbol(
           SymbolView(dest_symbol, self._dest_obj.bbox, self._dest_obj.offset), None)
       self._deferred_stores[dest_symbol.name] = symbol.symbol, symbol.symbol, None
+      self._record_staged(dest_symbol.name,
+                          symbol.symbol.data_view.get_bbox(),
+                          self._dest_obj.offset)
       self._instructions.append(load_op)
       return symbol.symbol
     else:
@@ -302,7 +425,19 @@ class MultilinearBuilder(AbstractBuilder):
                                    next=self._get_target_symbol(True, True),
                                    productOperation=MulOperator(),
                                    sumOperation=AddOperator(),
-                                   dest_obj=self._dest_obj))
+                                   dest_obj=self._dest_obj,
+                                   theta=self._theta))
+
+  def _store_offset(self):
+    """Destination offset seen by the store, in the shifted origin.
+
+    The accumulator is indexed by the lead loop variable, which now runs in
+    the theta-shifted space; the global destination is not, so the shift has
+    to come back out on the way to memory.  Dimension 0 of the destination is
+    the one carrying the lead index.
+    """
+    return [o - (self._theta if j == 0 else 0)
+            for j, o in enumerate(self._dest_obj.offset)]
 
   def _make_store(self):
     if self._dest_obj.tensor in self._scopes:
@@ -315,18 +450,30 @@ class MultilinearBuilder(AbstractBuilder):
         #                                        num_threads=self._num_threads))
         # see note below (but update to the new temp regs)
         self._deferred_stores[dest_symbol.name] = (self._temp_regs, dest_symbol, None)
+        self._record_staged(dest_symbol.name,
+                          # the *actual* range the accumulator ended up with:
+                          # _analyze intersects the operands, so _ns can be
+                          # strictly smaller than the declared destination box
+                          self._temp_regs.data_view.get_bbox(),
+                            self._store_offset())
       elif dest_symbol.stype == SymbolType.Global:
         can_use_atomic = self._atomic_update and self._add and (dest_symbol.name not in self._deferred_stores or self._deferred_stores[dest_symbol.name][2] is not None)
         if self._use_registers_always or can_use_atomic:
           update = True if can_use_atomic else None
           self._deferred_stores[dest_symbol.name] = (self._temp_regs, dest_symbol, update)
+          self._record_staged(dest_symbol.name,
+                          # the *actual* range the accumulator ended up with:
+                          # _analyze intersects the operands, so _ns can be
+                          # strictly smaller than the declared destination box
+                          self._temp_regs.data_view.get_bbox(),
+                              self._store_offset())
         else:
           self._instructions.append(StoreRegToGlb(context=self._context,
                                                   src=self._temp_regs,
                                                   dest=dest_symbol,
                                                   num_threads=self._num_threads,
                                                   atomic=None,
-                                                  dest_offset=self._dest_obj.offset))
+                                                  dest_offset=self._store_offset()))
       elif dest_symbol.stype == SymbolType.Register:
         self._instructions.append(StoreRegToReg(context=self._context,
                                                 src=self._temp_regs,
@@ -345,6 +492,12 @@ class MultilinearBuilder(AbstractBuilder):
       # do not swap matrix layout in global memory until we need to
       self._scopes.add_symbol(dest_symbol)
       self._deferred_stores[dest_symbol.name] = (self._temp_regs, dest_symbol, None)
+      self._record_staged(dest_symbol.name,
+                          # the *actual* range the accumulator ended up with:
+                          # _analyze intersects the operands, so _ns can be
+                          # strictly smaller than the declared destination box
+                          self._temp_regs.data_view.get_bbox(),
+                          self._store_offset())
 
   def _insert_sync_block(self):
     self._instructions.append(SyncThreads(context=self._context,
@@ -357,11 +510,15 @@ class MultilinearBuilder(AbstractBuilder):
 
   def build_epilogue(self):
     self._reset()
-    for store_regs, store_global, update in self._deferred_stores.values():
+    for name, (store_regs, store_global, update) in self._deferred_stores.items():
       if store_global.stype == SymbolType.Global:
+        # each entry carries its own offset; _store_offset() would hand out the
+        # last build's, which is only right when there is a single entry
+        _, shift = self._staged_view.get(
+            name, (None, [0] * store_global.data_view.rank()))
         self._instructions.append(StoreRegToGlb(context=self._context,
                                                   src=store_regs,
                                                   dest=store_global,
                                                   num_threads=self._num_threads,
                                                   atomic=update,
-                                                  dest_offset=self._dest_obj.offset))
+                                                  dest_offset=shift))

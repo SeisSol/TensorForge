@@ -32,7 +32,8 @@ class MultilinearInstruction(ComputeInstruction):
                sumOperation: ReductionOperator,
                dest_obj,
                num_threads: int,
-               blockcount: int=1):
+               blockcount: int=1,
+               theta: int=0):
         super(MultilinearInstruction, self).__init__(context)
         self._dest = dest
         self._ops = ops
@@ -44,6 +45,11 @@ class MultilinearInstruction(ComputeInstruction):
         self._gemm_meta_data = None
         self._num_threads = num_threads
         self._blockcount = blockcount
+        # origin of the lead loop, chosen by the builder so that a register-
+        # resident operand's lane assignment lines up (see
+        # MultilinearBuilder._lead_origin_shift).  Only relative offsets
+        # matter, so shifting it is free apart from at most one extra slot.
+        self._theta = theta
         self._prev = prev
         self._next = next
         self._dest_obj = dest_obj
@@ -75,6 +81,11 @@ class MultilinearInstruction(ComputeInstruction):
 
         self._analyze()
 
+    def _eff_offset(self, i, j):
+        """Operand offset as seen from the shifted lead origin."""
+        return self._ops[i].offset[j] - (self._theta
+                                         if self._target[i][j] == 0 else 0)
+
     def _check_offsets(self):
         """A slicing offset is a logical->storage shift, never a loop bound.
 
@@ -99,10 +110,11 @@ class MultilinearInstruction(ComputeInstruction):
             if op.symbol.stype not in (SymbolType.Register, SymbolType.Scratch):
                 continue
 
+            i = self._ops.index(op)
             view = op.symbol.data_view
             threads = op.symbol.num_threads
             for j, o in enumerate(op.offset):
-                if self._target[self._ops.index(op)][j] == 0 and o % threads != 0:
+                if self._target[i][j] == 0 and self._eff_offset(i, j) % threads != 0:
                     raise GenerationError(
                         f'{op.symbol.name}: lead-dimension slicing offset {o} '
                         f'is not a multiple of {threads}. Only whole '
@@ -158,6 +170,12 @@ class MultilinearInstruction(ComputeInstruction):
             self._ns[i] = (max(self._ns[i][0], self._dest_obj.bbox.lower()[i]),
                            min(self._ns[i][1], self._dest_obj.bbox.upper()[i]))
 
+        # move the whole lead loop into the shifted origin; every participant's
+        # effective offset drops by theta in turn (_eff_offset)
+        if self._theta and self._ns:
+            self._ns[0] = (self._ns[0][0] + self._theta,
+                           self._ns[0][1] + self._theta)
+
         self._ks = [0] * len(preKs)
         self._sparseK = [False] * len(preKs)
         for i in range(len(preKs)):
@@ -186,12 +204,18 @@ class MultilinearInstruction(ComputeInstruction):
         for l,u in self._ns[1:]:
             self._iregs *= u - l
 
-        if self._prev is not None:
-            self._dest.data_view = self._prev.data_view
-        if self._next is not None:
-            self._dest.data_view = self._next.data_view
-        if self._dest.data_view is None:
+        if self._theta:
+            # the accumulator is indexed by the shifted lead loop, so it takes
+            # the shifted view; inheriting an unshifted one from the
+            # surrounding symbols would put the store in the wrong origin
             self._dest.data_view = self._idest.data_view
+        else:
+            if self._prev is not None:
+                self._dest.data_view = self._prev.data_view
+            if self._next is not None:
+                self._dest.data_view = self._next.data_view
+            if self._dest.data_view is None:
+                self._dest.data_view = self._idest.data_view
 
         self._lead_dims = [0]#[t for t in self._target[0] if t >= 0]
 
@@ -264,7 +288,7 @@ class MultilinearInstruction(ComputeInstruction):
             data = []
             for i, op in enumerate(self._ops):
                 v = op.symbol.load(writer, self._context, None,
-                                   [add_offset(varlist[loopmap[nk]], op.offset[j])
+                                   [add_offset(varlist[loopmap[nk]], self._eff_offset(i, j))
                                     for j, nk in enumerate(self._opdim_to_nks[i])],
                                    False)
                 if v is None:
@@ -292,7 +316,7 @@ class MultilinearInstruction(ComputeInstruction):
                 allLoaded = len(self._ops) > 0
                 for i, op in enumerate(self._ops):
                     allLoaded &= op.symbol.load(writer, self._context, f'data{i}',
-                        [add_offset(varlist[loopmap[nk]], op.offset[j]) for j, nk in enumerate(self._opdim_to_nks[i])], False)
+                        [add_offset(varlist[loopmap[nk]], self._eff_offset(i, j)) for j, nk in enumerate(self._opdim_to_nks[i])], False)
                     if not allLoaded:
                         break
                 if allLoaded:
@@ -411,7 +435,7 @@ class MultilinearInstruction(ComputeInstruction):
                 if opid is not None:
                     # same rule as the loop path: logical index in, storage
                     # index out.  add_offset folds the (usual) zero away.
-                    idx = [add_offset(x, self._ops[opid].offset[d])
+                    idx = [add_offset(x, self._eff_offset(opid, d))
                            for d, x in enumerate(idx)]
                 return idx
 
