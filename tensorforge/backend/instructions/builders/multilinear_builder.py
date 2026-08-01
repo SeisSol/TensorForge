@@ -310,8 +310,15 @@ class MultilinearBuilder(AbstractBuilder):
       lo = view.bbox.lower()[j] + view.offset[j] - shift[j]
       hi = view.bbox.upper()[j] + view.offset[j] - shift[j]
       if lo < covered.lower()[j] or hi > covered.upper()[j]:
-        _, staged_dest, _ = self._deferred_stores[name]
-        if staged_dest.stype != SymbolType.Global:
+        staged_src, staged_dest, _ = self._deferred_stores[name]
+        # A *preload* stages a global input and records `src is dest`; global
+        # memory still holds the value, so dropping the entry and staging the
+        # wanted range afresh is sound.  A *pending store* has a register array
+        # as `src` and the destination symbol as `dest` --- discriminating on
+        # `dest.stype` instead misreads the shared-memory temporary that
+        # _make_store creates, drops it, and loses both the value and the
+        # symbol's data view.
+        if staged_src is staged_dest:
           # preload of a global input: drop it and stage afresh
           del self._deferred_stores[name]
           self._staged_view.pop(name, None)
