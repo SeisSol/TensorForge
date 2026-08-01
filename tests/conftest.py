@@ -92,6 +92,13 @@ def _discover_targets_session(config) -> List[Target]:
 # Pytest hooks
 # ----------------------------------------------------------------------
 
+def pytest_addoption(parser):
+    parser.addoption(
+        "--snapshot-update", action="store_true", default=False,
+        help="rewrite the golden snapshots under tests/snapshots/ instead "
+             "of comparing against them")
+
+
 def pytest_report_header(config):
     targets = _discover_targets_session(config)
     if not targets:
@@ -120,6 +127,16 @@ def pytest_generate_tests(metafunc):
                 ))
             params.append(pytest.param(c, marks=marks, id=c.NAME))
         metafunc.parametrize("case", params)
+    if "snapshot_case" in metafunc.fixturenames:
+        # Deliberately not the `case` fixture: that one carries the case's
+        # XFAIL marker, which is a statement about *numerics on device*.
+        # Generation is a separate question -- a case that is expected to
+        # produce wrong results still has generated source worth freezing,
+        # and with strict=True the marker would turn a passing snapshot
+        # comparison into a hard XPASS failure.
+        cases = _discover_cases()
+        metafunc.parametrize("snapshot_case", cases,
+                             ids=[c.NAME for c in cases])
     if "target" in metafunc.fixturenames:
         targets = _discover_targets_session(metafunc.config)
         if not targets:

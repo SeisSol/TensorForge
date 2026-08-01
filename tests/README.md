@@ -21,6 +21,25 @@ If no targets are found, all GPU-bound tests are skipped (with a clear
 reason); the host-only checks still run, so the harness itself stays
 covered.
 
+## Golden snapshots
+
+`test_snapshots.py` freezes the generated source for every case on every
+codegen backend under `snapshots/`. It needs no GPU and no toolchain, so it
+runs everywhere and is the check that makes a codegen refactor reviewable:
+the diff *is* the review. A snapshot changing is not a failure, it is a
+request to look. When the change is intended:
+
+```bash
+pytest --snapshot-update      # rewrites snapshots/
+```
+
+and commit the rewritten snapshots in the same change that caused them.
+
+Cases that fail to generate are snapshotted too, as `FAILED: <Exception>`.
+Losing or gaining such a failure is as interesting as a shifted line.
+`test_no_orphaned_snapshots` catches the other direction: a snapshot with no
+case behind it means a case was renamed and quietly stopped being covered.
+
 ## What this suite covers
 
 Cases live under `cases/`, grouped by feature:
