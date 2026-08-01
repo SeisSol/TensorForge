@@ -1,14 +1,21 @@
 # SPDX-License-Identifier: MIT
-"""``C = A_sub @ B`` — only A is sliced, B and C use bbox == shape.
+"""``C = A_sub @ B`` — both shifts active on A at once, and cancelling.
 
-A is stored as 32×16 but the GEMM only reads the 12×16 block from row 4
-to row 16 (lead-dim slicing). B is a plain 16×8 (no slicing), C is
-plain 12×8 (no slicing).
+A's *memory* bounding box is ``[4,16) x [0,16)``: the buffer holds 12x16
+reals and address 0 is row 4.  That box lives in A's own coordinates, so
+A's index space is 4..16 while C's is 0..12 — and a bounding box does not
+remap an index space, it only says what is stored.  Contracting the two
+against a shared ``n0`` therefore needs the slicing offset to reconcile
+the origins: A gets a logical bbox of ``[0,12)`` and offset 4.
 
-The case is here to make sure mixed slicing works — the generator must
-emit different address arithmetic for the sliced operand than for the
-unsliced ones, which is a different code path from "everything sliced
-the same way".
+The two shifts then run in opposite directions and cancel exactly:
+``address = index - lower + offset = n0 - 4 + 4 = n0``.  That makes this
+the case where conflating them is invisible in the address but fatal in
+the loop range, which is why it is worth having.
+
+``slice_offset_a`` is the same computation with the other knob only (full
+storage box, pure offset); ``bbox_shared_lower`` is the third quadrant
+(memory box, no offset, consistent across operands).
 """
 
 import numpy as np
@@ -23,9 +30,8 @@ DTYPE = Datatype.F32
 BATCH = 4
 TOL = (1e-5, 1e-5)
 
-# A: declared 32x16, bbox 12x16 starting at row 4.  Memory spans
-# upper - lower, so the host buffer is the 12x16 block itself and A[4, j]
-# lives at address 0 + j*12 --- there is nothing left to slice host-side.
+# A: declared 32x16, memory box 12x16 starting at row 4.  The host buffer
+# is that 12x16 block, so there is nothing to slice host-side.
 A_STORAGE = (32, 16)
 A_LO, A_HI = (4, 0), (16, 16)
 
@@ -33,7 +39,9 @@ A_LO, A_HI = (4, 0), (16, 16)
 def descr_list():
     a = SubTensor(Tensor(list(A_STORAGE), Addressing.STRIDED,
                          BoundingBox(list(A_LO), list(A_HI)),
-                         alias="A", datatype=DTYPE))
+                         alias="A", datatype=DTYPE),
+                  bbox=BoundingBox([0, 0], [12, 16]),
+                  offset=[4, 0])
     b = SubTensor(Tensor([16, 8], Addressing.STRIDED,
                          BoundingBox([0, 0], [16, 8]),
                          alias="B", datatype=DTYPE))
