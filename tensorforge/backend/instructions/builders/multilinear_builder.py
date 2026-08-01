@@ -121,28 +121,31 @@ class MultilinearBuilder(AbstractBuilder):
 
       if self._ops[i].symbol.stype == SymbolType.Global:
         if needs_reload and self._ops[i].symbol.obj.addressing != Addressing.NONE:
-          staged, load_op = self._make_loader_and_symbol(self._stage_view(i), is_transpose=self._descr.permute[i])
-          self._mem_regions[i] = self._staged_region(i, staged)
+          shift = self._stage_shift(i, absorb_lead=False)
+          staged, load_op = self._make_loader_and_symbol(self._stage_view(i, shift), is_transpose=self._descr.permute[i])
+          self._mem_regions[i] = self._staged_region(i, staged, shift)
           self._loaders_cache[self._mem_regions[i]] = load_op
           self._instructions.append(load_op)
         else:
           if self._preload_registers and self._ops[i].symbol.obj.addressing != Addressing.NONE:
             # only register-preload dense matrices for now
-            staged, load_op = self._make_loader_and_symbol_reg(self._stage_view(i), linearize=needs_reload2)
-            self._mem_regions[i] = self._staged_region(i, staged)
+            shift = self._stage_shift(i, absorb_lead=not needs_reload2)
+            staged, load_op = self._make_loader_and_symbol_reg(self._stage_view(i, shift), linearize=needs_reload2)
+            self._mem_regions[i] = self._staged_region(i, staged, shift)
             self._deferred_stores[self._ops[i].symbol.name] = self._mem_regions[i].symbol, self._mem_regions[i].symbol, None
             self._record_staged(self._ops[i].symbol.name,
                                 self._mem_regions[i].symbol.data_view.get_bbox(),
-                                [0] * self._ops[i].bbox.rank())
+                                shift)
             self._instructions.append(load_op)
           elif self._preload_shmem and self._ops[i].symbol.obj.addressing != Addressing.NONE:
             # only register-preload dense matrices for now
-            staged, load_op = self._make_loader_and_symbol(self._stage_view(i), None)
-            self._mem_regions[i] = self._staged_region(i, staged)
+            shift = self._stage_shift(i, absorb_lead=False)
+            staged, load_op = self._make_loader_and_symbol(self._stage_view(i, shift), None)
+            self._mem_regions[i] = self._staged_region(i, staged, shift)
             self._deferred_stores[self._ops[i].symbol.name] = self._mem_regions[i].symbol, self._mem_regions[i].symbol, None
             self._record_staged(self._ops[i].symbol.name,
                                 self._mem_regions[i].symbol.data_view.get_bbox(),
-                                [0] * self._ops[i].bbox.rank())
+                                shift)
             self._instructions.append(load_op)
           else:
             # Note: operand will reside in glb. mem for gemm operation
@@ -222,20 +225,52 @@ class MultilinearBuilder(AbstractBuilder):
           upper = [max(a, b) for a, b in zip(prev.upper(), upper)]
         self._operand_union[symbol.name] = BoundingBox(lower, upper)
 
-  def _stage_view(self, i):
-    """The operand as the staging load should see it: the whole union, in
-    storage coordinates, so the copy is an identity mapping."""
+  def _union_of(self, i):
     view = self._ops[i]
     union = self._operand_union.get(view.symbol.name)
     if union is None:
       union = BoundingBox([l + o for l, o in zip(view.bbox.lower(), view.offset)],
                           [u + o for u, o in zip(view.bbox.upper(), view.offset)])
-    return SymbolView(view.symbol, union, [0] * union.rank())
+    return union
 
-  def _staged_region(self, i, staged):
+  def _stage_shift(self, i, absorb_lead):
+    """How the staged image is indexed relative to the tensor.
+
+    Position `r` of the image holds tensor element `r + shift`.
+
+    For a register image the lead dimension is spread across lanes and the slot
+    count is `ceil(u/T) - floor(l/T)`, so a union starting mid-block costs an
+    extra slot for nothing: `[8,24)` at T=16 needs two slots where `[0,16)`
+    needs one.  Absorbing the union's lead lower bound while loading --- free,
+    the loader forms a global address per element anyway --- puts the image
+    back at origin 0.  The remaining dimensions stay in storage coordinates,
+    where the offset is a plain constant in the address and absorbing it buys
+    nothing.
+
+    A shared-memory image is a verbatim copy of the whole storage box, so its
+    coordinates already are the tensor's and the shift is zero throughout.  So
+    is the linearized register path, which copies flat and cannot express a
+    shift at all.
+    """
+    rank = self._ops[i].bbox.rank()
+    if not absorb_lead or rank == 0:
+      return [0] * rank
+    return [self._union_of(i).lower()[0]] + [0] * (rank - 1)
+
+  def _stage_view(self, i, shift):
+    """The operand as the staging load should see it: the whole union, in the
+    image's own coordinates."""
+    union = self._union_of(i)
+    return SymbolView(self._ops[i].symbol,
+                      BoundingBox([l - s for l, s in zip(union.lower(), shift)],
+                                  [u - s for u, s in zip(union.upper(), shift)]),
+                      list(shift))
+
+  def _staged_region(self, i, staged, shift):
     """The staged symbol as the *compute* site should see it: this operand's
-    own logical box and its own offset, unchanged."""
-    return SymbolView(staged.symbol, self._ops[i].bbox, self._ops[i].offset)
+    own logical box, with its offset rebased onto the image."""
+    return SymbolView(staged.symbol, self._ops[i].bbox,
+                      [o - s for o, s in zip(self._ops[i].offset, shift)])
 
   def _resolve_reuse(self, i, name):
     """Decide whether the already-staged image can serve this operand.
