@@ -23,7 +23,9 @@ class GlobalLoaderBuilder(AbstractBuilder):
     predest = Symbol(name=f'ptr_{GeneralLexicon.GLOBAL_MEM_PREFIX}{src.name}',
                     stype=SymbolType.Global,
                     obj=src.obj)
-    predest.data_view = DataView(shape=src.obj.shape, permute=None, bbox=src.obj.get_bbox())
+    # a global tensor's extent is its bounding box: memory spans
+    # upper - lower, with address 0 at `lower`
+    predest.data_view = DataView(shape=src.obj.get_actual_shape(), permute=None, bbox=src.obj.get_bbox())
 
     self._scopes.add_symbol(predest)
     self._instructions.append(GetElementPtr(self._context, src, predest, True))

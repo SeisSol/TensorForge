@@ -3,7 +3,7 @@ from tensorforge.common.context import Context
 from tensorforge.common.matrix.tensor import Tensor
 from tensorforge.common.matrix.boundingbox import BoundingBox
 from tensorforge.backend.data_types import RegMemObject
-from tensorforge.backend.symbol import Symbol, SymbolType, DataView, LeadIndex, write_loops, LeadLoop, Loop, Immediate
+from tensorforge.backend.symbol import Symbol, SymbolType, DataView, LeadIndex, write_loops, LeadLoop, Loop, Immediate, add_offset
 from tensorforge.common.exceptions import InternalError
 from tensorforge.backend.writer import Writer
 from . import AbstractShrMemWrite, MemoryInstruction
@@ -134,7 +134,8 @@ class StoreRegToGlb(AbstractInstruction):
                src: Symbol,
                dest: Symbol,
                num_threads: int,
-               atomic):
+               atomic,
+               dest_offset=None):
     super(StoreRegToGlb, self).__init__(context)
 
     if src.stype != SymbolType.Register:
@@ -152,7 +153,7 @@ class StoreRegToGlb(AbstractInstruction):
     src.add_user(self)
     dest.add_user(self)
 
-    dest.data_view = DataView(shape=dest.obj.shape,
+    dest.data_view = DataView(shape=dest.obj.get_actual_shape(),
                               permute=None,
                               bbox=dest.obj.get_bbox())
 
@@ -164,6 +165,12 @@ class StoreRegToGlb(AbstractInstruction):
     self._num_threads: int = num_threads
     self._is_ready: bool = True
     self._atomic = atomic
+    # logical->storage shift of the destination slice.  `src` (registers) is
+    # indexed logically, `dest` (global) in storage coordinates, so the shift
+    # enters both the loop bounds --- which mix the two bboxes --- and the
+    # store itself.
+    self._dest_offset = (list(dest_offset) if dest_offset is not None
+                         else [0] * dest.data_view.rank())
 
   def gen_ir(self, writer: Writer) -> None:
     writer.new_line()
@@ -173,7 +180,12 @@ class StoreRegToGlb(AbstractInstruction):
 
     writer(f'// {self}')
     src_bbox = self._src.data_view.get_bbox()
-    dest_bbox = self._dest.data_view.get_bbox()
+    # pull the destination's storage bbox back into logical coordinates so the
+    # union below compares like with like
+    raw_dest_bbox = self._dest.data_view.get_bbox()
+    dest_bbox = BoundingBox(
+        [l - o for l, o in zip(raw_dest_bbox.lower(), self._dest_offset)],
+        [u - o for u, o in zip(raw_dest_bbox.upper(), self._dest_offset)])
     with writer.Scope():
       manual = [False]
       loops = []
@@ -187,11 +199,13 @@ class StoreRegToGlb(AbstractInstruction):
 
       def inner(indices):
         needsLoad = all(not isinstance(index, Immediate) or (src_bbox.lower()[i] <= index._value and src_bbox.upper()[i] > index._value) for i,index in enumerate(indices))
+        dest_indices = [add_offset(x, self._dest_offset[i])
+                        for i, x in enumerate(indices)]
         if needsLoad:
           self._src.load(writer, self._context, 'value', indices, False)
-          self._dest.store(writer, self._context, 'value', indices, allow_nontemporal, self._atomic)
+          self._dest.store(writer, self._context, 'value', dest_indices, allow_nontemporal, self._atomic)
         else:
-          self._dest.store(writer, self._context, '0', indices, allow_nontemporal, self._atomic)
+          self._dest.store(writer, self._context, '0', dest_indices, allow_nontemporal, self._atomic)
 
       if not any(manual) and self._context.get_vm().get_hw_descr().vendor in ['amd'] and False:
         pass

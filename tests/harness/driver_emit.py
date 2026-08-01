@@ -93,8 +93,11 @@ def collect_operands(generator) -> List[DriverOperand]:
             alias=t.alias,
             is_source=is_src,
             is_sink=is_snk,
-            shape=tuple(t.shape),
-            volume=int(t.get_real_volume()),
+            # the kernel addresses the *stored* region: memory spans
+            # upper - lower and address 0 is `lower`, so the host buffer is
+            # bbox-shaped, not shape-shaped (see DataView.get_dim_strides)
+            shape=tuple(t.get_actual_shape()),
+            volume=int(t.get_actual_volume()),
             ctype=ctype(t.datatype),
             addressing=str(t.addressing),
         ))

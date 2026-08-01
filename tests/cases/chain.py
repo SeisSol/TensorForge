@@ -26,11 +26,10 @@ DTYPE = Datatype.F32
 BATCH = 4
 TOL = (1e-4, 1e-4)        # two-step chain accumulates more FP error
 
+# Each operand is declared 32x32 but its bounding box is smaller; memory
+# spans upper - lower, so every host buffer is bbox-shaped and no host-side
+# slicing is involved.
 STORAGE = (32, 32)
-A_SUB = (slice(0, 12), slice(0, 12))
-B_SUB = (slice(0, 12), slice(0, 6))
-C_SUB = (slice(0, 6), slice(0, 6))
-D_SUB = (slice(0, 12), slice(0, 6))
 
 
 def descr_list():
@@ -55,10 +54,7 @@ def descr_list():
 
 def reference(inputs, dest_in):
     out = np.array(dest_in, copy=True)
-    A_sub = inputs["A"][:, *A_SUB]
-    B_sub = inputs["B"][:, *B_SUB]
-    C_sub = inputs["C"][:, *C_SUB]
-    out[:, *D_SUB] = np.einsum("bik,bkj->bij",
-                               A_sub,
-                               np.einsum("bik,bkj->bij", B_sub, C_sub))
+    out[...] = np.einsum("bik,bkj->bij",
+                         inputs["A"],
+                         np.einsum("bik,bkj->bij", inputs["B"], inputs["C"]))
     return out

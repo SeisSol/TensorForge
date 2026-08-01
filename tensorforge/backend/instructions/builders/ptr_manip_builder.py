@@ -26,7 +26,7 @@ class GetElementPtrBuilder(AbstractBuilder):
 
     if src.stype not in (SymbolType.Scalar, SymbolType.Data):
       # TODO: remove this code path
-      dest.data_view = DataView(shape=src.obj.shape, permute=None, bbox=src.obj.get_bbox())
+      dest.data_view = DataView(shape=src.obj.get_actual_shape(), permute=None, bbox=src.obj.get_bbox())
     else:
       dest.data_view = DataView(shape=src.obj.shape, permute=None)
     self._scopes.add_symbol(dest)

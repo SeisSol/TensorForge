@@ -2,7 +2,7 @@ from typing import Union
 import math
 from tensorforge.common.matrix.tensor import Tensor
 from . import AbstractShrMemWrite, MemoryInstruction
-from tensorforge.backend.symbol import Symbol, SymbolType, DataView, LeadIndex, write_loops, LeadLoop, Loop
+from tensorforge.backend.symbol import Symbol, SymbolType, DataView, LeadIndex, write_loops, LeadLoop, Loop, add_offset
 from tensorforge.common.exceptions import InternalError
 from tensorforge.backend.writer import Writer
 from tensorforge.common.matrix.boundingbox import BoundingBox
@@ -88,7 +88,7 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
       return f'{lexic.thread_idx_x}'
 
   def _get_bounding_box_dense(self):
-    self._src.data_view = DataView(shape=self._tensor.shape,
+    self._src.data_view = DataView(shape=self._tensor.get_actual_shape(),
                                    permute=None,
                                    bbox=self._tensor.get_bbox())
 
@@ -320,7 +320,9 @@ class GlbToRegLoader(MemoryInstruction, LoadInstruction):
                src: Symbol,
                dest: Symbol,
                num_threads: int,
-               linearize: bool):
+               linearize: bool,
+               src_bbox=None,
+               src_offset=None):
     super(GlbToRegLoader, self).__init__(context)
 
     if dest.stype != SymbolType.Register:
@@ -338,9 +340,20 @@ class GlbToRegLoader(MemoryInstruction, LoadInstruction):
     src.add_user(self)
     dest.add_user(self)
 
+    # `src_bbox` is the region to load, in *logical* coordinates; `src_offset`
+    # is the logical->storage shift of the operand this load stages.  Registers
+    # dispatch on `isinstance(index, LeadIndex)` (Symbol.build_address), so an
+    # offset cannot ride along as a VarOffset the way it can for a global or
+    # shared-memory operand --- it would land in the non-lead branch and pick up
+    # both the wrong divisor and the wrong stride.  It is therefore consumed
+    # here: read at `x + offset`, write at `x`, and the register image is in
+    # logical coordinates from then on.
+    self._bbox = src_bbox if src_bbox is not None else src.obj.get_bbox()
+    self._offset = list(src_offset) if src_offset is not None else [0] * self._bbox.rank()
+
     dest.data_view = DataView(shape=src.obj.shape,
                               permute=None,
-                              bbox=src.obj.get_bbox())
+                              bbox=self._bbox)
 
     # if dest.data_view.get_dim_size(0) > src.data_view.get_dim_size(0):
     #   raise InternalError('store: `src` and `dest` do not match in size aling dim `0`')
@@ -357,9 +370,13 @@ class GlbToRegLoader(MemoryInstruction, LoadInstruction):
 
     allow_nontemporal = len(self._src.get_user_list()) == 1
 
-    src_bbox = self._src.data_view.get_bbox()
+    src_bbox = self._bbox
 
     if self._linearize:
+      # a flat run over spp.count_nz() cannot express a sub-slice
+      assert all(o == 0 for o in self._offset), \
+          (f'{self._src.name}: linearized register load cannot apply slicing '
+           f'offset {self._offset}')
       # TODO: box better?
       total_size = self._src.obj.spp.count_nz()
 
@@ -433,7 +450,11 @@ class GlbToRegLoader(MemoryInstruction, LoadInstruction):
         loops += [Loop(f'i{i}', src_bbox.lower()[i], src_bbox.upper()[i], 1)]
 
       def inner(indices):
-        self._src.load(writer, self._context, 'value', indices, allow_nontemporal)
+        # logical index in on the register side, storage index out on the
+        # global side --- add_offset folds the (usual) zero away
+        self._src.load(writer, self._context, 'value',
+                       [add_offset(x, self._offset[i])
+                        for i, x in enumerate(indices)], allow_nontemporal)
         self._dest.store(writer, self._context, 'value', indices, False,
                          base=self.write_base())
 

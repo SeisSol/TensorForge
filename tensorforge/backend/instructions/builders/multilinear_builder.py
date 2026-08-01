@@ -111,20 +111,18 @@ class MultilinearBuilder(AbstractBuilder):
 
       if self._ops[i].symbol.stype == SymbolType.Global:
         if needs_reload and self._ops[i].symbol.obj.addressing != Addressing.NONE:
-          self._assert_stageable(i)
-          self._mem_regions[i], load_op = self._make_loader_and_symbol(self._ops[i].symbol, is_transpose=self._descr.permute[i])
+          self._mem_regions[i], load_op = self._make_loader_and_symbol(self._ops[i], is_transpose=self._descr.permute[i])
           self._loaders_cache[self._mem_regions[i]] = load_op
           self._instructions.append(load_op)
         else:
           if self._preload_registers and self._ops[i].symbol.obj.addressing != Addressing.NONE:
             # only register-preload dense matrices for now
-            self._assert_stageable(i)
-            self._mem_regions[i], load_op = self._make_loader_and_symbol_reg(self._ops[i].symbol, linearize=needs_reload2)
+            self._mem_regions[i], load_op = self._make_loader_and_symbol_reg(self._ops[i], linearize=needs_reload2)
             self._deferred_stores[self._ops[i].symbol.name] = self._mem_regions[i].symbol, self._mem_regions[i].symbol, None
             self._instructions.append(load_op)
           elif self._preload_shmem and self._ops[i].symbol.obj.addressing != Addressing.NONE:
             # only register-preload dense matrices for now
-            self._mem_regions[i], load_op = self._make_loader_and_symbol(self._ops[i].symbol, None)
+            self._mem_regions[i], load_op = self._make_loader_and_symbol(self._ops[i], None)
             self._deferred_stores[self._ops[i].symbol.name] = self._mem_regions[i].symbol, self._mem_regions[i].symbol, None
             self._instructions.append(load_op)
           else:
@@ -143,14 +141,20 @@ class MultilinearBuilder(AbstractBuilder):
               # means: data loaded to shr. mem. cannot be reused. Because `op1` not need to be transposed
               # we don't need to load it to shr. mem. Instead, it will be taken from glb. mem.
               # we don't need delete previous (aliased) symbol
-              self._mem_regions[i] = SymbolView(prev_loader.get_src())
+              self._mem_regions[i] = SymbolView(prev_loader.get_src(),
+                                               self._ops[i].bbox, self._ops[i].offset)
             else:
               # means: data cannot be reused. we need to reload it again and traspose on the fly.
               # additionally, we need to remove aliased symbol to avoid clashes
               # self._scopes.delete_symbol(self._ops[i].symbol)
               self._scopes.add_scope()
               prev_symbol = prev_loader.get_src()
-              self._mem_regions[i], load_op = self._make_loader_and_symbol(prev_symbol)
+              # NOTE: this call was missing its `is_transpose` argument entirely
+              # (TypeError if the branch is ever reached); re-staging the original
+              # global source wants this operation's own permutation.
+              self._mem_regions[i], load_op = self._make_loader_and_symbol(
+                  SymbolView(prev_symbol, self._ops[i].bbox, self._ops[i].offset),
+                  is_transpose=self._descr.permute[i])
               self._loaders_cache[self._mem_regions[i]] = load_op
               self._instructions.append(load_op)
           else:
@@ -162,29 +166,32 @@ class MultilinearBuilder(AbstractBuilder):
       else:
         raise InternalError(f'gemm-builder: op{i} ({self._ops[i].symbol.name}) must be either in shr or glb mem, given: {self._ops[i].symbol.stype}')
 
-  def _assert_stageable(self, i):
-    """Both staging paths return `SymbolView(dest)` --- no bbox, no offset.
-
-    The view falls back to the destination symbol's own data view, so whatever
-    the frontend attached to this operand is discarded here.  That is only
-    harmless for a zero offset.  Teaching GlbToShrLoader/GlbToRegLoader to read
-    at `x + offset` and write at `x` is step (D); until then, refuse loudly.
-    """
-    assert all(o == 0 for o in self._ops[i].offset), \
-        (f'{self._ops[i].symbol.name}: operand carries slicing offset '
-         f'{self._ops[i].offset} and needs staging, but the loaders do not '
-         f'absorb offsets yet')
-
-  def _make_loader_and_symbol_reg(self, operand, linearize) -> Tuple[Symbol, GlbToRegLoader]:
+  def _make_loader_and_symbol_reg(self, opview, linearize) -> Tuple[Symbol, GlbToRegLoader]:
+    operand = opview.symbol
     regsize = 1
     threads = self._num_threads
     lead_dim = [0] # [t for t in self._descr.target[0] if t >= 0]
 
-    for d, dim in enumerate(operand.data_view._bbox.sizes()):
+    # the register image holds the operand's *logical* region: GlbToRegLoader
+    # consumes the slicing offset while loading, so everything downstream of
+    # this point indexes logically.
+    #
+    # The linearized path is the exception: it copies spp.count_nz() elements
+    # flat, so the array has to span the whole stored region --- and it cannot
+    # express a slice at all (GlbToRegLoader asserts the offset is zero there).
+    if linearize:
+      bbox = operand.data_view._bbox
+    else:
+      bbox = opview.bbox
+
+    for d in range(bbox.rank()):
+      dim = bbox.size(d)
       if d not in lead_dim or threads == 0:
         regsize *= dim
       else:
-        regsize *= (dim + threads - 1) // threads
+        # same slot count as DataView.get_dim_slots / _iregs / the addressing
+        # side.  `ceil((u-l)/T)` disagrees once [l,u) straddles a block border.
+        regsize *= -(-bbox.upper()[d] // threads) - bbox.lower()[d] // threads
         threads //= dim
     name = self._name_registers()
     regmem = RegMemObject(name, regsize, spp=None if operand.obj.is_dense() else operand.obj.spp)
@@ -199,10 +206,13 @@ class MultilinearBuilder(AbstractBuilder):
                                      dest=registers,
                                      src=operand,
                                      num_threads=self._num_threads,
-                                     linearize = linearize)
-    return SymbolView(registers), load_op
+                                     linearize = linearize,
+                                     src_bbox = bbox,
+                                     src_offset = opview.offset)
+    return SymbolView(registers, bbox), load_op
 
-  def _make_loader_and_symbol(self, operand, is_transpose) -> Tuple[Symbol, GlbToShrLoader]:
+  def _make_loader_and_symbol(self, opview, is_transpose) -> Tuple[Symbol, GlbToShrLoader]:
+    operand = opview.symbol
     shr_mem_region = Symbol(name=self._name_shr_reg(),
                             stype=SymbolType.SharedMem,
                             obj=operand.obj)
@@ -214,7 +224,13 @@ class MultilinearBuilder(AbstractBuilder):
                                      shr_mem=self._shr_mem,
                                      num_threads=self._num_threads,
                                      permute=is_transpose)
-    return SymbolView(shr_mem_region), load_op
+    # GlbToShrLoader copies the whole storage bounding box verbatim and gives
+    # the copy the *same* bbox (only the shape is padded), so the operand's
+    # logical->storage shift is just as valid against the shared-memory image
+    # as it was against global memory.  Shared memory addresses through the
+    # untyped branch of Symbol.build_address, so the offset can simply survive
+    # here rather than having to be consumed the way the register path does.
+    return SymbolView(shr_mem_region, opview.bbox, opview.offset), load_op
 
   def _name_registers(self):
     name = f'r{self._counter}'
@@ -262,12 +278,14 @@ class MultilinearBuilder(AbstractBuilder):
       # should be found in the previous step already
       return None
     elif self._preload_registers and dest_symbol.stype == SymbolType.Global and not self._atomic_update and not next:
-      symbol, load_op = self._make_loader_and_symbol_reg(dest_symbol, False)
+      symbol, load_op = self._make_loader_and_symbol_reg(
+          SymbolView(dest_symbol, self._dest_obj.bbox, self._dest_obj.offset), False)
       self._deferred_stores[dest_symbol.name] = symbol.symbol, symbol.symbol, None
       self._instructions.append(load_op)
       return symbol.symbol
     elif self._preload_shmem and dest_symbol.stype == SymbolType.Global and not self._atomic_update and not next:
-      symbol, load_op = self._make_loader_and_symbol(dest_symbol, None)
+      symbol, load_op = self._make_loader_and_symbol(
+          SymbolView(dest_symbol, self._dest_obj.bbox, self._dest_obj.offset), None)
       self._deferred_stores[dest_symbol.name] = symbol.symbol, symbol.symbol, None
       self._instructions.append(load_op)
       return symbol.symbol
@@ -307,7 +325,8 @@ class MultilinearBuilder(AbstractBuilder):
                                                   src=self._temp_regs,
                                                   dest=dest_symbol,
                                                   num_threads=self._num_threads,
-                                                  atomic=None))
+                                                  atomic=None,
+                                                  dest_offset=self._dest_obj.offset))
       elif dest_symbol.stype == SymbolType.Register:
         self._instructions.append(StoreRegToReg(context=self._context,
                                                 src=self._temp_regs,
@@ -344,4 +363,5 @@ class MultilinearBuilder(AbstractBuilder):
                                                   src=store_regs,
                                                   dest=store_global,
                                                   num_threads=self._num_threads,
-                                                  atomic=update))
+                                                  atomic=update,
+                                                  dest_offset=self._dest_obj.offset))

@@ -23,10 +23,11 @@ DTYPE = Datatype.F32
 BATCH = 4
 TOL = (1e-5, 1e-5)
 
-# A: 32x16 storage, bbox 12x16 starting at row 4.
+# A: declared 32x16, bbox 12x16 starting at row 4.  Memory spans
+# upper - lower, so the host buffer is the 12x16 block itself and A[4, j]
+# lives at address 0 + j*12 --- there is nothing left to slice host-side.
 A_STORAGE = (32, 16)
 A_LO, A_HI = (4, 0), (16, 16)
-A_SUB = (slice(4, 16), slice(0, 16))
 
 
 def descr_list():
@@ -43,5 +44,4 @@ def descr_list():
 
 
 def reference(inputs, dest_in):
-    A_sub = inputs["A"][:, *A_SUB]
-    return np.einsum("bik,bkj->bij", A_sub, inputs["B"])
+    return np.einsum("bik,bkj->bij", inputs["A"], inputs["B"])

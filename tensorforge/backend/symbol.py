@@ -61,6 +61,8 @@ class DataView:
     return len(self.shape)
 
   def get_volume(self):
+    # physical extent, i.e. including any staging padding --- see
+    # get_dim_strides for why this is `shape` and not the bounding box
     volume = 1
     for s in self.shape:
       volume *= s
@@ -86,11 +88,24 @@ class DataView:
     upper = self._bbox.upper()[index]
     return -(-upper // num_threads) - lower // num_threads
 
-  def get_dim_strides(self, mask=[], bbox=False):
+  def get_dim_strides(self, mask=[]):
+    """Strides of the buffer this view describes.
+
+    `shape` is the *physical extent* --- the stride basis --- and `bbox` is the
+    live coordinate range inside it, with address 0 at `bbox.lower()`.  The two
+    are not interchangeable: a shared-memory staging buffer is padded against
+    bank conflicts and for alignment (GlbToShrLoader._get_bounding_box_dense
+    builds `dst_shape` from `_next_size()`), so its extent is strictly larger
+    than its bounding box and the padding has to show up in the strides.
+
+    For a global tensor the extent *is* the bounding box, since memory spans
+    `upper - lower`.  That is established where the view is constructed
+    (Tensor.get_actual_shape), not here.
+    """
     # TODO: permute? Yes or no? Also, unify SPPs.
     strides = []
     current = 1
-    for i, size in enumerate(self.get_bbox().sizes() if bbox else self.shape):
+    for i, size in enumerate(self.shape):
       if i not in mask:
         strides += [current]
         current *= size

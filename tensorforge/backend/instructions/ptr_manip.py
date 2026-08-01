@@ -56,7 +56,9 @@ class GetElementPtr(AbstractInstruction):
       lhs = 'const ' if self._src.obj.direction == DataFlowDirection.SOURCE else ''
       lhs += f'{datatype} *{const_mod} {self._vm.get_lexic().restrict_kw} {self._dest.name}'
     if batch_addressing == Addressing.STRIDED:
-      main_offset = f'{self.batch_index()} * {batch_obj.get_real_volume()}'
+      # distance between batch elements is the *stored* volume, i.e.
+      # prod(upper - lower), not prod(shape)
+      main_offset = f'{self.batch_index()} * {batch_obj.get_actual_volume()}'
       sub_offset = f'{batch_obj.get_offset_to_first_element()}'
       address = f'{main_offset} + {sub_offset}{extra_offset}'
       rhs = f'&{self._src.name}[{address}]'

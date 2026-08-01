@@ -78,24 +78,26 @@ class MultilinearInstruction(ComputeInstruction):
     def _check_offsets(self):
         """A slicing offset is a logical->storage shift, never a loop bound.
 
-        It may therefore only reach an operand whose address is formed from the
-        full index expression --- i.e. a global one.  Shared-memory and register
-        operands got here through a staging load, and those loaders do not yet
-        absorb the offset (they drop the SymbolView's bbox and offset outright),
-        so anything but zero would silently miscompile.  Same for the
-        destination: StoreRegToGlb indexes `src` and `dest` with one and the
-        same index list, so a shifted destination needs the offset folded into
-        the store first.
+        Global and shared-memory operands build their address from the whole
+        index expression (Symbol.build_address, untyped branch), so the offset
+        can ride along as a VarOffset and is applied at the access site.
+        Registers instead dispatch on `isinstance(index, LeadIndex)`; a wrapped
+        lead index would fall into the non-lead branch and pick up both the
+        wrong divisor and the wrong stride.  GlbToRegLoader therefore consumes
+        the offset while loading and hands back a logical register image --- so
+        reaching this point with a non-zero offset on registers means the
+        absorption was skipped somewhere.
+
+        The destination needs no check here: `_idest` accumulates in logical
+        coordinates and StoreRegToGlb folds `dest.offset` in on the way out.
         """
-        for i, op in enumerate(self._ops):
+        for op in self._ops:
             if any(o != 0 for o in op.offset):
-                assert op.symbol.stype in (SymbolType.Global, SymbolType.Batch), \
-                    (f'{op.symbol.name}: slicing offset {op.offset} on a '
-                     f'{op.symbol.stype} operand --- staging loads must absorb '
-                     f'the offset before it reaches the compute site')
-        assert all(o == 0 for o in self._dest_obj.offset), \
-            (f'{self._dest_obj.tensor}: slicing offset {self._dest_obj.offset} on '
-             f'the destination --- StoreRegToGlb has to fold it in first')
+                assert op.symbol.stype in (SymbolType.Global, SymbolType.Batch,
+                                           SymbolType.SharedMem), \
+                    (f'{op.symbol.name}: slicing offset {op.offset} survived on '
+                     f'a {op.symbol.stype} operand --- the staging load should '
+                     f'have consumed it')
 
     def _analyze(self):
         self._check_offsets()
