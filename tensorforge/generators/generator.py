@@ -278,7 +278,7 @@ class Generator:
             # shared-memory loads commits twice before waiting.  The latter is
             # not new; trans_a already did it.
             depth = async_depth(section.stream)
-            if depth > 1:
+            if depth > 1 and False: # disabled for now (not needed for thread_scope_thread)
               # NOT __shared__: the scope is thread, so the state is private and
               # each thread needs its own.  Putting a thread-scope state in
               # shared memory would have every thread of the block driving one
