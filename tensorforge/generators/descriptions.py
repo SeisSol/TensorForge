@@ -218,10 +218,26 @@ class GemmDescr(MultilinearDescr):
                beta=0.0,
                strict_match: bool = False,
                prefer_align: bool = False):
-    # target_a = [-1, 0] if trans_a else [0, -1]
-    # target_b = [1, -1] if trans_b else [-1, 0]
-    target_a = [0, -1]
-    target_b = [-1, 1]
+    # Transposition belongs in `target`, not in `permute`.
+    #
+    # `target[i][j]` says which loop index dimension j of operand i carries:
+    # >= 0 is an output index, < 0 a contraction index.  That mapping is what
+    # MultilinearInstruction._analyze reads to build the loop ranges --- and it
+    # reads it *without* consulting `permute`.  Encoding a transpose only in
+    # `permute` therefore left `_analyze` pairing the wrong dimensions: for
+    # `trans_a` with a non-square operand it took the output extent for the
+    # contraction extent, so the sum ran over the wrong length and the result
+    # came out short by whatever the two dimensions differed by.
+    #
+    # This is also the convention everything else already uses:
+    # `generate_tmp_matrix` writes `[-1, 0] if trans_a`, and yateto's
+    # `factory.getIndices` derives `target` from the index letters while
+    # emitting `permute` as the identity throughout.
+    target_a = [-1, 0] if trans_a else [0, -1]
+    target_b = [1, -1] if trans_b else [-1, 1]
+    # `permute` still carries the transpose for the staging decisions
+    # (GlbToShrLoader's `is_transpose`); deriving those from `target` too is a
+    # separate step.
     permute_a = [1, 0] if trans_a else [0, 1]
     permute_b = [1, 0] if trans_b else [0, 1]
     # assert beta == 0.0
