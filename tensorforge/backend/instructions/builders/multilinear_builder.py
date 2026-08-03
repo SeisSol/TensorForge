@@ -222,18 +222,14 @@ class MultilinearBuilder(AbstractBuilder):
         tensor = getattr(op, 'tensor', None)
         if tensor is None:
           continue
-        symbol = self._scopes.get_symbol(tensor)
-        if symbol is None:
-          continue
         lower = [l + o for l, o in zip(op.bbox.lower(), op.offset)]
         upper = [u + o for u, o in zip(op.bbox.upper(), op.offset)]
-        prev = self._operand_union.get(symbol.name)
-        if prev is not None:
-          lower = [min(a, b) for a, b in zip(prev.lower(), lower)]
-          upper = [max(a, b) for a, b in zip(prev.upper(), upper)]
-        self._operand_union[symbol.name] = BoundingBox(lower, upper)
-        # ...and again keyed by tensor, so a temporary can be looked up before
-        # anything has given it a symbol
+
+        # Keyed by tensor, and recorded *before* the symbol lookup: a temporary
+        # has no symbol until the operation that first writes it creates one,
+        # so guarding this on the lookup left every temporary with an empty
+        # read union --- and `_written_in_slices` then saw nothing to cover and
+        # happily deferred a store that only held part of the tensor.
         rkey = id(tensor)
         rprev = self._read_union.get(rkey)
         rlo, rup = list(lower), list(upper)
@@ -241,6 +237,17 @@ class MultilinearBuilder(AbstractBuilder):
           rlo = [min(a, b) for a, b in zip(rprev.lower(), rlo)]
           rup = [max(a, b) for a, b in zip(rprev.upper(), rup)]
         self._read_union[rkey] = BoundingBox(rlo, rup)
+
+        # The staging union is keyed by symbol name, which only exists for
+        # tensors that are already materialised somewhere.
+        symbol = self._scopes.get_symbol(tensor)
+        if symbol is None:
+          continue
+        prev = self._operand_union.get(symbol.name)
+        if prev is not None:
+          lower = [min(a, b) for a, b in zip(prev.lower(), lower)]
+          upper = [max(a, b) for a, b in zip(prev.upper(), upper)]
+        self._operand_union[symbol.name] = BoundingBox(lower, upper)
 
       dest = getattr(descr, 'dest', None)
       tensor = getattr(dest, 'tensor', None) if dest is not None else None
