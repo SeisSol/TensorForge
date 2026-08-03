@@ -207,6 +207,14 @@ class MultilinearBuilder(AbstractBuilder):
     staged, and their range is whatever `_analyze` intersects it down to.
     """
     self._operand_union = {}
+    # same, but over destinations: what a tensor's writes cover, and how many
+    # descriptors contribute.  A temporary written by exactly one operation can
+    # stay in registers until someone asks for it; one written in slices has to
+    # be assembled somewhere, because each operation only ever holds its own
+    # slice in `_temp_regs`.
+    self._dest_union = {}
+    self._read_union = {}
+    self._dest_writers = {}
     for descr in descr_list:
       if not isinstance(descr, MultilinearDescr):
         continue
@@ -224,6 +232,54 @@ class MultilinearBuilder(AbstractBuilder):
           lower = [min(a, b) for a, b in zip(prev.lower(), lower)]
           upper = [max(a, b) for a, b in zip(prev.upper(), upper)]
         self._operand_union[symbol.name] = BoundingBox(lower, upper)
+        # ...and again keyed by tensor, so a temporary can be looked up before
+        # anything has given it a symbol
+        rkey = id(tensor)
+        rprev = self._read_union.get(rkey)
+        rlo, rup = list(lower), list(upper)
+        if rprev is not None:
+          rlo = [min(a, b) for a, b in zip(rprev.lower(), rlo)]
+          rup = [max(a, b) for a, b in zip(rprev.upper(), rup)]
+        self._read_union[rkey] = BoundingBox(rlo, rup)
+
+      dest = getattr(descr, 'dest', None)
+      tensor = getattr(dest, 'tensor', None) if dest is not None else None
+      if tensor is not None:
+        # keyed by tensor, not by symbol name: a temporary has no symbol until
+        # the operation that first writes it creates one, which is long after
+        # plan() has run
+        key = id(tensor)
+        lower = [l + o for l, o in zip(dest.bbox.lower(), dest.offset)]
+        upper = [u + o for u, o in zip(dest.bbox.upper(), dest.offset)]
+        prev = self._dest_union.get(key)
+        if prev is not None:
+          lower = [min(a, b) for a, b in zip(prev.lower(), lower)]
+          upper = [max(a, b) for a, b in zip(prev.upper(), upper)]
+        self._dest_union[key] = BoundingBox(lower, upper)
+        self._dest_writers[key] = self._dest_writers.get(key, 0) + 1
+
+  def _written_in_slices(self, tensor):
+    """Does this tensor get assembled from several writes?
+
+    Deferring the store is right while one operation writes the whole thing:
+    the value can stay in registers and be handed straight to the next
+    consumer.  With several writers each operation holds only its own slice, so
+    the deferred entry --- there is one per name --- would keep whichever came
+    last and silently lose the rest.  Those have to go into the shared buffer
+    as they are produced.
+    """
+    if self._dest_writers.get(id(tensor), 0) > 1:
+      return True
+    # one writer is still not enough if it does not cover everything that gets
+    # read back: `_analyze` intersects `_ns` down to what the operands support,
+    # so a single store can easily be narrower than the declared destination
+    written = self._dest_union.get(id(tensor))
+    read = self._read_union.get(id(tensor))
+    if written is None or read is None:
+      return False
+    return any(read.lower()[j] < written.lower()[j]
+               or read.upper()[j] > written.upper()[j]
+               for j in range(written.rank()))
 
   def _union_of(self, i):
     view = self._ops[i]
@@ -543,11 +599,18 @@ class MultilinearBuilder(AbstractBuilder):
     if self._dest_obj.tensor in self._scopes:
       dest_symbol = self._scopes.get_symbol(self._dest_obj.tensor)
       if dest_symbol.stype == SymbolType.SharedMem:
-        #self._instructions.append(StoreRegToShr(context=self._context,
-        #                                        src=self._temp_regs,
-        #                                        dest=dest_symbol,
-        #                                        shr_mem=self._shr_mem,
-        #                                        num_threads=self._num_threads))
+        if self._written_in_slices(self._dest_obj.tensor):
+          # assembled from several writes: this slice has to land in the shared
+          # buffer now, since `_temp_regs` only ever holds our own part and the
+          # deferred entry keeps just one of them
+          self._instructions.append(StoreRegToShr(context=self._context,
+                                                  src=self._temp_regs,
+                                                  dest=dest_symbol,
+                                                  shr_mem=self._shr_mem,
+                                                  num_threads=self._num_threads,
+                                                  dest_bbox=self._dest_union.get(id(self._dest_obj.tensor)),
+                                                  dest_offset=self._store_offset()))
+          return
         # see note below (but update to the new temp regs)
         self._deferred_stores[dest_symbol.name] = (self._temp_regs, dest_symbol, None)
         self._record_staged(dest_symbol.name,
@@ -558,7 +621,12 @@ class MultilinearBuilder(AbstractBuilder):
                             self._store_offset())
       elif dest_symbol.stype == SymbolType.Global:
         can_use_atomic = self._atomic_update and self._add and (dest_symbol.name not in self._deferred_stores or self._deferred_stores[dest_symbol.name][2] is not None)
-        if self._use_registers_always or can_use_atomic:
+        # same reasoning as for shared memory: a destination assembled from
+        # several writes cannot be kept in registers, since the deferred
+        # entry holds one slice and drops the rest.  Atomics are exempt --
+        # there each write goes out on its own anyway.
+        if can_use_atomic or (self._use_registers_always
+                              and not self._written_in_slices(self._dest_obj.tensor)):
           update = True if can_use_atomic else None
           self._deferred_stores[dest_symbol.name] = (self._temp_regs, dest_symbol, update)
           self._record_staged(dest_symbol.name,
@@ -591,6 +659,15 @@ class MultilinearBuilder(AbstractBuilder):
 
       # do not swap matrix layout in global memory until we need to
       self._scopes.add_symbol(dest_symbol)
+      if self._written_in_slices(self._dest_obj.tensor):
+        self._instructions.append(StoreRegToShr(context=self._context,
+                                                src=self._temp_regs,
+                                                dest=dest_symbol,
+                                                shr_mem=self._shr_mem,
+                                                num_threads=self._num_threads,
+                                                dest_bbox=self._dest_union.get(id(self._dest_obj.tensor)),
+                                                dest_offset=self._store_offset()))
+        return
       self._deferred_stores[dest_symbol.name] = (self._temp_regs, dest_symbol, None)
       self._record_staged(dest_symbol.name,
                           # the *actual* range the accumulator ended up with:

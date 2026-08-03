@@ -73,7 +73,9 @@ class StoreRegToShr(AbstractShrMemWrite):
                src: Symbol,
                dest: Symbol,
                shr_mem: Symbol,
-               num_threads: int):
+               num_threads: int,
+               dest_bbox=None,
+               dest_offset=None):
     super(StoreRegToShr, self).__init__(context)
 
     if src.stype != SymbolType.Register:
@@ -92,11 +94,16 @@ class StoreRegToShr(AbstractShrMemWrite):
     dest.add_user(self)
     shr_mem.add_user(self)
 
-    # bbox = dest.obj.get_bbox()
-    # bbox = BoundingBox([0] * bbox.rank(), bbox.sizes())
-    dest.data_view = DataView(src.data_view.get_bbox().sizes(),
+    # `dest_bbox` is the whole buffer, `dest_offset` where this store lands in
+    # it.  The two differ as soon as a tensor is assembled from several writes:
+    # sizing the view to `src` alone would give every slice its own idea of how
+    # big the shared buffer is, and the last one written would win.
+    self._dest_offset = (list(dest_offset) if dest_offset is not None
+                         else [0] * src.data_view.get_bbox().rank())
+    buffer_bbox = dest_bbox if dest_bbox is not None else src.data_view.get_bbox()
+    dest.data_view = DataView(buffer_bbox.sizes(),
                               permute=None,
-                              bbox=src.data_view.get_bbox())
+                              bbox=buffer_bbox)
 
     self._dest: Symbol = dest
     self._src: Symbol = src#.clone()
@@ -117,7 +124,9 @@ class StoreRegToShr(AbstractShrMemWrite):
 
     def inner(indices):
       self._src.load(writer, self._context, 'value', indices, False)
-      self._dest.store(writer, self._context, 'value', indices, False)
+      self._dest.store(writer, self._context, 'value',
+                       [add_offset(x, self._dest_offset[i])
+                        for i, x in enumerate(indices)], False)
 
     write_loops(self._context, writer, loops, inner)
 
