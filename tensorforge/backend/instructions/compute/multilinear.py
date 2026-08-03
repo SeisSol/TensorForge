@@ -642,8 +642,40 @@ class MultilinearInstruction(ComputeInstruction):
                 threads //= dimmax - dimmin
                 stride *= dimmax - dimmin
 
+        def _dim_covered(i, var):
+            """Is position `var` of this dim inside idest's coverage?
+
+            Static shortcut first: if idest's bounds for this dimension already
+            contain dest's *whole* iteration range, the answer is yes no matter
+            where in that range the current lane sits --- true statically, no
+            need to inspect `var` at all.
+
+            The dynamic fallback (`.lead()`, a block-start value: `nonlead *
+            block`, always a multiple of the block size) only agrees with true
+            per-lane containment while idest's lower bound is itself a multiple
+            of that block size.  A theta-shifted accumulator's bounds need not
+            be: theta is chosen mod num_threads for lane alignment, but here
+            `block` is this loop's own per-dimension stride factor, which can
+            differ.  Comparing a block-start against raw, non-block-aligned
+            bounds silently answered `False` for a lead dimension whose
+            coverage was in fact exact, which is exactly the static case above
+            already resolves --- so this fallback is only reached for the
+            genuinely partial-overlap case it was written for.
+            """
+            lo_i = self._idest.data_view.get_bbox().lower()[i]
+            hi_i = self._idest.data_view.get_bbox().upper()[i]
+            lo_d = self._dest.data_view.get_bbox().lower()[i]
+            hi_d = self._dest.data_view.get_bbox().upper()[i]
+            if lo_i <= lo_d and hi_i >= hi_d:
+                return True
+            if not isinstance(var, (Immediate, LeadIndex)):
+                return True
+            if isinstance(var.nonlead(), (str,)):
+                return True
+            return lo_i <= int(var.lead()) and hi_i > int(var.lead())
+
         def nonlead_writer(varlist):
-            needsLoad = all(not isinstance(varlist[loopmap[f'n{i}']], (Immediate, LeadIndex)) or isinstance(varlist[loopmap[f'n{i}']].nonlead(), (str,)) or (self._idest.data_view.get_bbox().lower()[i] <= int(varlist[loopmap[f'n{i}']].lead()) and self._idest.data_view.get_bbox().upper()[i] > int(varlist[loopmap[f'n{i}']].lead())) for i,_ in enumerate(self._ns))
+            needsLoad = all(_dim_covered(i, varlist[loopmap[f'n{i}']]) for i,_ in enumerate(self._ns))
             if needsLoad:
                 self._idest.load(writer, self._context, 'value', [varlist[loopmap[f'n{i}']] for i,_ in enumerate(self._ns)], False)
                 valvar = 'value'
