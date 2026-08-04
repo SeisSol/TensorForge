@@ -149,3 +149,50 @@ def test_lead_index_off_dim0_needs_no_cross_lane_read(backend, arch):
         f"{name} holds the lead index lane by lane, but it is read through a "
         f"cross-lane primitive: {src[hit.start():hit.start() + 60]!r}"
         if hit else "")
+
+
+# ----------------------------------------------------------------------
+# Every result has to reach memory
+# ----------------------------------------------------------------------
+
+_COMPUTE = re.compile(r"//\s*(\w+) = \+\((?P<ops>[^)]*)\) \+ (?:None|name: (\w+))")
+# `glb_mN = store{r>g}(rM);` but `sN = store{r>s}(localShrMem0, rM);`
+_STORED = re.compile(r"//\s*\w+ = store\{r>[gs]\}\((?:\w+,\s*)?(\w+)\)")
+
+
+def _dropped_results(src):
+    """Result arrays that are neither stored nor read again.
+
+    A multilinear writes into a register array; that array then has to be
+    stored, handed to a later step as its bias, or consumed as an operand.
+    One that is none of those has been computed and thrown away, which is what
+    a lost write looks like from the outside --- no crash, no diagnostic, just
+    a term missing from the answer.
+
+    ``auto& irN = rM;`` is deliberately not counted as a use: that is how a
+    compute writes its result in place, i.e. a definition.
+    """
+    produced, consumed = [], set()
+    for match in _COMPUTE.finditer(src):
+        produced.append(match.group(1))
+        consumed.update(re.findall(r"\b[rs]\d+\b", match.group("ops")))
+        if match.group(3):
+            consumed.add(match.group(3))
+    consumed.update(_STORED.findall(src))
+    return [r for r in produced if r not in consumed]
+
+
+@pytest.mark.parametrize("backend,arch", [("cuda", "sm_86"), ("hip", "gfx90a")])
+def test_sliced_accumulation_writes_every_term(backend, arch):
+    """Slicing and accumulation together still write every term.
+
+    ``_deferred_stores`` holds one entry per symbol name.  Deferring an atomic
+    update therefore makes it collide with the next slice of the same tensor:
+    the second displaced the first, and one term ended up in a register array
+    nothing ever read.
+    """
+    src = _generate("sliced_accumulate", backend, arch).get_kernel()
+    dropped = _dropped_results(src)
+    assert not dropped, f"result(s) computed and discarded: {dropped}"
+    assert src.count("store{r>g}") == 4, (
+        f"four writes were produced, {src.count('store{r>g}')} reach memory")

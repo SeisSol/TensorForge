@@ -269,7 +269,6 @@ class MultilinearBuilder(AbstractBuilder):
     self._read_tensors = {}
     self._eff_reads = {}
     self._eff_writes = {}
-    self._dest_writers = {}
     for descr in descr_list:
       if not isinstance(descr, MultilinearDescr):
         continue
@@ -319,7 +318,6 @@ class MultilinearBuilder(AbstractBuilder):
           lower = [min(a, b) for a, b in zip(prev.lower(), lower)]
           upper = [max(a, b) for a, b in zip(prev.upper(), upper)]
         self._dest_union[key] = BoundingBox(lower, upper)
-        self._dest_writers[key] = self._dest_writers.get(key, 0) + 1
         self._dest_boxes.setdefault(key, []).append(
             BoundingBox([l + o for l, o in zip(dest.bbox.lower(), dest.offset)],
                         [u + o for u, o in zip(dest.bbox.upper(), dest.offset)]))
@@ -814,7 +812,7 @@ class MultilinearBuilder(AbstractBuilder):
             for j, o in enumerate(self._dest_obj.offset)]
 
   def _invalidate_residency(self, name):
-    """Drop the recorded register image of `name`: memory is now newer.
+    """The register image of `name` is about to stop being the newest copy.
 
     `_get_target_symbol` preloads a global destination into registers and
     records that image so the *next* operation on the same tensor can
@@ -826,9 +824,35 @@ class MultilinearBuilder(AbstractBuilder):
     `preload + own term` and overwrites the previous one, so the destination
     ends up holding the first write plus the *last* term and nothing in
     between.
+
+    Which of the two kinds of entry this is decides what "invalidate" means,
+    on the same `src is dest` discriminator `_resolve_reuse` uses.  A preload
+    is a copy of something global memory still holds, so it is simply
+    dropped.  A pending writeback is the *only* copy of a result that has not
+    reached memory yet; dropping that would lose it, so it goes out first.
     """
-    self._deferred_stores.pop(name, None)
-    self._staged_view.pop(name, None)
+    entry = self._deferred_stores.pop(name, None)
+    _, shift = self._staged_view.pop(name, (None, None))
+    if entry is None:
+      return
+    store_regs, store_dest, update = entry
+    if store_regs is store_dest:
+      return                                    # preload: memory still has it
+    if store_dest.stype == SymbolType.Global:
+      if shift is None:
+        shift = [0] * store_dest.data_view.rank()
+      self._instructions.append(StoreRegToGlb(context=self._context,
+                                              src=store_regs,
+                                              dest=store_dest,
+                                              num_threads=self._num_threads,
+                                              atomic=update,
+                                              dest_offset=shift))
+    else:
+      self._instructions.append(StoreRegToShr(context=self._context,
+                                              src=store_regs,
+                                              dest=store_dest,
+                                              shr_mem=self._shr_mem,
+                                              num_threads=self._num_threads))
 
   def _make_store(self):
     if self._dest_obj.tensor in self._scopes:
@@ -856,13 +880,27 @@ class MultilinearBuilder(AbstractBuilder):
                           self._temp_regs.data_view.get_bbox(),
                             self._store_offset())
       elif dest_symbol.stype == SymbolType.Global:
+        in_slices = self._written_in_slices(self._dest_obj.tensor)
         can_use_atomic = self._atomic_update and self._add and (dest_symbol.name not in self._deferred_stores or self._deferred_stores[dest_symbol.name][2] is not None)
-        # same reasoning as for shared memory: a destination assembled from
-        # several writes cannot be kept in registers, since the deferred
-        # entry holds one slice and drops the rest.  Atomics are exempt --
-        # there each write goes out on its own anyway.
-        if can_use_atomic or (self._use_registers_always
-                              and not self._written_in_slices(self._dest_obj.tensor)):
+        # A destination assembled from several writes cannot be kept in
+        # registers: `_deferred_stores` holds one entry per name, so a second
+        # slice would displace the first and its whole contribution would be
+        # computed and thrown away.
+        #
+        # Atomics are exempt from that *only* if they really do go out on
+        # their own.  Deferring one is what makes it collide with the next
+        # slice, so with several writers the update is emitted here instead
+        # of at the epilogue; there is nothing to serialise, since an atomic
+        # add is order-independent by construction.  With a single covering
+        # writer deferring still pays --- it saves the read-modify-write.
+        if can_use_atomic and in_slices:
+          self._instructions.append(StoreRegToGlb(context=self._context,
+                                                  src=self._temp_regs,
+                                                  dest=dest_symbol,
+                                                  num_threads=self._num_threads,
+                                                  atomic=True,
+                                                  dest_offset=self._store_offset()))
+        elif can_use_atomic or (self._use_registers_always and not in_slices):
           update = True if can_use_atomic else None
           self._deferred_stores[dest_symbol.name] = (self._temp_regs, dest_symbol, update)
           self._record_staged(dest_symbol.name,
