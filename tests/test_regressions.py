@@ -11,6 +11,7 @@ dimension a register staging spreads across lanes.
 from __future__ import annotations
 
 import importlib.util
+import itertools
 import re
 from pathlib import Path
 
@@ -379,3 +380,98 @@ def test_case_names_a_single_output(path):
             f"returns (currently {declared!r})")
     elif declared is not None:
         assert declared in sinks, f"{mod.NAME}: OUTPUT={declared!r} is not a sink"
+
+
+# ----------------------------------------------------------------------
+# A store may not read past its accumulator
+# ----------------------------------------------------------------------
+
+_REG_DECL = re.compile(r"float (r\d+)\[(\d+)\]")
+_LOCAL = re.compile(r"int32_t (\w+) = (.+);$")
+_SRC_READ = re.compile(r"float value = (r\d+)\[(\w+)\];")
+
+
+def _expand(expr, env):
+    for _ in range(14):
+        new = re.sub(r"\b(v\d+\w*)\b",
+                     lambda m: f"({env[m.group(1)]})" if m.group(1) in env
+                     else m.group(1), expr)
+        if new == expr:
+            return new
+        expr = new
+    return expr
+
+
+def _out_of_range_reads(src):
+    """Register-array indices a global store uses that the array does not have.
+
+    The accumulator's size is right there in its declaration, and the store's
+    index expressions are local, so the check is exact: expand the local
+    `int32_t` assignments, evaluate at every corner of the loop nest, and
+    compare against the declared length.  A store that believes it holds more
+    than it does shows up here as an index past the end --- and, on the way
+    out, as elements written that were never computed.
+    """
+    lines = src.splitlines()
+    sizes = {m.group(1): int(m.group(2))
+             for m in (_REG_DECL.search(l) for l in lines) if m}
+    bad = []
+    for i, line in enumerate(lines):
+        if not _STORE_HEAD.search(line):
+            continue
+        env, ranges = {}, []
+        for follow in lines[i + 1:i + 400]:
+            t = follow.strip()
+            if _STORE_HEAD.search(t) or re.match(r"//\s*\w+ = (load|\+\()", t):
+                break
+            m = _FOR_BOUNDS.search(t)
+            if m:
+                var = re.search(r"int32_t (\w+) =", t).group(1)
+                ranges.append((var, int(m.group(1)), int(m.group(2)) - 1))
+                continue
+            m = _LOCAL.match(t)
+            if m:
+                env[m.group(1)] = m.group(2)
+            m = _SRC_READ.match(t)
+            if not m:
+                continue
+            reg, idx = m.group(1), _expand(m.group(2), env)
+            idx = re.sub(r"\(threadIdx\.x % \d+\)", "0", idx)
+            names = [v for v, _, _ in ranges]
+            for combo in itertools.product(*[(lo, hi) for _, lo, hi in ranges]):
+                try:
+                    value = eval(idx, {"__builtins__": {}}, dict(zip(names, combo)))
+                except Exception:
+                    break
+                if reg in sizes and not 0 <= value < sizes[reg]:
+                    bad.append((reg, value, sizes[reg]))
+    return bad
+
+
+@pytest.mark.parametrize("backend,arch", [("cuda", "sm_86"), ("hip", "gfx90a")])
+def test_narrow_write_does_not_claim_the_whole_tensor(backend, arch):
+    """A write finds the image of an earlier *read* and must not adopt its box.
+
+    ``_deferred_stores`` is keyed by symbol name and lives for the whole
+    kernel, so the register image staged for reading ``D`` wide is what the
+    later one-column write finds.  Adopting its data view made a one-element
+    accumulator claim thirteen, and the store wrote all thirteen columns.
+    """
+    src = _generate("narrow_write_after_wide_read", backend, arch).get_kernel()
+    bad = _out_of_range_reads(src)
+    assert not bad, f"store reads past its accumulator: {bad[:5]}"
+
+    stores = _store_loops(src)
+    narrow = stores[0]
+    assert len(narrow[1]) == 2 and narrow[1][1] == (0, 1), (
+        f"the write covers one column; the store walks {narrow[1]}")
+
+
+@pytest.mark.parametrize("name", ["accumulate_chain", "sliced_accumulate",
+                                  "sliced_write", "sliced_write_view",
+                                  "accumulate_then_read",
+                                  "narrow_write_after_wide_read"])
+@pytest.mark.parametrize("backend,arch", [("cuda", "sm_86"), ("hip", "gfx90a")])
+def test_no_store_reads_past_its_accumulator(name, backend, arch):
+    src = _generate(name, backend, arch).get_kernel()
+    assert not _out_of_range_reads(src)

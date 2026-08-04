@@ -212,21 +212,8 @@ class StoreRegToGlb(AbstractInstruction):
       # The lead loop is built from the accumulator alone: it drives the thread
       # mapping, and widening it would hand `inner` a LeadIndex outside what
       # the register array holds, which the `needsLoad` test below cannot see
-      # (it recognises `Immediate` only).  So a window that narrows the *lead*
-      # dimension cannot be zero-filled here.  Nothing generates one today ---
-      # yateto's eqspp windows in the poroelastic kernels are all on the
-      # trailing dimensions --- and a silent partial fill is exactly the
-      # failure mode this whole area keeps producing, so say so instead.
-      if (src_bbox.rank() > 0
-          and (src_bbox.lower()[0] > dest_bbox.lower()[0]
-               or src_bbox.upper()[0] < dest_bbox.upper()[0])):
-        raise InternalError(
-            f'{self._dest.name}: the accumulator covers '
-            f'[{src_bbox.lower()[0]},{src_bbox.upper()[0]}) of the lead '
-            f'dimension but this store undertakes to define '
-            f'[{dest_bbox.lower()[0]},{dest_bbox.upper()[0]}); zero-filling '
-            f'the remainder needs the lead loop to run past the register '
-            f'array, which the store cannot express yet')
+      # (it recognises `Immediate` only).  What the promise covers beyond it
+      # gets its own nest below, which writes zeros and never touches `src`.
       loops += [LeadLoop('i0', src_bbox.lower()[0], src_bbox.upper()[0], self._num_threads, 1)]
       for i in range(1, src_bbox.rank()):
         unroll = (src_bbox.lower()[i], src_bbox.upper()[i]) != (dest_bbox.lower()[i], dest_bbox.upper()[i])
@@ -249,6 +236,42 @@ class StoreRegToGlb(AbstractInstruction):
         pass
       else:
         write_loops(self._context, writer, loops, inner)
+
+      self._fill_lead_remainder(writer, src_bbox, dest_bbox, allow_nontemporal)
+
+  def _fill_lead_remainder(self, writer, src_bbox, dest_bbox,
+                           allow_nontemporal) -> None:
+    """Zero what the promise covers beyond the accumulator's lead range.
+
+    A tensor padded for alignment --- 20 basis functions stored as 32 --- is
+    assigned over its eqspp window and read back over the padded range, so the
+    padding has to be defined and nothing else defines it.  The main nest
+    cannot do it: its lead loop is sized to the register array, and running it
+    further would read past the end.  A separate nest over just the remainder
+    can, because it writes a constant and never touches `src`.
+
+    An accumulation never gets here --- it does not zero-fill at all --- so
+    the atomic flag is irrelevant and deliberately not passed on.
+    """
+    if src_bbox.rank() == 0 or self._atomic:
+      return
+    gaps = [(dest_bbox.lower()[0], src_bbox.lower()[0]),
+            (src_bbox.upper()[0], dest_bbox.upper()[0])]
+    for lo, hi in gaps:
+      if lo >= hi:
+        continue
+      loops = [LeadLoop('z0', lo, hi, self._num_threads, 1)]
+      for i in range(1, src_bbox.rank()):
+        loops += [Loop(f'z{i}', min(src_bbox.lower()[i], dest_bbox.lower()[i]),
+                       max(src_bbox.upper()[i], dest_bbox.upper()[i]), 1)]
+
+      def zero(indices):
+        self._dest.store(writer, self._context, '0',
+                         [add_offset(x, self._dest_offset[i])
+                          for i, x in enumerate(indices)],
+                         allow_nontemporal, None)
+
+      write_loops(self._context, writer, loops, zero)
 
   def __str__(self) -> str:
     return f'{self._dest.name} = store{{r>g}}({self._src.name});'

@@ -874,9 +874,12 @@ class MultilinearBuilder(AbstractBuilder):
     this shape: `m4[:, 6:13] = Q[:, 10:13] x S` is the only assignment to
     `m4`, and the three accumulations that follow read columns 0..5 back.
 
-    A destination with a nonzero offset is a *view*: a slice of the tensor,
-    with its own index space, and the rest of the tensor belongs to other
-    descriptors.  Touching anything outside it destroys their work.
+    A destination the frontend marked as *sliced* is a view: a slice of the
+    tensor, with its own index space, and the rest belongs to other
+    descriptors.  Touching anything outside it destroys their work.  A nonzero
+    offset implies it, but a slice starting at index 0 has none --- the
+    space-time predictor writes exactly that, one row and one column at a
+    time --- so the flag carries it instead.
 
     An accumulation never zero-fills either way: it is defined in terms of
     what is already there.
@@ -885,7 +888,7 @@ class MultilinearBuilder(AbstractBuilder):
     sparse operand, an intersection with what the operands support --- and
     that difference is what the store legitimately fills with zeros.
     """
-    if self._add or any(o != 0 for o in self._dest_obj.offset):
+    if self._add or getattr(self._dest_obj, 'sliced', False):
       bbox = self._dest_obj.bbox
     else:
       bbox = self._dest_obj.tensor.get_bbox()

@@ -132,12 +132,22 @@ class SubTensor(TensorWrapper):
     def __init__(self,
         tensor: Tensor,
         bbox: Union[BoundingBox, None] = None,
-        offset: Union[list[int], None] = None):
+        offset: Union[list[int], None] = None,
+        sliced: bool = False):
         self.tensor = tensor
         self.bbox = bbox
         if bbox is None:
             self.bbox = self.tensor.bbox
         self.offset = offset or ([0] * self.bbox.rank())
+        # Whether this names a *slice* of the tensor rather than the tensor
+        # itself.  The two look alike -- both carry a box narrower than the
+        # tensor's -- but they mean opposite things when the box is written:
+        # a narrow box on the tensor itself is an eqspp window, so everything
+        # outside it is zero and a write has to say so; a slice owns only what
+        # it names.  A nonzero offset gives it away, but a slice starting at
+        # index 0 has none, so the frontend states it instead of leaving the
+        # backend to guess.
+        self.sliced = sliced or any(o != 0 for o in self.offset)
 
     def __str__(self):
         return f'{self.tensor}({self.bbox})'

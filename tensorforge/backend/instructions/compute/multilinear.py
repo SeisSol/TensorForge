@@ -129,6 +129,12 @@ class MultilinearInstruction(ComputeInstruction):
                         f'is not covered by what the registers hold '
                         f'([{have.lower()[j]},{have.upper()[j]}))')
 
+    @staticmethod
+    def _same_box(a, b):
+        return (a.rank() == b.rank()
+                and list(a.lower()) == list(b.lower())
+                and list(a.upper()) == list(b.upper()))
+
     def _analyze(self):
         self._check_offsets()
 
@@ -213,15 +219,24 @@ class MultilinearInstruction(ComputeInstruction):
             # `prev`/`next` are adopted for their *layout*: when the result is
             # handed to or taken from a register image, the accumulator has to
             # be indexed the way that image is, or the transfer between them is
-            # off.  That only applies to an image --- a global or shared symbol
-            # describes the whole buffer, and this operation writes the box its
-            # descriptor declares, which for a sliced write is a small part of
-            # it.  Adopting the buffer's box there made the accumulator claim a
-            # range it does not hold: the store then read past the end of the
-            # register array and wrote the slice at the wrong offset.
+            # off.  Two things disqualify a neighbour.  A global or shared
+            # symbol describes the whole buffer, not the box this operation
+            # writes.  And a register image is only usable if it is an image of
+            # the *same* box: `_deferred_stores` is keyed by symbol name and
+            # lives for the whole kernel, so what a later operation finds there
+            # may have been staged for a read of a much wider region.  In the
+            # poroelastic space-time predictor a one-row-one-column write
+            # picked up the image of the whole 32x13x4 tensor and inherited its
+            # box; the accumulator then claimed elements it never computed, and
+            # the store wrote all of them --- reading past the end of the
+            # register array on the way.
             for neighbour in (self._prev, self._next):
-                if neighbour is not None and neighbour.stype in (
-                        SymbolType.Register, SymbolType.Scratch):
+                if (neighbour is not None
+                        and neighbour.stype in (SymbolType.Register,
+                                                SymbolType.Scratch)
+                        and neighbour.data_view is not None
+                        and self._same_box(neighbour.data_view.get_bbox(),
+                                           self._idest.data_view.get_bbox())):
                     self._dest.data_view = neighbour.data_view
             if self._dest.data_view is None:
                 self._dest.data_view = self._idest.data_view

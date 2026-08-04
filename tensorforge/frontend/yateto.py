@@ -122,6 +122,10 @@ class GpuKernelGeneratorV1:
       # the access site only.
       tml = op.memoryLayout
       offset = [0] * currentPreShape.rank()
+      # a view means the operand names a slice, not the tensor; see
+      # SubTensor.sliced.  The offset alone does not carry it: `subslice` from
+      # index 0 produces a view with a zero shift.
+      sliced = type(tml).__name__ == 'MemoryLayoutView'
       while type(tml).__name__ == 'MemoryLayoutView':
         # relidx() adds this view's `start` in the one dimension it slices;
         # nested views compose, so this accumulates the full logical->storage shift
@@ -151,7 +155,7 @@ class GpuKernelGeneratorV1:
             f'{op.name}: logical bbox [{lo},{hi}) + offset {offset[j]} escapes ' \
             f'storage [{storeBox[j].start},{storeBox[j].stop}) in dim {j}'
 
-      return SubTensor(tensor, currentPreShape, offset)
+      return SubTensor(tensor, currentPreShape, offset, sliced=sliced)
 
   def add_scalar(self, ops, statements, indices):
     indicesIndexed = {}
