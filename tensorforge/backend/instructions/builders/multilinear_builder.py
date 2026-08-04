@@ -214,7 +214,10 @@ class MultilinearBuilder(AbstractBuilder):
     # slice in `_temp_regs`.
     self._dest_union = {}
     self._read_union = {}
-    self._dest_writers = {}
+    # every box each writer of a destination states; the count is how many
+    # writers there are, and whether they all match the union is whether the
+    # tensor is assembled from pieces
+    self._dest_boxes = {}
     for descr in descr_list:
       if not isinstance(descr, MultilinearDescr):
         continue
@@ -263,7 +266,9 @@ class MultilinearBuilder(AbstractBuilder):
           lower = [min(a, b) for a, b in zip(prev.lower(), lower)]
           upper = [max(a, b) for a, b in zip(prev.upper(), upper)]
         self._dest_union[key] = BoundingBox(lower, upper)
-        self._dest_writers[key] = self._dest_writers.get(key, 0) + 1
+        self._dest_boxes.setdefault(key, []).append(
+            BoundingBox([l + o for l, o in zip(dest.bbox.lower(), dest.offset)],
+                        [u + o for u, o in zip(dest.bbox.upper(), dest.offset)]))
 
   def _written_in_slices(self, tensor):
     """Does this tensor get assembled from several writes?
@@ -274,8 +279,21 @@ class MultilinearBuilder(AbstractBuilder):
     the deferred entry --- there is one per name --- would keep whichever came
     last and silently lose the rest.  Those have to go into the shared buffer
     as they are produced.
+
+    Several writers are *not* by themselves such a case.  An accumulation
+    chain --- `d = a1 b1` followed by `d += a2 b2` and so on, which is what a
+    yateto flux or ADER derivative kernel looks like --- has every writer
+    covering the same box, each reading what the previous one produced.  There
+    the last accumulator holds the whole tensor, deferring is exactly right,
+    and forcing the store out per term costs a global round trip on every
+    term.  So the question is not how many writers there are but whether any
+    of them writes less than the union.
     """
-    if self._dest_writers.get(id(tensor), 0) > 1:
+    boxes = self._dest_boxes.get(id(tensor), [])
+    union = self._dest_union.get(id(tensor))
+    if union is not None and any(
+        b.lower()[j] > union.lower()[j] or b.upper()[j] < union.upper()[j]
+        for b in boxes for j in range(union.rank())):
       return True
     # one writer is still not enough if it does not cover everything that gets
     # read back: `_analyze` intersects `_ns` down to what the operands support,
@@ -602,11 +620,29 @@ class MultilinearBuilder(AbstractBuilder):
     return [o - (self._theta if j == 0 else 0)
             for j, o in enumerate(self._dest_obj.offset)]
 
+  def _invalidate_residency(self, name):
+    """Drop the recorded register image of `name`: memory is now newer.
+
+    `_get_target_symbol` preloads a global destination into registers and
+    records that image so the *next* operation on the same tensor can
+    accumulate straight into it.  That is only sound while the image stays
+    the newest copy.  As soon as this operation writes memory from a
+    different array --- which is what the eager-store paths below do --- the
+    recorded image is one accumulation step behind, and leaving it in place
+    hands every later `+=` a stale bias: each step then computes
+    `preload + own term` and overwrites the previous one, so the destination
+    ends up holding the first write plus the *last* term and nothing in
+    between.
+    """
+    self._deferred_stores.pop(name, None)
+    self._staged_view.pop(name, None)
+
   def _make_store(self):
     if self._dest_obj.tensor in self._scopes:
       dest_symbol = self._scopes.get_symbol(self._dest_obj.tensor)
       if dest_symbol.stype == SymbolType.SharedMem:
         if self._written_in_slices(self._dest_obj.tensor):
+          self._invalidate_residency(dest_symbol.name)
           # assembled from several writes: this slice has to land in the shared
           # buffer now, since `_temp_regs` only ever holds our own part and the
           # deferred entry keeps just one of them
@@ -643,6 +679,7 @@ class MultilinearBuilder(AbstractBuilder):
                           self._temp_regs.data_view.get_bbox(),
                               self._store_offset())
         else:
+          self._invalidate_residency(dest_symbol.name)
           self._instructions.append(StoreRegToGlb(context=self._context,
                                                   src=self._temp_regs,
                                                   dest=dest_symbol,

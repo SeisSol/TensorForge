@@ -40,6 +40,11 @@ _FOR = re.compile(r'^for\s*\((?:const\s+)?\w+\s+(?P<v>\w+)\s*=\s*(?P<a>.+?);'
                   r'\s*\w+\s*(?P<cmp><=?|>=?)\s*(?P<b>.+?);\s*(?P<step>.+?)\)$')
 _IF = re.compile(r'^if\s*\((?P<c>.*)\)$')
 
+# How many slots `evaluate(preset=...)` fills per array.  Larger than any
+# operand a test case declares; the interpreter reads only what the kernel
+# addresses, so the surplus is inert.
+_PRESET_SLOTS = 4096
+
 
 class Slot:
     """Flat memory, addressed by ``(base, index)``."""
@@ -284,10 +289,26 @@ def parse(src: str) -> List:
 
 
 def evaluate(src: str, tid: int = 0, seed: int = 0,
-             globals_only: bool = False) -> Dict:
-    """Run one kernel body for one thread; return the resulting memory."""
+             globals_only: bool = False,
+             preset: Optional[Dict[str, float]] = None) -> Dict:
+    """Run one kernel body for one thread; return the resulting memory.
+
+    ``preset`` maps a global array name to a value every one of its slots is
+    filled with before the run.  Unwritten slots otherwise take a
+    pseudo-random value derived from their identity, which is what makes two
+    runs comparable --- but it also means an input cannot be *chosen*.  Being
+    able to zero one operand turns this into a reference-free sensitivity
+    test: if the result does not move when a term's operand is zeroed, the
+    kernel is not using that term.
+    """
     body = src[src.index('{'):]
     mem = Slot(seed)
+    if preset:
+        for name, value in preset.items():
+            # generously wide: the interpreter only ever reads slots the
+            # kernel addresses, so over-filling costs nothing
+            for idx in range(_PRESET_SLOTS):
+                mem.write(name, idx, value)
     env = {
         'threadIdx': type('T', (), {'x': tid, 'y': 0, 'z': 0})(),
         'blockIdx': type('B', (), {'x': 0, 'y': 0, 'z': 0})(),
