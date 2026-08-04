@@ -19,6 +19,7 @@ import pytest
 
 import kernel_eval
 from tensorforge.backend.instructions.memory.load import GlbToRegLoader
+from tensorforge.common.basic_types import Datatype
 from tensorforge.common.context import Context
 from tensorforge.generators.generator import Generator
 
@@ -475,3 +476,148 @@ def test_narrow_write_does_not_claim_the_whole_tensor(backend, arch):
 def test_no_store_reads_past_its_accumulator(name, backend, arch):
     src = _generate(name, backend, arch).get_kernel()
     assert not _out_of_range_reads(src)
+
+
+# ----------------------------------------------------------------------
+# The accumulation bias must come from where the result goes
+# ----------------------------------------------------------------------
+
+_BIAS = re.compile(r"//\s*(\w+) = \+\(.*?\) \+ name: (\w+),")
+_GUARD_LINE = re.compile(r"if \((.+)\) \{")
+_OLDVALUE = re.compile(r"float oldvalue = (\w+)\[(\w+)\];")
+
+
+def _predictor_descrs():
+    """The space-time predictor's inner loop, reduced to four descriptors.
+
+        t             = A x v                    (temporary, whole box)
+        D[10:20, 12] += t[10:20, 12] x M0
+        t[10:20, 8]  += s1 * D[10:20, 12] * s2   (read-modify-write on t)
+        D[10:20, 11] += t[10:20, 11] x M1
+
+    Every write slices the *lead* dimension, which pins the accumulator's
+    origin, and `D` is read back in between.  That combination is what the
+    three defects below need, and nothing in `cases/` produces it.
+    """
+    from tensorforge.common.basic_types import Addressing
+    from tensorforge.common.matrix.boundingbox import BoundingBox
+    from tensorforge.common.matrix.tensor import SubTensor, Tensor
+    from tensorforge.generators.descriptions import MultilinearDescr
+
+    M, N, T, LO, HI = 32, 13, 4, 10, 20
+
+    def tensor(shape, alias, is_tmp=False, addressing=Addressing.PTR_BASED):
+        return Tensor(shape, addressing,
+                      BoundingBox([0] * len(shape), list(shape)),
+                      alias=alias, is_tmp=is_tmp, datatype=Datatype.F32)
+
+    def sliced(t, col):
+        return SubTensor(t, BoundingBox([0, 0, 0], [HI - LO, 1, T]),
+                         [LO, col, 0], sliced=True)
+
+    a = tensor([M, N], "A")
+    v = tensor([T], "v", addressing=Addressing.NONE)
+    d = tensor([M, N, T], "D")
+    t = tensor([M, N, T], "t", is_tmp=True, addressing=Addressing.STRIDED)
+    s1 = tensor([], "s1", addressing=Addressing.SCALAR)
+    s2 = tensor([], "s2", addressing=Addressing.SCALAR)
+
+    def contract(dest_col, src_col, mat):
+        return MultilinearDescr(
+            dest=sliced(d, dest_col), ops=[sliced(t, src_col), SubTensor(mat)],
+            target=[[0, 1, -1], [-1, 2]], permute=[[0, 1, 2], [0, 1]], add=True)
+
+    return [
+        MultilinearDescr(dest=SubTensor(t), ops=[SubTensor(a), SubTensor(v)],
+                         target=[[0, 1], [2]], permute=[[0, 1], [0]]),
+        contract(12, 12, tensor([T, T], "M0")),
+        MultilinearDescr(dest=sliced(t, 8),
+                         ops=[SubTensor(s1), sliced(d, 12), SubTensor(s2)],
+                         target=[[], [0, 1, 2], []],
+                         permute=[[], [0, 1, 2], []], add=True),
+        contract(11, 11, tensor([T, T], "M1")),
+    ]
+
+
+def _predictor_source(backend, arch):
+    ctx = Context(arch=arch, backend=backend, fp_type=Datatype.F32)
+    gen = Generator(_predictor_descrs(), ctx)
+    gen.generate()
+    return gen.get_kernel()
+
+
+def _guard_after(lines, index):
+    for line in lines[index + 1:index + 8]:
+        m = _GUARD_LINE.search(line)
+        if m:
+            return re.sub(r"v\d+_lead", "LEAD", m.group(1))
+    return None
+
+
+# CUDA only: a vendor with atomic updates takes the `can_use_atomic`
+# path instead, where the accumulation has no bias operand at all.
+@pytest.mark.parametrize("backend,arch", [("cuda", "sm_86")])
+def test_bias_is_loaded_by_the_lanes_that_use_it(backend, arch):
+    """The destination preload runs on the same lanes as the compute.
+
+    `GlbToRegLoader` consumes a slicing offset while loading, so the image sits
+    at origin 0 and element `s` lands in lane `s % T`.  Theta, though, is
+    pinned on the destination's offset and shifts the whole lead loop by it.
+    With the two out of step the lanes that did the arithmetic never loaded a
+    bias and the ones that loaded it did nothing: `+=` quietly became `=`.
+    """
+    src = _predictor_source(backend, arch)
+    lines = src.splitlines()
+    loads = {m.group(1): i for i, l in enumerate(lines)
+             for m in [re.match(r"\s*//\s*(\w+) = load\{g>r\}\(glb_\w+\);", l)] if m}
+    checked = 0
+    for i, line in enumerate(lines):
+        m = _BIAS.search(line)
+        if not m or m.group(2) not in loads:
+            continue
+        checked += 1
+        assert _guard_after(lines, loads[m.group(2)]) == _guard_after(lines, i), (
+            f"{m.group(2)} is loaded by different lanes than the compute that "
+            f"uses it as bias: load guard "
+            f"{_guard_after(lines, loads[m.group(2)])!r} vs compute guard "
+            f"{_guard_after(lines, i)!r}")
+    assert checked, "expected at least one register-resident bias"
+
+
+# CUDA only: a vendor with atomic updates takes the `can_use_atomic`
+# path instead, where the accumulation has no bias operand at all.
+@pytest.mark.parametrize("backend,arch", [("cuda", "sm_86")])
+def test_shared_bias_carries_the_destination_offset(backend, arch):
+    """A destination read live out of shared memory needs its slicing offset.
+
+    `_get_target_symbol` falls back to the destination symbol itself for a
+    shared temporary, and the compute then addresses it with its own loop
+    indices.  The store adds the descriptor's offset on the way out; the read
+    has to as well, or the accumulation takes its bias from the wrong
+    elements --- `t[10:20, 8] += ...` read `t[0:10, 0]`.
+    """
+    src = _predictor_source(backend, arch)
+    lines = src.splitlines()
+    checked = 0
+    for i, line in enumerate(lines):
+        m = _BIAS.search(line)
+        if not m or not m.group(2).startswith("s"):
+            continue
+        sym = m.group(2)
+        read = next((_OLDVALUE.search(x) for x in lines[i:i + 400]
+                     if _OLDVALUE.search(x)
+                     and _OLDVALUE.search(x).group(1) == sym), None)
+        assert read is not None, f"no bias read from {sym}"
+        addr = next((x for x in lines[i:i + 400]
+                     if f"int32_t {read.group(2)} =" in x), None)
+        assert addr is not None
+        checked += 1
+        # the store that follows addresses the same symbol; both must agree
+        store = next((x for x in lines[i:i + 500] if f"{sym}[" in x and "] = " in x
+                      and "oldvalue" not in x), None)
+        assert store is not None, f"no store back to {sym}"
+        shifts = set(re.findall(r"\+ (\d+)\)", addr.split("=", 1)[1]))
+        assert shifts, (
+            f"the bias read from {sym} carries no slicing offset "
+            f"({addr.strip()}); the store does")
+    assert checked, "expected a shared-memory bias"

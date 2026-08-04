@@ -145,7 +145,8 @@ class StoreRegToGlb(AbstractInstruction):
                num_threads: int,
                atomic,
                dest_offset=None,
-               dest_bbox=None):
+               dest_bbox=None,
+               zero_fill=True):
     super(StoreRegToGlb, self).__init__(context)
 
     if src.stype != SymbolType.Register:
@@ -187,7 +188,11 @@ class StoreRegToGlb(AbstractInstruction):
     # and the difference has to be zero-filled.  The *tensor's* box is not that
     # promise: a sliced write declares a small part of it, and the rest belongs
     # to other descriptors or to whatever the caller put there.
-    self._promise = dest_bbox
+    # An accumulation defines nothing: it adds to what is there.  Only an
+    # assignment undertakes to cover a box, and only then may the part
+    # `_analyze` narrowed away be filled with zeros.
+    self._promise = dest_bbox if zero_fill else None
+    self._zero_fill = zero_fill
 
   def gen_ir(self, writer: Writer) -> None:
     writer.new_line()
@@ -197,7 +202,9 @@ class StoreRegToGlb(AbstractInstruction):
 
     writer(f'// {self}')
     src_bbox = self._src.data_view.get_bbox()
-    if self._promise is not None:
+    if not getattr(self, '_zero_fill', True):
+      dest_bbox = src_bbox
+    elif self._promise is not None:
       dest_bbox = self._promise
     else:
       # pull the destination's storage bbox back into logical coordinates so

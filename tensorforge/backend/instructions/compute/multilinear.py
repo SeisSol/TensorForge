@@ -33,7 +33,8 @@ class MultilinearInstruction(ComputeInstruction):
                dest_obj,
                num_threads: int,
                blockcount: int=1,
-               theta: int=0):
+               theta: int=0,
+               prev_offset=None):
         super(MultilinearInstruction, self).__init__(context)
         self._dest = dest
         self._ops = ops
@@ -51,6 +52,7 @@ class MultilinearInstruction(ComputeInstruction):
         # matter, so shifting it is free apart from at most one extra slot.
         self._theta = theta
         self._prev = prev
+        self._prev_offset = prev_offset
         self._next = next
         self._dest_obj = dest_obj
 
@@ -709,7 +711,7 @@ class MultilinearInstruction(ComputeInstruction):
                 writer(f'const {self._dest.get_fptype()} newvalue1 = {self._productOperation.format(valvar, f"{scalar_var}")};')
                 valvar = 'newvalue1'
             if self._prev is not None:
-                self._prev.load(writer, self._context, 'oldvalue', [varlist[loopmap[f'n{i}']] for i,_ in enumerate(self._ns)], False)
+                self._prev.load(writer, self._context, 'oldvalue', [add_offset(varlist[loopmap[f'n{i}']], self._prev_offset[i]) if self._prev_offset else varlist[loopmap[f'n{i}']] for i,_ in enumerate(self._ns)], False)
                 writer(f'const {self._dest.get_fptype()} newvalue2 = {self._sumOperation.format("oldvalue", valvar)};')
                 valvar = 'newvalue2'
             self._dest.store(writer, self._context, valvar, [varlist[loopmap[f'n{i}']] for i,_ in enumerate(self._ns)], False)

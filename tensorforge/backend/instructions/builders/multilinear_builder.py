@@ -760,10 +760,75 @@ class MultilinearBuilder(AbstractBuilder):
     self._instructions.append(registerAlloc)
     return registers
 
+  def _target_image_fits(self, name):
+    """Does the image staged under `name` hold exactly this destination?
+
+    `_deferred_stores` and `_staged_view` are keyed by symbol name and live for
+    the whole kernel, so what a destination finds under its name may have been
+    staged for something else entirely --- most often an *operand* read of a
+    different slice of the same tensor.  Taking it as the accumulation bias
+    then reads the wrong elements, from the wrong lanes: in the poroelastic
+    space-time predictor `m2[:, 11] += ...` picked up the image of
+    `m2[:, 12]`, staged one descriptor earlier, and accumulated onto that.
+
+    An accumulation chain onto the same box --- the case the reuse exists for
+    --- has the staged region equal to the destination's, so require that.
+    """
+    staged = self._staged_view.get(name)
+    if staged is None:
+      return False
+    covered, shift = staged
+    if covered is None or covered.rank() != self._dest_obj.bbox.rank():
+      return False
+    want = ([l + o for l, o in zip(self._dest_obj.bbox.lower(), self._dest_obj.offset)],
+            [u + o for u, o in zip(self._dest_obj.bbox.upper(), self._dest_obj.offset)])
+    have = ([l + s for l, s in zip(covered.lower(), shift)],
+            [u + s for u, s in zip(covered.upper(), shift)])
+    return have == want
+
+  def _dest_preload_view(self, dest_symbol):
+    """The destination, staged in the tensor's own lead coordinates.
+
+    `GlbToRegLoader` consumes a slicing offset while loading: it reads
+    `index + offset` and stores at `index`, so the image sits at origin 0 and
+    element `s` lands in lane `s % T`.  For an operand that is fine ---
+    `_stage_shift`/`_staged_region` rebase the offset to match, and
+    `_lead_origin_shift` then reads the rebased one.
+
+    The destination has no such rebasing.  `_lead_origin_shift` pins theta on
+    `_dest_obj.offset[0]`, and `_analyze` shifts the whole lead loop by it, so
+    the compute and the store address row `n0` in lane `n0 % T`.  An absorbed
+    offset puts the preloaded bias somewhere else entirely: for
+    `m2[10:20, 12] += ...` the loader filled lanes 0..9 while lanes 10..19 did
+    the arithmetic and stored, so every accumulation read a bias of zero and
+    the destination's previous value was dropped.  `+=` silently became `=`.
+
+    Folding the *lead* offset into the box instead leaves that axis in tensor
+    coordinates, where lane `l` holds row `l` --- which is what theta assumes.
+    The other axes keep theirs: the compute addresses them logically, so an
+    absorbed offset there would send the read past the start of the array.
+    """
+    bbox = self._dest_obj.bbox
+    offset = list(self._dest_obj.offset)
+    if not offset:
+      return SymbolView(dest_symbol, bbox, offset)
+    lower, upper = list(bbox.lower()), list(bbox.upper())
+    lower[0] += offset[0]
+    upper[0] += offset[0]
+    offset[0] = 0
+    return SymbolView(dest_symbol, BoundingBox(lower, upper), offset)
+
   def _get_target_symbol(self, prev=False, next=False):
     dest_symbol = self._scopes.get_symbol(self._dest_obj.tensor)
     if dest_symbol is None:
       return None
+    if (dest_symbol.name in self._deferred_stores
+        and not self._target_image_fits(dest_symbol.name)):
+      # staged for something else: it cannot serve as this destination.  A
+      # pending writeback still has to reach memory, which is exactly what
+      # `_invalidate_residency` does; a preload is simply dropped and the
+      # ordinary path below stages the region this operation needs.
+      self._invalidate_residency(dest_symbol.name)
     if dest_symbol.name in self._deferred_stores:
       dest_registers,_,_ = self._deferred_stores[dest_symbol.name]
       return dest_registers
@@ -772,37 +837,57 @@ class MultilinearBuilder(AbstractBuilder):
       return None
     elif self._preload_registers and dest_symbol.stype == SymbolType.Global and not self._atomic_update and not next:
       symbol, load_op = self._make_loader_and_symbol_reg(
-          SymbolView(dest_symbol, self._dest_obj.bbox, self._dest_obj.offset), False)
+          self._dest_preload_view(dest_symbol), False)
       self._deferred_stores[dest_symbol.name] = symbol.symbol, symbol.symbol, None
       self._record_staged(dest_symbol.name,
                           symbol.symbol.data_view.get_bbox(),
-                          self._dest_obj.offset)
+                          [0] + list(self._dest_obj.offset[1:]))
       self._instructions.append(load_op)
       return symbol.symbol
     elif self._preload_shmem and dest_symbol.stype == SymbolType.Global and not self._atomic_update and not next:
       symbol, load_op = self._make_loader_and_symbol(
-          SymbolView(dest_symbol, self._dest_obj.bbox, self._dest_obj.offset), None)
+          self._dest_preload_view(dest_symbol), None)
       self._deferred_stores[dest_symbol.name] = symbol.symbol, symbol.symbol, None
       self._record_staged(dest_symbol.name,
                           symbol.symbol.data_view.get_bbox(),
-                          self._dest_obj.offset)
+                          [0] + list(self._dest_obj.offset[1:]))
       self._instructions.append(load_op)
       return symbol.symbol
     else:
       return dest_symbol
 
   def _make_compute(self):
+    prev = self._get_target_symbol(True) if self._add else None
     self._instructions.append(MultilinearInstruction(context=self._context,
                                    ops=self._mem_regions,
                                    target=self._descr.target,
                                    dest=self._temp_regs,
                                    num_threads=self._num_threads,
-                                   prev=self._get_target_symbol(True) if self._add else None,
+                                   prev=prev,
+                                   prev_offset=self._prev_offset(prev),
                                    next=self._get_target_symbol(True, True),
                                    productOperation=MulOperator(),
                                    sumOperation=AddOperator(),
                                    dest_obj=self._dest_obj,
                                    theta=self._theta))
+
+  def _prev_offset(self, prev):
+    """Where the accumulation bias sits, relative to the loop indices.
+
+    A staged image was loaded through `_dest_preload_view`, so it already sits
+    where the loop indices point and needs no shift.  A destination read live
+    out of memory --- which is what `_get_target_symbol` falls back to for a
+    shared temporary --- does not: the loop indices are the descriptor's own,
+    and its slicing offset has to be added, exactly as `_make_store` adds it on
+    the way out.  Without it a `t0[10:20, 8] += ...` read its bias from
+    `t0[0:10, 0]` and wrote the sum to the right place, so the temporary
+    accumulated onto the wrong elements.
+    """
+    if prev is None:
+      return None
+    if prev is self._scopes.get_symbol(self._dest_obj.tensor):
+      return self._store_offset()
+    return None
 
   def _store_offset(self):
     """Destination offset seen by the store, in the shifted origin.
@@ -852,7 +937,8 @@ class MultilinearBuilder(AbstractBuilder):
                                               num_threads=self._num_threads,
                                               atomic=update,
                                               dest_offset=shift,
-                                              dest_bbox=promise))
+                                              dest_bbox=promise,
+                                              zero_fill=promise is not None))
     else:
       self._instructions.append(StoreRegToShr(context=self._context,
                                               src=store_regs,
@@ -945,11 +1031,13 @@ class MultilinearBuilder(AbstractBuilder):
                                                   num_threads=self._num_threads,
                                                   atomic=True,
                                                   dest_offset=self._store_offset(),
-                                                  dest_bbox=self._promised_box()))
+                                                  dest_bbox=self._promised_box(),
+                                                  zero_fill=not self._add))
         elif can_use_atomic or (self._use_registers_always and not in_slices):
           update = True if can_use_atomic else None
           self._deferred_stores[dest_symbol.name] = (self._temp_regs, dest_symbol, update)
-          self._promised[dest_symbol.name] = self._promised_box()
+          self._promised[dest_symbol.name] = (
+              self._promised_box() if not self._add else None)
           self._record_staged(dest_symbol.name,
                           # the *actual* range the accumulator ended up with:
                           # _analyze intersects the operands, so _ns can be
@@ -964,7 +1052,8 @@ class MultilinearBuilder(AbstractBuilder):
                                                   num_threads=self._num_threads,
                                                   atomic=None,
                                                   dest_offset=self._store_offset(),
-                                                  dest_bbox=self._promised_box()))
+                                                  dest_bbox=self._promised_box(),
+                                                  zero_fill=not self._add))
       elif dest_symbol.stype == SymbolType.Register:
         self._instructions.append(StoreRegToReg(context=self._context,
                                                 src=self._temp_regs,
@@ -1022,4 +1111,5 @@ class MultilinearBuilder(AbstractBuilder):
                                                   num_threads=self._num_threads,
                                                   atomic=update,
                                                   dest_offset=shift,
-                                                  dest_bbox=self._promised.get(name)))
+                                                  dest_bbox=self._promised.get(name),
+                                                  zero_fill=self._promised.get(name) is not None))
