@@ -444,10 +444,18 @@ class GlbToRegLoader(MemoryInstruction, LoadInstruction):
         start = total_count_g
 
     else:
+      # The lane axis is whichever dimension the destination declares, not
+      # dimension 0: a transposed operand carries the lead index elsewhere, and
+      # writing the image with the lane on dimension 0 while every reader
+      # addresses it through `lead_dims` puts the two out of step.
+      lead_pos = self._dest.lead_dims[0]
       loops = []
-      loops += [LeadLoop('i0', src_bbox.lower()[0], src_bbox.upper()[0], self._num_threads, 1)]
-      for i in range(1, src_bbox.rank()):
-        loops += [Loop(f'i{i}', src_bbox.lower()[i], src_bbox.upper()[i], 1)]
+      for i in range(src_bbox.rank()):
+        if i == lead_pos:
+          loops += [LeadLoop(f'i{i}', src_bbox.lower()[i], src_bbox.upper()[i],
+                             self._num_threads, 1)]
+        else:
+          loops += [Loop(f'i{i}', src_bbox.lower()[i], src_bbox.upper()[i], 1)]
 
       def inner(indices):
         # logical index in on the register side, storage index out on the

@@ -67,7 +67,8 @@ class MultilinearBuilder(AbstractBuilder):
     self._add = descr.add
 
     self._mem_regions = [None] * len(self._ops)
-
+    # per operand: which of its dimensions is spread across lanes
+    self._lead_pos = [0] * len(self._ops)
 
     for i in range(len(self._ops)):
         self._make_load_op(i)
@@ -87,10 +88,51 @@ class MultilinearBuilder(AbstractBuilder):
     has_lead_dim = 0 in self._descr.target[i]
     transpose = self._descr.permute[i] != [j for j in range(len(self._descr.target[i]))]
 
+    # Which operand dimension carries the destination's lead index --- i.e.
+    # which one has to end up spread across lanes.  Everything downstream of a
+    # register staging already assumes this dimension is the lane axis:
+    # `_lead_origin_shift` pins the origin on `target[i].index(0)`, and
+    # `MultilinearInstruction._check_offsets` checks the slicing remainder
+    # there.  Only the staging itself used to hardcode dimension 0, so an
+    # operand whose lead index sits elsewhere --- a transposed one --- got an
+    # image whose lane axis was a *contraction* dimension.  `Symbol.load` then
+    # found a loop constant on what it believed was the lane axis and emitted a
+    # cross-lane broadcast, which hands every lane the same element and drops
+    # the lane-distributed index entirely.
+    lead_pos = self._descr.target[i].index(0) if has_lead_dim else 0
+    self._lead_pos[i] = lead_pos
+
     needs_reload = (transpose or not has_lead_dim) and not prefer_broadcast
     needs_reload2 = transpose or not has_lead_dim
 
     name = self._ops[i].symbol.name
+
+    # An image already staged for an earlier operation spreads whichever
+    # dimension *that* operation needed across lanes.  Reusing it for an
+    # operand with a different lane axis -- the same tensor used once plainly
+    # and once transposed -- is a cross-lane transpose, which an address
+    # cannot express.  Both cases have a fallback already:
+    #   * a preload of a global input (`src is dest`) can be dropped, since
+    #     global memory still holds the value and the ordinary path re-stages
+    #     it in the orientation this operand wants;
+    #   * a pending store of a temporary has to go out to shared memory first,
+    #     which is exactly what `needs_reload` already does (and what the CUDA
+    #     path does for every transposed operand anyway).
+    staged = self._deferred_stores.get(name)
+    if staged is not None and not self._lane_axis_matches(name, lead_pos):
+      if staged[0] is staged[1]:
+        del self._deferred_stores[name]
+        self._staged_view.pop(name, None)
+      else:
+        needs_reload = True
+
+    # The linearized load packs the operand flat --- storage element `f` goes
+    # to lane `f % T`, slot `f // T` --- which can only ever make the *first*
+    # dimension the lane axis.  With the lane axis elsewhere the flat packing
+    # and the per-dimension addressing describe different images, so take the
+    # dimension-wise loader instead; it is correct for any lane axis.
+    linearize = needs_reload2 and lead_pos == 0
+
     if name in self._deferred_stores and self._resolve_reuse(i, name):
       if needs_reload:
         src, dest, _ = self._deferred_stores[name]
@@ -131,7 +173,9 @@ class MultilinearBuilder(AbstractBuilder):
           if self._preload_registers and self._ops[i].symbol.obj.addressing != Addressing.NONE:
             # only register-preload dense matrices for now
             shift = self._stage_shift(i, absorb_lead=not needs_reload2)
-            staged, load_op = self._make_loader_and_symbol_reg(self._stage_view(i, shift), linearize=needs_reload2)
+            staged, load_op = self._make_loader_and_symbol_reg(
+                self._stage_view(i, shift), linearize=linearize,
+                lead_pos=lead_pos)
             self._mem_regions[i] = self._staged_region(i, staged, shift)
             self._deferred_stores[self._ops[i].symbol.name] = self._mem_regions[i].symbol, self._mem_regions[i].symbol, None
             self._record_staged(self._ops[i].symbol.name,
@@ -468,7 +512,10 @@ class MultilinearBuilder(AbstractBuilder):
     rank = self._ops[i].bbox.rank()
     if not absorb_lead or rank == 0:
       return [0] * rank
-    return [self._union_of(i).lower()[0]] + [0] * (rank - 1)
+    lead_pos = self._lead_pos[i]
+    shift = [0] * rank
+    shift[lead_pos] = self._union_of(i).lower()[lead_pos]
+    return shift
 
   def _stage_view(self, i, shift):
     """The operand as the staging load should see it: the whole union, in the
@@ -484,6 +531,17 @@ class MultilinearBuilder(AbstractBuilder):
     own logical box, with its offset rebased onto the image."""
     return SymbolView(staged.symbol, self._ops[i].bbox,
                       [o - s for o, s in zip(self._ops[i].offset, shift)])
+
+  def _lane_axis_matches(self, name, lead_pos):
+    """Does the staged image spread the dimension this operand needs?
+
+    Only register images have a lane axis at all; a shared-memory staging is
+    a verbatim copy and serves any orientation.
+    """
+    staged_src, _, _ = self._deferred_stores[name]
+    if staged_src.stype not in (SymbolType.Register, SymbolType.Scratch):
+      return True
+    return staged_src.lead_dims == [lead_pos]
 
   def _resolve_reuse(self, i, name):
     """Decide whether the already-staged image can serve this operand.
@@ -593,11 +651,13 @@ class MultilinearBuilder(AbstractBuilder):
           'implemented; stage one of them separately instead.')
     return next(iter(pins), 0)
 
-  def _make_loader_and_symbol_reg(self, opview, linearize) -> Tuple[Symbol, GlbToRegLoader]:
+  def _make_loader_and_symbol_reg(self, opview, linearize,
+                                  lead_pos: int = 0) -> Tuple[Symbol, GlbToRegLoader]:
     operand = opview.symbol
     regsize = 1
     threads = self._num_threads
-    lead_dim = [0] # [t for t in self._descr.target[0] if t >= 0]
+    # the dimension spread across lanes; the rest goes into slots
+    lead_dim = [lead_pos]
 
     # the register image holds the operand's *logical* region: GlbToRegLoader
     # consumes the slicing offset while loading, so everything downstream of
@@ -623,6 +683,7 @@ class MultilinearBuilder(AbstractBuilder):
     name = self._name_registers()
     regmem = RegMemObject(name, regsize, spp=None if operand.obj.is_dense() else operand.obj.spp)
     registers = Symbol(name=name, stype=SymbolType.Register, obj=regmem)
+    registers.lead_dims = [lead_pos]
     registers.num_threads = self._num_threads
     registers.datatype = self._context.fp_type
     self._scopes.add_symbol(registers)
