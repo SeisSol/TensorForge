@@ -182,22 +182,6 @@ def _dropped_results(src):
     return [r for r in produced if r not in consumed]
 
 
-@pytest.mark.parametrize("backend,arch", [("cuda", "sm_86"), ("hip", "gfx90a")])
-def test_sliced_accumulation_writes_every_term(backend, arch):
-    """Slicing and accumulation together still write every term.
-
-    ``_deferred_stores`` holds one entry per symbol name.  Deferring an atomic
-    update therefore makes it collide with the next slice of the same tensor:
-    the second displaced the first, and one term ended up in a register array
-    nothing ever read.
-    """
-    src = _generate("sliced_accumulate", backend, arch).get_kernel()
-    dropped = _dropped_results(src)
-    assert not dropped, f"result(s) computed and discarded: {dropped}"
-    assert src.count("store{r>g}") == 4, (
-        f"four writes were produced, {src.count('store{r>g}')} reach memory")
-
-
 # ----------------------------------------------------------------------
 # A sliced write covers its slice, and only its slice
 # ----------------------------------------------------------------------
@@ -232,39 +216,58 @@ def _store_loops(src):
 
 
 @pytest.mark.parametrize("backend,arch", [("cuda", "sm_86"), ("hip", "gfx90a")])
-def test_sliced_write_lands_on_its_slice(backend, arch):
-    """The slice is written where it belongs, and nothing else is touched."""
-    src = _generate("sliced_write", backend, arch).get_kernel()
+def test_eqspp_window_write_defines_the_whole_tensor(backend, arch):
+    """No slicing offset: the box is the eqspp window, the rest is zero.
 
-    assert not _ZERO_TO_GLOBAL.search(src), (
-        "the columns outside the slice are being zero-filled; they belong to "
-        "other descriptors or to the caller")
+    ``sliced_write`` assigns ``D[:, 6:13]`` with no offset, so it addresses
+    ``D`` itself and its box is the range yateto knows the result can be
+    nonzero in.  Columns 0..5 are therefore zero, not unspecified --- and
+    nothing else in the kernel writes them, so this store has to.  The
+    poroelastic space-time predictor reads them straight back.
+    """
+    src = _generate("sliced_write", backend, arch).get_kernel()
+    assert _ZERO_TO_GLOBAL.search(src), (
+        "columns outside the eqspp window are left as they were; nothing "
+        "else defines them")
 
     stores = _store_loops(src)
     assert len(stores) == 1, f"expected one store, got {len(stores)}"
     _, bounds = stores[0]
-    assert len(bounds) == 2, f"expected a lead loop and one counted loop: {bounds}"
-    assert bounds[0] == (0, 1), (
+    assert bounds and bounds[0] == (0, 1), (
         f"the destination spans one thread-block on the lead axis, "
-        f"the store walks {bounds[0]}")
-    assert bounds[1] == (6, 13), (
-        f"the slice is columns 6..12, the store walks {bounds[1]}")
+        f"the store walks {bounds[0] if bounds else None}")
 
 
 @pytest.mark.parametrize("backend,arch", [("cuda", "sm_86"), ("hip", "gfx90a")])
-def test_sliced_accumulation_stays_inside_its_half(backend, arch):
-    """Each half writes one thread-block, not both.
+def test_view_write_touches_nothing_outside_its_slice(backend, arch):
+    """With an offset the destination is a slice and owns only its own box.
 
-    The destination is sliced on the *lead* axis here, so a store that took
-    its extent from the tensor rather than from the descriptor walks two
-    blocks and writes over the other half.
+    The mirror image of the case above, and the reason the two cannot share a
+    rule: ``kernel_0bf208a83b`` writes ``m2`` column by column through views,
+    and zero-filling around any one of them wipes the other twelve.
+    """
+    src = _generate("sliced_write_view", backend, arch).get_kernel()
+    assert not _ZERO_TO_GLOBAL.search(src), (
+        "a slice is zero-filling around itself; the rest of the tensor "
+        "belongs to other descriptors")
+
+
+@pytest.mark.parametrize("backend,arch", [("cuda", "sm_86"), ("hip", "gfx90a")])
+def test_sliced_accumulation_writes_every_term(backend, arch):
+    """Slicing and accumulation together still write every term.
+
+    ``_deferred_stores`` holds one entry per symbol name.  Deferring an atomic
+    update therefore makes it collide with the next slice of the same tensor:
+    the second displaced the first, and one term ended up in a register array
+    nothing ever read.
     """
     src = _generate("sliced_accumulate", backend, arch).get_kernel()
-    assert not _ZERO_TO_GLOBAL.search(src)
-    for reg, bounds in _store_loops(src):
-        assert bounds and bounds[0] == (0, 1), (
-            f"store of {reg} walks {bounds[0] if bounds else None} lead "
-            f"blocks; each half is exactly one")
+    dropped = _dropped_results(src)
+    assert not dropped, f"result(s) computed and discarded: {dropped}"
+    assert src.count("store{r>g}") == 3, (
+        f"three writes were produced, {src.count('store{r>g}')} reach memory")
+    assert not _ZERO_TO_GLOBAL.search(src), (
+        "an accumulation is zero-filling around its slice")
 
 
 # ----------------------------------------------------------------------
@@ -325,7 +328,8 @@ def test_accumulated_tensor_is_read_after_its_last_write(backend, arch):
 
 
 @pytest.mark.parametrize("name", ["accumulate_chain", "sliced_accumulate",
-                                  "sliced_write", "accumulate_then_read"])
+                                  "sliced_write", "sliced_write_view",
+                                  "accumulate_then_read"])
 @pytest.mark.parametrize("backend,arch", [("cuda", "sm_86"), ("hip", "gfx90a")])
 def test_no_stale_global_read(name, backend, arch):
     """The same invariant across every case that writes a tensor twice."""

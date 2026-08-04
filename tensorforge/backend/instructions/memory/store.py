@@ -209,6 +209,24 @@ class StoreRegToGlb(AbstractInstruction):
     with writer.Scope():
       manual = [False]
       loops = []
+      # The lead loop is built from the accumulator alone: it drives the thread
+      # mapping, and widening it would hand `inner` a LeadIndex outside what
+      # the register array holds, which the `needsLoad` test below cannot see
+      # (it recognises `Immediate` only).  So a window that narrows the *lead*
+      # dimension cannot be zero-filled here.  Nothing generates one today ---
+      # yateto's eqspp windows in the poroelastic kernels are all on the
+      # trailing dimensions --- and a silent partial fill is exactly the
+      # failure mode this whole area keeps producing, so say so instead.
+      if (src_bbox.rank() > 0
+          and (src_bbox.lower()[0] > dest_bbox.lower()[0]
+               or src_bbox.upper()[0] < dest_bbox.upper()[0])):
+        raise InternalError(
+            f'{self._dest.name}: the accumulator covers '
+            f'[{src_bbox.lower()[0]},{src_bbox.upper()[0]}) of the lead '
+            f'dimension but this store undertakes to define '
+            f'[{dest_bbox.lower()[0]},{dest_bbox.upper()[0]}); zero-filling '
+            f'the remainder needs the lead loop to run past the register '
+            f'array, which the store cannot express yet')
       loops += [LeadLoop('i0', src_bbox.lower()[0], src_bbox.upper()[0], self._num_threads, 1)]
       for i in range(1, src_bbox.rank()):
         unroll = (src_bbox.lower()[i], src_bbox.upper()[i]) != (dest_bbox.lower()[i], dest_bbox.upper()[i])

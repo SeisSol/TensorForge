@@ -863,15 +863,32 @@ class MultilinearBuilder(AbstractBuilder):
   def _promised_box(self):
     """What this operation undertakes to define, in the accumulator's frame.
 
-    The descriptor's declared destination box, shifted into the theta origin
-    on the lead dimension the way the accumulator is.  `_analyze` may narrow
-    the range below this --- sparse operands, an intersection with what the
-    operands support --- and the difference is what a store legitimately
-    zero-fills.  The tensor's own box is a different thing entirely and must
-    not be used for it: a sliced write declares a small part of the tensor,
-    and the rest is other descriptors' data.
+    Two different things can look like a narrow destination box, and they want
+    opposite treatment.
+
+    A descriptor whose destination has no slicing offset addresses the tensor
+    itself; its box is the *eqspp window*, the range yateto knows the result
+    can be nonzero in.  Everything outside that window is zero, not
+    unspecified, so the store has to write it as zero --- there is no other
+    operation that will.  The poroelastic space-time predictor has exactly
+    this shape: `m4[:, 6:13] = Q[:, 10:13] x S` is the only assignment to
+    `m4`, and the three accumulations that follow read columns 0..5 back.
+
+    A destination with a nonzero offset is a *view*: a slice of the tensor,
+    with its own index space, and the rest of the tensor belongs to other
+    descriptors.  Touching anything outside it destroys their work.
+
+    An accumulation never zero-fills either way: it is defined in terms of
+    what is already there.
+
+    `_analyze` may narrow the accumulator below whichever box applies --- a
+    sparse operand, an intersection with what the operands support --- and
+    that difference is what the store legitimately fills with zeros.
     """
-    bbox = self._dest_obj.bbox
+    if self._add or any(o != 0 for o in self._dest_obj.offset):
+      bbox = self._dest_obj.bbox
+    else:
+      bbox = self._dest_obj.tensor.get_bbox()
     lower = list(bbox.lower())
     upper = list(bbox.upper())
     if lower:
