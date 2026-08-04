@@ -196,3 +196,72 @@ def test_sliced_accumulation_writes_every_term(backend, arch):
     assert not dropped, f"result(s) computed and discarded: {dropped}"
     assert src.count("store{r>g}") == 4, (
         f"four writes were produced, {src.count('store{r>g}')} reach memory")
+
+
+# ----------------------------------------------------------------------
+# A sliced write covers its slice, and only its slice
+# ----------------------------------------------------------------------
+
+_STORE_HEAD = re.compile(r"//\s*(glb_\w+) = store\{r>g\}\((\w+)\);")
+_FOR_BOUNDS = re.compile(r"for \(int32_t \w+ = (-?\d+); \w+ < (-?\d+);")
+_ZERO_TO_GLOBAL = re.compile(r"\bglb_\w+\[\w+\] = 0;")
+
+
+def _store_loops(src):
+    """Per global store: the bounds of the loops it walks.
+
+    The emitted store is a lead loop over thread-blocks plus one counted loop
+    per remaining dimension.  Reading the bounds back is the cheapest exact
+    statement about *which* elements a store touches --- a slice written at the
+    wrong offset, or one that spills past its box, shows up here and nowhere
+    else short of running the kernel.
+    """
+    lines = src.splitlines()
+    out = []
+    for i, line in enumerate(lines):
+        head = _STORE_HEAD.search(line)
+        if not head:
+            continue
+        bounds = []
+        for follow in lines[i + 1:i + 12]:
+            m = _FOR_BOUNDS.search(follow)
+            if m:
+                bounds.append((int(m.group(1)), int(m.group(2))))
+        out.append((head.group(2), bounds))
+    return out
+
+
+@pytest.mark.parametrize("backend,arch", [("cuda", "sm_86"), ("hip", "gfx90a")])
+def test_sliced_write_lands_on_its_slice(backend, arch):
+    """The slice is written where it belongs, and nothing else is touched."""
+    src = _generate("sliced_write", backend, arch).get_kernel()
+
+    assert not _ZERO_TO_GLOBAL.search(src), (
+        "the columns outside the slice are being zero-filled; they belong to "
+        "other descriptors or to the caller")
+
+    stores = _store_loops(src)
+    assert len(stores) == 1, f"expected one store, got {len(stores)}"
+    _, bounds = stores[0]
+    assert len(bounds) == 2, f"expected a lead loop and one counted loop: {bounds}"
+    assert bounds[0] == (0, 1), (
+        f"the destination spans one thread-block on the lead axis, "
+        f"the store walks {bounds[0]}")
+    assert bounds[1] == (6, 13), (
+        f"the slice is columns 6..12, the store walks {bounds[1]}")
+
+
+@pytest.mark.parametrize("backend,arch", [("cuda", "sm_86"), ("hip", "gfx90a")])
+def test_sliced_accumulation_stays_inside_its_half(backend, arch):
+    """Each half writes one thread-block, not both.
+
+    The destination is sliced on the *lead* axis here, so a store that took
+    its extent from the tensor rather than from the descriptor walks two
+    blocks and writes over the other half.
+    """
+    src = _generate("sliced_accumulate", backend, arch).get_kernel()
+    assert not _ZERO_TO_GLOBAL.search(src)
+    for reg, bounds in _store_loops(src):
+        assert bounds and bounds[0] == (0, 1), (
+            f"store of {reg} walks {bounds[0] if bounds else None} lead "
+            f"blocks; each half is exactly one")

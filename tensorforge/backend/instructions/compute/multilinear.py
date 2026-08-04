@@ -210,10 +210,19 @@ class MultilinearInstruction(ComputeInstruction):
             # surrounding symbols would put the store in the wrong origin
             self._dest.data_view = self._idest.data_view
         else:
-            if self._prev is not None:
-                self._dest.data_view = self._prev.data_view
-            if self._next is not None:
-                self._dest.data_view = self._next.data_view
+            # `prev`/`next` are adopted for their *layout*: when the result is
+            # handed to or taken from a register image, the accumulator has to
+            # be indexed the way that image is, or the transfer between them is
+            # off.  That only applies to an image --- a global or shared symbol
+            # describes the whole buffer, and this operation writes the box its
+            # descriptor declares, which for a sliced write is a small part of
+            # it.  Adopting the buffer's box there made the accumulator claim a
+            # range it does not hold: the store then read past the end of the
+            # register array and wrote the slice at the wrong offset.
+            for neighbour in (self._prev, self._next):
+                if neighbour is not None and neighbour.stype in (
+                        SymbolType.Register, SymbolType.Scratch):
+                    self._dest.data_view = neighbour.data_view
             if self._dest.data_view is None:
                 self._dest.data_view = self._idest.data_view
 

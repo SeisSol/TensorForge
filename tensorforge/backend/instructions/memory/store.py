@@ -144,7 +144,8 @@ class StoreRegToGlb(AbstractInstruction):
                dest: Symbol,
                num_threads: int,
                atomic,
-               dest_offset=None):
+               dest_offset=None,
+               dest_bbox=None):
     super(StoreRegToGlb, self).__init__(context)
 
     if src.stype != SymbolType.Register:
@@ -180,6 +181,13 @@ class StoreRegToGlb(AbstractInstruction):
     # store itself.
     self._dest_offset = (list(dest_offset) if dest_offset is not None
                          else [0] * dest.data_view.rank())
+    # What this store promises to define, in the same logical coordinates as
+    # `src`.  `_analyze` intersects the accumulator's range down to what the
+    # operands support, so it can end up narrower than the descriptor declared
+    # and the difference has to be zero-filled.  The *tensor's* box is not that
+    # promise: a sliced write declares a small part of it, and the rest belongs
+    # to other descriptors or to whatever the caller put there.
+    self._promise = dest_bbox
 
   def gen_ir(self, writer: Writer) -> None:
     writer.new_line()
@@ -189,12 +197,15 @@ class StoreRegToGlb(AbstractInstruction):
 
     writer(f'// {self}')
     src_bbox = self._src.data_view.get_bbox()
-    # pull the destination's storage bbox back into logical coordinates so the
-    # union below compares like with like
-    raw_dest_bbox = self._dest.data_view.get_bbox()
-    dest_bbox = BoundingBox(
-        [l - o for l, o in zip(raw_dest_bbox.lower(), self._dest_offset)],
-        [u - o for u, o in zip(raw_dest_bbox.upper(), self._dest_offset)])
+    if self._promise is not None:
+      dest_bbox = self._promise
+    else:
+      # pull the destination's storage bbox back into logical coordinates so
+      # the union below compares like with like
+      raw_dest_bbox = self._dest.data_view.get_bbox()
+      dest_bbox = BoundingBox(
+          [l - o for l, o in zip(raw_dest_bbox.lower(), self._dest_offset)],
+          [u - o for u, o in zip(raw_dest_bbox.upper(), self._dest_offset)])
     with writer.Scope():
       manual = [False]
       loops = []

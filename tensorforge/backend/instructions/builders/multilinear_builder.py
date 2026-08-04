@@ -48,6 +48,10 @@ class MultilinearBuilder(AbstractBuilder):
     self._preload_shmem = self._context.get_vm().get_hw_descr().vendor in [] #['nvidia']
     self._atomic_update = self._context.get_vm().get_hw_descr().vendor in ['amd'] # , 'nvidia' # ?
     self._deferred_stores = {}
+    # per pending writeback: the box its producing descriptor undertook to
+    # define, so the deferred store zero-fills exactly what `_analyze` narrowed
+    # away and nothing else
+    self._promised = {}
     # what each deferred/staged image actually holds, so a later consumer
     # can tell whether reusing it is sound: position `r` of the image holds
     # tensor element `r + shift`, for `r` inside `covered`.
@@ -832,6 +836,7 @@ class MultilinearBuilder(AbstractBuilder):
     reached memory yet; dropping that would lose it, so it goes out first.
     """
     entry = self._deferred_stores.pop(name, None)
+    promise = self._promised.pop(name, None)
     _, shift = self._staged_view.pop(name, (None, None))
     if entry is None:
       return
@@ -846,13 +851,33 @@ class MultilinearBuilder(AbstractBuilder):
                                               dest=store_dest,
                                               num_threads=self._num_threads,
                                               atomic=update,
-                                              dest_offset=shift))
+                                              dest_offset=shift,
+                                              dest_bbox=promise))
     else:
       self._instructions.append(StoreRegToShr(context=self._context,
                                               src=store_regs,
                                               dest=store_dest,
                                               shr_mem=self._shr_mem,
                                               num_threads=self._num_threads))
+
+  def _promised_box(self):
+    """What this operation undertakes to define, in the accumulator's frame.
+
+    The descriptor's declared destination box, shifted into the theta origin
+    on the lead dimension the way the accumulator is.  `_analyze` may narrow
+    the range below this --- sparse operands, an intersection with what the
+    operands support --- and the difference is what a store legitimately
+    zero-fills.  The tensor's own box is a different thing entirely and must
+    not be used for it: a sliced write declares a small part of the tensor,
+    and the rest is other descriptors' data.
+    """
+    bbox = self._dest_obj.bbox
+    lower = list(bbox.lower())
+    upper = list(bbox.upper())
+    if lower:
+      lower[0] += self._theta
+      upper[0] += self._theta
+    return BoundingBox(lower, upper)
 
   def _make_store(self):
     if self._dest_obj.tensor in self._scopes:
@@ -899,10 +924,12 @@ class MultilinearBuilder(AbstractBuilder):
                                                   dest=dest_symbol,
                                                   num_threads=self._num_threads,
                                                   atomic=True,
-                                                  dest_offset=self._store_offset()))
+                                                  dest_offset=self._store_offset(),
+                                                  dest_bbox=self._promised_box()))
         elif can_use_atomic or (self._use_registers_always and not in_slices):
           update = True if can_use_atomic else None
           self._deferred_stores[dest_symbol.name] = (self._temp_regs, dest_symbol, update)
+          self._promised[dest_symbol.name] = self._promised_box()
           self._record_staged(dest_symbol.name,
                           # the *actual* range the accumulator ended up with:
                           # _analyze intersects the operands, so _ns can be
@@ -916,7 +943,8 @@ class MultilinearBuilder(AbstractBuilder):
                                                   dest=dest_symbol,
                                                   num_threads=self._num_threads,
                                                   atomic=None,
-                                                  dest_offset=self._store_offset()))
+                                                  dest_offset=self._store_offset(),
+                                                  dest_bbox=self._promised_box()))
       elif dest_symbol.stype == SymbolType.Register:
         self._instructions.append(StoreRegToReg(context=self._context,
                                                 src=self._temp_regs,
@@ -973,4 +1001,5 @@ class MultilinearBuilder(AbstractBuilder):
                                                   dest=store_global,
                                                   num_threads=self._num_threads,
                                                   atomic=update,
-                                                  dest_offset=shift))
+                                                  dest_offset=shift,
+                                                  dest_bbox=self._promised.get(name)))
