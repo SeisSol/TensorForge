@@ -265,3 +265,69 @@ def test_sliced_accumulation_stays_inside_its_half(backend, arch):
         assert bounds and bounds[0] == (0, 1), (
             f"store of {reg} walks {bounds[0] if bounds else None} lead "
             f"blocks; each half is exactly one")
+
+
+# ----------------------------------------------------------------------
+# A load may not be overtaken by a store to what it reads
+# ----------------------------------------------------------------------
+
+_GLB_LOAD = re.compile(r"//\s*(\w+) = load\{g>r\}\((glb_\w+)\);")
+_GLB_STORE = re.compile(r"//\s*(glb_\w+) = store\{r>g\}\((\w+)\);")
+_USE = re.compile(r"//\s*(\w+) = \+\(([^)]*)\)(?: \+ name: (\w+))?")
+
+
+def _stale_reads(src):
+    """Loads whose tensor is stored to before the loaded value is consumed.
+
+    `MoveLoads` splits a load into transfer and wait so the transfer can go
+    early.  Between the two positions nothing may write what it reads, or the
+    consumer gets the value from before that write.  Reading the emitted order
+    back is an exact test: the transfer is where the comment sits.
+    """
+    seq = []
+    for line in src.splitlines():
+        t = line.strip()
+        m = _GLB_LOAD.match(t)
+        if m:
+            seq.append(("load", m.group(1), m.group(2)))
+            continue
+        m = _GLB_STORE.match(t)
+        if m:
+            seq.append(("store", m.group(1), m.group(2)))
+            continue
+        m = _USE.match(t)
+        if m:
+            read = set(re.findall(r"\b[rs]\d+\b", m.group(2)))
+            if m.group(3):
+                read.add(m.group(3))
+            seq.append(("compute", m.group(1), read))
+
+    stale = []
+    for i, (kind, reg, tensor) in enumerate(seq):
+        if kind != "load":
+            continue
+        for j in range(i + 1, len(seq)):
+            if seq[j][0] == "compute" and reg in seq[j][2]:
+                if any(k == "store" and t == tensor
+                       for k, t, _ in seq[i + 1:j]):
+                    stale.append((reg, tensor))
+                break
+    return stale
+
+
+@pytest.mark.parametrize("backend,arch", [("cuda", "sm_86"), ("hip", "gfx90a")])
+def test_accumulated_tensor_is_read_after_its_last_write(backend, arch):
+    src = _generate("accumulate_then_read", backend, arch).get_kernel()
+    stale = _stale_reads(src)
+    assert not stale, (
+        "load(s) hoisted above a store to the same tensor, so the consumer "
+        f"sees a value from before that store: {stale}")
+
+
+@pytest.mark.parametrize("name", ["accumulate_chain", "sliced_accumulate",
+                                  "sliced_write", "accumulate_then_read"])
+@pytest.mark.parametrize("backend,arch", [("cuda", "sm_86"), ("hip", "gfx90a")])
+def test_no_stale_global_read(name, backend, arch):
+    """The same invariant across every case that writes a tensor twice."""
+    src = _generate(name, backend, arch).get_kernel()
+    assert not _stale_reads(src)
