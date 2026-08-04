@@ -11,6 +11,7 @@ from tensorforge.backend.instructions.sync_block import SyncThreads
 from tensorforge.backend.instructions.compute.multilinear import MultilinearInstruction
 from tensorforge.common.matrix.tensor import Tensor
 from tensorforge.common.exceptions import InternalError, GenerationError
+import itertools
 from tensorforge.common.matrix.boundingbox import BoundingBox
 from tensorforge.generators.descriptions import MultilinearDescr
 from tensorforge.backend.instructions.builders.allocator_builder import AbstractBuilder
@@ -217,7 +218,14 @@ class MultilinearBuilder(AbstractBuilder):
     # every box each writer of a destination states; the count is how many
     # writers there are, and whether they all match the union is whether the
     # tensor is assembled from pieces
+    # every individual write box, not just their union: two writes to [0,2) and
+    # [8,10) union to [0,10), so a union-against-union test would wave through
+    # a read of [2,8) that nothing ever wrote
     self._dest_boxes = {}
+    self._read_tensors = {}
+    self._eff_reads = {}
+    self._eff_writes = {}
+    self._dest_writers = {}
     for descr in descr_list:
       if not isinstance(descr, MultilinearDescr):
         continue
@@ -240,6 +248,7 @@ class MultilinearBuilder(AbstractBuilder):
           rlo = [min(a, b) for a, b in zip(rprev.lower(), rlo)]
           rup = [max(a, b) for a, b in zip(rprev.upper(), rup)]
         self._read_union[rkey] = BoundingBox(rlo, rup)
+        self._read_tensors[tensor] = self._read_union[rkey]
 
         # The staging union is keyed by symbol name, which only exists for
         # tensors that are already materialised somewhere.
@@ -266,9 +275,132 @@ class MultilinearBuilder(AbstractBuilder):
           lower = [min(a, b) for a, b in zip(prev.lower(), lower)]
           upper = [max(a, b) for a, b in zip(prev.upper(), upper)]
         self._dest_union[key] = BoundingBox(lower, upper)
+        self._dest_writers[key] = self._dest_writers.get(key, 0) + 1
         self._dest_boxes.setdefault(key, []).append(
             BoundingBox([l + o for l, o in zip(dest.bbox.lower(), dest.offset)],
                         [u + o for u, o in zip(dest.bbox.upper(), dest.offset)]))
+
+      eff = self._effective_boxes(descr)
+      if eff is not None:
+        eff_reads, eff_write = eff
+        for t, box in eff_reads.items():
+          prev = self._eff_reads.get(t)
+          self._eff_reads[t] = box if prev is None else BoundingBox(
+              [min(a, b) for a, b in zip(prev.lower(), box.lower())],
+              [max(a, b) for a, b in zip(prev.upper(), box.upper())])
+        if tensor is not None:
+          self._eff_writes.setdefault(id(tensor), []).append(eff_write)
+
+    self._check_initialised()
+
+  def _effective_boxes(self, descr):
+    """Read and write boxes after the range intersection, in tensor coords.
+
+    A descriptor's declared operand box is an upper bound on what that operand
+    contributes; `_analyze` intersects the boxes of everything sharing a target
+    index (and the destination) and iterates only that. Checking declared reads
+    against actual writes therefore flags regions that are never touched --- so
+    the intersection has to be replayed here to compare like with like.
+
+    Returns `(reads, write)` where `reads` maps tensor -> BoundingBox and
+    `write` is the destination's box, or `None` when the shapes do not line up.
+    """
+    ranges = {}
+
+    def narrow(t, lo, hi):
+      prev = ranges.get(t)
+      ranges[t] = (max(prev[0], lo), min(prev[1], hi)) if prev else (lo, hi)
+
+    ops = list(getattr(descr, 'ops', []) or [])
+    targets = list(getattr(descr, 'target', []) or [])
+    dest = getattr(descr, 'dest', None)
+    if dest is None or len(ops) != len(targets):
+      return None
+    for op, target in zip(ops, targets):
+      if getattr(op, 'bbox', None) is None or len(target) != op.bbox.rank():
+        return None
+      for j, t in enumerate(target):
+        narrow(t, op.bbox.lower()[j], op.bbox.upper()[j])
+    for j in range(dest.bbox.rank()):
+      narrow(j, dest.bbox.lower()[j], dest.bbox.upper()[j])
+
+    reads = {}
+    for op, target in zip(ops, targets):
+      tensor = getattr(op, 'tensor', None)
+      if tensor is None:
+        continue
+      lo = [ranges[t][0] + op.offset[j] for j, t in enumerate(target)]
+      hi = [ranges[t][1] + op.offset[j] for j, t in enumerate(target)]
+      box = BoundingBox(lo, hi)
+      prev = reads.get(tensor)
+      if prev is not None:
+        box = BoundingBox([min(a, b) for a, b in zip(prev.lower(), lo)],
+                          [max(a, b) for a, b in zip(prev.upper(), hi)])
+      reads[tensor] = box
+    wlo = [ranges[j][0] + dest.offset[j] for j in range(dest.bbox.rank())]
+    whi = [ranges[j][1] + dest.offset[j] for j in range(dest.bbox.rank())]
+    return reads, BoundingBox(wlo, whi)
+
+  def _uncovered(self, key, read):
+    """The first sub-box of `read` that no write covers, or None.
+
+    Coordinate compression: cut every dimension at all the box boundaries that
+    fall inside `read`.  Each resulting cell then lies either wholly inside or
+    wholly outside every write box, so "is this cell covered" is an exact test
+    and the whole check is exact rather than conservative.
+    """
+    boxes = self._eff_writes.get(key, [])
+    rank = read.rank()
+    if rank == 0 or not boxes or any(b.rank() != rank for b in boxes):
+      return None
+    cuts = []
+    for j in range(rank):
+      lo, hi = read.lower()[j], read.upper()[j]
+      if lo >= hi:
+        return None                      # empty read, nothing to cover
+      pts = {lo, hi}
+      for b in boxes:
+        for v in (b.lower()[j], b.upper()[j]):
+          if lo < v < hi:
+            pts.add(v)
+      cuts.append(sorted(pts))
+    for corner in itertools.product(*[range(len(c) - 1) for c in cuts]):
+      lo = [cuts[j][corner[j]] for j in range(rank)]
+      hi = [cuts[j][corner[j] + 1] for j in range(rank)]
+      if any(all(b.lower()[j] <= lo[j] and hi[j] <= b.upper()[j]
+                 for j in range(rank)) for b in boxes):
+        continue
+      return BoundingBox(lo, hi)
+    return None
+
+  def _check_initialised(self):
+    """Refuse to read a temporary where nothing ever wrote.
+
+    A temporary is created by the kernel, so anything read outside what the
+    kernel writes is whatever the shared or global allocation happened to
+    contain.  Global inputs and outputs are exempt: an input is legitimately
+    never written, and an output may hold a value the caller put there.
+
+    Filling the gap with zeros is the obvious other answer, and the right one
+    once a declaration instruction owns the buffer.  Until then this refuses,
+    because a silently undefined summand is exactly the failure mode that took
+    the longest to find in this area.
+    """
+    for tensor, read in self._eff_reads.items():
+      if not getattr(tensor, 'is_tmp', False):
+        continue
+      key = id(tensor)
+      if key not in self._eff_writes:
+        raise GenerationError(
+            f'{getattr(tensor, "alias", None) or tensor}: temporary is read '
+            f'over {read} but never written')
+      gap = self._uncovered(key, read)
+      if gap is not None:
+        raise GenerationError(
+            f'{getattr(tensor, "alias", None) or tensor}: temporary is read '
+            f'over {read} but {gap} is never written by any operation '
+            f'(writes: {self._eff_writes[key]}). Zero-filling the gap needs a '
+            f'declaration instruction that owns the buffer.')
 
   def _written_in_slices(self, tensor):
     """Does this tensor get assembled from several writes?
