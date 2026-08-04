@@ -123,9 +123,34 @@ def run_case(case, target: Target, cache_root: Path,
     # ``rcp``, force positivity for ``sqrt``/``log``.
     input_transform = getattr(case, "INPUT_TRANSFORM", {})
 
+    # Which buffer is *the* output.  `reference()` returns one array and gets
+    # one `dest_in`, so both ends have to name the same operand --- the
+    # snapshot handed to the reference and the buffer read back afterwards.
+    # They used to be picked independently, one taking the last sink and the
+    # other the first, which agreed only because every case had exactly one.
+    sinks = [o for o in ops_meta if o.is_sink]
+    if not sinks:
+        return RunResult(False, float("inf"), float("inf"),
+                         "case has no sink operand -- nothing to compare")
+    declared = getattr(case, "OUTPUT", None)
+    if declared is not None:
+        sink_op = next((o for o in sinks
+                        if (o.alias or o.kernel_name) == declared), None)
+        if sink_op is None:
+            return RunResult(False, float("inf"), float("inf"),
+                             f"OUTPUT={declared!r} is not a sink of this case; "
+                             f"sinks are "
+                             f"{[o.alias or o.kernel_name for o in sinks]}")
+    elif len(sinks) == 1:
+        sink_op = sinks[0]
+    else:
+        return RunResult(False, float("inf"), float("inf"),
+                         "case writes several tensors "
+                         f"({[o.alias or o.kernel_name for o in sinks]}); "
+                         "set OUTPUT to the one reference() returns")
+
     inputs_by_alias: Dict[str, np.ndarray] = {}
     flats: Dict[str, np.ndarray] = {}          # kernel_name -> flat buffer
-    dest_alias = None
     dest_in_view = None
     for op in ops_meta:
         key = op.alias or op.kernel_name
@@ -137,8 +162,8 @@ def run_case(case, target: Target, cache_root: Path,
         if op.is_sink and not op.is_source:
             # pure output: init to zero so reference can read a defined C_in
             view, flat = layout.zeros_batch(op.shape, op_batch, dt)
-            dest_alias = key
-            dest_in_view = np.array(view, copy=True)       # snapshot pre-kernel
+            if op is sink_op:
+                dest_in_view = np.array(view, copy=True)   # snapshot pre-kernel
         elif op.is_source and not op.is_sink:
             view, flat = layout.make_batch(rng, op.shape, op_batch, dt)
             if key in input_transform:
@@ -152,13 +177,9 @@ def run_case(case, target: Target, cache_root: Path,
                 view[...] = input_transform[key](np.asarray(view)).astype(
                     layout.np_dtype(dt), copy=False)
             inputs_by_alias[key] = np.array(view, copy=True)
-            dest_alias = key
-            dest_in_view = np.array(view, copy=True)
+            if op is sink_op:
+                dest_in_view = np.array(view, copy=True)
         flats[op.kernel_name] = flat
-
-    if dest_in_view is None:
-        return RunResult(False, float("inf"), float("inf"),
-                         "case has no sink operand — nothing to compare")
 
     expected = _reference_for_case(case, inputs_by_alias, dest_in_view)
 
@@ -202,8 +223,7 @@ def run_case(case, target: Target, cache_root: Path,
             return RunResult(False, float("nan"), float("nan"),
                              f"driver exit {proc.returncode}; see {detail_dir}")
 
-        # Read back the sink's buffer.
-        sink_op = next(o for o in ops_meta if o.is_sink)
+        # Read back the chosen output buffer.
         got_bytes = (out_dir / f"out_{sink_op.kernel_name}.bin").read_bytes()
         got_flat = np.frombuffer(got_bytes, dtype=layout.np_export_dtype(dt)).astype(layout.np_dtype(dt))
         got_view = layout.view_of(got_flat, sink_op.shape, batch)

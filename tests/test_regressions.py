@@ -25,7 +25,7 @@ CASES = Path(__file__).parent / "cases"
 
 
 def _load(name):
-    path = CASES / f"{name}.py"
+    path = next(iter(sorted(CASES.rglob(f"{name}.py"))), CASES / f"{name}.py")
     spec = importlib.util.spec_from_file_location(f"tf_regr__{name}", path)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
@@ -331,3 +331,47 @@ def test_no_stale_global_read(name, backend, arch):
     """The same invariant across every case that writes a tensor twice."""
     src = _generate(name, backend, arch).get_kernel()
     assert not _stale_reads(src)
+
+
+# ----------------------------------------------------------------------
+# The harness has to compare the buffer the reference describes
+# ----------------------------------------------------------------------
+
+def _all_case_paths():
+    return sorted(p for p in (CASES).rglob("*.py") if p.name != "__init__.py")
+
+
+@pytest.mark.parametrize("path", _all_case_paths(), ids=lambda p: p.stem)
+def test_case_names_a_single_output(path):
+    """A case that writes several tensors must say which one it means.
+
+    `reference()` returns one array and receives one `dest_in`, so the
+    snapshot handed to it and the buffer read back afterwards have to be the
+    same operand.  They used to be chosen independently --- the input
+    preparation took the last sink, the comparison the first --- which agreed
+    only as long as every case had exactly one.  A case with two then had its
+    intermediate compared against a reference for its result, and reported a
+    kernel bug that was not there.
+    """
+    from harness import driver_emit
+
+    mod = _load(path.stem)
+    if not hasattr(mod, "descr_list"):
+        pytest.skip("not a case module")
+    ctx = Context(arch="sm_86", backend="cuda", fp_type=getattr(mod, "DTYPE", None))
+    try:
+        gen = Generator(mod.descr_list(), ctx)
+        gen.generate()
+    except Exception:
+        # cases pinned as XFAIL do not build a descriptor list at all
+        pytest.skip("case does not generate on this target")
+    sinks = [o.alias or o.kernel_name
+             for o in driver_emit.collect_operands(gen) if o.is_sink]
+    assert sinks, "a case has to write something"
+    declared = getattr(mod, "OUTPUT", None)
+    if len(sinks) > 1:
+        assert declared in sinks, (
+            f"{mod.NAME} writes {sinks}; set OUTPUT to the one reference() "
+            f"returns (currently {declared!r})")
+    elif declared is not None:
+        assert declared in sinks, f"{mod.NAME}: OUTPUT={declared!r} is not a sink"

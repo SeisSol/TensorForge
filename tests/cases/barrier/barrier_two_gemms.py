@@ -38,6 +38,9 @@ from tensorforge.common.matrix.tensor import SubTensor, Tensor
 from tensorforge.generators.descriptions import GemmDescr, GridBarrierDescr
 
 NAME = "barrier_two_gemms_16x16"
+# Two tensors are written --- the intermediate D and the result E ---
+# so the case has to name the one `reference()` returns.
+OUTPUT = "E"
 DTYPE = Datatype.F32
 BATCH = 4
 TOL = (1e-4, 1e-4)

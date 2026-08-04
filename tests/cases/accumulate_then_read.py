@@ -28,6 +28,9 @@ from tensorforge.common.matrix.tensor import SubTensor, Tensor
 from tensorforge.generators.descriptions import GemmDescr, MultilinearDescr
 
 NAME = "accumulate_then_read"
+# The kernel writes two tensors --- the accumulator D and the result O --- so
+# it has to say which one `reference()` returns.
+OUTPUT = "O"
 DTYPE = Datatype.F32
 BATCH = 4
 TOL = (1e-4, 1e-4)
