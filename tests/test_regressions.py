@@ -621,3 +621,33 @@ def test_shared_bias_carries_the_destination_offset(backend, arch):
             f"the bias read from {sym} carries no slicing offset "
             f"({addr.strip()}); the store does")
     assert checked, "expected a shared-memory bias"
+
+
+# ----------------------------------------------------------------------
+# What a writer actually writes decides whether a tensor is sliced
+# ----------------------------------------------------------------------
+
+@pytest.mark.parametrize("backend,arch", [("cuda", "sm_86"), ("hip", "gfx90a")])
+def test_partial_writes_are_staged_for_the_whole_read(backend, arch):
+    """Successive partial writes, then a read of the union.
+
+    `t = Q; t += F0; t += F1; O = t x M`, where every descriptor declares the
+    whole of `t` --- that is what yateto emits --- but `_analyze` intersects
+    the range down to what each operand supports, so the accumulations write
+    half of it.  Judged on the declared boxes those look like one writer
+    covering everything, so the value was kept in registers; the image left
+    behind then held only the last writer's rows, and the read that follows
+    wants the union.  It was refused outright, which is where the elastic
+    build stopped.
+
+    The tensor has to go through memory instead, so ask the question of the
+    boxes that are actually written.
+    """
+    src = _generate("partial_writes_read_whole", backend, arch).get_kernel()
+    # each partial write goes out as it is produced ...
+    assert src.count("store{r>s}") >= 3, (
+        "the partial writes are not being staged out; the register image "
+        "would hold only the last one's rows")
+    # ... and the read that follows takes the union from there
+    reads = re.findall(r"//\s*\w+ = \+\((s\d+) \* ", src)
+    assert reads, "the final contraction does not read the staged tensor"

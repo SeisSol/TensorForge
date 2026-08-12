@@ -466,9 +466,23 @@ class MultilinearBuilder(AbstractBuilder):
     and forcing the store out per term costs a global round trip on every
     term.  So the question is not how many writers there are but whether any
     of them writes less than the union.
+
+    Ask it of what each writer *actually* writes, not of what its descriptor
+    declares.  `_analyze` intersects the range down to what the operands
+    support, so an accumulation onto the whole box from an operand that spans
+    half of it writes half --- the elastic ADER kernels are full of
+    `t += Q_face * c`, all declaring the whole tensor and each covering the
+    rows its own face touches.  Judged on the declared boxes those look like
+    one writer covering everything, and the register image left behind holds
+    only the last one's rows; the read that follows then wants the union and
+    finds half of it.
     """
-    boxes = self._dest_boxes.get(id(tensor), [])
-    union = self._dest_union.get(id(tensor))
+    boxes = self._eff_writes.get(id(tensor)) or self._dest_boxes.get(id(tensor), [])
+    union = None
+    for b in boxes:
+      union = b if union is None else BoundingBox(
+          [min(l, o) for l, o in zip(union.lower(), b.lower())],
+          [max(u, o) for u, o in zip(union.upper(), b.upper())])
     if union is not None and any(
         b.lower()[j] > union.lower()[j] or b.upper()[j] < union.upper()[j]
         for b in boxes for j in range(union.rank())):
