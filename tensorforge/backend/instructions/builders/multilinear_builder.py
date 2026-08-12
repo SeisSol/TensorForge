@@ -747,10 +747,23 @@ class MultilinearBuilder(AbstractBuilder):
     lead_dim = [0] # [t for t in self._descr.target[0] if t >= 0]
 
     # TODO: shrink to enumerate(self._dest_obj.bbox.sizes())
+    #
+    # Which frame the box is already in decides whether theta still has to be
+    # applied.  An accumulation takes the bias image's box, and that image is
+    # staged through `_dest_preload_view` --- in the tensor's own lead
+    # coordinates, theta included.  The descriptor's own box is not: it is
+    # stated relative to the slice, and theta is what moves it.  Adding theta
+    # to the first counts it twice, which lands the range in the wrong
+    # block(s): for `m2[20:35, 12] += ...` with 32 lanes it gave one register
+    # slot where the range spans two, so the store --- which walks the two
+    # blocks `_analyze` found --- read past the end of the array.  Order 4
+    # never showed it because every window fell inside one block.
     if self._add:
       bbox = self._get_target_symbol().data_view._bbox
+      shift = 0
     else:
       bbox = self._dest_obj.bbox
+      shift = self._theta
 
     for d in range(bbox.rank()):
       dim = bbox.size(d)
@@ -760,8 +773,8 @@ class MultilinearBuilder(AbstractBuilder):
         # the accumulator is indexed in the shifted origin, so the slot count
         # follows the shifted range.  Straddling one more block boundary is
         # exactly the price of not needing a shuffle.
-        r_start = (bbox.lower()[d] + self._theta) // threads
-        r_end = (bbox.upper()[d] + self._theta + threads - 1) // threads
+        r_start = (bbox.lower()[d] + shift) // threads
+        r_end = (bbox.upper()[d] + shift + threads - 1) // threads
         regsize *= r_end - r_start
         threads //= dim # TODO?
     name = self._name_registers()

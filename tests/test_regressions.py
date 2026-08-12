@@ -651,3 +651,63 @@ def test_partial_writes_are_staged_for_the_whole_read(backend, arch):
     # ... and the read that follows takes the union from there
     reads = re.findall(r"//\s*\w+ = \+\((s\d+) \* ", src)
     assert reads, "the final contraction does not read the staged tensor"
+
+
+# ----------------------------------------------------------------------
+# A lead window may span more than one register block
+# ----------------------------------------------------------------------
+
+@pytest.mark.parametrize("backend,arch", [("cuda", "sm_86"), ("hip", "gfx90a")])
+def test_accumulator_is_sized_for_every_block_it_spans(backend, arch):
+    """The result array holds as many slots as the store walks.
+
+    With 32 lanes, `D[20:35, 12] += ...` covers lanes 20..31 of one register
+    block and lanes 0..2 of the next, so the accumulator needs two slots per
+    remaining index.  `_analyze` works that out and the store walks both;
+    `_alloc_register_array` sized for one, because it added theta to a box
+    that already carried it --- the bias image is staged in the tensor's own
+    lead coordinates.  Order 4 hid it: every window fell inside one block, and
+    the double count cancelled.
+
+    The host interpreter does not enforce array bounds, so the emitted numbers
+    do not give this away; the store's indices against the declared length do.
+    """
+    src = _generate("lead_window_spans_two_blocks", backend, arch).get_kernel()
+    bad = _out_of_range_reads(src)
+    assert not bad, f"store reads past its accumulator: {bad[:5]}"
+
+
+@pytest.mark.parametrize("theta,blocks", [(0, 1), (4, 1), (20, 2), (30, 2)])
+def test_accumulator_slot_count_follows_the_window(theta, blocks):
+    """However the window falls, the array and the inner buffer agree.
+
+    The inner buffer is sized from the range `_analyze` computed, the result
+    array from the box; they describe the same thing and disagreeing is the
+    defect.  Sweeping theta pins both the straddling case and the one-block
+    case that used to cancel.
+    """
+    module = _load("lead_window_spans_two_blocks")
+    descrs = module.descr_list()
+    # move the window without rebuilding the case
+    dest = descrs[-1].dest
+    dest.offset[0] = theta
+    for op in descrs[-1].ops:
+        if getattr(op, "offset", None) and len(op.offset) == 3:
+            op.offset[0] = theta
+
+    ctx = Context(arch="sm_86", backend="cuda", fp_type=Datatype.F32)
+    gen = Generator(descrs, ctx)
+    gen.generate()
+    src = gen.get_kernel()
+
+    sizes = {m.group(1): int(m.group(2))
+             for m in (re.search(r"float (i?r\d+)\[(\d+)\]", l)
+                       for l in src.splitlines()) if m}
+    inner = {k: v for k, v in sizes.items() if k.startswith("ir")}
+    assert inner, "expected an inner accumulation buffer"
+    for name, size in inner.items():
+        outer = sizes.get(name[1:])
+        assert outer == size, (
+            f"{name[1:]} holds {outer} slots but {name} holds {size}; "
+            f"the store walks {size // blocks} indices over {blocks} block(s)")
+    assert not _out_of_range_reads(src)
