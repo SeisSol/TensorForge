@@ -644,7 +644,7 @@ class Symbol:
     if self.stype == SymbolType.Scalar:
       return f'{name}'
     if self.stype == SymbolType.Data:
-      return self.get_fptype().literal(self.obj.value(runIdx))
+      return self.get_fptype().literal(self.obj.value(index))
 
   def encode_values(self, pos, runIdx, writer, context: Context, variable, index: List[Union[str, int, Immediate, Variable, LeadIndex]], nontemp, leadidx):
     wrote = False

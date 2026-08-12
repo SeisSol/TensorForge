@@ -15,6 +15,8 @@ from tensorforge.ir.logical.compute import Multilinear
 from tensorforge.ir.type import BaseDatatype
 from tensorforge.ir.data.memory import Logical
 
+import numpy as np
+
 class GpuKernelGeneratorV1:
   def __init__(self, arch):
     self._arch = arch
@@ -226,7 +228,7 @@ class GpuKernelGeneratorV1:
 
   def make_tensor(self, op, can_be_aligned, dims):
     if isinstance(op, (float, int)):
-      return Tensor([], Addressing.SCALAR, data = [op])
+      return Tensor([], Addressing.SCALAR, data = np.array(op))
     if self.is_scalar(op):
       entry = self._add_scalar(op)
       entry_name = op.name()
@@ -402,7 +404,7 @@ class GpuKernelGeneratorV1:
 
   def _append_operation(self, op):
     if isinstance(op, (float, int)):
-      return Tensor([], Addressing.SCALAR, data = op)
+      return Tensor([], Addressing.SCALAR, data = np.array(op))
     elif self.is_scalar(op):
       return self._cache[f'{self._prefix}{op.name()}']
     else:
