@@ -187,9 +187,14 @@ GROUPS = {
                   (PKG / 'codegen.py').read_text() + '\n\ndef hook(writer):\n    pass\n')),
     ]),
 
-    # `test_signatures.py` reads the committed snapshots, so a mutation to the
+    # `test_syntax.py` reads the committed snapshots, so a mutation to the
     # generator would not reach it.  The snapshots are the input here.
-    'signatures': ('tests/test_signatures.py', [
+    #
+    # The last three could not be expressed against the old
+    # `test_signatures.py`: it lifted reference-taking calls out with a regex
+    # and looked at those alone, so a defect anywhere else in the kernel --- or
+    # in an argument it could not type --- was outside what it could see.
+    'syntax': ('tests/test_syntax.py', [
         ('a literal handed to a reference parameter',
          sub(Path('tests/snapshots/gemm_56x18_x_18x18.hip.cpp'),
              'tensorforge::transpose4x4b32(v29_tp, v30_tp, v31_tp, v32_tp,',
@@ -198,6 +203,36 @@ GROUPS = {
          sub(Path('tests/snapshots/gemm_square_16.hip.cpp'),
              ', v13_data, v14_data, v15_data, v16_data);',
              ', v13_data, v14_data, v15_data);', 1)),
+        ('an operand that is never declared',
+         sub(Path('tests/snapshots/gemm_square_16.hip.cpp'),
+             ', v13_data, v14_data, v15_data, v16_data);',
+             ', v13_data, v14_data, v15_data, v16_undeclared);', 1)),
+        ('an MFMA accumulator of the wrong width',
+         sub(Path('tests/snapshots/gemm_square_16.hip.cpp'),
+             'tensorforge::VectorT<float, 4>',
+             'tensorforge::VectorT<float, 2>', 1)),
+        ('a store past the end of a shared-memory declaration',
+         sub(Path('tests/snapshots/gemm_square_16.hip.cpp'),
+             'const auto batchId_start',
+             'const auto batchId_start = undeclared_symbol; const auto _unused',
+             1)),
+    ]),
+
+    # The shim is a copy of a C++ fact; the check that it stays one has to
+    # fail when the copy drifts, in either direction.
+    'shim': ('tests/test_syntax.py::test_shim_matches_the_device_headers', [
+        ('an overload dropped from the shim',
+         sub(Path('tests/shim/tensorforge_host.h'),
+             'template <int Row> void fmacdpp16(double &c, double a, double b);\n',
+             '', 1)),
+        ('the shim made more permissive than the header',
+         sub(Path('tests/shim/tensorforge_host.h'),
+             'template <int Row> float movdpp16(float a);',
+             'template <int Row, typename T> T movdpp16(T a);', 1)),
+        ('a parameter that should be a reference passed by value',
+         sub(Path('tests/shim/tensorforge_host.h'),
+             'void transpose16x2(T &w1, T &w2, T v1, T v2);',
+             'void transpose16x2(T w1, T &w2, T v1, T v2);', 1)),
     ]),
 
     'operands': ('tests/test_snapshots.py', [
