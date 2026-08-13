@@ -197,6 +197,45 @@ def _check_scope(body: Tuple[Stmt, ...], live: set, diag: List[str],
             if len(s.regions) != 1 or s.text is None:
                 diag.append('rawblock: needs text and exactly one region')
 
+        elif s.op == Op.DECLARE:
+            if len(s.target) != 1 or s.args or s.regions or s.text is not None:
+                diag.append('declare: needs exactly one target and nothing else')
+            if s.predicate is not None:
+                # There is no initialiser to turn into a select, and wrapping
+                # the declaration in a guard would scope the value inside it.
+                diag.append('declare: must not be predicated')
+            if s.target and isinstance(s.target[0].type, BufferType):
+                diag.append('declare: a buffer comes from alloc, not declare')
+
+        elif s.op == Op.PACK:
+            if len(s.target) != 1:
+                diag.append('pack: produces exactly one value')
+            elif isinstance(s.target[0].type, ScalarType):
+                n = s.target[0].type.length
+                if n is None:
+                    diag.append('pack: the result must be a vector type')
+                elif n != len(s.args):
+                    diag.append(f'pack: {len(s.args)} parts for a {n}-vector')
+
+        elif s.op == Op.EXTRACT:
+            if len(s.target) != 1 or len(s.args) != 1:
+                diag.append('extract: takes one vector and produces one value')
+            elif isinstance(s.args[0], Value) and isinstance(s.args[0].type, ScalarType):
+                n = s.args[0].type.length
+                lane = s.attr('lane')
+                if n is None:
+                    diag.append('extract: the operand must be a vector')
+                elif not isinstance(lane, int) or not 0 <= lane < n:
+                    diag.append(f'extract: lane {lane} out of range for a '
+                                f'{n}-vector')
+
+        elif s.op == Op.ACCUM:
+            if s.target or len(s.args) != 2:
+                diag.append('accum: takes a target operand and a value, '
+                            'and produces nothing')
+            elif not isinstance(s.args[0], Value):
+                diag.append('accum: the accumulated register must be a value')
+
         elif s.op == Op.ALLOC:
             if len(s.target) != 1 or not isinstance(s.target[0].type, BufferType):
                 diag.append('alloc: must produce exactly one buffer value')
@@ -347,7 +386,13 @@ def _dce_body(body: Tuple[Stmt, ...], uses) -> Tuple[Stmt, ...]:
 def _cse_key(s: Stmt):
     def k(x: Operand):
         return ('v', x.id) if isinstance(x, Value) else ('c', type(x).__name__, x)
+    # The result layout is part of the key, not a detail of the operands: two
+    # statements can agree on op, text and arguments and still land their
+    # results in different lanes -- a broadcast is exactly that.  Merging them
+    # would silently drop the relayout.  Untracked (`None`) only ever matches
+    # untracked, which is what every call site produces today.
     return (s.op, tuple(k(a) for a in s.args), s.text, s.attrs,
+            tuple(t.layout for t in s.target),
             None if s.predicate is None else s.predicate.id)
 
 

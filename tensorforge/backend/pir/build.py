@@ -25,8 +25,9 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 from tensorforge.common.basic_types import Datatype
 
 from .core import (BOOL, INDEX, TOKEN, Access, BufferType, Effect, IRError,
-                   MemSpace, Op, Operand, Region, ScalarType, Stmt, TokenType,
-                   Value, dump, Uniformity)
+                   LaneAxis, MemSpace, Op, Operand, Region, RegisterLayout,
+                   ScalarType, Stmt, TokenType, Value, dump, join_layout,
+                   Uniformity)
 
 
 def access_of(symbol: Any, kind: Effect) -> Access:
@@ -102,16 +103,21 @@ class IRBuilder:
     # -- values ------------------------------------------------------------ #
 
     def value(self, type_, hint: str = '',
-              uniform: Union[bool, Uniformity] = Uniformity.GRID) -> Value:
+              uniform: Union[bool, Uniformity] = Uniformity.GRID,
+              layout: Optional[RegisterLayout] = None) -> Value:
         """``uniform`` accepts a bool for compatibility: True -> GRID,
-        False -> LANE.  New code should pass a :class:`Uniformity`."""
+        False -> LANE.  New code should pass a :class:`Uniformity`.
+
+        ``layout`` is how the value is spread over the lanes, when the caller
+        knows.  Left ``None`` it stays untracked, which is what every existing
+        call site produces and therefore changes nothing."""
         if self._alloc is not None:
             ident = self._alloc.next_index()
         else:
             self._counter += 1
             ident = self._counter
         return Value(id=ident, type=type_, uniformity=_as_uniformity(uniform),
-                     hint=hint)
+                     hint=hint, layout=layout)
 
     def varalloc(self, prefix: str = 'v') -> Value:
         """Drop-in for ``Writer.varalloc``.
@@ -156,7 +162,11 @@ class IRBuilder:
         thread-divergent guard.
         """
         uniform = _join(args)
-        v = self.value(type_, hint=hint, uniform=uniform)
+        # Same shape as the uniformity join, and for the same reason: an
+        # elementwise result lives where its operands live.  Until something
+        # attaches a layout this is `None` in, `None` out.
+        v = self.value(type_, hint=hint, uniform=uniform,
+                       layout=join_layout(args))
         # `escapes`: the name is referenced from raw text, so the value must
         # neither be eliminated nor folded into its consumer.  Migration
         # scaffolding -- it disappears once the consumer takes a Value.
@@ -165,14 +175,131 @@ class IRBuilder:
         return v
 
     def call(self, callee: str, type_, *args: Operand, hint: str = '',
-             pure: bool = True, effect: Effect = Effect.NONE,
-             accesses: Tuple[Access, ...] = ()) -> Value:
-        """A lexic primitive: ``tensorforge::broadcast<...>``, shuffles, MFMA."""
+             pure: bool = True, movable: bool = True,
+             effect: Effect = Effect.NONE,
+             accesses: Tuple[Access, ...] = (),
+             layout: Optional[RegisterLayout] = None,
+             keep_layout: bool = False, materialize: bool = False) -> Value:
+        """A lexic primitive: ``tensorforge::broadcast<...>``, shuffles, MFMA.
+
+        Unlike :meth:`op`, the result layout is *not* inherited by default.
+        A broadcast or a shuffle exists precisely to change the distribution,
+        so inheriting would be wrong more often than right; the caller says
+        what comes out (``layout``), or says that this one does pass it
+        through (``keep_layout``).
+
+        ``movable=False`` is what a *cross-lane* primitive wants.  Such an
+        instruction reads the registers of other lanes, so it is only well
+        defined where the wave is converged; it stays a pure function of its
+        operands -- CSE and inlining remain correct and are the point -- but
+        it must not be hoisted out of the region it was placed in.
+
+        ``materialize`` keeps the result in a variable of its own.  An
+        accumulator chain -- each MFMA consuming the previous one -- is
+        single-use at every link, so the inliner would fold the whole chain
+        into one nested expression.  That is the same value, but it collapses
+        a schedule that was written down deliberately and leaves the register
+        pressure estimate with nothing to count.
+        """
         uniform = _join(args)
-        v = self.value(type_, hint=hint, uniform=uniform)
-        self._emit_op(Op.CALL, (v,), args, pure=pure, effect=effect,
-                      accesses=accesses, attrs=(('callee', callee),))
+        if layout is None and keep_layout:
+            layout = join_layout(args)
+        v = self.value(type_, hint=hint, uniform=uniform, layout=layout)
+        attrs = (('callee', callee),)
+        if materialize:
+            attrs += (('no_inline', True),)
+        self._emit_op(Op.CALL, (v,), args, pure=pure, movable=movable,
+                      effect=effect, accesses=accesses, attrs=attrs)
         return v
+
+    def declare(self, type_=None, *, hint: str = '', init: str = '{}',
+                uniform: Union[bool, Uniformity] = Uniformity.GRID,
+                layout: Optional[RegisterLayout] = None) -> Value:
+        """A definition with no computed initialiser: ``Ty name{};``.
+
+        The accumulator of a hand-written intrinsic sequence is written by
+        `fmacdpp` through a reference, so it is not the result of any single
+        statement and cannot be an SSA producer.  Until now that meant emitting
+        the declaration as raw text, which left the value *used but never
+        defined* --- invisible to the verifier, and untouchable by every pass,
+        because nothing connected the name to a statement.
+
+        This node closes that hole without changing what is emitted: the value
+        has a definition point, so def-use analysis works, while the C++ text
+        stays byte-for-byte what the raw statement produced.  It is
+        deliberately *not* in ``Op.DECLARING``: there is no initialiser to fold
+        a predicate into, so a predicated declaration is rejected rather than
+        silently lowered to a select.
+
+        `escapes` is set: the value is written through a reference elsewhere,
+        so it must keep its own name and must not be folded into a consumer.
+        """
+        type_ = type_ or ScalarType(self._fptype)
+        v = self.value(type_, hint=hint, uniform=uniform, layout=layout)
+        self._emit_op(Op.DECLARE, (v,), (), pure=False, movable=False,
+                      effect=Effect.NONE,
+                      attrs=(('init', init), ('escapes', True)))
+        return v
+
+    def call_stmt(self, callee: str, *args: Operand,
+                  writes: Sequence[Operand] = (),
+                  effect: Optional[Effect] = None,
+                  movable: bool = False) -> Stmt:
+        """A vendor intrinsic invoked for its effect, not for a result.
+
+        ``fmacdpp16<0>(c, a, b)`` and ``transpose4x4b32(...)`` return nothing
+        and write through a reference, so they cannot be modelled as pure
+        SSA producers.  They can still stop being *opaque*: the arguments go
+        in as values, so the def-use edges are real, and the registers written
+        go in as declared :class:`Access` es keyed on the value itself.  Two
+        such calls on different accumulators then provably do not conflict,
+        which ``Effect.UNKNOWN`` on a raw statement can never say.
+
+        ``writes`` names the operands mutated in place.  Their producers are
+        pinned: a value whose name is handed to a reference parameter must not
+        be folded into its consumer, or the assignment would land nowhere.
+        """
+        for w in writes:
+            self._require_addressable(w, callee)
+        accesses = tuple(Access(Effect.READ | Effect.WRITE, MemSpace.REGISTER,
+                                base=w) for w in writes if isinstance(w, Value))
+        for w in writes:
+            self.pin(w)
+        if effect is None:
+            effect = Effect.WRITE if accesses else Effect.NONE
+        return self._emit_op(Op.CALL, (), tuple(args), pure=False,
+                             movable=movable, effect=effect,
+                             accesses=accesses, attrs=(('callee', callee),))
+
+    def _require_addressable(self, value: Operand, callee: str) -> None:
+        """A written argument has to be something that has an address.
+
+        The C++ these calls reach takes its outputs by non-const reference, so
+        a literal in a written position is ill-formed --- and nothing in this
+        repository compiles, so it would surface as a build failure at a user
+        site rather than here.  It has happened: a padded MFMA tail block used
+        to hand `0.0f` to `transpose4x4b32`'s third and fourth parameters,
+        which are `T &`.
+
+        Cheap to check and worth checking eagerly rather than in `verify`,
+        which only runs under `TF_IR_DEBUG`.
+        """
+        if not isinstance(value, Value):
+            raise IRError(
+                f'{callee}: {value!r} is written but is not a value; a '
+                f'reference parameter needs something with an address')
+        producer = self._producer(value)
+        if producer is not None and producer.op == Op.CONST:
+            raise IRError(
+                f'{callee}: {value!r} is written but is a constant, which '
+                f'renders as a literal; a reference parameter cannot bind it')
+
+    def _producer(self, value: Value) -> Optional[Stmt]:
+        for scope in reversed(self._stack):
+            for st in reversed(scope.body):
+                if st.target and st.target[0] is value:
+                    return st
+        return None
 
     def pin(self, value: Operand) -> Operand:
         """Mark `value`'s producer as escaping.
@@ -524,15 +651,21 @@ class IRBuilder:
 
     def load_expr(self, text: str, type_, base: Any, *,
                   kind: Effect = Effect.READ, space: Optional[MemSpace] = None,
-                  args: Sequence[Operand] = (), hint: str = 'ld') -> Value:
+                  args: Sequence[Operand] = (), hint: str = 'ld',
+                  layout: Optional[RegisterLayout] = None) -> Value:
         """A declaration whose right-hand side is still text, but whose result
         is a real SSA value.
 
         The bridge for migrating a body from the inside out: the access itself
         may stay a vendor-specific string, while everything that consumes it
         becomes structured.
+
+        ``layout`` is how the loaded value ends up spread over the lanes, when
+        the caller can say.  A load is where a distribution *enters* the IR:
+        every later layout is derived from one of these or from an explicit
+        relayout, so leaving them untracked leaves the whole chain untracked.
         """
-        v = self.value(type_, hint=hint)
+        v = self.value(type_, hint=hint, layout=layout)
         self._emit_op(Op.RAWEXPR, (v,), tuple(args), pure=False, movable=True,
                       effect=kind,
                       accesses=(Access(kind,
@@ -542,7 +675,8 @@ class IRBuilder:
         return v
 
     def value_block(self, type_, base: Any = None, *,
-                    kind: Effect = Effect.READ, hint: str = 'v'):
+                    kind: Effect = Effect.READ, hint: str = 'v',
+                    layout: Optional[RegisterLayout] = None):
         """A region that produces one value by assigning to it internally.
 
         The escape hatch for code that is not SSA and cannot cheaply be made
@@ -553,7 +687,47 @@ class IRBuilder:
         comes from the shared allocator, so it no longer needs an enclosing
         scope to avoid colliding with the next instruction.
         """
-        return _ValueBlock(self, type_, base, kind, hint)
+        return _ValueBlock(self, type_, base, kind, hint, layout)
+
+    def pack(self, type_, *parts: Operand, hint: str = 'pk') -> Value:
+        """Aggregate initialisation: ``VecTy v{a, b};``.
+
+        The vendor path builds a short vector to hand a pair of accumulators
+        to one cross-lane instruction.  As raw text the elements were names
+        baked into a string; here they are operands, so the loads that
+        produced them are reachable from this statement.
+        """
+        v = self.value(type_, hint=hint, uniform=_join(parts),
+                       layout=join_layout(parts))
+        self._emit_op(Op.PACK, (v,), tuple(parts), pure=True)
+        return v
+
+    def extract(self, vec: Value, lane: int, type_=None,
+                hint: str = 'el') -> Value:
+        """``v[i]`` on a packed vector -- the inverse of :meth:`pack`."""
+        type_ = type_ or ScalarType(self._fptype)
+        v = self.value(type_, hint=hint, uniform=_join((vec,)),
+                       layout=vec.layout)
+        self._emit_op(Op.EXTRACT, (v,), (vec,), pure=True,
+                      attrs=(('lane', lane),))
+        return v
+
+    def accumulate(self, target: Value, value: Operand) -> Stmt:
+        """``target += value;`` on a declared register.
+
+        The structured counterpart of :meth:`Accumulate`, for the same reason
+        :meth:`call_stmt` exists: an accumulator is mutated in place, so it is
+        not an SSA producer, but the mutation can still declare *which*
+        register it touches instead of being an opaque write.  `value` goes in
+        as an operand, so the computation it comes from cannot be reordered
+        past this statement.
+        """
+        self.pin(target)
+        return self._emit_op(Op.ACCUM, (), (target, value), pure=False,
+                             movable=False, effect=Effect.WRITE,
+                             accesses=(Access(Effect.READ | Effect.WRITE,
+                                              MemSpace.REGISTER,
+                                              base=target),))
 
     def Comment(self, text: str) -> Stmt:
         return self._emit_op(Op.RAWSTMT, (), (), pure=False, movable=True,
@@ -608,12 +782,12 @@ class IRBuilder:
 
 
 class _ValueBlock:
-    def __init__(self, builder, type_, base, kind, hint):
+    def __init__(self, builder, type_, base, kind, hint, layout=None):
         self.builder = builder
         self._type = type_
         self._base = base
         self._kind = kind
-        self.value = builder.value(type_, hint=hint)
+        self.value = builder.value(type_, hint=hint, layout=layout)
 
     def __enter__(self) -> Value:
         self.builder.push(kind='valueblock')

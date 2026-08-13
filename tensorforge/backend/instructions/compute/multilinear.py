@@ -477,9 +477,13 @@ class MultilinearInstruction(ComputeInstruction):
                 sparse = None
 
             def B(writer, var, j, k):
+                # `var is None` asks for the value itself rather than a name
+                # the caller allocated.  A vendor intrinsic needs the former:
+                # an operand without a definition point has no def-use edge
+                # back to the read that produced it.
                 if sparse:
-                    self._ops[1].symbol.load_linear(writer, self._context, var, k)
-                    return True
+                    res = self._ops[1].symbol.load_linear(writer, self._context, var, k)
+                    return res if var is None else True
                 with writer.speculative() as spec:
                     res = self._ops[1].symbol.load(writer, self._context, var, unwindOp(0, j, k, 1, False), False)
                     if not res:

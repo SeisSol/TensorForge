@@ -237,6 +237,182 @@ class Uniformity(IntEnum):
     GRID = 3     # same everywhere
 
 
+@dataclass(frozen=True)
+class LaneAxis:
+    """One tensor dimension, spread over the lanes of a wave.
+
+    The map is the one the index machinery generates, read backwards::
+
+        idx = ((tid / stride) % block) + slot * block
+
+    so element ``s`` lives in slot ``s // block``, held by every thread ``t``
+    with ``(t // stride) % block == s % block`` --- that is, by a run of
+    ``stride`` *consecutive* threads starting at ``(s % block) * stride``, and
+    again every ``stride * block`` threads after that.
+
+    So ``block`` is how many distinct elements the dimension is spread over
+    before it wraps to the next slot, and ``stride`` is how many neighbouring
+    threads hold a *copy* of the same element.  ``stride`` is replication, not
+    packing: it does not mean a lane holds several elements.  A lane holding
+    four consecutive elements is a vector *type* (``ScalarType(base, 4)``)
+    over the slot dimension, which is a different thing and does not belong on
+    this axis.
+
+    ``block == 1`` is the degenerate case: not distributed, every lane holds
+    the whole extent.
+    """
+
+    block: int
+    stride: int = 1
+
+    def __post_init__(self):
+        if self.block < 1:
+            raise IRError(f'lane block must be >= 1, got {self.block}')
+        if self.stride < 1:
+            raise IRError(f'lane stride must be >= 1, got {self.stride}')
+        if self.block == 1:
+            # Not distributed: every thread holds the whole extent, and no
+            # stride changes that.  Normalised because equality is the one
+            # thing this type is *for* --- two axes describing the same
+            # distribution have to compare equal, or a pass refuses a merge
+            # that was legitimate and a relayout search fails to find an
+            # instruction that was already there.
+            object.__setattr__(self, 'stride', 1)
+
+    @property
+    def is_distributed(self) -> bool:
+        return self.block > 1
+
+    def holders(self, element: int, threads: int) -> Tuple[int, ...]:
+        """Which threads hold `element`.  The definition, executable.
+
+        Exists so that the mapping can be *checked* against the index the
+        generator emits rather than restated in prose next to it --- the two
+        had already drifted once.
+        """
+        want = element % self.block
+        return tuple(t for t in range(threads)
+                     if (t // self.stride) % self.block == want)
+
+    def slot(self, element: int) -> int:
+        return element // self.block
+
+    def __repr__(self):
+        return (f'{self.block}' if self.stride == 1
+                else f'{self.block}@{self.stride}')
+
+
+@dataclass(frozen=True)
+class RegisterLayout:
+    """How a register-resident value is distributed over a wave.
+
+    A tuple of :class:`LaneAxis`, one per tensor dimension, outermost first.
+    This is *not* a layout algebra: it cannot be inverted, and composing two
+    layouts concatenates their axes rather than solving for a shared lane map.
+    That is on purpose.  For the operator shapes this generator targets the
+    set of layouts in play is small and enumerable, and the property a pass
+    actually needs is only ``==``: may these two register images be treated as
+    the same distribution, or does moving between them take a shuffle?
+
+    ``None`` -- the default on :class:`Value` -- means *not tracked*, not
+    *scalar*.  Every conservative check therefore has to treat an untracked
+    value as distinct from every tracked one.
+    """
+
+    axes: Tuple[LaneAxis, ...] = ()
+
+    @property
+    def rank(self) -> int:
+        return len(self.axes)
+
+    @property
+    def is_distributed(self) -> bool:
+        return any(a.is_distributed for a in self.axes)
+
+    def holders(self, index: Tuple[int, ...], threads: int) -> Tuple[int, ...]:
+        """Which threads hold the element at multi-index `index`.
+
+        The intersection of the per-axis answers.  For a rank-2 layout of a
+        fused operator -- four lanes per entry of dimension 0, dimension 1
+        alongside, so lane ``l`` holds ``(l % 4, l // 4)`` -- this comes out as
+        a single lane, which is what makes the layout a bijection rather than
+        a replication.
+        """
+        if len(index) != self.rank:
+            raise IRError(f'index of rank {len(index)} for a rank-{self.rank} '
+                          f'layout')
+        out = set(range(threads))
+        for axis, i in zip(self.axes, index):
+            out &= set(axis.holders(i, threads))
+        return tuple(sorted(out))
+
+    def tiles(self, threads: int) -> bool:
+        """Do the axes partition the lanes exactly, one lane per multi-index?
+
+        This is the question a single axis cannot answer, and the reason
+        ``stride`` reads differently at rank 1 and rank 2.  ``LaneAxis(16, 4)``
+        on its own puts one element in four neighbouring lanes: they hold a
+        *copy*, and the value is replicated fourfold.  The same axis beside a
+        ``LaneAxis(4, 1)`` puts one element of *dimension 1* in those four
+        lanes, and they differ in dimension 0 -- no copy anywhere.
+
+        Same field, same number, opposite meaning, decided by the rest of the
+        layout.  Which is why this defers to :meth:`replication` rather than
+        carrying a second rule of its own: two rules for one fact drift, and
+        the structural one had already disagreed with the count.
+        """
+        return self.replication(threads) == 1
+
+    def replication(self, threads: int) -> int:
+        """How many lanes hold a copy of the same element.
+
+        Counted, not derived.  A structural formula has to reason about which
+        thread-id bits the axes leave uncovered, and gets `LaneAxis(16, 4)`
+        alone wrong -- the four lanes below the stride are covered by no axis,
+        so they are copies, and a formula keyed on the strides tiling reports
+        "does not tile" instead of "replicates by four".  At wave sizes an
+        enumeration is exact and costs nothing.
+
+        Returns 0 if the replication is not uniform across lanes.
+        """
+        classes = {}
+        for t in range(threads):
+            key = tuple((t // a.stride) % a.block for a in self.axes)
+            classes.setdefault(key, 0)
+            classes[key] += 1
+        sizes = set(classes.values())
+        return sizes.pop() if len(sizes) == 1 else 0
+
+    def compose(self, other: 'RegisterLayout') -> 'RegisterLayout':
+        """Append `other`'s axes.  Used to build a multi-dimensional layout
+        out of the per-dimension descriptions the index machinery produces."""
+        return RegisterLayout(self.axes + other.axes)
+
+    def axis(self, dim: int) -> LaneAxis:
+        return self.axes[dim]
+
+    def __repr__(self):
+        return f'layout<{",".join(repr(a) for a in self.axes)}>'
+
+
+SCALAR_LAYOUT = RegisterLayout()
+
+
+def join_layout(operands) -> Optional[RegisterLayout]:
+    """The layout an elementwise result inherits from its operands.
+
+    Only when every layout-carrying operand agrees.  Disagreement is not an
+    error here -- a vendor intrinsic may legitimately consume two different
+    distributions -- but the result is then untracked, which every consumer
+    has to treat conservatively.
+    """
+    seen = {x.layout for x in operands
+            if isinstance(x, Value) and x.layout is not None}
+    if len(seen) == 1:
+        return next(iter(seen))
+    return None
+
+
 @dataclass(frozen=True, eq=False)
 class Value:
     """An SSA value.
@@ -253,6 +429,13 @@ class Value:
     # wants the extra precision reads `uniformity` instead.
     uniformity: Uniformity = Uniformity.GRID
     hint: str = ''          # debug-only name fragment, e.g. 'acc' or 'data0'
+    # How the value is spread over the lanes, when that is known.  `None` is
+    # *untracked*, and untracked is not a layout: two untracked values say
+    # nothing about each other, so every check that compares layouts has to
+    # fail closed.  Nothing attaches one yet -- the field exists so that the
+    # loaders, the vendor intrinsics and the passes can start agreeing on a
+    # vocabulary one at a time instead of all at once.
+    layout: Optional[RegisterLayout] = None
 
     @property
     def uniform(self) -> bool:
@@ -276,7 +459,8 @@ class Value:
     def __repr__(self):
         marks = {Uniformity.LANE: '~', Uniformity.MULT: '^',
                  Uniformity.BLOCK: '', Uniformity.GRID: ''}
-        return f'%{marks[self.uniformity]}{self}:{self.type!r}'
+        lay = '' if self.layout is None else f'/{self.layout!r}'
+        return f'%{marks[self.uniformity]}{self}:{self.type!r}{lay}'
 
 
 # An operand is either an SSA value or an inline literal.  Literals are allowed
@@ -329,6 +513,10 @@ class Op:
     WAIT = 'wait'
     BARRIER = 'barrier'
     CALL = 'call'
+    DECLARE = 'declare'     # `Ty name{};` -- a definition with no initialiser
+    ACCUM = 'accum'         # `target += value;` -- in-place, no result
+    PACK = 'pack'           # `VecTy v{a, b};`  -- aggregate initialisation
+    EXTRACT = 'extract'     # `v[i]`            -- element of a packed vector
     # legacy escape hatches
     RAWEXPR = 'rawexpr'     # exactly one target; `text` is an *expression*
     RAWSTMT = 'rawstmt'     # no target;          `text` is a *statement*
@@ -339,7 +527,7 @@ class Op:
     ASYNC = frozenset({COPY_ASYNC, LOAD_ASYNC})
     # statements that lower to a C++ declaration and therefore handle a
     # predicate themselves (as a select) rather than through a guard block
-    DECLARING = frozenset({RAWEXPR, LOAD, LOAD_ASYNC, CALL})
+    DECLARING = frozenset({RAWEXPR, LOAD, LOAD_ASYNC, CALL, PACK, EXTRACT})
 
 
 @dataclass(frozen=True)

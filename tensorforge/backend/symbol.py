@@ -7,7 +7,8 @@ from tensorforge.common.context import Context
 from tensorforge.common.basic_types import Datatype, Addressing
 from tensorforge.common.exceptions import GenerationError
 from .writer import Writer
-from tensorforge.backend.pir.core import BOOL, INDEX, Effect
+from tensorforge.backend.pir.core import (BOOL, INDEX, Effect, LaneAxis,
+                                          RegisterLayout)
 
 from tensorforge.common.matrix.spp import BoundingBoxSPP
 
@@ -188,12 +189,63 @@ class Variable:
     return self.build(writer, context)
 
 class LeadIndex:
+  """An index into a dimension that is spread across the lanes of a wave.
+
+  ``idx = ((tid / stride) % block) + nonlead * block`` -- so `block` and
+  `stride` describe the *distribution* (which lane holds what) and `nonlead`
+  picks the slot within a lane.  Two `LeadIndex` with the same block/stride
+  address the same register image at possibly different offsets; two with
+  different block/stride do not, and moving between them is a shuffle.
+
+  That distinction is what `layout()` hands out, and it is the only reason
+  this class is comparable: a pass that wants to know whether two values may
+  be treated as one needs to ask, and asking used to mean re-deriving the
+  answer from a generated string.
+  """
+
   # TODO: make nonlead a variable
   def __init__(self, nonlead, block, stride, value=None):
     self._nonlead = nonlead
     self._block = block
     self._stride = stride
     self._value = value
+
+  def layout(self) -> RegisterLayout:
+    """The one-axis register layout this index addresses.
+
+    Deliberately drops `nonlead` and `value`: those say *which* element, not
+    *how the dimension is distributed*.
+    """
+    return RegisterLayout((LaneAxis(self._block, self._stride),))
+
+  def same_layout(self, other) -> bool:
+    """Do the two indices address the same distribution?
+
+    An index that is not a `LeadIndex` is not distributed at all, so it only
+    matches a degenerate (`block == 1`) lead index.
+    """
+    if isinstance(other, LeadIndex):
+      return self.layout() == other.layout()
+    return self._block == 1
+
+  def _key(self):
+    return (self._nonlead, self._block, self._stride, self._value)
+
+  def __eq__(self, other):
+    # Structural, including `nonlead`: this is value equality of the *index*,
+    # which is a stronger statement than `same_layout`.
+    return isinstance(other, LeadIndex) and self._key() == other._key()
+
+  def __ne__(self, other):
+    return not self.__eq__(other)
+
+  def __hash__(self):
+    return hash(self._key())
+
+  def __repr__(self):
+    tail = '' if self._value is None else f', value={self._value!r}'
+    return (f'LeadIndex({self._nonlead!r}, block={self._block}, '
+            f'stride={self._stride}{tail})')
 
   def is_thread_dependent(self):
     return True
@@ -268,6 +320,39 @@ def add_offset(x, offset):
     return VarOffset(x.variable, x.offset + offset)
   else:
     return VarOffset(x, offset)
+
+def layout_of(index, num_threads=None):
+  """The register layout a loaded value ends up with, from its index list.
+
+  A load is where a distribution enters the IR: the index expression already
+  says which lane holds what, and `LeadIndex` has said so all along --- it
+  just printed the answer instead of returning it.  Everything downstream is
+  either derived from one of these or produced by an explicit relayout, so a
+  load that stays untracked leaves its whole consumer chain untracked.
+
+  Several distributed dimensions give a multi-axis layout, in dimension
+  order -- a fused operator can put four lanes on each entry of dimension 0
+  and run dimension 1 alongside, so lane `l` holds `(l % 4, l // 4)`.  That is
+  `LaneAxis(4, 1)` beside `LaneAxis(16, 4)`, and the two together are a
+  bijection: `holders` returns one lane.
+
+  The result is only handed out when the axes `tiles()` the wave.  Axes that
+  do not tile describe something this function has not established -- partial
+  replication, an unusual nesting order -- and `None`, meaning *unknown*, is
+  the safe answer: it only ever stops a pass from acting, whereas a guess can
+  make it act wrongly.
+  """
+  leads = [unwrap_lead(i) for i in index]
+  leads = [x[0] for x in leads if x is not None]
+  if not leads:
+    return None
+  if len(leads) == 1:
+    return leads[0].layout()
+  if num_threads is None:
+    return None
+  layout = RegisterLayout(tuple(l.layout().axis(0) for l in leads))
+  return layout if layout.tiles(num_threads) else None
+
 
 def unwrap_lead(index):
   """Peel `VarOffset` wrappers and report the accumulated shift.
@@ -729,16 +814,30 @@ class Symbol:
     addrs = []
     if context.get_vm().get_lexic().simd_mode:
       writer(f'{context.get_vm().get_lexic().get_simd(self.get_fptype(), self.num_threads)} {variable}({index});')
+      return None
     else:
       if self.stype == SymbolType.Register:
         access = f'{self.name}[{index // self.num_threads}]'
       else:
         access = f'{self.name}[{index} + threadIdx.x * {vec}]'
 
+      if variable is None:
+        # Structured: the consumer takes the value rather than a name it
+        # allocated beforehand.  Same seam as `load`, and the reason is the
+        # same -- an operand handed to a vendor intrinsic has to have a
+        # definition point, or the def-use edge to this read does not exist.
+        from tensorforge.backend.pir.core import ScalarType
+        type_ = (ScalarType(self.get_fptype()) if vec == 1
+                 else ScalarType(self.get_fptype(), vec))
+        text = (access if vec == 1
+                else f'*(tensorforge::VectorT<{self.get_fptype()}, {vec}>*)&{access}')
+        return writer.load_expr(text, type_, self, hint='lin')
+
       if vec == 1:
         writer.access_stmt(f'{self.get_fptype()} {variable} = {access};', self, Effect.READ, args=_operands(variable, addrs))
       else:
         writer(f'tensorforge::VectorT<{self.get_fptype()}, {vec}> {variable} = *(tensorforge::VectorT<{self.get_fptype()}, {vec}>*)&{access};')
+      return None
 
   def store_linear(self, writer, context: Context, variable, index, vec = 1,
                    base: str = None):
@@ -838,7 +937,8 @@ class Symbol:
           # glb_load is a declare-then-assign pair, so it needs the same
           # wrapper as the sparse path to have a single declared result
           blk = writer.value_block(ScalarType(self.get_fptype()), self,
-                                   hint='data')
+                                   hint='data',
+                                   layout=layout_of(index, self.num_threads))
           with blk as v:
             writer.access_stmt(lex.glb_load(str(v), access, nontemp), self,
                                Effect.READ, args=_operands(None, addrs))
@@ -846,7 +946,7 @@ class Symbol:
         return writer.load_expr(
             access, ScalarType(self.get_fptype()), self,
             args=_operands(variable, addrs),
-            hint='data')
+            hint='data', layout=layout_of(index, self.num_threads))
       if context.get_vm().get_lexic().simd_mode:
         writer(f'{context.get_vm().get_lexic().get_simd(self.get_fptype(), 16)} {variable}({access});')
       elif self.stype == SymbolType.Global:

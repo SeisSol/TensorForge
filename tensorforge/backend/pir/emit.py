@@ -292,7 +292,8 @@ class Emitter:
                     pending.clear()
                 if (s.pure and not s.regions and not s.has_side_effects
                         and s.effect == Effect.NONE and len(s.target) == 1
-                        and s.op != Op.CONST and not s.attr('escapes')):
+                        and s.op != Op.CONST and not s.attr('escapes')
+                        and not s.attr('no_inline')):
                     t = s.target[0]
                     if len(uses.get(t.id, ())) == 1 and here.get(t.id, 0) == 1:
                         pending.add(t.id)
@@ -464,9 +465,40 @@ class Emitter:
                 v = s.target[0]
                 self.bind(v, f'{GeneralLexicon.BATCH_ID_NAME}{callee[len("batch_id_"):]}')
                 return
-            v = s.target[0]
             args = ', '.join(self.operand(a) for a in s.args)
+            if not s.target:
+                # A void intrinsic: invoked for what it does to a register it
+                # takes by reference, so there is nothing to declare.  The
+                # operands still went through `operand()`, which is the point
+                # -- the arguments are values the IR knows, not baked-in names.
+                w(f'{callee}({args});')
+                return
+            v = s.target[0]
             self.declare(v, f'{callee}({args})', s)
+            return
+
+        if op == Op.DECLARE:
+            v = s.target[0]
+            # No initialiser to inline, so `declare()`'s folding machinery does
+            # not apply -- this is the plain declaration the raw text used to
+            # emit, byte for byte.
+            w(f'{self.ctype(v.type)} {self.name(v)}{s.attr("init", "{}")};')
+            return
+
+        if op == Op.PACK:
+            v = s.target[0]
+            parts = ', '.join(self.operand(a) for a in s.args)
+            self.declare(v, f'{{{parts}}}', s)
+            return
+
+        if op == Op.EXTRACT:
+            v = s.target[0]
+            self.declare(v, f'{self.operand(s.args[0])}[{s.attr("lane")}]', s)
+            return
+
+        if op == Op.ACCUM:
+            target, value = s.args
+            w(f'{self.operand(target)} += {self.operand(value)};')
             return
 
         if op == Op.FOR:
