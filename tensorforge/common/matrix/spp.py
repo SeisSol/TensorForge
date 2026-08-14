@@ -11,7 +11,7 @@ class FullSPP(SparsityPattern):
         self.shape = shape
 
     def is_nz(self, index):
-        return True
+        return all(i < s for i, s in zip(index, self.shape))
 
     def count_nz(self):
         return reduce(lambda x,y: x*y, self.shape, 1)
@@ -66,7 +66,7 @@ class MaskSPP(SparsityPattern):
         #print(self.indexmask)
 
     def is_nz(self, index):
-        return self.mask[tuple(index)]
+        return all(i < s for i, s in zip(index, self.mask.shape)) and self.mask[tuple(index)]
 
     def count_nz(self):
         return np.count_nonzero(self.mask)
@@ -93,7 +93,7 @@ class ListSPP(SparsityPattern):
             self.indexmask[tuple(entry)] = i
 
     def is_nz(self, index):
-        return self.indexmask[tuple(index)] > 0
+        return all(i < s for i, s in zip(index, self.indexmask.shape)) and self.indexmask[tuple(index)] > 0
 
     def count_nz(self):
         return np.count_nonzero(self.indexmask)

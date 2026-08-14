@@ -62,7 +62,7 @@ class Tensor:
 
     def value(self, index):
         realindex = tuple(index)
-        if realindex in self.data:
+        if self.spp.is_nz(realindex):
             return self.data[realindex]
         else:
             return None
