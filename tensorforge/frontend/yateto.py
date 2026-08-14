@@ -99,7 +99,7 @@ class GpuKernelGeneratorV1:
 
   def get_tensor(self, op, can_be_aligned, dims):
     if isinstance(op, (float, int)):
-      return SubTensor(tensor = Tensor([], Addressing.SCALAR, data = [op]))
+      return SubTensor(tensor = Tensor([], Addressing.SCALAR, data = np.array(op)))
     elif self.is_scalar(op):
       return SubTensor(self._cache[f'{self._prefix}{op.name()}'])
     else:
