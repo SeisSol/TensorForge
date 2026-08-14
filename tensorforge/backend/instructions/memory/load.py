@@ -162,8 +162,8 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
         loops += [Loop(f'i{i}', src_bbox.lower()[i], src_bbox.upper()[i], 1)]
 
       def inner(indices):
-        self._src.load(writer, self._context, 'value', indices, allow_nontemporal)
-        self._dest.store(writer, self._context, 'value', indices, False,
+        value = self._src.load(writer, self._context, None, indices, allow_nontemporal)
+        self._dest.store(writer, self._context, value, indices, False,
                          base=self.write_base())
 
       write_loops(self._context, writer, loops, inner)
@@ -460,10 +460,10 @@ class GlbToRegLoader(MemoryInstruction, LoadInstruction):
       def inner(indices):
         # logical index in on the register side, storage index out on the
         # global side --- add_offset folds the (usual) zero away
-        self._src.load(writer, self._context, 'value',
+        value = self._src.load(writer, self._context, None,
                        [add_offset(x, self._offset[i])
                         for i, x in enumerate(indices)], allow_nontemporal)
-        self._dest.store(writer, self._context, 'value', indices, False,
+        self._dest.store(writer, self._context, value, indices, False,
                          base=self.write_base())
 
       write_loops(self._context, writer, loops, inner)

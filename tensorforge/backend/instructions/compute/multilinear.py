@@ -639,16 +639,17 @@ class MultilinearInstruction(ComputeInstruction):
             # no linear needed
             return
 
+        from tensorforge.backend.pir.core import ScalarType
+        ftype = ScalarType(self._idest.get_fptype())
+
         if len(self._scalar) > 0:
-            scalar_var = writer.varalloc()
-            writer(f'{self._fp_as_str} {scalar_var}{"{}"};')
-            with writer.AnonymousScope():
-                self._scalar[0].symbol.load(writer, self._context, 'value', [], False)
-                writer(f'{scalar_var} = value;')
+            scalar_var = self._scalar[0].symbol.load(writer, self._context, None, [], False)
+            assert scalar_var is not None
+
             for scalar in self._scalar[1:]:
-                with writer.AnonymousScope():
-                    scalar.symbol.load(writer, self._context, 'value', [], False)
-                    writer(f'{scalar_var} = {self._productOperation.format("value", f"{scalar_var}")};')
+                scalar_add = scalar.symbol.load(writer, self._context, None, [], False)
+                scalar_var = self._emit_binop(writer, ftype, self._productOperation, scalar_add, scalar_var)
+                assert scalar_var is not None
 
         loopstack = []
         loopmap = {}
@@ -707,17 +708,16 @@ class MultilinearInstruction(ComputeInstruction):
         def nonlead_writer(varlist):
             needsLoad = all(_dim_covered(i, varlist[loopmap[f'n{i}']]) for i,_ in enumerate(self._ns))
             if needsLoad:
-                self._idest.load(writer, self._context, 'value', [varlist[loopmap[f'n{i}']] for i,_ in enumerate(self._ns)], False)
-                valvar = 'value'
+                valvar = self._idest.load(writer, self._context, None, [varlist[loopmap[f'n{i}']] for i,_ in enumerate(self._ns)], False)
             else:
-                valvar = '0'
-            if len(self._scalar) > 0 and valvar != '0':
-                writer(f'const {self._dest.get_fptype()} newvalue1 = {self._productOperation.format(valvar, f"{scalar_var}")};')
-                valvar = 'newvalue1'
+                valvar = writer.const(self._sumOperation.neutral(), ftype)
+
+            if len(self._scalar) > 0:
+                valvar = self._emit_binop(writer, ftype, self._productOperation, valvar, scalar_var)
             if self._prev is not None:
-                self._prev.load(writer, self._context, 'oldvalue', [add_offset(varlist[loopmap[f'n{i}']], self._prev_offset[i]) if self._prev_offset else varlist[loopmap[f'n{i}']] for i,_ in enumerate(self._ns)], False)
-                writer(f'const {self._dest.get_fptype()} newvalue2 = {self._sumOperation.format("oldvalue", valvar)};')
-                valvar = 'newvalue2'
+                oldvalue = self._prev.load(writer, self._context, None, [add_offset(varlist[loopmap[f'n{i}']], self._prev_offset[i]) if self._prev_offset else varlist[loopmap[f'n{i}']] for i,_ in enumerate(self._ns)], False)
+                valvar = self._emit_binop(writer, ftype, self._sumOperation, oldvalue, valvar)
+
             self._dest.store(writer, self._context, valvar, [varlist[loopmap[f'n{i}']] for i,_ in enumerate(self._ns)], False)
 
         write_loops(self._context, writer, loopstack, nonlead_writer)

@@ -56,8 +56,8 @@ class StoreRegToReg(MemoryInstruction):
       loops += [Loop(f'i{i}', src_bbox.lower()[i], src_bbox.upper()[i], 1)]
 
     def inner(indices):
-      self._src.load(writer, self._context, 'value', indices, False)
-      self._dest.store(writer, self._context, 'value', indices, False)
+      value = self._src.load(writer, self._context, None, indices, False)
+      self._dest.store(writer, self._context, value, indices, False)
 
     write_loops(self._context, writer, loops, inner)
 
@@ -123,8 +123,8 @@ class StoreRegToShr(AbstractShrMemWrite):
       loops += [Loop(f'i{i}', src_bbox.lower()[i], src_bbox.upper()[i], 1)]
 
     def inner(indices):
-      self._src.load(writer, self._context, 'value', indices, False)
-      self._dest.store(writer, self._context, 'value',
+      value = self._src.load(writer, self._context, None, indices, False)
+      self._dest.store(writer, self._context, value,
                        [add_offset(x, self._dest_offset[i])
                         for i, x in enumerate(indices)], False)
 
@@ -234,10 +234,11 @@ class StoreRegToGlb(AbstractInstruction):
         dest_indices = [add_offset(x, self._dest_offset[i])
                         for i, x in enumerate(indices)]
         if needsLoad:
-          self._src.load(writer, self._context, 'value', indices, False)
-          self._dest.store(writer, self._context, 'value', dest_indices, allow_nontemporal, self._atomic)
+          value = self._src.load(writer, self._context, None, indices, False)
         else:
-          self._dest.store(writer, self._context, '0', dest_indices, allow_nontemporal, self._atomic)
+          value = writer.const(0) # TODO: dtype
+
+        self._dest.store(writer, self._context, value, dest_indices, allow_nontemporal, self._atomic)
 
       if not any(manual) and self._context.get_vm().get_hw_descr().vendor in ['amd'] and False:
         pass
@@ -273,7 +274,8 @@ class StoreRegToGlb(AbstractInstruction):
                        max(src_bbox.upper()[i], dest_bbox.upper()[i]), 1)]
 
       def zero(indices):
-        self._dest.store(writer, self._context, '0',
+        value = writer.const(0) # TODO: dtype
+        self._dest.store(writer, self._context, value,
                          [add_offset(x, self._dest_offset[i])
                           for i, x in enumerate(indices)],
                          allow_nontemporal, None)
@@ -318,6 +320,8 @@ class StoreShrMemToGlb(AbstractInstruction):
     return self._dest
 
   def gen_ir(self, writer):
+    raise NotImplementedError() # broken
+
     dest_matrix = self._dest.obj
 
     dest_name = self._dest.name
