@@ -533,10 +533,7 @@ class Generator:
     """
     for matrix in self._matrix_list:
       if matrix not in self._tmp_list:
-        # temporary. For now, take only the selector matrices
-        if matrix.has_values() and len(matrix.get_values()) < 16 and False:
-          stype = SymbolType.Data
-        elif matrix.addressing == Addressing.SCALAR:
+        if matrix.addressing == Addressing.SCALAR:
           # known scalars will always be inlined
           if matrix.has_values():
             stype = SymbolType.Data
