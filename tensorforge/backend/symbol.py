@@ -563,12 +563,19 @@ class Symbol:
     self.datatype: Union[Datatype, None] = None
     self.num_threads = None
     self.lead_dims = [0] # has only an effect for register storage
+    #: How this symbol's register image is distributed across the wave, when
+    #: that is known.  Set by whoever fills it -- `store_linear` is the only
+    #: filler that does so today -- and reported by `load_linear`, so that a
+    #: reader does not have to restate a fact about a write it cannot see.
+    #: `None` is *unknown*, never *not distributed*.
+    self.layout = None
     self._users = []
 
   def clone(self):
     cloned = Symbol(self.name, self.stype, self.obj)
     cloned.data_view = deepcopy(self.data_view)
     cloned.datatype = self.datatype
+    cloned.layout = self.layout
     cloned._users = [user for user in self._users]
     cloned.lead_dims = [ld for ld in self.lead_dims]
     return cloned
@@ -831,13 +838,54 @@ class Symbol:
                  else ScalarType(self.get_fptype(), vec))
         text = (access if vec == 1
                 else f'*(tensorforge::VectorT<{self.get_fptype()}, {vec}>*)&{access}')
-        return writer.load_expr(text, type_, self, hint='lin')
+        # Whatever the fill recorded, unchanged: this read cannot see the
+        # distribution, so it reports rather than derives.
+        return writer.load_expr(text, type_, self, hint='lin',
+                                layout=self.layout)
 
       if vec == 1:
         writer.access_stmt(f'{self.get_fptype()} {variable} = {access};', self, Effect.READ, args=_operands(variable, addrs))
       else:
         writer(f'tensorforge::VectorT<{self.get_fptype()}, {vec}> {variable} = *(tensorforge::VectorT<{self.get_fptype()}, {vec}>*)&{access};')
       return None
+
+  def _record_linear_layout(self, index, vec):
+    """Note the distribution a linearized fill leaves behind.
+
+    `GlbToRegLoader` stages a flat run: it reads `glb[i + threadIdx.x * g]`
+    into a temporary and stores that temporary at `reg[i // num_threads]`,
+    with `i` stepping by `num_threads * g`.  So register slot `s` holds
+    element `s * num_threads + t` on lane `t` --- which is `LaneAxis(threads,
+    1)`, the same map `LeadIndex` writes as
+    `((tid / stride) % block) + slot * block` with `block = num_threads` and
+    `stride = 1`.
+
+    The claim is recorded *here*, where the write that makes it true is
+    emitted, rather than re-derived in `load_linear` from the read.  The read
+    is `reg[i // num_threads]` and carries no lane term at all: nothing about
+    the distribution is recoverable from it, so a reader stating one would be
+    restating a fact owned by another file --- the arrangement that produced
+    two wrong layout claims in the relayout table already.
+
+    Only for registers, and only for the shape the loader actually emits.
+    Anything else leaves `layout` alone, which keeps it `None`, which means
+    unknown.
+    """
+    from tensorforge.backend.pir.core import LaneAxis, RegisterLayout
+    if self.stype != SymbolType.Register or self.num_threads is None:
+      return
+    if not isinstance(index, int) or index % (self.num_threads * vec) != 0:
+      # A fill that does not start on a slot boundary distributes something
+      # this function has not established.
+      return
+    layout = RegisterLayout((LaneAxis(self.num_threads, 1),))
+    if self.layout is not None and self.layout != layout:
+      # Two fills disagreeing about the same register image is a defect, and
+      # a silent overwrite would hand the second one's claim to consumers of
+      # the first.  Unknown is the safe answer.
+      self.layout = None
+      return
+    self.layout = layout
 
   def store_linear(self, writer, context: Context, variable, index, vec = 1,
                    base: str = None):
@@ -847,6 +895,7 @@ class Symbol:
     # AbstractShrMemWrite.write_base().
     name = base or self.name
     addrs = []
+    self._record_linear_layout(index, vec)
     if context.get_vm().get_lexic().simd_mode:
       pass
       # TODO:

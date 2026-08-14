@@ -19,12 +19,18 @@ def fmadpp(step):
     def emit(writer, C, A, B, row):
         want = fmadpp_operand_layout(step)
         got = getattr(A, 'layout', None)
-        # `None` is *unknown*, not *wrong*: the sparse loader does not yet say
-        # what it produces, and refusing to emit for want of an annotation
-        # would turn a description into an obstacle.  A layout that is present
-        # and disagrees is a different matter --- the instruction's DPP
-        # pattern assumes this distribution, so a mismatch is a wrong kernel,
-        # not a slow one.
+        # `None` is *unknown*, not *wrong*, and refusing to emit for want of
+        # an annotation would turn a description into an obstacle.  A layout
+        # that is present and disagrees is a different matter --- the
+        # instruction's DPP pattern assumes this distribution, so a mismatch
+        # is a wrong kernel, not a slow one.
+        #
+        # The sparse loader used to be what took this exemption, for 1841 of
+        # these operands.  It now reports the distribution its fill recorded,
+        # and those are checked here like any other.  What is left is the MFMA
+        # accumulator, read back as the next operator's operand: `matmul32`
+        # leaves `acclayout = None` deliberately, because that distribution is
+        # not derivable and a guess would be worse than the gap.
         if got is not None and got != want:
             raise ValueError(
                 f'fmacdpp{step} needs its broadcast operand at {want!r}, '

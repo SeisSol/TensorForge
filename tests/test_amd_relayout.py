@@ -266,9 +266,11 @@ def test_fmadpp_rejects_an_operand_in_the_wrong_distribution():
 def test_fmadpp_lets_an_untracked_operand_through():
     """`None` is unknown, not wrong.
 
-    The sparse loader does not say what it produces yet. Refusing to emit for
-    want of an annotation would turn a description into an obstacle, and the
-    parts that are annotated would stop being worth annotating.
+    The sparse loader used to be the reason this mattered; it now reports what
+    its fill recorded (`test_sparse_layout.py`).  The MFMA accumulator still
+    does not, deliberately.  Refusing to emit for want of an annotation would
+    turn a description into an obstacle, and the parts that are annotated
+    would stop being worth annotating.
     """
     from tensorforge.backend.instructions.compute.primitives import amd
     from tensorforge.backend.pir.core import ScalarType

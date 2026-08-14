@@ -235,6 +235,34 @@ GROUPS = {
              'void transpose16x2(T w1, T &w2, T v1, T v2);', 1)),
     ]),
 
+    # The sparse loader's layout is a claim about a *write*, recorded where the
+    # write happens and read back somewhere else.  Both ends have to fail.
+    'sparse': ('tests/test_sparse_layout.py', [
+        ('the fill records nothing',
+         sub(Path('tensorforge/backend/symbol.py'),
+             '    self._record_linear_layout(index, vec)\n', '', 1)),
+        ('the read drops what the fill recorded',
+         sub(Path('tensorforge/backend/symbol.py'),
+             "        return writer.load_expr(text, type_, self, hint='lin',\n"
+             "                                layout=self.layout)",
+             "        return writer.load_expr(text, type_, self, hint='lin')", 1)),
+        ('the wave width taken as the block instead of the thread count',
+         sub(Path('tensorforge/backend/symbol.py'),
+             'layout = RegisterLayout((LaneAxis(self.num_threads, 1),))',
+             'layout = RegisterLayout((LaneAxis(self.num_threads, 2),))', 1)),
+        ('a mid-slot fill claimed anyway',
+         sub(Path('tensorforge/backend/symbol.py'),
+             'if not isinstance(index, int) or index % (self.num_threads * vec) != 0:',
+             'if not isinstance(index, int):', 1)),
+        ('two disagreeing fills, last one wins',
+         sub(Path('tensorforge/backend/symbol.py'),
+             '      self.layout = None\n      return\n    self.layout = layout',
+             '      pass\n    self.layout = layout', 1)),
+        ('the layout lost on clone',
+         sub(Path('tensorforge/backend/symbol.py'),
+             '    cloned.layout = self.layout\n', '', 1)),
+    ]),
+
     'operands': ('tests/test_snapshots.py', [
         ('hfma asks for the wrong distribution',
          sub(PKG / 'relayout.py',
