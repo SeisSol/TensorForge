@@ -280,6 +280,44 @@ GROUPS = {
              '            if False:', 1)),
     ]),
 
+    # The nvidia path is live now; the guard that keeps it from silently
+    # going dead again, and the gate that keeps it from aborting cases it
+    # cannot take.
+    'nvidia': ('tests/test_nvidia_reachability.py', [
+        ('a second definition of matmul',
+         sub(Path('tensorforge/backend/instructions/compute/primitives/nvidia.py'),
+             'def matmul(writer, C, A, B, M, N, K, kx, threads, dtype, sparse, ctx, shmptr, shmsize):',
+             'def matmul(*args, **kwargs):\n    pass\n\n'
+             'def matmul(writer, C, A, B, M, N, K, kx, threads, dtype, sparse, ctx, shmptr, shmsize):',
+             1)),
+        ('an unreachable helper reintroduced',
+         sub(Path('tensorforge/backend/instructions/compute/primitives/nvidia.py'),
+             'def tfconvert(writer: Writer, variables):',
+             'def shuffle_swap(writer, v):\n'
+             '    return f"__shfl_xor_sync(0xffffffff, {v}, 1)"\n\n'
+             'def tfconvert(writer: Writer, variables):', 1)),
+        ('the atom spelled out a second time',
+         sub(Path('tensorforge/backend/instructions/compute/primitives/nvidia.py'),
+             'def shmsize(stages):\n    atom = ATOM',
+             'def shmsize(stages):\n    atom = INSTRS[1]', 1)),
+    ]),
+
+    'gate': ('tests/test_nvidia_gate.py', [
+        ('the wave width no longer checked',
+         sub(Path('tensorforge/backend/instructions/compute/primitives/nvidia.py'),
+             'return threads == 32 and dtype == ATOM.d and not sparse',
+             'return dtype == ATOM.d and not sparse', 1)),
+        ('the operand type no longer checked',
+         sub(Path('tensorforge/backend/instructions/compute/primitives/nvidia.py'),
+             'return threads == 32 and dtype == ATOM.d and not sparse',
+             'return threads == 32 and not sparse', 1)),
+        ('the gate bypassed entirely',
+         sub(Path('tensorforge/backend/instructions/compute/multilinear.py'),
+             '            return nvidia.supports(self._num_threads, self._idest.datatype,\n'
+             '                                   self._second_operand_is_sparse())',
+             '            return True', 1)),
+    ]),
+
     'operands': ('tests/test_snapshots.py', [
         ('hfma asks for the wrong distribution',
          sub(PKG / 'relayout.py',

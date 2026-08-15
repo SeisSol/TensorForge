@@ -18,11 +18,11 @@ act with a reason attached; growing it silently is the failure this guards.
 
 from __future__ import annotations
 
-import ast
-from collections import defaultdict
 from pathlib import Path
 
 import pytest
+
+from harness import reachability
 
 AMD = (Path(__file__).parent.parent / "tensorforge" / "backend" /
        "instructions" / "compute" / "primitives" / "amd")
@@ -60,59 +60,9 @@ KEPT_UNREACHABLE = {
 }
 
 
-def _sources():
-    for name in MODULES:
-        p = AMD / f"{name}.py"
-        assert p.exists(), f"{p} is missing; MODULES is out of date"
-        yield name, p.read_text()
-
-
-def _module_defs(tree):
-    """Module-level definitions, keyed by name, newest last."""
-    defs = defaultdict(list)
-    for node in tree.body:
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
-                             ast.ClassDef)):
-            defs[node.name].append(node)
-        elif isinstance(node, ast.Assign):
-            for t in node.targets:
-                # `__all__` is the export list, not a definition -- it names
-                # everything by construction, so treating it as one would make
-                # the reachability check vacuous.
-                if isinstance(t, ast.Name) and t.id != "__all__":
-                    defs[t.id].append(node)
-    return defs
-
-
-def _reachable(defs, entry):
-    live = {n: v[-1] for n, v in defs.items()}
-    seen, work = set(), [entry]
-    while work:
-        name = work.pop()
-        if name in seen or name not in live:
-            continue
-        seen.add(name)
-        for n in ast.walk(live[name]):
-            if isinstance(n, ast.Name) and n.id in live and n.id not in seen:
-                work.append(n.id)
-    return seen
-
-
 @pytest.fixture(scope="module")
 def analysis():
-    """Definitions and reachability across the whole package.
-
-    Cross-module `from .x import y` lines are not treated as definitions --
-    they are edges, and the definition they point at is already in the merged
-    table. Counting them would make every re-export look like a second
-    definition of the same name.
-    """
-    defs = defaultdict(list)
-    for mod, src in _sources():
-        for name, nodes in _module_defs(ast.parse(src)).items():
-            defs[name].extend((mod, n) for n in nodes)
-    flat = {n: [x[1] for x in v] for n, v in defs.items()}
-    return flat, _reachable(flat, ENTRY)
+    return reachability.analyse(AMD, MODULES, [ENTRY])
 
 
 def test_entry_point_exists(analysis):
@@ -130,7 +80,7 @@ def test_no_name_is_defined_twice(analysis):
     picks whichever it imports last.
     """
     defs, _ = analysis
-    dupes = {n: [d.lineno for d in v] for n, v in defs.items() if len(v) > 1}
+    dupes = reachability.duplicate_definitions(defs)
     assert not dupes, f"shadowed definitions: {dupes}"
 
 
@@ -150,35 +100,10 @@ def test_allow_list_does_not_outlive_its_entries(analysis):
     assert not stale, f"KEPT_UNREACHABLE is out of date for: {sorted(stale)}"
 
 
-def _code_only(path: Path) -> str:
-    """The module's source with comments and docstrings stripped.
-
-    The invariant is about what the module *emits*, not about what it is
-    allowed to say.  A comment recording that two routines used to be written
-    against a CUDA intrinsic is exactly the note a reader wants, and a check
-    that forbade naming it would delete its own explanation.
-    """
-    import io
-    import tokenize
-
-    out = []
-    with open(path, "rb") as fh:
-        tokens = list(tokenize.tokenize(fh.readline))
-    prev_end = (1, 0)
-    for tok in tokens:
-        if tok.type == tokenize.COMMENT:
-            continue
-        if tok.type == tokenize.STRING and tok.line.strip().startswith(
-                ('"""', "'''", 'r"""', "r'''")):
-            continue                      # docstring on its own line
-        out.append(tok.string)
-    return "\n".join(out)
-
-
 @pytest.mark.parametrize("mod", MODULES)
 def test_no_cuda_intrinsics_in_the_amd_package(mod):
     """`__shfl_xor_sync` is CUDA.  Two routines here were written against it."""
-    src = _code_only(AMD / f"{mod}.py")
+    src = reachability.code_only(AMD / f"{mod}.py")
     for token in ("__shfl_xor_sync", "__shfl_sync", "__ballot_sync"):
         assert token not in src, f"{mod}.py: {token} is a CUDA intrinsic"
 
@@ -186,13 +111,5 @@ def test_no_cuda_intrinsics_in_the_amd_package(mod):
 def test_module_has_no_empty_stubs(analysis):
     """`def f(...): pass` reads as an implemented hook and is not one."""
     defs, _ = analysis
-    stubs = []
-    for name, nodes in defs.items():
-        node = nodes[-1]
-        if not isinstance(node, ast.FunctionDef):
-            continue
-        body = [s for s in node.body if not isinstance(s, ast.Expr)
-                or not isinstance(s.value, ast.Constant)]
-        if len(body) == 1 and isinstance(body[0], ast.Pass):
-            stubs.append(name)
+    stubs = reachability.empty_stubs(defs)
     assert not stubs, f"empty stubs: {stubs}"

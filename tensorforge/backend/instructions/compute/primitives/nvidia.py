@@ -1,197 +1,17 @@
 from tensorforge.common.basic_types import Datatype
 from tensorforge.backend.writer import Writer
 
-def reduction_generic(writer: Writer, operation, blocks):
-    var = value
-    with writer.Scope():
-        for block in blocks:
-            tempvar = writer.tempvar()
-            shuffle_swap(writer, dtype, tempvar, var, block)
-            writer(f'{value} = {operation.format("newvalue", {value})}')
-            var = tempvar
-
-def minmaxfloatint(writer: Writer, operation, target, source):
-    with writer.Scope():
-        writer(f'auto negval = __float_as_uint(max(0, {source}));')
-        writer(f'auto posval = __float_as_uint(min(0, {source}));')
-        writer(f'auto rednegval = __reduction_min_sync(-1, negval);')
-        writer(f'auto redposval = __reduction_max_sync(-1, posval);')
-        writer(f'{target} = min(__uint_as_float(rednegval), __uint_as_float(redposval));')
-
-def full_reduction(writer: Writer, operation, dtype, target, source):
-    if dtype == Datatype.BOOL and operation == Operation.AND:
-        writer(f'{target} = __all_sync(-1, {source});')
-    elif dtype == Datatype.BOOL and operation == Operation.OR:
-        writer(f'{target} = __any_sync(-1, {source});')
-    elif dtype in [Datatype.I32, Datatype.I32] and ARCH > sm80 and operation == Operation.MIN:
-        writer(f'{target} = __reduction_min_sync(-1, {source});')
-    elif dtype in [Datatype.I32, Datatype.I32] and ARCH > sm80 and operation == Operation.MAX:
-        writer(f'{target} = __reduction_max_sync(-1, {source});')
-    elif dtype == Datatype.F32 and ARCH > sm80 and operation in [Operation.MIN, Operation.MAX]:
-        minmaxfloatint(writer, operation, target, source)
-    elif dtype in [Datatype.I32] and ARCH > sm80 and operation == Operation.AND:
-        writer(f'{target} = __reduction_and_sync(-1, {source});')
-    elif dtype in [Datatype.I32] and ARCH > sm80 and operation == Operation.OR:
-        writer(f'{target} = __reduction_or_sync(-1, {source});')
-    elif dtype in [Datatype.I32] and ARCH > sm80 and operation == Operation.XOR:
-        writer(f'{target} = __reduction_xor_sync(-1, {source});')
-    elif dtype in [Datatype.I64] and ARCH > sm80 and operation == Operation.AND:
-        writer(f'{target} = __reduction_and_sync(-1, {source});')
-    elif dtype in [Datatype.I64] and ARCH > sm80 and operation == Operation.OR:
-        writer(f'{target} = __reduction_or_sync(-1, {source});')
-    elif dtype in [Datatype.I64] and ARCH > sm80 and operation == Operation.XOR:
-        writer(f'{target} = __reduction_xor_sync(-1, {source});')
-    # TODO: __reduction_xor_and_or_sync for uint and ulong
-    else:
-        reduction_generic(writer, operation, [2,4,8,16,32])
-
-def ballot_reduction(writer: Writer, operation, subblock, block, source, target):
-    with writer.Scope():
-        tempvar = writer.tempvar()
-        blockvar = writer.tempvar()
-        subblockvar = writer.tempvar()
-        maskvar = writer.tempvar()
-        writer(f'const auto {tempvar} = __ballot_sync(-1, {source});')
-        writer(f'const auto {blockvar} = (threadIdx.x / {block}) * {block};')
-        writer(f'const auto {subblockvar} = threadIdx.x % {subblock};')
-
-        maskval = 0
-        pos = 0
-        while pos < block:
-            maskval |= 2**pos
-            pos += subblock
-        writer(f'const auto {maskvar} = ({maskval} << {subblockvar}) << {blockvar};')
-
-        if operation == Operation.AND:
-            writer(f'{target} = ({tempvar} & {maskvar}) == {maskvar};')
-        if operation == Operation.OR:
-            writer(f'{target} = ({tempvar} & {maskvar}) != 0;')
-        if operation == Operation.XOR:
-            writer(f'{target} = (__popc({tempvar} & {maskvar}) & 1) == 0;')
-
-def reduction(writer: Writer, source, target, operation, subblock, block):
-    if block == 32 and subblock == 1:
-        return full_reduction(writer)
-    elif dtype == Datatype.BOOL:
-        return ballot_reduction(writer)
-    else:
-        return reduction_generic(writer, blocks)
-
-def reduction(writer: Writer, source, target, operation, blocks):
-    if sorted(blocks) == [2,4,8,16,32]:
-        return full_reduction(writer)
-    else:
-        return reduction_generic(writer, blocks)
-
-def shuffle_swap(writer, dtype, target, source, block):
-    writer(f'{target} = __shfl_xor_sync(-1, {block >> 1}, {source});')
-
-def shuffle_mirror(writer, dtype, target, source, block):
-    writer(f'{target} = __shfl_xor_sync(-1, {block - 1}, {source});')
-
-def shuffle_broadcast(writer, dtype, target, source, lane, subblock, block):
-    if subblock == 1:
-        writer(f'{target} = __shfl_sync(-1, {source}, {lane}, {block});')
-    else:
-        # TODO: not correct in all cases
-        writer(f'{target} = __shfl_sync(-1, {source}, {lane * subblock} + (threadIdx.x % {subblock}), {block});')
-
-def atomic(writer: Writer, target, source, operation):
-    pass
-
-def read_shared(writer: Writer, block):
-    pass
-
-def shuffle_broadcast_forall(writer, dtype, size, source, filter, callback, subblock, block):
-    if block == subblock:
-        if filter(0):
-            callback(f'{source}', 0)
-    else:
-        for b in range(block // subblock):
-            tempname = f'{source}temp{block}'
-            if filter(b):
-                with writer.Scope():
-                    writer(f'{dtype} {tempname}[{size}];')
-                    for i in range(size):
-                        shuffle_broadcast(writer, dtype, f'{tempname}[{i}]', f'{source}[{i}]', b, subblock, block)
-                    callback(f'{tempname}', b)
-
-def prefer_rowload():
-    return False
-
 def tfconvert(writer: Writer, variables):
     for variable in variables:
         writer(f'uint32_t {variable}u, {variable}l;')
         writer(f'tensorforge::splitFloatTF32({variable}u, {variable}l, {variable});')
     return [(f'{v}u', f'{v}l') for v in variables]
 
-def bfconvert(writer: Writer, variables):
-    raise NotImplementedError()
-    for v1, v2 in zip(variables[0::2], variables[1::2]):
-        writer('const auto {v1}u = __float_to_tf32({v1});')
-        writer('const auto {v1}m = __float_to_tf32({v1} - {v1}u);')
-        writer('const auto {v1}l = __float_to_tf32({v1} - {v1}u - {v1}m);')
-    return [(f'{v}u', f'{v}m', f'{v}l') for v in variables[0::2]]
-
 class MMAMode:
     DIRECT = 0
     TF32 = 1
     BF16 = 2
     I8 = 3
-
-class MatmulCall:
-    def setup_code(self):
-        return ''
-
-    def call_code(self, a, b, c, d):
-        return ''
-
-    def __init__(self, n, m, k, b, d, name, mode):
-        self.n = n
-        self.m = m
-        self.k = k
-        self.b = b
-        self.d = d
-        self.name = name
-        self.mode = mode
-
-    def generate(self, writer, context, A, B, C):
-        Cstr = ','.join(f'{c}' for c in C)
-        with writer.Scope():
-            writer(f'auto mma = cute::MMA_Atom<{self.name}>{{}};')
-            if self.mode == MMAMode.BF16:
-                Abf16 = bfconvert(writer, A)
-                Bbf16 = bfconvert(writer, B)
-
-                Austr = ','.join(f'{a[0]}' for a in Abf16)
-                Amstr = ','.join(f'{a[1]}' for a in Abf16)
-                Alstr = ','.join(f'{a[2]}' for a in Abf16)
-                Bustr = ','.join(f'{b[0]}' for b in Bbf16)
-                Bmstr = ','.join(f'{b[1]}' for b in Bbf16)
-                Blstr = ','.join(f'{b[2]}' for b in Bbf16)
-
-                writer(f'mma.fma({Cstr},{Austr},{Bustr},{Cstr});')
-                writer(f'mma.fma({Cstr},{Austr},{Bmstr},{Cstr});')
-                writer(f'mma.fma({Cstr},{Austr},{Blstr},{Cstr});')
-                writer(f'mma.fma({Cstr},{Amstr},{Bustr},{Cstr});')
-                writer(f'mma.fma({Cstr},{Amstr},{Bmstr},{Cstr});')
-                writer(f'mma.fma({Cstr},{Alstr},{Bustr},{Cstr});')
-            if self.mode == MMAMode.TF32:
-                Atf32 = tfconvert(writer, A)
-                Btf32 = tfconvert(writer, B)
-
-                Austr = ','.join(f'{a[0]}' for a in Atf32)
-                Alstr = ','.join(f'{a[1]}' for a in Atf32)
-                Bustr = ','.join(f'{b[0]}' for b in Btf32)
-                Blstr = ','.join(f'{b[1]}' for b in Btf32)
-
-                writer(f'mma.fma({Cstr},{Austr},{Bustr},{Cstr});')
-                writer(f'mma.fma({Cstr},{Austr},{Blstr},{Cstr});')
-                writer(f'mma.fma({Cstr},{Alstr},{Bustr},{Cstr});')
-            else:
-                Astr = ','.join(f'{a}' for a in A)
-                Bstr = ','.join(f'{b}' for b in B)
-                writer(f'mma.fma({Cstr},{Astr},{Bstr},{Cstr});')
 
 class MMAInstr:
     def headers(self):
@@ -210,16 +30,51 @@ class MMAInstr:
         return []
 
     def asmcall(self, writer, D, A, B, C):
+        """The `mma.sync` itself.
+
+        `D` and `C` are the same accumulator at every call site -- the
+        instruction reads it and writes it back.  Listing it as `"=f"` under
+        outputs and again as `"f"` under inputs states two *unrelated*
+        operands that happen to name one C++ lvalue, and nothing then requires
+        the compiler to give them the same register: it is free to read the
+        accumulator into one and write the result into another, dropping the
+        accumulation.  `"+f"` is the constraint that says read-and-write, and
+        then the operand is listed once.
+
+        Numbering follows from that.  PTX numbers outputs and inputs in one
+        sequence, so folding C into D shifts A and B down by `len(C)` --
+        writing the offsets from the *emitted* groups rather than from the
+        argument lists is what keeps the two in step.
+        """
         typeid = "f" if self.d == Datatype.F32 else "d"
         typeidx = "r" if self.d == Datatype.F32 else "d"
+
+        inout = D if D is C or list(D) == list(C) else None
 
         arggrp = lambda x, b: "{" + ','.join(f"%{i + b}" for i,_ in enumerate(x)) + "}"
         arggrp2 = lambda x, o: ','.join(f'"{o}"({v})' for v in x)
 
+        if inout is not None:
+            # one operand, read-write: D and C name the same registers
+            outs = arggrp2(inout, f"+{typeid}")
+            ins = f'{arggrp2(A, typeidx)}, {arggrp2(B, typeidx)}'
+            dgrp = arggrp(inout, 0)
+            agrp = arggrp(A, len(inout))
+            bgrp = arggrp(B, len(inout) + len(A))
+            cgrp = dgrp
+        else:
+            outs = arggrp2(D, f"={typeid}")
+            ins = (f'{arggrp2(A, typeidx)}, {arggrp2(B, typeidx)}, '
+                   f'{arggrp2(C, typeid)}')
+            dgrp = arggrp(D, 0)
+            agrp = arggrp(A, len(D))
+            bgrp = arggrp(B, len(D) + len(A))
+            cgrp = arggrp(C, len(D) + len(A) + len(B))
+
         writer(f"""asm("{self.name} "
-"{arggrp(D, 0)}, {arggrp(A, len(D))}, {arggrp(B, len(D + A))}, {arggrp(C, len(D + A + B))};"
-: {arggrp2(D, f"={typeid}")}
-: {arggrp2(A, f"{typeidx}")}, {arggrp2(B, f"{typeidx}")}, {arggrp2(C, f"{typeid}")}
+"{dgrp}, {agrp}, {bgrp}, {cgrp};"
+: {outs}
+: {ins}
 );""")
 
     def epilogue(self):
@@ -240,65 +95,6 @@ class MMAInstr:
             else:
                 self.asmcall(writer, C, A, B, C)
 
-class CUTEAtom:
-    def __init__(self, m, n, k, b, d, name, mode):
-        self.n = n
-        self.m = m
-        self.k = k
-        self.b = b
-        self.d = d
-        self.name = name
-        self.mode = mode
-
-    def headers(self):
-        return ['cute/atom.hpp']
-
-    def generate(self, writer, context, A, B, C):
-        Cstr = ','.join(f'{c}' for c in C)
-        with writer.Scope():
-            writer(f'auto mma = cute::MMA_Atom<{self.name}>{{}};')
-            if self.mode == MMAMode.BF16:
-                Abf16 = bfconvert(writer, A)
-                Bbf16 = bfconvert(writer, B)
-
-                Austr = ','.join(f'{a[0]}' for a in Abf16)
-                Amstr = ','.join(f'{a[1]}' for a in Abf16)
-                Alstr = ','.join(f'{a[2]}' for a in Abf16)
-                Bustr = ','.join(f'{b[0]}' for b in Bbf16)
-                Bmstr = ','.join(f'{b[1]}' for b in Bbf16)
-                Blstr = ','.join(f'{b[2]}' for b in Bbf16)
-
-                writer(f'mma.fma({Cstr},{Austr},{Bustr},{Cstr});')
-                writer(f'mma.fma({Cstr},{Austr},{Bmstr},{Cstr});')
-                writer(f'mma.fma({Cstr},{Austr},{Blstr},{Cstr});')
-                writer(f'mma.fma({Cstr},{Amstr},{Bustr},{Cstr});')
-                writer(f'mma.fma({Cstr},{Amstr},{Bmstr},{Cstr});')
-                writer(f'mma.fma({Cstr},{Alstr},{Bustr},{Cstr});')
-            if self.mode == MMAMode.TF32:
-                Atf32 = tfconvert(writer, A)
-                Btf32 = tfconvert(writer, B)
-
-                Austr = ','.join(f'{a[0]}' for a in Atf32)
-                Alstr = ','.join(f'{a[1]}' for a in Atf32)
-                Bustr = ','.join(f'{b[0]}' for b in Btf32)
-                Blstr = ','.join(f'{b[1]}' for b in Btf32)
-
-                writer(f'mma.fma({Cstr},{Austr},{Bustr},{Cstr});')
-                writer(f'mma.fma({Cstr},{Austr},{Blstr},{Cstr});')
-                writer(f'mma.fma({Cstr},{Alstr},{Bustr},{Cstr});')
-            else:
-                Astr = ','.join(f'{a}' for a in A)
-                Bstr = ','.join(f'{b}' for b in B)
-                writer(f'mma.fma({Cstr},{Astr},{Bstr},{Cstr});')
-
-ATOMS = [
-    CUTEAtom(16,8,4,1,Datatype.F32,'SM80_16x8x4_F32TF32TF32F32_TN', MMAMode.TF32),
-    CUTEAtom(16,8,8,1,Datatype.F32,'SM80_16x8x8_F32TF32TF32F32_TN', MMAMode.TF32),
-    CUTEAtom(8,8,4,1,Datatype.F64,'SM80_8x8x4_F64F64F64F64_TN', MMAMode.DIRECT),
-    CUTEAtom(16,8,4,1,Datatype.F64,'SM90_16x8x4_F64F64F64F64_TN', MMAMode.DIRECT),
-    CUTEAtom(16,8,8,1,Datatype.F64,'SM90_16x8x8_F64F64F64F64_TN', MMAMode.DIRECT),
-]
-
 INSTRS = [
     MMAInstr(16,8,4,1,Datatype.F32,'mma.sync.aligned.m16n8k4.row.col.f32.tf32.tf32.f32', MMAMode.TF32), # SM_80
     MMAInstr(16,8,8,1,Datatype.F32,'mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32', MMAMode.TF32), # SM_80
@@ -311,89 +107,45 @@ INSTRS = [
     MMAInstr(16,8,32,1,Datatype.F64,'mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32', MMAMode.I8), # SM_80
 ]
 
-def matmul(writer, C, A, B, M, N, K, kx, threads, dtype, sparse, ctx, shmptr, shmsize):
-    if sparse:
-        return False
+#: The atom `matmul` and `shmsize` are both hard-wired to.  Named once so the
+#: capability predicate, the shared-memory reservation and the emitter cannot
+#: drift apart -- they had three separate copies of `INSTRS[1]` before.
+ATOM = INSTRS[1]
 
-    atom = ATOMS[1]
 
-    mma = writer.varalloc()
-    mmaT = writer.varalloc()
+def supports(threads, dtype, sparse) -> bool:
+    """Whether `matmul` can emit for this shape, asked *before* it is called.
 
-    Ashm = writer.varalloc()
-    Bshm = writer.varalloc()
+    This was an `assert` inside the emitter, which was safe only for as long
+    as nothing reached it.  Turning the path on makes the difference matter:
+    an assertion aborts generation for a case the generic path handles
+    perfectly well, so the preconditions have to be a question the caller can
+    ask, not a crash the caller cannot avoid.
 
-    Acopy = writer.varalloc()
-    Bcopy = writer.varalloc()
+    * ``threads == 32``.  The emitter is warp-level throughout -- it stages
+      operands through `__syncwarp` and indexes shared memory by
+      `threadIdx.x` modulo the atom's `k`.  Narrower waves would need a
+      warp-level broadcast and a way back; wider ones are a different
+      instruction.  Neither exists here yet.
+    * ``dtype == ATOM.d``.  `ATOM` is a TF32 instruction.  Nothing downstream
+      compares the operand type against it, so an `f64` case would emit
+      `mma.sync...f32.tf32.tf32.f32` over doubles and be quietly wrong rather
+      than loudly unsupported.
+    * ``not sparse``.  `matmul` already declines these by returning `False`,
+      but `temp_shmem` reserves shared memory off the same predicate; if the
+      two disagree the reservation is made for a kernel that never uses it.
+    """
+    return threads == 32 and dtype == ATOM.d and not sparse
 
-    Areg = writer.varalloc()
-    Breg = writer.varalloc()
-    Creg = writer.varalloc()
-
-    # for now, assume that we're warp level
-    assert threads == 32
-
-    writer(f'const auto {mma} = cute::make_tiled_mma(cute::UniversalFMA<{dtype.ctype()}, {dtype.ctype()}, {dtype.ctype()}>(), cute::Layout<cute::Shape<cute::_16, cute::_16, cute::_16>>);')
-    writer(f'const auto {mmaT} = {mma}.get_slice(threadIdx.x);')
-
-    nregs = atom.n // 4
-    mregs = atom.m // 8
-    kregs = atom.k // 4
-
-    aregs = mregs * kregs
-    bregs = nregs * kregs
-    cregs = nregs * mregs
-
-    for ix in range(0, M):
-        for j in range(0, N, atom.n):
-            for i in range(0, threads, atom.m):
-                writer(f'{atom.d.ctype()} {Creg}[{cregs}]{"{}"};')
-                for k in range(0, K, atom.k):
-                    writer(f'{atom.d.ctype()} {Areg}[]{"{}"};')
-                    writer(f'{atom.d.ctype()} {Breg}[]{"{}"};')
-
-                    atom.generate(writer, ctx, [], [], [])
-                    writer(f'cute::copy({Acopy}, {Areg}, {Ashm});')
-                    writer(f'cute::copy({Bcopy}, {Breg}, {Bshm});')
-                    writer(f'cute::gemm({mma}, {Areg}, {Breg}, {Creg});')
-            for i in range(0, threads):
-                for jj in range(0, atom.n):
-                    C(writer, f'{Creg}', ix * threads + i, j + jj)
-
-    return False
 
 def shmsize(stages):
-    atom = INSTRS[1]
+    atom = ATOM
     threads = 32
     aregs = (atom.m * atom.k) // threads
     bregs = (atom.n * atom.k) // threads
     cregs = (atom.m * atom.n) // threads
 
     return 32 * max(aregs + bregs, cregs)
-
-class MMAWrapper:
-    def headers(self):
-        return []
-
-    def __init__(self, base):
-        self.n = base.n
-        self.m = 32
-        self.k = base.k
-        self.b = base.b
-        self.d = base.d
-        self.name = base.name
-        self.mode = base.mode
-        self.base = base
-
-    def headers(self):
-        return self.base.headers()
-
-    def generate(self, writer, context, A, B, C):
-        p = self.m // self.base.m
-        Ap = len(A) // p
-        Cp = len(C) // p
-        for i in range(p):
-            self.base.generate(writer, context, A[Ap*i:Ap*(i+1)], B, C[Cp*i:Cp*(i+1)])
 
 def matmul(writer, C, A, B, M, N, K, kx, threads, dtype, sparse, ctx, shmptr, shmsize):
     def threadrange(start, size):
@@ -411,7 +163,7 @@ def matmul(writer, C, A, B, M, N, K, kx, threads, dtype, sparse, ctx, shmptr, sh
     if sparse:
         return False
 
-    atom = INSTRS[1]
+    atom = ATOM
 
     mma = writer.varalloc()
     mmaT = writer.varalloc()
@@ -426,7 +178,7 @@ def matmul(writer, C, A, B, M, N, K, kx, threads, dtype, sparse, ctx, shmptr, sh
     Breg = writer.varalloc()
     Creg = writer.varalloc()
 
-    # for now, assume that we're warp level
+    # `supports()` is the gate; this is the guard for a direct caller.
     assert threads == 32
 
     ntile = 8

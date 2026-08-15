@@ -378,10 +378,32 @@ class MultilinearInstruction(ComputeInstruction):
         return writer.rawexpr(operator.format('{0}', '{1}'), a, b,
                               type_=ftype, hint='p', pure=True, movable=True)
 
+    def _second_operand_is_sparse(self):
+        """Whether the B operand takes the sparse access path.
+
+        The same expression decides three things -- which accessor `B` gets,
+        whether `matmul` declines, and whether shared memory is reserved --
+        so it is written once.
+        """
+        obj = self._ops[1].symbol.obj
+        return bool(obj) and (not obj.is_dense()
+                              or self._ops[1].symbol.data_view.shape[0] < 16)
+
     def _is_matmul(self):
-        can_use = self._context.get_vm().get_hw_descr().vendor in ['amd']
-        can_use &= len(self._ops) == 2
-        return can_use
+        vendor = self._context.get_vm().get_hw_descr().vendor
+        if len(self._ops) != 2:
+            return False
+        if vendor == 'amd':
+            return True
+        if vendor == 'nvidia':
+            return False # still keep disabled for now
+            # Asked, not asserted.  The emitter's preconditions used to be an
+            # `assert` that nothing reached; with the path enabled, a case it
+            # cannot take has to fall through to the generic path instead of
+            # aborting generation.
+            return nvidia.supports(self._num_threads, self._idest.datatype,
+                                   self._second_operand_is_sparse())
+        return False
 
 
     def _nonleading_dim_test(self, writer: Writer):
@@ -468,7 +490,7 @@ class MultilinearInstruction(ComputeInstruction):
             def C(writer, var, i, j):
                 self._idest.store(writer, self._context, var, unwindOp(i, j, 0, None, False), False)
 
-            if self._ops[1].symbol.obj and (not self._ops[1].symbol.obj.is_dense() or self._ops[1].symbol.data_view.shape[0] < 16):
+            if self._second_operand_is_sparse():
                 def sparse(k, j):
                     if self._ops[1].symbol.obj and not self._ops[1].symbol.obj.is_dense():
                         return self._ops[1].symbol.obj.linear_index(unwindOp(0, j, k, 1, True)) is not None
