@@ -190,7 +190,11 @@ def _dropped_results(src):
 
 _STORE_HEAD = re.compile(r"//\s*(glb_\w+) = store\{r>g\}\((\w+)\);")
 _FOR_BOUNDS = re.compile(r"for \(int32_t \w+ = (-?\d+); \w+ < (-?\d+);")
-_ZERO_TO_GLOBAL = re.compile(r"\bglb_\w+\[\w+\] = 0;")
+# The literal is typed now (`0.0f`, not `0`): the neutral element comes
+# from `writer.const(..., ftype)` rather than the string "0".  What this
+# test is about is that the columns get *defined*, not how the zero is
+# spelled.
+_ZERO_TO_GLOBAL = re.compile(r"\bglb_\w+\[\w+\] = 0(?:\.0+[fF]?)?;")
 
 
 def _store_loops(src):
@@ -482,9 +486,52 @@ def test_no_store_reads_past_its_accumulator(name, backend, arch):
 # The accumulation bias must come from where the result goes
 # ----------------------------------------------------------------------
 
+_ADDR_DEF = r"int32_t {name} = ([^;]+);"
+
+
+def _resolved_address(lines, name, depth=8):
+    """The address expression for `name`, with intermediates substituted in.
+
+    Address arithmetic is SSA now, so a shift and the term that follows it
+    land in different statements::
+
+        int32_t v629_a = v625_off + ((v614_n1 + 8) * 32);
+        int32_t v630_a = v629_a + (v615_n2 * 416);
+
+    Reading only the statement the load names would miss the `+ 8` entirely
+    and report a correct kernel as a wrong one.  Substituting transitively
+    asks the question the test means to ask -- does the address the bias is
+    read through carry the offset, anywhere along the way.
+    """
+    expr = None
+    for line in lines:
+        m = re.search(_ADDR_DEF.format(name=re.escape(name)), line)
+        if m:
+            expr = m.group(1)
+            break
+    if expr is None:
+        return None
+    for _ in range(depth):
+        names = [n for n in re.findall(r"\bv\d+_\w+\b", expr)]
+        grown = expr
+        for n in names:
+            for line in lines:
+                m = re.search(_ADDR_DEF.format(name=re.escape(n)), line)
+                if m:
+                    grown = grown.replace(n, f"({m.group(1)})")
+                    break
+        if grown == expr:
+            break
+        expr = grown
+    return expr
+
+
 _BIAS = re.compile(r"//\s*(\w+) = \+\(.*?\) \+ name: (\w+),")
 _GUARD_LINE = re.compile(r"if \((.+)\) \{")
-_OLDVALUE = re.compile(r"float oldvalue = (\w+)\[(\w+)\];")
+# The read used to be handed the fixed name `oldvalue`; it is an SSA
+# value now, so the name varies.  The pair this test needs is still
+# there -- which symbol is read, and through which address.
+_OLDVALUE = re.compile(r"\bfloat \w+ = (\w+)\[(\w+)\];")
 
 
 def _predictor_descrs():
@@ -608,15 +655,14 @@ def test_shared_bias_carries_the_destination_offset(backend, arch):
                      if _OLDVALUE.search(x)
                      and _OLDVALUE.search(x).group(1) == sym), None)
         assert read is not None, f"no bias read from {sym}"
-        addr = next((x for x in lines[i:i + 400]
-                     if f"int32_t {read.group(2)} =" in x), None)
+        addr = _resolved_address(lines[i:i + 400], read.group(2))
         assert addr is not None
         checked += 1
         # the store that follows addresses the same symbol; both must agree
         store = next((x for x in lines[i:i + 500] if f"{sym}[" in x and "] = " in x
                       and "oldvalue" not in x), None)
         assert store is not None, f"no store back to {sym}"
-        shifts = set(re.findall(r"\+ (\d+)\)", addr.split("=", 1)[1]))
+        shifts = set(re.findall(r"\+ (\d+)\)", addr))
         assert shifts, (
             f"the bias read from {sym} carries no slicing offset "
             f"({addr.strip()}); the store does")
@@ -711,3 +757,62 @@ def test_accumulator_slot_count_follows_the_window(theta, blocks):
             f"{name[1:]} holds {outer} slots but {name} holds {size}; "
             f"the store walks {size // blocks} indices over {blocks} block(s)")
     assert not _out_of_range_reads(src)
+
+
+# --------------------------------------------------------------------------- #
+# Tensor.data is an ndarray of the tensor's shape
+# --------------------------------------------------------------------------- #
+
+def test_a_scalar_operand_reaches_the_kernel():
+    """`alpha != 1` builds a synthetic `SCALAR` tensor to carry the constant.
+
+    Its `data` is read back through `value()`, which indexes by coordinate
+    tuple -- `()` for a rank-0 tensor.  A list answers that with a TypeError,
+    and for a while nothing noticed: `value()` asked `realindex in self.data`
+    first, which on a list tests the *elements* and never matches a coordinate,
+    so every lookup fell through to `None`.  Asking the sparsity pattern
+    instead reaches the access, and this case stopped generating on both
+    backends.
+    """
+    import numpy as np
+
+    from tensorforge.common.matrix.tensor import Tensor
+    from tensorforge.common.basic_types import Addressing
+
+    scalar = Tensor([], Addressing.SCALAR, data=np.array(13.0))
+    assert scalar.value(()) == pytest.approx(13.0)
+
+    source = _generate("csa_alpha").get_kernel()
+    assert "13" in source, "the constant never reached the generated kernel"
+
+
+@pytest.mark.parametrize("data,why", [
+    ([13.0], "a list cannot be indexed by a coordinate tuple"),
+    (13.0, "a bare float has no shape"),
+])
+def test_data_that_is_not_an_array_is_rejected_at_construction(data, why):
+    """Checked, not coerced.
+
+    An `np.asarray` in the constructor would accept these and leave the caller
+    unfixed -- which is how the requirement came to have two homes.  The error
+    names the tensor, so the caller is findable from the message alone.
+    """
+    from tensorforge.common.matrix.tensor import Tensor
+    from tensorforge.common.basic_types import Addressing
+    from tensorforge.common.exceptions import GenerationError
+
+    with pytest.raises(GenerationError, match="must be an ndarray"):
+        Tensor([], Addressing.SCALAR, data=data)
+
+
+def test_data_of_the_wrong_shape_is_rejected_at_construction():
+    """`np.array([alpha])` is shape `(1,)`; the tensor is `()`.  Close enough
+    to pass an `isinstance`, and wrong at every index."""
+    import numpy as np
+
+    from tensorforge.common.matrix.tensor import Tensor
+    from tensorforge.common.basic_types import Addressing
+    from tensorforge.common.exceptions import GenerationError
+
+    with pytest.raises(GenerationError, match="has shape"):
+        Tensor([], Addressing.SCALAR, data=np.array([13.0]))

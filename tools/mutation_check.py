@@ -197,16 +197,16 @@ GROUPS = {
     'syntax': ('tests/test_syntax.py', [
         ('a literal handed to a reference parameter',
          sub(Path('tests/snapshots/gemm_56x18_x_18x18.hip.cpp'),
-             'tensorforge::transpose4x4b32(v29_tp, v30_tp, v31_tp, v32_tp,',
-             'tensorforge::transpose4x4b32(v29_tp, v30_tp, 0.0f, 0.0f,', 1)),
+             'tensorforge::transpose4x4b32(v31_tp, v32_tp, v33_tp, v34_tp,',
+             'tensorforge::transpose4x4b32(v31_tp, v32_tp, 0.0f, 0.0f,', 1)),
         ('an argument dropped from a transpose',
          sub(Path('tests/snapshots/gemm_square_16.hip.cpp'),
-             ', v13_data, v14_data, v15_data, v16_data);',
-             ', v13_data, v14_data, v15_data);', 1)),
+             ', v14_data, v15_data, v16_data, v17_data);',
+             ', v14_data, v15_data, v16_data);', 1)),
         ('an operand that is never declared',
          sub(Path('tests/snapshots/gemm_square_16.hip.cpp'),
-             ', v13_data, v14_data, v15_data, v16_data);',
-             ', v13_data, v14_data, v15_data, v16_undeclared);', 1)),
+             ', v14_data, v15_data, v16_data, v17_data);',
+             ', v14_data, v15_data, v16_data, v17_undeclared);', 1)),
         ('an MFMA accumulator of the wrong width',
          sub(Path('tests/snapshots/gemm_square_16.hip.cpp'),
              'tensorforge::VectorT<float, 4>',
@@ -261,6 +261,23 @@ GROUPS = {
         ('the layout lost on clone',
          sub(Path('tensorforge/backend/symbol.py'),
              '    cloned.layout = self.layout\n', '', 1)),
+    ]),
+
+    # The contract on `Tensor.data`, and the two test patterns that the PIR
+    # refactor made stale without making anything fail loudly enough.
+    'data': ('tests/test_regressions.py', [
+        ('a list handed to Tensor.data',
+         sub(Path('tensorforge/generators/descriptions.py'),
+             'data=(np.array(alpha, dtype=float)',
+             'data=([alpha]', 1)),
+        ('the shape check dropped',
+         sub(Path('tensorforge/common/matrix/tensor.py'),
+             '            if self.data.shape != self.shape:',
+             '            if False:', 1)),
+        ('the type check dropped',
+         sub(Path('tensorforge/common/matrix/tensor.py'),
+             '            if not isinstance(self.data, np.ndarray):',
+             '            if False:', 1)),
     ]),
 
     'operands': ('tests/test_snapshots.py', [

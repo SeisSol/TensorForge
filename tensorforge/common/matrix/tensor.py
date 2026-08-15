@@ -2,6 +2,8 @@ from .spp import SparsityPattern, FullSPP
 from .boundingbox import BoundingBox
 from functools import reduce
 from typing import List, Union
+
+import numpy as np
 from ..basic_types import Addressing, DataFlowDirection, Datatype
 from tensorforge.common.exceptions import GenerationError
 
@@ -13,7 +15,7 @@ class Tensor:
         alias: Union[str, None]=None,
         is_tmp: bool = False,
         spp: SparsityPattern = None,
-        data: Union[List[float], None] = None,
+        data: Union[np.ndarray, None] = None,
         datatype: Datatype = None,
         alignment: int = 0):
         self.name = None
@@ -40,6 +42,26 @@ class Tensor:
         if self.addressing == Addressing.SCALAR:
             # allow higher-order tensors, if they're effectively a scalar anyways
             assert all(d == 1 for d in self.shape)
+
+        # `value()` indexes this by coordinate tuple, which a list answers with
+        # a TypeError.  That went unnoticed for as long as `value()` asked
+        # `realindex in self.data` first: on a list that tests the *elements*,
+        # which a coordinate tuple never matches, so every lookup fell through
+        # to `None` and the ill-typed access was never reached.  Asking the
+        # sparsity pattern instead -- the right question -- reaches it.
+        #
+        # Checked rather than coerced.  A `np.asarray` here would accept the
+        # callers that still hand over a list and leave them unfixed, which is
+        # how the requirement got two homes in the first place.
+        if self.data is not None:
+            if not isinstance(self.data, np.ndarray):
+                raise GenerationError(
+                    f'Tensor {self}: data must be an ndarray of shape '
+                    f'{self.shape}, got {type(self.data).__name__}')
+            if self.data.shape != self.shape:
+                raise GenerationError(
+                    f'Tensor {self}: data has shape {self.data.shape}, '
+                    f'tensor is {self.shape}')
 
         # check whether bbox was given correctly
         if any(dimshape < dimsize for dimshape, dimsize in zip(self.shape, self.bbox.sizes())):

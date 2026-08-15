@@ -255,7 +255,10 @@ class GemmDescr(MultilinearDescr):
       dest_dtype = getattr(c.tensor, 'datatype', None)
       alpha_tensor = SubTensor(Tensor(
           [], Addressing.SCALAR,
-          data=[alpha] if isinstance(alpha, (float, int)) else None,
+          # Shape `()`, not `(1,)`: the tensor is `[]`, and `value()` indexes
+          # it with the empty tuple.
+          data=(np.array(alpha, dtype=float)
+                if isinstance(alpha, (float, int)) else None),
           datatype=dest_dtype,
       ))
       super(GemmDescr, self).__init__(c, [a, b, alpha_tensor], [target_a, target_b, []], [permute_a, permute_b, []], add, strict_match, prefer_align)
