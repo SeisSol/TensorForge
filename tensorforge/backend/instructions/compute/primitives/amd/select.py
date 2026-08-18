@@ -6,7 +6,7 @@ a link error.
 """
 
 from tensorforge.common.basic_types import Datatype
-from .arch import cdna2, gfx1250, gfx1251, rdna
+from .arch import cdna2, gfx1250, gfx1251, rdna, gfx906
 from .caps import has_fmacdpp4, has_fmacdpp8, has_fmacdpp16
 
 
@@ -19,7 +19,7 @@ def wanted_fmadpp_step(datatype, threads, ctx):
     emit a call to a template that has only a declaration there.
     """
     step = 1
-    if threads >= 4 and datatype == Datatype.F32:
+    if threads >= 4 and datatype == Datatype.F32 and gfx906(ctx):
         step = 4
     if threads >= 8 and datatype == Datatype.F32 and (rdna(ctx) or gfx1251(ctx) or gfx1250(ctx)):
         step = 8

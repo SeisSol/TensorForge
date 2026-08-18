@@ -33,3 +33,6 @@ def cdna1(ctx):
 def rdna(ctx):
     # TODO: gfx1250 ?
     return amdarch(ctx) >= 0x1000 and amdarch(ctx) < 0x1250
+
+def gfx906(ctx):
+    return amdarch(ctx) >= 0x906 and not amdarch(ctx) in (0x907, 0x909, 0x90b, 0x90c, 0x90d, 0x90f)
