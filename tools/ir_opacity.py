@@ -77,6 +77,20 @@ def emit(self, stmt):
 pirbuild.IRBuilder.emit = emit
 
 
+def _cases():
+    """Every case the snapshot harness sees, which is not every case in the
+    top level of `tests/cases`.
+
+    `conftest.py` walks recursively; `barrier/`, `elementwise/`, `reduction/`
+    and `slicing/` hold 24 further cases between them.  Reporting a corpus
+    number off a top-level glob understates it by almost half, and this number
+    is meant to be the one two contexts quote at each other.
+    """
+    root = Path('tests/cases')
+    return [p for p in sorted(root.rglob('*.py'))
+            if '__pycache__' not in p.parts]
+
+
 def _load(path):
     spec = importlib.util.spec_from_file_location('case', path)
     mod = importlib.util.module_from_spec(spec)
@@ -88,7 +102,7 @@ def main(argv):
     want_cases = '--sites' not in argv
     want_sites = '--cases' not in argv
 
-    cases = sorted(Path('tests/cases').glob('*.py'))
+    cases = _cases()
     total = Counter()
     rows = []
     failed = []

@@ -81,6 +81,24 @@ def test_generated_source_matches_snapshot(snapshot_case, backend, arch,
     path = _path_for(snapshot_case, backend)
 
     if request.config.getoption("--snapshot-update"):
+        # A case that used to generate and now raises is a regression, never an
+        # intended snapshot update.  Without this the harness happily replaces
+        # 285 lines with a single `FAILED:` line and reports success, and the
+        # broken output becomes the thing every later run is compared against.
+        #
+        # Not hypothetical: a killed `mutation_check.py` left a mutation in the
+        # tree, the next `--snapshot-update` baked it into 57 files, and the
+        # only visible symptom was that the diff was large -- which it is
+        # during a migration anyway.
+        if (actual.startswith("FAILED:") and path.exists()
+                and not path.read_text().startswith("FAILED:")
+                and not request.config.getoption("--snapshot-accept-failures")):
+            pytest.fail(
+                f"{snapshot_case.NAME} [{backend}] generated before and raises "
+                f"now:\n  {actual.splitlines()[0]}\n"
+                f"Refusing to record the failure over a working snapshot. Fix "
+                f"the regression, or pass --snapshot-accept-failures if the "
+                f"case is genuinely expected to stop generating.")
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(actual)
         return

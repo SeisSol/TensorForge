@@ -163,8 +163,14 @@ def _at_rev(rev, path):
     return r.stdout if r.returncode == 0 else None
 
 
+def _case_paths():
+    """Recursive, matching `conftest.py`: the subdirectories hold 24 cases."""
+    return [p for p in sorted(Path('tests/cases').rglob('*.py'))
+            if '__pycache__' not in p.parts]
+
+
 def _cases():
-    for path in sorted(Path('tests/cases').glob('*.py')):
+    for path in _case_paths():
         spec = importlib.util.spec_from_file_location('case', path)
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)

@@ -97,6 +97,11 @@ def pytest_addoption(parser):
         "--snapshot-update", action="store_true", default=False,
         help="rewrite the golden snapshots under tests/snapshots/ instead "
              "of comparing against them")
+    parser.addoption(
+        "--snapshot-accept-failures", action="store_true", default=False,
+        help="with --snapshot-update, allow recording a generation failure "
+             "over a snapshot that previously generated. Off by default: that "
+             "transition is a regression, not an update")
 
 
 def pytest_report_header(config):

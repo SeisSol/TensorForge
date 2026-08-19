@@ -14,6 +14,7 @@ Run from the repository root.
 | `duplicate_elements.py` | does any output element get computed by more than one path? |
 | `access_equiv.py` | did a refactor change *which* memory is touched, or only what it is called? |
 | `ir_opacity.py` | how much of the emitted IR is opaque to the passes, versus structured -- and which function emitted it? |
+| `access_equiv.py` | did a refactor change *which* memory gets touched, or only what it is called? |
 | `layout_census.py` | which register layouts does the generator actually produce? |
 | `operand_layouts.py` | do the vendor intrinsics receive their operands in the distribution they require? |
 
@@ -37,8 +38,10 @@ answer licenses not reading the diff, so `tests/test_access_equiv.py` pins both
 directions: for each thing it ignores, a pair it must call identical, and next
 to it a pair it must call different.
 
-It runs the whole case corpus, not a hand-picked four, and attributes every
-raw node to the function that emitted it. The percentage says how far along
+It runs the whole case corpus -- recursively, the way `conftest.py` discovers
+cases, because `barrier/`, `elementwise/`, `reduction/` and `slicing/` hold 24
+of the 52 between them -- and attributes every raw node to the function that
+emitted it. The percentage says how far along
 the migration is; the site table says what to change next, which is the
 question that actually gets asked. Cases that stop generating still count
 whatever they emitted before stopping -- dropping them would move the total
@@ -72,3 +75,20 @@ so a stale cache would let the subprocess import the unmutated module and
 report a guard as working when it was never exercised. That is exactly the
 false confidence this harness exists to prevent, and it produced it once
 before the caches were cleared.
+
+`access_equiv.py` answers the question a snapshot diff cannot during a
+migration. Unpinning an address renumbers every later SSA value and lets the
+emitter fold single-use addresses into their loads, so 55000 lines move and
+almost none of it is a change in behaviour. Reviewing that by eye is how a real
+change gets waved through in the middle of it.
+
+So it expands every SSA name in every subscript down to leaves, canonicalises,
+and compares the multiset of `(base, address)` pairs against a git revision.
+Renumbering, parenthesisation and identity terms are canonicalised away;
+associativity and distribution deliberately are not, because on an address
+`a*(b+c)` and `a*b + c` usually differ for a reason.
+
+A subscript it cannot parse raises rather than falling back to a text
+comparison. The quiet alternative ends with the tool reporting "identical" over
+accesses it stopped reading, and its entire value is that the answer licenses
+not reading the diff.

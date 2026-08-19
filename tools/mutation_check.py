@@ -20,6 +20,14 @@ are the real ones from the session's history, not invented ones:
 Source files are edited in place and restored in a `finally`.  Run it on a
 clean tree.
 
+A `finally` does not survive SIGKILL, and a timeout is SIGKILL.  When that
+happens the tree is left mutated, and the next thing anyone runs is usually
+`pytest --snapshot-update`, which records the mutated generator's output as
+the new baseline across dozens of files -- during a migration the only symptom
+is a large diff, which there would be anyway.  That has happened.  So the
+mutated paths are also written to a lock file, checked on startup and restored
+from git before anything else runs.
+
     python3 tools/mutation_check.py            # all groups
     python3 tools/mutation_check.py layout     # one group
 """
@@ -394,6 +402,30 @@ GROUPS = {
 }
 
 
+LOCK = Path('.mutation-in-progress')
+
+
+def _recover():
+    """Undo a run that was killed before its `finally` could run.
+
+    `git checkout --` rather than the recorded text: the lock survives because
+    the process did not, so whatever it was holding in memory is gone.  Only
+    the paths named in the lock are touched, so unrelated edits in the working
+    tree are left alone.
+    """
+    if not LOCK.exists():
+        return
+    paths = [p for p in LOCK.read_text().split('\n') if p]
+    print(f'a previous run was killed with {len(paths)} file(s) mutated; '
+          f'restoring from git:')
+    for p in paths:
+        print(f'  {p}')
+    if paths:
+        subprocess.run(['git', 'checkout', '--', *paths], check=False)
+    LOCK.unlink()
+    print()
+
+
 def run(group, target, mutations):
     print(f'\n=== {group}  ({target})')
     originals = {}
@@ -406,6 +438,7 @@ def run(group, target, mutations):
                 print(f'  {name:56s} SKIPPED: {exc}')
                 continue
             originals.setdefault(path, path.read_text())
+            LOCK.write_text('\n'.join(str(p) for p in originals))
             path.write_text(text)
             r = _run_tests(target)
             ok = r.returncode != 0
@@ -414,13 +447,16 @@ def run(group, target, mutations):
             for p, t in originals.items():
                 p.write_text(t)
             originals.clear()
+            LOCK.unlink(missing_ok=True)
     finally:
         for p, t in originals.items():
             p.write_text(t)
+        LOCK.unlink(missing_ok=True)
     return caught, len(mutations)
 
 
 def main():
+    _recover()
     wanted = sys.argv[1:] or list(GROUPS)
     total = hit = 0
     for group in wanted:
