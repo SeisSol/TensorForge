@@ -396,7 +396,8 @@ class MultilinearInstruction(ComputeInstruction):
         if vendor == 'amd':
             return True
         if vendor == 'nvidia':
-            return False # still keep disabled for now
+            if not nvidia.ENABLED:
+                return False
             # Asked, not asserted.  The emitter's preconditions used to be an
             # `assert` that nothing reached; with the path enabled, a case it
             # cannot take has to fall through to the generic path instead of

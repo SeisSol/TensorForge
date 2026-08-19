@@ -404,6 +404,9 @@ GROUPS = {
              '            return nvidia.supports(self._num_threads, self._idest.datatype,\n'
              '                                   self._second_operand_is_sparse())',
              '            return True', 1)),
+        ('the deployment switch flipped without re-recording',
+         sub(Path('tensorforge/backend/instructions/compute/primitives/nvidia.py'),
+             'ENABLED = False', 'ENABLED = True', 1)),
     ]),
 
     'operands': ('tests/test_snapshots.py', [

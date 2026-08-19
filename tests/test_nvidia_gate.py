@@ -16,6 +16,15 @@ case it turns away still comes out of the generator.
 
 Measured while enabling it: 9 of the corpus's CUDA cases take the path, and
 the same 9 snapshots changed.  No HIP snapshot moved.
+
+The path is parked (`nvidia.ENABLED`) pending a run on real hardware: `"+f"`
+versus `"=f"`/`"f"` on the accumulator is a register-allocation difference no
+front end can see.  The tests below that need the emitter's output turn it on
+for themselves.  A parked path whose tests skip is a path that quietly rots --
+that is how `nvidia.py` accumulated 23 unreachable definitions in the first
+place -- so what is checked here is the emitter, which is worth checking
+whether or not it is deployed.  `test_the_switch_is_off` is the separate,
+one-line statement of the deployment decision.
 """
 
 from __future__ import annotations
@@ -88,13 +97,28 @@ def _generate(case, backend="cuda", arch="sm_86"):
 CASE_THAT_TAKES_THE_PATH = "rectangular.py"
 
 
-def test_a_case_that_takes_the_path_emits_the_instruction():
+@pytest.fixture
+def enabled(monkeypatch):
+    """The emitter, independent of whether the path is deployed."""
+    monkeypatch.setattr(nvidia, "ENABLED", True)
+
+
+def test_the_switch_is_off():
+    """Not an opinion about whether it should be -- a place where the
+    deployment decision is written down once, so flipping it is a diff."""
+    assert nvidia.ENABLED is False, (
+        "the path is live now; drop this test and re-record the CUDA "
+        "snapshots, which move for 9 cases")
+
+
+def test_a_case_that_takes_the_path_emits_the_instruction(enabled):
     source = _generate(CASE_THAT_TAKES_THE_PATH)
     assert nvidia.ATOM.name in source, (
         "the case no longer reaches the MMA path; pick another one")
 
 
-def test_the_same_case_still_generates_when_the_gate_says_no(monkeypatch):
+def test_the_same_case_still_generates_when_the_gate_says_no(enabled,
+                                                            monkeypatch):
     monkeypatch.setattr(nvidia, "supports", lambda *a, **k: False)
     source = _generate(CASE_THAT_TAKES_THE_PATH)
     assert source, "generation produced nothing"
@@ -105,7 +129,7 @@ def test_the_same_case_still_generates_when_the_gate_says_no(monkeypatch):
 # The inline asm the path emits
 # --------------------------------------------------------------------------- #
 
-def test_the_accumulator_is_one_read_write_operand():
+def test_the_accumulator_is_one_read_write_operand(enabled):
     """`D` and `C` are the same accumulator at every call site.
 
     Listing it as `"=f"` under outputs and again as `"f"` under inputs states
@@ -120,7 +144,7 @@ def test_the_accumulator_is_one_read_write_operand():
         "an output-only constraint on an operand that is also read")
 
 
-def test_the_operand_numbering_survives_the_fold():
+def test_the_operand_numbering_survives_the_fold(enabled):
     """PTX numbers outputs and inputs in one sequence, so folding C into D
     shifts A and B down by `len(C)`.  Getting that wrong reads the wrong
     registers and still compiles."""

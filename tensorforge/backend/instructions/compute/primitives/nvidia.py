@@ -113,6 +113,17 @@ INSTRS = [
 ATOM = INSTRS[1]
 
 
+#: Whether the path is deployed, as opposed to whether it *can* emit for a
+#: given shape -- that second question is `supports()`.  Two different facts,
+#: so two names: `supports()` is a property of the shape, `ENABLED` is a
+#: decision about the generator, and only the second is something to flip.
+#:
+#: Parked pending a run on real hardware.  `"+f"` versus `"=f"`/`"f"` on the
+#: accumulator is a register-allocation difference no front end can see, and
+#: the corpus is checked for well-formedness, not executed.
+ENABLED = False
+
+
 def supports(threads, dtype, sparse) -> bool:
     """Whether `matmul` can emit for this shape, asked *before* it is called.
 

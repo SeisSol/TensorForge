@@ -46,10 +46,12 @@ PRIMITIVES = (Path(__file__).parent.parent / "tensorforge" / "backend" /
 
 MODULES = ["nvidia"]
 
-#: What `multilinear.py` calls.  `supports` is an entry point in its own
-#: right, not something `matmul` reaches: the gate is asked *before* the
-#: emitter, which is the whole change that made this file live.
-ENTRIES = ["matmul", "supports", "shmsize"]
+#: What `multilinear.py` reads.  `supports` is an entry point in its own
+#: right, not something `matmul` reaches -- the gate is asked *before* the
+#: emitter, which is the whole change that made this file live -- and
+#: `ENABLED` likewise: it is a module-level constant the caller consults, and
+#: without it here the deployment switch reads as dead.
+ENTRIES = ["matmul", "supports", "shmsize", "ENABLED"]
 
 # Unreachable on purpose.  Each entry would need a reason that says why
 # deleting it would be worse than keeping it.  There are none.
