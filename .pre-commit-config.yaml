@@ -79,11 +79,14 @@ repos:
     hooks:
     -   id: clang-format
         name: '[C++] clang-format'
+        files: ^(?!tests\/snapshots)
 
 -   repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v6.0.0
     hooks:
     -   id: end-of-file-fixer
         name: '[GENERIC] newline eof'
+        files: ^(?!tests\/snapshots)
     -   id: trailing-whitespace
         name: '[GENERIC] remove trailing whitespace'
+        files: ^(?!tests\/snapshots)

@@ -12,7 +12,7 @@ Run from the repository root.
 | `arch_sweep.py` | does every supported AMD target still generate, and which helpers does it emit? |
 | `undefined_symbols.py` | does any target call a `fmacdpp` variant its runtime does not define? |
 | `duplicate_elements.py` | does any output element get computed by more than one path? |
-| `ir_opacity.py` | how much of the emitted IR is opaque to the passes, versus structured? |
+| `ir_opacity.py` | how much of the emitted IR is opaque to the passes, versus structured -- and which function emitted it? |
 | `layout_census.py` | which register layouts does the generator actually produce? |
 | `operand_layouts.py` | do the vendor intrinsics receive their operands in the distribution they require? |
 
@@ -21,6 +21,14 @@ carries vendor-specific text, but it has an SSA result and a declared memory
 effect, so a pass can reorder around it and reuse it; a `rawstmt` with
 `Effect.UNKNOWN` can do neither. Counting them together hides the difference
 that matters.
+
+It runs the whole case corpus, not a hand-picked four, and attributes every
+raw node to the function that emitted it. The percentage says how far along
+the migration is; the site table says what to change next, which is the
+question that actually gets asked. Cases that stop generating still count
+whatever they emitted before stopping -- dropping them would move the total
+whenever an unrelated defect is fixed, and a baseline that moves for reasons
+outside the change under test is not a baseline.
 
 ## mutation_check.py
 
