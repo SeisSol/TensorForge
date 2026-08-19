@@ -680,6 +680,20 @@ class Symbol:
       total = arith('add', total, p, lambda x, y: x + y)
     return total
 
+  def address_value(self, writer, context: Context,
+                    index: List[Union[str, int, Immediate, Variable, LeadIndex]]):
+    """The address as an operand, not as a name inside a string.
+
+    `access_address` pins its result, because the name is interpolated into
+    raw text that the IR cannot see into: unpinned, folding would rewrite the
+    value the text still refers to by name.  An address handed to `Op.LOAD` or
+    `Op.STORE` is a real operand, so the pin is not only unnecessary, it is
+    the thing standing between the address arithmetic and every pass that
+    could improve it --- the same `i * 18 + j` recomputed at sixteen loads
+    stays sixteen computations while it is pinned.
+    """
+    return self.build_address(writer, context, index)
+
   def access_address(self, context: Context, index: List[Union[str, int, Immediate, Variable, LeadIndex]], writer=None, out=None):
     if writer is not None:
       # the result's name goes into raw text, so pin it against DCE and folding
@@ -992,6 +1006,24 @@ class Symbol:
             writer.access_stmt(lex.glb_load(str(v), access, nontemp), self,
                                Effect.READ, args=_operands(None, addrs))
           return v
+        if access is pre_access and self.stype in (
+                SymbolType.Register, SymbolType.Scratch,
+                SymbolType.SharedMem, SymbolType.Batch):
+          # The dereference itself, with the address as an operand rather than
+          # as a name spliced into a string.  Everything the string version
+          # declared -- the symbol it reads, the effect, the layout -- survives;
+          # what it could not say is that `base` and the address are *operands*,
+          # so a pass could neither see the def-use edge to the address nor
+          # recognise two reads of the same place.
+          #
+          # Two kinds stay on the text path.  A broadcast (`access is not
+          # pre_access`) is a load wrapped in a vendor intrinsic, and splitting
+          # it here would leave a named temporary the source does not have.  A
+          # Scalar is not a subscripted access at all -- `access` returns the
+          # bare name -- so `Op.LOAD` would invent a `[0]` that never existed.
+          return writer.load(self, self.address_value(writer, context, index),
+                             type_=ScalarType(self.get_fptype()), hint='data',
+                             layout=layout_of(index, self.num_threads))
         return writer.load_expr(
             access, ScalarType(self.get_fptype()), self,
             args=_operands(variable, addrs),

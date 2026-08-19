@@ -559,23 +559,23 @@ __launch_bounds__(256)
               #pragma unroll
               for (int32_t v736_n1 = 0; v736_n1 < 8; ++v736_n1) {
                 int32_t v737_a = 0 + v736_n1;
-                float v738_data = ir2[v737_a];
-                int32_t v739_a = 0 + v736_n1;
-                float v740_data = r1[v739_a];
-                int32_t v742_a = 0 + v736_n1;
-                r2[v742_a] = (v740_data + v738_data);
+                float v739_data = ir2[v736_n1];
+                int32_t v740_a = 0 + v736_n1;
+                float v742_data = r1[v736_n1];
+                int32_t v744_a = 0 + v736_n1;
+                r2[v744_a] = (v742_data + v739_data);
               }
             }
           }
           // glb_m0 = store{r>g}(r2);
-          int32_t v745_lead = threadIdx.x % 16;
-          if (v745_lead < 12) {
+          int32_t v747_lead = threadIdx.x % 16;
+          if (v747_lead < 12) {
             #pragma unroll
-            for (int32_t v747_i1 = 0; v747_i1 < 8; ++v747_i1) {
-              int32_t v748_a = 0 + v747_i1;
-              float v749_data = r2[v748_a];
-              int32_t v756_a = v745_lead + (v747_i1 * 12);
-              glb_m0[v756_a] = v749_data;
+            for (int32_t v749_i1 = 0; v749_i1 < 8; ++v749_i1) {
+              int32_t v750_a = 0 + v749_i1;
+              float v752_data = r2[v749_i1];
+              int32_t v759_a = v747_lead + (v749_i1 * 12);
+              glb_m0[v759_a] = v752_data;
             }
           }
           __syncwarp();

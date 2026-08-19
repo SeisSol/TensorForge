@@ -283,9 +283,9 @@ __launch_bounds__(256)
             #pragma unroll
             for (int32_t v50_i1 = 0; v50_i1 < 8; ++v50_i1) {
               int32_t v51_a = 0 + v50_i1;
-              double v52_data = r2[v51_a];
-              int32_t v59_a = v48_lead + (v50_i1 * 12);
-              __builtin_amdgcn_global_atomic_fadd_f64(&glb_m0[v59_a], v52_data);
+              double v53_data = r2[v50_i1];
+              int32_t v60_a = v48_lead + (v50_i1 * 12);
+              __builtin_amdgcn_global_atomic_fadd_f64(&glb_m0[v60_a], v53_data);
             }
           }
           ;

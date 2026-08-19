@@ -451,13 +451,13 @@ __launch_bounds__(256)
           int32_t v64_lead = threadIdx.x % 16;
           #pragma unroll
           for (int32_t v65_i0 = 0; v65_i0 < 1; ++v65_i0) {
-            int32_t v73_lead = v64_lead + (v65_i0 * 16);
+            int32_t v74_lead = v64_lead + (v65_i0 * 16);
             #pragma unroll
             for (int32_t v66_i1 = 0; v66_i1 < 16; ++v66_i1) {
               int32_t v67_a = v65_i0 + v66_i1;
-              double v68_data = r2[v67_a];
-              int32_t v75_a = v73_lead + (v66_i1 * 16);
-              glb_m0[v75_a] = v68_data;
+              double v69_data = r2[(v65_i0 + v66_i1)];
+              int32_t v76_a = v74_lead + (v66_i1 * 16);
+              glb_m0[v76_a] = v69_data;
             }
           }
           ;

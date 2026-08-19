@@ -1145,59 +1145,62 @@ __launch_bounds__(256)
                 for (int32_t v883_n2 = 0; v883_n2 < 6; ++v883_n2) {
                   int32_t v885_a = v883_n2 * 2;
                   int32_t v887_a = v884_a + v885_a;
-                  float v888_data = ir3[v887_a];
-                  int32_t v892_a = v884_a + v885_a;
-                  float v893_data = r2[v892_a];
-                  int32_t v898_a = v884_a + v885_a;
-                  r3[v898_a] = (v893_data + v888_data);
+                  int32_t v891_a = v884_a + v885_a;
+                  float v892_data = ir3[v891_a];
+                  int32_t v896_a = v884_a + v885_a;
+                  float v901_data = r2[v891_a];
+                  int32_t v906_a = v884_a + v885_a;
+                  r3[v906_a] = (v901_data + v892_data);
                 }
               }
             }
             if (v839_lead < 3) {
               #pragma unroll
-              for (int32_t v900_n1 = 0; v900_n1 < 1; ++v900_n1) {
-                int32_t v904_a = 1 + (v900_n1 * 2);
+              for (int32_t v908_n1 = 0; v908_n1 < 1; ++v908_n1) {
+                int32_t v912_a = 1 + (v908_n1 * 2);
                 #pragma unroll
-                for (int32_t v901_n2 = 0; v901_n2 < 6; ++v901_n2) {
-                  int32_t v903_a = v901_n2 * 2;
-                  int32_t v905_a = v904_a + v903_a;
-                  float v906_data = ir3[v905_a];
-                  int32_t v910_a = v904_a + v903_a;
-                  float v911_data = r2[v910_a];
-                  int32_t v916_a = v904_a + v903_a;
-                  r3[v916_a] = (v911_data + v906_data);
+                for (int32_t v909_n2 = 0; v909_n2 < 6; ++v909_n2) {
+                  int32_t v911_a = v909_n2 * 2;
+                  int32_t v913_a = v912_a + v911_a;
+                  float v918_data = ir3[(v912_a + v911_a)];
+                  int32_t v922_a = v912_a + v911_a;
+                  float v927_data = r2[(v912_a + v911_a)];
+                  int32_t v932_a = v912_a + v911_a;
+                  r3[v932_a] = (v927_data + v918_data);
                 }
               }
             }
           }
           // glb_m2 = store{r>g}(r3);
-          int32_t v919_lead = threadIdx.x % 32;
-          if (v919_lead >= 20) {
+          int32_t v935_lead = threadIdx.x % 32;
+          if (v935_lead >= 20) {
             #pragma unroll
-            for (int32_t v921_i1 = 0; v921_i1 < 1; ++v921_i1) {
-              int32_t v923_a = v921_i1 * 2;
-              int32_t v936_a = v919_lead + ((v921_i1 + 12) * 64);
+            for (int32_t v937_i1 = 0; v937_i1 < 1; ++v937_i1) {
+              int32_t v939_a = v937_i1 * 2;
+              int32_t v956_a = v935_lead + ((v937_i1 + 12) * 64);
               #pragma unroll
-              for (int32_t v922_i2 = 0; v922_i2 < 6; ++v922_i2) {
-                int32_t v926_a = v923_a + (v922_i2 * 2);
-                float v927_data = r3[v926_a];
-                int32_t v937_a = v936_a + (v922_i2 * 832);
-                glb_m2[v937_a] = v927_data;
+              for (int32_t v938_i2 = 0; v938_i2 < 6; ++v938_i2) {
+                int32_t v940_a = v938_i2 * 2;
+                int32_t v942_a = v939_a + v940_a;
+                float v947_data = r3[(v939_a + v940_a)];
+                int32_t v957_a = v956_a + (v938_i2 * 832);
+                glb_m2[v957_a] = v947_data;
               }
             }
           }
-          if (v919_lead < 3) {
-            int32_t v950_lead = v919_lead + 32_i32;
+          if (v935_lead < 3) {
+            int32_t v974_lead = v935_lead + 32_i32;
             #pragma unroll
-            for (int32_t v939_i1 = 0; v939_i1 < 1; ++v939_i1) {
-              int32_t v943_a = 1 + (v939_i1 * 2);
-              int32_t v954_a = v950_lead + ((v939_i1 + 12) * 64);
+            for (int32_t v959_i1 = 0; v959_i1 < 1; ++v959_i1) {
+              int32_t v963_a = 1 + (v959_i1 * 2);
+              int32_t v978_a = v974_lead + ((v959_i1 + 12) * 64);
               #pragma unroll
-              for (int32_t v940_i2 = 0; v940_i2 < 6; ++v940_i2) {
-                int32_t v944_a = v943_a + (v940_i2 * 2);
-                float v945_data = r3[v944_a];
-                int32_t v955_a = v954_a + (v940_i2 * 832);
-                glb_m2[v955_a] = v945_data;
+              for (int32_t v960_i2 = 0; v960_i2 < 6; ++v960_i2) {
+                int32_t v962_a = v960_i2 * 2;
+                int32_t v964_a = v963_a + v962_a;
+                float v969_data = r3[(v963_a + v962_a)];
+                int32_t v979_a = v978_a + (v960_i2 * 832);
+                glb_m2[v979_a] = v969_data;
               }
             }
           }

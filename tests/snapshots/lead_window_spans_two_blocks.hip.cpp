@@ -625,28 +625,30 @@ __launch_bounds__(256)
             #pragma unroll
             for (int32_t v226_i1 = 0; v226_i1 < 1; ++v226_i1) {
               int32_t v228_a = v226_i1 * 2;
-              int32_t v241_a = v224_lead + ((v226_i1 + 12) * 64);
+              int32_t v245_a = v224_lead + ((v226_i1 + 12) * 64);
               #pragma unroll
               for (int32_t v227_i2 = 0; v227_i2 < 6; ++v227_i2) {
-                int32_t v231_a = v228_a + (v227_i2 * 2);
-                float v232_data = r2[v231_a];
-                int32_t v242_a = v241_a + (v227_i2 * 832);
-                __builtin_amdgcn_global_atomic_fadd_f32(&glb_m2[v242_a], v232_data);
+                int32_t v229_a = v227_i2 * 2;
+                int32_t v231_a = v228_a + v229_a;
+                float v236_data = r2[(v228_a + v229_a)];
+                int32_t v246_a = v245_a + (v227_i2 * 832);
+                __builtin_amdgcn_global_atomic_fadd_f32(&glb_m2[v246_a], v236_data);
               }
             }
           }
           if (v224_lead < 3) {
-            int32_t v255_lead = v224_lead + 32_i32;
+            int32_t v263_lead = v224_lead + 32_i32;
             #pragma unroll
-            for (int32_t v244_i1 = 0; v244_i1 < 1; ++v244_i1) {
-              int32_t v248_a = 1 + (v244_i1 * 2);
-              int32_t v259_a = v255_lead + ((v244_i1 + 12) * 64);
+            for (int32_t v248_i1 = 0; v248_i1 < 1; ++v248_i1) {
+              int32_t v252_a = 1 + (v248_i1 * 2);
+              int32_t v267_a = v263_lead + ((v248_i1 + 12) * 64);
               #pragma unroll
-              for (int32_t v245_i2 = 0; v245_i2 < 6; ++v245_i2) {
-                int32_t v249_a = v248_a + (v245_i2 * 2);
-                float v250_data = r2[v249_a];
-                int32_t v260_a = v259_a + (v245_i2 * 832);
-                __builtin_amdgcn_global_atomic_fadd_f32(&glb_m2[v260_a], v250_data);
+              for (int32_t v249_i2 = 0; v249_i2 < 6; ++v249_i2) {
+                int32_t v251_a = v249_i2 * 2;
+                int32_t v253_a = v252_a + v251_a;
+                float v258_data = r2[(v252_a + v251_a)];
+                int32_t v268_a = v267_a + (v249_i2 * 832);
+                __builtin_amdgcn_global_atomic_fadd_f32(&glb_m2[v268_a], v258_data);
               }
             }
           }

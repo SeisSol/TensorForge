@@ -393,9 +393,9 @@ __launch_bounds__(256)
             #pragma unroll
             for (int32_t v107_i1 = 0; v107_i1 < 6; ++v107_i1) {
               int32_t v108_a = 0 + v107_i1;
-              float v109_data = r4[v108_a];
-              int32_t v116_a = v105_lead + (v107_i1 * 12);
-              glb_m2[v116_a] = v109_data;
+              float v110_data = r4[v107_i1];
+              int32_t v117_a = v105_lead + (v107_i1 * 12);
+              glb_m2[v117_a] = v110_data;
             }
           }
           ;

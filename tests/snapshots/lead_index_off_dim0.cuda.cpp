@@ -139,21 +139,21 @@ __launch_bounds__(256)
               #pragma unroll
               for (int32_t v66_n1 = 0; v66_n1 < 9; ++v66_n1) {
                 int32_t v67_a = 0 + v66_n1;
-                float v68_data = ir1[v67_a];
-                int32_t v69_a = 0 + v66_n1;
-                r1[v69_a] = v68_data;
+                float v69_data = ir1[v66_n1];
+                int32_t v70_a = 0 + v66_n1;
+                r1[v70_a] = v69_data;
               }
             }
           }
           // glb_m0 = store{r>g}(r1);
-          int32_t v72_lead = threadIdx.x % 32;
-          if (v72_lead < 20) {
+          int32_t v73_lead = threadIdx.x % 32;
+          if (v73_lead < 20) {
             #pragma unroll
-            for (int32_t v74_i1 = 0; v74_i1 < 9; ++v74_i1) {
-              int32_t v75_a = 0 + v74_i1;
-              float v76_data = r1[v75_a];
-              int32_t v83_a = v72_lead + (v74_i1 * 20);
-              glb_m0[v83_a] = v76_data;
+            for (int32_t v75_i1 = 0; v75_i1 < 9; ++v75_i1) {
+              int32_t v76_a = 0 + v75_i1;
+              float v78_data = r1[v75_i1];
+              int32_t v85_a = v73_lead + (v75_i1 * 20);
+              glb_m0[v85_a] = v78_data;
             }
           }
           __syncwarp();

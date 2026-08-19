@@ -892,23 +892,25 @@ __launch_bounds__(256)
           int32_t v721_lead = threadIdx.x % 32;
           #pragma unroll
           for (int32_t v722_i0 = 0; v722_i0 < 1; ++v722_i0) {
-            int32_t v731_lead = v721_lead + (v722_i0 * 32);
+            int32_t v733_lead = v721_lead + (v722_i0 * 32);
             #pragma unroll
             for (int32_t v723_i1 = 0; v723_i1 < 9; ++v723_i1) {
-              int32_t v725_a = v722_i0 + (v723_i1 * 2);
-              float v726_data = r4[v725_a];
-              int32_t v733_a = v731_lead + (v723_i1 * 56);
-              glb_m2[v733_a] = v726_data;
+              int32_t v724_a = v723_i1 * 2;
+              int32_t v725_a = v722_i0 + v724_a;
+              float v728_data = r4[(v722_i0 + v724_a)];
+              int32_t v735_a = v733_lead + (v723_i1 * 56);
+              glb_m2[v735_a] = v728_data;
             }
           }
           if (v721_lead < 24) {
-            int32_t v743_lead = v721_lead + 32_i32;
+            int32_t v747_lead = v721_lead + 32_i32;
             #pragma unroll
-            for (int32_t v735_i1 = 0; v735_i1 < 9; ++v735_i1) {
-              int32_t v737_a = 1 + (v735_i1 * 2);
-              float v738_data = r4[v737_a];
-              int32_t v745_a = v743_lead + (v735_i1 * 56);
-              glb_m2[v745_a] = v738_data;
+            for (int32_t v737_i1 = 0; v737_i1 < 9; ++v737_i1) {
+              int32_t v738_a = v737_i1 * 2;
+              int32_t v739_a = 1 + v738_a;
+              float v742_data = r4[(1 + v738_a)];
+              int32_t v749_a = v747_lead + (v737_i1 * 56);
+              glb_m2[v749_a] = v742_data;
             }
           }
           ;

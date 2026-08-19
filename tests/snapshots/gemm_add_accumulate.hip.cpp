@@ -191,9 +191,9 @@ __launch_bounds__(256)
             #pragma unroll
             for (int32_t v108_i1 = 0; v108_i1 < 8; ++v108_i1) {
               int32_t v109_a = 0 + v108_i1;
-              float v110_data = r2[v109_a];
-              int32_t v117_a = v106_lead + (v108_i1 * 12);
-              __builtin_amdgcn_global_atomic_fadd_f32(&glb_m0[v117_a], v110_data);
+              float v111_data = r2[v108_i1];
+              int32_t v118_a = v106_lead + (v108_i1 * 12);
+              __builtin_amdgcn_global_atomic_fadd_f32(&glb_m0[v118_a], v111_data);
             }
           }
           ;

@@ -12,6 +12,7 @@ Run from the repository root.
 | `arch_sweep.py` | does every supported AMD target still generate, and which helpers does it emit? |
 | `undefined_symbols.py` | does any target call a `fmacdpp` variant its runtime does not define? |
 | `duplicate_elements.py` | does any output element get computed by more than one path? |
+| `access_equiv.py` | did a refactor change *which* memory is touched, or only what it is called? |
 | `ir_opacity.py` | how much of the emitted IR is opaque to the passes, versus structured -- and which function emitted it? |
 | `layout_census.py` | which register layouts does the generator actually produce? |
 | `operand_layouts.py` | do the vendor intrinsics receive their operands in the distribution they require? |
@@ -21,6 +22,20 @@ carries vendor-specific text, but it has an SSA result and a declared memory
 effect, so a pass can reorder around it and reuse it; a `rawstmt` with
 `Effect.UNKNOWN` can do neither. Counting them together hides the difference
 that matters.
+
+`access_equiv.py` exists because a textual snapshot diff answers "did the
+source change", which during a migration is almost always yes and almost never
+the question. Unpinning an address renumbers every SSA value after it and lets
+single-use addresses inline into their loads, so thousands of lines move
+without a single access moving. It expands every subscript down to leaves and
+compares the multiset of `(base, address)` pairs against a git revision.
+
+What it canonicalises away -- renumbering, parenthesisation, `0 + x` -- is
+chosen; what it refuses to canonicalise -- associativity, distribution -- is
+chosen just as deliberately, because on an address those are usually real. Its
+answer licenses not reading the diff, so `tests/test_access_equiv.py` pins both
+directions: for each thing it ignores, a pair it must call identical, and next
+to it a pair it must call different.
 
 It runs the whole case corpus, not a hand-picked four, and attributes every
 raw node to the function that emitted it. The percentage says how far along

@@ -897,23 +897,23 @@ __launch_bounds__(256)
               #pragma unroll
               for (int32_t v1346_n1 = 0; v1346_n1 < 16; ++v1346_n1) {
                 int32_t v1347_a = v1345_n0 + v1346_n1;
-                float v1348_data = ir1[v1347_a];
-                int32_t v1349_a = v1345_n0 + v1346_n1;
-                r1[v1349_a] = v1348_data;
+                float v1349_data = ir1[(v1345_n0 + v1346_n1)];
+                int32_t v1350_a = v1345_n0 + v1346_n1;
+                r1[v1350_a] = v1349_data;
               }
             }
           }
           // glb_m0 = store{r>g}(r1);
-          int32_t v1352_lead = threadIdx.x % 16;
+          int32_t v1353_lead = threadIdx.x % 16;
           #pragma unroll
-          for (int32_t v1353_i0 = 0; v1353_i0 < 1; ++v1353_i0) {
-            int32_t v1361_lead = v1352_lead + (v1353_i0 * 16);
+          for (int32_t v1354_i0 = 0; v1354_i0 < 1; ++v1354_i0) {
+            int32_t v1363_lead = v1353_lead + (v1354_i0 * 16);
             #pragma unroll
-            for (int32_t v1354_i1 = 0; v1354_i1 < 16; ++v1354_i1) {
-              int32_t v1355_a = v1353_i0 + v1354_i1;
-              float v1356_data = r1[v1355_a];
-              int32_t v1363_a = v1361_lead + (v1354_i1 * 16);
-              glb_m0[v1363_a] = v1356_data;
+            for (int32_t v1355_i1 = 0; v1355_i1 < 16; ++v1355_i1) {
+              int32_t v1356_a = v1354_i0 + v1355_i1;
+              float v1358_data = r1[(v1354_i0 + v1355_i1)];
+              int32_t v1365_a = v1363_lead + (v1355_i1 * 16);
+              glb_m0[v1365_a] = v1358_data;
             }
           }
           __syncwarp();

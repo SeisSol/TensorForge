@@ -436,23 +436,25 @@ __launch_bounds__(256)
           int32_t v495_lead = threadIdx.x % 32;
           #pragma unroll
           for (int32_t v496_i0 = 0; v496_i0 < 1; ++v496_i0) {
-            int32_t v505_lead = v495_lead + (v496_i0 * 32);
+            int32_t v507_lead = v495_lead + (v496_i0 * 32);
             #pragma unroll
             for (int32_t v497_i1 = 0; v497_i1 < 18; ++v497_i1) {
-              int32_t v499_a = v496_i0 + (v497_i1 * 2);
-              float v500_data = r2[v499_a];
-              int32_t v507_a = v505_lead + (v497_i1 * 56);
-              glb_m0[v507_a] = v500_data;
+              int32_t v498_a = v497_i1 * 2;
+              int32_t v499_a = v496_i0 + v498_a;
+              float v502_data = r2[(v496_i0 + v498_a)];
+              int32_t v509_a = v507_lead + (v497_i1 * 56);
+              glb_m0[v509_a] = v502_data;
             }
           }
           if (v495_lead < 24) {
-            int32_t v517_lead = v495_lead + 32_i32;
+            int32_t v521_lead = v495_lead + 32_i32;
             #pragma unroll
-            for (int32_t v509_i1 = 0; v509_i1 < 18; ++v509_i1) {
-              int32_t v511_a = 1 + (v509_i1 * 2);
-              float v512_data = r2[v511_a];
-              int32_t v519_a = v517_lead + (v509_i1 * 56);
-              glb_m0[v519_a] = v512_data;
+            for (int32_t v511_i1 = 0; v511_i1 < 18; ++v511_i1) {
+              int32_t v512_a = v511_i1 * 2;
+              int32_t v513_a = 1 + v512_a;
+              float v516_data = r2[(1 + v512_a)];
+              int32_t v523_a = v521_lead + (v511_i1 * 56);
+              glb_m0[v523_a] = v516_data;
             }
           }
           ;

@@ -37,6 +37,7 @@ SYM = Path('tensorforge/backend/symbol.py')
 HIP = Path('tensorforge/include/tensorforge_device/hip.h')
 EMIT = Path('tensorforge/backend/pir/emit.py')
 ABSTR = Path('tensorforge/backend/instructions/abstract_instruction.py')
+EQUIV = Path('tools/access_equiv.py')
 
 
 def _run_tests(target):
@@ -197,6 +198,40 @@ GROUPS = {
         ('the instruction hands over a budget it did not declare',
          sub(ABSTR, "scratch=(('tempShrMem', budget) if budget else None))",
              "scratch=('tempShrMem', 1 << 20))")),
+    ]),
+
+    'equiv': ('tests/test_access_equiv.py', [
+        ('renaming collapses distinct names onto one',
+         sub(EQUIV, "renames.setdefault(m.group(0), f'N{len(renames)}_{m.group(1)}')",
+             "renames.setdefault(m.group(0), 'N')")),
+        ('the base name is not compared',
+         sub(EQUIV, "out[(canon_names(base),", "out[(('any'),")),
+        ('multiplicity dropped: a set, not a multiset',
+         sub(EQUIV, "                 canon_names(_canon_expr(_expand(index, defs))))] += 1",
+             "                 canon_names(_canon_expr(_expand(index, defs))))] = 1")),
+        # A loop header is kept out of `defs` by two independent things: it
+        # does not start with a type, and it does not end in `;`.  Breaking
+        # either alone changes nothing, which is the point -- so the mutation
+        # that shows the guard is real has to break both.
+        ('the definition pattern loosened at both ends, so a loop header is a definition',
+         sub(EQUIV,
+             "DEF = re.compile(r'^\\s*(?:const\\s+)?'\n"
+             "                 r'(?:int32_t|unsigned|float|double|auto|size_t)\\s+'\n"
+             "                 r'(v\\d+_\\w+)\\s*=\\s*(.+?);\\s*$')",
+             "DEF = re.compile(r'.*?(?:const\\s+)?'\n"
+             "                 r'(?:int32_t|unsigned|float|double|auto|size_t)\\s+'\n"
+             "                 r'(v\\d+_\\w+)\\s*=\\s*(.+?);')")),
+        ('a typed literal falls back to flat text',
+         sub(EQUIV, r"_SUFFIX = re.compile(r'\b(\d+)_[iu]\d+\b')",
+             r"_SUFFIX = re.compile(r'\b(\d+)_NOMATCH\b')")),
+        ('an unparseable subscript silently downgrades to text',
+         sub(EQUIV, '        raise ValueError(',
+             "        return re.sub(r'\\s+', '', text)\n        raise ValueError(")),
+        ('identity folding dropped',
+         sub(EQUIV, '        if isinstance(node.op, ast.Add):', '        if False:')),
+        ('definitions never expand, so inlining reads as a change',
+         sub(EQUIV, "    if depth > 64:              # a cycle would mean the source is not SSA",
+             "    if True:")),
     ]),
 
     'reachability': ('tests/test_amd_reachability.py', [
