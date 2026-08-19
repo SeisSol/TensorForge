@@ -46,6 +46,7 @@ HIP = Path('tensorforge/include/tensorforge_device/hip.h')
 EMIT = Path('tensorforge/backend/pir/emit.py')
 ABSTR = Path('tensorforge/backend/instructions/abstract_instruction.py')
 EQUIV = Path('tools/access_equiv.py')
+SYM = Path('tensorforge/backend/symbol.py')
 
 
 def _run_tests(target):
@@ -240,6 +241,23 @@ GROUPS = {
         ('definitions never expand, so inlining reads as a change',
          sub(EQUIV, "    if depth > 64:              # a cycle would mean the source is not SSA",
              "    if True:")),
+    ]),
+
+    'access': ('tests/test_pir_access.py', [
+        ('the register store falls back to text',
+         sub(SYM, '          if base is None and isinstance(variable, _Value):',
+             '          if False:')),
+        ('a base override routed through Op.STORE, losing the override',
+         sub(SYM, '          if base is None and isinstance(variable, _Value):',
+             '          if isinstance(variable, _Value):')),
+        ('the address pinned again, so nothing folds or shares',
+         sub(SYM, '    return self.build_address(writer, context, index)\n\n  def access_address',
+             '    return writer.pin(self.build_address(writer, context, index))\n\n  def access_address')),
+        ('a scalar routed through Op.LOAD, inventing a subscript',
+         sub(SYM, '''        if access is pre_access and self.stype in (
+                SymbolType.Register, SymbolType.Scratch,
+                SymbolType.SharedMem, SymbolType.Batch):''',
+             '        if access is pre_access:')),
     ]),
 
     'reachability': ('tests/test_amd_reachability.py', [

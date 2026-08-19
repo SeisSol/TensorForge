@@ -104,6 +104,38 @@ def pytest_addoption(parser):
              "transition is a regression, not an update")
 
 
+# `tools/mutation_check.py` writes this while a source file is deliberately
+# broken, and removes it when the run finishes.  It survives a killed run --
+# which is exactly when it matters.
+MUTATION_LOCK = Path(__file__).resolve().parents[1] / ".mutation-in-progress"
+
+
+def pytest_collection(session):
+    """Refuse to run on a tree a killed mutation run left broken.
+
+    The harness restores its own mutations on the next invocation, which
+    covers the case where the next thing you run is the harness. It is not,
+    usually: it is pytest, and then every result in the session describes
+    source nobody meant to test. That has already happened here once, and the
+    only symptom was a large snapshot diff -- indistinguishable from the large
+    snapshot diff a migration produces.
+
+    Refusing is right rather than restoring silently: the tree may also hold
+    edits made since, and guessing which is which is not this hook's job.
+    """
+    if not MUTATION_LOCK.exists():
+        return
+    paths = [p for p in MUTATION_LOCK.read_text().split("\n") if p]
+    raise pytest.UsageError(
+        "a mutation run was killed and left "
+        f"{len(paths)} file(s) deliberately broken:\n  "
+        + "\n  ".join(paths)
+        + "\n\nRestore them, then remove the lock:\n"
+        f"  git checkout -- {' '.join(paths)}\n"
+        f"  rm {MUTATION_LOCK}\n"
+        "or re-run tools/mutation_check.py, which restores them itself.")
+
+
 def pytest_report_header(config):
     targets = _discover_targets_session(config)
     if not targets:

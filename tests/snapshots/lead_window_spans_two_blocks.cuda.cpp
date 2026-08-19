@@ -1150,57 +1150,57 @@ __launch_bounds__(256)
                   int32_t v896_a = v884_a + v885_a;
                   float v901_data = r2[v891_a];
                   int32_t v906_a = v884_a + v885_a;
-                  r3[v906_a] = (v901_data + v892_data);
+                  r3[v891_a] = (v901_data + v892_data);
                 }
               }
             }
             if (v839_lead < 3) {
               #pragma unroll
-              for (int32_t v908_n1 = 0; v908_n1 < 1; ++v908_n1) {
-                int32_t v912_a = 1 + (v908_n1 * 2);
+              for (int32_t v912_n1 = 0; v912_n1 < 1; ++v912_n1) {
+                int32_t v916_a = 1 + (v912_n1 * 2);
                 #pragma unroll
-                for (int32_t v909_n2 = 0; v909_n2 < 6; ++v909_n2) {
-                  int32_t v911_a = v909_n2 * 2;
-                  int32_t v913_a = v912_a + v911_a;
-                  float v918_data = ir3[(v912_a + v911_a)];
-                  int32_t v922_a = v912_a + v911_a;
-                  float v927_data = r2[(v912_a + v911_a)];
-                  int32_t v932_a = v912_a + v911_a;
-                  r3[v932_a] = (v927_data + v918_data);
+                for (int32_t v913_n2 = 0; v913_n2 < 6; ++v913_n2) {
+                  int32_t v915_a = v913_n2 * 2;
+                  int32_t v917_a = v916_a + v915_a;
+                  float v922_data = ir3[(v916_a + v915_a)];
+                  int32_t v926_a = v916_a + v915_a;
+                  float v931_data = r2[(v916_a + v915_a)];
+                  int32_t v936_a = v916_a + v915_a;
+                  r3[(v916_a + v915_a)] = (v931_data + v922_data);
                 }
               }
             }
           }
           // glb_m2 = store{r>g}(r3);
-          int32_t v935_lead = threadIdx.x % 32;
-          if (v935_lead >= 20) {
+          int32_t v943_lead = threadIdx.x % 32;
+          if (v943_lead >= 20) {
             #pragma unroll
-            for (int32_t v937_i1 = 0; v937_i1 < 1; ++v937_i1) {
-              int32_t v939_a = v937_i1 * 2;
-              int32_t v956_a = v935_lead + ((v937_i1 + 12) * 64);
+            for (int32_t v945_i1 = 0; v945_i1 < 1; ++v945_i1) {
+              int32_t v947_a = v945_i1 * 2;
+              int32_t v964_a = v943_lead + ((v945_i1 + 12) * 64);
               #pragma unroll
-              for (int32_t v938_i2 = 0; v938_i2 < 6; ++v938_i2) {
-                int32_t v940_a = v938_i2 * 2;
-                int32_t v942_a = v939_a + v940_a;
-                float v947_data = r3[(v939_a + v940_a)];
-                int32_t v957_a = v956_a + (v938_i2 * 832);
-                glb_m2[v957_a] = v947_data;
+              for (int32_t v946_i2 = 0; v946_i2 < 6; ++v946_i2) {
+                int32_t v948_a = v946_i2 * 2;
+                int32_t v950_a = v947_a + v948_a;
+                float v955_data = r3[(v947_a + v948_a)];
+                int32_t v965_a = v964_a + (v946_i2 * 832);
+                glb_m2[v965_a] = v955_data;
               }
             }
           }
-          if (v935_lead < 3) {
-            int32_t v974_lead = v935_lead + 32_i32;
+          if (v943_lead < 3) {
+            int32_t v982_lead = v943_lead + 32_i32;
             #pragma unroll
-            for (int32_t v959_i1 = 0; v959_i1 < 1; ++v959_i1) {
-              int32_t v963_a = 1 + (v959_i1 * 2);
-              int32_t v978_a = v974_lead + ((v959_i1 + 12) * 64);
+            for (int32_t v967_i1 = 0; v967_i1 < 1; ++v967_i1) {
+              int32_t v971_a = 1 + (v967_i1 * 2);
+              int32_t v986_a = v982_lead + ((v967_i1 + 12) * 64);
               #pragma unroll
-              for (int32_t v960_i2 = 0; v960_i2 < 6; ++v960_i2) {
-                int32_t v962_a = v960_i2 * 2;
-                int32_t v964_a = v963_a + v962_a;
-                float v969_data = r3[(v963_a + v962_a)];
-                int32_t v979_a = v978_a + (v960_i2 * 832);
-                glb_m2[v979_a] = v969_data;
+              for (int32_t v968_i2 = 0; v968_i2 < 6; ++v968_i2) {
+                int32_t v970_a = v968_i2 * 2;
+                int32_t v972_a = v971_a + v970_a;
+                float v977_data = r3[(v971_a + v970_a)];
+                int32_t v987_a = v986_a + (v968_i2 * 832);
+                glb_m2[v987_a] = v977_data;
               }
             }
           }

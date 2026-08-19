@@ -1064,7 +1064,24 @@ class Symbol:
       if self.stype == SymbolType.Register or self.stype == SymbolType.Scratch:
         assert len(self.lead_dims) == 1
         if isinstance(index[self.lead_dims[0]], LeadIndex):
-          writer.access_stmt(assign, self, kind, args=_operands(variable, addrs), fmt=fmt)
+          from tensorforge.backend.pir.core import Value as _Value
+          if base is None and isinstance(variable, _Value):
+            # The symmetric case to the structured load: the destination
+            # address and the stored value are operands, not names inside a
+            # string.  A pass can now see that this write and a later read
+            # touch the same place, and the address arithmetic is foldable
+            # instead of pinned behind a name the text refers to.
+            #
+            # `base` is an override of the pointer name -- a rotating buffer
+            # writing to a stage other than its own -- which `Op.STORE` cannot
+            # express, since its base *is* the symbol.  A non-Value variable is
+            # a literal, and the spelling a literal gets is the emitter's to
+            # decide on the text path; routing it here would change `0` into
+            # `0.0f` or the reverse for reasons unrelated to this change.
+            writer.store(self, variable,
+                         self.address_value(writer, context, index))
+          else:
+            writer.access_stmt(assign, self, kind, args=_operands(variable, addrs), fmt=fmt)
         else:
           with writer.If(f'{context.get_vm().get_lexic().thread_idx_x} == {index[self.lead_dims[0]]}'):
             writer.access_stmt(assign, self, kind, args=_operands(variable, addrs), fmt=fmt)

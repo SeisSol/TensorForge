@@ -6389,20 +6389,20 @@ __launch_bounds__(256)
                 int32_t v15969_a = 0 + v15968_n1;
                 float v15971_data = ir5[v15968_n1];
                 int32_t v15972_a = 0 + v15968_n1;
-                r5[v15972_a] = v15971_data;
+                r5[v15968_n1] = v15971_data;
               }
             }
           }
           // glb_m3 = store{r>g}(r5);
-          int32_t v15975_lead = threadIdx.x % 32;
-          if ((v15975_lead >= 8) && (v15975_lead < 16)) {
-            int32_t v15988_off = v15975_lead + -8;
+          int32_t v15976_lead = threadIdx.x % 32;
+          if ((v15976_lead >= 8) && (v15976_lead < 16)) {
+            int32_t v15989_off = v15976_lead + -8;
             #pragma unroll
-            for (int32_t v15979_i1 = 0; v15979_i1 < 8; ++v15979_i1) {
-              int32_t v15980_a = 0 + v15979_i1;
-              float v15982_data = r5[v15979_i1];
-              int32_t v15990_a = v15988_off + (v15979_i1 * 8);
-              glb_m3[v15990_a] = v15982_data;
+            for (int32_t v15980_i1 = 0; v15980_i1 < 8; ++v15980_i1) {
+              int32_t v15981_a = 0 + v15980_i1;
+              float v15983_data = r5[v15980_i1];
+              int32_t v15991_a = v15989_off + (v15980_i1 * 8);
+              glb_m3[v15991_a] = v15983_data;
             }
           }
           __syncwarp();

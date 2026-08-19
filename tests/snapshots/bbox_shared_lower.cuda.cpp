@@ -546,20 +546,20 @@ __launch_bounds__(256)
                 int32_t v725_a = 0 + v724_n1;
                 float v727_data = ir1[v724_n1];
                 int32_t v728_a = 0 + v724_n1;
-                r1[v728_a] = v727_data;
+                r1[v724_n1] = v727_data;
               }
             }
           }
           // glb_m0 = store{r>g}(r1);
-          int32_t v731_lead = threadIdx.x % 16;
-          if (v731_lead < 12) {
-            int32_t v743_a = ((v731_lead + 16_i32) + -12) - 4;
+          int32_t v732_lead = threadIdx.x % 16;
+          if (v732_lead < 12) {
+            int32_t v744_a = ((v732_lead + 16_i32) + -12) - 4;
             #pragma unroll
-            for (int32_t v733_i1 = 0; v733_i1 < 8; ++v733_i1) {
-              int32_t v734_a = 0 + v733_i1;
-              float v736_data = r1[v733_i1];
-              int32_t v745_a = v743_a + (v733_i1 * 12);
-              glb_m0[v745_a] = v736_data;
+            for (int32_t v734_i1 = 0; v734_i1 < 8; ++v734_i1) {
+              int32_t v735_a = 0 + v734_i1;
+              float v737_data = r1[v734_i1];
+              int32_t v746_a = v744_a + (v734_i1 * 12);
+              glb_m0[v746_a] = v737_data;
             }
           }
           __syncwarp();
