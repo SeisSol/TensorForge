@@ -371,11 +371,18 @@ class Emitter:
         if op == Op.ALLOC:
             v = s.target[0]
             t = v.type
-            qual = {MemSpace.SHARED: '__shared__ ', MemSpace.CONSTANT: 'const '}.get(
-                t.space, '')
-            # Shared/scratch buffers are only *named* here; the byte offset is
-            # assigned by opt.mem_region_allocation upstairs.  Until that pass
-            # understands pir allocs, fall back to a plain declaration.
+            arena = s.attr('arena')
+            if arena is not None:
+                # A shared buffer is a window into the kernel's one arena, at
+                # the offset the builder bumped out of this instruction's
+                # declared scratch tail.  Declaring `__shared__` here instead
+                # would allocate outside the size ShrMemOpt computed, which is
+                # what the occupancy calculation and the barrier placement both
+                # read.
+                off = s.attr('offset', 0)
+                w(f'{t.elem.ctype()}* {self.name(v)} = &{arena}[{off}];')
+                return
+            qual = {MemSpace.CONSTANT: 'const '}.get(t.space, '')
             w(f'{qual}{t.elem.ctype()} {self.name(v)}[{t.volume}];')
             return
 

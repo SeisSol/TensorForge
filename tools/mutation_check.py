@@ -14,6 +14,8 @@ are the real ones from the session's history, not invented ones:
 * the `LaneAxis` lane map as first documented, with `stride` read as packing
 * the broadcast layout as first annotated: right numbers, wrong roles
 * `0.0f` handed to a `T &` parameter of `transpose4x4b32`
+* a shared buffer declared inside a body, outside the sized arena
+* two scratch windows handed out at the same offset
 
 Source files are edited in place and restored in a `finally`.  Run it on a
 clean tree.
@@ -33,6 +35,8 @@ CORE = Path('tensorforge/backend/pir/core.py')
 BUILD = Path('tensorforge/backend/pir/build.py')
 SYM = Path('tensorforge/backend/symbol.py')
 HIP = Path('tensorforge/include/tensorforge_device/hip.h')
+EMIT = Path('tensorforge/backend/pir/emit.py')
+ABSTR = Path('tensorforge/backend/instructions/abstract_instruction.py')
 
 
 def _run_tests(target):
@@ -173,6 +177,26 @@ GROUPS = {
          sub(Path('tests/harness/wavesim.py'),
              '        raise NotImplementedError(',
              '        return list(vals)\n        raise NotImplementedError(')),
+    ]),
+
+    'scratch': ('tests/test_pir_scratch.py', [
+        ('a shared alloc declares its own array again',
+         sub(EMIT,
+             "                off = s.attr('offset', 0)\n"
+             "                w(f'{t.elem.ctype()}* {self.name(v)} = &{arena}[{off}];')\n"
+             "                return",
+             "                pass")),
+        ('the budget check dropped',
+         sub(BUILD, '        if end > budget:', '        if False:')),
+        ('windows overlap: the cursor never advances',
+         sub(BUILD, '        self._scratch_used = end', '        pass')),
+        ('alignment ignored',
+         sub(BUILD, '        align = max(1, 16 // elem.size())', '        align = 1')),
+        ('no budget read as unlimited',
+         sub(BUILD, '        if self._scratch is None:', '        if False:')),
+        ('the instruction hands over a budget it did not declare',
+         sub(ABSTR, "scratch=(('tempShrMem', budget) if budget else None))",
+             "scratch=('tempShrMem', 1 << 20))")),
     ]),
 
     'reachability': ('tests/test_amd_reachability.py', [

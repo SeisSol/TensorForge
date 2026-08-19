@@ -23,6 +23,7 @@ from dataclasses import replace
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 from tensorforge.common.basic_types import Datatype
+from tensorforge.common.exceptions import GenerationError
 
 from .core import (BOOL, INDEX, TOKEN, Access, BufferType, Effect, IRError,
                    LaneAxis, MemSpace, Op, Operand, Region, RegisterLayout,
@@ -78,7 +79,7 @@ def _join(operands) -> Uniformity:
 
 class IRBuilder:
     def __init__(self, fptype: Datatype = Datatype.F32, context: Any = None,
-                 alloc: Any = None):
+                 alloc: Any = None, scratch: Optional[Tuple[str, int]] = None):
         # -1 so the first value is v0, matching writer.VarAlloc: a mechanism
         # swap should not show up as a diff in generated source.
         #
@@ -88,6 +89,12 @@ class IRBuilder:
         # would otherwise both start at v0.  That uniqueness is file-scoped
         # state, and it lives on the Writer.
         self._alloc = alloc
+        # The scratch arena this body may suballocate from: (pointer name,
+        # budget in elements).  `None` means the instruction declared no
+        # budget, and a shared alloc from it is a defect rather than a
+        # request to make room -- see `alloc`.
+        self._scratch = scratch
+        self._scratch_used = 0
         self._counter = -1
         self._stack: List[_Scope] = [_Scope(kind='root')]
         self._fptype = fptype
@@ -346,14 +353,61 @@ class IRBuilder:
               hint: str = 'buf') -> Value:
         """Request a buffer *symbolically*.
 
-        No offset, no address: the whole-kernel allocator upstairs assigns
-        those.  This is the bridge between the two layers --- the micro-IR sees
-        the tile as a value and can reason about aliasing on it; the macro-IR
-        owns the resource and can still decide to place it in registers.
+        For registers and scratch: no offset, no address --- the whole-kernel
+        allocator upstairs assigns those.  This is the bridge between the two
+        layers: the micro-IR sees the tile as a value and can reason about
+        aliasing on it; the macro-IR owns the resource and can still decide to
+        place it in registers.
+
+        For :attr:`MemSpace.SHARED` the answer cannot be deferred that far.
+        Shared memory is one arena per kernel, sized by ``ShrMemOpt`` from
+        ``temp_shmem()`` *before* any instruction body is built, so by the time
+        this runs the budget is already fixed and an independent
+        ``__shared__`` array would sit outside it --- uncounted against the
+        occupancy limit and invisible to the barrier placement that keys on
+        region membership.  So a shared alloc is a suballocation of the tail
+        this instruction declared, handed out here by bump.
+
+        The declared budget stays the contract, and it is now checked.  It was
+        not before: `nvidia.matmul` carries an
+        ``assert 32 * max(aregs + bregs, cregs) <= shmsize`` precisely because
+        the size in ``temp_shmem()`` and the hand-written offsets in the body
+        are two statements of one fact, kept in agreement by hand.  Every
+        caller that allocates through here gets that check for free, against
+        what it actually asked for rather than against a formula restated at
+        the use site.
         """
         v = self.value(BufferType(elem, tuple(shape), space), hint=hint)
-        self._emit_op(Op.ALLOC, (v,), (), pure=False, movable=False)
+        attrs: Tuple = ()
+        if space == MemSpace.SHARED:
+            attrs = self._suballocate(v, elem)
+        self._emit_op(Op.ALLOC, (v,), (), pure=False, movable=False,
+                      attrs=attrs)
         return v
+
+    def _suballocate(self, v: Value, elem: Datatype) -> Tuple:
+        """Place a shared buffer in this instruction's scratch tail."""
+        if self._scratch is None:
+            raise GenerationError(
+                f'shared alloc of {v.type} with no scratch budget: the '
+                f'instruction building this body returns 0 from temp_shmem(), '
+                f'so ShrMemOpt reserved nothing for it to sit in')
+        name, budget = self._scratch
+        # 16 bytes is what the vectorised paths need -- `nvidia.matmul` stores
+        # through `float4` -- and matches the alignment ShrMemOpt already pads
+        # the arena to.  Aligning every suballocation keeps that property
+        # independent of the order they are requested in.
+        align = max(1, 16 // elem.size())
+        start = ((self._scratch_used + align - 1) // align) * align
+        end = start + v.type.volume
+        if end > budget:
+            raise GenerationError(
+                f'scratch overflow: {v.type} at offset {start} needs '
+                f'{end} elements, budget is {budget}. Either temp_shmem() '
+                f'under-reports what this instruction allocates, or the body '
+                f'allocates more than it declared')
+        self._scratch_used = end
+        return (('arena', name), ('offset', start))
 
     def load(self, base: Any, *indices: Operand, type_=None, hint: str = '',
              space: Optional[MemSpace] = None, uniform: Optional[bool] = None,

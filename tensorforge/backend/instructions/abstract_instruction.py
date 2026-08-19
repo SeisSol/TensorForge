@@ -217,8 +217,14 @@ class AbstractInstruction(ABC):
       build(self._shared_body[-1])      # join the enclosing body
       return
 
+    # The scratch tail this instruction declared to ShrMemOpt, so that a
+    # shared alloc inside the body lands in the space that was reserved for
+    # it rather than in an array of its own.  `temp_shmem()` is 0 for almost
+    # everything, and 0 correctly means "this body may not allocate".
+    budget = self.temp_shmem()
     builder = pir.IRBuilder(fptype=self._context.fp_type, context=self._context,
-                            alloc=getattr(writer, 'alloc', None))
+                            alloc=getattr(writer, 'alloc', None),
+                            scratch=(('tempShrMem', budget) if budget else None))
     build(builder)
     body = builder.finish()
 

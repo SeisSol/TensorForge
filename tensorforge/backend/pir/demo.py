@@ -26,7 +26,7 @@ K = 35
 
 def build_contraction():
     """acc = sum_k A[tid, k] * B[k]  --- with deliberate CSE/LICM/DCE bait."""
-    b = IRBuilder(fptype=Datatype.F32)
+    b = IRBuilder(fptype=Datatype.F32, scratch=('tempShrMem', 64 * K))
 
     A = b.alloc(Datatype.F32, (64, K), MemSpace.SHARED, hint='A')
     B = b.alloc(Datatype.F32, (K,), MemSpace.REGISTER, hint='B')
@@ -54,7 +54,7 @@ def build_contraction():
 
 def build_loop_with_write():
     """Same shape, but the loop writes A --- the invariant load must stay."""
-    b = IRBuilder(fptype=Datatype.F32)
+    b = IRBuilder(fptype=Datatype.F32, scratch=('tempShrMem', 64 * K))
     A = b.alloc(Datatype.F32, (64, K), MemSpace.SHARED, hint='A')
     tid = b.thread_id('x')
     zero = b.const(0.0)
@@ -130,7 +130,7 @@ def build_pipeline():
     The copy issued in iteration k is waited in iteration k+1; the token rides
     through the loop's iter_args next to the accumulator.
     """
-    b = IRBuilder(fptype=Datatype.F32)
+    b = IRBuilder(fptype=Datatype.F32, scratch=('tempShrMem', TILE * 2))
     # leading dimension first (DataView convention): the thread index is the
     # fastest-varying axis, so lanes stay coalesced and the buffer index picks
     # the half of the double buffer.
@@ -192,7 +192,7 @@ def build_masked():
 
 def build_mixed():
     """One copy and one register load in flight at once."""
-    b = IRBuilder(fptype=Datatype.F32)
+    b = IRBuilder(fptype=Datatype.F32, scratch=('tempShrMem', TILE * 2))
     glb = b.alloc(Datatype.F32, (TILE, TILES), MemSpace.GLOBAL, hint='glb')
     lds = b.alloc(Datatype.F32, (TILE, 2), MemSpace.SHARED, hint='lds')
     tid = b.thread_id('x')
@@ -433,7 +433,7 @@ def main():
         print(pw.get_src())
 
     # an unwaited copy is reported
-    b2 = IRBuilder(fptype=Datatype.F32)
+    b2 = IRBuilder(fptype=Datatype.F32, scratch=('tempShrMem', 4))
     g2 = b2.alloc(Datatype.F32, (4,), MemSpace.GLOBAL, hint='g')
     l2 = b2.alloc(Datatype.F32, (4,), MemSpace.SHARED, hint='l')
     b2.copy_async(l2, g2, dst_index=(0,), src_index=(0,))
