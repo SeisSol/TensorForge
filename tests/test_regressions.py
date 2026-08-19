@@ -503,14 +503,21 @@ def _resolved_address(lines, name, depth=8):
     asks the question the test means to ask -- does the address the bias is
     read through carry the offset, anywhere along the way.
     """
-    expr = None
-    for line in lines:
-        m = re.search(_ADDR_DEF.format(name=re.escape(name)), line)
-        if m:
-            expr = m.group(1)
-            break
-    if expr is None:
-        return None
+    if not re.fullmatch(r"v\d+_\w+", name.strip()):
+        # A single-use address is folded into its subscript now that it is an
+        # operand rather than a name inside a string, so the load may hand us
+        # `(v322_lead + 384)` instead of a name to look up.  Substituting into
+        # it is the same question; there is just one fewer hop to start from.
+        expr = name
+    else:
+        expr = None
+        for line in lines:
+            m = re.search(_ADDR_DEF.format(name=re.escape(name)), line)
+            if m:
+                expr = m.group(1)
+                break
+        if expr is None:
+            return None
     for _ in range(depth):
         names = [n for n in re.findall(r"\bv\d+_\w+\b", expr)]
         grown = expr
@@ -531,7 +538,10 @@ _GUARD_LINE = re.compile(r"if \((.+)\) \{")
 # The read used to be handed the fixed name `oldvalue`; it is an SSA
 # value now, so the name varies.  The pair this test needs is still
 # there -- which symbol is read, and through which address.
-_OLDVALUE = re.compile(r"\bfloat \w+ = (\w+)\[(\w+)\];")
+# The subscript may be a name or a folded expression: `s0[v298_a]` and
+# `s0[(v322_lead + 384)]` are the same read, and which one appears depends on
+# whether the address has more than one use.
+_OLDVALUE = re.compile(r"\bfloat \w+ = (\w+)\[([^\]]+)\];")
 
 
 def _predictor_descrs():
