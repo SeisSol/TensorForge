@@ -197,7 +197,8 @@ GROUPS = {
              "                return",
              "                pass")),
         ('the budget check dropped',
-         sub(BUILD, '        if end > budget:', '        if False:')),
+         sub(BUILD, '        if max(end, self._scratch_peak) > budget:',
+             '        if False:')),
         ('windows overlap: the cursor never advances',
          sub(BUILD, '        self._scratch_used = end', '        pass')),
         ('alignment ignored',
@@ -407,6 +408,42 @@ GROUPS = {
         ('the deployment switch flipped without re-recording',
          sub(Path('tensorforge/backend/instructions/compute/primitives/nvidia.py'),
              'ENABLED = False', 'ENABLED = True', 1)),
+    ]),
+
+    # A raw statement may narrow what it touches, and must then be complete
+    # about what it uses.  Both halves, plus the scope that carries the
+    # lifetime a liveness analysis cannot yet see.
+    'rawaccess': ('tests/test_pir_raw_accesses.py', [
+        ('a narrowed access set not checked at all',
+         sub(Path('tensorforge/backend/pir/build.py'),
+             '            self._check_declared_accesses(code, accesses, args)',
+             '            pass', 1)),
+        ('the operand requirement dropped',
+         sub(Path('tensorforge/backend/pir/build.py'),
+             '            if id(v) not in used:',
+             '            if False:', 1)),
+        ('the declared-access requirement dropped',
+         sub(Path('tensorforge/backend/pir/build.py'),
+             '            if id(v) in shared and not conservative and v not in covered:',
+             '            if False:', 1)),
+        ('operands accepted but not recorded, so no use edge',
+         sub(Path('tensorforge/backend/pir/build.py'),
+             'return self._emit_op(Op.RAWSTMT, (), tuple(args), pure=False,',
+             'return self._emit_op(Op.RAWSTMT, (), (), pure=False,', 1)),
+        ('a raw statement made movable by declaring no accesses',
+         sub(Path('tensorforge/backend/pir/build.py'),
+             '        return self._emit_op(Op.RAWSTMT, (), tuple(args), pure=False,\n'
+             '                             movable=False,',
+             '        return self._emit_op(Op.RAWSTMT, (), tuple(args), pure=False,\n'
+             '                             movable=(accesses == ()),', 1)),
+        ('the scope no longer releases',
+         sub(Path('tensorforge/backend/pir/build.py'),
+             '            self._scratch_used = mark',
+             '            pass', 1)),
+        ('the budget checked against the mark, not the peak',
+         sub(Path('tensorforge/backend/pir/build.py'),
+             'if max(end, self._scratch_peak) > budget:',
+             'if end > budget:', 1)),
     ]),
 
     'operands': ('tests/test_snapshots.py', [

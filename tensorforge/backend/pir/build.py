@@ -18,6 +18,7 @@ The builder knows nothing about C++ syntax.  Rendering lives in ``pir.emit``.
 
 from __future__ import annotations
 
+import re
 from contextlib import contextmanager
 from dataclasses import replace
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
@@ -77,6 +78,21 @@ def _join(operands) -> Uniformity:
     return min(levels) if levels else Uniformity.GRID
 
 
+#: An identifier the builder might have emitted.  Values are named `v{id}` or
+#: `v{id}_{hint}`, so this over-matches on purpose and the lookup decides.
+_IDENT = re.compile(r'\bv\d+\w*\b')
+
+
+def _names_in(code: str, name: str) -> bool:
+    """Whether `name` appears in `code` as an identifier, not as a substring.
+
+    `v1` must not match `v13`, or the check fires on statements that have
+    nothing to do with the buffer and callers learn to pass the argument that
+    turns it off.
+    """
+    return re.search(rf'\b{re.escape(name)}\b', code) is not None
+
+
 class IRBuilder:
     def __init__(self, fptype: Datatype = Datatype.F32, context: Any = None,
                  alloc: Any = None, scratch: Optional[Tuple[str, int]] = None):
@@ -95,6 +111,14 @@ class IRBuilder:
         # request to make room -- see `alloc`.
         self._scratch = scratch
         self._scratch_used = 0
+        self._scratch_peak = 0
+        # Buffers this body allocated, for `_check_declared_accesses`.
+        self._shared_buffers: List[Value] = []
+        # Every value this body has named, keyed by the identifier it emits
+        # as.  A raw statement that narrows its accesses is checked against
+        # this, so the lookup has to be by name rather than a scan over all
+        # values -- there are thousands of both.
+        self._by_name: Dict[str, Value] = {}
         self._counter = -1
         self._stack: List[_Scope] = [_Scope(kind='root')]
         self._fptype = fptype
@@ -123,8 +147,10 @@ class IRBuilder:
         else:
             self._counter += 1
             ident = self._counter
-        return Value(id=ident, type=type_, uniformity=_as_uniformity(uniform),
-                     hint=hint, layout=layout)
+        v = Value(id=ident, type=type_, uniformity=_as_uniformity(uniform),
+                  hint=hint, layout=layout)
+        self._by_name[str(v)] = v
+        return v
 
     def varalloc(self, prefix: str = 'v') -> Value:
         """Drop-in for ``Writer.varalloc``.
@@ -381,9 +407,49 @@ class IRBuilder:
         attrs: Tuple = ()
         if space == MemSpace.SHARED:
             attrs = self._suballocate(v, elem)
+            self._shared_buffers.append(v)
         self._emit_op(Op.ALLOC, (v,), (), pure=False, movable=False,
                       attrs=attrs)
         return v
+
+    @contextmanager
+    def scratch_scope(self):
+        """Buffers allocated inside are dead at the end of it.
+
+        The hand form of what a liveness analysis over this body would derive,
+        and it is here only because that analysis cannot yet run: a raw
+        statement that does not declare its accesses conflicts with every
+        buffer in every space, so a body still made mostly of raw text has an
+        interference graph in which everything interferes and a colouring that
+        reuses nothing.
+
+        `nvidia.matmul` is the case.  Its A and B windows live only inside the
+        k/kk/ii nest and its C window only in the epilogue after it closes, so
+        C may sit on top of A and B --- 192 elements rather than 320 for
+        m16n8k8.  That is a lifetime argument, stated here once by nesting
+        instead of three times as offset constants plus an `assert` restating
+        the total.
+
+        Written to be replaceable rather than to last.  What it computes is a
+        peak, which is exactly what a colouring computes, so when the body is
+        structured enough for liveness the two are comparable and this can go.
+        """
+        mark = self._scratch_used
+        try:
+            yield
+        finally:
+            self._scratch_peak = max(self._scratch_peak, self._scratch_used)
+            self._scratch_used = mark
+
+    @property
+    def scratch_peak(self) -> int:
+        """High-water mark, which is what the budget has to cover.
+
+        Not `_scratch_used`: that falls back at the end of every scope, so on
+        a body that uses scopes it under-reports, and a check against it would
+        pass a body that overflows.
+        """
+        return max(self._scratch_peak, self._scratch_used)
 
     def _suballocate(self, v: Value, elem: Datatype) -> Tuple:
         """Place a shared buffer in this instruction's scratch tail."""
@@ -400,7 +466,7 @@ class IRBuilder:
         align = max(1, 16 // elem.size())
         start = ((self._scratch_used + align - 1) // align) * align
         end = start + v.type.volume
-        if end > budget:
+        if max(end, self._scratch_peak) > budget:
             raise GenerationError(
                 f'scratch overflow: {v.type} at offset {start} needs '
                 f'{end} elements, budget is {budget}. Either temp_shmem() '
@@ -644,13 +710,97 @@ class IRBuilder:
 
     # -- legacy Writer facade ---------------------------------------------- #
 
-    def __call__(self, code: str) -> Stmt:
-        """Raw statement text.  Opaque, therefore impure, pinned and
-        conservatively assumed to touch everything."""
-        return self._emit_op(Op.RAWSTMT, (), (), pure=False, movable=False,
-                             effect=Effect.UNKNOWN, text=code,
-                             accesses=(Access(Effect.READ | Effect.WRITE,
-                                              MemSpace.UNKNOWN, None),))
+    #: What a raw statement is assumed to touch when it does not say.
+    _TOUCHES_EVERYTHING = (Access(Effect.READ | Effect.WRITE,
+                                  MemSpace.UNKNOWN, None),)
+
+    def __call__(self, code: str, *args: Operand,
+                 accesses: Optional[Sequence[Access]] = None) -> Stmt:
+        """Raw statement text.  Opaque, therefore impure and pinned.
+
+        Two separable facts, and they were being answered by one default.
+        *What it is* --- opaque text, unmovable, not a candidate for CSE ---
+        stays `Effect.UNKNOWN` no matter what: nothing here can reason about
+        the statement as code.  *What it touches* is a different question, and
+        the conservative answer to it has a cost that shows up as soon as
+        anything wants to reason about memory.
+
+        `Access(base=None)` conflicts with everything in its space, and
+        `MemSpace.UNKNOWN` conflicts with every space, so a single raw
+        statement between two shared-memory accesses keeps every buffer live.
+        A body that is nine tenths converted therefore analyses exactly as
+        badly as one that is not converted at all --- which makes the
+        conversion all-or-nothing, and an all-or-nothing conversion is one
+        that does not get done.
+
+        So a caller that knows may say.  ``accesses=()`` is the common case:
+        this statement touches no memory the IR models (a `__syncwarp`, a
+        register declaration).  Omitting the argument keeps the old answer, so
+        every existing call site means exactly what it meant before.
+
+        This is a promise the text cannot be made to keep, which is why
+        `_check_declared_accesses` holds it to the part that *is* checkable:
+        a buffer this body allocated, named in the text, must appear in the
+        declared set *and* among ``args``.
+
+        ``args`` are the values the statement uses, in `rawexpr`'s convention.
+        Declaring an access is not the same as declaring a use, and the
+        difference is not academic: an `Access` tells the aliasing question
+        which buffers a statement may touch, while the use chain is what keeps
+        the buffer's definition alive.  A `float4` store that named its tile
+        only inside the text had a correct access set and no use edge, so the
+        `alloc` that produced the tile was reachable by nothing, was removed,
+        and the kernel referred to an undeclared pointer.  It compiled cleanly
+        as IR and not at all as C++.
+        """
+        if accesses is None:
+            accesses = self._TOUCHES_EVERYTHING
+        else:
+            accesses = tuple(accesses)
+            self._check_declared_accesses(code, accesses, args)
+        return self._emit_op(Op.RAWSTMT, (), tuple(args), pure=False,
+                             movable=False, effect=Effect.UNKNOWN, text=code,
+                             accesses=accesses)
+
+    def _check_declared_accesses(self, code: str,
+                                 accesses: Sequence[Access],
+                                 args: Sequence[Operand] = ()) -> None:
+        """Hold a narrowed access set to what the text visibly does.
+
+        Only one direction is decidable: if a buffer allocated in this body is
+        named in the statement, the statement touches it.  The converse is not
+        --- a pointer can be reached through an alias this never sees --- so
+        an undeclared *absence* is not an error, and nothing here tries to
+        prove one.
+
+        Catching the one direction is enough to matter.  The failure this
+        prevents is a `store` whose buffer was left out of the declaration and
+        so is reported dead while still being written, and that failure is
+        silent: the generated code is unchanged, the allocation moves, and the
+        result is a wrong kernel produced by a correct-looking pass.
+        """
+        covered = {a.base for a in accesses}
+        conservative = (None in covered
+                        or any(a.space == MemSpace.UNKNOWN for a in accesses))
+        used = {id(a) for a in args}
+        shared = {id(b) for b in self._shared_buffers}
+
+        for name in set(_IDENT.findall(code)):
+            v = self._by_name.get(name)
+            if v is None:
+                continue                # not one of ours: a kernel parameter,
+                                        # a loop variable, a C++ keyword
+            if id(v) not in used:
+                raise IRError(
+                    f'raw statement names {name} but does not list it among '
+                    f'its operands: {code.strip()[:70]!r}. Without a use edge '
+                    f'the statement that defines {name} is reachable by '
+                    f'nothing and will be removed.')
+            if id(v) in shared and not conservative and v not in covered:
+                raise IRError(
+                    f'raw statement names {name} but does not declare an '
+                    f'access to it: {code.strip()[:70]!r}. Either add the '
+                    f'access or drop the `accesses` argument.')
 
     def rawexpr(self, text: str, *args: Operand, type_=None, hint: str = '',
                 pure: bool = False, movable: bool = False) -> Value:

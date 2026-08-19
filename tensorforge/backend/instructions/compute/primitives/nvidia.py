@@ -1,4 +1,5 @@
 from tensorforge.common.basic_types import Datatype
+from tensorforge.backend.pir.core import INDEX, Access, Effect, MemSpace
 from tensorforge.backend.writer import Writer
 
 def tfconvert(writer: Writer, variables):
@@ -204,11 +205,27 @@ def matmul(writer, C, A, B, M, N, K, kx, threads, dtype, sparse, ctx, shmptr, sh
     bregs = (atom.n * atom.k) // threads
     cregs = (atom.m * atom.n) // threads
 
-    assert 32 * max(aregs + bregs, cregs) <= shmsize
-
-    aoffs = 0
-    boffs = aregs * 32
-    coffs = 0
+    # The three staging windows, taken from the scratch tail this instruction
+    # declared to ShrMemOpt rather than placed by hand.
+    #
+    # `aoffs = 0`, `boffs = aregs * 32`, `coffs = 0` was not three constants
+    # but one packing: C deliberately overlaps A and B, which is why the size
+    # is `32 * max(aregs + bregs, cregs)` and not their sum -- 192 elements
+    # rather than 320 for m16n8k8.  It is legal because A and B are live only
+    # inside the k/kk/ii nest and C only in the epilogue after it closes.
+    #
+    # That is a lifetime argument, and it was being carried by three integers
+    # and an `assert` restating the total.  It belongs to a liveness analysis;
+    # until the body is structured enough for one to see it, the windows are
+    # requested and the overlap is stated in one place instead of three.
+    with writer.scratch_scope():
+        Ashm = writer.alloc(atom.d, (aregs * threads,), MemSpace.SHARED,
+                            hint='atile')
+        Bshm = writer.alloc(atom.d, (bregs * threads,), MemSpace.SHARED,
+                            hint='btile')
+    with writer.scratch_scope():
+        Cshm = writer.alloc(atom.d, (cregs * threads,), MemSpace.SHARED,
+                            hint='ctile')
 
     for j in range(0, N, atom.n):
         with writer.AnonymousScope():
@@ -229,16 +246,19 @@ def matmul(writer, C, A, B, M, N, K, kx, threads, dtype, sparse, ctx, shmptr, sh
                                     trueSK = min(atom.k, threads - trueK)
                                     with threadrange(trueK, trueSK):
                                         for jj in range(0, atom.n):
-                                            writer(f'{shmptr}[{boffs} + (threadIdx.x - {trueK}) % {atom.k} + {jj * atom.k}] = {Breg}_{k//threads}_{jj};')
+                                            writer.store(Bshm, f'{Breg}_{k//threads}_{jj}',
+                                                         writer.rawexpr(f'(threadIdx.x - {trueK}) % {atom.k} + {jj * atom.k}', type_=INDEX, hint='a'))
                                     if trueSK != atom.k:
                                         with threadrange(0, atom.k - trueSK):
                                             for jj in range(0, atom.n):
-                                                writer(f'{shmptr}[{boffs} + (threadIdx.x + {trueSK}) % {atom.k} + {jj * atom.k}] = {Breg}_{k//threads+1}_{jj};')
+                                                writer.store(Bshm, f'{Breg}_{k//threads+1}_{jj}',
+                                                                     writer.rawexpr(f'(threadIdx.x + {trueSK}) % {atom.k} + {jj * atom.k}', type_=INDEX, hint='a'))
                                     writer('__syncwarp();')
 
                                     for jj in range(0, nregs):
                                         for kkk in range(0, kregs):
-                                            writer(f'{atom.d.ctype()} {Breg2}_{kkk + jj * kregs} = {shmptr}[{boffs} + (threadIdx.x % {ktile}) + (threadIdx.x / {ktile} + {jj * ntile}) * {atom.k} + {kkk * ktile}];')
+                                            _b = writer.load(Bshm, writer.rawexpr(f'(threadIdx.x % {ktile}) + (threadIdx.x / {ktile} + {jj * ntile}) * {atom.k} + {kkk * ktile}', type_=INDEX, hint='a'), hint='data')
+                                            writer(f'{atom.d.ctype()} {Breg2}_{kkk + jj * kregs} = {_b};', _b, accesses=())
 
                                     for kkk in range(0, min(atom.k, K - k - kk)):
                                         A(writer, f'{Areg}_{kkk}', i // threads, k + kk + kkk)
@@ -252,13 +272,16 @@ def matmul(writer, C, A, B, M, N, K, kx, threads, dtype, sparse, ctx, shmptr, sh
                                                 # for kkk in range(0, atom.k):
                                                 #     writer(f'{shmptr}[{aoffs} + (threadIdx.x - {ii}) % {atom.m} + {kkk * atom.m}] = {Areg}_{kkk};')
                                                 for kkk in range(0, atom.k, ktile):
-                                                    writer(f'*(float4*)&{shmptr}[{aoffs} + ((threadIdx.x - {ii}) % {atom.m}) * {ktile} + {kkk * atom.m}] = make_float4({Areg}_{kkk}, {Areg}_{kkk+1}, {Areg}_{kkk+2}, {Areg}_{kkk+3});')
+                                                    writer(f'*(float4*)&{Ashm}[((threadIdx.x - {ii}) % {atom.m}) * {ktile} + {kkk * atom.m}] = make_float4({Areg}_{kkk}, {Areg}_{kkk+1}, {Areg}_{kkk+2}, {Areg}_{kkk+3});',
+                                                        Ashm,
+                                                        accesses=(Access(Effect.WRITE, MemSpace.SHARED, Ashm),))
                                             writer('__syncwarp();')
 
                                             for kk in range(0, kregs):
                                                 for iii in range(0, mregs):
                                                     #writer(f'{atom.d.ctype()} {Areg2}_{iii + kk * mregs} = {shmptr}[{aoffs} + (threadIdx.x / {ktile}) + (threadIdx.x % {ktile} + {kk * ktile}) * {atom.m} + {iii * mtile}];')
-                                                    writer(f'{atom.d.ctype()} {Areg2}_{iii + kk * mregs} = {shmptr}[{aoffs} + threadIdx.x + {(iii + kk * mregs) * 32}];')
+                                                    _a = writer.load(Ashm, writer.rawexpr(f'threadIdx.x + {(iii + kk * mregs) * 32}', type_=INDEX, hint='a'), hint='data')
+                                                    writer(f'{atom.d.ctype()} {Areg2}_{iii + kk * mregs} = {_a};', _a, accesses=())
 
                                             atom.generate(writer, ctx, [f'{Areg2}_{i}' for i in range (aregs)], [f'{Breg2}_{i}' for i in range (bregs)], [f'{Creg}[{i}][{ii // atom.m}]' for i in range (cregs)])
 
@@ -269,12 +292,14 @@ def matmul(writer, C, A, B, M, N, K, kx, threads, dtype, sparse, ctx, shmptr, sh
                         with writer.AnonymousScope():
                             for jj in range(0, nregs * 2):
                                 for iii in range(0, mregs):
-                                    writer(f'{shmptr}[{coffs} + threadIdx.x * 2 + {iii} + {jj * 64}] = {Creg}[{iii + mregs * jj}][{ii // atom.m}];')
+                                    writer.store(Cshm, f'{Creg}[{iii + mregs * jj}][{ii // atom.m}]',
+                                        writer.rawexpr(f'threadIdx.x * 2 + {iii} + {jj * 64}', type_=INDEX, hint='a'))
 
                             writer('__syncwarp();')
                             with threadrange(ii, atom.m):
                                 for jj in range(0, atom.n):
-                                    writer(f'{Creg}_{jj} = {shmptr}[{coffs} + (threadIdx.x % {atom.m}) * {atom.n} + {jj}];')
+                                    _c = writer.load(Cshm, writer.rawexpr(f'(threadIdx.x % {atom.m}) * {atom.n} + {jj}', type_=INDEX, hint='a'), hint='data')
+                                    writer(f'{Creg}_{jj} = {_c};', _c, accesses=())
                             writer('__syncwarp();')
 
                     for jj in range(0, min(atom.n, N - j)):
