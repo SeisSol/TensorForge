@@ -170,3 +170,42 @@ def test_the_exceptions_are_reachable_at_all():
     assert 'SymbolType.Register' in src
     assert 'base is None' in src, 'the base-override exception vanished'
     assert 'access is pre_access' in src, 'the broadcast exception vanished'
+
+
+# ---------------------------------------------------------------------- #
+# nodes not built at all
+# ---------------------------------------------------------------------- #
+
+def test_the_innermost_loop_body_opens_no_scope():
+    """`write_loops` used to wrap every innermost body in `writer.Scope()`.
+
+    `flatten_scopes` then removed every one of them, because a textless
+    `Op.RAWBLOCK` lowers to nothing: the writer speculates the brace and drops
+    it when the region turns out to declare nothing. So the scopes cost 18016
+    constructed nodes per corpus run and bought no text.
+
+    They were not free before the pass ran, either --- a region boundary
+    constrains inlining and code motion, and every pass ordered ahead of
+    `flatten_scopes` saw them.
+    """
+    from tensorforge.backend.pir import build as pirbuild
+    from tensorforge.backend.pir.core import Op
+
+    seen = []
+    original = pirbuild.IRBuilder.emit
+
+    def counting(self, stmt):
+        if stmt.op == Op.RAWBLOCK and not stmt.text:
+            seen.append(stmt)
+        return original(self, stmt)
+
+    pirbuild.IRBuilder.emit = counting
+    try:
+        _generate("chain_three")
+    finally:
+        pirbuild.IRBuilder.emit = original
+
+    # `allocate.py` and friends still open a few; the loop nests must not.
+    assert len(seen) < 200, (
+        f'{len(seen)} textless scopes constructed -- write_loops is opening '
+        f'them again')

@@ -38,10 +38,24 @@ answer licenses not reading the diff, so `tests/test_access_equiv.py` pins both
 directions: for each thing it ignores, a pair it must call identical, and next
 to it a pair it must call different.
 
+It reports two numbers, because they answer different questions and conflating
+them made this tool wrong once. *Constructed* is what the generator emits into
+the builder; *lowered* is what survives `pir.optimize` and reaches codegen. The
+second is smaller, because passes delete raw nodes: `flatten_scopes` removes
+every textless `Op.RAWBLOCK`, and the 18016 empty scopes `write_loops_inner`
+used to open read as 67% of everything opaque while lowering to no text at all.
+Quoting the constructed number as progress overstated the work left roughly
+fivefold.
+
+Both are attributed to the function that emitted them. Lowered nodes are
+matched back to their site by their raw text, since the passes rebuild
+statements with `replace` and the emitting frame is gone by then -- and putting
+the site in `attrs` would change behaviour, because `flatten_scopes` keys on
+`attrs` being empty.
+
 It runs the whole case corpus -- recursively, the way `conftest.py` discovers
 cases, because `barrier/`, `elementwise/`, `reduction/` and `slicing/` hold 24
-of the 52 between them -- and attributes every raw node to the function that
-emitted it. The percentage says how far along
+of the 52 between them. The percentage says how far along
 the migration is; the site table says what to change next, which is the
 question that actually gets asked. Cases that stop generating still count
 whatever they emitted before stopping -- dropping them would move the total

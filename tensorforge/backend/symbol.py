@@ -538,8 +538,7 @@ class SparseLoop:
 def write_loops(context: Context, writer: Writer, loops: List[Loop], inner):
   def write_loops_inner(context: Context, writer: Writer, loops: List[Loop], inner, varlist):
     if len(loops) == 0:
-      with writer.Scope():
-        inner(varlist)
+      inner(varlist)
     else:
       inner_next = lambda v: write_loops_inner(context, writer, loops[1:], inner, varlist + v)
       loops[0].write(context, writer, inner_next)

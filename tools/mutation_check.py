@@ -253,6 +253,9 @@ GROUPS = {
         ('the address pinned again, so nothing folds or shares',
          sub(SYM, '    return self.build_address(writer, context, index)\n\n  def access_address',
              '    return writer.pin(self.build_address(writer, context, index))\n\n  def access_address')),
+        ('the innermost loop body wrapped in a scope again',
+         sub(SYM, '    if len(loops) == 0:\n      inner(varlist)',
+             '    if len(loops) == 0:\n      with writer.Scope():\n        inner(varlist)')),
         ('a scalar routed through Op.LOAD, inventing a subscript',
          sub(SYM, '''        if access is pre_access and self.stype in (
                 SymbolType.Register, SymbolType.Scratch,
