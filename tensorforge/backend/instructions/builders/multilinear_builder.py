@@ -150,21 +150,10 @@ class MultilinearBuilder(AbstractBuilder):
       else:
         self._ops[i].symbol, _, _ = self._deferred_stores[name]
 
-    if self._ops[i].symbol.stype == SymbolType.Scalar or self._ops[i].symbol.stype == SymbolType.Data:
+    if self._ops[i].symbol.stype == SymbolType.Scalar or self._ops[i].symbol.stype == SymbolType.Data \
+      or (isinstance(self._ops[i].symbol.obj, Tensor) and len(self._ops[i].symbol.obj.shape) == 0): # <-- quasi-scalar
       self._mem_regions[i] = self._ops[i]
     else:
-
-      if has_lead_dim:
-        lead_idx = self._descr.target[i].index(0)
-
-        # heuristic. We may need to store the L2 load granularity or similar
-        small_lead = False # self._ops[i].symbol.data_view.shape[self._descr.permute[i][lead_idx]] < self._context.get_vm().get_hw_descr().vec_unit_length
-      else:
-        small_lead = False
-
-      # This is a heuristics implemented because having too sparse matrices can increase bank conflicts
-      # And this heuristical optimization should remain until a better shared memory loader is implemented
-      # sparse = self._ops[i].symbol.obj.sparsity() < 0.65
 
       if self._ops[i].symbol.stype == SymbolType.Global:
         if needs_reload and self._ops[i].symbol.obj.addressing != Addressing.NONE:
