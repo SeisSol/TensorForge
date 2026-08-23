@@ -8,7 +8,7 @@ from tensorforge.common.basic_types import Datatype, Addressing
 from tensorforge.common.exceptions import GenerationError
 from .writer import Writer
 from tensorforge.backend.pir.core import (BOOL, INDEX, Effect, LaneAxis,
-                                          RegisterLayout)
+                                          RegisterLayout, ScalarType)
 
 from tensorforge.common.matrix.spp import BoundingBoxSPP
 
@@ -751,24 +751,32 @@ class Symbol:
     if self.stype == SymbolType.Data:
       return self.get_fptype().literal(self.obj.value(index))
 
-  def encode_values(self, pos, runIdx, writer, context: Context, variable, index: List[Union[str, int, Immediate, Variable, LeadIndex]], nontemp, leadidx):
+  def encode_values(self, pos, runIdx, writer, context: Context, index: List[Union[str, int, Immediate, Variable, LeadIndex]], nontemp, leadidx):
     wrote = False
     if pos == len(index):
       if self.stype == SymbolType.Data:
+        # constant value (data) load
+
         value = self.obj.value(runIdx)
         if value is not None:
-          writer(f'{variable} = {self.get_fptype().literal(value)};')
-          wrote = True
+          wrote = writer.const(value, ScalarType(self.get_fptype()))
+          # writer(f'{variable} = {self.get_fptype().literal(value)};')
       else:
         # TODO: unite with access_address
         if leadidx is None:
+          # scalar load
+
           value = self.obj.linear_index(runIdx)
           if value is not None:
-            writer.access_stmt(f'{variable} = {self.name}[{value}];', self, Effect.READ)
-            wrote = True
+            wrote = writer.load(self, value,
+                             type_=ScalarType(self.get_fptype()), hint='data',
+                             layout=None)
+            # writer.access_stmt(f'{variable} = {self.name}[{value}];', self, Effect.READ)
         else:
+          # SIMD block-aligned sparsity
+
           offset = self.data_view.get_dim_offsets()[leadidx]
-          strindex = index[leadidx].write(context)
+          strindex = self.build_address(writer, context, index[leadidx])
           rngs = []
           rng = None
           startValue = None
@@ -791,8 +799,7 @@ class Symbol:
             rngs += [(rng, self.data_view.get_dim_size(leadidx))]
 
           if len(rngs) > 0:
-            idxvar = writer.varalloc()
-            writer(f'const int32_t {idxvar} = {strindex} - {offset};')
+            idxvar = writer.op('sub', INDEX, strindex, offset, hint='idx')
 
             lead = index[leadidx]
             bndS = lead._nonlead * lead._block
@@ -802,32 +809,70 @@ class Symbol:
               runIdx[leadidx] = rngS
               value = self.obj.linear_index(runIdx)
 
+              validx = writer.op('add', INDEX, (value - rngS), idxvar)
+
               if rngS <= bndS and rngE >= bndE:
-                writer.access_stmt(f'{variable} = {self.name}[{value - rngS} + {idxvar}];', self, Effect.READ)
-                wrote = True
+                assert wrote is None
+                wrote = writer.load(self, validx, type_=ScalarType(self.get_fptype()), hint='data',
+                                          layout=layout_of(validx, self.num_threads))
+                # writer.access_stmt(f'{variable} = {self.name}[{validx}];', self, Effect.READ)
               elif rngE > bndS and rngS < bndE:
-                with writer.If(f'{idxvar} >= {rngS} && {idxvar} < {rngE}'):
-                  writer.access_stmt(f'{variable} = {self.name}[{value - rngS} + {idxvar}];', self, Effect.READ)
-                  wrote = True
+                cond1 = writer.op('ge', BOOL, idxvar, rngS)
+                cond2 = writer.op('lt', BOOL, idxvar, rngE)
+                cond = writer.op('and', BOOL, cond1, cond2, hint='cond')
+                with sel.then():
+                  local_load = writer.load(self, validx, type_=ScalarType(self.get_fptype()), hint='data',
+                                          layout=layout_of(validx, self.num_threads))
+                  sel.yield_(local_load)
+                  # writer.access_stmt(f'{variable} = {self.name}[{validx}];', self, Effect.READ)
+                with sel.otherwise():
+                  if wrote is None:
+                    sel.yield_(writer.const(0.0, ScalarType(self.get_fptype())))
+                  else:
+                    sel.yield_(wrote)
+
+                wrote = sel.result
     else:
       if isinstance(index[pos], (int, np.int32, np.int64)):
         runIdx[pos] = index[pos]
-        wrote |= self.encode_values(pos + 1, runIdx, writer, context, variable, index, nontemp, leadidx)
+        wrote = self.encode_values(pos + 1, runIdx, writer, context, index, nontemp, leadidx)
       elif isinstance(index[pos], Immediate):
         runIdx[pos] = index[pos]._value
-        wrote |= self.encode_values(pos + 1, runIdx, writer, context, variable, index, nontemp, leadidx)
+        wrote = self.encode_values(pos + 1, runIdx, writer, context, index, nontemp, leadidx)
       elif pos == leadidx:
-        wrote |= self.encode_values(pos + 1, runIdx, writer, context, variable, index, nontemp, leadidx)
+        wrote = self.encode_values(pos + 1, runIdx, writer, context, index, nontemp, leadidx)
       else:
-        # TODO: move block sparsity one level up
-        strindex = f'{index[pos]}' if isinstance(index[pos], (str, int, float, np.int64)) else index[pos].write(context)
-        if True: # sparse/data
-          # TODO: check sparsity pattern here for which ifs are worth it
-          offset = self.data_view.get_dim_offsets()[pos]
-          for i in range(self.data_view.get_dim_size(pos)):
-            runIdx[pos] = i
-            with writer.If(f'({strindex} - {offset}) == {runIdx[pos]}'):
-              wrote |= self.encode_values(pos + 1, runIdx, writer, context, variable, index, nontemp, leadidx)
+        # unroll one dimension (speculatively)
+        offset = self.data_view.get_dim_offsets()[pos]
+        for i in range(self.data_view.get_dim_size(pos)):
+          runIdx[pos] = i
+
+          with writer.speculative() as spec:
+            if isinstance(index[pos], (str, int, float, np.int64)):
+              idxvar = index[pos] - offset
+            else:
+              strindex = self.build_address(writer, context, index[leadidx])
+              idxvar = writer.op('sub', INDEX, strindex, offset, hint='idx')
+            cond = writer.op('eq', BOOL, idxvar, runIdx[pos], hint='cond')
+
+            sel = writer.if_else(cond)
+
+            with sel.then():
+              wrote_here = self.encode_values(pos + 1, runIdx, writer, context, index, nontemp, leadidx)
+              if wrote_here is None:
+                spec.discard()
+                sel.yield_(writer.const(0.0, ScalarType(self.get_fptype())))
+              else:
+                sel.yield_(wrote_here)
+            with sel.otherwise():
+              if wrote is None:
+                sel.yield_(writer.const(0.0, ScalarType(self.get_fptype())))
+              else:
+                sel.yield_(wrote)
+
+          if wrote_here is not None:
+            wrote = sel.result
+
     return wrote
 
   def load_linear(self, writer, context: Context, variable, index, vec = 1):
@@ -929,25 +974,17 @@ class Symbol:
     addrs = []
     if self.stype == SymbolType.Data or (not self.obj.is_dense() and not isinstance(self.obj.spp, BoundingBoxSPP)):
       if variable is None:
-        # Wrap the whole declare-then-conditionally-assign sequence in a block
-        # with a declared result: the inside stays opaque, but the value has a
-        # unique name and can be an operand.
-        from tensorforge.backend.pir.core import ScalarType
-        blk = writer.value_block(ScalarType(self.get_fptype()), self, hint='data')
-        with blk as v:
-          writer(f'{v} = {self.get_fptype().literal(0)};')
-          leadidx = None
-          for i, idx in enumerate(index):
-            if isinstance(idx, LeadIndex):
-              if leadidx is None:
-                leadidx = idx
-              else:
-                leadidx = None
-                break
-          leadidxidx = index.index(leadidx) if leadidx is not None else None
-          ok = self.encode_values(0, [0] * len(index), writer, context, str(v),
-                                  index, nontemp, leadidxidx)
-        return v if ok else None
+        leadidx = None
+        for i, idx in enumerate(index):
+          if isinstance(idx, LeadIndex):
+            if leadidx is None:
+              leadidx = idx
+            else:
+              leadidx = None
+              break
+        leadidxidx = index.index(leadidx) if leadidx is not None else None
+        return self.encode_values(0, [0] * len(index), writer, context,
+                                index, nontemp, leadidxidx)
       writer(f'{self.get_fptype()} {variable} = {self.get_fptype().literal(0)};')
 
       # treat the lead index last for better sparsity handling
@@ -964,7 +1001,8 @@ class Symbol:
         leadidxidx = index.index(leadidx)
       else:
         leadidxidx = None
-      return self.encode_values(0, [0] * len(index), writer, context, variable, index, nontemp, leadidxidx)
+      assert False
+      return self.encode_values(0, [0] * len(index), writer, context, index, nontemp, leadidxidx)
     else:
       pre_access = self.access(context, index, writer, addrs)
       if self.stype == SymbolType.Register or self.stype == SymbolType.Scratch:
