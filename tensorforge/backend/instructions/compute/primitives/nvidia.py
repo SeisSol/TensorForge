@@ -4,8 +4,9 @@ from tensorforge.backend.writer import Writer
 
 def tfconvert(writer: Writer, variables):
     for variable in variables:
-        writer(f'uint32_t {variable}u, {variable}l;')
-        writer(f'tensorforge::splitFloatTF32({variable}u, {variable}l, {variable});')
+        writer(f'uint32_t {variable}u, {variable}l;', accesses=())
+        writer(f'tensorforge::splitFloatTF32({variable}u, {variable}l, {variable});',
+               accesses=())
     return [(f'{v}u', f'{v}l') for v in variables]
 
 class MMAMode:
@@ -30,7 +31,7 @@ class MMAInstr:
     def headers(self):
         return []
 
-    def asmcall(self, writer, D, A, B, C):
+    def asmcall(self, writer, D, A, B, C, uses=()):
         """The `mma.sync` itself.
 
         `D` and `C` are the same accumulator at every call site -- the
@@ -72,16 +73,18 @@ class MMAInstr:
             bgrp = arggrp(B, len(D) + len(A))
             cgrp = arggrp(C, len(D) + len(A) + len(B))
 
+        # The instruction is register-to-register: its operands are the
+        # fragments the caller already loaded, and it names no buffer.
         writer(f"""asm("{self.name} "
 "{dgrp}, {agrp}, {bgrp}, {cgrp};"
 : {outs}
 : {ins}
-);""")
+);""", *uses, accesses=())
 
     def epilogue(self):
         pass
 
-    def generate(self, writer, context, A, B, C):
+    def generate(self, writer, context, A, B, C, uses=()):
         with writer.Scope():
             if self.mode == MMAMode.I8:
 
@@ -90,11 +93,11 @@ class MMAInstr:
                 Atf32 = tfconvert(writer, A)
                 Btf32 = tfconvert(writer, B)
 
-                self.asmcall(writer, C, [a[0] for a in Atf32], [b[0] for b in Btf32], C)
-                self.asmcall(writer, C, [a[0] for a in Atf32], [b[1] for b in Btf32], C)
-                self.asmcall(writer, C, [a[1] for a in Atf32], [b[0] for b in Btf32], C)
+                self.asmcall(writer, C, [a[0] for a in Atf32], [b[0] for b in Btf32], C, uses)
+                self.asmcall(writer, C, [a[0] for a in Atf32], [b[1] for b in Btf32], C, uses)
+                self.asmcall(writer, C, [a[1] for a in Atf32], [b[0] for b in Btf32], C, uses)
             else:
-                self.asmcall(writer, C, A, B, C)
+                self.asmcall(writer, C, A, B, C, uses)
 
 INSTRS = [
     MMAInstr(16,8,4,1,Datatype.F32,'mma.sync.aligned.m16n8k4.row.col.f32.tf32.tf32.f32', MMAMode.TF32), # SM_80
@@ -233,15 +236,16 @@ def matmul(writer, C, A, B, M, N, K, kx, threads, dtype, sparse, ctx, shmptr, sh
                 for jj in range(0, min(atom.n, N - j)):
                     B(writer, f'{Breg}_{k//threads}_{jj}', j + jj, k // threads)
                 for jj in range(min(atom.n, N - j), atom.n):
-                    writer(f'{atom.d.ctype()} {Breg}_{k//threads}_{jj}{"{}"};')
+                    writer(f'{atom.d.ctype()} {Breg}_{k//threads}_{jj}{"{}"};', accesses=())
             for i in range(0, M, threads):
                 with writer.AnonymousScope():
-                    writer(f'{atom.d.ctype()} {Creg}[{cregs}][{threads // atom.m}]{"{}"};')
+                    writer(f'{atom.d.ctype()} {Creg}[{cregs}][{threads // atom.m}]{"{}"};',
+                                accesses=())
                     for k in range(0, K, threads):
                         with writer.AnonymousScope():
                             for kk in range(0, min(threads, K - k), atom.k):
                                 with writer.AnonymousScope():
-                                    writer('__syncwarp();')
+                                    writer('__syncwarp();', accesses=())
                                     trueK = kk + kx
                                     trueSK = min(atom.k, threads - trueK)
                                     with threadrange(trueK, trueSK):
@@ -253,7 +257,7 @@ def matmul(writer, C, A, B, M, N, K, kx, threads, dtype, sparse, ctx, shmptr, sh
                                             for jj in range(0, atom.n):
                                                 writer.store(Bshm, f'{Breg}_{k//threads+1}_{jj}',
                                                                      writer.rawexpr(f'(threadIdx.x + {trueSK}) % {atom.k} + {jj * atom.k}', type_=INDEX, hint='a'))
-                                    writer('__syncwarp();')
+                                    writer('__syncwarp();', accesses=())
 
                                     for jj in range(0, nregs):
                                         for kkk in range(0, kregs):
@@ -263,11 +267,11 @@ def matmul(writer, C, A, B, M, N, K, kx, threads, dtype, sparse, ctx, shmptr, sh
                                     for kkk in range(0, min(atom.k, K - k - kk)):
                                         A(writer, f'{Areg}_{kkk}', i // threads, k + kk + kkk)
                                     for kkk in range(min(atom.k, K - k - kk), atom.k):
-                                        writer(f'{atom.d.ctype()} {Areg}_{kkk}{"{}"};')
+                                        writer(f'{atom.d.ctype()} {Areg}_{kkk}{"{}"};', accesses=())
 
                                     for ii in range(0, min(threads, M - i), atom.m):
                                         with writer.AnonymousScope():
-                                            writer('__syncwarp();')
+                                            writer('__syncwarp();', accesses=())
                                             with threadrange(ii, atom.m):
                                                 # for kkk in range(0, atom.k):
                                                 #     writer(f'{shmptr}[{aoffs} + (threadIdx.x - {ii}) % {atom.m} + {kkk * atom.m}] = {Areg}_{kkk};')
@@ -275,7 +279,7 @@ def matmul(writer, C, A, B, M, N, K, kx, threads, dtype, sparse, ctx, shmptr, sh
                                                     writer(f'*(float4*)&{Ashm}[((threadIdx.x - {ii}) % {atom.m}) * {ktile} + {kkk * atom.m}] = make_float4({Areg}_{kkk}, {Areg}_{kkk+1}, {Areg}_{kkk+2}, {Areg}_{kkk+3});',
                                                         Ashm,
                                                         accesses=(Access(Effect.WRITE, MemSpace.SHARED, Ashm),))
-                                            writer('__syncwarp();')
+                                            writer('__syncwarp();', accesses=())
 
                                             for kk in range(0, kregs):
                                                 for iii in range(0, mregs):
@@ -286,7 +290,7 @@ def matmul(writer, C, A, B, M, N, K, kx, threads, dtype, sparse, ctx, shmptr, sh
                                             atom.generate(writer, ctx, [f'{Areg2}_{i}' for i in range (aregs)], [f'{Breg2}_{i}' for i in range (bregs)], [f'{Creg}[{i}][{ii // atom.m}]' for i in range (cregs)])
 
                     for jj in range(0, atom.n):
-                        writer(f'{atom.d.ctype()} {Creg}_{jj}{"{}"};')
+                        writer(f'{atom.d.ctype()} {Creg}_{jj}{"{}"};', accesses=())
 
                     for ii in range(0, threads, atom.m):
                         with writer.AnonymousScope():
@@ -295,12 +299,12 @@ def matmul(writer, C, A, B, M, N, K, kx, threads, dtype, sparse, ctx, shmptr, sh
                                     writer.store(Cshm, f'{Creg}[{iii + mregs * jj}][{ii // atom.m}]',
                                         writer.rawexpr(f'threadIdx.x * 2 + {iii} + {jj * 64}', type_=INDEX, hint='a'))
 
-                            writer('__syncwarp();')
+                            writer('__syncwarp();', accesses=())
                             with threadrange(ii, atom.m):
                                 for jj in range(0, atom.n):
                                     _c = writer.load(Cshm, writer.rawexpr(f'(threadIdx.x % {atom.m}) * {atom.n} + {jj}', type_=INDEX, hint='a'), hint='data')
                                     writer(f'{Creg}_{jj} = {_c};', _c, accesses=())
-                            writer('__syncwarp();')
+                            writer('__syncwarp();', accesses=())
 
                     for jj in range(0, min(atom.n, N - j)):
                         C(writer, f'{Creg}_{jj}', i // threads, j + jj)

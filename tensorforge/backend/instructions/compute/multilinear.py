@@ -246,12 +246,15 @@ class MultilinearInstruction(ComputeInstruction):
         self._lead_dims = [0]#[t for t in self._target[0] if t >= 0]
 
     def gen_code_inner(self, writer: Writer):
-        writer(f'// {self._ns} {self._ks}')
+        # A comment touches nothing.  Left conservative it would be read as
+        # touching every buffer, and this one sits above them all.
+        writer(f'// {self._ns} {self._ks}', accesses=())
 
         if len(self._scalar) == 0 and self._prev is None and self._next is None and self._idest.data_view == self._dest.data_view:
             writer(f'auto& {self._idest.name} = {self._dest.name};')
         else:
-            writer(f'{self._dest.get_fptype()} {self._idest.name}[{self._iregs}]{"{}"};')
+            writer(f'{self._dest.get_fptype()} {self._idest.name}[{self._iregs}]{"{}"};',
+                   accesses=())
         if not self._nonleading_dim_test(writer):
             self._nonleading_dim(writer)
         if len(self._ns) == 0:

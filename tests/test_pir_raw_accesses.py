@@ -88,7 +88,7 @@ def test_a_buffer_named_in_the_text_must_be_an_operand():
     b = builder()
     tile = b.alloc(Datatype.F32, (16,), MemSpace.SHARED, hint='tile')
     write = (Access(Effect.WRITE, MemSpace.SHARED, tile),)
-    with pytest.raises(IRError, match="does not list it among its operands"):
+    with pytest.raises(IRError, match="without listing it"):
         b(f'*(float4*)&{tile}[0] = x;', accesses=write)
 
 
@@ -107,9 +107,37 @@ def test_any_named_value_must_be_an_operand_not_only_buffers():
     tile = b.alloc(Datatype.F32, (16,), MemSpace.SHARED, hint='tile')
     idx = b.rawexpr('threadIdx.x', type_=INDEX, hint='a')
     val = b.load(tile, idx, hint='data')
-    with pytest.raises(IRError, match="does not list it among its operands"):
+    with pytest.raises(IRError, match="without listing it"):
         b(f'float x = {val};', accesses=())
     assert b(f'float x = {val};', val, accesses=()) is not None
+
+
+def test_a_declaration_says_defines_not_args():
+    """A raw declaration names its value without using it.
+
+    `float v35[4][2]{};` is where the name comes from, so requiring it in
+    `args` would be asking for a use edge that runs backwards.
+    """
+    b = builder()
+    tile = b.alloc(Datatype.F32, (16,), MemSpace.SHARED, hint='tile')
+    idx = b.rawexpr('threadIdx.x', type_=INDEX, hint='a')
+    val = b.load(tile, idx, hint='data')
+    stmt = b(f'float copy = {val};', val, accesses=())
+    assert val in stmt.args
+
+
+def test_a_varalloc_name_is_not_asked_to_claim_anything():
+    """`varalloc` reserves a C++ identifier; it does not define an IR value.
+
+    Legacy bodies redeclare one per scope --- `float v35[4][2]{};` inside each
+    iteration --- which is ordinary C++ and not SSA at all.  There is no
+    defining statement for `dce` to remove, so the argument the check rests on
+    does not apply, and demanding a claim would only teach callers to drop the
+    `accesses` argument that turns the check on.
+    """
+    b = builder()
+    name = b.varalloc()
+    assert b(f'float {name}[4][2]{{}};', accesses=()) is not None
 
 
 def test_a_name_that_is_not_ours_is_left_alone():

@@ -160,8 +160,18 @@ class IRBuilder:
         defaults to the kernel's floating point type rather than a hard-coded
         F32 --- SeisSol builds both fp32 and fp64.
         """
-        return self.value(ScalarType(self._fptype),
-                          hint='' if prefix == 'v' else prefix)
+        v = self.value(ScalarType(self._fptype),
+                       hint='' if prefix == 'v' else prefix)
+        # A name reservation, not a value the IR defines anywhere.  Legacy
+        # bodies redeclare one of these per scope --- `float v35[4][2]{};`
+        # inside each iteration --- which is ordinary C++ and not SSA at all.
+        # `_check_declared_accesses` must not ask a raw statement to claim
+        # such a name as a use or a definition: there is no defining statement
+        # for `dce` to remove, so the argument the check rests on does not
+        # apply, and demanding a claim here would only teach callers to drop
+        # the `accesses` argument that turns the check on.
+        self._by_name.pop(str(v), None)
+        return v
 
     def index(self, hint: str = '',
               uniform: Union[bool, Uniformity] = Uniformity.GRID) -> Value:
@@ -723,6 +733,7 @@ class IRBuilder:
                                   MemSpace.UNKNOWN, None),)
 
     def __call__(self, code: str, *args: Operand,
+                 defines: Sequence[Value] = (),
                  accesses: Optional[Sequence[Access]] = None) -> Stmt:
         """Raw statement text.  Opaque, therefore impure and pinned.
 
@@ -751,6 +762,12 @@ class IRBuilder:
         a buffer this body allocated, named in the text, must appear in the
         declared set *and* among ``args``.
 
+        ``args`` are the values the statement uses and ``defines`` the ones it
+        introduces, both in `rawexpr`'s convention.  A raw declaration ---
+        ``float v35[4][2]{};`` --- names a value without using it, and
+        requiring that one as an operand would be asking for a use edge that
+        runs backwards.
+
         ``args`` are the values the statement uses, in `rawexpr`'s convention.
         Declaring an access is not the same as declaring a use, and the
         difference is not academic: an `Access` tells the aliasing question
@@ -765,14 +782,16 @@ class IRBuilder:
             accesses = self._TOUCHES_EVERYTHING
         else:
             accesses = tuple(accesses)
-            self._check_declared_accesses(code, accesses, args)
-        return self._emit_op(Op.RAWSTMT, (), tuple(args), pure=False,
-                             movable=False, effect=Effect.UNKNOWN, text=code,
+            self._check_declared_accesses(code, accesses, args, defines)
+        return self._emit_op(Op.RAWSTMT, tuple(defines), tuple(args),
+                             pure=False, movable=False,
+                             effect=Effect.UNKNOWN, text=code,
                              accesses=accesses)
 
     def _check_declared_accesses(self, code: str,
                                  accesses: Sequence[Access],
-                                 args: Sequence[Operand] = ()) -> None:
+                                 args: Sequence[Operand] = (),
+                                 defines: Sequence[Value] = ()) -> None:
         """Hold a narrowed access set to what the text visibly does.
 
         Only one direction is decidable: if a buffer allocated in this body is
@@ -790,7 +809,7 @@ class IRBuilder:
         covered = {a.base for a in accesses}
         conservative = (None in covered
                         or any(a.space == MemSpace.UNKNOWN for a in accesses))
-        used = {id(a) for a in args}
+        named = {id(a) for a in args} | {id(d) for d in defines}
         shared = {id(b) for b in self._shared_buffers}
 
         for name in set(_IDENT.findall(code)):
@@ -798,12 +817,13 @@ class IRBuilder:
             if v is None:
                 continue                # not one of ours: a kernel parameter,
                                         # a loop variable, a C++ keyword
-            if id(v) not in used:
+            if id(v) not in named:
                 raise IRError(
-                    f'raw statement names {name} but does not list it among '
-                    f'its operands: {code.strip()[:70]!r}. Without a use edge '
-                    f'the statement that defines {name} is reachable by '
-                    f'nothing and will be removed.')
+                    f'raw statement names {name} without listing it: '
+                    f'{code.strip()[:70]!r}. Pass it in `args` if the '
+                    f'statement uses it, or in `defines` if this is where it '
+                    f'comes from. Left out of both, whatever produces {name} '
+                    f'is reachable by nothing and will be removed.')
             if id(v) in shared and not conservative and v not in covered:
                 raise IRError(
                     f'raw statement names {name} but does not declare an '
