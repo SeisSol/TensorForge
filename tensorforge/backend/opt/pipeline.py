@@ -215,7 +215,23 @@ class Pipeline(AbstractTransformer):
         prologue, body = self._advance_pointers(loop, analysis)
         if self._rotate:
             prologue, body = self._rotate_buffers(loop, analysis, prologue, body)
+        body = self._hoist_out_of_guard(loop, body)
         return prologue, body
+
+    def _hoist_out_of_guard(self, loop: BatchLoop, body):
+        """Move everything carried across the back edge ahead of the flag guard.
+
+        Order within the prefix is the order it was registered in: the pointer
+        advances first, because the transfer reads the advanced pointer, then
+        the wait, then the transfer.
+        """
+        if not self._hoist:
+            return body
+        marked = {id(i) for i in self._hoist}
+        rest = [i for i in body if id(i) not in marked]
+        head = [i for i in self._hoist if any(o is i for o in body)]
+        loop.mark_unguarded(head)
+        return head + rest
 
     def _rotate_buffers(self, loop: BatchLoop, analysis: PipelineAnalysis,
                         prologue, body):
@@ -233,10 +249,40 @@ class Pipeline(AbstractTransformer):
         the prologue peels that many transfers.  With ``d = 2`` that is one:
         element 0 into stage 0, using the pointer the peeled ``GetElementPtr``
         already computed.
+
+        The prefetch is hoisted out of the per-element flag guard (see
+        ``_hoist_out_of_guard``), because it is issued in iteration ``k`` for
+        element ``k + 1``: left under the guard, a skipped element would leave
+        the stage it should have filled untouched while iteration ``k + 1``
+        read it anyway.  No placement of the stage counter fixes that -- inside
+        the guard the counter and the element sequence drift apart, outside it
+        the stage is simply unfilled -- so the transfer has to move instead.
+
+        The stage is indexed by the loop's *iteration counter*, not by
+        ``batchId0``.  Those differ: the batch loop is grid-strided, so one
+        thread's consecutive elements are ``stride`` apart, and ``stride`` is
+        ``gridDim.x * blockDim.y`` -- almost always even.  With ``d = 2`` that
+        makes ``batchId0 % d`` invariant over a thread's iterations, so the
+        consumer stays pinned to one stage while the producer fills the other,
+        and every iteration after the first re-reads the prologue's element.
+        The prologue compounds it: it can only name a literal stage, so it
+        writes stage 0, while iteration 0 reads ``batchId0 % d`` -- unfilled
+        for every thread group with an odd start index.  Neither shows up as a
+        crash, only as wrong numbers.
         """
         d = self._depth
-        k = loop.index_name(0)
-        read = f'{k} % {d}'
+        if d != 2:
+            # Stages 0..d-2 would all have to be filled by the prologue, each
+            # from a *different* element, but the peeled GetElementPtr leaves
+            # exactly one pointer behind (element 0).  Filling them all from it
+            # would put element 0 in every stage.  Raising beats emitting that.
+            raise InternalError(
+                f'buffer rotation is implemented for depth 2, got {d}: '
+                f'the prologue would have to peel {d - 1} transfers from '
+                f'{d - 1} distinct element pointers, and only the first is '
+                f'computed')
+        k = loop.request_stage_counter(d)
+        read = f'{k}'
         write = f'({k} + {d - 1}) % {d}'
 
         peeled: List[AbstractInstruction] = []
@@ -270,35 +316,30 @@ class Pipeline(AbstractTransformer):
                 if not sym.replace_user(load, replacement):
                     users.append(replacement)
 
-            # Move the wait *ahead* of the transfer.
+            waits = [j for j, o in enumerate(body)
+                     if isinstance(o, LoadWait) and o.awaited() is load]
+            for j in waits:
+                body[j] = LoadWait(replacement)
+            # The wait goes ahead of the transfer, and both go ahead of the
+            # flag guard.
             #
-            # There is one cuda::pipeline per section and it is a FIFO.  With
-            # the wait after the commit, the batch this iteration issues and the
-            # one the previous iteration issued are both outstanding at
-            # producer_acquire(), which needs two stages -- more than the
-            # thread-scope pipeline from cuda::make_pipeline() has, so iteration
-            # 0 blocks on a slot that only frees further down.  That is why the
-            # NVIDIA path hung while AMD, which emits no pipeline object at all,
-            # was fine.
-            #
-            # Putting the wait first fixes it without giving up memcpy_async:
-            # FIFO order means consumer_wait() retires the batch issued in
-            # iteration k-1 -- exactly the stage this iteration reads -- and
-            # release happens before the next acquire, so only one batch is ever
-            # in flight.  The transfer for element k + d - 1 is still issued
-            # before the compute on element k, so the overlap is unchanged.
+            # Ahead of the transfer: there is one cuda::pipeline per section and
+            # it is a FIFO.  With the wait after the commit, the batch this
+            # iteration issues and the one the previous iteration issued are
+            # both outstanding at producer_acquire(), which needs two stages --
+            # more than the thread-scope pipeline from cuda::make_pipeline() has,
+            # so iteration 0 blocks on a slot that only frees further down.  That
+            # is why the NVIDIA path hung while AMD, which emits no pipeline
+            # object at all, was fine.  Waiting first keeps only one batch in
+            # flight without giving up memcpy_async: FIFO order means
+            # consumer_wait() retires the batch issued in iteration k-1 --
+            # exactly the stage this iteration reads.
             #
             # This is what the token in the async pir instructions states
             # explicitly: the wait consumes the token of the *previous*
             # iteration.  Here the FIFO supplies that implicitly.
-            waits = [j for j, o in enumerate(body)
-                     if isinstance(o, LoadWait) and o.awaited() is load]
-            here = body.index(replacement)
-            for j in waits:
-                body[j] = LoadWait(replacement)
-            for j in sorted(waits, reverse=True):
-                if j > here:
-                    body.insert(here, body.pop(j))
+            self._hoist.extend(body[j] for j in sorted(waits))
+            self._hoist.append(replacement)
             load = replacement
 
             # ... and the prologue fills the stages nobody else will.  The
@@ -335,6 +376,7 @@ class Pipeline(AbstractTransformer):
         body = list(loop.region)
         advanced = {id(c.producer) for c in analysis.candidates}
         advanced_ptr = self._advanced_ptr = {}
+        hoist = self._hoist = []
 
         for index, instr in enumerate(body):
             if id(instr) not in advanced:
@@ -374,4 +416,5 @@ class Pipeline(AbstractTransformer):
                 update_dest=original,
                 pipeline=True)
             advanced_ptr[id(original)] = rolling
+            hoist.append(body[index])
         return prologue, body

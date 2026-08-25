@@ -60,6 +60,11 @@ class BatchLoop(AbstractInstruction):
         # how many elements ahead are bound as batchid1, batchid2, ... for
         # prefetching; only the strided loop rebinds them per iteration
         self._lookahead = lookahead
+        # Set by the pipelining pass; emits a rolling iteration counter.  Not
+        # emitted otherwise, so a disabled pass leaves the text unchanged.
+        self._stage_depth: Optional[int] = None
+        # ids of leading region instructions emitted outside the flag guard
+        self._unguarded: set = set()
         self._is_ready = True
 
     # -- structure ------------------------------------------------------- #
@@ -168,6 +173,75 @@ class BatchLoop(AbstractInstruction):
                 f'{lookahead} requested')
         return self._batch(lookahead)
 
+    def stage_counter_name(self) -> str:
+        return f'pipeStage{self._section_index}'
+
+    def request_stage_counter(self, depth: int) -> str:
+        """Bind a counter that runs ``0, 1, ... depth-1, 0, ...`` per iteration.
+
+        A rotating buffer has to be indexed by the *iteration*, not by the
+        element.  Those are the same thing only in a unit-stride loop; here the
+        strided loop advances the element index by ``gridDim.x * blockDim.y``
+        per iteration, and the queue-driven loop takes whatever the hardware
+        hands it.  Indexing stages by ``batchId0 % depth`` therefore fails
+        twice over: the stage never alternates when ``depth`` divides the
+        stride -- the common case, since the stride is a product of two block
+        counts -- and the first iteration reads ``batchId0 % depth`` while a
+        peeled prologue can only name a literal, so every thread group with an
+        odd start index reads a stage nobody filled.
+
+        ``SINGLE`` has one iteration and so nothing to rotate; it raises rather
+        than returning a counter that would always read zero.
+        """
+        if self._mode is LoopMode.SINGLE:
+            raise InternalError(
+                'a single-iteration loop has no iteration to pipeline against')
+        if depth < 2:
+            raise InternalError(f'stage counter needs depth >= 2, got {depth}')
+        if self._stage_depth not in (None, depth):
+            raise InternalError(
+                f'loop already pipelined at depth {self._stage_depth}, '
+                f'cannot also serve depth {depth}')
+        self._stage_depth = depth
+        return self.stage_counter_name()
+
+    def mark_unguarded(self, instrs) -> None:
+        """Emit these region instructions *outside* the per-element flag guard.
+
+        The guard is ``if (flags[batchId0])``: a runtime mask that skips
+        individual elements.  Anything the loop carries across the back edge
+        has to sit outside it, or a skipped element desynchronises it from the
+        element sequence for the rest of the loop.  Two things in a pipelined
+        loop do:
+
+        * the rolling pointer's advance --- skip it once and the pointer
+          trails the loop variable permanently, so every later iteration
+          computes on the wrong element;
+        * the prefetch itself, issued in iteration ``k`` for element
+          ``k + 1`` --- skip it and iteration ``k + 1`` reads a stage nobody
+          filled.
+
+        Neither is specific to rotation: the address-advance half has the same
+        hole.  The marked instructions must form a prefix of the region,
+        because the guard is one contiguous block; the pass moves them there.
+        """
+        self._unguarded = {id(i) for i in instrs}
+
+    def _split_guard(self):
+        """``(unguarded prefix, guarded remainder)``."""
+        if not self._unguarded:
+            return [], list(self._region)
+        cut = 0
+        while cut < len(self._region) and id(self._region[cut]) in self._unguarded:
+            cut += 1
+        stray = [i for i in self._region[cut:] if id(i) in self._unguarded]
+        if stray:
+            raise InternalError(
+                f'{len(stray)} instruction(s) marked unguarded do not form a '
+                f'prefix of the region, first is {type(stray[0]).__name__}; '
+                f'the flag guard is one block and cannot be reopened')
+        return self._region[:cut], self._region[cut:]
+
     def prologue_index(self) -> str:
         """The index a peeled iteration should use.
 
@@ -204,15 +278,41 @@ class BatchLoop(AbstractInstruction):
                    f'{prev} + {self._stride} < {self._num_elements()} ? '
                    f'{prev} + {self._stride} : {prev};')
 
+    def _declare_stage_counter(self, writer) -> None:
+        if self._stage_depth is None:
+            return
+        writer(f'uint32_t {self.stage_counter_name()} = 0;')
+
+    def _advance_stage_counter(self, writer) -> None:
+        """Advance the counter *outside* the flag guard.
+
+        Inside would tie the counter to the compute, and the transfer it indexes
+        is issued for the *next* element -- so a skipped element desynchronises
+        them either way.  Outside is the placement that stays correct once the
+        pipelined transfer is hoisted out of the guard, which is what closing
+        that hole needs; see the note in opt/pipeline.py.
+        """
+        if self._stage_depth is None:
+            return
+        d = self._stage_depth
+        name = self.stage_counter_name()
+        if d & (d - 1) == 0:
+            writer(f'{name} = ({name} + 1) & {d - 1};')
+        else:
+            writer(f'{name} = ({name} + 1) % {d};')
+
     def _emit_body(self, writer) -> None:
+        head, guarded = self._split_guard()
+        for instr in head:
+            instr.gen_code(writer)
         with writer.If(self._flag_guard(writer)):
             if os.environ.get('TF_IR_WIDE'):
                 # one body for every instruction of the region
                 with AbstractInstruction.shared_body(self._context, writer):
-                    for instr in self._region:
+                    for instr in guarded:
                         instr.gen_code(writer)
             else:
-                for instr in self._region:
+                for instr in guarded:
                     instr.gen_code(writer)
 
     def gen_code(self, writer) -> None:
@@ -225,12 +325,15 @@ class BatchLoop(AbstractInstruction):
         if self._mode is LoopMode.PERSISTENT:
             # TODO: OMP target
             # TODO: maybe iterate over adjacent elements? (for indirect pointers)
+            self._declare_stage_counter(writer)
             with writer.For(f'size_t {self._batch(0)} = {self._start}; '
                             f'{self._batch(0)} < {self._num_elements()}; '
                             f'{self._batch(0)} += {self._stride}'):
                 self._lookahead_bindings(writer)
                 self._emit_body(writer)
+                self._advance_stage_counter(writer)
         elif self._mode is LoopMode.LAUNCHCTRL:
+            self._declare_stage_counter(writer)
             writer(f'__shared__ tensorforge::ClusterLaunchCtrl launchctrl;')
             writer(f'int phase = 0;')
             writer(f'launchctrl.init();')
@@ -239,6 +342,7 @@ class BatchLoop(AbstractInstruction):
                 writer('launchctrl.setupNext();')
                 with writer.If(self._size_guard()):
                     self._emit_body(writer)
+                self._advance_stage_counter(writer)
                 writer('const auto nextBlock = launchctrl.queryNext(phase);')
                 with writer.If('!nextBlock.has_value()'):
                     writer('break;')

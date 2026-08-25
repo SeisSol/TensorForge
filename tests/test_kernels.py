@@ -440,3 +440,127 @@ def test_f64_variant_cases_use_double_precision():
                     f"{path.name}: operand {op.tensor.alias} carries "
                     f"{op.tensor.datatype}, not F64 — kernel will be "
                     "generated at the wrong precision")
+
+
+def test_rotating_buffer_is_staged_by_iteration_not_element():
+    """The rotating stage index must come from the loop's iteration counter.
+
+    The batch loop is grid-strided: one thread's consecutive elements are
+    ``gridDim.x * blockDim.y`` apart. Indexing stages by ``batchId0 % depth``
+    therefore breaks twice -- the stage never alternates when ``depth`` divides
+    that stride (the usual case), and iteration 0 reads ``batchId0 % depth``
+    while the peeled prologue can only write a literal stage, so every thread
+    group with an odd start index reads a stage nobody filled. Neither shows up
+    as a crash, only as wrong numbers, which is why this is pinned here.
+    """
+    import re
+
+    from tensorforge.common.basic_types import Addressing, Datatype
+    from tensorforge.common.context import Context, Options
+    from tensorforge.common.matrix.boundingbox import BoundingBox
+    from tensorforge.common.matrix.tensor import SubTensor, Tensor
+    from tensorforge.generators.descriptions import GemmDescr
+    from tensorforge.generators.generator import Generator
+
+    def descrs():
+        def sub(rows, cols, alias):
+            return SubTensor(Tensor([rows, cols], Addressing.STRIDED,
+                                    BoundingBox([0, 0], [rows, cols]),
+                                    alias=alias, datatype=Datatype.F32))
+        return [GemmDescr(False, False,
+                          a=sub(16, 16, "A"), b=sub(16, 16, "B"),
+                          c=sub(16, 16, "C"))]
+
+    opts = Options(enable_pipeline=True, enable_multibuffer=True)
+    ctx = Context(arch="sm_90", backend="cuda", fp_type=Datatype.F32,
+                  options=opts)
+    gen = Generator(descrs(), ctx)
+    gen.generate()
+    src = gen.get_kernel()
+
+    counter = "pipeStage0"
+    assert f"uint32_t {counter} = 0;" in src, \
+        "the rotating buffer needs an iteration counter declared before the loop"
+    assert re.search(rf"{counter} = \({counter} \+ 1\) [&%]", src), \
+        f"{counter} is never advanced, so every iteration reads one stage"
+
+    # Every stage selector must be the counter, never the element index.
+    selectors = re.findall(r"localShrMem\d+\[[^\]]*?\(([^)]*?)\) \* \d+\]", src)
+    assert selectors, "expected at least one staged shared-memory view"
+    for expr in selectors:
+        assert "batchId" not in expr, (
+            f"stage selected by element index ({expr!r}); in a grid-strided "
+            f"loop that is not the iteration number")
+        assert counter in expr or expr.strip().isdigit(), (
+            f"stage selector {expr!r} is neither the counter nor a literal")
+
+    # The prologue fills a literal stage, and iteration 0 must read that one.
+    assert "(0) * " in src, "the peeled prologue fill must write stage 0"
+
+
+def _inside_flag_guard(src, markers):
+    """Lines matching ``markers`` that lie inside an ``if (allowed) { ... }``."""
+    depth, guard_depths, hits = 0, [], []
+    for line in src.splitlines():
+        opened = "if (allowed) {" in line
+        if guard_depths and any(m in line for m in markers):
+            hits.append(line.strip())
+        depth += line.count("{") - line.count("}")
+        if opened:
+            guard_depths.append(depth)
+        while guard_depths and depth < guard_depths[-1]:
+            guard_depths.pop()
+    return hits
+
+
+def test_pipelined_work_sits_outside_the_element_flag_guard():
+    """Anything carried across the back edge must not be under ``flags``.
+
+    ``flags`` is a runtime per-element mask, so a skipped element must not be
+    able to desynchronise the pipeline from the element sequence. Two things
+    qualify:
+
+    * the rolling pointer's advance — skipped once, it trails the loop
+      variable for the rest of the loop, so this must be outside the guard in
+      *both* pipelining modes;
+    * the prefetch, which iteration ``k`` issues for element ``k + 1`` — only
+      rotation moves it across the back edge, so only rotation requires it
+      outside. Without rotation, producer and consumer are the same iteration
+      and are correctly skipped together.
+    """
+    from tensorforge.common.basic_types import Addressing, Datatype
+    from tensorforge.common.context import Context, Options
+    from tensorforge.common.matrix.boundingbox import BoundingBox
+    from tensorforge.common.matrix.tensor import SubTensor, Tensor
+    from tensorforge.generators.descriptions import GemmDescr
+    from tensorforge.generators.generator import Generator
+
+    def sub(rows, cols, alias):
+        return SubTensor(Tensor([rows, cols], Addressing.STRIDED,
+                                BoundingBox([0, 0], [rows, cols]),
+                                alias=alias, datatype=Datatype.F32))
+
+    def kernel(**opt_kw):
+        ctx = Context(arch="sm_90", backend="cuda", fp_type=Datatype.F32,
+                      options=Options(**opt_kw))
+        gen = Generator([GemmDescr(False, False, a=sub(16, 16, "A"),
+                                   b=sub(16, 16, "B"), c=sub(16, 16, "C"))],
+                        ctx)
+        gen.generate()
+        return gen.get_kernel()
+
+    advance = ["pipe_glb"]
+    prefetch = ["consumer_wait", "producer_acquire", "producer_commit"]
+
+    pipe_only = kernel(enable_pipeline=True)
+    assert "pipe_glb" in pipe_only, "address pipelining produced no rolling pointer"
+    assert not _inside_flag_guard(pipe_only, advance), (
+        "the rolling pointer advance is under the flag guard; a skipped "
+        "element leaves it trailing the loop variable permanently")
+
+    rotated = kernel(enable_pipeline=True, enable_multibuffer=True)
+    assert not _inside_flag_guard(rotated, advance), \
+        "rolling pointer advance under the flag guard in the rotating build"
+    assert not _inside_flag_guard(rotated, prefetch), (
+        "the prefetch is under the flag guard; a skipped element leaves the "
+        "stage it should have filled untouched")

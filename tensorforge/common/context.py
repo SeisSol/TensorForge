@@ -15,8 +15,12 @@ class Options:
     self.align_shr_mem: bool = align_shr_mem
     self.enable_sync_block_opt = enable_sync_block_opt
     # Software pipelining. `enable_pipeline` advances the address computation;
-    # `enable_multibuffer` additionally rotates the shared-memory buffers and is
-    # not wired up yet -- see backend/opt/pipeline.py.
+    # `enable_multibuffer` additionally rotates the shared-memory buffers, which
+    # needs `enable_pipeline` (rotation reads the advanced pointer) and is
+    # implemented for `pipeline_depth == 2` only -- see backend/opt/pipeline.py.
+    #
+    # Both stay off by default pending hardware numbers; correctness no longer
+    # blocks them.
     self.enable_pipeline = enable_pipeline
     self.enable_multibuffer = enable_multibuffer
     self.pipeline_depth = pipeline_depth
