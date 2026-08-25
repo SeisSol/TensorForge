@@ -75,16 +75,16 @@ __launch_bounds__(256)
           int32_t v2_lead = threadIdx.x % 16;
           #pragma unroll
           for (int32_t v3_i0 = 0; v3_i0 < 1; ++v3_i0) {
-            int32_t v9_lead = v2_lead + (v3_i0 * 16);
+            int32_t v8_lead = v3_i0 * 16;
+            int32_t v9_lead = v2_lead + v8_lead;
+            int32_t v16_lead = v2_lead + v8_lead;
             #pragma unroll
             for (int32_t v4_i1 = 0; v4_i1 < 16; ++v4_i1) {
-              int32_t v11_a = v9_lead + (v4_i1 * 16);
-              double v12_data;
-              {
-                v12_data = __ldcg(&glb_m1[v11_a]);
-              }
-              int32_t v13_a = v3_i0 + v4_i1;
-              r0[v13_a] = v12_data;
+              int32_t v10_a = v4_i1 * 16;
+              int32_t v11_a = v9_lead + v10_a;
+              double v19_data = __ldcg(&glb_m1[(v16_lead + v10_a)]);
+              int32_t v20_a = v3_i0 + v4_i1;
+              r0[v20_a] = v19_data;
             }
           }
           double* __restrict__ s0 = &localShrMem0[0];
@@ -107,397 +107,183 @@ __launch_bounds__(256)
             // r1 = +(r0 * s0) + None
             // [(0, 16), (0, 16)] [(0, 16)]
             double ir1[16]{};
-            double v17_data = r0[0];
-            double v18_data;
-            {
-              v18_data = 0.0;
-              v18_data = s0[0];
-            }
-            double v20_data = ir1[0];
-            ir1[0] = (v20_data + (v17_data * v18_data));
-            double v22_data = r0[0];
-            double v23_data;
-            {
-              v23_data = 0.0;
-              v23_data = s0[2];
-            }
-            double v25_data = ir1[1];
-            ir1[1] = (v25_data + (v22_data * v23_data));
-            double v30_data = r0[1];
-            double v31_data;
-            {
-              v31_data = 0.0;
-              v31_data = s0[1];
-            }
-            double v33_data = ir1[0];
-            ir1[0] = (v33_data + (v30_data * v31_data));
-            double v35_data = r0[1];
-            double v36_data;
-            {
-              v36_data = 0.0;
-              v36_data = s0[3];
-            }
-            double v38_data = ir1[1];
-            ir1[1] = (v38_data + (v35_data * v36_data));
-            double v40_data = r0[1];
-            double v41_data;
-            {
-              v41_data = 0.0;
-              v41_data = s0[5];
-            }
-            double v43_data = ir1[2];
-            ir1[2] = (v43_data + (v40_data * v41_data));
-            double v48_data = r0[2];
-            double v49_data;
-            {
-              v49_data = 0.0;
-              v49_data = s0[4];
-            }
-            double v51_data = ir1[1];
-            ir1[1] = (v51_data + (v48_data * v49_data));
-            double v53_data = r0[2];
-            double v54_data;
-            {
-              v54_data = 0.0;
-              v54_data = s0[6];
-            }
-            double v56_data = ir1[2];
-            ir1[2] = (v56_data + (v53_data * v54_data));
-            double v58_data = r0[2];
-            double v59_data;
-            {
-              v59_data = 0.0;
-              v59_data = s0[8];
-            }
-            double v61_data = ir1[3];
-            ir1[3] = (v61_data + (v58_data * v59_data));
-            double v66_data = r0[3];
-            double v67_data;
-            {
-              v67_data = 0.0;
-              v67_data = s0[7];
-            }
-            double v69_data = ir1[2];
-            ir1[2] = (v69_data + (v66_data * v67_data));
-            double v71_data = r0[3];
-            double v72_data;
-            {
-              v72_data = 0.0;
-              v72_data = s0[9];
-            }
-            double v74_data = ir1[3];
-            ir1[3] = (v74_data + (v71_data * v72_data));
-            double v76_data = r0[3];
-            double v77_data;
-            {
-              v77_data = 0.0;
-              v77_data = s0[11];
-            }
-            double v79_data = ir1[4];
-            ir1[4] = (v79_data + (v76_data * v77_data));
-            double v84_data = r0[4];
-            double v85_data;
-            {
-              v85_data = 0.0;
-              v85_data = s0[10];
-            }
-            double v87_data = ir1[3];
-            ir1[3] = (v87_data + (v84_data * v85_data));
-            double v89_data = r0[4];
-            double v90_data;
-            {
-              v90_data = 0.0;
-              v90_data = s0[12];
-            }
-            double v92_data = ir1[4];
-            ir1[4] = (v92_data + (v89_data * v90_data));
-            double v94_data = r0[4];
-            double v95_data;
-            {
-              v95_data = 0.0;
-              v95_data = s0[14];
-            }
-            double v97_data = ir1[5];
-            ir1[5] = (v97_data + (v94_data * v95_data));
-            double v102_data = r0[5];
-            double v103_data;
-            {
-              v103_data = 0.0;
-              v103_data = s0[13];
-            }
-            double v105_data = ir1[4];
-            ir1[4] = (v105_data + (v102_data * v103_data));
-            double v107_data = r0[5];
-            double v108_data;
-            {
-              v108_data = 0.0;
-              v108_data = s0[15];
-            }
-            double v110_data = ir1[5];
-            ir1[5] = (v110_data + (v107_data * v108_data));
-            double v112_data = r0[5];
-            double v113_data;
-            {
-              v113_data = 0.0;
-              v113_data = s0[17];
-            }
-            double v115_data = ir1[6];
-            ir1[6] = (v115_data + (v112_data * v113_data));
-            double v120_data = r0[6];
-            double v121_data;
-            {
-              v121_data = 0.0;
-              v121_data = s0[16];
-            }
-            double v123_data = ir1[5];
-            ir1[5] = (v123_data + (v120_data * v121_data));
-            double v125_data = r0[6];
-            double v126_data;
-            {
-              v126_data = 0.0;
-              v126_data = s0[18];
-            }
-            double v128_data = ir1[6];
-            ir1[6] = (v128_data + (v125_data * v126_data));
-            double v130_data = r0[6];
-            double v131_data;
-            {
-              v131_data = 0.0;
-              v131_data = s0[20];
-            }
-            double v133_data = ir1[7];
-            ir1[7] = (v133_data + (v130_data * v131_data));
-            double v138_data = r0[7];
-            double v139_data;
-            {
-              v139_data = 0.0;
-              v139_data = s0[19];
-            }
-            double v141_data = ir1[6];
-            ir1[6] = (v141_data + (v138_data * v139_data));
-            double v143_data = r0[7];
-            double v144_data;
-            {
-              v144_data = 0.0;
-              v144_data = s0[21];
-            }
-            double v146_data = ir1[7];
-            ir1[7] = (v146_data + (v143_data * v144_data));
-            double v148_data = r0[7];
-            double v149_data;
-            {
-              v149_data = 0.0;
-              v149_data = s0[23];
-            }
-            double v151_data = ir1[8];
-            ir1[8] = (v151_data + (v148_data * v149_data));
-            double v156_data = r0[8];
-            double v157_data;
-            {
-              v157_data = 0.0;
-              v157_data = s0[22];
-            }
-            double v159_data = ir1[7];
-            ir1[7] = (v159_data + (v156_data * v157_data));
-            double v161_data = r0[8];
-            double v162_data;
-            {
-              v162_data = 0.0;
-              v162_data = s0[24];
-            }
-            double v164_data = ir1[8];
-            ir1[8] = (v164_data + (v161_data * v162_data));
-            double v166_data = r0[8];
-            double v167_data;
-            {
-              v167_data = 0.0;
-              v167_data = s0[26];
-            }
-            double v169_data = ir1[9];
-            ir1[9] = (v169_data + (v166_data * v167_data));
-            double v174_data = r0[9];
-            double v175_data;
-            {
-              v175_data = 0.0;
-              v175_data = s0[25];
-            }
-            double v177_data = ir1[8];
-            ir1[8] = (v177_data + (v174_data * v175_data));
-            double v179_data = r0[9];
-            double v180_data;
-            {
-              v180_data = 0.0;
-              v180_data = s0[27];
-            }
-            double v182_data = ir1[9];
-            ir1[9] = (v182_data + (v179_data * v180_data));
-            double v184_data = r0[9];
-            double v185_data;
-            {
-              v185_data = 0.0;
-              v185_data = s0[29];
-            }
-            double v187_data = ir1[10];
-            ir1[10] = (v187_data + (v184_data * v185_data));
-            double v192_data = r0[10];
-            double v193_data;
-            {
-              v193_data = 0.0;
-              v193_data = s0[28];
-            }
-            double v195_data = ir1[9];
-            ir1[9] = (v195_data + (v192_data * v193_data));
-            double v197_data = r0[10];
-            double v198_data;
-            {
-              v198_data = 0.0;
-              v198_data = s0[30];
-            }
-            double v200_data = ir1[10];
-            ir1[10] = (v200_data + (v197_data * v198_data));
-            double v202_data = r0[10];
-            double v203_data;
-            {
-              v203_data = 0.0;
-              v203_data = s0[32];
-            }
-            double v205_data = ir1[11];
-            ir1[11] = (v205_data + (v202_data * v203_data));
-            double v210_data = r0[11];
-            double v211_data;
-            {
-              v211_data = 0.0;
-              v211_data = s0[31];
-            }
-            double v213_data = ir1[10];
-            ir1[10] = (v213_data + (v210_data * v211_data));
-            double v215_data = r0[11];
-            double v216_data;
-            {
-              v216_data = 0.0;
-              v216_data = s0[33];
-            }
-            double v218_data = ir1[11];
-            ir1[11] = (v218_data + (v215_data * v216_data));
-            double v220_data = r0[11];
-            double v221_data;
-            {
-              v221_data = 0.0;
-              v221_data = s0[35];
-            }
-            double v223_data = ir1[12];
-            ir1[12] = (v223_data + (v220_data * v221_data));
-            double v228_data = r0[12];
-            double v229_data;
-            {
-              v229_data = 0.0;
-              v229_data = s0[34];
-            }
-            double v231_data = ir1[11];
-            ir1[11] = (v231_data + (v228_data * v229_data));
-            double v233_data = r0[12];
-            double v234_data;
-            {
-              v234_data = 0.0;
-              v234_data = s0[36];
-            }
-            double v236_data = ir1[12];
-            ir1[12] = (v236_data + (v233_data * v234_data));
-            double v238_data = r0[12];
-            double v239_data;
-            {
-              v239_data = 0.0;
-              v239_data = s0[38];
-            }
-            double v241_data = ir1[13];
-            ir1[13] = (v241_data + (v238_data * v239_data));
-            double v246_data = r0[13];
-            double v247_data;
-            {
-              v247_data = 0.0;
-              v247_data = s0[37];
-            }
-            double v249_data = ir1[12];
-            ir1[12] = (v249_data + (v246_data * v247_data));
-            double v251_data = r0[13];
-            double v252_data;
-            {
-              v252_data = 0.0;
-              v252_data = s0[39];
-            }
-            double v254_data = ir1[13];
-            ir1[13] = (v254_data + (v251_data * v252_data));
-            double v256_data = r0[13];
-            double v257_data;
-            {
-              v257_data = 0.0;
-              v257_data = s0[41];
-            }
-            double v259_data = ir1[14];
-            ir1[14] = (v259_data + (v256_data * v257_data));
-            double v264_data = r0[14];
-            double v265_data;
-            {
-              v265_data = 0.0;
-              v265_data = s0[40];
-            }
-            double v267_data = ir1[13];
-            ir1[13] = (v267_data + (v264_data * v265_data));
-            double v269_data = r0[14];
-            double v270_data;
-            {
-              v270_data = 0.0;
-              v270_data = s0[42];
-            }
-            double v272_data = ir1[14];
-            ir1[14] = (v272_data + (v269_data * v270_data));
-            double v274_data = r0[14];
-            double v275_data;
-            {
-              v275_data = 0.0;
-              v275_data = s0[44];
-            }
-            double v277_data = ir1[15];
-            ir1[15] = (v277_data + (v274_data * v275_data));
-            double v282_data = r0[15];
-            double v283_data;
-            {
-              v283_data = 0.0;
-              v283_data = s0[43];
-            }
-            double v285_data = ir1[14];
-            ir1[14] = (v285_data + (v282_data * v283_data));
-            double v287_data = r0[15];
-            double v288_data;
-            {
-              v288_data = 0.0;
-              v288_data = s0[45];
-            }
-            double v290_data = ir1[15];
-            ir1[15] = (v290_data + (v287_data * v288_data));
+            double v24_data = r0[0];
+            double v25_data = s0[0];
+            double v27_data = ir1[0];
+            ir1[0] = (v27_data + (v24_data * v25_data));
+            double v30_data = s0[2];
+            double v32_data = ir1[1];
+            ir1[1] = (v32_data + (v24_data * v30_data));
+            double v51_data = r0[1];
+            double v52_data = s0[1];
+            double v54_data = ir1[0];
+            ir1[0] = (v54_data + (v51_data * v52_data));
+            double v57_data = s0[3];
+            double v59_data = ir1[1];
+            ir1[1] = (v59_data + (v51_data * v57_data));
+            double v62_data = s0[5];
+            double v64_data = ir1[2];
+            ir1[2] = (v64_data + (v51_data * v62_data));
+            double v82_data = r0[2];
+            double v84_data = s0[4];
+            double v86_data = ir1[1];
+            ir1[1] = (v86_data + (v82_data * v84_data));
+            double v89_data = s0[6];
+            double v91_data = ir1[2];
+            ir1[2] = (v91_data + (v82_data * v89_data));
+            double v94_data = s0[8];
+            double v96_data = ir1[3];
+            ir1[3] = (v96_data + (v82_data * v94_data));
+            double v113_data = r0[3];
+            double v116_data = s0[7];
+            double v118_data = ir1[2];
+            ir1[2] = (v118_data + (v113_data * v116_data));
+            double v121_data = s0[9];
+            double v123_data = ir1[3];
+            ir1[3] = (v123_data + (v113_data * v121_data));
+            double v126_data = s0[11];
+            double v128_data = ir1[4];
+            ir1[4] = (v128_data + (v113_data * v126_data));
+            double v144_data = r0[4];
+            double v148_data = s0[10];
+            double v150_data = ir1[3];
+            ir1[3] = (v150_data + (v144_data * v148_data));
+            double v153_data = s0[12];
+            double v155_data = ir1[4];
+            ir1[4] = (v155_data + (v144_data * v153_data));
+            double v158_data = s0[14];
+            double v160_data = ir1[5];
+            ir1[5] = (v160_data + (v144_data * v158_data));
+            double v175_data = r0[5];
+            double v180_data = s0[13];
+            double v182_data = ir1[4];
+            ir1[4] = (v182_data + (v175_data * v180_data));
+            double v185_data = s0[15];
+            double v187_data = ir1[5];
+            ir1[5] = (v187_data + (v175_data * v185_data));
+            double v190_data = s0[17];
+            double v192_data = ir1[6];
+            ir1[6] = (v192_data + (v175_data * v190_data));
+            double v206_data = r0[6];
+            double v212_data = s0[16];
+            double v214_data = ir1[5];
+            ir1[5] = (v214_data + (v206_data * v212_data));
+            double v217_data = s0[18];
+            double v219_data = ir1[6];
+            ir1[6] = (v219_data + (v206_data * v217_data));
+            double v222_data = s0[20];
+            double v224_data = ir1[7];
+            ir1[7] = (v224_data + (v206_data * v222_data));
+            double v237_data = r0[7];
+            double v244_data = s0[19];
+            double v246_data = ir1[6];
+            ir1[6] = (v246_data + (v237_data * v244_data));
+            double v249_data = s0[21];
+            double v251_data = ir1[7];
+            ir1[7] = (v251_data + (v237_data * v249_data));
+            double v254_data = s0[23];
+            double v256_data = ir1[8];
+            ir1[8] = (v256_data + (v237_data * v254_data));
+            double v268_data = r0[8];
+            double v276_data = s0[22];
+            double v278_data = ir1[7];
+            ir1[7] = (v278_data + (v268_data * v276_data));
+            double v281_data = s0[24];
+            double v283_data = ir1[8];
+            ir1[8] = (v283_data + (v268_data * v281_data));
+            double v286_data = s0[26];
+            double v288_data = ir1[9];
+            ir1[9] = (v288_data + (v268_data * v286_data));
+            double v299_data = r0[9];
+            double v308_data = s0[25];
+            double v310_data = ir1[8];
+            ir1[8] = (v310_data + (v299_data * v308_data));
+            double v313_data = s0[27];
+            double v315_data = ir1[9];
+            ir1[9] = (v315_data + (v299_data * v313_data));
+            double v318_data = s0[29];
+            double v320_data = ir1[10];
+            ir1[10] = (v320_data + (v299_data * v318_data));
+            double v330_data = r0[10];
+            double v340_data = s0[28];
+            double v342_data = ir1[9];
+            ir1[9] = (v342_data + (v330_data * v340_data));
+            double v345_data = s0[30];
+            double v347_data = ir1[10];
+            ir1[10] = (v347_data + (v330_data * v345_data));
+            double v350_data = s0[32];
+            double v352_data = ir1[11];
+            ir1[11] = (v352_data + (v330_data * v350_data));
+            double v361_data = r0[11];
+            double v372_data = s0[31];
+            double v374_data = ir1[10];
+            ir1[10] = (v374_data + (v361_data * v372_data));
+            double v377_data = s0[33];
+            double v379_data = ir1[11];
+            ir1[11] = (v379_data + (v361_data * v377_data));
+            double v382_data = s0[35];
+            double v384_data = ir1[12];
+            ir1[12] = (v384_data + (v361_data * v382_data));
+            double v392_data = r0[12];
+            double v404_data = s0[34];
+            double v406_data = ir1[11];
+            ir1[11] = (v406_data + (v392_data * v404_data));
+            double v409_data = s0[36];
+            double v411_data = ir1[12];
+            ir1[12] = (v411_data + (v392_data * v409_data));
+            double v414_data = s0[38];
+            double v416_data = ir1[13];
+            ir1[13] = (v416_data + (v392_data * v414_data));
+            double v423_data = r0[13];
+            double v436_data = s0[37];
+            double v438_data = ir1[12];
+            ir1[12] = (v438_data + (v423_data * v436_data));
+            double v441_data = s0[39];
+            double v443_data = ir1[13];
+            ir1[13] = (v443_data + (v423_data * v441_data));
+            double v446_data = s0[41];
+            double v448_data = ir1[14];
+            ir1[14] = (v448_data + (v423_data * v446_data));
+            double v454_data = r0[14];
+            double v468_data = s0[40];
+            double v470_data = ir1[13];
+            ir1[13] = (v470_data + (v454_data * v468_data));
+            double v473_data = s0[42];
+            double v475_data = ir1[14];
+            ir1[14] = (v475_data + (v454_data * v473_data));
+            double v478_data = s0[44];
+            double v480_data = ir1[15];
+            ir1[15] = (v480_data + (v454_data * v478_data));
+            double v485_data = r0[15];
+            double v500_data = s0[43];
+            double v502_data = ir1[14];
+            ir1[14] = (v502_data + (v485_data * v500_data));
+            double v505_data = s0[45];
+            double v507_data = ir1[15];
+            ir1[15] = (v507_data + (v485_data * v505_data));
             #pragma unroll
-            for (int32_t v295_n0 = 0; v295_n0 < 1; ++v295_n0) {
+            for (int32_t v512_n0 = 0; v512_n0 < 1; ++v512_n0) {
               #pragma unroll
-              for (int32_t v296_n1 = 0; v296_n1 < 16; ++v296_n1) {
-                int32_t v297_a = v295_n0 + v296_n1;
-                int32_t v298_a = v295_n0 + v296_n1;
-                double v299_data = ir1[v298_a];
-                int32_t v300_a = v295_n0 + v296_n1;
-                r1[v298_a] = v299_data;
+              for (int32_t v513_n1 = 0; v513_n1 < 16; ++v513_n1) {
+                int32_t v514_a = v512_n0 + v513_n1;
+                int32_t v515_a = v512_n0 + v513_n1;
+                double v516_data = ir1[v515_a];
+                int32_t v517_a = v512_n0 + v513_n1;
+                r1[v515_a] = v516_data;
               }
             }
           }
           // glb_m0 = store{r>g}(r1);
-          int32_t v304_lead = threadIdx.x % 16;
+          int32_t v521_lead = threadIdx.x % 16;
           #pragma unroll
-          for (int32_t v305_i0 = 0; v305_i0 < 1; ++v305_i0) {
-            int32_t v314_lead = v304_lead + (v305_i0 * 16);
+          for (int32_t v522_i0 = 0; v522_i0 < 1; ++v522_i0) {
+            int32_t v531_lead = v521_lead + (v522_i0 * 16);
             #pragma unroll
-            for (int32_t v306_i1 = 0; v306_i1 < 16; ++v306_i1) {
-              int32_t v307_a = v305_i0 + v306_i1;
-              double v309_data = r1[(v305_i0 + v306_i1)];
-              int32_t v316_a = v314_lead + (v306_i1 * 16);
-              glb_m0[v316_a] = v309_data;
+            for (int32_t v523_i1 = 0; v523_i1 < 16; ++v523_i1) {
+              int32_t v524_a = v522_i0 + v523_i1;
+              double v526_data = r1[(v522_i0 + v523_i1)];
+              int32_t v533_a = v531_lead + (v523_i1 * 16);
+              glb_m0[v533_a] = v526_data;
             }
           }
           __syncwarp();

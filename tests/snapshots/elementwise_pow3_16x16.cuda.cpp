@@ -72,12 +72,9 @@ __launch_bounds__(256)
             for (int32_t v4_k1 = 0; v4_k1 < 16; ++v4_k1) {
               int32_t v10_a = v4_k1 * 16;
               int32_t v11_a = v2_lead + v10_a;
-              float v12_data;
-              {
-                v12_data = glb_m0[v11_a];
-              }
-              int32_t v20_a = v2_lead + v10_a;
-              glb_m1[v20_a] = (powf(v12_data, 3.0f));
+              float v19_data = glb_m0[(v2_lead + v10_a)];
+              int32_t v27_a = v2_lead + v10_a;
+              glb_m1[v27_a] = (powf(v19_data, 3.0f));
             }
           }
           __syncwarp();
