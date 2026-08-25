@@ -453,6 +453,29 @@ GROUPS = {
              'if end > budget:', 1)),
     ]),
 
+    # `scratch_scope` declares a packing; this is the check that it holds.
+    'scratchcheck': ('tests/test_scratch_check.py', [
+        ('a read across a reused window no longer reported',
+         sub(Path('tensorforge/backend/pir/scratch_check.py'),
+             '                if t.reads and last_write[other] is not None:',
+             '                if False:', 1)),
+        ('a rewrite between the clobber and the read not noticed',
+         sub(Path('tensorforge/backend/pir/scratch_check.py'),
+             '                    if mine is None or mine < last_write[other]:',
+             '                    if True:', 1)),
+        ('windows compared without checking that they overlap',
+         sub(Path('tensorforge/backend/pir/scratch_check.py'),
+             '            if not win[a].overlaps(win[b]):\n                continue',
+             '            if False:\n                continue', 1)),
+        ('an undeclared statement passed over in silence',
+         sub(Path('tensorforge/backend/pir/scratch_check.py'),
+             '                opaque.append(here)', '                pass', 1)),
+        ('the allocation counted as a use of its own buffer',
+         sub(Path('tensorforge/backend/pir/scratch_check.py'),
+             '        if stmt.op == Op.ALLOC:\n            continue',
+             '        if False:\n            continue', 1)),
+    ]),
+
     'operands': ('tests/test_snapshots.py', [
         ('hfma asks for the wrong distribution',
          sub(PKG / 'relayout.py',

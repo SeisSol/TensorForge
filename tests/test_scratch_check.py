@@ -1,0 +1,162 @@
+# SPDX-License-Identifier: MIT
+"""`scratch_scope` makes a claim; this is what holds it to account.
+
+Sibling scopes share space, which is how `nvidia.matmul` fits three tiles into
+192 elements rather than 320.  Nothing checked that the sharing was safe.
+
+Deriving the packing instead was the first plan and it does not work.  A
+liveness analysis over the body computes a single interval per buffer, and
+`matmul`'s loops are unrolled, so the C tile's interval --- first touch in
+iteration `i`'s epilogue to last touch in the final one --- covers the A and B
+staging of every iteration in between.  All three interfere, 320 elements, and
+the analysis is right about the question it was asked.  What makes the reuse
+safe is that each burst overwrites the tile completely before reading it, and
+no single store does that: 128 elements, 48 writes.  Proving the union covers
+the buffer is an index-set analysis, and it would be a great deal of machinery
+to re-derive something the emitter knew when it wrote the scopes.
+
+So the claim stays where it is made and this checks it, the same arrangement
+as the sparse loader's layout.  The check is necessary, not sufficient, and
+`check_reuse` returns the opaque statements alongside the violations so that
+"no violations" cannot be read as "safe" when it means "not asked".
+"""
+
+from __future__ import annotations
+
+import importlib.util
+from pathlib import Path
+
+import pytest
+
+from tensorforge.backend.pir import scratch_check as sc
+from tensorforge.backend.pir.build import IRBuilder
+from tensorforge.backend.pir.core import INDEX, MemSpace
+from tensorforge.common.basic_types import Datatype
+from tensorforge.common.context import Context
+from tensorforge.generators.generator import Generator
+
+CASES = Path(__file__).resolve().parent / "cases"
+
+
+def _body(read_a_after_c: bool):
+    b = IRBuilder(fptype=Datatype.F32, scratch=('tempShrMem', 192))
+    i = b.rawexpr('threadIdx.x', type_=INDEX, hint='a')
+    with b.scratch_scope():
+        a = b.alloc(Datatype.F32, (128,), MemSpace.SHARED, hint='atile')
+        bb = b.alloc(Datatype.F32, (64,), MemSpace.SHARED, hint='btile')
+        b.store(a, b.rawexpr('1.0f', hint='v'), i)
+        b.store(bb, b.rawexpr('2.0f', hint='v'), i)
+        b.load(a, i, hint='d')
+    with b.scratch_scope():
+        c = b.alloc(Datatype.F32, (128,), MemSpace.SHARED, hint='ctile')
+        b.store(c, b.rawexpr('3.0f', hint='v'), i)
+        b.load(c, i, hint='d')
+        if read_a_after_c:
+            b.load(a, i, hint='d')
+    return b.finish()
+
+
+def test_sibling_scopes_that_do_not_outlive_each_other_are_accepted():
+    violations, opaque = sc.check_reuse(_body(read_a_after_c=False))
+    assert not violations
+    assert not opaque
+
+
+def test_a_read_across_a_reused_window_is_caught():
+    """The error a mis-nested scope actually produces."""
+    violations, opaque = sc.check_reuse(_body(read_a_after_c=True))
+    assert len(violations) == 1
+    v = violations[0]
+    assert 'atile' in str(v.read_of) and 'ctile' in str(v.clobbered_by)
+    assert v.clobbered_at < v.at
+
+
+def test_a_rewrite_between_the_clobber_and_the_read_is_allowed():
+    """Which is exactly what every iteration after the first does."""
+    b = IRBuilder(fptype=Datatype.F32, scratch=('tempShrMem', 128))
+    i = b.rawexpr('threadIdx.x', type_=INDEX, hint='a')
+    with b.scratch_scope():
+        a = b.alloc(Datatype.F32, (128,), MemSpace.SHARED, hint='atile')
+        b.store(a, b.rawexpr('1.0f', hint='v'), i)
+    with b.scratch_scope():
+        c = b.alloc(Datatype.F32, (128,), MemSpace.SHARED, hint='ctile')
+        b.store(c, b.rawexpr('2.0f', hint='v'), i)
+    b.store(a, b.rawexpr('3.0f', hint='v'), i)      # a is rewritten
+    b.load(a, i, hint='d')
+    violations, _ = sc.check_reuse(b.finish())
+    assert not violations
+
+
+def test_windows_that_do_not_overlap_are_not_compared():
+    b = IRBuilder(fptype=Datatype.F32, scratch=('tempShrMem', 256))
+    i = b.rawexpr('threadIdx.x', type_=INDEX, hint='a')
+    a = b.alloc(Datatype.F32, (128,), MemSpace.SHARED, hint='atile')
+    c = b.alloc(Datatype.F32, (128,), MemSpace.SHARED, hint='ctile')
+    b.store(a, b.rawexpr('1.0f', hint='v'), i)
+    b.store(c, b.rawexpr('2.0f', hint='v'), i)
+    b.load(a, i, hint='d')
+    assert sc.windows(b.finish())
+    violations, _ = sc.check_reuse(b.finish())
+    assert not violations
+
+
+def test_an_undeclared_statement_is_reported_not_ignored():
+    """A body with an opaque statement has not been checked, and saying so is
+    the difference between a result and a false reassurance."""
+    b = IRBuilder(fptype=Datatype.F32, scratch=('tempShrMem', 192))
+    i = b.rawexpr('threadIdx.x', type_=INDEX, hint='a')
+    with b.scratch_scope():
+        a = b.alloc(Datatype.F32, (128,), MemSpace.SHARED, hint='atile')
+        b.store(a, b.rawexpr('1.0f', hint='v'), i)
+    with b.scratch_scope():
+        c = b.alloc(Datatype.F32, (128,), MemSpace.SHARED, hint='ctile')
+        b.store(c, b.rawexpr('2.0f', hint='v'), i)
+    b('someOpaqueThing();')                    # no accesses argument
+    _, opaque = sc.check_reuse(b.finish())
+    assert opaque
+
+
+# --------------------------------------------------------------------------- #
+# Over the corpus
+# --------------------------------------------------------------------------- #
+
+def _bodies(case: str, backend: str, arch: str):
+    path = CASES / case
+    spec = importlib.util.spec_from_file_location(path.stem, path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    from tensorforge.backend.instructions.compute.primitives import nvidia
+    collected = []
+    original = IRBuilder.finish
+
+    def finish(self):
+        body = original(self)
+        if getattr(self, '_scratch', None):
+            collected.append(body)
+        return body
+
+    IRBuilder.finish = finish
+    enabled = nvidia.ENABLED
+    nvidia.ENABLED = True
+    try:
+        ctx = Context(arch=arch, backend=backend,
+                      fp_type=getattr(mod, "DTYPE", None) or Datatype.F32)
+        Generator(mod.descr_list(), ctx).generate()
+    finally:
+        IRBuilder.finish = original
+        nvidia.ENABLED = enabled
+    return collected
+
+
+# `case` is auto-parametrized across the whole corpus by conftest.
+@pytest.mark.parametrize("case_file", ["rectangular.py", "square_notrans.py"])
+def test_the_generated_packing_is_consistent(case_file):
+    """The point of all of it: `matmul` overlaps C onto A and gets away with
+    it, and now that is a checked statement rather than a comment."""
+    for body in _bodies(case_file, "cuda", "sm_86"):
+        violations, opaque = sc.check_reuse(body)
+        assert not violations, "\n".join(str(v) for v in violations)
+        assert not opaque, (
+            f"{len(opaque)} statements did not declare their accesses, so the "
+            f"packing was not really checked")
