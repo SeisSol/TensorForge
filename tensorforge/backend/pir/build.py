@@ -479,7 +479,8 @@ class IRBuilder:
              space: Optional[MemSpace] = None, uniform: Optional[bool] = None,
              predicate: Optional[Value] = None,
              other: Optional[Operand] = None,
-             layout: Optional[RegisterLayout] = None) -> Value:
+             layout: Optional[RegisterLayout] = None,
+             nontemporal: bool = False) -> Value:
         """``layout`` is how the loaded value ends up spread over the lanes.
 
         A load is where a distribution *enters* the IR: every later layout is
@@ -498,7 +499,14 @@ class IRBuilder:
         if uniform is None:
             uniform = _join(indices)
         v = self.value(type_, hint=hint or 'ld', uniform=uniform, layout=layout)
-        attrs = (('other', other),) if other is not None else ()
+
+        attrs = []
+        if other is not None:
+            attrs += [('other', other)]
+        if nontemporal:
+            attrs += [('nontemporal', nontemporal)]
+        attrs = tuple(attrs)
+
         self._emit_op(Op.LOAD, (v,), (base,) + tuple(indices),
                       predicate=predicate, pure=False, movable=True,
                       effect=Effect.READ,

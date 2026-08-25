@@ -117,11 +117,11 @@ class HipLexic(CudaLexic):
     else:
       return f'{lhs} = {rhs};'
 
-  def glb_load(self, lhs, rhs, nontemporal=False):
+  def glb_load(self, rhs, nontemporal=False):
     if nontemporal and self._underlying_hardware == 'amd':
-      return f'{lhs} = __builtin_nontemporal_load(&{rhs});'
+      return f'__builtin_nontemporal_load(&{rhs})'
     else:
-      return f'{lhs} = {rhs};'
+      return f'{rhs}'
 
   def atomic_store(self, access, variable, op, datatype):
     # those sometimes are faster

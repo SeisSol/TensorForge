@@ -233,7 +233,7 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
           writer(f'cuda::memcpy_async(&{lhs}, &{rhs}, cuda::aligned_size_t<{elsize}>({elsize}), {self._pipeline});')
       else:
         def write_load(lhs, rhs):
-          writer(self._context.get_vm().get_lexic().glb_load(lhs, rhs, nontemporal=nontemporal))
+          writer(f'{lhs} = {self._context.get_vm().get_lexic().glb_load(rhs, nontemporal=nontemporal)};')
 
       if linscale is None:
         indexwrapper = lambda x: x

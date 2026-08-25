@@ -387,9 +387,16 @@ class Emitter:
             return
 
         if op == Op.LOAD:
+            lex = self._lexic()
+
             v = s.target[0]
             addr = self.address(s.args[0], s.args[1:])
-            self.declare(v, f'{self.base_name(s.args[0])}[{addr}]', s)
+            nontemporal = s.attr('nontemporal')
+            access = f'{self.base_name(s.args[0])}[{addr}]'
+            if nontemporal:
+                self.declare(v, f'{lex.glb_load(access, True)}', s)
+            else:
+                self.declare(v, access, s)
             return
 
         if op == Op.LOAD_ASYNC:

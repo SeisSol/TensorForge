@@ -752,7 +752,7 @@ class Symbol:
       return self.get_fptype().literal(self.obj.value(index))
 
   def encode_values(self, pos, runIdx, writer, context: Context, index: List[Union[str, int, Immediate, Variable, LeadIndex]], nontemp, leadidx):
-    wrote = False
+    wrote = None
     if pos == len(index):
       if self.stype == SymbolType.Data:
         # constant value (data) load
@@ -1033,19 +1033,9 @@ class Symbol:
         lex = context.get_vm().get_lexic()
         if lex.simd_mode:
           return None
-        if self.stype == SymbolType.Global:
-          # glb_load is a declare-then-assign pair, so it needs the same
-          # wrapper as the sparse path to have a single declared result
-          blk = writer.value_block(ScalarType(self.get_fptype()), self,
-                                   hint='data',
-                                   layout=layout_of(index, self.num_threads))
-          with blk as v:
-            writer.access_stmt(lex.glb_load(str(v), access, nontemp), self,
-                               Effect.READ, args=_operands(None, addrs))
-          return v
         if access is pre_access and self.stype in (
                 SymbolType.Register, SymbolType.Scratch,
-                SymbolType.SharedMem, SymbolType.Batch):
+                SymbolType.SharedMem, SymbolType.Batch, SymbolType.Global):
           # The dereference itself, with the address as an operand rather than
           # as a name spliced into a string.  Everything the string version
           # declared -- the symbol it reads, the effect, the layout -- survives;
@@ -1060,7 +1050,7 @@ class Symbol:
           # bare name -- so `Op.LOAD` would invent a `[0]` that never existed.
           return writer.load(self, self.address_value(writer, context, index),
                              type_=ScalarType(self.get_fptype()), hint='data',
-                             layout=layout_of(index, self.num_threads))
+                             layout=layout_of(index, self.num_threads), nontemporal = nontemp)
         return writer.load_expr(
             access, ScalarType(self.get_fptype()), self,
             args=_operands(variable, addrs),
@@ -1068,8 +1058,7 @@ class Symbol:
       if context.get_vm().get_lexic().simd_mode:
         writer(f'{context.get_vm().get_lexic().get_simd(self.get_fptype(), 16)} {variable}({access});')
       elif self.stype == SymbolType.Global:
-        writer(f'{self.get_fptype()} {variable};')
-        writer.access_stmt(context.get_vm().get_lexic().glb_load(variable, access, nontemp), self, Effect.READ, args=_operands(variable, addrs))
+        writer(f'{self.get_fptype()} {variable} = {context.get_vm().get_lexic().glb_load(variable, access, nontemp)};', self, Effect.READ, args=_operands(variable, addrs))
       else:
         writer.access_stmt(f'{self.get_fptype()} {variable} = {access};', self, Effect.READ, args=_operands(variable, addrs))
       return True

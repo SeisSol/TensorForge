@@ -255,12 +255,12 @@ class CudaLexic(Lexic):
     else:
       return f'{lhs} = {rhs};'
 
-  def glb_load(self, lhs, rhs, nontemporal=False):
+  def glb_load(self, rhs, nontemporal=False):
     if nontemporal:
-      # return f'{lhs} = __ldg(&{rhs});'
-      return f'{lhs} = __ldcg(&{rhs});'
+      # return f'__ldg(&{rhs})'
+      return f'__ldcg(&{rhs})'
     else:
-      return f'{lhs} = {rhs};'
+      return f'{rhs}'
 
   def atomic_store(self, access, variable, datatype):
     return f'atomicAdd(&{access}, {variable});'

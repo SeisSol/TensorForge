@@ -318,10 +318,11 @@ class MultilinearInstruction(ComputeInstruction):
                                     for j, nk in enumerate(self._opdim_to_nks[i])],
                                    False)
                 if v is None:
-                    return False
+                    # zero; no data
+                    return True
                 data.append(v)
-            if len(data) != len(self._ops) or not data:
-                return False
+            if len(data) == 0:
+                return True
             prod = data[0]
             for i in range(1, len(data)):
                 prod = self._emit_binop(writer, ftype, self._productOperation,
@@ -329,7 +330,8 @@ class MultilinearInstruction(ComputeInstruction):
             ns = [varlist[loopmap[f'n{i}']] for i, _ in enumerate(self._ns)]
             value = self._idest.load(writer, self._context, None, ns, False)
             if value is None:
-                return False
+                assert False
+                return True
             total = self._emit_binop(writer, ftype, self._sumOperation,
                                      value, prod)
             self._idest.store(writer, self._context, total, ns, False)
