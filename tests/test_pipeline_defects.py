@@ -45,12 +45,6 @@ def _loop_body(kernel: str) -> list:
     start = next(i for i, l in enumerate(lines) if "for (size_t batchId0" in l)
     return lines[start:]
 
-
-@pytest.mark.xfail(strict=True, reason=(
-    "the rotating buffer indexes stages by the element id, not by the "
-    "iteration counter: batchId0 advances by gridDim.x * blockDim.y, so "
-    "batchId0 % 2 is invariant whenever the stride is even and the read stage "
-    "never alternates"))
 def test_stage_index_is_not_the_element_id():
     kernel = _kernel("chain_five.py", enable_pipeline=True,
                      enable_multibuffer=True, pipeline_depth=2)
@@ -62,11 +56,6 @@ def test_stage_index_is_not_the_element_id():
         "stage index derived from the element id:\n  "
         + "\n  ".join(offenders))
 
-
-@pytest.mark.xfail(strict=True, reason=(
-    "the rolling pointer advance sits inside `if (allowed)`, so an element "
-    "masked out by the flags array skips the advance and every later "
-    "iteration reads the wrong element"))
 def test_rolling_pointer_advance_is_not_under_the_flag_guard():
     kernel = _kernel("chain_five.py", enable_pipeline=True,
                      enable_multibuffer=False, pipeline_depth=2)
