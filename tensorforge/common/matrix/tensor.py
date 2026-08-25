@@ -15,7 +15,7 @@ class Tensor:
         alias: Union[str, None]=None,
         is_tmp: bool = False,
         spp: SparsityPattern = None,
-        data: Union[np.ndarray, None] = None,
+        data: Union[np.ndarray, dict, None] = None,
         datatype: Datatype = None,
         alignment: int = 0):
         self.name = None
@@ -54,6 +54,12 @@ class Tensor:
         # callers that still hand over a list and leave them unfixed, which is
         # how the requirement got two homes in the first place.
         if self.data is not None:
+            if isinstance(self.data, dict):
+                # TODO: proper dtype
+                data = np.zeros(self.shape, dtype=np.float64)
+                for pos, value in self.data:
+                    data[pos] = value
+                self.data = data
             if not isinstance(self.data, np.ndarray):
                 raise GenerationError(
                     f'Tensor {self}: data must be an ndarray of shape '
