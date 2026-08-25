@@ -306,7 +306,7 @@ class MultilinearInstruction(ComputeInstruction):
                 threads //= dimmax - dimmin
                 stride *= dimmax - dimmin
 
-        def nonlead_structured(varlist):
+        def nonlead_writer(varlist):
             """Fully structured: loads hand back values, products and the
             accumulation are IR ops, no name leaves the block.  Returns False
             if any operand cannot produce a value (the sparse path declares
@@ -322,10 +322,11 @@ class MultilinearInstruction(ComputeInstruction):
                                    False)
                 if v is None:
                     # zero; no data
-                    return True
+                    return
                 data.append(v)
             if len(data) == 0:
-                return True
+                # also zero
+                return
             prod = data[0]
             for i in range(1, len(data)):
                 prod = self._emit_binop(writer, ftype, self._productOperation,
@@ -334,44 +335,9 @@ class MultilinearInstruction(ComputeInstruction):
             value = self._idest.load(writer, self._context, None, ns, False)
             if value is None:
                 assert False
-                return True
             total = self._emit_binop(writer, ftype, self._sumOperation,
                                      value, prod)
             self._idest.store(writer, self._context, total, ns, False)
-            return True
-
-        def nonlead_named(varlist):
-            """The original path, for operands the structured one cannot take."""
-            prod = []
-            with writer.speculative() as spec:
-                allLoaded = len(self._ops) > 0
-                for i, op in enumerate(self._ops):
-                    allLoaded &= op.symbol.load(writer, self._context, f'data{i}',
-                        [add_offset(varlist[loopmap[nk]], self._eff_offset(i, j)) for j, nk in enumerate(self._opdim_to_nks[i])], False)
-                    if not allLoaded:
-                        break
-                if allLoaded:
-                    for i, op in enumerate(self._ops):
-                        if i > 0:
-                            prod += [f'{self._fp_as_str} prod{i} = {self._productOperation.format(f"prod{i-1}", f"data{i}")};']
-                        else:
-                            prod += [f'{self._fp_as_str} prod{i} = data{i};']
-                    for p in prod:
-                        writer(p)
-                    ns = [varlist[loopmap[f'n{i}']] for i, _ in enumerate(self._ns)]
-                    self._idest.load(writer, self._context, 'value', ns, False)
-                    writer(f'{self._fp_as_str} newvalue = {self._sumOperation.format("value", f"prod{len(self._ops)-1}")};')
-                    self._idest.store(writer, self._context, 'newvalue', ns, False)
-                else:
-                    spec.discard()
-
-        def nonlead_writer(varlist):
-            with writer.speculative() as spec:
-                if not nonlead_structured(varlist):
-                    spec.discard()
-                else:
-                    return
-            nonlead_named(varlist)
 
         write_loops(self._context, writer, loopstack, nonlead_writer)
 
@@ -674,17 +640,6 @@ class MultilinearInstruction(ComputeInstruction):
 
             for loop in loopstack[::-1]:
                 loop.__exit__(None, None, None)
-
-    def _reduction(self, var, writer: Writer):
-        write(f'{var} = tensorforge::reduction<tensorforge::ReductionOperation<{self._fp_as_str}, tensorforge::Op::Sum>, {self._num_threads}, 1, {self._fp_as_str}>({var});')
-
-    def _sycl_reduction(self, writer: Writer):
-        writer(f'{var} = sycl::reduction({var});')
-
-    def _omp_reduction(self, writer: Writer):
-        writer(f'#pragma omp for reduction({self._sumOperation}: shmAddr[0:{self._total_shm_size}])')
-        with writer.For(f'int32_t i = 0; i < TODO; ++i'):
-            writer(f'shmAddr[i] = {self._sumOperation.format("shmAddr[i]", f"value")};')
 
     def get_operands(self):
         inops = [op.symbol for op in self._ops] + [op.symbol for op in self._scalar]
