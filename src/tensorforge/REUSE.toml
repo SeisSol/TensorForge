@@ -8,6 +8,6 @@
 version = 1
 
 [[annotations]]
-path = ["AUTHORS", "requirements.txt"]
+path = ["VERSION"]
 SPDX-FileCopyrightText = "2023 SeisSol Group"
 SPDX-License-Identifier = "MIT"
