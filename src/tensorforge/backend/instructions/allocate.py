@@ -45,9 +45,16 @@ class RegisterAlloc(AbstractInstruction):
       # builder.  On the unmigrated path it is the Writer, which has no
       # structured alloc, so that path keeps emitting the line.
       if hasattr(writer, 'alloc') and callable(getattr(writer, 'alloc')):
-        writer.alloc(datatype, (self._dest.obj.size,), MemSpace.REGISTER,
-                     hint=self._dest.obj.name, extern=self._dest.obj.name,
-                     init=init_values_list)
+        value = writer.alloc(datatype, (self._dest.obj.size,),
+                             MemSpace.REGISTER,
+                             hint=self._dest.obj.name,
+                             extern=self._dest.obj.name,
+                             init=init_values_list)
+        # Publish it, so a consumer built into this same body addresses the
+        # buffer as a value rather than by interpolating the name.  Consumers
+        # in other bodies see None and keep using the name -- see
+        # Symbol.pir_buffer.
+        self._dest.set_pir_buffer(writer, value)
       else:
         writer(f'{datatype} {self._dest.obj.name}'
                f'[{self._dest.obj.size}]{init_values_list};')

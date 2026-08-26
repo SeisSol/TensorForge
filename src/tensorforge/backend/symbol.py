@@ -571,7 +571,29 @@ class Symbol:
     #: reader does not have to restate a fact about a write it cannot see.
     #: `None` is *unknown*, never *not distributed*.
     self.layout = None
+    #: The PIR value for this buffer, and the builder that made it.
+    #:
+    #: A value belongs to the body it was built into.  With one body per loop
+    #: body most buffers are allocated and used inside one, so the value
+    #: reaches its consumers and the C++ name is redundant; a buffer that
+    #: outlives the body -- the shared arena, or a tile shared between two
+    #: batch loops -- is allocated in one builder and read in another, and
+    #: there the value is meaningless and the name is all there is.  Holding
+    #: the builder alongside the value is what tells those two cases apart,
+    #: rather than assuming the common one and emitting a dangling id in the
+    #: rare one.
+    self._pir_buffer = None
     self._users = []
+
+  def set_pir_buffer(self, builder, value) -> None:
+    self._pir_buffer = (id(builder), value)
+
+  def pir_buffer(self, builder):
+    """The value, if it belongs to the body currently being built."""
+    if self._pir_buffer is None:
+      return None
+    owner, value = self._pir_buffer
+    return value if owner == id(builder) else None
 
   def clone(self):
     cloned = Symbol(self.name, self.stype, self.obj)
@@ -968,7 +990,21 @@ class Symbol:
         access = f'{name}[{index} + threadIdx.x * {vec}]'
 
       if vec == 1:
-        writer.access_stmt(f'{access} = {variable};', self, Effect.WRITE, args=_operands(variable, addrs))
+        # `base` is the symbol's own name for everything except a rotating
+        # shared buffer, and every caller passes it rather than leaving it
+        # None -- so testing for None alone silently never fires.
+        own_base = base is None or base == self.name
+        buf = (self.pir_buffer(writer)
+               if self.stype == SymbolType.Register and own_base else None)
+        if buf is not None and hasattr(writer, 'store'):
+          # Structured: the buffer is an operand, so the write declares what
+          # it touches by construction instead of by a hand-passed alias
+          # base.  The emitted text is the same while the allocation still
+          # carries its `extern` name; it stops being the same on the commit
+          # that drops the name, which is the point.
+          writer.store(buf, variable, index // self.num_threads)
+        else:
+          writer.access_stmt(f'{access} = {variable};', self, Effect.WRITE, args=_operands(variable, addrs))
       else:
         convert = f'*(tensorforge::VectorT<{self.get_fptype()}, {vec}>*)&'
         writer.access_stmt(f'{convert}{access} = {convert}{variable};', self, Effect.WRITE, args=_operands(variable, addrs))
