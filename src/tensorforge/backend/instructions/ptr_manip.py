@@ -6,6 +6,7 @@ from tensorforge.common.context import Context
 from tensorforge.common.helper import get_extra_offset_name, Addressing
 from tensorforge.common.basic_types import GeneralLexicon, DataFlowDirection, StridedAddressing
 from tensorforge.common.exceptions import GenerationError
+from tensorforge.backend.pir.core import Effect
 
 class GetElementPtr(AbstractInstruction):
   def __init__(self,
@@ -95,7 +96,35 @@ class GetElementPtr(AbstractInstruction):
       writer(f'const auto {self._update_dest.name} = {self._dest.name};')
       writer(f'{self._dest.name} = {rhs};')
     else:
-      writer(f'{lhs} = {rhs};')
+      self._emit_binding(writer, f'{lhs} = {rhs};')
+
+  def _emit_binding(self, writer, text: str) -> None:
+    """The binding, saying what it touches.
+
+    It was a bare statement, so `Effect.UNKNOWN`, so it conflicted with every
+    access in the body and pinned everything on both sides of it -- 362 nodes
+    corpus-wide, the largest blocking site after `allocate.py`.  That matters
+    here rather than in the abstract: `WrapLoads` moves a transfer past the
+    instructions between it and its consumer, and a binding that conflicts
+    with everything is a wall in the middle of exactly that stretch.
+
+    What it actually touches is the batch handle it reads.  Strided
+    addressing does not even do that -- the right-hand side is address
+    arithmetic and touches no memory -- but `Addressing.PTR_BASED` reads
+    `m1[batchId]` out of the pointer array, so declaring the read covers both
+    and is conservative for the one that does less.
+
+    `movable=False`, and not out of caution: the pointer it defines is still
+    a C++ name, so a consumer reading `glb_m1` does so through text the IR
+    cannot see.  Letting the binding sink below such a consumer would compile
+    to a use before its definition.  Movability comes back when the
+    definition becomes a value -- the same trade as `extern` on the register
+    tiles, and it ends the same way.
+    """
+    if hasattr(writer, 'access_stmt'):
+      writer.access_stmt(text, self._src, Effect.READ, movable=False)
+    else:
+      writer(text)
 
   def defs(self):
     return (self._dest,) if self._update_dest is None else (self._dest, self._update_dest)

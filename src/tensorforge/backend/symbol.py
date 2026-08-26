@@ -916,6 +916,21 @@ class Symbol:
         # allocated beforehand.  Same seam as `load`, and the reason is the
         # same -- an operand handed to a vendor intrinsic has to have a
         # definition point, or the def-use edge to this read does not exist.
+        buf = self.pir_buffer(writer) if vec == 1 else None
+        if buf is not None and hasattr(writer, 'load'):
+          # Addressed rather than named, the pair to `store_linear`.  There
+          # were two structured mechanisms here: `load_expr` wraps a string
+          # in a value so the def-use edge exists, and `load` makes the
+          # buffer an operand so the *access* is known too.  The second
+          # subsumes the first wherever the buffer is a value in this body,
+          # so the first is left only for the case that is not yet -- shared
+          # tiles, which is 552 of the 668 reads through here.
+          #
+          # The layout claim is carried across unchanged: it is recorded by
+          # the fill in `_record_linear_layout` and only reported here, since
+          # `reg[i // num_threads]` has no lane term to derive one from.
+          return writer.load(buf, index // self.num_threads, hint='lin',
+                             layout=self.layout)
         from tensorforge.backend.pir.core import ScalarType
         type_ = (ScalarType(self.get_fptype()) if vec == 1
                  else ScalarType(self.get_fptype(), vec))

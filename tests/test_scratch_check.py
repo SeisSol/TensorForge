@@ -157,22 +157,21 @@ def _bodies(case: str, backend: str, arch: str):
 # go down and must never go up.
 #
 # `square_notrans` is at zero and stays there.  `rectangular` takes the NVIDIA
-# async path, and its 14 break down as
+# async path, and its 11 break down as
 #
-#   3  ptr_manip.py     the `glb_m*` pointer bindings
 #   1  allocate.py      the `s0` window -- ShrMemAlloc, not RegisterAlloc
 #   5  primitives/      `cuda::pipeline` acquire/commit/wait/release and the
 #                       two `memcpy_async` calls
 #   3  __syncwarp()
-#   1  a comment emitted through `writer(...)` rather than `Comment()`, so it
-#      carries Effect.UNKNOWN where an identical comment two lines away
-#      carries Effect.NONE
-#   1  the store comment on the epilogue, same cause
+#   2  comments emitted through `writer(...)` rather than `Comment()`, so they
+#      carry Effect.UNKNOWN where an identical comment two lines away carries
+#      Effect.NONE
 #
-# It was 16 until `RegisterAlloc` started allocating through the builder;
-# the two `float r*[36]{}` declarations are values now.  `ptr_manip.py:gen_ir`
-# is the next three.
-STILL_OPAQUE = {"rectangular.py": 14, "square_notrans.py": 0}
+# It was 16 before `RegisterAlloc` allocated through the builder, and 14
+# before the `glb_m*` bindings declared their read.  The `s0` window is the
+# shared side of `allocate.py`; the five async statements are the NVIDIA
+# primitives, and `Op.COPY_ASYNC` and `Op.WAIT` already exist to receive them.
+STILL_OPAQUE = {"rectangular.py": 11, "square_notrans.py": 0}
 
 
 # `case` is auto-parametrized across the whole corpus by conftest.
