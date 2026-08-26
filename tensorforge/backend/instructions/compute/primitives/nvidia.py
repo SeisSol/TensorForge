@@ -114,12 +114,6 @@ INSTRS = [
     MMAInstr(16,8,32,1,Datatype.F64,'mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32', MMAMode.I8), # SM_80
 ]
 
-#: The atom `matmul` and `shmsize` are both hard-wired to.  Named once so the
-#: capability predicate, the shared-memory reservation and the emitter cannot
-#: drift apart -- they had three separate copies of `INSTRS[1]` before.
-ATOM = INSTRS[1]
-
-
 #: Whether the path is deployed, as opposed to whether it *can* emit for a
 #: given shape -- that second question is `supports()`.  Two different facts,
 #: so two names: `supports()` is a property of the shape, `ENABLED` is a
@@ -145,15 +139,11 @@ def supports(threads, dtype, sparse) -> bool:
       `threadIdx.x` modulo the atom's `k`.  Narrower waves would need a
       warp-level broadcast and a way back; wider ones are a different
       instruction.  Neither exists here yet.
-    * ``dtype == ATOM.d``.  `ATOM` is a TF32 instruction.  Nothing downstream
-      compares the operand type against it, so an `f64` case would emit
-      `mma.sync...f32.tf32.tf32.f32` over doubles and be quietly wrong rather
-      than loudly unsupported.
     * ``not sparse``.  `matmul` already declines these by returning `False`,
       but `temp_shmem` reserves shared memory off the same predicate; if the
       two disagree the reservation is made for a kernel that never uses it.
     """
-    return threads == 32 and dtype == ATOM.d and not sparse
+    return threads == 32 and dtype in (Datatype.F32, Datatype.F64) and not sparse
 
 
 def shmsize(stages):
@@ -181,7 +171,15 @@ def matmul(writer, C, A, B, M, N, K, kx, threads, dtype, sparse, ctx, shmptr, sh
     if sparse:
         return False
 
-    atom = ATOM
+    # for now.
+    # TODO for later: split matrix into tiles
+    # if too small for matrix tile (or with zero padded), use FMA instead
+    # use different tile sizes if available
+
+    atom = {
+        Datatype.F32: INSTRS[1],
+        Datatype.F64: INSTRS[2]
+    }[dtype]
 
     mma = writer.varalloc()
     mmaT = writer.varalloc()
@@ -233,6 +231,11 @@ def matmul(writer, C, A, B, M, N, K, kx, threads, dtype, sparse, ctx, shmptr, sh
         Cshm = writer.alloc(atom.d, (cregs * threads,), MemSpace.SHARED,
                             hint='ctile')
 
+    x4type = {
+        Datatype.F32: 'float4',
+        Datatype.F64: 'double4'
+    }[dtype]
+
     for j in range(0, N, atom.n):
         with writer.AnonymousScope():
             for k in range(0, K + kx, threads):
@@ -279,7 +282,7 @@ def matmul(writer, C, A, B, M, N, K, kx, threads, dtype, sparse, ctx, shmptr, sh
                                                 # for kkk in range(0, atom.k):
                                                 #     writer(f'{shmptr}[{aoffs} + (threadIdx.x - {ii}) % {atom.m} + {kkk * atom.m}] = {Areg}_{kkk};')
                                                 for kkk in range(0, atom.k, ktile):
-                                                    writer(f'*(float4*)&{Ashm}[((threadIdx.x - {ii}) % {atom.m}) * {ktile} + {kkk * atom.m}] = make_float4({Areg}_{kkk}, {Areg}_{kkk+1}, {Areg}_{kkk+2}, {Areg}_{kkk+3});',
+                                                    writer(f'*({x4type}*)&{Ashm}[((threadIdx.x - {ii}) % {atom.m}) * {ktile} + {kkk * atom.m}] = make_{x4type}({Areg}_{kkk}, {Areg}_{kkk+1}, {Areg}_{kkk+2}, {Areg}_{kkk+3});',
                                                         Ashm,
                                                         accesses=(Access(Effect.WRITE, MemSpace.SHARED, Ashm),))
                                             writer('__syncwarp();', accesses=())
