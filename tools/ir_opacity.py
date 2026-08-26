@@ -71,13 +71,33 @@ text_site: Dict[str, Counter] = {}
 
 
 def _classify(stmt):
-    """`raw*` is too coarse: a `rawexpr` has an SSA result and a declared
-    effect, so a pass can reorder around it and reuse it; a `rawstmt` with
-    `Effect.UNKNOWN` can do neither."""
+    """`raw*` is too coarse, and so was the two-way split that replaced it.
+
+    Three questions, not one.  *Can a pass reason about this as code?*  No, for
+    anything raw.  *Does it pin everything around it?*  Only if its effect is
+    `UNKNOWN` or it declares no accesses while claiming one.  *Does it cost
+    anything at all?*  A comment has `Effect.NONE`, no accesses and
+    `movable=True`: it constrains nothing, reorders freely and lowers to a line
+    the compiler discards.
+
+    Counting comments as opaque put `compute/__init__.py:gen_ir` at the head of
+    the work list with 1092 nodes, 23% of everything -- and rewriting that site
+    would have bought exactly nothing, because the nodes it emits are the
+    `sink.Comment(self.__str__())` on line 19.  Corpus-wide that is 686 of 4735
+    raw nodes, 14.5%, all inert.
+
+    So `inert` is its own bucket and does not count against the migration.  Of
+    what remains, `blocking` is what a scheduler cannot move across and
+    `declared` is what it can.
+    """
     if stmt.op not in ('rawstmt', 'rawexpr', 'rawblock'):
         return 'structured'
-    if bool(stmt.effect & Effect.UNKNOWN) or not stmt.accesses:
-        return 'opaque'
+    if stmt.effect & Effect.UNKNOWN:
+        return 'blocking'
+    if not stmt.accesses:
+        if stmt.effect == Effect.NONE and stmt.movable:
+            return 'inert'
+        return 'blocking'
     return 'declared'
 
 
@@ -184,26 +204,28 @@ def main(argv):
 
     if want_cases:
         print(f'{"case":34s} {"arch":8s} {"total":>7s} '
-              f'{"opaque":>14s} {"declared":>14s} {"structured":>14s}')
+              f'{"blocking":>14s} {"declared":>14s} {"inert":>14s} '
+              f'{"structured":>14s}')
         for name, arch, c in rows:
             t = sum(c.values())
             if t == 0:
                 continue
             cells = [f'{c[k]:6d} ({100 * c[k] / t:4.1f}%)'
-                     for k in ('opaque', 'declared', 'structured')]
+                     for k in ('blocking', 'declared', 'inert', 'structured')]
             print(f'{name:34s} {arch:8s} {t:7d} '
-                  f'{cells[0]:>14s} {cells[1]:>14s} {cells[2]:>14s}')
+                  f'{cells[0]:>14s} {cells[1]:>14s} {cells[2]:>14s} '
+                  f'{cells[3]:>14s}')
         print()
 
     t = sum(total.values())
-    raw = total['opaque'] + total['declared']
+    raw = total['blocking'] + total['declared'] + total['inert']
     lt = sum(lowered.values()) or 1
     print(f'corpus: {len(cases)} cases x {len(TARGETS)} targets, '
           f'{len(cases) * len(TARGETS) - len(failed)} generated, '
           f'{len(failed)} failed')
     print(f'{"":14s}{"constructed":>22s}{"lowered":>22s}')
     print(f'  {"nodes":11s} {t:9d}{"":12s} {lt:9d}')
-    for k in ('structured', 'declared', 'opaque'):
+    for k in ('structured', 'declared', 'inert', 'blocking'):
         print(f'  {k:11s} {total[k]:9d} ({100 * total[k] / t:5.1f}%) '
               f'{lowered[k]:9d} ({100 * lowered[k] / lt:5.1f}%)')
     print(f'  raw by op (constructed)  {dict(by_op)}')
@@ -212,7 +234,7 @@ def main(argv):
               + ', '.join(f'{n}/{b} ({e})' for n, b, e in failed))
 
     if want_sites:
-        lraw = lowered['opaque'] + lowered['declared']
+        lraw = lowered['blocking'] + lowered['declared'] + lowered['inert']
         print()
         print('raw nodes that REACH CODEGEN, by emitting site '
               '-- this is the work left:')
