@@ -146,8 +146,12 @@ def supports(threads, dtype, sparse) -> bool:
     return threads == 32 and dtype in (Datatype.F32, Datatype.F64) and not sparse
 
 
-def shmsize(stages):
-    atom = ATOM
+def shmsize(stages, dtype):
+    atom = {
+        Datatype.F32: INSTRS[1],
+        Datatype.F64: INSTRS[2]
+    }[dtype]
+
     threads = 32
     aregs = (atom.m * atom.k) // threads
     bregs = (atom.n * atom.k) // threads

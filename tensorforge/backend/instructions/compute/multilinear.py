@@ -656,5 +656,5 @@ class MultilinearInstruction(ComputeInstruction):
 
     def temp_shmem(self):
         if self._is_matmul() and self._context.get_vm().get_hw_descr().vendor in ['nvidia']:
-            return nvidia.shmsize(1)
+            return nvidia.shmsize(1, self._idest.datatype)
         return 0
