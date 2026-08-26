@@ -45,12 +45,17 @@ CASES = Path(__file__).resolve().parent / "cases"
 #: (`NAME` is `gemm_sparse_band_B`; the snapshot goes by that.)
 SPARSE_CASE = "slicing/sparsity_band.py"
 
-#: `float v0 = glb_m2[0 + threadIdx.x * 1];`
+#: `float v23_lin = glb_m2[0 + threadIdx.x * 1];`
+#:
+#: The temporary used to be `v0`, named by the loader.  It is a PIR value now,
+#: so the name comes from the shared allocator and carries the builder's hint:
+#: `v23_lin`.  Only the spelling moved -- the fill this test checks is the same
+#: two statements in the same order.
 _READ = re.compile(
-    r"^\s*\w+\s+(?P<tmp>v\d+)\s*=\s*(?P<src>\w+)\[(?P<base>\d+)\s*\+\s*"
+    r"^\s*\w+\s+(?P<tmp>v\d+\w*)\s*=\s*(?P<src>\w+)\[(?P<base>\d+)\s*\+\s*"
     r"threadIdx\.x\s*\*\s*(?P<vec>\d+)\]\s*;", re.M)
-#: `r1[0] = v0;`
-_WRITE = re.compile(r"^\s*(?P<reg>r\d+)\[(?P<slot>\d+)\]\s*=\s*(?P<tmp>v\d+)\s*;",
+#: `r1[0] = v23_lin;`
+_WRITE = re.compile(r"^\s*(?P<reg>r\d+)\[(?P<slot>\d+)\]\s*=\s*(?P<tmp>v\d+\w*)\s*;",
                     re.M)
 
 

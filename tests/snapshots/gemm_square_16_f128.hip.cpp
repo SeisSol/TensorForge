@@ -86,41 +86,39 @@ __launch_bounds__(256)
             }
           }
           __float128 r1[2]{};
-          {
-            // r1 = load{g>r}(glb_m2);
-            __float128 v0 = glb_m2[0 + threadIdx.x * 1];
-            r1[0] = v0;
-            __float128 v2 = glb_m2[2 + threadIdx.x * 1];
-            r1[1] = v2;
-          }
+          // r1 = load{g>r}(glb_m2);
+          __float128 v23_lin = glb_m2[0 + threadIdx.x * 1];
+          r1[0] = v23_lin;
+          __float128 v24_lin = glb_m2[2 + threadIdx.x * 1];
+          r1[1] = v24_lin;
           // wait(r0 = load{g>r}(glb_m1););
           // wait(r1 = load{g>r}(glb_m2););
           __float128 r2[2]{};
           // r2 = +(r0 * r1) + None
           // [(0, 2), (0, 2)] [(0, 2)]
           auto& ir2 = r2;
-          __float128 v24_data = r0[0];
-          __float128 v25_data = r0[1];
-          __float128 v26_acc{};
-          __float128 v27_acc{};
-          __float128 v28_lin = r1[0];
-          v26_acc += ((tensorforge::broadcast<2, 1, 0>(v28_lin)) * v24_data);
-          v26_acc += ((tensorforge::broadcast<2, 1, 1>(v28_lin)) * v25_data);
-          __float128 v33_lin = r1[1];
-          v27_acc += ((tensorforge::broadcast<2, 1, 0>(v33_lin)) * v24_data);
-          v27_acc += ((tensorforge::broadcast<2, 1, 1>(v33_lin)) * v25_data);
-          ir2[0] = v26_acc;
-          ir2[1] = v27_acc;
+          __float128 v26_data = r0[0];
+          __float128 v27_data = r0[1];
+          __float128 v28_acc{};
+          __float128 v29_acc{};
+          __float128 v30_lin = r1[0];
+          v28_acc += ((tensorforge::broadcast<2, 1, 0>(v30_lin)) * v26_data);
+          v28_acc += ((tensorforge::broadcast<2, 1, 1>(v30_lin)) * v27_data);
+          __float128 v35_lin = r1[1];
+          v29_acc += ((tensorforge::broadcast<2, 1, 0>(v35_lin)) * v26_data);
+          v29_acc += ((tensorforge::broadcast<2, 1, 1>(v35_lin)) * v27_data);
+          ir2[0] = v28_acc;
+          ir2[1] = v29_acc;
           // glb_m0 = store{r>g}(r2);
           #pragma unroll
-          for (int32_t v41_i0 = 0; v41_i0 < 1; ++v41_i0) {
-            int32_t v50_lead = v3_lead + (v41_i0 * 2);
+          for (int32_t v43_i0 = 0; v43_i0 < 1; ++v43_i0) {
+            int32_t v52_lead = v3_lead + (v43_i0 * 2);
             #pragma unroll
-            for (int32_t v42_i1 = 0; v42_i1 < 2; ++v42_i1) {
-              int32_t v43_a = v41_i0 + v42_i1;
-              __float128 v45_data = r2[(v41_i0 + v42_i1)];
-              int32_t v52_a = v50_lead + (v42_i1 * 2);
-              glb_m0[v52_a] = v45_data;
+            for (int32_t v44_i1 = 0; v44_i1 < 2; ++v44_i1) {
+              int32_t v45_a = v43_i0 + v44_i1;
+              __float128 v47_data = r2[(v43_i0 + v44_i1)];
+              int32_t v54_a = v52_lead + (v44_i1 * 2);
+              glb_m0[v54_a] = v47_data;
             }
           }
           ;

@@ -1018,6 +1018,13 @@ class Symbol:
           # carries its `extern` name; it stops being the same on the commit
           # that drops the name, which is the point.
           writer.store(buf, variable, index // self.num_threads)
+        elif not isinstance(variable, (str, int, float)):
+          # The value came from a structured read, so it has no C++ name yet
+          # and may never get one -- the emitter decides whether to inline it
+          # into this very statement.  Formatting it in at build time would
+          # take that decision away and print a name that was never declared.
+          writer.access_stmt(f'{access} = {{0}};', self, Effect.WRITE,
+                             args=(variable,), fmt=True)
         else:
           writer.access_stmt(f'{access} = {variable};', self, Effect.WRITE, args=_operands(variable, addrs))
       else:

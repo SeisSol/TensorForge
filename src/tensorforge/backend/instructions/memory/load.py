@@ -387,8 +387,15 @@ class GlbToRegLoader(MemoryInstruction, LoadInstruction):
       for g in [1]: #[4, 2, 1]:
         granularity = self._num_threads * g
         for i in range(start, total_size, granularity):
-          self._src.load_linear(writer, self._context, f'v{i}', i, g)
-          self._dest.store_linear(writer, self._context, f'v{i}', i, g,
+          # The staging temporary was a C++ name, `v{i}`, declared by the read
+          # and consumed by the write one line later.  Passing the value
+          # instead removes the declaration -- and with it the reason the
+          # `{ }` around this instruction has to stay, since `flatten_scopes`
+          # keeps any region whose raw text declares a name.  Those braces
+          # were 427 blocking nodes: an opaque block head makes the async
+          # scheduler drop its state and nothing reorders across one.
+          staged = self._src.load_linear(writer, self._context, None, i, g)
+          self._dest.store_linear(writer, self._context, staged, i, g,
                                   base=self.write_base())
 
         start = (total_size // granularity) * granularity
