@@ -157,21 +157,22 @@ def _bodies(case: str, backend: str, arch: str):
 # go down and must never go up.
 #
 # `square_notrans` is at zero and stays there.  `rectangular` takes the NVIDIA
-# async path, and its 16 break down as
+# async path, and its 14 break down as
 #
 #   3  ptr_manip.py     the `glb_m*` pointer bindings
-#   3  allocate.py      `float r0[36]{}`, `float r1[36]{}`, the `s0` window
+#   1  allocate.py      the `s0` window -- ShrMemAlloc, not RegisterAlloc
 #   5  primitives/      `cuda::pipeline` acquire/commit/wait/release and the
 #                       two `memcpy_async` calls
 #   3  __syncwarp()
 #   1  a comment emitted through `writer(...)` rather than `Comment()`, so it
 #      carries Effect.UNKNOWN where an identical comment two lines away
 #      carries Effect.NONE
+#   1  the store comment on the epilogue, same cause
 #
-# The first six are `allocate.py:gen_ir` and `ptr_manip.py:gen_ir`, which are
-# the top two blocking sites corpus-wide (tools/ir_opacity.py).  Migrating
-# them moves this number to 10 without anyone touching this file.
-STILL_OPAQUE = {"rectangular.py": 16, "square_notrans.py": 0}
+# It was 16 until `RegisterAlloc` started allocating through the builder;
+# the two `float r*[36]{}` declarations are values now.  `ptr_manip.py:gen_ir`
+# is the next three.
+STILL_OPAQUE = {"rectangular.py": 14, "square_notrans.py": 0}
 
 
 # `case` is auto-parametrized across the whole corpus by conftest.

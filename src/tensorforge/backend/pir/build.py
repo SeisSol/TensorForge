@@ -386,7 +386,8 @@ class IRBuilder:
         return v
 
     def alloc(self, elem: Datatype, shape: Sequence[int], space: MemSpace,
-              hint: str = 'buf') -> Value:
+              hint: str = 'buf', extern: str = None,
+              init: str = '') -> Value:
         """Request a buffer *symbolically*.
 
         For registers and scratch: no offset, no address --- the whole-kernel
@@ -418,6 +419,26 @@ class IRBuilder:
         if space == MemSpace.SHARED:
             attrs = self._suballocate(v, elem)
             self._shared_buffers.append(v)
+        if extern is not None:
+            # A name the macro layer owns and other instructions still spell
+            # out as text.  Transitional, and measurably so: with one PIR body
+            # per loop body, 89.8% of buffers have their definition and all
+            # their uses inside one body and need no name at all once the
+            # consumers take the value (tools/buffer_spans.py).  What is left
+            # is the shared arena, its scratch tail, and the tiles of the two
+            # cases that have two batch loops -- things that genuinely outlive
+            # a body.  So this set shrinks per migrated consumer rather than
+            # becoming the permanent way values are addressed.
+            #
+            # `escapes` is not decoration here.  Making the allocation
+            # structured also makes it deletable, and the reads that justify
+            # it are still raw text the IR cannot see, so DCE removes the
+            # declaration and leaves the uses referring to a name that no
+            # longer exists.  That produces a corpus which still renders and
+            # no longer compiles, which the snapshot harness cannot catch.
+            attrs = attrs + (('extern', extern), ('escapes', True))
+        if init:
+            attrs = attrs + (('init', init),)
         self._emit_op(Op.ALLOC, (v,), (), pure=False, movable=False,
                       attrs=attrs)
         return v

@@ -383,7 +383,11 @@ class Emitter:
                 w(f'{t.elem.ctype()}* {self.name(v)} = &{arena}[{off}];')
                 return
             qual = {MemSpace.CONSTANT: 'const '}.get(t.space, '')
-            w(f'{qual}{t.elem.ctype()} {self.name(v)}[{t.volume}];')
+            extern = s.attr('extern')
+            if extern is not None:
+                self.bind(v, extern)
+            w(f'{qual}{t.elem.ctype()} {self.name(v)}[{t.volume}]'
+              f'{s.attr("init", "")};')
             return
 
         if op == Op.LOAD:

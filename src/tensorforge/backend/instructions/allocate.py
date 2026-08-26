@@ -6,6 +6,7 @@ from tensorforge.common.context import Context
 from tensorforge.backend.symbol import Symbol
 from tensorforge.common.basic_types import GeneralLexicon
 from tensorforge.backend.writer import Writer
+from tensorforge.backend.pir.core import MemSpace
 from .abstract_instruction import AbstractInstruction
 
 
@@ -34,8 +35,22 @@ class RegisterAlloc(AbstractInstruction):
           real_literal = self._vm.get_real_literal()
           init_values = ', '.join([datatype.literal(self._init_value)] * self._dest.obj.size)
           init_values_list = f' = {{{init_values}}}'
-      result = f'{datatype} {self._dest.obj.name}[{self._dest.obj.size}]{init_values_list};'
-      writer(result)
+      # Structured: the tile becomes a value the body can reason about
+      # instead of a line of text that conflicts with everything.  The name
+      # is still the macro layer's, because the consumers still spell it out
+      # -- see IRBuilder.alloc's `extern`, and the count of buffers that will
+      # stop needing it once symbol.py takes the value instead.
+      #
+      # `gen_ir` is already the inside of `through_pir`, so the sink is the
+      # builder.  On the unmigrated path it is the Writer, which has no
+      # structured alloc, so that path keeps emitting the line.
+      if hasattr(writer, 'alloc') and callable(getattr(writer, 'alloc')):
+        writer.alloc(datatype, (self._dest.obj.size,), MemSpace.REGISTER,
+                     hint=self._dest.obj.name, extern=self._dest.obj.name,
+                     init=init_values_list)
+      else:
+        writer(f'{datatype} {self._dest.obj.name}'
+               f'[{self._dest.obj.size}]{init_values_list};')
 
   def __str__(self) -> str:
     return f'{self._dest.obj.name} = alloc_regs [{self._dest.obj.size}];'
