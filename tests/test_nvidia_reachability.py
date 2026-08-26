@@ -43,7 +43,7 @@ import pytest
 
 from harness import reachability
 
-PRIMITIVES = (Path(__file__).parent.parent / "tensorforge" / "backend" /
+PRIMITIVES = (Path(__file__).parent.parent / "src" / "tensorforge" / "backend" /
               "instructions" / "compute" / "primitives")
 
 MODULES = ["nvidia"]

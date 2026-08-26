@@ -27,7 +27,7 @@ from tensorforge.backend.instructions.compute.primitives import amd
 from tensorforge.common.basic_types import Datatype
 from tensorforge.common.context import Context
 
-HIP_H = (Path(__file__).parent.parent / "tensorforge" / "include" /
+HIP_H = (Path(__file__).parent.parent / "src" / "tensorforge" / "include" /
          "tensorforge_device" / "hip.h")
 
 ARCHS = ["gfx900", "gfx906", "gfx908", "gfx90a", "gfx940", "gfx942", "gfx950",

@@ -44,7 +44,7 @@ _CACHE_ROOT = Path(os.environ.get(
 ))
 
 # tensorforge_aux.{cu,cpp} sit here; the build needs the include dir.
-TENSORFORGE_INCLUDE = HERE.parent / "tensorforge" / "include"
+TENSORFORGE_INCLUDE = HERE.parent / "src" / "tensorforge" / "include"
 
 
 # ----------------------------------------------------------------------

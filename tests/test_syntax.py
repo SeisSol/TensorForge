@@ -64,7 +64,7 @@ def test_generated_kernel_is_well_formed(path):
 # The shim is a copy of a C++ fact, and copies drift.
 # --------------------------------------------------------------------------
 
-INCLUDE = Path(__file__).resolve().parent.parent / "tensorforge" / "include"
+INCLUDE = Path(__file__).resolve().parent.parent / "src" / "tensorforge" / "include"
 DEVICE_HEADERS = (INCLUDE / "tensorforge_device" / "hip.h",
                   INCLUDE / "tensorforge_device" / "cuda.h")
 

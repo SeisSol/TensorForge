@@ -36,7 +36,7 @@ import pytest
 from tensorforge.backend.instructions.compute.primitives import nvidia
 from tensorforge.common.basic_types import Datatype
 
-ATOM_TYPE = nvidia.ATOM.d
+ATOM_TYPE = Datatype.F32
 
 
 # --------------------------------------------------------------------------- #
@@ -61,7 +61,7 @@ def test_a_different_operand_type_is_turned_away():
     operand type against it, so an f64 case would emit
     `mma.sync...f32.tf32.tf32.f32` over doubles.  Quietly wrong is worse than
     loudly unsupported."""
-    other = Datatype.F64 if ATOM_TYPE != Datatype.F64 else Datatype.F32
+    other = Datatype.I64
     assert not nvidia.supports(32, other, sparse=None)
 
 
@@ -115,7 +115,7 @@ def test_the_switch_is_off():
 
 def test_a_case_that_takes_the_path_emits_the_instruction(enabled):
     source = _generate(CASE_THAT_TAKES_THE_PATH)
-    assert nvidia.ATOM.name in source, (
+    assert nvidia.INSTRS[1].name in source, (
         "the case no longer reaches the MMA path; pick another one")
 
 
@@ -124,7 +124,7 @@ def test_the_same_case_still_generates_when_the_gate_says_no(enabled,
     monkeypatch.setattr(nvidia, "supports", lambda *a, **k: False)
     source = _generate(CASE_THAT_TAKES_THE_PATH)
     assert source, "generation produced nothing"
-    assert nvidia.ATOM.name not in source, "the gate was not consulted"
+    assert nvidia.INSTRS[1].name not in source, "the gate was not consulted"
 
 
 # --------------------------------------------------------------------------- #

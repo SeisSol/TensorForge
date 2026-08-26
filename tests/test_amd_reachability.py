@@ -26,7 +26,7 @@ import pytest
 
 from harness import reachability
 
-AMD = (Path(__file__).parent.parent / "tensorforge" / "backend" /
+AMD = (Path(__file__).parent.parent / "src" / "tensorforge" / "backend" /
        "instructions" / "compute" / "primitives" / "amd")
 
 #: Modules of the package, in dependency order.  Reachability is computed over
