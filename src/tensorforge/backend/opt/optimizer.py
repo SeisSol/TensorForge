@@ -24,6 +24,7 @@ from .mem_region_allocation import MemoryRegionAllocation
 from .memmove import MoveLoads
 from .pipeline import Pipeline
 from .shr_mem_analyzer import ShrMemOpt
+from .wrap import WrapLoads
 from .sync_block import SyncThreadsOpt
 
 
@@ -60,6 +61,20 @@ class OptimizationStage:
         'MoveLoads',
         lambda pc, instrs: MoveLoads(pc.context, instrs),
         scope=PassScope.PER_REGION))
+
+    # Slot-granular prefetch.  Whole nest, like Pipeline: the peeled transfer
+    # lands outside the loop.  Runs after MoveLoads, which splits the transfer
+    # from its wait -- this pass moves the transfer and leaves the wait where
+    # the consumer is -- and before Pipeline, so a body it has already wrapped
+    # is not also rotated.
+    #
+    # Off by default.
+    pm.add(LegacyTransform(
+        'WrapLoads',
+        lambda pc, instrs: WrapLoads(
+            pc.context, instrs,
+            distance=getattr(opts, 'wrap_distance', 1)),
+        enabled=lambda pc: getattr(opts, 'enable_wrap_loads', False)))
 
     # Software pipelining, one pass where there used to be two (MultiBuffer
     # and PtrPipe were the same transform at two granularities).  Whole nest:

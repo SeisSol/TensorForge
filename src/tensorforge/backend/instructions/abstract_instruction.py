@@ -192,9 +192,28 @@ class AbstractInstruction(ABC):
 
   @classmethod
   @contextmanager
-  def shared_body(cls, context, writer: Writer):
+  def shared_body(cls, context, writer: Writer, scratch: int = 0):
+    """Open one PIR body that several instructions build into.
+
+    ``scratch`` is the tail ShrMemOpt reserved, and it has to be passed in
+    rather than derived: a body has no idea which instructions will join it,
+    and an instruction that joins one loses its own ``through_pir`` call and
+    with it the budget that call would have set up.  Without this a merged
+    body rejects every shared allocation inside it, which is `nvidia.matmul`
+    and so most of the tensor-core path.
+
+    The reservation is the *max* over the members, matching
+    ``BatchLoop.temp_shmem()``, because the members run in sequence and reuse
+    the tail.  ``through_pir`` keeps that true by giving each member its own
+    ``scratch_scope``, so one member's buffers are dead before the next
+    member's are placed.  If a future scheduler interleaves members, that
+    assumption is what breaks, and it breaks loudly: the scope's high-water
+    mark is checked against the budget.
+    """
     builder = pir.IRBuilder(fptype=context.fp_type, context=context,
-                            alloc=getattr(writer, 'alloc', None))
+                            alloc=getattr(writer, 'alloc', None),
+                            scratch=(('tempShrMem', scratch) if scratch
+                                     else None))
     cls._shared_body.append(builder)
     try:
       yield builder
@@ -217,7 +236,14 @@ class AbstractInstruction(ABC):
       return
 
     if self._shared_body:
-      build(self._shared_body[-1])      # join the enclosing body
+      # Join the enclosing body, but in a scratch scope of this instruction's
+      # own: the shared budget is the max over the members, not the sum, so a
+      # member's buffers have to be dead before the next member places its
+      # own.  Without the scope they accumulate and the second matmul in a
+      # body overflows a tail sized for one.
+      builder = self._shared_body[-1]
+      with builder.scratch_scope():
+        build(builder)
       return
 
     # The scratch tail this instruction declared to ShrMemOpt, so that a

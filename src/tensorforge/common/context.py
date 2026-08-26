@@ -13,7 +13,9 @@ class Options:
                enable_sync_block_opt=True,
                enable_pipeline=False,
                enable_multibuffer=False,
-               pipeline_depth=2):
+               pipeline_depth=2,
+               enable_wrap_loads=False,
+               wrap_distance=1):
     self.exact_contraction_length: bool = exact_contraction_length
     self.align_shr_mem: bool = align_shr_mem
     self.enable_sync_block_opt = enable_sync_block_opt
@@ -27,6 +29,12 @@ class Options:
     self.enable_pipeline = enable_pipeline
     self.enable_multibuffer = enable_multibuffer
     self.pipeline_depth = pipeline_depth
+    # Slot-granular prefetch: move a register transfer `wrap_distance` compute
+    # slots ahead of its consumer, wrapping to the previous iteration when that
+    # runs off the front of the body.  One buffer copy for any distance up to
+    # n - 1; see backend/opt/wrap.py.
+    self.enable_wrap_loads = enable_wrap_loads
+    self.wrap_distance = wrap_distance
 
 
 class Context:

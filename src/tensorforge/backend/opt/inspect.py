@@ -185,6 +185,9 @@ def verify(instrs: Sequence[AbstractInstruction],
                 f'{type(instr).__name__} does not describe its data flow; '
                 f'passes must treat it as opaque'))
 
+        # -- 5b. a prefetch for the next element, left under the flag guard
+        diags.extend(_check_guarded_prefetch(instr, index))
+
         # -- 6. recurse into regions, tightening the barrier limit
         inner_limit = min(max_barrier_scope, instr.uniform_scope())
         for region in instr.regions():
@@ -201,6 +204,49 @@ def verify(instrs: Sequence[AbstractInstruction],
     if check_offsets:
         diags.extend(_check_shared_aliasing(instrs))
     diags.extend(_check_async_depth(instrs))
+    return diags
+
+
+def _check_guarded_prefetch(instr: AbstractInstruction,
+                            index: Optional[int]) -> List['Diagnostic']:
+    """A transfer for element ``k + 1`` must not sit under the element guard.
+
+    The batch loop wraps its body in ``if (flags[batchId0])``, a runtime mask
+    over individual elements.  A transfer addressed from a *lookahead* index is
+    issued in iteration ``k`` for element ``k + 1``, so skipping element ``k``
+    skips the prefetch, and iteration ``k + 1`` reads whatever the iteration
+    before that left in the buffer.  Nothing crashes; the numbers are wrong for
+    every element after the first masked one.
+
+    ``BatchLoop.mark_unguarded`` lifts instructions out of the guard, but only
+    a *prefix* of the region -- the guard is one contiguous block -- and the
+    slot-granular prefetch belongs mid-body, which is not a prefix.  So this is
+    reported rather than fixed: closing it needs either a second unguarded
+    region after the guard or a predicated transfer, and until then a caller
+    enabling wrap-around on a section that passes a flags array should know.
+    """
+    from tensorforge.backend.instructions.batch_loop import BatchLoop
+    from tensorforge.backend.instructions.ptr_manip import GetElementPtr
+
+    if not isinstance(instr, BatchLoop):
+        return []
+    unguarded = getattr(instr, '_unguarded', set())
+    ahead = set()
+    diags: List['Diagnostic'] = []
+    for inner in instr.region:
+        if isinstance(inner, GetElementPtr):
+            offset = inner._batch_offset
+            if isinstance(offset, int) and offset > 0:
+                ahead.update(id(d) for d in inner.defs())
+            continue
+        if id(inner) in unguarded:
+            continue
+        if any(id(u) in ahead for u in inner.uses()):
+            diags.append(Diagnostic(
+                'warning', index,
+                f'{type(inner).__name__} prefetches the next element from '
+                f'inside the per-element flag guard; a masked element skips '
+                f'it and the next iteration reads a stale buffer'))
     return diags
 
 

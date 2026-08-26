@@ -52,7 +52,21 @@ class Transfer(NamedTuple):
     index: int              # position in the body
     slot: int               # how many compute slots precede it
     first_use_slot: Optional[int]   # slot of the first consumer, if any
+    last_use_slot: Optional[int]    # slot of the last consumer, if any
     shared: bool            # destination is shared memory, not a register
+
+    @property
+    def span(self) -> int:
+        """Slots between the first and last consumer of the loaded value.
+
+        A buffer read in one slot can be refilled in the next.  One read in
+        slot 1 and another in slot 3 pins the buffer for three slots, and the
+        wrapped write must land after the *last* of them or it clobbers the
+        value the second read still wants.  The span is what that costs.
+        """
+        if self.first_use_slot is None or self.last_use_slot is None:
+            return 0
+        return self.last_use_slot - self.first_use_slot
 
     @property
     def distance(self) -> Optional[int]:
@@ -67,12 +81,24 @@ class Transfer(NamedTuple):
             return False
         return self.first_use_slot - d < 0
 
+    def free_distance(self, n: int) -> int:
+        """Largest ``d`` this transfer can take without a second copy."""
+        return max(n - 1 - self.span, 0)
+
     @staticmethod
-    def copies(d: int, n: int) -> int:
-        """Buffer copies needed at distance ``d`` in a body of ``n`` slots."""
+    def copies(d: int, n: int, span: int = 0) -> int:
+        """Buffer copies needed at distance ``d`` in a body of ``n`` slots.
+
+        The value is written ``d`` slots before its first read and stays live
+        until its last, so its lifetime is ``d + span + 1`` slots against an
+        initiation interval of ``n``.  With a single consumer this is the
+        ``ceil((d + 1) / n)`` the module docstring gives; with several it is
+        the span that decides, and ignoring it is how a wrapped write ends up
+        overtaking a read that has not happened yet.
+        """
         if n <= 0:
             return 1
-        return -(-(d + 1) // n)
+        return -(-(d + span + 1) // n)
 
 
 class SlotModel:
@@ -111,16 +137,18 @@ class SlotModel:
             if dest is None:
                 self.rejected.append((instr, 'no destination symbol'))
                 continue
-            use = self._first_use(index, dest)
+            uses = self._uses(index, dest)
             self.transfers.append(Transfer(
                 load=instr,
                 index=index,
                 slot=slot_of[index],
-                first_use_slot=None if use is None else slot_of[use],
+                first_use_slot=None if not uses else slot_of[uses[0]],
+                last_use_slot=None if not uses else slot_of[uses[-1]],
                 shared=isinstance(instr, AbstractShrMemWrite)))
         return self
 
-    def _first_use(self, after: int, sym) -> Optional[int]:
+    def _uses(self, after: int, sym) -> List[int]:
+        out = []
         for index in range(after + 1, len(self._body)):
             instr = self._body[index]
             if isinstance(instr, LoadWait):
@@ -128,8 +156,8 @@ class SlotModel:
                 # completion, not consumption
                 continue
             if any(u is sym for u in instr.uses()):
-                return index
-        return None
+                out.append(index)
+        return out
 
     # ------------------------------------------------------------------ #
 
@@ -139,12 +167,20 @@ class SlotModel:
 
     @property
     def free_distance(self) -> int:
-        """Largest ``d`` that still needs one copy per buffer."""
-        return max(self.n - 1, 0)
+        """Largest ``d`` every transfer here can take at one copy.
+
+        Bounded by the widest consumer span, not by ``n - 1``: a buffer read in
+        slots 1 and 3 gives back two slots of the distance it could otherwise
+        have had.
+        """
+        if not self.transfers:
+            return max(self.n - 1, 0)
+        return min(t.free_distance(self.n) for t in self.transfers)
 
     def cost(self, d: int) -> Dict[str, int]:
         """What distance ``d`` costs this body, in copies and wrapped loads."""
-        c = Transfer.copies(d, self.n)
+        c = max((Transfer.copies(d, self.n, t.span) for t in self.transfers),
+                default=Transfer.copies(d, self.n))
         return {
             'copies': c,
             'wrapped': sum(1 for t in self.transfers if t.wraps_at(d, self.n)),
@@ -160,7 +196,9 @@ class SlotModel:
             name = getattr(dest, 'name', '?')
             where = 'shr' if t.shared else 'reg'
             lines.append(f'  {name} [{where}] slot {t.slot} -> '
-                         f'{t.first_use_slot} (distance {t.distance})')
+                         f'{t.first_use_slot}..{t.last_use_slot} '
+                         f'(distance {t.distance}, span {t.span}, '
+                         f'free {t.free_distance(self.n)})')
         return '\n'.join(lines)
 
 

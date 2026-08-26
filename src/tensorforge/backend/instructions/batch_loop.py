@@ -247,9 +247,25 @@ class BatchLoop(AbstractInstruction):
 
         The loop variable does not exist before the loop, so a peeled iteration
         cannot name it.  The generator binds ``batchId_start`` ahead of the
-        loop for exactly this.
+        loop, and ``batchId1`` beside it as ``batchId_start`` clamped into
+        range -- this returns the clamped one, and the distinction is not
+        cosmetic.
+
+        ``batchId_start`` is ``threadIdx.y + blockDim.y * blockIdx.x``, bounded
+        by the launch geometry and not by the element count.  The grid is sized
+        ``min(occupancy, numElements)`` *blocks* of ``blockDim.y`` rows, so at
+        100 elements and 16 rows the last thread starts at 1599: the threads
+        whose start is past the end are the common case, not the edge.  They
+        never enter the loop, which is why the loop body never noticed --- but
+        a peeled iteration runs *before* the guard, so it dereferences that
+        index unconditionally.  With strided addressing that reads past the
+        batch; with ``Addressing.PTR_BASED`` it reads a pointer past the end of
+        the pointer array and then follows it.
+
+        Clamping sends those threads to element 0, whose value they load and
+        never use.
         """
-        return f'{GeneralLexicon.BATCH_ID_NAME}_start'
+        return f'{GeneralLexicon.BATCH_ID_NAME}1'
 
     def _num_elements(self) -> str:
         return f'{GeneralLexicon.NUM_ELEMENTS}{self._section_index}'
@@ -308,7 +324,9 @@ class BatchLoop(AbstractInstruction):
         with writer.If(self._flag_guard(writer)):
             if os.environ.get('TF_IR_WIDE'):
                 # one body for every instruction of the region
-                with AbstractInstruction.shared_body(self._context, writer):
+                budget = max((i.temp_shmem() for i in guarded), default=0)
+                with AbstractInstruction.shared_body(self._context, writer,
+                                                     scratch=budget):
                     for instr in guarded:
                         instr.gen_code(writer)
             else:
