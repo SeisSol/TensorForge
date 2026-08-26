@@ -1,6 +1,4 @@
-// SPDX-FileCopyrightText: 2026 SeisSol Group
-//
-// SPDX-License-Identifier: MIT
+// === base name ===
 kernel_b5ac3bb66a
 
 // === header ===
