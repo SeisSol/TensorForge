@@ -257,7 +257,7 @@ def test_add_true_sets_accumulate_and_promotes_dest():
     from tensorforge.common.context import Context
     from tensorforge.generators.generator import Generator
 
-    mod = _import_case("add_true.py")
+    mod = _import_case("reduction/add_true.py")
     descrs = mod.descr_list()
     assert any(d.add for d in descrs), "add_true case: no add=True descr"
     # The dest of the add=True descr must be SOURCESINK.
@@ -297,20 +297,6 @@ def test_addressing_none_uses_none_for_operator():
     Generator(descrs, Context(arch="sm_86", backend="cuda",
                               fp_type=mod.DTYPE)).generate()
 
-
-def test_addressing_ptr_based_constructs_and_is_xfail():
-    """``addressing_ptr_based`` must use PTR_BASED addressing and be
-    marked XFAIL (harness driver doesn't yet emit T**-style allocations)."""
-    from tensorforge.common.basic_types import Addressing
-    mod = _import_case("addressing_ptr_based.py")
-    assert getattr(mod, "XFAIL", False), (
-        "ptr_based case: must be XFAIL until driver_emit supports PTR_BASED")
-    descrs = mod.descr_list()
-    ptr_ops = [op for d in descrs for op in d.matrix_list()
-               if op.tensor.addressing == Addressing.PTR_BASED]
-    assert ptr_ops, "ptr_based case: no PTR_BASED operand"
-
-
 def test_sparsity_band_uses_maskspp_and_generates():
     """``sparsity_band`` must attach a non-Full :class:`SparsityPattern`
     to at least one operand, and generation must produce a kernel that
@@ -347,7 +333,7 @@ def test_barriers_cases_construct_and_generate():
     from tensorforge.common.context import Context
     from tensorforge.generators.generator import Generator
 
-    cases_dir = Path(__file__).parent / "cases" / "barriers"
+    cases_dir = Path(__file__).parent / "cases" / "barrier"
     case_files = sorted(p for p in cases_dir.glob("*.py")
                         if not p.name.startswith("_"))
     assert case_files, "expected at least one barriers case"

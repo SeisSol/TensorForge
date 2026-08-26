@@ -51,3 +51,5 @@ class BoundingBox:
 
     def __str__(self):
         return '×'.join(f'{{{l}..{u}}}' for l,u in zip(self._lower, self._upper))
+
+    __repr__ = __str__

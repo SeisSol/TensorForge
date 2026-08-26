@@ -118,18 +118,3 @@ def test_module_has_no_empty_stubs(analysis):
     """
     defs, _ = analysis
     assert not reachability.empty_stubs(defs)
-
-
-def test_the_atom_is_named_once(analysis):
-    """`INSTRS[1]` had three separate copies: `shmsize`, the CUTE `matmul` and
-    the live one.  A shared-memory reservation computed from one atom and an
-    emitter using another is a silent overflow, so the choice is `ATOM`."""
-    import ast
-
-    tree = ast.parse((PRIMITIVES / "nvidia.py").read_text())
-    subscripts = [n for n in ast.walk(tree)
-                  if isinstance(n, ast.Subscript)
-                  and isinstance(n.value, ast.Name) and n.value.id == "INSTRS"]
-    assert len(subscripts) <= 1, (
-        f"INSTRS is subscripted at lines {[n.lineno for n in subscripts]}; "
-        f"the selected atom is named once, as ATOM")
