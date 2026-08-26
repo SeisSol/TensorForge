@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 SeisSol Group
+#
 # SPDX-License-Identifier: MIT
 """Mapping between TensorForge's on-device layout and NumPy arrays.
 

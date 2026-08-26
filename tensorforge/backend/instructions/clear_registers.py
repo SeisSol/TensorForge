@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 SeisSol Group
+#
+# SPDX-License-Identifier: MIT
 from tensorforge.common.context import Context
 from tensorforge.backend.symbol import Symbol, SymbolType
 from tensorforge.backend.writer import Writer

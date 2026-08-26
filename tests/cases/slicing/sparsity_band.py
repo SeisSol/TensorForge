@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 SeisSol Group
+#
 # SPDX-License-Identifier: MIT
 """``C = A @ B`` with a banded sparsity pattern on B.
 

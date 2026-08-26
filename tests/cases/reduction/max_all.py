@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 SeisSol Group
+#
 # SPDX-License-Identifier: MIT
 """``s = max_{i, j} a[i, j]`` — full (all-axis) reduction to a scalar.
 

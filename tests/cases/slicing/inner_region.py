@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 SeisSol Group
+#
 # SPDX-License-Identifier: MIT
 """``C = A[8:24, 8:24] @ B`` — an inner 16x16 window of a 32x32 operand.
 

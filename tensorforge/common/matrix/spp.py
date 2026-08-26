@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 SeisSol Group
+#
+# SPDX-License-Identifier: MIT
 from functools import reduce
 import numpy as np
 

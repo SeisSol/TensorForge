@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 SeisSol Group
+#
 # SPDX-License-Identifier: MIT
 """``C[b] = A[b] @ B[b]`` with :data:`Addressing.PTR_BASED` operands.
 

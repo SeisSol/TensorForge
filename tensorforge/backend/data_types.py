@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 SeisSol Group
+#
+# SPDX-License-Identifier: MIT
 class ShrMemObject:
   def __init__(self, name, size=None, mults_per_block=None):
     self.name = name

@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 SeisSol Group
+#
+# SPDX-License-Identifier: MIT
 from collections import OrderedDict
 from copy import copy
 from tensorforge.common.ordered import OrderedSet

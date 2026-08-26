@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 SeisSol Group
+#
+# SPDX-License-Identifier: MIT
 """Matrix paths with no call site yet.
 
 Unreachable from `matmul()`, and deliberately not deleted: they are

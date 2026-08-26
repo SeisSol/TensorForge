@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 SeisSol Group
+#
+# SPDX-License-Identifier: MIT
 """The MFMA tile catalogue.
 
 What a tile *is* -- its intrinsic, the transpose its A operand needs --

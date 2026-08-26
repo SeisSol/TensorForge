@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 SeisSol Group
+#
+# SPDX-License-Identifier: MIT
 from tensorforge.common.basic_types import GeneralLexicon
 from .lexic import Lexic, Operation
 from tensorforge.backend.writer import MultiBlock

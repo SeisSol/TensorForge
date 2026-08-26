@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 SeisSol Group
+#
 # SPDX-License-Identifier: MIT
 """``D[20:35, 12] += s * t[20:35, 12]`` --- a window across two register blocks.
 

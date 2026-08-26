@@ -1,4 +1,8 @@
-#pragma once
+// SPDX-FileCopyrightText: 2026 SeisSol Group
+//
+// SPDX-License-Identifier: MIT
+#ifndef SEISSOL_TENSORFORGE_INCLUDE_TENSORFORGE_DEVICE_CUDA_H_
+#define SEISSOL_TENSORFORGE_INCLUDE_TENSORFORGE_DEVICE_CUDA_H_
 
 #include <optional>
 #include <type_traits>
@@ -155,3 +159,4 @@ __device__ __forceinline__ void splitFloatTF32(uint32_t &upper, uint32_t &lower,
 }
 
 } // namespace tensorforge
+#endif // SEISSOL_TENSORFORGE_INCLUDE_TENSORFORGE_DEVICE_CUDA_H_

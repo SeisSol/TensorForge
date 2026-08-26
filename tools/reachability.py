@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 SeisSol Group
+#
+# SPDX-License-Identifier: MIT
 """What in the AMD package is reachable from its single entry point?
 
 `multilinear.py` calls exactly one name: `amd.matmul`.  Anything not reachable

@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 SeisSol Group
+#
 # SPDX-License-Identifier: MIT
 """``B[i, j] = exp(A[i, j])`` — single-unary-op ElementwiseDescr.
 

@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 SeisSol Group
+#
+# SPDX-License-Identifier: MIT
 """Broadcast width selection.
 
 Strategy first, then narrowed to what the runtime defines.  The split is

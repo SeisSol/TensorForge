@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 SeisSol Group
+#
+# SPDX-License-Identifier: MIT
 from .memory import MemorySpace
 from ..type import Datatype
 import numpy as np

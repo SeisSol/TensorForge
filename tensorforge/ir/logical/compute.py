@@ -1,7 +1,6 @@
-# for most of these:
-# load args
-# execute
-# store result
+# SPDX-FileCopyrightText: 2026 SeisSol Group
+#
+# SPDX-License-Identifier: MIT
 
 # TODO: handle memlayout changes more properly
 

@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 SeisSol Group
+#
+# SPDX-License-Identifier: MIT
 """Which fmacdpp symbols does the generator actually put in the source,
 and does the runtime define each of them for that target?"""
 import importlib.util, re

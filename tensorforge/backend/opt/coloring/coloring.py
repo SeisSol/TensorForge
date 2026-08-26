@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 SeisSol Group
+#
+# SPDX-License-Identifier: MIT
 from copy import copy
 from typing import List, Dict, Set, Union
 from .vertex import Vertex

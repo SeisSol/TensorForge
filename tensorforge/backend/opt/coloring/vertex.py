@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 SeisSol Group
+#
+# SPDX-License-Identifier: MIT
 from typing import Set, TypeVar, Generic
 from tensorforge.common.ordered import OrderedSet
 VertexType = TypeVar('VertexType')

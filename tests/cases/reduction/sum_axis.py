@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 SeisSol Group
+#
 # SPDX-License-Identifier: MIT
 """``b[i] = sum_j a[i, j]`` — sum-reduction along axis 1, via ReductionDescr.
 

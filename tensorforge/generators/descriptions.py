@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 SeisSol Group
+#
+# SPDX-License-Identifier: MIT
 import numpy as np
 
 from tensorforge.common.exceptions import GenerationError, InternalError

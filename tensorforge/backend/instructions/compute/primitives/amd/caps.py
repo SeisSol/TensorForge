@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 SeisSol Group
+#
+# SPDX-License-Identifier: MIT
 """What the runtime actually defines.
 
 Mirrors the `#if` guards in `include/tensorforge_device/hip.h`.  This is

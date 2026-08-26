@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 SeisSol Group
+#
+# SPDX-License-Identifier: MIT
 """Consistency checks for the bbox/offset split.  Run from the tensorforge root.
 
 Pure arithmetic --- no codegen, no GPU.  Covers the two invariants the patch

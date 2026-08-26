@@ -1,4 +1,5 @@
-#!/usr/bin/env python3
+# SPDX-FileCopyrightText: 2026 SeisSol Group
+#
 # SPDX-License-Identifier: MIT
 """Capture, for every kernel a codegen run produces, the descriptor list the
 frontend handed the backend.

@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 SeisSol Group
+#
 # SPDX-License-Identifier: MIT
 """``C[i,j] = sum_k A[k,i] * B[k,j]`` with the contraction on the lead axis.
 

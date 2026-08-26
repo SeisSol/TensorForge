@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 SeisSol Group
+#
 # SPDX-License-Identifier: MIT
 """``C = alpha * A @ B + beta * C_in`` with ``alpha=1`` and ``beta=0.5``.
 

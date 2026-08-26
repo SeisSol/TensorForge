@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 SeisSol Group
+#
+# SPDX-License-Identifier: MIT
 """Evaluate a captured descriptor list in NumPy, and lay the tensors out the
 way the generated kernel addresses them (first index fastest)."""
 import json

@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 SeisSol Group
+#
 # SPDX-License-Identifier: MIT
 """``D = A B``, then ``D[:, 0:8] += A0 B0`` and ``D[:, 8:16] += A1 B1``.
 

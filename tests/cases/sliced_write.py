@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 SeisSol Group
+#
 # SPDX-License-Identifier: MIT
 """``D[:, 6:13] = Q[:, 10:13] @ S[10:13, 6:13]`` --- one sliced write, beta=0.
 

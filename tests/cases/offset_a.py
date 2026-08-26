@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 SeisSol Group
+#
 # SPDX-License-Identifier: MIT
 """``C = A_sub @ B`` — both shifts active on A at once, and cancelling.
 

@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 SeisSol Group
+#
+# SPDX-License-Identifier: MIT
 
 from tensorforge.interface import YatetoInterface as yi
 from tensorforge.common.basic_types import Addressing, Datatype, DataFlowDirection

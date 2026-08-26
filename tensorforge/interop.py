@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 SeisSol Group
+#
+# SPDX-License-Identifier: MIT
 def get_cmake_path():
     import os
     mydir = os.path.dirname(os.path.realpath(__file__))

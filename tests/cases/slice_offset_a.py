@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 SeisSol Group
+#
 # SPDX-License-Identifier: MIT
 """``C = A[4:16, :] @ B`` — expressed as a *slicing offset*, not a bbox.
 

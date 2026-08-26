@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 SeisSol Group
+#
+# SPDX-License-Identifier: MIT
 """One function per vendor instruction.
 
 Thin wrappers over the PIR node that carries each instruction.  They

@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 SeisSol Group
+#
 # SPDX-License-Identifier: MIT
 """``C += sum_k A[i, k] * B[k, j]`` — bare :class:`MultilinearDescr`
 with ``add=True``.

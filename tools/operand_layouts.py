@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 SeisSol Group
+#
+# SPDX-License-Identifier: MIT
 """Does the A operand of fmacdpp{step} always arrive at LaneAxis(step, 1)?
 
 If it does, that is an invariant the layouts can *check* -- the first thing

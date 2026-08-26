@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 SeisSol Group
+#
+# SPDX-License-Identifier: MIT
 from tensorforge.common.context import Context
 from tensorforge.backend.scopes import Scopes, Symbol
 from tensorforge.backend.symbol import SymbolType, DataView

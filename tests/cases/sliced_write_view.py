@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 SeisSol Group
+#
 # SPDX-License-Identifier: MIT
 """``D[:, 8:9] = Q[:, 10:13] @ S[10:13, 8:9]`` --- written through a *view*.
 

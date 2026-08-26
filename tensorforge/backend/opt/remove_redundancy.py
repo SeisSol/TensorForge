@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 SeisSol Group
+#
+# SPDX-License-Identifier: MIT
 from typing import List
 from tensorforge.backend.instructions.memory.store import StoreRegToGlb
 from .abstract import AbstractTransformer, Context, AbstractInstruction

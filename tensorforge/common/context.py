@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 SeisSol Group
+#
+# SPDX-License-Identifier: MIT
 from math import ceil
 from tensorforge.common.vm.vm import VM, vm_factory
 from tensorforge.common.basic_types import Datatype

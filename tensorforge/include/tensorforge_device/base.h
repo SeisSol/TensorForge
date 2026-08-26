@@ -1,4 +1,8 @@
-#pragma once
+// SPDX-FileCopyrightText: 2026 SeisSol Group
+//
+// SPDX-License-Identifier: MIT
+#ifndef SEISSOL_TENSORFORGE_INCLUDE_TENSORFORGE_DEVICE_BASE_H_
+#define SEISSOL_TENSORFORGE_INCLUDE_TENSORFORGE_DEVICE_BASE_H_
 
 #include <cmath>
 #include <cstddef>
@@ -113,3 +117,4 @@ template <typename T> struct ReductionOperation<T, Operation::Xor> {
 };
 
 } // namespace tensorforge
+#endif // SEISSOL_TENSORFORGE_INCLUDE_TENSORFORGE_DEVICE_BASE_H_

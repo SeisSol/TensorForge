@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 SeisSol Group
+#
 # SPDX-License-Identifier: MIT
 """``b[i] = max_j a[i, j]`` — max-reduction along axis 1.
 

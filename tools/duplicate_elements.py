@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 SeisSol Group
+#
+# SPDX-License-Identifier: MIT
 """Duplicate output elements, measured without double-wrapping.
 
 `matmul32` calls `matmuldpp` internally, so wrapping the C callback in both

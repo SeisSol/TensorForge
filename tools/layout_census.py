@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 SeisSol Group
+#
+# SPDX-License-Identifier: MIT
 """How many *distinct* register layouts does the generator actually produce?
 
 The choice between a layout algebra and a table of named layouts turns on

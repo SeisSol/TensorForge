@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 SeisSol Group
+#
+# SPDX-License-Identifier: MIT
 
 def dpas(writer, C, B, A, rc, sd):
     # cf. https://github.com/intel/intel-graphics-compiler/blob/master/documentation/visa/instructions/DPAS.md

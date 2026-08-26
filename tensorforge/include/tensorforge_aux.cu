@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 SeisSol Group
+//
+// SPDX-License-Identifier: MIT
 #include "tensorforge_aux.h"
 
 #include <cuda_runtime.h>

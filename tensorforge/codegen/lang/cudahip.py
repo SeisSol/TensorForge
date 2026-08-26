@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 SeisSol Group
+#
+# SPDX-License-Identifier: MIT
 from ..kernel import SingleSourceKernel
 
 class CudaKernel(SingleSourceKernel):

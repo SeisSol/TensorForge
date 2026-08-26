@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 SeisSol Group
+#
+# SPDX-License-Identifier: MIT
 from typing import Tuple, Dict, List
 from tensorforge.common.context import Context
 from tensorforge.common.basic_types import Addressing

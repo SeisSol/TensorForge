@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 SeisSol Group
+#
 # SPDX-License-Identifier: MIT
 """Everything in `primitives/nvidia.py` is reachable, or is listed as not.
 

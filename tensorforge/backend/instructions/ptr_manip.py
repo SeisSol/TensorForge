@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 SeisSol Group
+#
+# SPDX-License-Identifier: MIT
 from .abstract_instruction import AbstractInstruction
 from tensorforge.common.context import Context
 from tensorforge.common.helper import get_extra_offset_name, Addressing

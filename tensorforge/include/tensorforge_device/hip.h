@@ -1,4 +1,8 @@
-#pragma once
+// SPDX-FileCopyrightText: 2026 SeisSol Group
+//
+// SPDX-License-Identifier: MIT
+#ifndef SEISSOL_TENSORFORGE_INCLUDE_TENSORFORGE_DEVICE_HIP_H_
+#define SEISSOL_TENSORFORGE_INCLUDE_TENSORFORGE_DEVICE_HIP_H_
 
 #include <hip/hip_runtime.h>
 
@@ -1073,3 +1077,4 @@ __device__
 }
 
 } // namespace tensorforge
+#endif // SEISSOL_TENSORFORGE_INCLUDE_TENSORFORGE_DEVICE_HIP_H_

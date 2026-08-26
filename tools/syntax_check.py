@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 SeisSol Group
+#
+# SPDX-License-Identifier: MIT
 """Does every generated kernel parse, and does every call in it resolve?
 
 `hipcc -fsyntax-only` for people without hipcc: the `// === kernel ===` section

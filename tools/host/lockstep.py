@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 SeisSol Group
+#
+# SPDX-License-Identifier: MIT
 """Execute a generated CUDA kernel on the host, all lanes, one batch element.
 
 `kernel_eval` interprets one thread.  Shared memory is where threads meet, so

@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 SeisSol Group
+#
+# SPDX-License-Identifier: MIT
 from .spp import SparsityPattern, FullSPP
 from .boundingbox import BoundingBox
 from functools import reduce

@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 SeisSol Group
+#
 # SPDX-License-Identifier: MIT
 """``b[i] = prod_j a[i, j]`` — product reduction via :class:`MulOperator`.
 

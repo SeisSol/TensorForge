@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 SeisSol Group
+#
+# SPDX-License-Identifier: MIT
 from tensorforge.common.matrix.tensor import Tensor, SubTensor
 from tensorforge.common.matrix.boundingbox import BoundingBox
 from tensorforge.common.matrix.spp import ListSPP

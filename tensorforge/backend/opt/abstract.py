@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 SeisSol Group
+#
+# SPDX-License-Identifier: MIT
 from abc import ABC, abstractmethod
 from typing import List
 from tensorforge.common.context import Context

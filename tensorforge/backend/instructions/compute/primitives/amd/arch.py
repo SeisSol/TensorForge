@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 SeisSol Group
+#
+# SPDX-License-Identifier: MIT
 """Architecture predicates: which family a target belongs to.
 
 Nothing here says what a target can *do* -- that is `caps`.  Keeping the

@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 SeisSol Group
+#
+# SPDX-License-Identifier: MIT
 from .lexic import Lexic, lexic_factory
 from .hw_descr import HwDecription, hw_descr_factory
 from math import ceil

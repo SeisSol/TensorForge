@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 SeisSol Group
+#
+# SPDX-License-Identifier: MIT
 from .lexic import Lexic
 from .cuda_lexic import CudaLexic
 from .hip_lexic import HipLexic

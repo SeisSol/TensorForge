@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 SeisSol Group
+#
+# SPDX-License-Identifier: MIT
 """Do the guards actually catch anything?
 
 Every check added here is only worth its runtime if it can fail.  A test that

@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 SeisSol Group
+#
 # SPDX-License-Identifier: MIT
 """``b[i] = min_j a[i, j]`` — min-reduction along axis 1.
 

@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 SeisSol Group
+#
+# SPDX-License-Identifier: MIT
 """Which instruction turns one lane distribution into another.
 
 A pass that wants to combine two values has to know whether they are laid out

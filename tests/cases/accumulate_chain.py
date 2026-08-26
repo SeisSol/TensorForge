@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 SeisSol Group
+#
 # SPDX-License-Identifier: MIT
 """``D = A0 B0 + A1 B1 + A2 B2 + A3 B3`` --- one write, three accumulations.
 

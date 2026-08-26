@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 SeisSol Group
+#
+# SPDX-License-Identifier: MIT
 from typing import List
 from tensorforge.common.exceptions import InternalError
 from tensorforge.backend.symbol import Symbol

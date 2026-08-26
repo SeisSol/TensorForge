@@ -1,45 +1,8 @@
+// SPDX-FileCopyrightText: 2026 SeisSol Group
+//
 // SPDX-License-Identifier: MIT
-//
-// A declaration-only stand-in for the device runtime, so that a plain host
-// compiler can parse a generated kernel.
-//
-// Why this is here at all: nothing in this repository compiled, and that was a
-// hole with a shape.  A padded MFMA tail block handed `0.0f` to a `T &`
-// parameter -- ill-formed C++ that the snapshot corpus, the symbolic
-// equivalence checker and the PIR verifier all passed, because none of them
-// models overload resolution.  A real compiler does, and the intrinsic surface
-// the generator actually emits is small enough to declare:
-//
-//     3248 __builtin_amdgcn_mfma_f32_4x4x1f32     4185 tensorforge::fmacdpp16
-//        9 __builtin_amdgcn_global_atomic_fadd     200 tensorforge::broadcast
-//                                                  126
-//                                                  tensorforge::transpose4x4b32
-//
-// So `g++ -fsyntax-only` over the corpus is affordable, and it decides name
-// lookup, overload resolution, reference binding and argument counts for
-// *every* line the generator wrote --- not for the subset a regex could lift
-// out.
-//
-// What this is not
-// ----------------
-// It is not a HIP or CUDA implementation and must never be included by
-// anything that runs.  Nothing here has a body, the DPP controls are absent,
-// and no statement about *semantics* follows from a file that compiles
-// against it.  It lives under `tests/` rather than beside `hip.h` for exactly
-// that reason: a shim in the shipped include directory is a shim that
-// eventually gets included by accident.
-//
-// It also covers the `// === kernel ===` section only.  The launcher needs
-// the host-side runtime API and, on CUDA, the `<<<>>>` launch syntax, which
-// is not C++; stubbing that far would mean writing a fake runtime, and a fake
-// runtime is a second place for a fact to live.  The launcher is therefore a
-// known gap, named here rather than left to be discovered.
-//
-// Every declaration below that has a counterpart in
-// `include/tensorforge_device/{hip,cuda}.h` is checked against it by
-// `tests/test_syntax.py::test_shim_matches_the_device_headers`.  A copy of a
-// C++ fact is a real cost; a checked copy is a seam.
-#pragma once
+#ifndef SEISSOL_TESTS_SHIM_TENSORFORGE_HOST_H_
+#define SEISSOL_TESTS_SHIM_TENSORFORGE_HOST_H_
 
 #include <algorithm>
 #include <cmath>
@@ -236,3 +199,4 @@ static_assert(sizeof(tensorforge::VectorT<float, 4>) == 4 * sizeof(float),
               "passes through it is now meaningless");
 static_assert(sizeof(tensorforge::VectorT<double, 2>) == 2 * sizeof(double),
               "VectorT lost its vector_size attribute");
+#endif // SEISSOL_TESTS_SHIM_TENSORFORGE_HOST_H_

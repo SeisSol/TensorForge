@@ -1,5 +1,8 @@
-#ifndef TENSORFORGE_INTERNALS_H
-#define TENSORFORGE_INTERNALS_H
+// SPDX-FileCopyrightText: 2026 SeisSol Group
+//
+// SPDX-License-Identifier: MIT
+#ifndef SEISSOL_TENSORFORGE_INCLUDE_TENSORFORGE_AUX_H_
+#define SEISSOL_TENSORFORGE_INCLUDE_TENSORFORGE_AUX_H_
 
 #include <array>
 #include <string>
@@ -26,4 +29,4 @@ std::array<void *, sizeof...(Args)> argsPtrs(Args &...args) {
 
 } // namespace tensorforge
 
-#endif // TENSORFORGE_INTERNALS_H
+#endif // SEISSOL_TENSORFORGE_INCLUDE_TENSORFORGE_AUX_H_

@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 SeisSol Group
+#
+# SPDX-License-Identifier: MIT
 from tensorforge.common.basic_types import Datatype
 from tensorforge.backend.pir.core import INDEX, Access, Effect, MemSpace
 from tensorforge.backend.writer import Writer

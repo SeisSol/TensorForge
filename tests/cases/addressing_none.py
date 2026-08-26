@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 SeisSol Group
+#
 # SPDX-License-Identifier: MIT
 """``C[b] = A @ B[b]`` — A is batch-constant (:data:`Addressing.NONE`).
 

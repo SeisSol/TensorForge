@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 SeisSol Group
+#
 # SPDX-License-Identifier: MIT
 """``C = A @ B^T``. Mirror of ``trans_a.py`` for the second-operand permute.
 

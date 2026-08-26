@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 SeisSol Group
+#
+# SPDX-License-Identifier: MIT
 """AMD code generation for the multilinear kernel.
 
 `multilinear.py` enters through `matmul()` and nothing else.  The modules

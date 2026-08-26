@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 SeisSol Group
+#
 # SPDX-License-Identifier: MIT
 """``B[i, j] = A[i, j] ** 3`` — single-(constant-folded)-op ElementwiseDescr.
 
