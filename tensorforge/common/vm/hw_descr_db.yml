@@ -1,3 +1,8 @@
+# SPDX-FileCopyrightText: 2024 SeisSol Group
+#
+# SPDX-License-Identifier: MIT
+
+# NVIDIA
 - arch: sm_60
   vec_unit_length: 32
   max_local_mem_size_per_block: 48kB
@@ -47,6 +52,8 @@
   base: sm_90
 - arch: sm_120
   base: sm_89
+
+# AMD
 - arch: gfx900
   vec_unit_length: 64
   max_local_mem_size_per_block: 64kB
@@ -106,6 +113,8 @@
   max_local_mem_size_per_block: 384kB # WGP(?) mode. With L1 together: 448 kiB
 - arch: gfx1251
   base: gfx1250
+
+# Intel
 - arch: pvc
   vec_unit_length: 16
   max_local_mem_size_per_block: 128kB

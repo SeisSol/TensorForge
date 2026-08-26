@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 SeisSol Group
+#
+# SPDX-License-Identifier: MIT
+
 execute_process(COMMAND python3 -c "import tensorforge; tensorforge.get_version()"
                 OUTPUT_VARIABLE PACKAGE_VERSION)
 

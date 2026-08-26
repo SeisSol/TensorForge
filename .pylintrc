@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2023 SeisSol Group
+#
+# SPDX-License-Identifier: MIT
+
 [MESSAGES CONTROL]
 
 disable=W0311, C0114, C0115, C0116, R0903

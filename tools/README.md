@@ -1,3 +1,9 @@
+<!--
+    SPDX-FileCopyrightText: 2026 SeisSol Group
+
+    SPDX-License-Identifier: MIT
+-->
+
 # Diagnostics
 
 Read-only reports on the state of the AMD code generation path. None of them

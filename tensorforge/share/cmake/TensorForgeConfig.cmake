@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 SeisSol Group
+#
+# SPDX-License-Identifier: MIT
+
 include(FindPackageHandleStandardArgs)
 
 execute_process(COMMAND realpath ${CMAKE_CURRENT_LIST_DIR}/../..

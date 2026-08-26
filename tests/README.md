@@ -1,3 +1,9 @@
+<!--
+    SPDX-FileCopyrightText: 2026 SeisSol Group
+
+    SPDX-License-Identifier: MIT
+-->
+
 # TensorForge end-to-end test harness
 
 Numerical, on-device tests: generate → compile → run → compare against NumPy.

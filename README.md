@@ -1,3 +1,9 @@
+<!--
+    SPDX-FileCopyrightText: 2026 SeisSol Group
+
+    SPDX-License-Identifier: MIT
+-->
+
 # TensorForge
 
 A code generator for small (batched) tensor contraction kernels on GPUs.

@@ -1,0 +1,13 @@
+# SPDX-FileCopyrightText: 2023 SeisSol Group
+#
+# SPDX-License-Identifier: MIT
+# SPDX-LicenseComments: Full text under /LICENSE and /LICENSES/
+#
+# SPDX-FileContributor: Author lists in /AUTHORS and /CITATION.cff
+
+version = 1
+
+[[annotations]]
+path = ["AUTHORS", "requirements.txt", "tensorforge/VERSION"]
+SPDX-FileCopyrightText = "2023 SeisSol Group"
+SPDX-License-Identifier = "MIT"

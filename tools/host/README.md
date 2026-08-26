@@ -1,3 +1,9 @@
+<!--
+    SPDX-FileCopyrightText: 2026 SeisSol Group
+
+    SPDX-License-Identifier: MIT
+-->
+
 # Host oracle for TensorForge kernels
 
 Checking a generated kernel by reading it stopped working somewhere around the
