@@ -322,7 +322,7 @@ class BatchLoop(AbstractInstruction):
         for instr in head:
             instr.gen_code(writer)
         with writer.If(self._flag_guard(writer)):
-            if os.environ.get('TF_IR_WIDE'):
+            if self._wide_bodies():
                 # one body for every instruction of the region
                 budget = max((i.temp_shmem() for i in guarded), default=0)
                 with AbstractInstruction.shared_body(self._context, writer,
@@ -332,6 +332,19 @@ class BatchLoop(AbstractInstruction):
             else:
                 for instr in guarded:
                     instr.gen_code(writer)
+
+    def _wide_bodies(self) -> bool:
+        """One PIR body for the whole region, or one per instruction.
+
+        The option decides; ``TF_IR_WIDE`` overrides it in either direction.
+        The override exists because turning this on moved 71 of 108 generated
+        outputs at once, and a delta that size has to be bisectable without
+        editing a call site or rebuilding.
+        """
+        override = os.environ.get('TF_IR_WIDE')
+        if override is not None:
+            return override not in ('', '0', 'false', 'False')
+        return self._context.get_user_options().wide_bodies
 
     def gen_code(self, writer) -> None:
         # Deliberately no writer.Scope() and no comment: the loop used to be

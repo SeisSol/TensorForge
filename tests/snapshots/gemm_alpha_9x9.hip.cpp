@@ -219,7 +219,7 @@ __launch_bounds__(256)
             ir2[6] = v36_acc;
             ir2[7] = v37_acc;
             ir2[8] = v38_acc;
-            if ((threadIdx.x % 16) < 9) {
+            if (v2_lead < 9) {
               #pragma unroll
               for (int32_t v50_n1 = 0; v50_n1 < 9; ++v50_n1) {
                 int32_t v51_a = 0 + v50_n1;
@@ -230,13 +230,12 @@ __launch_bounds__(256)
             }
           }
           // glb_m0 = store{r>g}(r2);
-          int32_t v59_lead = threadIdx.x % 16;
-          if (v59_lead < 9) {
+          if (v2_lead < 9) {
             #pragma unroll
             for (int32_t v61_i1 = 0; v61_i1 < 9; ++v61_i1) {
               int32_t v62_a = 0 + v61_i1;
               float v64_data = r2[v61_i1];
-              int32_t v71_a = v59_lead + (v61_i1 * 9);
+              int32_t v71_a = v2_lead + (v61_i1 * 9);
               glb_m0[v71_a] = v64_data;
             }
           }

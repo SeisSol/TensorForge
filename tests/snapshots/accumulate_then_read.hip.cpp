@@ -369,10 +369,9 @@ __launch_bounds__(256)
           ir2[11] = v45_acc;
           ir2[12] = v46_acc;
           // glb_m0 = store{r>g}(r2);
-          int32_t v66_lead = threadIdx.x % 32;
           #pragma unroll
           for (int32_t v67_i0 = 0; v67_i0 < 1; ++v67_i0) {
-            int32_t v76_lead = v66_lead + (v67_i0 * 32);
+            int32_t v76_lead = v2_lead + (v67_i0 * 32);
             #pragma unroll
             for (int32_t v68_i1 = 0; v68_i1 < 13; ++v68_i1) {
               int32_t v69_a = v67_i0 + v68_i1;
@@ -383,13 +382,12 @@ __launch_bounds__(256)
           }
           float r5[32]{};
           // r5 = load{g>r}(glb_m4);
-          int32_t v81_lead = threadIdx.x % 32;
-          if (v81_lead < 16) {
+          if (v2_lead < 16) {
             #pragma unroll
             for (int32_t v83_i1 = 0; v83_i1 < 32; ++v83_i1) {
               int32_t v89_a = v83_i1 * 16;
-              int32_t v90_a = v81_lead + v89_a;
-              float v98_data = __builtin_nontemporal_load(&glb_m4[(v81_lead + v89_a)]);
+              int32_t v90_a = v2_lead + v89_a;
+              float v98_data = __builtin_nontemporal_load(&glb_m4[(v2_lead + v89_a)]);
               int32_t v99_a = 0 + v83_i1;
               r5[v99_a] = v98_data;
             }
@@ -853,25 +851,23 @@ __launch_bounds__(256)
           tensorforge::fmacdpp16<15>(v406_acc, v409_bc, v211_data);
           ir6[12] = v406_acc;
           // glb_m0 = store{r>g}(r6);
-          int32_t v412_lead = threadIdx.x % 32;
-          if (v412_lead < 16) {
+          if (v2_lead < 16) {
             #pragma unroll
             for (int32_t v414_i1 = 0; v414_i1 < 13; ++v414_i1) {
               int32_t v415_a = 0 + v414_i1;
               float v417_data = r6[v414_i1];
-              int32_t v424_a = v412_lead + (v414_i1 * 32);
+              int32_t v424_a = v2_lead + (v414_i1 * 32);
               __builtin_amdgcn_global_atomic_fadd_f32(&glb_m0[v424_a], v417_data);
             }
           }
           float r9[32]{};
           // r9 = load{g>r}(glb_m6);
-          int32_t v427_lead = threadIdx.x % 32;
-          if (v427_lead < 16) {
+          if (v2_lead < 16) {
             #pragma unroll
             for (int32_t v429_i1 = 0; v429_i1 < 32; ++v429_i1) {
               int32_t v435_a = v429_i1 * 16;
-              int32_t v436_a = v427_lead + v435_a;
-              float v444_data = __builtin_nontemporal_load(&glb_m6[(v427_lead + v435_a)]);
+              int32_t v436_a = v2_lead + v435_a;
+              float v444_data = __builtin_nontemporal_load(&glb_m6[(v2_lead + v435_a)]);
               int32_t v445_a = 0 + v429_i1;
               r9[v445_a] = v444_data;
             }
@@ -1335,25 +1331,23 @@ __launch_bounds__(256)
           tensorforge::fmacdpp16<15>(v752_acc, v755_bc, v557_data);
           ir10[12] = v752_acc;
           // glb_m0 = store{r>g}(r10);
-          int32_t v758_lead = threadIdx.x % 32;
-          if (v758_lead < 16) {
+          if (v2_lead < 16) {
             #pragma unroll
             for (int32_t v760_i1 = 0; v760_i1 < 13; ++v760_i1) {
               int32_t v761_a = 0 + v760_i1;
               float v763_data = r10[v760_i1];
-              int32_t v770_a = v758_lead + (v760_i1 * 32);
+              int32_t v770_a = v2_lead + (v760_i1 * 32);
               __builtin_amdgcn_global_atomic_fadd_f32(&glb_m0[v770_a], v763_data);
             }
           }
           float r13[32]{};
           // r13 = load{g>r}(glb_m8);
-          int32_t v773_lead = threadIdx.x % 32;
-          if (v773_lead < 16) {
+          if (v2_lead < 16) {
             #pragma unroll
             for (int32_t v775_i1 = 0; v775_i1 < 32; ++v775_i1) {
               int32_t v781_a = v775_i1 * 16;
-              int32_t v782_a = v773_lead + v781_a;
-              float v790_data = __builtin_nontemporal_load(&glb_m8[(v773_lead + v781_a)]);
+              int32_t v782_a = v2_lead + v781_a;
+              float v790_data = __builtin_nontemporal_load(&glb_m8[(v2_lead + v781_a)]);
               int32_t v791_a = 0 + v775_i1;
               r13[v791_a] = v790_data;
             }
@@ -1801,24 +1795,22 @@ __launch_bounds__(256)
           tensorforge::fmacdpp16<15>(v1098_acc, v1101_bc, v903_data);
           ir14[12] = v1098_acc;
           // glb_m0 = store{r>g}(r14);
-          int32_t v1104_lead = threadIdx.x % 32;
-          if (v1104_lead < 16) {
+          if (v2_lead < 16) {
             #pragma unroll
             for (int32_t v1106_i1 = 0; v1106_i1 < 13; ++v1106_i1) {
               int32_t v1107_a = 0 + v1106_i1;
               float v1109_data = r14[v1106_i1];
-              int32_t v1116_a = v1104_lead + (v1106_i1 * 32);
+              int32_t v1116_a = v2_lead + (v1106_i1 * 32);
               __builtin_amdgcn_global_atomic_fadd_f32(&glb_m0[v1116_a], v1109_data);
             }
           }
           float r15[13]{};
           // r15 = load{g>r}(glb_m0);
-          int32_t v1119_lead = threadIdx.x % 32;
           #pragma unroll
           for (int32_t v1120_i0 = 0; v1120_i0 < 1; ++v1120_i0) {
             int32_t v1125_lead = v1120_i0 * 32;
-            int32_t v1126_lead = v1119_lead + v1125_lead;
-            int32_t v1133_lead = v1119_lead + v1125_lead;
+            int32_t v1126_lead = v2_lead + v1125_lead;
+            int32_t v1133_lead = v2_lead + v1125_lead;
             #pragma unroll
             for (int32_t v1121_i1 = 0; v1121_i1 < 13; ++v1121_i1) {
               int32_t v1127_a = v1121_i1 * 32;
@@ -2076,10 +2068,9 @@ __launch_bounds__(256)
           ir17[11] = v1162_acc;
           ir17[12] = v1163_acc;
           // glb_m9 = store{r>g}(r17);
-          int32_t v1183_lead = threadIdx.x % 32;
           #pragma unroll
           for (int32_t v1184_i0 = 0; v1184_i0 < 1; ++v1184_i0) {
-            int32_t v1193_lead = v1183_lead + (v1184_i0 * 32);
+            int32_t v1193_lead = v2_lead + (v1184_i0 * 32);
             #pragma unroll
             for (int32_t v1185_i1 = 0; v1185_i1 < 13; ++v1185_i1) {
               int32_t v1186_a = v1184_i0 + v1185_i1;

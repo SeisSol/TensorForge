@@ -141,10 +141,9 @@ __launch_bounds__(256)
             }
           }
           // glb_m0 = store{r>g}(r1);
-          int32_t v58_lead = threadIdx.x % 32;
           #pragma unroll
           for (int32_t v59_i0 = 0; v59_i0 < 1; ++v59_i0) {
-            int32_t v68_lead = v58_lead + (v59_i0 * 32);
+            int32_t v68_lead = v2_lead + (v59_i0 * 32);
             #pragma unroll
             for (int32_t v60_i1 = 0; v60_i1 < 1; ++v60_i1) {
               int32_t v61_a = v59_i0 + v60_i1;
@@ -155,12 +154,11 @@ __launch_bounds__(256)
           }
           float r2[13]{};
           // r2 = load{g>r}(glb_m0);
-          int32_t v74_lead = threadIdx.x % 32;
           #pragma unroll
           for (int32_t v75_i0 = 0; v75_i0 < 1; ++v75_i0) {
             int32_t v80_lead = v75_i0 * 32;
-            int32_t v81_lead = v74_lead + v80_lead;
-            int32_t v88_lead = v74_lead + v80_lead;
+            int32_t v81_lead = v2_lead + v80_lead;
+            int32_t v88_lead = v2_lead + v80_lead;
             #pragma unroll
             for (int32_t v76_i1 = 0; v76_i1 < 13; ++v76_i1) {
               int32_t v82_a = v76_i1 * 32;
@@ -728,10 +726,9 @@ __launch_bounds__(256)
             }
           }
           // glb_m3 = store{r>g}(r3);
-          int32_t v989_lead = threadIdx.x % 32;
           #pragma unroll
           for (int32_t v990_i0 = 0; v990_i0 < 1; ++v990_i0) {
-            int32_t v999_lead = v989_lead + (v990_i0 * 32);
+            int32_t v999_lead = v2_lead + (v990_i0 * 32);
             #pragma unroll
             for (int32_t v991_i1 = 0; v991_i1 < 13; ++v991_i1) {
               int32_t v992_a = v990_i0 + v991_i1;

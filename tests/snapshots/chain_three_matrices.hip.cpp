@@ -110,12 +110,11 @@ __launch_bounds__(256)
           // wait(r0 = load{g>r}(glb_m0););
           float r3[112]{};
           // r3 = load{g>r}(glb_m3);
-          int32_t v43_lead = threadIdx.x % 32;
           #pragma unroll
           for (int32_t v44_i0 = 0; v44_i0 < 1; ++v44_i0) {
             int32_t v49_lead = v44_i0 * 32;
-            int32_t v50_lead = v43_lead + v49_lead;
-            int32_t v57_lead = v43_lead + v49_lead;
+            int32_t v50_lead = v2_lead + v49_lead;
+            int32_t v57_lead = v2_lead + v49_lead;
             #pragma unroll
             for (int32_t v45_i1 = 0; v45_i1 < 56; ++v45_i1) {
               int32_t v51_a = v45_i1 * 56;
@@ -125,9 +124,9 @@ __launch_bounds__(256)
               r3[v62_a] = v60_data;
             }
           }
-          if (v43_lead < 24) {
-            int32_t v69_lead = v43_lead + 32_i32;
-            int32_t v76_lead = v43_lead + 32_i32;
+          if (v2_lead < 24) {
+            int32_t v69_lead = v2_lead + 32_i32;
+            int32_t v76_lead = v2_lead + 32_i32;
             #pragma unroll
             for (int32_t v64_i1 = 0; v64_i1 < 56; ++v64_i1) {
               int32_t v70_a = v64_i1 * 56;
@@ -887,10 +886,9 @@ __launch_bounds__(256)
           ir4[16] = v739_acc;
           ir4[17] = v740_acc;
           // glb_m2 = store{r>g}(r4);
-          int32_t v749_lead = threadIdx.x % 32;
           #pragma unroll
           for (int32_t v750_i0 = 0; v750_i0 < 1; ++v750_i0) {
-            int32_t v761_lead = v749_lead + (v750_i0 * 32);
+            int32_t v761_lead = v2_lead + (v750_i0 * 32);
             #pragma unroll
             for (int32_t v751_i1 = 0; v751_i1 < 9; ++v751_i1) {
               int32_t v752_a = v751_i1 * 2;
@@ -900,8 +898,8 @@ __launch_bounds__(256)
               glb_m2[v763_a] = v756_data;
             }
           }
-          if (v749_lead < 24) {
-            int32_t v775_lead = v749_lead + 32_i32;
+          if (v2_lead < 24) {
+            int32_t v775_lead = v2_lead + 32_i32;
             #pragma unroll
             for (int32_t v765_i1 = 0; v765_i1 < 9; ++v765_i1) {
               int32_t v766_a = v765_i1 * 2;

@@ -15,7 +15,8 @@ class Options:
                enable_multibuffer=False,
                pipeline_depth=2,
                enable_wrap_loads=False,
-               wrap_distance=1):
+               wrap_distance=1,
+               wide_bodies=True):
     self.exact_contraction_length: bool = exact_contraction_length
     self.align_shr_mem: bool = align_shr_mem
     self.enable_sync_block_opt = enable_sync_block_opt
@@ -35,6 +36,23 @@ class Options:
     # n - 1; see backend/opt/wrap.py.
     self.enable_wrap_loads = enable_wrap_loads
     self.wrap_distance = wrap_distance
+    # One PIR body per loop body, rather than one per macro instruction.
+    #
+    # A pass sees a body.  Per macro instruction that means `RegisterAlloc`,
+    # the loader that fills the buffer and the multilinear that reads it are
+    # three separate bodies, and the only thing connecting them is the C++
+    # name -- 60.7% of buffers in the corpus are named for that reason alone,
+    # against 10.3% per loop body (tools/buffer_spans.py).  Everything still
+    # needing a name here outlives one loop body: the shared arena, its
+    # scratch tail, and the tiles of the two cases that have two batch loops.
+    #
+    # So this is not primarily a code-quality switch -- the cross-instruction
+    # CSE win is 0.2% -- it is what makes the naming go away, and with it the
+    # reason `symbol.py` builds addresses as text.
+    #
+    # `TF_IR_WIDE=0` forces it off without touching a call site, because a
+    # change that moves 71 of 108 generated outputs has to stay bisectable.
+    self.wide_bodies = wide_bodies
 
 
 class Context:

@@ -146,11 +146,10 @@ __launch_bounds__(256)
             }
           }
           // glb_m0 = store{r>g}(r1);
-          int32_t v124_lead = threadIdx.x % 16;
           #pragma unroll
           for (int32_t v125_i0 = 0; v125_i0 < 1; ++v125_i0) {
             float v126_data = r1[v125_i0];
-            int32_t v131_lead = v124_lead + (v125_i0 * 16);
+            int32_t v131_lead = v2_lead + (v125_i0 * 16);
             glb_m0[v131_lead] = v126_data;
           }
           __syncwarp();

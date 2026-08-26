@@ -120,10 +120,9 @@ __launch_bounds__(256)
           tensorforge::fmacdpp16<2>(v25_acc, v27_bc, v24_data);
           ir2[0] = v25_acc;
           // glb_m0 = store{r>g}(r2);
-          int32_t v30_lead = threadIdx.x % 32;
           #pragma unroll
           for (int32_t v31_i0 = 0; v31_i0 < 1; ++v31_i0) {
-            int32_t v40_lead = v30_lead + (v31_i0 * 32);
+            int32_t v40_lead = v2_lead + (v31_i0 * 32);
             #pragma unroll
             for (int32_t v32_i1 = 0; v32_i1 < 1; ++v32_i1) {
               int32_t v33_a = v31_i0 + v32_i1;
@@ -134,12 +133,11 @@ __launch_bounds__(256)
           }
           float r3[13]{};
           // r3 = load{g>r}(glb_m0);
-          int32_t v46_lead = threadIdx.x % 32;
           #pragma unroll
           for (int32_t v47_i0 = 0; v47_i0 < 1; ++v47_i0) {
             int32_t v52_lead = v47_i0 * 32;
-            int32_t v53_lead = v46_lead + v52_lead;
-            int32_t v60_lead = v46_lead + v52_lead;
+            int32_t v53_lead = v2_lead + v52_lead;
+            int32_t v60_lead = v2_lead + v52_lead;
             #pragma unroll
             for (int32_t v48_i1 = 0; v48_i1 < 13; ++v48_i1) {
               int32_t v54_a = v48_i1 * 32;
@@ -397,10 +395,9 @@ __launch_bounds__(256)
           ir5[11] = v89_acc;
           ir5[12] = v90_acc;
           // glb_m3 = store{r>g}(r5);
-          int32_t v110_lead = threadIdx.x % 32;
           #pragma unroll
           for (int32_t v111_i0 = 0; v111_i0 < 1; ++v111_i0) {
-            int32_t v120_lead = v110_lead + (v111_i0 * 32);
+            int32_t v120_lead = v2_lead + (v111_i0 * 32);
             #pragma unroll
             for (int32_t v112_i1 = 0; v112_i1 < 13; ++v112_i1) {
               int32_t v113_a = v111_i0 + v112_i1;

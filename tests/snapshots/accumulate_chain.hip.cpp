@@ -115,13 +115,12 @@ __launch_bounds__(256)
           // wait(r0 = load{g>r}(glb_m1););
           float r3[12]{};
           // r3 = load{g>r}(glb_m3);
-          int32_t v23_lead = threadIdx.x % 16;
-          if (v23_lead < 12) {
+          if (v2_lead < 12) {
             #pragma unroll
             for (int32_t v25_i1 = 0; v25_i1 < 12; ++v25_i1) {
               int32_t v31_a = v25_i1 * 12;
-              int32_t v32_a = v23_lead + v31_a;
-              float v40_data = __builtin_nontemporal_load(&glb_m3[(v23_lead + v31_a)]);
+              int32_t v32_a = v2_lead + v31_a;
+              float v40_data = __builtin_nontemporal_load(&glb_m3[(v2_lead + v31_a)]);
               int32_t v41_a = 0 + v25_i1;
               r3[v41_a] = v40_data;
             }
@@ -280,13 +279,12 @@ __launch_bounds__(256)
           // wait(r3 = load{g>r}(glb_m3););
           float r6[12]{};
           // r6 = load{g>r}(glb_m5);
-          int32_t v70_lead = threadIdx.x % 16;
-          if (v70_lead < 12) {
+          if (v2_lead < 12) {
             #pragma unroll
             for (int32_t v72_i1 = 0; v72_i1 < 12; ++v72_i1) {
               int32_t v78_a = v72_i1 * 12;
-              int32_t v79_a = v70_lead + v78_a;
-              float v87_data = __builtin_nontemporal_load(&glb_m5[(v70_lead + v78_a)]);
+              int32_t v79_a = v2_lead + v78_a;
+              float v87_data = __builtin_nontemporal_load(&glb_m5[(v2_lead + v78_a)]);
               int32_t v88_a = 0 + v72_i1;
               r6[v88_a] = v87_data;
             }
@@ -427,7 +425,7 @@ __launch_bounds__(256)
             ir5[5] = v106_acc;
             ir5[6] = v107_acc;
             ir5[7] = v108_acc;
-            if ((threadIdx.x % 16) < 12) {
+            if (v2_lead < 12) {
               #pragma unroll
               for (int32_t v119_n1 = 0; v119_n1 < 8; ++v119_n1) {
                 int32_t v120_a = 0 + v119_n1;
@@ -458,13 +456,12 @@ __launch_bounds__(256)
           // wait(r6 = load{g>r}(glb_m5););
           float r9[12]{};
           // r9 = load{g>r}(glb_m7);
-          int32_t v131_lead = threadIdx.x % 16;
-          if (v131_lead < 12) {
+          if (v2_lead < 12) {
             #pragma unroll
             for (int32_t v133_i1 = 0; v133_i1 < 12; ++v133_i1) {
               int32_t v139_a = v133_i1 * 12;
-              int32_t v140_a = v131_lead + v139_a;
-              float v148_data = __builtin_nontemporal_load(&glb_m7[(v131_lead + v139_a)]);
+              int32_t v140_a = v2_lead + v139_a;
+              float v148_data = __builtin_nontemporal_load(&glb_m7[(v2_lead + v139_a)]);
               int32_t v149_a = 0 + v133_i1;
               r9[v149_a] = v148_data;
             }
@@ -605,7 +602,7 @@ __launch_bounds__(256)
             ir8[5] = v167_acc;
             ir8[6] = v168_acc;
             ir8[7] = v169_acc;
-            if ((threadIdx.x % 16) < 12) {
+            if (v2_lead < 12) {
               #pragma unroll
               for (int32_t v180_n1 = 0; v180_n1 < 8; ++v180_n1) {
                 int32_t v181_a = 0 + v180_n1;
@@ -770,7 +767,7 @@ __launch_bounds__(256)
             ir11[5] = v207_acc;
             ir11[6] = v208_acc;
             ir11[7] = v209_acc;
-            if ((threadIdx.x % 16) < 12) {
+            if (v2_lead < 12) {
               #pragma unroll
               for (int32_t v220_n1 = 0; v220_n1 < 8; ++v220_n1) {
                 int32_t v221_a = 0 + v220_n1;
@@ -783,13 +780,12 @@ __launch_bounds__(256)
             }
           }
           // glb_m0 = store{r>g}(r11);
-          int32_t v232_lead = threadIdx.x % 16;
-          if (v232_lead < 12) {
+          if (v2_lead < 12) {
             #pragma unroll
             for (int32_t v234_i1 = 0; v234_i1 < 8; ++v234_i1) {
               int32_t v235_a = 0 + v234_i1;
               float v237_data = r11[v234_i1];
-              int32_t v244_a = v232_lead + (v234_i1 * 12);
+              int32_t v244_a = v2_lead + (v234_i1 * 12);
               glb_m0[v244_a] = v237_data;
             }
           }

@@ -276,13 +276,12 @@ __launch_bounds__(256)
           ir2[6] = v43_acc;
           ir2[7] = v44_acc;
           // glb_m0 = store{r>g}(r2);
-          int32_t v55_lead = threadIdx.x % 16;
-          if (v55_lead < 12) {
+          if (v2_lead < 12) {
             #pragma unroll
             for (int32_t v57_i1 = 0; v57_i1 < 8; ++v57_i1) {
               int32_t v58_a = 0 + v57_i1;
               double v60_data = r2[v57_i1];
-              int32_t v67_a = v55_lead + (v57_i1 * 12);
+              int32_t v67_a = v2_lead + (v57_i1 * 12);
               __builtin_amdgcn_global_atomic_fadd_f64(&glb_m0[v67_a], v60_data);
             }
           }

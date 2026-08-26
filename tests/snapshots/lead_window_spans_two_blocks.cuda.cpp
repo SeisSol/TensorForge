@@ -87,13 +87,12 @@ __launch_bounds__(256)
           }
           float r2[12]{};
           // r2 = load{g>r}(glb_m2);
-          int32_t v24_lead = threadIdx.x % 32;
-          if (v24_lead >= 20) {
+          if (v2_lead >= 20) {
             #pragma unroll
             for (int32_t v26_i1 = 0; v26_i1 < 1; ++v26_i1) {
               int32_t v34_a = (v26_i1 + 12) * 64;
-              int32_t v36_a = v24_lead + v34_a;
-              int32_t v46_a = v24_lead + v34_a;
+              int32_t v36_a = v2_lead + v34_a;
+              int32_t v46_a = v2_lead + v34_a;
               int32_t v49_a = v26_i1 * 2;
               #pragma unroll
               for (int32_t v27_i2 = 0; v27_i2 < 6; ++v27_i2) {
@@ -105,9 +104,9 @@ __launch_bounds__(256)
               }
             }
           }
-          if (v24_lead < 3) {
-            int32_t v60_lead = v24_lead + 32_i32;
-            int32_t v70_lead = v24_lead + 32_i32;
+          if (v2_lead < 3) {
+            int32_t v60_lead = v2_lead + 32_i32;
+            int32_t v70_lead = v2_lead + 32_i32;
             #pragma unroll
             for (int32_t v54_i1 = 0; v54_i1 < 1; ++v54_i1) {
               int32_t v62_a = (v54_i1 + 12) * 64;
@@ -479,8 +478,7 @@ __launch_bounds__(256)
             // r3 = +(r1) + name: r2, type: SymbolType.Register, lead: [0]
             // [(20, 35), (0, 1), (0, 6)] []
             float ir3[12]{};
-            int32_t v866_lead = threadIdx.x % 32;
-            if (v866_lead >= 20) {
+            if (v2_lead >= 20) {
               float v868_data = r1[24];
               float v869_data = ir3[0];
               ir3[0] = (v869_data + v868_data);
@@ -500,7 +498,7 @@ __launch_bounds__(256)
               float v884_data = ir3[10];
               ir3[10] = (v884_data + v883_data);
             }
-            if (v866_lead < 3) {
+            if (v2_lead < 3) {
               float v887_data = r1[25];
               float v888_data = ir3[1];
               ir3[1] = (v888_data + v887_data);
@@ -520,7 +518,7 @@ __launch_bounds__(256)
               float v903_data = ir3[11];
               ir3[11] = (v903_data + v902_data);
             }
-            if (v866_lead >= 20) {
+            if (v2_lead >= 20) {
               #pragma unroll
               for (int32_t v909_n1 = 0; v909_n1 < 1; ++v909_n1) {
                 int32_t v911_a = v909_n1 * 2;
@@ -537,7 +535,7 @@ __launch_bounds__(256)
                 }
               }
             }
-            if (v866_lead < 3) {
+            if (v2_lead < 3) {
               #pragma unroll
               for (int32_t v939_n1 = 0; v939_n1 < 1; ++v939_n1) {
                 int32_t v943_a = 1 + (v939_n1 * 2);
@@ -555,12 +553,11 @@ __launch_bounds__(256)
             }
           }
           // glb_m2 = store{r>g}(r3);
-          int32_t v970_lead = threadIdx.x % 32;
-          if (v970_lead >= 20) {
+          if (v2_lead >= 20) {
             #pragma unroll
             for (int32_t v972_i1 = 0; v972_i1 < 1; ++v972_i1) {
               int32_t v974_a = v972_i1 * 2;
-              int32_t v991_a = v970_lead + ((v972_i1 + 12) * 64);
+              int32_t v991_a = v2_lead + ((v972_i1 + 12) * 64);
               #pragma unroll
               for (int32_t v973_i2 = 0; v973_i2 < 6; ++v973_i2) {
                 int32_t v975_a = v973_i2 * 2;
@@ -571,8 +568,8 @@ __launch_bounds__(256)
               }
             }
           }
-          if (v970_lead < 3) {
-            int32_t v1009_lead = v970_lead + 32_i32;
+          if (v2_lead < 3) {
+            int32_t v1009_lead = v2_lead + 32_i32;
             #pragma unroll
             for (int32_t v994_i1 = 0; v994_i1 < 1; ++v994_i1) {
               int32_t v998_a = 1 + (v994_i1 * 2);

@@ -186,9 +186,8 @@ __launch_bounds__(256)
           ir2[6] = (v110_acc[2]);
           ir2[7] = (v110_acc[3]);
           // glb_m0 = store{r>g}(r2);
-          int32_t v117_lead = threadIdx.x % 16;
-          if (v117_lead < 12) {
-            int32_t v129_a = ((v117_lead + 16_i32) + -12) - 4;
+          if (v2_lead < 12) {
+            int32_t v129_a = ((v2_lead + 16_i32) + -12) - 4;
             #pragma unroll
             for (int32_t v119_i1 = 0; v119_i1 < 8; ++v119_i1) {
               int32_t v120_a = 0 + v119_i1;

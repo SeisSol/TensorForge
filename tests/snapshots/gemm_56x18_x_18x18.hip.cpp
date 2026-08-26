@@ -432,10 +432,9 @@ __launch_bounds__(256)
           ir2[33] = (v504_acc[0]);
           ir2[35] = (v504_acc[1]);
           // glb_m0 = store{r>g}(r2);
-          int32_t v509_lead = threadIdx.x % 32;
           #pragma unroll
           for (int32_t v510_i0 = 0; v510_i0 < 1; ++v510_i0) {
-            int32_t v521_lead = v509_lead + (v510_i0 * 32);
+            int32_t v521_lead = v2_lead + (v510_i0 * 32);
             #pragma unroll
             for (int32_t v511_i1 = 0; v511_i1 < 18; ++v511_i1) {
               int32_t v512_a = v511_i1 * 2;
@@ -445,8 +444,8 @@ __launch_bounds__(256)
               glb_m0[v523_a] = v516_data;
             }
           }
-          if (v509_lead < 24) {
-            int32_t v535_lead = v509_lead + 32_i32;
+          if (v2_lead < 24) {
+            int32_t v535_lead = v2_lead + 32_i32;
             #pragma unroll
             for (int32_t v525_i1 = 0; v525_i1 < 18; ++v525_i1) {
               int32_t v526_a = v525_i1 * 2;

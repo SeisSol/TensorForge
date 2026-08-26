@@ -108,8 +108,7 @@ __launch_bounds__(256)
             // r1 = +(r0 * s0) + None
             // [(0, 9), (0, 9)] [(0, 9)]
             float ir1[9]{};
-            int32_t v23_lead = threadIdx.x % 16;
-            if (v23_lead < 9) {
+            if (v2_lead < 9) {
               float v25_data = r0[0];
               float v26_data = s0[0];
               float v28_data = ir1[0];
@@ -139,7 +138,7 @@ __launch_bounds__(256)
               float v68_data = ir1[8];
               ir1[8] = (v68_data + (v25_data * v66_data));
             }
-            if (v23_lead < 9) {
+            if (v2_lead < 9) {
               float v74_data = r0[1];
               float v75_data = s0[1];
               float v77_data = ir1[0];
@@ -169,7 +168,7 @@ __launch_bounds__(256)
               float v117_data = ir1[8];
               ir1[8] = (v117_data + (v74_data * v115_data));
             }
-            if (v23_lead < 9) {
+            if (v2_lead < 9) {
               float v123_data = r0[2];
               float v124_data = s0[2];
               float v126_data = ir1[0];
@@ -199,7 +198,7 @@ __launch_bounds__(256)
               float v166_data = ir1[8];
               ir1[8] = (v166_data + (v123_data * v164_data));
             }
-            if (v23_lead < 9) {
+            if (v2_lead < 9) {
               float v172_data = r0[3];
               float v173_data = s0[3];
               float v175_data = ir1[0];
@@ -229,7 +228,7 @@ __launch_bounds__(256)
               float v215_data = ir1[8];
               ir1[8] = (v215_data + (v172_data * v213_data));
             }
-            if (v23_lead < 9) {
+            if (v2_lead < 9) {
               float v221_data = r0[4];
               float v222_data = s0[4];
               float v224_data = ir1[0];
@@ -259,7 +258,7 @@ __launch_bounds__(256)
               float v264_data = ir1[8];
               ir1[8] = (v264_data + (v221_data * v262_data));
             }
-            if (v23_lead < 9) {
+            if (v2_lead < 9) {
               float v270_data = r0[5];
               float v271_data = s0[5];
               float v273_data = ir1[0];
@@ -289,7 +288,7 @@ __launch_bounds__(256)
               float v313_data = ir1[8];
               ir1[8] = (v313_data + (v270_data * v311_data));
             }
-            if (v23_lead < 9) {
+            if (v2_lead < 9) {
               float v319_data = r0[6];
               float v320_data = s0[6];
               float v322_data = ir1[0];
@@ -319,7 +318,7 @@ __launch_bounds__(256)
               float v362_data = ir1[8];
               ir1[8] = (v362_data + (v319_data * v360_data));
             }
-            if (v23_lead < 9) {
+            if (v2_lead < 9) {
               float v368_data = r0[7];
               float v369_data = s0[7];
               float v371_data = ir1[0];
@@ -349,7 +348,7 @@ __launch_bounds__(256)
               float v411_data = ir1[8];
               ir1[8] = (v411_data + (v368_data * v409_data));
             }
-            if (v23_lead < 9) {
+            if (v2_lead < 9) {
               float v417_data = r0[8];
               float v418_data = s0[8];
               float v420_data = ir1[0];
@@ -379,7 +378,7 @@ __launch_bounds__(256)
               float v460_data = ir1[8];
               ir1[8] = (v460_data + (v417_data * v458_data));
             }
-            if (v23_lead < 9) {
+            if (v2_lead < 9) {
               #pragma unroll
               for (int32_t v467_n1 = 0; v467_n1 < 9; ++v467_n1) {
                 int32_t v468_a = 0 + v467_n1;
@@ -390,13 +389,12 @@ __launch_bounds__(256)
             }
           }
           // glb_m0 = store{r>g}(r1);
-          int32_t v476_lead = threadIdx.x % 16;
-          if (v476_lead < 9) {
+          if (v2_lead < 9) {
             #pragma unroll
             for (int32_t v478_i1 = 0; v478_i1 < 9; ++v478_i1) {
               int32_t v479_a = 0 + v478_i1;
               float v481_data = r1[v478_i1];
-              int32_t v488_a = v476_lead + (v478_i1 * 9);
+              int32_t v488_a = v2_lead + (v478_i1 * 9);
               glb_m0[v488_a] = v481_data;
             }
           }

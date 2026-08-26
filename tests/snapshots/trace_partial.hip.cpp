@@ -137,11 +137,10 @@ __launch_bounds__(256)
           float v115_data = ir1[0];
           ir1[0] = (v115_data + v114_data);
           // glb_m0 = store{r>g}(r1);
-          int32_t v119_lead = threadIdx.x % 16;
           #pragma unroll
           for (int32_t v120_i0 = 0; v120_i0 < 1; ++v120_i0) {
             float v121_data = r1[v120_i0];
-            int32_t v126_lead = v119_lead + (v120_i0 * 16);
+            int32_t v126_lead = v2_lead + (v120_i0 * 16);
             glb_m0[v126_lead] = v121_data;
           }
           ;

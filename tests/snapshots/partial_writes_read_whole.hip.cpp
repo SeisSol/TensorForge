@@ -94,13 +94,12 @@ __launch_bounds__(256)
           }
           float r2[9]{};
           // r2 = load{g>r}(glb_m1);
-          int32_t v23_lead = threadIdx.x % 32;
-          if (v23_lead < 16) {
+          if (v2_lead < 16) {
             #pragma unroll
             for (int32_t v25_i1 = 0; v25_i1 < 9; ++v25_i1) {
               int32_t v31_a = v25_i1 * 16;
-              int32_t v32_a = v23_lead + v31_a;
-              float v40_data = __builtin_nontemporal_load(&glb_m1[(v23_lead + v31_a)]);
+              int32_t v32_a = v2_lead + v31_a;
+              float v40_data = __builtin_nontemporal_load(&glb_m1[(v2_lead + v31_a)]);
               int32_t v41_a = 0 + v25_i1;
               r2[v41_a] = v40_data;
             }
@@ -139,10 +138,9 @@ __launch_bounds__(256)
           ir1[8] = (v70_data + v69_data);
           float* __restrict__ s0 = &localShrMem0[0];
           // s0 = store{r>s}(localShrMem0, r1);
-          int32_t v74_lead = threadIdx.x % 32;
           #pragma unroll
           for (int32_t v75_i0 = 0; v75_i0 < 1; ++v75_i0) {
-            int32_t v84_lead = v74_lead + (v75_i0 * 32);
+            int32_t v84_lead = v2_lead + (v75_i0 * 32);
             #pragma unroll
             for (int32_t v76_i1 = 0; v76_i1 < 9; ++v76_i1) {
               int32_t v77_a = v75_i0 + v76_i1;
@@ -153,13 +151,12 @@ __launch_bounds__(256)
           }
           float r4[9]{};
           // r4 = load{g>r}(glb_m2);
-          int32_t v89_lead = threadIdx.x % 32;
-          if (v89_lead < 16) {
+          if (v2_lead < 16) {
             #pragma unroll
             for (int32_t v91_i1 = 0; v91_i1 < 9; ++v91_i1) {
               int32_t v97_a = v91_i1 * 16;
-              int32_t v98_a = v89_lead + v97_a;
-              float v106_data = __builtin_nontemporal_load(&glb_m2[(v89_lead + v97_a)]);
+              int32_t v98_a = v2_lead + v97_a;
+              float v106_data = __builtin_nontemporal_load(&glb_m2[(v2_lead + v97_a)]);
               int32_t v107_a = 0 + v91_i1;
               r4[v107_a] = v106_data;
             }
@@ -169,7 +166,7 @@ __launch_bounds__(256)
           // r3 = +(r2) + None
           // [(0, 16), (0, 9)] []
           auto& ir3 = r3;
-          if ((threadIdx.x % 32) < 16) {
+          if (v2_lead < 16) {
             float v112_data = r2[0];
             float v113_data = ir3[0];
             ir3[0] = (v113_data + v112_data);
@@ -199,13 +196,12 @@ __launch_bounds__(256)
             ir3[8] = (v137_data + v136_data);
           }
           // s0 = store{r>s}(localShrMem0, r3);
-          int32_t v141_lead = threadIdx.x % 32;
-          if (v141_lead < 16) {
+          if (v2_lead < 16) {
             #pragma unroll
             for (int32_t v143_i1 = 0; v143_i1 < 9; ++v143_i1) {
               int32_t v144_a = 0 + v143_i1;
               float v146_data = r3[v143_i1];
-              int32_t v153_a = v141_lead + (v143_i1 * 32);
+              int32_t v153_a = v2_lead + (v143_i1 * 32);
               s0[v153_a] = v146_data;
             }
           }
@@ -224,7 +220,7 @@ __launch_bounds__(256)
           // r5 = +(r4) + None
           // [(0, 16), (0, 9)] []
           auto& ir5 = r5;
-          if ((threadIdx.x % 32) < 16) {
+          if (v2_lead < 16) {
             float v158_data = r4[0];
             float v159_data = ir5[0];
             ir5[0] = (v159_data + v158_data);
@@ -254,13 +250,12 @@ __launch_bounds__(256)
             ir5[8] = (v183_data + v182_data);
           }
           // s0 = store{r>s}(localShrMem0, r5);
-          int32_t v187_lead = threadIdx.x % 32;
-          if (v187_lead < 16) {
+          if (v2_lead < 16) {
             #pragma unroll
             for (int32_t v189_i1 = 0; v189_i1 < 9; ++v189_i1) {
               int32_t v190_a = 0 + v189_i1;
               float v192_data = r5[v189_i1];
-              int32_t v199_a = v187_lead + (v189_i1 * 32);
+              int32_t v199_a = v2_lead + (v189_i1 * 32);
               s0[v199_a] = v192_data;
             }
           }
@@ -270,25 +265,24 @@ __launch_bounds__(256)
           // r7 = +(s0 * r6) + None
           // [(0, 32), (0, 9)] [(0, 9)]
           auto& ir7 = r7;
-          int32_t v202_lane = threadIdx.x % 32;
-          int32_t v205_a = v202_lane + 0;
-          float v212_data = s0[v202_lane];
-          int32_t v218_a = v202_lane + 32;
-          float v225_data = s0[(v202_lane + 32)];
-          int32_t v231_a = v202_lane + 64;
-          float v238_data = s0[(v202_lane + 64)];
-          int32_t v244_a = v202_lane + 96;
-          float v251_data = s0[(v202_lane + 96)];
-          int32_t v257_a = v202_lane + 128;
-          float v264_data = s0[(v202_lane + 128)];
-          int32_t v270_a = v202_lane + 160;
-          float v277_data = s0[(v202_lane + 160)];
-          int32_t v283_a = v202_lane + 192;
-          float v290_data = s0[(v202_lane + 192)];
-          int32_t v296_a = v202_lane + 224;
-          float v303_data = s0[(v202_lane + 224)];
-          int32_t v309_a = v202_lane + 256;
-          float v316_data = s0[(v202_lane + 256)];
+          int32_t v205_a = v2_lead + 0;
+          float v212_data = s0[v2_lead];
+          int32_t v218_a = v2_lead + 32;
+          float v225_data = s0[(v2_lead + 32)];
+          int32_t v231_a = v2_lead + 64;
+          float v238_data = s0[(v2_lead + 64)];
+          int32_t v244_a = v2_lead + 96;
+          float v251_data = s0[(v2_lead + 96)];
+          int32_t v257_a = v2_lead + 128;
+          float v264_data = s0[(v2_lead + 128)];
+          int32_t v270_a = v2_lead + 160;
+          float v277_data = s0[(v2_lead + 160)];
+          int32_t v283_a = v2_lead + 192;
+          float v290_data = s0[(v2_lead + 192)];
+          int32_t v296_a = v2_lead + 224;
+          float v303_data = s0[(v2_lead + 224)];
+          int32_t v309_a = v2_lead + 256;
+          float v316_data = s0[(v2_lead + 256)];
           float v317_acc{};
           float v318_acc{};
           float v319_acc{};
@@ -397,10 +391,9 @@ __launch_bounds__(256)
           ir7[7] = v324_acc;
           ir7[8] = v325_acc;
           // glb_m3 = store{r>g}(r7);
-          int32_t v337_lead = threadIdx.x % 32;
           #pragma unroll
           for (int32_t v338_i0 = 0; v338_i0 < 1; ++v338_i0) {
-            int32_t v347_lead = v337_lead + (v338_i0 * 32);
+            int32_t v347_lead = v2_lead + (v338_i0 * 32);
             #pragma unroll
             for (int32_t v339_i1 = 0; v339_i1 < 9; ++v339_i1) {
               int32_t v340_a = v338_i0 + v339_i1;

@@ -106,8 +106,7 @@ __launch_bounds__(256)
             // r1 = +(r0 * s0) + None
             // [(16, 28), (0, 8)] [(0, 16)]
             float ir1[8]{};
-            int32_t v27_lead = threadIdx.x % 16;
-            if (v27_lead < 12) {
+            if (v2_lead < 12) {
               float v29_data = r0[0];
               float v30_data = s0[0];
               float v32_data = ir1[0];
@@ -134,7 +133,7 @@ __launch_bounds__(256)
               float v67_data = ir1[7];
               ir1[7] = (v67_data + (v29_data * v65_data));
             }
-            if (v27_lead < 12) {
+            if (v2_lead < 12) {
               float v73_data = r0[1];
               float v74_data = s0[1];
               float v76_data = ir1[0];
@@ -161,7 +160,7 @@ __launch_bounds__(256)
               float v111_data = ir1[7];
               ir1[7] = (v111_data + (v73_data * v109_data));
             }
-            if (v27_lead < 12) {
+            if (v2_lead < 12) {
               float v117_data = r0[2];
               float v118_data = s0[2];
               float v120_data = ir1[0];
@@ -188,7 +187,7 @@ __launch_bounds__(256)
               float v155_data = ir1[7];
               ir1[7] = (v155_data + (v117_data * v153_data));
             }
-            if (v27_lead < 12) {
+            if (v2_lead < 12) {
               float v161_data = r0[3];
               float v162_data = s0[3];
               float v164_data = ir1[0];
@@ -215,7 +214,7 @@ __launch_bounds__(256)
               float v199_data = ir1[7];
               ir1[7] = (v199_data + (v161_data * v197_data));
             }
-            if (v27_lead < 12) {
+            if (v2_lead < 12) {
               float v205_data = r0[4];
               float v206_data = s0[4];
               float v208_data = ir1[0];
@@ -242,7 +241,7 @@ __launch_bounds__(256)
               float v243_data = ir1[7];
               ir1[7] = (v243_data + (v205_data * v241_data));
             }
-            if (v27_lead < 12) {
+            if (v2_lead < 12) {
               float v249_data = r0[5];
               float v250_data = s0[5];
               float v252_data = ir1[0];
@@ -269,7 +268,7 @@ __launch_bounds__(256)
               float v287_data = ir1[7];
               ir1[7] = (v287_data + (v249_data * v285_data));
             }
-            if (v27_lead < 12) {
+            if (v2_lead < 12) {
               float v293_data = r0[6];
               float v294_data = s0[6];
               float v296_data = ir1[0];
@@ -296,7 +295,7 @@ __launch_bounds__(256)
               float v331_data = ir1[7];
               ir1[7] = (v331_data + (v293_data * v329_data));
             }
-            if (v27_lead < 12) {
+            if (v2_lead < 12) {
               float v337_data = r0[7];
               float v338_data = s0[7];
               float v340_data = ir1[0];
@@ -323,7 +322,7 @@ __launch_bounds__(256)
               float v375_data = ir1[7];
               ir1[7] = (v375_data + (v337_data * v373_data));
             }
-            if (v27_lead < 12) {
+            if (v2_lead < 12) {
               float v381_data = r0[8];
               float v382_data = s0[8];
               float v384_data = ir1[0];
@@ -350,7 +349,7 @@ __launch_bounds__(256)
               float v419_data = ir1[7];
               ir1[7] = (v419_data + (v381_data * v417_data));
             }
-            if (v27_lead < 12) {
+            if (v2_lead < 12) {
               float v425_data = r0[9];
               float v426_data = s0[9];
               float v428_data = ir1[0];
@@ -377,7 +376,7 @@ __launch_bounds__(256)
               float v463_data = ir1[7];
               ir1[7] = (v463_data + (v425_data * v461_data));
             }
-            if (v27_lead < 12) {
+            if (v2_lead < 12) {
               float v469_data = r0[10];
               float v470_data = s0[10];
               float v472_data = ir1[0];
@@ -404,7 +403,7 @@ __launch_bounds__(256)
               float v507_data = ir1[7];
               ir1[7] = (v507_data + (v469_data * v505_data));
             }
-            if (v27_lead < 12) {
+            if (v2_lead < 12) {
               float v513_data = r0[11];
               float v514_data = s0[11];
               float v516_data = ir1[0];
@@ -431,7 +430,7 @@ __launch_bounds__(256)
               float v551_data = ir1[7];
               ir1[7] = (v551_data + (v513_data * v549_data));
             }
-            if (v27_lead < 12) {
+            if (v2_lead < 12) {
               float v557_data = r0[12];
               float v558_data = s0[12];
               float v560_data = ir1[0];
@@ -458,7 +457,7 @@ __launch_bounds__(256)
               float v595_data = ir1[7];
               ir1[7] = (v595_data + (v557_data * v593_data));
             }
-            if (v27_lead < 12) {
+            if (v2_lead < 12) {
               float v601_data = r0[13];
               float v602_data = s0[13];
               float v604_data = ir1[0];
@@ -485,7 +484,7 @@ __launch_bounds__(256)
               float v639_data = ir1[7];
               ir1[7] = (v639_data + (v601_data * v637_data));
             }
-            if (v27_lead < 12) {
+            if (v2_lead < 12) {
               float v645_data = r0[14];
               float v646_data = s0[14];
               float v648_data = ir1[0];
@@ -512,7 +511,7 @@ __launch_bounds__(256)
               float v683_data = ir1[7];
               ir1[7] = (v683_data + (v645_data * v681_data));
             }
-            if (v27_lead < 12) {
+            if (v2_lead < 12) {
               float v689_data = r0[15];
               float v690_data = s0[15];
               float v692_data = ir1[0];
@@ -539,7 +538,7 @@ __launch_bounds__(256)
               float v727_data = ir1[7];
               ir1[7] = (v727_data + (v689_data * v725_data));
             }
-            if (v27_lead < 12) {
+            if (v2_lead < 12) {
               #pragma unroll
               for (int32_t v733_n1 = 0; v733_n1 < 8; ++v733_n1) {
                 int32_t v734_a = 0 + v733_n1;
@@ -550,9 +549,8 @@ __launch_bounds__(256)
             }
           }
           // glb_m0 = store{r>g}(r1);
-          int32_t v741_lead = threadIdx.x % 16;
-          if (v741_lead < 12) {
-            int32_t v753_a = ((v741_lead + 16_i32) + -12) - 4;
+          if (v2_lead < 12) {
+            int32_t v753_a = ((v2_lead + 16_i32) + -12) - 4;
             #pragma unroll
             for (int32_t v743_i1 = 0; v743_i1 < 8; ++v743_i1) {
               int32_t v744_a = 0 + v743_i1;

@@ -905,10 +905,9 @@ __launch_bounds__(256)
             }
           }
           // glb_m0 = store{r>g}(r1);
-          int32_t v1361_lead = threadIdx.x % 16;
           #pragma unroll
           for (int32_t v1362_i0 = 0; v1362_i0 < 1; ++v1362_i0) {
-            int32_t v1371_lead = v1361_lead + (v1362_i0 * 16);
+            int32_t v1371_lead = v2_lead + (v1362_i0 * 16);
             #pragma unroll
             for (int32_t v1363_i1 = 0; v1363_i1 < 16; ++v1363_i1) {
               int32_t v1364_a = v1362_i0 + v1363_i1;

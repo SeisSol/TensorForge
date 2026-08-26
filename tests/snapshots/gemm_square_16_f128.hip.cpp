@@ -112,10 +112,9 @@ __launch_bounds__(256)
           ir2[0] = v23_acc;
           ir2[1] = v24_acc;
           // glb_m0 = store{r>g}(r2);
-          int32_t v37_lead = threadIdx.x % 2;
           #pragma unroll
           for (int32_t v38_i0 = 0; v38_i0 < 1; ++v38_i0) {
-            int32_t v47_lead = v37_lead + (v38_i0 * 2);
+            int32_t v47_lead = v2_lead + (v38_i0 * 2);
             #pragma unroll
             for (int32_t v39_i1 = 0; v39_i1 < 2; ++v39_i1) {
               int32_t v40_a = v38_i0 + v39_i1;

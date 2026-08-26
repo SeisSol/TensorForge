@@ -91,12 +91,11 @@ __launch_bounds__(256)
           }
           float r2[12]{};
           // r2 = load{g>r}(glb_m1);
-          int32_t v23_lead = threadIdx.x % 32;
           #pragma unroll
           for (int32_t v24_i0 = 0; v24_i0 < 1; ++v24_i0) {
             int32_t v29_lead = v24_i0 * 32;
-            int32_t v30_lead = v23_lead + v29_lead;
-            int32_t v37_lead = v23_lead + v29_lead;
+            int32_t v30_lead = v2_lead + v29_lead;
+            int32_t v37_lead = v2_lead + v29_lead;
             #pragma unroll
             for (int32_t v25_i1 = 0; v25_i1 < 12; ++v25_i1) {
               int32_t v31_a = v25_i1 * 32;
@@ -402,10 +401,9 @@ __launch_bounds__(256)
           float v142_data = ir5[0];
           ir5[0] = (v142_data + v141_data);
           // glb_m0 = store{r>g}(r5);
-          int32_t v146_lead = threadIdx.x % 32;
           #pragma unroll
           for (int32_t v147_i0 = 0; v147_i0 < 1; ++v147_i0) {
-            int32_t v156_lead = v146_lead + (v147_i0 * 32);
+            int32_t v156_lead = v2_lead + (v147_i0 * 32);
             #pragma unroll
             for (int32_t v148_i1 = 0; v148_i1 < 1; ++v148_i1) {
               int32_t v149_a = v147_i0 + v148_i1;
@@ -416,12 +414,11 @@ __launch_bounds__(256)
           }
           float r6[13]{};
           // r6 = load{g>r}(glb_m0);
-          int32_t v162_lead = threadIdx.x % 32;
           #pragma unroll
           for (int32_t v163_i0 = 0; v163_i0 < 1; ++v163_i0) {
             int32_t v168_lead = v163_i0 * 32;
-            int32_t v169_lead = v162_lead + v168_lead;
-            int32_t v176_lead = v162_lead + v168_lead;
+            int32_t v169_lead = v2_lead + v168_lead;
+            int32_t v176_lead = v2_lead + v168_lead;
             #pragma unroll
             for (int32_t v164_i1 = 0; v164_i1 < 13; ++v164_i1) {
               int32_t v170_a = v164_i1 * 32;
@@ -679,10 +676,9 @@ __launch_bounds__(256)
           ir8[11] = v205_acc;
           ir8[12] = v206_acc;
           // glb_m3 = store{r>g}(r8);
-          int32_t v226_lead = threadIdx.x % 32;
           #pragma unroll
           for (int32_t v227_i0 = 0; v227_i0 < 1; ++v227_i0) {
-            int32_t v236_lead = v226_lead + (v227_i0 * 32);
+            int32_t v236_lead = v2_lead + (v227_i0 * 32);
             #pragma unroll
             for (int32_t v228_i1 = 0; v228_i1 < 13; ++v228_i1) {
               int32_t v229_a = v227_i0 + v228_i1;

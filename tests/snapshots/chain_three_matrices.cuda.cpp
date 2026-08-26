@@ -115,12 +115,11 @@ __launch_bounds__(256)
           // wait(r0 = load{g>r}(glb_m0););
           float r2[112]{};
           // r2 = load{g>r}(glb_m3);
-          int32_t v43_lead = threadIdx.x % 32;
           #pragma unroll
           for (int32_t v44_i0 = 0; v44_i0 < 1; ++v44_i0) {
             int32_t v49_lead = v44_i0 * 32;
-            int32_t v50_lead = v43_lead + v49_lead;
-            int32_t v57_lead = v43_lead + v49_lead;
+            int32_t v50_lead = v2_lead + v49_lead;
+            int32_t v57_lead = v2_lead + v49_lead;
             #pragma unroll
             for (int32_t v45_i1 = 0; v45_i1 < 56; ++v45_i1) {
               int32_t v51_a = v45_i1 * 56;
@@ -130,9 +129,9 @@ __launch_bounds__(256)
               r2[v62_a] = v60_data;
             }
           }
-          if (v43_lead < 24) {
-            int32_t v69_lead = v43_lead + 32_i32;
-            int32_t v76_lead = v43_lead + 32_i32;
+          if (v2_lead < 24) {
+            int32_t v69_lead = v2_lead + 32_i32;
+            int32_t v76_lead = v2_lead + 32_i32;
             #pragma unroll
             for (int32_t v64_i1 = 0; v64_i1 < 56; ++v64_i1) {
               int32_t v70_a = v64_i1 * 56;
@@ -150,7 +149,6 @@ __launch_bounds__(256)
           // r1 = +(r0 * s0) + None
           // [(0, 56), (0, 9)] [(0, 9)]
           auto& ir1 = r1;
-          int32_t v84_lead = threadIdx.x % 32;
           float v85_data = r0[0];
           float v86_data = s0[0];
           float v88_data = ir1[0];
@@ -179,7 +177,7 @@ __launch_bounds__(256)
           float v126_data = s0[72];
           float v128_data = ir1[16];
           ir1[16] = (v128_data + (v85_data * v126_data));
-          if (v84_lead < 24) {
+          if (v2_lead < 24) {
             float v131_data = r0[1];
             float v134_data = ir1[1];
             ir1[1] = (v134_data + (v131_data * v86_data));
@@ -228,7 +226,7 @@ __launch_bounds__(256)
           float v220_data = s0[73];
           float v222_data = ir1[16];
           ir1[16] = (v222_data + (v179_data * v220_data));
-          if (v84_lead < 24) {
+          if (v2_lead < 24) {
             float v225_data = r0[3];
             float v228_data = ir1[1];
             ir1[1] = (v228_data + (v225_data * v180_data));
@@ -277,7 +275,7 @@ __launch_bounds__(256)
           float v314_data = s0[74];
           float v316_data = ir1[16];
           ir1[16] = (v316_data + (v273_data * v314_data));
-          if (v84_lead < 24) {
+          if (v2_lead < 24) {
             float v319_data = r0[5];
             float v322_data = ir1[1];
             ir1[1] = (v322_data + (v319_data * v274_data));
@@ -326,7 +324,7 @@ __launch_bounds__(256)
           float v408_data = s0[75];
           float v410_data = ir1[16];
           ir1[16] = (v410_data + (v367_data * v408_data));
-          if (v84_lead < 24) {
+          if (v2_lead < 24) {
             float v413_data = r0[7];
             float v416_data = ir1[1];
             ir1[1] = (v416_data + (v413_data * v368_data));
@@ -375,7 +373,7 @@ __launch_bounds__(256)
           float v502_data = s0[76];
           float v504_data = ir1[16];
           ir1[16] = (v504_data + (v461_data * v502_data));
-          if (v84_lead < 24) {
+          if (v2_lead < 24) {
             float v507_data = r0[9];
             float v510_data = ir1[1];
             ir1[1] = (v510_data + (v507_data * v462_data));
@@ -424,7 +422,7 @@ __launch_bounds__(256)
           float v596_data = s0[77];
           float v598_data = ir1[16];
           ir1[16] = (v598_data + (v555_data * v596_data));
-          if (v84_lead < 24) {
+          if (v2_lead < 24) {
             float v601_data = r0[11];
             float v604_data = ir1[1];
             ir1[1] = (v604_data + (v601_data * v556_data));
@@ -473,7 +471,7 @@ __launch_bounds__(256)
           float v690_data = s0[78];
           float v692_data = ir1[16];
           ir1[16] = (v692_data + (v649_data * v690_data));
-          if (v84_lead < 24) {
+          if (v2_lead < 24) {
             float v695_data = r0[13];
             float v698_data = ir1[1];
             ir1[1] = (v698_data + (v695_data * v650_data));
@@ -522,7 +520,7 @@ __launch_bounds__(256)
           float v784_data = s0[79];
           float v786_data = ir1[16];
           ir1[16] = (v786_data + (v743_data * v784_data));
-          if (v84_lead < 24) {
+          if (v2_lead < 24) {
             float v789_data = r0[15];
             float v792_data = ir1[1];
             ir1[1] = (v792_data + (v789_data * v744_data));
@@ -571,7 +569,7 @@ __launch_bounds__(256)
           float v878_data = s0[80];
           float v880_data = ir1[16];
           ir1[16] = (v880_data + (v837_data * v878_data));
-          if (v84_lead < 24) {
+          if (v2_lead < 24) {
             float v883_data = r0[17];
             float v886_data = ir1[1];
             ir1[1] = (v886_data + (v883_data * v838_data));
@@ -596,10 +594,9 @@ __launch_bounds__(256)
           __syncwarp();
           float* __restrict__ s1 = &localShrMem0[0];
           // s1 = store{r>s}(localShrMem0, r1);
-          int32_t v930_lead = threadIdx.x % 32;
           #pragma unroll
           for (int32_t v931_i0 = 0; v931_i0 < 1; ++v931_i0) {
-            int32_t v942_lead = v930_lead + (v931_i0 * 32);
+            int32_t v942_lead = v2_lead + (v931_i0 * 32);
             #pragma unroll
             for (int32_t v932_i1 = 0; v932_i1 < 9; ++v932_i1) {
               int32_t v933_a = v932_i1 * 2;
@@ -609,8 +606,8 @@ __launch_bounds__(256)
               s1[v944_a] = v937_data;
             }
           }
-          if (v930_lead < 24) {
-            int32_t v956_lead = v930_lead + 32_i32;
+          if (v2_lead < 24) {
+            int32_t v956_lead = v2_lead + 32_i32;
             #pragma unroll
             for (int32_t v946_i1 = 0; v946_i1 < 9; ++v946_i1) {
               int32_t v947_a = v946_i1 * 2;
@@ -626,7 +623,6 @@ __launch_bounds__(256)
             // r3 = +(r2 * s1) + None
             // [(0, 56), (0, 9)] [(0, 56)]
             float ir3[18]{};
-            int32_t v961_lead = threadIdx.x % 32;
             float v962_data = r2[0];
             float v963_data = s1[0];
             float v965_data = ir3[0];
@@ -655,7 +651,7 @@ __launch_bounds__(256)
             float v1003_data = s1[448];
             float v1005_data = ir3[16];
             ir3[16] = (v1005_data + (v962_data * v1003_data));
-            if (v961_lead < 24) {
+            if (v2_lead < 24) {
               float v1008_data = r2[1];
               float v1011_data = ir3[1];
               ir3[1] = (v1011_data + (v1008_data * v963_data));
@@ -704,7 +700,7 @@ __launch_bounds__(256)
             float v1097_data = s1[449];
             float v1099_data = ir3[16];
             ir3[16] = (v1099_data + (v1056_data * v1097_data));
-            if (v961_lead < 24) {
+            if (v2_lead < 24) {
               float v1102_data = r2[3];
               float v1105_data = ir3[1];
               ir3[1] = (v1105_data + (v1102_data * v1057_data));
@@ -753,7 +749,7 @@ __launch_bounds__(256)
             float v1191_data = s1[450];
             float v1193_data = ir3[16];
             ir3[16] = (v1193_data + (v1150_data * v1191_data));
-            if (v961_lead < 24) {
+            if (v2_lead < 24) {
               float v1196_data = r2[5];
               float v1199_data = ir3[1];
               ir3[1] = (v1199_data + (v1196_data * v1151_data));
@@ -802,7 +798,7 @@ __launch_bounds__(256)
             float v1285_data = s1[451];
             float v1287_data = ir3[16];
             ir3[16] = (v1287_data + (v1244_data * v1285_data));
-            if (v961_lead < 24) {
+            if (v2_lead < 24) {
               float v1290_data = r2[7];
               float v1293_data = ir3[1];
               ir3[1] = (v1293_data + (v1290_data * v1245_data));
@@ -851,7 +847,7 @@ __launch_bounds__(256)
             float v1379_data = s1[452];
             float v1381_data = ir3[16];
             ir3[16] = (v1381_data + (v1338_data * v1379_data));
-            if (v961_lead < 24) {
+            if (v2_lead < 24) {
               float v1384_data = r2[9];
               float v1387_data = ir3[1];
               ir3[1] = (v1387_data + (v1384_data * v1339_data));
@@ -900,7 +896,7 @@ __launch_bounds__(256)
             float v1473_data = s1[453];
             float v1475_data = ir3[16];
             ir3[16] = (v1475_data + (v1432_data * v1473_data));
-            if (v961_lead < 24) {
+            if (v2_lead < 24) {
               float v1478_data = r2[11];
               float v1481_data = ir3[1];
               ir3[1] = (v1481_data + (v1478_data * v1433_data));
@@ -949,7 +945,7 @@ __launch_bounds__(256)
             float v1567_data = s1[454];
             float v1569_data = ir3[16];
             ir3[16] = (v1569_data + (v1526_data * v1567_data));
-            if (v961_lead < 24) {
+            if (v2_lead < 24) {
               float v1572_data = r2[13];
               float v1575_data = ir3[1];
               ir3[1] = (v1575_data + (v1572_data * v1527_data));
@@ -998,7 +994,7 @@ __launch_bounds__(256)
             float v1661_data = s1[455];
             float v1663_data = ir3[16];
             ir3[16] = (v1663_data + (v1620_data * v1661_data));
-            if (v961_lead < 24) {
+            if (v2_lead < 24) {
               float v1666_data = r2[15];
               float v1669_data = ir3[1];
               ir3[1] = (v1669_data + (v1666_data * v1621_data));
@@ -1047,7 +1043,7 @@ __launch_bounds__(256)
             float v1755_data = s1[456];
             float v1757_data = ir3[16];
             ir3[16] = (v1757_data + (v1714_data * v1755_data));
-            if (v961_lead < 24) {
+            if (v2_lead < 24) {
               float v1760_data = r2[17];
               float v1763_data = ir3[1];
               ir3[1] = (v1763_data + (v1760_data * v1715_data));
@@ -1096,7 +1092,7 @@ __launch_bounds__(256)
             float v1849_data = s1[457];
             float v1851_data = ir3[16];
             ir3[16] = (v1851_data + (v1808_data * v1849_data));
-            if (v961_lead < 24) {
+            if (v2_lead < 24) {
               float v1854_data = r2[19];
               float v1857_data = ir3[1];
               ir3[1] = (v1857_data + (v1854_data * v1809_data));
@@ -1145,7 +1141,7 @@ __launch_bounds__(256)
             float v1943_data = s1[458];
             float v1945_data = ir3[16];
             ir3[16] = (v1945_data + (v1902_data * v1943_data));
-            if (v961_lead < 24) {
+            if (v2_lead < 24) {
               float v1948_data = r2[21];
               float v1951_data = ir3[1];
               ir3[1] = (v1951_data + (v1948_data * v1903_data));
@@ -1194,7 +1190,7 @@ __launch_bounds__(256)
             float v2037_data = s1[459];
             float v2039_data = ir3[16];
             ir3[16] = (v2039_data + (v1996_data * v2037_data));
-            if (v961_lead < 24) {
+            if (v2_lead < 24) {
               float v2042_data = r2[23];
               float v2045_data = ir3[1];
               ir3[1] = (v2045_data + (v2042_data * v1997_data));
@@ -1243,7 +1239,7 @@ __launch_bounds__(256)
             float v2131_data = s1[460];
             float v2133_data = ir3[16];
             ir3[16] = (v2133_data + (v2090_data * v2131_data));
-            if (v961_lead < 24) {
+            if (v2_lead < 24) {
               float v2136_data = r2[25];
               float v2139_data = ir3[1];
               ir3[1] = (v2139_data + (v2136_data * v2091_data));
@@ -1292,7 +1288,7 @@ __launch_bounds__(256)
             float v2225_data = s1[461];
             float v2227_data = ir3[16];
             ir3[16] = (v2227_data + (v2184_data * v2225_data));
-            if (v961_lead < 24) {
+            if (v2_lead < 24) {
               float v2230_data = r2[27];
               float v2233_data = ir3[1];
               ir3[1] = (v2233_data + (v2230_data * v2185_data));
@@ -1341,7 +1337,7 @@ __launch_bounds__(256)
             float v2319_data = s1[462];
             float v2321_data = ir3[16];
             ir3[16] = (v2321_data + (v2278_data * v2319_data));
-            if (v961_lead < 24) {
+            if (v2_lead < 24) {
               float v2324_data = r2[29];
               float v2327_data = ir3[1];
               ir3[1] = (v2327_data + (v2324_data * v2279_data));
@@ -1390,7 +1386,7 @@ __launch_bounds__(256)
             float v2413_data = s1[463];
             float v2415_data = ir3[16];
             ir3[16] = (v2415_data + (v2372_data * v2413_data));
-            if (v961_lead < 24) {
+            if (v2_lead < 24) {
               float v2418_data = r2[31];
               float v2421_data = ir3[1];
               ir3[1] = (v2421_data + (v2418_data * v2373_data));
@@ -1439,7 +1435,7 @@ __launch_bounds__(256)
             float v2507_data = s1[464];
             float v2509_data = ir3[16];
             ir3[16] = (v2509_data + (v2466_data * v2507_data));
-            if (v961_lead < 24) {
+            if (v2_lead < 24) {
               float v2512_data = r2[33];
               float v2515_data = ir3[1];
               ir3[1] = (v2515_data + (v2512_data * v2467_data));
@@ -1488,7 +1484,7 @@ __launch_bounds__(256)
             float v2601_data = s1[465];
             float v2603_data = ir3[16];
             ir3[16] = (v2603_data + (v2560_data * v2601_data));
-            if (v961_lead < 24) {
+            if (v2_lead < 24) {
               float v2606_data = r2[35];
               float v2609_data = ir3[1];
               ir3[1] = (v2609_data + (v2606_data * v2561_data));
@@ -1537,7 +1533,7 @@ __launch_bounds__(256)
             float v2695_data = s1[466];
             float v2697_data = ir3[16];
             ir3[16] = (v2697_data + (v2654_data * v2695_data));
-            if (v961_lead < 24) {
+            if (v2_lead < 24) {
               float v2700_data = r2[37];
               float v2703_data = ir3[1];
               ir3[1] = (v2703_data + (v2700_data * v2655_data));
@@ -1586,7 +1582,7 @@ __launch_bounds__(256)
             float v2789_data = s1[467];
             float v2791_data = ir3[16];
             ir3[16] = (v2791_data + (v2748_data * v2789_data));
-            if (v961_lead < 24) {
+            if (v2_lead < 24) {
               float v2794_data = r2[39];
               float v2797_data = ir3[1];
               ir3[1] = (v2797_data + (v2794_data * v2749_data));
@@ -1635,7 +1631,7 @@ __launch_bounds__(256)
             float v2883_data = s1[468];
             float v2885_data = ir3[16];
             ir3[16] = (v2885_data + (v2842_data * v2883_data));
-            if (v961_lead < 24) {
+            if (v2_lead < 24) {
               float v2888_data = r2[41];
               float v2891_data = ir3[1];
               ir3[1] = (v2891_data + (v2888_data * v2843_data));
@@ -1684,7 +1680,7 @@ __launch_bounds__(256)
             float v2977_data = s1[469];
             float v2979_data = ir3[16];
             ir3[16] = (v2979_data + (v2936_data * v2977_data));
-            if (v961_lead < 24) {
+            if (v2_lead < 24) {
               float v2982_data = r2[43];
               float v2985_data = ir3[1];
               ir3[1] = (v2985_data + (v2982_data * v2937_data));
@@ -1733,7 +1729,7 @@ __launch_bounds__(256)
             float v3071_data = s1[470];
             float v3073_data = ir3[16];
             ir3[16] = (v3073_data + (v3030_data * v3071_data));
-            if (v961_lead < 24) {
+            if (v2_lead < 24) {
               float v3076_data = r2[45];
               float v3079_data = ir3[1];
               ir3[1] = (v3079_data + (v3076_data * v3031_data));
@@ -1782,7 +1778,7 @@ __launch_bounds__(256)
             float v3165_data = s1[471];
             float v3167_data = ir3[16];
             ir3[16] = (v3167_data + (v3124_data * v3165_data));
-            if (v961_lead < 24) {
+            if (v2_lead < 24) {
               float v3170_data = r2[47];
               float v3173_data = ir3[1];
               ir3[1] = (v3173_data + (v3170_data * v3125_data));
@@ -1831,7 +1827,7 @@ __launch_bounds__(256)
             float v3259_data = s1[472];
             float v3261_data = ir3[16];
             ir3[16] = (v3261_data + (v3218_data * v3259_data));
-            if (v961_lead < 24) {
+            if (v2_lead < 24) {
               float v3264_data = r2[49];
               float v3267_data = ir3[1];
               ir3[1] = (v3267_data + (v3264_data * v3219_data));
@@ -1880,7 +1876,7 @@ __launch_bounds__(256)
             float v3353_data = s1[473];
             float v3355_data = ir3[16];
             ir3[16] = (v3355_data + (v3312_data * v3353_data));
-            if (v961_lead < 24) {
+            if (v2_lead < 24) {
               float v3358_data = r2[51];
               float v3361_data = ir3[1];
               ir3[1] = (v3361_data + (v3358_data * v3313_data));
@@ -1929,7 +1925,7 @@ __launch_bounds__(256)
             float v3447_data = s1[474];
             float v3449_data = ir3[16];
             ir3[16] = (v3449_data + (v3406_data * v3447_data));
-            if (v961_lead < 24) {
+            if (v2_lead < 24) {
               float v3452_data = r2[53];
               float v3455_data = ir3[1];
               ir3[1] = (v3455_data + (v3452_data * v3407_data));
@@ -1978,7 +1974,7 @@ __launch_bounds__(256)
             float v3541_data = s1[475];
             float v3543_data = ir3[16];
             ir3[16] = (v3543_data + (v3500_data * v3541_data));
-            if (v961_lead < 24) {
+            if (v2_lead < 24) {
               float v3546_data = r2[55];
               float v3549_data = ir3[1];
               ir3[1] = (v3549_data + (v3546_data * v3501_data));
@@ -2027,7 +2023,7 @@ __launch_bounds__(256)
             float v3635_data = s1[476];
             float v3637_data = ir3[16];
             ir3[16] = (v3637_data + (v3594_data * v3635_data));
-            if (v961_lead < 24) {
+            if (v2_lead < 24) {
               float v3640_data = r2[57];
               float v3643_data = ir3[1];
               ir3[1] = (v3643_data + (v3640_data * v3595_data));
@@ -2076,7 +2072,7 @@ __launch_bounds__(256)
             float v3729_data = s1[477];
             float v3731_data = ir3[16];
             ir3[16] = (v3731_data + (v3688_data * v3729_data));
-            if (v961_lead < 24) {
+            if (v2_lead < 24) {
               float v3734_data = r2[59];
               float v3737_data = ir3[1];
               ir3[1] = (v3737_data + (v3734_data * v3689_data));
@@ -2125,7 +2121,7 @@ __launch_bounds__(256)
             float v3823_data = s1[478];
             float v3825_data = ir3[16];
             ir3[16] = (v3825_data + (v3782_data * v3823_data));
-            if (v961_lead < 24) {
+            if (v2_lead < 24) {
               float v3828_data = r2[61];
               float v3831_data = ir3[1];
               ir3[1] = (v3831_data + (v3828_data * v3783_data));
@@ -2174,7 +2170,7 @@ __launch_bounds__(256)
             float v3917_data = s1[479];
             float v3919_data = ir3[16];
             ir3[16] = (v3919_data + (v3876_data * v3917_data));
-            if (v961_lead < 24) {
+            if (v2_lead < 24) {
               float v3922_data = r2[63];
               float v3925_data = ir3[1];
               ir3[1] = (v3925_data + (v3922_data * v3877_data));
@@ -2223,7 +2219,7 @@ __launch_bounds__(256)
             float v4011_data = s1[480];
             float v4013_data = ir3[16];
             ir3[16] = (v4013_data + (v3970_data * v4011_data));
-            if (v961_lead < 24) {
+            if (v2_lead < 24) {
               float v4016_data = r2[65];
               float v4019_data = ir3[1];
               ir3[1] = (v4019_data + (v4016_data * v3971_data));
@@ -2272,7 +2268,7 @@ __launch_bounds__(256)
             float v4105_data = s1[481];
             float v4107_data = ir3[16];
             ir3[16] = (v4107_data + (v4064_data * v4105_data));
-            if (v961_lead < 24) {
+            if (v2_lead < 24) {
               float v4110_data = r2[67];
               float v4113_data = ir3[1];
               ir3[1] = (v4113_data + (v4110_data * v4065_data));
@@ -2321,7 +2317,7 @@ __launch_bounds__(256)
             float v4199_data = s1[482];
             float v4201_data = ir3[16];
             ir3[16] = (v4201_data + (v4158_data * v4199_data));
-            if (v961_lead < 24) {
+            if (v2_lead < 24) {
               float v4204_data = r2[69];
               float v4207_data = ir3[1];
               ir3[1] = (v4207_data + (v4204_data * v4159_data));
@@ -2370,7 +2366,7 @@ __launch_bounds__(256)
             float v4293_data = s1[483];
             float v4295_data = ir3[16];
             ir3[16] = (v4295_data + (v4252_data * v4293_data));
-            if (v961_lead < 24) {
+            if (v2_lead < 24) {
               float v4298_data = r2[71];
               float v4301_data = ir3[1];
               ir3[1] = (v4301_data + (v4298_data * v4253_data));
@@ -2419,7 +2415,7 @@ __launch_bounds__(256)
             float v4387_data = s1[484];
             float v4389_data = ir3[16];
             ir3[16] = (v4389_data + (v4346_data * v4387_data));
-            if (v961_lead < 24) {
+            if (v2_lead < 24) {
               float v4392_data = r2[73];
               float v4395_data = ir3[1];
               ir3[1] = (v4395_data + (v4392_data * v4347_data));
@@ -2468,7 +2464,7 @@ __launch_bounds__(256)
             float v4481_data = s1[485];
             float v4483_data = ir3[16];
             ir3[16] = (v4483_data + (v4440_data * v4481_data));
-            if (v961_lead < 24) {
+            if (v2_lead < 24) {
               float v4486_data = r2[75];
               float v4489_data = ir3[1];
               ir3[1] = (v4489_data + (v4486_data * v4441_data));
@@ -2517,7 +2513,7 @@ __launch_bounds__(256)
             float v4575_data = s1[486];
             float v4577_data = ir3[16];
             ir3[16] = (v4577_data + (v4534_data * v4575_data));
-            if (v961_lead < 24) {
+            if (v2_lead < 24) {
               float v4580_data = r2[77];
               float v4583_data = ir3[1];
               ir3[1] = (v4583_data + (v4580_data * v4535_data));
@@ -2566,7 +2562,7 @@ __launch_bounds__(256)
             float v4669_data = s1[487];
             float v4671_data = ir3[16];
             ir3[16] = (v4671_data + (v4628_data * v4669_data));
-            if (v961_lead < 24) {
+            if (v2_lead < 24) {
               float v4674_data = r2[79];
               float v4677_data = ir3[1];
               ir3[1] = (v4677_data + (v4674_data * v4629_data));
@@ -2615,7 +2611,7 @@ __launch_bounds__(256)
             float v4763_data = s1[488];
             float v4765_data = ir3[16];
             ir3[16] = (v4765_data + (v4722_data * v4763_data));
-            if (v961_lead < 24) {
+            if (v2_lead < 24) {
               float v4768_data = r2[81];
               float v4771_data = ir3[1];
               ir3[1] = (v4771_data + (v4768_data * v4723_data));
@@ -2664,7 +2660,7 @@ __launch_bounds__(256)
             float v4857_data = s1[489];
             float v4859_data = ir3[16];
             ir3[16] = (v4859_data + (v4816_data * v4857_data));
-            if (v961_lead < 24) {
+            if (v2_lead < 24) {
               float v4862_data = r2[83];
               float v4865_data = ir3[1];
               ir3[1] = (v4865_data + (v4862_data * v4817_data));
@@ -2713,7 +2709,7 @@ __launch_bounds__(256)
             float v4951_data = s1[490];
             float v4953_data = ir3[16];
             ir3[16] = (v4953_data + (v4910_data * v4951_data));
-            if (v961_lead < 24) {
+            if (v2_lead < 24) {
               float v4956_data = r2[85];
               float v4959_data = ir3[1];
               ir3[1] = (v4959_data + (v4956_data * v4911_data));
@@ -2762,7 +2758,7 @@ __launch_bounds__(256)
             float v5045_data = s1[491];
             float v5047_data = ir3[16];
             ir3[16] = (v5047_data + (v5004_data * v5045_data));
-            if (v961_lead < 24) {
+            if (v2_lead < 24) {
               float v5050_data = r2[87];
               float v5053_data = ir3[1];
               ir3[1] = (v5053_data + (v5050_data * v5005_data));
@@ -2811,7 +2807,7 @@ __launch_bounds__(256)
             float v5139_data = s1[492];
             float v5141_data = ir3[16];
             ir3[16] = (v5141_data + (v5098_data * v5139_data));
-            if (v961_lead < 24) {
+            if (v2_lead < 24) {
               float v5144_data = r2[89];
               float v5147_data = ir3[1];
               ir3[1] = (v5147_data + (v5144_data * v5099_data));
@@ -2860,7 +2856,7 @@ __launch_bounds__(256)
             float v5233_data = s1[493];
             float v5235_data = ir3[16];
             ir3[16] = (v5235_data + (v5192_data * v5233_data));
-            if (v961_lead < 24) {
+            if (v2_lead < 24) {
               float v5238_data = r2[91];
               float v5241_data = ir3[1];
               ir3[1] = (v5241_data + (v5238_data * v5193_data));
@@ -2909,7 +2905,7 @@ __launch_bounds__(256)
             float v5327_data = s1[494];
             float v5329_data = ir3[16];
             ir3[16] = (v5329_data + (v5286_data * v5327_data));
-            if (v961_lead < 24) {
+            if (v2_lead < 24) {
               float v5332_data = r2[93];
               float v5335_data = ir3[1];
               ir3[1] = (v5335_data + (v5332_data * v5287_data));
@@ -2958,7 +2954,7 @@ __launch_bounds__(256)
             float v5421_data = s1[495];
             float v5423_data = ir3[16];
             ir3[16] = (v5423_data + (v5380_data * v5421_data));
-            if (v961_lead < 24) {
+            if (v2_lead < 24) {
               float v5426_data = r2[95];
               float v5429_data = ir3[1];
               ir3[1] = (v5429_data + (v5426_data * v5381_data));
@@ -3007,7 +3003,7 @@ __launch_bounds__(256)
             float v5515_data = s1[496];
             float v5517_data = ir3[16];
             ir3[16] = (v5517_data + (v5474_data * v5515_data));
-            if (v961_lead < 24) {
+            if (v2_lead < 24) {
               float v5520_data = r2[97];
               float v5523_data = ir3[1];
               ir3[1] = (v5523_data + (v5520_data * v5475_data));
@@ -3056,7 +3052,7 @@ __launch_bounds__(256)
             float v5609_data = s1[497];
             float v5611_data = ir3[16];
             ir3[16] = (v5611_data + (v5568_data * v5609_data));
-            if (v961_lead < 24) {
+            if (v2_lead < 24) {
               float v5614_data = r2[99];
               float v5617_data = ir3[1];
               ir3[1] = (v5617_data + (v5614_data * v5569_data));
@@ -3105,7 +3101,7 @@ __launch_bounds__(256)
             float v5703_data = s1[498];
             float v5705_data = ir3[16];
             ir3[16] = (v5705_data + (v5662_data * v5703_data));
-            if (v961_lead < 24) {
+            if (v2_lead < 24) {
               float v5708_data = r2[101];
               float v5711_data = ir3[1];
               ir3[1] = (v5711_data + (v5708_data * v5663_data));
@@ -3154,7 +3150,7 @@ __launch_bounds__(256)
             float v5797_data = s1[499];
             float v5799_data = ir3[16];
             ir3[16] = (v5799_data + (v5756_data * v5797_data));
-            if (v961_lead < 24) {
+            if (v2_lead < 24) {
               float v5802_data = r2[103];
               float v5805_data = ir3[1];
               ir3[1] = (v5805_data + (v5802_data * v5757_data));
@@ -3203,7 +3199,7 @@ __launch_bounds__(256)
             float v5891_data = s1[500];
             float v5893_data = ir3[16];
             ir3[16] = (v5893_data + (v5850_data * v5891_data));
-            if (v961_lead < 24) {
+            if (v2_lead < 24) {
               float v5896_data = r2[105];
               float v5899_data = ir3[1];
               ir3[1] = (v5899_data + (v5896_data * v5851_data));
@@ -3252,7 +3248,7 @@ __launch_bounds__(256)
             float v5985_data = s1[501];
             float v5987_data = ir3[16];
             ir3[16] = (v5987_data + (v5944_data * v5985_data));
-            if (v961_lead < 24) {
+            if (v2_lead < 24) {
               float v5990_data = r2[107];
               float v5993_data = ir3[1];
               ir3[1] = (v5993_data + (v5990_data * v5945_data));
@@ -3301,7 +3297,7 @@ __launch_bounds__(256)
             float v6079_data = s1[502];
             float v6081_data = ir3[16];
             ir3[16] = (v6081_data + (v6038_data * v6079_data));
-            if (v961_lead < 24) {
+            if (v2_lead < 24) {
               float v6084_data = r2[109];
               float v6087_data = ir3[1];
               ir3[1] = (v6087_data + (v6084_data * v6039_data));
@@ -3350,7 +3346,7 @@ __launch_bounds__(256)
             float v6173_data = s1[503];
             float v6175_data = ir3[16];
             ir3[16] = (v6175_data + (v6132_data * v6173_data));
-            if (v961_lead < 24) {
+            if (v2_lead < 24) {
               float v6178_data = r2[111];
               float v6181_data = ir3[1];
               ir3[1] = (v6181_data + (v6178_data * v6133_data));
@@ -3383,7 +3379,7 @@ __launch_bounds__(256)
                 r3[v6231_a] = v6232_data;
               }
             }
-            if (v961_lead < 24) {
+            if (v2_lead < 24) {
               #pragma unroll
               for (int32_t v6238_n1 = 0; v6238_n1 < 9; ++v6238_n1) {
                 int32_t v6239_a = v6238_n1 * 2;
@@ -3396,10 +3392,9 @@ __launch_bounds__(256)
             }
           }
           // glb_m2 = store{r>g}(r3);
-          int32_t v6250_lead = threadIdx.x % 32;
           #pragma unroll
           for (int32_t v6251_i0 = 0; v6251_i0 < 1; ++v6251_i0) {
-            int32_t v6262_lead = v6250_lead + (v6251_i0 * 32);
+            int32_t v6262_lead = v2_lead + (v6251_i0 * 32);
             #pragma unroll
             for (int32_t v6252_i1 = 0; v6252_i1 < 9; ++v6252_i1) {
               int32_t v6253_a = v6252_i1 * 2;
@@ -3409,8 +3404,8 @@ __launch_bounds__(256)
               glb_m2[v6264_a] = v6257_data;
             }
           }
-          if (v6250_lead < 24) {
-            int32_t v6276_lead = v6250_lead + 32_i32;
+          if (v2_lead < 24) {
+            int32_t v6276_lead = v2_lead + 32_i32;
             #pragma unroll
             for (int32_t v6266_i1 = 0; v6266_i1 < 9; ++v6266_i1) {
               int32_t v6267_a = v6266_i1 * 2;

@@ -324,13 +324,12 @@ __launch_bounds__(256)
           ir2[14] = (v260_acc[2]);
           ir2[15] = (v260_acc[3]);
           // glb_m0 = store{r>g}(r2);
-          int32_t v267_lead = threadIdx.x % 16;
-          if (v267_lead < 12) {
+          if (v2_lead < 12) {
             #pragma unroll
             for (int32_t v269_i1 = 0; v269_i1 < 16; ++v269_i1) {
               int32_t v270_a = 0 + v269_i1;
               float v272_data = r2[v269_i1];
-              int32_t v279_a = v267_lead + (v269_i1 * 12);
+              int32_t v279_a = v2_lead + (v269_i1 * 12);
               glb_m0[v279_a] = v272_data;
             }
           }
