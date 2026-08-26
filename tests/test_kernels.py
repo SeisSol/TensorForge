@@ -320,7 +320,7 @@ def test_sparsity_band_uses_maskspp_and_generates():
     from tensorforge.common.matrix.spp import FullSPP
     from tensorforge.generators.generator import Generator
 
-    mod = _import_case("sparsity_band.py")
+    mod = _import_case("slicing/sparsity_band.py")
     descrs = mod.descr_list()
     sparse_ops = [op for d in descrs for op in d.matrix_list()
                   if not isinstance(op.tensor.spp, FullSPP)]
