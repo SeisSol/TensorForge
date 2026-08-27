@@ -221,13 +221,9 @@ def test_reduction_descr_constructs():
         assert d.var.tensor.direction == DataFlowDirection.SOURCE
         assert d.dest.tensor.direction == DataFlowDirection.SINK
 
-        if getattr(mod, "XFAIL", False):
-            # Only the lead-axis contraction is still open.  Anything else
-            # carrying the marker means a path that worked has stopped.
-            assert path.stem == "max_all", (
-                f"{path.name}: marked XFAIL, but the only reduction case "
-                "still expected to fail is max_all (lead-axis contraction)")
-            continue
+        assert not getattr(mod, "XFAIL", False), (
+            f"{path.name}: marked XFAIL, but every reduction case generates "
+            "since the cross-lane fold landed")
 
         ctx = Context(arch="sm_86", backend="cuda",
                       fp_type=getattr(mod, "DTYPE", None))

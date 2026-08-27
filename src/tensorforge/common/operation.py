@@ -116,6 +116,15 @@ class Operator(metaclass=ABCMeta):
 
 class ReductionOperator(Operator):
   @abstractmethod
+  def operation(self) -> Operation:
+    """The `Operation` member this operator stands for.
+
+    `irop()` names the pseudo-IR op and `__str__` the C++ spelling; neither
+    round-trips back to the enum, which is what a lexic needs to pick the
+    matching `tensorforge::ReductionOperation` specialisation.
+    """
+
+  @abstractmethod
   def neutral(self, dtype: Datatype):
     """Identity element for `dtype`, as a Python value.
 
@@ -130,6 +139,9 @@ class ReductionOperator(Operator):
     return 2
 
 class AddOperator(ReductionOperator):
+  def operation(self):
+    return Operation.ADD
+
   def irop(self):
     return 'add'
 
@@ -146,6 +158,9 @@ class AddOperator(ReductionOperator):
     return '+'
 
 class MulOperator(ReductionOperator):
+  def operation(self):
+    return Operation.MUL
+
   def absorbing(self):
     return 0
 
@@ -165,6 +180,9 @@ class MulOperator(ReductionOperator):
     return '*'
 
 class MinOperator(ReductionOperator):
+  def operation(self):
+    return Operation.MIN
+
   def irop(self):
     return 'min'
 
@@ -185,6 +203,9 @@ class MinOperator(ReductionOperator):
     return 'min'
 
 class MaxOperator(ReductionOperator):
+  def operation(self):
+    return Operation.MAX
+
   def irop(self):
     return 'max'
 
@@ -205,6 +226,9 @@ class MaxOperator(ReductionOperator):
     return 'max'
 
 class AndOperator(ReductionOperator):
+  def operation(self):
+    return Operation.AND
+
   def absorbing(self):
     return 0
 
@@ -229,6 +253,9 @@ class AndOperator(ReductionOperator):
     return '&'
 
 class OrOperator(ReductionOperator):
+  def operation(self):
+    return Operation.OR
+
   def irop(self):
     # bitwise, not logical: `and` would render as `&&`
     return 'bitor'
@@ -246,6 +273,9 @@ class OrOperator(ReductionOperator):
     return '|'
 
 class XorOperator(ReductionOperator):
+  def operation(self):
+    return Operation.XOR
+
   def irop(self):
     # bitwise, not logical: `and` would render as `&&`
     return 'bitxor'

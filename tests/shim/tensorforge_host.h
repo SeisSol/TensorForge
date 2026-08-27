@@ -181,6 +181,20 @@ template <int Row> void fmacdpp16(float2 &c, float2 a, float2 b);
 template <std::size_t Block, std::size_t Subblock, std::size_t Lane, typename T>
 T broadcast(T value);
 
+// The operator tag is a type, so `Operation` and `ReductionOperation` have to
+// be here too -- a `reduction` declared over an opaque `typename Op` would
+// accept `ReductionOperation<float, Operation::Nonsense>` and report nothing.
+enum class Operation { Add, Mul, And, Or, Xor, Min, Max };
+
+template <typename T, Operation OpT> struct ReductionOperation {
+  static constexpr Operation Op = OpT;
+  static T applyOperation(const T &a1, const T &a2);
+  static T neutral();
+};
+
+template <typename Op, std::size_t Block, std::size_t Subblock, typename T>
+T reduction(const T &value);
+
 // Two overloads, not one template.  A single `template <int Row, typename T>
 // T movdpp16(T)` would accept calls the runtime rejects -- `movdpp16<0>` on a
 // `double` has no definition there -- and a shim that is more permissive than

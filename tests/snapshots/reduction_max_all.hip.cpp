@@ -1,1 +1,93 @@
-FAILED: InternalError: reduction over the lead dimension is not implemented yet: max over axes [0, 1] contracts axis 0 of glb_m0, which is distributed over threads. A cross-lane fold is needed here.
+// === base name ===
+kernel_90d491a14e
+
+// === header ===
+void launcher_kernel_90d491a14e(const float* m0, unsigned m0_extraOffset, float* m1, unsigned m1_extraOffset, size_t numElements0, unsigned* flags0 = nullptr, void* streamPtr = nullptr);
+
+
+// === launcher ===
+void launcher_kernel_90d491a14e(const float* m0, unsigned m0_extraOffset, float* m1, unsigned m1_extraOffset, size_t numElements0, unsigned* flags0 , void* streamPtr) {
+  dim3 block (32, 8, 1);
+  static std::size_t gridsize = 0;
+      if (gridsize == 0) {
+        int device, smCount, blocksPerSM;
+        CHECK_RES(hipGetDevice(&device));
+        CHECK_RES(hipDeviceGetAttribute(&smCount, hipDeviceAttributeMultiprocessorCount, device));
+        CHECK_RES(hipOccupancyMaxActiveBlocksPerMultiprocessor(&blocksPerSM, kernel_kernel_90d491a14e, block.x * block.y * block.z, 0 * sizeof(float)));
+        CHECK_ERR;
+        if (blocksPerSM > 0) {
+          gridsize = smCount * blocksPerSM;
+        }
+        else {
+          gridsize = smCount;
+        }
+      }
+      
+  dim3 grid (std::min(gridsize, numElements0), 1, 1);
+  static bool shmemsizeset = false;
+      if (!shmemsizeset) {
+        CHECK_RES(hipFuncSetAttribute(reinterpret_cast<const void*>(&kernel_kernel_90d491a14e), hipFuncAttributeMaxDynamicSharedMemorySize, 0 * sizeof(float)));
+        CHECK_ERR;
+        shmemsizeset = true;
+      }
+      
+  hipStream_t stream = (streamPtr != nullptr) ? static_cast<hipStream_t>(streamPtr) : 0;
+  hipLaunchKernelGGL(kernel_kernel_90d491a14e, grid, block, 0 * sizeof(float), stream,  m0,  m0_extraOffset,  m1,  m1_extraOffset,  numElements0,  flags0 );
+  CHECK_ERR;
+}
+
+
+// === kernel ===
+__global__ void 
+__launch_bounds__(256)
+ kernel_kernel_90d491a14e(const float* m0, unsigned m0_extraOffset, float* m1, unsigned m1_extraOffset, size_t numElements0, unsigned* flags0 ) {
+  extern __shared__ char totalShrMemPtr[];
+   {
+    // generated with TensorForge. Version: 0.0.1
+    // meta data:
+    // m0 16×16(16×16) {0..16}×{0..16} strided
+    // m1 1(1) {0..1} strided
+    // OUT = max(A, dims=[0, 1])
+    {
+      const auto batchId_start = threadIdx.y + blockDim.y * (blockIdx.x);
+      const auto batchId1 = batchId_start < numElements0 ? batchId_start : 0;
+      const auto batchId2 = batchId1 + (gridDim.x * blockDim.y) < numElements0 ? batchId1 + (gridDim.x * blockDim.y) : batchId1;
+      __syncthreads();
+      for (size_t batchId0 = threadIdx.y + blockDim.y * (blockIdx.x); batchId0 < numElements0; batchId0 += (gridDim.x * blockDim.y)) {
+        const auto batchId1 = batchId0 + (gridDim.x * blockDim.y) < numElements0 ? batchId0 + (gridDim.x * blockDim.y) : batchId0;
+        const auto batchId2 = batchId1 + (gridDim.x * blockDim.y) < numElements0 ? batchId1 + (gridDim.x * blockDim.y) : batchId1;
+        bool allowed = true;
+        if (flags0 != nullptr) {
+          allowed = static_cast<bool>(flags0[batchId0]);
+        }
+        if (allowed) {
+          const float *const __restrict__ glb_m0 = &m0[batchId0 * 256 + 0 + m0_extraOffset];
+          float *const __restrict__ glb_m1 = &m1[batchId0 * 1 + 0 + m1_extraOffset];
+          // glb_m1 = max(glb_m0, dims=[0, 1])
+          int32_t v3_lead = threadIdx.x % 32;
+          float v25_sel0;
+          if (v3_lead < 16) {
+            float v6_acc0 = -INFINITY;
+            #pragma unroll
+            for (int32_t v5_r1 = 0; v5_r1 < 16; ++v5_r1) {
+              int32_t v12_a = v5_r1 * 16;
+              int32_t v13_a = v3_lead + v12_a;
+              float v21_data = glb_m0[(v3_lead + v12_a)];
+              v6_acc0 = (fmaxf(v6_acc0, v21_data));
+            }
+            v25_sel0 = v6_acc0;
+          }
+          else {
+            v25_sel0 = -INFINITY;
+          }
+          float v26_red = tensorforge::reduction<tensorforge::ReductionOperation<float, tensorforge::Operation::Max>, 32, 1, float>(v25_sel0);
+          if (v3_lead == 0) {
+            glb_m1[0] = v26_red;
+          }
+          ;
+        }
+      }
+    }
+  }
+}
+

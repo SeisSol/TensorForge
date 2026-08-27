@@ -241,16 +241,40 @@ class CudaLexic(Lexic):
 
     raise NotImplementedError(f'{op}')
 
-  def reduction(self, optype, fptype, blocks):
-    if fptype == Datatype.BOOL and blocks == [2,4,8,16,32]:
-      if optype == Operation.AND:
-        return f'__all_sync(-1, value)'
-      if optype == Operation.OR:
-        return f'__any_sync(-1, value)'
-      if optype == Operation.XOR:
-        return f'!__and_sync(-1, !value)'
-    for block in blocks:
-      f'__shfl_xor_sync(-1, {block}, value)'
+  #: C++ `tensorforge::Operation` members, by the `Operation` they lower from.
+  REDUCTION_OPS = {
+      Operation.ADD: 'Add',
+      Operation.MUL: 'Mul',
+      Operation.MIN: 'Min',
+      Operation.MAX: 'Max',
+      Operation.AND: 'And',
+      Operation.OR: 'Or',
+      Operation.XOR: 'Xor',
+  }
+
+  def reduction(self, variable, optype, fptype, block, subblock=1):
+    """An all-reduce across `block` lanes, in groups of `subblock`.
+
+    A call rather than a butterfly spelled out here, for the same reason
+    `broadcast` is one: the exchange already exists in `tensorforge_device`,
+    both backends define it under the same name, and `multilinear`'s
+    lead-dimension fold wants the same thing.  A lexic that emitted the
+    intrinsics directly would be a second copy of it.
+
+    The previous body was unreachable and would not have worked if it had
+    been: it returned `None` (the loop's last statement was a bare f-string),
+    tested `blocks == [2, 4, 8, 16, 32]` for what is a single width, named
+    `__and_sync`, which does not exist, and emitted CUDA intrinsics
+    unconditionally -- and `HipLexic` inherits this method, so HIP would have
+    got `__shfl_xor_sync` too.
+    """
+    if optype not in self.REDUCTION_OPS:
+      raise NotImplementedError(f'reduction over {optype}')
+    ctype = fptype.ctype()
+    op = (f'tensorforge::ReductionOperation<{ctype}, '
+          f'tensorforge::Operation::{self.REDUCTION_OPS[optype]}>')
+    return (f'tensorforge::reduction<{op}, {block}, {subblock}, {ctype}>'
+            f'({variable})')
 
   def glb_store(self, lhs, rhs, nontemporal=False):
     if nontemporal:

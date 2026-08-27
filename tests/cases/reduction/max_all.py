@@ -20,7 +20,6 @@ the pipeline assumes ``rank() >= 1`` in several places (see
 ``BoundingBox([], [])`` works but is untested elsewhere; rank-1 with
 a single element is the conservative choice.
 
-XFAIL: the cross-lane fold is not implemented.
 """
 
 import numpy as np
@@ -36,12 +35,6 @@ DTYPE = Datatype.F32
 BATCH = 4
 TOL = (1e-6, 1e-6)
 
-XFAIL = True
-XFAIL_REASON = (
-    "The non-lead reduction path is implemented, but this case contracts "
-    "the lead axis too, so it needs the cross-lane fold that "
-    "ReductionInstruction does not have yet."
-)
 
 
 def descr_list():

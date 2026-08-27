@@ -74,6 +74,7 @@ DEVICE_HEADERS = (INCLUDE / "tensorforge_device" / "hip.h",
 CHECKED = (
     "transpose4x4b32", "transpose16x16b32", "transpose16x2", "transpose16x4",
     "fmacdpp4", "fmacdpp16", "broadcast", "movdpp16", "splitFloatTF32",
+    "reduction",
 )
 
 _DECL = re.compile(

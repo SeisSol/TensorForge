@@ -75,9 +75,6 @@ failure, which is the signal to drop the marker.
 
 Currently XFAIL:
 
-* `cases/reduction/max_all.py` — contracts the lead axis, which needs the
-cross-lane fold `ReductionInstruction` does not have yet
-
 * `cases/beta_nonzero.py` — `GemmDescr` silently drops the `beta` argument
 
 * `cases/addressing_ptr_based.py` — the test driver
@@ -271,11 +268,12 @@ is a sequential axis, so each lane owns one point of the kept iteration
 space and folds into a register, with no cross-lane traffic, no shared
 memory and no barrier. Four of the five cases take that path.
 
-`max_all` contracts the lead axis as well, so its fold crosses lanes.
-That needs a shuffle within a wave and, once `num_threads` exceeds
-`vec_unit_length`, a scratch tile in shared memory on top. It stays
-`XFAIL = True` until that lands; the conftest attaches
-`pytest.mark.xfail(strict=True, run=True)` from the marker.
+`max_all` contracts the lead axis as well, so its fold crosses lanes: each
+lane folds what it owns, taking the neutral element where it owns nothing,
+then one `tensorforge::reduction` call over the lane partials, then lane 0
+stores. The guard around step one is an `if`/`else` yielding a value rather
+than a bare bounds check, because a shuffle reached by only part of the warp
+is undefined.
 
 The five cases reflect the operator space:
 
@@ -373,10 +371,11 @@ has a deterministic reproducer in the suite:
    `tanf`. Reproducer: `cases/elementwise/tanh.py` will fail
    numerically once generation works.
 
-5. **A lead-axis reduction has no lowering** — `ReductionInstruction`
-   emits the non-lead fold and raises with an explicit message when a
-   contracted axis is the thread-distributed one. Reproducer:
-   `cases/reduction/max_all.py` (XFAIL).
+5. **A partial lead-axis reduction has no lowering** — contracting the
+   thread-distributed axis works only when every axis is contracted.
+   Keeping some would mean redistributing them over the lanes first.
+   `ReductionInstruction` raises with an explicit message. No case
+   reproduces it; `ReductionDescr` has no shape that reaches it today.
 
 6. **PTR_BASED needs harness driver work** — the generator emits
    correct device code, but `tests/harness/driver_emit.py:257` only

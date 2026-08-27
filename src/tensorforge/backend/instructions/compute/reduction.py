@@ -100,11 +100,15 @@ class ReductionInstruction(ComputeInstruction):
         kept = self._kept()
 
         if src_lead in self._dims:
-            raise InternalError(
-                f'reduction over the lead dimension is not implemented yet: '
-                f'{self._operation} over axes {self._dims} contracts axis '
-                f'{src_lead} of {self._op.symbol.name}, which is distributed '
-                f'over threads. A cross-lane fold is needed here.')
+            if kept:
+                raise InternalError(
+                    f'reduction: {self._operation} contracts the lead axis '
+                    f'{src_lead} of {self._op.symbol.name} while keeping '
+                    f'{kept}. Only the full contraction has a cross-lane '
+                    f'lowering; a partial one would have to redistribute the '
+                    f'kept axes over the lanes first.')
+            self._lead_reduction(writer, src_lead)
+            return
 
         self._check_dest_lead(kept, src_lead)
         self._nonlead_reduction(writer, kept, src_lead)
@@ -147,6 +151,101 @@ class ReductionInstruction(ComputeInstruction):
 
         write_loops(self._context, writer, loopstack, self._body(writer, kept))
 
+    def _lead_reduction(self, writer: Writer, src_lead: int) -> None:
+        """Every axis contracted, so the fold crosses lanes.
+
+        Three steps, and the middle one is why this cannot reuse `LeadLoop`:
+
+        1. each lane folds the axes it owns into a partial.  Lanes that own no
+           element -- the lead extent need not fill the thread count -- take
+           the neutral element instead of being skipped;
+        2. one cross-lane all-reduce over the partials;
+        3. lane 0 stores.
+
+        Step 1's `if`/`else` is load-bearing. `LeadLoop` would emit a bare
+        guard, and a shuffle under a guard is undefined behaviour whenever the
+        mask names a lane that did not reach it: with a lead extent of 16 and
+        32 threads, half the warp would sit outside the region while the other
+        half asked it for a value. `LeadLoop.neutral` looks like it addresses
+        this, but the pass that would consume the attribute (`if_convert`) is
+        not in the default pipeline and does not read it. Selecting the
+        neutral element explicitly makes every lane arrive at the exchange
+        with something defined, which is what the exchange requires.
+        """
+        from tensorforge.backend.pir.core import BOOL, ScalarType
+
+        acc_type = ScalarType(self._context.fp_type)
+        extent = self._op.bbox.size(src_lead)
+        lead = self._lane(writer)
+
+        # -- 1. the per-lane partial --------------------------------------- #
+        if extent >= self._num_threads:
+            partial = self._lane_partial(writer, src_lead, lead)
+        else:
+            guard = writer.if_else(
+                writer.op('lt', BOOL, lead, extent, hint='own'),
+                types=(acc_type,))
+            with guard.then():
+                guard.yield_(self._lane_partial(writer, src_lead, lead))
+            with guard.otherwise():
+                guard.yield_(writer.const(self._neutral(), acc_type))
+            partial = guard.result
+
+        # -- 2. the cross-lane fold ---------------------------------------- #
+        total = self._cross_lane(writer, partial)
+
+        # -- 3. one lane stores -------------------------------------------- #
+        # `reduction` is an all-reduce, so every lane holds the answer and
+        # letting them all write would be a race on one address rather than a
+        # disagreement. Still a race, so it is guarded.
+        with writer.if_(writer.op('eq', BOOL, lead, 0, hint='w')):
+            self._dest.symbol.store(
+                writer, self._context, total,
+                self._offset(self._dest, [0] * self._dest.bbox.rank()), False)
+
+    def _lane(self, writer: Writer):
+        """`threadIdx.x % num_threads` -- the same lane index `LeadLoop` builds.
+
+        Spelled here rather than borrowed because `LeadLoop._lead` only exists
+        inside its own `write`, and CSE merges the two anyway.
+        """
+        from tensorforge.backend.pir.core import INDEX
+        tid = writer.thread_id('x')
+        return writer.op('rem', INDEX, tid, self._num_threads, hint='lead')
+
+    def _lane_partial(self, writer: Writer, src_lead: int, lead):
+        """This lane's fold over the axes it owns, lead axis pinned to `lead`."""
+        from tensorforge.backend.symbol import LeadIndex
+
+        index = {src_lead: LeadIndex(0, self._num_threads, 1)}
+        rest = [d for d in self._dims if d != src_lead]
+        value = self._fold_axes(writer, index, rest, 0)
+        if value is None:
+            raise InternalError(
+                f'reduction: {self._op.symbol.name} yielded no value for its '
+                f'load; the sparse path has no reduction lowering yet')
+        return value
+
+    def _cross_lane(self, writer: Writer, partial):
+        """The all-reduce, as the lexic spells it.
+
+        A call into `tensorforge_device`, not a butterfly built here: both
+        backends already define `tensorforge::reduction` under the same name,
+        `multilinear`'s lead-dimension fold wants the identical exchange, and a
+        backend whose sub-group reduction is a single library call -- SYCL's
+        `reduce_over_group`, say -- overrides one method instead of growing a
+        second lowering.
+        """
+        from tensorforge.backend.pir.core import ScalarType
+
+        lexic = self._context.get_vm().get_lexic()
+        text = lexic.reduction('{0}', self._operation.operation(),
+                               self._context.fp_type, self._num_threads,
+                               subblock=1)
+        return writer.rawexpr(text, partial,
+                              type_=ScalarType(self._context.fp_type),
+                              hint='red', pure=True, movable=False)
+
     def _body(self, writer: Writer, kept: Sequence[int]):
         def inner(varlist):
             # `write_loops` hands over one variable per loop it wrote, in the
@@ -164,6 +263,10 @@ class ReductionInstruction(ComputeInstruction):
         return inner
 
     def _fold(self, writer: Writer, index: dict, depth: int):
+        return self._fold_axes(writer, index, self._dims, depth)
+
+    def _fold_axes(self, writer: Writer, index: dict, axes: Sequence[int],
+                   depth: int):
         """Nest one `for` per contracted axis, carrying the accumulator.
 
         The accumulator is a loop-carried SSA value rather than a declared
@@ -174,10 +277,10 @@ class ReductionInstruction(ComputeInstruction):
         """
         from tensorforge.backend.pir.core import ScalarType
 
-        if depth == len(self._dims):
+        if depth == len(axes):
             return self._load(writer, index)
 
-        axis = self._dims[depth]
+        axis = axes[depth]
         lo, hi = 0, self._op.bbox.size(axis)
         acc_type = ScalarType(self._context.fp_type)
 
@@ -191,7 +294,7 @@ class ReductionInstruction(ComputeInstruction):
         with loop:
             index[axis] = Variable(str(loop.induction), Datatype.I32,
                                    loop.induction)
-            inner = self._fold(writer, index, depth + 1)
+            inner = self._fold_axes(writer, index, axes, depth + 1)
             loop.yield_(self._combine(writer, loop.iter_args[0], inner))
         del index[axis]
         return loop.result
