@@ -288,8 +288,17 @@ def _check_scope(body: Tuple[Stmt, ...], live: set, diag: List[str],
                 diag.append('copy.async: must carry Effect.ASYNC')
 
         elif s.op == Op.WAIT:
-            if len(s.args) > 1:
-                diag.append('wait: takes at most one token')
+            # Several tokens are allowed, and for a macro copy they are
+            # required: `schedule_async` retires the waited token and
+            # everything issued before it in its class, so one wait covers a
+            # transfer split into hops -- but `check_tokens` runs before the
+            # schedule exists and would call the earlier hops unconsumed.
+            # Naming them reconciles the two without either guessing, and the
+            # emitted code is unchanged because `prior` still comes from one
+            # position.
+            if any(not isinstance(a.type, TokenType) for a in s.args
+                   if isinstance(a, Value)):
+                diag.append('wait: every operand must be a completion token')
             if s.args and not isinstance(_typeof(s.args[0]), TokenType):
                 diag.append('wait: argument must be a completion token')
 

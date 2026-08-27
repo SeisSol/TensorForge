@@ -148,7 +148,21 @@ def _sched(body: Tuple[Stmt, ...], state: _State,
 
 
 def _sched_wait(s: Stmt, state: _State, diag: List[str]) -> Stmt:
-    tok = s.waited
+    # A wait may name several tokens: the hops of one macro copy are retired
+    # together, and naming them is how `check_tokens` sees that.  The count is
+    # still derived from a single position -- the *latest* of them, since
+    # retiring that one retires everything issued before it in its class.
+    tok = None
+    if s.args:
+        best = -1
+        for cand in s.args:
+            if not _is_token(cand):
+                continue
+            i = state.index_of(cand.id) if state.known else -1
+            if i > best:
+                best, tok = i, cand
+        if tok is None:
+            tok = s.waited
 
     if tok is None:                         # explicit full drain
         state.drain()

@@ -591,6 +591,7 @@ class IRBuilder:
                    elems: int = 1,
                    dst_space: Optional[MemSpace] = None,
                    src_space: Optional[MemSpace] = None,
+                   predicate: Optional[Value] = None,
                    hint: str = 'cp') -> Value:
         """Issue an asynchronous copy ``src -> dst``; returns its token.
 
@@ -598,16 +599,35 @@ class IRBuilder:
         Copy and wait carry the *same* accesses, which is what keeps any read
         of ``dst`` from being hoisted above the wait --- the reorder machinery
         needs no notion of asynchrony beyond that.
+
+        ``elems`` is the extent one lane moves, and ``predicate`` is what makes
+        the extent enough.  A macro copy is not a tile: the loader splits a
+        transfer into hops of 4, 2 and 1 elements per lane and then has
+        ``length % num_threads`` elements left over, which the last hop moves
+        under ``linear_idx < rest``.  A shape that only admitted whole tiles
+        would have to exclude that hop, and the ragged tail is not the rare
+        case --- it is every transfer whose length is not a multiple of the
+        block.
+
+        Predication does not change the token.  The copy issues for the wave
+        whenever any lane is active, so it counts once against the hardware
+        counter either way, and the guard is a real branch rather than a
+        select because the token has no C++ value to select on.
+
+        The token granularity is independent of all of this.  A wait retires
+        every copy up to and including the one it names, so a wait on the last
+        token of a group retires the group --- one token per macro copy falls
+        out of that rather than needing a group object to express it.
         """
         dst_space = dst_space if dst_space is not None else self._space_of(dst)
         src_space = src_space if src_space is not None else self._space_of(src)
-        accesses = (Access(Effect.READ, src_space, src),
-                    Access(Effect.WRITE, dst_space, dst))
+        accesses = (Access(Effect.READ, src_space, self.alias_root(src)),
+                    Access(Effect.WRITE, dst_space, self.alias_root(dst)))
 
         tok = self.value(TOKEN, hint=hint)
         self._emit_op(Op.COPY_ASYNC, (tok,),
                       (dst, src) + tuple(dst_index) + tuple(src_index),
-                      pure=False, movable=True,
+                      pure=False, movable=True, predicate=predicate,
                       effect=Effect.READ | Effect.WRITE | Effect.ASYNC,
                       accesses=accesses,
                       attrs=(('ndst', len(tuple(dst_index))), ('elems', elems),
@@ -655,27 +675,44 @@ class IRBuilder:
         self._token_uniform[tok.id] = uniform
         return tok
 
-    def wait(self, token: Optional[Value] = None) -> Stmt:
+    def wait(self, token: Optional[Value] = None, *also: Value) -> Stmt:
         """Wait for ``token`` (or, with ``None``, drain every outstanding copy).
+
+        Several tokens may be named, and for a macro copy they have to be.
+        ``schedule_async`` retires the waited token *and everything issued
+        before it in its own class* --- that is what the hardware counter does,
+        and it is why one wait suffices for a transfer split into hops.  But
+        `check_tokens` requires every token to be consumed exactly once, and it
+        runs before the schedule exists, so it cannot see that a later wait
+        already retired the earlier hops.  Naming them makes the two agree
+        without either having to guess: the emitted code is unchanged, since
+        ``prior`` is still derived from one position.
+
+        This is also the whole of what a "group" needs to be.  A group object
+        would carry a stage count, an acquire and a release; naming the tokens
+        a wait retires carries the same information as a def-use edge, which
+        every pass already understands.
 
         The concrete counter value (``vmcnt(N)`` / ``wait_prior(N)``) is not
         decided here --- ``schedule_async`` derives it from the outstanding set
         once the schedule is final.
         """
-        if token is None:
+        tokens = ((token,) + also) if token is not None else ()
+        if not tokens:
             accesses = (Access(Effect.READ | Effect.WRITE, MemSpace.UNKNOWN, None),)
         else:
-            accesses = self._token_accesses.get(
-                token.id,
-                (Access(Effect.READ | Effect.WRITE, MemSpace.UNKNOWN, None),))
+            fallback = (Access(Effect.READ | Effect.WRITE, MemSpace.UNKNOWN, None),)
+            accesses = tuple(a for t in tokens
+                             for a in self._token_accesses.get(t.id, fallback))
         results: Tuple[Value, ...] = ()
-        if token is not None:
-            types = self._token_results.get(token.id, ())
-            results = tuple(self.value(t, hint=token.hint or 'ld',
-                                       uniform=self._token_uniform.get(token.id, True))
+        if tokens:
+            # Only the named token can release values; the hops retired
+            # alongside it are copies, which produce none.
+            types = self._token_results.get(tokens[0].id, ())
+            results = tuple(self.value(t, hint=tokens[0].hint or 'ld',
+                                       uniform=self._token_uniform.get(tokens[0].id, True))
                             for t in types)
-        stmt = self._emit_op(Op.WAIT, results,
-                             () if token is None else (token,),
+        stmt = self._emit_op(Op.WAIT, results, tokens,
                              pure=False, movable=True,
                              effect=Effect.READ | Effect.WRITE | Effect.ASYNC,
                              accesses=accesses)
