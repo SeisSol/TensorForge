@@ -43,6 +43,14 @@ SNAPSHOT_DIR = Path(__file__).parent / "snapshots"
 BACKENDS = (
     ("cuda", "sm_86"),
     ("hip", "gfx90a"),
+    # SYCL, both modes on the same device.  `acpp` is the SPMD lowering and
+    # `oneapi` currently flips `SyclLexic.simd_mode`, so the pair is not two
+    # spellings of one target -- it is the whole difference between the two
+    # programming models, and until now neither had a baseline.  A feature
+    # that lands CUDA-only shows up here as a diff instead of as a bug report
+    # from a PVC run months later.
+    ("acpp", "pvc"),
+    ("oneapi", "pvc"),
 )
 
 # A mismatch on a 1000-line kernel should not bury the report.

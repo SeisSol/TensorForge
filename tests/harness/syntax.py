@@ -23,7 +23,31 @@ from typing import List, Optional
 HERE = Path(__file__).resolve().parent
 TESTS = HERE.parent
 SHIM = TESTS / "shim" / "tensorforge_host.h"
+SYCL_SHIM = TESTS / "shim" / "tensorforge_sycl.h"
 SNAPSHOT_DIR = TESTS / "snapshots"
+
+#: Which shim answers for which backend.  A snapshot is named
+#: ``<case>.<backend>.cpp``, so the backend is recoverable from the path and
+#: no caller has to pass it -- the alternative was a default argument, and a
+#: default here means a CUDA shim silently checking a SYCL kernel and
+#: reporting that `sycl::queue` does not exist as if the *generator* were at
+#: fault.
+_SHIMS = {
+    "cuda": SHIM,
+    "hip": SHIM,
+    "oneapi": SYCL_SHIM,
+    "acpp": SYCL_SHIM,
+}
+
+
+def shim_for(backend: Optional[str]) -> Path:
+    return _SHIMS.get(backend or "", SHIM)
+
+
+def backend_of(path: Path) -> Optional[str]:
+    """The backend a snapshot was generated for, from ``<case>.<backend>.cpp``."""
+    parts = path.name.split(".")
+    return parts[-2] if len(parts) >= 3 else None
 
 #: A snapshot of a case that failed to generate records the exception instead
 #: of source.  `test_snapshots.py` writes those with this marker.
@@ -45,8 +69,8 @@ def kernel_section(text: str) -> Optional[str]:
     return m.group(1) if m else None
 
 
-def translation_unit(kernel: str) -> str:
-    return f'#include "{SHIM}"\n\n{kernel}'
+def translation_unit(kernel: str, shim: Optional[Path] = None) -> str:
+    return f'#include "{shim or SHIM}"\n\n{kernel}'
 
 
 @dataclass(frozen=True)
@@ -62,10 +86,11 @@ class Result:
 
 
 def check_source(kernel: str, cxx: Optional[str] = None,
-                 path: Optional[Path] = None) -> Result:
+                 path: Optional[Path] = None,
+                 shim: Optional[Path] = None) -> Result:
     cxx = cxx or compiler()
     with tempfile.NamedTemporaryFile("w", suffix=".cpp", delete=False) as f:
-        f.write(translation_unit(kernel))
+        f.write(translation_unit(kernel, shim))
         tmp = f.name
     try:
         r = subprocess.run(
@@ -84,7 +109,7 @@ def check_snapshot(path: Path, cxx: Optional[str] = None) -> Result:
     if kernel is None:
         return Result(path, None, reason="no kernel section (generation "
                                          "failure or unrecognised layout)")
-    return check_source(kernel, cxx, path)
+    return check_source(kernel, cxx, path, shim_for(backend_of(path)))
 
 
 def snapshots(pattern: str = "*.cpp") -> List[Path]:
