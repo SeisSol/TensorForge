@@ -401,14 +401,27 @@ SCALAR_LAYOUT = RegisterLayout()
 def join_layout(operands) -> Optional[RegisterLayout]:
     """The layout an elementwise result inherits from its operands.
 
-    Only when every layout-carrying operand agrees.  Disagreement is not an
-    error here -- a vendor intrinsic may legitimately consume two different
-    distributions -- but the result is then untracked, which every consumer
-    has to treat conservatively.
+    A replicated operand does not veto.  ``alpha * A`` where ``alpha`` is a
+    scalar broadcast to every lane and ``A`` is spread across them produces a
+    value spread exactly like ``A``; the old rule saw two distinct layouts,
+    called it a disagreement, and returned ``None``.  That is not
+    conservative, it is a loss: ``None`` means *unknown*, so every consumer
+    downstream of a single scaling had to fail closed, and a scaling is on
+    almost every operator SeisSol generates.
+
+    Genuine disagreement -- two *different distributions* -- still gives
+    ``None``.  A vendor intrinsic may legitimately consume two of those, so it
+    is not an error here, but nothing may be concluded from it either.
     """
     seen = {x.layout for x in operands
             if isinstance(x, Value) and x.layout is not None}
-    if len(seen) == 1:
+    if not seen:
+        return None
+    spread = {lay for lay in seen if lay.is_distributed}
+    if len(spread) == 1:
+        return next(iter(spread))
+    if not spread and len(seen) == 1:
+        # every operand replicated, and they agree on the rank
         return next(iter(seen))
     return None
 
@@ -436,6 +449,58 @@ class Value:
     # loaders, the vendor intrinsics and the passes can start agreeing on a
     # vocabulary one at a time instead of all at once.
     layout: Optional[RegisterLayout] = None
+
+    def __post_init__(self):
+        """One fact, one place: a distributed value is lane-varying.
+
+        ``uniformity`` and ``layout.is_distributed`` are two statements about
+        the same thing, and they disagreed on 71443 of the 93837 values in the
+        corpus that carried a layout -- always in the unsafe direction, with
+        ``uniformity`` reading ``GRID`` ("the same everywhere") for a value
+        spread across the lanes.
+
+        Not an oversight at those call sites.  ``op()`` and ``load()`` join the
+        uniformity of their *operands*, and for a register-resident tile the
+        operand is the slot index, which genuinely is the same in every lane --
+        the lane is implicit in "each thread has its own array".  The address
+        is uniform; the value it names is not.  Joining the operands answers
+        the address's question and writes the answer on the value.
+
+        Deriving it here rather than fixing six call sites is deliberate: a
+        rule that lives on the type cannot drift from itself, and the next
+        helper that forwards a layout gets it right without knowing this
+        existed.  Only tightening is applied -- a caller that already said
+        ``LANE`` is not overruled.
+        """
+        if (self.layout is not None and self.layout.is_distributed
+                and self.uniformity > Uniformity.LANE):
+            object.__setattr__(self, 'uniformity', Uniformity.LANE)
+
+    @property
+    def distributed(self) -> bool:
+        """Does the wave hold a tensor here, rather than one value per lane?
+
+        The question the ESIMD emitter asks to pick between ``T`` and
+        ``simd<T, N>``.  ``False`` for an untracked value is *not* an answer --
+        see :meth:`lane_span`, which refuses instead of guessing.
+        """
+        return self.layout is not None and self.layout.is_distributed
+
+    def lane_span(self) -> int:
+        """How many lanes this value is spread over.
+
+        ``1`` means replicated: every lane holds the whole thing.  An
+        untracked layout raises rather than returning ``1``, because those two
+        are the same number and opposite facts -- and an emitter that cannot
+        tell them apart writes a scalar where a vector belongs.
+        """
+        if self.layout is None:
+            raise IRError(f'{self!r} has no tracked distribution; its lane '
+                          f'span is unknown, not 1')
+        span = 1
+        for axis in self.layout.axes:
+            span *= axis.block
+        return span
 
     @property
     def uniform(self) -> bool:

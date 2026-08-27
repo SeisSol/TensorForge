@@ -114,6 +114,24 @@ def _check_scope(body: Tuple[Stmt, ...], live: set, diag: List[str],
             if v.id not in live:
                 diag.append(f'{s.op}: operand {v!r} used before definition')
 
+        # -- distribution agrees with uniformity --------------------------- #
+        #
+        # The other direction of the rule `Value.__post_init__` enforces.
+        # There, a distributed layout narrows an over-broad uniformity, which
+        # is always safe.  Here: a value the builder called lane-varying whose
+        # layout says every lane holds the same thing.  That cannot be
+        # narrowed away -- one of the two is simply wrong, and which one is
+        # not decidable from here -- so it is reported rather than repaired.
+        #
+        # An untracked layout is not checked.  `None` means unknown, and
+        # unknown disagrees with nothing.
+        for t in s.target:
+            if (t.layout is not None and not t.layout.is_distributed
+                    and t.uniformity <= Uniformity.LANE):
+                diag.append(
+                    f'{s.op}: {t!r} is lane-varying but its layout says every '
+                    f'lane holds the same element; one of the two is wrong')
+
         # -- predicate ----------------------------------------------------- #
         if s.predicate is not None:
             t = s.predicate.type

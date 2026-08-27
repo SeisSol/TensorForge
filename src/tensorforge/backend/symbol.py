@@ -10,8 +10,8 @@ from tensorforge.common.context import Context
 from tensorforge.common.basic_types import Datatype, Addressing
 from tensorforge.common.exceptions import GenerationError
 from .writer import Writer
-from tensorforge.backend.pir.core import (BOOL, INDEX, Effect, LaneAxis,
-                                          RegisterLayout, ScalarType)
+from tensorforge.backend.pir.core import (BOOL, INDEX, SCALAR_LAYOUT, Effect,
+                                          LaneAxis, RegisterLayout, ScalarType)
 
 from tensorforge.common.matrix.spp import BoundingBoxSPP
 
@@ -348,7 +348,14 @@ def layout_of(index, num_threads=None):
   leads = [unwrap_lead(i) for i in index]
   leads = [x[0] for x in leads if x is not None]
   if not leads:
-    return None
+    # Thread-independent: every lane computes the same address, so every lane
+    # loads the same element.  That is *replicated*, which is a layout --- and
+    # `None` here said *unknown*, the strictly weaker claim, on every load of
+    # a scalar or a broadcast operand.  The distinction is invisible to the
+    # SPMD emitter (both spell the value `float x`) and load-bearing for an
+    # explicitly vectorised one, where replicated is `T` and unknown is a
+    # value that cannot be given a type at all.
+    return SCALAR_LAYOUT
   if len(leads) == 1:
     return leads[0].layout()
   if num_threads is None:
