@@ -464,7 +464,13 @@ def main():
     assert waits['copy'].attr('prior_unified') == 1
     mw = Writer()
     emit(mix, mw, vm_factory('gfx942', 'hip', 'float'))
-    assert 'vmcnt(1)' in mw.get_src(), mw.get_src()
+    # AMD emits no wait at all: `SIInsertWaitcnts` places it, and an inline
+    # `s_waitcnt` would be opaque to the pass that computes the count.  The
+    # count itself is asserted above, where it lives -- and it is what a
+    # gfx125x emitter would need to pick `s_wait_asynccnt`, since `vmcnt` is
+    # deprecated from gfx12 on.
+    assert 'vmcnt' not in mw.get_src(), mw.get_src()
+    assert 's_waitcnt' not in mw.get_src(), mw.get_src()
     mw = Writer()
     emit(mix, mw, vm_factory('sm_80', 'cuda', 'float'))
     assert '__pipeline_wait_prior(0);' in mw.get_src(), mw.get_src()

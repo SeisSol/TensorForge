@@ -98,15 +98,40 @@ class HipLexic(CudaLexic):
   def wait_async(self, prior):
     if self._underlying_hardware != 'amd':
       return super().wait_async(prior)
-    # Let the assembler encode vmcnt: the encoding is split across
-    # non-contiguous bits on gfx9 and moved again on gfx10+, and
-    # __builtin_amdgcn_s_waitcnt takes the *encoded* immediate.
-    # TODO: remove again (and rely implicitly), replace by async waits (cf. latest LLVM)
-    return f'__asm__ volatile("s_waitcnt vmcnt({prior})" ::: "memory");'
+    # Nothing.  `SIInsertWaitcnts` places this wait itself, and places it
+    # better than we can.
+    #
+    # `copy_async` lowers to `llvm.amdgcn.global.load.lds`, which the pass
+    # recognises as an LDS DMA: it tracks which LDS buffer each one writes
+    # and emits the smallest count before the `ds_read` that needs it --
+    # `vmcnt(2)` then `vmcnt(0)` for two distinct arrays, not `vmcnt(0)`
+    # twice.  Its alias tracking has a fixed number of slots and falls back
+    # to `vmcnt(0)` once they run out, so on a body with many buffers this is
+    # conservative; the lever for that is `sched_group_barrier`, not a wait
+    # written by hand.
+    #
+    # Writing one by hand was worse than redundant.  Inline asm with a
+    # `"memory"` clobber is opaque to the very pass that would have computed
+    # the count, and to the scheduler that decides the issue order the count
+    # is derived from -- so it degraded the result it was meant to control.
+    #
+    # And it was wrong ahead of gfx12.  `vmcnt` is deprecated there: the
+    # counter is split into loadcnt, storecnt, dscnt, kmcnt, samplecnt,
+    # bvhcnt and expcnt, and gfx1250 adds asynccnt and tensorcnt for exactly
+    # this class of transfer, reachable through `s_wait_asynccnt` rather than
+    # through an encoded `s_waitcnt` immediate.  An instruction spelled here
+    # would have to be respelled per target; a count left in the IR does not.
+    #
+    # The `prior` the IR derives stays: it is what a future emitter needs to
+    # pick `s_wait_asynccnt` on gfx125x, and what `verify` checks the token
+    # pairing against.  It is information, not an instruction.
+    return ''
 
   def wait_async_regs(self, prior):
-    # Same counter as the LDS path: on CDNA every vector memory operation,
-    # global->VGPR included, decrements vmcnt.
+    # Also nothing, and here it never needed saying at all: a global load
+    # into a VGPR has a register dependency, which is the thing
+    # `SIInsertWaitcnts` was built to see.  It waits before the first use of
+    # the destination register and not one instruction earlier.
     if self._underlying_hardware != 'amd':
       return super().wait_async_regs(prior)
     return self.wait_async(prior)
