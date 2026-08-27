@@ -76,6 +76,29 @@ class Lexic(ABC):
   def get_operation(self, op: Operation, value1, value2):
     pass
 
+  def reduction(self, variable, optype, fptype, block, subblock=1):
+    """An all-reduce of `variable` across `block` lanes, in groups of
+    `subblock`.
+
+    Declared here so a backend that has no answer says so.  `CudaLexic`
+    implements it and `HipLexic` inherits that; `SyclLexic` has `broadcast`
+    but not this, so a cross-lane reduction reached it as
+    `AttributeError: 'SyclLexic' object has no attribute 'reduction'` --- a
+    missing attribute reads as a typo, and this is a missing feature.
+
+    Not implemented for SYCL because the signature is the open question, not
+    the body.  `sycl::reduce_over_group` takes a whole group and has no
+    `subblock`, so it answers only for `subblock == 1` and
+    `block == sub_group_size`; anything else is a hand-built exchange over
+    `permute_group_by_xor`.  Under ESIMD the model is different again --- the
+    vector is explicit and the reduction is an operation on `simd<T, N>`
+    rather than a cross-lane construct.  Committing to a spelling before that
+    is decided would fix the wrong shape in place.
+    """
+    raise NotImplementedError(
+        f'{type(self).__name__} has no cross-lane reduction; see '
+        f'Lexic.reduction')
+
   def glb_store(self, lhs, rhs, nontemporal=False):
     return f'{lhs} = {rhs};'
 

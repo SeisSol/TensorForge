@@ -100,14 +100,8 @@ class ReductionInstruction(ComputeInstruction):
         kept = self._kept()
 
         if src_lead in self._dims:
-            if kept:
-                raise InternalError(
-                    f'reduction: {self._operation} contracts the lead axis '
-                    f'{src_lead} of {self._op.symbol.name} while keeping '
-                    f'{kept}. Only the full contraction has a cross-lane '
-                    f'lowering; a partial one would have to redistribute the '
-                    f'kept axes over the lanes first.')
-            self._lead_reduction(writer, src_lead)
+            self._check_cross_lane_is_available()
+            self._lead_reduction(writer, kept, src_lead)
             return
 
         self._check_dest_lead(kept, src_lead)
@@ -151,57 +145,164 @@ class ReductionInstruction(ComputeInstruction):
 
         write_loops(self._context, writer, loopstack, self._body(writer, kept))
 
-    def _lead_reduction(self, writer: Writer, src_lead: int) -> None:
-        """Every axis contracted, so the fold crosses lanes.
+    def _check_cross_lane_is_available(self) -> None:
+        """A cross-lane fold that spans more than one wave has no lowering.
+
+        The exchange in `tensorforge_device` is a shuffle, and a shuffle
+        reaches one wave.  Above `vec_unit_length` the lane partials have to
+        meet in shared memory instead: one slot per wave, a barrier, then a
+        fold over the slots.  `temp_shmem()` below reserves for exactly that,
+        and the missing piece is the barrier.
+
+        `Uniformity.MULT` is the scope such a barrier needs -- a rendezvous of
+        the threads working on one multiplication -- and `emit._sync` lowers
+        MULT to `sync_simd()`, which is correct today because a multiplication
+        cannot outgrow a wave.  Lifting that cap is what brings `sync_block()`
+        with it, and with it the second stage here.
+
+        Until then this raises.  The verifier would reject the configuration
+        anyway -- see `tests/test_barrier_scope.py` -- but it would say which
+        invariant was violated, and this says which feature is missing.
+        """
+        vul = self._context.get_vm().get_hw_descr().vec_unit_length
+        if self._num_threads > vul:
+            raise InternalError(
+                f'reduction: a cross-lane fold over {self._num_threads} '
+                f'threads spans {self._num_threads // vul} waves of {vul}, '
+                f'and the second stage needs a shared-memory rendezvous of '
+                f'one multiplication. Uniformity.MULT lowers to sync_simd() '
+                f'while the thread count is capped at a wave.')
+
+    def temp_shmem(self) -> int:
+        """One slot per wave, per multiplication, for the super-wave fold.
+
+        Declared even though `_check_cross_lane_is_available` currently
+        refuses that case: the budget is read before any body is built, the
+        figure is a property of the thread count alone, and stating it here
+        keeps the reservation and the use in one place for when the barrier
+        arrives.  `tempShrMem` is already striped by `threadIdx.y`, so this is
+        per multiple and not per block.
+        """
+        if not self._contracts_lead():
+            return 0
+        vul = self._context.get_vm().get_hw_descr().vec_unit_length
+        return max(0, self._num_threads // vul) if self._num_threads > vul \
+            else 0
+
+    def _contracts_lead(self) -> bool:
+        return self._lead_dim(self._op) in self._dims
+
+    def _lead_reduction(self, writer: Writer, kept: Sequence[int],
+                        src_lead: int) -> None:
+        """The lead axis is contracted, so the fold crosses lanes.
 
         Three steps, and the middle one is why this cannot reuse `LeadLoop`:
 
-        1. each lane folds the axes it owns into a partial.  Lanes that own no
-           element -- the lead extent need not fill the thread count -- take
-           the neutral element instead of being skipped;
+        1. each lane folds the contracted axes it owns into a partial.  Lanes
+           that own no element -- the lead extent need not fill the thread
+           count -- take the neutral element instead of being skipped;
         2. one cross-lane all-reduce over the partials;
         3. lane 0 stores.
 
-        Step 1's `if`/`else` is load-bearing. `LeadLoop` would emit a bare
+        Step 1's `if`/`else` is load-bearing.  `LeadLoop` would emit a bare
         guard, and a shuffle under a guard is undefined behaviour whenever the
         mask names a lane that did not reach it: with a lead extent of 16 and
         32 threads, half the warp would sit outside the region while the other
-        half asked it for a value. `LeadLoop.neutral` looks like it addresses
+        half asked it for a value.  `LeadLoop.neutral` looks like it addresses
         this, but the pass that would consume the attribute (`if_convert`) is
-        not in the default pipeline and does not read it. Selecting the
+        not in the default pipeline and does not read it.  Selecting the
         neutral element explicitly makes every lane arrive at the exchange
         with something defined, which is what the exchange requires.
+
+        Kept axes wrap all three steps as sequential loops.  They cannot stay
+        thread-distributed: the lanes are spoken for by the axis being
+        contracted, and the whole of steps 2 and 3 has to run once per kept
+        point.  The destination is therefore written by one lane for every
+        element, which is as uncoalesced as it sounds and is the price of
+        contracting the axis the hardware distributes.
+        """
+        loopstack = [Loop(f'k{i}', 0, self._op.bbox.size(i), 1, unroll=False)
+                     for i in kept]
+
+        def inner(varlist):
+            index = dict(zip(kept, varlist))
+            self._fold_across_lanes(writer, index, kept, varlist, src_lead)
+
+        if loopstack:
+            write_loops(self._context, writer, loopstack, inner)
+        else:
+            inner([])
+
+    def _fold_across_lanes(self, writer: Writer, index: dict,
+                           kept: Sequence[int], varlist, src_lead: int) -> None:
+        from tensorforge.backend.pir.core import BOOL
+
+        lead = self._lane(writer)
+        partial = self._lane_partial(writer, index, src_lead, lead)
+        total = self._cross_lane(writer, partial, src_lead)
+
+        # `reduction` is an all-reduce, so every lane holds the answer and
+        # letting them all write would be a race on one address rather than a
+        # disagreement.  Still a race, so it is guarded.
+        with writer.if_(writer.op('eq', BOOL, lead, 0, hint='w')):
+            self._dest.symbol.store(writer, self._context, total,
+                                    self._dest_index(kept, varlist), False)
+
+    def _slots(self, src_lead: int) -> int:
+        """How many elements of the lead axis one lane owns.
+
+        `LeadIndex(slot, threads, stride)` addresses one of them.  Folding only
+        slot 0 -- which is what a single `LeadIndex(0, ...)` does -- silently
+        drops every element past the first `num_threads`, and the answer that
+        comes out is a sum over the part that fitted.
+        """
+        extent = self._op.bbox.size(src_lead)
+        return (extent + self._num_threads - 1) // self._num_threads
+
+    def _lane_partial(self, writer: Writer, index: dict, src_lead: int, lead):
+        """This lane's fold over every slot of the lead axis that it owns.
+
+        The slot count is a compile-time constant, so the slots are unrolled
+        here rather than emitted as a loop: only the last one can be ragged,
+        and unrolling means the guard is emitted for that one alone instead of
+        being evaluated on every iteration.
+
+        A ragged slot is an `if`/`else` yielding the neutral element, not a
+        bare guard.  The exchange downstream is a shuffle, and a shuffle
+        reached by only part of the wave is undefined -- so every lane has to
+        leave here with a defined value even when it owns nothing.
         """
         from tensorforge.backend.pir.core import BOOL, ScalarType
 
         acc_type = ScalarType(self._context.fp_type)
         extent = self._op.bbox.size(src_lead)
-        lead = self._lane(writer)
+        rest = [d for d in self._dims if d != src_lead]
 
-        # -- 1. the per-lane partial --------------------------------------- #
-        if extent >= self._num_threads:
-            partial = self._lane_partial(writer, src_lead, lead)
-        else:
-            guard = writer.if_else(
-                writer.op('lt', BOOL, lead, extent, hint='own'),
-                types=(acc_type,))
-            with guard.then():
-                guard.yield_(self._lane_partial(writer, src_lead, lead))
-            with guard.otherwise():
-                guard.yield_(writer.const(self._neutral(), acc_type))
-            partial = guard.result
+        def fold(slot):
+            from tensorforge.backend.symbol import LeadIndex
+            inner = dict(index)
+            inner[src_lead] = LeadIndex(slot, self._num_threads, 1)
+            return self._fold_axes(writer, inner, rest, 0)
 
-        # -- 2. the cross-lane fold ---------------------------------------- #
-        total = self._cross_lane(writer, partial)
-
-        # -- 3. one lane stores -------------------------------------------- #
-        # `reduction` is an all-reduce, so every lane holds the answer and
-        # letting them all write would be a race on one address rather than a
-        # disagreement. Still a race, so it is guarded.
-        with writer.if_(writer.op('eq', BOOL, lead, 0, hint='w')):
-            self._dest.symbol.store(
-                writer, self._context, total,
-                self._offset(self._dest, [0] * self._dest.bbox.rank()), False)
+        acc = None
+        for slot in range(self._slots(src_lead)):
+            lo = slot * self._num_threads
+            if lo + self._num_threads <= extent:
+                contrib = fold(slot)
+            else:
+                # The guard has to contain the load, not just select after it:
+                # a lane past the end would otherwise read out of bounds.
+                guard = writer.if_else(
+                    writer.op('lt', BOOL, lead, extent - lo, hint='own'),
+                    types=(acc_type,))
+                with guard.then():
+                    guard.yield_(fold(slot))
+                with guard.otherwise():
+                    guard.yield_(writer.const(self._neutral(), acc_type))
+                contrib = guard.result
+            acc = contrib if acc is None else self._combine(writer, acc,
+                                                            contrib)
+        return acc
 
     def _lane(self, writer: Writer):
         """`threadIdx.x % num_threads` -- the same lane index `LeadLoop` builds.
@@ -213,20 +314,28 @@ class ReductionInstruction(ComputeInstruction):
         tid = writer.thread_id('x')
         return writer.op('rem', INDEX, tid, self._num_threads, hint='lead')
 
-    def _lane_partial(self, writer: Writer, src_lead: int, lead):
-        """This lane's fold over the axes it owns, lead axis pinned to `lead`."""
-        from tensorforge.backend.symbol import LeadIndex
+    def _exchange_width(self, src_lead: int) -> int:
+        """How many lanes the fold actually has to cross.
 
-        index = {src_lead: LeadIndex(0, self._num_threads, 1)}
-        rest = [d for d in self._dims if d != src_lead]
-        value = self._fold_axes(writer, index, rest, 0)
-        if value is None:
-            raise InternalError(
-                f'reduction: {self._op.symbol.name} yielded no value for its '
-                f'load; the sparse path has no reduction lowering yet')
-        return value
+        `num_threads` is the upper bound, not the answer.  When the lead axis
+        fits in one slot, only lanes `0 .. extent-1` hold anything; the rest
+        arrive with the neutral element and reducing them in costs a butterfly
+        step that cannot change the result.  Rounding the extent up to a power
+        of two keeps the groups aligned, so lane 0's group still covers every
+        lane that holds data -- and lane 0 is the one that stores.
 
-    def _cross_lane(self, writer: Writer, partial):
+        16 over 32 threads is four exchanges instead of five.  With more than
+        one slot every lane holds data and the full width is the answer.
+        """
+        if self._slots(src_lead) > 1:
+            return self._num_threads
+        extent = self._op.bbox.size(src_lead)
+        width = 1
+        while width < extent:
+            width <<= 1
+        return min(width, self._num_threads)
+
+    def _cross_lane(self, writer: Writer, partial, src_lead: int):
         """The all-reduce, as the lexic spells it.
 
         A call into `tensorforge_device`, not a butterfly built here: both
@@ -240,8 +349,8 @@ class ReductionInstruction(ComputeInstruction):
 
         lexic = self._context.get_vm().get_lexic()
         text = lexic.reduction('{0}', self._operation.operation(),
-                               self._context.fp_type, self._num_threads,
-                               subblock=1)
+                               self._context.fp_type,
+                               self._exchange_width(src_lead), subblock=1)
         return writer.rawexpr(text, partial,
                               type_=ScalarType(self._context.fp_type),
                               hint='red', pure=True, movable=False)
@@ -306,8 +415,11 @@ class ReductionInstruction(ComputeInstruction):
         rejecting here: `min` over `I32` starts at `INT32_MAX`, not at an
         infinity that the type cannot hold.
         """
-        fp = self._context.fp_type
-        return fp.literal(self._operation.neutral(fp))
+        # The raw Python value, not `fp.literal(...)` of it: the emitter calls
+        # `literal` itself on a CONST's value.  Formatting here too worked by
+        # accident for the infinities, since `float('-INFINITY')` parses, and
+        # not at all for `0.0f`, which does not.
+        return self._operation.neutral(self._context.fp_type)
 
     def _combine(self, writer: Writer, acc, value):
         from tensorforge.backend.pir.core import ScalarType
@@ -321,8 +433,21 @@ class ReductionInstruction(ComputeInstruction):
 
     def _load(self, writer: Writer, index: dict):
         addr = [index[i] for i in range(self._op.bbox.rank())]
-        return self._op.symbol.load(writer, self._context, None,
-                                    self._offset(self._op, addr), False)
+        value = self._op.symbol.load(writer, self._context, None,
+                                     self._offset(self._op, addr), False)
+        if value is None:
+            # Checked here rather than where the fold ends, because a load
+            # nested inside a sequential axis hands its None to `_combine`
+            # instead of returning it: the loop result is a value either way,
+            # so the miss is invisible one frame up.  `Symbol.load` answers
+            # None for every structured load under `simd_mode`, and the fold
+            # built `max(acc, None)` out of it.
+            raise InternalError(
+                f'reduction: {self._op.symbol.name} has no structured load on '
+                f'this backend, so there is no value to fold. The reduction '
+                f'needs one; a named-variable load would not give the fold '
+                f'something it can carry across the loop.')
+        return value
 
     def _dest_index(self, kept: Sequence[int], varlist) -> List:
         if self._dest.bbox.rank() == len(kept):

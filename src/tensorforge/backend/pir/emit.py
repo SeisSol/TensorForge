@@ -112,13 +112,36 @@ class Emitter:
     def bind(self, v: Value, text: str) -> None:
         self._names[v.id] = text
 
-    def operand(self, x: Operand) -> str:
+    def operand(self, x: Operand, type_=None) -> str:
+        """A value's name, or an immediate spelled for `type_`.
+
+        `str(x)` is fine for the index arithmetic that supplies most
+        immediates, and wrong for a float one: Python prints an infinity as
+        `inf`, which is not C++. That only became reachable once a loop
+        carried an operator's neutral element -- `MaxOperator`'s is
+        `-math.inf` -- as its initial value, since `Op.CONST` spells its
+        value through `Datatype.literal` and a loop init did not.
+        """
         if isinstance(x, Value):
             if x.id in self._consts:
                 return self._consts[x.id]
             return self.name(x)
         if isinstance(x, bool):
             return 'true' if x else 'false'
+        if isinstance(x, (int, float)) and isinstance(type_, ScalarType):
+            return type_.base.literal(x)
+        if x is None:
+            # `str(None)` is `None`, which is a perfectly good C++ identifier
+            # and a perfectly bad one to emit.  It arrives when a producer
+            # answered with nothing and the consumer used the answer anyway --
+            # `Symbol.load` returns None for every structured load under
+            # `simd_mode`, and the value flowed into an arithmetic op, which
+            # came out as `sycl::max(float(acc), float(None))`.  Loud here,
+            # because the alternative is a compiler error pointing at the
+            # arithmetic rather than at the load that had no value.
+            raise IRError(
+                'a None operand reached the emitter; some producer returned '
+                'no value and its consumer used the result anyway')
         return str(x)
 
     # -- types ------------------------------------------------------------- #
@@ -608,7 +631,8 @@ class Emitter:
                 continue
             nm = self.name(arg)
             self.bind(res, nm)
-            w(f'{self.ctype(arg.type)} {nm} = {self.operand(init)};')
+            w(f'{self.ctype(arg.type)} {nm} = '
+              f'{self.operand(init, arg.type)};')
             targets.append(nm)
 
         i = self.name(ind)

@@ -418,8 +418,17 @@ def _cse_key(s: Stmt):
     # results in different lanes -- a broadcast is exactly that.  Merging them
     # would silently drop the relayout.  Untracked (`None`) only ever matches
     # untracked, which is what every call site produces today.
+    #
+    # The result *type* is there for the same reason, and `Op.CONST` is why it
+    # had to be: a constant carries its value in `attrs` and takes no
+    # arguments, so `const(0, INDEX)` and `const(0, float)` had identical keys
+    # and were merged.  Whichever survived decided the spelling for both, and
+    # `Datatype.literal` spells them differently -- a float accumulator seeded
+    # from an integer zero came out as `0_i32`.  For an operator whose neutral
+    # element is 0 that still computes the right answer; the same merge on an
+    # infinity would not.
     return (s.op, tuple(k(a) for a in s.args), s.text, s.attrs,
-            tuple(t.layout for t in s.target),
+            tuple((t.layout, t.type) for t in s.target),
             None if s.predicate is None else s.predicate.id)
 
 
