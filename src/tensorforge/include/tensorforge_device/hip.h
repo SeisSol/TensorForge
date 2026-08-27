@@ -718,7 +718,6 @@ __device__ __forceinline__ void fma16h(T &c, T a, T b) {
   }
 }
 
-template <typename Op, std::size_t Block, std::size_t Subblock>
 // Bits at 0, Subblock, 2*Subblock, ... below Block: the lanes that share a
 // reduction with lane 0 of a block.  64-bit, because a wavefront is.
 template <std::size_t Block, std::size_t Subblock>
@@ -730,6 +729,7 @@ constexpr unsigned long long groupMask() {
   return mask;
 }
 
+template <typename Op, std::size_t Block, std::size_t Subblock>
 __device__ __forceinline__ bool ballotReduction(bool value) {
   const auto ballot = __ballot(value ? 1 : 0);
   const auto thread = (threadIdx.x / Block) * Block;
