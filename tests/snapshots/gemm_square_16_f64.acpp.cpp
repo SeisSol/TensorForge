@@ -55,7 +55,7 @@ inline void kernel_kernel_417e1ddcc4(sycl::queue *stream, sycl::range<3> group_c
               }
               // wait(s0 = load{g>s}(glb_m2[0, 1]));
               double r0[16]{};
-              item.barrier();
+              sycl::group_barrier(item.get_sub_group());
               // r0 = +(glb_m1 * s0) + None
               // [(0, 16), (0, 16)] [(0, 16)]
               double ir0[16]{};

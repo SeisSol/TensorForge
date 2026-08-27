@@ -22,7 +22,7 @@ void launcher_kernel_08888e2501(const float* m0, unsigned m0_extraOffset, float*
 inline void kernel_kernel_08888e2501(sycl::queue *stream, sycl::range<3> group_count, sycl::range<3> group_size, const float* m0, unsigned m0_extraOffset, float* m1, unsigned m1_extraOffset, size_t numElements0, unsigned* flags0 ) {
   stream->submit([&](sycl::handler &cgh) {
     sycl::local_accessor<float, 1> totalShrMem (256, cgh); {
-      cgh.parallel_for(sycl::nd_range<3>{{group_size.get(0), group_size.get(1), group_count.get(0) * group_size.get(2)}, group_size}, [=](sycl::nd_item<3> item) [[intel::sycl_explicit_simd]] [[intel::grf_size(256)]] [[intel::kernel_args_restrict]] {
+      cgh.parallel_for(sycl::nd_range<3>{{group_size.get(0), group_size.get(1), group_count.get(0) * group_size.get(2)}, group_size}, [=](sycl::nd_item<3> item) [[intel::reqd_sub_group_size(16)]] [[intel::kernel_args_restrict]] {
         // generated with TensorForge. Version: 0.0.1
         // meta data:
         // m0 16×16(16×16) {0..16}×{0..16} strided
@@ -44,10 +44,22 @@ inline void kernel_kernel_08888e2501(sycl::queue *stream, sycl::range<3> group_c
               const float *const __restrict__ glb_m0 = &m0[batchId0 * 256 + 0 + m0_extraOffset];
               float *const __restrict__ glb_m1 = &m1[batchId0 * 16 + 0 + m1_extraOffset];
               // glb_m1 = min(glb_m0, dims=[1])
+              int32_t v4_lead = item.get_local_id(0) % 16;
               #pragma unroll
               for (int32_t v5_k0 = 0; v5_k0 < 1; ++v5_k0) {
-                int32_t v13_lead = v5_k0 * 16;
-                v12_res0.copy_to(glb_m1[v13_lead]);
+                int32_t v11_lead = v5_k0 * 16;
+                int32_t v12_lead = v4_lead + v11_lead;
+                int32_t v19_lead = v4_lead + v11_lead;
+                float v7_acc0 = INFINITY;
+                #pragma unroll
+                for (int32_t v6_r1 = 0; v6_r1 < 16; ++v6_r1) {
+                  int32_t v13_a = v6_r1 * 16;
+                  int32_t v14_a = v12_lead + v13_a;
+                  float v22_data = glb_m0[(v19_lead + v13_a)];
+                  v7_acc0 = (sycl::min(float(v7_acc0), float(v22_data)));
+                }
+                int32_t v29_lead = v4_lead + v11_lead;
+                glb_m1[v29_lead] = v7_acc0;
               }
             }
           }

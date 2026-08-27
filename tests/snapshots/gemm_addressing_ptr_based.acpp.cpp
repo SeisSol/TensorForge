@@ -53,7 +53,7 @@ inline void kernel_kernel_769f1b7f89(sycl::queue *stream, sycl::range<3> group_c
               *(sycl::vec<float, 4>*)&s0[0 + 0 + 4 * item.get_local_id(0) + 192] = *(sycl::vec<float, 4>*)&glb_m2[0 + 0 + 4 * item.get_local_id(0) + 192];
               // wait(s0 = load{g>s}(glb_m2[0, 1]));
               float r0[16]{};
-              item.barrier();
+              sycl::group_barrier(item.get_sub_group());
               // r0 = +(glb_m1 * s0) + None
               // [(0, 16), (0, 16)] [(0, 16)]
               float ir0[16]{};

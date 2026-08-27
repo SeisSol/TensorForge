@@ -1,1 +1,1 @@
-FAILED: AttributeError: 'SyclLexic' object has no attribute 'reduction'
+FAILED: NotImplementedError: SyclLexic has no cross-lane reduction; see Lexic.reduction

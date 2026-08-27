@@ -22,7 +22,7 @@ void launcher_kernel_a7d5d30824(float* m0, unsigned m0_extraOffset, const float*
 inline void kernel_kernel_a7d5d30824(sycl::queue *stream, sycl::range<3> group_count, sycl::range<3> group_size, float* m0, unsigned m0_extraOffset, const float* m1, unsigned m1_extraOffset, size_t numElements0, unsigned* flags0 ) {
   stream->submit([&](sycl::handler &cgh) {
     sycl::local_accessor<float, 1> totalShrMem (256, cgh); {
-      cgh.parallel_for(sycl::nd_range<3>{{group_size.get(0), group_size.get(1), group_count.get(0) * group_size.get(2)}, group_size}, [=](sycl::nd_item<3> item) [[intel::sycl_explicit_simd]] [[intel::grf_size(256)]] [[intel::kernel_args_restrict]] {
+      cgh.parallel_for(sycl::nd_range<3>{{group_size.get(0), group_size.get(1), group_count.get(0) * group_size.get(2)}, group_size}, [=](sycl::nd_item<3> item) [[intel::reqd_sub_group_size(16)]] [[intel::kernel_args_restrict]] {
         // generated with TensorForge. Version: 0.0.1
         // meta data:
         // m0 16(16) {0..16} strided
@@ -47,31 +47,82 @@ inline void kernel_kernel_a7d5d30824(sycl::queue *stream, sycl::range<3> group_c
               // r0 = +(glb_m1) + None
               // [(0, 16)] [(0, 16)]
               float ir0[1]{};
-              int32_t v8_a = 0_i32 + 0;
-              int32_t v13_a = 0_i32 + 16;
-              int32_t v18_a = 0_i32 + 32;
-              int32_t v23_a = 0_i32 + 48;
-              int32_t v28_a = 0_i32 + 64;
-              int32_t v33_a = 0_i32 + 80;
-              int32_t v38_a = 0_i32 + 96;
-              int32_t v43_a = 0_i32 + 112;
-              int32_t v48_a = 0_i32 + 128;
-              int32_t v53_a = 0_i32 + 144;
-              int32_t v58_a = 0_i32 + 160;
-              int32_t v63_a = 0_i32 + 176;
-              int32_t v68_a = 0_i32 + 192;
-              int32_t v73_a = 0_i32 + 208;
-              int32_t v78_a = 0_i32 + 224;
-              int32_t v83_a = 0_i32 + 240;
+              int32_t v6_lead = item.get_local_id(0) % 16;
+              int32_t v12_a = v6_lead + 0;
+              float v19_data = glb_m1[v6_lead];
+              float v20_data = ir0[0];
+              ir0[0] = (v20_data + v19_data);
+              int32_t v30_a = v6_lead + 16;
+              float v37_data = glb_m1[(v6_lead + 16)];
+              float v38_data = ir0[0];
+              ir0[0] = (v38_data + v37_data);
+              int32_t v48_a = v6_lead + 32;
+              float v55_data = glb_m1[(v6_lead + 32)];
+              float v56_data = ir0[0];
+              ir0[0] = (v56_data + v55_data);
+              int32_t v66_a = v6_lead + 48;
+              float v73_data = glb_m1[(v6_lead + 48)];
+              float v74_data = ir0[0];
+              ir0[0] = (v74_data + v73_data);
+              int32_t v84_a = v6_lead + 64;
+              float v91_data = glb_m1[(v6_lead + 64)];
+              float v92_data = ir0[0];
+              ir0[0] = (v92_data + v91_data);
+              int32_t v102_a = v6_lead + 80;
+              float v109_data = glb_m1[(v6_lead + 80)];
+              float v110_data = ir0[0];
+              ir0[0] = (v110_data + v109_data);
+              int32_t v120_a = v6_lead + 96;
+              float v127_data = glb_m1[(v6_lead + 96)];
+              float v128_data = ir0[0];
+              ir0[0] = (v128_data + v127_data);
+              int32_t v138_a = v6_lead + 112;
+              float v145_data = glb_m1[(v6_lead + 112)];
+              float v146_data = ir0[0];
+              ir0[0] = (v146_data + v145_data);
+              int32_t v156_a = v6_lead + 128;
+              float v163_data = glb_m1[(v6_lead + 128)];
+              float v164_data = ir0[0];
+              ir0[0] = (v164_data + v163_data);
+              int32_t v174_a = v6_lead + 144;
+              float v181_data = glb_m1[(v6_lead + 144)];
+              float v182_data = ir0[0];
+              ir0[0] = (v182_data + v181_data);
+              int32_t v192_a = v6_lead + 160;
+              float v199_data = glb_m1[(v6_lead + 160)];
+              float v200_data = ir0[0];
+              ir0[0] = (v200_data + v199_data);
+              int32_t v210_a = v6_lead + 176;
+              float v217_data = glb_m1[(v6_lead + 176)];
+              float v218_data = ir0[0];
+              ir0[0] = (v218_data + v217_data);
+              int32_t v228_a = v6_lead + 192;
+              float v235_data = glb_m1[(v6_lead + 192)];
+              float v236_data = ir0[0];
+              ir0[0] = (v236_data + v235_data);
+              int32_t v246_a = v6_lead + 208;
+              float v253_data = glb_m1[(v6_lead + 208)];
+              float v254_data = ir0[0];
+              ir0[0] = (v254_data + v253_data);
+              int32_t v264_a = v6_lead + 224;
+              float v271_data = glb_m1[(v6_lead + 224)];
+              float v272_data = ir0[0];
+              ir0[0] = (v272_data + v271_data);
+              int32_t v282_a = v6_lead + 240;
+              float v289_data = glb_m1[(v6_lead + 240)];
+              float v290_data = ir0[0];
+              ir0[0] = (v290_data + v289_data);
               #pragma unroll
-              for (int32_t v87_n0 = 0; v87_n0 < 1; ++v87_n0) {
-                None = r0[v87_n0];
+              for (int32_t v295_n0 = 0; v295_n0 < 1; ++v295_n0) {
+                float v296_data = ir0[v295_n0];
+                r0[v295_n0] = v296_data;
               }
               // glb_m0 = store{r>g}(r0);
               #pragma unroll
-              for (int32_t v91_i0 = 0; v91_i0 < 1; ++v91_i0) {
-                int32_t v92_lead = v91_i0 * 16;
-                None.copy_to(glb_m0[v92_lead]);
+              for (int32_t v300_i0 = 0; v300_i0 < 1; ++v300_i0) {
+                float v301_data = r0[v300_i0];
+                int32_t v306_lead = v6_lead + (v300_i0 * 16);
+                glb_m0[v306_lead] = v301_data;
               }
             }
           }

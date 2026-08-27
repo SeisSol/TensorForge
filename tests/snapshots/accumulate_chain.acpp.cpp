@@ -66,7 +66,7 @@ inline void kernel_kernel_8a03a3cd0d(sycl::queue *stream, sycl::range<3> group_c
               *(sycl::vec<float, 2>*)&s0[0 + 0 + 2 * item.get_local_id(0) + 64] = *(sycl::vec<float, 2>*)&glb_m2[0 + 0 + 2 * item.get_local_id(0) + 64];
               // wait(s0 = load{g>s}(glb_m2[0, 1]));
               float r0[8]{};
-              item.barrier();
+              sycl::group_barrier(item.get_sub_group());
               // r0 = +(glb_m1 * s0) + None
               // [(0, 12), (0, 8)] [(0, 12)]
               float ir0[8]{};
@@ -594,14 +594,14 @@ inline void kernel_kernel_8a03a3cd0d(sycl::queue *stream, sycl::range<3> group_c
                   glb_m0[v1716_a] = v1709_data;
                 }
               }
-              item.barrier();
+              sycl::group_barrier(item.get_sub_group());
               float* __restrict__ s1 = &localShrMem0[0];
               // s1 = load{g>s}(glb_m4[0, 1])
               *(sycl::vec<float, 4>*)&s1[0 + 0 + 4 * item.get_local_id(0) + 0] = *(sycl::vec<float, 4>*)&glb_m4[0 + 0 + 4 * item.get_local_id(0) + 0];
               *(sycl::vec<float, 2>*)&s1[0 + 0 + 2 * item.get_local_id(0) + 64] = *(sycl::vec<float, 2>*)&glb_m4[0 + 0 + 2 * item.get_local_id(0) + 64];
               // wait(s1 = load{g>s}(glb_m4[0, 1]));
               float r1[8]{};
-              item.barrier();
+              sycl::group_barrier(item.get_sub_group());
               // r1 = +(glb_m3 * s1) + name: glb_m0, type: SymbolType.Global, lead: [0]
               // [(0, 12), (0, 8)] [(0, 12)]
               float ir1[8]{};
@@ -1131,14 +1131,14 @@ inline void kernel_kernel_8a03a3cd0d(sycl::queue *stream, sycl::range<3> group_c
                   glb_m0[v3440_a] = v3433_data;
                 }
               }
-              item.barrier();
+              sycl::group_barrier(item.get_sub_group());
               float* __restrict__ s2 = &localShrMem0[0];
               // s2 = load{g>s}(glb_m6[0, 1])
               *(sycl::vec<float, 4>*)&s2[0 + 0 + 4 * item.get_local_id(0) + 0] = *(sycl::vec<float, 4>*)&glb_m6[0 + 0 + 4 * item.get_local_id(0) + 0];
               *(sycl::vec<float, 2>*)&s2[0 + 0 + 2 * item.get_local_id(0) + 64] = *(sycl::vec<float, 2>*)&glb_m6[0 + 0 + 2 * item.get_local_id(0) + 64];
               // wait(s2 = load{g>s}(glb_m6[0, 1]));
               float r2[8]{};
-              item.barrier();
+              sycl::group_barrier(item.get_sub_group());
               // r2 = +(glb_m5 * s2) + name: glb_m0, type: SymbolType.Global, lead: [0]
               // [(0, 12), (0, 8)] [(0, 12)]
               float ir2[8]{};
@@ -1668,14 +1668,14 @@ inline void kernel_kernel_8a03a3cd0d(sycl::queue *stream, sycl::range<3> group_c
                   glb_m0[v5164_a] = v5157_data;
                 }
               }
-              item.barrier();
+              sycl::group_barrier(item.get_sub_group());
               float* __restrict__ s3 = &localShrMem0[0];
               // s3 = load{g>s}(glb_m8[0, 1])
               *(sycl::vec<float, 4>*)&s3[0 + 0 + 4 * item.get_local_id(0) + 0] = *(sycl::vec<float, 4>*)&glb_m8[0 + 0 + 4 * item.get_local_id(0) + 0];
               *(sycl::vec<float, 2>*)&s3[0 + 0 + 2 * item.get_local_id(0) + 64] = *(sycl::vec<float, 2>*)&glb_m8[0 + 0 + 2 * item.get_local_id(0) + 64];
               // wait(s3 = load{g>s}(glb_m8[0, 1]));
               float r3[8]{};
-              item.barrier();
+              sycl::group_barrier(item.get_sub_group());
               // r3 = +(glb_m7 * s3) + name: glb_m0, type: SymbolType.Global, lead: [0]
               // [(0, 12), (0, 8)] [(0, 12)]
               float ir3[8]{};

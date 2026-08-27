@@ -56,7 +56,7 @@ inline void kernel_kernel_08703cce1d(sycl::queue *stream, sycl::range<3> group_c
               }
               // wait(s0 = load{g>s}(glb_m1[0, 1]));
               float r0[6]{};
-              item.barrier();
+              sycl::group_barrier(item.get_sub_group());
               // r0 = +(glb_m0 * s0) + None
               // [(0, 12), (0, 6)] [(0, 6)]
               auto& ir0 = r0;
@@ -253,7 +253,7 @@ inline void kernel_kernel_08703cce1d(sycl::queue *stream, sycl::range<3> group_c
                 float v640_data = ir0[5];
                 ir0[5] = (v640_data + (v637_data * v638_data));
               }
-              item.barrier();
+              sycl::group_barrier(item.get_sub_group());
               float* __restrict__ s1 = &localShrMem0[0];
               // s1 = store{r>s}(localShrMem0, r0);
               if (v8_lead < 12) {
@@ -266,7 +266,7 @@ inline void kernel_kernel_08703cce1d(sycl::queue *stream, sycl::range<3> group_c
                 }
               }
               float r1[6]{};
-              item.barrier();
+              sycl::group_barrier(item.get_sub_group());
               // r1 = +(glb_m3 * s1) + None
               // [(0, 12), (0, 6)] [(0, 12)]
               float ir1[6]{};

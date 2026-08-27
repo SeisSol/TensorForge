@@ -22,7 +22,7 @@ void launcher_kernel_0b2fc070b9(__float128* m0, unsigned m0_extraOffset, const _
 inline void kernel_kernel_0b2fc070b9(sycl::queue *stream, sycl::range<3> group_count, sycl::range<3> group_size, __float128* m0, unsigned m0_extraOffset, const __float128* m1, unsigned m1_extraOffset, const __float128* m2, unsigned m2_extraOffset, size_t numElements0, unsigned* flags0 ) {
   stream->submit([&](sycl::handler &cgh) {
     sycl::local_accessor<__float128, 1> totalShrMem (768, cgh); {
-      cgh.parallel_for(sycl::nd_range<3>{{group_size.get(0), group_size.get(1), group_count.get(0) * group_size.get(2)}, group_size}, [=](sycl::nd_item<3> item) [[intel::sycl_explicit_simd]] [[intel::grf_size(256)]] [[intel::kernel_args_restrict]] {
+      cgh.parallel_for(sycl::nd_range<3>{{group_size.get(0), group_size.get(1), group_count.get(0) * group_size.get(2)}, group_size}, [=](sycl::nd_item<3> item) [[intel::reqd_sub_group_size(16)]] [[intel::kernel_args_restrict]] {
         // generated with TensorForge. Version: 0.0.1
         // meta data:
         // m0 2×2(2×2) {0..2}×{0..2} strided
@@ -51,32 +51,52 @@ inline void kernel_kernel_0b2fc070b9(sycl::queue *stream, sycl::range<3> group_c
               s0[0 + 0 + 1 * item.get_local_id(0) + 2] = glb_m2[0 + 0 + 1 * item.get_local_id(0) + 2];
               // wait(s0 = load{g>s}(glb_m2[0, 1]));
               __float128 r0[2]{};
-              ;
+              sycl::group_barrier(item.get_sub_group());
               // r0 = +(glb_m1 * s0) + None
               // [(0, 2), (0, 2)] [(0, 2)]
               __float128 ir0[2]{};
-              int32_t v10_a = 0_i32 + 0;
-              int32_t v12_a = 0_i32 + 0;
-              int32_t v17_a = 0_i32 + 2;
-              int32_t v19_a = 0_i32 + 2;
+              int32_t v8_lead = item.get_local_id(0) % 2;
+              int32_t v14_a = v8_lead + 0;
+              __float128 v21_data = glb_m1[v8_lead];
+              __float128 v22_data = s0[0];
+              __float128 v24_data = ir0[0];
+              ir0[0] = (v24_data + (v21_data * v22_data));
+              int32_t v31_a = v8_lead + 0;
+              __float128 v38_data = glb_m1[v8_lead];
+              __float128 v39_data = s0[2];
+              __float128 v41_data = ir0[1];
+              ir0[1] = (v41_data + (v38_data * v39_data));
+              int32_t v51_a = v8_lead + 2;
+              __float128 v58_data = glb_m1[(v8_lead + 2)];
+              __float128 v59_data = s0[1];
+              __float128 v61_data = ir0[0];
+              ir0[0] = (v61_data + (v58_data * v59_data));
+              int32_t v68_a = v8_lead + 2;
+              __float128 v75_data = glb_m1[(v8_lead + 2)];
+              __float128 v76_data = s0[3];
+              __float128 v78_data = ir0[1];
+              ir0[1] = (v78_data + (v75_data * v76_data));
               #pragma unroll
-              for (int32_t v23_n0 = 0; v23_n0 < 1; ++v23_n0) {
+              for (int32_t v83_n0 = 0; v83_n0 < 1; ++v83_n0) {
                 #pragma unroll
-                for (int32_t v24_n1 = 0; v24_n1 < 2; ++v24_n1) {
-                  int32_t v25_a = v23_n0 + v24_n1;
-                  int32_t v26_a = v23_n0 + v24_n1;
-                  None = r0[v26_a];
+                for (int32_t v84_n1 = 0; v84_n1 < 2; ++v84_n1) {
+                  int32_t v85_a = v83_n0 + v84_n1;
+                  int32_t v86_a = v83_n0 + v84_n1;
+                  __float128 v87_data = ir0[v86_a];
+                  int32_t v88_a = v83_n0 + v84_n1;
+                  r0[v86_a] = v87_data;
                 }
               }
               // glb_m0 = store{r>g}(r0);
               #pragma unroll
-              for (int32_t v30_i0 = 0; v30_i0 < 1; ++v30_i0) {
-                int32_t v33_lead = v30_i0 * 2;
+              for (int32_t v93_i0 = 0; v93_i0 < 1; ++v93_i0) {
+                int32_t v102_lead = v8_lead + (v93_i0 * 2);
                 #pragma unroll
-                for (int32_t v31_i1 = 0; v31_i1 < 2; ++v31_i1) {
-                  int32_t v32_a = v30_i0 + v31_i1;
-                  int32_t v35_a = v33_lead + (v31_i1 * 2);
-                  None.copy_to(glb_m0[v35_a]);
+                for (int32_t v94_i1 = 0; v94_i1 < 2; ++v94_i1) {
+                  int32_t v95_a = v93_i0 + v94_i1;
+                  __float128 v97_data = r0[(v93_i0 + v94_i1)];
+                  int32_t v104_a = v102_lead + (v94_i1 * 2);
+                  glb_m0[v104_a] = v97_data;
                 }
               }
             }
