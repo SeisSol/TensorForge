@@ -52,20 +52,19 @@ def _snapshots():
 
 #: Backends whose generated source is known not to compile, with the reason.
 #:
-#: `oneapi` selects `SyclLexic.simd_mode`, and the ESIMD branches in
-#: `symbol.py` do not emit a kernel -- they emit one with the data flow
-#: removed.  `Symbol.load` returns Python `None` for the structured path and
-#: the caller interpolates it, so the source says `None = r0[i];`, and
-#: `store_linear` is a bare `pass`.  Every `oneapi` snapshot fails here, and
-#: that is the correct report: the path is not incomplete, it is wrong.
+#: Empty, and the mechanism stays because emptying it was the point.  It held
+#: `oneapi` while `SyclLexic.simd_mode` selected the branches in `symbol.py`
+#: that did not emit a kernel so much as one with the data flow removed --
+#: `Symbol.load` returned Python `None` for the structured path and the caller
+#: interpolated it, so the source said `None = r0[i];`.  Those branches are
+#: gone; `oneapi` now gets the same SPMD lowering as every other backend and
+#: compiles.
 #:
-#: `strict=True` deliberately.  When the ESIMD emitter lands, these turn from
-#: xfail to XPASS and the suite goes red until the entry is deleted -- which
-#: is the only way a list like this stays a record of work outstanding
-#: instead of a place where a fixed defect goes to be forgotten.
-KNOWN_BAD_BACKENDS = {
-    "oneapi": "ESIMD path drops the data flow; see docs and symbol.py simd_mode",
-}
+#: `strict=True` is what made the removal happen rather than be remembered:
+#: the entry turned from xfail to XPASS in the same run that fixed it, and the
+#: suite stayed red until it was deleted.  A non-strict list is where a fixed
+#: defect goes to be forgotten.
+KNOWN_BAD_BACKENDS: dict = {}
 
 
 def _param(path):

@@ -149,6 +149,8 @@ template <typename G, typename T> T group_broadcast(G, T x, std::size_t) {
   return x;
 }
 
+template <typename G> void group_barrier(G) {}
+
 // -- math ------------------------------------------------------------------
 //
 // Templates rather than overloads: the generator instantiates these at

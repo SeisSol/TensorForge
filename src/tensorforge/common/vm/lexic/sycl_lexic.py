@@ -7,7 +7,7 @@ from tensorforge.backend.writer import MultiBlock
 from tensorforge.common.basic_types import Datatype
 
 class SyclLexic(Lexic):
-  def __init__(self, backend, underlying_hardware):
+  def __init__(self, backend, underlying_hardware, explicit_simd=False):
     super().__init__(underlying_hardware)
     self._backend = backend
     self.thread_idx_y = "item.get_local_id(1)"
@@ -21,13 +21,33 @@ class SyclLexic(Lexic):
     self.stream_type = "sycl::queue"
     self.restrict_kw = "__restrict__"
 
-    self.simd_mode = self._underlying_hardware == 'intel' and self._backend == 'oneapi'
+    # Which *lowering* the kernel body uses, not which hardware it runs on.
+    #
+    # This used to be derived -- `intel and oneapi` -- and that derivation was
+    # the defect: selecting a target implied selecting a programming model,
+    # and the model it selected had no emitter behind it.  What it did have
+    # was a set of branches in `symbol.py` that returned early instead of
+    # emitting, so an Intel target silently produced a kernel with the
+    # arithmetic missing.
+    #
+    # Now it is a request the caller makes, and the only thing it still
+    # governs is the *spelling* the lexic hands out: the kernel attributes,
+    # the broadcast, and the wave-level barrier.  Nothing outside this file
+    # asks about it, which is the property that has to hold until an ESIMD
+    # emitter exists to answer for the body as well.
+    self.simd_mode = explicit_simd
 
   def multifile(self):
     return False
 
-  def get_launch_size(self, func_name, block):
-    return f"""""" # TODO:
+  def get_launch_size(self, func_name, block, shmem):
+    # `shmem` was missing here while `generator.py` has passed three arguments
+    # for as long as the persistent-launch path has existed, so every SYCL
+    # target that reaches it died with a TypeError before emitting a line --
+    # which is also why nothing noticed: the path is only taken for some
+    # arch/occupancy combinations, and no SYCL target was in the snapshot
+    # corpus to take it.
+    return f"""""" # TODO: occupancy query via device info
 
   def set_shmem_size(self, func_name, shmem):
     return ''
@@ -71,9 +91,20 @@ class SyclLexic(Lexic):
 
   def sync_simd(self):
     if self.simd_mode:
+      # One work-item *is* the vector: there are no lanes to synchronise.
       return ""
-    else:
-      return "item.barrier()" # TODO make better
+    # A sub-group barrier, not a work-group one.
+    #
+    # `SyncThreads.barrier_scope()` reports `SIMD` whenever the thread count
+    # fits in a wave, and `verify()` admits the instruction on that basis --
+    # a `BatchLoop` is only SIMD-uniform, so a GROUP barrier inside it is
+    # rejected as a deadlock.  Emitting `item.barrier()` here made the code
+    # do exactly what the check had just forbidden: the scope said SIMD and
+    # the instruction was work-group wide.  On CUDA and HIP the two agree
+    # (`__syncwarp`, `s_waitcnt`); only SYCL had the claim and the code
+    # disagreeing, and only on SYCL is the wave narrow enough (16 on PVC) for
+    # ordinary operator shapes to reach it.
+    return "sycl::group_barrier(item.get_sub_group())"
 
   def sync_grid(self):
     raise NotImplementedError() # TODO

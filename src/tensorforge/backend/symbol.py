@@ -257,9 +257,7 @@ class LeadIndex:
     return f'{self._nonlead}'
 
   def write(self, context: Context):
-    if context.get_vm().get_lexic().simd_mode:
-      return f'({self._nonlead} * {self._block})'
-    elif self._block > 1:
+    if self._block > 1:
       return f'(({context.get_vm().get_lexic().thread_idx_x} / {self._stride}) % {self._block}) + {self._nonlead} * {self._block}'
     elif self._block == 1:
       return f'{self._nonlead}'
@@ -275,8 +273,6 @@ class LeadIndex:
 
   def build(self, writer, context: Context):
     nl = self.build_nonlead(writer, context)
-    if context.get_vm().get_lexic().simd_mode:
-      return writer.op('mul', INDEX, nl, self._block, hint='lead')
     if self._block > 1:
       lane = writer.op('rem', INDEX,
                        writer.op('div', INDEX, writer.thread_id('x'),
@@ -923,54 +919,50 @@ class Symbol:
 
   def load_linear(self, writer, context: Context, variable, index, vec = 1):
     addrs = []
-    if context.get_vm().get_lexic().simd_mode:
-      writer(f'{context.get_vm().get_lexic().get_simd(self.get_fptype(), self.num_threads)} {variable}({index});')
-      return None
+    if self.stype == SymbolType.Register:
+      addr = index // self.num_threads
     else:
-      if self.stype == SymbolType.Register:
-        addr = index // self.num_threads
-      else:
-        addr = f'{index} + threadIdx.x * {vec}'
-      access = f'{self.name}[{addr}]'
+      addr = f'{index} + threadIdx.x * {vec}'
+    access = f'{self.name}[{addr}]'
 
-      if variable is None:
-        # Structured: the consumer takes the value rather than a name it
-        # allocated beforehand.  Same seam as `load`, and the reason is the
-        # same -- an operand handed to a vendor intrinsic has to have a
-        # definition point, or the def-use edge to this read does not exist.
-        buf = self.pir_buffer(writer) if vec == 1 else None
-        if buf is not None and hasattr(writer, 'load'):
-          # Addressed rather than named, the pair to `store_linear`.  There
-          # were two structured mechanisms here: `load_expr` wraps a string
-          # in a value so the def-use edge exists, and `load` makes the
-          # buffer an operand so the *access* is known too.  The second
-          # subsumes the first wherever the buffer is a value in this body.
-          #
-          # `addr` rather than a formula rebuilt here.  The first version
-          # inlined `index // self.num_threads`, which is the *register*
-          # address; the day the shared window became a value that branch
-          # started taking shared symbols too, and `num_threads` is None for
-          # those.  One address, computed once, for whichever branch runs.
-          #
-          # The layout claim is carried across unchanged: it is recorded by
-          # the fill in `_record_linear_layout` and only reported here, since
-          # neither address has a lane term to derive one from.
-          return writer.load(buf, addr, hint='lin', layout=self.layout)
-        from tensorforge.backend.pir.core import ScalarType
-        type_ = (ScalarType(self.get_fptype()) if vec == 1
-                 else ScalarType(self.get_fptype(), vec))
-        text = (access if vec == 1
-                else f'*(tensorforge::VectorT<{self.get_fptype()}, {vec}>*)&{access}')
-        # Whatever the fill recorded, unchanged: this read cannot see the
-        # distribution, so it reports rather than derives.
-        return writer.load_expr(text, type_, self, hint='lin',
-                                layout=self.layout)
+    if variable is None:
+      # Structured: the consumer takes the value rather than a name it
+      # allocated beforehand.  Same seam as `load`, and the reason is the
+      # same -- an operand handed to a vendor intrinsic has to have a
+      # definition point, or the def-use edge to this read does not exist.
+      buf = self.pir_buffer(writer) if vec == 1 else None
+      if buf is not None and hasattr(writer, 'load'):
+        # Addressed rather than named, the pair to `store_linear`.  There
+        # were two structured mechanisms here: `load_expr` wraps a string
+        # in a value so the def-use edge exists, and `load` makes the
+        # buffer an operand so the *access* is known too.  The second
+        # subsumes the first wherever the buffer is a value in this body.
+        #
+        # `addr` rather than a formula rebuilt here.  The first version
+        # inlined `index // self.num_threads`, which is the *register*
+        # address; the day the shared window became a value that branch
+        # started taking shared symbols too, and `num_threads` is None for
+        # those.  One address, computed once, for whichever branch runs.
+        #
+        # The layout claim is carried across unchanged: it is recorded by
+        # the fill in `_record_linear_layout` and only reported here, since
+        # neither address has a lane term to derive one from.
+        return writer.load(buf, addr, hint='lin', layout=self.layout)
+      from tensorforge.backend.pir.core import ScalarType
+      type_ = (ScalarType(self.get_fptype()) if vec == 1
+               else ScalarType(self.get_fptype(), vec))
+      text = (access if vec == 1
+              else f'*(tensorforge::VectorT<{self.get_fptype()}, {vec}>*)&{access}')
+      # Whatever the fill recorded, unchanged: this read cannot see the
+      # distribution, so it reports rather than derives.
+      return writer.load_expr(text, type_, self, hint='lin',
+                              layout=self.layout)
 
-      if vec == 1:
-        writer.access_stmt(f'{self.get_fptype()} {variable} = {access};', self, Effect.READ, args=_operands(variable, addrs))
-      else:
-        writer(f'tensorforge::VectorT<{self.get_fptype()}, {vec}> {variable} = *(tensorforge::VectorT<{self.get_fptype()}, {vec}>*)&{access};')
-      return None
+    if vec == 1:
+      writer.access_stmt(f'{self.get_fptype()} {variable} = {access};', self, Effect.READ, args=_operands(variable, addrs))
+    else:
+      writer(f'tensorforge::VectorT<{self.get_fptype()}, {vec}> {variable} = *(tensorforge::VectorT<{self.get_fptype()}, {vec}>*)&{access};')
+    return None
 
   def _record_linear_layout(self, index, vec):
     """Note the distribution a linearized fill leaves behind.
@@ -1019,44 +1011,39 @@ class Symbol:
     name = base or self.name
     addrs = []
     self._record_linear_layout(index, vec)
-    if context.get_vm().get_lexic().simd_mode:
-      pass
-      # TODO:
-      # writer(f'{context.get_vm().get_lexic().get_simd(self.get_fptype(), self.num_threads)} {variable}({index});')
+    if self.stype == SymbolType.Register:
+      addr = index // self.num_threads
     else:
-      if self.stype == SymbolType.Register:
-        addr = index // self.num_threads
-      else:
-        addr = f'{index} + threadIdx.x * {vec}'
-      access = f'{name}[{addr}]'
+      addr = f'{index} + threadIdx.x * {vec}'
+    access = f'{name}[{addr}]'
 
-      if vec == 1:
-        # `base` is the symbol's own name for everything except a rotating
-        # shared buffer, and every caller passes it rather than leaving it
-        # None -- so testing for None alone silently never fires.  When it is
-        # a real override the value is the wrong buffer: it addresses the
-        # stage consumers read while this write fills a different one.
-        own_base = base is None or base == self.name
-        buf = self.pir_buffer(writer) if own_base else None
-        if buf is not None and hasattr(writer, 'store'):
-          # Structured: the buffer is an operand, so the write declares what
-          # it touches by construction instead of by a hand-passed alias
-          # base.  The emitted text is the same while the allocation still
-          # carries its `extern` name; it stops being the same on the commit
-          # that drops the name, which is the point.
-          writer.store(buf, variable, addr)
-        elif not isinstance(variable, (str, int, float)):
-          # The value came from a structured read, so it has no C++ name yet
-          # and may never get one -- the emitter decides whether to inline it
-          # into this very statement.  Formatting it in at build time would
-          # take that decision away and print a name that was never declared.
-          writer.access_stmt(f'{access} = {{0}};', self, Effect.WRITE,
-                             args=(variable,), fmt=True)
-        else:
-          writer.access_stmt(f'{access} = {variable};', self, Effect.WRITE, args=_operands(variable, addrs))
+    if vec == 1:
+      # `base` is the symbol's own name for everything except a rotating
+      # shared buffer, and every caller passes it rather than leaving it
+      # None -- so testing for None alone silently never fires.  When it is
+      # a real override the value is the wrong buffer: it addresses the
+      # stage consumers read while this write fills a different one.
+      own_base = base is None or base == self.name
+      buf = self.pir_buffer(writer) if own_base else None
+      if buf is not None and hasattr(writer, 'store'):
+        # Structured: the buffer is an operand, so the write declares what
+        # it touches by construction instead of by a hand-passed alias
+        # base.  The emitted text is the same while the allocation still
+        # carries its `extern` name; it stops being the same on the commit
+        # that drops the name, which is the point.
+        writer.store(buf, variable, addr)
+      elif not isinstance(variable, (str, int, float)):
+        # The value came from a structured read, so it has no C++ name yet
+        # and may never get one -- the emitter decides whether to inline it
+        # into this very statement.  Formatting it in at build time would
+        # take that decision away and print a name that was never declared.
+        writer.access_stmt(f'{access} = {{0}};', self, Effect.WRITE,
+                           args=(variable,), fmt=True)
       else:
-        convert = f'*(tensorforge::VectorT<{self.get_fptype()}, {vec}>*)&'
-        writer.access_stmt(f'{convert}{access} = {convert}{variable};', self, Effect.WRITE, args=_operands(variable, addrs))
+        writer.access_stmt(f'{access} = {variable};', self, Effect.WRITE, args=_operands(variable, addrs))
+    else:
+      convert = f'*(tensorforge::VectorT<{self.get_fptype()}, {vec}>*)&'
+      writer.access_stmt(f'{convert}{access} = {convert}{variable};', self, Effect.WRITE, args=_operands(variable, addrs))
 
   def load(self, writer, context: Context, variable, index: List[Union[str, int, Immediate, Variable, LeadIndex]], nontemp):
     addrs = []
@@ -1118,9 +1105,6 @@ class Symbol:
       if variable is None:
         # structured: the consumer takes the value, not a name
         from tensorforge.backend.pir.core import ScalarType
-        lex = context.get_vm().get_lexic()
-        if lex.simd_mode:
-          return None
         if access is pre_access and self.stype in (
                 SymbolType.Register, SymbolType.Scratch,
                 SymbolType.SharedMem, SymbolType.Batch, SymbolType.Global):
@@ -1143,9 +1127,7 @@ class Symbol:
             access, ScalarType(self.get_fptype()), self,
             args=_operands(variable, addrs),
             hint='data', layout=layout_of(index, self.num_threads))
-      if context.get_vm().get_lexic().simd_mode:
-        writer(f'{context.get_vm().get_lexic().get_simd(self.get_fptype(), 16)} {variable}({access});')
-      elif self.stype == SymbolType.Global:
+      if self.stype == SymbolType.Global:
         writer(f'{self.get_fptype()} {variable} = {context.get_vm().get_lexic().glb_load(variable, access, nontemp)};', self, Effect.READ, args=_operands(variable, addrs))
       else:
         writer.access_stmt(f'{self.get_fptype()} {variable} = {access};', self, Effect.READ, args=_operands(variable, addrs))
@@ -1160,47 +1142,41 @@ class Symbol:
 
     fmt = not isinstance(variable, (str, int, float))
     var = '{0}' if fmt else variable
-    if context.get_vm().get_lexic().simd_mode:
-      if self.stype == SymbolType.Global:
-        writer(f'{variable}.copy_to({access});')
+    if self.stype == SymbolType.Global:
+      if atomic:
+        assign = context.get_vm().get_lexic().atomic_store(access, var, None, self.get_fptype())
       else:
-        writer(f'{variable} = {access};')
+        assign = context.get_vm().get_lexic().glb_store(access, var, nontemp)
     else:
-      if self.stype == SymbolType.Global:
-        if atomic:
-          assign = context.get_vm().get_lexic().atomic_store(access, var, None, self.get_fptype())
-        else:
-          assign = context.get_vm().get_lexic().glb_store(access, var, nontemp)
-      else:
-        assign = f'{access} = {var};'
+      assign = f'{access} = {var};'
 
-      kind = Effect.ATOMIC if atomic else Effect.WRITE
-      if self.stype == SymbolType.Register or self.stype == SymbolType.Scratch:
-        assert len(self.lead_dims) == 1
-        if isinstance(index[self.lead_dims[0]], LeadIndex):
-          from tensorforge.backend.pir.core import Value as _Value
-          if base is None and isinstance(variable, _Value):
-            # The symmetric case to the structured load: the destination
-            # address and the stored value are operands, not names inside a
-            # string.  A pass can now see that this write and a later read
-            # touch the same place, and the address arithmetic is foldable
-            # instead of pinned behind a name the text refers to.
-            #
-            # `base` is an override of the pointer name -- a rotating buffer
-            # writing to a stage other than its own -- which `Op.STORE` cannot
-            # express, since its base *is* the symbol.  A non-Value variable is
-            # a literal, and the spelling a literal gets is the emitter's to
-            # decide on the text path; routing it here would change `0` into
-            # `0.0f` or the reverse for reasons unrelated to this change.
-            writer.store(self, variable,
-                         self.address_value(writer, context, index))
-          else:
-            writer.access_stmt(assign, self, kind, args=_operands(variable, addrs), fmt=fmt)
+    kind = Effect.ATOMIC if atomic else Effect.WRITE
+    if self.stype == SymbolType.Register or self.stype == SymbolType.Scratch:
+      assert len(self.lead_dims) == 1
+      if isinstance(index[self.lead_dims[0]], LeadIndex):
+        from tensorforge.backend.pir.core import Value as _Value
+        if base is None and isinstance(variable, _Value):
+          # The symmetric case to the structured load: the destination
+          # address and the stored value are operands, not names inside a
+          # string.  A pass can now see that this write and a later read
+          # touch the same place, and the address arithmetic is foldable
+          # instead of pinned behind a name the text refers to.
+          #
+          # `base` is an override of the pointer name -- a rotating buffer
+          # writing to a stage other than its own -- which `Op.STORE` cannot
+          # express, since its base *is* the symbol.  A non-Value variable is
+          # a literal, and the spelling a literal gets is the emitter's to
+          # decide on the text path; routing it here would change `0` into
+          # `0.0f` or the reverse for reasons unrelated to this change.
+          writer.store(self, variable,
+                       self.address_value(writer, context, index))
         else:
-          with writer.If(f'{context.get_vm().get_lexic().thread_idx_x} == {index[self.lead_dims[0]]}'):
-            writer.access_stmt(assign, self, kind, args=_operands(variable, addrs), fmt=fmt)
+          writer.access_stmt(assign, self, kind, args=_operands(variable, addrs), fmt=fmt)
       else:
-        writer.access_stmt(assign, self, kind, args=_operands(variable, addrs), fmt=fmt)
+        with writer.If(f'{context.get_vm().get_lexic().thread_idx_x} == {index[self.lead_dims[0]]}'):
+          writer.access_stmt(assign, self, kind, args=_operands(variable, addrs), fmt=fmt)
+    else:
+      writer.access_stmt(assign, self, kind, args=_operands(variable, addrs), fmt=fmt)
 
   def add_user(self, user):
     self._users.append(user)
