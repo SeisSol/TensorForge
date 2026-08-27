@@ -11,6 +11,7 @@ from tensorforge.common.context import Context
 from tensorforge.common.operation import ReductionOperator
 from typing import Union, List
 from tensorforge.common.basic_types import Datatype
+from tensorforge.backend.pir.core import MemSpace
 from tensorforge.backend.writer import Writer
 
 from tensorforge.common.matrix.tensor import Tensor
@@ -255,6 +256,21 @@ class MultilinearInstruction(ComputeInstruction):
 
         if len(self._scalar) == 0 and self._prev is None and self._next is None and self._idest.data_view == self._dest.data_view:
             writer(f'auto& {self._idest.name} = {self._dest.name};')
+        elif hasattr(writer, 'alloc') and callable(getattr(writer, 'alloc')):
+            # Same shape `RegisterAlloc` stopped emitting as text, from a
+            # different site.  It matters beyond its own node count: this was
+            # the last raw declaration inside a compute body, and
+            # `flatten_scopes` keeps the `{ }` around any region whose raw
+            # text declares a C++ name -- so one line here held a wall around
+            # every multilinear in the corpus.
+            #
+            # The name stays via `extern` for the same reason as there: the
+            # accumulation still spells `ir2` out in places this does not
+            # reach yet.
+            value = writer.alloc(self._dest.get_fptype(), (self._iregs,),
+                                 MemSpace.REGISTER, hint=self._idest.name,
+                                 extern=self._idest.name, init='{}')
+            self._idest.set_pir_buffer(writer, value)
         else:
             writer(f'{self._dest.get_fptype()} {self._idest.name}[{self._iregs}]{"{}"};',
                    accesses=())

@@ -474,113 +474,111 @@ __launch_bounds__(256)
           ir1[155] = (v865_data + (v837_data * v113_data));
           // wait(r2 = load{g>r}(glb_m2););
           float r3[12]{};
-          {
-            // r3 = +(r1) + name: r2, type: SymbolType.Register, lead: [0]
-            // [(20, 35), (0, 1), (0, 6)] []
-            float ir3[12]{};
-            if (v3_lead >= 20) {
-              float v872_data = r1[24];
-              float v873_data = ir3[0];
-              ir3[0] = (v873_data + v872_data);
-              float v875_data = r1[50];
-              float v876_data = ir3[2];
-              ir3[2] = (v876_data + v875_data);
-              float v878_data = r1[76];
-              float v879_data = ir3[4];
-              ir3[4] = (v879_data + v878_data);
-              float v881_data = r1[102];
-              float v882_data = ir3[6];
-              ir3[6] = (v882_data + v881_data);
-              float v884_data = r1[128];
-              float v885_data = ir3[8];
-              ir3[8] = (v885_data + v884_data);
-              float v887_data = r1[154];
-              float v888_data = ir3[10];
-              ir3[10] = (v888_data + v887_data);
-            }
-            if (v3_lead < 3) {
-              float v891_data = r1[25];
-              float v892_data = ir3[1];
-              ir3[1] = (v892_data + v891_data);
-              float v894_data = r1[51];
-              float v895_data = ir3[3];
-              ir3[3] = (v895_data + v894_data);
-              float v897_data = r1[77];
-              float v898_data = ir3[5];
-              ir3[5] = (v898_data + v897_data);
-              float v900_data = r1[103];
-              float v901_data = ir3[7];
-              ir3[7] = (v901_data + v900_data);
-              float v903_data = r1[129];
-              float v904_data = ir3[9];
-              ir3[9] = (v904_data + v903_data);
-              float v906_data = r1[155];
-              float v907_data = ir3[11];
-              ir3[11] = (v907_data + v906_data);
-            }
-            if (v3_lead >= 20) {
+          // r3 = +(r1) + name: r2, type: SymbolType.Register, lead: [0]
+          // [(20, 35), (0, 1), (0, 6)] []
+          float ir3[12]{};
+          if (v3_lead >= 20) {
+            float v873_data = r1[24];
+            float v874_data = ir3[0];
+            ir3[0] = (v874_data + v873_data);
+            float v876_data = r1[50];
+            float v877_data = ir3[2];
+            ir3[2] = (v877_data + v876_data);
+            float v879_data = r1[76];
+            float v880_data = ir3[4];
+            ir3[4] = (v880_data + v879_data);
+            float v882_data = r1[102];
+            float v883_data = ir3[6];
+            ir3[6] = (v883_data + v882_data);
+            float v885_data = r1[128];
+            float v886_data = ir3[8];
+            ir3[8] = (v886_data + v885_data);
+            float v888_data = r1[154];
+            float v889_data = ir3[10];
+            ir3[10] = (v889_data + v888_data);
+          }
+          if (v3_lead < 3) {
+            float v892_data = r1[25];
+            float v893_data = ir3[1];
+            ir3[1] = (v893_data + v892_data);
+            float v895_data = r1[51];
+            float v896_data = ir3[3];
+            ir3[3] = (v896_data + v895_data);
+            float v898_data = r1[77];
+            float v899_data = ir3[5];
+            ir3[5] = (v899_data + v898_data);
+            float v901_data = r1[103];
+            float v902_data = ir3[7];
+            ir3[7] = (v902_data + v901_data);
+            float v904_data = r1[129];
+            float v905_data = ir3[9];
+            ir3[9] = (v905_data + v904_data);
+            float v907_data = r1[155];
+            float v908_data = ir3[11];
+            ir3[11] = (v908_data + v907_data);
+          }
+          if (v3_lead >= 20) {
+            #pragma unroll
+            for (int32_t v914_n1 = 0; v914_n1 < 1; ++v914_n1) {
+              int32_t v916_a = v914_n1 * 2;
               #pragma unroll
-              for (int32_t v913_n1 = 0; v913_n1 < 1; ++v913_n1) {
-                int32_t v915_a = v913_n1 * 2;
-                #pragma unroll
-                for (int32_t v914_n2 = 0; v914_n2 < 6; ++v914_n2) {
-                  int32_t v916_a = v914_n2 * 2;
-                  int32_t v918_a = v915_a + v916_a;
-                  int32_t v922_a = v915_a + v916_a;
-                  float v923_data = ir3[v922_a];
-                  int32_t v927_a = v915_a + v916_a;
-                  float v932_data = r2[v922_a];
-                  int32_t v937_a = v915_a + v916_a;
-                  r3[v922_a] = (v932_data + v923_data);
-                }
+              for (int32_t v915_n2 = 0; v915_n2 < 6; ++v915_n2) {
+                int32_t v917_a = v915_n2 * 2;
+                int32_t v919_a = v916_a + v917_a;
+                int32_t v923_a = v916_a + v917_a;
+                float v924_data = ir3[v923_a];
+                int32_t v928_a = v916_a + v917_a;
+                float v933_data = r2[v923_a];
+                int32_t v938_a = v916_a + v917_a;
+                r3[v923_a] = (v933_data + v924_data);
               }
             }
-            if (v3_lead < 3) {
+          }
+          if (v3_lead < 3) {
+            #pragma unroll
+            for (int32_t v944_n1 = 0; v944_n1 < 1; ++v944_n1) {
+              int32_t v948_a = 1 + (v944_n1 * 2);
               #pragma unroll
-              for (int32_t v943_n1 = 0; v943_n1 < 1; ++v943_n1) {
-                int32_t v947_a = 1 + (v943_n1 * 2);
-                #pragma unroll
-                for (int32_t v944_n2 = 0; v944_n2 < 6; ++v944_n2) {
-                  int32_t v946_a = v944_n2 * 2;
-                  int32_t v948_a = v947_a + v946_a;
-                  float v953_data = ir3[(v947_a + v946_a)];
-                  int32_t v957_a = v947_a + v946_a;
-                  float v962_data = r2[(v947_a + v946_a)];
-                  int32_t v967_a = v947_a + v946_a;
-                  r3[(v947_a + v946_a)] = (v962_data + v953_data);
-                }
+              for (int32_t v945_n2 = 0; v945_n2 < 6; ++v945_n2) {
+                int32_t v947_a = v945_n2 * 2;
+                int32_t v949_a = v948_a + v947_a;
+                float v954_data = ir3[(v948_a + v947_a)];
+                int32_t v958_a = v948_a + v947_a;
+                float v963_data = r2[(v948_a + v947_a)];
+                int32_t v968_a = v948_a + v947_a;
+                r3[(v948_a + v947_a)] = (v963_data + v954_data);
               }
             }
           }
           // glb_m2 = store{r>g}(r3);
           if (v3_lead >= 20) {
             #pragma unroll
-            for (int32_t v976_i1 = 0; v976_i1 < 1; ++v976_i1) {
-              int32_t v978_a = v976_i1 * 2;
-              int32_t v995_a = v3_lead + ((v976_i1 + 12) * 64);
+            for (int32_t v977_i1 = 0; v977_i1 < 1; ++v977_i1) {
+              int32_t v979_a = v977_i1 * 2;
+              int32_t v996_a = v3_lead + ((v977_i1 + 12) * 64);
               #pragma unroll
-              for (int32_t v977_i2 = 0; v977_i2 < 6; ++v977_i2) {
-                int32_t v979_a = v977_i2 * 2;
-                int32_t v981_a = v978_a + v979_a;
-                float v986_data = r3[(v978_a + v979_a)];
-                int32_t v996_a = v995_a + (v977_i2 * 832);
-                glb_m2[v996_a] = v986_data;
+              for (int32_t v978_i2 = 0; v978_i2 < 6; ++v978_i2) {
+                int32_t v980_a = v978_i2 * 2;
+                int32_t v982_a = v979_a + v980_a;
+                float v987_data = r3[(v979_a + v980_a)];
+                int32_t v997_a = v996_a + (v978_i2 * 832);
+                glb_m2[v997_a] = v987_data;
               }
             }
           }
           if (v3_lead < 3) {
-            int32_t v1013_lead = v3_lead + 32_i32;
+            int32_t v1014_lead = v3_lead + 32_i32;
             #pragma unroll
-            for (int32_t v998_i1 = 0; v998_i1 < 1; ++v998_i1) {
-              int32_t v1002_a = 1 + (v998_i1 * 2);
-              int32_t v1017_a = v1013_lead + ((v998_i1 + 12) * 64);
+            for (int32_t v999_i1 = 0; v999_i1 < 1; ++v999_i1) {
+              int32_t v1003_a = 1 + (v999_i1 * 2);
+              int32_t v1018_a = v1014_lead + ((v999_i1 + 12) * 64);
               #pragma unroll
-              for (int32_t v999_i2 = 0; v999_i2 < 6; ++v999_i2) {
-                int32_t v1001_a = v999_i2 * 2;
-                int32_t v1003_a = v1002_a + v1001_a;
-                float v1008_data = r3[(v1002_a + v1001_a)];
-                int32_t v1018_a = v1017_a + (v999_i2 * 832);
-                glb_m2[v1018_a] = v1008_data;
+              for (int32_t v1000_i2 = 0; v1000_i2 < 6; ++v1000_i2) {
+                int32_t v1002_a = v1000_i2 * 2;
+                int32_t v1004_a = v1003_a + v1002_a;
+                float v1009_data = r3[(v1003_a + v1002_a)];
+                int32_t v1019_a = v1018_a + (v1000_i2 * 832);
+                glb_m2[v1019_a] = v1009_data;
               }
             }
           }
