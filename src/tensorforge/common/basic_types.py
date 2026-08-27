@@ -2,6 +2,7 @@
 #
 # SPDX-License-Identifier: MIT
 import enum
+import math
 
 
 class DataFlowDirection(enum.Enum):
@@ -61,6 +62,20 @@ class StridedAddressing:
   def __req__(self, other):
     return other == Addressing.STRIDED
 
+def _nonfinite(value: float):
+  """C++ spelling for the values Python prints without a numeric literal.
+
+  `INFINITY` and `NAN` are `<cmath>` macros, usable in device code on every
+  backend the lexics target, and `INFINITY` converts exactly to double, so one
+  spelling serves both float and double.
+  """
+  if math.isnan(value):
+    return 'NAN'
+  if math.isinf(value):
+    return '-INFINITY' if value < 0 else 'INFINITY'
+  return None
+
+
 class Datatype(enum.Enum):
   F32 = 0
   F64 = 1
@@ -99,6 +114,19 @@ class Datatype(enum.Enum):
     return self.as_str(self)
 
   def literal(self, value):
+    if self in (Datatype.F32, Datatype.F64, Datatype.F16, Datatype.BF16,
+                Datatype.F128):
+      spelling = _nonfinite(float(value))
+      if spelling is not None:
+        # `f'{float("inf"):.16}f'` is `inff`, which is not C++.  It only ever
+        # showed up once an operator's *neutral element* reached here --
+        # `MinOperator.neutral()` is `math.inf` -- so nothing caught it while
+        # literals came from user data.
+        if self == self.F16:
+          return f'static_cast<__half>({spelling})'
+        if self == self.BF16:
+          return f'static_cast<__bfloat16>({spelling})'
+        return spelling
     if self == self.F32:
       return f'{float(value):.16}f'
     elif self == self.F64:

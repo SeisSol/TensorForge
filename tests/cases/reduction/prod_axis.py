@@ -11,9 +11,9 @@ hence the looser tolerance.
 
 The case exercises a different ``neutral()`` value (``1`` rather than
 ``0`` or ``±inf``); a reduction implementation that hard-codes one
-neutral element will fail this case while the others pass.
-
-XFAIL: same as the other reduction cases.
+neutral element will fail this case while the others pass. It is also
+the one operator in the family that ``Op.ACCUM`` cannot express, since
+that lowers to ``+=``.
 """
 
 import numpy as np
@@ -30,11 +30,6 @@ BATCH = 4
 TOL = (1e-3, 1e-3)         # 16-fold product of values near 1 amplifies rounding
 INPUT_TRANSFORM = {"A": lambda x: 1.0 + 0.05 * np.tanh(x)}
 
-XFAIL = True
-XFAIL_REASON = (
-    "ReductionDescr / ReductionInstruction are scaffold-only; "
-    "product reductions stress the neutral-element-1 path."
-)
 
 
 def descr_list():

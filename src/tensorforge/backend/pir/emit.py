@@ -22,6 +22,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 from tensorforge.common.basic_types import Datatype
 
 from tensorforge.common.basic_types import GeneralLexicon
+from tensorforge.common.operation import Operation
 from .core import (Access, BufferType, Effect, IRError, MemSpace, Op, Operand,
                    Region, ScalarType, Stmt, TokenType, Value, def_use, walk)
 
@@ -81,6 +82,15 @@ _INFIX = {
     'lt': '<', 'le': '<=', 'gt': '>', 'ge': '>=', 'eq': '==', 'ne': '!=',
     'and': '&&', 'or': '||',
 }
+
+# Ops with no infix form that the lexic already spells correctly.  Without
+# this they fell through to the generic `f'{op}({args})'`, i.e. unqualified
+# `min(a, b)` -- which happens to resolve in CUDA and HIP device code through
+# the vendor headers' global-namespace overloads, and so worked by accident
+# while silently depending on which headers a translation unit had pulled in.
+# `get_operation` gives `fminf`/`fmin` by dtype, which is what the elementwise
+# path has always emitted for the same operator.
+_LEXIC_BINOP = {'min': Operation.MIN, 'max': Operation.MAX}
 
 
 class Emitter:
@@ -147,6 +157,19 @@ class Emitter:
     def _hw(self):
         vm = self._vm()
         return None if vm is None else vm.get_hw_descr()
+
+    def _lexic_binop(self, op: str, v: Value, args: Sequence[str]) -> str:
+        """`min`/`max` as the lexic spells them, by result dtype.
+
+        Falls back to the bare call when there is no lexic -- the IR-level
+        tests build bodies without a context, and an emitter that raised there
+        would make them require one for an op that is not what they test.
+        """
+        lex = self._lexic()
+        if lex is None:
+            return f'{op}({", ".join(args)})'
+        base = getattr(v.type, 'base', None)
+        return lex.get_operation(_LEXIC_BINOP[op], base, args[0], args[1])
 
     def _sync(self, scope=None) -> str:
         # The scope used to be an unchecked string that never reached here, so
@@ -539,6 +562,8 @@ class Emitter:
                 expr = f'{args[0]} ? {args[1]} : {args[2]}'
             elif op == 'neg' and len(args) == 1:
                 expr = f'-{args[0]}'
+            elif op in _LEXIC_BINOP and len(args) == 2:
+                expr = self._lexic_binop(op, v, args)
             else:
                 expr = f'{op}({", ".join(args)})'
             self.declare(v, expr, s)

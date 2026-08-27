@@ -55,7 +55,7 @@ Cases live under `cases/`, grouped by feature:
 | Plain GEMM            | `cases/*.py`          | dense GEMM in every dtype, transposes, alpha/beta scaling, fused chains                 |
 | Elementwise           | `cases/elementwise/`  | `ElementwiseDescr` with exactly one nonlinear unary op per `Assignment` (sqrt, exp, …)  |
 | Slicing               | `cases/slicing/`      | non-trivial `BoundingBox` inside larger `Tensor.shape` (sub-region GEMMs)               |
-| Reductions            | `cases/reduction/`    | `ReductionDescr` for sum/min/max/prod outside the multilinear lowering (XFAIL on dev2)  |
+| Reductions            | `cases/reduction/`    | `ReductionDescr` for sum/min/max/prod outside the multilinear lowering                  |
 | Barriers              | `cases/barriers/`     | `GridFenceDescr` / `GridBarrierDescr` between descrs (multi-section, cooperative launch)|
 
 Top-level `cases/*.py` also include the *single-feature* coverage
@@ -75,8 +75,8 @@ failure, which is the signal to drop the marker.
 
 Currently XFAIL:
 
-* every `cases/reduction/*` — `ReductionDescr` and
-`ReductionInstruction` are scaffold-only on `dev2`
+* `cases/reduction/max_all.py` — contracts the lead axis, which needs the
+cross-lane fold `ReductionInstruction` does not have yet
 
 * `cases/beta_nonzero.py` — `GemmDescr` silently drops the `beta` argument
 
@@ -264,18 +264,18 @@ right number of arguments at the call site — older builds of the
 driver hardcoded a single pair and would have produced an arity
 mismatch the moment any barrier-using case landed.
 
-### Reduction cases (currently XFAIL)
+### Reduction cases
 
-`ReductionDescr` and its sibling `ReductionInstruction` are
-scaffold-only on `dev2`. Test cases under `cases/reduction/` set
-`XFAIL = True` and an `XFAIL_REASON`; the conftest attaches
-`pytest.mark.xfail(strict=True, run=True)` accordingly.
+`ReductionInstruction` emits the *non-lead* fold: every contracted axis
+is a sequential axis, so each lane owns one point of the kept iteration
+space and folds into a register, with no cross-lane traffic, no shared
+memory and no barrier. Four of the five cases take that path.
 
-The construction signature mirrors what
-`descriptions.py:ReductionDescr.__init__` actually accepts today (bare
-`Tensor`, not `SubTensor`). When the API stabilises this is expected
-to change, and the cases will need updating along with the harness's
-handling of non-SubTensor operands.
+`max_all` contracts the lead axis as well, so its fold crosses lanes.
+That needs a shuffle within a wave and, once `num_threads` exceeds
+`vec_unit_length`, a scratch tile in shared memory on top. It stays
+`XFAIL = True` until that lands; the conftest attaches
+`pytest.mark.xfail(strict=True, run=True)` from the marker.
 
 The five cases reflect the operator space:
 
@@ -283,13 +283,15 @@ The five cases reflect the operator space:
 `cases/trace.py` which uses `MultilinearDescr`);
 
 * `max_axis`, `min_axis` — the cases that genuinely
-need `ReductionDescr` (max/min aren't multilinear);
+need `ReductionDescr` (max/min aren't multilinear), and the pair that
+pins down the `±inf` neutral elements;
 
 * `max_all` — full reduction to a single-element
-sink (rank-0 sink edge case);
+sink, and the lead-axis contraction;
 
 * `prod_axis` — `MulOperator` with neutral element
-1 (constrained-domain inputs to avoid overflow).
+1 (constrained-domain inputs to avoid overflow), the one operator
+`Op.ACCUM` cannot express since it lowers to `+=`.
 
 ### F64 variants
 
@@ -371,12 +373,10 @@ has a deterministic reproducer in the suite:
    `tanf`. Reproducer: `cases/elementwise/tanh.py` will fail
    numerically once generation works.
 
-5. **`ReductionDescr` and `ReductionInstruction` are scaffold-only** —
-   `ReductionDescr.__init__` stores neither `dims` nor `op`;
-   `ReductionInstruction.__init__` is literally `pass`; the
-   `Generator` does not dispatch on `ReductionDescr` at all (no
-   `isinstance` branch in `generator.py`). Reproducer: every
-   `cases/reduction/*` (all XFAIL).
+5. **A lead-axis reduction has no lowering** — `ReductionInstruction`
+   emits the non-lead fold and raises with an explicit message when a
+   contracted axis is the thread-distributed one. Reproducer:
+   `cases/reduction/max_all.py` (XFAIL).
 
 6. **PTR_BASED needs harness driver work** — the generator emits
    correct device code, but `tests/harness/driver_emit.py:257` only
@@ -384,7 +384,7 @@ has a deterministic reproducer in the suite:
    `addressing_ptr_based.py` (XFAIL).
 
 The order of fixes that turns the most XFAIL cases green at once is
-roughly 3 → 5 → 4 → 2 → 1 → 6.
+roughly 3 → 4 → 2 → 1 → 5 → 6.
 
 ## Backends
 

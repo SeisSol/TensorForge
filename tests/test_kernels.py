@@ -178,22 +178,25 @@ def test_slicing_cases_construct_and_generate():
 
 
 def test_reduction_descr_constructs():
-    """Reduction cases can build a :class:`ReductionDescr` without crashing.
+    """Reduction cases build a :class:`ReductionDescr` and generate.
 
-    Generation is *not* exercised here — currently it crashes with
-    ``AttributeError: 'Tensor' object has no attribute 'tensor'`` because
-    the :class:`Generator` does not dispatch on :class:`ReductionDescr`
-    and the fall-through path at ``generator.py:428`` assumes every
-    operand in ``matrix_list()`` is a :class:`SubTensor`. Each reduction
-    case carries ``XFAIL=True``, so the end-to-end test is marked
-    accordingly via :func:`pytest_generate_tests` and will go from
-    xfail → xpass-strict-failure once the reduction path is wired up.
+    Generation *is* exercised here for every case that is not marked
+    XFAIL, which since the non-lead fold landed is all of them except
+    ``max_all``: that one contracts the lead axis and needs the
+    cross-lane path.
+
+    The XFAIL assertion this test used to carry — every reduction case
+    must be marked — has been inverted rather than deleted. A case that
+    silently regains the marker is a case that stopped working, and that
+    is worth failing on in the same place the original assertion was.
     """
     from pathlib import Path
     import importlib.util
 
     from tensorforge.common.basic_types import DataFlowDirection
+    from tensorforge.common.context import Context
     from tensorforge.generators.descriptions import ReductionDescr
+    from tensorforge.generators.generator import Generator
 
     cases_dir = Path(__file__).parent / "cases" / "reduction"
     case_files = sorted(p for p in cases_dir.glob("*.py")
@@ -210,11 +213,27 @@ def test_reduction_descr_constructs():
         d = descrs[0]
         assert isinstance(d, ReductionDescr), (
             f"{path.name}: not a ReductionDescr ({type(d).__name__})")
-        assert d.var.direction == DataFlowDirection.SOURCE
-        assert d.dest.direction == DataFlowDirection.SINK
-        assert getattr(mod, "XFAIL", False), (
-            f"{path.name}: reduction case must carry XFAIL=True until "
-            "ReductionInstruction is implemented")
+        # `.tensor.direction`, not `.direction`: the cases pass `SubTensor`,
+        # and it is the wrapped `Tensor` that carries the flow direction --
+        # which is also what `ReductionDescr.__init__` sets.  The old spelling
+        # never ran, because the loop aborted one assertion earlier on a
+        # misfiled multilinear case that has since moved out of this directory.
+        assert d.var.tensor.direction == DataFlowDirection.SOURCE
+        assert d.dest.tensor.direction == DataFlowDirection.SINK
+
+        if getattr(mod, "XFAIL", False):
+            # Only the lead-axis contraction is still open.  Anything else
+            # carrying the marker means a path that worked has stopped.
+            assert path.stem == "max_all", (
+                f"{path.name}: marked XFAIL, but the only reduction case "
+                "still expected to fail is max_all (lead-axis contraction)")
+            continue
+
+        ctx = Context(arch="sm_86", backend="cuda",
+                      fp_type=getattr(mod, "DTYPE", None))
+        gen = Generator(mod.descr_list(), ctx)
+        gen.generate()
+        assert gen.get_kernel(), f"{path.name}: empty kernel"
 
 
 # ---------------------------------------------------------------------- #
@@ -257,7 +276,11 @@ def test_add_true_sets_accumulate_and_promotes_dest():
     from tensorforge.common.context import Context
     from tensorforge.generators.generator import Generator
 
-    mod = _import_case("reduction/add_true.py")
+    # `reduction/add_true.py` never existed -- the directory held
+    # `add_true_f64.py`, which is a multilinear case and has since moved up
+    # next to this one.  The test has been failing on the import ever since it
+    # was written.
+    mod = _import_case("add_true.py")
     descrs = mod.descr_list()
     assert any(d.add for d in descrs), "add_true case: no add=True descr"
     # The dest of the add=True descr must be SOURCESINK.

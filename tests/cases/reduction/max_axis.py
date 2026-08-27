@@ -7,8 +7,10 @@ The case that is *not* expressible as a :class:`MultilinearDescr`:
 ``max`` is not a multilinear operator. This is the genuine reason for
 ``ReductionDescr`` to exist alongside the multilinear path.
 
-Same XFAIL story as :mod:`sum_axis` — scaffold-only API plus no
-generator dispatch.
+It is also the case that pins the neutral element down to a spelling:
+``MaxOperator.neutral()`` is ``-math.inf``, and an input that happens
+to be entirely negative is the only thing that separates a correct
+``-INFINITY`` from a wrong ``numeric_limits<float>::min()``.
 """
 
 import numpy as np
@@ -24,12 +26,6 @@ DTYPE = Datatype.F32
 BATCH = 4
 TOL = (1e-6, 1e-6)         # max is exact when implemented correctly
 
-XFAIL = True
-XFAIL_REASON = (
-    "ReductionDescr / ReductionInstruction are scaffold-only; max "
-    "reductions in particular are the unique-to-this-API case (no "
-    "multilinear lowering)."
-)
 
 
 def descr_list():

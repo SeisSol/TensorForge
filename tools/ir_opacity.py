@@ -161,7 +161,7 @@ def _cases():
     top level of `tests/cases`.
 
     `conftest.py` walks recursively; `barrier/`, `elementwise/`, `reduction/`
-    and `slicing/` hold 24 further cases between them.  Reporting a corpus
+    and `slicing/` hold 23 further cases between them.  Reporting a corpus
     number off a top-level glob understates it by almost half, and this number
     is meant to be the one two contexts quote at each other.
     """

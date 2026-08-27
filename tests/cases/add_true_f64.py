@@ -3,6 +3,13 @@
 # SPDX-License-Identifier: MIT
 """F64 variant of ``add_true.py`` — accumulation in double precision.
 
+Lived under ``cases/reduction/`` until the reduction path was implemented,
+which is when it stopped being harmless: it builds a
+:class:`MultilinearDescr`, so ``test_reduction_descr_constructs`` — which
+asserts every case in that directory is a :class:`ReductionDescr` — failed on
+it. The ``add=True`` accumulation it covers is a multilinear feature and has
+nothing to do with ``ReductionDescr``.
+
 Same shape and structure as ``cases/add_true.py``, but with
 :data:`Datatype.F64`. Worth its own case because the
 ``add=True`` path in :mod:`multilinear_builder` flows through a

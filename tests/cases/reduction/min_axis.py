@@ -5,12 +5,8 @@
 
 Dual to ``max_axis``; tests that ``MinOperator`` survives the same path
 ``MaxOperator`` does. The neutral element differs (``+inf`` vs.\\
-``-inf``) so the implementation has to thread the operator's
-``neutral()`` value through correctly. ``MaxOperator.neutral()`` returns
-``-math.inf``, ``MinOperator.neutral()`` returns ``math.inf`` — both
-will need handling in F32 (``-inf``/``+inf`` representable).
-
-XFAIL: same reason as the other reduction cases.
+``-inf``), so a reduction that threads ``neutral()`` through correctly
+for one sign and not the other fails exactly one of this pair.
 """
 
 import numpy as np
@@ -26,10 +22,6 @@ DTYPE = Datatype.F32
 BATCH = 4
 TOL = (1e-6, 1e-6)
 
-XFAIL = True
-XFAIL_REASON = (
-    "ReductionDescr / ReductionInstruction are scaffold-only."
-)
 
 
 def descr_list():

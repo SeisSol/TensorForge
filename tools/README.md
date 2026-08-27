@@ -60,7 +60,7 @@ the site in `attrs` would change behaviour, because `flatten_scopes` keys on
 `attrs` being empty.
 
 It runs the whole case corpus -- recursively, the way `conftest.py` discovers
-cases, because `barrier/`, `elementwise/`, `reduction/` and `slicing/` hold 24
+cases, because `barrier/`, `elementwise/`, `reduction/` and `slicing/` hold 23
 of the 52 between them. The percentage says how far along
 the migration is; the site table says what to change next, which is the
 question that actually gets asked. Cases that stop generating still count

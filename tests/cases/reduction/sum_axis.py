@@ -7,26 +7,11 @@ This is the same arithmetic as ``cases/trace.py``, which uses a bare
 :class:`MultilinearDescr`. Here we use the dedicated
 :class:`ReductionDescr` API so that the reduction path itself is
 exercised — both descriptors should produce identical numerical
-output once the reduction pipeline lights up.
+output, which is what makes the pair worth keeping.
 
-XFAIL because:
-
-* ``ReductionDescr.__init__`` (see ``descriptions.py:102``) accepts
-  ``dims`` and ``op`` but stores neither — the reduction structure is
-  lost on construction.
-* ``ReductionInstruction.__init__`` (``reduction.py:9``) is
-  literally ``pass``.
-* The :class:`Generator` does not dispatch on ``ReductionDescr`` —
-  ``isinstance`` checks only cover ``Multilinear`` and ``Elementwise``.
-
-Construction signature: ``ReductionDescr(dest, var, dims, op)`` takes
-bare :class:`Tensor` objects (the constructor calls
-``set_data_flow_direction`` directly on them — see
-``descriptions.py:108-109``). This is inconsistent with the rest of
-the API, which uses :class:`SubTensor`; once the reduction pipeline
-is implemented this signature is likely to shift. When that happens,
-the test will need updating along with the harness's handling for
-non-SubTensor operands.
+The contracted axis is not the lead axis, so this lowers to the
+register-local fold: each lane owns one ``i`` and folds ``j`` into an
+accumulator, with no cross-lane traffic.
 """
 
 import numpy as np
@@ -42,11 +27,6 @@ DTYPE = Datatype.F32
 BATCH = 4
 TOL = (1e-5, 1e-5)
 
-XFAIL = True
-XFAIL_REASON = (
-    "ReductionDescr is complete and the Generator dispatches on it, but "
-    "ReductionInstruction.gen_code_inner is still a skeleton and raises."
-)
 
 
 def descr_list():
