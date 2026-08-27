@@ -146,7 +146,17 @@ class Emitter:
 
     # -- types ------------------------------------------------------------- #
 
-    def ctype(self, t) -> str:
+    def ctype(self, t, value: Optional[Value] = None) -> str:
+        """The C++ spelling of a value's type.
+
+        ``value`` is the value being declared, when there is one.  This
+        emitter does not need it -- in SPMD the lane is in the *address*, so a
+        value's type says nothing about how it is spread across the wave.  An
+        explicitly vectorised emitter needs exactly that, and it needs it at
+        every declaration; passing the value here rather than threading a
+        second parameter through six call sites is what keeps the two
+        emitters one class apart instead of one file apart.
+        """
         if isinstance(t, TokenType):
             raise IRError('a completion token has no C++ representation; it '
                           'must not escape into generated code')
@@ -293,7 +303,7 @@ class Emitter:
         if name is None and v.id in self._inline:
             self.bind(v, _atomic(expr) and expr or f'({expr})')
             return
-        self.writer(f'{self.ctype(v.type)} {name or self.name(v)} = {expr};')
+        self.writer(f'{self.ctype(v.type, v)} {name or self.name(v)} = {expr};')
 
     def base_name(self, base: Operand) -> str:
         if isinstance(base, Value):
@@ -419,7 +429,7 @@ class Emitter:
             if s.attr('pragma'):
                 w(f'#pragma {s.attr("pragma")}')
             for t in s.target:      # a value-producing block declares it first
-                w(f'{self.ctype(t.type)} {self.name(t)};')
+                w(f'{self.ctype(t.type, t)} {self.name(t)};')
             with w.Block(s.text):
                 self._emit_body(s.regions[0].body, yield_to)
             return
@@ -565,7 +575,7 @@ class Emitter:
             # No initialiser to inline, so `declare()`'s folding machinery does
             # not apply -- this is the plain declaration the raw text used to
             # emit, byte for byte.
-            w(f'{self.ctype(v.type)} {self.name(v)}{s.attr("init", "{}")};')
+            w(f'{self.ctype(v.type, v)} {self.name(v)}{s.attr("init", "{}")};')
             return
 
         if op == Op.PACK:
@@ -631,8 +641,7 @@ class Emitter:
                 continue
             nm = self.name(arg)
             self.bind(res, nm)
-            w(f'{self.ctype(arg.type)} {nm} = '
-              f'{self.operand(init, arg.type)};')
+            w(f'{self.ctype(arg.type, arg)} {nm} = {self.operand(init, arg.type)};')
             targets.append(nm)
 
         i = self.name(ind)
@@ -643,7 +652,7 @@ class Emitter:
             advance = f'--{i}'
         else:
             advance = f'{i} += {self.operand(step)}'
-        head = (f'{self.ctype(ind.type)} {i} = {self.operand(lo)}; '
+        head = (f'{self.ctype(ind.type, ind)} {i} = {self.operand(lo)}; '
                 f'{i} {cmp_} {self.operand(hi)}; {advance}')
         # unroll goes through Writer.For, which folds the pragma into the block
         # head; a separate statement would flush the enclosing speculation and
@@ -659,7 +668,7 @@ class Emitter:
                 targets.append(None)
                 continue
             nm = self.name(res)
-            w(f'{self.ctype(res.type)} {nm};')
+            w(f'{self.ctype(res.type, res)} {nm};')
             targets.append(nm)
 
         with w.If(_unwrap(self.operand(s.cond))):
@@ -670,5 +679,22 @@ class Emitter:
 
 
 def emit(body: Tuple[Stmt, ...], writer, context: Any = None) -> None:
-    """Lower ``body`` into ``writer``."""
-    Emitter(writer, context).run(body)
+    """Lower ``body`` into ``writer``, in whichever model the lexic asks for.
+
+    The choice is the lexic's because the lexic is where the rest of the
+    model already lives -- the kernel attributes, the broadcast spelling, the
+    wave barrier.  Splitting the decision between here and there is how the
+    old arrangement ended up with an ESIMD kernel attribute on an SPMD body.
+    """
+    lex = getattr(context, 'get_vm', None)
+    simd = False
+    if lex is not None:
+        try:
+            simd = bool(getattr(context.get_vm().get_lexic(), 'simd_mode', False))
+        except Exception:
+            simd = False
+    if simd:
+        from .emit_esimd import EsimdEmitter
+        EsimdEmitter(writer, context).run(body)
+    else:
+        Emitter(writer, context).run(body)
