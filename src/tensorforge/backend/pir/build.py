@@ -94,8 +94,18 @@ def _names_in(code: str, name: str) -> bool:
 
 
 class IRBuilder:
+    #: Monotonic, never reused.  `id()` is not an identity for this purpose:
+    #: a builder that has been finished and collected frees its address, and
+    #: the next builder can be handed the same one.  Anything keyed on `id()`
+    #: then treats two different bodies as the same body -- which is exactly
+    #: the mistake `Symbol.pir_buffer` is there to prevent, so it must not be
+    #: the mechanism that makes it.
+    _next_uid = 0
+
     def __init__(self, fptype: Datatype = Datatype.F32, context: Any = None,
                  alloc: Any = None, scratch: Optional[Tuple[str, int]] = None):
+        IRBuilder._next_uid += 1
+        self.uid = IRBuilder._next_uid
         # -1 so the first value is v0, matching writer.VarAlloc: a mechanism
         # swap should not show up as a diff in generated source.
         #
@@ -387,7 +397,8 @@ class IRBuilder:
 
     def alloc(self, elem: Datatype, shape: Sequence[int], space: MemSpace,
               hint: str = 'buf', extern: str = None,
-              init: str = '') -> Value:
+              init: str = '', arena: str = None, offset=0,
+              restrict: str = None) -> Value:
         """Request a buffer *symbolically*.
 
         For registers and scratch: no offset, no address --- the whole-kernel
@@ -416,7 +427,18 @@ class IRBuilder:
         """
         v = self.value(BufferType(elem, tuple(shape), space), hint=hint)
         attrs: Tuple = ()
-        if space == MemSpace.SHARED:
+        if arena is not None:
+            # A window the *region* allocator placed, not the scratch bump
+            # allocator.  `_suballocate` hands out offsets inside this
+            # instruction's `tempShrMem` tail; `ShrMemOpt` places the shared
+            # tiles in `localShrMem0` and hands the offset in from outside.
+            # Two allocators, one arena, and only one of them may pick an
+            # offset for any given buffer -- so an externally placed window
+            # says so rather than asking for one it would then have to ignore.
+            attrs = (('arena', arena), ('offset', offset))
+            if restrict:
+                attrs = attrs + (('restrict', restrict),)
+        elif space == MemSpace.SHARED:
             attrs = self._suballocate(v, elem)
             self._shared_buffers.append(v)
         if extern is not None:

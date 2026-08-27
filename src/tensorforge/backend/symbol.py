@@ -586,14 +586,28 @@ class Symbol:
     self._users = []
 
   def set_pir_buffer(self, builder, value) -> None:
-    self._pir_buffer = (id(builder), value)
+    self._pir_buffer = (self._builder_uid(builder), value)
+
+  @staticmethod
+  def _builder_uid(builder):
+    """A token that is never handed to a second builder.
+
+    `id()` is not one.  A body that has been finished and collected frees its
+    address, and the next builder can be given the same address -- so a
+    buffer declared in the pre-loop preload was recognised as belonging to
+    the batch loop's body, and its reads were emitted against a value whose
+    declaration was in another scope.  That compiles to a name that does not
+    exist, which the corpus renders happily and only the syntax check catches.
+    """
+    return getattr(builder, 'uid', None)
 
   def pir_buffer(self, builder):
     """The value, if it belongs to the body currently being built."""
     if self._pir_buffer is None:
       return None
     owner, value = self._pir_buffer
-    return value if owner == id(builder) else None
+    uid = self._builder_uid(builder)
+    return value if uid is not None and owner == uid else None
 
   def clone(self):
     cloned = Symbol(self.name, self.stype, self.obj)
@@ -907,9 +921,10 @@ class Symbol:
       return None
     else:
       if self.stype == SymbolType.Register:
-        access = f'{self.name}[{index // self.num_threads}]'
+        addr = index // self.num_threads
       else:
-        access = f'{self.name}[{index} + threadIdx.x * {vec}]'
+        addr = f'{index} + threadIdx.x * {vec}'
+      access = f'{self.name}[{addr}]'
 
       if variable is None:
         # Structured: the consumer takes the value rather than a name it
@@ -922,15 +937,18 @@ class Symbol:
           # were two structured mechanisms here: `load_expr` wraps a string
           # in a value so the def-use edge exists, and `load` makes the
           # buffer an operand so the *access* is known too.  The second
-          # subsumes the first wherever the buffer is a value in this body,
-          # so the first is left only for the case that is not yet -- shared
-          # tiles, which is 552 of the 668 reads through here.
+          # subsumes the first wherever the buffer is a value in this body.
+          #
+          # `addr` rather than a formula rebuilt here.  The first version
+          # inlined `index // self.num_threads`, which is the *register*
+          # address; the day the shared window became a value that branch
+          # started taking shared symbols too, and `num_threads` is None for
+          # those.  One address, computed once, for whichever branch runs.
           #
           # The layout claim is carried across unchanged: it is recorded by
           # the fill in `_record_linear_layout` and only reported here, since
-          # `reg[i // num_threads]` has no lane term to derive one from.
-          return writer.load(buf, index // self.num_threads, hint='lin',
-                             layout=self.layout)
+          # neither address has a lane term to derive one from.
+          return writer.load(buf, addr, hint='lin', layout=self.layout)
         from tensorforge.backend.pir.core import ScalarType
         type_ = (ScalarType(self.get_fptype()) if vec == 1
                  else ScalarType(self.get_fptype(), vec))
@@ -1000,24 +1018,26 @@ class Symbol:
       # writer(f'{context.get_vm().get_lexic().get_simd(self.get_fptype(), self.num_threads)} {variable}({index});')
     else:
       if self.stype == SymbolType.Register:
-        access = f'{name}[{index // self.num_threads}]'
+        addr = index // self.num_threads
       else:
-        access = f'{name}[{index} + threadIdx.x * {vec}]'
+        addr = f'{index} + threadIdx.x * {vec}'
+      access = f'{name}[{addr}]'
 
       if vec == 1:
         # `base` is the symbol's own name for everything except a rotating
         # shared buffer, and every caller passes it rather than leaving it
-        # None -- so testing for None alone silently never fires.
+        # None -- so testing for None alone silently never fires.  When it is
+        # a real override the value is the wrong buffer: it addresses the
+        # stage consumers read while this write fills a different one.
         own_base = base is None or base == self.name
-        buf = (self.pir_buffer(writer)
-               if self.stype == SymbolType.Register and own_base else None)
+        buf = self.pir_buffer(writer) if own_base else None
         if buf is not None and hasattr(writer, 'store'):
           # Structured: the buffer is an operand, so the write declares what
           # it touches by construction instead of by a hand-passed alias
           # base.  The emitted text is the same while the allocation still
           # carries its `extern` name; it stops being the same on the commit
           # that drops the name, which is the point.
-          writer.store(buf, variable, index // self.num_threads)
+          writer.store(buf, variable, addr)
         elif not isinstance(variable, (str, int, float)):
           # The value came from a structured read, so it has no C++ name yet
           # and may never get one -- the emitter decides whether to inline it

@@ -595,7 +595,9 @@ class MultilinearInstruction(ComputeInstruction):
             if needsLoad:
                 valvar = self._idest.load(writer, self._context, None, [varlist[loopmap[f'n{i}']] for i,_ in enumerate(self._ns)], False)
             else:
-                valvar = writer.const(self._sumOperation.neutral(), ftype)
+                valvar = writer.const(
+                    self._sumOperation.neutral(self._context.fp_type),
+                    ftype)
 
             if len(self._scalar) > 0:
                 valvar = self._emit_binop(writer, ftype, self._productOperation, valvar, scalar_var)

@@ -100,54 +100,54 @@ __launch_bounds__(256)
           // r1 = +(r0 * s0) + None
           // [(0, 20), (0, 9)] [(0, 1)]
           float ir1[9]{};
-          int32_t v24_lead = threadIdx.x % 32;
-          if (v24_lead < 20) {
-            float v26_data = r0[0];
-            float v27_data = s0[0];
-            float v29_data = ir1[0];
-            ir1[0] = (v29_data + (v26_data * v27_data));
-            float v32_data = s0[1];
-            float v34_data = ir1[1];
-            ir1[1] = (v34_data + (v26_data * v32_data));
-            float v37_data = s0[2];
-            float v39_data = ir1[2];
-            ir1[2] = (v39_data + (v26_data * v37_data));
-            float v42_data = s0[3];
-            float v44_data = ir1[3];
-            ir1[3] = (v44_data + (v26_data * v42_data));
-            float v47_data = s0[4];
-            float v49_data = ir1[4];
-            ir1[4] = (v49_data + (v26_data * v47_data));
-            float v52_data = s0[5];
-            float v54_data = ir1[5];
-            ir1[5] = (v54_data + (v26_data * v52_data));
-            float v57_data = s0[6];
-            float v59_data = ir1[6];
-            ir1[6] = (v59_data + (v26_data * v57_data));
-            float v62_data = s0[7];
-            float v64_data = ir1[7];
-            ir1[7] = (v64_data + (v26_data * v62_data));
-            float v67_data = s0[8];
-            float v69_data = ir1[8];
-            ir1[8] = (v69_data + (v26_data * v67_data));
+          int32_t v25_lead = threadIdx.x % 32;
+          if (v25_lead < 20) {
+            float v27_data = r0[0];
+            float v28_data = s0[0];
+            float v30_data = ir1[0];
+            ir1[0] = (v30_data + (v27_data * v28_data));
+            float v33_data = s0[1];
+            float v35_data = ir1[1];
+            ir1[1] = (v35_data + (v27_data * v33_data));
+            float v38_data = s0[2];
+            float v40_data = ir1[2];
+            ir1[2] = (v40_data + (v27_data * v38_data));
+            float v43_data = s0[3];
+            float v45_data = ir1[3];
+            ir1[3] = (v45_data + (v27_data * v43_data));
+            float v48_data = s0[4];
+            float v50_data = ir1[4];
+            ir1[4] = (v50_data + (v27_data * v48_data));
+            float v53_data = s0[5];
+            float v55_data = ir1[5];
+            ir1[5] = (v55_data + (v27_data * v53_data));
+            float v58_data = s0[6];
+            float v60_data = ir1[6];
+            ir1[6] = (v60_data + (v27_data * v58_data));
+            float v63_data = s0[7];
+            float v65_data = ir1[7];
+            ir1[7] = (v65_data + (v27_data * v63_data));
+            float v68_data = s0[8];
+            float v70_data = ir1[8];
+            ir1[8] = (v70_data + (v27_data * v68_data));
           }
-          if (v24_lead < 20) {
+          if (v25_lead < 20) {
             #pragma unroll
-            for (int32_t v75_n1 = 0; v75_n1 < 9; ++v75_n1) {
-              int32_t v76_a = 0 + v75_n1;
-              float v78_data = ir1[v75_n1];
-              int32_t v79_a = 0 + v75_n1;
-              r1[v75_n1] = v78_data;
+            for (int32_t v76_n1 = 0; v76_n1 < 9; ++v76_n1) {
+              int32_t v77_a = 0 + v76_n1;
+              float v79_data = ir1[v76_n1];
+              int32_t v80_a = 0 + v76_n1;
+              r1[v76_n1] = v79_data;
             }
           }
           // glb_m0 = store{r>g}(r1);
-          if (v24_lead < 20) {
+          if (v25_lead < 20) {
             #pragma unroll
-            for (int32_t v85_i1 = 0; v85_i1 < 9; ++v85_i1) {
-              int32_t v86_a = 0 + v85_i1;
-              float v88_data = r1[v85_i1];
-              int32_t v95_a = v24_lead + (v85_i1 * 20);
-              glb_m0[v95_a] = v88_data;
+            for (int32_t v86_i1 = 0; v86_i1 < 9; ++v86_i1) {
+              int32_t v87_a = 0 + v86_i1;
+              float v89_data = r1[v86_i1];
+              int32_t v96_a = v25_lead + (v86_i1 * 20);
+              glb_m0[v96_a] = v89_data;
             }
           }
           __syncwarp();

@@ -719,13 +719,26 @@ __device__ __forceinline__ void fma16h(T &c, T a, T b) {
 }
 
 template <typename Op, std::size_t Block, std::size_t Subblock>
+// Bits at 0, Subblock, 2*Subblock, ... below Block: the lanes that share a
+// reduction with lane 0 of a block.  64-bit, because a wavefront is.
+template <std::size_t Block, std::size_t Subblock>
+constexpr unsigned long long groupMask() {
+  unsigned long long mask = 0;
+  for (std::size_t k = 0; k < Block; k += Subblock) {
+    mask |= 1ull << k;
+  }
+  return mask;
+}
+
 __device__ __forceinline__ bool ballotReduction(bool value) {
   const auto ballot = __ballot(value ? 1 : 0);
   const auto thread = (threadIdx.x / Block) * Block;
   const auto subthread = Subblock == 1 ? 0 : (threadIdx.x % Subblock);
-  constexpr auto basemask = 1;
 
-  const auto mask = (basemask << subthread) << thread;
+  // `(1 << subthread) << thread` named a single lane, so the And test reduced
+  // to "is my own bit set" and returned this lane's input unchanged.  It was
+  // also an `int`, which a wavefront's 64 lanes overflow from lane 31 on.
+  const auto mask = groupMask<Block, Subblock>() << (thread + subthread);
 
   if constexpr (Op::Op == Operation::And) {
     return (mask & ballot) == mask;
@@ -752,9 +765,16 @@ __device__ __forceinline__ T reduction(const T &value) {
     return ballotReduction<Op, Block, Subblock>(value);
   }
 
-  const auto other = swap<Block>(value);
+  // `swap<N>` exchanges with the mirror lane of an N-sized group.  Once each
+  // Subblock-sized group holds a uniform value, mirroring across `2*Subblock`
+  // pairs each group with its neighbour, which is the butterfly step -- so the
+  // width has to grow with the recursion.  `swap<Block>` repeated the same
+  // full-width exchange at every level instead.
+  const auto other = swap<(Subblock << 1)>(value);
   const auto result = Op::applyOperation(value, other);
-  return reduction<Op, T, Block, (Subblock << 1)>(result);
+  // Argument order is <Op, Block, Subblock, T>: `T` was being passed where
+  // `Block` is declared, which does not compile once this branch is reached.
+  return reduction<Op, Block, (Subblock << 1), T>(result);
 }
 
 constexpr std::size_t GlobalMemspace = 1;

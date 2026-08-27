@@ -199,18 +199,12 @@ class ReductionInstruction(ComputeInstruction):
     def _neutral(self):
         """The operator's identity, as a literal of the kernel's dtype.
 
-        `MinOperator`/`MaxOperator` return `-+math.inf`, which an integer
-        kernel has no representation for; that is rejected here rather than
-        spelled into integer code.
+        The operator answers per type, so the integer case no longer needs
+        rejecting here: `min` over `I32` starts at `INT32_MAX`, not at an
+        infinity that the type cannot hold.
         """
-        value = self._operation.neutral()
         fp = self._context.fp_type
-        if value in (float('inf'), float('-inf')) and \
-                fp not in (Datatype.F16, Datatype.F32, Datatype.F64):
-            raise InternalError(
-                f'reduction: {self._operation} has no representable neutral '
-                f'element in {fp}')
-        return fp.literal(value)
+        return fp.literal(self._operation.neutral(fp))
 
     def _combine(self, writer: Writer, acc, value):
         from tensorforge.backend.pir.core import ScalarType

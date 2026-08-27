@@ -7,6 +7,7 @@ from tensorforge.backend.writer import Writer
 from typing import Union
 from tensorforge.common.context import Context
 from tensorforge.common.basic_types import GeneralLexicon
+from tensorforge.backend.pir.core import MemSpace
 
 class MemoryInstruction(AbstractInstruction):
   def __init__(self, context: Context):
@@ -138,8 +139,29 @@ class AbstractShrMemWrite(MemoryInstruction):
 
   def gen_code_declare(self, writer: Writer) -> None:
     if self._declare:
-      lhs = f'{self._fp_as_str}* {self._vm.get_lexic().restrict_kw} {self._dest.name}'
-      writer(f'{lhs} = &{self._arena()}[{self._stage_offset()}];')
+      offset = self._stage_offset()
+      if (hasattr(writer, 'alloc') and callable(getattr(writer, 'alloc'))
+          and self._stages == 1):
+        # The window is a value, so a read through it declares what it
+        # touches instead of naming it.  `extern` because the consumers still
+        # spell `s0` out, same as the register tiles.
+        #
+        # Only where the offset is a number.  A rotating buffer's offset
+        # carries the stage expression, and the scratch check orders windows
+        # by their start to prove that two of them do not overlap -- a
+        # symbolic start cannot be ordered against a numeric one, and letting
+        # it through makes the check compare an int with a string rather than
+        # decline.  The rotating case keeps the text until the offset itself
+        # is a value.
+        value = writer.alloc(self._dest.get_fptype(), (self.stage_size(),),
+                             MemSpace.SHARED, hint=self._dest.name,
+                             extern=self._dest.name,
+                             arena=self._arena(), offset=int(offset),
+                             restrict=self._vm.get_lexic().restrict_kw)
+        self._dest.set_pir_buffer(writer, value)
+      else:
+        lhs = f'{self._fp_as_str}* {self._vm.get_lexic().restrict_kw} {self._dest.name}'
+        writer(f'{lhs} = &{self._arena()}[{offset}];')
 
   def compute_shared_mem_size(self) -> int:
     # What the region allocator must reserve: every stage at once.  Returning

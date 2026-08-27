@@ -16,20 +16,40 @@
 
 namespace tensorforge {
 
+// The participation mask for the `_sync` intrinsics.  Every call site here
+// passed `warpSize`, which is the *width* of a warp -- 32, i.e. the single bit
+// 0x20 -- so the mask named lane 5 alone and no other lane took part in the
+// exchange.
+inline constexpr unsigned FullWarpMask = 0xffffffffu;
+
 __device__ __forceinline__ int lane_id() {
   int lane;
   asm("mov.u32 %0, %%laneid" : "=r"(lane)::);
   return lane;
 }
 
+// Bits at 0, Subblock, 2*Subblock, ... below Block: the lanes that share a
+// reduction with lane 0 of a block.
+template <std::size_t Block, std::size_t Subblock>
+constexpr unsigned groupMask() {
+  unsigned mask = 0;
+  for (std::size_t k = 0; k < Block; k += Subblock) {
+    mask |= 1u << k;
+  }
+  return mask;
+}
+
 template <typename Op, std::size_t Block, std::size_t Subblock>
 __device__ __forceinline__ bool ballotReduction(bool value) {
-  const auto ballot = __ballot_sync(warpSize, value ? 1 : 0);
+  const auto ballot = __ballot_sync(FullWarpMask, value ? 1 : 0);
   const auto thread = (threadIdx.x / Block) * Block;
   const auto subthread = Subblock == 1 ? 0 : (threadIdx.x % Subblock);
-  constexpr auto basemask = 1;
 
-  const auto mask = (basemask << subthread) << thread;
+  // `(1 << subthread) << thread` was a single bit, so `(mask & ballot) == mask`
+  // only ever re-read this lane's own contribution and every reduction
+  // returned it unchanged.  The mask has to name all Block/Subblock lanes that
+  // participate.
+  const auto mask = groupMask<Block, Subblock>() << (thread + subthread);
 
   if constexpr (Op::Op == Operation::And) {
     return (mask & ballot) == mask;
@@ -42,12 +62,25 @@ __device__ __forceinline__ bool ballotReduction(bool value) {
   }
 }
 
+// A butterfly all-reduce: after it, every lane of a Block-sized group holds
+// the same result.
+//
+// Four things were wrong here at once, and the first two cancel any effect the
+// others might have had:
+//
+//   - the return type was `bool`, so every reduction of a numeric type came
+//     back as 0 or 1;
+//   - `value` was never read.  `result` started at the neutral element and
+//     nothing else fed the loop, so the answer was the neutral element;
+//   - the shuffle mask was `warpSize`, i.e. lane 5 only (see FullWarpMask);
+//   - the XOR distance was `i - 1`, a mask of low bits rather than the single
+//     bit `i`, so lanes paired with the wrong partners.
 template <typename Op, typename T, std::size_t Block, std::size_t Subblock>
-__device__ __forceinline__ bool fullReduction(T value) {
-  T result = Op::neutral();
+__device__ __forceinline__ T fullReduction(T value) {
+  T result = value;
 #pragma unroll
   for (std::size_t i = Block >> 1; i >= Subblock; i >>= 1) {
-    const auto other = __shfl_xor_sync(warpSize, result, i - 1);
+    const auto other = __shfl_xor_sync(FullWarpMask, result, i);
     result = Op::applyOperation(result, other);
   }
   return result;
@@ -59,10 +92,10 @@ __device__ __forceinline__ T reduction(const T &value) {
     return value;
   } else if constexpr (std::is_same_v<T, bool> && Op::Op == Operation::And &&
                        Block == 32 && Subblock == 1) {
-    return __all_sync(warpSize, value ? 1 : 0) != 0;
+    return __all_sync(FullWarpMask, value ? 1 : 0) != 0;
   } else if constexpr (std::is_same_v<T, bool> && Op::Op == Operation::Or &&
                        Block == 32 && Subblock == 1) {
-    return __any_sync(warpSize, value ? 1 : 0) != 0;
+    return __any_sync(FullWarpMask, value ? 1 : 0) != 0;
   } else if constexpr (std::is_same_v<T, bool>) {
     return ballotReduction<Op, Block, Subblock>(value);
   } else {
@@ -71,7 +104,7 @@ __device__ __forceinline__ T reduction(const T &value) {
 }
 
 template <typename T> __device__ __forceinline__ T readlane(T value, int lane) {
-  return __shfl_sync(warpSize, value, lane);
+  return __shfl_sync(FullWarpMask, value, lane);
 }
 
 template <std::size_t Block, std::size_t Subblock, std::size_t Lane, typename T>
@@ -80,7 +113,8 @@ __device__ __forceinline__ T broadcast(T value) {
     return value;
   } else {
     const auto subblockvar = lane_id() % Subblock;
-    return __shfl_sync(warpSize, value, Subblock * Lane + subblockvar, Block);
+    return __shfl_sync(FullWarpMask, value, Subblock * Lane + subblockvar,
+                       Block);
   }
 }
 

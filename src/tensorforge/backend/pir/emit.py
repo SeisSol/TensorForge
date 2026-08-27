@@ -403,7 +403,12 @@ class Emitter:
                 # what the occupancy calculation and the barrier placement both
                 # read.
                 off = s.attr('offset', 0)
-                w(f'{t.elem.ctype()}* {self.name(v)} = &{arena}[{off}];')
+                extern = s.attr('extern')
+                if extern is not None:
+                    self.bind(v, extern)
+                qual = s.attr('restrict')
+                qual = f'{qual} ' if qual else ''
+                w(f'{t.elem.ctype()}* {qual}{self.name(v)} = &{arena}[{off}];')
                 return
             qual = {MemSpace.CONSTANT: 'const '}.get(t.space, '')
             extern = s.attr('extern')

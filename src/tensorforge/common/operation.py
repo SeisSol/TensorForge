@@ -4,7 +4,9 @@
 from enum import Enum
 from typing import Union, List
 import math
-from abc import abstractmethod
+from abc import ABCMeta, abstractmethod
+
+from tensorforge.common.basic_types import Datatype
 
 class Operation(Enum):
   COPY = 0,
@@ -66,7 +68,32 @@ class OperationType(Enum):
   UINT = 2,
   BOOLEAN = 3
 
-class Operator:
+_FLOATS = (Datatype.F16, Datatype.BF16, Datatype.F32, Datatype.F64,
+           Datatype.F128)
+
+
+def _is_float(dtype: Datatype) -> bool:
+  return dtype in _FLOATS
+
+
+def _int_max(dtype: Datatype) -> int:
+  return (1 << (8 * dtype.size() - 1)) - 1
+
+
+def _int_min(dtype: Datatype) -> int:
+  return -(1 << (8 * dtype.size() - 1))
+
+
+class Operator(metaclass=ABCMeta):
+  """Base for the operators a descriptor can carry.
+
+  `ABCMeta` is the point: without it `@abstractmethod` only sets a flag that
+  nothing reads, so an incomplete subclass instantiates happily and fails at
+  the first call instead of at construction.  Seven concrete `format` methods
+  carried the decorator while also being the implementation, which is a
+  contradiction that only stayed harmless because nothing enforced it.
+  """
+
   def absorbing(self):
     """Value `a` with `op(a, x) == a` for all x, or None if there is none."""
     return None
@@ -89,8 +116,15 @@ class Operator:
 
 class ReductionOperator(Operator):
   @abstractmethod
-  def neutral(self):
-    pass
+  def neutral(self, dtype: Datatype):
+    """Identity element for `dtype`, as a Python value.
+
+    Type-dependent because the identity genuinely is: `min` starts from
+    positive infinity over the reals and from the largest representable
+    integer over `I32`, and a bitwise `and` starts from all-ones, whose
+    spelling is the width's.  A single dtype-free answer is wrong for every
+    operator here except `add` and `mul`.
+    """
 
   def num_operands(self):
     return 2
@@ -99,10 +133,9 @@ class AddOperator(ReductionOperator):
   def irop(self):
     return 'add'
 
-  def neutral(self):
+  def neutral(self, dtype: Datatype):
     return 0
 
-  @abstractmethod
   def format(self, *ops):
     return f'({ops[0]} + {ops[1]})'
 
@@ -119,10 +152,9 @@ class MulOperator(ReductionOperator):
   def irop(self):
     return 'mul'
 
-  def neutral(self):
+  def neutral(self, dtype: Datatype):
     return 1
 
-  @abstractmethod
   def format(self, *ops):
     return f'({ops[0]} * {ops[1]})'
 
@@ -136,10 +168,13 @@ class MinOperator(ReductionOperator):
   def irop(self):
     return 'min'
 
-  def neutral(self):
-    return math.inf
+  def neutral(self, dtype: Datatype):
+    if _is_float(dtype):
+      return math.inf
+    if dtype == Datatype.BOOL:
+      return True
+    return _int_max(dtype)
 
-  @abstractmethod
   def format(self, *ops):
     return f'min({ops[0]}, {ops[1]})'
 
@@ -153,10 +188,13 @@ class MaxOperator(ReductionOperator):
   def irop(self):
     return 'max'
 
-  def neutral(self):
-    return -math.inf
+  def neutral(self, dtype: Datatype):
+    if _is_float(dtype):
+      return -math.inf
+    if dtype == Datatype.BOOL:
+      return False
+    return _int_min(dtype)
 
-  @abstractmethod
   def format(self, *ops):
     return f'max({ops[0]}, {ops[1]})'
 
@@ -174,10 +212,13 @@ class AndOperator(ReductionOperator):
     # bitwise, not logical: `and` would render as `&&`
     return 'bitand'
 
-  def neutral(self):
-    return True
+  def neutral(self, dtype: Datatype):
+    # All ones, not 1.  `True` is only the identity for a one-bit type; on
+    # anything wider it clears every bit above the lowest.  Two's complement
+    # makes -1 all-ones at every width, which is what `Datatype` offers --
+    # it has no unsigned members.
+    return True if dtype == Datatype.BOOL else -1
 
-  @abstractmethod
   def format(self, *ops):
     return f'({ops[0]} & {ops[1]})'
 
@@ -192,10 +233,9 @@ class OrOperator(ReductionOperator):
     # bitwise, not logical: `and` would render as `&&`
     return 'bitor'
 
-  def neutral(self):
-    return False
+  def neutral(self, dtype: Datatype):
+    return False if dtype == Datatype.BOOL else 0
 
-  @abstractmethod
   def format(self, *ops):
     return f'({ops[0]} | {ops[1]})'
 
@@ -210,10 +250,9 @@ class XorOperator(ReductionOperator):
     # bitwise, not logical: `and` would render as `&&`
     return 'bitxor'
 
-  def neutral(self):
-    return False
+  def neutral(self, dtype: Datatype):
+    return False if dtype == Datatype.BOOL else 0
 
-  @abstractmethod
   def format(self, *ops):
     return f'({ops[0]} ^ {ops[1]})'
 
