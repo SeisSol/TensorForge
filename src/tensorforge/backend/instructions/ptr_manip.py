@@ -7,6 +7,7 @@ from tensorforge.common.helper import get_extra_offset_name, Addressing
 from tensorforge.common.basic_types import GeneralLexicon, DataFlowDirection, StridedAddressing
 from tensorforge.common.exceptions import GenerationError
 from tensorforge.backend.pir.core import Effect
+from tensorforge.backend.pir.core import MemSpace
 
 class GetElementPtr(AbstractInstruction):
   def __init__(self,
@@ -96,35 +97,49 @@ class GetElementPtr(AbstractInstruction):
       writer(f'const auto {self._update_dest.name} = {self._dest.name};')
       writer(f'{self._dest.name} = {rhs};')
     else:
-      self._emit_binding(writer, f'{lhs} = {rhs};')
+      self._emit_binding(writer, lhs, rhs)
 
-  def _emit_binding(self, writer, text: str) -> None:
-    """The binding, saying what it touches.
+  def _emit_binding(self, writer, lhs: str, rhs: str) -> None:
+    """The binding, as a definition rather than a statement.
 
     It was a bare statement, so `Effect.UNKNOWN`, so it conflicted with every
-    access in the body and pinned everything on both sides of it -- 362 nodes
-    corpus-wide, the largest blocking site after `allocate.py`.  That matters
-    here rather than in the abstract: `WrapLoads` moves a transfer past the
-    instructions between it and its consumer, and a binding that conflicts
-    with everything is a wall in the middle of exactly that stretch.
+    access in the body and pinned everything on both sides of it -- the
+    largest blocking site after `allocate.py`.  That matters here rather than
+    in the abstract: `WrapLoads` moves a transfer past the instructions
+    between it and its consumer, and a binding that conflicts with everything
+    is a wall in the middle of exactly that stretch.
 
-    What it actually touches is the batch handle it reads.  Strided
-    addressing does not even do that -- the right-hand side is address
-    arithmetic and touches no memory -- but `Addressing.PTR_BASED` reads
-    `m1[batchId]` out of the pointer array, so declaring the read covers both
-    and is conservative for the one that does less.
+    Declaring only its accesses made it reorderable but still nameless, so it
+    had to stay pinned anyway: a consumer reading `glb_m1` did so through text
+    the IR could not see, and letting the binding sink below one would compile
+    to a use before its definition.  Producing a *value* is what removes that
+    reason -- the def-use edge exists, so the scheduler knows the distance it
+    may not close.
 
-    `movable=False`, and not out of caution: the pointer it defines is still
-    a C++ name, so a consumer reading `glb_m1` does so through text the IR
-    cannot see.  Letting the binding sink below such a consumer would compile
-    to a use before its definition.  Movability comes back when the
-    definition becomes a value -- the same trade as `extern` on the register
-    tiles, and it ends the same way.
+    The declarator stays text.  `const float *const __restrict__ p` and the
+    AMD `auto p` with its type inside a cast are not renderable from a type,
+    and teaching the emitter a declarator grammar for one caller would buy
+    nothing the value does not already buy.
+
+    What it touches is the batch handle it reads.  Strided addressing does not
+    even do that -- the right-hand side is address arithmetic and reaches no
+    memory -- but `Addressing.PTR_BASED` reads `m1[batchId]` out of the
+    pointer array, so declaring the read covers both.  The accesses are
+    recorded against `self._src`, not against the value: `may_alias` treats
+    distinct bases as never aliasing, and a window that claimed its own
+    identity would let a write through the underlying buffer reorder past a
+    read through the window.
     """
-    if hasattr(writer, 'access_stmt'):
-      writer.access_stmt(text, self._src, Effect.READ, movable=False)
+    if hasattr(writer, 'decl_expr'):
+      from tensorforge.backend.pir.core import BufferType
+      value = writer.decl_expr(
+          lhs, rhs.replace('{', '{{').replace('}', '}}'),
+          BufferType(self._dest.get_fptype(), (1,), MemSpace.GLOBAL),
+          self._src, kind=Effect.READ, hint=self._dest.name,
+          extern=self._dest.name, alias_root=self._src)
+      self._dest.set_pir_buffer(writer, value)
     else:
-      writer(text)
+      writer(f'{lhs} = {rhs};')
 
   def defs(self):
     return (self._dest,) if self._update_dest is None else (self._dest, self._update_dest)

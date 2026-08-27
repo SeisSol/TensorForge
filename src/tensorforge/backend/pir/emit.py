@@ -374,6 +374,20 @@ class Emitter:
 
         if op == Op.RAWEXPR:
             v = s.target[0]
+            decl = s.attr('decl')
+            if decl is not None:
+                # The declarator is the caller's text, not something rendered
+                # from `v.type`: a pointer binding reads
+                # `const float *const __restrict__ p`, and on the AMD
+                # pointer-based path `auto p` with the type inside a cast on
+                # the right.  The value still exists, so consumers address the
+                # buffer rather than spelling its name.
+                extern = s.attr('extern')
+                if extern is not None:
+                    self.bind(v, extern)
+                w(f'{decl} = '
+                  f'{s.text.format(*[self.operand(a) for a in s.args])};')
+                return
             text = s.text.format(*[self.operand(a) for a in s.args])
             self.declare(v, text, s)
             return

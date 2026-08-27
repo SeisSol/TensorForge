@@ -106,6 +106,8 @@ class IRBuilder:
                  alloc: Any = None, scratch: Optional[Tuple[str, int]] = None):
         IRBuilder._next_uid += 1
         self.uid = IRBuilder._next_uid
+        #: value id -> the buffer its accesses belong to (see `decl_expr`)
+        self._view_root = {}
         # -1 so the first value is v0, matching writer.VarAlloc: a mechanism
         # swap should not show up as a diff in generated source.
         #
@@ -563,7 +565,8 @@ class IRBuilder:
         self._emit_op(Op.LOAD, (v,), (base,) + tuple(indices),
                       predicate=predicate, pure=False, movable=True,
                       effect=Effect.READ,
-                      accesses=(Access(Effect.READ, space, base),),
+                      accesses=(Access(Effect.READ, space,
+                                       self.alias_root(base)),),
                       attrs=attrs)
         return v
 
@@ -579,7 +582,8 @@ class IRBuilder:
         return self._emit_op(Op.STORE, (), (base, value) + tuple(indices),
                              predicate=predicate, pure=False, movable=True,
                              effect=kind,
-                             accesses=(Access(kind, space, base),))
+                             accesses=(Access(kind, space,
+                                              self.alias_root(base)),))
 
     def copy_async(self, dst: Any, src: Any, *,
                    dst_index: Sequence[Operand] = (),
@@ -931,6 +935,52 @@ class IRBuilder:
                              pure=False, movable=movable, effect=kind,
                              accesses=(Access(kind, space, base),), text=text,
                              attrs=(('fmt', True),) if fmt else ())
+
+    def decl_expr(self, decl: str, text: str, type_, base: Any, *,
+                  kind: Effect = Effect.READ, space: Optional[MemSpace] = None,
+                  args: Sequence[Operand] = (), hint: str = 'ptr',
+                  extern: str = None, alias_root: Any = None) -> Value:
+        """A declaration whose declarator is text too, not only its right side.
+
+        `load_expr` renders `{ctype} {name} = {text};`, which is enough while
+        the thing being declared is a scalar.  A pointer binding is not: it
+        reads `const float *const __restrict__ p`, or on the AMD pointer-based
+        path `auto p` with the type inside a cast on the right.  Rendering
+        that from a `type_` would mean teaching the emitter a declarator
+        grammar for one caller.
+
+        So the declarator stays text and the *result* becomes a value, which
+        is the half that matters: consumers can address the buffer instead of
+        interpolating its name, and the def-use edge exists, so a scheduler
+        knows the binding cannot sink below a read through it.
+
+        `alias_root` is not optional bookkeeping.  `may_alias` treats two
+        distinct bases as never aliasing, so a view that claimed its own
+        identity would let a write through the underlying buffer reorder past
+        a read through the window.  The root is what the accesses are recorded
+        against, so a window is the buffer it is a window into.
+        """
+        v = self.value(type_, hint=hint)
+        root = base if alias_root is None else alias_root
+        self._view_root[v.id] = root
+        attrs = (('decl', decl), ('escapes', True))
+        if extern is not None:
+            attrs = attrs + (('extern', extern),)
+        self._emit_op(Op.RAWEXPR, (v,), tuple(args), pure=False, movable=True,
+                      effect=kind,
+                      accesses=(Access(kind,
+                                       self._space_of(base) if space is None
+                                       else space, root),),
+                      text=text, attrs=attrs)
+        return v
+
+    def alias_root(self, base: Any) -> Any:
+        """The buffer an operand's accesses should be recorded against."""
+        seen = getattr(base, 'id', None)
+        while seen is not None and seen in self._view_root:
+            base = self._view_root[seen]
+            seen = getattr(base, 'id', None)
+        return base
 
     def load_expr(self, text: str, type_, base: Any, *,
                   kind: Effect = Effect.READ, space: Optional[MemSpace] = None,
