@@ -671,8 +671,7 @@ class IRBuilder:
                              predicate=predicate, pure=False, movable=True,
                              effect=kind, attrs=attrs,
                              accesses=(Access(kind, space,
-                                              self.alias_root(base)),),
-                             attrs=attrs)
+                                              self.alias_root(base)),))
 
     def copy_async(self, dst: Any, src: Any, *,
                    dst_index: Sequence[Operand] = (),

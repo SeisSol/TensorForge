@@ -172,7 +172,12 @@ def _bodies(case: str, backend: str, arch: str):
 # about: the five async statements are NVIDIA primitives and `Op.COPY_ASYNC`
 # and `Op.WAIT` already exist to receive them, the syncwarps are barriers, and
 # the two comments cost nothing but are miscategorised at their emission site.
-STILL_OPAQUE = {"rectangular.py": 10, "square_notrans.py": 0}
+# Lowered 10 -> 7: global stores became `Op.STORE`, so the three that were
+# raw assignments now declare their accesses.  The ratchet is meant to be
+# lowered -- that is the direction of the migration -- and the equality
+# assertion below is what forces the number to be re-read rather than
+# left as a ceiling nothing approaches.
+STILL_OPAQUE = {"rectangular.py": 7, "square_notrans.py": 0}
 
 
 # `case` is auto-parametrized across the whole corpus by conftest.

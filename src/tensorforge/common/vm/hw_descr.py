@@ -45,6 +45,10 @@ def hw_descr_factory(arch, backend):
     backend = "acpp"
   if backend == "dpcpp":
     backend = "oneapi"
+  # The lowering differs, the device does not: `esimd` runs on the same
+  # hardware `oneapi` does and reads the same row of the table.
+  from .lexic import EXPLICIT_SIMD_BACKENDS
+  backend = EXPLICIT_SIMD_BACKENDS.get(backend, backend)
 
   script_dir = os.path.dirname(os.path.realpath(__file__))
   db_file_path = os.path.join(script_dir, 'hw_descr_db.yml')

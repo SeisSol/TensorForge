@@ -37,6 +37,7 @@ _SHIMS = {
     "hip": SHIM,
     "oneapi": SYCL_SHIM,
     "acpp": SYCL_SHIM,
+    "esimd": SYCL_SHIM,
 }
 
 

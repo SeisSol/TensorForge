@@ -43,14 +43,20 @@ SNAPSHOT_DIR = Path(__file__).parent / "snapshots"
 BACKENDS = (
     ("cuda", "sm_86"),
     ("hip", "gfx90a"),
-    # SYCL, both modes on the same device.  `acpp` is the SPMD lowering and
-    # `oneapi` currently flips `SyclLexic.simd_mode`, so the pair is not two
-    # spellings of one target -- it is the whole difference between the two
-    # programming models, and until now neither had a baseline.  A feature
-    # that lands CUDA-only shows up here as a diff instead of as a bug report
-    # from a PVC run months later.
+    # SPMD SYCL, and the explicitly vectorised lowering of the same device.
+    #
+    # `oneapi` in SPMD mode used to sit here as a third SYCL entry and was
+    # dropped: it differed from `acpp` in two lines out of several hundred --
+    # `local_accessor` instead of `accessor`, and the kernel attributes -- so
+    # 54 files bought almost nothing and every cross-cutting change had to be
+    # reviewed four times instead of three.
+    #
+    # What that costs is named rather than waved away: nothing now generates
+    # `[[intel::reqd_sub_group_size(16)]]`, since the `esimd` target takes the
+    # other branch of the same `if`.  The `oneapi` half of `local_accessor`
+    # stays covered through `esimd`.
     ("acpp", "pvc"),
-    ("oneapi", "pvc"),
+    ("esimd", "pvc"),
 )
 
 # A mismatch on a 1000-line kernel should not bury the report.
