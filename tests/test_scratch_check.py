@@ -156,17 +156,21 @@ def _bodies(case: str, backend: str, arch: str):
 # packing check has to skip them.  A ratchet, not a target: these numbers may
 # go down and must never go up.
 #
-# `square_notrans` is at zero and stays there.  `rectangular` takes the NVIDIA
-# async path, and its 3 are the `__syncwarp()` calls -- barriers, which are
-# raw by nature until `Op.BARRIER` covers the warp scope.
+# Both at zero.  Every statement in a scratch-carrying body now declares what
+# it touches, so the packing is checked rather than partly skipped -- which is
+# what this file claimed to do from the start and could not.
 #
-# 16 before `RegisterAlloc` allocated through the builder, 14 before the
-# `glb_m*` bindings declared their read, 11 before the shared window became a
-# value, 10 before the transfers became `copy.async`.  The five
-# `cuda::pipeline` statements and the two miscategorised comments went with
-# that last one: the pipeline calls because there is no object left to drive,
-# the comments because the block that carried them did.
-STILL_OPAQUE = {"rectangular.py": 3, "square_notrans.py": 0}
+# The way down, for whoever adds the next entry: 16 before `RegisterAlloc`
+# allocated through the builder, 14 before the `glb_m*` bindings declared
+# their read, 11 before the shared window became a value, 10 before the
+# transfers became `copy.async` and took the `cuda::pipeline` statements with
+# them, 3 while the `__syncwarp()` calls were left.
+#
+# Zero is not a milestone to defend for its own sake.  An entry appearing here
+# again means a body reasons about something raw, and the number says how
+# much; the useful question is which site emitted it, which
+# tools/ir_opacity.py answers.
+STILL_OPAQUE = {"rectangular.py": 0, "square_notrans.py": 0}
 
 
 # `case` is auto-parametrized across the whole corpus by conftest.
