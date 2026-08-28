@@ -90,6 +90,22 @@ def sub(path, old, new, count=0):
 
 
 GROUPS = {
+    # The diagnostics themselves.  `ir_opacity` reported the whole corpus as
+    # failing to generate for as long as nobody re-derived its number.
+    'tools': ('tests/test_tools.py::test_ir_opacity_still_generates_the_corpus', [
+        ('the counting wrapper stops accepting what it wraps',
+         sub(Path('tools/ir_opacity.py'),
+             'def _counting_optimize(body, *args, **kwargs):',
+             'def _counting_optimize(body):', 1)),
+    ]),
+
+    'tools_sites': ('tests/test_tools.py::test_no_site_label_is_ambiguous', [
+        ('the site label stops naming a file',
+         sub(Path('tools/ir_opacity.py'),
+             "            path = Path(name)",
+             "            return f'{Path(name).name}:{f.f_code.co_name}'\n            path = Path(name)", 1)),
+    ]),
+
     'caps': ('tests/test_amd_caps.py', [
         ('gfx900 guard removed (the original bug)',
          sub(PKG / 'caps.py', '    return amdarch(ctx) != 0x900',

@@ -104,9 +104,15 @@ def _classify(stmt):
 _orig_optimize = pir.optimize
 
 
-def _counting_optimize(body):
-    """Count what reaches codegen, which is what `optimize` returns."""
-    out = _orig_optimize(body)
+def _counting_optimize(body, *args, **kwargs):
+    """Count what reaches codegen, which is what `optimize` returns.
+
+    Forwards whatever `optimize` takes.  Naming its parameters here made the
+    tool report every case as a generation failure the moment one was added --
+    a hundred-odd `TypeError`s that look like the generator broke, from a
+    wrapper that only ever wanted to count the result.
+    """
+    out = _orig_optimize(body, *args, **kwargs)
     for stmt, _ in walk(out):
         kind = _classify(stmt)
         lowered[kind] += 1
@@ -134,7 +140,13 @@ def _site():
     while f is not None:
         name = f.f_code.co_filename
         if '/pir/' not in name and 'writer' not in name:
-            return f'{Path(name).name}:{f.f_code.co_name}'
+            # `__init__.py:gen_ir` names two different files and is the
+            # largest bucket in the report; the parent directory disambiguates
+            # without turning every row into an absolute path.
+            path = Path(name)
+            label = (f'{path.parent.name}/{path.name}'
+                     if path.name == '__init__.py' else path.name)
+            return f'{label}:{f.f_code.co_name}'
         f = f.f_back
     return '?'
 
