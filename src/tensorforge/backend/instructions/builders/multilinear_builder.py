@@ -28,10 +28,12 @@ class MultilinearBuilder(AbstractBuilder):
                context: Context,
                scopes: Scopes,
                shr_mem: Symbol,
-               num_threads: int):
+               num_threads: int,
+               lead_width: int = 1):
     super(MultilinearBuilder, self).__init__(context, scopes)
     self._shr_mem = shr_mem
     self._num_threads = num_threads
+    self._lead_width = lead_width
 
     self._counter = 0
     self._counter_shr_reg = 0
@@ -919,7 +921,8 @@ class MultilinearBuilder(AbstractBuilder):
                                    productOperation=MulOperator(),
                                    sumOperation=AddOperator(),
                                    dest_obj=self._dest_obj,
-                                   theta=self._theta))
+                                   theta=self._theta,
+                                   lead_width=getattr(self, '_lead_width', 1)))
 
   def _prev_offset(self, prev):
     """Where the accumulation bias sits, relative to the loop indices.

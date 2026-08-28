@@ -426,6 +426,21 @@ def layout_of(index, num_threads=None):
   return layout if layout.tiles(num_threads) else None
 
 
+def lead_width_of(index) -> int:
+  """The per-lane width the lead index of this access carries.
+
+  One number for the whole access: the lead dimension is the only one that
+  is distributed, so at most one index in the list can be wide, and an access
+  whose lead index is a plain integer -- a broadcast, a sliced constant -- is
+  scalar however wide its neighbours are.
+  """
+  for idx in index:
+    lead = unwrap_lead(idx)
+    if lead is not None:
+      return lead[0].width
+  return 1
+
+
 def unwrap_lead(index):
   """Peel `VarOffset` wrappers and report the accumulated shift.
 
@@ -1418,8 +1433,22 @@ class Symbol:
           # it here would leave a named temporary the source does not have.  A
           # Scalar is not a subscripted access at all -- `access` returns the
           # bare name -- so `Op.LOAD` would invent a `[0]` that never existed.
+          # The width the lead index carries, on the type -- the address is
+          # already scaled by it, because `LeadIndex.build` multiplies.
+          #
+          # `RELAXED` rather than a byte count, for every space and not only
+          # for registers.  A shared window *is* 16-byte aligned and the
+          # address *is* a multiple of the width, but a sliced operand adds a
+          # constant that this call cannot see the divisibility of, and a
+          # claim that is wrong is worse than one that is weak.  The relaxed
+          # type is legal at any base; tightening it needs the constant part
+          # of the address modelled, which is its own step.
+          w = lead_width_of(index)
+          ltype = (ScalarType(self.get_fptype()) if w == 1
+                   else ScalarType(self.get_fptype(), w))
           return writer.load(self, self.address_value(writer, context, index),
-                             type_=ScalarType(self.get_fptype()), hint='data',
+                             type_=ltype, hint='data',
+                             align=None if w == 1 else RELAXED,
                              layout=layout_of(index, self.num_threads), nontemporal = nontemp)
         return writer.load_expr(
             access, ScalarType(self.get_fptype()), self,
@@ -1491,8 +1520,13 @@ class Symbol:
       # would change `0` into `0.0f` or the reverse for reasons unrelated to
       # this change.  And an atomic goes through `atomic_store`, which returns
       # an expression rather than a statement.
+      # The width comes off the *stored value*, as it does in the emitter:
+      # the buffer is typed by its element and would narrow every wide write
+      # to its first component.  `RELAXED` for the same reason as in `load`.
+      wide = getattr(getattr(variable, 'type', None), 'length', None)
       writer.store(self, variable,
                    self.address_value(writer, context, index),
+                   align=None if wide is None else RELAXED,
                    nontemporal=bool(nontemp), pointer=base)
     elif (self.stype in (SymbolType.Register, SymbolType.Scratch)
           and not isinstance(lead, LeadIndex)):

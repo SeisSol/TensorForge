@@ -43,6 +43,8 @@ _DECL = re.compile(
 _FOR = re.compile(r'^for\s*\((?:const\s+)?\w+\s+(?P<v>\w+)\s*=\s*(?P<a>.+?);'
                   r'\s*\w+\s*(?P<cmp><=?|>=?)\s*(?P<b>.+?);\s*(?P<step>.+?)\)$')
 _IF = re.compile(r'^if\s*\((?P<c>.*)\)$')
+#: `*(SomeVecType*)&name[expr] = value`
+_VEC_ASSIGN = re.compile(r'^\*\s*\([^)]*\)\s*&\s*\w+\s*\[.*\]\s*=')
 
 # How many slots `evaluate(preset=...)` fills per array.  Larger than any
 # operand a test case declares; the interpreter reads only what the kernel
@@ -197,6 +199,20 @@ class Interp:
         if am:
             self.env[am.group(1)] = self.ev(am.group(2))   # alias: same object
             return
+        if '::' in stmt and _VEC_ASSIGN.match(stmt):
+            # A widened store: `*(tensorforge::VectorRelaxedT<float,2>*)&r[i]
+            # = v;`.  The `'::' in stmt` catch-all below was written for
+            # `cuda::pipeline` and friends, which genuinely have no effect on
+            # the values compared here -- and it swallowed these, silently, so
+            # every widened kernel evaluated to a destination of all zeros and
+            # every oracle test passed without touching the arithmetic it was
+            # there to check.
+            #
+            # Refused rather than modelled.  Modelling it means vector values
+            # in the interpreter, which is worth doing; until it is done, an
+            # abort is the honest answer and a silent skip is the dangerous
+            # one.
+            raise Abort(f'vector assignment not modelled: {stmt!r}')
         if 'pipeline' in stmt or '::' in stmt:
             return
         if m and m.group('name') not in ('return',):

@@ -44,13 +44,26 @@ class AbstractThreadBlockPolicy:
 
 
 class RegmaxBlockPolicy(AbstractThreadBlockPolicy):
-  def __init__(self, context, global_mem, mem_size_per_mult, num_threads):
+  def __init__(self, context, global_mem, mem_size_per_mult, num_threads,
+               lead_width=1):
     super().__init__(context, global_mem, mem_size_per_mult, num_threads)
+    #: Lanes times width is what the lane count *was* before the lead
+    #: dimension was vectorised, and it is the right divisor here.
+    #:
+    #: This is the whole occupancy story of the vectorisation, so it is worth
+    #: stating: `256 // num_threads` binds in every case in the corpus -- the
+    #: memory bound never does -- so halving the lane count would otherwise
+    #: double the mults, double the shared memory per block and halve the
+    #: occupancy above roughly 256 elements per mult.  Holding the mults
+    #: instead makes the block smaller: shared memory per block unchanged,
+    #: blocks per SM unchanged or better, and the same work in flight with
+    #: half the instructions issued to do it.
+    self._lead_width = max(1, lead_width)
 
   def get_num_mults_per_block(self):
     # the //2 is a heuristic
     # self._max_threads // self._num_threads // 2
-    max_thread_mults = 256 // self._num_threads
+    max_thread_mults = 256 // (self._num_threads * self._lead_width)
     if self._mem_per_mult == 0:
       return max_thread_mults
     else:
@@ -93,6 +106,7 @@ class Generator:
 
     self._num_threads: int = 0
     self._num_active_threads: int = 0
+    self._lead_width: int = 1
 
     self._section: Section = Section()
     self._sections: List[Section] = []
@@ -362,11 +376,20 @@ class Generator:
     self._header = f'{self._generate_launcher_proto(with_defaults=True)};\n'
 
   def _deduce_num_threads(self):
+    widths = []
     for descr in self.descr_list:
       num_threads, num_active_threads = descr.get_num_threads(self._context)
 
       self._num_threads = max(num_threads, self._num_threads)
       self._num_active_threads = max(num_active_threads, self._num_active_threads)
+      widths.append(getattr(descr, 'lead_width', lambda _c: 1)(self._context))
+
+    # The *minimum*, where the thread count is a maximum, and the asymmetry is
+    # not an oversight.  One register image is shared across the descriptors
+    # of a section, so a width one of them cannot take is a width none of them
+    # may take; a lane count one of them needs is a lane count all of them
+    # must have.
+    self._lead_width = min(widths) if widths else 1
 
     compress = True
     for gemm_descr in self.descr_list:
@@ -453,7 +476,8 @@ class Generator:
     builder = MultilinearBuilder(self._context,
                           self._scopes,
                           self._scopes.get_symbol(self._section.shr_mem_obj),
-                          self._num_threads)
+                          self._num_threads,
+                          self._lead_width)
     # builder.build_prologue()
 
     def get_symbol_view(op):
@@ -494,7 +518,8 @@ class Generator:
     policy = self._thread_block_policy_type(self._context,
                                             self._section.shr_mem_obj.get_global_size(),
                                             self._section.shr_mem_obj.get_size_per_mult(),
-                                            self._num_threads)
+                                            self._num_threads,
+                                            self._lead_width)
     num_mults_per_block = policy.get_num_mults_per_block()
     self._section.shr_mem_obj.set_mults_per_block(num_mults_per_block)
 

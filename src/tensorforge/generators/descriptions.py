@@ -44,7 +44,37 @@ class MultilinearDescr(OperationDescription):
   def _analyze(self):
     pass
 
+  def lead_width(self, context: Context) -> int:
+    """How many adjacent lead-dimension elements one lane holds.
+
+    Legal only where *every* matrix indexed by the lead dimension proves the
+    alignment: the destination and any operand whose axis 0 is the lead
+    dimension are all read and written through the same wide cast, so the
+    weakest of them decides.  An operand that is not indexed by the lead
+    dimension -- `B` in `C[m,n] += A[m,k] B[k,n]` -- is a broadcast and is
+    splatted rather than loaded wide, so it does not constrain anything.
+    """
+    from tensorforge.backend.instructions.memory import vectorize
+    if not vectorize.lead_vectorize_supported(context):
+      return 1
+    align = min([getattr(m.tensor, 'alignment', 0) or 0
+                 for m in self.matrix_list()] or [0])
+    fp = context.fp_type.size()
+    return vectorize.lead_threads_and_width(self._lead_dim(), fp, align)[1]
+
   def get_num_threads(self, context: Context):
+    from tensorforge.backend.instructions.memory import vectorize
+    if vectorize.lead_vectorize_supported(context):
+      fp = context.fp_type.size()
+      align = min([getattr(m.tensor, 'alignment', 0) or 0
+                   for m in self.matrix_list()] or [0])
+      threads, width = vectorize.lead_threads_and_width(
+          self._lead_dim(), fp, align)
+      if width > 1:
+        # The extent still has to be covered: the loop bound is in elements
+        # and the lane count is what it is divided by, so this returns the
+        # *lane* count and the width travels separately.
+        return threads, self._lead_dim()
     num_threads = context.align(num=self._lead_dim())
     if self._lead_dim() <= 32:
       num_threads = 32

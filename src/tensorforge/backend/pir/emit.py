@@ -395,7 +395,8 @@ class Emitter:
                     pending.clear()
                 if (s.pure and not s.regions and not s.has_side_effects
                         and s.effect == Effect.NONE and len(s.target) == 1
-                        and s.op != Op.CONST and not s.attr('escapes')
+                        and s.op not in (Op.CONST, Op.PACK)
+                        and not s.attr('escapes')
                         and not s.attr('no_inline')):
                     t = s.target[0]
                     if len(uses.get(t.id, ())) == 1 and here.get(t.id, 0) == 1:
@@ -648,6 +649,12 @@ class Emitter:
             return
 
         if op == Op.PACK:
+            # Never inlined -- see `_plan_inlining`.  `{a, b}` is an
+            # *initialiser*, not an expression: `x * {a, b}` is not C++, and
+            # inlining a pack into its consumer produced exactly that as soon
+            # as a splatted operand met a multiply.  It has to keep its own
+            # declaration, which is also how the vendor path has always used
+            # it.
             v = s.target[0]
             parts = ', '.join(self.operand(a) for a in s.args)
             self.declare(v, f'{{{parts}}}', s)

@@ -25,7 +25,16 @@ a 16-byte access that a padded batch stride no longer covers.
 
 from __future__ import annotations
 
+import os
 from typing import List, Sequence, Tuple
+
+#: Whether the lead dimension is vectorised at all.  Off by default, and the
+#: reason is not doubt about the mechanism: it changes the thread count of
+#: every kernel, and the only instrument that can say whether that was a good
+#: idea is a register and occupancy measurement on real hardware.  The host
+#: oracle checks that the numbers still come out right; it cannot check that
+#: they come out faster.
+LEAD_VECTORIZE = os.environ.get('TF_LEAD_VEC', '') not in ('', '0')
 
 #: No target loads more than 16 bytes in one instruction: `LDG.128`/`LDS.128`
 #: on NVIDIA, `global_load_dwordx4`/`ds_read_b128` on AMD.  So `double4` is
@@ -231,3 +240,27 @@ def lead_threads_and_width(extent: int, elem_bytes: int, align_bytes: int,
             continue
         return threads, w
     return scalar_threads, 1
+
+
+def lead_vectorize_supported(context) -> bool:
+    """Whether this backend can spell what the widened compute path emits.
+
+    CUDA and HIP can: `VectorT`/`VectorRelaxedT` are GNU vector types, so
+    they carry arithmetic and the naturally-aligned and element-aligned
+    spellings convert to each other.
+
+    SYCL cannot, and for two separate reasons.  `sycl::vec` has no
+    element-aligned twin, so a relaxed cast has nowhere to go; and it does
+    not define `operator*` between two `vec`s the way a GNU vector does, so
+    the product does not compile even where the cast would.  The ESIMD
+    emitter is further out still -- its whole model puts the lane axis in the
+    type, so a per-lane width is a second axis it has no spelling for yet.
+
+    Left as a capability question rather than a `TODO`: the widened path is
+    correct on the backends that answer yes, and silently wrong on the ones
+    that would need `sycl::vec`'s componentwise API instead.
+    """
+    if not LEAD_VECTORIZE:
+        return False
+    lex = context.get_vm().get_lexic()
+    return getattr(lex, '_backend', None) in ('cuda', 'hip', 'hipsycl_cuda')

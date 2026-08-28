@@ -40,6 +40,7 @@ class MultilinearInstruction(ComputeInstruction):
                num_threads: int,
                blockcount: int=1,
                theta: int=0,
+               lead_width: int=1,
                prev_offset=None):
         super(MultilinearInstruction, self).__init__(context)
         self._dest = dest
@@ -51,6 +52,10 @@ class MultilinearInstruction(ComputeInstruction):
         self._user_options = context.get_user_options()
         self._gemm_meta_data = None
         self._num_threads = num_threads
+        #: Adjacent lead-dimension elements per lane.  The lane count is
+        #: already reduced to match, so `threads * lead_width` is what the
+        #: lane count was before -- see `vectorize.lead_threads_and_width`.
+        self._lead_width = lead_width
         self._blockcount = blockcount
         # origin of the lead loop, chosen by the builder so that a register-
         # resident operand's lane assignment lines up (see
@@ -353,8 +358,10 @@ class MultilinearInstruction(ComputeInstruction):
             if i not in self._lead_dims or threads == 0:
                 loopstack += [Loop(f'n{i}', dimmin, dimmax, 1, unroll=self._sparseN[i] or force_unroll)]
             else:
-                loopstack += [LeadLoop(f'n{i}', dimmin, dimmax, threads, stride, unroll=self._sparseN[i] or force_unroll)]
-                threads //= dimmax - dimmin
+                loopstack += [LeadLoop(f'n{i}', dimmin, dimmax, threads, stride,
+                                       unroll=self._sparseN[i] or force_unroll,
+                                       width=self._lead_width)]
+                threads //= max(1, -(-(dimmax - dimmin) // self._lead_width))
                 stride *= dimmax - dimmin
 
         def nonlead_writer(varlist):
@@ -364,7 +371,10 @@ class MultilinearInstruction(ComputeInstruction):
             and then conditionally assigns a named variable, which is not SSA);
             the caller then falls back."""
             from tensorforge.backend.pir.core import ScalarType
-            ftype = ScalarType(self._idest.get_fptype())
+            ftype = (ScalarType(self._idest.get_fptype())
+                     if self._lead_width == 1
+                     else ScalarType(self._idest.get_fptype(),
+                                     self._lead_width))
             data = []
             for i, op in enumerate(self._ops):
                 v = op.symbol.load(writer, self._context, None,
@@ -374,7 +384,7 @@ class MultilinearInstruction(ComputeInstruction):
                 if v is None:
                     # zero; no data
                     return
-                data.append(v)
+                data.append(self._splat(writer, ftype, v))
             if len(data) == 0:
                 # also zero
                 return
@@ -391,6 +401,27 @@ class MultilinearInstruction(ComputeInstruction):
             self._vdest.store(writer, self._context, total, ns, False)
 
         write_loops(self._context, writer, loopstack, nonlead_writer)
+
+    def _splat(self, writer, ftype, v):
+        """A scalar operand broadcast into every component of the vector.
+
+        `B` in `C[m,n] += A[m,k] B[k,n]` is not indexed by the lead dimension,
+        so it loads one element while `A` and `C` load `lead_width` of them.
+        Multiplying a vector by a scalar is not something the generated types
+        do -- and on CUDA it would not compile at all -- so the scalar is
+        packed into a vector of itself.
+
+        This is where the packing overhead lives, and it is the reason the
+        width is not free even where the registers are: one `{b, b}` per
+        distinct `B` value.  It pays because the pack is loop-invariant in the
+        lead dimension while the FMAs it feeds are not, so LICM hoists it out
+        of exactly the loop that multiplies it.
+        """
+        if ftype.length is None:
+            return v
+        if getattr(getattr(v, 'type', None), 'length', None) is not None:
+            return v
+        return writer.pack(ftype, *([v] * ftype.length), hint='splat')
 
     def _emit_binop(self, writer, ftype, operator, a, b):
         """`operator` as an IR op if it has one, else its format string."""
@@ -412,6 +443,21 @@ class MultilinearInstruction(ComputeInstruction):
                               or self._ops[1].symbol.data_view.shape[0] < 16)
 
     def _is_matmul(self):
+        if self._lead_width > 1:
+            # Not a preference: the matrix-core paths own the lane-to-register
+            # mapping of their fragments, and the lead width is a change to
+            # exactly that mapping.  Handing MFMA operands addressed at stride
+            # `width` gives it the right registers in the wrong places, which
+            # is silent -- the generated code compiles and the numbers are
+            # wrong.
+            #
+            # The two are alternative schemes rather than composable ones, and
+            # that was the argument for not forking a vectorised path beside
+            # the WMMAs in the first place.  Whether the packed-VALU
+            # arrangement beats the matrix cores for FP32 is the open question
+            # from the AMD side; this makes the choice explicit instead of
+            # letting one silently corrupt the other.
+            return False
         vendor = self._context.get_vm().get_hw_descr().vendor
         if len(self._ops) != 2:
             return False
