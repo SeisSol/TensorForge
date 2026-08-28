@@ -43,6 +43,11 @@ class AbstractThreadBlockPolicy:
     pass
 
 
+def _lead_blocking() -> int:
+  from tensorforge.backend.instructions.memory import vectorize
+  return vectorize.LEAD_BLOCKING
+
+
 class RegmaxBlockPolicy(AbstractThreadBlockPolicy):
   def __init__(self, context, global_mem, mem_size_per_mult, num_threads,
                lead_width=1):
@@ -58,12 +63,18 @@ class RegmaxBlockPolicy(AbstractThreadBlockPolicy):
     #: instead makes the block smaller: shared memory per block unchanged,
     #: blocks per SM unchanged or better, and the same work in flight with
     #: half the instructions issued to do it.
-    self._lead_width = max(1, lead_width)
+    #: Width times blocking: how many lead-dimension elements one lane now
+    #: covers where it used to cover one.  `num_threads * this` is the lane
+    #: count the operators started with, which is what `mults_per_block` has
+    #: to be sized from -- sizing it from the *reduced* count would double
+    #: the mults, double the shared memory per block and halve the occupancy,
+    #: spending the whole win on memory.
+    self._lane_factor = max(1, lead_width)
 
   def get_num_mults_per_block(self):
     # the //2 is a heuristic
     # self._max_threads // self._num_threads // 2
-    max_thread_mults = 256 // (self._num_threads * self._lead_width)
+    max_thread_mults = 256 // (self._num_threads * self._lane_factor)
     if self._mem_per_mult == 0:
       return max_thread_mults
     else:
@@ -519,7 +530,8 @@ class Generator:
                                             self._section.shr_mem_obj.get_global_size(),
                                             self._section.shr_mem_obj.get_size_per_mult(),
                                             self._num_threads,
-                                            self._lead_width)
+                                            self._lead_width
+                                            * _lead_blocking())
     num_mults_per_block = policy.get_num_mults_per_block()
     self._section.shr_mem_obj.set_mults_per_block(num_mults_per_block)
 

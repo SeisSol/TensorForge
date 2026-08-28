@@ -36,6 +36,12 @@ from typing import List, Sequence, Tuple
 #: they come out faster.
 LEAD_VECTORIZE = os.environ.get('TF_LEAD_VEC', '') not in ('', '0')
 
+#: Vectors per lane in the lead dimension.  1 keeps the arrangement the width
+#: alone produces; 2 is where the packed FMA starts paying for its own splat.
+#: Separate from `LEAD_VECTORIZE` because it is a *register* decision and the
+#: width is an instruction one -- they want separate measurements.
+LEAD_BLOCKING = int(os.environ.get('TF_LEAD_BLOCK', '1') or '1')
+
 #: No target loads more than 16 bytes in one instruction: `LDG.128`/`LDS.128`
 #: on NVIDIA, `global_load_dwordx4`/`ds_read_b128` on AMD.  So `double4` is
 #: not a width, and `float4` is the widest there is.
@@ -188,7 +194,8 @@ def _round_up_pow2(n: int, cap: int) -> int:
 
 
 def lead_threads_and_width(extent: int, elem_bytes: int, align_bytes: int,
-                           max_threads: int = 32, cap: int = 2):
+                           max_threads: int = 32, cap: int = 2,
+                           blocking: int = 1):
     """Pick the lane count and the per-lane width together.
 
     `lead_vector_width` takes the thread count as given, and for most of the
@@ -220,15 +227,38 @@ def lead_threads_and_width(extent: int, elem_bytes: int, align_bytes: int,
     per block unchanged, blocks per SM unchanged or better.  The win is real
     only in the second arrangement.
 
+    ``blocking`` is how many vectors a lane should hold at once, and it is a
+    second lever on the same quantity: `R` vectors per lane means `R` times
+    fewer lanes, again at constant total registers.  What it buys is not the
+    loads -- those are already wide -- but the *amortisation* of everything
+    that is per-`b` rather than per-element.  Per `(n, k)` a lane issues one
+    load of `b`, one splat of it, and `R` fused multiply-adds, so:
+
+        scalar             3.00 instructions per m-element
+        w=2, R=1           1.50
+        w=2, R=2           1.00
+        w=2, R=4           0.75
+
+    At `R == 1` on a target with packed FMA the splat and the packed
+    instruction come to exactly what two scalar FMAs cost, so the arithmetic
+    is a wash and the whole gain of the width is in the loads.  `R == 2` is
+    where the packed form starts paying for its own splat.
+
+    Total registers stay neutral as before, and per-*thread* registers go up
+    by `R` on top of `w`.  That is the number to watch: at order 6 in FP64 it
+    is already the binding constraint, so the default stays at 1.
+
     Returns ``(threads, width)``; ``width == 1`` reproduces today's choice.
     """
     if extent < 1:
         return 1, 1
+    if blocking < 1:
+        raise ValueError(f'blocking must be >= 1, got {blocking}')
     scalar_threads = _round_up_pow2(extent, max_threads)
     for w in widths_for(elem_bytes, align_bytes):
         if w > cap or w == 1:
             continue
-        threads = _round_up_pow2(-(-extent // w), max_threads)
+        threads = _round_up_pow2(-(-extent // (w * blocking)), max_threads)
         # Total floats for the operator, not per lane: a lane carries `w`
         # times as many and there are `w` times fewer of them, so the two
         # cancel -- unless the thread cap bit before the width could absorb

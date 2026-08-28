@@ -60,7 +60,33 @@ class MultilinearDescr(OperationDescription):
     align = min([getattr(m.tensor, 'alignment', 0) or 0
                  for m in self.matrix_list()] or [0])
     fp = context.fp_type.size()
-    return vectorize.lead_threads_and_width(self._lead_dim(), fp, align)[1]
+    return vectorize.lead_threads_and_width(
+        self._lead_dim(), fp, align, blocking=vectorize.LEAD_BLOCKING)[1]
+
+  def scalar_num_threads(self, context: Context) -> int:
+    """The lane count this operator would have had without vectorisation.
+
+    What `RegmaxBlockPolicy` has to divide by.  Sizing `mults_per_block` from
+    the *reduced* lane count would double the mults, double the shared memory
+    per block and halve the occupancy -- the whole win spent on memory.
+    Dividing by the count the operator started with keeps the mults where
+    they were and makes the block smaller instead, which is the arrangement
+    that leaves blocks per SM unchanged or better.
+
+    Computed by the same ladder `get_num_threads` uses rather than by a
+    formula that looks equivalent: `context.align` rounds 20 up to 32 and 35
+    up to 64, while the ladder caps at 32, and using the wrong one moves
+    `mults_per_block` on every operator whose lead dimension is not a power
+    of two.
+    """
+    return self._thread_ladder(context)
+
+  def _thread_ladder(self, context: Context) -> int:
+    num_threads = context.align(num=self._lead_dim())
+    for cap in (32, 16, 8, 4, 2, 1):
+      if self._lead_dim() <= cap:
+        num_threads = cap
+    return num_threads
 
   def get_num_threads(self, context: Context):
     from tensorforge.backend.instructions.memory import vectorize
@@ -69,26 +95,14 @@ class MultilinearDescr(OperationDescription):
       align = min([getattr(m.tensor, 'alignment', 0) or 0
                    for m in self.matrix_list()] or [0])
       threads, width = vectorize.lead_threads_and_width(
-          self._lead_dim(), fp, align)
+          self._lead_dim(), fp, align,
+          blocking=vectorize.LEAD_BLOCKING)
       if width > 1:
         # The extent still has to be covered: the loop bound is in elements
         # and the lane count is what it is divided by, so this returns the
         # *lane* count and the width travels separately.
         return threads, self._lead_dim()
-    num_threads = context.align(num=self._lead_dim())
-    if self._lead_dim() <= 32:
-      num_threads = 32
-    if self._lead_dim() <= 16:
-      num_threads = 16
-    if self._lead_dim() <= 8:
-      num_threads = 8
-    if self._lead_dim() <= 4:
-      num_threads = 4
-    if self._lead_dim() <= 2:
-      num_threads = 2
-    if self._lead_dim() <= 1:
-      num_threads = 1
-    return num_threads, self._lead_dim()
+    return self._thread_ladder(context), self._lead_dim()
 
   def matrix_list(self):
     return [self.dest] + [op for op in self.ops]

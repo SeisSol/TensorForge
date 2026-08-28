@@ -292,3 +292,52 @@ def test_fp64_gets_the_same_treatment_from_a_16_byte_base():
 
 def test_a_degenerate_extent_is_one_lane():
     assert lead_threads_and_width(0, 4, 16) == (1, 1)
+
+
+# --------------------------------------------------------------------------- #
+# Register blocking: what makes the packed FMA pay for its own splat
+# --------------------------------------------------------------------------- #
+
+def test_blocking_reduces_the_lane_count_a_second_time():
+    """`R` vectors per lane means `R` times fewer lanes, at constant total.
+
+    The same lever as the width, one level down. What it buys is not loads --
+    those are already wide -- but the amortisation of everything that is per
+    `b` rather than per element: one load of `b` and one splat of it now feed
+    `R` fused multiply-adds instead of one.
+    """
+    assert lead_threads_and_width(32, 4, 16) == (16, 2)
+    assert lead_threads_and_width(32, 4, 16, blocking=2) == (8, 2)
+    assert lead_threads_and_width(32, 4, 16, blocking=4) == (4, 2)
+
+
+@pytest.mark.parametrize('extent', [16, 20, 32, 35, 56, 120])
+@pytest.mark.parametrize('blocking', [1, 2, 4])
+def test_blocking_keeps_the_total_register_count_neutral(extent, blocking):
+    """As the width does, and for the same reason: `R` times as many floats
+    per lane against `R` times fewer lanes."""
+    narrow_threads, _ = lead_threads_and_width(extent, 4, 0)
+    threads, width = lead_threads_and_width(extent, 4, 16, blocking=blocking)
+    assert (wide_floats(extent, threads, width)
+            <= scalar_floats(extent, narrow_threads) * blocking)
+
+
+@pytest.mark.parametrize('extent', [16, 20, 32, 35, 56, 120])
+@pytest.mark.parametrize('blocking', [1, 2, 4])
+def test_the_lanes_still_cover_the_extent_when_blocked(extent, blocking):
+    threads, width = lead_threads_and_width(extent, 4, 16, blocking=blocking)
+    assert threads * width * -(-extent // (threads * width)) >= extent
+
+
+def test_blocking_does_nothing_without_a_width():
+    """It is a second factor on the same decision, not an independent one.
+
+    An operand that cannot prove its alignment gets no width, and then there
+    is no splat to amortise and no reason to give up lanes.
+    """
+    assert lead_threads_and_width(32, 4, 0, blocking=4) == (32, 1)
+
+
+def test_a_zero_blocking_is_refused():
+    with pytest.raises(ValueError):
+        lead_threads_and_width(32, 4, 16, blocking=0)
