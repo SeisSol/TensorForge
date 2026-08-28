@@ -642,19 +642,34 @@ class IRBuilder:
               space: Optional[MemSpace] = None,
               predicate: Optional[Value] = None,
               align: Optional[int] = None,
-              atomic: bool = False) -> Stmt:
+              atomic: bool = False,
+              nontemporal: bool = False) -> Stmt:
+        """``nontemporal`` is a cache hint, carried the way ``Op.LOAD`` carries
+        its own: as an attribute the emitter hands to ``lexic.glb_store``.
+
+        It has to travel with the statement rather than be baked into a string
+        at the call site, because baking it in is what kept global stores off
+        this path -- ``Symbol.store`` asked the lexic for a finished statement
+        and then had nothing structured left to emit."""
         if space is None:
             space = (base.type.space if isinstance(base, Value)
                      and isinstance(base.type, BufferType)
                      else MemSpace.from_symbol_type(getattr(base, 'stype', None)))
         kind = Effect.ATOMIC if atomic else Effect.WRITE
-        # See `load`: the alignment a wide access needs is proved by the
-        # caller and carried, because the address is an expression the IR
-        # cannot evaluate.
-        attrs = (('align', align),) if align is not None else ()
+
+        attrs = []
+        if nontemporal:
+            attrs += [('nontemporal', nontemporal)]
+        if align is not None:
+            # See `load`: the alignment a wide access needs is proved by the
+            # caller and carried, because the address is an expression the IR
+            # cannot evaluate.
+            attrs += [('align', align)]
+        attrs = tuple(attrs)
+
         return self._emit_op(Op.STORE, (), (base, value) + tuple(indices),
                              predicate=predicate, pure=False, movable=True,
-                             effect=kind,
+                             effect=kind, attrs=attrs,
                              accesses=(Access(kind, space,
                                               self.alias_root(base)),),
                              attrs=attrs)
@@ -998,7 +1013,13 @@ class IRBuilder:
         """
         type_ = type_ or ScalarType(self._fptype)
         uniform = _join(args)
-        v = self.value(type_, hint=hint, uniform=uniform)
+        # Same join as `op()`, and for the same reason: an expression over
+        # operands that are spread across the lanes produces a value spread the
+        # same way.  Left off, every elementwise result was untracked -- the
+        # text is opaque to the IR, but its *shape* is not, and a raw
+        # expression is still elementwise over its operands.
+        v = self.value(type_, hint=hint, uniform=uniform,
+                       layout=join_layout(args))
         self._emit_op(Op.RAWEXPR, (v,), args, pure=pure, movable=movable,
                       effect=Effect.NONE if pure else Effect.UNKNOWN, text=text)
         return v

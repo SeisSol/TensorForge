@@ -193,10 +193,17 @@ def _dropped_results(src):
 _STORE_HEAD = re.compile(r"//\s*(glb_\w+) = store\{r>g\}\((\w+)\);")
 _FOR_BOUNDS = re.compile(r"for \(int32_t \w+ = (-?\d+); \w+ < (-?\d+);")
 # The literal is typed now (`0.0f`, not `0`): the neutral element comes
-# from `writer.const(..., ftype)` rather than the string "0".  What this
-# test is about is that the columns get *defined*, not how the zero is
-# spelled.
-_ZERO_TO_GLOBAL = re.compile(r"\bglb_\w+\[\w+\] = 0(?:\.0+[fF]?)?;")
+# from `writer.const(..., ftype)` rather than the string "0".  And the
+# subscript is an expression now (`glb_m0[(v6_lead + v163_lead)]`), not a
+# named temporary: a global store is an `Op.STORE` since the structured path
+# was extended to global memory, and the emitter inlines an address with one
+# use instead of naming it.
+#
+# Both are spellings.  What this test is about is that the columns get
+# *defined*, so the pattern says "some subscript" rather than enumerating the
+# shapes a subscript has taken -- it has now been rewritten twice for reasons
+# that had nothing to do with the property.
+_ZERO_TO_GLOBAL = re.compile(r"\bglb_\w+\[[^\]]+\] = 0(?:\.0+[fF]?)?;")
 
 
 def _store_loops(src):

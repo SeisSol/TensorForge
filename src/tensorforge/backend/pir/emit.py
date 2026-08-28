@@ -518,7 +518,20 @@ class Emitter:
             addr = self.address(s.args[0], s.args[2:])
             val = s.args[1]
             vt = val.type if isinstance(val, Value) else None
-            w(f'{self.elem_access(s.args[0], addr, vt)} = {self.operand(val)};')
+            access = self.elem_access(s.args[0], addr, vt)
+            # A store to global memory goes through the lexic, the same way
+            # `Op.LOAD` above goes through `glb_load`: the nontemporal hint is
+            # `__stcg` on NVIDIA and `__builtin_nontemporal_store` on AMD, and
+            # neither is expressible as an assignment.  Without this the hint
+            # would be silently dropped for every store that reaches here --
+            # which is why global stores had to stay on the text path.
+            space = s.accesses[0].space if s.accesses else None
+            lex = self._lexic()
+            if space is MemSpace.GLOBAL and lex is not None:
+                w(lex.glb_store(access, self.operand(val),
+                                bool(s.attr('nontemporal'))))
+                return
+            w(f'{access} = {self.operand(val)};')
             return
 
         if op == Op.COPY_ASYNC:

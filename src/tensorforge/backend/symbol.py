@@ -1243,43 +1243,70 @@ class Symbol:
     addrs = []
     assert self.stype != SymbolType.Data
 
-    access = self.access(context, index, writer, addrs, base=base)
-
-    fmt = not isinstance(variable, (str, int, float))
-    var = '{0}' if fmt else variable
-    if self.stype == SymbolType.Global:
-      if atomic:
-        assign = context.get_vm().get_lexic().atomic_store(access, var, None, self.get_fptype())
-      else:
-        assign = context.get_vm().get_lexic().glb_store(access, var, nontemp)
-    else:
-      assign = f'{access} = {var};'
-
     kind = Effect.ATOMIC if atomic else Effect.WRITE
-    if self.stype == SymbolType.Register or self.stype == SymbolType.Scratch:
-      assert len(self.lead_dims) == 1
-      if isinstance(index[self.lead_dims[0]], LeadIndex):
-        from tensorforge.backend.pir.core import Value as _Value
-        if base is None and isinstance(variable, _Value):
-          # The symmetric case to the structured load: the destination
-          # address and the stored value are operands, not names inside a
-          # string.  A pass can now see that this write and a later read
-          # touch the same place, and the address arithmetic is foldable
-          # instead of pinned behind a name the text refers to.
-          #
-          # `base` is an override of the pointer name -- a rotating buffer
-          # writing to a stage other than its own -- which `Op.STORE` cannot
-          # express, since its base *is* the symbol.  A non-Value variable is
-          # a literal, and the spelling a literal gets is the emitter's to
-          # decide on the text path; routing it here would change `0` into
-          # `0.0f` or the reverse for reasons unrelated to this change.
-          writer.store(self, variable,
-                       self.address_value(writer, context, index))
+    from tensorforge.backend.pir.core import Value as _Value
+    lead = index[self.lead_dims[0]] if len(self.lead_dims) == 1 else None
+    structured = (base is None and not atomic and isinstance(variable, _Value)
+                  and isinstance(lead, LeadIndex)
+                  and self.stype in (SymbolType.Register, SymbolType.Scratch,
+                                     SymbolType.Global))
+
+    # Decided *before* the text address is built, not after.  `self.access()`
+    # emits the address as IR ops and the last of them carries `escapes`, so
+    # it survives DCE whether or not anything reads it -- building one for a
+    # store that then takes the structured path leaves a second, identical
+    # address chain in the output next to the one `address_value` produces.
+    # That waste already existed for registers; extending the structured path
+    # to global memory would have doubled it rather than exposed it.
+    if not structured:
+      access = self.access(context, index, writer, addrs, base=base)
+      fmt = not isinstance(variable, (str, int, float))
+      var = '{0}' if fmt else variable
+      if self.stype == SymbolType.Global:
+        if atomic:
+          assign = context.get_vm().get_lexic().atomic_store(access, var, None, self.get_fptype())
         else:
-          writer.access_stmt(assign, self, kind, args=_operands(variable, addrs), fmt=fmt)
+          assign = context.get_vm().get_lexic().glb_store(access, var, nontemp)
       else:
-        with writer.If(f'{context.get_vm().get_lexic().thread_idx_x} == {index[self.lead_dims[0]]}'):
-          writer.access_stmt(assign, self, kind, args=_operands(variable, addrs), fmt=fmt)
+        assign = f'{access} = {var};'
+
+    if structured:
+      # The symmetric case to the structured load: the destination address and
+      # the stored value are operands, not names inside a string.  A pass can
+      # now see that this write and a later read touch the same place, and the
+      # address arithmetic is foldable instead of pinned behind a name the
+      # text refers to.
+      #
+      # Global joins Register and Scratch here.  It could not before, because
+      # the nontemporal hint was resolved into a finished statement by
+      # `lexic.glb_store` at this call site, leaving nothing structured to
+      # emit; `Op.STORE` carries the hint now and the emitter asks the lexic.
+      #
+      # Three cases stay on the text path, each for its own reason.  `base` is
+      # an override of the pointer name -- a rotating buffer writing to a
+      # stage other than its own -- which `Op.STORE` cannot express, since its
+      # base *is* the symbol.  A non-Value variable is a literal, and the
+      # spelling a literal gets is the emitter's to decide; routing it here
+      # would change `0` into `0.0f` or the reverse for reasons unrelated to
+      # this change.  And an atomic goes through `atomic_store`, which returns
+      # an expression rather than a statement.
+      writer.store(self, variable,
+                   self.address_value(writer, context, index),
+                   nontemporal=bool(nontemp))
+    elif (self.stype in (SymbolType.Register, SymbolType.Scratch)
+          and not isinstance(lead, LeadIndex)):
+      # One named element of a dimension that lives in the registers, so
+      # exactly one lane holds it and the others must not write.
+      #
+      # Deliberately *not* extended to Global alongside the branch above.
+      # Global memory is shared: every lane addresses it directly and there is
+      # no lane that uniquely owns an element, so the guard would be wrong --
+      # and it also formats the index with `{...}`, which for a `VarOffset`
+      # interpolates a Python object repr (address included) straight into the
+      # generated source.  Unreachable today for register-like symbols, which
+      # is why nothing has caught it; see `VarOffset.__str__`.
+      with writer.If(f'{context.get_vm().get_lexic().thread_idx_x} == {lead}'):
+        writer.access_stmt(assign, self, kind, args=_operands(variable, addrs), fmt=fmt)
     else:
       writer.access_stmt(assign, self, kind, args=_operands(variable, addrs), fmt=fmt)
 
