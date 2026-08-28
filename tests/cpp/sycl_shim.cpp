@@ -83,4 +83,28 @@ static_assert(!std::is_same<tensorforge::TF32, float>::value,
 static_assert(std::is_convertible<float, tensorforge::TF32>::value,
               "TF32 must be constructible from float");
 
+// --------------------------------------------------------------------------
+// DPAS: the operand sizes are the header's arithmetic, and a wrong one is a
+// compile error there.  Asserting them here means the table in
+// `primitives/intel.py` is checked against a call and not only against a
+// second copy of the formulas.
+// --------------------------------------------------------------------------
+
+namespace xmx = tensorforge::intel_xmx;
+
+// tf32: OpsPerChannel = 1, so M = RepeatCount = 8, K = SystolicDepth = 8,
+// N = ExecutionSize = 16.  |A| = M*K = 64, |B| = K*N = 128, |C| = M*N = 128.
+static_assert(
+    std::is_same<decltype(xmx::dpas<8, 8, float>(
+                     std::declval<esimd::simd<float, 128>>(),
+                     std::declval<esimd::simd<tensorforge::TF32, 128>>(),
+                     std::declval<esimd::simd<tensorforge::TF32, 64>>())),
+                 esimd::simd<float, 128>>::value,
+    "the DPAS result is M*N of the accumulator type");
+
+// The split feeds it: a float vector in, two TF32 vectors out.
+static_assert(std::is_convertible<esimd::simd<float, 16>,
+                                  esimd::simd<tensorforge::TF32, 16>>::value,
+              "a DPAS operand is reached by element conversion");
+
 int main() { return 0; }

@@ -228,6 +228,12 @@ public:
     for (int i = 0; i < N; ++i)
       _v[i] = v;
   }
+  /// Implicit conversion from another `simd` of the same length: the elements
+  /// are type-converted.  Documented on `simd_obj_impl` and load-bearing here
+  /// -- it is what turns a `simd<float, N>` into the `simd<TF32, N>` a DPAS
+  /// operand has to be.
+  template <typename U> simd(const simd<U, N> &) {}
+
   /// Linear progression `base, base+step, ...` -- `simd_obj_impl(Ty, Ty)` in
   /// the real header.  This is how a lane index is built when there is no
   /// thread id to ask.
@@ -339,6 +345,15 @@ simd_mask<N> operator!=(const simd<T, N> &, U) {
 }
 
 } // namespace intel_esimd
+
+/// `xmx::dpas<SystolicDepth, RepeatCount, T>(C, B, A)`.
+///
+/// The operand sizes are the header's own arithmetic, not this shim's
+/// invention: `|A| = M*K`, `|B| = K*N`, `|C| = |result| = M*N`, with
+/// `M = RepeatCount`, `K = SystolicDepth * OpsPerChannel` and `N` deduced
+/// from `|B|`.  Declared with free sizes here because the real header derives
+/// them and static_asserts them; `tests/test_intel_gate.py` recomputes them
+/// against the same formulas so the table cannot drift silently.
 
 namespace intel_xmx {
 
