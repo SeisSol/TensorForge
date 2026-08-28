@@ -124,16 +124,35 @@ def test_a_ragged_range_is_accepted():
     assert LeadLoop('n0', 0, 35, 32, 1, width=2).width == 2
 
 
-def test_both_lane_bounds_over_include_the_straddling_lane():
-    """Floor below, ceiling above.  Both directions err inwards-inclusive.
+def test_the_straddling_lane_is_excluded_and_its_element_peeled():
+    """With 3 elements left and width 2, one whole vector fits and one
+    element is left over.
 
-    With 3 elements left and width 2, lane 0 covers elements 0-1 and lane 1
-    covers 2-3: the bound has to be 2 lanes, which keeps element 2 and picks
-    up element 3 from outside.
+    The bound excludes the straddling lane rather than over-including it, and
+    the leftover comes back as a plain element index -- a scalar FMA on the
+    machinery that already handles a fixed element of a distributed
+    dimension.  Over-computing it instead was safe for the destination, whose
+    guard is at element granularity, and safe for the *source* only where the
+    operand window happened to be sized past the extent.
     """
     loop = LeadLoop('n0', 0, 35, 32, 1, width=2)
-    assert loop._lane_hi(3) == 2
-    assert loop._lane_lo(3) == 1
+    assert loop._lane_hi(3) == 1
+    assert loop._peeled(3) == 1
+    assert loop._peeled(4) == 0
+
+
+def test_a_width_one_loop_peels_nothing():
+    loop = LeadLoop('n0', 0, 35, 32, 1)
+    for offset in range(6):
+        assert loop._peeled(offset) == 0
+        assert loop._lane_hi(offset) == offset
+
+
+def test_the_peel_hands_over_the_elements_the_vectors_missed():
+    seen = []
+    LeadLoop('n0', 0, 35, 32, 1, width=2)._peel(
+        lambda idx: seen.append(idx[0]), 34, 35 % 64)
+    assert seen == [34]
 
 
 def test_at_width_one_the_bounds_are_the_element_offsets():

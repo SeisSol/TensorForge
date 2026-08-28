@@ -371,10 +371,18 @@ class MultilinearInstruction(ComputeInstruction):
             and then conditionally assigns a named variable, which is not SSA);
             the caller then falls back."""
             from tensorforge.backend.pir.core import ScalarType
-            ftype = (ScalarType(self._idest.get_fptype())
-                     if self._lead_width == 1
-                     else ScalarType(self._idest.get_fptype(),
-                                     self._lead_width))
+            from tensorforge.backend.symbol import lead_width_of
+            # From the *indices*, not from `self._lead_width`.  The lead loop
+            # peels the components no whole vector covers and hands them over
+            # as plain element indices, so the last body of a ragged
+            # dimension is scalar while every earlier one is wide.  Reading
+            # the instruction's field instead made the peeled body build a
+            # vector type over a scalar element -- a splat of the tail and a
+            # wide store past the end of it.
+            width = lead_width_of(
+                [varlist[loopmap[f'n{i}']] for i, _ in enumerate(self._ns)])
+            ftype = (ScalarType(self._idest.get_fptype()) if width == 1
+                     else ScalarType(self._idest.get_fptype(), width))
             data = []
             for i, op in enumerate(self._ops):
                 v = op.symbol.load(writer, self._context, None,

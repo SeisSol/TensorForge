@@ -323,7 +323,26 @@ class LeadIndex:
     return self._nonlead * self._block * self._width
 
   def build_nonlead(self, writer, context: Context):
-    return self._nonlead if self._value is None else self._value
+    """The slot, in the units the *register* address is counted in.
+
+    Floats, not vectors.  A register-resident lead dimension addresses
+    `r[slot]` directly -- the lane term is implicit in "each lane has its own
+    array" -- so at width `w` one slot covers `w` consecutive floats and the
+    next one starts `w` further on.  Returning the bare slot number put slot
+    1 at float 1, overlapping the second half of slot 0.
+
+    Invisible in everything generated so far: every operator in the corpus
+    has at most one slot per lane once the lane count is chosen for the
+    width, so `slot` and `slot * w` are both 0.  It bites at the first
+    operator whose lead dimension is longer than `threads * w` -- 120 over 32
+    lanes is the first, and it is an ordinary order-5 shape.
+    """
+    nl = self._nonlead if self._value is None else self._value
+    if self._width == 1:
+      return nl
+    if isinstance(nl, (int, np.integer)):
+      return int(nl) * self._width
+    return writer.op('mul', INDEX, nl, self._width, hint='vslot')
 
   def build(self, writer, context: Context):
     nl = self.build_nonlead(writer, context)
@@ -560,13 +579,43 @@ class LeadLoop:
     """
     return offset // self.width
 
-  def _lane_hi(self, offset):
-    """One past the last lane whose vector starts before element `offset`.
+  def _peel(self, inner, first, offset):
+    """Emit the leftover components as plain element indices.
 
-    Ceiling, for the same reason and with the same consequence: at a ragged
-    end one lane holds a vector half inside the box.  Both bounds
-    *over-include* rather than exclude, so the boundary lane computes a
-    component it must not keep.
+    `first` is the element the last whole vector ended at.  Each leftover is
+    handed to `inner` as an integer, which is a *fixed* element of a
+    distributed dimension -- `Symbol.load` broadcasts it from the lane that
+    owns it and `Symbol.store` guards the write to that lane, both of which
+    already existed for sliced constants.  So the tail is scalar FMAs on the
+    existing machinery rather than a component mask on a new one, and there
+    are at most `width - 1` of them per lead loop.
+    """
+    for c in range(self._peeled(offset)):
+      inner([first + c])
+
+  def _peeled(self, offset):
+    """The `offset % width` components that no whole vector covers.
+
+    Returned as *element* indices, so the caller can hand them to `inner` as
+    plain integers: a fixed element of a distributed dimension is exactly
+    what `Symbol.load`'s broadcast path and `Symbol.store`'s
+    one-lane-owns-it guard already handle, and reusing them costs at most
+    `width - 1` scalar operations at the end of a lead loop.
+
+    Peeling rather than over-computing.  The earlier arrangement let the
+    straddling lane carry a component from outside the box and relied on
+    nothing reading it back -- true for the destination, whose own guard is
+    at element granularity, and true only by accident for the *source*, whose
+    read left the operand window whenever the window was sized for the exact
+    extent.  A scalar tail has neither problem and costs one FMA.
+    """
+    return offset % self.width
+
+  def _lane_hi(self, offset):
+    """One past the last lane whose vector lies wholly below element `offset`.
+
+    Floor now, not ceiling: the straddling lane is excluded here and its
+    valid components come back as `_peeled`.
 
     That is deliberate, and it rests on two conditions the width policy
     checks rather than this loop:
@@ -582,11 +631,8 @@ class LeadLoop:
       would leave the buffer, which is a correctness problem rather than a
       wasted lane.
 
-    Excluding the straddling lane instead would drop element `offset - 1`,
-    which is inside the box.  There is no bound that does both; splitting the
-    components is a different mechanism.
     """
-    return (offset + self.width - 1) // self.width
+    return offset // self.width
 
   def _guard(self, writer, lead, lo, hi):
     """`lead >= lo && lead < hi`, with either bound optional."""
@@ -636,11 +682,12 @@ class LeadLoop:
       extent = self._narrow(writer, actualstart, lo, hi)
       if extent is not None:
         inner([LeadIndex(actualstart, extent, self.stride, width=self.width)])
-      else:
+      elif hi > 0 or lo is not None:
         index = LeadIndex(actualstart, self.threads, self.stride,
                           width=self.width)
         with self._guard(writer, lead(), lo, hi):
           inner([index])
+      self._peel(inner, actualstart * span + hi * self.width, tail)
     else:
       if self.start % span != 0:
         index = LeadIndex(actualstart, self.threads, self.stride,
@@ -665,10 +712,13 @@ class LeadLoop:
         # Not narrowed: this is the tail slot of a *multi*-slot dimension, so
         # its base is `(actualend - 1) * threads` and narrowing `block` would
         # move it.  See `_narrow`.
-        index = LeadIndex(actualend - 1, self.threads, self.stride,
-                          width=self.width)
-        with self._guard(writer, lead(), None, self._lane_hi(tail)):
-          inner([index])
+        hi = self._lane_hi(tail)
+        if hi > 0:
+          index = LeadIndex(actualend - 1, self.threads, self.stride,
+                            width=self.width)
+          with self._guard(writer, lead(), None, hi):
+            inner([index])
+        self._peel(inner, realend * span + hi * self.width, tail)
 
 class Loop:
   def __init__(self, name, start, end, step=1, unroll=False):
