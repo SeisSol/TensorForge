@@ -56,22 +56,19 @@ __launch_bounds__(256)
       for (size_t batchId0 = threadIdx.y + blockDim.y * (blockIdx.x); batchId0 < numElements0; batchId0 += (gridDim.x * blockDim.y)) {
         const auto batchId1 = batchId0 + (gridDim.x * blockDim.y) < numElements0 ? batchId0 + (gridDim.x * blockDim.y) : batchId0;
         const auto batchId2 = batchId1 + (gridDim.x * blockDim.y) < numElements0 ? batchId1 + (gridDim.x * blockDim.y) : batchId1;
-        bool allowed = true;
-        if (flags0 != nullptr) {
-          allowed = static_cast<bool>(flags0[batchId0]);
-        }
+        const bool allowed = flags0 == nullptr ? true : static_cast<bool>(flags0[batchId0]);
         if (allowed) {
           const float *const __restrict__ glb_m0 = &m0[batchId0 * 256 + 0 + m0_extraOffset];
           float *const __restrict__ glb_m1 = &m1[batchId0 * 256 + 0 + m1_extraOffset];
           // glb_m1 = tanh(glb_m0)
-          int32_t v5_lead = threadIdx.x % 64;
-          if (v5_lead < 16) {
+          int32_t v8_lead = threadIdx.x % 64;
+          if (v8_lead < 16) {
             #pragma unroll
-            for (int32_t v7_k1 = 0; v7_k1 < 16; ++v7_k1) {
-              int32_t v13_a = v7_k1 * 16;
-              int32_t v14_a = v5_lead + v13_a;
-              float v22_data = glb_m0[(v5_lead + v13_a)];
-              glb_m1[(v5_lead + v13_a)] = (tanhf(v22_data));
+            for (int32_t v10_k1 = 0; v10_k1 < 16; ++v10_k1) {
+              int32_t v16_a = v10_k1 * 16;
+              int32_t v17_a = v8_lead + v16_a;
+              float v25_data = glb_m0[(v8_lead + v16_a)];
+              glb_m1[(v8_lead + v16_a)] = (tanhf(v25_data));
             }
           }
         }

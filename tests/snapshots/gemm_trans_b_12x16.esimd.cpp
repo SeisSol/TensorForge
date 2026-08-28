@@ -37,10 +37,7 @@ inline void kernel_kernel_e7f2438624(sycl::queue *stream, sycl::range<3> group_c
           float* tempShrMem = &localShrMem0[352];
           const size_t batchId0 = item.get_local_id(1) + item.get_group().get_local_range(1) * (item.get_group().get_group_id(0));
           if (batchId0 < numElements0) {
-            bool allowed = true;
-            if (flags0 != nullptr) {
-              allowed = static_cast<bool>(flags0[batchId0]);
-            }
+            const bool allowed = flags0 == nullptr ? true : static_cast<bool>(flags0[batchId0]);
             if (allowed) {
               float *const __restrict__ glb_m0 = &m0[batchId0 * 192 + 0 + m0_extraOffset];
               const float *const __restrict__ glb_m1 = &m1[batchId0 * 240 + 0 + m1_extraOffset];

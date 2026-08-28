@@ -58,33 +58,30 @@ __launch_bounds__(256)
       for (size_t batchId0 = threadIdx.y + blockDim.y * (blockIdx.x); batchId0 < numElements0; batchId0 += (gridDim.x * blockDim.y)) {
         const auto batchId1 = batchId0 + (gridDim.x * blockDim.y) < numElements0 ? batchId0 + (gridDim.x * blockDim.y) : batchId0;
         const auto batchId2 = batchId1 + (gridDim.x * blockDim.y) < numElements0 ? batchId1 + (gridDim.x * blockDim.y) : batchId1;
-        bool allowed = true;
-        if (flags0 != nullptr) {
-          allowed = static_cast<bool>(flags0[batchId0]);
-        }
+        const bool allowed = flags0 == nullptr ? true : static_cast<bool>(flags0[batchId0]);
         if (allowed) {
           const float *const __restrict__ glb_m0 = &m0[batchId0 * 256 + 0 + m0_extraOffset];
           float *const __restrict__ glb_m1 = &m1[batchId0 * 1 + 0 + m1_extraOffset];
           // glb_m1 = max(glb_m0, dims=[0, 1])
-          int32_t v4_lead = threadIdx.x % 32;
-          float v26_sel0;
-          if (v4_lead < 16) {
-            float v7_acc0 = -INFINITY;
+          int32_t v7_lead = threadIdx.x % 32;
+          float v29_sel0;
+          if (v7_lead < 16) {
+            float v10_acc0 = -INFINITY;
             #pragma unroll
-            for (int32_t v6_r1 = 0; v6_r1 < 16; ++v6_r1) {
-              int32_t v13_a = v6_r1 * 16;
-              int32_t v14_a = v4_lead + v13_a;
-              float v22_data = glb_m0[(v4_lead + v13_a)];
-              v7_acc0 = (fmaxf(v7_acc0, v22_data));
+            for (int32_t v9_r1 = 0; v9_r1 < 16; ++v9_r1) {
+              int32_t v16_a = v9_r1 * 16;
+              int32_t v17_a = v7_lead + v16_a;
+              float v25_data = glb_m0[(v7_lead + v16_a)];
+              v10_acc0 = (fmaxf(v10_acc0, v25_data));
             }
-            v26_sel0 = v7_acc0;
+            v29_sel0 = v10_acc0;
           }
           else {
-            v26_sel0 = -INFINITY;
+            v29_sel0 = -INFINITY;
           }
-          float v27_red = tensorforge::reduction<tensorforge::ReductionOperation<float, tensorforge::Operation::Max>, 16, 1, float>(v26_sel0);
-          if (v4_lead == 0) {
-            glb_m1[0] = v27_red;
+          float v30_red = tensorforge::reduction<tensorforge::ReductionOperation<float, tensorforge::Operation::Max>, 16, 1, float>(v29_sel0);
+          if (v7_lead == 0) {
+            glb_m1[0] = v30_red;
           }
           __syncwarp();
         }

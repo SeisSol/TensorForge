@@ -58,25 +58,22 @@ __launch_bounds__(256)
       for (size_t batchId0 = threadIdx.y + blockDim.y * (blockIdx.x); batchId0 < numElements0; batchId0 += (gridDim.x * blockDim.y)) {
         const auto batchId1 = batchId0 + (gridDim.x * blockDim.y) < numElements0 ? batchId0 + (gridDim.x * blockDim.y) : batchId0;
         const auto batchId2 = batchId1 + (gridDim.x * blockDim.y) < numElements0 ? batchId1 + (gridDim.x * blockDim.y) : batchId1;
-        bool allowed = true;
-        if (flags0 != nullptr) {
-          allowed = static_cast<bool>(flags0[batchId0]);
-        }
+        const bool allowed = flags0 == nullptr ? true : static_cast<bool>(flags0[batchId0]);
         if (allowed) {
           const float *const __restrict__ glb_m0 = &m0[batchId0 * 256 + 0 + m0_extraOffset];
           float *const __restrict__ glb_m1 = &m1[batchId0 * 16 + 0 + m1_extraOffset];
           // glb_m1 = *(glb_m0, dims=[1])
-          int32_t v5_lead = threadIdx.x % 32;
-          if (v5_lead < 16) {
-            float v8_acc0 = 1.0f;
+          int32_t v8_lead = threadIdx.x % 32;
+          if (v8_lead < 16) {
+            float v11_acc0 = 1.0f;
             #pragma unroll
-            for (int32_t v7_r1 = 0; v7_r1 < 16; ++v7_r1) {
-              int32_t v14_a = v7_r1 * 16;
-              int32_t v15_a = v5_lead + v14_a;
-              float v23_data = glb_m0[(v5_lead + v14_a)];
-              v8_acc0 = (v8_acc0 * v23_data);
+            for (int32_t v10_r1 = 0; v10_r1 < 16; ++v10_r1) {
+              int32_t v17_a = v10_r1 * 16;
+              int32_t v18_a = v8_lead + v17_a;
+              float v26_data = glb_m0[(v8_lead + v17_a)];
+              v11_acc0 = (v11_acc0 * v26_data);
             }
-            glb_m1[v5_lead] = v8_acc0;
+            glb_m1[v8_lead] = v11_acc0;
           }
           __syncwarp();
         }

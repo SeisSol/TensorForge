@@ -1170,6 +1170,21 @@ class IRBuilder:
         against, so a window is the buffer it is a window into.
         """
         v = self.value(type_, hint=hint)
+        if base is None:
+            # Pure text with no memory behind it: the lookahead bindings are
+            # index arithmetic over the induction variable and the grid shape,
+            # and they read nothing.  Declaring an access with no base would
+            # say the opposite -- `base=None` conflicts with everything in its
+            # space -- so a computation that may move anywhere would pin the
+            # body it sits in.
+            if extern is None:
+                raise IRError('decl_expr needs `extern`; see below')
+            self._emit_op(Op.RAWEXPR, (v,), tuple(args), pure=True,
+                          movable=True, effect=Effect.NONE, accesses=(),
+                          text=text,
+                          attrs=(('decl', decl), ('extern', extern),
+                                 ('escapes', True)))
+            return v
         if extern is None:
             raise IRError(
                 'decl_expr needs `extern`: the declarator is caller text and '

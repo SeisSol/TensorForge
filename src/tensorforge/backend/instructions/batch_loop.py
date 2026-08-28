@@ -62,6 +62,7 @@ class BatchLoop(AbstractInstruction):
         self._lookahead = lookahead
         # Set by the pipelining pass; emits a rolling iteration counter.  Not
         # emitted otherwise, so a disabled pass leaves the text unchanged.
+        self._induction = None
         self._stage_depth: Optional[int] = None
         # ids of leading region instructions emitted outside the flag guard
         self._unguarded: set = set()
@@ -279,20 +280,56 @@ class BatchLoop(AbstractInstruction):
     def _size_guard(self) -> str:
         return f'{self._batch(0)} < {self._num_elements()}'
 
-    def _flag_guard(self, writer) -> str:
+    def _flag_guard(self, writer):
+        """The per-element mask, as one definition where the IR can hold it.
+
+        It used to be three statements and a block: `bool allowed = true;`,
+        then a guarded assignment.  Two assignments to one name is not a value,
+        so the `if (allowed)` around the body had to be raw text as well, and
+        the body could say nothing about the condition it ran under.
+
+        A conditional expression says the same thing once.  `?:` short-circuits,
+        so `flags0[batchId0]` is still read only when the pointer is non-null ---
+        which is the whole reason for the two-step shape.
+        """
         flags = f'{GeneralLexicon.FLAGS_NAME}{self._section_index}'
-        writer(f'bool allowed = true;')
-        with writer.If(f'{flags} != nullptr'):
-            writer(f'allowed = static_cast<bool>({flags}[{self._batch(0)}]);')
+        if hasattr(writer, 'decl_expr') and self._induction is not None:
+            from tensorforge.backend.pir.core import BOOL, Effect, MemSpace
+            writer.decl_expr(
+                'const bool allowed',
+                f'{flags} == nullptr ? true : static_cast<bool>({flags}[{{0}}])',
+                BOOL, None, args=(self._induction,), kind=Effect.READ,
+                space=MemSpace.GLOBAL, hint='allowed', extern='allowed')
+            return 'allowed'
+        writer(f'const bool allowed = '
+               f'{flags} == nullptr ? true : '
+               f'static_cast<bool>({flags}[{self._batch(0)}]);')
         return 'allowed'
 
     def _lookahead_bindings(self, writer) -> None:
-        """Bind batchid1..N as clamped element indices, for prefetching."""
+        """Bind batchid1..N as clamped element indices, for prefetching.
+
+        Each one reads the previous, and the first reads the induction
+        variable, so the chain is passed as operands rather than spelled into
+        the text.  Without that the IR sees index arithmetic with no inputs,
+        which is loop-invariant as far as it can tell.
+        """
+        if not (hasattr(writer, 'decl_expr') and self._induction is not None):
+            for n in range(1, self._lookahead + 1):
+                prev = self._batch(n - 1)
+                writer(f'const auto {self._batch(n)} = '
+                       f'{prev} + {self._stride} < {self._num_elements()} ? '
+                       f'{prev} + {self._stride} : {prev};')
+            return
+        from tensorforge.backend.pir.core import INDEX
+        prev = self._induction
         for n in range(1, self._lookahead + 1):
-            prev = self._batch(n - 1)
-            writer(f'const auto {self._batch(n)} = '
-                   f'{prev} + {self._stride} < {self._num_elements()} ? '
-                   f'{prev} + {self._stride} : {prev};')
+            prev = writer.decl_expr(
+                f'const auto {self._batch(n)}',
+                f'{{0}} + {self._stride} < {self._num_elements()} ? '
+                f'{{0}} + {self._stride} : {{0}}',
+                INDEX, None, args=(prev,), hint=self._batch(n),
+                extern=self._batch(n))
 
     def _declare_stage_counter(self, writer) -> None:
         if self._stage_depth is None:
@@ -406,10 +443,20 @@ class BatchLoop(AbstractInstruction):
                 # `numElements`.
                 with writer.for_(self._start, self._num_elements(),
                                  self._stride, extern=self._batch(0),
-                                 ctype='size_t'):
-                    self._lookahead_bindings(writer)
-                    self._emit_body(writer)
-                    self._advance_stage_counter(writer)
+                                 ctype='size_t') as loop:
+                    # The induction *value*, not just its name.  Anything
+                    # inside that mentions `batchId0` has to say so as an
+                    # operand, or the IR sees a computation with no inputs and
+                    # hoists it out of the loop that defines the thing it
+                    # reads -- which is what happened the first time, silently
+                    # and only in the generated text.
+                    self._induction = loop.induction
+                    try:
+                        self._lookahead_bindings(writer)
+                        self._emit_body(writer)
+                        self._advance_stage_counter(writer)
+                    finally:
+                        self._induction = None
                 return
             with writer.For(f'size_t {self._batch(0)} = {self._start}; '
                             f'{self._batch(0)} < {self._num_elements()}; '

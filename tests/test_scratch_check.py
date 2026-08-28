@@ -156,26 +156,21 @@ def _bodies(case: str, backend: str, arch: str):
 # packing check has to skip them.  A ratchet, not a target: these numbers may
 # go down and must never go up.
 #
-# `rectangular` is at 4, up from 0, and this is the one direction the ratchet
-# is not supposed to move -- so it needs the reason rather than the number.
+# Back to zero, one commit after the loop pushed it to 4.
 #
-# The body did not get worse; it got bigger.  The persistent batch loop is an
-# `Op.FOR` now, so its scaffolding -- the loop header, the flag guard, the
-# lookahead bindings and the stage counter -- is *inside* a body for the first
-# time.  Those four statements were raw before as well; they were simply in
-# nobody's body and so in nobody's count.  `tools/macro_surface.py` measures
-# the same move from the other side and agrees: 2.0% of kernel lines emitted
-# outside any PIR body, down to 1.1%.
+# Those four were the loop's own scaffolding, raw text that had simply never
+# been inside a body before: two lookahead bindings and the two statements
+# that computed `allowed`.  They are values now -- the bindings a chain of
+# conditional expressions over the induction value, the guard one conditional
+# expression instead of an assignment and a guarded overwrite.
 #
-# It goes back to zero as the scaffolding becomes structured: the guard as
-# `Op.IF`, the lookahead bindings as values. Until then, four is the honest
-# number and a fifth means something new.
-#
-# The way down before this: 16 before `RegisterAlloc` allocated through the
-# builder, 14 before the `glb_m*` bindings declared their read, 11 before the
-# shared window became a value, 10 before the transfers became `copy.async`,
-# 3 while the `__syncwarp()` calls were left, then 0.
-STILL_OPAQUE = {"rectangular.py": 4, "square_notrans.py": 0}
+# The way down, for whoever adds the next entry: 16 before `RegisterAlloc`
+# allocated through the builder, 14 before the `glb_m*` bindings declared
+# their read, 11 before the shared window became a value, 10 before the
+# transfers became `copy.async`, 3 while the `__syncwarp()` calls were left,
+# 0, then 4 when the batch loop moved into the IR and brought its scaffolding
+# with it, then 0 again.
+STILL_OPAQUE = {"rectangular.py": 0, "square_notrans.py": 0}
 
 
 # `case` is auto-parametrized across the whole corpus by conftest.

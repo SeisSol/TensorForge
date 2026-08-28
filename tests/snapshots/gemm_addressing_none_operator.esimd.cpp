@@ -38,10 +38,7 @@ inline void kernel_kernel_151d4e8604(sycl::queue *stream, sycl::range<3> group_c
           const float *const __restrict__ glb_m1 = &m1[0];
           const size_t batchId0 = item.get_local_id(1) + item.get_group().get_local_range(1) * (item.get_group().get_group_id(0));
           if (batchId0 < numElements0) {
-            bool allowed = true;
-            if (flags0 != nullptr) {
-              allowed = static_cast<bool>(flags0[batchId0]);
-            }
+            const bool allowed = flags0 == nullptr ? true : static_cast<bool>(flags0[batchId0]);
             if (allowed) {
               float *const __restrict__ glb_m0 = &m0[batchId0 * 256 + 0 + m0_extraOffset];
               const float *const __restrict__ glb_m2 = &m2[batchId0 * 256 + 0 + m2_extraOffset];
