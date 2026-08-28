@@ -264,3 +264,45 @@ def lead_vectorize_supported(context) -> bool:
         return False
     lex = context.get_vm().get_lexic()
     return getattr(lex, '_backend', None) in ('cuda', 'hip', 'hipsycl_cuda')
+
+
+def reduction_vector_width(extent: int, elem_bytes: int, align_bytes: int,
+                           k_stride: int, dense: bool, cap: int = 4) -> int:
+    """How many reduction steps one load of the broadcast operand may cover.
+
+    A different question from `lead_vector_width`, and the conditions barely
+    overlap.  `B` in `C[m,n] += A[m,k] B[k,n]` is not indexed by the lead
+    dimension, so it is loaded once and splatted; but `k` *is* `B`'s own
+    contiguous axis, so `B[k,n] .. B[k+V-1,n]` are adjacent and one load
+    fetches the operands of `V` consecutive reduction steps.
+
+    What this does and does not buy:
+
+    * It removes `V - 1` loads per `(k, n)` pair.  On an operand that lives in
+      shared memory or in registers reached by a cross-lane broadcast, that is
+      the instruction the inner loop issues most often after the FMA itself.
+    * It does **not** remove a single splat.  The `V` components still feed
+      `V` separate FMAs against `V` different `A` vectors, and each still
+      needs its own `{b, b}`.  Anything that claims otherwise is confusing
+      this with vectorising the reduction on *both* operands, which needs `A`
+      staged k-contiguous and turns the accumulator into a partial sum.
+
+    Unlike the lead dimension, a remainder here is free: the reduction is a
+    sum, so leftover `k` values are simply added scalarly afterwards and no
+    lane holds anything half-valid.  Divisibility is therefore not a
+    condition, and `cap` may go to 4 where the lead width could not.
+
+    Two conditions that are structural rather than arithmetic:
+
+    * ``k_stride`` must be 1.  A transposed `B` has its reduction axis
+      strided, and then the `V` values are not adjacent at all.
+    * ``dense`` -- a sparse operand stores only its non-zeros, so a wide load
+      reads across whichever entries happen to follow, and the whole point of
+      the sparse path is not to touch them.
+    """
+    if extent < 1 or k_stride != 1 or not dense:
+        return 1
+    for w in widths_for(elem_bytes, align_bytes):
+        if w <= cap and w <= extent:
+            return w
+    return 1
