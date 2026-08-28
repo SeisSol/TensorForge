@@ -63,14 +63,38 @@ class Refusal(Exception):
     happen."""
 
 
-def _sole_async(region: Region) -> Tuple[int, Stmt]:
-    issues = [(i, s) for i, s in enumerate(region.body)
+def _sole_async(region: Region) -> Tuple[int, Stmt, Optional[int]]:
+    """The one async issue, whether it is the loop's or its guard's.
+
+    Returns ``(index, statement, guard_index)``, where `guard_index` is the
+    position of the `Op.IF` it was found inside, or None if it was a direct
+    statement of the loop.
+
+    Looking inside one guard is not a convenience.  The batch loop's guard is
+    *per element* -- `flags0[batchId0]` -- so element k being masked says
+    nothing about k+1, and a prefetch for k+1 that sits under k's mask breaks
+    the chain for every element after a masked one.  A transfer moved across
+    the back edge therefore has to leave the guard, which is the same rule
+    `_split_guard` already applies to barriers and for the same reason: what
+    the next iteration depends on cannot be conditional on this one.
+    """
+    direct = [(i, s) for i, s in enumerate(region.body)
               if s.op in (Op.COPY_ASYNC, Op.LOAD_ASYNC)]
-    if len(issues) != 1:
-        raise Refusal(f'{len(issues)} async issues in the body; this pass '
+    guards = [(i, s) for i, s in enumerate(region.body) if s.op is Op.IF]
+    inside = []
+    for gi, g in guards:
+        for s in g.regions[0].body:
+            if s.op in (Op.COPY_ASYNC, Op.LOAD_ASYNC):
+                inside.append((gi, s))
+    found = [(i, s, None) for i, s in direct] + [(g, s, g) for g, s in inside]
+    if len(found) != 1:
+        raise Refusal(f'{len(found)} async issues in the body; this pass '
                       f'moves one, and picking among several is a schedule '
                       f'rather than a rewrite')
-    return issues[0]
+    if len(guards) > 1:
+        raise Refusal('more than one guard in the body; which one a transfer '
+                      'must leave is then a choice rather than a fact')
+    return found[0]
 
 
 def _its_wait(region: Region, token: Value) -> Tuple[int, Stmt]:
@@ -125,13 +149,34 @@ def _wrap_one(loop: Stmt, make_value,
     if any(isinstance(a.type, TokenType) for a in region.args):
         raise Refusal('this loop already carries a token')
 
-    i_issue, issue = _sole_async(region)
+    i_issue, issue, guard_at = _sole_async(region)
     token = issue.target[0]
-    i_wait, wait = _its_wait(region, token)
-    if i_wait < i_issue:
-        raise Refusal('the wait precedes the issue; nothing to stretch')
 
-    for s in region.body[i_issue + 1:i_wait]:
+    if guard_at is None:
+        scope = region.body
+        i_wait, wait = _its_wait(region, token)
+        if i_wait < i_issue:
+            raise Refusal('the wait precedes the issue; nothing to stretch')
+        between = scope[i_issue + 1:i_wait]
+    else:
+        guard = region.body[guard_at]
+        inner = guard.regions[0]
+        i_issue_in = next(i for i, s in enumerate(inner.body) if s is issue)
+        i_wait, wait = _its_wait(inner, token)
+        if i_wait < i_issue_in:
+            raise Refusal('the wait precedes the issue; nothing to stretch')
+        between = inner.body[i_issue_in + 1:i_wait]
+        # Leaving the guard means the issue may no longer use anything the
+        # guard defines -- including its condition, which it must not depend
+        # on: the whole point is that a masked element still prefetches.
+        inside_defs = {t.id for s in inner.body for t in s.target}
+        inside_defs |= {a.id for a in inner.args}
+        if any(isinstance(a, Value) and a.id in inside_defs
+               for a in issue.args):
+            raise Refusal('the transfer reads something the guard defines, so '
+                          'it cannot be issued outside it')
+
+    for s in between:
         if not can_reorder(issue, s):
             raise Refusal('the issue may not cross a statement between it '
                           'and its wait, so it may not cross the back edge '
@@ -152,8 +197,11 @@ def _wrap_one(loop: Stmt, make_value,
     # a pass that quietly assumed someone else had done it would be wrong in
     # exactly the cases where nobody had.
     dst_writes = [a for a in issue.accesses if a.writes]
-    for s in region.body:
-        if s is issue or s.op is Op.WAIT:
+    scan = list(region.body)
+    if guard_at is not None:
+        scan += list(region.body[guard_at].regions[0].body)
+    for s in scan:
+        if s is issue or s.op is Op.WAIT or s.op is Op.IF:
             continue
         for a in s.accesses:
             if a.writes:
@@ -173,11 +221,25 @@ def _wrap_one(loop: Stmt, make_value,
                       'to advance')
 
     carried = make_value(token.type, 'cp')
-    body = list(region.body)
-    body[i_issue] = rewritten
-    body[i_wait] = replace(wait, args=tuple(
+    swap_wait = lambda w: replace(w, args=tuple(
         carried if isinstance(a, Value) and a.id == token.id else a
-        for a in wait.args))
+        for a in w.args))
+    if guard_at is None:
+        body = list(region.body)
+        body[i_issue] = rewritten
+        body[i_wait] = swap_wait(wait)
+    else:
+        guard = region.body[guard_at]
+        inner = list(guard.regions[0].body)
+        inner = [s for s in inner if s is not issue]
+        inner[[i for i, s in enumerate(inner) if s is wait][0]] = swap_wait(wait)
+        # The issue lands in the loop's region, before the guard: outside it,
+        # because the next element's transfer must not be conditional on this
+        # element's mask.
+        body = list(region.body)
+        body[guard_at] = replace(guard, regions=(
+            replace(guard.regions[0], body=tuple(inner)),))
+        body.insert(guard_at, rewritten)
 
     term = region.terminator
     yielded = (term.args if term is not None else ()) + (token,)

@@ -297,12 +297,11 @@ class BatchLoop(AbstractInstruction):
         flags = f'{GeneralLexicon.FLAGS_NAME}{self._section_index}'
         if hasattr(writer, 'decl_expr') and self._induction is not None:
             from tensorforge.backend.pir.core import BOOL, Effect, MemSpace
-            writer.decl_expr(
+            return writer.decl_expr(
                 'const bool allowed',
                 f'{flags} == nullptr ? true : static_cast<bool>({flags}[{{0}}])',
                 BOOL, None, args=(self._induction,), kind=Effect.READ,
                 space=MemSpace.GLOBAL, hint='allowed', extern='allowed')
-            return 'allowed'
         writer(f'const bool allowed = '
                f'{flags} == nullptr ? true : '
                f'static_cast<bool>({flags}[{self._batch(0)}]);')
@@ -364,7 +363,14 @@ class BatchLoop(AbstractInstruction):
         head, guarded = self._split_guard()
         for instr in head:
             instr.gen_code(writer)
-        with writer.If(self._flag_guard(writer)):
+        cond = self._flag_guard(writer)
+        # A real `Op.IF` where the condition is a value.  It was a raw block,
+        # which made the whole body one opaque region as far as any pass was
+        # concerned -- `wrap_prefetch` looked into the loop, found the guard,
+        # and reported no transfers because none were *its* statements.
+        guard = (writer.if_(cond) if hasattr(writer, 'if_')
+                 and not isinstance(cond, str) else writer.If(cond))
+        with guard:
             if AbstractInstruction._shared_body:
                 # Already inside one -- opened by `gen_code` around the loop.
                 for instr in guarded:
