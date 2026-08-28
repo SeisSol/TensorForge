@@ -484,7 +484,9 @@ class Emitter:
             extern = s.attr('extern')
             if extern is not None:
                 self.bind(v, extern)
-            w(f'{qual}{t.elem.ctype()} {self.name(v)}[{t.volume}]'
+            align = s.attr('align')
+            spec = f'alignas({align}) ' if align else ''
+            w(f'{spec}{qual}{t.elem.ctype()} {self.name(v)}[{t.volume}]'
               f'{s.attr("init", "")};')
             return
 

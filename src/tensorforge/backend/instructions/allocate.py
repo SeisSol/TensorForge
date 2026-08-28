@@ -45,10 +45,19 @@ class RegisterAlloc(AbstractInstruction):
       # builder.  On the unmigrated path it is the Writer, which has no
       # structured alloc, so that path keeps emitting the line.
       if hasattr(writer, 'alloc') and callable(getattr(writer, 'alloc')):
+        # Aligned as far as one wide access could use, so that a width may be
+        # chosen from a guarantee this declaration actually makes.  It also
+        # breaks a circularity: the width is the minimum over both bases, and
+        # if the register end were decided from the width there would be
+        # nothing to start from.
+        from tensorforge.backend.instructions.memory import vectorize
+        align = vectorize.register_array_align(
+            self._dest.obj.size * datatype.size())
         value = writer.alloc(datatype, (self._dest.obj.size,),
                              MemSpace.REGISTER,
                              hint=self._dest.obj.name,
                              extern=self._dest.obj.name,
+                             align=align if align > datatype.size() else None,
                              init=init_values_list)
         # Publish it, so a consumer built into this same body addresses the
         # buffer as a value rather than by interpolating the name.  Consumers

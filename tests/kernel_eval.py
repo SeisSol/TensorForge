@@ -31,7 +31,11 @@ import struct
 from typing import Dict, List, Optional, Tuple
 
 _DECL = re.compile(
-    r'^(?:const\s+)?(?:__restrict__\s+)?'
+    # `alignas(N)` is a declaration specifier, not a statement of its own: a
+    # register staging array carries one so that a wide access may be cast
+    # onto it, and the oracle has to read past it to find the array.
+    r'^(?:alignas\s*\(\s*\d+\s*\)\s+)?'
+    r'(?:const\s+)?(?:__restrict__\s+)?'
     r'(?:float|double|int32_t|int|unsigned|size_t|bool|auto|__float128|char)'
     r'(?P<ptr>\s*\*(?:\s*const)?(?:\s*__restrict__)?)?\s+'
     r'(?P<name>\w+)\s*(?P<arr>\[\s*(?P<dim>\d+)\s*\])?\s*'

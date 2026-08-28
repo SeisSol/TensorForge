@@ -84,3 +84,27 @@ def plan_hops(total: int, threads: int,
         hops += [(pos + k * step, w) for k in range(n)]
         pos += n * step
     return hops, total - pos
+
+
+def register_array_align(volume_bytes: int,
+                         cap_bytes: int = MAX_ACCESS_BYTES) -> int:
+    """How far a register staging array is declared aligned, in bytes.
+
+    Stated once and read from both ends -- `allocate.py` requests it, and
+    `Symbol.linear_align_bytes` reports it -- because the two are the same
+    fact, and a width chosen from a guarantee the declaration does not make
+    is exactly the bug this whole path is about.
+
+    Declaring it breaks a circularity rather than adding a knob.  The width
+    depends on the minimum of the two bases' alignment, and if the register
+    end were decided *from* the width there would be nothing to start from;
+    with the array always as aligned as one access can use, the width depends
+    on the source alone.
+
+    A small array is not over-aligned: an 8-byte one asks for 8, not 16.  The
+    padding would be free but the claim would not be true of anything.
+    """
+    a = 1
+    while a * 2 <= min(cap_bytes, max(volume_bytes, 1)):
+        a *= 2
+    return a

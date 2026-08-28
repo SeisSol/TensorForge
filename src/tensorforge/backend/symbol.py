@@ -687,16 +687,24 @@ class Symbol:
     * **SharedMem/Scratch**: 16, and not by assumption -- `_suballocate`
       rounds every window start up to `16 // elem.size()` elements for this
       reason, so the property holds however the windows were requested.
-    * **Register**: the natural alignment of the array we declare, until an
-      `Op.ALLOC` asks for more.  A plain `float r[8]` is not `float4`-aligned
-      by any rule, and the compiler over-aligning it in practice is not a
-      guarantee to cast on.
+    * **Register**: what `allocate.py` declares, which is
+      `vectorize.register_array_align` of the array's size.  A plain `float
+      r[8]` is not `float4`-aligned by any rule, and the compiler
+      over-aligning it in practice is not a guarantee to cast on -- so the
+      array is declared `alignas`, and this reads back the same rule rather
+      than a second one that could drift from it.
     """
+    from tensorforge.backend.instructions.memory import vectorize
     elem = self.get_fptype().size()
     if self.stype in (SymbolType.SharedMem, SymbolType.Scratch):
       return max(elem, 16)
     if self.stype in (SymbolType.Global, SymbolType.Data, SymbolType.Batch):
       return max(elem, getattr(self.obj, 'alignment', 0) or 0)
+    if self.stype == SymbolType.Register:
+      size = getattr(self.obj, 'size', None)
+      if size is None:
+        return elem
+      return max(elem, vectorize.register_array_align(size * elem))
     return elem
 
   def clone(self):

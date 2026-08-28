@@ -780,8 +780,30 @@ __device__ __forceinline__ T reduction(const T &value) {
 constexpr std::size_t GlobalMemspace = 1;
 constexpr std::size_t ConstantMemspace = 4;
 
+// The attribute has to sit on a typedef *inside* a class template, not on an
+// alias template.  On an alias template with a dependent element type GCC
+// drops it -- with a `-Wattributes` warning, not an error -- and `VectorT<T,
+// N>` silently becomes plain `T`: size 4, alignment 4, and a
+// `*(VectorT<float,4>*)&buf[i] = v` that moves one element instead of four.
+// Clang applies it, so hipcc never saw this; `target_lexic` spells the same
+// type for a host target, which does not.
+template <typename T, std::size_t N> struct VectorOf {
+  //: Naturally aligned: `N * sizeof(T)`.  This is the type a wide access uses
+  //: when the base *proves* that much alignment.
+  typedef T type __attribute__((__vector_size__(N * sizeof(T))));
+  //: Same width, element alignment only.  For a base that proves less than
+  //: the full width: the compiler then splits the access instead of emitting
+  //: one the hardware requires to be aligned, which is a slower correct
+  //: access rather than an undefined fast one.
+  typedef T relaxed
+      __attribute__((__vector_size__(N * sizeof(T)), __aligned__(sizeof(T))));
+};
+
 template <typename T, std::size_t N>
-using VectorT = __attribute__((__vector_size__(N * sizeof(T)))) T;
+using VectorT = typename VectorOf<T, N>::type;
+
+template <typename T, std::size_t N>
+using VectorRelaxedT = typename VectorOf<T, N>::relaxed;
 
 template <typename T, std::size_t Space>
 using SpacePtr = __attribute__((address_space(Space))) T *;

@@ -458,6 +458,7 @@ class IRBuilder:
     def alloc(self, elem: Datatype, shape: Sequence[int], space: MemSpace,
               hint: str = 'buf', extern: str = None,
               init: str = '', arena: str = None, offset=0,
+              align: Optional[int] = None,
               restrict: str = None) -> Value:
         """Request a buffer *symbolically*.
 
@@ -521,6 +522,13 @@ class IRBuilder:
             attrs = attrs + (('extern', extern), ('escapes', True))
         if init:
             attrs = attrs + (('init', init),)
+        if align is not None:
+            # Declared, not hoped for.  A plain `float r[8]` is 4-byte aligned
+            # by every rule that applies to it; that compilers usually give it
+            # more is not something a reinterpret cast may rely on.  This is
+            # the other half of `Symbol.linear_align_bytes`, which reports the
+            # same number back to whoever picks a width.
+            attrs = attrs + (('align', align),)
         self._emit_op(Op.ALLOC, (v,), (), pure=False, movable=False,
                       attrs=attrs)
         return v
