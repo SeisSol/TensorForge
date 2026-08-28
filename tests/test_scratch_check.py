@@ -162,24 +162,11 @@ def _bodies(case: str, backend: str, arch: str):
 #
 # 16 before `RegisterAlloc` allocated through the builder, 14 before the
 # `glb_m*` bindings declared their read, 11 before the shared window became a
-<<<<<<< ours
-# value.  Nothing raw is left in this body that a pass would need to reason
-# about: the five async statements are NVIDIA primitives and `Op.COPY_ASYNC`
-# and `Op.WAIT` already exist to receive them, the syncwarps are barriers, and
-# the two comments cost nothing but are miscategorised at their emission site.
-# Lowered 10 -> 7: global stores became `Op.STORE`, so the three that were
-# raw assignments now declare their accesses.  The ratchet is meant to be
-# lowered -- that is the direction of the migration -- and the equality
-# assertion below is what forces the number to be re-read rather than
-# left as a ceiling nothing approaches.
-STILL_OPAQUE = {"rectangular.py": 7, "square_notrans.py": 0}
-=======
 # value, 10 before the transfers became `copy.async`.  The five
 # `cuda::pipeline` statements and the two miscategorised comments went with
 # that last one: the pipeline calls because there is no object left to drive,
 # the comments because the block that carried them did.
 STILL_OPAQUE = {"rectangular.py": 3, "square_notrans.py": 0}
->>>>>>> theirs
 
 
 # `case` is auto-parametrized across the whole corpus by conftest.
