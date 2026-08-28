@@ -43,12 +43,25 @@ for r in results:
     if r.ok:
         kinds['ok'] += 1
         continue
+    reason = syntax.known_bad(r.path)
+    if reason:
+        kinds['known'] += 1
+        print(f'--- {r.path.name}: known, {reason}')
+        continue
     bad += 1
     print(f'--- {r.path.name}')
     for line in r.errors():
         print(f'    {line.strip()}')
 
+# `known` is reported apart from `ill-formed` for the same reason the suite
+# marks them xfail: three standing failures are how a check stops being read,
+# and the day one of them starts compiling is a thing to notice, not to miss
+# in a count that was already red.
 print(f'\n--- {kinds["ok"]} well-formed, {bad} ill-formed, '
+      f'{kinds["known"]} known-bad, '
       f'{kinds["skipped"]} without a kernel section '
       f'({Path(cxx).name}) ---')
+if kinds['known'] and not bad:
+    print('    (known-bad entries are tracked in tests/harness/syntax.py; '
+          'one compiling now would be news)')
 raise SystemExit(1 if bad else 0)

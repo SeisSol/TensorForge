@@ -106,3 +106,27 @@ def test_the_censuses_still_see_something(tool, marker):
     assert re.search(marker, out), f"{tool} produced nothing recognisable:\n{out[-800:]}"
     numbers = [int(n) for n in re.findall(r"^\s*(\d+)\s", out, re.M)]
     assert numbers and max(numbers) > 0, f"{tool} counted nothing:\n{out[-800:]}"
+
+
+def test_the_runner_agrees_with_the_suite():
+    """`tools/syntax_check.py` and `test_syntax.py` read one list.
+
+    They did not.  The suite marked three ESIMD snapshots xfail with a reason;
+    the command-line runner knew nothing about them and printed three failures
+    every time.  A check with standing reds is a check nobody reads, which is
+    the whole reason the xfail table exists on the test side.
+    """
+    from harness import syntax
+
+    out = _run("syntax_check.py")
+    m = re.search(r"(\d+) well-formed, (\d+) ill-formed, (\d+) known-bad", out)
+    assert m, f"the summary line changed:\n{out[-600:]}"
+    well_formed, ill_formed, known = (int(g) for g in m.groups())
+
+    assert known == len(syntax.NOT_YET_ESIMD), (
+        f"the runner counted {known} tracked failures, the list has "
+        f"{len(syntax.NOT_YET_ESIMD)}")
+    assert ill_formed == 0, (
+        "a snapshot stopped compiling and is not in the tracked list")
+    for name in syntax.NOT_YET_ESIMD:
+        assert name in out, f"{name} is tracked but was not reported"

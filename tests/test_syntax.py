@@ -89,27 +89,8 @@ KNOWN_BAD_BACKENDS: dict = {}
 #:
 #: `strict=True`, so this shrinks deliberately: when the remaining cases land
 #: they turn XPASS and the suite goes red until the entries go.
-#: The ESIMD snapshots that do not compile, by name.
-#:
-#: A list and not a pattern.  The first version of this matched on "contains a
-#: mask and an `if`", which stopped describing the set as soon as narrowing
-#: changed which cases failed and why -- and a heuristic that quietly
-#: misclassifies is worse than no heuristic, because the entry it wrongly
-#: excuses looks reviewed.
-#: Empty, and the mechanism stays because emptying it was the point.
-#:
-#: It held six ESIMD snapshots that reached a predicated store: a guard on the
-#: lead axis that narrowing could not remove, because the vector had to
-#: *start* somewhere other than element zero and `LeadIndex` had no base
-#: offset to say it with.  It has one since the `VarOffset` merge, and
-#: `DataView.split_lead_shift` puts the leftover lanes into a register address
-#: -- so a head block, a ragged tail and a later slot are all just a vector
-#: with a base now, and no mask survives the corpus.
-NOT_YET_ESIMD: dict = {}
-
-
 def _known_bad(path) -> str:
-    return NOT_YET_ESIMD.get(path.name, "")
+    return syntax.known_bad(path)
 
 
 def _param(path):

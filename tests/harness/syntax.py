@@ -57,6 +57,36 @@ _FAILURE_MARKER = "!!"
 _KERNEL = re.compile(r"^// === kernel ===\n(.*?)(?=^// === |\Z)", re.M | re.S)
 
 
+#: Generated source known not to compile, by snapshot name.
+#:
+#: Empty, and the mechanism stays because emptying it was the point.
+#:
+#: It held six ESIMD snapshots that reached a predicated store: a guard on the
+#: lead axis that narrowing could not remove, because the vector had to
+#: *start* somewhere other than element zero and `LeadIndex` had no base
+#: offset to say it with.  It has one since the `VarOffset` merge, and
+#: `DataView.split_lead_shift` puts the leftover lanes into a register address
+#: -- so a head block, a ragged tail and a later slot are all just a vector
+#: with a base now, and no mask survives the corpus.
+#:
+#: A list and not a pattern.  The first version matched on "contains a mask
+#: and an `if`", which stopped describing the set as soon as narrowing changed
+#: which cases failed and why -- and a heuristic that quietly misclassifies is
+#: worse than none, because the entry it wrongly excuses looks reviewed.
+NOT_YET_ESIMD: dict = {}
+
+
+def known_bad(path) -> str:
+    """The recorded reason this snapshot does not compile, or ``''``.
+
+    Here rather than in `test_syntax.py` because `tools/syntax_check.py` needs
+    the same answer.  It did not have it, so the command-line runner reported
+    three permanent failures for cases the suite already tracks as expected --
+    and three standing reds are how a check stops being read.
+    """
+    return NOT_YET_ESIMD.get(path.name, "")
+
+
 def compiler() -> Optional[str]:
     return (os.environ.get("TF_HOST_CXX")
             or shutil.which("g++") or shutil.which("clang++"))

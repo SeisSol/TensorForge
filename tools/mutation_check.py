@@ -277,10 +277,8 @@ GROUPS = {
     'scratch': ('tests/test_pir_scratch.py', [
         ('a shared alloc declares its own array again',
          sub(EMIT,
-             "                off = s.attr('offset', 0)\n"
-             "                w(f'{t.elem.ctype()}* {self.name(v)} = &{arena}[{off}];')\n"
-             "                return",
-             "                pass")),
+             "                w(f'{t.elem.ctype()}* {qual}{self.name(v)} = &{arena}[{off}];')",
+             "                w(f'__shared__ {t.elem.ctype()} {self.name(v)}[{t.volume}];')")),
         ('the budget check dropped',
          sub(BUILD, '        if max(end, self._scratch_peak) > budget:',
              '        if False:')),
@@ -330,12 +328,12 @@ GROUPS = {
     ]),
 
     'access': ('tests/test_pir_access.py', [
-        ('the register store falls back to text',
-         sub(SYM, '          if base is None and isinstance(variable, _Value):',
-             '          if False:')),
-        ('a base override routed through Op.STORE, losing the override',
-         sub(SYM, '          if base is None and isinstance(variable, _Value):',
-             '          if isinstance(variable, _Value):')),
+        ('the structured store falls back to text',
+         sub(SYM, '    structured = (not atomic and isinstance(variable, _Value)',
+             '    structured = (False and isinstance(variable, _Value)')),
+        ('an atomic routed through Op.STORE, losing the atomicity',
+         sub(SYM, '    structured = (not atomic and isinstance(variable, _Value)',
+             '    structured = (isinstance(variable, _Value)')),
         ('the address pinned again, so nothing folds or shares',
          sub(SYM, '    return self.build_address(writer, context, index)\n\n  def access_address',
              '    return writer.pin(self.build_address(writer, context, index))\n\n  def access_address')),
@@ -345,7 +343,7 @@ GROUPS = {
         ('a scalar routed through Op.LOAD, inventing a subscript',
          sub(SYM, '''        if access is pre_access and self.stype in (
                 SymbolType.Register, SymbolType.Scratch,
-                SymbolType.SharedMem, SymbolType.Batch):''',
+                SymbolType.SharedMem, SymbolType.Batch, SymbolType.Global):''',
              '        if access is pre_access:')),
     ]),
 
@@ -371,16 +369,16 @@ GROUPS = {
     'syntax': ('tests/test_syntax.py', [
         ('a literal handed to a reference parameter',
          sub(Path('tests/snapshots/gemm_56x18_x_18x18.hip.cpp'),
-             'tensorforge::transpose4x4b32(v31_tp, v32_tp, v33_tp, v34_tp,',
-             'tensorforge::transpose4x4b32(v31_tp, v32_tp, 0.0f, 0.0f,', 1)),
+             'tensorforge::transpose4x4b32(v66_tp, v67_tp, v68_tp, v69_tp,',
+             'tensorforge::transpose4x4b32(v66_tp, v67_tp, 0.0f, 0.0f,', 1)),
         ('an argument dropped from a transpose',
          sub(Path('tests/snapshots/gemm_square_16.hip.cpp'),
-             ', v14_data, v15_data, v16_data, v17_data);',
-             ', v14_data, v15_data, v16_data);', 1)),
+             ', v47_data, v48_data, v49_data, v50_data);',
+             ', v47_data, v48_data, v49_data);', 1)),
         ('an operand that is never declared',
          sub(Path('tests/snapshots/gemm_square_16.hip.cpp'),
-             ', v14_data, v15_data, v16_data, v17_data);',
-             ', v14_data, v15_data, v16_data, v17_undeclared);', 1)),
+             ', v47_data, v48_data, v49_data, v50_data);',
+             ', v47_data, v48_data, v49_data, v50_undeclared);', 1)),
         ('an MFMA accumulator of the wrong width',
          sub(Path('tests/snapshots/gemm_square_16.hip.cpp'),
              'tensorforge::VectorT<float, 4>',
@@ -394,6 +392,19 @@ GROUPS = {
 
     # The shim is a copy of a C++ fact; the check that it stays one has to
     # fail when the copy drifts, in either direction.
+    # One list, two readers.  The tool reported three permanent failures for
+    # cases the suite already tracked, which is how a check stops being read.
+    'knownbad': ('tests/test_tools.py::test_the_runner_agrees_with_the_suite', [
+        ('the tool stops recognising a tracked failure',
+         sub(Path('tools/syntax_check.py'),
+             '    reason = syntax.known_bad(r.path)',
+             "    reason = ''", 1)),
+        ('a tracked entry counted as well-formed',
+         sub(Path('tools/syntax_check.py'),
+             "        kinds['known'] += 1",
+             "        kinds['ok'] += 1", 1)),
+    ]),
+
     'shim': ('tests/test_syntax.py::test_shim_matches_the_device_headers', [
         ('an overload dropped from the shim',
          sub(Path('tests/shim/tensorforge_host.h'),
@@ -417,9 +428,10 @@ GROUPS = {
              '    self._record_linear_layout(index, vec)\n', '', 1)),
         ('the read drops what the fill recorded',
          sub(Path('src/tensorforge/backend/symbol.py'),
-             "        return writer.load_expr(text, type_, self, hint='lin',\n"
-             "                                layout=self.layout)",
-             "        return writer.load_expr(text, type_, self, hint='lin')", 1)),
+             "        return writer.load(buf, addr, type_=ltype, hint='lin',\n"
+             "                           layout=self.layout,",
+             "        return writer.load(buf, addr, type_=ltype, hint='lin',\n"
+             "                           layout=None,", 1)),
         ('the wave width taken as the block instead of the thread count',
          sub(Path('src/tensorforge/backend/symbol.py'),
              'layout = RegisterLayout((LaneAxis(self.num_threads, 1),))',
