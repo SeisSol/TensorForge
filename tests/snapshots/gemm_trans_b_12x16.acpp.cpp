@@ -59,8 +59,7 @@ inline void kernel_kernel_e7f2438624(sycl::queue *stream, sycl::range<3> group_c
                   int32_t v14_a = v8_i1 * 16;
                   int32_t v15_a = v13_lead + v14_a;
                   float v23_data = glb_m2[(v20_lead + v14_a)];
-                  int32_t v30_a = v28_lead + (v8_i1 * 17);
-                  s0[v30_a] = v23_data;
+                  s0[(v28_lead + (v8_i1 * 17))] = v23_data;
                 }
               }
               // wait(s0 = load{g>s}(glb_m2[1, 0]));

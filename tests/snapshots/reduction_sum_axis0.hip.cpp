@@ -64,24 +64,24 @@ __launch_bounds__(256)
           const float *const __restrict__ glb_m0 = &m0[batchId0 * 256 + 0 + m0_extraOffset];
           float *const __restrict__ glb_m1 = &m1[batchId0 * 16 + 0 + m1_extraOffset];
           // glb_m1 = +(glb_m0, dims=[0])
-          int32_t v4_lead = threadIdx.x % 32;
-          bool v5_own = v4_lead < 16;
-          bool v24_w = v4_lead == 0;
+          int32_t v5_lead = threadIdx.x % 32;
+          bool v6_own = v5_lead < 16;
+          bool v25_w = v5_lead == 0;
           #pragma unroll
-          for (int32_t v2_k1 = 0; v2_k1 < 16; ++v2_k1) {
-            float v22_sel0;
-            if (v5_own) {
-              int32_t v11_a = v2_k1 * 16;
-              int32_t v12_a = v4_lead + v11_a;
-              float v20_data = glb_m0[(v4_lead + v11_a)];
-              v22_sel0 = v20_data;
+          for (int32_t v3_k1 = 0; v3_k1 < 16; ++v3_k1) {
+            float v23_sel0;
+            if (v6_own) {
+              int32_t v12_a = v3_k1 * 16;
+              int32_t v13_a = v5_lead + v12_a;
+              float v21_data = glb_m0[(v5_lead + v12_a)];
+              v23_sel0 = v21_data;
             }
             else {
-              v22_sel0 = 0.0f;
+              v23_sel0 = 0.0f;
             }
-            float v23_red = tensorforge::reduction<tensorforge::ReductionOperation<float, tensorforge::Operation::Add>, 16, 1, float>(v22_sel0);
-            if (v24_w) {
-              glb_m1[v2_k1] = v23_red;
+            float v24_red = tensorforge::reduction<tensorforge::ReductionOperation<float, tensorforge::Operation::Add>, 16, 1, float>(v23_sel0);
+            if (v25_w) {
+              glb_m1[v3_k1] = v24_red;
             }
           }
         }

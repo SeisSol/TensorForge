@@ -1577,8 +1577,7 @@ inline void kernel_kernel_3e24e7feaf(sycl::queue *stream, sycl::range<3> group_c
                 int32_t v3198_a = 0 + v3197_a;
                 tensorforge::intel_esimd::simd<float, 6> v3201_data;
                 v3201_data.copy_from(r1 + (v3197_a));
-                int32_t v3206_a = 6_i32 + (v3196_i1 * 12);
-                s1[v3206_a] = v3201_data;
+                v3201_data.copy_to(s1 + ((6_i32 + (v3196_i1 * 12))));
               }
               float r2[192]{};
               // r2 = +(glb_m4 * s1) + None

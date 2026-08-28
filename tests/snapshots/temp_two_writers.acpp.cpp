@@ -1581,8 +1581,7 @@ inline void kernel_kernel_3e24e7feaf(sycl::queue *stream, sycl::range<3> group_c
                 for (int32_t v5030_i1 = 0; v5030_i1 < 12; ++v5030_i1) {
                   int32_t v5031_a = 0 + v5030_i1;
                   float v5033_data = r1[v5030_i1];
-                  int32_t v5041_a = v5039_off + (v5030_i1 * 12);
-                  s1[v5041_a] = v5033_data;
+                  s1[(v5039_off + (v5030_i1 * 12))] = v5033_data;
                 }
               }
               float r2[12]{};

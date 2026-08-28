@@ -59,8 +59,7 @@ inline void kernel_kernel_f94e030d8c(sycl::queue *stream, sycl::range<3> group_c
                   int32_t v14_a = v8_i1 * 20;
                   int32_t v15_a = v13_lead + v14_a;
                   float v23_data = glb_m1[(v20_lead + v14_a)];
-                  int32_t v30_a = v28_lead + (v8_i1 * 21);
-                  s0[v30_a] = v23_data;
+                  s0[(v28_lead + (v8_i1 * 21))] = v23_data;
                 }
               }
               if (v6_lead < 4) {
@@ -72,8 +71,7 @@ inline void kernel_kernel_f94e030d8c(sycl::queue *stream, sycl::range<3> group_c
                   int32_t v38_a = v32_i1 * 20;
                   int32_t v39_a = v37_lead + v38_a;
                   float v47_data = glb_m1[(v44_lead + v38_a)];
-                  int32_t v54_a = v52_lead + (v32_i1 * 21);
-                  s0[v54_a] = v47_data;
+                  s0[(v52_lead + (v32_i1 * 21))] = v47_data;
                 }
               }
               float* __restrict__ s1 = &localShrMem0[0];

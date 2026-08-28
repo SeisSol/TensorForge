@@ -56,8 +56,7 @@ inline void kernel_kernel_e7f2438624(sycl::queue *stream, sycl::range<3> group_c
                   int32_t v9_a = v6_lead + v8_a;
                   tensorforge::intel_esimd::simd<float, 16> v14_data;
                   v14_data.copy_from(glb_m2 + ((v6_lead + v8_a)));
-                  int32_t v18_a = v6_lead + (v5_i1 * 17);
-                  s0[v18_a] = v14_data;
+                  v14_data.copy_to(s0 + ((v6_lead + (v5_i1 * 17))));
                 }
               }
               // wait(s0 = load{g>s}(glb_m2[1, 0]));

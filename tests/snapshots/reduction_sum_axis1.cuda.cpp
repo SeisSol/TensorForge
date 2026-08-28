@@ -66,17 +66,17 @@ __launch_bounds__(256)
           const float *const __restrict__ glb_m0 = &m0[batchId0 * 256 + 0 + m0_extraOffset];
           float *const __restrict__ glb_m1 = &m1[batchId0 * 16 + 0 + m1_extraOffset];
           // glb_m1 = +(glb_m0, dims=[1])
-          int32_t v4_lead = threadIdx.x % 32;
-          if (v4_lead < 16) {
-            float v7_acc0 = 0.0f;
+          int32_t v5_lead = threadIdx.x % 32;
+          if (v5_lead < 16) {
+            float v8_acc0 = 0.0f;
             #pragma unroll
-            for (int32_t v6_r1 = 0; v6_r1 < 16; ++v6_r1) {
-              int32_t v13_a = v6_r1 * 16;
-              int32_t v14_a = v4_lead + v13_a;
-              float v22_data = glb_m0[(v4_lead + v13_a)];
-              v7_acc0 = (v7_acc0 + v22_data);
+            for (int32_t v7_r1 = 0; v7_r1 < 16; ++v7_r1) {
+              int32_t v14_a = v7_r1 * 16;
+              int32_t v15_a = v5_lead + v14_a;
+              float v23_data = glb_m0[(v5_lead + v14_a)];
+              v8_acc0 = (v8_acc0 + v23_data);
             }
-            glb_m1[v4_lead] = v7_acc0;
+            glb_m1[v5_lead] = v8_acc0;
           }
           __syncwarp();
         }

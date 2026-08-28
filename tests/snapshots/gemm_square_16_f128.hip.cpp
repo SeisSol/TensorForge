@@ -70,53 +70,52 @@ __launch_bounds__(256)
           const __float128 *const __restrict__ glb_m2 = &m2[batchId0 * 4 + 0 + m2_extraOffset];
           __float128 r0[2]{};
           // r0 = load{g>r}(glb_m1);
-          int32_t v6_lead = threadIdx.x % 2;
+          int32_t v7_lead = threadIdx.x % 2;
           #pragma unroll
-          for (int32_t v7_i0 = 0; v7_i0 < 1; ++v7_i0) {
-            int32_t v12_lead = v7_i0 * 2;
-            int32_t v13_lead = v6_lead + v12_lead;
-            int32_t v20_lead = v6_lead + v12_lead;
+          for (int32_t v8_i0 = 0; v8_i0 < 1; ++v8_i0) {
+            int32_t v13_lead = v8_i0 * 2;
+            int32_t v14_lead = v7_lead + v13_lead;
+            int32_t v21_lead = v7_lead + v13_lead;
             #pragma unroll
-            for (int32_t v8_i1 = 0; v8_i1 < 2; ++v8_i1) {
-              int32_t v14_a = v8_i1 * 2;
-              int32_t v15_a = v13_lead + v14_a;
-              __float128 v23_data = __builtin_nontemporal_load(&glb_m1[(v20_lead + v14_a)]);
-              int32_t v24_a = v7_i0 + v8_i1;
-              r0[v24_a] = v23_data;
+            for (int32_t v9_i1 = 0; v9_i1 < 2; ++v9_i1) {
+              int32_t v15_a = v9_i1 * 2;
+              int32_t v16_a = v14_lead + v15_a;
+              __float128 v24_data = __builtin_nontemporal_load(&glb_m1[(v21_lead + v15_a)]);
+              r0[(v8_i0 + v9_i1)] = v24_data;
             }
           }
           __float128 r1[2]{};
           // r1 = load{g>r}(glb_m2);
-          __float128 v26_lin = glb_m2[0 + threadIdx.x * 1];
-          r1[0] = v26_lin;
-          __float128 v27_lin = glb_m2[2 + threadIdx.x * 1];
-          r1[1] = v27_lin;
+          __float128 v27_lin = glb_m2[0 + threadIdx.x * 1];
+          r1[0] = v27_lin;
+          __float128 v28_lin = glb_m2[2 + threadIdx.x * 1];
+          r1[1] = v28_lin;
           // wait(r0 = load{g>r}(glb_m1););
           // wait(r1 = load{g>r}(glb_m2););
           __float128 r2[2]{};
           // r2 = +(r0 * r1) + None
           // [(0, 2), (0, 2)] [(0, 2)]
-          __float128 v29_data = r0[0];
-          __float128 v30_data = r0[1];
-          __float128 v31_acc{};
+          __float128 v30_data = r0[0];
+          __float128 v31_data = r0[1];
           __float128 v32_acc{};
-          __float128 v33_lin = r1[0];
-          v31_acc += ((tensorforge::broadcast<2, 1, 0>(v33_lin)) * v29_data);
-          v31_acc += ((tensorforge::broadcast<2, 1, 1>(v33_lin)) * v30_data);
-          __float128 v38_lin = r1[1];
-          v32_acc += ((tensorforge::broadcast<2, 1, 0>(v38_lin)) * v29_data);
-          v32_acc += ((tensorforge::broadcast<2, 1, 1>(v38_lin)) * v30_data);
-          r2[0] = v31_acc;
-          r2[1] = v32_acc;
+          __float128 v33_acc{};
+          __float128 v34_lin = r1[0];
+          v32_acc += ((tensorforge::broadcast<2, 1, 0>(v34_lin)) * v30_data);
+          v32_acc += ((tensorforge::broadcast<2, 1, 1>(v34_lin)) * v31_data);
+          __float128 v39_lin = r1[1];
+          v33_acc += ((tensorforge::broadcast<2, 1, 0>(v39_lin)) * v30_data);
+          v33_acc += ((tensorforge::broadcast<2, 1, 1>(v39_lin)) * v31_data);
+          r2[0] = v32_acc;
+          r2[1] = v33_acc;
           // glb_m0 = store{r>g}(r2);
           #pragma unroll
-          for (int32_t v46_i0 = 0; v46_i0 < 1; ++v46_i0) {
-            int32_t v55_lead = v6_lead + (v46_i0 * 2);
+          for (int32_t v47_i0 = 0; v47_i0 < 1; ++v47_i0) {
+            int32_t v56_lead = v7_lead + (v47_i0 * 2);
             #pragma unroll
-            for (int32_t v47_i1 = 0; v47_i1 < 2; ++v47_i1) {
-              int32_t v48_a = v46_i0 + v47_i1;
-              __float128 v50_data = r2[(v46_i0 + v47_i1)];
-              glb_m0[(v55_lead + (v47_i1 * 2))] = v50_data;
+            for (int32_t v48_i1 = 0; v48_i1 < 2; ++v48_i1) {
+              int32_t v49_a = v47_i0 + v48_i1;
+              __float128 v51_data = r2[(v47_i0 + v48_i1)];
+              glb_m0[(v56_lead + (v48_i1 * 2))] = v51_data;
             }
           }
         }

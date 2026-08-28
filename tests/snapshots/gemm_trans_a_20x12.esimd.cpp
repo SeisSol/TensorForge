@@ -56,8 +56,7 @@ inline void kernel_kernel_f94e030d8c(sycl::queue *stream, sycl::range<3> group_c
                   int32_t v9_a = v6_lead + v8_a;
                   tensorforge::intel_esimd::simd<float, 16> v14_data;
                   v14_data.copy_from(glb_m1 + ((v6_lead + v8_a)));
-                  int32_t v18_a = v6_lead + (v5_i1 * 21);
-                  s0[v18_a] = v14_data;
+                  v14_data.copy_to(s0 + ((v6_lead + (v5_i1 * 21))));
                 }
               }
               tensorforge::intel_esimd::simd_mask<16> v20_g = (tensorforge::intel_esimd::simd<int32_t, 16>(0, 1)) < 4;
@@ -67,9 +66,8 @@ inline void kernel_kernel_f94e030d8c(sycl::queue *stream, sycl::range<3> group_c
                 int32_t v25_a = 16_i32 + v24_a;
                 tensorforge::intel_esimd::simd<float, 16> v30_data(0.0f);
                 v30_data.merge(tensorforge::intel_esimd::simd<float, 16>(glb_m1[(16_i32 + v24_a)]), v20_g);
-                int32_t v34_a = 16_i32 + (v21_i1 * 21);
                 if (v20_g) {
-                  s0[v34_a] = v30_data;
+                  v30_data.copy_to(s0 + ((16_i32 + (v21_i1 * 21))));
                 }
               }
               float* __restrict__ s1 = &localShrMem0[0];
