@@ -1085,8 +1085,17 @@ def _declares(body: Tuple[Stmt, ...]) -> bool:
 
     Structured values do not count: their names come from the shared
     allocator and are unique across the whole generated file.
+
+    Nor does a *block head*.  A `rawblock`'s text is `for (int32_t i = 0; ...)`
+    or `if (...)`, and a name introduced there is scoped to the block it opens
+    -- it cannot collide with anything in the enclosing scope, which is the
+    only thing this predicate exists to prevent.  Reading the head as a
+    declaration kept 38 anonymous scopes alive across the corpus, every one of
+    them around an unrolled hop loop whose `i` was never visible outside it.
     """
     for s in body:
+        if s.regions:
+            continue
         if s.text and _CDECL.search(s.text):
             return True
     return False

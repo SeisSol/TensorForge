@@ -233,20 +233,28 @@ class AbstractInstruction(ABC):
     finally:
       cls._shared_body.pop()
     body = builder.finish()
-    opts = context.get_user_options()
-    if getattr(opts, 'enable_wrap_loads', False):
-        from tensorforge.backend.pir.wrap import wrap_prefetch
-        why: list = []
-        body = wrap_prefetch(body, lambda ty, hint: builder.value(ty, hint=hint),
-                             report=why)
-        if os.environ.get('TF_IR_DEBUG'):
-            for w in why:
-                print(f'wrap: declined -- {w}')
     if os.environ.get('TF_IR_DEBUG'):
       for d in pir.verify(body, strict=False):
         print(f'pir: {d}')
-    pir.emit(pir.optimize(body, explicit_simd=_explicit_simd(context)),
-             writer, context)
+    body = pir.optimize(body, explicit_simd=_explicit_simd(context))
+    if getattr(context.get_user_options(), 'enable_wrap_loads', False):
+      # After `optimize`, not before.  The transfers sit inside the anonymous
+      # scopes the loaders open, and `flatten_scopes` is what removes them --
+      # running first meant the pass looked at a body whose every transfer was
+      # still two rawblocks deep and reported that it found none.
+      #
+      # Before `schedule_async`, because moving an issue across the back edge
+      # changes what is outstanding at every wait, and those counts describe
+      # the final order.
+      from tensorforge.backend.pir.wrap import wrap_prefetch
+      why: list = []
+      body = wrap_prefetch(body, lambda ty, hint: builder.value(ty, hint=hint),
+                           report=why)
+      body, _ = pir.schedule_async(body)
+      if os.environ.get('TF_IR_DEBUG'):
+        for w in why:
+          print(f'wrap: declined -- {w}')
+    pir.emit(body, writer, context)
 
   def through_pir(self, writer: Writer, build) -> None:
     """Route ``build(sink)`` through the pseudo-IR into ``writer``.

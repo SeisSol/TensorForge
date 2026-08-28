@@ -68,13 +68,11 @@ __launch_bounds__(256)
           float *const __restrict__ glb_m0 = &m0[batchId0 * 256 + 0 + m0_extraOffset];
           const float *const __restrict__ glb_m2 = &m2[batchId0 * 256 + 0 + m2_extraOffset];
           float* __restrict__ s0 = &localShrMem0[0];
-          {
-            // s0 = load{g>s}(glb_m2[0, 1])
-            #pragma unroll
-            for (int32_t i = 0; i < 16; i += 1) {
-              __pipeline_memcpy_async(&s0[0 + 0 + 1 * threadIdx.x + i * 16], &glb_m2[0 + 0 + 1 * threadIdx.x + i * 16], 4);
-              __pipeline_commit();
-            }
+          // s0 = load{g>s}(glb_m2[0, 1])
+          #pragma unroll
+          for (int32_t i = 0; i < 16; i += 1) {
+            __pipeline_memcpy_async(&s0[0 + 0 + 1 * threadIdx.x + i * 16], &glb_m2[0 + 0 + 1 * threadIdx.x + i * 16], 4);
+            __pipeline_commit();
           }
           // wait(s0 = load{g>s}(glb_m2[0, 1]));
           __pipeline_wait_prior(0);

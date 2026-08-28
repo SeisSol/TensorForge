@@ -707,17 +707,15 @@ __launch_bounds__(256)
           }
           __syncwarp();
           float* __restrict__ s2 = &localShrMem0[0];
-          {
-            // s2 = load{g>s}(glb_m4[0, 1])
-            #pragma unroll
-            for (int32_t i = 0; i < 5; i += 1) {
-              __pipeline_memcpy_async(&s2[0 + 0 + 1 * threadIdx.x + i * 32], &glb_m4[0 + 0 + 1 * threadIdx.x + i * 32], 4);
-              __pipeline_commit();
-            }
-            if (threadIdx.x < 9) {
-              __pipeline_memcpy_async(&s2[0 + 0 + 1 * threadIdx.x + 160], &glb_m4[0 + 0 + 1 * threadIdx.x + 160], 4);
-              __pipeline_commit();
-            }
+          // s2 = load{g>s}(glb_m4[0, 1])
+          #pragma unroll
+          for (int32_t i = 0; i < 5; i += 1) {
+            __pipeline_memcpy_async(&s2[0 + 0 + 1 * threadIdx.x + i * 32], &glb_m4[0 + 0 + 1 * threadIdx.x + i * 32], 4);
+            __pipeline_commit();
+          }
+          if (threadIdx.x < 9) {
+            __pipeline_memcpy_async(&s2[0 + 0 + 1 * threadIdx.x + 160], &glb_m4[0 + 0 + 1 * threadIdx.x + 160], 4);
+            __pipeline_commit();
           }
           // wait(r5 = load{g>r}(glb_m0););
           // wait(s2 = load{g>s}(glb_m4[0, 1]));

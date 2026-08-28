@@ -43,12 +43,10 @@ inline void kernel_kernel_417e1ddcc4(sycl::queue *stream, sycl::range<3> group_c
               const double *const __restrict__ glb_m1 = &m1[batchId0 * 256 + 0 + m1_extraOffset];
               const double *const __restrict__ glb_m2 = &m2[batchId0 * 256 + 0 + m2_extraOffset];
               double* __restrict__ s0 = &localShrMem0[0];
-              {
-                // s0 = load{g>s}(glb_m2[0, 1])
-                #pragma unroll
-                for (int32_t i = 0; i < 16; i += 2) {
-                  *(sycl::vec<double, 2>*)&s0[0 + 0 + 2 * item.get_local_id(0) + i * 16] = *(sycl::vec<double, 2>*)&glb_m2[0 + 0 + 2 * item.get_local_id(0) + i * 16];
-                }
+              // s0 = load{g>s}(glb_m2[0, 1])
+              #pragma unroll
+              for (int32_t i = 0; i < 16; i += 2) {
+                *(sycl::vec<double, 2>*)&s0[0 + 0 + 2 * item.get_local_id(0) + i * 16] = *(sycl::vec<double, 2>*)&glb_m2[0 + 0 + 2 * item.get_local_id(0) + i * 16];
               }
               // wait(s0 = load{g>s}(glb_m2[0, 1]));
               double r0[256]{};

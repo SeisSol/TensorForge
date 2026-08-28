@@ -72,12 +72,10 @@ inline void kernel_kernel_f94e030d8c(sycl::queue *stream, sycl::range<3> group_c
                 }
               }
               float* __restrict__ s1 = &localShrMem0[0];
-              {
-                // s1 = load{g>s}(glb_m2[0, 1])
-                #pragma unroll
-                for (int32_t i = 0; i < 20; i += 4) {
-                  *(sycl::vec<float, 4>*)&s1[0 + 0 + 4 * item.get_local_id(0) + i * 16] = *(sycl::vec<float, 4>*)&glb_m2[0 + 0 + 4 * item.get_local_id(0) + i * 16];
-                }
+              // s1 = load{g>s}(glb_m2[0, 1])
+              #pragma unroll
+              for (int32_t i = 0; i < 20; i += 4) {
+                *(sycl::vec<float, 4>*)&s1[0 + 0 + 4 * item.get_local_id(0) + i * 16] = *(sycl::vec<float, 4>*)&glb_m2[0 + 0 + 4 * item.get_local_id(0) + i * 16];
               }
               // wait(s0 = load{g>s}(glb_m1[1, 0]));
               // wait(s1 = load{g>s}(glb_m2[0, 1]));

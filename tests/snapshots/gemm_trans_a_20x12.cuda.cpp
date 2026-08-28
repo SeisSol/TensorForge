@@ -97,13 +97,11 @@ __launch_bounds__(256)
             }
           }
           float* __restrict__ s1 = &localShrMem0[0];
-          {
-            // s1 = load{g>s}(glb_m2[0, 1])
-            #pragma unroll
-            for (int32_t i = 0; i < 20; i += 1) {
-              __pipeline_memcpy_async(&s1[0 + 0 + 1 * threadIdx.x + i * 16], &glb_m2[0 + 0 + 1 * threadIdx.x + i * 16], 4);
-              __pipeline_commit();
-            }
+          // s1 = load{g>s}(glb_m2[0, 1])
+          #pragma unroll
+          for (int32_t i = 0; i < 20; i += 1) {
+            __pipeline_memcpy_async(&s1[0 + 0 + 1 * threadIdx.x + i * 16], &glb_m2[0 + 0 + 1 * threadIdx.x + i * 16], 4);
+            __pipeline_commit();
           }
           // wait(s0 = load{g>s}(glb_m1[1, 0]));
           // wait(s1 = load{g>s}(glb_m2[0, 1]));
