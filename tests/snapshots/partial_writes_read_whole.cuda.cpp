@@ -146,8 +146,7 @@ __launch_bounds__(256)
             for (int32_t v85_i1 = 0; v85_i1 < 9; ++v85_i1) {
               int32_t v86_a = v84_i0 + v85_i1;
               float v88_data = r1[(v84_i0 + v85_i1)];
-              int32_t v95_a = v93_lead + (v85_i1 * 32);
-              s0[v95_a] = v88_data;
+              s0[(v93_lead + (v85_i1 * 32))] = v88_data;
             }
           }
           float r4[9]{};
@@ -215,8 +214,7 @@ __launch_bounds__(256)
             for (int32_t v180_i1 = 0; v180_i1 < 9; ++v180_i1) {
               int32_t v181_a = 0 + v180_i1;
               float v183_data = r3[v180_i1];
-              int32_t v190_a = v8_lead + (v180_i1 * 32);
-              s0[v190_a] = v183_data;
+              s0[(v8_lead + (v180_i1 * 32))] = v183_data;
             }
           }
           // wait(r4 = load{g>r}(glb_m2););
@@ -272,8 +270,7 @@ __launch_bounds__(256)
             for (int32_t v253_i1 = 0; v253_i1 < 9; ++v253_i1) {
               int32_t v254_a = 0 + v253_i1;
               float v256_data = r5[v253_i1];
-              int32_t v263_a = v8_lead + (v253_i1 * 32);
-              s0[v263_a] = v256_data;
+              s0[(v8_lead + (v253_i1 * 32))] = v256_data;
             }
           }
           float* __restrict__ s1 = &localShrMem0[0];

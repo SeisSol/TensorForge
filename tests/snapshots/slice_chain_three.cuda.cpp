@@ -250,8 +250,7 @@ __launch_bounds__(256)
             for (int32_t v262_i1 = 0; v262_i1 < 6; ++v262_i1) {
               int32_t v263_a = 0 + v262_i1;
               float v265_data = r1[v262_i1];
-              int32_t v272_a = v7_lead + (v262_i1 * 12);
-              s1[v272_a] = v265_data;
+              s1[(v7_lead + (v262_i1 * 12))] = v265_data;
             }
           }
           float r3[6]{};

@@ -43,10 +43,10 @@ inline void kernel_kernel_a7d5d30824(sycl::queue *stream, sycl::range<3> group_c
             if (allowed) {
               float *const __restrict__ glb_m0 = &m0[batchId0 * 16 + 0 + m0_extraOffset];
               const float *const __restrict__ glb_m1 = &m1[batchId0 * 256 + 0 + m1_extraOffset];
-              float r0[1]{};
+              float r0[16]{};
               // r0 = +(glb_m1) + None
               // [(0, 16)] [(0, 16)]
-              float ir0[1]{};
+              float ir0[16]{};
               int32_t v6_a = 0_i32 + 0;
               tensorforge::intel_esimd::simd<float, 16> v10_data;
               v10_data.copy_from(glb_m1 + (0_i32));
@@ -145,16 +145,20 @@ inline void kernel_kernel_a7d5d30824(sycl::queue *stream, sycl::range<3> group_c
               (v146_data + v145_data).copy_to(ir0 + (0));
               #pragma unroll
               for (int32_t v148_n0 = 0; v148_n0 < 1; ++v148_n0) {
-                tensorforge::intel_esimd::simd<float, 16> v149_data;
-                v149_data.copy_from(ir0 + (v148_n0));
-                v149_data.copy_to(r0 + (v148_n0));
+                int32_t v149_a = v148_n0 * 16;
+                int32_t v150_a = v148_n0 * 16;
+                tensorforge::intel_esimd::simd<float, 16> v151_data;
+                v151_data.copy_from(ir0 + (v150_a));
+                v151_data.copy_to(r0 + (v150_a));
               }
               // glb_m0 = store{r>g}(r0);
               #pragma unroll
-              for (int32_t v150_i0 = 0; v150_i0 < 1; ++v150_i0) {
-                tensorforge::intel_esimd::simd<float, 16> v151_data;
-                v151_data.copy_from(r0 + (v150_i0));
-                v151_data.copy_to(glb_m0 + ((v150_i0 * 16)));
+              for (int32_t v153_i0 = 0; v153_i0 < 1; ++v153_i0) {
+                int32_t v154_a = v153_i0 * 16;
+                int32_t v155_a = v153_i0 * 16;
+                tensorforge::intel_esimd::simd<float, 16> v156_data;
+                v156_data.copy_from(r0 + (v155_a));
+                v156_data.copy_to(glb_m0 + (v155_a));
               }
             }
           }

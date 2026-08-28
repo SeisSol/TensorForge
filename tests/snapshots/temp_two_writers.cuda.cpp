@@ -593,8 +593,7 @@ __launch_bounds__(256)
             for (int32_t v825_i1 = 0; v825_i1 < 12; ++v825_i1) {
               int32_t v826_a = 0 + v825_i1;
               float v828_data = r1[v825_i1];
-              int32_t v835_a = v8_lead + (v825_i1 * 12);
-              s1[v835_a] = v828_data;
+              s1[(v8_lead + (v825_i1 * 12))] = v828_data;
             }
           }
           float r4[12]{};

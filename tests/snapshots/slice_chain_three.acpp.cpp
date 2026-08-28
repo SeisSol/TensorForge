@@ -260,8 +260,7 @@ inline void kernel_kernel_08703cce1d(sycl::queue *stream, sycl::range<3> group_c
                 for (int32_t v647_i1 = 0; v647_i1 < 6; ++v647_i1) {
                   int32_t v648_a = 0 + v647_i1;
                   float v650_data = r0[v647_i1];
-                  int32_t v657_a = v8_lead + (v647_i1 * 12);
-                  s1[v657_a] = v650_data;
+                  s1[(v8_lead + (v647_i1 * 12))] = v650_data;
                 }
               }
               float r1[6]{};

@@ -586,8 +586,7 @@ __launch_bounds__(256)
             for (int32_t v694_i1 = 0; v694_i1 < 16; ++v694_i1) {
               int32_t v695_a = v693_i0 + v694_i1;
               float v697_data = r2[(v693_i0 + v694_i1)];
-              int32_t v704_a = v702_lead + (v694_i1 * 32);
-              s0[v704_a] = v697_data;
+              s0[(v702_lead + (v694_i1 * 32))] = v697_data;
             }
           }
           float r5[16]{};

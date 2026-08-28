@@ -1234,8 +1234,7 @@ __launch_bounds__(256)
             for (int32_t v1883_i1 = 0; v1883_i1 < 13; ++v1883_i1) {
               int32_t v1884_a = v1882_i0 + v1883_i1;
               float v1886_data = r2[(v1882_i0 + v1883_i1)];
-              int32_t v1893_a = v1891_lead + (v1883_i1 * 32);
-              s2[v1893_a] = v1886_data;
+              s2[(v1891_lead + (v1883_i1 * 32))] = v1886_data;
             }
           }
           // wait(r4 = load{g>r}(glb_m0););
@@ -3169,8 +3168,7 @@ __launch_bounds__(256)
             for (int32_t v5069_i1 = 0; v5069_i1 < 13; ++v5069_i1) {
               int32_t v5070_a = v5068_i0 + v5069_i1;
               float v5072_data = r6[(v5068_i0 + v5069_i1)];
-              int32_t v5079_a = v5077_lead + (v5069_i1 * 32);
-              s4[v5079_a] = v5072_data;
+              s4[(v5077_lead + (v5069_i1 * 32))] = v5072_data;
             }
           }
           // wait(r8 = load{g>r}(glb_m0););
@@ -5104,8 +5102,7 @@ __launch_bounds__(256)
             for (int32_t v8255_i1 = 0; v8255_i1 < 13; ++v8255_i1) {
               int32_t v8256_a = v8254_i0 + v8255_i1;
               float v8258_data = r10[(v8254_i0 + v8255_i1)];
-              int32_t v8265_a = v8263_lead + (v8255_i1 * 32);
-              s6[v8265_a] = v8258_data;
+              s6[(v8263_lead + (v8255_i1 * 32))] = v8258_data;
             }
           }
           // wait(r12 = load{g>r}(glb_m0););

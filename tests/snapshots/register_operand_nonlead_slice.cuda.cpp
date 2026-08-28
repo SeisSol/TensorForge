@@ -2763,8 +2763,7 @@ __launch_bounds__(256)
             for (int32_t v5370_i1 = 0; v5370_i1 < 16; ++v5370_i1) {
               int32_t v5371_a = v5369_i0 + v5370_i1;
               float v5373_data = r1[(v5369_i0 + v5370_i1)];
-              int32_t v5380_a = v5378_lead + (v5370_i1 * 32);
-              s1[v5380_a] = v5373_data;
+              s1[(v5378_lead + (v5370_i1 * 32))] = v5373_data;
             }
           }
           __syncwarp();
@@ -2777,8 +2776,7 @@ __launch_bounds__(256)
             for (int32_t v5386_i1 = 0; v5386_i1 < 16; ++v5386_i1) {
               int32_t v5387_a = v5385_i0 + v5386_i1;
               float v5389_data = r3[(v5385_i0 + v5386_i1)];
-              int32_t v5396_a = v5394_lead + (v5386_i1 * 32);
-              s2[v5396_a] = v5389_data;
+              s2[(v5394_lead + (v5386_i1 * 32))] = v5389_data;
             }
           }
           float r4[16]{};

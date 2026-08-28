@@ -600,8 +600,7 @@ __launch_bounds__(256)
               int32_t v945_a = v944_i1 * 2;
               int32_t v946_a = v943_i0 + v945_a;
               float v949_data = r1[(v943_i0 + v945_a)];
-              int32_t v956_a = v954_lead + (v944_i1 * 56);
-              s1[v956_a] = v949_data;
+              s1[(v954_lead + (v944_i1 * 56))] = v949_data;
             }
           }
           if (v7_lead < 24) {
@@ -611,8 +610,7 @@ __launch_bounds__(256)
               int32_t v959_a = v958_i1 * 2;
               int32_t v960_a = 1 + v959_a;
               float v963_data = r1[(1 + v959_a)];
-              int32_t v970_a = v968_lead + (v958_i1 * 56);
-              s1[v970_a] = v963_data;
+              s1[(v968_lead + (v958_i1 * 56))] = v963_data;
             }
           }
           float r3[18]{};
