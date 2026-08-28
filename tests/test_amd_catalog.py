@@ -198,3 +198,215 @@ def test_an_offered_tile_can_always_be_emitted(arch, threads):
     for tile in amd.usable_mfma_tiles(threads, Datatype.F32, ctx):
         tile.scale(threads)      # must not raise
         assert tile.fits(threads)
+
+
+# --------------------------------------------------------------------------- #
+# The catalogue against LLVM
+# --------------------------------------------------------------------------- #
+#
+# `MATRIX_OPS` states shapes, block counts, per-lane fragment widths and
+# feature gates.  Those are facts LLVM already writes down, so they are a copy,
+# and this is the seam that keeps the copy honest -- the same construction as
+# the `hip.h` checks above, one layer out.
+#
+# The table is vendored rather than fetched: the suite stays offline, and a
+# change to what LLVM says shows up in review as a diff to
+# `tests/data/amd_matrix_builtins.json` next to the catalogue change it
+# justifies.  Regenerate with `tools/amd_matrix_table.py`.
+
+import json
+
+from tensorforge.backend.instructions.compute.primitives.amd import catalog
+
+LLVM_TABLE = Path(__file__).parent / "data" / "amd_matrix_builtins.json"
+
+#: Element formats a split can reach back to F32 or F64 from.  Anything
+#: narrower is in `NOT_MODELLED`.
+MODELLED_INPUTS = {"f32", "f64", "f16", "bf16", "xf32"}
+
+
+def _llvm():
+    return json.loads(LLVM_TABLE.read_text())
+
+
+def _llvm_rows():
+    """The builtins the catalogue claims to cover: float in, F32/F64 out."""
+    return {r["builtin"]: r for r in _llvm()["builtins"]
+            if r["out"] in ("f32", "f64") and r["in"] in MODELLED_INPUTS}
+
+
+def test_the_catalogue_covers_every_float_matrix_builtin():
+    """Equality, not containment.
+
+    Containment would let a new generation's instructions arrive unnoticed:
+    `wmma_f64_16x16x4_f64` appeared with gfx1251 and is the whole reason the
+    FP64 path on that target is direct rather than emulated. `NOT_MODELLED`
+    says which families are left out on purpose; nothing else may be.
+    """
+    assert {op.builtin for op in catalog.MATRIX_OPS} == set(_llvm_rows()), (
+        "the catalogue and LLVM disagree about which float matrix "
+        "instructions exist; rerun tools/amd_matrix_table.py")
+
+
+@pytest.mark.parametrize("op", catalog.MATRIX_OPS, ids=lambda op: op.builtin)
+def test_every_row_matches_the_llvm_signature(op):
+    row = _llvm_rows()[op.builtin]
+    assert (op.m, op.n, op.k) == (row["m"], row["n"], row["k"])
+    assert op.wave == row["wave"]
+    assert (op.gate or op.feature) == row["feature"], (
+        "the row names a feature clang does not gate this builtin on")
+    assert (op.a.per_lane, op.b.per_lane, op.d.per_lane) == (
+        row["a"][0], row["b"][0], row["d"][0])
+
+
+@pytest.mark.parametrize("op", catalog.MATRIX_OPS, ids=lambda op: op.builtin)
+def test_a_stricter_row_is_a_subset_of_what_clang_accepts(op):
+    """`feature` may be narrower than clang's gate, never wider.
+
+    Narrower is the interesting direction and the reason `gate` exists: clang
+    lets `mfma_f32_16x16x8_xf32` through on any `mai-insts` target, and the
+    instruction only exists on gfx942, so a row that trusted the builtin gate
+    would offer XF32 on gfx908 and fail in the backend. Wider would be a call
+    the front end rejects outright.
+    """
+    from tensorforge.backend.instructions.compute.primitives.amd import features
+    ours = set(features.FEATURE_TARGETS[op.feature])
+    theirs = set(features.FEATURE_TARGETS[op.gate or op.feature])
+    assert ours <= theirs, f"{op.builtin}: {op.feature} reaches past {op.gate}"
+
+
+@pytest.mark.parametrize("op", catalog.MATRIX_OPS, ids=lambda op: op.builtin)
+def test_blocks_and_replication_account_for_every_slot(op):
+    """The invariant that makes `blocks` a checkable claim.
+
+    LLVM states `per_lane * wave`; the catalogue splits it into a block count
+    and a replication factor, and only their product is determined. Asserting
+    the product turns a wrong split into a failure at whichever of the three
+    operands it does not fit -- which is what distinguishes a genuine 4-block
+    MFMA from a 1-block WMMA whose operand is held four times over.
+    """
+    assert op.a.per_lane * op.wave == op.m * op.k * op.blocks * op.replication("a")
+    assert op.b.per_lane * op.wave == op.k * op.n * op.blocks * op.replication("b")
+    assert op.d.per_lane * op.wave == op.m * op.n * op.blocks * op.replication("d")
+
+
+def test_only_the_rdna3_fragments_are_replicated():
+    """The one place the operands are held more than once.
+
+    Not a curiosity: it is why `wmma-256b-insts` costs 8 VGPRs per operand
+    where `wmma-128b-insts` costs 4 for the same 16x16x16 shape. If a later
+    generation joins them, this test is the place that says so.
+    """
+    replicated = {op.builtin for op in catalog.MATRIX_OPS
+                  if op.replication("a") > 1}
+    assert replicated == {op.builtin for op in catalog.MATRIX_OPS
+                          if op.feature == "wmma-256b-insts"}
+    for op in catalog.MATRIX_OPS:
+        assert op.replication("d") == 1, "no accumulator here is replicated"
+
+
+@pytest.mark.parametrize("feature,targets",
+                         sorted(catalog_features := _llvm()["features"].items()))
+def test_feature_targets_cover_what_llvm_lists(feature, targets):
+    """Containment, because gfx940 and gfx941 are ours and not LLVM's.
+
+    Both were removed from LLVM main as targets, not for lacking the
+    instructions, and `hip.h` still guards on them. So the check is that
+    nothing LLVM names is missing here -- the surplus is named in
+    `features._REMOVED_FROM_LLVM`.
+    """
+    from tensorforge.backend.instructions.compute.primitives.amd import features
+    ours = features.FEATURE_TARGETS[feature]
+    missing = [t for t in targets if int(t[3:], 16) not in ours]
+    assert not missing, f"{feature}: LLVM lists {missing}, features.py does not"
+
+
+@pytest.mark.parametrize("arch", ARCHS)
+def test_a_row_is_only_offered_where_its_wave_matches(arch):
+    """A matrix instruction is a whole-wave operation.
+
+    `wave` is stated per row because the same shape exists in both widths --
+    `wmma_f32_16x16x16_bf16_w32` and `..._w64` differ only in it -- and
+    picking the wrong one gives a correctly typed call that reads the wrong
+    lanes, which no snapshot would catch.
+    """
+    ctx = _ctx(arch)
+    hw = amd.wave_size(ctx)
+    for dtype in (Datatype.F32, Datatype.F64):
+        for op in catalog.ops_for(dtype, _ctx(arch, dtype)):
+            assert op.wave == hw
+            assert op.d.dtype == dtype
+
+
+def test_gfx1250_and_gfx1251_reach_the_native_paths():
+    """The finding that changes what those targets need.
+
+    gfx1250 has a native F32 matrix instruction and gfx1251 adds F64, so
+    neither is a split-precision target for the types SeisSol computes in.
+    Asserted rather than left to a comment, because the arch predicates in
+    `arch.py` still route both to the DPP path.
+    """
+    f32 = {op.builtin for op in catalog.ops_for(Datatype.F32, _ctx("gfx1250"))}
+    assert "wmma_f32_16x16x4_f32" in f32
+
+    f64 = {op.builtin for op in
+           catalog.ops_for(Datatype.F64, _ctx("gfx1251", Datatype.F64))}
+    assert "wmma_f64_16x16x4_f64" in f64
+    assert not catalog.ops_for(Datatype.F64, _ctx("gfx1250", Datatype.F64)), (
+        "gfx1251-gemm-insts is gfx1251 only")
+
+
+def test_fp64_mfma_is_offered_on_cdna2_and_up():
+    for arch in ("gfx90a", "gfx942", "gfx950"):
+        got = {op.builtin for op in
+               catalog.ops_for(Datatype.F64, _ctx(arch, Datatype.F64))}
+        assert got == {"mfma_f64_4x4x4f64", "mfma_f64_16x16x4f64"}
+    assert not catalog.ops_for(Datatype.F64, _ctx("gfx908", Datatype.F64)), (
+        "gfx908 has MFMA but no FP64 MFMA")
+
+
+# --------------------------------------------------------------------------- #
+# splits
+# --------------------------------------------------------------------------- #
+
+def test_bf16_needs_three_terms_and_six_products_for_f32():
+    """The scheme `mfma_emu_bf16_f32` already writes out, as a formula.
+
+    Three BF16 terms are 24 significand bits, which is F32's, and the products
+    with `i + j >= 3` sit at or below its rounding error.
+    """
+    op = next(o for o in catalog.MATRIX_OPS
+              if o.builtin == "mfma_f32_4x4x4bf16_1k")
+    terms = catalog.split_terms(op, Datatype.F32)
+    assert terms == 3
+    products = catalog.split_products(terms)
+    assert len(products) == 6
+    assert set(products) == {(0, 0), (0, 1), (1, 0), (0, 2), (2, 0), (1, 1)}
+
+
+def test_products_are_ordered_smallest_contribution_first():
+    products = catalog.split_products(3)
+    weights = [i + j for i, j in products]
+    assert weights == sorted(weights, reverse=True), (
+        "products are ordered by contribution, largest last")
+    assert weights[0] == 2, "the three smallest kept products come first"
+    assert products[-1] == (0, 0), "the leading term is accumulated last"
+
+
+def test_xf32_needs_fewer_terms_than_bf16():
+    """Why the gfx942 path is worth having beside the BF16 one.
+
+    Eleven significand bits against eight: two terms reach 22 bits where BF16
+    reaches 16, so the reduced variant is much closer to F32 for the same
+    three products.
+    """
+    xf32 = next(o for o in catalog.MATRIX_OPS if "xf32" in o.builtin)
+    bf16 = next(o for o in catalog.MATRIX_OPS if o.builtin.endswith("bf16_1k"))
+    assert xf32.significand > bf16.significand
+    assert len(catalog.split_products(2)) == 3
+
+
+def test_a_direct_row_needs_a_single_term():
+    op = next(o for o in catalog.MATRIX_OPS if o.builtin == "mfma_f64_4x4x4f64")
+    assert catalog.split_terms(op, Datatype.F64) == 1
+    assert catalog.split_products(1) == ((0, 0),)

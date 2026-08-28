@@ -9,7 +9,8 @@ the bugs that came out of this file:
 
 * `arch`     -- which family a target is
 * `caps`     -- what its runtime defines
-* `catalog`  -- what an MFMA tile is
+* `features` -- which LLVM subtarget features it has
+* `catalog`  -- what a matrix instruction is
 * `relayout` -- which instruction turns one lane distribution into another
 * `select`   -- which instruction width to use
 * `emitters` -- how to write one instruction down
@@ -35,8 +36,11 @@ from tensorforge.common.basic_types import Datatype
 
 from .arch import amdarch, cdna1, cdna2, gfx1250, gfx1251, rdna
 from .caps import has_fmacdpp4, has_fmacdpp8, has_fmacdpp16
-from .catalog import (DEFINED_TRANSPOSES, MFMA_TILES, MfmaTile,
+from .catalog import (DEFINED_TRANSPOSES, MANTISSA, MATRIX_OPS, MFMA_TILES,
+                      NOT_MODELLED, XF32_MANTISSA, Call, Fragment, MatrixOp,
+                      MfmaTile, ops_for, split_products, split_terms,
                       usable_mfma_tiles)
+from .features import FEATURE_TARGETS, has_feature, wave_size
 from .codegen import hfma, matmul32, matmuldpp
 from .emitters import fmadpp, fmadpp4, fmadpp8, fmadpp16, fmascalar
 from .relayout import (BROADCAST, MOVDPP16, RELAYOUTS, TRANSPOSE4X4, Relayout,
@@ -48,6 +52,10 @@ from .unused import (mfma_emu_bf16_f32, mfma_emu_f16_f32, mfma_emu_int8,
 __all__ = [
     'amdarch', 'cdna1', 'cdna2', 'gfx1250', 'gfx1251', 'rdna',
     'has_fmacdpp4', 'has_fmacdpp8', 'has_fmacdpp16',
+    'FEATURE_TARGETS', 'has_feature', 'wave_size',
+    'Call', 'Fragment', 'MatrixOp', 'MATRIX_OPS', 'MANTISSA',
+    'XF32_MANTISSA', 'NOT_MODELLED', 'ops_for', 'split_terms',
+    'split_products',
     'MfmaTile', 'DEFINED_TRANSPOSES', 'MFMA_TILES', 'usable_mfma_tiles',
     'wanted_fmadpp_step', 'select_fmadpp_step',
     'Relayout', 'RELAYOUTS', 'BROADCAST', 'MOVDPP16', 'TRANSPOSE4X4',

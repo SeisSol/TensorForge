@@ -59,6 +59,19 @@ KEPT_UNREACHABLE = {
         "matrix path, to be repaired rather than rewritten",
     "wmma3atom":
         "matrix path, to be repaired rather than rewritten",
+    # The catalogue describes every float matrix instruction; `matmul()` still
+    # selects from the three K=1 F32 tiles through `usable_mfma_tiles`, so the
+    # general query and the split arithmetic have no call site yet. They lose
+    # their entry here when the emitter that consumes them lands -- which is
+    # what `test_allow_list_does_not_outlive_its_entries` enforces.
+    "ops_for":
+        "catalogue query; the emitter that selects from it is not written",
+    "split_terms":
+        "split-precision arithmetic; no emitter consumes it yet",
+    "split_products":
+        "split-precision arithmetic; no emitter consumes it yet",
+    "NOT_MODELLED":
+        "documents the catalogue's boundary; read by the LLVM cross-check",
 }
 
 
