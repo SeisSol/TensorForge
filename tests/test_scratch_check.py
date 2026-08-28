@@ -156,17 +156,26 @@ def _bodies(case: str, backend: str, arch: str):
 # packing check has to skip them.  A ratchet, not a target: these numbers may
 # go down and must never go up.
 #
-# Both at zero.  Every statement in a scratch-carrying body now declares what
-# it touches, so the packing is checked rather than partly skipped -- which is
-# what this file claimed to do from the start and could not.
+# `rectangular` is at 4, up from 0, and this is the one direction the ratchet
+# is not supposed to move -- so it needs the reason rather than the number.
 #
-# 16 before `RegisterAlloc` allocated through the builder, 14 before the
-# `glb_m*` bindings declared their read, 11 before the shared window became a
-# value, 10 before the transfers became `copy.async`.  The five
-# `cuda::pipeline` statements and the two miscategorised comments went with
-# that last one: the pipeline calls because there is no object left to drive,
-# the comments because the block that carried them did.
-STILL_OPAQUE = {"rectangular.py": 0, "square_notrans.py": 0}
+# The body did not get worse; it got bigger.  The persistent batch loop is an
+# `Op.FOR` now, so its scaffolding -- the loop header, the flag guard, the
+# lookahead bindings and the stage counter -- is *inside* a body for the first
+# time.  Those four statements were raw before as well; they were simply in
+# nobody's body and so in nobody's count.  `tools/macro_surface.py` measures
+# the same move from the other side and agrees: 2.0% of kernel lines emitted
+# outside any PIR body, down to 1.1%.
+#
+# It goes back to zero as the scaffolding becomes structured: the guard as
+# `Op.IF`, the lookahead bindings as values. Until then, four is the honest
+# number and a fifth means something new.
+#
+# The way down before this: 16 before `RegisterAlloc` allocated through the
+# builder, 14 before the `glb_m*` bindings declared their read, 11 before the
+# shared window became a value, 10 before the transfers became `copy.async`,
+# 3 while the `__syncwarp()` calls were left, then 0.
+STILL_OPAQUE = {"rectangular.py": 4, "square_notrans.py": 0}
 
 
 # `case` is auto-parametrized across the whole corpus by conftest.

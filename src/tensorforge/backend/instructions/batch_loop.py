@@ -322,7 +322,11 @@ class BatchLoop(AbstractInstruction):
         for instr in head:
             instr.gen_code(writer)
         with writer.If(self._flag_guard(writer)):
-            if self._wide_bodies():
+            if AbstractInstruction._shared_body:
+                # Already inside one -- opened by `gen_code` around the loop.
+                for instr in guarded:
+                    instr.gen_code(writer)
+            elif self._wide_bodies():
                 # one body for every instruction of the region
                 budget = max((i.temp_shmem() for i in guarded), default=0)
                 with AbstractInstruction.shared_body(self._context, writer,
@@ -350,13 +354,63 @@ class BatchLoop(AbstractInstruction):
         # Deliberately no writer.Scope() and no comment: the loop used to be
         # emitted inline by the generator, and adding either would change the
         # generated text.
+        if self._structured_loop(writer):
+            # One body for the whole section, with the loop *inside* it.
+            #
+            # Until now the builder was opened by `_emit_body`, one level
+            # further in, so every body sat within the loop and none could
+            # name it.  That is the 2% `tools/macro_surface.py` measures and
+            # the reason a transfer cannot be moved to the previous iteration:
+            # `can_reorder` licenses swaps inside a body, and nothing licenses
+            # a move across a back edge made of Writer text.
+            budget = self.temp_shmem()
+            with AbstractInstruction.shared_body(self._context, writer,
+                                                 scratch=budget) as builder:
+                self.gen_code_inner(builder)
+            return
         self.gen_code_inner(writer)
+
+    def _structured_loop(self, writer) -> bool:
+        """Should this loop be an `Op.FOR` rather than Writer text?
+
+        `PERSISTENT` only, for now.  `LAUNCHCTRL` is a `while` with a break and
+        a queried successor, which is not a counted loop and wants its own
+        design; the remaining mode has no loop at all, so there is nothing to
+        put in the IR.
+
+        Not when a body is already open: `shared_body` nests, and a second
+        one would put the loop inside the body it is meant to contain.
+        """
+        if self._mode is not LoopMode.PERSISTENT:
+            return False
+        if not self._wide_bodies():
+            return False
+        if AbstractInstruction._shared_body:
+            return False
+        # `for_` is the builder's; the Writer has only the raw `For`.  Testing
+        # for `alloc` would not do it -- `Writer` carries a `VarAlloc` under
+        # that name, so the check passed for neither and the path never ran
+        # while the corpus dutifully reported no drift.
+        return not hasattr(writer, 'for_')
 
     def gen_code_inner(self, writer) -> None:
         if self._mode is LoopMode.PERSISTENT:
             # TODO: OMP target
             # TODO: maybe iterate over adjacent elements? (for indirect pointers)
             self._declare_stage_counter(writer)
+            if hasattr(writer, 'for_'):
+                # `extern` and `ctype` because the name and the type are the
+                # macro layer's: `batchId0` is spelled out by the lookahead
+                # bindings, the flag guard and every `access_address` in the
+                # body, and it is `size_t` because it is compared against
+                # `numElements`.
+                with writer.for_(self._start, self._num_elements(),
+                                 self._stride, extern=self._batch(0),
+                                 ctype='size_t'):
+                    self._lookahead_bindings(writer)
+                    self._emit_body(writer)
+                    self._advance_stage_counter(writer)
+                return
             with writer.For(f'size_t {self._batch(0)} = {self._start}; '
                             f'{self._batch(0)} < {self._num_elements()}; '
                             f'{self._batch(0)} += {self._stride}'):
