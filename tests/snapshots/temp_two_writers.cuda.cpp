@@ -76,7 +76,7 @@ __launch_bounds__(256)
           const float *const __restrict__ glb_m2 = &m2[batchId0 * 72 + 0 + m2_extraOffset];
           float *const __restrict__ glb_m3 = &m3[batchId0 * 144 + 0 + m3_extraOffset];
           const float *const __restrict__ glb_m4 = &m4[batchId0 * 144 + 0 + m4_extraOffset];
-          alignas(16) float r0[12]{};
+          float r0[12]{};
           // r0 = load{g>r}(glb_m0);
           int32_t v8_lead = threadIdx.x % 16;
           if (v8_lead < 6) {
@@ -99,7 +99,7 @@ __launch_bounds__(256)
             }
           }
           // wait(r0 = load{g>r}(glb_m0););
-          alignas(16) float r2[12]{};
+          float r2[12]{};
           // r2 = load{g>r}(glb_m2);
           if (v8_lead < 6) {
             #pragma unroll
@@ -113,7 +113,7 @@ __launch_bounds__(256)
           }
           // wait(s0 = load{g>s}(glb_m1[0, 1]));
           __pipeline_wait_prior(0);
-          alignas(16) float r1[12]{};
+          float r1[12]{};
           __syncwarp();
           // r1 = +(r0 * s0) + None
           // [(0, 6), (0, 12)] [(0, 12)]
@@ -597,7 +597,7 @@ __launch_bounds__(256)
               s1[v835_a] = v828_data;
             }
           }
-          alignas(16) float r4[12]{};
+          float r4[12]{};
           // r4 = load{g>r}(glb_m4);
           if (v8_lead < 12) {
             #pragma unroll
@@ -610,7 +610,7 @@ __launch_bounds__(256)
             }
           }
           // wait(r2 = load{g>r}(glb_m2););
-          alignas(16) float r3[12]{};
+          float r3[12]{};
           // r3 = +(r2 * s0) + None
           // [(0, 6), (0, 12)] [(0, 12)]
           float ir3[12]{};
@@ -1103,7 +1103,7 @@ __launch_bounds__(256)
             }
           }
           // wait(r4 = load{g>r}(glb_m4););
-          alignas(16) float r5[12]{};
+          float r5[12]{};
           __syncwarp();
           // r5 = +(r4 * s1) + None
           // [(0, 12), (0, 12)] [(0, 12)]

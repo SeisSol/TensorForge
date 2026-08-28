@@ -83,7 +83,7 @@ __launch_bounds__(256)
           const float *const __restrict__ glb_m6 = &m6[batchId0 * 96 + 0 + m6_extraOffset];
           const float *const __restrict__ glb_m7 = &m7[batchId0 * 144 + 0 + m7_extraOffset];
           const float *const __restrict__ glb_m8 = &m8[batchId0 * 96 + 0 + m8_extraOffset];
-          alignas(16) float r0[12]{};
+          float r0[12]{};
           // r0 = load{g>r}(glb_m1);
           int32_t v12_lead = threadIdx.x % 16;
           if (v12_lead < 12) {
@@ -96,7 +96,7 @@ __launch_bounds__(256)
               r0[v30_a] = v29_data;
             }
           }
-          alignas(16) float r1[8]{};
+          float r1[8]{};
           // r1 = load{g>r}(glb_m2);
           float v32_lin = glb_m2[0 + threadIdx.x * 1];
           r1[0] = v32_lin;
@@ -111,7 +111,7 @@ __launch_bounds__(256)
           float v37_lin = glb_m2[80 + threadIdx.x * 1];
           r1[5] = v37_lin;
           // wait(r0 = load{g>r}(glb_m1););
-          alignas(16) float r3[12]{};
+          float r3[12]{};
           // r3 = load{g>r}(glb_m3);
           if (v12_lead < 12) {
             #pragma unroll
@@ -124,7 +124,7 @@ __launch_bounds__(256)
             }
           }
           // wait(r1 = load{g>r}(glb_m2););
-          alignas(16) float r2[8]{};
+          float r2[8]{};
           // r2 = +(r0 * r1) + None
           // [(0, 12), (0, 8)] [(0, 12)]
           float v61_data = r0[0];
@@ -257,7 +257,7 @@ __launch_bounds__(256)
           r2[5] = v78_acc;
           r2[6] = v79_acc;
           r2[7] = v80_acc;
-          alignas(16) float r4[8]{};
+          float r4[8]{};
           // r4 = load{g>r}(glb_m4);
           float v88_lin = glb_m4[0 + threadIdx.x * 1];
           r4[0] = v88_lin;
@@ -272,7 +272,7 @@ __launch_bounds__(256)
           float v93_lin = glb_m4[80 + threadIdx.x * 1];
           r4[5] = v93_lin;
           // wait(r3 = load{g>r}(glb_m3););
-          alignas(16) float r6[12]{};
+          float r6[12]{};
           // r6 = load{g>r}(glb_m5);
           if (v12_lead < 12) {
             #pragma unroll
@@ -285,7 +285,7 @@ __launch_bounds__(256)
             }
           }
           // wait(r4 = load{g>r}(glb_m4););
-          alignas(16) float r5[8]{};
+          float r5[8]{};
           // r5 = +(r3 * r4) + name: r2, type: SymbolType.Register, lead: [0]
           // [(0, 12), (0, 8)] [(0, 12)]
           float ir5[8]{};
@@ -429,7 +429,7 @@ __launch_bounds__(256)
               r5[v148_n1] = (v154_data + v151_data);
             }
           }
-          alignas(16) float r7[8]{};
+          float r7[8]{};
           // r7 = load{g>r}(glb_m6);
           float v158_lin = glb_m6[0 + threadIdx.x * 1];
           r7[0] = v158_lin;
@@ -444,7 +444,7 @@ __launch_bounds__(256)
           float v163_lin = glb_m6[80 + threadIdx.x * 1];
           r7[5] = v163_lin;
           // wait(r6 = load{g>r}(glb_m5););
-          alignas(16) float r9[12]{};
+          float r9[12]{};
           // r9 = load{g>r}(glb_m7);
           if (v12_lead < 12) {
             #pragma unroll
@@ -457,7 +457,7 @@ __launch_bounds__(256)
             }
           }
           // wait(r7 = load{g>r}(glb_m6););
-          alignas(16) float r8[8]{};
+          float r8[8]{};
           // r8 = +(r6 * r7) + name: r5, type: SymbolType.Register, lead: [0]
           // [(0, 12), (0, 8)] [(0, 12)]
           float ir8[8]{};
@@ -601,7 +601,7 @@ __launch_bounds__(256)
               r8[v218_n1] = (v224_data + v221_data);
             }
           }
-          alignas(16) float r10[8]{};
+          float r10[8]{};
           // r10 = load{g>r}(glb_m8);
           float v228_lin = glb_m8[0 + threadIdx.x * 1];
           r10[0] = v228_lin;
@@ -617,7 +617,7 @@ __launch_bounds__(256)
           r10[5] = v233_lin;
           // wait(r9 = load{g>r}(glb_m7););
           // wait(r10 = load{g>r}(glb_m8););
-          alignas(16) float r11[8]{};
+          float r11[8]{};
           // r11 = +(r9 * r10) + name: r8, type: SymbolType.Register, lead: [0]
           // [(0, 12), (0, 8)] [(0, 12)]
           float ir11[8]{};

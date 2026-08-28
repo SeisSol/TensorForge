@@ -77,7 +77,7 @@ __launch_bounds__(256)
           const float *const __restrict__ glb_m2 = &m2[batchId0 * 3136 + 0 + m2_extraOffset];
           float *const __restrict__ glb_m3 = &m3[batchId0 * 81 + 0 + m3_extraOffset];
           const float *const __restrict__ glb_m4 = &m4[batchId0 * 81 + 0 + m4_extraOffset];
-          alignas(16) float r0[112]{};
+          float r0[112]{};
           // r0 = load{g>r}(glb_m0);
           int32_t v8_lead = threadIdx.x % 32;
           #pragma unroll
@@ -120,7 +120,7 @@ __launch_bounds__(256)
             }
           }
           // wait(r0 = load{g>r}(glb_m0););
-          alignas(16) float r2[112]{};
+          float r2[112]{};
           // r2 = load{g>r}(glb_m2);
           #pragma unroll
           for (int32_t v54_i0 = 0; v54_i0 < 1; ++v54_i0) {
@@ -150,7 +150,7 @@ __launch_bounds__(256)
           }
           // wait(s0 = load{g>s}(glb_m1[0, 1]));
           __pipeline_wait_prior(0);
-          alignas(16) float r1[18]{};
+          float r1[18]{};
           __syncwarp();
           // r1 = +(r0 * s0) + None
           // [(0, 56), (0, 9)] [(0, 56)]
@@ -2899,7 +2899,7 @@ __launch_bounds__(256)
             r1[17] = (v5355_data + (v5312_data * v5307_data));
           }
           // wait(r2 = load{g>r}(glb_m2););
-          alignas(16) float r3[18]{};
+          float r3[18]{};
           // r3 = +(r2 * s0) + None
           // [(0, 56), (0, 9)] [(0, 56)]
           float v5361_data = r2[0];
@@ -5193,7 +5193,7 @@ __launch_bounds__(256)
               s2[v10685_a] = v10678_data;
             }
           }
-          alignas(16) float r4[9]{};
+          float r4[9]{};
           __syncwarp();
           // r4 = +(s1 * s2) + None
           // [(0, 9), (0, 9)] [(0, 56)]
@@ -7842,7 +7842,7 @@ __launch_bounds__(256)
           }
           // wait(s4 = load{g>s}(glb_m4[0, 1]));
           __pipeline_wait_prior(0);
-          alignas(16) float r5[9]{};
+          float r5[9]{};
           __syncwarp();
           // r5 = +(r4 * s4) + None
           // [(0, 9), (0, 9)] [(0, 9)]

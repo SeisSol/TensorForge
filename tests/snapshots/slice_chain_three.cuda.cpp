@@ -73,7 +73,7 @@ __launch_bounds__(256)
           const float *const __restrict__ glb_m1 = &m1[batchId0 * 36 + 0 + m1_extraOffset];
           float *const __restrict__ glb_m2 = &m2[batchId0 * 72 + 0 + m2_extraOffset];
           const float *const __restrict__ glb_m3 = &m3[batchId0 * 144 + 0 + m3_extraOffset];
-          alignas(16) float r0[6]{};
+          float r0[6]{};
           // r0 = load{g>r}(glb_m0);
           int32_t v7_lead = threadIdx.x % 16;
           if (v7_lead < 12) {
@@ -97,7 +97,7 @@ __launch_bounds__(256)
             __pipeline_commit();
           }
           // wait(r0 = load{g>r}(glb_m0););
-          alignas(16) float r2[12]{};
+          float r2[12]{};
           // r2 = load{g>r}(glb_m3);
           if (v7_lead < 12) {
             #pragma unroll
@@ -111,7 +111,7 @@ __launch_bounds__(256)
           }
           // wait(s0 = load{g>s}(glb_m1[0, 1]));
           __pipeline_wait_prior(0);
-          alignas(16) float r1[6]{};
+          float r1[6]{};
           __syncwarp();
           // r1 = +(r0 * s0) + None
           // [(0, 12), (0, 6)] [(0, 6)]
@@ -254,7 +254,7 @@ __launch_bounds__(256)
               s1[v272_a] = v265_data;
             }
           }
-          alignas(16) float r3[6]{};
+          float r3[6]{};
           __syncwarp();
           // r3 = +(r2 * s1) + None
           // [(0, 12), (0, 6)] [(0, 12)]

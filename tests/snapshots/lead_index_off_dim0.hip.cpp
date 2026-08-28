@@ -78,13 +78,13 @@ __launch_bounds__(256)
               r0[v22_a] = v21_data;
             }
           }
-          alignas(16) float r1[9]{};
+          float r1[9]{};
           // r1 = load{g>r}(glb_m2);
           float v24_lin = glb_m2[0 + threadIdx.x * 1];
           r1[0] = v24_lin;
           // wait(r0 = load{g>r}(glb_m1););
           // wait(r1 = load{g>r}(glb_m2););
-          alignas(16) float r2[9]{};
+          float r2[9]{};
           // r2 = +(r0 * r1) + None
           // [(0, 20), (0, 9)] [(0, 1)]
           float v26_data = r0[0];

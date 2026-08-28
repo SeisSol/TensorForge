@@ -72,7 +72,7 @@ __launch_bounds__(256)
           const float *const __restrict__ glb_m2 = &m2[batchId0 * 156 + 0 + m2_extraOffset];
           float *const __restrict__ glb_m3 = &m3[batchId0 * 416 + 0 + m3_extraOffset];
           const float *const __restrict__ glb_m4 = &m4[batchId0 * 169 + 0 + m4_extraOffset];
-          alignas(16) float r0[13]{};
+          float r0[13]{};
           // r0 = load{g>r}(glb_m0);
           int32_t v8_lead = threadIdx.x % 32;
           #pragma unroll
@@ -89,7 +89,7 @@ __launch_bounds__(256)
               r0[v26_a] = v25_data;
             }
           }
-          alignas(16) float r2[12]{};
+          float r2[12]{};
           // r2 = load{g>r}(glb_m1);
           #pragma unroll
           for (int32_t v31_i0 = 0; v31_i0 < 1; ++v31_i0) {
@@ -106,7 +106,7 @@ __launch_bounds__(256)
             }
           }
           // wait(r0 = load{g>r}(glb_m0););
-          alignas(16) float r1[13]{};
+          float r1[13]{};
           // r1 = +(r0) + None
           // [(0, 32), (0, 13)] []
           float v53_data = r0[0];
@@ -148,7 +148,7 @@ __launch_bounds__(256)
           float v89_data = r0[12];
           float v90_data = r1[12];
           r1[12] = (v90_data + v89_data);
-          alignas(16) float r3[13]{};
+          float r3[13]{};
           // r3 = load{g>r}(glb_m2);
           float v93_lin = glb_m2[0 + threadIdx.x * 1];
           r3[0] = v93_lin;
@@ -162,7 +162,7 @@ __launch_bounds__(256)
           r3[4] = v97_lin;
           // wait(r2 = load{g>r}(glb_m1););
           // wait(r3 = load{g>r}(glb_m2););
-          alignas(16) float r4[13]{};
+          float r4[13]{};
           // r4 = +(r2 * r3) + name: r1, type: SymbolType.Register, lead: [0]
           // [(0, 32), (0, 13)] [(0, 12)]
           float ir4[13]{};
@@ -404,7 +404,7 @@ __launch_bounds__(256)
               glb_m0[(v172_lead + ((v164_i1 + 4) * 32))] = v167_data;
             }
           }
-          alignas(16) float r6[13]{};
+          float r6[13]{};
           // r6 = load{g>r}(glb_m0);
           #pragma unroll
           for (int32_t v180_i0 = 0; v180_i0 < 1; ++v180_i0) {
@@ -420,7 +420,7 @@ __launch_bounds__(256)
               r6[v197_a] = v196_data;
             }
           }
-          alignas(16) float r7[13]{};
+          float r7[13]{};
           // r7 = load{g>r}(glb_m4);
           float v199_lin = glb_m4[0 + threadIdx.x * 1];
           r7[0] = v199_lin;
@@ -436,7 +436,7 @@ __launch_bounds__(256)
           r7[5] = v204_lin;
           // wait(r6 = load{g>r}(glb_m0););
           // wait(r7 = load{g>r}(glb_m4););
-          alignas(16) float r8[13]{};
+          float r8[13]{};
           // r8 = +(r6 * r7) + None
           // [(0, 32), (0, 13)] [(0, 13)]
           float v206_data = r6[0];

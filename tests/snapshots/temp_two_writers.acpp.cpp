@@ -57,7 +57,7 @@ inline void kernel_kernel_3e24e7feaf(sycl::queue *stream, sycl::range<3> group_c
               *(sycl::vec<float, 4>*)&s0[0 + 0 + 4 * item.get_local_id(0) + 64] = *(sycl::vec<float, 4>*)&glb_m1[0 + 0 + 4 * item.get_local_id(0) + 64];
               s0[0 + 0 + 1 * item.get_local_id(0) + 128] = glb_m1[0 + 0 + 1 * item.get_local_id(0) + 128];
               // wait(s0 = load{g>s}(glb_m1[0, 1]));
-              alignas(16) float r0[12]{};
+              float r0[12]{};
               sycl::group_barrier(item.get_sub_group());
               // r0 = +(glb_m0 * s0) + None
               // [(0, 6), (0, 12)] [(0, 12)]
@@ -818,7 +818,7 @@ inline void kernel_kernel_3e24e7feaf(sycl::queue *stream, sycl::range<3> group_c
                   s1[v2518_a] = v2511_data;
                 }
               }
-              alignas(16) float r1[12]{};
+              float r1[12]{};
               // r1 = +(glb_m2 * s0) + None
               // [(0, 6), (0, 12)] [(0, 12)]
               float ir1[12]{};
@@ -1586,7 +1586,7 @@ inline void kernel_kernel_3e24e7feaf(sycl::queue *stream, sycl::range<3> group_c
                   s1[v5041_a] = v5033_data;
                 }
               }
-              alignas(16) float r2[12]{};
+              float r2[12]{};
               sycl::group_barrier(item.get_sub_group());
               // r2 = +(glb_m4 * s1) + None
               // [(0, 12), (0, 12)] [(0, 12)]

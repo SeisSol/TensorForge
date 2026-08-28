@@ -71,7 +71,7 @@ __launch_bounds__(256)
         if (allowed) {
           double *const __restrict__ glb_m0 = &m0[batchId0 * 256 + 0 + m0_extraOffset];
           const double *const __restrict__ glb_m2 = &m2[batchId0 * 256 + 0 + m2_extraOffset];
-          alignas(16) double r0[16]{};
+          double r0[16]{};
           // r0 = load{g>r}(glb_m2);
           double v5_lin = glb_m2[0 + threadIdx.x * 1];
           r0[0] = v5_lin;
@@ -106,7 +106,7 @@ __launch_bounds__(256)
           double v20_lin = glb_m2[240 + threadIdx.x * 1];
           r0[15] = v20_lin;
           // wait(r0 = load{g>r}(glb_m2););
-          alignas(16) double r1[16]{};
+          double r1[16]{};
           // r1 = +(glb_m1 * r0) + None
           // [(0, 16), (0, 16)] [(0, 16)]
           int32_t v24_lane = threadIdx.x % 16;

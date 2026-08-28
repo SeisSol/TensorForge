@@ -75,7 +75,7 @@ __launch_bounds__(256)
           auto glb_m2 = (tensorforge::SpacePtrRestrict<const float, tensorforge::GlobalMemspace>)&m2[batchId0][0 + m2_extraOffset];
           auto glb_m3 = (tensorforge::SpacePtrRestrict<float, tensorforge::GlobalMemspace>)&m3[batchId0][0 + m3_extraOffset];
           auto glb_m4 = (tensorforge::SpacePtrRestrict<const float, tensorforge::GlobalMemspace>)&m4[batchId0][0 + m4_extraOffset];
-          alignas(16) float r0[9]{};
+          float r0[9]{};
           // r0 = load{g>r}(glb_m0);
           int32_t v8_lead = threadIdx.x % 32;
           #pragma unroll
@@ -92,7 +92,7 @@ __launch_bounds__(256)
               r0[v26_a] = v25_data;
             }
           }
-          alignas(16) float r2[9]{};
+          float r2[9]{};
           // r2 = load{g>r}(glb_m1);
           if (v8_lead < 16) {
             #pragma unroll
@@ -105,7 +105,7 @@ __launch_bounds__(256)
             }
           }
           // wait(r0 = load{g>r}(glb_m0););
-          alignas(16) float r1[9]{};
+          float r1[9]{};
           // r1 = +(r0) + None
           // [(0, 32), (0, 9)] []
           float v53_data = r0[0];
@@ -148,7 +148,7 @@ __launch_bounds__(256)
               s0[v95_a] = v88_data;
             }
           }
-          alignas(16) float r4[9]{};
+          float r4[9]{};
           // r4 = load{g>r}(glb_m2);
           if (v8_lead < 16) {
             #pragma unroll
@@ -161,7 +161,7 @@ __launch_bounds__(256)
             }
           }
           // wait(r2 = load{g>r}(glb_m1););
-          alignas(16) float r3[9]{};
+          float r3[9]{};
           // r3 = +(r2) + None
           // [(0, 16), (0, 9)] []
           if (v8_lead < 16) {
@@ -203,7 +203,7 @@ __launch_bounds__(256)
               s0[v164_a] = v157_data;
             }
           }
-          alignas(16) float r6[9]{};
+          float r6[9]{};
           // r6 = load{g>r}(glb_m4);
           float v166_lin = glb_m4[0 + threadIdx.x * 1];
           r6[0] = v166_lin;
@@ -212,7 +212,7 @@ __launch_bounds__(256)
           float v168_lin = glb_m4[64 + threadIdx.x * 1];
           r6[2] = v168_lin;
           // wait(r4 = load{g>r}(glb_m2););
-          alignas(16) float r5[9]{};
+          float r5[9]{};
           // r5 = +(r4) + None
           // [(0, 16), (0, 9)] []
           if (v8_lead < 16) {
@@ -255,7 +255,7 @@ __launch_bounds__(256)
             }
           }
           // wait(r6 = load{g>r}(glb_m4););
-          alignas(16) float r7[9]{};
+          float r7[9]{};
           // r7 = +(s0 * r6) + None
           // [(0, 32), (0, 9)] [(0, 9)]
           int32_t v222_a = v8_lead + 0;

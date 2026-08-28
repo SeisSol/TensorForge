@@ -77,7 +77,7 @@ __launch_bounds__(256)
           const float *const __restrict__ glb_m2 = &m2[batchId0][0 + m2_extraOffset];
           float *const __restrict__ glb_m3 = &m3[batchId0][0 + m3_extraOffset];
           const float *const __restrict__ glb_m4 = &m4[batchId0][0 + m4_extraOffset];
-          alignas(16) float r0[9]{};
+          float r0[9]{};
           // r0 = load{g>r}(glb_m0);
           int32_t v8_lead = threadIdx.x % 32;
           #pragma unroll
@@ -94,7 +94,7 @@ __launch_bounds__(256)
               r0[v26_a] = v25_data;
             }
           }
-          alignas(16) float r2[9]{};
+          float r2[9]{};
           // r2 = load{g>r}(glb_m1);
           if (v8_lead < 16) {
             #pragma unroll
@@ -107,7 +107,7 @@ __launch_bounds__(256)
             }
           }
           // wait(r0 = load{g>r}(glb_m0););
-          alignas(16) float r1[9]{};
+          float r1[9]{};
           // r1 = +(r0) + None
           // [(0, 32), (0, 9)] []
           float v53_data = r0[0];
@@ -150,7 +150,7 @@ __launch_bounds__(256)
               s0[v95_a] = v88_data;
             }
           }
-          alignas(16) float r4[9]{};
+          float r4[9]{};
           // r4 = load{g>r}(glb_m2);
           if (v8_lead < 16) {
             #pragma unroll
@@ -163,7 +163,7 @@ __launch_bounds__(256)
             }
           }
           // wait(r2 = load{g>r}(glb_m1););
-          alignas(16) float r3[9]{};
+          float r3[9]{};
           __syncwarp();
           // r3 = +(r2) + name: s0, type: SymbolType.SharedMem, lead: [0]
           // [(0, 16), (0, 9)] []
@@ -220,7 +220,7 @@ __launch_bounds__(256)
             }
           }
           // wait(r4 = load{g>r}(glb_m2););
-          alignas(16) float r5[9]{};
+          float r5[9]{};
           __syncwarp();
           // r5 = +(r4) + name: s0, type: SymbolType.SharedMem, lead: [0]
           // [(0, 16), (0, 9)] []
@@ -288,7 +288,7 @@ __launch_bounds__(256)
           }
           // wait(s1 = load{g>s}(glb_m4[0, 1]));
           __pipeline_wait_prior(0);
-          alignas(16) float r6[9]{};
+          float r6[9]{};
           __syncwarp();
           // r6 = +(s0 * s1) + None
           // [(0, 32), (0, 9)] [(0, 9)]

@@ -55,7 +55,7 @@ inline void kernel_kernel_7cc2a3c5b0(sycl::queue *stream, sycl::range<3> group_c
               float v17_data = glb_m0[v6_lead];
               float v18_data = r0[0];
               r0[0] = (v18_data + v17_data);
-              alignas(8) float r1[3]{};
+              float r1[3]{};
               // r1 = +(glb_m1) + None
               // [(0, 32), (0, 3)] []
               int32_t v29_a = v6_lead + 0;
@@ -70,7 +70,7 @@ inline void kernel_kernel_7cc2a3c5b0(sycl::queue *stream, sycl::range<3> group_c
               float v66_data = glb_m1[(v6_lead + 64)];
               float v67_data = r1[2];
               r1[2] = (v67_data + v66_data);
-              alignas(8) float r2[3]{};
+              float r2[3]{};
               // r2 = +(r0) + None
               // [(0, 32), (0, 3)] []
               float v73_data = r0[0];
@@ -80,7 +80,7 @@ inline void kernel_kernel_7cc2a3c5b0(sycl::queue *stream, sycl::range<3> group_c
               r2[1] = (v77_data + v73_data);
               float v80_data = r2[2];
               r2[2] = (v80_data + v73_data);
-              alignas(8) float r3[3]{};
+              float r3[3]{};
               // r3 = +(r1) + name: r2, type: SymbolType.Register, lead: [0]
               // [(0, 32), (0, 3)] []
               float ir3[3]{};
@@ -105,7 +105,7 @@ inline void kernel_kernel_7cc2a3c5b0(sycl::queue *stream, sycl::range<3> group_c
                   r3[v102_a] = (v106_data + v103_data);
                 }
               }
-              alignas(8) float r4[3]{};
+              float r4[3]{};
               // r4 = +(r3) + None
               // [(0, 32), (0, 3)] []
               float ir4[3]{};

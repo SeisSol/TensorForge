@@ -80,7 +80,7 @@ __launch_bounds__(256)
           const float *const __restrict__ glb_m4 = &m4[batchId0 * 96 + 0 + m4_extraOffset];
           const float *const __restrict__ glb_m5 = &m5[batchId0 * 384 + 0 + m5_extraOffset];
           const float *const __restrict__ glb_m6 = &m6[batchId0 * 96 + 0 + m6_extraOffset];
-          alignas(16) float r0[12]{};
+          float r0[12]{};
           // r0 = load{g>r}(glb_m1);
           int32_t v10_lead = threadIdx.x % 32;
           #pragma unroll
@@ -107,7 +107,7 @@ __launch_bounds__(256)
             }
           }
           // wait(r0 = load{g>r}(glb_m1););
-          alignas(16) float r2[12]{};
+          float r2[12]{};
           // r2 = load{g>r}(glb_m3);
           #pragma unroll
           for (int32_t v35_i0 = 0; v35_i0 < 1; ++v35_i0) {
@@ -125,7 +125,7 @@ __launch_bounds__(256)
           }
           // wait(s0 = load{g>s}(glb_m2[0, 1]));
           __pipeline_wait_prior(0);
-          alignas(16) float r1[16]{};
+          float r1[16]{};
           __syncwarp();
           // r1 = +(r0 * s0) + None
           // [(0, 32), (0, 16)] [(0, 12)]
@@ -749,7 +749,7 @@ __launch_bounds__(256)
           __pipeline_memcpy_async(&s1[0 + 0 + 1 * threadIdx.x + 64], &glb_m4[0 + 0 + 1 * threadIdx.x + 64], 4);
           __pipeline_commit();
           // wait(r2 = load{g>r}(glb_m3););
-          alignas(16) float r3[8]{};
+          float r3[8]{};
           // r3 = load{g>r}(glb_m0);
           #pragma unroll
           for (int32_t v1083_i0 = 0; v1083_i0 < 1; ++v1083_i0) {
@@ -767,7 +767,7 @@ __launch_bounds__(256)
           }
           // wait(s1 = load{g>s}(glb_m4[0, 1]));
           __pipeline_wait_prior(0);
-          alignas(16) float r5[12]{};
+          float r5[12]{};
           // r5 = load{g>r}(glb_m5);
           #pragma unroll
           for (int32_t v1105_i0 = 0; v1105_i0 < 1; ++v1105_i0) {
@@ -784,7 +784,7 @@ __launch_bounds__(256)
             }
           }
           // wait(r3 = load{g>r}(glb_m0););
-          alignas(16) float r4[8]{};
+          float r4[8]{};
           __syncwarp();
           // r4 = +(r2 * s1) + name: r3, type: SymbolType.Register, lead: [0]
           // [(0, 32), (0, 8)] [(0, 12)]
@@ -1122,7 +1122,7 @@ __launch_bounds__(256)
           __pipeline_memcpy_async(&s2[0 + 0 + 1 * threadIdx.x + 64], &glb_m6[0 + 0 + 1 * threadIdx.x + 64], 4);
           __pipeline_commit();
           // wait(r5 = load{g>r}(glb_m5););
-          alignas(16) float r6[8]{};
+          float r6[8]{};
           // r6 = load{g>r}(glb_m0);
           #pragma unroll
           for (int32_t v1677_i0 = 0; v1677_i0 < 1; ++v1677_i0) {
@@ -1141,7 +1141,7 @@ __launch_bounds__(256)
           // wait(s2 = load{g>s}(glb_m6[0, 1]));
           __pipeline_wait_prior(0);
           // wait(r6 = load{g>r}(glb_m0););
-          alignas(16) float r7[8]{};
+          float r7[8]{};
           __syncwarp();
           // r7 = +(r5 * s2) + name: r6, type: SymbolType.Register, lead: [0]
           // [(0, 32), (0, 8)] [(0, 12)]

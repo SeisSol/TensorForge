@@ -113,7 +113,7 @@ __launch_bounds__(256)
           // wait(s0 = load{g>s}(glb_m1[1, 0]));
           // wait(s1 = load{g>s}(glb_m2[0, 1]));
           __pipeline_wait_prior(0);
-          alignas(16) float r0[16]{};
+          float r0[16]{};
           __syncwarp();
           // r0 = +(s0 * s1) + None
           // [(0, 12), (0, 16)] [(0, 20)]

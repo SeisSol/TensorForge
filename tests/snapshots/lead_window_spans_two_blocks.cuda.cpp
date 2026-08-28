@@ -68,7 +68,7 @@ __launch_bounds__(256)
         if (allowed) {
           const float *const __restrict__ glb_m0 = &m0[batchId0][0 + m0_extraOffset];
           float *const __restrict__ glb_m2 = &m2[batchId0][0 + m2_extraOffset];
-          alignas(16) float r0[26]{};
+          float r0[26]{};
           // r0 = load{g>r}(glb_m0);
           int32_t v6_lead = threadIdx.x % 32;
           #pragma unroll
@@ -85,7 +85,7 @@ __launch_bounds__(256)
               r0[v25_a] = v23_data;
             }
           }
-          alignas(16) float r2[12]{};
+          float r2[12]{};
           // r2 = load{g>r}(glb_m2);
           if (v6_lead >= 20) {
             #pragma unroll
@@ -124,7 +124,7 @@ __launch_bounds__(256)
             }
           }
           // wait(r0 = load{g>r}(glb_m0););
-          alignas(16) float r1[156]{};
+          float r1[156]{};
           // r1 = +(r0 * glb_m1) + None
           // [(0, 64), (0, 13), (0, 6)] []
           float v90_data = r0[0];
@@ -472,7 +472,7 @@ __launch_bounds__(256)
           float v868_data = r1[155];
           r1[155] = (v868_data + (v840_data * v116_data));
           // wait(r2 = load{g>r}(glb_m2););
-          alignas(16) float r3[12]{};
+          float r3[12]{};
           // r3 = +(r1) + name: r2, type: SymbolType.Register, lead: [0]
           // [(20, 35), (0, 1), (0, 6)] []
           float ir3[12]{};

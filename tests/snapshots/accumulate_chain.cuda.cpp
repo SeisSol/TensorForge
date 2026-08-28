@@ -85,7 +85,7 @@ __launch_bounds__(256)
           const float *const __restrict__ glb_m6 = &m6[batchId0 * 96 + 0 + m6_extraOffset];
           const float *const __restrict__ glb_m7 = &m7[batchId0 * 144 + 0 + m7_extraOffset];
           const float *const __restrict__ glb_m8 = &m8[batchId0 * 96 + 0 + m8_extraOffset];
-          alignas(16) float r0[12]{};
+          float r0[12]{};
           // r0 = load{g>r}(glb_m1);
           int32_t v12_lead = threadIdx.x % 16;
           if (v12_lead < 12) {
@@ -108,7 +108,7 @@ __launch_bounds__(256)
             }
           }
           // wait(r0 = load{g>r}(glb_m1););
-          alignas(16) float r2[12]{};
+          float r2[12]{};
           // r2 = load{g>r}(glb_m3);
           if (v12_lead < 12) {
             #pragma unroll
@@ -122,7 +122,7 @@ __launch_bounds__(256)
           }
           // wait(s0 = load{g>s}(glb_m2[0, 1]));
           __pipeline_wait_prior(0);
-          alignas(16) float r1[8]{};
+          float r1[8]{};
           __syncwarp();
           // r1 = +(r0 * s0) + None
           // [(0, 12), (0, 8)] [(0, 12)]
@@ -470,7 +470,7 @@ __launch_bounds__(256)
             }
           }
           // wait(r2 = load{g>r}(glb_m3););
-          alignas(16) float r4[12]{};
+          float r4[12]{};
           // r4 = load{g>r}(glb_m5);
           if (v12_lead < 12) {
             #pragma unroll
@@ -484,7 +484,7 @@ __launch_bounds__(256)
           }
           // wait(s1 = load{g>s}(glb_m4[0, 1]));
           __pipeline_wait_prior(0);
-          alignas(16) float r3[8]{};
+          float r3[8]{};
           __syncwarp();
           // r3 = +(r2 * s1) + name: r1, type: SymbolType.Register, lead: [0]
           // [(0, 12), (0, 8)] [(0, 12)]
@@ -834,7 +834,7 @@ __launch_bounds__(256)
             }
           }
           // wait(r4 = load{g>r}(glb_m5););
-          alignas(16) float r6[12]{};
+          float r6[12]{};
           // r6 = load{g>r}(glb_m7);
           if (v12_lead < 12) {
             #pragma unroll
@@ -848,7 +848,7 @@ __launch_bounds__(256)
           }
           // wait(s2 = load{g>s}(glb_m6[0, 1]));
           __pipeline_wait_prior(0);
-          alignas(16) float r5[8]{};
+          float r5[8]{};
           __syncwarp();
           // r5 = +(r4 * s2) + name: r3, type: SymbolType.Register, lead: [0]
           // [(0, 12), (0, 8)] [(0, 12)]
@@ -1200,7 +1200,7 @@ __launch_bounds__(256)
           // wait(r6 = load{g>r}(glb_m7););
           // wait(s3 = load{g>s}(glb_m8[0, 1]));
           __pipeline_wait_prior(0);
-          alignas(16) float r7[8]{};
+          float r7[8]{};
           __syncwarp();
           // r7 = +(r6 * s3) + name: r5, type: SymbolType.Register, lead: [0]
           // [(0, 12), (0, 8)] [(0, 12)]

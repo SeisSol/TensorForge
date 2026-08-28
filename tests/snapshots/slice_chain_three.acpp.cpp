@@ -55,7 +55,7 @@ inline void kernel_kernel_08703cce1d(sycl::queue *stream, sycl::range<3> group_c
                 s0[0 + 0 + 1 * item.get_local_id(0) + 32] = glb_m1[0 + 0 + 1 * item.get_local_id(0) + 32];
               }
               // wait(s0 = load{g>s}(glb_m1[0, 1]));
-              alignas(16) float r0[6]{};
+              float r0[6]{};
               sycl::group_barrier(item.get_sub_group());
               // r0 = +(glb_m0 * s0) + None
               // [(0, 12), (0, 6)] [(0, 6)]
@@ -264,7 +264,7 @@ inline void kernel_kernel_08703cce1d(sycl::queue *stream, sycl::range<3> group_c
                   s1[v657_a] = v650_data;
                 }
               }
-              alignas(16) float r1[6]{};
+              float r1[6]{};
               sycl::group_barrier(item.get_sub_group());
               // r1 = +(glb_m3 * s1) + None
               // [(0, 12), (0, 6)] [(0, 12)]

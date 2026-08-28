@@ -54,7 +54,7 @@ inline void kernel_kernel_08a27dccde(sycl::queue *stream, sycl::range<3> group_c
                 s0[0 + 0 + 1 * item.get_local_id(0) + 80] = glb_m2[0 + 0 + 1 * item.get_local_id(0) + 80];
               }
               // wait(s0 = load{g>s}(glb_m2[0, 1]));
-              alignas(16) float r0[9]{};
+              float r0[9]{};
               sycl::group_barrier(item.get_sub_group());
               // r0 = +(glb_m1 * s0) + None
               // [(0, 9), (0, 9)] [(0, 9)]

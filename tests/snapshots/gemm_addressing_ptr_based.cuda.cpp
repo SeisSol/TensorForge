@@ -70,7 +70,7 @@ __launch_bounds__(256)
           float *const __restrict__ glb_m0 = &m0[batchId0][0 + m0_extraOffset];
           const float *const __restrict__ glb_m1 = &m1[batchId0][0 + m1_extraOffset];
           const float *const __restrict__ glb_m2 = &m2[batchId0][0 + m2_extraOffset];
-          alignas(16) float r0[16]{};
+          float r0[16]{};
           // r0 = load{g>r}(glb_m1);
           int32_t v6_lead = threadIdx.x % 16;
           #pragma unroll
@@ -99,7 +99,7 @@ __launch_bounds__(256)
           // wait(r0 = load{g>r}(glb_m1););
           // wait(s0 = load{g>s}(glb_m2[0, 1]));
           __pipeline_wait_prior(0);
-          alignas(16) float r1[16]{};
+          float r1[16]{};
           __syncwarp();
           // r1 = +(r0 * s0) + None
           // [(0, 16), (0, 16)] [(0, 16)]

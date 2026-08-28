@@ -70,7 +70,7 @@ __launch_bounds__(256)
           double *const __restrict__ glb_m0 = &m0[batchId0 * 96 + 0 + m0_extraOffset];
           const double *const __restrict__ glb_m1 = &m1[batchId0 * 192 + 0 + m1_extraOffset];
           const double *const __restrict__ glb_m2 = &m2[batchId0 * 128 + 0 + m2_extraOffset];
-          alignas(16) double r0[16]{};
+          double r0[16]{};
           // r0 = load{g>r}(glb_m1);
           int32_t v6_lead = threadIdx.x % 16;
           if (v6_lead < 12) {
@@ -93,7 +93,7 @@ __launch_bounds__(256)
             }
           }
           // wait(r0 = load{g>r}(glb_m1););
-          alignas(16) double r1[8]{};
+          double r1[8]{};
           // r1 = load{g>r}(glb_m0);
           if (v6_lead < 12) {
             #pragma unroll
@@ -108,7 +108,7 @@ __launch_bounds__(256)
           // wait(s0 = load{g>s}(glb_m2[0, 1]));
           __pipeline_wait_prior(0);
           // wait(r1 = load{g>r}(glb_m0););
-          alignas(16) double r2[8]{};
+          double r2[8]{};
           __syncwarp();
           // r2 = +(r0 * s0) + name: r1, type: SymbolType.Register, lead: [0]
           // [(0, 12), (0, 8)] [(0, 16)]

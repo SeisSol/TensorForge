@@ -77,7 +77,7 @@ __launch_bounds__(256)
           const float *const __restrict__ glb_m2 = &m2[batchId0 * 1024 + 0 + m2_extraOffset];
           float *const __restrict__ glb_m3 = &m3[batchId0 * 128 + 0 + m3_extraOffset];
           const float *const __restrict__ glb_m4 = &m4[batchId0 * 128 + 0 + m4_extraOffset];
-          alignas(16) float r0[32]{};
+          float r0[32]{};
           // r0 = load{g>r}(glb_m0);
           int32_t v8_lead = threadIdx.x % 32;
           #pragma unroll
@@ -104,7 +104,7 @@ __launch_bounds__(256)
             }
           }
           // wait(r0 = load{g>r}(glb_m0););
-          alignas(16) float r2[32]{};
+          float r2[32]{};
           // r2 = load{g>r}(glb_m2);
           #pragma unroll
           for (int32_t v33_i0 = 0; v33_i0 < 1; ++v33_i0) {
@@ -122,7 +122,7 @@ __launch_bounds__(256)
           }
           // wait(s0 = load{g>s}(glb_m1[0, 1]));
           __pipeline_wait_prior(0);
-          alignas(16) float r1[16]{};
+          float r1[16]{};
           __syncwarp();
           // r1 = +(r0 * s0) + None
           // [(0, 32), (0, 16)] [(0, 32)]
@@ -1695,7 +1695,7 @@ __launch_bounds__(256)
           float v2706_data = r1[15];
           r1[15] = (v2706_data + (v2628_data * v2704_data));
           // wait(r2 = load{g>r}(glb_m2););
-          alignas(16) float r3[16]{};
+          float r3[16]{};
           // r3 = +(r2 * s0) + None
           // [(0, 32), (0, 16)] [(0, 32)]
           float v2712_data = r2[0];
@@ -2781,7 +2781,7 @@ __launch_bounds__(256)
               s2[v5396_a] = v5389_data;
             }
           }
-          alignas(16) float r4[16]{};
+          float r4[16]{};
           __syncwarp();
           // r4 = +(s1 * s2) + None
           // [(0, 16), (0, 16)] [(0, 32)]
@@ -5422,7 +5422,7 @@ __launch_bounds__(256)
           __pipeline_commit();
           // wait(s4 = load{g>s}(glb_m4[0, 1]));
           __pipeline_wait_prior(0);
-          alignas(16) float r5[8]{};
+          float r5[8]{};
           __syncwarp();
           // r5 = +(r4 * s4) + None
           // [(0, 16), (0, 8)] [(0, 16)]

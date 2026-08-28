@@ -74,7 +74,7 @@ __launch_bounds__(256)
           const float *const __restrict__ glb_m2 = &m2[batchId0 * 72 + 0 + m2_extraOffset];
           float *const __restrict__ glb_m3 = &m3[batchId0 * 144 + 0 + m3_extraOffset];
           const float *const __restrict__ glb_m4 = &m4[batchId0 * 144 + 0 + m4_extraOffset];
-          alignas(16) float r0[12]{};
+          float r0[12]{};
           // r0 = load{g>r}(glb_m0);
           int32_t v8_lead = threadIdx.x % 16;
           if (v8_lead < 6) {
@@ -87,7 +87,7 @@ __launch_bounds__(256)
               r0[v26_a] = v25_data;
             }
           }
-          alignas(16) float r1[12]{};
+          float r1[12]{};
           // r1 = load{g>r}(glb_m1);
           float v28_lin = glb_m1[0 + threadIdx.x * 1];
           r1[0] = v28_lin;
@@ -218,7 +218,7 @@ __launch_bounds__(256)
           float v91_lin = glb_m1[1008 + threadIdx.x * 1];
           r1[63] = v91_lin;
           // wait(r0 = load{g>r}(glb_m0););
-          alignas(16) float r3[12]{};
+          float r3[12]{};
           // r3 = load{g>r}(glb_m2);
           if (v8_lead < 6) {
             #pragma unroll
@@ -231,7 +231,7 @@ __launch_bounds__(256)
             }
           }
           // wait(r1 = load{g>r}(glb_m1););
-          alignas(16) float r2[12]{};
+          float r2[12]{};
           // r2 = +(r0 * r1) + None
           // [(0, 6), (0, 12)] [(0, 12)]
           float v115_data = r1[0];
@@ -335,7 +335,7 @@ __launch_bounds__(256)
               s0[v241_a] = v234_data;
             }
           }
-          alignas(16) float r5[12]{};
+          float r5[12]{};
           // r5 = load{g>r}(glb_m4);
           if (v8_lead < 12) {
             #pragma unroll
@@ -348,7 +348,7 @@ __launch_bounds__(256)
             }
           }
           // wait(r3 = load{g>r}(glb_m2););
-          alignas(16) float r4[12]{};
+          float r4[12]{};
           // r4 = +(r3 * r1) + None
           // [(0, 6), (0, 12)] [(0, 12)]
           float v269_tp{};
@@ -441,7 +441,7 @@ __launch_bounds__(256)
             }
           }
           // wait(r5 = load{g>r}(glb_m4););
-          alignas(16) float r6[12]{};
+          float r6[12]{};
           // r6 = +(r5 * s0) + None
           // [(0, 12), (0, 12)] [(0, 12)]
           float v393_data = r5[0];

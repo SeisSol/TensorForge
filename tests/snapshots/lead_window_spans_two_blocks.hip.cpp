@@ -74,7 +74,7 @@ __launch_bounds__(256)
         if (allowed) {
           auto glb_m0 = (tensorforge::SpacePtrRestrict<const float, tensorforge::GlobalMemspace>)&m0[batchId0][0 + m0_extraOffset];
           auto glb_m2 = (tensorforge::SpacePtrRestrict<float, tensorforge::GlobalMemspace>)&m2[batchId0][0 + m2_extraOffset];
-          alignas(16) float r0[26]{};
+          float r0[26]{};
           // r0 = load{g>r}(glb_m0);
           int32_t v7_lead = threadIdx.x % 32;
           #pragma unroll
@@ -92,7 +92,7 @@ __launch_bounds__(256)
             }
           }
           // wait(r0 = load{g>r}(glb_m0););
-          alignas(16) float r1[156]{};
+          float r1[156]{};
           // r1 = +(r0 * glb_m1) + None
           // [(0, 64), (0, 13), (0, 6)] []
           float v28_data = r0[0];
@@ -573,7 +573,7 @@ __launch_bounds__(256)
           r1[153] = v183_acc;
           r1[154] = v184_acc;
           r1[155] = v185_acc;
-          alignas(16) float r2[12]{};
+          float r2[12]{};
           // r2 = +(r1) + None
           // [(20, 35), (0, 1), (0, 6)] []
           if (v7_lead >= 20) {

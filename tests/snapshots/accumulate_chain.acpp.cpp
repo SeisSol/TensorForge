@@ -65,7 +65,7 @@ inline void kernel_kernel_8a03a3cd0d(sycl::queue *stream, sycl::range<3> group_c
               *(sycl::vec<float, 4>*)&s0[0 + 0 + 4 * item.get_local_id(0) + 0] = *(sycl::vec<float, 4>*)&glb_m2[0 + 0 + 4 * item.get_local_id(0) + 0];
               *(sycl::vec<float, 2>*)&s0[0 + 0 + 2 * item.get_local_id(0) + 64] = *(sycl::vec<float, 2>*)&glb_m2[0 + 0 + 2 * item.get_local_id(0) + 64];
               // wait(s0 = load{g>s}(glb_m2[0, 1]));
-              alignas(16) float r0[8]{};
+              float r0[8]{};
               sycl::group_barrier(item.get_sub_group());
               // r0 = +(glb_m1 * s0) + None
               // [(0, 12), (0, 8)] [(0, 12)]
@@ -598,7 +598,7 @@ inline void kernel_kernel_8a03a3cd0d(sycl::queue *stream, sycl::range<3> group_c
               *(sycl::vec<float, 4>*)&s1[0 + 0 + 4 * item.get_local_id(0) + 0] = *(sycl::vec<float, 4>*)&glb_m4[0 + 0 + 4 * item.get_local_id(0) + 0];
               *(sycl::vec<float, 2>*)&s1[0 + 0 + 2 * item.get_local_id(0) + 64] = *(sycl::vec<float, 2>*)&glb_m4[0 + 0 + 2 * item.get_local_id(0) + 64];
               // wait(s1 = load{g>s}(glb_m4[0, 1]));
-              alignas(16) float r1[8]{};
+              float r1[8]{};
               sycl::group_barrier(item.get_sub_group());
               // r1 = +(glb_m3 * s1) + name: glb_m0, type: SymbolType.Global, lead: [0]
               // [(0, 12), (0, 8)] [(0, 12)]
@@ -1133,7 +1133,7 @@ inline void kernel_kernel_8a03a3cd0d(sycl::queue *stream, sycl::range<3> group_c
               *(sycl::vec<float, 4>*)&s2[0 + 0 + 4 * item.get_local_id(0) + 0] = *(sycl::vec<float, 4>*)&glb_m6[0 + 0 + 4 * item.get_local_id(0) + 0];
               *(sycl::vec<float, 2>*)&s2[0 + 0 + 2 * item.get_local_id(0) + 64] = *(sycl::vec<float, 2>*)&glb_m6[0 + 0 + 2 * item.get_local_id(0) + 64];
               // wait(s2 = load{g>s}(glb_m6[0, 1]));
-              alignas(16) float r2[8]{};
+              float r2[8]{};
               sycl::group_barrier(item.get_sub_group());
               // r2 = +(glb_m5 * s2) + name: glb_m0, type: SymbolType.Global, lead: [0]
               // [(0, 12), (0, 8)] [(0, 12)]
@@ -1668,7 +1668,7 @@ inline void kernel_kernel_8a03a3cd0d(sycl::queue *stream, sycl::range<3> group_c
               *(sycl::vec<float, 4>*)&s3[0 + 0 + 4 * item.get_local_id(0) + 0] = *(sycl::vec<float, 4>*)&glb_m8[0 + 0 + 4 * item.get_local_id(0) + 0];
               *(sycl::vec<float, 2>*)&s3[0 + 0 + 2 * item.get_local_id(0) + 64] = *(sycl::vec<float, 2>*)&glb_m8[0 + 0 + 2 * item.get_local_id(0) + 64];
               // wait(s3 = load{g>s}(glb_m8[0, 1]));
-              alignas(16) float r3[8]{};
+              float r3[8]{};
               sycl::group_barrier(item.get_sub_group());
               // r3 = +(glb_m7 * s3) + name: glb_m0, type: SymbolType.Global, lead: [0]
               // [(0, 12), (0, 8)] [(0, 12)]

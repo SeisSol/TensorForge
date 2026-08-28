@@ -68,7 +68,7 @@ __launch_bounds__(256)
           float *const __restrict__ glb_m0 = &m0[batchId0 * 128 + 0 + m0_extraOffset];
           const float *const __restrict__ glb_m1 = &m1[batchId0 * 256 + 0 + m1_extraOffset];
           const float *const __restrict__ glb_m2 = &m2[batchId0 * 128 + 0 + m2_extraOffset];
-          alignas(16) float r0[16]{};
+          float r0[16]{};
           // r0 = load{g>r}(glb_m1);
           int32_t v6_lead = threadIdx.x % 16;
           #pragma unroll
@@ -85,15 +85,15 @@ __launch_bounds__(256)
               r0[v24_a] = v23_data;
             }
           }
-          alignas(16) float r1[8]{};
+          float r1[8]{};
           // r1 = load{g>r}(glb_m2);
           tensorforge::VectorT<float, 4> v26_lin = *(tensorforge::VectorT<float, 4>*)&glb_m2[0 + threadIdx.x * 4];
-          *(tensorforge::VectorT<float, 4>*)&r1[0] = v26_lin;
+          *(tensorforge::VectorRelaxedT<float, 4>*)&r1[0] = v26_lin;
           tensorforge::VectorT<float, 4> v27_lin = *(tensorforge::VectorT<float, 4>*)&glb_m2[64 + threadIdx.x * 4];
-          *(tensorforge::VectorT<float, 4>*)&r1[4] = v27_lin;
+          *(tensorforge::VectorRelaxedT<float, 4>*)&r1[4] = v27_lin;
           // wait(r0 = load{g>r}(glb_m1););
           // wait(r1 = load{g>r}(glb_m2););
-          alignas(16) float r2[8]{};
+          float r2[8]{};
           // r2 = +(r0 * r1) + None
           // [(0, 16), (0, 8)] [(0, 16)]
           float v29_data = r1[0];

@@ -77,7 +77,7 @@ __launch_bounds__(256)
           const float *const __restrict__ glb_m2 = &m2[batchId0 * 156 + 0 + m2_extraOffset];
           float *const __restrict__ glb_m3 = &m3[batchId0 * 416 + 0 + m3_extraOffset];
           const float *const __restrict__ glb_m4 = &m4[batchId0 * 169 + 0 + m4_extraOffset];
-          alignas(16) float r0[13]{};
+          float r0[13]{};
           // r0 = load{g>r}(glb_m0);
           int32_t v8_lead = threadIdx.x % 32;
           #pragma unroll
@@ -94,7 +94,7 @@ __launch_bounds__(256)
               r0[v26_a] = v25_data;
             }
           }
-          alignas(16) float r2[12]{};
+          float r2[12]{};
           // r2 = load{g>r}(glb_m1);
           #pragma unroll
           for (int32_t v31_i0 = 0; v31_i0 < 1; ++v31_i0) {
@@ -111,7 +111,7 @@ __launch_bounds__(256)
             }
           }
           // wait(r0 = load{g>r}(glb_m0););
-          alignas(16) float r1[13]{};
+          float r1[13]{};
           // r1 = +(r0) + None
           // [(0, 32), (0, 13)] []
           float v53_data = r0[0];
@@ -170,7 +170,7 @@ __launch_bounds__(256)
           // wait(r2 = load{g>r}(glb_m1););
           // wait(s1 = load{g>s}(glb_m2[0, 1]));
           __pipeline_wait_prior(0);
-          alignas(16) float r3[13]{};
+          float r3[13]{};
           __syncwarp();
           // r3 = +(r2 * s1) + name: r1, type: SymbolType.Register, lead: [0]
           // [(0, 32), (0, 13)] [(0, 12)]
@@ -695,7 +695,7 @@ __launch_bounds__(256)
               glb_m0[(v958_lead + ((v950_i1 + 4) * 32))] = v953_data;
             }
           }
-          alignas(16) float r5[13]{};
+          float r5[13]{};
           // r5 = load{g>r}(glb_m0);
           #pragma unroll
           for (int32_t v966_i0 = 0; v966_i0 < 1; ++v966_i0) {
@@ -728,7 +728,7 @@ __launch_bounds__(256)
           // wait(r5 = load{g>r}(glb_m0););
           // wait(s2 = load{g>s}(glb_m4[0, 1]));
           __pipeline_wait_prior(0);
-          alignas(16) float r6[13]{};
+          float r6[13]{};
           __syncwarp();
           // r6 = +(r5 * s2) + None
           // [(0, 32), (0, 13)] [(0, 13)]

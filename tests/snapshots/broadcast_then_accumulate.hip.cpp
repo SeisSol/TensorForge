@@ -79,7 +79,7 @@ __launch_bounds__(256)
             float v18_data = __builtin_nontemporal_load(&glb_m0[(v6_lead + v11_lead)]);
             r0[v7_i0] = v18_data;
           }
-          alignas(8) float r2[3]{};
+          float r2[3]{};
           // r2 = load{g>r}(glb_m1);
           #pragma unroll
           for (int32_t v23_i0 = 0; v23_i0 < 1; ++v23_i0) {
@@ -103,7 +103,7 @@ __launch_bounds__(256)
           float v46_data = r1[0];
           r1[0] = (v46_data + v45_data);
           // wait(r2 = load{g>r}(glb_m1););
-          alignas(8) float r3[3]{};
+          float r3[3]{};
           // r3 = +(r2) + None
           // [(0, 32), (0, 3)] []
           float v52_data = r2[0];
@@ -115,7 +115,7 @@ __launch_bounds__(256)
           float v58_data = r2[2];
           float v59_data = r3[2];
           r3[2] = (v59_data + v58_data);
-          alignas(8) float r4[3]{};
+          float r4[3]{};
           // r4 = +(r1) + None
           // [(0, 32), (0, 3)] []
           float v65_data = r1[0];
@@ -125,7 +125,7 @@ __launch_bounds__(256)
           r4[1] = (v69_data + v65_data);
           float v72_data = r4[2];
           r4[2] = (v72_data + v65_data);
-          alignas(8) float r5[3]{};
+          float r5[3]{};
           // r5 = +(r3) + name: r4, type: SymbolType.Register, lead: [0]
           // [(0, 32), (0, 3)] []
           float ir5[3]{};
@@ -150,7 +150,7 @@ __launch_bounds__(256)
               r5[v94_a] = (v98_data + v95_data);
             }
           }
-          alignas(8) float r6[3]{};
+          float r6[3]{};
           // r6 = +(r5) + None
           // [(0, 32), (0, 3)] []
           float v105_data = r5[0];

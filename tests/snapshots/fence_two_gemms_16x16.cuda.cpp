@@ -76,7 +76,7 @@ __launch_bounds__(256)
           const float *const __restrict__ glb_m2 = &m2[batchId0 * 256 + 0 + m2_extraOffset];
           float *const __restrict__ glb_m3 = &m3[batchId0 * 256 + 0 + m3_extraOffset];
           const float *const __restrict__ glb_m4 = &m4[batchId0 * 256 + 0 + m4_extraOffset];
-          alignas(16) float r0[16]{};
+          float r0[16]{};
           // r0 = load{g>r}(glb_m1);
           int32_t v8_lead = threadIdx.x % 32;
           if (v8_lead < 16) {
@@ -101,7 +101,7 @@ __launch_bounds__(256)
           // wait(r0 = load{g>r}(glb_m1););
           // wait(s0 = load{g>s}(glb_m2[0, 1]));
           __pipeline_wait_prior(0);
-          alignas(16) float r1[16]{};
+          float r1[16]{};
           __syncwarp();
           // r1 = +(r0 * s0) + None
           // [(0, 16), (0, 16)] [(0, 16)]
@@ -965,7 +965,7 @@ __launch_bounds__(256)
           const float *const __restrict__ glb_m2 = &m2[batchId0 * 256 + 0 + m2_extraOffset];
           float *const __restrict__ glb_m3 = &m3[batchId0 * 256 + 0 + m3_extraOffset];
           const float *const __restrict__ glb_m4 = &m4[batchId0 * 256 + 0 + m4_extraOffset];
-          alignas(16) float r0[16]{};
+          float r0[16]{};
           // r0 = load{g>r}(glb_m0);
           int32_t v1407_lead = threadIdx.x % 32;
           if (v1407_lead < 16) {
@@ -990,7 +990,7 @@ __launch_bounds__(256)
           // wait(r0 = load{g>r}(glb_m0););
           // wait(s0 = load{g>s}(glb_m4[0, 1]));
           __pipeline_wait_prior(0);
-          alignas(16) float r1[16]{};
+          float r1[16]{};
           __syncwarp();
           // r1 = +(r0 * s0) + None
           // [(0, 16), (0, 16)] [(0, 16)]

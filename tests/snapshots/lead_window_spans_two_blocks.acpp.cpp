@@ -44,7 +44,7 @@ inline void kernel_kernel_671a350836(sycl::queue *stream, sycl::range<3> group_c
             if (allowed) {
               const float *const __restrict__ glb_m0 = &m0[batchId0][0 + m0_extraOffset];
               float *const __restrict__ glb_m2 = &m2[batchId0][0 + m2_extraOffset];
-              alignas(16) float r0[156]{};
+              float r0[156]{};
               // r0 = +(glb_m0 * glb_m1) + None
               // [(0, 64), (0, 13), (0, 6)] []
               int32_t v6_lead = item.get_local_id(0) % 32;
@@ -678,7 +678,7 @@ inline void kernel_kernel_671a350836(sycl::queue *stream, sycl::range<3> group_c
               float v2654_data = glb_m0[((v6_lead + 32_i32) + 768)];
               float v2657_data = r0[155];
               r0[155] = (v2657_data + (v2654_data * v105_data));
-              alignas(16) float r1[12]{};
+              float r1[12]{};
               // r1 = +(r0) + name: glb_m2, type: SymbolType.Global, lead: [0]
               // [(20, 35), (0, 1), (0, 6)] []
               float ir1[12]{};

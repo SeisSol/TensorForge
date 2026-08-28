@@ -86,7 +86,7 @@ inline void kernel_kernel_f94e030d8c(sycl::queue *stream, sycl::range<3> group_c
               }
               // wait(s0 = load{g>s}(glb_m1[1, 0]));
               // wait(s1 = load{g>s}(glb_m2[0, 1]));
-              alignas(16) float r0[16]{};
+              float r0[16]{};
               sycl::group_barrier(item.get_sub_group());
               // r0 = +(s0 * s1) + None
               // [(0, 12), (0, 16)] [(0, 20)]
