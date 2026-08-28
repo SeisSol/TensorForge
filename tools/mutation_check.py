@@ -489,6 +489,17 @@ GROUPS = {
     ]),
 
     'gate': ('tests/test_nvidia_gate.py', [
+        ('a staged fragment goes back to a varalloc name',
+         sub(Path('src/tensorforge/backend/instructions/compute/primitives/nvidia.py'),
+             '                                        Areg[kkk] = A(writer, None, i // threads, k + kk + kkk)',
+             "                                        Areg[kkk] = writer.varalloc()\n"
+             "                                        A(writer, f'{Areg[kkk]}', i // threads, k + kk + kkk)", 1)),
+        ('a padding fragment declared as text again',
+         sub(Path('src/tensorforge/backend/instructions/compute/primitives/nvidia.py'),
+             "                                        Areg[kkk] = writer.declare(ScalarType(atom.d),\n"
+             "                                                                   hint='as')",
+             "                                        Areg[kkk] = writer.varalloc()\n"
+             "                                        writer(f'float {Areg[kkk]}{{}};', accesses=())", 1)),
         ('the wave width no longer checked',
          sub(Path('src/tensorforge/backend/instructions/compute/primitives/nvidia.py'),
              'return threads == 32 and dtype in (Datatype.F32, Datatype.F64) and not sparse',

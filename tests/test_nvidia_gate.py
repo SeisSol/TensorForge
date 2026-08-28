@@ -161,3 +161,39 @@ def test_the_operand_numbering_survives_the_fold(enabled):
     numbers = [int(x.lstrip("%")) for x in d + a + b]
     assert numbers == list(range(len(numbers))), (
         f"operand numbering is not contiguous from 0: {numbers}")
+
+
+def test_the_matmul_emits_no_raw_statements(enabled):
+    """The end of the conversion, asserted rather than remembered.
+
+    Every operand in this path is a value now: the accessors hand back the
+    value instead of a name to write into, the accumulator slots and the
+    padding fragments are `declare`, the warp syncs are `barrier`, the staging
+    store is `store` over a `pack`, and `mma.sync` is `asm_stmt`.
+
+    A count, not a list, because the list would need re-recording on every
+    unrelated change.  Zero is the only number here that means anything: one
+    raw statement is a place where a pass cannot see what the code does, and
+    the whole point of the conversion was that there is no such place left.
+    """
+    import traceback
+
+    from tensorforge.backend.pir import build as pir_build
+
+    seen = []
+    original = pir_build.IRBuilder.__call__
+
+    def call(self, code, *args, **kwargs):
+        frame = next((f for f in reversed(traceback.extract_stack())
+                      if f.filename.endswith('primitives/nvidia.py')), None)
+        if frame is not None:
+            seen.append(f'nvidia.py:{frame.lineno}: {code.strip()[:60]}')
+        return original(self, code, *args, **kwargs)
+
+    pir_build.IRBuilder.__call__ = call
+    try:
+        _generate(CASE_THAT_TAKES_THE_PATH)
+    finally:
+        pir_build.IRBuilder.__call__ = original
+
+    assert not seen, "raw statements left in the MMA path:\n" + "\n".join(seen)

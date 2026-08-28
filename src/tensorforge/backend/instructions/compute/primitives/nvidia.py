@@ -214,8 +214,11 @@ def matmul(writer, C, A, B, M, N, K, kx, threads, dtype, sparse, ctx, shmptr, sh
 
 
 
-    Areg = writer.varalloc()
-    Breg = writer.varalloc()
+    # Staged fragments, by slot.  Dicts because the B index is a pair and the
+    # extents are loop-derived; what matters is that these hold values now, not
+    # C++ identifiers built out of a `varalloc` name.
+    Areg = {}
+    Breg = {}
     Creg = writer.varalloc()
 
     # `supports()` is the gate; this is the guard for a direct caller.
@@ -269,10 +272,17 @@ def matmul(writer, C, A, B, M, N, K, kx, threads, dtype, sparse, ctx, shmptr, sh
     for j in range(0, N, atom.n):
         with writer.AnonymousScope():
             for k in range(0, K + kx, threads):
+                # `var is None` asks the accessor for the value rather than a
+                # name to write into -- the protocol has said so since the
+                # sparse loader took it, and the MMA path simply never used it.
+                # The padding slots are a `declare` for the same reason they
+                # were a raw declaration: nothing loads them, and the MMA reads
+                # a zero.
                 for jj in range(0, min(atom.n, N - j)):
-                    B(writer, f'{Breg}_{k//threads}_{jj}', j + jj, k // threads)
+                    Breg[k // threads, jj] = B(writer, None, j + jj, k // threads)
                 for jj in range(min(atom.n, N - j), atom.n):
-                    writer(f'{atom.d.ctype()} {Breg}_{k//threads}_{jj}{"{}"};', accesses=())
+                    Breg[k // threads, jj] = writer.declare(ScalarType(atom.d),
+                                                            hint='bs')
             for i in range(0, M, threads):
                 with writer.AnonymousScope():
                     # One value per accumulator slot rather than a `[cregs][n]`
@@ -294,12 +304,12 @@ def matmul(writer, C, A, B, M, N, K, kx, threads, dtype, sparse, ctx, shmptr, sh
                                     trueSK = min(atom.k, threads - trueK)
                                     with threadrange(trueK, trueSK):
                                         for jj in range(0, atom.n):
-                                            writer.store(Bshm, f'{Breg}_{k//threads}_{jj}',
+                                            writer.store(Bshm, Breg[k // threads, jj],
                                                          writer.rawexpr(f'(threadIdx.x - {trueK}) % {atom.k} + {jj * atom.k}', type_=INDEX, hint='a'))
                                     if trueSK != atom.k:
                                         with threadrange(0, atom.k - trueSK):
                                             for jj in range(0, atom.n):
-                                                writer.store(Bshm, f'{Breg}_{k//threads+1}_{jj}',
+                                                writer.store(Bshm, Breg[k // threads + 1, jj],
                                                                      writer.rawexpr(f'(threadIdx.x + {trueSK}) % {atom.k} + {jj * atom.k}', type_=INDEX, hint='a'))
                                     writer.barrier(Uniformity.MULT)
 
@@ -316,9 +326,10 @@ def matmul(writer, C, A, B, M, N, K, kx, threads, dtype, sparse, ctx, shmptr, sh
                                             Bfrag[kkk + jj * kregs] = writer.load(Bshm, writer.rawexpr(f'(threadIdx.x % {ktile}) + (threadIdx.x / {ktile} + {jj * ntile}) * {atom.k} + {kkk * ktile}', type_=INDEX, hint='a'), hint='b')
 
                                     for kkk in range(0, min(atom.k, K - k - kk)):
-                                        A(writer, f'{Areg}_{kkk}', i // threads, k + kk + kkk)
+                                        Areg[kkk] = A(writer, None, i // threads, k + kk + kkk)
                                     for kkk in range(min(atom.k, K - k - kk), atom.k):
-                                        writer(f'{atom.d.ctype()} {Areg}_{kkk}{"{}"};', accesses=())
+                                        Areg[kkk] = writer.declare(ScalarType(atom.d),
+                                                                   hint='as')
 
                                     for ii in range(0, min(threads, M - i), atom.m):
                                         with writer.AnonymousScope():
@@ -336,7 +347,7 @@ def matmul(writer, C, A, B, M, N, K, kx, threads, dtype, sparse, ctx, shmptr, sh
                                                     # cast the verb performs.
                                                     quad = writer.pack(
                                                         ScalarType(atom.d, 4),
-                                                        *(f'{Areg}_{kkk + n}' for n in range(4)),
+                                                        *(Areg[kkk + n] for n in range(4)),
                                                         hint='q')
                                                     writer.store(
                                                         Ashm, quad,
