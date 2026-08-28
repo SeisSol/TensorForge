@@ -57,15 +57,26 @@ class Touch:
 
 @dataclass(frozen=True)
 class Window:
-    """Where a buffer sits in the arena, in elements."""
+    """Where a buffer sits in the arena, in elements.
+
+    `arena` is part of the position, not decoration.  A body can hold buffers
+    from more than one arena --- `rectangular` has a 352-element window in
+    `localShrMem0` alongside the three `tempShrMem` tiles --- and offsets are
+    counted from each arena's own base, so two buffers with overlapping
+    offsets in *different* arenas do not share a byte.  Comparing offsets
+    alone reports them as clobbering each other.
+    """
     start: int
     length: int
+    arena: Optional[str] = None
 
     @property
     def end(self) -> int:
         return self.start + self.length
 
     def overlaps(self, other: 'Window') -> bool:
+        if self.arena != other.arena:
+            return False
         return self.start < other.end and other.start < self.end
 
 
@@ -86,10 +97,11 @@ def windows(body: Sequence[Stmt]) -> Dict[int, Window]:
             continue
         attrs = dict(stmt.attrs) if stmt.attrs else {}
         offset = attrs.get('offset')
+        arena = attrs.get('arena')
         for t in stmt.target:
             if getattr(t.type, 'space', None) == MemSpace.SHARED:
                 out[id(t)] = Window(offset if offset is not None else 0,
-                                    t.type.volume)
+                                    t.type.volume, arena)
     return out
 
 

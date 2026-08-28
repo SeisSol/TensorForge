@@ -748,7 +748,7 @@ class IRBuilder:
         if uniform is None:
             uniform = _join(indices)
 
-        accesses = (Access(Effect.READ, space, base),)
+        accesses = (Access(Effect.READ, space, self.alias_root(base)),)
         tok = self.value(TOKEN, hint=hint)
         attrs: Tuple[Tuple[str, Any], ...] = (
             ('counter', 'load'), ('types', (type_,)), ('uniform', uniform),
@@ -1065,7 +1065,9 @@ class IRBuilder:
         # the emitter's decision to inline it -- the name would be gone.
         return self._emit_op(Op.RAWSTMT, (), tuple(args),
                              pure=False, movable=movable, effect=kind,
-                             accesses=(Access(kind, space, base),), text=text,
+                             accesses=(Access(kind, space,
+                                              self.alias_root(base)),),
+                             text=text,
                              attrs=(('fmt', True),) if fmt else ())
 
     def decl_expr(self, decl: str, text: str, type_, base: Any, *,
@@ -1107,11 +1109,33 @@ class IRBuilder:
         return v
 
     def alias_root(self, base: Any) -> Any:
-        """The buffer an operand's accesses should be recorded against."""
-        seen = getattr(base, 'id', None)
-        while seen is not None and seen in self._view_root:
-            base = self._view_root[seen]
-            seen = getattr(base, 'id', None)
+        """The buffer an operand's accesses should be recorded against.
+
+        A symbol and the value that stands for it *in this body* are one
+        buffer, so they have to reach the access model as one object.  They
+        did not: the structured path (`load`/`store`) records against the
+        value, the text path (`load_expr`/`access_stmt`) against the symbol,
+        and `may_alias` compares bases with `is` --- so a write through one
+        was invisible to a read through the other and `load_cse` could reuse
+        a load across it.  Nothing in the corpus takes both paths for one
+        symbol in one body today, which is why it never fired; the gate that
+        keeps it that way is `vec == 1` in `Symbol.load_linear`.
+
+        `pir_buffer` returns `None` for a value belonging to another body,
+        which is the wanted answer there: in that body the symbol is the only
+        identity, and every path uses it.
+        """
+        buf = base.pir_buffer(self) if hasattr(base, 'pir_buffer') else None
+        if buf is not None:
+            base = buf
+        # `seen` bounds the walk: `_view_root` is built one entry at a time by
+        # `decl_expr` and a cycle would be a defect, not something to hang on.
+        seen = set()
+        vid = getattr(base, 'id', None)
+        while vid is not None and vid in self._view_root and vid not in seen:
+            seen.add(vid)
+            base = self._view_root[vid]
+            vid = getattr(base, 'id', None)
         return base
 
     def load_expr(self, text: str, type_, base: Any, *,
@@ -1135,7 +1159,7 @@ class IRBuilder:
                       effect=kind,
                       accesses=(Access(kind,
                                        self._space_of(base) if space is None
-                                       else space, base),),
+                                       else space, self.alias_root(base)),),
                       text=text)
         return v
 
@@ -1265,7 +1289,7 @@ class _ValueBlock:
         acc = ()
         if self._base is not None:
             acc = (Access(self._kind, self.builder._space_of(self._base),
-                          self._base),)
+                          self.builder.alias_root(self._base)),)
         self.builder.emit(Stmt(op=Op.RAWBLOCK, target=(self.value,),
                                regions=(region,), text='', pure=False,
                                movable=False, effect=self._kind, accesses=acc))

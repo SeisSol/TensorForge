@@ -168,6 +168,18 @@ class Effect(IntFlag):
 ANY_EFFECT = (Effect.READ | Effect.WRITE | Effect.ATOMIC | Effect.BARRIER |
               Effect.ASYNC | Effect.UNKNOWN)
 
+# Raw int masks.  `Effect` is an `IntFlag`, and `a | b` / `a & b` on one of
+# those goes through `enum.Flag.__or__` -> `_get_value` -> `Flag.__call__` ->
+# `Flag.__new__`, which is roughly two orders of magnitude slower than an int
+# operation.  The analysis passes evaluate these predicates millions of times
+# per kernel, so the masks are folded once here and the tests are done on the
+# underlying int.
+_M_WRITES = int(Effect.WRITE | Effect.ATOMIC)
+_M_SIDE = int(Effect.WRITE | Effect.ATOMIC | Effect.BARRIER | Effect.ASYNC |
+              Effect.UNKNOWN)
+_M_SYNC = int(Effect.BARRIER | Effect.ASYNC)
+_M_CLOBBER = int(Effect.WRITE | Effect.ATOMIC | Effect.UNKNOWN)
+
 
 @dataclass(frozen=True)
 class Access:
@@ -184,7 +196,7 @@ class Access:
 
     @property
     def writes(self) -> bool:
-        return bool(self.kind & (Effect.WRITE | Effect.ATOMIC))
+        return int(self.kind) & _M_WRITES != 0
 
     def __repr__(self):
         k = '+'.join(f.name.lower() for f in Effect if f and (self.kind & f))
@@ -641,9 +653,7 @@ class Stmt:
 
     @property
     def has_side_effects(self) -> bool:
-        return bool(self.effect & (Effect.WRITE | Effect.ATOMIC |
-                                   Effect.BARRIER | Effect.ASYNC |
-                                   Effect.UNKNOWN))
+        return int(self.effect) & _M_SIDE != 0
 
     def writes(self) -> Tuple[Access, ...]:
         return tuple(a for a in self.accesses if a.writes)
@@ -801,10 +811,10 @@ def free_values(body: Tuple[Stmt, ...]) -> Dict[int, Value]:
 
 
 def collect_effect(body: Tuple[Stmt, ...]) -> Effect:
-    e = Effect.NONE
+    acc = 0
     for s, _ in walk(body):
-        e |= s.effect
-    return e
+        acc |= int(s.effect)
+    return Effect(acc)
 
 
 def collect_accesses(body: Tuple[Stmt, ...]) -> Tuple[Access, ...]:

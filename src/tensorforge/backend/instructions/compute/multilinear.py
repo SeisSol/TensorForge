@@ -4,6 +4,7 @@
 from typing import Union
 import math
 from . import ComputeInstruction
+from tensorforge.common.matrix.boundingbox import BoundingBox
 from tensorforge.backend.symbol import SymbolType, add_offset, Symbol, SymbolView, DataView, Loop, LeadLoop, write_loops, LeadIndex, LinearizedLoop, Immediate
 from tensorforge.common.exceptions import InternalError, GenerationError
 from tensorforge.backend.writer import Writer
@@ -216,8 +217,8 @@ class MultilinearInstruction(ComputeInstruction):
         self._idest = copy(self._dest)
         self._idest.name = f'i{self._dest.name}'
         self._idest.data_view = DataView(shape = [u - l for l,u in self._ns], permute=[i for i in range(targetrank)])
-        self._idest.data_view._bbox._lower = [l for l,_ in self._ns]
-        self._idest.data_view._bbox._upper = [u for _,u in self._ns]
+        self._idest.data_view._bbox = BoundingBox([l for l,_ in self._ns],
+                                                  [u for _,u in self._ns])
         self._iregs = 1
         if len(self._ns) > 0:
             self._iregs = -(-self._ns[0][1] // self._num_threads) - self._ns[0][0] // self._num_threads

@@ -48,7 +48,10 @@ class DataView:
     self._bbox = bbox
 
   def get_bbox(self):
-    return deepcopy(self._bbox)
+    # `BoundingBox` has no mutating API -- `_lower`/`_upper` are tuples and
+    # every operation returns a new box -- so the defensive deepcopy that used
+    # to be here bought nothing and cost ~700k copies on a single large GEMM.
+    return self._bbox
 
   def reset_bbox(self, bbox):
     self._bbox = bbox

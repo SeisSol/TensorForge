@@ -526,7 +526,7 @@ def load_cse(body: Tuple[Stmt, ...]) -> Tuple[Stmt, ...]:
     alone --- deleting them would leave the text referring to a variable that
     is no longer declared.
     """
-    body, mapping = _load_cse_body(body, {})
+    body, mapping = _load_cse_body(body, _Avail())
     return substitute(body, mapping) if mapping else body
 
 
@@ -545,26 +545,121 @@ def _load_key(s: Stmt):
                   for a in s.accesses))
 
 
-def _kill(available: Dict[Any, Any], accesses: Tuple[Access, ...],
-          effect: Effect) -> Dict[Any, Any]:
-    if effect & (Effect.BARRIER | Effect.ASYNC):
-        # only thread-private state survives a barrier or a wait
-        available = {k: v for k, v in available.items()
-                     if all(a.space is MemSpace.REGISTER for a in v[1])}
-    if not accesses:
-        # an undeclared side effect has to be assumed to hit everything
-        if effect & (Effect.WRITE | Effect.ATOMIC | Effect.UNKNOWN):
-            return {}
-        return available
-    if not any(a.writes for a in accesses):
-        return available
-    return {k: v for k, v in available.items()
-            if not any(accesses_conflict(w, a)
-                       for w in accesses for a in v[1])}
+_EMPTY: frozenset = frozenset()
+_M_SYNC = int(Effect.BARRIER | Effect.ASYNC)
+_M_CLOBBER = int(Effect.WRITE | Effect.ATOMIC | Effect.UNKNOWN)
 
 
-def _load_cse_body(body: Tuple[Stmt, ...], available: Dict[Any, Any]):
-    available = dict(available)
+class _Avail:
+    """Availability map for `load_cse`, indexed by what a write can kill.
+
+    The plain dict version re-tested every live entry against every access of
+    every statement, so one kill cost O(|available|) and a body cost
+    O(n^2) --- on a fully unrolled 56x56x56 GEMM that is ~14k statements
+    against ~2.3k live loads, i.e. millions of `accesses_conflict` calls.
+
+    `may_alias` only ever says yes within one address space, and within a
+    space only for the same base or an unknown one, so the entries a write can
+    reach are known from `(space, base)` alone.  Indexing on that pair turns
+    the scan into a couple of set lookups and makes the pass linear in
+    practice.  The kill set is exactly the one the scan produced --- this is a
+    faster spelling of the same predicate, not a weaker one.
+    """
+
+    __slots__ = ('entries', '_by_space', '_by_base', '_nonregister')
+
+    def __init__(self, other: Optional['_Avail'] = None):
+        if other is None:
+            self.entries: Dict[Any, Any] = {}
+            self._by_space: Dict[Any, set] = {}
+            self._by_base: Dict[Any, set] = {}
+            self._nonregister: set = set()
+        else:
+            self.entries = dict(other.entries)
+            self._by_space = {k: set(v) for k, v in other._by_space.items()}
+            self._by_base = {k: set(v) for k, v in other._by_base.items()}
+            self._nonregister = set(other._nonregister)
+
+    def get(self, key):
+        return self.entries.get(key)
+
+    def add(self, key, target, accesses: Tuple[Access, ...]) -> None:
+        # The index is only equivalent to the scan because of what
+        # `_reusable_load` admits: a stored access is a pure read with a known
+        # space.  Relaxing that gate without revisiting `kill` would make this
+        # silently unsound rather than merely imprecise, so pin it here.
+        assert all(a.kind == Effect.READ and a.space is not MemSpace.UNKNOWN
+                   for a in accesses), \
+            'availability entry outside what _reusable_load admits'
+        if key in self.entries:
+            self._unindex(key)
+        self.entries[key] = (target, accesses)
+        for a in accesses:
+            self._by_space.setdefault(a.space, set()).add(key)
+            self._by_base.setdefault(
+                (a.space, None if a.base is None else id(a.base)),
+                set()).add(key)
+            if a.space is not MemSpace.REGISTER:
+                self._nonregister.add(key)
+
+    def _unindex(self, key) -> None:
+        _, accesses = self.entries[key]
+        for a in accesses:
+            bucket = self._by_space.get(a.space)
+            if bucket is not None:
+                bucket.discard(key)
+            bucket = self._by_base.get(
+                (a.space, None if a.base is None else id(a.base)))
+            if bucket is not None:
+                bucket.discard(key)
+        self._nonregister.discard(key)
+
+    def _drop(self, keys) -> None:
+        for key in keys:
+            if key in self.entries:
+                self._unindex(key)
+                del self.entries[key]
+
+    def clear(self) -> None:
+        self.entries.clear()
+        self._by_space.clear()
+        self._by_base.clear()
+        self._nonregister.clear()
+
+    def kill(self, accesses: Tuple[Access, ...], effect: Effect) -> None:
+        eff = int(effect)
+        if eff & _M_SYNC:
+            # only thread-private state survives a barrier or a wait
+            self._drop(list(self._nonregister))
+        if not accesses:
+            # an undeclared side effect has to be assumed to hit everything
+            if eff & _M_CLOBBER:
+                self.clear()
+            return
+        if not self.entries:
+            return
+        victims = set()
+        for w in accesses:
+            if not w.writes:
+                continue
+            if w.space is MemSpace.UNKNOWN:
+                self.clear()
+                return
+            # a stored entry never has UNKNOWN space and never writes, so
+            # `accesses_conflict(w, a)` reduces to "same space, and one of the
+            # two bases is unknown or they are the same base".
+            if w.base is None:
+                victims.update(self._by_space.get(w.space, _EMPTY))
+            else:
+                victims.update(self._by_base.get((w.space, None), _EMPTY))
+                victims.update(
+                    self._by_base.get((w.space, id(w.base)), _EMPTY))
+        if victims:
+            self._drop(victims)
+
+
+def _load_cse_body(body: Tuple[Stmt, ...], available: '_Avail'):
+    available = _Avail(available)
     mapping: Dict[int, Value] = {}
     out: List[Stmt] = []
 
@@ -575,10 +670,10 @@ def _load_cse_body(body: Tuple[Stmt, ...], available: Dict[Any, Any]):
             # the fixed point trivial.
             inner = tuple(a for r in s.regions
                           for a in collect_accesses(r.body))
-            eff = s.effect
+            eff = int(s.effect)
             for r in s.regions:
-                eff |= collect_effect(r.body)
-            available = _kill(available, inner + s.accesses, eff)
+                eff |= int(collect_effect(r.body))
+            available.kill(inner + s.accesses, Effect(eff))
             regions = []
             for r in s.regions:
                 sub, sub_map = _load_cse_body(r.body, available)
@@ -593,11 +688,11 @@ def _load_cse_body(body: Tuple[Stmt, ...], available: Dict[Any, Any]):
                 for old, new in zip(s.target, prev[0]):
                     mapping[old.id] = new
                 continue
-            available[key] = (s.target, s.accesses)
+            available.add(key, s.target, s.accesses)
             out.append(s)
             continue
 
-        available = _kill(available, s.accesses, s.effect)
+        available.kill(s.accesses, s.effect)
         out.append(s)
 
     return tuple(out), mapping
