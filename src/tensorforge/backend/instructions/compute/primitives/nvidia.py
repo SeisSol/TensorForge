@@ -2,15 +2,40 @@
 #
 # SPDX-License-Identifier: MIT
 from tensorforge.common.basic_types import Datatype
-from tensorforge.backend.pir.core import INDEX, Access, Effect, MemSpace
+from tensorforge.backend.pir.core import (INDEX, Access, Effect, MemSpace,
+                                          ScalarType, Value)
 from tensorforge.backend.writer import Writer
 
+#: `splitFloatTF32` takes `uint32_t &`, so the halves cannot be `I32`: the
+#: reference would not bind and the kernel would not compile.  That signature
+#: is the whole reason `Datatype.U32` exists.
+TF32_HALF = ScalarType(Datatype.U32)
+
+
 def tfconvert(writer: Writer, variables):
+    """Split each operand into the two TF32 halves the MMA multiplies.
+
+    The halves used to be a raw declaration and a raw call --- two statements
+    per operand, 4584 across the corpus, and the largest opaque site here after
+    `matmul` itself.  Nothing followed from that opacity being cheap to remove:
+    the declaration has a value, the call writes through references to it, and
+    the IR has had verbs for both since the AMD conversion.
+
+    What does *not* become structured yet is the input.  `generate` is handed
+    A and B as C++ identifiers built from `varalloc` names, not as values, so
+    the operand goes in as text and there is no def-use edge into the split.
+    Closing that is the `matmul` patch; until then this is a boundary, and
+    writing it as one is better than writing it as an intrinsic that happens
+    to take a string.
+    """
+    out = []
     for variable in variables:
-        writer(f'uint32_t {variable}u, {variable}l;', accesses=())
-        writer(f'tensorforge::splitFloatTF32({variable}u, {variable}l, {variable});',
-               accesses=())
-    return [(f'{v}u', f'{v}l') for v in variables]
+        upper = writer.declare(TF32_HALF, hint='u')
+        lower = writer.declare(TF32_HALF, hint='l')
+        writer.call_stmt('tensorforge::splitFloatTF32', upper, lower, variable,
+                         writes=(upper, lower))
+        out.append((upper, lower))
+    return out
 
 class MMAMode:
     DIRECT = 0
@@ -39,50 +64,45 @@ class MMAInstr:
 
         `D` and `C` are the same accumulator at every call site -- the
         instruction reads it and writes it back.  Listing it as `"=f"` under
-        outputs and again as `"f"` under inputs states two *unrelated*
-        operands that happen to name one C++ lvalue, and nothing then requires
-        the compiler to give them the same register: it is free to read the
-        accumulator into one and write the result into another, dropping the
-        accumulation.  `"+f"` is the constraint that says read-and-write, and
-        then the operand is listed once.
+        outputs and again as `"f"` under inputs states two *unrelated* operands
+        that happen to name one C++ lvalue, and nothing then requires the
+        compiler to give them the same register: it may read the accumulator
+        into one and write the result into another, dropping the accumulation.
+        `"+f"` says read-and-write, and then the operand is listed once.
 
-        Numbering follows from that.  PTX numbers outputs and inputs in one
-        sequence, so folding C into D shifts A and B down by `len(C)` --
-        writing the offsets from the *emitted* groups rather than from the
-        argument lists is what keeps the two in step.
+        Numbering follows from that.  The assembler numbers outputs and inputs
+        in one sequence, so folding C into D shifts A and B down by `len(C)`;
+        `asm_stmt` checks the template against the operand list rather than
+        trusting that the two were edited together.
         """
         typeid = "f" if self.d == Datatype.F32 else "d"
         typeidx = "r" if self.d == Datatype.F32 else "d"
 
         inout = D if D is C or list(D) == list(C) else None
 
-        arggrp = lambda x, b: "{" + ','.join(f"%{i + b}" for i,_ in enumerate(x)) + "}"
-        arggrp2 = lambda x, o: ','.join(f'"{o}"({v})' for v in x)
+        grp = lambda n, b: "{" + ','.join(f"%{i + b}" for i in range(n)) + "}"
 
         if inout is not None:
-            # one operand, read-write: D and C name the same registers
-            outs = arggrp2(inout, f"+{typeid}")
-            ins = f'{arggrp2(A, typeidx)}, {arggrp2(B, typeidx)}'
-            dgrp = arggrp(inout, 0)
-            agrp = arggrp(A, len(inout))
-            bgrp = arggrp(B, len(inout) + len(A))
+            operands = ([(f'+{typeid}', v) for v in inout]
+                        + [(typeidx, v) for v in A]
+                        + [(typeidx, v) for v in B])
+            dgrp = grp(len(inout), 0)
+            agrp = grp(len(A), len(inout))
+            bgrp = grp(len(B), len(inout) + len(A))
             cgrp = dgrp
         else:
-            outs = arggrp2(D, f"={typeid}")
-            ins = (f'{arggrp2(A, typeidx)}, {arggrp2(B, typeidx)}, '
-                   f'{arggrp2(C, typeid)}')
-            dgrp = arggrp(D, 0)
-            agrp = arggrp(A, len(D))
-            bgrp = arggrp(B, len(D) + len(A))
-            cgrp = arggrp(C, len(D) + len(A) + len(B))
+            operands = ([(f'={typeid}', v) for v in D]
+                        + [(typeidx, v) for v in A]
+                        + [(typeidx, v) for v in B]
+                        + [(typeid, v) for v in C])
+            dgrp = grp(len(D), 0)
+            agrp = grp(len(A), len(D))
+            bgrp = grp(len(B), len(D) + len(A))
+            cgrp = grp(len(C), len(D) + len(A) + len(B))
 
-        # The instruction is register-to-register: its operands are the
-        # fragments the caller already loaded, and it names no buffer.
-        writer(f"""asm("{self.name} "
-"{dgrp}, {agrp}, {bgrp}, {cgrp};"
-: {outs}
-: {ins}
-);""", *uses, accesses=())
+        template = (f'"{self.name} "\n'
+                    f'"{dgrp}, {agrp}, {bgrp}, {cgrp};"')
+        writer.asm_stmt(template, operands)
 
     def epilogue(self):
         pass
@@ -191,8 +211,7 @@ def matmul(writer, C, A, B, M, N, K, kx, threads, dtype, sparse, ctx, shmptr, sh
     Ashm = writer.varalloc()
     Bshm = writer.varalloc()
 
-    Areg2 = writer.varalloc()
-    Breg2 = writer.varalloc()
+
 
     Areg = writer.varalloc()
     Breg = writer.varalloc()
@@ -226,6 +245,12 @@ def matmul(writer, C, A, B, M, N, K, kx, threads, dtype, sparse, ctx, shmptr, sh
     # and an `assert` restating the total.  It belongs to a liveness analysis;
     # until the body is structured enough for one to see it, the windows are
     # requested and the overlap is stated in one place instead of three.
+    # Fragment slots, filled by the loads and read by the MMA.  Generously
+    # sized: the index is `iii + kk * mregs` and `kkk + jj * kregs`, so the
+    # bound is a product of loop extents rather than the register count.
+    Afrag = [None] * (aregs * mregs * kregs * 8)
+    Bfrag = [None] * (bregs * nregs * kregs * 8)
+
     with writer.scratch_scope():
         Ashm = writer.alloc(atom.d, (aregs * threads,), MemSpace.SHARED,
                             hint='atile')
@@ -249,8 +274,16 @@ def matmul(writer, C, A, B, M, N, K, kx, threads, dtype, sparse, ctx, shmptr, sh
                     writer(f'{atom.d.ctype()} {Breg}_{k//threads}_{jj}{"{}"};', accesses=())
             for i in range(0, M, threads):
                 with writer.AnonymousScope():
-                    writer(f'{atom.d.ctype()} {Creg}[{cregs}][{threads // atom.m}]{"{}"};',
-                                accesses=())
+                    # One value per accumulator slot rather than a `[cregs][n]`
+                    # array named by `varalloc`.  The array was a C++
+                    # identifier the IR knew nothing about, so `mma.sync`'s
+                    # read-write operand could not be a value and the asm had
+                    # to stay raw text.  Same registers, same initialisation;
+                    # the difference is that each slot now has a definition
+                    # point and a use chain.
+                    Cvals = [[writer.declare(ScalarType(atom.d), hint='c')
+                              for _ in range(threads // atom.m)]
+                             for _ in range(cregs)]
                     for k in range(0, K, threads):
                         with writer.AnonymousScope():
                             for kk in range(0, min(threads, K - k), atom.k):
@@ -271,8 +304,15 @@ def matmul(writer, C, A, B, M, N, K, kx, threads, dtype, sparse, ctx, shmptr, sh
 
                                     for jj in range(0, nregs):
                                         for kkk in range(0, kregs):
-                                            _b = writer.load(Bshm, writer.rawexpr(f'(threadIdx.x % {ktile}) + (threadIdx.x / {ktile} + {jj * ntile}) * {atom.k} + {kkk * ktile}', type_=INDEX, hint='a'), hint='data')
-                                            writer(f'{atom.d.ctype()} {Breg2}_{kkk + jj * kregs} = {_b};', _b, accesses=())
+                                            # The loaded value *is* the
+                                            # fragment.  Copying it into a
+                                            # `varalloc` name and handing the
+                                            # name to the MMA was pure
+                                            # indirection: a declaration and an
+                                            # assignment per fragment, and a
+                                            # C++ identifier where the IR had a
+                                            # value all along.
+                                            Bfrag[kkk + jj * kregs] = writer.load(Bshm, writer.rawexpr(f'(threadIdx.x % {ktile}) + (threadIdx.x / {ktile} + {jj * ntile}) * {atom.k} + {kkk * ktile}', type_=INDEX, hint='a'), hint='b')
 
                                     for kkk in range(0, min(atom.k, K - k - kk)):
                                         A(writer, f'{Areg}_{kkk}', i // threads, k + kk + kkk)
@@ -294,29 +334,41 @@ def matmul(writer, C, A, B, M, N, K, kx, threads, dtype, sparse, ctx, shmptr, sh
                                             for kk in range(0, kregs):
                                                 for iii in range(0, mregs):
                                                     #writer(f'{atom.d.ctype()} {Areg2}_{iii + kk * mregs} = {shmptr}[{aoffs} + (threadIdx.x / {ktile}) + (threadIdx.x % {ktile} + {kk * ktile}) * {atom.m} + {iii * mtile}];')
-                                                    _a = writer.load(Ashm, writer.rawexpr(f'threadIdx.x + {(iii + kk * mregs) * 32}', type_=INDEX, hint='a'), hint='data')
-                                                    writer(f'{atom.d.ctype()} {Areg2}_{iii + kk * mregs} = {_a};', _a, accesses=())
+                                                    Afrag[iii + kk * mregs] = writer.load(Ashm, writer.rawexpr(f'threadIdx.x + {(iii + kk * mregs) * 32}', type_=INDEX, hint='a'), hint='a')
 
-                                            atom.generate(writer, ctx, [f'{Areg2}_{i}' for i in range (aregs)], [f'{Breg2}_{i}' for i in range (bregs)], [f'{Creg}[{i}][{ii // atom.m}]' for i in range (cregs)])
+                                            atom.generate(writer, ctx, Afrag[:aregs], Bfrag[:bregs],
+                                                          [Cvals[i][ii // atom.m] for i in range (cregs)])
 
-                    for jj in range(0, atom.n):
-                        writer(f'{atom.d.ctype()} {Creg}_{jj}{"{}"};', accesses=())
+                    # The epilogue's staging registers.  Assigned inside a
+                    # thread guard and read outside it, so they are declared
+                    # here and written through `assign` rather than being the
+                    # result of the load: a value defined inside the guard
+                    # would not be visible to the store that follows.
+                    Cout = [writer.declare(ScalarType(atom.d), hint='c')
+                            for _ in range(atom.n)]
 
                     for ii in range(0, threads, atom.m):
                         with writer.AnonymousScope():
                             for jj in range(0, nregs * 2):
                                 for iii in range(0, mregs):
-                                    writer.store(Cshm, f'{Creg}[{iii + mregs * jj}][{ii // atom.m}]',
+                                    writer.store(Cshm, Cvals[iii + mregs * jj][ii // atom.m],
                                         writer.rawexpr(f'threadIdx.x * 2 + {iii} + {jj * 64}', type_=INDEX, hint='a'))
 
                             writer('__syncwarp();', accesses=())
                             with threadrange(ii, atom.m):
                                 for jj in range(0, atom.n):
                                     _c = writer.load(Cshm, writer.rawexpr(f'(threadIdx.x % {atom.m}) * {atom.n} + {jj}', type_=INDEX, hint='a'), hint='data')
-                                    writer(f'{Creg}_{jj} = {_c};', _c, accesses=())
+                                    # Raw, but no longer anonymous: both sides
+                                    # are values, so the load has a use and the
+                                    # declaration has a writer.  A plain
+                                    # `assign` verb would close the last of it;
+                                    # the IR has none yet, and inventing an op
+                                    # for one statement is worse than saying so.
+                                    writer(f'{Cout[jj]} = {_c};', Cout[jj], _c,
+                                           accesses=())
                             writer('__syncwarp();', accesses=())
 
                     for jj in range(0, min(atom.n, N - j)):
-                        C(writer, f'{Creg}_{jj}', i // threads, j + jj)
+                        C(writer, Cout[jj], i // threads, j + jj)
 
     return True
