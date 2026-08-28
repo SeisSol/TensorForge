@@ -1123,7 +1123,49 @@ def _convertible(s: Stmt) -> bool:
     return True
 
 
-def if_convert(body: Tuple[Stmt, ...]) -> Tuple[Stmt, ...]:
+def _sinkable_loop(s: Stmt) -> Optional[Stmt]:
+    """`if (m) { for (...) { ... } }`, where `m` may move inside the loop.
+
+    A mask is not control flow.  Moving a guard into a loop leaves the trip
+    count alone and suppresses only what the body *writes*, which is the same
+    program -- so the shape `_convertible` refuses (a region inside the guard)
+    is convertible after all, one level down.
+
+    Three preconditions, and each is a case where it would not be:
+
+    * The loop carries no values.  A masked-out lane's accumulator would have
+      to keep its previous value across the back edge, which is a `merge` and
+      not a predicate; predicating the update alone would leave the
+      accumulator undefined for that lane.
+    * The bounds are lane-uniform.  Sinking says the trip count is the same
+      whether or not the guard holds; a bound derived from the mask makes that
+      false.
+    * Only the loop is in the guard.  With a second statement beside it the
+      predicate would have to be applied twice over, in two different ways.
+
+    Returns the loop, or None.
+    """
+    if s.op != Op.IF or s.target or len(s.regions) != 1:
+        return None
+    if not isinstance(s.cond, Value):
+        return None
+    inner = s.regions[0].body
+    if len(inner) != 1 or inner[0].op != Op.FOR:
+        return None
+    loop = inner[0]
+    if loop.target or len(loop.regions) != 1:
+        return None
+    for b in loop.loop_bounds:
+        if isinstance(b, Value) and b.layout is not None and b.distributed:
+            return None
+    if loop.regions[0].args and len(loop.regions[0].args) > 1:
+        # induction variable only; anything more is an iteration argument
+        return None
+    return loop
+
+
+def if_convert(body: Tuple[Stmt, ...],
+               sink_into_loops: bool = False) -> Tuple[Stmt, ...]:
     """Push a guard's condition onto its statements and dissolve the region.
 
     One rule for everything inside: reads become selects and are free to move,
@@ -1135,11 +1177,32 @@ def if_convert(body: Tuple[Stmt, ...]) -> Tuple[Stmt, ...]:
     Not in the default pipeline: it trades one shared brace for one per
     side-effecting statement, which is only worth it once something actually
     uses the freedom it buys.
+
+    ``sink_into_loops`` additionally moves a guard *through* a loop; see
+    :func:`_sinkable_loop`.  Off by default because for a real branch it is a
+    pessimisation -- the loop runs its full trip count instead of being
+    skipped.  Where the guard is a lane mask there is no branch to skip with,
+    so it is the only lowering rather than a trade.
     """
     out: List[Stmt] = []
     for s in body:
-        s = replace(s, regions=tuple(replace(r, body=if_convert(r.body))
-                                     for r in s.regions))
+        s = replace(s, regions=tuple(
+            replace(r, body=if_convert(r.body, sink_into_loops))
+            for r in s.regions))
+        if sink_into_loops:
+            loop = _sinkable_loop(s)
+            if loop is not None:
+                region = loop.regions[0]
+                # The same transformation, one level down: wrap the loop's
+                # body in the guard that was outside the loop and convert
+                # that.  Reusing the machinery rather than repeating it is
+                # what keeps the two from growing different rules about what
+                # may be predicated.
+                guarded = Stmt(op=Op.IF, args=(s.cond,),
+                               regions=(Region(body=region.body),))
+                inner = if_convert((guarded,), sink_into_loops)
+                out.append(replace(loop, regions=(replace(region, body=inner),)))
+                continue
         if _convertible(s):
             cond = s.cond
             for inner in s.regions[0].body:
@@ -1278,7 +1341,9 @@ def optimize(body: Tuple[Stmt, ...], dump_hook=None,
         # conversion is the only legal path rather than a trade of one shared
         # brace for several.  It runs before `fold`, so that the predicates it
         # attaches take part in the same simplification as everything else.
-        stages = (stages[0], ('if_convert', if_convert)) + stages[1:]
+        stages = (stages[0],
+                  ('if_convert',
+                   lambda b: if_convert(b, sink_into_loops=True))) + stages[1:]
     for name, fn in stages:
         body = fn(body)
         if dump_hook is not None:

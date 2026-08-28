@@ -200,6 +200,15 @@ class SyclLexic(Lexic):
       f'Composing it from the intrinsics that do exist is a numerics '
       f'decision, not a spelling one.')
 
+  def get_simd_mask(self, size):
+    """`simd_mask<N>`: the type a comparison over a `simd<T, N>` produces.
+
+    Its own family, not `simd<bool, N>` -- the hardware keeps masks in mask
+    registers and the API follows, so a predicated operation takes one of
+    these and nothing else converts to it.
+    """
+    return f'tensorforge::intel_esimd::simd_mask<{size}>'
+
   def get_operation(self, op: Operation, fptype, value1, value2):
     if self.simd_mode:
       return self._esimd_operation(op, fptype, value1, value2)

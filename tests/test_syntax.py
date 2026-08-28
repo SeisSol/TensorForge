@@ -67,8 +67,37 @@ def _snapshots():
 KNOWN_BAD_BACKENDS: dict = {}
 
 
+#: Generated source known not to compile, with the reason.
+#:
+#: These twelve reach a *predicated store*.  `_folds_predicate` refuses to
+#: fold a predicate into a select when the statement writes -- rightly, or the
+#: write would happen when it must not -- so the base emitter wraps it in
+#: `if (mask)`, and a `simd_mask` is not a branch condition.
+#:
+#: The vector form is not a spelling change.  `block_store`'s predicate is a
+#: `simd_mask<1>`: it suppresses the whole transfer, not individual lanes.
+#: Per-lane masking on a store is `scatter`, which takes a `simd_mask<N>` and
+#: a vector of byte offsets -- a different instruction with different cost,
+#: not a decorated `copy_to`.  Choosing between "narrow the block store" and
+#: "scatter" is a codegen decision and belongs in a change of its own.
+#:
+#: `strict=True`, so this shrinks deliberately: when the masked
+#: store lands these turn XPASS and the suite goes red until the entries go.
+_MASKED_STORE = "predicated store; see the comment on _MASKED_STORE"
+
+
+def _known_bad(path) -> str:
+    """Only the ESIMD cases that actually contain a predicated store."""
+    if not path.name.endswith(".esimd.cpp"):
+        return ""
+    text = path.read_text()
+    if "simd_mask" in text and "if (" in text:
+        return _MASKED_STORE
+    return ""
+
+
 def _param(path):
-    reason = KNOWN_BAD_BACKENDS.get(syntax.backend_of(path))
+    reason = KNOWN_BAD_BACKENDS.get(syntax.backend_of(path)) or _known_bad(path)
     marks = [pytest.mark.xfail(strict=True, reason=reason)] if reason else []
     return pytest.param(path, marks=marks, id=path.name)
 

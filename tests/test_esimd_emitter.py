@@ -247,3 +247,76 @@ def test_a_mask_is_not_a_branch_condition(emitter):
     guard = Stmt(op=Op.IF, args=(cond,), regions=(Region(),))
     with pytest.raises(IRError, match='if_convert'):
         emitter._emit_if(guard)
+
+
+# --------------------------------------------------------------------------
+# a mask is a type of its own, and a select over one is a merge
+# --------------------------------------------------------------------------
+
+def test_a_distributed_bool_is_a_mask_not_a_vector_of_bools(emitter):
+    """`simd<bool, N>` exists and is the wrong answer.
+
+    ESIMD keeps masks in their own family because the hardware does: a
+    comparison over a `simd` yields one, a predicated operation takes one, and
+    nothing else converts to it.  Spelling it `simd<bool, N>` compiles the
+    declaration and fails at every use.
+    """
+    v = val(40, ScalarType(Datatype.BOOL), SPREAD16)
+    assert 'simd_mask<16>' in emitter.ctype(v.type, v)
+
+
+def test_a_replicated_bool_is_still_a_plain_bool(emitter):
+    v = val(41, ScalarType(Datatype.BOOL), SCALAR_LAYOUT)
+    assert 'simd_mask' not in emitter.ctype(v.type, v)
+
+
+# --------------------------------------------------------------------------
+# sinking a guard through a loop
+# --------------------------------------------------------------------------
+
+def _guard_over_loop(cond, loop_target=(), bounds=(0, 4, 1), body=()):
+    from tensorforge.backend.pir.core import Op, Region, Stmt
+    loop = Stmt(op=Op.FOR, target=tuple(loop_target), args=tuple(bounds),
+                regions=(Region(args=(val(99, ScalarType(Datatype.I32),
+                                          SCALAR_LAYOUT),), body=tuple(body)),))
+    return Stmt(op=Op.IF, args=(cond,), regions=(Region(body=(loop,)),))
+
+
+def test_a_guard_around_a_loop_sinks_into_it():
+    """A mask is not control flow: moving it inside leaves the trip count
+    alone and suppresses only what the body writes."""
+    from tensorforge.backend.pir import passes
+    cond = val(50, ScalarType(Datatype.BOOL), SPREAD16)
+    assert passes._sinkable_loop(_guard_over_loop(cond)) is not None
+
+
+def test_a_loop_that_carries_a_value_does_not_sink():
+    """A masked-out lane's accumulator has to keep its previous value across
+    the back edge, which is a merge and not a predicate; predicating the
+    update alone would leave it undefined for that lane."""
+    from tensorforge.backend.pir import passes
+    cond = val(51, ScalarType(Datatype.BOOL), SPREAD16)
+    carried = val(52, ScalarType(Datatype.F32), SPREAD16)
+    assert passes._sinkable_loop(
+        _guard_over_loop(cond, loop_target=(carried,))) is None
+
+
+def test_a_lane_varying_bound_does_not_sink():
+    """Sinking says the trip count is the same whether or not the guard holds;
+    a bound derived from the mask makes that false."""
+    from tensorforge.backend.pir import passes
+    cond = val(53, ScalarType(Datatype.BOOL), SPREAD16)
+    bound = val(54, ScalarType(Datatype.I32), SPREAD16)
+    assert passes._sinkable_loop(
+        _guard_over_loop(cond, bounds=(0, bound, 1))) is None
+
+
+def test_sinking_is_off_by_default():
+    """For a real branch it is a pessimisation -- the loop runs its full trip
+    count instead of being skipped.  Only a mask has no branch to skip with."""
+    from tensorforge.backend.pir import passes
+    from tensorforge.backend.pir.core import Op
+    cond = val(55, ScalarType(Datatype.BOOL), SPREAD16)
+    guard = _guard_over_loop(cond)
+    assert passes.if_convert((guard,))[0].op == Op.IF
+    assert passes.if_convert((guard,), sink_into_loops=True)[0].op == Op.FOR

@@ -31,8 +31,10 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
+from tensorforge.common.basic_types import Datatype
+
 from .core import IRError, Op, ScalarType, TokenType, Value
-from .emit import Emitter
+from .emit import Emitter, _folds_predicate
 
 
 class EsimdEmitter(Emitter):
@@ -76,6 +78,16 @@ class EsimdEmitter(Emitter):
             # derived, the other is a hole.
             return super().ctype(t, value)
 
+        if t.base is Datatype.BOOL:
+            # A distributed boolean is a *mask*, not a vector of bools.
+            # `simd<bool, N>` exists as a type but is not what a comparison
+            # over a `simd` produces and not what a predicated operation
+            # takes; ESIMD keeps masks in their own family precisely because
+            # the hardware does.  Spelling this `simd<bool, N>` compiled the
+            # declaration and then failed at every use, which is the worst
+            # place to find out.
+            return self.mask_type(value.lane_span())
+
         # Distributed.  Two dimensions multiply into one vector length: the
         # lane axis (how many lanes the dimension is spread over) and the slot
         # axis (`ScalarType.length`, how many consecutive elements one lane
@@ -85,6 +97,13 @@ class EsimdEmitter(Emitter):
         span = value.lane_span()
         width = span * (t.length or 1)
         return self.simd_type(t.base.ctype(), width)
+
+    def mask_type(self, width: int) -> str:
+        lex = self._lexic()
+        get = getattr(lex, 'get_simd_mask', None) if lex is not None else None
+        if get is None:
+            raise IRError('the ESIMD emitter needs a lexic with get_simd_mask()')
+        return get(width)
 
     def simd_type(self, elem: str, width: int) -> str:
         lex = self._lexic()
@@ -116,6 +135,42 @@ class EsimdEmitter(Emitter):
     # -- memory ------------------------------------------------------------ #
 
     def declare(self, v: Value, expr: str, s, name: str = None) -> None:
+        """As the base emitter, plus two things a vector declaration needs.
+
+        A folded predicate is a `merge`, not a ternary.  `m ? a : b` on a
+        `simd_mask` does not compile -- there is no single bit to test -- and
+        where a conversion existed it would pick one arm for all N elements.
+        The vector form declares the else-value and merges the then-value in
+        under the mask, which is two statements, so it cannot be an
+        initialiser expression.
+
+        And the *result* of a masked select is distributed even when both arms
+        are replicated: masked lanes keep one value, unmasked lanes take the
+        other, so the mask is what introduces the distribution.  Its width
+        therefore decides the type, not `v.layout` -- which was computed before
+        `if_convert` attached the predicate and cannot know about it.
+        """
+        pred = getattr(s, 'predicate', None)
+        if (pred is not None and _folds_predicate(s)
+                and isinstance(pred, Value) and pred.layout is not None
+                and pred.distributed and isinstance(v.type, ScalarType)):
+            width = pred.lane_span() * (v.type.length or 1)
+            ty = self.simd_type(v.type.base.ctype(), width)
+            other = s.attr('other')
+            other = (self.operand(other) if other is not None
+                     else self.zero(v.type))
+            nm = name or self.name(v)
+            self.writer(f'{ty} {nm}({other});')
+            # Both arms go through the vector type explicitly.  `merge` takes a
+            # `simd`, and the then-value is often a *replicated* load -- the
+            # mask is what makes the result distributed, not the operand -- so
+            # it has to be broadcast rather than left to an implicit
+            # conversion the API does not offer.
+            self.writer(f'{nm}.merge({ty}({expr}), {self.operand(pred)});')
+            return
+        return self._declare_unpredicated(v, expr, s, name)
+
+    def _declare_unpredicated(self, v: Value, expr: str, s, name: str = None) -> None:
         """A distributed value is filled by a transfer, not by an initialiser.
 
         `simd<T, N>` has no constructor taking a `T` lvalue, and `= p[i]` would

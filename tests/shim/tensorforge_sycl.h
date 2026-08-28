@@ -195,6 +195,7 @@ namespace tensorforge {
 namespace intel_esimd {
 
 template <typename T, int N> class simd;
+template <int N> class simd_mask;
 
 template <typename T, int N, int Size, int Stride> class simd_view {
 public:
@@ -244,13 +245,26 @@ public:
   T &operator[](int i) { return _v[i]; }
   const T &operator[](int i) const { return _v[i]; }
 
+  /// `merge(Val, Mask)`: take `Val`'s elements where the mask is set, keep
+  /// this object's where it is not.  The vector form of a select, and the
+  /// reason a predicated declaration is two statements rather than a ternary.
+  template <int M> void merge(const simd &, const simd_mask<M> &) {}
+
   void copy_to(T *p) const { (void)p; }
   void copy_from(const T *p) { (void)p; }
 
+  // Arithmetic takes a scalar on either side as well as another vector --
+  // `v * 2.0f` is ordinary ESIMD and the generator emits it.  Templated on
+  // the scalar type because the generator mixes `float` literals into
+  // `simd<double, N>` expressions and the real API converts.
   simd operator+(const simd &) const { return *this; }
   simd operator-(const simd &) const { return *this; }
   simd operator*(const simd &) const { return *this; }
   simd operator/(const simd &) const { return *this; }
+  template <typename U> simd operator+(U) const { return *this; }
+  template <typename U> simd operator-(U) const { return *this; }
+  template <typename U> simd operator*(U) const { return *this; }
+  template <typename U> simd operator/(U) const { return *this; }
   simd operator-() const { return *this; }
   simd &operator+=(const simd &) { return *this; }
 
@@ -285,6 +299,43 @@ template <typename T, int N> simd<T, N> pow(simd<T, N> a, simd<T, N>) {
 }
 template <typename T, int N, typename U> simd<T, N> pow(simd<T, N> a, U) {
   return a;
+}
+
+/// `simd_mask<N>`: what a comparison over a `simd` yields, and the only thing
+/// a predicated operation accepts.  A distinct family, as in the real header
+/// -- it deliberately does *not* convert to `bool`, so that a mask reaching a
+/// branch condition is a compile error here as well as there.
+template <int N> class simd_mask {
+public:
+  simd_mask() = default;
+  simd_mask operator&(const simd_mask &) const { return *this; }
+  simd_mask operator|(const simd_mask &) const { return *this; }
+  simd_mask operator!() const { return *this; }
+};
+
+template <typename T, int N, typename U>
+simd_mask<N> operator<(const simd<T, N> &, U) {
+  return {};
+}
+template <typename T, int N, typename U>
+simd_mask<N> operator<=(const simd<T, N> &, U) {
+  return {};
+}
+template <typename T, int N, typename U>
+simd_mask<N> operator>(const simd<T, N> &, U) {
+  return {};
+}
+template <typename T, int N, typename U>
+simd_mask<N> operator>=(const simd<T, N> &, U) {
+  return {};
+}
+template <typename T, int N, typename U>
+simd_mask<N> operator==(const simd<T, N> &, U) {
+  return {};
+}
+template <typename T, int N, typename U>
+simd_mask<N> operator!=(const simd<T, N> &, U) {
+  return {};
 }
 
 } // namespace intel_esimd

@@ -425,8 +425,23 @@ def join_layout(operands) -> Optional[RegisterLayout]:
     ``None``.  A vendor intrinsic may legitimately consume two of those, so it
     is not an error here, but nothing may be concluded from it either.
     """
-    seen = {x.layout for x in operands
-            if isinstance(x, Value) and x.layout is not None}
+    values = [x for x in operands if isinstance(x, Value)]
+    if operands and not values:
+        # Every operand is a literal.  A literal is the same in every lane by
+        # definition, so anything computed from literals alone is too -- the
+        # same argument that gives `const` its layout, one step further along.
+        #
+        # This is the biggest single hole it closes: `LeadIndex.build` emits
+        # `mul(nonlead, block)` for the slot offset, and both operands are
+        # plain integers, so the result was *unknown* rather than *replicated*
+        # -- and every address derived from it inherited the unknown.
+        #
+        # Zero operands is deliberately not covered.  A `rawexpr` with no
+        # arguments is text the IR cannot read, and `threadIdx.x` is exactly
+        # such a text; calling it replicated would be a guess, and the wrong
+        # one.
+        return SCALAR_LAYOUT
+    seen = {x.layout for x in values if x.layout is not None}
     if not seen:
         return None
     spread = {lay for lay in seen if lay.is_distributed}
