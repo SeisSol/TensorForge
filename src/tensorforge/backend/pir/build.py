@@ -26,7 +26,8 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 from tensorforge.common.basic_types import Datatype
 from tensorforge.common.exceptions import GenerationError
 
-from .core import (BOOL, INDEX, TOKEN, Access, BufferType, Effect, IRError,
+from .core import (BOOL, INDEX, SCALAR_LAYOUT, TOKEN, Access, BufferType,
+                   Effect, IRError,
                    LaneAxis, MemSpace, Op, Operand, Region, RegisterLayout,
                    ScalarType, Stmt, TokenType, Value, dump, join_layout,
                    Uniformity)
@@ -186,8 +187,23 @@ class IRBuilder:
         return v
 
     def index(self, hint: str = '',
-              uniform: Union[bool, Uniformity] = Uniformity.GRID) -> Value:
-        return self.value(INDEX, hint=hint, uniform=uniform)
+              uniform: Union[bool, Uniformity] = Uniformity.GRID,
+              layout: Optional[RegisterLayout] = None) -> Value:
+        """An integer, replicated across the wave unless said otherwise.
+
+        A loop counter and an address are the same in every lane: the loop is
+        entered the same number of times and the subscript is computed from
+        the same operands.  `None` here said *unknown*, which is a weaker
+        claim than the truth and one an explicitly vectorised emitter cannot
+        act on -- it has to decide between `int` and `simd<int, N>` at the
+        declaration, and unknown is not one of the two.
+
+        A genuinely lane-varying index does exist (a gather's address vector),
+        and it will have to pass its layout in rather than inherit this
+        default.  Stated as a default rather than a hard rule for that reason.
+        """
+        return self.value(INDEX, hint=hint, uniform=uniform,
+                          layout=SCALAR_LAYOUT if layout is None else layout)
 
     # -- emission core ----------------------------------------------------- #
 
@@ -203,8 +219,11 @@ class IRBuilder:
     # -- structured constructors ------------------------------------------- #
 
     def const(self, value, type_=None) -> Value:
+        """A literal.  Replicated by definition -- there is no lane in which
+        it is a different number, so this is the one distribution that needs
+        no derivation and can never be wrong."""
         type_ = type_ or ScalarType(self._fptype)
-        v = self.value(type_, hint='c')
+        v = self.value(type_, hint='c', layout=SCALAR_LAYOUT)
         self._emit_op(Op.CONST, (v,), (), attrs=(('value', value),))
         return v
 
@@ -380,6 +399,42 @@ class IRBuilder:
         self._emit_op(Op.CALL, (v,), (), attrs=(('callee', f'thread_idx_{axis}'),))
         return v
 
+    def lane_offset(self, block: int, stride: int = 1,
+                    hint: str = 'lane') -> Operand:
+        """The address contribution of one lane within a distributed dimension.
+
+        Not the same question as :meth:`thread_id`, even though SPMD answers
+        both with the same register.  ``thread_id`` asks *which thread am I*;
+        this asks *where does my share of this dimension start*.  They coincide
+        only because SPMD spreads the dimension across the threads -- so the
+        two were one call, and separating them is what lets a second model
+        answer them differently.
+
+        SPMD: ``(tid / stride) % block``, the lane's element of the dimension.
+
+        Explicitly vectorised: ``0``.  The dimension *is* the vector, the
+        work-item holds all of it, and its base offset in the register is
+        zero.  The lane term then folds out of the address by the ordinary
+        identity rules -- ``add(0, x) -> x`` -- rather than by a second code
+        path that has to stay in step with the first.
+
+        ``block == 1`` is not distributed at all, so there is no contribution
+        to make in either model.
+        """
+        if block <= 1:
+            return 0
+        if self._explicit_simd():
+            return 0
+        lane = self.op('div', INDEX, self.thread_id('x'), stride, hint=hint)
+        return self.op('rem', INDEX, lane, block, hint=hint)
+
+    def _explicit_simd(self) -> bool:
+        """Whether the lowering puts the lane in the type rather than the address."""
+        try:
+            return bool(self.context.get_vm().get_lexic().simd_mode)
+        except AttributeError:
+            return False
+
     def batch_id(self, lookahead: int = 0) -> Value:
         """The element this multiplication is working on.
 
@@ -392,7 +447,10 @@ class IRBuilder:
         ``lookahead`` names the index the loop binds that many iterations ahead,
         which is what a peeled or advanced transfer consumes.
         """
-        v = self.value(INDEX, hint=f'batch{lookahead}', uniform=Uniformity.MULT)
+        # MULT-uniform is a statement about the lanes: every thread of one
+        # multiplication has the same batch id, which is exactly replication.
+        v = self.value(INDEX, hint=f'batch{lookahead}', uniform=Uniformity.MULT,
+                       layout=SCALAR_LAYOUT)
         self._emit_op(Op.CALL, (v,), (),
                       attrs=(('callee', f'batch_id_{lookahead}'),))
         return v
@@ -1220,8 +1278,16 @@ class _ForHandle:
         self._types = types
         self._unroll = unroll
         self.induction = builder.index(hint=hint)
-        self.iter_args = tuple(builder.value(t, hint=f'acc{i}')
-                               for i, t in enumerate(types))
+        # A loop-carried value is distributed exactly like the init it starts
+        # from -- the back edge cannot change how a value is spread across the
+        # lanes, only what it holds.  Left untracked, an accumulator became a
+        # hole in the middle of an otherwise fully tracked body.
+        self.iter_args = tuple(
+            builder.value(t, hint=f'acc{i}',
+                          layout=(inits[i].layout
+                                  if i < len(inits) and isinstance(inits[i], Value)
+                                  else None))
+            for i, t in enumerate(types))
         self.results: Tuple[Value, ...] = ()
         # a token carried through the loop keeps the accesses of its copy
         for arg, init in zip(self.iter_args, inits):
@@ -1240,8 +1306,15 @@ class _ForHandle:
         region = self.builder.pop()
         if exc_type is not None:
             return False
-        self.results = tuple(self.builder.value(t, hint=f'res{i}')
-                             for i, t in enumerate(self._types))
+        # Same argument on the way out: a result is the last value the body
+        # yielded, and yielding does not redistribute.
+        self.results = tuple(
+            self.builder.value(t, hint=f'res{i}',
+                               layout=(region.yielded[i].layout
+                                       if i < len(region.yielded)
+                                       and isinstance(region.yielded[i], Value)
+                                       else None))
+            for i, t in enumerate(self._types))
         for res, y in zip(self.results, region.yielded):
             if isinstance(res.type, TokenType) and isinstance(y, Value):
                 acc = self.builder._token_accesses.get(y.id)

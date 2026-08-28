@@ -31,7 +31,7 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
-from .core import IRError, ScalarType, TokenType, Value
+from .core import IRError, Op, ScalarType, TokenType, Value
 from .emit import Emitter
 
 
@@ -112,6 +112,60 @@ class EsimdEmitter(Emitter):
                 'and not a subscript. A caller reaching here is still building '
                 'an SPMD address.')
         return super()._thread_idx(axis)
+
+    # -- memory ------------------------------------------------------------ #
+
+    def declare(self, v: Value, expr: str, s, name: str = None) -> None:
+        """A distributed value is filled by a transfer, not by an initialiser.
+
+        `simd<T, N>` has no constructor taking a `T` lvalue, and `= p[i]` would
+        either fail to compile or -- worse, where a conversion exists --
+        broadcast one element into all N.  The vector form is a declaration
+        followed by `copy_from`, so this splits what the base emitter writes as
+        one statement.
+
+        Only for loads: an arithmetic result of `simd` operands is already a
+        `simd` and initialises normally.  `Op.LOAD` marks its own statements,
+        so the split is keyed on that rather than guessed from the text.
+        """
+        if (getattr(s, 'op', None) in (Op.LOAD, Op.LOAD_ASYNC)
+                and v.layout is not None and v.distributed):
+            nm = name or self.name(v)
+            self.writer(f'{self.ctype(v.type, v)} {nm};')
+            self.writer(f'{nm}.copy_from({self._as_pointer(expr)});')
+            return
+        super().declare(v, expr, s, name)
+
+    @staticmethod
+    def _as_pointer(access: str) -> str:
+        """`p[i]` -> `p + (i)`.
+
+        `copy_from` takes the address of the first element, and the base
+        emitter has already built the subscript.  Rewriting it here rather
+        than teaching `Op.LOAD` to hand out both forms keeps the address
+        arithmetic in one place -- it is the same expression either way, and
+        two builders of it would drift.
+        """
+        if access.endswith(']') and '[' in access:
+            base, _, idx = access[:-1].partition('[')
+            return f'{base} + ({idx})'
+        return f'&{access}'
+
+    def _emit_stmt(self, s, yield_to) -> None:
+        """A distributed value is written back by a transfer too.
+
+        The symmetric case to the load: `p[i] = v` where `v` is a `simd` is
+        either ill-formed or a narrowing to one element, and neither is the
+        store that was meant.
+        """
+        if getattr(s, 'op', None) == Op.STORE:
+            val = s.args[1]
+            if isinstance(val, Value) and val.layout is not None and val.distributed:
+                addr = self.address(s.args[0], s.args[2:])
+                ptr = self._as_pointer(f'{self.base_name(s.args[0])}[{addr}]')
+                self.writer(f'{self.operand(val)}.copy_to({ptr});')
+                return
+        super()._emit_stmt(s, yield_to)
 
     # -- entry ------------------------------------------------------------- #
 

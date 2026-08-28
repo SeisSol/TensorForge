@@ -131,3 +131,19 @@ def test_the_other_axes_still_answer(emitter):
     """`y` and `z` are work-group coordinates in both models: which element
     this work-item handles, not which lane of it."""
     assert emitter._thread_idx('y')
+
+
+# --------------------------------------------------------------------------
+# memory: a distributed value moves by transfer, not by initialiser
+# --------------------------------------------------------------------------
+
+def test_a_subscript_becomes_a_pointer(emitter):
+    """`copy_from` takes the address of the first element.
+
+    Rewritten from the subscript the base emitter already built, rather than
+    asking `Op.LOAD` for a second form of the same address -- two builders of
+    one expression drift, and this one is not simple (`DataView.get_address`
+    folds the shape in).
+    """
+    assert emitter._as_pointer('glb_m0[i + 16 * j]') == 'glb_m0 + (i + 16 * j)'
+    assert emitter._as_pointer('x') == '&x'

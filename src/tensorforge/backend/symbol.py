@@ -274,10 +274,13 @@ class LeadIndex:
   def build(self, writer, context: Context):
     nl = self.build_nonlead(writer, context)
     if self._block > 1:
-      lane = writer.op('rem', INDEX,
-                       writer.op('div', INDEX, writer.thread_id('x'),
-                                 self._stride, hint='lane'),
-                       self._block, hint='lane')
+      # The lane's share of this dimension, asked of the builder rather than
+      # spelled out here.  The arithmetic used to be inline -- `(tid/stride) %
+      # block` -- which is the SPMD answer written down as though it were the
+      # only one there is.  It is not: an explicitly vectorised lowering holds
+      # the whole dimension in one register and contributes nothing to the
+      # address, and the difference belongs where the model is known.
+      lane = writer.lane_offset(self._block, self._stride, hint='lane')
       return writer.op('add', INDEX, lane,
                        writer.op('mul', INDEX, nl, self._block, hint='lead'),
                        hint='lead')
