@@ -503,3 +503,51 @@ def test_a_shift_splits_into_slots_and_lanes():
     assert DataView.split_lead_shift(36, 16) == (2, 4)
     # width scales the slot, not the lane count
     assert DataView.split_lead_shift(36, 16, width=2) == (1, 2)
+
+
+# --------------------------------------------------------------------------
+# register pressure in bytes
+# --------------------------------------------------------------------------
+
+def test_a_vector_costs_its_whole_width():
+    """Counting values says one; counting registers says sixteen.
+
+    The difference is the wave width, and it is in the direction that matters:
+    under SPMD a value is one register per thread, so a count *is* a register
+    count.  When the work-item holds the whole wave it understates by 16 on
+    PVC.
+    """
+    from tensorforge.backend.pir.passes import register_bytes
+    assert register_bytes(val(60, F32, SCALAR_LAYOUT)) == 4
+    assert register_bytes(val(61, F32, SPREAD16)) == 64
+
+
+def test_the_slot_axis_multiplies_the_lane_axis():
+    """`ScalarType.length` and the layout are different things everywhere else
+    and still are here -- they just both make the register bigger."""
+    from tensorforge.backend.pir.passes import register_bytes
+    v = val(62, ScalarType(Datatype.F32, 4), SPREAD16)
+    assert register_bytes(v) == 16 * 4 * 4
+
+
+def test_an_untracked_layout_counts_as_one_lane():
+    """A floor, not an estimate: it is what SPMD would need, so the number
+    never overstates and a budget comparison stays on the safe side."""
+    from tensorforge.backend.pir.passes import register_bytes
+    assert register_bytes(val(63, F32)) == 4
+
+
+def test_a_register_allocation_is_register_file():
+    """And on this path it is the biggest thing in it.
+
+    `lead_window_spans_two_blocks` peaks at 540 bytes of SSA values beside a
+    `float r0[4992]` -- 19 KB.  Counting only the values reported that kernel
+    as comfortable.
+    """
+    from tensorforge.backend.pir.core import BufferType, MemSpace
+    from tensorforge.backend.pir.passes import register_bytes
+    from tensorforge.backend.pir.core import Value as V
+    reg = V(id=64, type=BufferType(Datatype.F32, (128,), MemSpace.REGISTER))
+    shared = V(id=65, type=BufferType(Datatype.F32, (128,), MemSpace.SHARED))
+    assert register_bytes(reg) == 128 * 4
+    assert register_bytes(shared) == 0, 'shared memory costs no registers'

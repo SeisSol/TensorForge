@@ -1571,6 +1571,38 @@ class Symbol:
       assert False
       return self.encode_values(0, [0] * len(index), writer, context, index, nontemp, leadidxidx)
     else:
+      # Whether the load will be a broadcast, decided *before* the text
+      # address is built.
+      #
+      # `self.access()` pins its result -- the name is meant to be spliced
+      # into raw text -- and a pinned value survives DCE whether or not any
+      # text ends up referring to it.  Building one for a load that then
+      # takes the structured path leaves a second, identical address chain in
+      # the output with nothing reading it.  Three such declarations per
+      # kernel is not a correctness problem; it is why `gemm_square_16.cuda`
+      # has ten `int32_t` declarations of which three are never read, and why
+      # a snapshot diff is harder to read than it needs to be.
+      #
+      # Same repair as `Symbol.store`, which had the same shape.
+      _bcast = False
+      if self.stype in (SymbolType.Register, SymbolType.Scratch) \
+              and len(self.lead_dims) == 1:
+        _idx = index[self.lead_dims[0]]
+        _bcast = (isinstance(_idx, (float, int, np.int32, np.int64))
+                  or not _idx.is_thread_dependent())
+      if (variable is None and not _bcast and self.stype in (
+              SymbolType.Register, SymbolType.Scratch, SymbolType.SharedMem,
+              SymbolType.Batch, SymbolType.Global)):
+        from tensorforge.backend.pir.core import ScalarType
+        w = lead_width_of(index)
+        ltype = (ScalarType(self.get_fptype()) if w == 1
+                 else ScalarType(self.get_fptype(), w))
+        return writer.load(self, self.address_value(writer, context, index),
+                           type_=ltype, hint='data',
+                           align=None if w == 1 else RELAXED,
+                           layout=layout_of(index, self.num_threads),
+                           nontemporal=nontemp)
+
       pre_access = self.access(context, index, writer, addrs)
       if self.stype == SymbolType.Register or self.stype == SymbolType.Scratch:
         assert len(self.lead_dims) == 1

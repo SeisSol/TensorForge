@@ -990,8 +990,13 @@ def _index(body: Tuple[Stmt, ...], start: int = 0):
     return order, span
 
 
-def pressure(body: Tuple[Stmt, ...]) -> int:
-    """Peak number of simultaneously live SSA values.
+def pressure(body: Tuple[Stmt, ...], in_bytes: bool = False) -> int:
+    """Peak simultaneously live SSA values, or the bytes they occupy.
+
+    `in_bytes` is what an explicitly vectorised kernel has to ask.  A count
+    treats `simd<float, 16>` and `float` as one apiece, which is right when a
+    value is one register per thread and wrong by the wave width when the
+    work-item holds the whole wave.  See `register_bytes`.
 
     The bound every scheduling decision needs: hoisting a load away from its
     use, unrolling further, or deepening a software pipeline all buy latency
@@ -1003,6 +1008,15 @@ def pressure(body: Tuple[Stmt, ...]) -> int:
     a value read inside a loop is live across every iteration, not just at the
     one statement that mentions it.
     """
+    values = _value_index(body) if in_bytes else {}
+    weight = ((lambda vid: register_bytes(values[vid]) if vid in values else 0)
+              if in_bytes else (lambda vid: 1))
+    # Register arrays are live for the whole body, so they are a constant
+    # added to every point rather than something the sweep can see rise and
+    # fall.  Added once here instead of extending their live ranges, which
+    # would say the same thing less clearly.
+    floor = (sum(register_bytes(v) for v in values.values()
+                 if isinstance(v.type, BufferType)) if in_bytes else 0)
     order, span = _index(body)
     pos: Dict[int, int] = {}          # statement identity -> index
     for i, st in enumerate(order):
@@ -1047,11 +1061,68 @@ def pressure(body: Tuple[Stmt, ...]) -> int:
                     end = max(end, span[anc][1])
             last[v.id] = max(last.get(v.id, d), end)
 
+    v_none = Value(id=-1, type=ScalarType(Datatype.I32))
     peak = 0
     for i in range(len(order)):
-        live = sum(1 for vid, d in define.items() if d <= i <= last.get(vid, d))
+        live = sum(weight(vid) for vid, d in define.items()
+                   if d <= i <= last.get(vid, d)
+                   and not isinstance(values.get(vid, v_none).type, BufferType))
         peak = max(peak, live)
-    return peak
+    return peak + floor
+
+
+def _value_index(body: Tuple[Stmt, ...]) -> Dict[int, Value]:
+    """Every value the body defines, by id -- targets and region arguments."""
+    out: Dict[int, Value] = {}
+    for st, _ in walk(body):
+        for r in st.regions:
+            for a in r.args:
+                out[a.id] = a
+        for t in st.target:
+            out[t.id] = t
+    return out
+
+
+def register_bytes(v: Value) -> int:
+    """How much register file one live value occupies.
+
+    Not the same question as "how many values are live", and the difference is
+    the whole reason this exists.  Under SPMD a value is one register per
+    thread and counting values is counting registers; under an explicit vector
+    the same value is `lanes * slots` elements in *this* work-item's registers,
+    so a count understates it by the wave width -- sixteen-fold on PVC, and in
+    the direction that matters.
+
+    Both axes multiply.  `ScalarType.length` is the slot axis (how many
+    consecutive elements one lane holds) and the layout is the lane axis; they
+    are kept apart everywhere else for good reasons and they are still
+    different things here, they just both make the register bigger.
+
+    An untracked layout counts as one lane.  That is a floor and not an
+    estimate: it is what SPMD would need, so the number never *over*states,
+    and a caller comparing against a budget stays on the safe side of a value
+    it cannot size.
+    """
+    t = v.type
+    if isinstance(t, BufferType):
+        # A register-space allocation *is* register file, and on the explicitly
+        # vectorised path it is the biggest thing in it by a wide margin: the
+        # SSA values of `lead_window_spans_two_blocks` peak at 540 bytes while
+        # its `float r0[4992]` is 19 KB.  Counting only the values would have
+        # reported that kernel as comfortable.
+        #
+        # Its whole volume, and for the whole body: an array is live from its
+        # declaration to the end of the scope, so there is no live range to
+        # narrow.  Every other space is memory and costs no registers.
+        return (t.volume * t.elem.size()
+                if t.space is MemSpace.REGISTER else 0)
+    if not isinstance(t, ScalarType):
+        return 0                      # tokens name an event, not storage
+    lanes = 1
+    if v.layout is not None:
+        for axis in v.layout.axes:
+            lanes *= axis.block
+    return lanes * (t.length or 1) * t.base.size()
 
 
 # --------------------------------------------------------------------------- #
