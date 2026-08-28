@@ -108,3 +108,48 @@ def register_array_align(volume_bytes: int,
     while a * 2 <= min(cap_bytes, max(volume_bytes, 1)):
         a *= 2
     return a
+
+
+def lead_vector_width(start: int, end: int, threads: int,
+                      elem_bytes: int, align_bytes: int,
+                      cap: int = 2) -> int:
+    """How many adjacent elements one lane should hold in the lead dimension.
+
+    This is the width that turns the per-lane element set from strided into
+    adjacent -- `LeadIndex`'s `width`, not `plan_hops`'s.  The two answer
+    different questions and only share the alignment part: a staging transfer
+    picks a width per hop over a flat run, while this picks one for the whole
+    distributed dimension, and every slot of it has to agree.
+
+    Three conditions, all necessary:
+
+    * the base has to prove the alignment, as everywhere else;
+    * the width has to *divide* the range over the threads, because a lane at
+      a ragged end would otherwise hold a vector half inside the box and
+      masking components is a different mechanism (`LeadLoop` refuses it);
+    * the width has to be a width -- capped at 16 bytes by the widest access
+      any target has.
+
+    `cap` defaults to 2 rather than to the widest legal value, and that is a
+    judgement rather than a limit of the mechanism.  Going wider multiplies
+    the accumulators each lane carries: at fixed tile size a width of 4 asks
+    for four times the registers per lane on a code that already spills at
+    order 6 in FP64.  Whether that pays is a register-pressure question with
+    a measurement behind it, so the default takes the width whose benefit --
+    halving the load and address instructions -- is not in doubt, and leaves
+    the rest to a caller who has measured.
+
+    Returns 1 when nothing wider survives, which is always correct.
+    """
+    if threads < 1:
+        raise ValueError(f'thread count must be >= 1, got {threads}')
+    extent = end - start
+    if extent <= 0:
+        return 1
+    for w in widths_for(elem_bytes, align_bytes):
+        if w > cap:
+            continue
+        span = threads * w
+        if extent % span == 0 and start % span == 0:
+            return w
+    return 1

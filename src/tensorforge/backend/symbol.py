@@ -8,7 +8,7 @@ from tensorforge.common.matrix.boundingbox import BoundingBox
 from functools import reduce
 from tensorforge.common.context import Context
 from tensorforge.common.basic_types import Datatype, Addressing
-from tensorforge.common.exceptions import GenerationError
+from tensorforge.common.exceptions import GenerationError, InternalError
 from .writer import Writer
 from tensorforge.backend.pir.core import (BOOL, INDEX, SCALAR_LAYOUT, Effect,
                                           LaneAxis, RegisterLayout, ScalarType)
@@ -216,11 +216,31 @@ class LeadIndex:
   """
 
   # TODO: make nonlead a variable
-  def __init__(self, nonlead, block, stride, value=None):
+  def __init__(self, nonlead, block, stride, value=None, width=1):
     self._nonlead = nonlead
     self._block = block
     self._stride = stride
     self._value = value
+    #: How many *adjacent* elements this lane holds at this index.  With
+    #: `width > 1` the map above scales uniformly:
+    #:
+    #:     idx = width * (((tid / stride) % block) + nonlead * block) + c
+    #:
+    #: with `c` in `[0, width)` naming a component *inside the value* rather
+    #: than a position in the address -- the whole vector is one access.
+    #:
+    #: This is what turns the per-lane element set from strided into
+    #: adjacent.  At `width == 1` a lane holds `lane, lane + block,
+    #: lane + 2*block, ...`, which are `block` apart and cannot be one wide
+    #: access however the base is aligned; at `width == 2` it holds
+    #: `2*lane, 2*lane+1` and then the pair `2*block` further on.  Cyclic
+    #: becomes blocked-by-`width`, and that is the whole content of the
+    #: change -- `layout()` is unchanged, because *which lane holds what
+    #: share* is still `LaneAxis(block, stride)`; the width lives on the
+    #: value's `ScalarType.length`, where `LaneAxis` says packing belongs.
+    self._width = width
+    if width < 1:
+      raise InternalError(f'lead width must be >= 1, got {width}')
 
   def layout(self) -> RegisterLayout:
     """The one-axis register layout this index addresses.
@@ -240,8 +260,12 @@ class LeadIndex:
       return self.layout() == other.layout()
     return self._block == 1
 
+  @property
+  def width(self) -> int:
+    return self._width
+
   def _key(self):
-    return (self._nonlead, self._block, self._stride, self._value)
+    return (self._nonlead, self._block, self._stride, self._value, self._width)
 
   def __eq__(self, other):
     # Structural, including `nonlead`: this is value equality of the *index*,
@@ -256,8 +280,9 @@ class LeadIndex:
 
   def __repr__(self):
     tail = '' if self._value is None else f', value={self._value!r}'
+    wide = '' if self._width == 1 else f', width={self._width}'
     return (f'LeadIndex({self._nonlead!r}, block={self._block}, '
-            f'stride={self._stride}{tail})')
+            f'stride={self._stride}{tail}{wide})')
 
   def is_thread_dependent(self):
     return True
@@ -267,15 +292,19 @@ class LeadIndex:
 
   def write(self, context: Context):
     if self._block > 1:
-      return f'(({context.get_vm().get_lexic().thread_idx_x} / {self._stride}) % {self._block}) + {self._nonlead} * {self._block}'
+      inner = (f'(({context.get_vm().get_lexic().thread_idx_x} / '
+               f'{self._stride}) % {self._block}) + '
+               f'{self._nonlead} * {self._block}')
+      return inner if self._width == 1 else f'({inner}) * {self._width}'
     elif self._block == 1:
-      return f'{self._nonlead}'
+      return f'{self._nonlead}' if self._width == 1 \
+             else f'{self._nonlead} * {self._width}'
 
   def nonlead(self):
     return self._nonlead
 
   def lead(self):
-    return self._nonlead * self._block
+    return self._nonlead * self._block * self._width
 
   def build_nonlead(self, writer, context: Context):
     return self._nonlead if self._value is None else self._value
@@ -290,9 +319,18 @@ class LeadIndex:
       # the whole dimension in one register and contributes nothing to the
       # address, and the difference belongs where the model is known.
       lane = writer.lane_offset(self._block, self._stride, hint='lane')
-      return writer.op('add', INDEX, lane,
+      addr = writer.op('add', INDEX, lane,
                        writer.op('mul', INDEX, nl, self._block, hint='lead'),
                        hint='lead')
+      # The scaling is on the *whole* index, not on the lane term alone: a
+      # lane's share starts `width` elements after its neighbour's, and the
+      # next slot starts `width * block` after this one.  Scaling only the
+      # lane would interleave the slots into each other's lanes.
+      if self._width > 1:
+        addr = writer.op('mul', INDEX, addr, self._width, hint='vlead')
+      return addr
+    if self._width > 1:
+      return writer.op('mul', INDEX, nl, self._width, hint='vlead')
     return nl
 
 class VarOffset:
@@ -409,7 +447,7 @@ class LeadLoop:
   """
 
   def __init__(self, name, start, end, threads, stride, unroll=False,
-               neutral=None):
+               neutral=None, width=1):
     self.start = start
     self.end = end
     self.unroll = unroll
@@ -417,6 +455,23 @@ class LeadLoop:
     self.var = name
     self.stride = stride
     self.neutral = neutral
+    #: Elements each lane holds adjacently at one slot -- see `LeadIndex`.
+    #: One slot then covers `threads * width` elements instead of `threads`.
+    self.width = width
+    if width > 1 and ((end - start) % (threads * width) != 0
+                      or start % (threads * width) != 0):
+      # A precondition, not a fallback.  The guards below compare a *lane*
+      # against a bound in elements, and at `width > 1` a lane covers a range
+      # rather than a point, so a ragged end would leave one lane with a
+      # vector straddling it -- half inside the box and half not.  There is a
+      # correct answer for that (mask the components), but it is a different
+      # mechanism from the one here, and choosing the width is exactly where
+      # it can be avoided instead: `vectorize.lead_vector_width` only offers
+      # a width that divides.
+      raise InternalError(
+          f'lead width {width} does not divide [{start}, {end}) over '
+          f'{threads} threads: a ragged end would leave a lane holding a '
+          f'vector that is half inside the box')
 
   def _lead(self, context: Context, writer):
     """Which element of the distributed dimension this lane is at.
@@ -447,41 +502,49 @@ class LeadLoop:
                       if self.neutral is not None else ())
 
   def write(self, context: Context, writer: Writer, inner):
-    actualstart = self.start // self.threads
-    realstart = (self.start + self.threads - 1) // self.threads
-    realend = (self.end) // self.threads
-    actualend = (self.end + self.threads - 1) // self.threads
+    # A slot is `threads * width` elements wide, so every division that turns
+    # an element range into a slot range takes the product.  At `width == 1`
+    # this is the arithmetic that was here before, character for character.
+    span = self.threads * self.width
+    actualstart = self.start // span
+    realstart = (self.start + span - 1) // span
+    realend = (self.end) // span
+    actualend = (self.end + span - 1) // span
 
     lead = self._lead(context, writer)
-    tail = self.end - realend * self.threads
+    tail = self.end - realend * span
 
     if actualstart >= actualend:
       pass
     if actualstart == realend:
-      index = LeadIndex(actualstart, self.threads, self.stride)
-      startIdx = self.start - actualstart * self.threads
+      index = LeadIndex(actualstart, self.threads, self.stride,
+                        width=self.width)
+      startIdx = self.start - actualstart * span
       with self._guard(writer, lead, startIdx if startIdx > 0 else None, tail):
         inner([index])
     else:
-      if self.start % self.threads != 0:
-        index = LeadIndex(actualstart, self.threads, self.stride)
+      if self.start % span != 0:
+        index = LeadIndex(actualstart, self.threads, self.stride,
+                          width=self.width)
         # the guard compares against a *lane*, so the bound has to be the
         # in-block remainder.  Without the `* self.threads` this only happened
         # to be right while actualstart == 0, i.e. start < threads; for
         # start=37, threads=32 it read `lead >= 36` and dropped the head block.
         with self._guard(writer, lead,
-                         self.start - actualstart * self.threads, None):
+                         self.start - actualstart * span, None):
           inner([index])
       if self.unroll:
         for value in range(realstart, realend):
-          inner([LeadIndex(value, self.threads, self.stride)])
+          inner([LeadIndex(value, self.threads, self.stride,
+                           width=self.width)])
       elif realstart < realend:
         loop = writer.for_(realstart, realend, 1, unroll=True, hint=self.var)
         with loop:
           inner([LeadIndex(str(loop.induction), self.threads, self.stride,
-                           loop.induction)])
-      if self.end % self.threads != 0:
-        index = LeadIndex(actualend - 1, self.threads, self.stride)
+                           loop.induction, width=self.width)])
+      if self.end % span != 0:
+        index = LeadIndex(actualend - 1, self.threads, self.stride,
+                          width=self.width)
         with self._guard(writer, lead, None, tail):
           inner([index])
 
