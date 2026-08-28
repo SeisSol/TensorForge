@@ -570,7 +570,18 @@ class Symbol:
     self.data_view: Union[DataView, None] = None
     self.datatype: Union[Datatype, None] = None
     self.num_threads = None
-    self.lead_dims = [0] # has only an effect for register storage
+    #: Which axis of this symbol is spread across the lanes.
+    #:
+    #: Read by `load` and `store` for `Register` and `Scratch` symbols, and by
+    #: `GlbToShrLoader` when it writes a register image; for the other symbol
+    #: types nothing consults it, since the lane axis of a global or shared
+    #: tensor is whatever the reading instruction chooses to distribute.
+    #:
+    #: The default is a guess, and every site that creates a register image
+    #: now overrides it -- `multilinear_builder` for both the staged operands
+    #: and the destination accumulator.  The compute instructions read it from
+    #: here rather than keeping their own copy.
+    self.lead_dims = [0]
     #: How this symbol's register image is distributed across the wave, when
     #: that is known.  Set by whoever fills it -- `store_linear` is the only
     #: filler that does so today -- and reported by `load_linear`, so that a

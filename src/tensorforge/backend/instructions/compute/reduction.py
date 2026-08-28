@@ -70,25 +70,6 @@ class ReductionInstruction(ComputeInstruction):
 
     # -- iteration space ------------------------------------------------- #
 
-    @staticmethod
-    def _lead_dim(view: SymbolView) -> int:
-        """Which axis of `view` is distributed over threads.
-
-        Read off the symbol rather than assumed to be axis 0, so that when
-        `Symbol.lead_dims` becomes authoritative for every symbol type -- it is
-        already the truth for register tiles, set by `multilinear_builder`, and
-        already consulted by `Symbol.load`/`store` -- this path follows without
-        an edit.  The instruction-local `self._lead_dims = [0]` that
-        `ElementwiseInstruction` and the multilinear path carry is the same
-        fact stated a second time, and the two can disagree.
-        """
-        lead = getattr(view.symbol, 'lead_dims', [0])
-        if len(lead) != 1:
-            raise InternalError(
-                f'reduction: {view.symbol.name} declares {len(lead)} lead '
-                f'dimensions; exactly one is supported')
-        return lead[0]
-
     def _kept(self) -> List[int]:
         rank = self._op.bbox.rank()
         return [i for i in range(rank) if i not in self._dims]
@@ -96,7 +77,7 @@ class ReductionInstruction(ComputeInstruction):
     # -- emission -------------------------------------------------------- #
 
     def gen_code_inner(self, writer: Writer):
-        src_lead = self._lead_dim(self._op)
+        src_lead = self.lead_dim(self._op)
         kept = self._kept()
 
         if src_lead in self._dims:
@@ -123,7 +104,7 @@ class ReductionInstruction(ComputeInstruction):
             # which the caller has already rejected.
             return
         expected = kept.index(src_lead)
-        actual = self._lead_dim(self._dest)
+        actual = self.lead_dim(self._dest)
         if actual != expected:
             raise InternalError(
                 f'reduction: {self._op.symbol.name} leads on axis {src_lead}, '
@@ -190,7 +171,7 @@ class ReductionInstruction(ComputeInstruction):
             else 0
 
     def _contracts_lead(self) -> bool:
-        return self._lead_dim(self._op) in self._dims
+        return self.lead_dim(self._op) in self._dims
 
     def _lead_reduction(self, writer: Writer, kept: Sequence[int],
                         src_lead: int) -> None:

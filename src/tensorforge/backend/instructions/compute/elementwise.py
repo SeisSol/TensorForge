@@ -41,12 +41,20 @@ class ElementwiseInstruction(ComputeInstruction):
         self._is_ready = True
         self._user_options = context.get_user_options()
         self._gemm_meta_data = None
-        self._lead_dims = [0]
         self.registers = None
 
         for view in self._tensor_srcs() + [self._dest]:
             if not isinstance(view.symbol.obj, Tensor):
                 raise InternalError('elementwise: operand is not a tensor')
+
+        # From the symbols, not assumed to be axis 0.  Every operand shares
+        # the destination's shape -- `ElementwiseDescr` checks that -- so
+        # iteration axis i is axis i of each of them, and the lane axis has to
+        # be the one they all declare.  `Symbol.load` and `Symbol.store`
+        # already address through `lead_dims`; iterating a different axis here
+        # would spread one and address the other.
+        self._lead_dims = [self.shared_lead_dim(
+            [self._dest] + self._tensor_srcs(), 'elementwise')]
 
         # The iteration space is the destination's, not something unified over
         # a list of assignments: elementwise means the operands share its shape,
@@ -91,7 +99,6 @@ class ElementwiseInstruction(ComputeInstruction):
 
         write_loops(self._context, writer, loopstack, self._body(writer))
 
-    @staticmethod
     @staticmethod
     def _index(view: SymbolView, varlist) -> List:
         # optree emitted `(n{k} + bbox.lower()[k])` as text, which forced a

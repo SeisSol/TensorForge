@@ -255,7 +255,21 @@ class MultilinearInstruction(ComputeInstruction):
             if self._dest.data_view is None:
                 self._dest.data_view = self._idest.data_view
 
-        self._lead_dims = [0]#[t for t in self._target[0] if t >= 0]
+        # From the destination symbol, not assumed to be axis 0.  These are
+        # destination axis indices: an N axis in `_lead_dims` becomes a
+        # `LeadLoop`, everything else a sequential `Loop`.  A K axis would be
+        # written `-i-1`, which is the encoding the test at the head of the K
+        # nest reads -- nothing produces one today, since a contraction axis
+        # spread across the lanes is the cross-lane fold that `_leading_dim`
+        # never got.
+        #
+        # The value is [0] for every case in the corpus, because
+        # `MultilinearDescr._lead_dim` aligns the thread count to the
+        # destination's axis 0 and nothing sets the destination's `lead_dims`
+        # to anything else.  Taking it from the symbol is what makes the two
+        # statements one: `multilinear_builder` already sets `lead_dims` on a
+        # staged register image, and `Symbol.load` addresses through it.
+        self._lead_dims = [self.lead_dim(self._dest)]
 
     def gen_code_inner(self, writer: Writer):
         # A comment touches nothing.  Left conservative it would be read as

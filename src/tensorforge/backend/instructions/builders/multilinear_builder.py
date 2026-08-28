@@ -749,7 +749,18 @@ class MultilinearBuilder(AbstractBuilder):
   def _alloc_register_array(self):
     regsize = 1
     threads = self._num_threads
-    lead_dim = [0] # [t for t in self._descr.target[0] if t >= 0]
+    # One statement of the lane axis, used twice below: to count the register
+    # slots, and -- at the bottom -- to tell the symbol.  It was two, and the
+    # symbol's half was the constructor default rather than anything said
+    # here, so a change to one would not have moved the other.
+    #
+    # 0 because `MultilinearDescr._lead_dim` aligns the thread count to the
+    # destination's axis 0, and the whole multilinear path is built on that.
+    # The commented-out alternative that stood here, `[t for t in
+    # self._descr.target[0] if t >= 0]`, is where a per-operand answer would
+    # come from once there is one.
+    lead_pos = 0
+    lead_dim = [lead_pos]
 
     # This array holds the operation's *result*, so it is sized from what the
     # operation writes: the destination's box, in the shifted origin the
@@ -782,6 +793,7 @@ class MultilinearBuilder(AbstractBuilder):
     name = self._name_registers()
     regmem = RegMemObject(name, regsize)
     registers = Symbol(name=name, stype=SymbolType.Register, obj=regmem)
+    registers.lead_dims = [lead_pos]
     registers.num_threads = self._num_threads
     registers.datatype = self._context.fp_type
     self._scopes.add_symbol(registers)
