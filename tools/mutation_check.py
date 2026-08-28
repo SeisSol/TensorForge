@@ -92,6 +92,23 @@ def sub(path, old, new, count=0):
 GROUPS = {
     # The diagnostics themselves.  `ir_opacity` reported the whole corpus as
     # failing to generate for as long as nobody re-derived its number.
+    # `flatten_scopes` decides which braces are load-bearing, and it decides
+    # it with a regex over raw text.
+    'cdecl': ('tests/test_flatten_scopes.py', [
+        ('brace initialisation not seen as a declaration',
+         sub(Path('src/tensorforge/backend/pir/passes.py'),
+             r"\w+_t)\s+(\w+)\s*[=;\[{,]')",
+             r"\w+_t)\s+(\w+)\s*[=;\[,]')", 1)),
+        ('a second declarator not seen',
+         sub(Path('src/tensorforge/backend/pir/passes.py'),
+             r"\w+_t)\s+(\w+)\s*[=;\[{,]')",
+             r"\w+_t)\s+(\w+)\s*[=;\[{]')", 1)),
+        ('every region spliced regardless',
+         sub(Path('src/tensorforge/backend/pir/passes.py'),
+             '                and not _declares(s.regions[0].body)):',
+             '                and True):', 1)),
+    ]),
+
     'tools': ('tests/test_tools.py::test_ir_opacity_still_generates_the_corpus', [
         ('the counting wrapper stops accepting what it wraps',
          sub(Path('tools/ir_opacity.py'),

@@ -1058,8 +1058,26 @@ def pressure(body: Tuple[Stmt, ...]) -> int:
 # Scope flattening
 # --------------------------------------------------------------------------- #
 
+#: A raw statement that introduces a C++ name.  What may follow the name is
+#: the whole question: `=` for an initialiser, `;` for a bare declaration, `[`
+#: for an array --- and also `{` for brace initialisation and `,` for a second
+#: declarator, both of which this missed.  10% of the declarations the corpus
+#: emits took one of those two forms, and every one of them was invisible to
+#: `flatten_scopes`, which then spliced away braces that were the only thing
+#: keeping two declarations of one name apart.
+#:
+#: Nothing had gone wrong yet because the misses were masked: the accumulator
+#: array `float v58[4][2]{};` matches on `[`, so the scope holding it was kept,
+#: and the `float v58_0{};` beside it survived by association.  Making the
+#: array a structured value removed the match and the braces went with it ---
+#: six declarations of one name, at one level, in a kernel that had compiled
+#: the day before.
+#:
+#: Over-matching here costs a pair of braces that could have been removed.
+#: Under-matching costs a kernel that does not compile, so the character class
+#: errs wide.
 _CDECL = re.compile(r'\b(?:const\s+)?(?:float|double|int32_t|int|auto|bool|'
-                    r'__float128|unsigned|char|short|long|\w+_t)\s+(\w+)\s*[=;\[]')
+                    r'__float128|unsigned|char|short|long|\w+_t)\s+(\w+)\s*[=;\[{,]')
 
 
 def _declares(body: Tuple[Stmt, ...]) -> bool:
