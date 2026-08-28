@@ -101,6 +101,49 @@ class ScalarType:
 
 
 @dataclass(frozen=True)
+class XorSwizzle:
+    """A bank-conflict-free permutation of a tile, as a function of the index.
+
+    Shared memory is 32 banks of four bytes, and a warp's access costs as many
+    cycles as the largest number of *distinct* addresses landing in one bank.
+    A tile read one way and written another cannot avoid that with padding:
+    the NVIDIA MMA's B fragment has 32 lanes reading 32 distinct elements
+    spread over 60, which is 240 bytes against 128 of bank width, so some bank
+    is hit twice whatever the stride.  Padding moves the collision, and
+    transposing moves it to the store.
+
+    Permuting instead costs nothing.  With a row of ``width`` elements
+    (a power of two), ``k ^ (n % width)`` gives each row a different column
+    order, so a column-wise read lands on ``width`` distinct banks while a
+    row-wise write still covers ``width`` distinct banks --- the map is a
+    bijection on each row, so no element moves between rows and nothing else
+    about the tile changes.
+
+    Expressible on the linear index alone, which is what lets it live here
+    rather than at every call site::
+
+        n * width + (k ^ (n % width))  ==  i ^ ((i // width) % width)
+
+    because ``k`` occupies the low ``log2(width)`` bits and ``n % width`` is
+    smaller than ``width``, so the XOR cannot carry out of them.
+    """
+
+    width: int
+
+    def __post_init__(self):
+        if self.width < 1 or self.width & (self.width - 1):
+            raise IRError(f'swizzle width must be a power of two, got '
+                          f'{self.width}')
+
+    def apply(self, index: int) -> int:
+        """The permuted index, for tests and for constant folding."""
+        return index ^ ((index // self.width) % self.width)
+
+    def __repr__(self):
+        return f'xor{self.width}'
+
+
+@dataclass(frozen=True)
 class BufferType:
     """Type of a memory buffer (the result of an ``alloc``).
 
@@ -111,6 +154,12 @@ class BufferType:
     elem: Datatype
     shape: Tuple[int, ...]
     space: MemSpace
+    #: How the linear index is permuted before it addresses this buffer.
+    #: On the buffer rather than at the accesses, because a permutation that
+    #: only some of them apply is worse than none: the store and the load
+    #: would disagree about where an element is, and the kernel would be
+    #: quietly wrong rather than merely slow.
+    swizzle: Optional['XorSwizzle'] = None
 
     @property
     def volume(self) -> int:
@@ -121,7 +170,8 @@ class BufferType:
 
     def __repr__(self):
         dims = 'x'.join(str(s) for s in self.shape)
-        return f'buffer<{dims}x{self.elem}, {self.space.name.lower()}>'
+        swz = f', {self.swizzle!r}' if self.swizzle else ''
+        return f'buffer<{dims}x{self.elem}, {self.space.name.lower()}{swz}>'
 
 
 @dataclass(frozen=True)

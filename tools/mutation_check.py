@@ -104,6 +104,36 @@ GROUPS = {
     # it with a regex over raw text.
     # The PTX node.  Its numbering check is the one that matters: a mismatch
     # reads different registers and still compiles.
+    # A tile's permutation lives on the buffer so no access can forget it.
+    'swizzle': ('tests/test_pir_swizzle.py', [
+        ('the load stops applying it',
+         sub(Path('src/tensorforge/backend/pir/build.py'),
+             '        indices = tuple(self._swizzled(base, i) for i in indices)\n'
+             '        if uniform is None:',
+             '        if uniform is None:', 1)),
+        ('the store stops applying it',
+         sub(Path('src/tensorforge/backend/pir/build.py'),
+             '        indices = tuple(self._swizzled(base, i) for i in indices)\n'
+             '        kind = Effect.ATOMIC if atomic else Effect.WRITE',
+             '        kind = Effect.ATOMIC if atomic else Effect.WRITE', 1)),
+        ('the permutation stops being a bijection',
+         sub(Path('src/tensorforge/backend/pir/core.py'),
+             'return index ^ ((index // self.width) % self.width)',
+             'return index ^ (index % self.width)', 1)),
+        ('a non-power-of-two width accepted',
+         sub(Path('src/tensorforge/backend/pir/core.py'),
+             'if self.width < 1 or self.width & (self.width - 1):',
+             'if False:', 1)),
+        ('the divide is by the wrong amount',
+         sub(Path('src/tensorforge/backend/pir/build.py'),
+             "        bits = swz.width.bit_length() - 1",
+             "        bits = swz.width.bit_length()", 1)),
+        ('the B tile loses its swizzle',
+         sub(Path('src/tensorforge/backend/instructions/compute/primitives/nvidia.py'),
+             "hint='btile', swizzle=XorSwizzle(atom.k))",
+             "hint='btile')", 1)),
+    ]),
+
     'asm': ('tests/test_pir_asm.py', [
         ('assign does not declare an access on its target',
          sub(Path('src/tensorforge/backend/pir/build.py'),

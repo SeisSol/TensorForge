@@ -29,8 +29,8 @@ from tensorforge.common.exceptions import GenerationError
 from .core import (BOOL, INDEX, SCALAR_LAYOUT, TOKEN, Access, BufferType,
                    Effect, IRError,
                    LaneAxis, MemSpace, Op, Operand, Region, RegisterLayout,
-                   ScalarType, Stmt, TokenType, Value, dump, join_layout,
-                   Uniformity)
+                   ScalarType, Stmt, TokenType, Value, XorSwizzle, dump,
+                   join_layout, Uniformity)
 
 
 def access_of(symbol: Any, kind: Effect) -> Access:
@@ -606,7 +606,8 @@ class IRBuilder:
               hint: str = 'buf', extern: str = None,
               init: str = '', arena: str = None, offset=0,
               align: Optional[int] = None,
-              restrict: str = None) -> Value:
+              restrict: str = None,
+              swizzle: Optional[XorSwizzle] = None) -> Value:
         """Request a buffer *symbolically*.
 
         For registers and scratch: no offset, no address --- the whole-kernel
@@ -633,7 +634,8 @@ class IRBuilder:
         what it actually asked for rather than against a formula restated at
         the use site.
         """
-        v = self.value(BufferType(elem, tuple(shape), space), hint=hint)
+        v = self.value(BufferType(elem, tuple(shape), space, swizzle),
+                       hint=hint)
         attrs: Tuple = ()
         if arena is not None:
             # A window the *region* allocator placed, not the scratch bump
@@ -743,6 +745,33 @@ class IRBuilder:
         self._scratch_used = end
         return (('arena', name), ('offset', start))
 
+    def _swizzled(self, base: Any, index: Operand) -> Operand:
+        """The index a swizzled buffer is actually addressed by.
+
+        Applied here, in the one place every read and write of a buffer passes
+        through, rather than at the call sites.  A permutation that only some
+        accesses apply is worse than none: the store and the load would
+        disagree about where an element lives, and the kernel would be quietly
+        wrong instead of merely slow.  Nothing outside this method knows the
+        buffer is swizzled, which is the property that makes it safe to turn
+        on for a tile that already works.
+        """
+        t = getattr(base, 'type', None)
+        swz = getattr(t, 'swizzle', None)
+        if swz is None:
+            return index
+        if isinstance(index, int):
+            return swz.apply(index)
+        # `i ^ ((i / width) % width)`, as IR ops -- the emitter sees arithmetic
+        # it can fold when the index is constant, not a string it cannot read.
+        # A shift and a mask, not a divide and a modulo: the width is a power
+        # of two, and this way the emitted address needs no strength reduction
+        # to be what one would have written by hand.
+        bits = swz.width.bit_length() - 1
+        row = self.op('shr', INDEX, index, bits, hint='sw')
+        sel = self.op('bitand', INDEX, row, swz.width - 1, hint='sw')
+        return self.op('bitxor', INDEX, index, sel, hint='sw')
+
     def load(self, base: Any, *indices: Operand, type_=None, hint: str = '',
              space: Optional[MemSpace] = None, uniform: Optional[bool] = None,
              predicate: Optional[Value] = None,
@@ -765,6 +794,7 @@ class IRBuilder:
             type_ = (ScalarType(base.type.elem)
                      if isinstance(base, Value) and isinstance(base.type, BufferType)
                      else ScalarType(self._fptype))
+        indices = tuple(self._swizzled(base, i) for i in indices)
         if uniform is None:
             uniform = _join(indices)
         v = self.value(type_, hint=hint or 'ld', uniform=uniform, layout=layout)
@@ -814,6 +844,7 @@ class IRBuilder:
             space = (base.type.space if isinstance(base, Value)
                      and isinstance(base.type, BufferType)
                      else MemSpace.from_symbol_type(getattr(base, 'stype', None)))
+        indices = tuple(self._swizzled(base, i) for i in indices)
         kind = Effect.ATOMIC if atomic else Effect.WRITE
 
         attrs = []

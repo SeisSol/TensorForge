@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: MIT
 from tensorforge.common.basic_types import Datatype
 from tensorforge.backend.pir.core import (INDEX, Access, Effect, MemSpace,
+                                          XorSwizzle,
                                           Uniformity,
                                           ScalarType, Value)
 from tensorforge.backend.writer import Writer
@@ -258,8 +259,14 @@ def matmul(writer, C, A, B, M, N, K, kx, threads, dtype, sparse, ctx, shmptr, sh
     with writer.scratch_scope():
         Ashm = writer.alloc(atom.d, (aregs * threads,), MemSpace.SHARED,
                             hint='atile')
+        # The B tile is written a row at a time and read a column at a time,
+        # which no linear stride can serve without bank conflicts: 32 lanes
+        # read 32 distinct elements spread over 60, and 240 bytes do not fit
+        # in 128 of bank width.  Padding moves the collision, transposing
+        # moves it to the store; permuting each row costs nothing and clears
+        # both.  Measured over the emitted addresses: 2-way -> 1-way.
         Bshm = writer.alloc(atom.d, (bregs * threads,), MemSpace.SHARED,
-                            hint='btile')
+                            hint='btile', swizzle=XorSwizzle(atom.k))
     with writer.scratch_scope():
         Cshm = writer.alloc(atom.d, (cregs * threads,), MemSpace.SHARED,
                             hint='ctile')
