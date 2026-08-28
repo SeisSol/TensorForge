@@ -895,9 +895,23 @@ class IRBuilder:
 
     def for_(self, lo: Operand, hi: Operand, step: Operand = 1,
              inits: Sequence[Operand] = (), types: Sequence[Any] = (),
-             unroll: bool = False, hint: str = 'i') -> '_ForHandle':
+             unroll: bool = False, hint: str = 'i', extern: str = None,
+             ctype: str = None) -> '_ForHandle':
+        """A loop.  ``extern`` and ``ctype`` are for loops the macro layer owns.
+
+        An inner loop is the IR's own: it picks the induction variable's name
+        and renders its type from `INDEX`.  A loop that already exists in
+        generated code is not -- the batch loop's variable is `batchId0`,
+        spelled out by the lookahead bindings, the flag guard and every
+        `access_address` in the body, and its type is `size_t` rather than
+        `int32_t` because it is compared against `numElements`.
+
+        Same trade as `extern` on `alloc`, and it ends the same way: the name
+        is needed while the things that spell it are still text, and stops
+        being needed as they migrate.
+        """
         return _ForHandle(self, lo, hi, step, tuple(inits), tuple(types),
-                          unroll, hint)
+                          unroll, hint, extern, ctype)
 
     def if_(self, cond: Operand, attrs: Tuple = ()) -> '_IfHandle':
         """Guard without results --- the common case (bounds checks)."""
@@ -1390,9 +1404,12 @@ class _RawBlock:
 
 
 class _ForHandle:
-    def __init__(self, builder, lo, hi, step, inits, types, unroll, hint):
+    def __init__(self, builder, lo, hi, step, inits, types, unroll, hint,
+                 extern=None, ctype=None):
         if len(inits) != len(types):
             raise IRError('for_: one result type per init value required')
+        self._extern = extern
+        self._ctype = ctype
         self.builder = builder
         self._args = (lo, hi, step) + inits
         self._types = types
@@ -1444,6 +1461,10 @@ class _ForHandle:
                 b._token_results[res.id] = b._token_results.get(y.id, ())
                 b._token_uniform[res.id] = b._token_uniform.get(y.id, True)
         attrs = (('unroll', True),) if self._unroll else ()
+        if self._extern is not None:
+            attrs = attrs + (('extern', self._extern),)
+        if self._ctype is not None:
+            attrs = attrs + (('ctype', self._ctype),)
         self.builder.emit(Stmt(op=Op.FOR, target=self.results, args=self._args,
                                regions=(region,), pure=False, movable=False,
                                attrs=attrs))

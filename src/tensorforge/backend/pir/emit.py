@@ -708,6 +708,9 @@ class Emitter:
             w(f'{self.ctype(arg.type, arg)} {nm} = {self.operand(init, arg.type)};')
             targets.append(nm)
 
+        extern = s.attr('extern')
+        if extern is not None:
+            self.bind(ind, extern)
         i = self.name(ind)
         cmp_ = '<' if not isinstance(step, int) or step > 0 else '>'
         if step == 1:
@@ -716,7 +719,11 @@ class Emitter:
             advance = f'--{i}'
         else:
             advance = f'{i} += {self.operand(step)}'
-        head = (f'{self.ctype(ind.type, ind)} {i} = {self.operand(lo)}; '
+        # `ctype` is an override for a loop the macro layer owns: the batch
+        # loop compares its induction variable against `numElements`, so it is
+        # `size_t` and not the `int32_t` that `INDEX` renders to.
+        ind_ctype = s.attr('ctype') or self.ctype(ind.type, ind)
+        head = (f'{ind_ctype} {i} = {self.operand(lo)}; '
                 f'{i} {cmp_} {self.operand(hi)}; {advance}')
         # unroll goes through Writer.For, which folds the pragma into the block
         # head; a separate statement would flush the enclosing speculation and
