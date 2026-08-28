@@ -593,6 +593,7 @@ class IRBuilder:
              predicate: Optional[Value] = None,
              other: Optional[Operand] = None,
              layout: Optional[RegisterLayout] = None,
+             align: Optional[int] = None,
              nontemporal: bool = False) -> Value:
         """``layout`` is how the loaded value ends up spread over the lanes.
 
@@ -618,6 +619,15 @@ class IRBuilder:
             attrs += [('other', other)]
         if nontemporal:
             attrs += [('nontemporal', nontemporal)]
+        if align is not None:
+            # What the *caller* proved about this address, in bytes.  A wide
+            # access is spelled as a reinterpret cast, and the cast's legality
+            # is not recoverable from the IR: the address is an expression,
+            # often a string.  So it is carried rather than derived, and
+            # `verify` rejects a wide access that carries nothing -- which
+            # makes "nobody checked" a state the IR cannot be in, without the
+            # IR having to understand the arithmetic.
+            attrs += [('align', align)]
         attrs = tuple(attrs)
 
         self._emit_op(Op.LOAD, (v,), (base,) + tuple(indices),
@@ -631,17 +641,23 @@ class IRBuilder:
     def store(self, base: Any, value: Operand, *indices: Operand,
               space: Optional[MemSpace] = None,
               predicate: Optional[Value] = None,
+              align: Optional[int] = None,
               atomic: bool = False) -> Stmt:
         if space is None:
             space = (base.type.space if isinstance(base, Value)
                      and isinstance(base.type, BufferType)
                      else MemSpace.from_symbol_type(getattr(base, 'stype', None)))
         kind = Effect.ATOMIC if atomic else Effect.WRITE
+        # See `load`: the alignment a wide access needs is proved by the
+        # caller and carried, because the address is an expression the IR
+        # cannot evaluate.
+        attrs = (('align', align),) if align is not None else ()
         return self._emit_op(Op.STORE, (), (base, value) + tuple(indices),
                              predicate=predicate, pure=False, movable=True,
                              effect=kind,
                              accesses=(Access(kind, space,
-                                              self.alias_root(base)),))
+                                              self.alias_root(base)),),
+                             attrs=attrs)
 
     def copy_async(self, dst: Any, src: Any, *,
                    dst_index: Sequence[Operand] = (),

@@ -122,3 +122,61 @@ def test_the_width_rides_on_the_type_not_on_a_second_field():
     assert isinstance(v.type, ScalarType)
     assert v.type.is_vector and v.type.length == 4
     assert v.type.base is Datatype.F32
+
+
+# --------------------------------------------------------------------------- #
+# The alignment claim a wide access has to carry
+# --------------------------------------------------------------------------- #
+
+def verify_diags(body):
+    from tensorforge.backend.pir import passes
+    diag = []
+    passes._check_scope(tuple(body), set(v.id for s in body for v in s.target),
+                        diag, None)
+    return [d for d in diag if 'align' in d]
+
+
+def test_a_wide_load_without_a_claim_is_reported():
+    """The bug the parked width list would have reintroduced.
+
+    A width chosen without anyone asking about alignment has no symptom until
+    a tensor happens not to be padded, so it has to be a state the IR cannot
+    be in rather than a review item.
+    """
+    b = builder()
+    b.load(buf(b), 'i', type_=F32X4, hint='lin')
+    assert any('no alignment claim' in d for d in verify_diags(b.finish()))
+
+
+def test_a_claim_too_small_for_the_width_is_reported():
+    b = builder()
+    b.load(buf(b), 'i', type_=F32X4, hint='lin', align=8)
+    diags = verify_diags(b.finish())
+    assert any('needs 16-byte' in d for d in diags)
+
+
+def test_a_sufficient_claim_passes():
+    b = builder()
+    v = b.load(buf(b), 'i', type_=F32X4, hint='lin', align=16)
+    b.store(buf(b), v, 'j', align=16)
+    assert verify_diags(b.finish()) == []
+
+
+def test_a_scalar_access_needs_no_claim():
+    """There is no cast, so there is nothing to prove."""
+    b = builder()
+    v = b.load(buf(b), 'i', type_=F32)
+    b.store(buf(b), v, 'j')
+    assert verify_diags(b.finish()) == []
+
+
+def test_the_store_is_checked_against_the_stored_value():
+    """Not against the buffer, which is typed by its element.
+
+    Reading the width off the base would give 1 for every store and silently
+    excuse every wide one -- the failure mode with no diagnostic.
+    """
+    b = builder()
+    v = b.load(buf(b), 'i', type_=F32X2, hint='lin', align=8)
+    b.store(buf(b), v, 'j')
+    assert any('no alignment claim' in d for d in verify_diags(b.finish()))

@@ -19,6 +19,9 @@ def _find_next_coprime(number, conumber):
     if math.gcd(i, conumber) == 1:
       return i
 
+from . import vectorize
+
+
 class LoadInstruction:
   pass
 
@@ -383,22 +386,48 @@ class GlbToRegLoader(MemoryInstruction, LoadInstruction):
       # TODO: box better?
       total_size = self._src.obj.spp.count_nz()
 
-      start = 0
-      for g in [1]: #[4, 2, 1]:
-        granularity = self._num_threads * g
-        for i in range(start, total_size, granularity):
-          # The staging temporary was a C++ name, `v{i}`, declared by the read
-          # and consumed by the write one line later.  Passing the value
-          # instead removes the declaration -- and with it the reason the
-          # `{ }` around this instruction has to stay, since `flatten_scopes`
-          # keeps any region whose raw text declares a name.  Those braces
-          # were 427 blocking nodes: an opaque block head makes the async
-          # scheduler drop its state and nothing reorders across one.
-          staged = self._src.load_linear(writer, self._context, None, i, g)
-          self._dest.store_linear(writer, self._context, staged, i, g,
-                                  base=self.write_base())
+      # The widths are no longer a list with the interesting entries commented
+      # out.  A transfer is as wide as the *narrower* of its two bases allows,
+      # and both have to prove it -- the read is a reinterpret cast and so is
+      # the write.  Today the destination is a register array with only its
+      # natural alignment, so this comes out as `[1]` on its own and the
+      # emitted code is unchanged; it opens up when the array is declared
+      # aligned, which is a fact about the allocation rather than an edit
+      # here.
+      elem = self._src.get_fptype().size()
+      widths = vectorize.widths_for(
+          elem, min(self._src.linear_align_bytes(),
+                    self._dest.linear_align_bytes()))
+      hops, tail = vectorize.plan_hops(total_size, self._num_threads, widths)
 
-        start = (total_size // granularity) * granularity
+      for i, g in hops:
+        # The staging temporary was a C++ name, `v{i}`, declared by the read
+        # and consumed by the write one line later.  Passing the value
+        # instead removes the declaration -- and with it the reason the
+        # `{ }` around this instruction has to stay, since `flatten_scopes`
+        # keeps any region whose raw text declares a name.  Those braces
+        # were 427 blocking nodes: an opaque block head makes the async
+        # scheduler drop its state and nothing reorders across one.
+        staged = self._src.load_linear(writer, self._context, None, i, g)
+        self._dest.store_linear(writer, self._context, staged, i, g,
+                                base=self.write_base())
+
+      if tail:
+        # Fewer than `num_threads` elements, so some lanes have nothing to
+        # read.  Emitted unguarded, which is what the `range` loop did by
+        # accident and what this now does on purpose: the lanes past the end
+        # read into the neighbouring matrix of the batch and their registers
+        # are never consumed.  It is still a read past the tensor -- 23 of 32
+        # lanes for a 9-element operand -- and at the last matrix in the batch
+        # there is no neighbour.  Guarding it is a decision about the buffer,
+        # not about the width, so it is left where it was rather than changed
+        # under cover of this one; `_write_datatransfer` already predicates
+        # its own tail and is the shape to copy when that decision is made.
+        self._dest.store_linear(
+            writer, self._context,
+            self._src.load_linear(writer, self._context, None,
+                                  total_size - tail, 1),
+            total_size - tail, 1, base=self.write_base())
 
     elif self._context.get_vm().get_hw_descr().vendor in ['amd'] and False:
 

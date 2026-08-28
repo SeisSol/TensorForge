@@ -626,6 +626,76 @@ class Symbol:
     uid = self._builder_uid(builder)
     return value if uid is not None and owner == uid else None
 
+  def _linear_claim(self, index, vec: int):
+    """The alignment this linearized access can prove, in bytes.
+
+    `None` for a scalar access: there is no cast, so there is nothing to
+    prove, and the verifier only asks of wide ones.  For a wide one the
+    answer combines the two facts that make the cast legal -- how far the
+    base is aligned, and how far into it the hop starts.
+
+    The offset term is the one that is easy to forget.  A 16-byte aligned
+    base does not make `&buf[i]` 16-byte aligned for every `i`; the hop
+    offsets `plan_hops` produces are multiples of `threads * width`, which
+    carries it, but a caller that picked an offset by hand would not, and
+    this is where that shows up rather than at runtime.
+    """
+    if vec == 1:
+      return None
+    elem = self.get_fptype().size()
+    base = self.linear_align_bytes()
+    if self.stype == SymbolType.Register:
+      # The register address is the slot, not the element: `index //
+      # num_threads`.  So it is the slot that has to divide.
+      off = (index // self.num_threads) if isinstance(index, int) else None
+    else:
+      # `index + threadIdx.x * vec`: the lane term is a multiple of `vec` by
+      # construction, so only the base offset can break the alignment.
+      off = index if isinstance(index, int) else None
+    if off is None:
+      # A symbolic offset proves nothing.  Answering the element size makes
+      # `verify` reject any wide access built on one, which is the intent:
+      # the width was chosen somewhere that could not see the offset.
+      return elem
+    if off == 0:
+      return base
+    byte_off = off * elem
+    return min(base, byte_off & -byte_off)   # largest power of two dividing it
+
+  def linear_align_bytes(self) -> int:
+    """How far the base of a linearized access is *provably* aligned, in bytes.
+
+    Provably.  An answer of `elem.size()` is not "4-byte aligned", it is "no
+    promise beyond the element", and `widths_for` turns both into the same
+    permission: width 1 only.  That asymmetry is deliberate and is the same
+    one `lane_span` makes by raising instead of returning 1 -- an unproven
+    alignment and a natural one are the same number and opposite facts, and
+    the reinterpret cast a wide access needs must not be reachable by
+    defaulting.
+
+    Where the promises come from:
+
+    * **Global/Data**: whatever the frontend attached.  `yateto.py` sets 16
+      when the memory layout reports an aligned stride, 0 otherwise, and 0
+      has to mean unknown rather than "unaligned" -- a batched tensor's base
+      moves by the batch stride, so a promise about element 0 of matrix 0 is
+      only a promise about every matrix if the stride carries it, which is
+      exactly what `alignedStride()` reports.
+    * **SharedMem/Scratch**: 16, and not by assumption -- `_suballocate`
+      rounds every window start up to `16 // elem.size()` elements for this
+      reason, so the property holds however the windows were requested.
+    * **Register**: the natural alignment of the array we declare, until an
+      `Op.ALLOC` asks for more.  A plain `float r[8]` is not `float4`-aligned
+      by any rule, and the compiler over-aligning it in practice is not a
+      guarantee to cast on.
+    """
+    elem = self.get_fptype().size()
+    if self.stype in (SymbolType.SharedMem, SymbolType.Scratch):
+      return max(elem, 16)
+    if self.stype in (SymbolType.Global, SymbolType.Data, SymbolType.Batch):
+      return max(elem, getattr(self.obj, 'alignment', 0) or 0)
+    return elem
+
   def clone(self):
     cloned = Symbol(self.name, self.stype, self.obj)
     cloned.data_view = deepcopy(self.data_view)
@@ -973,7 +1043,8 @@ class Symbol:
         ltype = (ScalarType(self.get_fptype()) if vec == 1
                  else ScalarType(self.get_fptype(), vec))
         return writer.load(buf, addr, type_=ltype, hint='lin',
-                           layout=self.layout)
+                           layout=self.layout,
+                           align=self._linear_claim(index, vec))
       from tensorforge.backend.pir.core import ScalarType
       type_ = (ScalarType(self.get_fptype()) if vec == 1
                else ScalarType(self.get_fptype(), vec))
@@ -1062,7 +1133,8 @@ class Symbol:
       # the one access that moves the most bytes outside every pass's view.
       # The width is on the stored value's type, so the emitter spells the
       # cast and the buffer stays an operand.
-      writer.store(buf, variable, addr)
+      writer.store(buf, variable, addr,
+                   align=self._linear_claim(index, vec))
     elif vec != 1:
       # Unstructured fallback: a rotating buffer writes through an alias
       # base, so there is no buffer value to make an operand of.

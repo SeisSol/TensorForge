@@ -114,6 +114,36 @@ def _check_scope(body: Tuple[Stmt, ...], live: set, diag: List[str],
             if v.id not in live:
                 diag.append(f'{s.op}: operand {v!r} used before definition')
 
+        # -- a wide access carries the alignment it needs -------------------- #
+        #
+        # `*(T4*)&buf[i]` is undefined unless that address is 16-byte aligned,
+        # and nothing in the IR can decide whether it is: the index is an
+        # expression, frequently a string, and the base's guarantee lives on
+        # the frontend's tensor rather than on the buffer value.  So the claim
+        # travels with the access and is checked for *sufficiency* here.
+        #
+        # Missing is the case worth catching.  A width chosen without anyone
+        # asking about alignment is exactly what the parked `for g in [4, 2,
+        # 1]` would have reintroduced, and it has no symptom until a tensor
+        # happens not to be padded.
+        if s.op in (Op.LOAD, Op.STORE):
+            carrier = s.target[:1] if s.op == Op.LOAD else s.args[1:2]
+            wide = [t for t in carrier
+                    if isinstance(getattr(t, 'type', None), ScalarType)
+                    and t.type.length is not None]
+            if wide:
+                need = wide[0].type.length * wide[0].type.base.size()
+                claim = s.attr('align')
+                if claim is None:
+                    diag.append(
+                        f'{s.op}: {wide[0].type} access carries no alignment '
+                        f'claim; a {need}-byte reinterpret cast needs one and '
+                        f'the IR cannot derive it from the address')
+                elif claim < need:
+                    diag.append(
+                        f'{s.op}: {wide[0].type} access needs {need}-byte '
+                        f'alignment but only {claim} is claimed')
+
         # -- distribution agrees with uniformity --------------------------- #
         #
         # The other direction of the rule `Value.__post_init__` enforces.
