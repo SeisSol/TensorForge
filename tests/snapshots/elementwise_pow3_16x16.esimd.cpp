@@ -44,18 +44,17 @@ inline void kernel_kernel_9656a8bcfa(sycl::queue *stream, sycl::range<3> group_c
               const float *const __restrict__ glb_m0 = &m0[batchId0 * 256 + 0 + m0_extraOffset];
               float *const __restrict__ glb_m1 = &m1[batchId0 * 256 + 0 + m1_extraOffset];
               // glb_m1 = pow(glb_m0, 3.0)
-              tensorforge::intel_esimd::simd<int32_t, 16> v2_lead = tensorforge::intel_esimd::simd<int32_t, 16>(0, 1);
               #pragma unroll
-              for (int32_t v3_k0 = 0; v3_k0 < 1; ++v3_k0) {
-                int32_t v5_lead = v3_k0 * 16;
+              for (int32_t v2_k0 = 0; v2_k0 < 1; ++v2_k0) {
+                int32_t v4_lead = v2_k0 * 16;
                 #pragma unroll
-                for (int32_t v4_k1 = 0; v4_k1 < 16; ++v4_k1) {
-                  int32_t v7_a = v4_k1 * 16;
-                  int32_t v8_a = v5_lead + v7_a;
-                  int32_t v12_a = v5_lead + v7_a;
-                  tensorforge::intel_esimd::simd<float, 16> v13_data;
-                  v13_data.copy_from(glb_m0 + (v12_a));
-                  (tensorforge::intel_esimd::pow(v13_data, 3.0f)).copy_to(glb_m1 + (v12_a));
+                for (int32_t v3_k1 = 0; v3_k1 < 16; ++v3_k1) {
+                  int32_t v6_a = v3_k1 * 16;
+                  int32_t v7_a = v4_lead + v6_a;
+                  int32_t v11_a = v4_lead + v6_a;
+                  tensorforge::intel_esimd::simd<float, 16> v12_data;
+                  v12_data.copy_from(glb_m0 + (v11_a));
+                  (tensorforge::intel_esimd::pow(v12_data, 3.0f)).copy_to(glb_m1 + (v11_a));
                 }
               }
             }
