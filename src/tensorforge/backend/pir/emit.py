@@ -322,7 +322,7 @@ class Emitter:
         return getattr(base, 'name', str(base))
 
     def elem_access(self, base: Operand, addr: str, t,
-                    relaxed: bool = False) -> str:
+                    relaxed: bool = False, pointer: str = None) -> str:
         """``base[addr]``, reinterpreted when the value is wider than one element.
 
         A buffer is typed by its element, so a vector-typed access reads or
@@ -338,7 +338,11 @@ class Emitter:
         Nothing here checks that, exactly as nothing checked it before; the
         legality belongs with whoever chooses the width, not with the spelling.
         """
-        access = f'{self.base_name(base)}[{addr}]'
+        # `pointer` overrides the *name* written through, never the base the
+        # accesses are attributed to: a rotating buffer's stages are one
+        # buffer, and telling a pass otherwise would let it reorder a fill
+        # past a read of the stage being filled.
+        access = f'{pointer or self.base_name(base)}[{addr}]'
         if isinstance(t, ScalarType) and t.length is not None:
             return f'*({self._vector_ctype(t, relaxed)}*)&{access}'
         return access
@@ -544,7 +548,8 @@ class Emitter:
             val = s.args[1]
             vt = val.type if isinstance(val, Value) else None
             access = self.elem_access(s.args[0], addr, vt,
-                                      s.attr('align') == 'relaxed')
+                                      s.attr('align') == 'relaxed',
+                                      pointer=s.attr('pointer'))
             # A store to global memory goes through the lexic, the same way
             # `Op.LOAD` above goes through `glb_load`: the nontemporal hint is
             # `__stcg` on NVIDIA and `__builtin_nontemporal_store` on AMD, and

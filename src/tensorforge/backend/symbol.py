@@ -1439,8 +1439,16 @@ class Symbol:
     kind = Effect.ATOMIC if atomic else Effect.WRITE
     from tensorforge.backend.pir.core import Value as _Value
     lead = index[self.lead_dims[0]] if len(self.lead_dims) == 1 else None
-    structured = (base is None and not atomic and isinstance(variable, _Value)
-                  and isinstance(lead, LeadIndex)
+    # `unwrap_lead`, not `isinstance`: a slicing offset wraps the lead index
+    # in a `VarOffset`, and `build_address` has always peeled that -- so the
+    # only thing the narrower test achieved was to send a sliced store back to
+    # the text path, where its address is a pinned name instead of an operand.
+    #
+    # `base` no longer disqualifies.  It overrides the pointer *name*, which
+    # `Op.STORE` now carries as an attribute; the base it attributes accesses
+    # to is still the symbol, which is what a rotating buffer's stages are.
+    structured = (not atomic and isinstance(variable, _Value)
+                  and lead is not None and unwrap_lead(lead) is not None
                   and self.stype in (SymbolType.Register, SymbolType.Scratch,
                                      SymbolType.Global, SymbolType.SharedMem))
 
@@ -1485,7 +1493,7 @@ class Symbol:
       # an expression rather than a statement.
       writer.store(self, variable,
                    self.address_value(writer, context, index),
-                   nontemporal=bool(nontemp))
+                   nontemporal=bool(nontemp), pointer=base)
     elif (self.stype in (SymbolType.Register, SymbolType.Scratch)
           and not isinstance(lead, LeadIndex)):
       # One named element of a dimension that lives in the registers, so

@@ -690,7 +690,8 @@ class IRBuilder:
               predicate: Optional[Value] = None,
               align: Optional[int] = None,
               atomic: bool = False,
-              nontemporal: bool = False) -> Stmt:
+              nontemporal: bool = False,
+              pointer: Optional[str] = None) -> Stmt:
         """``nontemporal`` is a cache hint, carried the way ``Op.LOAD`` carries
         its own: as an attribute the emitter hands to ``lexic.glb_store``.
 
@@ -707,6 +708,15 @@ class IRBuilder:
         attrs = []
         if nontemporal:
             attrs += [('nontemporal', nontemporal)]
+        if pointer is not None:
+            # The pointer written *through*, when it is not the symbol's own
+            # name.  A rotating shared buffer fills a stage other than the one
+            # its consumers read, and `Op.STORE`'s base is the symbol -- so the
+            # override is a spelling the emitter applies, not a different
+            # destination.  It deliberately does not change `alias_root`: the
+            # stages are the same buffer, and a pass that thinks otherwise
+            # would reorder a fill past a read of the stage it fills.
+            attrs += [('pointer', pointer)]
         if align is not None:
             # See `load`: the alignment a wide access needs is proved by the
             # caller and carried, because the address is an expression the IR

@@ -170,7 +170,13 @@ def test_the_exceptions_are_reachable_at_all():
     import inspect
     src = inspect.getsource(Symbol.load) + inspect.getsource(Symbol.store)
     assert 'SymbolType.Register' in src
-    assert 'base is None' in src, 'the base-override exception vanished'
+    # The base override used to be checked here as a third exception.  It is
+    # not one any more: `Op.STORE` carries the pointer name as an attribute,
+    # so a rotating buffer writing to a stage other than its own goes through
+    # the structured path like everything else.  `atomic` is what is left --
+    # `atomic_store` returns an expression rather than a statement, and takes
+    # operands the op has no place for.
+    assert 'atomic' in src, 'the atomic exception vanished'
     assert 'access is pre_access' in src, 'the broadcast exception vanished'
 
 

@@ -97,18 +97,18 @@ KNOWN_BAD_BACKENDS: dict = {}
 #: misclassifies is worse than no heuristic, because the entry it wrongly
 #: excuses looks reviewed.
 NOT_YET_ESIMD = {
-    # A guard that narrowing cannot remove -- `lane >= lo`, or a later slot --
-    # so the store keeps a predicate, and a `simd_mask` is not a branch
-    # condition.  See `LeadLoop._narrow` for why both need a base offset the
-    # index does not carry yet.
-    "bbox_shared_lower.esimd.cpp": "predicated store",
-    "lead_window_spans_two_blocks.esimd.cpp": "predicated store",
-    # A vector assigned into a scalar slot, on a path `Op.STORE` has not
-    # reached: `Symbol.store` still writes text where `base` overrides the
-    # pointer name, and a rotating shared buffer does exactly that.
-    "gemm_trans_a_20x12.esimd.cpp": "store on the text path (pointer override)",
-    "gemm_trans_b_12x16.esimd.cpp": "store on the text path (pointer override)",
-    "temp_two_writers.esimd.cpp": "store on the text path (pointer override)",
+    # All three the same thing: a guard that narrowing cannot remove -- a
+    # lower bound (`lane >= lo`) or a later slot -- so the store keeps a
+    # predicate, and a `simd_mask` is not a branch condition.
+    #
+    # Both need the vector to *start* somewhere other than element zero, which
+    # is a base offset `LeadIndex` does not carry; see `LeadLoop._narrow` for
+    # why guessing it would put a wrong address behind a correct-looking type.
+    # That is now the only thing between this corpus and a fully well-formed
+    # ESIMD lowering.
+    "bbox_shared_lower.esimd.cpp": "predicated store: needs a base offset",
+    "gemm_trans_a_20x12.esimd.cpp": "predicated store: needs a base offset",
+    "lead_window_spans_two_blocks.esimd.cpp": "predicated store: needs a base offset",
 }
 
 

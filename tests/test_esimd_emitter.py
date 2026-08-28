@@ -397,3 +397,36 @@ def test_narrowing_refuses_a_straddling_vector():
     from tensorforge.backend.symbol import LeadLoop
     loop = LeadLoop('i', 0, 9, 16, stride=1, width=2)
     assert loop._narrow(_FakeWriter(True), 0, None, 5) is None
+
+
+# --------------------------------------------------------------------------
+# the last two text-path stores
+# --------------------------------------------------------------------------
+
+def test_a_sliced_lead_index_still_takes_the_structured_path():
+    """`unwrap_lead`, not `isinstance`.
+
+    A slicing offset wraps the lead index in a `VarOffset`, which
+    `build_address` has always peeled -- so testing for `LeadIndex` alone only
+    ever sent a sliced store back to the text path, where its address is a
+    pinned name instead of an operand.
+    """
+    from tensorforge.backend.symbol import LeadIndex, VarOffset, unwrap_lead
+    idx = VarOffset(LeadIndex(0, 16, 1), 32)
+    assert not isinstance(idx, LeadIndex)
+    assert unwrap_lead(idx) is not None
+
+
+def test_the_pointer_override_does_not_move_the_alias_root():
+    """A rotating buffer's stages are one buffer.
+
+    `pointer` changes the name written through and nothing else -- telling a
+    pass the stages were separate would let it reorder a fill past a read of
+    the stage being filled.
+    """
+    from tensorforge.backend.pir.core import MemSpace
+    b = _builder('esimd')
+    buf = b.alloc(Datatype.F32, (16,), MemSpace.REGISTER, hint='s')
+    stmt = b.store(buf, b.const(1.0), 0, pointer='stage1')
+    assert stmt.attr('pointer') == 'stage1'
+    assert stmt.accesses[0].base is b.alias_root(buf)
