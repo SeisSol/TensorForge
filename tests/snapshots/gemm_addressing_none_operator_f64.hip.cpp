@@ -109,7 +109,6 @@ __launch_bounds__(256)
           double r1[16]{};
           // r1 = +(glb_m1 * r0) + None
           // [(0, 16), (0, 16)] [(0, 16)]
-          auto& ir1 = r1;
           int32_t v24_lane = threadIdx.x % 16;
           int32_t v27_a = v24_lane + 0;
           double v34_data = glb_m1[v24_lane];
@@ -431,22 +430,22 @@ __launch_bounds__(256)
           tensorforge::fmacdpp16<13>(v245_acc, v261_data, v203_data);
           tensorforge::fmacdpp16<14>(v245_acc, v261_data, v216_data);
           tensorforge::fmacdpp16<15>(v245_acc, v261_data, v229_data);
-          ir1[0] = v230_acc;
-          ir1[1] = v231_acc;
-          ir1[2] = v232_acc;
-          ir1[3] = v233_acc;
-          ir1[4] = v234_acc;
-          ir1[5] = v235_acc;
-          ir1[6] = v236_acc;
-          ir1[7] = v237_acc;
-          ir1[8] = v238_acc;
-          ir1[9] = v239_acc;
-          ir1[10] = v240_acc;
-          ir1[11] = v241_acc;
-          ir1[12] = v242_acc;
-          ir1[13] = v243_acc;
-          ir1[14] = v244_acc;
-          ir1[15] = v245_acc;
+          r1[0] = v230_acc;
+          r1[1] = v231_acc;
+          r1[2] = v232_acc;
+          r1[3] = v233_acc;
+          r1[4] = v234_acc;
+          r1[5] = v235_acc;
+          r1[6] = v236_acc;
+          r1[7] = v237_acc;
+          r1[8] = v238_acc;
+          r1[9] = v239_acc;
+          r1[10] = v240_acc;
+          r1[11] = v241_acc;
+          r1[12] = v242_acc;
+          r1[13] = v243_acc;
+          r1[14] = v244_acc;
+          r1[15] = v245_acc;
           // glb_m0 = store{r>g}(r1);
           #pragma unroll
           for (int32_t v265_i0 = 0; v265_i0 < 1; ++v265_i0) {
@@ -459,7 +458,6 @@ __launch_bounds__(256)
               glb_m0[v276_a] = v269_data;
             }
           }
-          ;
         }
       }
     }

@@ -107,7 +107,6 @@ __launch_bounds__(256)
           float r2[16]{};
           // r2 = +(r0 * r1) + None
           // [(0, 16), (0, 16)] [(0, 16)]
-          auto& ir2 = r2;
           float v37_data = r1[0];
           float v38_data = r1[1];
           float v39_data = r1[2];
@@ -150,10 +149,10 @@ __launch_bounds__(256)
           tensorforge::VectorT<float, 4> v75_acc = __builtin_amdgcn_mfma_f32_4x4x1f32(v42_tp, v71_data, v74_acc, 3, 3, 0);
           tensorforge::VectorT<float, 4> v76_acc = __builtin_amdgcn_mfma_f32_4x4x1f32(v43_tp, v72_data, v75_acc, 3, 3, 0);
           tensorforge::VectorT<float, 4> v77_acc = __builtin_amdgcn_mfma_f32_4x4x1f32(v44_tp, v73_data, v76_acc, 3, 3, 0);
-          ir2[0] = (v77_acc[0]);
-          ir2[1] = (v77_acc[1]);
-          ir2[2] = (v77_acc[2]);
-          ir2[3] = (v77_acc[3]);
+          r2[0] = (v77_acc[0]);
+          r2[1] = (v77_acc[1]);
+          r2[2] = (v77_acc[2]);
+          r2[3] = (v77_acc[3]);
           float v82_data = r1[4];
           float v83_data = r1[5];
           float v84_data = r1[6];
@@ -180,10 +179,10 @@ __launch_bounds__(256)
           tensorforge::VectorT<float, 4> v120_acc = __builtin_amdgcn_mfma_f32_4x4x1f32(v87_tp, v71_data, v119_acc, 3, 3, 0);
           tensorforge::VectorT<float, 4> v121_acc = __builtin_amdgcn_mfma_f32_4x4x1f32(v88_tp, v72_data, v120_acc, 3, 3, 0);
           tensorforge::VectorT<float, 4> v122_acc = __builtin_amdgcn_mfma_f32_4x4x1f32(v89_tp, v73_data, v121_acc, 3, 3, 0);
-          ir2[4] = (v122_acc[0]);
-          ir2[5] = (v122_acc[1]);
-          ir2[6] = (v122_acc[2]);
-          ir2[7] = (v122_acc[3]);
+          r2[4] = (v122_acc[0]);
+          r2[5] = (v122_acc[1]);
+          r2[6] = (v122_acc[2]);
+          r2[7] = (v122_acc[3]);
           float v127_data = r1[8];
           float v128_data = r1[9];
           float v129_data = r1[10];
@@ -210,10 +209,10 @@ __launch_bounds__(256)
           tensorforge::VectorT<float, 4> v165_acc = __builtin_amdgcn_mfma_f32_4x4x1f32(v132_tp, v71_data, v164_acc, 3, 3, 0);
           tensorforge::VectorT<float, 4> v166_acc = __builtin_amdgcn_mfma_f32_4x4x1f32(v133_tp, v72_data, v165_acc, 3, 3, 0);
           tensorforge::VectorT<float, 4> v167_acc = __builtin_amdgcn_mfma_f32_4x4x1f32(v134_tp, v73_data, v166_acc, 3, 3, 0);
-          ir2[8] = (v167_acc[0]);
-          ir2[9] = (v167_acc[1]);
-          ir2[10] = (v167_acc[2]);
-          ir2[11] = (v167_acc[3]);
+          r2[8] = (v167_acc[0]);
+          r2[9] = (v167_acc[1]);
+          r2[10] = (v167_acc[2]);
+          r2[11] = (v167_acc[3]);
           float v172_data = r1[12];
           float v173_data = r1[13];
           float v174_data = r1[14];
@@ -240,10 +239,10 @@ __launch_bounds__(256)
           tensorforge::VectorT<float, 4> v210_acc = __builtin_amdgcn_mfma_f32_4x4x1f32(v177_tp, v71_data, v209_acc, 3, 3, 0);
           tensorforge::VectorT<float, 4> v211_acc = __builtin_amdgcn_mfma_f32_4x4x1f32(v178_tp, v72_data, v210_acc, 3, 3, 0);
           tensorforge::VectorT<float, 4> v212_acc = __builtin_amdgcn_mfma_f32_4x4x1f32(v179_tp, v73_data, v211_acc, 3, 3, 0);
-          ir2[12] = (v212_acc[0]);
-          ir2[13] = (v212_acc[1]);
-          ir2[14] = (v212_acc[2]);
-          ir2[15] = (v212_acc[3]);
+          r2[12] = (v212_acc[0]);
+          r2[13] = (v212_acc[1]);
+          r2[14] = (v212_acc[2]);
+          r2[15] = (v212_acc[3]);
           // glb_m0 = store{r>g}(r2);
           if (v8_lead < 16) {
             #pragma unroll
@@ -254,7 +253,6 @@ __launch_bounds__(256)
               glb_m0[v231_a] = v224_data;
             }
           }
-          ;
         }
       }
     }
@@ -313,7 +311,6 @@ __launch_bounds__(256)
           float r2[16]{};
           // r2 = +(r0 * r1) + None
           // [(0, 16), (0, 16)] [(0, 16)]
-          auto& ir2 = r2;
           float v269_data = r1[0];
           float v270_data = r1[1];
           float v271_data = r1[2];
@@ -356,10 +353,10 @@ __launch_bounds__(256)
           tensorforge::VectorT<float, 4> v307_acc = __builtin_amdgcn_mfma_f32_4x4x1f32(v274_tp, v303_data, v306_acc, 3, 3, 0);
           tensorforge::VectorT<float, 4> v308_acc = __builtin_amdgcn_mfma_f32_4x4x1f32(v275_tp, v304_data, v307_acc, 3, 3, 0);
           tensorforge::VectorT<float, 4> v309_acc = __builtin_amdgcn_mfma_f32_4x4x1f32(v276_tp, v305_data, v308_acc, 3, 3, 0);
-          ir2[0] = (v309_acc[0]);
-          ir2[1] = (v309_acc[1]);
-          ir2[2] = (v309_acc[2]);
-          ir2[3] = (v309_acc[3]);
+          r2[0] = (v309_acc[0]);
+          r2[1] = (v309_acc[1]);
+          r2[2] = (v309_acc[2]);
+          r2[3] = (v309_acc[3]);
           float v314_data = r1[4];
           float v315_data = r1[5];
           float v316_data = r1[6];
@@ -386,10 +383,10 @@ __launch_bounds__(256)
           tensorforge::VectorT<float, 4> v352_acc = __builtin_amdgcn_mfma_f32_4x4x1f32(v319_tp, v303_data, v351_acc, 3, 3, 0);
           tensorforge::VectorT<float, 4> v353_acc = __builtin_amdgcn_mfma_f32_4x4x1f32(v320_tp, v304_data, v352_acc, 3, 3, 0);
           tensorforge::VectorT<float, 4> v354_acc = __builtin_amdgcn_mfma_f32_4x4x1f32(v321_tp, v305_data, v353_acc, 3, 3, 0);
-          ir2[4] = (v354_acc[0]);
-          ir2[5] = (v354_acc[1]);
-          ir2[6] = (v354_acc[2]);
-          ir2[7] = (v354_acc[3]);
+          r2[4] = (v354_acc[0]);
+          r2[5] = (v354_acc[1]);
+          r2[6] = (v354_acc[2]);
+          r2[7] = (v354_acc[3]);
           float v359_data = r1[8];
           float v360_data = r1[9];
           float v361_data = r1[10];
@@ -416,10 +413,10 @@ __launch_bounds__(256)
           tensorforge::VectorT<float, 4> v397_acc = __builtin_amdgcn_mfma_f32_4x4x1f32(v364_tp, v303_data, v396_acc, 3, 3, 0);
           tensorforge::VectorT<float, 4> v398_acc = __builtin_amdgcn_mfma_f32_4x4x1f32(v365_tp, v304_data, v397_acc, 3, 3, 0);
           tensorforge::VectorT<float, 4> v399_acc = __builtin_amdgcn_mfma_f32_4x4x1f32(v366_tp, v305_data, v398_acc, 3, 3, 0);
-          ir2[8] = (v399_acc[0]);
-          ir2[9] = (v399_acc[1]);
-          ir2[10] = (v399_acc[2]);
-          ir2[11] = (v399_acc[3]);
+          r2[8] = (v399_acc[0]);
+          r2[9] = (v399_acc[1]);
+          r2[10] = (v399_acc[2]);
+          r2[11] = (v399_acc[3]);
           float v404_data = r1[12];
           float v405_data = r1[13];
           float v406_data = r1[14];
@@ -446,10 +443,10 @@ __launch_bounds__(256)
           tensorforge::VectorT<float, 4> v442_acc = __builtin_amdgcn_mfma_f32_4x4x1f32(v409_tp, v303_data, v441_acc, 3, 3, 0);
           tensorforge::VectorT<float, 4> v443_acc = __builtin_amdgcn_mfma_f32_4x4x1f32(v410_tp, v304_data, v442_acc, 3, 3, 0);
           tensorforge::VectorT<float, 4> v444_acc = __builtin_amdgcn_mfma_f32_4x4x1f32(v411_tp, v305_data, v443_acc, 3, 3, 0);
-          ir2[12] = (v444_acc[0]);
-          ir2[13] = (v444_acc[1]);
-          ir2[14] = (v444_acc[2]);
-          ir2[15] = (v444_acc[3]);
+          r2[12] = (v444_acc[0]);
+          r2[13] = (v444_acc[1]);
+          r2[14] = (v444_acc[2]);
+          r2[15] = (v444_acc[3]);
           // glb_m3 = store{r>g}(r2);
           if (v240_lead < 16) {
             #pragma unroll
@@ -460,7 +457,6 @@ __launch_bounds__(256)
               glb_m3[v463_a] = v456_data;
             }
           }
-          ;
         }
       }
     }

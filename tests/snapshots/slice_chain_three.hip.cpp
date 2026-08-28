@@ -231,7 +231,6 @@ __launch_bounds__(256)
           float r2[6]{};
           // r2 = +(r0 * r1) + None
           // [(0, 12), (0, 6)] [(0, 6)]
-          auto& ir2 = r2;
           float v114_data = r1[0];
           float v115_data = r1[1];
           float v116_data = r1[2];
@@ -254,10 +253,10 @@ __launch_bounds__(256)
           float v132_data = r0[5];
           tensorforge::VectorT<float, 4> v135_acc = __builtin_amdgcn_mfma_f32_4x4x1f32(v118_tp, v131_data, v130_acc, 2, 1, 0);
           tensorforge::VectorT<float, 4> v136_acc = __builtin_amdgcn_mfma_f32_4x4x1f32(v119_tp, v132_data, v135_acc, 2, 1, 0);
-          ir2[0] = (v136_acc[0]);
-          ir2[1] = (v136_acc[1]);
-          ir2[2] = (v136_acc[2]);
-          ir2[3] = (v136_acc[3]);
+          r2[0] = (v136_acc[0]);
+          r2[1] = (v136_acc[1]);
+          r2[2] = (v136_acc[2]);
+          r2[3] = (v136_acc[3]);
           float v141_data = r1[4];
           float v142_data = r1[5];
           float v145_tp{};
@@ -272,13 +271,12 @@ __launch_bounds__(256)
           tensorforge::VectorT<float, 4> v157_acc = __builtin_amdgcn_mfma_f32_4x4x1f32(v148_tp, v126_data, v156_acc, 2, 0, 0);
           tensorforge::VectorT<float, 4> v162_acc = __builtin_amdgcn_mfma_f32_4x4x1f32(v145_tp, v131_data, v157_acc, 2, 1, 0);
           tensorforge::VectorT<float, 4> v163_acc = __builtin_amdgcn_mfma_f32_4x4x1f32(v146_tp, v132_data, v162_acc, 2, 1, 0);
-          ir2[4] = (v163_acc[0]);
-          ir2[5] = (v163_acc[1]);
+          r2[4] = (v163_acc[0]);
+          r2[5] = (v163_acc[1]);
           // wait(r3 = load{g>r}(glb_m3););
           float r4[6]{};
           // r4 = +(r3 * r2) + None
           // [(0, 12), (0, 6)] [(0, 12)]
-          auto& ir4 = r4;
           float v167_data = r3[0];
           float v168_data = r3[1];
           float v169_data = r3[2];
@@ -374,12 +372,12 @@ __launch_bounds__(256)
           tensorforge::fmacdpp16<5>(v184_acc, v189_lin, v176_data);
           tensorforge::fmacdpp16<6>(v184_acc, v189_lin, v177_data);
           tensorforge::fmacdpp16<7>(v184_acc, v189_lin, v178_data);
-          ir4[0] = v179_acc;
-          ir4[1] = v180_acc;
-          ir4[2] = v181_acc;
-          ir4[3] = v182_acc;
-          ir4[4] = v183_acc;
-          ir4[5] = v184_acc;
+          r4[0] = v179_acc;
+          r4[1] = v180_acc;
+          r4[2] = v181_acc;
+          r4[3] = v182_acc;
+          r4[4] = v183_acc;
+          r4[5] = v184_acc;
           // glb_m2 = store{r>g}(r4);
           if (v7_lead < 12) {
             #pragma unroll
@@ -390,7 +388,6 @@ __launch_bounds__(256)
               glb_m2[v204_a] = v197_data;
             }
           }
-          ;
         }
       }
     }

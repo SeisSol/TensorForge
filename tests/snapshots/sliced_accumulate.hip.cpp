@@ -127,7 +127,6 @@ __launch_bounds__(256)
           float r2[16]{};
           // r2 = +(r0 * r1) + None
           // [(0, 32), (0, 16)] [(0, 12)]
-          auto& ir2 = r2;
           float v59_data = r0[0];
           float v60_data = r0[1];
           float v61_data = r0[2];
@@ -366,22 +365,22 @@ __launch_bounds__(256)
           tensorforge::fmacdpp16<13>(v86_acc, v104_bc, v68_data);
           tensorforge::fmacdpp16<14>(v86_acc, v104_bc, v69_data);
           tensorforge::fmacdpp16<15>(v86_acc, v104_bc, v70_data);
-          ir2[0] = v71_acc;
-          ir2[1] = v72_acc;
-          ir2[2] = v73_acc;
-          ir2[3] = v74_acc;
-          ir2[4] = v75_acc;
-          ir2[5] = v76_acc;
-          ir2[6] = v77_acc;
-          ir2[7] = v78_acc;
-          ir2[8] = v79_acc;
-          ir2[9] = v80_acc;
-          ir2[10] = v81_acc;
-          ir2[11] = v82_acc;
-          ir2[12] = v83_acc;
-          ir2[13] = v84_acc;
-          ir2[14] = v85_acc;
-          ir2[15] = v86_acc;
+          r2[0] = v71_acc;
+          r2[1] = v72_acc;
+          r2[2] = v73_acc;
+          r2[3] = v74_acc;
+          r2[4] = v75_acc;
+          r2[5] = v76_acc;
+          r2[6] = v77_acc;
+          r2[7] = v78_acc;
+          r2[8] = v79_acc;
+          r2[9] = v80_acc;
+          r2[10] = v81_acc;
+          r2[11] = v82_acc;
+          r2[12] = v83_acc;
+          r2[13] = v84_acc;
+          r2[14] = v85_acc;
+          r2[15] = v86_acc;
           // glb_m0 = store{r>g}(r2);
           #pragma unroll
           for (int32_t v108_i0 = 0; v108_i0 < 1; ++v108_i0) {
@@ -423,7 +422,6 @@ __launch_bounds__(256)
           float r5[8]{};
           // r5 = +(r3 * r4) + None
           // [(0, 32), (0, 8)] [(0, 12)]
-          auto& ir5 = r5;
           float v147_data = r3[0];
           float v148_data = r3[1];
           float v149_data = r3[2];
@@ -549,14 +547,14 @@ __launch_bounds__(256)
           tensorforge::fmacdpp16<13>(v166_acc, v175_bc, v156_data);
           tensorforge::fmacdpp16<14>(v166_acc, v175_bc, v157_data);
           tensorforge::fmacdpp16<15>(v166_acc, v175_bc, v158_data);
-          ir5[0] = v159_acc;
-          ir5[1] = v160_acc;
-          ir5[2] = v161_acc;
-          ir5[3] = v162_acc;
-          ir5[4] = v163_acc;
-          ir5[5] = v164_acc;
-          ir5[6] = v165_acc;
-          ir5[7] = v166_acc;
+          r5[0] = v159_acc;
+          r5[1] = v160_acc;
+          r5[2] = v161_acc;
+          r5[3] = v162_acc;
+          r5[4] = v163_acc;
+          r5[5] = v164_acc;
+          r5[6] = v165_acc;
+          r5[7] = v166_acc;
           // glb_m0 = store{r>g}(r5);
           #pragma unroll
           for (int32_t v179_i0 = 0; v179_i0 < 1; ++v179_i0) {
@@ -582,7 +580,6 @@ __launch_bounds__(256)
           float r8[8]{};
           // r8 = +(r6 * r7) + None
           // [(0, 32), (0, 8)] [(0, 12)]
-          auto& ir8 = r8;
           float v196_data = r6[0];
           float v197_data = r6[1];
           float v198_data = r6[2];
@@ -708,14 +705,14 @@ __launch_bounds__(256)
           tensorforge::fmacdpp16<13>(v215_acc, v224_bc, v205_data);
           tensorforge::fmacdpp16<14>(v215_acc, v224_bc, v206_data);
           tensorforge::fmacdpp16<15>(v215_acc, v224_bc, v207_data);
-          ir8[0] = v208_acc;
-          ir8[1] = v209_acc;
-          ir8[2] = v210_acc;
-          ir8[3] = v211_acc;
-          ir8[4] = v212_acc;
-          ir8[5] = v213_acc;
-          ir8[6] = v214_acc;
-          ir8[7] = v215_acc;
+          r8[0] = v208_acc;
+          r8[1] = v209_acc;
+          r8[2] = v210_acc;
+          r8[3] = v211_acc;
+          r8[4] = v212_acc;
+          r8[5] = v213_acc;
+          r8[6] = v214_acc;
+          r8[7] = v215_acc;
           // glb_m0 = store{r>g}(r8);
           #pragma unroll
           for (int32_t v228_i0 = 0; v228_i0 < 1; ++v228_i0) {
@@ -728,7 +725,6 @@ __launch_bounds__(256)
               __builtin_amdgcn_global_atomic_fadd_f32(&glb_m0[v240_a], v232_data);
             }
           }
-          ;
         }
       }
     }

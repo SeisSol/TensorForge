@@ -104,7 +104,6 @@ __launch_bounds__(256)
           float r2[8]{};
           // r2 = +(r0 * r1) + None
           // [(0, 12), (0, 8)] [(0, 16)]
-          auto& ir2 = r2;
           float v35_data = r1[0];
           float v36_data = r1[1];
           float v37_data = r1[2];
@@ -147,10 +146,10 @@ __launch_bounds__(256)
           tensorforge::VectorT<float, 4> v73_acc = __builtin_amdgcn_mfma_f32_4x4x1f32(v40_tp, v69_data, v72_acc, 2, 3, 0);
           tensorforge::VectorT<float, 4> v74_acc = __builtin_amdgcn_mfma_f32_4x4x1f32(v41_tp, v70_data, v73_acc, 2, 3, 0);
           tensorforge::VectorT<float, 4> v75_acc = __builtin_amdgcn_mfma_f32_4x4x1f32(v42_tp, v71_data, v74_acc, 2, 3, 0);
-          ir2[0] = (v75_acc[0]);
-          ir2[1] = (v75_acc[1]);
-          ir2[2] = (v75_acc[2]);
-          ir2[3] = (v75_acc[3]);
+          r2[0] = (v75_acc[0]);
+          r2[1] = (v75_acc[1]);
+          r2[2] = (v75_acc[2]);
+          r2[3] = (v75_acc[3]);
           float v80_data = r1[4];
           float v81_data = r1[5];
           float v82_data = r1[6];
@@ -177,10 +176,10 @@ __launch_bounds__(256)
           tensorforge::VectorT<float, 4> v118_acc = __builtin_amdgcn_mfma_f32_4x4x1f32(v85_tp, v69_data, v117_acc, 2, 3, 0);
           tensorforge::VectorT<float, 4> v119_acc = __builtin_amdgcn_mfma_f32_4x4x1f32(v86_tp, v70_data, v118_acc, 2, 3, 0);
           tensorforge::VectorT<float, 4> v120_acc = __builtin_amdgcn_mfma_f32_4x4x1f32(v87_tp, v71_data, v119_acc, 2, 3, 0);
-          ir2[4] = (v120_acc[0]);
-          ir2[5] = (v120_acc[1]);
-          ir2[6] = (v120_acc[2]);
-          ir2[7] = (v120_acc[3]);
+          r2[4] = (v120_acc[0]);
+          r2[5] = (v120_acc[1]);
+          r2[6] = (v120_acc[2]);
+          r2[7] = (v120_acc[3]);
           // glb_m0 = store{r>g}(r2);
           if (v6_lead < 12) {
             #pragma unroll
@@ -191,7 +190,6 @@ __launch_bounds__(256)
               __builtin_amdgcn_global_atomic_fadd_f32(&glb_m0[v139_a], v132_data);
             }
           }
-          ;
         }
       }
     }

@@ -79,13 +79,13 @@ class CudaLexic(Lexic):
     return MultiBlock(file, [header, shmdef])
 
   def sync_block(self):
-    return "__syncthreads()"
+    return "__syncthreads();"
 
   def sync_simd(self):
-    return "__syncwarp()"
+    return "__syncwarp();"
 
   def sync_grid(self):
-    return "cooperative_groups::this_grid().sync()"
+    return "cooperative_groups::this_grid().sync();"
 
   def get_sub_group_id(self, sub_group_size):
     return f'{self.thread_idx_x} % {sub_group_size}'

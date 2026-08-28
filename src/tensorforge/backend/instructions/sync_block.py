@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: MIT
 from tensorforge.common.context import Context
 from .abstract_instruction import AbstractInstruction, BarrierScope
-
+from tensorforge.backend.pir.core import Uniformity
 
 class SyncThreads(AbstractInstruction):
   def __init__(self, context: Context, num_threads_per_mult):
@@ -22,14 +22,10 @@ class SyncThreads(AbstractInstruction):
     return ()
 
   def gen_ir(self, writer):
-    writer(f'{self.__str__()}')
+    writer.barrier(Uniformity.MULT)
 
   def __str__(self) -> str:
-    lexic = self._vm.get_lexic()
-    if self._num_threads > self._vm.get_hw_descr().vec_unit_length:
-      return f'{lexic.sync_block()};'
-    else:
-      return f'{lexic.sync_simd()};'
+    return self.barrier_scope()
 
   def gen_mask_threads(self, num_threads) -> str:
     return ''
@@ -46,11 +42,10 @@ class SyncBlock(AbstractInstruction):
     return ()
 
   def gen_ir(self, writer):
-    writer(f'{self.__str__()}')
+    writer.barrier(Uniformity.BLOCK)
 
   def __str__(self) -> str:
-    lexic = self._vm.get_lexic()
-    return f'{lexic.sync_block()};'
+    return self.barrier_scope()
 
   def gen_mask_threads(self, num_threads) -> str:
     return ''
@@ -67,11 +62,10 @@ class SyncGrid(AbstractInstruction):
     return ()
 
   def gen_ir(self, writer):
-    writer(f'{self.__str__()}')
+    writer.barrier(Uniformity.GRID)
 
   def __str__(self) -> str:
-    lexic = self._vm.get_lexic()
-    return f'{lexic.sync_grid()};'
+    return self.barrier_scope()
 
   def gen_mask_threads(self, num_threads) -> str:
     return ''

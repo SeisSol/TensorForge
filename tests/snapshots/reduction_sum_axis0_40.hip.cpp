@@ -86,7 +86,6 @@ __launch_bounds__(256)
               glb_m1[v2_k1] = v39_red;
             }
           }
-          ;
         }
       }
     }

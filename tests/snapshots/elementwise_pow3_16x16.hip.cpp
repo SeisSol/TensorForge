@@ -75,7 +75,6 @@ __launch_bounds__(256)
               glb_m1[v29_a] = (powf(v21_data, 3.0f));
             }
           }
-          ;
         }
       }
     }

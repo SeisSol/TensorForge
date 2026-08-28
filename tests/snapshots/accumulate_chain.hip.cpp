@@ -127,7 +127,6 @@ __launch_bounds__(256)
           float r2[8]{};
           // r2 = +(r0 * r1) + None
           // [(0, 12), (0, 8)] [(0, 12)]
-          auto& ir2 = r2;
           float v61_data = r0[0];
           float v62_data = r0[1];
           float v63_data = r0[2];
@@ -250,14 +249,14 @@ __launch_bounds__(256)
           tensorforge::fmacdpp16<13>(v80_acc, v86_lin, v70_data);
           tensorforge::fmacdpp16<14>(v80_acc, v86_lin, v71_data);
           tensorforge::fmacdpp16<15>(v80_acc, v86_lin, v72_data);
-          ir2[0] = v73_acc;
-          ir2[1] = v74_acc;
-          ir2[2] = v75_acc;
-          ir2[3] = v76_acc;
-          ir2[4] = v77_acc;
-          ir2[5] = v78_acc;
-          ir2[6] = v79_acc;
-          ir2[7] = v80_acc;
+          r2[0] = v73_acc;
+          r2[1] = v74_acc;
+          r2[2] = v75_acc;
+          r2[3] = v76_acc;
+          r2[4] = v77_acc;
+          r2[5] = v78_acc;
+          r2[6] = v79_acc;
+          r2[7] = v80_acc;
           float r4[8]{};
           // r4 = load{g>r}(glb_m4);
           float v88_lin = glb_m4[0 + threadIdx.x * 1];
@@ -775,7 +774,6 @@ __launch_bounds__(256)
               glb_m0[v292_a] = v285_data;
             }
           }
-          ;
         }
       }
     }

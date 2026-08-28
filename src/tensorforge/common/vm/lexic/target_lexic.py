@@ -162,10 +162,10 @@ class TargetLexic(Lexic):
     return TargetContext()
 
   def sync_block(self):
-    return "#pragma omp barrier //"
+    return "#pragma omp barrier"
 
   def sync_simd(self):
-    return "#pragma omp barrier //"
+    return "#pragma omp barrier"
 
   def sync_grid(self):
     return ""

@@ -75,7 +75,6 @@ __launch_bounds__(256)
               glb_m1[v29_a] = (tanhf(v21_data));
             }
           }
-          ;
         }
       }
     }

@@ -203,7 +203,7 @@ class StoreRegToGlb(AbstractInstruction):
 
     allow_nontemporal = len(self._src.get_user_list()) == 1 # self._src.get_last_user() is self
 
-    writer(f'// {self}')
+    writer.Comment(f'{self}')
     src_bbox = self._src.data_view.get_bbox()
     if not getattr(self, '_zero_fill', True):
       dest_bbox = src_bbox
@@ -339,7 +339,7 @@ class StoreShrMemToGlb(AbstractInstruction):
 
     # TODO: float4 storage
 
-    writer('// {self}')
+    writer.Comment(f'{self}')
 
     writer.Pragma("unroll")
     with writer.For(f'int32_t k = 0; k < {dest_data_view.columns}; ++k'):

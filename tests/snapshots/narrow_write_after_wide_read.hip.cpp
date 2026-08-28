@@ -109,46 +109,45 @@ __launch_bounds__(256)
           float r1[13]{};
           // r1 = +(r0) + None
           // [(0, 32), (0, 13)] []
-          auto& ir1 = r1;
           float v53_data = r0[0];
-          float v54_data = ir1[0];
-          ir1[0] = (v54_data + v53_data);
+          float v54_data = r1[0];
+          r1[0] = (v54_data + v53_data);
           float v56_data = r0[1];
-          float v57_data = ir1[1];
-          ir1[1] = (v57_data + v56_data);
+          float v57_data = r1[1];
+          r1[1] = (v57_data + v56_data);
           float v59_data = r0[2];
-          float v60_data = ir1[2];
-          ir1[2] = (v60_data + v59_data);
+          float v60_data = r1[2];
+          r1[2] = (v60_data + v59_data);
           float v62_data = r0[3];
-          float v63_data = ir1[3];
-          ir1[3] = (v63_data + v62_data);
+          float v63_data = r1[3];
+          r1[3] = (v63_data + v62_data);
           float v65_data = r0[4];
-          float v66_data = ir1[4];
-          ir1[4] = (v66_data + v65_data);
+          float v66_data = r1[4];
+          r1[4] = (v66_data + v65_data);
           float v68_data = r0[5];
-          float v69_data = ir1[5];
-          ir1[5] = (v69_data + v68_data);
+          float v69_data = r1[5];
+          r1[5] = (v69_data + v68_data);
           float v71_data = r0[6];
-          float v72_data = ir1[6];
-          ir1[6] = (v72_data + v71_data);
+          float v72_data = r1[6];
+          r1[6] = (v72_data + v71_data);
           float v74_data = r0[7];
-          float v75_data = ir1[7];
-          ir1[7] = (v75_data + v74_data);
+          float v75_data = r1[7];
+          r1[7] = (v75_data + v74_data);
           float v77_data = r0[8];
-          float v78_data = ir1[8];
-          ir1[8] = (v78_data + v77_data);
+          float v78_data = r1[8];
+          r1[8] = (v78_data + v77_data);
           float v80_data = r0[9];
-          float v81_data = ir1[9];
-          ir1[9] = (v81_data + v80_data);
+          float v81_data = r1[9];
+          r1[9] = (v81_data + v80_data);
           float v83_data = r0[10];
-          float v84_data = ir1[10];
-          ir1[10] = (v84_data + v83_data);
+          float v84_data = r1[10];
+          r1[10] = (v84_data + v83_data);
           float v86_data = r0[11];
-          float v87_data = ir1[11];
-          ir1[11] = (v87_data + v86_data);
+          float v87_data = r1[11];
+          r1[11] = (v87_data + v86_data);
           float v89_data = r0[12];
-          float v90_data = ir1[12];
-          ir1[12] = (v90_data + v89_data);
+          float v90_data = r1[12];
+          r1[12] = (v90_data + v89_data);
           float r3[13]{};
           // r3 = load{g>r}(glb_m2);
           float v93_lin = glb_m2[0 + threadIdx.x * 1];
@@ -392,10 +391,9 @@ __launch_bounds__(256)
           float r5[1]{};
           // r5 = +(r4) + None
           // [(0, 32), (0, 1)] []
-          auto& ir5 = r5;
           float v158_data = r4[4];
-          float v159_data = ir5[0];
-          ir5[0] = (v159_data + v158_data);
+          float v159_data = r5[0];
+          r5[0] = (v159_data + v158_data);
           // glb_m0 = store{r>g}(r5);
           #pragma unroll
           for (int32_t v164_i0 = 0; v164_i0 < 1; ++v164_i0) {
@@ -443,7 +441,6 @@ __launch_bounds__(256)
           float r8[13]{};
           // r8 = +(r6 * r7) + None
           // [(0, 32), (0, 13)] [(0, 13)]
-          auto& ir8 = r8;
           float v207_data = r6[0];
           float v208_data = r6[1];
           float v209_data = r6[2];
@@ -656,19 +653,19 @@ __launch_bounds__(256)
           tensorforge::fmacdpp16<6>(v232_acc, v249_bc, v217_data);
           tensorforge::fmacdpp16<7>(v232_acc, v249_bc, v218_data);
           tensorforge::fmacdpp16<8>(v232_acc, v249_bc, v219_data);
-          ir8[0] = v220_acc;
-          ir8[1] = v221_acc;
-          ir8[2] = v222_acc;
-          ir8[3] = v223_acc;
-          ir8[4] = v224_acc;
-          ir8[5] = v225_acc;
-          ir8[6] = v226_acc;
-          ir8[7] = v227_acc;
-          ir8[8] = v228_acc;
-          ir8[9] = v229_acc;
-          ir8[10] = v230_acc;
-          ir8[11] = v231_acc;
-          ir8[12] = v232_acc;
+          r8[0] = v220_acc;
+          r8[1] = v221_acc;
+          r8[2] = v222_acc;
+          r8[3] = v223_acc;
+          r8[4] = v224_acc;
+          r8[5] = v225_acc;
+          r8[6] = v226_acc;
+          r8[7] = v227_acc;
+          r8[8] = v228_acc;
+          r8[9] = v229_acc;
+          r8[10] = v230_acc;
+          r8[11] = v231_acc;
+          r8[12] = v232_acc;
           // glb_m3 = store{r>g}(r8);
           #pragma unroll
           for (int32_t v253_i0 = 0; v253_i0 < 1; ++v253_i0) {
@@ -681,7 +678,6 @@ __launch_bounds__(256)
               glb_m3[v264_a] = v257_data;
             }
           }
-          ;
         }
       }
     }

@@ -274,10 +274,10 @@ class MultilinearInstruction(ComputeInstruction):
     def gen_code_inner(self, writer: Writer):
         # A comment touches nothing.  Left conservative it would be read as
         # touching every buffer, and this one sits above them all.
-        writer(f'// {self._ns} {self._ks}', accesses=())
+        writer.Comment(f'{self._ns} {self._ks}')
 
         if len(self._scalar) == 0 and self._prev is None and self._next is None and self._idest.data_view == self._dest.data_view:
-            writer(f'auto& {self._idest.name} = {self._dest.name};')
+            self._vdest = self._dest
         elif hasattr(writer, 'alloc') and callable(getattr(writer, 'alloc')):
             # Same shape `RegisterAlloc` stopped emitting as text, from a
             # different site.  It matters beyond its own node count: this was
@@ -293,6 +293,7 @@ class MultilinearInstruction(ComputeInstruction):
                                  MemSpace.REGISTER, hint=self._idest.name,
                                  extern=self._idest.name, init='{}')
             self._idest.set_pir_buffer(writer, value)
+            self._vdest = self._idest
         else:
             writer(f'{self._dest.get_fptype()} {self._idest.name}[{self._iregs}]{"{}"};',
                    accesses=())
@@ -373,12 +374,12 @@ class MultilinearInstruction(ComputeInstruction):
                 prod = self._emit_binop(writer, ftype, self._productOperation,
                                         prod, data[i])
             ns = [varlist[loopmap[f'n{i}']] for i, _ in enumerate(self._ns)]
-            value = self._idest.load(writer, self._context, None, ns, False)
+            value = self._vdest.load(writer, self._context, None, ns, False)
             if value is None:
                 assert False
             total = self._emit_binop(writer, ftype, self._sumOperation,
                                      value, prod)
-            self._idest.store(writer, self._context, total, ns, False)
+            self._vdest.store(writer, self._context, total, ns, False)
 
         write_loops(self._context, writer, loopstack, nonlead_writer)
 
@@ -501,7 +502,7 @@ class MultilinearInstruction(ComputeInstruction):
                 return idx
 
             def C(writer, var, i, j):
-                self._idest.store(writer, self._context, var, unwindOp(i, j, 0, None, False), False)
+                self._vdest.store(writer, self._context, var, unwindOp(i, j, 0, None, False), False)
 
             if self._second_operand_is_sparse():
                 def sparse(k, j):
@@ -615,7 +616,7 @@ class MultilinearInstruction(ComputeInstruction):
         def nonlead_writer(varlist):
             needsLoad = all(_dim_covered(i, varlist[loopmap[f'n{i}']]) for i,_ in enumerate(self._ns))
             if needsLoad:
-                valvar = self._idest.load(writer, self._context, None, [varlist[loopmap[f'n{i}']] for i,_ in enumerate(self._ns)], False)
+                valvar = self._vdest.load(writer, self._context, None, [varlist[loopmap[f'n{i}']] for i,_ in enumerate(self._ns)], False)
             else:
                 valvar = writer.const(
                     self._sumOperation.neutral(self._context.fp_type),

@@ -104,7 +104,6 @@ __launch_bounds__(256)
           double r2[8]{};
           // r2 = +(r0 * r1) + None
           // [(0, 12), (0, 8)] [(0, 16)]
-          auto& ir2 = r2;
           double v35_data = r0[0];
           double v36_data = r0[1];
           double v37_data = r0[2];
@@ -265,14 +264,14 @@ __launch_bounds__(256)
           tensorforge::fmacdpp16<13>(v58_acc, v66_data, v48_data);
           tensorforge::fmacdpp16<14>(v58_acc, v66_data, v49_data);
           tensorforge::fmacdpp16<15>(v58_acc, v66_data, v50_data);
-          ir2[0] = v51_acc;
-          ir2[1] = v52_acc;
-          ir2[2] = v53_acc;
-          ir2[3] = v54_acc;
-          ir2[4] = v55_acc;
-          ir2[5] = v56_acc;
-          ir2[6] = v57_acc;
-          ir2[7] = v58_acc;
+          r2[0] = v51_acc;
+          r2[1] = v52_acc;
+          r2[2] = v53_acc;
+          r2[3] = v54_acc;
+          r2[4] = v55_acc;
+          r2[5] = v56_acc;
+          r2[6] = v57_acc;
+          r2[7] = v58_acc;
           // glb_m0 = store{r>g}(r2);
           if (v6_lead < 12) {
             #pragma unroll
@@ -283,7 +282,6 @@ __launch_bounds__(256)
               __builtin_amdgcn_global_atomic_fadd_f64(&glb_m0[v81_a], v74_data);
             }
           }
-          ;
         }
       }
     }

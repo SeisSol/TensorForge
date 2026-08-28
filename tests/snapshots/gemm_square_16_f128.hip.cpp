@@ -96,7 +96,6 @@ __launch_bounds__(256)
           __float128 r2[2]{};
           // r2 = +(r0 * r1) + None
           // [(0, 2), (0, 2)] [(0, 2)]
-          auto& ir2 = r2;
           __float128 v29_data = r0[0];
           __float128 v30_data = r0[1];
           __float128 v31_acc{};
@@ -107,8 +106,8 @@ __launch_bounds__(256)
           __float128 v38_lin = r1[1];
           v32_acc += ((tensorforge::broadcast<2, 1, 0>(v38_lin)) * v29_data);
           v32_acc += ((tensorforge::broadcast<2, 1, 1>(v38_lin)) * v30_data);
-          ir2[0] = v31_acc;
-          ir2[1] = v32_acc;
+          r2[0] = v31_acc;
+          r2[1] = v32_acc;
           // glb_m0 = store{r>g}(r2);
           #pragma unroll
           for (int32_t v46_i0 = 0; v46_i0 < 1; ++v46_i0) {
@@ -121,7 +120,6 @@ __launch_bounds__(256)
               glb_m0[v57_a] = v50_data;
             }
           }
-          ;
         }
       }
     }

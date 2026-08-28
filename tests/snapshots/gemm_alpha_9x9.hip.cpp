@@ -235,7 +235,6 @@ __launch_bounds__(256)
               glb_m0[v84_a] = v77_data;
             }
           }
-          ;
         }
       }
     }

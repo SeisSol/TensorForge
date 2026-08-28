@@ -77,7 +77,6 @@ __launch_bounds__(256)
             int32_t v29_lead = v4_lead + 0_i32;
             glb_m1[v29_lead] = v7_acc0;
           }
-          ;
         }
       }
     }

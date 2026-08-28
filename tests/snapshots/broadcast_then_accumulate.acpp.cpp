@@ -50,39 +50,36 @@ inline void kernel_kernel_7cc2a3c5b0(sycl::queue *stream, sycl::range<3> group_c
               float r0[1]{};
               // r0 = +(glb_m0) + None
               // [(0, 32)] []
-              auto& ir0 = r0;
               int32_t v6_lead = item.get_local_id(0) % 32;
               int32_t v11_lead = v6_lead + 0_i32;
               float v17_data = glb_m0[v6_lead];
-              float v18_data = ir0[0];
-              ir0[0] = (v18_data + v17_data);
+              float v18_data = r0[0];
+              r0[0] = (v18_data + v17_data);
               float r1[3]{};
               // r1 = +(glb_m1) + None
               // [(0, 32), (0, 3)] []
-              auto& ir1 = r1;
               int32_t v29_a = v6_lead + 0;
               float v36_data = glb_m1[v6_lead];
-              float v37_data = ir1[0];
-              ir1[0] = (v37_data + v36_data);
+              float v37_data = r1[0];
+              r1[0] = (v37_data + v36_data);
               int32_t v44_a = v6_lead + 32;
               float v51_data = glb_m1[(v6_lead + 32)];
-              float v52_data = ir1[1];
-              ir1[1] = (v52_data + v51_data);
+              float v52_data = r1[1];
+              r1[1] = (v52_data + v51_data);
               int32_t v59_a = v6_lead + 64;
               float v66_data = glb_m1[(v6_lead + 64)];
-              float v67_data = ir1[2];
-              ir1[2] = (v67_data + v66_data);
+              float v67_data = r1[2];
+              r1[2] = (v67_data + v66_data);
               float r2[3]{};
               // r2 = +(r0) + None
               // [(0, 32), (0, 3)] []
-              auto& ir2 = r2;
               float v73_data = r0[0];
-              float v74_data = ir2[0];
-              ir2[0] = (v74_data + v73_data);
-              float v77_data = ir2[1];
-              ir2[1] = (v77_data + v73_data);
-              float v80_data = ir2[2];
-              ir2[2] = (v80_data + v73_data);
+              float v74_data = r2[0];
+              r2[0] = (v74_data + v73_data);
+              float v77_data = r2[1];
+              r2[1] = (v77_data + v73_data);
+              float v80_data = r2[2];
+              r2[2] = (v80_data + v73_data);
               float r3[3]{};
               // r3 = +(r1) + name: r2, type: SymbolType.Register, lead: [0]
               // [(0, 32), (0, 3)] []

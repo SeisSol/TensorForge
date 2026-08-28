@@ -84,7 +84,6 @@ __launch_bounds__(256)
           if (v3_lead == 0) {
             glb_m1[0] = v26_red;
           }
-          ;
         }
       }
     }

@@ -213,10 +213,10 @@ class Emitter:
             return '__syncthreads();'
         name = getattr(scope, 'name', 'BLOCK')
         if name == 'MULT':
-            return f'{lex.sync_simd()};'
+            return lex.sync_simd()
         if name == 'GRID':
-            return f'{lex.sync_grid()};'
-        return f'{lex.sync_block()};'
+            return lex.sync_grid()
+        return lex.sync_block()
 
     def _thread_idx(self, axis: str) -> str:
         lex = self._lexic()
@@ -456,7 +456,9 @@ class Emitter:
             return
 
         if op == Op.BARRIER:
-            w(self._sync(s.attr('scope')))
+            sync_instr = self._sync(s.attr('scope'))
+            if sync_instr is not None:
+                w(sync_instr)
             return
 
         if op == Op.ALLOC:

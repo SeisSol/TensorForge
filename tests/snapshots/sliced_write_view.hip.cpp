@@ -106,7 +106,6 @@ __launch_bounds__(256)
           float r2[1]{};
           // r2 = +(r0 * r1) + None
           // [(0, 32), (0, 1)] [(10, 13)]
-          auto& ir2 = r2;
           float v36_data = r0[0];
           float v37_data = r0[1];
           float v38_data = r0[2];
@@ -116,7 +115,7 @@ __launch_bounds__(256)
           tensorforge::fmacdpp16<0>(v39_acc, v41_bc, v36_data);
           tensorforge::fmacdpp16<1>(v39_acc, v41_bc, v37_data);
           tensorforge::fmacdpp16<2>(v39_acc, v41_bc, v38_data);
-          ir2[0] = v39_acc;
+          r2[0] = v39_acc;
           // glb_m0 = store{r>g}(r2);
           #pragma unroll
           for (int32_t v45_i0 = 0; v45_i0 < 1; ++v45_i0) {
@@ -164,7 +163,6 @@ __launch_bounds__(256)
           float r5[13]{};
           // r5 = +(r3 * r4) + None
           // [(0, 32), (0, 13)] [(0, 13)]
-          auto& ir5 = r5;
           float v88_data = r3[0];
           float v89_data = r3[1];
           float v90_data = r3[2];
@@ -377,19 +375,19 @@ __launch_bounds__(256)
           tensorforge::fmacdpp16<6>(v113_acc, v130_bc, v98_data);
           tensorforge::fmacdpp16<7>(v113_acc, v130_bc, v99_data);
           tensorforge::fmacdpp16<8>(v113_acc, v130_bc, v100_data);
-          ir5[0] = v101_acc;
-          ir5[1] = v102_acc;
-          ir5[2] = v103_acc;
-          ir5[3] = v104_acc;
-          ir5[4] = v105_acc;
-          ir5[5] = v106_acc;
-          ir5[6] = v107_acc;
-          ir5[7] = v108_acc;
-          ir5[8] = v109_acc;
-          ir5[9] = v110_acc;
-          ir5[10] = v111_acc;
-          ir5[11] = v112_acc;
-          ir5[12] = v113_acc;
+          r5[0] = v101_acc;
+          r5[1] = v102_acc;
+          r5[2] = v103_acc;
+          r5[3] = v104_acc;
+          r5[4] = v105_acc;
+          r5[5] = v106_acc;
+          r5[6] = v107_acc;
+          r5[7] = v108_acc;
+          r5[8] = v109_acc;
+          r5[9] = v110_acc;
+          r5[10] = v111_acc;
+          r5[11] = v112_acc;
+          r5[12] = v113_acc;
           // glb_m3 = store{r>g}(r5);
           #pragma unroll
           for (int32_t v134_i0 = 0; v134_i0 < 1; ++v134_i0) {
@@ -402,7 +400,6 @@ __launch_bounds__(256)
               glb_m3[v145_a] = v138_data;
             }
           }
-          ;
         }
       }
     }

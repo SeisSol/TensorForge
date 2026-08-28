@@ -32,10 +32,10 @@ class OpenCLLexic(Lexic):
   #__kernel __attribute__(( reqd_work_group_size({kernel_bounds}) ))
 
   def sync_block(self):
-    return "item.barrier()"
+    return "item.barrier();"
 
   def sync_simd(self):
-    return "item.barrier()"
+    return "item.barrier();"
 
   def get_sub_group_id(self, sub_group_size):
     return f'item.get_sub_group().get_local_id()[0]'

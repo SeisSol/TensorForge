@@ -87,12 +87,12 @@ class SyclLexic(Lexic):
       return MultiBlock(file, [l1, l2, localmem, l3], ["", ");", "", ");"])
 
   def sync_block(self):
-    return "item.barrier()"
+    return "item.barrier();"
 
   def sync_simd(self):
     if self.simd_mode:
       # One work-item *is* the vector: there are no lanes to synchronise.
-      return ""
+      return None
     # A sub-group barrier, not a work-group one.
     #
     # `SyncThreads.barrier_scope()` reports `SIMD` whenever the thread count
@@ -104,11 +104,11 @@ class SyclLexic(Lexic):
     # (`__syncwarp`, `s_waitcnt`); only SYCL had the claim and the code
     # disagreeing, and only on SYCL is the wave narrow enough (16 on PVC) for
     # ordinary operator shapes to reach it.
-    return "sycl::group_barrier(item.get_sub_group())"
+    return "sycl::group_barrier(item.get_sub_group());"
 
   def sync_grid(self):
     raise NotImplementedError() # TODO
-    #return "item.barrier()"
+    #return "item.barrier();"
 
   def get_sub_group_id(self, sub_group_size):
     return f'item.get_sub_group().get_local_id()[0]'

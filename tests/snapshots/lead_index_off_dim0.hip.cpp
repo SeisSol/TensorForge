@@ -87,7 +87,6 @@ __launch_bounds__(256)
           float r2[9]{};
           // r2 = +(r0 * r1) + None
           // [(0, 20), (0, 9)] [(0, 1)]
-          auto& ir2 = r2;
           float v26_data = r0[0];
           float v27_acc{};
           float v28_acc{};
@@ -109,15 +108,15 @@ __launch_bounds__(256)
           tensorforge::fmacdpp16<6>(v33_acc, v37_bc, v26_data);
           tensorforge::fmacdpp16<7>(v34_acc, v37_bc, v26_data);
           tensorforge::fmacdpp16<8>(v35_acc, v37_bc, v26_data);
-          ir2[0] = v27_acc;
-          ir2[1] = v28_acc;
-          ir2[2] = v29_acc;
-          ir2[3] = v30_acc;
-          ir2[4] = v31_acc;
-          ir2[5] = v32_acc;
-          ir2[6] = v33_acc;
-          ir2[7] = v34_acc;
-          ir2[8] = v35_acc;
+          r2[0] = v27_acc;
+          r2[1] = v28_acc;
+          r2[2] = v29_acc;
+          r2[3] = v30_acc;
+          r2[4] = v31_acc;
+          r2[5] = v32_acc;
+          r2[6] = v33_acc;
+          r2[7] = v34_acc;
+          r2[8] = v35_acc;
           // glb_m0 = store{r>g}(r2);
           int32_t v40_lead = threadIdx.x % 32;
           if (v40_lead < 20) {
@@ -129,7 +128,6 @@ __launch_bounds__(256)
               glb_m0[v52_a] = v45_data;
             }
           }
-          ;
         }
       }
     }

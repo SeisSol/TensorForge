@@ -108,7 +108,6 @@ __launch_bounds__(256)
           double r2[8]{};
           // r2 = +(r0 * r1) + None
           // [(0, 16), (0, 8)] [(0, 16)]
-          auto& ir2 = r2;
           double v38_data = r0[0];
           double v39_data = r0[1];
           double v40_data = r0[2];
@@ -269,14 +268,14 @@ __launch_bounds__(256)
           tensorforge::fmacdpp16<13>(v61_acc, v69_data, v51_data);
           tensorforge::fmacdpp16<14>(v61_acc, v69_data, v52_data);
           tensorforge::fmacdpp16<15>(v61_acc, v69_data, v53_data);
-          ir2[0] = v54_acc;
-          ir2[1] = v55_acc;
-          ir2[2] = v56_acc;
-          ir2[3] = v57_acc;
-          ir2[4] = v58_acc;
-          ir2[5] = v59_acc;
-          ir2[6] = v60_acc;
-          ir2[7] = v61_acc;
+          r2[0] = v54_acc;
+          r2[1] = v55_acc;
+          r2[2] = v56_acc;
+          r2[3] = v57_acc;
+          r2[4] = v58_acc;
+          r2[5] = v59_acc;
+          r2[6] = v60_acc;
+          r2[7] = v61_acc;
           // glb_m0 = store{r>g}(r2);
           #pragma unroll
           for (int32_t v73_i0 = 0; v73_i0 < 1; ++v73_i0) {
@@ -289,7 +288,6 @@ __launch_bounds__(256)
               glb_m0[v84_a] = v77_data;
             }
           }
-          ;
         }
       }
     }

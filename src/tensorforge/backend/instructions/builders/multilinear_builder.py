@@ -8,7 +8,6 @@ from tensorforge.backend.scopes import Scopes
 from tensorforge.backend.symbol import Symbol, SymbolType, SymbolView
 from tensorforge.backend.instructions.allocate import RegisterAlloc
 from tensorforge.backend.instructions.memory.load import GlbToShrLoader, GlbToRegLoader
-from tensorforge.backend.instructions.clear_registers import ClearRegisters
 from tensorforge.backend.instructions.memory.store import StoreRegToGlb, StoreRegToShr, StoreRegToReg
 from tensorforge.backend.instructions.sync_block import SyncThreads
 from tensorforge.backend.instructions.compute.multilinear import MultilinearInstruction

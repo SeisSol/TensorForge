@@ -99,35 +99,32 @@ __launch_bounds__(256)
           float r1[1]{};
           // r1 = +(r0) + None
           // [(0, 32)] []
-          auto& ir1 = r1;
           float v45_data = r0[0];
-          float v46_data = ir1[0];
-          ir1[0] = (v46_data + v45_data);
+          float v46_data = r1[0];
+          r1[0] = (v46_data + v45_data);
           // wait(r2 = load{g>r}(glb_m1););
           float r3[3]{};
           // r3 = +(r2) + None
           // [(0, 32), (0, 3)] []
-          auto& ir3 = r3;
           float v52_data = r2[0];
-          float v53_data = ir3[0];
-          ir3[0] = (v53_data + v52_data);
+          float v53_data = r3[0];
+          r3[0] = (v53_data + v52_data);
           float v55_data = r2[1];
-          float v56_data = ir3[1];
-          ir3[1] = (v56_data + v55_data);
+          float v56_data = r3[1];
+          r3[1] = (v56_data + v55_data);
           float v58_data = r2[2];
-          float v59_data = ir3[2];
-          ir3[2] = (v59_data + v58_data);
+          float v59_data = r3[2];
+          r3[2] = (v59_data + v58_data);
           float r4[3]{};
           // r4 = +(r1) + None
           // [(0, 32), (0, 3)] []
-          auto& ir4 = r4;
           float v65_data = r1[0];
-          float v66_data = ir4[0];
-          ir4[0] = (v66_data + v65_data);
-          float v69_data = ir4[1];
-          ir4[1] = (v69_data + v65_data);
-          float v72_data = ir4[2];
-          ir4[2] = (v72_data + v65_data);
+          float v66_data = r4[0];
+          r4[0] = (v66_data + v65_data);
+          float v69_data = r4[1];
+          r4[1] = (v69_data + v65_data);
+          float v72_data = r4[2];
+          r4[2] = (v72_data + v65_data);
           float r5[3]{};
           // r5 = +(r3) + name: r4, type: SymbolType.Register, lead: [0]
           // [(0, 32), (0, 3)] []
@@ -157,16 +154,15 @@ __launch_bounds__(256)
           float r6[3]{};
           // r6 = +(r5) + None
           // [(0, 32), (0, 3)] []
-          auto& ir6 = r6;
           float v106_data = r5[0];
-          float v107_data = ir6[0];
-          ir6[0] = (v107_data + v106_data);
+          float v107_data = r6[0];
+          r6[0] = (v107_data + v106_data);
           float v109_data = r5[1];
-          float v110_data = ir6[1];
-          ir6[1] = (v110_data + v109_data);
+          float v110_data = r6[1];
+          r6[1] = (v110_data + v109_data);
           float v112_data = r5[2];
-          float v113_data = ir6[2];
-          ir6[2] = (v113_data + v112_data);
+          float v113_data = r6[2];
+          r6[2] = (v113_data + v112_data);
           // glb_m2 = store{r>g}(r6);
           #pragma unroll
           for (int32_t v118_i0 = 0; v118_i0 < 1; ++v118_i0) {
@@ -179,7 +175,6 @@ __launch_bounds__(256)
               glb_m2[v129_a] = v122_data;
             }
           }
-          ;
         }
       }
     }

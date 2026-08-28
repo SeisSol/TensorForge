@@ -52,8 +52,7 @@ class HipLexic(CudaLexic):
     return f"hipLaunchKernelGGL({func_name}, {grid}, {block}, {shmem}, {stream}, {func_params})"
 
   def sync_simd(self):
-    # noop
-    return ""
+    return None
 
   def get_sub_group_id(self, sub_group_size):
     return f'{self.thread_idx_x} % {sub_group_size}'
