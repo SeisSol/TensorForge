@@ -130,6 +130,10 @@ GROUPS = {
     ]),
 
     'swizzle': ('tests/test_pir_swizzle.py', [
+        ('a swizzle allowed on a buffer whose name escapes',
+         sub(Path('src/tensorforge/backend/pir/build.py'),
+             '        if swizzle is not None and extern is not None:',
+             '        if False:', 1)),
         ('the load stops applying it',
          sub(Path('src/tensorforge/backend/pir/build.py'),
              '        indices = tuple(self._swizzled(base, i) for i in indices)\n'

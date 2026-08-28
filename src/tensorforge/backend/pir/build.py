@@ -651,6 +651,22 @@ class IRBuilder:
         elif space == MemSpace.SHARED:
             attrs = self._suballocate(v, elem)
             self._shared_buffers.append(v)
+        if swizzle is not None and extern is not None:
+            # A swizzle is only sound if *every* access applies it, and `load`
+            # and `store` are what apply it.  `extern` says the opposite: the
+            # name is spelled out by code that does not go through them.
+            #
+            # Measured on the corpus, all 5650 accesses to a shared symbol
+            # take the text path today, so a swizzle here would silently do
+            # nothing -- and the moment one of them becomes structured, the
+            # store and the load would disagree about where an element lives.
+            # That is a wrong kernel, not a slow one, and it would appear on
+            # an unrelated commit.
+            raise IRError(
+                f'{hint!r}: a swizzled buffer cannot be extern. The name is '
+                f'spelled out by code that does not go through load/store, so '
+                f'the permutation would be applied to some accesses and not '
+                f'others. Convert those accesses first.')
         if extern is not None:
             # A name the macro layer owns and other instructions still spell
             # out as text.  Transitional, and measurably so: with one PIR body

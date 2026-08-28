@@ -174,3 +174,32 @@ def test_padding_would_not_have_worked():
     rows of nine wrap past 64 and collide again."""
     padded = lambda t: (t % 4) + (t // 4) * 9
     assert _ways(padded) == 2
+
+
+# --------------------------------------------------------------------------- #
+# Where it may not go
+# --------------------------------------------------------------------------- #
+
+def test_a_swizzled_buffer_cannot_be_extern():
+    """`extern` means the name is spelled out by code that does not go through
+    `load` and `store` --- and those are what apply the permutation.
+
+    This is the one way the mechanism can produce a wrong kernel rather than a
+    slow one, so it is refused rather than documented.  Measured on the corpus,
+    every access to a shared *symbol* takes the text path today, so a swizzle
+    there would silently do nothing; the danger is the day one of them becomes
+    structured and the store and the load stop agreeing about where an element
+    lives.  That would arrive on an unrelated commit.
+    """
+    b = builder()
+    with pytest.raises(IRError, match="cannot be extern"):
+        b.alloc(Datatype.F32, (64,), MemSpace.SHARED, hint='s0', extern='s0',
+                arena='arena', offset=0, swizzle=XorSwizzle(8))
+
+
+def test_extern_without_a_swizzle_is_still_fine():
+    """The macro layer's windows are extern and unswizzled, which is the
+    arrangement today and has to keep working."""
+    b = builder()
+    assert b.alloc(Datatype.F32, (64,), MemSpace.SHARED, hint='s0',
+                   extern='s0', arena='arena', offset=0) is not None
