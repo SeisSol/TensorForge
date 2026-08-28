@@ -37,12 +37,17 @@ from tensorforge.generators.generator import Generator
 
 CASES = Path(__file__).resolve().parent / "cases"
 
-#: case name -> (acquire, commit, wait, release) as generated today.
-#: `gemm_trans_b_12x16` waits on a pipeline it never commits to at all.
-KNOWN_UNBALANCED = {
-    "gemm_trans_a_20x12": (1, 1, 2, 2),
-    "gemm_trans_b_12x16": (0, 0, 1, 1),
-}
+#: Empty, and it should stay empty.
+#:
+#: Both entries came out on the commit that stopped `LoadWait` keying on
+#: `_use_cuda_memcpy`.  That flag is a static choice, not a record: the
+#: reordering path ignores it and moves the data with ordinary loads and
+#: stores, so a wait fired for a transfer that never went in flight.  The rest
+#: of the async path migrated to `copy.async` in the same commit, so the
+#: brackets this counts are mostly gone as well -- which is why an entry
+#: appearing here again would mean something specific: a `cuda::pipeline`
+#: driven by hand, and unbalanced.
+KNOWN_UNBALANCED = {}
 
 
 def _kernels():

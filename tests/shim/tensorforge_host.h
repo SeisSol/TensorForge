@@ -126,6 +126,22 @@ template <typename D, typename S, typename Sz, thread_scope Sc>
 void memcpy_async(D *, const S *, Sz, pipeline<Sc> &);
 } // namespace cuda
 
+// --------------------------------------------------------------------------
+// The `__pipeline_*` primitives from <cuda_pipeline.h>.
+//
+// `cuda::pipeline` above is a wrapper over exactly these, and the structured
+// copy path lowers to the primitives directly: no stage count fixed at
+// compile time, no acquire/release bookkeeping, and `__pipeline_wait_prior`
+// takes the number of outstanding groups to leave in flight rather than a
+// number of stages.  Both surfaces are declared here because both are
+// reachable -- a transfer that migrated uses the primitives, one that did not
+// still drives the object.
+// --------------------------------------------------------------------------
+
+void __pipeline_memcpy_async(void *, const void *, std::size_t);
+void __pipeline_commit();
+void __pipeline_wait_prior(std::size_t);
+
 namespace cooperative_groups {
 struct grid_group {
   void sync() const {}

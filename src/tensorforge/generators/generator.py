@@ -280,6 +280,13 @@ class Generator:
             # peeled transfer before the loop, and a body holding two
             # shared-memory loads commits twice before waiting.  The latter is
             # not new; trans_a already did it.
+            # Declared whether or not anything drives it.  Whether a transfer
+            # takes the structured path is decided per body, from whether its
+            # buffers are values there, and this runs before any body exists --
+            # so the choice cannot be made here without building the section
+            # twice.  An unused local is the price, and it is the safe
+            # direction: under-declaring is a compile error, over-declaring is
+            # a line nvcc drops.
             depth = async_depth(section.stream)
             if depth > 1 and False: # disabled for now (not needed for thread_scope_thread)
               # NOT __shared__: the scope is thread, so the state is private and

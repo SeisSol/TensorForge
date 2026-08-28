@@ -157,17 +157,12 @@ def _bodies(case: str, backend: str, arch: str):
 # go down and must never go up.
 #
 # `square_notrans` is at zero and stays there.  `rectangular` takes the NVIDIA
-# async path, and its 10 break down as
-#
-#   5  primitives/      `cuda::pipeline` acquire/commit/wait/release and the
-#                       two `memcpy_async` calls
-#   3  __syncwarp()
-#   2  comments emitted through `writer(...)` rather than `Comment()`, so they
-#      carry Effect.UNKNOWN where an identical comment two lines away carries
-#      Effect.NONE
+# async path, and its 3 are the `__syncwarp()` calls -- barriers, which are
+# raw by nature until `Op.BARRIER` covers the warp scope.
 #
 # 16 before `RegisterAlloc` allocated through the builder, 14 before the
 # `glb_m*` bindings declared their read, 11 before the shared window became a
+<<<<<<< ours
 # value.  Nothing raw is left in this body that a pass would need to reason
 # about: the five async statements are NVIDIA primitives and `Op.COPY_ASYNC`
 # and `Op.WAIT` already exist to receive them, the syncwarps are barriers, and
@@ -178,6 +173,13 @@ def _bodies(case: str, backend: str, arch: str):
 # assertion below is what forces the number to be re-read rather than
 # left as a ceiling nothing approaches.
 STILL_OPAQUE = {"rectangular.py": 7, "square_notrans.py": 0}
+=======
+# value, 10 before the transfers became `copy.async`.  The five
+# `cuda::pipeline` statements and the two miscategorised comments went with
+# that last one: the pipeline calls because there is no object left to drive,
+# the comments because the block that carried them did.
+STILL_OPAQUE = {"rectangular.py": 3, "square_notrans.py": 0}
+>>>>>>> theirs
 
 
 # `case` is auto-parametrized across the whole corpus by conftest.

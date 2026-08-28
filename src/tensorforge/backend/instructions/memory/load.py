@@ -69,6 +69,14 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
 
     self._use_cuda_memcpy = self._context.get_vm().get_hw_descr().vendor == 'nvidia' and not self._no_memcpy
     self._use_tma_memcpy = False
+    #: tokens issued by this transfer, for the `LoadWait` that retires them
+    self._tokens = []
+    self._token_owner = None
+    self._issued_structured = False
+    #: did this transfer actually put something in flight?  `_use_cuda_memcpy`
+    #: is a static choice; the reordering path ignores it and moves the data
+    #: synchronously, so the flag alone cannot tell a wait what to do.
+    self._issued_async = False
 
     if self._permute is None:
       self._permute = [i for i in range(len(self._src.obj.shape))]
@@ -172,9 +180,18 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
         self._dest.store(writer, self._context, value, indices, False,
                          base=self.write_base())
 
+      # The reordering path moves the data with ordinary loads and stores.
+      # Nothing is in flight when it returns, so nothing may be waited for.
+      self._issued_async = False
       write_loops(self._context, writer, loops, inner)
     else:
-      if self._use_cuda_memcpy:
+      self._issued_async = self._use_cuda_memcpy
+      structured_issue = self._use_cuda_memcpy and self._structured_copy(writer)
+      if structured_issue:
+        self._tokens = []
+        self._token_owner = getattr(writer, 'uid', None)
+        self._issued_structured = True
+      elif self._use_cuda_memcpy:
         writer(f'{self._pipeline}.producer_acquire();')
 
       loops = [writer.For(f'int32_t i{i} = 0; i{i} < {self._dest.data_view.shape[i]}; ++i{i}', True) for i in self._loop_indices]
@@ -195,7 +212,13 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
       for loop in loops[::-1]:
         loop.__exit__(None, None, None)
 
-      if self._use_cuda_memcpy:
+      if structured_issue:
+        # `__pipeline_commit()` comes from the emitter, once per copy, via
+        # `commit_async()`.  No acquire, no release, and no stage count: the
+        # object those belonged to is gone, and with it the compile-time N
+        # that made prefetch distance a number of iterations.
+        pass
+      elif self._use_cuda_memcpy:
         writer(f'__syncwarp();')
         writer(f'{self._pipeline}.producer_commit();')
       if self._use_tma_memcpy:
@@ -222,6 +245,16 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
           pos += num_hops
       rest = length % self._num_threads
       if rest > 0:
+        # The tail: `length % num_threads` elements, moved by the lanes below
+        # `rest`.  On the structured path this is the copy's own predicate
+        # rather than a block around it -- a guard block would put the token
+        # in a scope the wait cannot name.
+        # A guard block, not the copy's own predicate, and not for want of
+        # support: `copy_async` takes one, but it has to be a Value and
+        # `_linear_idx()` is still text.  The block costs nothing here -- a
+        # token has no C++ representation, so nothing is scoped inside it that
+        # the wait needs to name.  It becomes the predicate on the commit that
+        # makes the linear index a value.
         with writer.If(f'{self._linear_idx()} < {rest}'):
           self._write_hop(writer, src_offset, dst_offset, index, pos, pos+1, 1, nontemporal, linscale)
 
@@ -233,7 +266,18 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
       else:
         typeprefix = ''
 
-      if self._use_cuda_memcpy:
+      structured = self._use_cuda_memcpy and self._structured_copy(writer)
+      if structured:
+        # One `copy.async` per hop, carrying the hop's extent.  The vector
+        # width stops being a cast on both sides of an assignment and becomes
+        # `elems`, which is what the emitter needs anyway to check the
+        # transfer size against `copy_async_sizes()`.
+        dst_buf = self._dest.pir_buffer(writer)
+        src_buf = self._src.pir_buffer(writer)
+        def write_load(lhs, rhs, _d=dst_buf, _s=src_buf, _n=increment):
+          self._tokens.append(writer.copy_async(
+              _d, _s, dst_index=(lhs,), src_index=(rhs,), elems=_n))
+      elif self._use_cuda_memcpy:
         elsize = self._dest.get_fptype().size() * increment
         def write_load(lhs, rhs):
           writer(f'cuda::memcpy_async(&{lhs}, &{rhs}, cuda::aligned_size_t<{elsize}>({elsize}), {self._pipeline});')
@@ -252,18 +296,53 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
           contiguous_index = indexwrapper(f'{increment} * {self._linear_idx()} + i * {self._num_threads}')
           dest_access_index = self._dest.access_address(self._context, index, writer)
           src_access_index = self._src.access_address(self._context, index, writer)
-          lhs = f'{typeprefix}{self.write_base()}[{dst_offset} + {dest_access_index} + {contiguous_index}]'
-          rhs = f'{typeprefix}{self._src.name}[{src_offset} + {src_access_index} + {contiguous_index}]'
-          write_load(lhs, rhs)
+          if structured:
+            write_load(f'{dst_offset} + {dest_access_index} + {contiguous_index}',
+                       f'{src_offset} + {src_access_index} + {contiguous_index}')
+          else:
+            lhs = f'{typeprefix}{self.write_base()}[{dst_offset} + {dest_access_index} + {contiguous_index}]'
+            rhs = f'{typeprefix}{self._src.name}[{src_offset} + {src_access_index} + {contiguous_index}]'
+            write_load(lhs, rhs)
       else:
         # load using manual loop unrolling
         for counter in range(start, end, increment):
           contiguous_index = indexwrapper(f'{increment} * {self._linear_idx()} + {counter * self._num_threads}')
           dest_access_index = self._dest.access_address(self._context, index, writer)
           src_access_index = self._src.access_address(self._context, index, writer)
-          lhs = f'{typeprefix}{self.write_base()}[{dst_offset} + {dest_access_index} + {contiguous_index}]'
-          rhs = f'{typeprefix}{self._src.name}[{src_offset} + {src_access_index} + {contiguous_index}]'
-          write_load(lhs, rhs)
+          if structured:
+            write_load(f'{dst_offset} + {dest_access_index} + {contiguous_index}',
+                       f'{src_offset} + {src_access_index} + {contiguous_index}')
+          else:
+            lhs = f'{typeprefix}{self.write_base()}[{dst_offset} + {dest_access_index} + {contiguous_index}]'
+            rhs = f'{typeprefix}{self._src.name}[{src_offset} + {src_access_index} + {contiguous_index}]'
+            write_load(lhs, rhs)
+
+  def tokens_for(self, writer):
+    """The tokens this transfer issued, if they belong to the body at hand.
+
+    Same guard as `Symbol.pir_buffer`, and for the same reason: a token is a
+    value of one body, and the loader and its wait are only guaranteed to
+    share one under wide bodies.
+    """
+    owner = getattr(writer, 'uid', None)
+    if owner is None or owner != self._token_owner:
+      return []
+    return list(self._tokens)
+
+  def _structured_copy(self, writer) -> bool:
+    """Can this transfer be a `copy.async` rather than a line of text?
+
+    Only where both ends are values in *this* body, and where the write goes
+    through the symbol's own window.  A rotating buffer writes a different
+    stage than the declaration names, so `write_base()` is not `self._dest`
+    and the value would address the wrong half.
+    """
+    if not hasattr(writer, 'copy_async'):
+      return False
+    if self.write_base() != self._dest.name:
+      return False
+    return (self._dest.pir_buffer(writer) is not None
+            and self._src.pir_buffer(writer) is not None)
 
   def get_src(self) -> Symbol:
     return self._src
@@ -289,7 +368,13 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
 
   def get_headers(self) -> List[str]:
     if self._use_cuda_memcpy:
-      return ['cooperative_groups.h', 'cooperative_groups/memcpy_async.h']
+      # Both, because the headers are collected before it is known which path
+      # a transfer takes: `cuda::memcpy_async` and the pipeline object come
+      # from cooperative_groups, the `__pipeline_*` primitives the structured
+      # copy lowers to come from cuda_pipeline.h.  Naming only the first is
+      # what made the migrated corpus render and stop compiling.
+      return ['cooperative_groups.h', 'cooperative_groups/memcpy_async.h',
+              'cuda_pipeline.h']
     else:
       return []
 
@@ -538,10 +623,36 @@ class LoadWait(MemoryInstruction, LoadInstruction):
     return self._instr.defs()
 
   def gen_code_inner(self, writer: Writer) -> None:
-    if isinstance(self._instr, GlbToShrLoader):
-      if self._instr._use_cuda_memcpy:
-        writer(f'{self._instr._pipeline}.consumer_wait();')
-        writer(f'{self._instr._pipeline}.consumer_release();')
+    if not isinstance(self._instr, GlbToShrLoader):
+      return
+    if not self._instr._issued_async:
+      # Nothing was put in flight: the transfer took the reordering path and
+      # moved its data with plain loads and stores.  Waiting anyway is what
+      # produced `consumer_wait()` on a pipeline that nothing committed to --
+      # undefined behaviour per libcu++, generated for two cases in the corpus
+      # and invisible because raw statements say nothing about their pairing.
+      # The flag this keyed on before, `_use_cuda_memcpy`, is a static choice
+      # rather than a record of what happened.
+      return
+    tokens = self._instr.tokens_for(writer)
+    if not tokens and self._instr._issued_structured:
+      # The transfer issued structurally but into a different body, so its
+      # tokens are not nameable here.  Draining is correct and merely waits
+      # longer.  Falling through to `consumer_wait()` would not be: nothing
+      # committed to that object, and libcu++ requires a committed stage --
+      # which is the unmatched wait `test_pipeline_brackets` pins, reachable
+      # more often now that the issue side migrated.
+      writer.wait()
+      return
+    if tokens:
+      # One wait for the whole transfer.  `schedule_async` derives the count
+      # from the last of them and retires the rest, so the hops need no wait
+      # of their own -- which is the thing the acquire/release pair was
+      # standing in for, expressed as a def-use edge instead.
+      writer.wait(tokens[-1], *tokens[:-1])
+    elif self._instr._use_cuda_memcpy:
+      writer(f'{self._instr._pipeline}.consumer_wait();')
+      writer(f'{self._instr._pipeline}.consumer_release();')
 
   def __str__(self) -> str:
     return f'wait({self._instr});'
