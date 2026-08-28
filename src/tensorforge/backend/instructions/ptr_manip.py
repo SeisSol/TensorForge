@@ -38,6 +38,22 @@ class GetElementPtr(AbstractInstruction):
       return self._batch_offset
     return f'{GeneralLexicon.BATCH_ID_NAME}{self._batch_offset}'
 
+  def dereferences_the_batch(self) -> bool:
+    """Does computing this address read memory indexed by the element?
+
+    `Addressing.PTR_BASED` does: the source is an array of pointers and the
+    address is `&m[batchId][off]`, which loads `m[batchId]` before offsetting
+    it.  Strided addressing and the batch-invariant modes do not -- the
+    right-hand side is arithmetic on a base the caller passed in.
+
+    The distinction decides whether this binding may be emitted outside the
+    per-element flag guard.  A masked element is one the caller told us not to
+    process, and nothing in the interface promises its pointer is valid to
+    dereference; an element whose *index* is merely multiplied by a stride
+    carries no such promise to break.
+    """
+    return getattr(self._src.obj, 'addressing', None) == Addressing.PTR_BASED
+
   def gen_ir(self, writer):
 
     batch_obj = self._src.obj

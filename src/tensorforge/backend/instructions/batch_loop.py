@@ -232,18 +232,52 @@ class BatchLoop(AbstractInstruction):
 
     def _split_guard(self):
         """``(unguarded prefix, guarded remainder)``."""
-        if not self._unguarded:
+        unguarded = set(self._unguarded) | self._address_prefix()
+        if not unguarded:
             return [], list(self._region)
+        self._unguarded = unguarded
         cut = 0
-        while cut < len(self._region) and id(self._region[cut]) in self._unguarded:
+        while cut < len(self._region) and id(self._region[cut]) in unguarded:
             cut += 1
-        stray = [i for i in self._region[cut:] if id(i) in self._unguarded]
+        stray = [i for i in self._region[cut:] if id(i) in unguarded]
         if stray:
             raise InternalError(
                 f'{len(stray)} instruction(s) marked unguarded do not form a '
                 f'prefix of the region, first is {type(stray[0]).__name__}; '
                 f'the flag guard is one block and cannot be reopened')
         return self._region[:cut], self._region[cut:]
+
+    def _address_prefix(self) -> set:
+        """The leading address bindings, when a prefetch will need them outside.
+
+        A transfer moved to the previous iteration has to be issued outside the
+        flag guard -- the mask is per element, so element k being skipped says
+        nothing about k+1, and a prefetch under k's mask breaks the chain for
+        everything after a masked element.  But the transfer reads
+        `glb_m0 = &m0[batchId0 * stride]`, which is bound inside the guard, so
+        the binding has to come out with it.
+
+        Only where computing the address does not itself read memory indexed by
+        the element.  `Addressing.PTR_BASED` loads `m0[batchId0]` out of a
+        pointer array before offsetting it, and a masked element is one the
+        caller told us not to process: nothing in the interface promises that
+        its pointer is valid to dereference.  Strided addressing multiplies an
+        index by a stride and promises nothing that could be broken.
+
+        Only the leading run, because the guard is one block and what leaves it
+        has to be a prefix.
+        """
+        from .ptr_manip import GetElementPtr
+        if not self._context.get_user_options().enable_wrap_loads:
+            return set()
+        out = set()
+        for instr in self._region:
+            if not isinstance(instr, GetElementPtr):
+                break
+            if instr.dereferences_the_batch():
+                break
+            out.add(id(instr))
+        return out
 
     def prologue_index(self) -> str:
         """The index a peeled iteration should use.
