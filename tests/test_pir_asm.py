@@ -154,3 +154,50 @@ def test_a_u32_value_declares_as_uint32():
     b = builder()
     v = b.declare(ScalarType(Datatype.U32), hint='u')
     assert 'uint32_t' in emitted(b.finish())
+
+
+# --------------------------------------------------------------------------- #
+# Writing to a value that is not an SSA producer
+# --------------------------------------------------------------------------- #
+
+def test_assign_writes_a_declared_value():
+    """The one shape `declare` left without a verb.
+
+    A declared value exists precisely because something writes it through a
+    reference or across a guard, so the write cannot be its definition and has
+    to be a statement of its own.  864 of those in the NVIDIA epilogue were raw
+    text, each naming two values the IR already knew.
+    """
+    b = builder()
+    target = b.declare(hint='c')
+    value = b.rawexpr('1.0f', hint='d')
+    stmt = b.assign(target, value)
+    assert f'{target} = {value};' in emitted(b.finish())
+    assert target in stmt.args and value in stmt.args
+
+
+def test_assign_declares_a_register_access_on_its_target():
+    """Which is the point: two assignments to different values provably do not
+    conflict, and `Effect.UNKNOWN` on a raw statement can never say that."""
+    b = builder()
+    x, y = b.declare(hint='x'), b.declare(hint='y')
+    v = b.rawexpr('1.0f', hint='d')
+    sx, sy = b.assign(x, v), b.assign(y, v)
+    assert {a.base for a in sx.accesses} == {x}
+    assert {a.base for a in sy.accesses} == {y}
+    assert sx.effect == Effect.WRITE
+
+
+def test_assign_refuses_a_target_without_an_address():
+    b = builder()
+    with pytest.raises(IRError, match="not a value|address"):
+        b.assign('v58[0][0]', b.rawexpr('1.0f', hint='d'))
+
+
+def test_assign_is_pinned():
+    """A value whose name is assigned to has to keep that name; folding it into
+    a consumer would land the assignment nowhere."""
+    b = builder()
+    t = b.declare(hint='c')
+    stmt = b.assign(t, b.rawexpr('1.0f', hint='d'))
+    assert not stmt.movable and not stmt.pure

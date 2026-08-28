@@ -613,6 +613,11 @@ class Emitter:
                     w(txt)
             return
 
+        if op == Op.CALL and s.attr('assign'):
+            target, value = s.args
+            w(f'{self.operand(target)} = {self.operand(value)};')
+            return
+
         if op == Op.CALL and s.attr('asm') is not None:
             # The operands are rendered here rather than baked into the
             # template, which is the whole point: the constraint list names

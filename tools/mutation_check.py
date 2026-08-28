@@ -105,6 +105,18 @@ GROUPS = {
     # The PTX node.  Its numbering check is the one that matters: a mismatch
     # reads different registers and still compiles.
     'asm': ('tests/test_pir_asm.py', [
+        ('assign does not declare an access on its target',
+         sub(Path('src/tensorforge/backend/pir/build.py'),
+             '            accesses=(Access(Effect.WRITE, MemSpace.REGISTER, base=target),),',
+             '            accesses=(),', 1)),
+        ('assign accepts a target with no address',
+         sub(Path('src/tensorforge/backend/pir/build.py'),
+             "        self._require_addressable(target, 'assign')",
+             '        pass', 1)),
+        ('assign made movable',
+         sub(Path('src/tensorforge/backend/pir/build.py'),
+             '            Op.CALL, (), (target, value), pure=False, movable=False,',
+             '            Op.CALL, (), (target, value), pure=False, movable=True,', 1)),
         ('the numbering check dropped',
          sub(Path('src/tensorforge/backend/pir/build.py'),
              '        if found != wanted:', '        if False:', 1)),

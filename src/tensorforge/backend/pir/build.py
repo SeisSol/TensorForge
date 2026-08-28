@@ -315,6 +315,29 @@ class IRBuilder:
                       attrs=(('init', init), ('escapes', True)))
         return v
 
+    def assign(self, target: Value, value: Operand) -> Stmt:
+        """``target = value;`` where `target` was produced by `declare`.
+
+        The one shape `declare` left without a verb.  A declared value is not
+        an SSA producer --- it exists because something writes it through a
+        reference or across a guard --- so the write has to be its own
+        statement, and until now that statement was raw text.  864 of them in
+        the NVIDIA epilogue alone, each naming two values the IR already knew.
+
+        Modelled exactly as `call_stmt`'s ``writes``: a declared register
+        access keyed on the target, so two assignments to different values
+        provably do not conflict, and the target pinned because a value whose
+        name is assigned to must keep that name rather than be folded into its
+        consumer.
+        """
+        self._require_addressable(target, 'assign')
+        self.pin(target)
+        return self._emit_op(
+            Op.CALL, (), (target, value), pure=False, movable=False,
+            effect=Effect.WRITE,
+            accesses=(Access(Effect.WRITE, MemSpace.REGISTER, base=target),),
+            attrs=(('assign', True),))
+
     def call_stmt(self, callee: str, *args: Operand,
                   writes: Sequence[Operand] = (),
                   effect: Optional[Effect] = None,

@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: MIT
 from tensorforge.common.basic_types import Datatype
 from tensorforge.backend.pir.core import (INDEX, Access, Effect, MemSpace,
+                                          Uniformity,
                                           ScalarType, Value)
 from tensorforge.backend.writer import Writer
 
@@ -288,7 +289,7 @@ def matmul(writer, C, A, B, M, N, K, kx, threads, dtype, sparse, ctx, shmptr, sh
                         with writer.AnonymousScope():
                             for kk in range(0, min(threads, K - k), atom.k):
                                 with writer.AnonymousScope():
-                                    writer('__syncwarp();', accesses=())
+                                    writer.barrier(Uniformity.MULT)
                                     trueK = kk + kx
                                     trueSK = min(atom.k, threads - trueK)
                                     with threadrange(trueK, trueSK):
@@ -300,7 +301,7 @@ def matmul(writer, C, A, B, M, N, K, kx, threads, dtype, sparse, ctx, shmptr, sh
                                             for jj in range(0, atom.n):
                                                 writer.store(Bshm, f'{Breg}_{k//threads+1}_{jj}',
                                                                      writer.rawexpr(f'(threadIdx.x + {trueSK}) % {atom.k} + {jj * atom.k}', type_=INDEX, hint='a'))
-                                    writer('__syncwarp();', accesses=())
+                                    writer.barrier(Uniformity.MULT)
 
                                     for jj in range(0, nregs):
                                         for kkk in range(0, kregs):
@@ -321,15 +322,27 @@ def matmul(writer, C, A, B, M, N, K, kx, threads, dtype, sparse, ctx, shmptr, sh
 
                                     for ii in range(0, min(threads, M - i), atom.m):
                                         with writer.AnonymousScope():
-                                            writer('__syncwarp();', accesses=())
+                                            writer.barrier(Uniformity.MULT)
                                             with threadrange(ii, atom.m):
                                                 # for kkk in range(0, atom.k):
                                                 #     writer(f'{shmptr}[{aoffs} + (threadIdx.x - {ii}) % {atom.m} + {kkk * atom.m}] = {Areg}_{kkk};')
                                                 for kkk in range(0, atom.k, ktile):
-                                                    writer(f'*({x4type}*)&{Ashm}[((threadIdx.x - {ii}) % {atom.m}) * {ktile} + {kkk * atom.m}] = make_{x4type}({Areg}_{kkk}, {Areg}_{kkk+1}, {Areg}_{kkk+2}, {Areg}_{kkk+3});',
-                                                        Ashm,
-                                                        accesses=(Access(Effect.WRITE, MemSpace.SHARED, Ashm),))
-                                            writer('__syncwarp();', accesses=())
+                                                    # `store` already emits the
+                                                    # reinterpret-cast form for
+                                                    # a vector-typed value.
+                                                    # Writing it by hand meant
+                                                    # the shared write was
+                                                    # opaque for the sake of a
+                                                    # cast the verb performs.
+                                                    quad = writer.pack(
+                                                        ScalarType(atom.d, 4),
+                                                        *(f'{Areg}_{kkk + n}' for n in range(4)),
+                                                        hint='q')
+                                                    writer.store(
+                                                        Ashm, quad,
+                                                        writer.rawexpr(f'((threadIdx.x - {ii}) % {atom.m}) * {ktile} + {kkk * atom.m}',
+                                                                       type_=INDEX, hint='a'))
+                                            writer.barrier(Uniformity.MULT)
 
                                             for kk in range(0, kregs):
                                                 for iii in range(0, mregs):
@@ -354,19 +367,12 @@ def matmul(writer, C, A, B, M, N, K, kx, threads, dtype, sparse, ctx, shmptr, sh
                                     writer.store(Cshm, Cvals[iii + mregs * jj][ii // atom.m],
                                         writer.rawexpr(f'threadIdx.x * 2 + {iii} + {jj * 64}', type_=INDEX, hint='a'))
 
-                            writer('__syncwarp();', accesses=())
+                            writer.barrier(Uniformity.MULT)
                             with threadrange(ii, atom.m):
                                 for jj in range(0, atom.n):
                                     _c = writer.load(Cshm, writer.rawexpr(f'(threadIdx.x % {atom.m}) * {atom.n} + {jj}', type_=INDEX, hint='a'), hint='data')
-                                    # Raw, but no longer anonymous: both sides
-                                    # are values, so the load has a use and the
-                                    # declaration has a writer.  A plain
-                                    # `assign` verb would close the last of it;
-                                    # the IR has none yet, and inventing an op
-                                    # for one statement is worse than saying so.
-                                    writer(f'{Cout[jj]} = {_c};', Cout[jj], _c,
-                                           accesses=())
-                            writer('__syncwarp();', accesses=())
+                                    writer.assign(Cout[jj], _c)
+                            writer.barrier(Uniformity.MULT)
 
                     for jj in range(0, min(atom.n, N - j)):
                         C(writer, Cout[jj], i // threads, j + jj)
