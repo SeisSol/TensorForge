@@ -168,7 +168,18 @@ class Emitter:
                 return lex.get_fptype(t.base.ctype(), t.length)
             return f'{t.base.ctype()}{t.length}'
         if isinstance(t, BufferType):
-            return t.elem.ctype()
+            # A buffer *declaration* renders its element type and puts the
+            # extent in the declarator -- `float r0[36]`, which `Op.ALLOC`
+            # spells itself.  A buffer in a *value* position is a pointer to
+            # that element type, and there are such positions now: a rolling
+            # pointer carried across a loop's back edge is an `iter_args`
+            # entry, and the loop declares it from its type alone.
+            #
+            # Rendering the element type there produced `float v4 = p0;` for a
+            # carried pointer, which is a narrowing conversion the compiler
+            # rejects rather than a wrong answer -- but only because the
+            # element type happened to be arithmetic.
+            return f'{t.elem.ctype()}*'
         raise IRError(f'cannot render type {t!r}')
 
     # -- lexic ------------------------------------------------------------- #

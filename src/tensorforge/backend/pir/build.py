@@ -1146,6 +1146,14 @@ class IRBuilder:
         against, so a window is the buffer it is a window into.
         """
         v = self.value(type_, hint=hint)
+        if extern is None:
+            raise IRError(
+                'decl_expr needs `extern`: the declarator is caller text and '
+                'has to spell the same name the emitter binds, and the caller '
+                'cannot know that name otherwise. Passing a declarator with a '
+                'name of its own emits a definition of one variable and a use '
+                'of another, which compiles only when some other statement '
+                'happens to have defined the second.')
         root = base if alias_root is None else alias_root
         self._view_root[v.id] = root
         attrs = (('decl', decl), ('escapes', True))
