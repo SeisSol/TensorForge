@@ -58,8 +58,7 @@ inline void kernel_kernel_06611af794(sycl::queue *stream, sycl::range<3> group_c
                   float v22_data = glb_m0[(v19_lead + v13_a)];
                   v7_acc0 = (v7_acc0 * v22_data);
                 }
-                int32_t v29_lead = v4_lead + v11_lead;
-                glb_m1[v29_lead] = v7_acc0;
+                glb_m1[(v4_lead + v11_lead)] = v7_acc0;
               }
             }
           }

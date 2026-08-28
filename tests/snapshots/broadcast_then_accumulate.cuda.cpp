@@ -81,7 +81,7 @@ __launch_bounds__(256)
             float v18_data = __ldcg(&glb_m0[(v6_lead + v11_lead)]);
             r0[v7_i0] = v18_data;
           }
-          float r2[3]{};
+          alignas(8) float r2[3]{};
           // r2 = load{g>r}(glb_m1);
           #pragma unroll
           for (int32_t v23_i0 = 0; v23_i0 < 1; ++v23_i0) {
@@ -105,7 +105,7 @@ __launch_bounds__(256)
           float v46_data = r1[0];
           r1[0] = (v46_data + v45_data);
           // wait(r2 = load{g>r}(glb_m1););
-          float r3[3]{};
+          alignas(8) float r3[3]{};
           // r3 = +(r2) + None
           // [(0, 32), (0, 3)] []
           float v52_data = r2[0];
@@ -117,7 +117,7 @@ __launch_bounds__(256)
           float v58_data = r2[2];
           float v59_data = r3[2];
           r3[2] = (v59_data + v58_data);
-          float r4[3]{};
+          alignas(8) float r4[3]{};
           // r4 = +(r1) + None
           // [(0, 32), (0, 3)] []
           float v65_data = r1[0];
@@ -127,7 +127,7 @@ __launch_bounds__(256)
           r4[1] = (v69_data + v65_data);
           float v72_data = r4[2];
           r4[2] = (v72_data + v65_data);
-          float r5[3]{};
+          alignas(8) float r5[3]{};
           // r5 = +(r3) + name: r4, type: SymbolType.Register, lead: [0]
           // [(0, 32), (0, 3)] []
           float ir5[3]{};
@@ -149,44 +149,41 @@ __launch_bounds__(256)
               float v95_data = ir5[v94_a];
               int32_t v96_a = v91_n0 + v92_n1;
               float v98_data = r4[v94_a];
-              int32_t v100_a = v91_n0 + v92_n1;
               r5[v94_a] = (v98_data + v95_data);
             }
           }
-          float r6[3]{};
+          alignas(8) float r6[3]{};
           // r6 = +(r5) + None
           // [(0, 32), (0, 3)] []
           float ir6[3]{};
-          float v107_data = r5[0];
-          float v108_data = ir6[0];
-          ir6[0] = (v108_data + v107_data);
-          float v110_data = r5[1];
-          float v111_data = ir6[1];
-          ir6[1] = (v111_data + v110_data);
-          float v113_data = r5[2];
-          float v114_data = ir6[2];
-          ir6[2] = (v114_data + v113_data);
+          float v106_data = r5[0];
+          float v107_data = ir6[0];
+          ir6[0] = (v107_data + v106_data);
+          float v109_data = r5[1];
+          float v110_data = ir6[1];
+          ir6[1] = (v110_data + v109_data);
+          float v112_data = r5[2];
+          float v113_data = ir6[2];
+          ir6[2] = (v113_data + v112_data);
           #pragma unroll
-          for (int32_t v119_n0 = 0; v119_n0 < 1; ++v119_n0) {
+          for (int32_t v118_n0 = 0; v118_n0 < 1; ++v118_n0) {
             #pragma unroll
-            for (int32_t v120_n1 = 0; v120_n1 < 3; ++v120_n1) {
-              int32_t v121_a = v119_n0 + v120_n1;
-              int32_t v122_a = v119_n0 + v120_n1;
-              float v123_data = ir6[v122_a];
-              int32_t v124_a = v119_n0 + v120_n1;
-              r6[v122_a] = v123_data;
+            for (int32_t v119_n1 = 0; v119_n1 < 3; ++v119_n1) {
+              int32_t v120_a = v118_n0 + v119_n1;
+              int32_t v121_a = v118_n0 + v119_n1;
+              float v122_data = ir6[v121_a];
+              r6[v121_a] = v122_data;
             }
           }
           // glb_m2 = store{r>g}(r6);
           #pragma unroll
-          for (int32_t v129_i0 = 0; v129_i0 < 1; ++v129_i0) {
-            int32_t v138_lead = v6_lead + (v129_i0 * 32);
+          for (int32_t v127_i0 = 0; v127_i0 < 1; ++v127_i0) {
+            int32_t v136_lead = v6_lead + (v127_i0 * 32);
             #pragma unroll
-            for (int32_t v130_i1 = 0; v130_i1 < 3; ++v130_i1) {
-              int32_t v131_a = v129_i0 + v130_i1;
-              float v133_data = r6[(v129_i0 + v130_i1)];
-              int32_t v140_a = v138_lead + (v130_i1 * 32);
-              glb_m2[v140_a] = v133_data;
+            for (int32_t v128_i1 = 0; v128_i1 < 3; ++v128_i1) {
+              int32_t v129_a = v127_i0 + v128_i1;
+              float v131_data = r6[(v127_i0 + v128_i1)];
+              glb_m2[(v136_lead + (v128_i1 * 32))] = v131_data;
             }
           }
           __syncwarp();

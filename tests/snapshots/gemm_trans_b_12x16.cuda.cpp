@@ -70,7 +70,7 @@ __launch_bounds__(256)
           float *const __restrict__ glb_m0 = &m0[batchId0 * 192 + 0 + m0_extraOffset];
           const float *const __restrict__ glb_m1 = &m1[batchId0 * 240 + 0 + m1_extraOffset];
           const float *const __restrict__ glb_m2 = &m2[batchId0 * 320 + 0 + m2_extraOffset];
-          float r0[20]{};
+          alignas(16) float r0[20]{};
           // r0 = load{g>r}(glb_m1);
           int32_t v6_lead = threadIdx.x % 16;
           if (v6_lead < 12) {
@@ -102,9 +102,7 @@ __launch_bounds__(256)
           }
           // wait(r0 = load{g>r}(glb_m1););
           // wait(s0 = load{g>s}(glb_m2[1, 0]));
-          pipeline.consumer_wait();
-          pipeline.consumer_release();
-          float r1[16]{};
+          alignas(16) float r1[16]{};
           __syncwarp();
           // r1 = +(r0 * s0) + None
           // [(0, 12), (0, 16)] [(0, 20)]
@@ -1134,18 +1132,16 @@ __launch_bounds__(256)
             for (int32_t v1739_n1 = 0; v1739_n1 < 16; ++v1739_n1) {
               int32_t v1740_a = 0 + v1739_n1;
               float v1742_data = ir1[v1739_n1];
-              int32_t v1743_a = 0 + v1739_n1;
               r1[v1739_n1] = v1742_data;
             }
           }
           // glb_m0 = store{r>g}(r1);
           if (v6_lead < 12) {
             #pragma unroll
-            for (int32_t v1749_i1 = 0; v1749_i1 < 16; ++v1749_i1) {
-              int32_t v1750_a = 0 + v1749_i1;
-              float v1752_data = r1[v1749_i1];
-              int32_t v1759_a = v6_lead + (v1749_i1 * 12);
-              glb_m0[v1759_a] = v1752_data;
+            for (int32_t v1748_i1 = 0; v1748_i1 < 16; ++v1748_i1) {
+              int32_t v1749_a = 0 + v1748_i1;
+              float v1751_data = r1[v1748_i1];
+              glb_m0[(v6_lead + (v1748_i1 * 12))] = v1751_data;
             }
           }
           __syncwarp();

@@ -55,7 +55,7 @@ inline void kernel_kernel_7cc2a3c5b0(sycl::queue *stream, sycl::range<3> group_c
               float v17_data = glb_m0[v6_lead];
               float v18_data = r0[0];
               r0[0] = (v18_data + v17_data);
-              float r1[3]{};
+              alignas(8) float r1[3]{};
               // r1 = +(glb_m1) + None
               // [(0, 32), (0, 3)] []
               int32_t v29_a = v6_lead + 0;
@@ -70,7 +70,7 @@ inline void kernel_kernel_7cc2a3c5b0(sycl::queue *stream, sycl::range<3> group_c
               float v66_data = glb_m1[(v6_lead + 64)];
               float v67_data = r1[2];
               r1[2] = (v67_data + v66_data);
-              float r2[3]{};
+              alignas(8) float r2[3]{};
               // r2 = +(r0) + None
               // [(0, 32), (0, 3)] []
               float v73_data = r0[0];
@@ -80,7 +80,7 @@ inline void kernel_kernel_7cc2a3c5b0(sycl::queue *stream, sycl::range<3> group_c
               r2[1] = (v77_data + v73_data);
               float v80_data = r2[2];
               r2[2] = (v80_data + v73_data);
-              float r3[3]{};
+              alignas(8) float r3[3]{};
               // r3 = +(r1) + name: r2, type: SymbolType.Register, lead: [0]
               // [(0, 32), (0, 3)] []
               float ir3[3]{};
@@ -102,44 +102,41 @@ inline void kernel_kernel_7cc2a3c5b0(sycl::queue *stream, sycl::range<3> group_c
                   float v103_data = ir3[v102_a];
                   int32_t v104_a = v99_n0 + v100_n1;
                   float v106_data = r2[v102_a];
-                  int32_t v108_a = v99_n0 + v100_n1;
                   r3[v102_a] = (v106_data + v103_data);
                 }
               }
-              float r4[3]{};
+              alignas(8) float r4[3]{};
               // r4 = +(r3) + None
               // [(0, 32), (0, 3)] []
               float ir4[3]{};
-              float v115_data = r3[0];
-              float v116_data = ir4[0];
-              ir4[0] = (v116_data + v115_data);
-              float v118_data = r3[1];
-              float v119_data = ir4[1];
-              ir4[1] = (v119_data + v118_data);
-              float v121_data = r3[2];
-              float v122_data = ir4[2];
-              ir4[2] = (v122_data + v121_data);
+              float v114_data = r3[0];
+              float v115_data = ir4[0];
+              ir4[0] = (v115_data + v114_data);
+              float v117_data = r3[1];
+              float v118_data = ir4[1];
+              ir4[1] = (v118_data + v117_data);
+              float v120_data = r3[2];
+              float v121_data = ir4[2];
+              ir4[2] = (v121_data + v120_data);
               #pragma unroll
-              for (int32_t v127_n0 = 0; v127_n0 < 1; ++v127_n0) {
+              for (int32_t v126_n0 = 0; v126_n0 < 1; ++v126_n0) {
                 #pragma unroll
-                for (int32_t v128_n1 = 0; v128_n1 < 3; ++v128_n1) {
-                  int32_t v129_a = v127_n0 + v128_n1;
-                  int32_t v130_a = v127_n0 + v128_n1;
-                  float v131_data = ir4[v130_a];
-                  int32_t v132_a = v127_n0 + v128_n1;
-                  r4[v130_a] = v131_data;
+                for (int32_t v127_n1 = 0; v127_n1 < 3; ++v127_n1) {
+                  int32_t v128_a = v126_n0 + v127_n1;
+                  int32_t v129_a = v126_n0 + v127_n1;
+                  float v130_data = ir4[v129_a];
+                  r4[v129_a] = v130_data;
                 }
               }
               // glb_m2 = store{r>g}(r4);
               #pragma unroll
-              for (int32_t v137_i0 = 0; v137_i0 < 1; ++v137_i0) {
-                int32_t v146_lead = v6_lead + (v137_i0 * 32);
+              for (int32_t v135_i0 = 0; v135_i0 < 1; ++v135_i0) {
+                int32_t v144_lead = v6_lead + (v135_i0 * 32);
                 #pragma unroll
-                for (int32_t v138_i1 = 0; v138_i1 < 3; ++v138_i1) {
-                  int32_t v139_a = v137_i0 + v138_i1;
-                  float v141_data = r4[(v137_i0 + v138_i1)];
-                  int32_t v148_a = v146_lead + (v138_i1 * 32);
-                  glb_m2[v148_a] = v141_data;
+                for (int32_t v136_i1 = 0; v136_i1 < 3; ++v136_i1) {
+                  int32_t v137_a = v135_i0 + v136_i1;
+                  float v139_data = r4[(v135_i0 + v136_i1)];
+                  glb_m2[(v144_lead + (v136_i1 * 32))] = v139_data;
                 }
               }
             }

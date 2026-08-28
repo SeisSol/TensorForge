@@ -75,7 +75,7 @@ __launch_bounds__(256)
           const float *const __restrict__ glb_m2 = &m2[batchId0 * 3136 + 0 + m2_extraOffset];
           float *const __restrict__ glb_m3 = &m3[batchId0 * 81 + 0 + m3_extraOffset];
           const float *const __restrict__ glb_m4 = &m4[batchId0 * 81 + 0 + m4_extraOffset];
-          float r0[112]{};
+          alignas(16) float r0[112]{};
           // r0 = load{g>r}(glb_m0);
           int32_t v8_lead = threadIdx.x % 32;
           #pragma unroll
@@ -104,7 +104,7 @@ __launch_bounds__(256)
               r0[v46_a] = v44_data;
             }
           }
-          float r1[18]{};
+          alignas(16) float r1[18]{};
           // r1 = load{g>r}(glb_m1);
           float v48_lin = glb_m1[0 + threadIdx.x * 1];
           r1[0] = v48_lin;
@@ -139,7 +139,7 @@ __launch_bounds__(256)
           float v63_lin = glb_m1[480 + threadIdx.x * 1];
           r1[15] = v63_lin;
           // wait(r0 = load{g>r}(glb_m0););
-          float r3[112]{};
+          alignas(16) float r3[112]{};
           // r3 = load{g>r}(glb_m2);
           #pragma unroll
           for (int32_t v68_i0 = 0; v68_i0 < 1; ++v68_i0) {
@@ -168,7 +168,7 @@ __launch_bounds__(256)
             }
           }
           // wait(r1 = load{g>r}(glb_m1););
-          float r2[18]{};
+          alignas(16) float r2[18]{};
           // r2 = +(r0 * r1) + None
           // [(0, 56), (0, 9)] [(0, 56)]
           float v107_data = r1[0];
@@ -685,7 +685,7 @@ __launch_bounds__(256)
           tensorforge::fmacdpp16<7>(v720_acc, v726_bc, v348_data);
           r2[16] = v719_acc;
           r2[17] = v720_acc;
-          float r6[9]{};
+          alignas(16) float r6[9]{};
           // r6 = load{g>r}(glb_m4);
           float v728_lin = glb_m4[0 + threadIdx.x * 1];
           r6[0] = v728_lin;
@@ -694,7 +694,7 @@ __launch_bounds__(256)
           float v730_lin = glb_m4[64 + threadIdx.x * 1];
           r6[2] = v730_lin;
           // wait(r3 = load{g>r}(glb_m2););
-          float r4[18]{};
+          alignas(16) float r4[18]{};
           // r4 = +(r3 * r1) + None
           // [(0, 56), (0, 9)] [(0, 56)]
           float v736_tp{};
@@ -1214,7 +1214,7 @@ __launch_bounds__(256)
               s0[v1383_a] = v1376_data;
             }
           }
-          float r5[9]{};
+          alignas(16) float r5[9]{};
           // r5 = +(s0 * r4) + None
           // [(0, 9), (0, 9)] [(0, 56)]
           float v1385_data = r4[0];
@@ -1776,7 +1776,7 @@ __launch_bounds__(256)
           tensorforge::fmacdpp16<7>(v4059_acc, v4065_bc, v4058_data);
           r5[8] = v4059_acc;
           // wait(r6 = load{g>r}(glb_m4););
-          float r7[9]{};
+          alignas(16) float r7[9]{};
           // r7 = +(r5 * r6) + None
           // [(0, 9), (0, 9)] [(0, 9)]
           float v4067_data = r5[0];
@@ -1901,8 +1901,7 @@ __launch_bounds__(256)
             for (int32_t v4098_i1 = 0; v4098_i1 < 9; ++v4098_i1) {
               int32_t v4099_a = 0 + v4098_i1;
               float v4101_data = r7[v4098_i1];
-              int32_t v4108_a = v8_lead + (v4098_i1 * 9);
-              glb_m3[v4108_a] = v4101_data;
+              glb_m3[(v8_lead + (v4098_i1 * 9))] = v4101_data;
             }
           }
         }

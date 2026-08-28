@@ -64,7 +64,7 @@ inline void kernel_kernel_e7f2438624(sycl::queue *stream, sycl::range<3> group_c
                 }
               }
               // wait(s0 = load{g>s}(glb_m2[1, 0]));
-              float r0[16]{};
+              alignas(16) float r0[16]{};
               sycl::group_barrier(item.get_sub_group());
               // r0 = +(glb_m1 * s0) + None
               // [(0, 12), (0, 16)] [(0, 20)]
@@ -1714,18 +1714,16 @@ inline void kernel_kernel_e7f2438624(sycl::queue *stream, sycl::range<3> group_c
                 for (int32_t v5557_n1 = 0; v5557_n1 < 16; ++v5557_n1) {
                   int32_t v5558_a = 0 + v5557_n1;
                   float v5560_data = ir0[v5557_n1];
-                  int32_t v5561_a = 0 + v5557_n1;
                   r0[v5557_n1] = v5560_data;
                 }
               }
               // glb_m0 = store{r>g}(r0);
               if (v6_lead < 12) {
                 #pragma unroll
-                for (int32_t v5567_i1 = 0; v5567_i1 < 16; ++v5567_i1) {
-                  int32_t v5568_a = 0 + v5567_i1;
-                  float v5570_data = r0[v5567_i1];
-                  int32_t v5577_a = v6_lead + (v5567_i1 * 12);
-                  glb_m0[v5577_a] = v5570_data;
+                for (int32_t v5566_i1 = 0; v5566_i1 < 16; ++v5566_i1) {
+                  int32_t v5567_a = 0 + v5566_i1;
+                  float v5569_data = r0[v5566_i1];
+                  glb_m0[(v6_lead + (v5566_i1 * 12))] = v5569_data;
                 }
               }
             }

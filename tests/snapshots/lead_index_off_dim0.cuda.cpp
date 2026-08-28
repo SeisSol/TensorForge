@@ -85,69 +85,64 @@ __launch_bounds__(256)
           }
           float* __restrict__ s0 = &localShrMem0[0];
           // s0 = load{g>s}(glb_m2[0, 1])
-          pipeline.producer_acquire();
           if (threadIdx.x < 9) {
-            cuda::memcpy_async(&s0[0 + 0 + 1 * threadIdx.x + 0], &glb_m2[0 + 0 + 1 * threadIdx.x + 0], cuda::aligned_size_t<4>(4), pipeline);
+            __pipeline_memcpy_async(&s0[0 + 0 + 1 * threadIdx.x + 0], &glb_m2[0 + 0 + 1 * threadIdx.x + 0], 4);
+            __pipeline_commit();
           }
-          __syncwarp();
-          pipeline.producer_commit();
           // wait(r0 = load{g>r}(glb_m1););
           // wait(s0 = load{g>s}(glb_m2[0, 1]));
-          pipeline.consumer_wait();
-          pipeline.consumer_release();
-          float r1[9]{};
+          __pipeline_wait_prior(0);
+          alignas(16) float r1[9]{};
           __syncwarp();
           // r1 = +(r0 * s0) + None
           // [(0, 20), (0, 9)] [(0, 1)]
           float ir1[9]{};
-          int32_t v28_lead = threadIdx.x % 32;
-          if (v28_lead < 20) {
-            float v30_data = r0[0];
-            float v31_data = s0[0];
-            float v33_data = ir1[0];
-            ir1[0] = (v33_data + (v30_data * v31_data));
-            float v36_data = s0[1];
-            float v38_data = ir1[1];
-            ir1[1] = (v38_data + (v30_data * v36_data));
-            float v41_data = s0[2];
-            float v43_data = ir1[2];
-            ir1[2] = (v43_data + (v30_data * v41_data));
-            float v46_data = s0[3];
-            float v48_data = ir1[3];
-            ir1[3] = (v48_data + (v30_data * v46_data));
-            float v51_data = s0[4];
-            float v53_data = ir1[4];
-            ir1[4] = (v53_data + (v30_data * v51_data));
-            float v56_data = s0[5];
-            float v58_data = ir1[5];
-            ir1[5] = (v58_data + (v30_data * v56_data));
-            float v61_data = s0[6];
-            float v63_data = ir1[6];
-            ir1[6] = (v63_data + (v30_data * v61_data));
-            float v66_data = s0[7];
-            float v68_data = ir1[7];
-            ir1[7] = (v68_data + (v30_data * v66_data));
-            float v71_data = s0[8];
-            float v73_data = ir1[8];
-            ir1[8] = (v73_data + (v30_data * v71_data));
+          int32_t v29_lead = threadIdx.x % 32;
+          if (v29_lead < 20) {
+            float v31_data = r0[0];
+            float v32_data = s0[0];
+            float v34_data = ir1[0];
+            ir1[0] = (v34_data + (v31_data * v32_data));
+            float v37_data = s0[1];
+            float v39_data = ir1[1];
+            ir1[1] = (v39_data + (v31_data * v37_data));
+            float v42_data = s0[2];
+            float v44_data = ir1[2];
+            ir1[2] = (v44_data + (v31_data * v42_data));
+            float v47_data = s0[3];
+            float v49_data = ir1[3];
+            ir1[3] = (v49_data + (v31_data * v47_data));
+            float v52_data = s0[4];
+            float v54_data = ir1[4];
+            ir1[4] = (v54_data + (v31_data * v52_data));
+            float v57_data = s0[5];
+            float v59_data = ir1[5];
+            ir1[5] = (v59_data + (v31_data * v57_data));
+            float v62_data = s0[6];
+            float v64_data = ir1[6];
+            ir1[6] = (v64_data + (v31_data * v62_data));
+            float v67_data = s0[7];
+            float v69_data = ir1[7];
+            ir1[7] = (v69_data + (v31_data * v67_data));
+            float v72_data = s0[8];
+            float v74_data = ir1[8];
+            ir1[8] = (v74_data + (v31_data * v72_data));
           }
-          if (v28_lead < 20) {
+          if (v29_lead < 20) {
             #pragma unroll
-            for (int32_t v79_n1 = 0; v79_n1 < 9; ++v79_n1) {
-              int32_t v80_a = 0 + v79_n1;
-              float v82_data = ir1[v79_n1];
-              int32_t v83_a = 0 + v79_n1;
-              r1[v79_n1] = v82_data;
+            for (int32_t v80_n1 = 0; v80_n1 < 9; ++v80_n1) {
+              int32_t v81_a = 0 + v80_n1;
+              float v83_data = ir1[v80_n1];
+              r1[v80_n1] = v83_data;
             }
           }
           // glb_m0 = store{r>g}(r1);
-          if (v28_lead < 20) {
+          if (v29_lead < 20) {
             #pragma unroll
             for (int32_t v89_i1 = 0; v89_i1 < 9; ++v89_i1) {
               int32_t v90_a = 0 + v89_i1;
               float v92_data = r1[v89_i1];
-              int32_t v99_a = v28_lead + (v89_i1 * 20);
-              glb_m0[v99_a] = v92_data;
+              glb_m0[(v29_lead + (v89_i1 * 20))] = v92_data;
             }
           }
           __syncwarp();

@@ -1,0 +1,1 @@
+FAILED: IRError: 4 value(s) have no tracked distribution and cannot be given an ESIMD type: %v8_lead:int32_t, %v20_a:int32_t, %v29_a:int32_t, %v38_a:int32_t. Every declaration needs to know how the value is spread over the lanes; in the SPMD lowering that is carried by the index expression instead, which is why these got this far untracked.

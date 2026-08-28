@@ -50,7 +50,7 @@ inline void kernel_kernel_ead773dd51(sycl::queue *stream, sycl::range<3> group_c
               *(sycl::vec<float, 4>*)&s0[0 + 0 + 4 * item.get_local_id(0) + 0] = *(sycl::vec<float, 4>*)&glb_m2[0 + 0 + 4 * item.get_local_id(0) + 0];
               *(sycl::vec<float, 4>*)&s0[0 + 0 + 4 * item.get_local_id(0) + 64] = *(sycl::vec<float, 4>*)&glb_m2[0 + 0 + 4 * item.get_local_id(0) + 64];
               // wait(s0 = load{g>s}(glb_m2[0, 1]));
-              float r0[8]{};
+              alignas(16) float r0[8]{};
               sycl::group_barrier(item.get_sub_group());
               // r0 = +(glb_m1 * s0) + None
               // [(0, 12), (0, 8)] [(0, 16)]
@@ -733,18 +733,16 @@ inline void kernel_kernel_ead773dd51(sycl::queue *stream, sycl::range<3> group_c
                 for (int32_t v2506_n1 = 0; v2506_n1 < 8; ++v2506_n1) {
                   int32_t v2507_a = 0 + v2506_n1;
                   float v2509_data = ir0[v2506_n1];
-                  int32_t v2510_a = 0 + v2506_n1;
                   r0[v2506_n1] = v2509_data;
                 }
               }
               // glb_m0 = store{r>g}(r0);
               if (v8_lead < 12) {
                 #pragma unroll
-                for (int32_t v2516_i1 = 0; v2516_i1 < 8; ++v2516_i1) {
-                  int32_t v2517_a = 0 + v2516_i1;
-                  float v2519_data = r0[v2516_i1];
-                  int32_t v2526_a = v8_lead + (v2516_i1 * 12);
-                  glb_m0[v2526_a] = v2519_data;
+                for (int32_t v2515_i1 = 0; v2515_i1 < 8; ++v2515_i1) {
+                  int32_t v2516_a = 0 + v2515_i1;
+                  float v2518_data = r0[v2515_i1];
+                  glb_m0[(v8_lead + (v2515_i1 * 12))] = v2518_data;
                 }
               }
             }

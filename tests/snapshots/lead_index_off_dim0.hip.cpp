@@ -78,13 +78,13 @@ __launch_bounds__(256)
               r0[v22_a] = v21_data;
             }
           }
-          float r1[9]{};
+          alignas(16) float r1[9]{};
           // r1 = load{g>r}(glb_m2);
           float v24_lin = glb_m2[0 + threadIdx.x * 1];
           r1[0] = v24_lin;
           // wait(r0 = load{g>r}(glb_m1););
           // wait(r1 = load{g>r}(glb_m2););
-          float r2[9]{};
+          alignas(16) float r2[9]{};
           // r2 = +(r0 * r1) + None
           // [(0, 20), (0, 9)] [(0, 1)]
           float v26_data = r0[0];
@@ -124,8 +124,7 @@ __launch_bounds__(256)
             for (int32_t v42_i1 = 0; v42_i1 < 9; ++v42_i1) {
               int32_t v43_a = 0 + v42_i1;
               float v45_data = r2[v42_i1];
-              int32_t v52_a = v40_lead + (v42_i1 * 20);
-              glb_m0[v52_a] = v45_data;
+              glb_m0[(v40_lead + (v42_i1 * 20))] = v45_data;
             }
           }
         }

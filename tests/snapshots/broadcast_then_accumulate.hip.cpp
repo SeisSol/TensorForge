@@ -79,7 +79,7 @@ __launch_bounds__(256)
             float v18_data = __builtin_nontemporal_load(&glb_m0[(v6_lead + v11_lead)]);
             r0[v7_i0] = v18_data;
           }
-          float r2[3]{};
+          alignas(8) float r2[3]{};
           // r2 = load{g>r}(glb_m1);
           #pragma unroll
           for (int32_t v23_i0 = 0; v23_i0 < 1; ++v23_i0) {
@@ -103,7 +103,7 @@ __launch_bounds__(256)
           float v46_data = r1[0];
           r1[0] = (v46_data + v45_data);
           // wait(r2 = load{g>r}(glb_m1););
-          float r3[3]{};
+          alignas(8) float r3[3]{};
           // r3 = +(r2) + None
           // [(0, 32), (0, 3)] []
           float v52_data = r2[0];
@@ -115,7 +115,7 @@ __launch_bounds__(256)
           float v58_data = r2[2];
           float v59_data = r3[2];
           r3[2] = (v59_data + v58_data);
-          float r4[3]{};
+          alignas(8) float r4[3]{};
           // r4 = +(r1) + None
           // [(0, 32), (0, 3)] []
           float v65_data = r1[0];
@@ -125,7 +125,7 @@ __launch_bounds__(256)
           r4[1] = (v69_data + v65_data);
           float v72_data = r4[2];
           r4[2] = (v72_data + v65_data);
-          float r5[3]{};
+          alignas(8) float r5[3]{};
           // r5 = +(r3) + name: r4, type: SymbolType.Register, lead: [0]
           // [(0, 32), (0, 3)] []
           float ir5[3]{};
@@ -147,32 +147,30 @@ __launch_bounds__(256)
               float v95_data = ir5[v94_a];
               int32_t v96_a = v91_n0 + v92_n1;
               float v98_data = r4[v94_a];
-              int32_t v100_a = v91_n0 + v92_n1;
               r5[v94_a] = (v98_data + v95_data);
             }
           }
-          float r6[3]{};
+          alignas(8) float r6[3]{};
           // r6 = +(r5) + None
           // [(0, 32), (0, 3)] []
-          float v106_data = r5[0];
-          float v107_data = r6[0];
-          r6[0] = (v107_data + v106_data);
-          float v109_data = r5[1];
-          float v110_data = r6[1];
-          r6[1] = (v110_data + v109_data);
-          float v112_data = r5[2];
-          float v113_data = r6[2];
-          r6[2] = (v113_data + v112_data);
+          float v105_data = r5[0];
+          float v106_data = r6[0];
+          r6[0] = (v106_data + v105_data);
+          float v108_data = r5[1];
+          float v109_data = r6[1];
+          r6[1] = (v109_data + v108_data);
+          float v111_data = r5[2];
+          float v112_data = r6[2];
+          r6[2] = (v112_data + v111_data);
           // glb_m2 = store{r>g}(r6);
           #pragma unroll
-          for (int32_t v118_i0 = 0; v118_i0 < 1; ++v118_i0) {
-            int32_t v127_lead = v6_lead + (v118_i0 * 32);
+          for (int32_t v117_i0 = 0; v117_i0 < 1; ++v117_i0) {
+            int32_t v126_lead = v6_lead + (v117_i0 * 32);
             #pragma unroll
-            for (int32_t v119_i1 = 0; v119_i1 < 3; ++v119_i1) {
-              int32_t v120_a = v118_i0 + v119_i1;
-              float v122_data = r6[(v118_i0 + v119_i1)];
-              int32_t v129_a = v127_lead + (v119_i1 * 32);
-              glb_m2[v129_a] = v122_data;
+            for (int32_t v118_i1 = 0; v118_i1 < 3; ++v118_i1) {
+              int32_t v119_a = v117_i0 + v118_i1;
+              float v121_data = r6[(v117_i0 + v118_i1)];
+              glb_m2[(v126_lead + (v118_i1 * 32))] = v121_data;
             }
           }
         }

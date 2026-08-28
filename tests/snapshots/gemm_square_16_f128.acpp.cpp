@@ -83,20 +83,18 @@ inline void kernel_kernel_0b2fc070b9(sycl::queue *stream, sycl::range<3> group_c
                   int32_t v85_a = v83_n0 + v84_n1;
                   int32_t v86_a = v83_n0 + v84_n1;
                   __float128 v87_data = ir0[v86_a];
-                  int32_t v88_a = v83_n0 + v84_n1;
                   r0[v86_a] = v87_data;
                 }
               }
               // glb_m0 = store{r>g}(r0);
               #pragma unroll
-              for (int32_t v93_i0 = 0; v93_i0 < 1; ++v93_i0) {
-                int32_t v102_lead = v8_lead + (v93_i0 * 2);
+              for (int32_t v92_i0 = 0; v92_i0 < 1; ++v92_i0) {
+                int32_t v101_lead = v8_lead + (v92_i0 * 2);
                 #pragma unroll
-                for (int32_t v94_i1 = 0; v94_i1 < 2; ++v94_i1) {
-                  int32_t v95_a = v93_i0 + v94_i1;
-                  __float128 v97_data = r0[(v93_i0 + v94_i1)];
-                  int32_t v104_a = v102_lead + (v94_i1 * 2);
-                  glb_m0[v104_a] = v97_data;
+                for (int32_t v93_i1 = 0; v93_i1 < 2; ++v93_i1) {
+                  int32_t v94_a = v92_i0 + v93_i1;
+                  __float128 v96_data = r0[(v92_i0 + v93_i1)];
+                  glb_m0[(v101_lead + (v93_i1 * 2))] = v96_data;
                 }
               }
             }

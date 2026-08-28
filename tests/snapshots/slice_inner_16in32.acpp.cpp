@@ -50,7 +50,7 @@ inline void kernel_kernel_87f2838a59(sycl::queue *stream, sycl::range<3> group_c
               *(sycl::vec<float, 4>*)&s0[0 + 0 + 4 * item.get_local_id(0) + 0] = *(sycl::vec<float, 4>*)&glb_m2[0 + 0 + 4 * item.get_local_id(0) + 0];
               *(sycl::vec<float, 4>*)&s0[0 + 0 + 4 * item.get_local_id(0) + 64] = *(sycl::vec<float, 4>*)&glb_m2[0 + 0 + 4 * item.get_local_id(0) + 64];
               // wait(s0 = load{g>s}(glb_m2[0, 1]));
-              float r0[8]{};
+              alignas(16) float r0[8]{};
               sycl::group_barrier(item.get_sub_group());
               // r0 = +(glb_m1 * s0) + None
               // [(0, 16), (0, 8)] [(0, 16)]
@@ -703,20 +703,18 @@ inline void kernel_kernel_87f2838a59(sycl::queue *stream, sycl::range<3> group_c
                   int32_t v2491_a = v2489_n0 + v2490_n1;
                   int32_t v2492_a = v2489_n0 + v2490_n1;
                   float v2493_data = ir0[v2492_a];
-                  int32_t v2494_a = v2489_n0 + v2490_n1;
                   r0[v2492_a] = v2493_data;
                 }
               }
               // glb_m0 = store{r>g}(r0);
               #pragma unroll
-              for (int32_t v2499_i0 = 0; v2499_i0 < 1; ++v2499_i0) {
-                int32_t v2508_lead = v8_lead + (v2499_i0 * 16);
+              for (int32_t v2498_i0 = 0; v2498_i0 < 1; ++v2498_i0) {
+                int32_t v2507_lead = v8_lead + (v2498_i0 * 16);
                 #pragma unroll
-                for (int32_t v2500_i1 = 0; v2500_i1 < 8; ++v2500_i1) {
-                  int32_t v2501_a = v2499_i0 + v2500_i1;
-                  float v2503_data = r0[(v2499_i0 + v2500_i1)];
-                  int32_t v2510_a = v2508_lead + (v2500_i1 * 16);
-                  glb_m0[v2510_a] = v2503_data;
+                for (int32_t v2499_i1 = 0; v2499_i1 < 8; ++v2499_i1) {
+                  int32_t v2500_a = v2498_i0 + v2499_i1;
+                  float v2502_data = r0[(v2498_i0 + v2499_i1)];
+                  glb_m0[(v2507_lead + (v2499_i1 * 16))] = v2502_data;
                 }
               }
             }

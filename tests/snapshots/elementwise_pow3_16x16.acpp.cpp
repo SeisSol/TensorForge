@@ -56,8 +56,7 @@ inline void kernel_kernel_9656a8bcfa(sycl::queue *stream, sycl::range<3> group_c
                   int32_t v12_a = v6_k1 * 16;
                   int32_t v13_a = v11_lead + v12_a;
                   float v21_data = glb_m0[(v18_lead + v12_a)];
-                  int32_t v29_a = v27_lead + v12_a;
-                  glb_m1[v29_a] = (sycl::pow(v21_data, 3.0f));
+                  glb_m1[(v27_lead + v12_a)] = (sycl::pow(v21_data, 3.0f));
                 }
               }
             }

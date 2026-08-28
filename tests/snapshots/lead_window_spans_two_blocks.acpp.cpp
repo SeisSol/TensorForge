@@ -44,7 +44,7 @@ inline void kernel_kernel_671a350836(sycl::queue *stream, sycl::range<3> group_c
             if (allowed) {
               const float *const __restrict__ glb_m0 = &m0[batchId0][0 + m0_extraOffset];
               float *const __restrict__ glb_m2 = &m2[batchId0][0 + m2_extraOffset];
-              float r0[156]{};
+              alignas(16) float r0[156]{};
               // r0 = +(glb_m0 * glb_m1) + None
               // [(0, 64), (0, 13), (0, 6)] []
               int32_t v6_lead = item.get_local_id(0) % 32;
@@ -678,7 +678,7 @@ inline void kernel_kernel_671a350836(sycl::queue *stream, sycl::range<3> group_c
               float v2654_data = glb_m0[((v6_lead + 32_i32) + 768)];
               float v2657_data = r0[155];
               r0[155] = (v2657_data + (v2654_data * v105_data));
-              float r1[12]{};
+              alignas(16) float r1[12]{};
               // r1 = +(r0) + name: glb_m2, type: SymbolType.Global, lead: [0]
               // [(20, 35), (0, 1), (0, 6)] []
               float ir1[12]{};
@@ -738,62 +738,58 @@ inline void kernel_kernel_671a350836(sycl::queue *stream, sycl::range<3> group_c
                     int32_t v2724_a = v2707_n2 * 832;
                     int32_t v2726_a = v2725_a + v2724_a;
                     float v2737_data = glb_m2[(v2735_a + v2724_a)];
-                    int32_t v2742_a = v2708_a + v2709_a;
                     r1[v2715_a] = (v2737_data + v2716_data);
                   }
                 }
               }
               if (v6_lead < 3) {
-                int32_t v2763_lead = v6_lead + 32_i32;
-                int32_t v2773_lead = v6_lead + 32_i32;
+                int32_t v2759_lead = v6_lead + 32_i32;
+                int32_t v2769_lead = v6_lead + 32_i32;
                 #pragma unroll
-                for (int32_t v2748_n1 = 0; v2748_n1 < 1; ++v2748_n1) {
-                  int32_t v2752_a = 1 + (v2748_n1 * 2);
-                  int32_t v2765_a = (v2748_n1 + 12) * 64;
-                  int32_t v2767_a = v2763_lead + v2765_a;
-                  int32_t v2777_a = v2773_lead + v2765_a;
+                for (int32_t v2744_n1 = 0; v2744_n1 < 1; ++v2744_n1) {
+                  int32_t v2748_a = 1 + (v2744_n1 * 2);
+                  int32_t v2761_a = (v2744_n1 + 12) * 64;
+                  int32_t v2763_a = v2759_lead + v2761_a;
+                  int32_t v2773_a = v2769_lead + v2761_a;
                   #pragma unroll
-                  for (int32_t v2749_n2 = 0; v2749_n2 < 6; ++v2749_n2) {
-                    int32_t v2751_a = v2749_n2 * 2;
-                    int32_t v2753_a = v2752_a + v2751_a;
-                    float v2758_data = ir1[(v2752_a + v2751_a)];
-                    int32_t v2766_a = v2749_n2 * 832;
-                    int32_t v2768_a = v2767_a + v2766_a;
-                    float v2779_data = glb_m2[(v2777_a + v2766_a)];
-                    int32_t v2784_a = v2752_a + v2751_a;
-                    r1[(v2752_a + v2751_a)] = (v2779_data + v2758_data);
+                  for (int32_t v2745_n2 = 0; v2745_n2 < 6; ++v2745_n2) {
+                    int32_t v2747_a = v2745_n2 * 2;
+                    int32_t v2749_a = v2748_a + v2747_a;
+                    float v2754_data = ir1[(v2748_a + v2747_a)];
+                    int32_t v2762_a = v2745_n2 * 832;
+                    int32_t v2764_a = v2763_a + v2762_a;
+                    float v2775_data = glb_m2[(v2773_a + v2762_a)];
+                    r1[(v2748_a + v2747_a)] = (v2775_data + v2754_data);
                   }
                 }
               }
               // glb_m2 = store{r>g}(r1);
               if (v6_lead >= 20) {
                 #pragma unroll
-                for (int32_t v2793_i1 = 0; v2793_i1 < 1; ++v2793_i1) {
-                  int32_t v2795_a = v2793_i1 * 2;
-                  int32_t v2812_a = v6_lead + ((v2793_i1 + 12) * 64);
+                for (int32_t v2785_i1 = 0; v2785_i1 < 1; ++v2785_i1) {
+                  int32_t v2787_a = v2785_i1 * 2;
+                  int32_t v2804_a = v6_lead + ((v2785_i1 + 12) * 64);
                   #pragma unroll
-                  for (int32_t v2794_i2 = 0; v2794_i2 < 6; ++v2794_i2) {
-                    int32_t v2796_a = v2794_i2 * 2;
-                    int32_t v2798_a = v2795_a + v2796_a;
-                    float v2803_data = r1[(v2795_a + v2796_a)];
-                    int32_t v2813_a = v2812_a + (v2794_i2 * 832);
-                    glb_m2[v2813_a] = v2803_data;
+                  for (int32_t v2786_i2 = 0; v2786_i2 < 6; ++v2786_i2) {
+                    int32_t v2788_a = v2786_i2 * 2;
+                    int32_t v2790_a = v2787_a + v2788_a;
+                    float v2795_data = r1[(v2787_a + v2788_a)];
+                    glb_m2[(v2804_a + (v2786_i2 * 832))] = v2795_data;
                   }
                 }
               }
               if (v6_lead < 3) {
-                int32_t v2830_lead = v6_lead + 32_i32;
+                int32_t v2822_lead = v6_lead + 32_i32;
                 #pragma unroll
-                for (int32_t v2815_i1 = 0; v2815_i1 < 1; ++v2815_i1) {
-                  int32_t v2819_a = 1 + (v2815_i1 * 2);
-                  int32_t v2834_a = v2830_lead + ((v2815_i1 + 12) * 64);
+                for (int32_t v2807_i1 = 0; v2807_i1 < 1; ++v2807_i1) {
+                  int32_t v2811_a = 1 + (v2807_i1 * 2);
+                  int32_t v2826_a = v2822_lead + ((v2807_i1 + 12) * 64);
                   #pragma unroll
-                  for (int32_t v2816_i2 = 0; v2816_i2 < 6; ++v2816_i2) {
-                    int32_t v2818_a = v2816_i2 * 2;
-                    int32_t v2820_a = v2819_a + v2818_a;
-                    float v2825_data = r1[(v2819_a + v2818_a)];
-                    int32_t v2835_a = v2834_a + (v2816_i2 * 832);
-                    glb_m2[v2835_a] = v2825_data;
+                  for (int32_t v2808_i2 = 0; v2808_i2 < 6; ++v2808_i2) {
+                    int32_t v2810_a = v2808_i2 * 2;
+                    int32_t v2812_a = v2811_a + v2810_a;
+                    float v2817_data = r1[(v2811_a + v2810_a)];
+                    glb_m2[(v2826_a + (v2808_i2 * 832))] = v2817_data;
                   }
                 }
               }

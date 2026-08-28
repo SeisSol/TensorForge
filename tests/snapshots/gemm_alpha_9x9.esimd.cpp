@@ -1,0 +1,1 @@
+FAILED: IRError: the ESIMD lowering has no lane index: one work-item is the whole vector, so a value spread over lanes is a simd<> type and not a subscript. A caller reaching here is still building an SPMD address.

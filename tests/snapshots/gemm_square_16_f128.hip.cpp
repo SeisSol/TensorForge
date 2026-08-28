@@ -116,8 +116,7 @@ __launch_bounds__(256)
             for (int32_t v47_i1 = 0; v47_i1 < 2; ++v47_i1) {
               int32_t v48_a = v46_i0 + v47_i1;
               __float128 v50_data = r2[(v46_i0 + v47_i1)];
-              int32_t v57_a = v55_lead + (v47_i1 * 2);
-              glb_m0[v57_a] = v50_data;
+              glb_m0[(v55_lead + (v47_i1 * 2))] = v50_data;
             }
           }
         }

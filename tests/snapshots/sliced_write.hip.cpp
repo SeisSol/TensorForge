@@ -65,7 +65,7 @@ __launch_bounds__(256)
           float *const __restrict__ glb_m0 = &m0[batchId0 * 416 + 0 + m0_extraOffset];
           const float *const __restrict__ glb_m1 = &m1[batchId0 * 416 + 0 + m1_extraOffset];
           const float *const __restrict__ glb_m2 = &m2[batchId0 * 169 + 0 + m2_extraOffset];
-          float r0[3]{};
+          alignas(8) float r0[3]{};
           // r0 = load{g>r}(glb_m1);
           int32_t v6_lead = threadIdx.x % 32;
           #pragma unroll
@@ -82,7 +82,7 @@ __launch_bounds__(256)
               r0[v25_a] = v23_data;
             }
           }
-          float r1[13]{};
+          alignas(16) float r1[13]{};
           // r1 = load{g>r}(glb_m2);
           float v27_lin = glb_m2[0 + threadIdx.x * 1];
           r1[0] = v27_lin;
@@ -98,7 +98,7 @@ __launch_bounds__(256)
           r1[5] = v32_lin;
           // wait(r0 = load{g>r}(glb_m1););
           // wait(r1 = load{g>r}(glb_m2););
-          float r2[7]{};
+          alignas(16) float r2[7]{};
           // r2 = +(r0 * r1) + None
           // [(0, 32), (6, 13)] [(10, 13)]
           float v34_data = r0[0];
@@ -146,46 +146,33 @@ __launch_bounds__(256)
           #pragma unroll
           for (int32_t v50_i0 = 0; v50_i0 < 1; ++v50_i0) {
             int32_t v55_lead = v50_i0 * 32;
-            int32_t v57_a = (v6_lead + v55_lead) + 0;
-            glb_m0[v57_a] = 0.0f;
-            int32_t v64_a = (v6_lead + v55_lead) + 32;
-            glb_m0[v64_a] = 0.0f;
-            int32_t v71_a = (v6_lead + v55_lead) + 64;
-            glb_m0[v71_a] = 0.0f;
-            int32_t v78_a = (v6_lead + v55_lead) + 96;
-            glb_m0[v78_a] = 0.0f;
-            int32_t v85_a = (v6_lead + v55_lead) + 128;
-            glb_m0[v85_a] = 0.0f;
-            int32_t v92_a = (v6_lead + v55_lead) + 160;
-            glb_m0[v92_a] = 0.0f;
+            glb_m0[(v6_lead + v55_lead)] = 0.0f;
+            glb_m0[((v6_lead + v55_lead) + 32)] = 0.0f;
+            glb_m0[((v6_lead + v55_lead) + 64)] = 0.0f;
+            glb_m0[((v6_lead + v55_lead) + 96)] = 0.0f;
+            glb_m0[((v6_lead + v55_lead) + 128)] = 0.0f;
+            glb_m0[((v6_lead + v55_lead) + 160)] = 0.0f;
             int32_t v93_a = v50_i0 + 0;
             float v95_data = r2[v50_i0];
-            int32_t v101_a = (v6_lead + v55_lead) + 192;
-            glb_m0[v101_a] = v95_data;
+            glb_m0[((v6_lead + v55_lead) + 192)] = v95_data;
             int32_t v102_a = v50_i0 + 1;
             float v104_data = r2[(v50_i0 + 1)];
-            int32_t v110_a = (v6_lead + v55_lead) + 224;
-            glb_m0[v110_a] = v104_data;
+            glb_m0[((v6_lead + v55_lead) + 224)] = v104_data;
             int32_t v111_a = v50_i0 + 2;
             float v113_data = r2[(v50_i0 + 2)];
-            int32_t v119_a = (v6_lead + v55_lead) + 256;
-            glb_m0[v119_a] = v113_data;
+            glb_m0[((v6_lead + v55_lead) + 256)] = v113_data;
             int32_t v120_a = v50_i0 + 3;
             float v122_data = r2[(v50_i0 + 3)];
-            int32_t v128_a = (v6_lead + v55_lead) + 288;
-            glb_m0[v128_a] = v122_data;
+            glb_m0[((v6_lead + v55_lead) + 288)] = v122_data;
             int32_t v129_a = v50_i0 + 4;
             float v131_data = r2[(v50_i0 + 4)];
-            int32_t v137_a = (v6_lead + v55_lead) + 320;
-            glb_m0[v137_a] = v131_data;
+            glb_m0[((v6_lead + v55_lead) + 320)] = v131_data;
             int32_t v138_a = v50_i0 + 5;
             float v140_data = r2[(v50_i0 + 5)];
-            int32_t v146_a = (v6_lead + v55_lead) + 352;
-            glb_m0[v146_a] = v140_data;
+            glb_m0[((v6_lead + v55_lead) + 352)] = v140_data;
             int32_t v147_a = v50_i0 + 6;
             float v149_data = r2[(v50_i0 + 6)];
-            int32_t v155_a = (v6_lead + v55_lead) + 384;
-            glb_m0[v155_a] = v149_data;
+            glb_m0[((v6_lead + v55_lead) + 384)] = v149_data;
           }
         }
       }

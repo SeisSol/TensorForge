@@ -65,7 +65,7 @@ __launch_bounds__(256)
           float *const __restrict__ glb_m0 = &m0[batchId0 * 1008 + 0 + m0_extraOffset];
           const float *const __restrict__ glb_m1 = &m1[batchId0 * 1008 + 0 + m1_extraOffset];
           const float *const __restrict__ glb_m2 = &m2[batchId0 * 324 + 0 + m2_extraOffset];
-          float r0[36]{};
+          alignas(16) float r0[36]{};
           // r0 = load{g>r}(glb_m1);
           int32_t v6_lead = threadIdx.x % 32;
           #pragma unroll
@@ -94,7 +94,7 @@ __launch_bounds__(256)
               r0[v44_a] = v42_data;
             }
           }
-          float r1[18]{};
+          alignas(16) float r1[18]{};
           // r1 = load{g>r}(glb_m2);
           float v46_lin = glb_m2[0 + threadIdx.x * 1];
           r1[0] = v46_lin;
@@ -120,7 +120,7 @@ __launch_bounds__(256)
           r1[10] = v56_lin;
           // wait(r0 = load{g>r}(glb_m1););
           // wait(r1 = load{g>r}(glb_m2););
-          float r2[36]{};
+          alignas(16) float r2[36]{};
           // r2 = +(r0 * r1) + None
           // [(0, 56), (0, 18)] [(0, 18)]
           float v58_data = r1[0];
@@ -437,8 +437,7 @@ __launch_bounds__(256)
               int32_t v529_a = v528_i1 * 2;
               int32_t v530_a = v527_i0 + v529_a;
               float v533_data = r2[(v527_i0 + v529_a)];
-              int32_t v540_a = v538_lead + (v528_i1 * 56);
-              glb_m0[v540_a] = v533_data;
+              glb_m0[(v538_lead + (v528_i1 * 56))] = v533_data;
             }
           }
           if (v6_lead < 24) {
@@ -448,8 +447,7 @@ __launch_bounds__(256)
               int32_t v543_a = v542_i1 * 2;
               int32_t v544_a = 1 + v543_a;
               float v547_data = r2[(1 + v543_a)];
-              int32_t v554_a = v552_lead + (v542_i1 * 56);
-              glb_m0[v554_a] = v547_data;
+              glb_m0[(v552_lead + (v542_i1 * 56))] = v547_data;
             }
           }
         }

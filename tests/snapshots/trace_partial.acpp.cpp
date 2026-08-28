@@ -121,8 +121,7 @@ inline void kernel_kernel_a7d5d30824(sycl::queue *stream, sycl::range<3> group_c
               #pragma unroll
               for (int32_t v300_i0 = 0; v300_i0 < 1; ++v300_i0) {
                 float v301_data = r0[v300_i0];
-                int32_t v306_lead = v6_lead + (v300_i0 * 16);
-                glb_m0[v306_lead] = v301_data;
+                glb_m0[(v6_lead + (v300_i0 * 16))] = v301_data;
               }
             }
           }

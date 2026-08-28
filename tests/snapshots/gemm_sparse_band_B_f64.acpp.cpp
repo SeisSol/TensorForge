@@ -52,7 +52,7 @@ inline void kernel_kernel_417e1ddcc4(sycl::queue *stream, sycl::range<3> group_c
                 s0[0 + 0 + 1 * item.get_local_id(0) + 32] = glb_m2[0 + 0 + 1 * item.get_local_id(0) + 32];
               }
               // wait(s0 = load{g>s}(glb_m2[0, 1]));
-              double r0[16]{};
+              alignas(16) double r0[16]{};
               sycl::group_barrier(item.get_sub_group());
               // r0 = +(glb_m1 * s0) + None
               // [(0, 16), (0, 16)] [(0, 16)]
@@ -505,20 +505,18 @@ inline void kernel_kernel_417e1ddcc4(sycl::queue *stream, sycl::range<3> group_c
                   int32_t v3571_a = v3569_n0 + v3570_n1;
                   int32_t v3572_a = v3569_n0 + v3570_n1;
                   double v3573_data = ir0[v3572_a];
-                  int32_t v3574_a = v3569_n0 + v3570_n1;
                   r0[v3572_a] = v3573_data;
                 }
               }
               // glb_m0 = store{r>g}(r0);
               #pragma unroll
-              for (int32_t v3579_i0 = 0; v3579_i0 < 1; ++v3579_i0) {
-                int32_t v3588_lead = v8_lead + (v3579_i0 * 16);
+              for (int32_t v3578_i0 = 0; v3578_i0 < 1; ++v3578_i0) {
+                int32_t v3587_lead = v8_lead + (v3578_i0 * 16);
                 #pragma unroll
-                for (int32_t v3580_i1 = 0; v3580_i1 < 16; ++v3580_i1) {
-                  int32_t v3581_a = v3579_i0 + v3580_i1;
-                  double v3583_data = r0[(v3579_i0 + v3580_i1)];
-                  int32_t v3590_a = v3588_lead + (v3580_i1 * 16);
-                  glb_m0[v3590_a] = v3583_data;
+                for (int32_t v3579_i1 = 0; v3579_i1 < 16; ++v3579_i1) {
+                  int32_t v3580_a = v3578_i0 + v3579_i1;
+                  double v3582_data = r0[(v3578_i0 + v3579_i1)];
+                  glb_m0[(v3587_lead + (v3579_i1 * 16))] = v3582_data;
                 }
               }
             }

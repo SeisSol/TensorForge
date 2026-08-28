@@ -73,8 +73,7 @@ __launch_bounds__(256)
               int32_t v12_a = v6_k1 * 16;
               int32_t v13_a = v4_lead + v12_a;
               double v21_data = glb_m0[(v4_lead + v12_a)];
-              int32_t v29_a = v4_lead + v12_a;
-              glb_m1[v29_a] = (sqrt(v21_data));
+              glb_m1[(v4_lead + v12_a)] = (sqrt(v21_data));
             }
           }
           __syncwarp();

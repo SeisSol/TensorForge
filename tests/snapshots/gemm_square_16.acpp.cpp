@@ -52,7 +52,7 @@ inline void kernel_kernel_30948bd44e(sycl::queue *stream, sycl::range<3> group_c
               *(sycl::vec<float, 4>*)&s0[0 + 0 + 4 * item.get_local_id(0) + 128] = *(sycl::vec<float, 4>*)&glb_m2[0 + 0 + 4 * item.get_local_id(0) + 128];
               *(sycl::vec<float, 4>*)&s0[0 + 0 + 4 * item.get_local_id(0) + 192] = *(sycl::vec<float, 4>*)&glb_m2[0 + 0 + 4 * item.get_local_id(0) + 192];
               // wait(s0 = load{g>s}(glb_m2[0, 1]));
-              float r0[16]{};
+              alignas(16) float r0[16]{};
               sycl::group_barrier(item.get_sub_group());
               // r0 = +(glb_m1 * s0) + None
               // [(0, 16), (0, 16)] [(0, 16)]
@@ -1345,20 +1345,18 @@ inline void kernel_kernel_30948bd44e(sycl::queue *stream, sycl::range<3> group_c
                   int32_t v4411_a = v4409_n0 + v4410_n1;
                   int32_t v4412_a = v4409_n0 + v4410_n1;
                   float v4413_data = ir0[v4412_a];
-                  int32_t v4414_a = v4409_n0 + v4410_n1;
                   r0[v4412_a] = v4413_data;
                 }
               }
               // glb_m0 = store{r>g}(r0);
               #pragma unroll
-              for (int32_t v4419_i0 = 0; v4419_i0 < 1; ++v4419_i0) {
-                int32_t v4428_lead = v8_lead + (v4419_i0 * 16);
+              for (int32_t v4418_i0 = 0; v4418_i0 < 1; ++v4418_i0) {
+                int32_t v4427_lead = v8_lead + (v4418_i0 * 16);
                 #pragma unroll
-                for (int32_t v4420_i1 = 0; v4420_i1 < 16; ++v4420_i1) {
-                  int32_t v4421_a = v4419_i0 + v4420_i1;
-                  float v4423_data = r0[(v4419_i0 + v4420_i1)];
-                  int32_t v4430_a = v4428_lead + (v4420_i1 * 16);
-                  glb_m0[v4430_a] = v4423_data;
+                for (int32_t v4419_i1 = 0; v4419_i1 < 16; ++v4419_i1) {
+                  int32_t v4420_a = v4418_i0 + v4419_i1;
+                  float v4422_data = r0[(v4418_i0 + v4419_i1)];
+                  glb_m0[(v4427_lead + (v4419_i1 * 16))] = v4422_data;
                 }
               }
             }

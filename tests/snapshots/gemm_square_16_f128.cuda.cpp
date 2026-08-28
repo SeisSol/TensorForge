@@ -89,55 +89,51 @@ __launch_bounds__(256)
           }
           __float128* __restrict__ s0 = &localShrMem0[0];
           // s0 = load{g>s}(glb_m2[0, 1])
-          pipeline.producer_acquire();
-          cuda::memcpy_async(&s0[0 + 0 + 1 * threadIdx.x + 0], &glb_m2[0 + 0 + 1 * threadIdx.x + 0], cuda::aligned_size_t<16>(16), pipeline);
-          cuda::memcpy_async(&s0[0 + 0 + 1 * threadIdx.x + 2], &glb_m2[0 + 0 + 1 * threadIdx.x + 2], cuda::aligned_size_t<16>(16), pipeline);
-          __syncwarp();
-          pipeline.producer_commit();
+          __pipeline_memcpy_async(&s0[0 + 0 + 1 * threadIdx.x + 0], &glb_m2[0 + 0 + 1 * threadIdx.x + 0], 16);
+          __pipeline_commit();
+          __pipeline_memcpy_async(&s0[0 + 0 + 1 * threadIdx.x + 2], &glb_m2[0 + 0 + 1 * threadIdx.x + 2], 16);
+          __pipeline_commit();
           // wait(r0 = load{g>r}(glb_m1););
           // wait(s0 = load{g>s}(glb_m2[0, 1]));
-          pipeline.consumer_wait();
-          pipeline.consumer_release();
+          __pipeline_wait_prior(0);
           __float128 r1[2]{};
           __syncwarp();
           // r1 = +(r0 * s0) + None
           // [(0, 2), (0, 2)] [(0, 2)]
           __float128 ir1[2]{};
-          __float128 v31_data = r0[0];
-          __float128 v32_data = s0[0];
-          __float128 v34_data = ir1[0];
-          ir1[0] = (v34_data + (v31_data * v32_data));
-          __float128 v37_data = s0[2];
-          __float128 v39_data = ir1[1];
-          ir1[1] = (v39_data + (v31_data * v37_data));
-          __float128 v44_data = r0[1];
-          __float128 v45_data = s0[1];
-          __float128 v47_data = ir1[0];
-          ir1[0] = (v47_data + (v44_data * v45_data));
-          __float128 v50_data = s0[3];
-          __float128 v52_data = ir1[1];
-          ir1[1] = (v52_data + (v44_data * v50_data));
+          __float128 v33_data = r0[0];
+          __float128 v34_data = s0[0];
+          __float128 v36_data = ir1[0];
+          ir1[0] = (v36_data + (v33_data * v34_data));
+          __float128 v39_data = s0[2];
+          __float128 v41_data = ir1[1];
+          ir1[1] = (v41_data + (v33_data * v39_data));
+          __float128 v46_data = r0[1];
+          __float128 v47_data = s0[1];
+          __float128 v49_data = ir1[0];
+          ir1[0] = (v49_data + (v46_data * v47_data));
+          __float128 v52_data = s0[3];
+          __float128 v54_data = ir1[1];
+          ir1[1] = (v54_data + (v46_data * v52_data));
           #pragma unroll
-          for (int32_t v57_n0 = 0; v57_n0 < 1; ++v57_n0) {
+          for (int32_t v59_n0 = 0; v59_n0 < 1; ++v59_n0) {
             #pragma unroll
-            for (int32_t v58_n1 = 0; v58_n1 < 2; ++v58_n1) {
-              int32_t v59_a = v57_n0 + v58_n1;
-              int32_t v60_a = v57_n0 + v58_n1;
-              __float128 v61_data = ir1[v60_a];
-              int32_t v62_a = v57_n0 + v58_n1;
-              r1[v60_a] = v61_data;
+            for (int32_t v60_n1 = 0; v60_n1 < 2; ++v60_n1) {
+              int32_t v61_a = v59_n0 + v60_n1;
+              int32_t v62_a = v59_n0 + v60_n1;
+              __float128 v63_data = ir1[v62_a];
+              r1[v62_a] = v63_data;
             }
           }
           // glb_m0 = store{r>g}(r1);
           #pragma unroll
-          for (int32_t v67_i0 = 0; v67_i0 < 1; ++v67_i0) {
-            int32_t v76_lead = v6_lead + (v67_i0 * 2);
+          for (int32_t v68_i0 = 0; v68_i0 < 1; ++v68_i0) {
+            int32_t v77_lead = v6_lead + (v68_i0 * 2);
             #pragma unroll
-            for (int32_t v68_i1 = 0; v68_i1 < 2; ++v68_i1) {
-              int32_t v69_a = v67_i0 + v68_i1;
-              __float128 v71_data = r1[(v67_i0 + v68_i1)];
-              int32_t v78_a = v76_lead + (v68_i1 * 2);
-              glb_m0[v78_a] = v71_data;
+            for (int32_t v69_i1 = 0; v69_i1 < 2; ++v69_i1) {
+              int32_t v70_a = v68_i0 + v69_i1;
+              __float128 v72_data = r1[(v68_i0 + v69_i1)];
+              glb_m0[(v77_lead + (v69_i1 * 2))] = v72_data;
             }
           }
           __syncwarp();
