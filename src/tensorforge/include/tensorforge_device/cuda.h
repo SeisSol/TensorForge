@@ -36,7 +36,27 @@ template <typename T, std::size_t N> struct VectorOf {
 };
 
 template <typename T, std::size_t N>
+using VectorT = typename VectorOf<T, N>::type;
+
+template <typename T, std::size_t N>
 using VectorRelaxedT = typename VectorOf<T, N>::relaxed;
+
+} // namespace tensorforge
+
+// The property this pattern has already got wrong once, in `hip.h`: written
+// as an alias template with a dependent element type, GCC drops the attribute
+// with a warning and `VectorT<float, 4>` becomes plain `float`.  If nvcc ever
+// does the same -- or declines `vector_size` in device code at all -- these
+// turn a silent quarter-width copy into a build error.
+static_assert(sizeof(tensorforge::VectorT<float, 4>) == 4 * sizeof(float),
+              "VectorT lost its vector_size attribute");
+static_assert(alignof(tensorforge::VectorT<float, 4>) == 4 * sizeof(float),
+              "VectorT is not naturally aligned");
+static_assert(alignof(tensorforge::VectorRelaxedT<float, 4>) == alignof(float),
+              "VectorRelaxedT is over-aligned: it exists to be castable onto "
+              "an array that only has element alignment");
+
+namespace tensorforge {
 
 __device__ __forceinline__ int lane_id() {
   int lane;

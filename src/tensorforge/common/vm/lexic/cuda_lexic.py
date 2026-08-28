@@ -140,15 +140,17 @@ class CudaLexic(Lexic):
     return f'__pipeline_wait_prior({prior});'
 
   def get_fptype(self, fptype, length=1, relaxed=False):
-    if relaxed:
-      # Element alignment only: the compiler splits the access rather than
-      # emitting one the hardware requires to be aligned.
-      return f'tensorforge::VectorRelaxedT<{fptype}, {length}>'
-    if length <= 4:
-      suffix = f'{length}' if length > 1 else ''
-      return f'{fptype}{suffix}'
-    else:
-      return f'__attribute__ ((vector_size (sizeof({fptype}) * {length}))) {fptype}'
+    if length == 1:
+      return f'{fptype}'
+    # Not `float2`/`float4`.  Those are CUDA's own structs: they have no
+    # arithmetic operators, so an elementwise op on one does not compile, and
+    # they are unrelated to `VectorRelaxedT`, so the two spellings could not
+    # be assigned to each other -- a staging transfer would load a `float4`
+    # and try to store it through a relaxed pointer of a different type.
+    # `hip.h` and `cuda.h` now declare the same pair, and both are usable as
+    # values and as cast targets.
+    kind = 'VectorRelaxedT' if relaxed else 'VectorT'
+    return f'tensorforge::{kind}<{fptype}, {length}>'
 
   def get_operation(self, op: Operation, fptype, value1, value2):
     fpsuffix = 'f' if fptype == Datatype.F32 else ''
