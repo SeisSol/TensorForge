@@ -46,11 +46,13 @@ def _loop(*, double_buffer=True, read_before_wait=False, barrier=False,
         if barrier:
             b.barrier()
         if extra_issue:
-            # waited alongside the first: a token must be consumed exactly
-            # once, and an unconsumed one is a `verify` failure rather than a
-            # second transfer to choose between
+            # A *separate* transfer with its own wait.  Two issues retired by
+            # one wait are one transfer in pieces and the pass moves them
+            # together; two waits mean two transfers, and choosing between
+            # them would be a schedule.
             second = b.copy_async(fill, glb, dst_index=(lane,), src_index=(k,))
-            b.wait(second, tok)
+            b.wait(second)
+            b.wait(tok)
         else:
             b.wait(tok)
         b.store(out, b.load(read, lane, hint='u'), lane)
@@ -116,10 +118,39 @@ def test_it_refuses_to_cross_a_barrier():
     assert not _moved(_wrap(b, body, nxt))
 
 
-def test_it_refuses_when_there_is_more_than_one_transfer():
+def test_it_refuses_two_transfers_with_two_waits():
     """Picking among several is a schedule, not a rewrite."""
     b, body, nxt = _loop(extra_issue=True)
     assert not _moved(_wrap(b, body, nxt))
+
+
+def test_it_moves_the_hops_of_one_transfer_together():
+    """A macro copy is hops of 4, 2 and 1 elements plus a predicated tail,
+    each its own `copy.async` and all retired by one wait.  That is one
+    transfer in pieces, and the group is what the wait consumes."""
+    b = IRBuilder(fptype=Datatype.F32, scratch=('tempShrMem', 256))
+    fill = b.alloc(Datatype.F32, (128,), MemSpace.SHARED, hint='s')
+    read = b.alloc(Datatype.F32, (128,), MemSpace.SHARED, hint='t')
+    glb = b.alloc(Datatype.F32, (4096,), MemSpace.GLOBAL, hint='g')
+    out = b.alloc(Datatype.F32, (128,), MemSpace.GLOBAL, hint='o')
+    lane = b.thread_id('x')
+    nxt = {}
+    with b.for_(0, 8, 1) as f:
+        k = f.induction
+        nxt[k.id] = b.op('add', INDEX, k, 1, hint='nk')
+        hops = [b.copy_async(fill, glb, dst_index=(lane,), src_index=(k,),
+                             elems=n) for n in (4, 2, 1)]
+        b.wait(hops[-1], *hops[:-1])
+        b.store(out, b.load(read, lane, hint='u'), lane)
+    body = b.finish()
+    verify(body)
+
+    wrapped = _wrap(b, body, nxt)
+    verify(wrapped)
+    loops = [s for s, _ in walk(wrapped) if s.op is Op.FOR]
+    assert len(loops[0].target) == 3, "all three hops carried, or none"
+    peeled = [s for s in wrapped if s.op is Op.COPY_ASYNC]
+    assert len(peeled) == 3, "the prologue is the whole transfer, not a hop"
 
 
 def test_it_refuses_a_loop_that_already_carries_a_token():
