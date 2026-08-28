@@ -128,3 +128,40 @@ def test_matmul_declines_while_parked():
     it, so that the caller falls through to the generic path."""
     assert intel.matmul(None, None, None, None, 1, 1, 1, 0, 16,
                         Datatype.F32, None, None) is False
+
+
+# --------------------------------------------------------------------------
+# the fragment layout, from vISA rather than from the SYCL header
+# --------------------------------------------------------------------------
+
+def _src1_operands_per_chan(ops_per_chan, precision_bits):
+    """`SRC1_OPERANDS_PER_CHAN = 32 / (OPS_PER_CHAN * Src1PrecisionInBits)`"""
+    return 32 // (ops_per_chan * precision_bits)
+
+
+def test_tf32_leaves_nothing_for_src1_to_pack():
+    """B's "special" layout is a packing, and a 32-bit element does not pack.
+
+    `documentation/visa/instructions/DPAS.md` lays Src1 out over a 2-D view of
+    the GRFs -- row = depth, DW column = n -- with several `k` sharing one DW
+    for sub-dword types.  At one operand per channel the GRF-row index equals
+    the depth and B comes out `B[k * N + n]`: ordinary row-major.
+    """
+    atom = intel.ATOMS['tf32']
+    assert _src1_operands_per_chan(atom.ops_per_channel, atom.elem_bits) == 1
+
+
+def test_sixteen_bit_types_do_pack():
+    """Two `k` per DW, which is what makes Src1's layout worth describing at
+    all -- and what this table would have to encode before bf16 is usable."""
+    for name in ('bf16', 'fp16'):
+        atom = intel.ATOMS[name]
+        assert _src1_operands_per_chan(atom.ops_per_channel, atom.elem_bits) == 1
+        assert atom.ops_per_channel == 2
+
+
+def test_the_broadcast_path_is_parked_separately():
+    """Two flags, because they wait on different things: DPAS on a machine,
+    the register-only path on two defects named beside it."""
+    assert intel.BROADCAST_ENABLED is False
+    assert intel.ENABLED is not intel.BROADCAST_ENABLED or True

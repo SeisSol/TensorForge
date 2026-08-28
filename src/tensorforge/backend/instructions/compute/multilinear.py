@@ -485,7 +485,7 @@ class MultilinearInstruction(ComputeInstruction):
             # parked one step earlier than NVIDIA's -- see `intel.ENABLED` --
             # but the gate is written now so that turning it on is a flag and
             # not a search for the call site.
-            if not intel.ENABLED:
+            if not (intel.ENABLED or intel.BROADCAST_ENABLED):
                 return False
             return intel.supports(self._num_threads, self._idest.datatype,
                                   self._second_operand_is_sparse())

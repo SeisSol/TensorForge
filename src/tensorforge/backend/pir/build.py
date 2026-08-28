@@ -513,6 +513,39 @@ class IRBuilder:
         lex = self.context.get_vm().get_lexic()
         return lex.get_simd(INDEX.base.ctype(), block)
 
+    def lane_broadcast(self, vec: Value, lane: int, block: int,
+                       hint: str = 'bc') -> Value:
+        """The value `vec` holds at `lane`, replicated across the wave.
+
+        The fourth question in the family with :meth:`thread_id`,
+        :meth:`lane_offset` and :meth:`lane_index`, and the one where the two
+        models differ most in *cost* rather than only in spelling.
+
+        SPMD has to move the value: lane `l`'s register is not readable from
+        lane `l'`, so this is a cross-lane instruction -- `__shfl`, a DPP
+        broadcast, `group_broadcast`.  It is why `amd/relayout.py` exists.
+
+        Explicitly vectorised, the whole vector is in this work-item's own
+        registers and `v[lane]` is an ordinary element read.  The broadcast
+        costs nothing, which is what makes a register-only matmul preferable
+        to staging operands through shared memory here where it is not on
+        AMD.
+
+        The result is *replicated* in both models -- one value, the same in
+        every lane -- which is why this is not `extract`: that one indexes the
+        slot axis (`ScalarType.length`) and keeps the lane distribution.
+        """
+        out = self.value(vec.type, hint=hint, uniform=Uniformity.MULT,
+                         layout=SCALAR_LAYOUT)
+        if self._explicit_simd():
+            self._emit_op(Op.EXTRACT, (out,), (vec,), pure=True,
+                          attrs=(('lane', lane),))
+            return out
+        lex = self.context.get_vm().get_lexic()
+        text = lex.broadcast('{0}', lane, block)
+        return self.rawexpr(text, vec, type_=vec.type, hint=hint,
+                            pure=True, movable=False, layout=SCALAR_LAYOUT)
+
     def lane_offset(self, block: int, stride: int = 1,
                     hint: str = 'lane') -> Operand:
         """The address contribution of one lane within a distributed dimension.

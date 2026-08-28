@@ -20,12 +20,23 @@ Those are sizes, and a wrong size is a compile error -- the header's own
 `static_assert`s catch it.  `tests/test_intel_gate.py` recomputes them from the
 same formulas, so this table cannot drift from the header without saying so.
 
-Not derived: *which element of the fragment a given lane holds*.  That is a
-hardware register assignment, it is in no header, and its failure mode is the
-bad one -- a correctly typed vector holding the wrong elements compiles, runs,
-and is wrong.  `amd/codegen.py` reaches the same conclusion about the MFMA
-accumulator and writes `None` rather than a plausible layout; the same applies
-with more force to a systolic array.  Hence `ENABLED`.
+The fragment layout *is* derived too, and from the vISA specification rather
+than the SYCL header -- `documentation/visa/instructions/DPAS.md` in
+intel-graphics-compiler.  An earlier version of this file said it was not
+documented anywhere; that was wrong, and the answer turns out to be simple::
+
+    Dst, Src0 (C) and Src2 (A) are row-major in the GRF's 1-D space.
+    Src1 (B) is laid out over a 2-D view: GRF row = k, DW column = n.
+
+For TF32 that degenerates.  `OPS_PER_CHAN = 1`, so
+`SRC1_OPERANDS_PER_CHAN = 32 / (1 * 32) = 1`, the GRF-row index `m` in the
+pseudo-code equals the depth `d`, and B's "special" layout becomes
+`B[k * N + n]` -- ordinary row-major.  The packing that makes Src1 unusual is
+for sub-dword types, where several `k` share one DW; a 32-bit element leaves
+nothing to pack.  With `Src2 advanced 8 * OPS_PER_CHAN per repeat` and
+`Dst/Src0 advanced one GRF per repeat`, all three come out as::
+
+    A[m * K + k]      B[k * N + n]      C[m * N + n]
 
 FP64 is deliberately absent.  XMX has no FP64 at all, and emulating it from
 TF32 costs more than PVC's vector units already deliver: ~419 TF of TF32
@@ -122,11 +133,11 @@ TF32_TERMS = 3
 #: given shape -- that second question is `supports()`.  Two different facts,
 #: so two names, and only this one is a decision about the generator.
 #:
-#: Parked pending a run on real hardware, for a sharper reason than the NVIDIA
-#: path's: the DPAS fragment layout -- which lane holds which element of A, B
-#: and C -- is in no header and cannot be checked by a front end.  A wrong one
-#: produces a kernel that compiles and computes wrong numbers, which nothing in
-#: this repository would catch.
+#: Parked pending a run on real hardware -- but for the same reason as the
+#: NVIDIA path now, not a sharper one.  The fragment layout turned out to be
+#: specified (see the module docstring); what is left unverified is the same
+#: class of thing `nvidia.py` names: an arrangement a front end cannot check,
+#: on an instruction nothing in this repository executes.
 ENABLED = False
 
 
@@ -154,21 +165,97 @@ def simd(lexic, elem, count) -> str:
     return lexic.get_simd(elem, count)
 
 
+#: Whether the register-only FMA path is deployed.
+#:
+#: Separate from `ENABLED`, because they are parked for different reasons.
+#: DPAS waits on a machine to check a systolic arrangement against.  This one
+#: uses nothing a front end cannot see -- an element read and an FMA -- so what
+#: it waits on is only itself, and two things are known to be wrong with it:
+#:
+#: * `float * simd<float, N>` needs the free `operator*`, and the operands go
+#:   in with the scalar on the left.  Cosmetic, but it does not compile.
+#: * the products come out shared across accumulators that should not share
+#:   them.  Either the operand callbacks are being asked in the wrong nesting
+#:   or `cse` is merging two `mul`s whose operands only look equal; it is not
+#:   diagnosed yet, and the emission is wrong until it is.
+#:
+#: Flipping this before both are fixed would put wrong arithmetic behind a
+#: correct-looking type, which is the failure mode this backend keeps being
+#: careful about.
+BROADCAST_ENABLED = False
+
+
+def broadcast_matmul(writer, C, A, B, M, N, K, kx, threads, dtype, ctx):
+    """`C[i][j] += B[k][j] * A[i][k]`, entirely in registers.
+
+    The same shape as the AMD DPP path in `amd/codegen.py`, and preferable
+    here for a reason that is specific to this model: the contraction index of
+    B lives in the *lanes*, so every product needs one of B's lanes broadcast
+    to all of them.  On AMD that is a real cross-lane instruction and the
+    reason `relayout.py` has a table of them; under an explicit vector it is
+    `v[k]`, an element read out of this work-item's own registers.
+
+    A free broadcast is what makes the register-only arrangement beat staging
+    operands through shared memory, which is what the NVIDIA path has to do --
+    there is no barrier, no arena, and no round trip.
+
+    A is per-lane in the output index `i`; B is per-lane in the contraction
+    index `k`.  Two different meanings of "lane" for the two operands, which
+    is exactly what the broadcast reconciles.
+    """
+    # `None` asks the loader for the value rather than for a name to fill in:
+    # these are operands, and an operand whose definition the IR cannot see is
+    # invisible to every pass that reasons about ordering or reuse.
+    a = {}
+    out_layout = None
+    for i in range(M):
+        for k in range(K + kx):
+            v = A(writer, None, i, k)
+            if v is not None and v is not False:
+                a[(i, k)] = v
+                # Taken from the operand rather than constructed: A is indexed
+                # by the same output index the accumulator is, so whatever
+                # distribution its loads came out with is the one to hold.
+                if out_layout is None:
+                    out_layout = v.layout
+
+    for j in range(N):
+        # The accumulator is spread over the lanes exactly like the output it
+        # holds -- one element of the lead dimension per lane.  Declared with
+        # that layout rather than left untracked, because untracked is not a
+        # conservative default here: an explicitly vectorised declaration
+        # cannot be written without it.
+        acc = [writer.declare(hint='acc', layout=out_layout) for _ in range(M)]
+        for k0 in range(0, K + kx, threads):
+            vb = B(writer, None, j, k0 // threads)
+            if vb is None or vb is False:
+                continue
+            for lane in range(min(threads, K + kx - k0)):
+                # One of B's lanes, replicated -- free here, a shuffle on AMD.
+                bk = writer.lane_broadcast(vb, lane, threads)
+                for i in range(M):
+                    operand = a.get((i, k0 + lane))
+                    if operand is None:
+                        continue
+                    writer.accumulate(
+                        acc[i], writer.op('mul', operand.type, bk, operand,
+                                          hint='p'))
+        for i in range(M):
+            C(writer, acc[i], i, j)
+    return True
+
+
 def matmul(writer, C, A, B, M, N, K, kx, threads, dtype, sparse, ctx):
-    """Not emitted.
+    """Neither path is deployed; `_is_matmul` asks before calling.
 
-    `ENABLED` is off, and `_is_matmul` asks before calling -- so this is
-    unreachable rather than merely unused.  It stays as the named place for
-    the emission to go, and returning `False` means the caller falls through
-    to the generic path, which is the correct behaviour for a path that is not
-    deployed.
+    Returning `False` means the caller falls through to the generic path,
+    which is the correct behaviour for a path that is not on.
 
-    What it will need, when there is a machine to check it against:
+    What DPAS will need, when there is a machine to check it against:
 
-    * A and B staged into `simd<TF32, M*K>` and `simd<TF32, K*N>` in the
-      fragment order the hardware expects.  The operand callbacks hand over
-      one element at a time and know nothing about that order, so the staging
-      is where the unknown sits -- see the module docstring.
+    * A and B staged row-major into `simd<TF32, M*K>` and `simd<TF32, K*N>`
+      -- see the module docstring; for TF32 the vISA layout is plain
+      row-major for all three operands.
     * three `xmx::dpas` per product, over `(hi,hi)`, `(hi,lo)`, `(lo,hi)`;
       see `TF32_TERMS`.
     * the accumulator's layout left untracked, exactly as the MFMA path leaves
@@ -176,4 +263,7 @@ def matmul(writer, C, A, B, M, N, K, kx, threads, dtype, sparse, ctx):
       as distinct from every other, so a pass stays conservative.  A wrong
       layout is not conservative.
     """
+    if BROADCAST_ENABLED and not sparse:
+        return broadcast_matmul(writer, C, A, B, M, N, K, kx, threads, dtype,
+                                ctx)
     return False
