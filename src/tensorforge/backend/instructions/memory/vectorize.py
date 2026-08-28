@@ -112,32 +112,40 @@ def register_array_align(volume_bytes: int,
 
 def lead_vector_width(start: int, end: int, threads: int,
                       elem_bytes: int, align_bytes: int,
-                      cap: int = 2) -> int:
+                      cap: int = 2, pay_registers: bool = False) -> int:
     """How many adjacent elements one lane should hold in the lead dimension.
 
-    This is the width that turns the per-lane element set from strided into
-    adjacent -- `LeadIndex`'s `width`, not `plan_hops`'s.  The two answer
-    different questions and only share the alignment part: a staging transfer
-    picks a width per hop over a flat run, while this picks one for the whole
-    distributed dimension, and every slot of it has to agree.
+    This is `LeadIndex`'s width, not `plan_hops`'s.  The two answer different
+    questions and share only the alignment part: a staging transfer picks a
+    width per hop over a flat run, while this picks one for a distributed
+    dimension whose every slot has to agree.
 
-    Three conditions, all necessary:
+    The interesting condition is not divisibility.  An extent that does not
+    divide leaves one lane holding a vector half outside the box, and the
+    lane computes that component rather than being excluded -- a few products
+    on data that is discarded.  What that costs is not instructions: the
+    guarded tail slot occupies the whole warp either way, so the lane was
+    already there.  It costs *registers*, and only sometimes:
 
-    * the base has to prove the alignment, as everywhere else;
-    * the width has to *divide* the range over the threads, because a lane at
-      a ragged end would otherwise hold a vector half inside the box and
-      masking components is a different mechanism (`LeadLoop` refuses it);
-    * the width has to be a width -- capped at 16 bytes by the widest access
-      any target has.
+        floats per lane at width 1:  ceil(extent / threads)
+        floats per lane at width w:  ceil(extent / (threads * w)) * w
 
-    `cap` defaults to 2 rather than to the widest legal value, and that is a
-    judgement rather than a limit of the mechanism.  Going wider multiplies
-    the accumulators each lane carries: at fixed tile size a width of 4 asks
-    for four times the registers per lane on a code that already spills at
-    order 6 in FP64.  Whether that pays is a register-pressure question with
-    a measurement behind it, so the default takes the width whose benefit --
-    halving the load and address instructions -- is not in doubt, and leaves
-    the rest to a caller who has measured.
+    For 56 over 32 lanes both are 2, and the width is free.  For 9 over 32
+    both schemes need one slot, but the wide one is a `float2`, so it is 2
+    floats against 1 -- the lead dimension does not even fill a slot and
+    half of every vector is waste.  The default therefore takes a width only
+    where the two agree; `pay_registers` lifts that for a caller who has
+    measured the occupancy and wants the packed math anyway.
+
+    Two conditions this does *not* check, because they are the caller's:
+
+    * the over-computed component must not be stored.  The destination's own
+      guard is at element granularity, so it is not -- unless the store also
+      goes wide, which needs a component mask this does not provide.
+    * the operand window must cover the rounded-up extent, or the read that
+      produces the discarded component leaves the tile.  That is a sizing
+      question for whoever allocates the window, and it is a correctness
+      problem rather than a wasted lane.
 
     Returns 1 when nothing wider survives, which is always correct.
     """
@@ -146,10 +154,17 @@ def lead_vector_width(start: int, end: int, threads: int,
     extent = end - start
     if extent <= 0:
         return 1
+    scalar_slots = -(-extent // threads)
     for w in widths_for(elem_bytes, align_bytes):
         if w > cap:
             continue
         span = threads * w
-        if extent % span == 0 and start % span == 0:
+        if start % span != 0:
+            # The head has the same straddling problem as the tail, and
+            # unlike the tail it shifts every later slot.  Left out for now
+            # rather than guarded: no operator in the corpus starts a lead
+            # dimension at an offset that is not a multiple of the span.
+            continue
+        if pay_registers or -(-extent // span) * w == scalar_slots:
             return w
     return 1

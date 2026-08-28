@@ -458,20 +458,6 @@ class LeadLoop:
     #: Elements each lane holds adjacently at one slot -- see `LeadIndex`.
     #: One slot then covers `threads * width` elements instead of `threads`.
     self.width = width
-    if width > 1 and ((end - start) % (threads * width) != 0
-                      or start % (threads * width) != 0):
-      # A precondition, not a fallback.  The guards below compare a *lane*
-      # against a bound in elements, and at `width > 1` a lane covers a range
-      # rather than a point, so a ragged end would leave one lane with a
-      # vector straddling it -- half inside the box and half not.  There is a
-      # correct answer for that (mask the components), but it is a different
-      # mechanism from the one here, and choosing the width is exactly where
-      # it can be avoided instead: `vectorize.lead_vector_width` only offers
-      # a width that divides.
-      raise InternalError(
-          f'lead width {width} does not divide [{start}, {end}) over '
-          f'{threads} threads: a ragged end would leave a lane holding a '
-          f'vector that is half inside the box')
 
   def _lead(self, context: Context, writer):
     """Which element of the distributed dimension this lane is at.
@@ -522,6 +508,43 @@ class LeadLoop:
       return None
     return hi
 
+  def _lane_lo(self, offset):
+    """The first lane whose vector reaches element `offset`.
+
+    Floor, so the lane whose vector *straddles* the bound is included and
+    computes one component from outside the box.  See `_lane_hi` for why that
+    is the right direction.
+    """
+    return offset // self.width
+
+  def _lane_hi(self, offset):
+    """One past the last lane whose vector starts before element `offset`.
+
+    Ceiling, for the same reason and with the same consequence: at a ragged
+    end one lane holds a vector half inside the box.  Both bounds
+    *over-include* rather than exclude, so the boundary lane computes a
+    component it must not keep.
+
+    That is deliberate, and it rests on two conditions the width policy
+    checks rather than this loop:
+
+    * the extra component is never *stored*.  It lands in an accumulator
+      slot that the destination's own guard -- which is at element
+      granularity -- does not write.  What it holds is arithmetic on data
+      from outside the box, and that is only contained because nothing reads
+      it back.
+    * the operand window covers the rounded-up extent, so the read that
+      produces it stays inside the tile.  Reading `ceil(extent / (threads *
+      width)) * threads * width` elements from a window sized for `extent`
+      would leave the buffer, which is a correctness problem rather than a
+      wasted lane.
+
+    Excluding the straddling lane instead would drop element `offset - 1`,
+    which is inside the box.  There is no bound that does both; splitting the
+    components is a different mechanism.
+    """
+    return (offset + self.width - 1) // self.width
+
   def _guard(self, writer, lead, lo, hi):
     """`lead >= lo && lead < hi`, with either bound optional."""
     cond = None
@@ -565,14 +588,15 @@ class LeadLoop:
       pass
     if actualstart == realend:
       startIdx = self.start - actualstart * span
-      lo = startIdx if startIdx > 0 else None
-      extent = self._narrow(writer, actualstart, lo, tail)
+      lo = self._lane_lo(startIdx) if startIdx > 0 else None
+      hi = self._lane_hi(tail)
+      extent = self._narrow(writer, actualstart, lo, hi)
       if extent is not None:
         inner([LeadIndex(actualstart, extent, self.stride, width=self.width)])
       else:
         index = LeadIndex(actualstart, self.threads, self.stride,
                           width=self.width)
-        with self._guard(writer, lead(), lo, tail):
+        with self._guard(writer, lead(), lo, hi):
           inner([index])
     else:
       if self.start % span != 0:
@@ -583,7 +607,7 @@ class LeadLoop:
         # to be right while actualstart == 0, i.e. start < threads; for
         # start=37, threads=32 it read `lead >= 36` and dropped the head block.
         with self._guard(writer, lead(),
-                         self.start - actualstart * span, None):
+                         self._lane_lo(self.start - actualstart * span), None):
           inner([index])
       if self.unroll:
         for value in range(realstart, realend):
@@ -600,7 +624,7 @@ class LeadLoop:
         # move it.  See `_narrow`.
         index = LeadIndex(actualend - 1, self.threads, self.stride,
                           width=self.width)
-        with self._guard(writer, lead(), None, tail):
+        with self._guard(writer, lead(), None, self._lane_hi(tail)):
           inner([index])
 
 class Loop:

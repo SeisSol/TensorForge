@@ -109,61 +109,89 @@ def test_a_zero_width_is_refused():
 
 
 # --------------------------------------------------------------------------- #
-# The loop precondition
+# The ragged end: over-compute rather than refuse
 # --------------------------------------------------------------------------- #
 
-def test_a_ragged_range_is_refused_rather_than_guarded():
-    """A lane at a ragged end would hold a vector half inside the box.
+def test_a_ragged_range_is_accepted():
+    """The boundary lane holds a vector half outside the box and computes it.
 
-    Masking the components is a correct answer and a different mechanism;
-    refusing here keeps the choice at the one place that can avoid the
-    situation entirely, which is where the width is picked.
+    Excluding it instead would drop an element that *is* inside; there is no
+    lane bound that does both, and splitting the components is a different
+    mechanism.  What the extra component costs is not instructions -- the
+    guarded tail slot occupies the whole warp either way.
     """
-    with pytest.raises(InternalError):
-        LeadLoop('n0', 0, 35, 16, 1, width=2)
+    assert LeadLoop('n0', 0, 35, 32, 1, width=2).width == 2
 
 
-def test_an_offset_start_is_refused_too():
-    """The head block has the same problem as the tail."""
-    with pytest.raises(InternalError):
-        LeadLoop('n0', 8, 72, 16, 1, width=2)
+def test_both_lane_bounds_over_include_the_straddling_lane():
+    """Floor below, ceiling above.  Both directions err inwards-inclusive.
+
+    With 3 elements left and width 2, lane 0 covers elements 0-1 and lane 1
+    covers 2-3: the bound has to be 2 lanes, which keeps element 2 and picks
+    up element 3 from outside.
+    """
+    loop = LeadLoop('n0', 0, 35, 32, 1, width=2)
+    assert loop._lane_hi(3) == 2
+    assert loop._lane_lo(3) == 1
 
 
-def test_a_clean_range_is_accepted():
-    assert LeadLoop('n0', 0, 64, 16, 1, width=2).width == 2
+def test_at_width_one_the_bounds_are_the_element_offsets():
+    """Every existing call site must see the arithmetic it saw before."""
+    loop = LeadLoop('n0', 0, 35, 32, 1)
+    for offset in range(6):
+        assert loop._lane_lo(offset) == offset
+        assert loop._lane_hi(offset) == offset
 
 
-def test_width_one_never_refuses():
-    """Every existing call site passes no width and must keep working."""
+def test_width_one_accepts_everything_as_before():
     for start, end in [(0, 35), (8, 72), (1, 2), (0, 9)]:
         assert LeadLoop('n0', start, end, 16, 1).width == 1
 
 
 # --------------------------------------------------------------------------- #
-# Choosing the width
+# Choosing the width: registers, not divisibility
 # --------------------------------------------------------------------------- #
 
 def test_an_unproven_base_gets_width_one():
     assert lead_vector_width(0, 32, 16, elem_bytes=4, align_bytes=0) == 1
 
 
-def test_a_proven_base_and_a_dividing_extent_get_two():
+def test_a_dividing_extent_gets_two():
     assert lead_vector_width(0, 32, 16, elem_bytes=4, align_bytes=16) == 2
 
 
-def test_an_extent_that_does_not_divide_gets_one():
-    """35 basis functions over 16 threads: the SeisSol shape that does not."""
+def test_a_ragged_extent_that_costs_no_registers_still_gets_two():
+    """35 over 32 lanes: two floats per lane either way, so the width is free.
+
+    This is the case the divisibility rule used to refuse, and refusing it
+    was the reason the policy answered 1 for almost the whole corpus.
+    """
+    assert lead_vector_width(0, 35, 32, elem_bytes=4, align_bytes=16) == 2
+
+
+def test_a_ragged_extent_that_does_cost_registers_gets_one():
+    """9 over 32 lanes: the dimension does not fill one slot, so half of
+    every vector is waste and the lane pays a register for it."""
+    assert lead_vector_width(0, 9, 32, elem_bytes=4, align_bytes=16) == 1
     assert lead_vector_width(0, 35, 16, elem_bytes=4, align_bytes=16) == 1
 
 
+def test_paying_the_register_is_available_to_a_caller_who_measured():
+    assert lead_vector_width(0, 9, 32, elem_bytes=4, align_bytes=16,
+                             pay_registers=True) == 2
+
+
+def test_an_offset_start_is_left_out():
+    """The head straddles like the tail and additionally shifts every later
+    slot.  No operator in the corpus starts at such an offset."""
+    assert lead_vector_width(8, 72, 16, elem_bytes=4, align_bytes=16) == 1
+
+
 def test_fp64_reaches_two_from_the_same_base():
-    """`double2` is 16 bytes, which is the widest access any target has."""
     assert lead_vector_width(0, 32, 16, elem_bytes=8, align_bytes=16) == 2
 
 
 def test_the_default_cap_is_two_and_is_a_judgement():
-    """Wider multiplies the accumulators per lane, on a code that already
-    spills at order 6 in FP64.  A caller who has measured may raise it."""
     assert lead_vector_width(0, 64, 16, elem_bytes=4, align_bytes=16) == 2
     assert lead_vector_width(0, 64, 16, elem_bytes=4, align_bytes=16,
                              cap=4) == 4
