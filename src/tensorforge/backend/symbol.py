@@ -944,7 +944,7 @@ class Symbol:
       # allocated beforehand.  Same seam as `load`, and the reason is the
       # same -- an operand handed to a vendor intrinsic has to have a
       # definition point, or the def-use edge to this read does not exist.
-      buf = self.pir_buffer(writer) if vec == 1 else None
+      buf = self.pir_buffer(writer)
       if buf is not None and hasattr(writer, 'load'):
         # Addressed rather than named, the pair to `store_linear`.  There
         # were two structured mechanisms here: `load_expr` wraps a string
@@ -961,7 +961,19 @@ class Symbol:
         # The layout claim is carried across unchanged: it is recorded by
         # the fill in `_record_linear_layout` and only reported here, since
         # neither address has a lane term to derive one from.
-        return writer.load(buf, addr, hint='lin', layout=self.layout)
+        #
+        # The width rides on the *type* rather than on a second parameter.
+        # `ScalarType.length` is where a lane holding several consecutive
+        # elements already lived (`LaneAxis` says so in as many words: packing
+        # is a vector type over the slot dimension, not a lane axis), and the
+        # ESIMD emitter already reads it -- `span * (length or 1)` is its
+        # `simd<>` width.  So the vectorised path needs no new state, only the
+        # type it always had and an emitter that spells the access for it.
+        from tensorforge.backend.pir.core import ScalarType
+        ltype = (ScalarType(self.get_fptype()) if vec == 1
+                 else ScalarType(self.get_fptype(), vec))
+        return writer.load(buf, addr, type_=ltype, hint='lin',
+                           layout=self.layout)
       from tensorforge.backend.pir.core import ScalarType
       type_ = (ScalarType(self.get_fptype()) if vec == 1
                else ScalarType(self.get_fptype(), vec))
@@ -1031,33 +1043,40 @@ class Symbol:
       addr = f'{index} + threadIdx.x * {vec}'
     access = f'{name}[{addr}]'
 
-    if vec == 1:
-      # `base` is the symbol's own name for everything except a rotating
-      # shared buffer, and every caller passes it rather than leaving it
-      # None -- so testing for None alone silently never fires.  When it is
-      # a real override the value is the wrong buffer: it addresses the
-      # stage consumers read while this write fills a different one.
-      own_base = base is None or base == self.name
-      buf = self.pir_buffer(writer) if own_base else None
-      if buf is not None and hasattr(writer, 'store'):
-        # Structured: the buffer is an operand, so the write declares what
-        # it touches by construction instead of by a hand-passed alias
-        # base.  The emitted text is the same while the allocation still
-        # carries its `extern` name; it stops being the same on the commit
-        # that drops the name, which is the point.
-        writer.store(buf, variable, addr)
-      elif not isinstance(variable, (str, int, float)):
-        # The value came from a structured read, so it has no C++ name yet
-        # and may never get one -- the emitter decides whether to inline it
-        # into this very statement.  Formatting it in at build time would
-        # take that decision away and print a name that was never declared.
-        writer.access_stmt(f'{access} = {{0}};', self, Effect.WRITE,
-                           args=(variable,), fmt=True)
-      else:
-        writer.access_stmt(f'{access} = {variable};', self, Effect.WRITE, args=_operands(variable, addrs))
-    else:
+    # `base` is the symbol's own name for everything except a rotating
+    # shared buffer, and every caller passes it rather than leaving it
+    # None -- so testing for None alone silently never fires.  When it is
+    # a real override the value is the wrong buffer: it addresses the
+    # stage consumers read while this write fills a different one.
+    own_base = base is None or base == self.name
+    buf = self.pir_buffer(writer) if own_base else None
+    if buf is not None and hasattr(writer, 'store'):
+      # Structured: the buffer is an operand, so the write declares what
+      # it touches by construction instead of by a hand-passed alias
+      # base.  The emitted text is the same while the allocation still
+      # carries its `extern` name; it stops being the same on the commit
+      # that drops the name, which is the point.
+      #
+      # No longer gated on `vec == 1`.  A wide write used to be excluded
+      # from this branch and spelled as a cast into a raw string, which put
+      # the one access that moves the most bytes outside every pass's view.
+      # The width is on the stored value's type, so the emitter spells the
+      # cast and the buffer stays an operand.
+      writer.store(buf, variable, addr)
+    elif vec != 1:
+      # Unstructured fallback: a rotating buffer writes through an alias
+      # base, so there is no buffer value to make an operand of.
       convert = f'*(tensorforge::VectorT<{self.get_fptype()}, {vec}>*)&'
       writer.access_stmt(f'{convert}{access} = {convert}{variable};', self, Effect.WRITE, args=_operands(variable, addrs))
+    elif not isinstance(variable, (str, int, float)):
+      # The value came from a structured read, so it has no C++ name yet
+      # and may never get one -- the emitter decides whether to inline it
+      # into this very statement.  Formatting it in at build time would
+      # take that decision away and print a name that was never declared.
+      writer.access_stmt(f'{access} = {{0}};', self, Effect.WRITE,
+                         args=(variable,), fmt=True)
+    else:
+      writer.access_stmt(f'{access} = {variable};', self, Effect.WRITE, args=_operands(variable, addrs))
 
   def load(self, writer, context: Context, variable, index: List[Union[str, int, Immediate, Variable, LeadIndex]], nontemp):
     addrs = []

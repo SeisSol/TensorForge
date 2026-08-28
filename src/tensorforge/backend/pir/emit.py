@@ -310,6 +310,27 @@ class Emitter:
             return self.name(base)
         return getattr(base, 'name', str(base))
 
+    def elem_access(self, base: Operand, addr: str, t) -> str:
+        """``base[addr]``, reinterpreted when the value is wider than one element.
+
+        A buffer is typed by its element, so a vector-typed access reads or
+        writes several of them at once and has to be spelled through a pointer
+        of the wider type.  That cast is not new -- ``load_linear`` and
+        ``store_linear`` formatted the same one into a raw string.  Putting it
+        *here* is what lets a vectorised access stay an ``Op.LOAD``/``Op.STORE``
+        with the buffer as an operand: the string form had to leave the
+        structured path (``pir_buffer`` was consulted only for ``vec == 1``),
+        which cost every pass its view of which buffer the access touches.
+
+        The cast is only defined when ``addr`` is aligned to the wider type.
+        Nothing here checks that, exactly as nothing checked it before; the
+        legality belongs with whoever chooses the width, not with the spelling.
+        """
+        access = f'{self.base_name(base)}[{addr}]'
+        if isinstance(t, ScalarType) and t.length is not None:
+            return f'*({self.ctype(t)}*)&{access}'
+        return access
+
     # -- driver ------------------------------------------------------------ #
 
     def _plan_inlining(self, body: Tuple[Stmt, ...]) -> set:
@@ -471,7 +492,7 @@ class Emitter:
             v = s.target[0]
             addr = self.address(s.args[0], s.args[1:])
             nontemporal = s.attr('nontemporal')
-            access = f'{self.base_name(s.args[0])}[{addr}]'
+            access = self.elem_access(s.args[0], addr, v.type)
             if nontemporal:
                 self.declare(v, f'{lex.glb_load(access, True)}', s)
             else:
@@ -493,7 +514,9 @@ class Emitter:
 
         if op == Op.STORE:
             addr = self.address(s.args[0], s.args[2:])
-            w(f'{self.base_name(s.args[0])}[{addr}] = {self.operand(s.args[1])};')
+            val = s.args[1]
+            vt = val.type if isinstance(val, Value) else None
+            w(f'{self.elem_access(s.args[0], addr, vt)} = {self.operand(val)};')
             return
 
         if op == Op.COPY_ASYNC:
