@@ -18,6 +18,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from tensorforge.common.basic_types import Datatype
 
+from .schedule import can_reorder
 from .core import (Access, BufferType, Effect, IRError, MemSpace, Op, Operand,
                    Region, ScalarType, Stmt, TokenType, Value,
                    accesses_conflict, collect_accesses, collect_effect,
@@ -1228,26 +1229,21 @@ def _reads_only(s: Stmt) -> bool:
 
 
 def _can_swap(earlier: Stmt, later: Stmt) -> bool:
-    """May `later` move in front of `earlier`?"""
-    if not later.movable:
-        return False
-    if earlier.effect & (Effect.BARRIER | Effect.UNKNOWN):
-        return False
-    if earlier.regions or later.regions:
-        return False
-    defs = {t.id for t in earlier.target}
-    for r in earlier.regions:
-        defs |= {a.id for a in r.args}
-    if any(v.id in defs for v in later.operands()):
-        return False                      # `later` reads what `earlier` defines
-    ldefs = {t.id for t in later.target}
-    if any(v.id in ldefs for v in earlier.operands()):
-        return False
-    for a in later.accesses:
-        for b in earlier.accesses:
-            if accesses_conflict(a, b):
-                return False
-    return True
+    """May `later` move in front of `earlier`?
+
+    `schedule.can_reorder` answers the same question, and having two spellings
+    of it is how they grow apart: this one tested `later.movable` but not
+    `earlier.movable`, and `earlier`'s effect but not `later`'s, so a swap that
+    dragged a pinned statement *down* past a movable one was licensed.  Nothing
+    in the corpus hit it -- `cluster_loads` hoists reads, and a read that is
+    blocked by an allocation is blocked by def-use first -- but it was licensed
+    by the predicate rather than by the caller.
+
+    Kept as a name because `cluster_loads` reads better for it, and because a
+    later caller may want a directional variant; if one does, it should say so
+    here rather than by omitting a check.
+    """
+    return can_reorder(earlier, later)
 
 
 def cluster_loads(body: Tuple[Stmt, ...], max_pressure: int = 32,
