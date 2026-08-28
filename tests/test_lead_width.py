@@ -25,7 +25,8 @@ from __future__ import annotations
 
 import pytest
 
-from tensorforge.backend.instructions.memory.vectorize import lead_vector_width
+from tensorforge.backend.instructions.memory.vectorize import (
+    lead_threads_and_width, lead_vector_width)
 from tensorforge.backend.symbol import LeadIndex, LeadLoop
 from tensorforge.common.exceptions import InternalError
 
@@ -199,3 +200,76 @@ def test_the_default_cap_is_two_and_is_a_judgement():
 
 def test_an_empty_range_is_width_one():
     assert lead_vector_width(4, 4, 16, elem_bytes=4, align_bytes=16) == 1
+
+
+# --------------------------------------------------------------------------- #
+# Choosing the lane count and the width together
+# --------------------------------------------------------------------------- #
+
+def scalar_floats(extent, threads):
+    return threads * -(-extent // threads)
+
+
+def wide_floats(extent, threads, width):
+    return threads * -(-extent // (threads * width)) * width
+
+
+def test_the_thread_count_is_not_a_constant_of_the_problem():
+    """Why `lead_vector_width` answers 1 for most of the corpus.
+
+    403 of 446 lead loops have an extent no larger than the thread count, so a
+    lane already holds one element and a width of 2 at fixed lane count can
+    only mean half the wave runs empty. Halving the lanes instead is the same
+    elements in half the instructions.
+    """
+    assert lead_vector_width(0, 32, 32, elem_bytes=4, align_bytes=16) == 1
+    assert lead_threads_and_width(32, elem_bytes=4, align_bytes=16) == (16, 2)
+
+
+@pytest.mark.parametrize('extent', [9, 12, 16, 20, 32, 35, 56, 64, 120, 512])
+def test_the_total_register_count_is_unchanged(extent):
+    """The invariant that makes this safe, and it is a *total*, not per lane.
+
+    A lane carries `w` times as many floats and there are `w` times fewer
+    lanes. Per block that cancels exactly; against a per-thread register cap
+    it does not, which is the constraint that already binds in FP64 at order
+    6 -- so this is neutral where register pressure is not already the limit
+    and needs a measurement where it is.
+    """
+    narrow_threads, narrow_width = lead_threads_and_width(extent, 4, 0)
+    threads, width = lead_threads_and_width(extent, 4, 16)
+    assert narrow_width == 1
+    assert (wide_floats(extent, threads, width)
+            <= scalar_floats(extent, narrow_threads))
+
+
+@pytest.mark.parametrize('extent', [9, 12, 16, 20, 32, 35, 56, 64, 120])
+def test_the_lanes_still_cover_the_extent(extent):
+    threads, width = lead_threads_and_width(extent, 4, 16)
+    assert threads * width * -(-extent // (threads * width)) >= extent
+
+
+def test_an_unproven_base_reproduces_todays_choice():
+    """`get_num_threads` rounds the extent up to a power of two, capped at 32."""
+    for extent, threads in [(9, 16), (12, 16), (20, 32), (32, 32), (120, 32)]:
+        assert lead_threads_and_width(extent, 4, 0) == (threads, 1)
+
+
+def test_a_short_dimension_halves_the_lanes_rather_than_wasting_them():
+    """32 over 32 lanes is the corpus's most common shape by a wide margin."""
+    assert lead_threads_and_width(32, 4, 16) == (16, 2)
+    assert lead_threads_and_width(16, 4, 16) == (8, 2)
+
+
+def test_a_long_dimension_keeps_the_lanes_and_takes_the_width():
+    """Past the cap the lane count cannot grow, so the width buys slots."""
+    assert lead_threads_and_width(120, 4, 16) == (32, 2)
+    assert lead_threads_and_width(512, 4, 16) == (32, 2)
+
+
+def test_fp64_gets_the_same_treatment_from_a_16_byte_base():
+    assert lead_threads_and_width(32, 8, 16) == (16, 2)
+
+
+def test_a_degenerate_extent_is_one_lane():
+    assert lead_threads_and_width(0, 4, 16) == (1, 1)

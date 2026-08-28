@@ -168,3 +168,66 @@ def lead_vector_width(start: int, end: int, threads: int,
         if pay_registers or -(-extent // span) * w == scalar_slots:
             return w
     return 1
+
+
+def _round_up_pow2(n: int, cap: int) -> int:
+    """The thread count `MultilinearDescr.get_num_threads` would pick for `n`."""
+    t = 1
+    while t < n and t < cap:
+        t *= 2
+    return t
+
+
+def lead_threads_and_width(extent: int, elem_bytes: int, align_bytes: int,
+                           max_threads: int = 32, cap: int = 2):
+    """Pick the lane count and the per-lane width together.
+
+    `lead_vector_width` takes the thread count as given, and for most of the
+    corpus that is why it answers 1: 403 of 446 lead loops have an extent no
+    larger than the thread count, so a lane already holds one element and a
+    width of 2 can only mean half the wave runs empty.  The thread count is
+    not a constant of the problem, though -- `get_num_threads` derives it from
+    the extent -- so the two are one decision.
+
+    At width `w` the lane count needed is `ceil(extent / w)`, rounded up to a
+    power of two as before.  A 32-element dimension becomes 16 lanes each
+    holding a `float2` instead of 32 lanes each holding a `float`: same
+    elements, same total registers for the operator, half the load and address
+    instructions, and one packed FMA where the target has one.
+
+    **Total** registers are what is neutral here, not per-lane registers.  A
+    lane now carries twice as many, and there are half as many lanes.  Per
+    block that cancels; against a per-*thread* register cap it does not, which
+    is the constraint that already binds in FP64 at order 6.  So this is safe
+    where register pressure is not already the limit and needs a measurement
+    where it is.
+
+    The caller has one more thing to get right, and it is the whole occupancy
+    story: `mults_per_block` must stay put.  `RegmaxBlockPolicy` sizes it as
+    `256 // num_threads`, which binds in every case in the corpus, so halving
+    the lane count doubles the mults, doubles the shared memory per block and
+    halves the occupancy for any operand above roughly 256 elements per mult.
+    Holding the mults instead simply makes the block smaller -- shared memory
+    per block unchanged, blocks per SM unchanged or better.  The win is real
+    only in the second arrangement.
+
+    Returns ``(threads, width)``; ``width == 1`` reproduces today's choice.
+    """
+    if extent < 1:
+        return 1, 1
+    scalar_threads = _round_up_pow2(extent, max_threads)
+    for w in widths_for(elem_bytes, align_bytes):
+        if w > cap or w == 1:
+            continue
+        threads = _round_up_pow2(-(-extent // w), max_threads)
+        # Total floats for the operator, not per lane: a lane carries `w`
+        # times as many and there are `w` times fewer of them, so the two
+        # cancel -- unless the thread cap bit before the width could absorb
+        # the extent, in which case the lanes hold several vectors each and
+        # the rounding has to be checked rather than assumed.
+        scalar_total = scalar_threads * -(-extent // scalar_threads)
+        wide_total = threads * -(-extent // (threads * w)) * w
+        if wide_total > scalar_total:
+            continue
+        return threads, w
+    return scalar_threads, 1
