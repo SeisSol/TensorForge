@@ -489,6 +489,39 @@ class LeadLoop:
     """
     return writer.lane_index(self.threads, self.stride, hint='lead')
 
+  def _narrow_possible(self, writer) -> bool:
+    """Whether this lowering can replace a guard with a narrower vector."""
+    return bool(getattr(writer, '_explicit_simd', lambda: False)())
+
+  def _narrow(self, writer, actualstart, lo, hi):
+    """The lane extent to use instead of a guard, or None to keep the guard.
+
+    A guard on the lead axis is almost always a *ragged end*: the dimension is
+    12 elements wide, the wave is 16, and lanes 12..15 are masked off.  In SPMD
+    that mask is unavoidable -- the wave is 16 threads whatever the operand
+    looks like.  Explicitly vectorised, the vector width is a compile-time
+    choice, so the honest answer is a 12-wide vector and no mask at all.
+
+    Measured over the corpus: 249 of 270 lead guards are a pure upper bound
+    (`lane < hi`), 21 are a pure lower bound, and none has both -- so no
+    interior window arises and nothing here needs a scatter.
+
+    Only the upper-bound case is narrowed, and only from slot zero.  A lower
+    bound would need the vector to *start* at `lo`, which is a base offset the
+    index does not currently carry; and a later slot's base is `nonlead *
+    block`, which stops being the right address once `block` is not the slot
+    stride any more.  Both are real, both need a decision about what
+    `LeadIndex` should carry, and guessing here would put a wrong address
+    behind a correct-looking type.
+    """
+    if not self._narrow_possible(writer):
+      return None
+    if lo is not None or hi is None or actualstart != 0:
+      return None
+    if hi <= 0 or hi >= self.threads:
+      return None
+    return hi
+
   def _guard(self, writer, lead, lo, hi):
     """`lead >= lo && lead < hi`, with either bound optional."""
     cond = None
@@ -511,17 +544,36 @@ class LeadLoop:
     realend = (self.end) // span
     actualend = (self.end + span - 1) // span
 
-    lead = self._lead(context, writer)
+    # Eager in SPMD, on demand where a guard may be narrowed away.
+    #
+    # Every branch below uses the lane index in SPMD, so building it up front
+    # costs nothing and keeps the value numbering exactly where it was --
+    # deferring it renumbers 83 snapshot files for no change in meaning.
+    # Under narrowing it can go unused, and then it must not be built: a
+    # `rawexpr` is opaque text, so `dce` cannot know it is free of effects and
+    # leaves a `simd<int, 16>` in the output that nothing reads.
+    _lead_cache = ([] if self._narrow_possible(writer)
+                   else [self._lead(context, writer)])
+
+    def lead():
+      if not _lead_cache:
+        _lead_cache.append(self._lead(context, writer))
+      return _lead_cache[0]
     tail = self.end - realend * span
 
     if actualstart >= actualend:
       pass
     if actualstart == realend:
-      index = LeadIndex(actualstart, self.threads, self.stride,
-                        width=self.width)
       startIdx = self.start - actualstart * span
-      with self._guard(writer, lead, startIdx if startIdx > 0 else None, tail):
-        inner([index])
+      lo = startIdx if startIdx > 0 else None
+      extent = self._narrow(writer, actualstart, lo, tail)
+      if extent is not None:
+        inner([LeadIndex(actualstart, extent, self.stride, width=self.width)])
+      else:
+        index = LeadIndex(actualstart, self.threads, self.stride,
+                          width=self.width)
+        with self._guard(writer, lead(), lo, tail):
+          inner([index])
     else:
       if self.start % span != 0:
         index = LeadIndex(actualstart, self.threads, self.stride,
@@ -530,7 +582,7 @@ class LeadLoop:
         # in-block remainder.  Without the `* self.threads` this only happened
         # to be right while actualstart == 0, i.e. start < threads; for
         # start=37, threads=32 it read `lead >= 36` and dropped the head block.
-        with self._guard(writer, lead,
+        with self._guard(writer, lead(),
                          self.start - actualstart * span, None):
           inner([index])
       if self.unroll:
@@ -543,9 +595,12 @@ class LeadLoop:
           inner([LeadIndex(str(loop.induction), self.threads, self.stride,
                            loop.induction, width=self.width)])
       if self.end % span != 0:
+        # Not narrowed: this is the tail slot of a *multi*-slot dimension, so
+        # its base is `(actualend - 1) * threads` and narrowing `block` would
+        # move it.  See `_narrow`.
         index = LeadIndex(actualend - 1, self.threads, self.stride,
                           width=self.width)
-        with self._guard(writer, lead, None, tail):
+        with self._guard(writer, lead(), None, tail):
           inner([index])
 
 class Loop:

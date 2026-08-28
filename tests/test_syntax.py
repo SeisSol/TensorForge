@@ -69,31 +69,54 @@ KNOWN_BAD_BACKENDS: dict = {}
 
 #: Generated source known not to compile, with the reason.
 #:
-#: These twelve reach a *predicated store*.  `_folds_predicate` refuses to
-#: fold a predicate into a select when the statement writes -- rightly, or the
-#: write would happen when it must not -- so the base emitter wraps it in
-#: `if (mask)`, and a `simd_mask` is not a branch condition.
+#: These six reach a *predicated store* that could not be narrowed away.
 #:
-#: The vector form is not a spelling change.  `block_store`'s predicate is a
-#: `simd_mask<1>`: it suppresses the whole transfer, not individual lanes.
-#: Per-lane masking on a store is `scatter`, which takes a `simd_mask<N>` and
-#: a vector of byte offsets -- a different instruction with different cost,
-#: not a decorated `copy_to`.  Choosing between "narrow the block store" and
-#: "scatter" is a codegen decision and belongs in a change of its own.
+#: `_folds_predicate` refuses to fold a predicate into a select when the
+#: statement writes -- rightly, or the write would happen when it must not --
+#: so the base emitter wraps it in `if (mask)`, and a `simd_mask` is not a
+#: branch condition.
 #:
-#: `strict=True`, so this shrinks deliberately: when the masked
-#: store lands these turn XPASS and the suite goes red until the entries go.
-_MASKED_STORE = "predicated store; see the comment on _MASKED_STORE"
+#: Twelve before `LeadLoop._narrow`: most lead guards are a ragged end, and an
+#: explicitly vectorised kernel answers those with a shorter vector rather
+#: than a mask.  What is left needs a base offset (`lane >= lo`) or sits in a
+#: later slot, and both change the address rather than just the width -- see
+#: `_narrow` for why guessing there would put a wrong address behind a
+#: correct-looking type.
+#:
+#: Not a scatter, incidentally.  Measured over the corpus, no lead guard has
+#: both bounds, so no interior window arises and per-element store masking is
+#: never the thing that is missing.
+#:
+#: `strict=True`, so this shrinks deliberately: when the remaining cases land
+#: they turn XPASS and the suite goes red until the entries go.
+#: The ESIMD snapshots that do not compile, by name.
+#:
+#: A list and not a pattern.  The first version of this matched on "contains a
+#: mask and an `if`", which stopped describing the set as soon as narrowing
+#: changed which cases failed and why -- and a heuristic that quietly
+#: misclassifies is worse than no heuristic, because the entry it wrongly
+#: excuses looks reviewed.
+NOT_YET_ESIMD = {
+    # A guard that narrowing cannot remove -- `lane >= lo`, or a later slot --
+    # so the store keeps a predicate, and a `simd_mask` is not a branch
+    # condition.  See `LeadLoop._narrow` for why both need a base offset the
+    # index does not carry yet.
+    "bbox_shared_lower.esimd.cpp": "predicated store",
+    "lead_window_spans_two_blocks.esimd.cpp": "predicated store",
+    # A vector value assigned into a scalar slot.  The register array is still
+    # sized for SPMD: `float ir0[8]` is one slot per thread times eight
+    # non-lead entries, while a work-item that holds all twelve lanes needs
+    # `12 * 8`.  Twenty-one snapshots read past the end of such an array --
+    # which *compiles*, so this one is worth more than the six that do not.
+    "gemm_trans_a_20x12.esimd.cpp": "register array sized per thread, not per work-item",
+    "gemm_trans_b_12x16.esimd.cpp": "register array sized per thread, not per work-item",
+    "slice_chain_three.esimd.cpp": "register array sized per thread, not per work-item",
+    "temp_two_writers.esimd.cpp": "register array sized per thread, not per work-item",
+}
 
 
 def _known_bad(path) -> str:
-    """Only the ESIMD cases that actually contain a predicated store."""
-    if not path.name.endswith(".esimd.cpp"):
-        return ""
-    text = path.read_text()
-    if "simd_mask" in text and "if (" in text:
-        return _MASKED_STORE
-    return ""
+    return NOT_YET_ESIMD.get(path.name, "")
 
 
 def _param(path):

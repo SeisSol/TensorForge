@@ -320,3 +320,48 @@ def test_sinking_is_off_by_default():
     guard = _guard_over_loop(cond)
     assert passes.if_convert((guard,))[0].op == Op.IF
     assert passes.if_convert((guard,), sink_into_loops=True)[0].op == Op.FOR
+
+
+# --------------------------------------------------------------------------
+# a ragged end is a shorter vector, not a mask
+# --------------------------------------------------------------------------
+
+def _leadloop(threads=16, start=0, end=12):
+    from tensorforge.backend.symbol import LeadLoop
+    return LeadLoop('i', start, end, threads, stride=1)
+
+
+class _FakeWriter:
+    def __init__(self, simd): self._simd = simd
+    def _explicit_simd(self): return self._simd
+
+
+def test_a_ragged_end_narrows_instead_of_masking():
+    """12 elements over a 16-lane wave.
+
+    SPMD has to mask lanes 12..15: the wave width is the hardware's whatever
+    the operand looks like.  An explicitly vectorised kernel makes the vector
+    12 wide and there is no ragged end to mask.
+    """
+    assert _leadloop()._narrow(_FakeWriter(True), 0, None, 12) == 12
+
+
+def test_spmd_keeps_the_mask():
+    assert _leadloop()._narrow(_FakeWriter(False), 0, None, 12) is None
+
+
+def test_a_lower_bound_is_not_narrowed():
+    """`lane >= 4` needs the vector to *start* at 4, which is a base offset
+    the index does not carry -- narrowing the width alone would keep the
+    address at zero and read the wrong elements."""
+    assert _leadloop(start=4, end=16)._narrow(_FakeWriter(True), 0, 4, None) is None
+
+
+def test_a_later_slot_is_not_narrowed():
+    """A later slot's base is `nonlead * block`, which stops being the right
+    address as soon as `block` is not the slot stride."""
+    assert _leadloop()._narrow(_FakeWriter(True), 1, None, 12) is None
+
+
+def test_a_full_width_block_needs_no_narrowing():
+    assert _leadloop(end=16)._narrow(_FakeWriter(True), 0, None, 16) is None
