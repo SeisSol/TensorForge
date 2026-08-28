@@ -60,7 +60,7 @@ class Tensor:
             if isinstance(self.data, dict):
                 # TODO: proper dtype
                 data = np.zeros(self.shape, dtype=np.float64)
-                for pos, value in self.data:
+                for pos, value in self.data.items():
                     data[pos] = value
                 self.data = data
             if not isinstance(self.data, np.ndarray):
