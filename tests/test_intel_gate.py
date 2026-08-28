@@ -122,12 +122,13 @@ def test_fp32_is_emulated_through_tf32():
     assert intel.TF32_TERMS == 3
 
 
-def test_matmul_declines_while_parked():
-    """`_is_matmul` asks `ENABLED` first, so this is unreachable -- but a path
-    that is not deployed must decline rather than emit if something does reach
-    it, so that the caller falls through to the generic path."""
+def test_a_sparse_operand_falls_through():
+    """The register path contracts over B's lanes, and a sparse operand is
+    loaded by linear index rather than as a lane-distributed vector.  Declining
+    sends the caller to the generic path, which handles it."""
     assert intel.matmul(None, None, None, None, 1, 1, 1, 0, 16,
-                        Datatype.F32, None, None) is False
+                        Datatype.F32, sparse=lambda k, j: True,
+                        ctx=None) is False
 
 
 # --------------------------------------------------------------------------
@@ -160,8 +161,71 @@ def test_sixteen_bit_types_do_pack():
         assert atom.ops_per_channel == 2
 
 
-def test_the_broadcast_path_is_parked_separately():
-    """Two flags, because they wait on different things: DPAS on a machine,
-    the register-only path on two defects named beside it."""
-    assert intel.BROADCAST_ENABLED is False
-    assert intel.ENABLED is not intel.BROADCAST_ENABLED or True
+def test_the_two_paths_are_flagged_separately():
+    """They wait on different things.
+
+    DPAS waits on a machine -- nothing here can check a systolic arrangement.
+    The register-only path uses an element read and an FMA, which a front end
+    does see, so it is on.
+    """
+    assert intel.ENABLED is False
+    assert intel.BROADCAST_ENABLED is True
+
+
+# --------------------------------------------------------------------------
+# the register-only contraction, checked structurally
+# --------------------------------------------------------------------------
+
+def _esimd_kernel(name):
+    import importlib.util, io, contextlib
+    from pathlib import Path
+    from tensorforge.common.context import Context
+    from tensorforge.generators.generator import Generator
+    p = Path(__file__).parent / 'cases' / f'{name}.py'
+    spec = importlib.util.spec_from_file_location(name, p)
+    case = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(case)
+    with contextlib.redirect_stdout(io.StringIO()):
+        gen = Generator(case.descr_list(),
+                        Context(arch='pvc', backend='esimd',
+                                fp_type=getattr(case, 'DTYPE', Datatype.F32)))
+        gen.generate()
+    return gen.get_kernel()
+
+
+def _products(src):
+    """`acc += (B[lane] * A)` triples, by accumulator."""
+    import re
+    out = {}
+    for m in re.finditer(r'(\w+_acc) \+= \(\((\w+)\[(\d+)\]\) \* (\w+)\)', src):
+        out.setdefault(m.group(1), []).append(
+            (m.group(2), int(m.group(3)), m.group(4)))
+    return out
+
+
+def test_the_contraction_is_complete_and_has_no_repeats():
+    """A 16x16 GEMM: sixteen accumulators, each sweeping the whole K.
+
+    This is the check that would have caught the `Mx` for `M` mix-up, which
+    made every accumulator receive the same product -- an error nowhere, and
+    wrong everywhere.
+    """
+    per = _products(_esimd_kernel('square_notrans'))
+    assert len(per) == 16, 'one accumulator per output column'
+    assert {len(v) for v in per.values()} == {16}, 'each sweeps the full K'
+    for acc, prods in per.items():
+        assert len(prods) == len(set(prods)), f'{acc} receives a product twice'
+
+
+def test_every_accumulator_sweeps_the_same_contraction():
+    per = _products(_esimd_kernel('square_notrans'))
+    lanes = {tuple(sorted(l for _, l, _ in v)) for v in per.values()}
+    avals = {tuple(sorted(a for _, _, a in v)) for v in per.values()}
+    assert len(lanes) == 1 and len(avals) == 1
+
+
+def test_one_b_vector_per_output_column():
+    """B's contraction index lives in the lanes, so a column of the output is
+    one vector broadcast lane by lane -- which is the whole arrangement."""
+    per = _products(_esimd_kernel('square_notrans'))
+    assert len({b for v in per.values() for b, _, _ in v}) == len(per)

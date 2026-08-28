@@ -120,7 +120,10 @@ class SyclLexic(Lexic):
     if self.simd_mode:
       return f'{variable}.select<{block}, {subblock}>({lane})'
     else:
-      return f'group_broadcast(-1, {variable}, {lane})'
+      # `group_broadcast(-1, ...)` before: an unqualified name and `-1` where
+      # a group object belongs.  A placeholder nothing had ever reached, which
+      # is how it survived -- the Intel register path is the first caller.
+      return f'sycl::group_broadcast(item.get_sub_group(), {variable}, {lane})'
 
   def kernel_range_object(self, name, values):
     return f"sycl::range<3> {name} ({values})"

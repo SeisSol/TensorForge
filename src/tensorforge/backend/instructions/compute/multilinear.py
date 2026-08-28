@@ -485,7 +485,16 @@ class MultilinearInstruction(ComputeInstruction):
             # parked one step earlier than NVIDIA's -- see `intel.ENABLED` --
             # but the gate is written now so that turning it on is a flag and
             # not a search for the call site.
-            if not (intel.ENABLED or intel.BROADCAST_ENABLED):
+            simd = _explicit_simd(self._context)
+            if not (intel.ENABLED or (intel.BROADCAST_ENABLED and simd)):
+                # The register-only path is for the explicitly vectorised
+                # lowering, and the reason is its whole argument: a lane
+                # broadcast is `v[k]` out of this work-item's own registers
+                # there, and a real cross-lane instruction in SPMD.  Taking it
+                # on an Intel target lowered as SPMD would trade a shared
+                # buffer for a `group_broadcast` per product, which is the
+                # trade the AMD path makes deliberately with DPP and this one
+                # does not.
                 return False
             return intel.supports(self._num_threads, self._idest.datatype,
                                   self._second_operand_is_sparse())
@@ -610,7 +619,17 @@ class MultilinearInstruction(ComputeInstruction):
             elif self._context.get_vm().get_hw_descr().vendor == 'nvidia':
                 return nvidia.matmul(writer, C, A, B, Mx, N, K, kx, self._num_threads, self._idest.datatype, sparse, self._context, 'tempShrMem', self.temp_shmem())
             elif self._context.get_vm().get_hw_descr().vendor == 'intel':
-                return intel.matmul(writer, C, A, B, Mx, N, K, kx, self._num_threads, self._idest.datatype, sparse, self._context)
+                # `M`, not `Mx`.  The two are different counts and the choice
+                # follows the operand model, not the vendor: `M` is the slot
+                # count (`ceil(lead / threads)`) and `Mx` the element count.
+                # `unwindI` maps its argument with `i % M`, so a register path
+                # that iterates to `Mx` asks for the same index `threads`
+                # times over and gets the same value back -- which is not an
+                # error anywhere, just the same product accumulated into
+                # everything.  AMD passes `M` for exactly this reason; NVIDIA
+                # passes `Mx` because it stages through shared memory and
+                # works in elements.
+                return intel.matmul(writer, C, A, B, M, N, K, kx, self._num_threads, self._idest.datatype, sparse, self._context)
             return True
         return False
 

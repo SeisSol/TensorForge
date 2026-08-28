@@ -311,6 +311,29 @@ template <typename T, int N, typename U> simd<T, N> pow(simd<T, N> a, U) {
 /// a predicated operation accepts.  A distinct family, as in the real header
 /// -- it deliberately does *not* convert to `bool`, so that a mask reaching a
 /// branch condition is a compile error here as well as there.
+/// `SCALAR BINOP simd`: ESIMD defines these as free operators that broadcast
+/// the scalar (see `__ESIMD_DEF_SIMD_OBJ_IMPL_BIN_OP` in
+/// `detail/operators.hpp`).  The member overloads above only cover a scalar on
+/// the *right*, and a broadcast matmul writes `B[k] * A` with the scalar on
+/// the left -- which is the natural order and not worth reversing to suit a
+/// shim.
+template <typename U, typename T, int N>
+simd<T, N> operator+(U, const simd<T, N> &r) {
+  return r;
+}
+template <typename U, typename T, int N>
+simd<T, N> operator-(U, const simd<T, N> &r) {
+  return r;
+}
+template <typename U, typename T, int N>
+simd<T, N> operator*(U, const simd<T, N> &r) {
+  return r;
+}
+template <typename U, typename T, int N>
+simd<T, N> operator/(U, const simd<T, N> &r) {
+  return r;
+}
+
 template <int N> class simd_mask {
 public:
   simd_mask() = default;

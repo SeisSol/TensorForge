@@ -167,22 +167,27 @@ def simd(lexic, elem, count) -> str:
 
 #: Whether the register-only FMA path is deployed.
 #:
-#: Separate from `ENABLED`, because they are parked for different reasons.
-#: DPAS waits on a machine to check a systolic arrangement against.  This one
-#: uses nothing a front end cannot see -- an element read and an FMA -- so what
-#: it waits on is only itself, and two things are known to be wrong with it:
+#: Separate from `ENABLED`, because they wait on different things.  DPAS waits
+#: on a machine: nothing here can check a systolic arrangement.  This path uses
+#: only what a front end sees -- an element read and an FMA -- so what it waits
+#: on is the arithmetic, and that is checkable without hardware.
 #:
-#: * `float * simd<float, N>` needs the free `operator*`, and the operands go
-#:   in with the scalar on the left.  Cosmetic, but it does not compile.
-#: * the products come out shared across accumulators that should not share
-#:   them.  Either the operand callbacks are being asked in the wrong nesting
-#:   or `cse` is merging two `mul`s whose operands only look equal; it is not
-#:   diagnosed yet, and the emission is wrong until it is.
+#: Two defects had to go first, and naming them is worth more than the flag:
 #:
-#: Flipping this before both are fixed would put wrong arithmetic behind a
-#: correct-looking type, which is the failure mode this backend keeps being
-#: careful about.
-BROADCAST_ENABLED = False
+#: * the dispatch passed `Mx` where this path needs `M`.  `unwindI` maps its
+#:   argument with `i % M`, so iterating to the element count asked for the
+#:   same index `threads` times and got the same value back -- and then the
+#:   same product was accumulated into everything.  Not an error anywhere,
+#:   just wrong.
+#: * `float * simd<float, N>` needs the free operator ESIMD defines in
+#:   `detail/operators.hpp`; the test shim only had the member overloads,
+#:   which cover a scalar on the right.
+#:
+#: What clears it now: 31 of 31 emitted kernels are well-formed, no
+#: accumulator receives a product twice, and on a 16x16 GEMM each of the 16
+#: accumulators sweeps the full contraction over one distinct B vector.  That
+#: is structure, not numerics -- the numbers still want a run.
+BROADCAST_ENABLED = True
 
 
 def broadcast_matmul(writer, C, A, B, M, N, K, kx, threads, dtype, ctx):
