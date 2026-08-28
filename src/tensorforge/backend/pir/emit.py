@@ -613,6 +613,20 @@ class Emitter:
                     w(txt)
             return
 
+        if op == Op.CALL and s.attr('asm') is not None:
+            # The operands are rendered here rather than baked into the
+            # template, which is the whole point: the constraint list names
+            # values the IR knows, so the split that produced a fragment has a
+            # real use and cannot be removed underneath the asm.
+            constraints = s.attr('constraints')
+            pairs = list(zip(constraints, s.args))
+            outs = ', '.join(f'"{c}"({self.operand(v)})'
+                             for c, v in pairs if c.startswith(('=', '+')))
+            ins = ', '.join(f'"{c}"({self.operand(v)})'
+                            for c, v in pairs if not c.startswith(('=', '+')))
+            w(f'asm({s.attr("asm")}\n: {outs}\n: {ins}\n);')
+            return
+
         if op == Op.CALL:
             callee = s.attr('callee')
             if callee is not None and callee.startswith('thread_idx_'):

@@ -87,6 +87,11 @@ class Datatype(enum.Enum):
   I16 = 21
   I32 = 22
   I64 = 23
+  # Unsigned, and only where a vendor signature demands it.  `splitFloatTF32`
+  # takes `uint32_t &`, so an `I32` there does not bind and the kernel does not
+  # compile -- which is the only reason this member exists.  Nothing in the
+  # generator computes with it.
+  U32 = 32
 
   def size(self):
     if self == self.F32:
@@ -102,6 +107,8 @@ class Datatype(enum.Enum):
     elif self == self.BOOL:
       return 1 # ?
     elif self == self.I32:
+      return 4
+    elif self == self.U32:
       return 4
     elif self == self.I8:
       return 1
@@ -145,6 +152,8 @@ class Datatype(enum.Enum):
       return f'{int(value)}_i16'
     elif self == self.I32:
       return f'{int(value)}_i32'
+    elif self == self.U32:
+      return f'{int(value)}u'
     elif self == self.I64:
       return f'{int(value)}_i64'
 
@@ -159,7 +168,8 @@ class Datatype(enum.Enum):
            Datatype.I8: 'int8_t',
            Datatype.I16: 'int16_t',
            Datatype.I32: 'int32_t',
-           Datatype.I64: 'int64_t',}
+           Datatype.I64: 'int64_t',
+           Datatype.U32: 'uint32_t',}
     return map[fp]
 
   def ctype(self):
@@ -176,7 +186,8 @@ class Datatype(enum.Enum):
            'int8_t': Datatype.I8,
            'int16_t': Datatype.I16,
            'int32_t': Datatype.I32,
-           'int64_t': Datatype.I64}
+           'int64_t': Datatype.I64,
+           'uint32_t': Datatype.U32}
     return map[as_str]
 
   @classmethod

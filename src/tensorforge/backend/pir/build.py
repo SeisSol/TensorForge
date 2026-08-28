@@ -345,6 +345,61 @@ class IRBuilder:
                              movable=movable, effect=effect,
                              accesses=accesses, attrs=(('callee', callee),))
 
+    def asm_stmt(self, template: str, operands: Sequence[Tuple[str, Operand]],
+                 *, movable: bool = False) -> Stmt:
+        """Inline assembly whose operands are values, not baked-in names.
+
+        `mma.sync` has no intrinsic, so the NVIDIA path has to emit PTX
+        directly.  That does not make it opaque.  What the statement reads and
+        writes is exactly as knowable as for any other vendor primitive: the
+        operands go in as values, the ones with a read-write or write-only
+        constraint go in as declared register accesses, and two `mma.sync`
+        calls on different accumulators then provably do not conflict.
+
+        ``operands`` is ordered, `(constraint, value)`, outputs and read-write
+        operands first.  That order is not a convention, it is how the
+        assembler numbers them: outputs and inputs share one sequence, `%0`
+        onwards, so moving an operand renumbers everything after it.  The
+        caller writes `%0`-style placeholders in ``template`` and this checks
+        that the two agree --- a mismatch there reads the wrong registers and
+        still compiles, which is the failure this node exists to make
+        impossible.
+
+        Not `Op.ASM`: the effects are `Op.CALL`'s effects and the only
+        difference is the rendering, so a second op would be a second set of
+        rules for the passes to learn.
+        """
+        seen_input = False
+        for constraint, _ in operands:
+            is_out = constraint.startswith(('=', '+'))
+            if is_out and seen_input:
+                raise IRError(
+                    f'asm operands are numbered in one sequence, so outputs '
+                    f'have to come first; {constraint!r} follows an input')
+            seen_input = seen_input or not is_out
+
+        wanted = {f'%{i}' for i in range(len(operands))}
+        found = set(re.findall(r'%\d+', template))
+        if found != wanted:
+            raise IRError(
+                f'asm template references {sorted(found)} but {len(operands)} '
+                f'operands were given. Numbering is positional, so a mismatch '
+                f'reads the wrong registers and still compiles.')
+
+        writes = [v for c, v in operands if c.startswith(('=', '+'))]
+        for w in writes:
+            self._require_addressable(w, 'asm')
+            self.pin(w)
+        accesses = tuple(Access(Effect.READ | Effect.WRITE, MemSpace.REGISTER,
+                                base=w) for w in writes if isinstance(w, Value))
+        return self._emit_op(
+            Op.CALL, (), tuple(v for _, v in operands), pure=False,
+            movable=movable,
+            effect=Effect.WRITE if accesses else Effect.NONE,
+            accesses=accesses,
+            attrs=(('asm', template),
+                   ('constraints', tuple(c for c, _ in operands))))
+
     def _require_addressable(self, value: Operand, callee: str) -> None:
         """A written argument has to be something that has an address.
 

@@ -41,15 +41,15 @@ import subprocess
 import sys
 from pathlib import Path
 
-PKG = Path('tensorforge/backend/instructions/compute/primitives/amd')
-CORE = Path('tensorforge/backend/pir/core.py')
-BUILD = Path('tensorforge/backend/pir/build.py')
-SYM = Path('tensorforge/backend/symbol.py')
-HIP = Path('tensorforge/include/tensorforge_device/hip.h')
-EMIT = Path('tensorforge/backend/pir/emit.py')
-ABSTR = Path('tensorforge/backend/instructions/abstract_instruction.py')
+PKG = Path('src/tensorforge/backend/instructions/compute/primitives/amd')
+CORE = Path('src/tensorforge/backend/pir/core.py')
+BUILD = Path('src/tensorforge/backend/pir/build.py')
+SYM = Path('src/tensorforge/backend/symbol.py')
+HIP = Path('src/tensorforge/include/tensorforge_device/hip.h')
+EMIT = Path('src/tensorforge/backend/pir/emit.py')
+ABSTR = Path('src/tensorforge/backend/instructions/abstract_instruction.py')
 EQUIV = Path('tools/access_equiv.py')
-SYM = Path('tensorforge/backend/symbol.py')
+SYM = Path('src/tensorforge/backend/symbol.py')
 
 
 def _run_tests(target):
@@ -79,6 +79,14 @@ def sub(path, old, new, count=0):
     which is the failure mode this whole file exists to avoid.
     """
     def make():
+        if not path.exists():
+            # Same failure as a mutation that no longer applies, and it used to
+            # be worse: a `FileNotFoundError` here aborts the whole sweep, so
+            # one stale path hides every group after it.  The move to `src/`
+            # left 38 of them and the harness stopped running entirely.
+            raise AssertionError(
+                f'{path} does not exist: the file has moved, so this check is '
+                f'no longer testing anything')
         text = path.read_text()
         out = text.replace(old, new) if not count else text.replace(old, new, count)
         if out == text:
@@ -94,6 +102,35 @@ GROUPS = {
     # failing to generate for as long as nobody re-derived its number.
     # `flatten_scopes` decides which braces are load-bearing, and it decides
     # it with a regex over raw text.
+    # The PTX node.  Its numbering check is the one that matters: a mismatch
+    # reads different registers and still compiles.
+    'asm': ('tests/test_pir_asm.py', [
+        ('the numbering check dropped',
+         sub(Path('src/tensorforge/backend/pir/build.py'),
+             '        if found != wanted:', '        if False:', 1)),
+        ('outputs allowed to follow inputs',
+         sub(Path('src/tensorforge/backend/pir/build.py'),
+             '            if is_out and seen_input:', '            if False:', 1)),
+        ('written operands not declared as accesses',
+         sub(Path('src/tensorforge/backend/pir/build.py'),
+             "        writes = [v for c, v in operands if c.startswith(('=', '+'))]",
+             '        writes = []', 1)),
+        ('a write-only constraint not counted as an output',
+         sub(Path('src/tensorforge/backend/pir/build.py'),
+             "            is_out = constraint.startswith(('=', '+'))",
+             "            is_out = constraint.startswith('+')", 1)),
+        ('the asm made movable',
+         sub(Path('src/tensorforge/backend/pir/build.py'),
+             '    def asm_stmt(self, template: str, operands: Sequence[Tuple[str, Operand]],\n'
+             '                 *, movable: bool = False) -> Stmt:',
+             '    def asm_stmt(self, template: str, operands: Sequence[Tuple[str, Operand]],\n'
+             '                 *, movable: bool = True) -> Stmt:', 1)),
+        ('uint32_t collapsed onto int32_t',
+         sub(Path('src/tensorforge/common/basic_types.py'),
+             "           Datatype.U32: 'uint32_t',}",
+             "           Datatype.U32: 'int32_t',}", 1)),
+    ]),
+
     'cdecl': ('tests/test_flatten_scopes.py', [
         ('brace initialisation not seen as a declaration',
          sub(Path('src/tensorforge/backend/pir/passes.py'),
@@ -364,27 +401,27 @@ GROUPS = {
     # write happens and read back somewhere else.  Both ends have to fail.
     'sparse': ('tests/test_sparse_layout.py', [
         ('the fill records nothing',
-         sub(Path('tensorforge/backend/symbol.py'),
+         sub(Path('src/tensorforge/backend/symbol.py'),
              '    self._record_linear_layout(index, vec)\n', '', 1)),
         ('the read drops what the fill recorded',
-         sub(Path('tensorforge/backend/symbol.py'),
+         sub(Path('src/tensorforge/backend/symbol.py'),
              "        return writer.load_expr(text, type_, self, hint='lin',\n"
              "                                layout=self.layout)",
              "        return writer.load_expr(text, type_, self, hint='lin')", 1)),
         ('the wave width taken as the block instead of the thread count',
-         sub(Path('tensorforge/backend/symbol.py'),
+         sub(Path('src/tensorforge/backend/symbol.py'),
              'layout = RegisterLayout((LaneAxis(self.num_threads, 1),))',
              'layout = RegisterLayout((LaneAxis(self.num_threads, 2),))', 1)),
         ('a mid-slot fill claimed anyway',
-         sub(Path('tensorforge/backend/symbol.py'),
+         sub(Path('src/tensorforge/backend/symbol.py'),
              'if not isinstance(index, int) or index % (self.num_threads * vec) != 0:',
              'if not isinstance(index, int):', 1)),
         ('two disagreeing fills, last one wins',
-         sub(Path('tensorforge/backend/symbol.py'),
+         sub(Path('src/tensorforge/backend/symbol.py'),
              '      self.layout = None\n      return\n    self.layout = layout',
              '      pass\n    self.layout = layout', 1)),
         ('the layout lost on clone',
-         sub(Path('tensorforge/backend/symbol.py'),
+         sub(Path('src/tensorforge/backend/symbol.py'),
              '    cloned.layout = self.layout\n', '', 1)),
     ]),
 
@@ -392,15 +429,15 @@ GROUPS = {
     # refactor made stale without making anything fail loudly enough.
     'data': ('tests/test_regressions.py', [
         ('a list handed to Tensor.data',
-         sub(Path('tensorforge/generators/descriptions.py'),
+         sub(Path('src/tensorforge/generators/descriptions.py'),
              'data=(np.array(alpha, dtype=float)',
              'data=([alpha]', 1)),
         ('the shape check dropped',
-         sub(Path('tensorforge/common/matrix/tensor.py'),
+         sub(Path('src/tensorforge/common/matrix/tensor.py'),
              '            if self.data.shape != self.shape:',
              '            if False:', 1)),
         ('the type check dropped',
-         sub(Path('tensorforge/common/matrix/tensor.py'),
+         sub(Path('src/tensorforge/common/matrix/tensor.py'),
              '            if not isinstance(self.data, np.ndarray):',
              '            if False:', 1)),
     ]),
@@ -410,39 +447,39 @@ GROUPS = {
     # cannot take.
     'nvidia': ('tests/test_nvidia_reachability.py', [
         ('a second definition of matmul',
-         sub(Path('tensorforge/backend/instructions/compute/primitives/nvidia.py'),
+         sub(Path('src/tensorforge/backend/instructions/compute/primitives/nvidia.py'),
              'def matmul(writer, C, A, B, M, N, K, kx, threads, dtype, sparse, ctx, shmptr, shmsize):',
              'def matmul(*args, **kwargs):\n    pass\n\n'
              'def matmul(writer, C, A, B, M, N, K, kx, threads, dtype, sparse, ctx, shmptr, shmsize):',
              1)),
         ('an unreachable helper reintroduced',
-         sub(Path('tensorforge/backend/instructions/compute/primitives/nvidia.py'),
+         sub(Path('src/tensorforge/backend/instructions/compute/primitives/nvidia.py'),
              'def tfconvert(writer: Writer, variables):',
              'def shuffle_swap(writer, v):\n'
              '    return f"__shfl_xor_sync(0xffffffff, {v}, 1)"\n\n'
              'def tfconvert(writer: Writer, variables):', 1)),
-        ('the atom spelled out a second time',
-         sub(Path('tensorforge/backend/instructions/compute/primitives/nvidia.py'),
-             'def shmsize(stages):\n    atom = ATOM',
-             'def shmsize(stages):\n    atom = INSTRS[1]', 1)),
+        ('the shared reservation and the emitter pick different atoms',
+         sub(Path('src/tensorforge/backend/instructions/compute/primitives/nvidia.py'),
+             'def shmsize(stages, dtype):\n    atom = {',
+             'def shmsize(stages, dtype):\n    dtype = Datatype.F32\n    atom = {', 1)),
     ]),
 
     'gate': ('tests/test_nvidia_gate.py', [
         ('the wave width no longer checked',
-         sub(Path('tensorforge/backend/instructions/compute/primitives/nvidia.py'),
-             'return threads == 32 and dtype == ATOM.d and not sparse',
-             'return dtype == ATOM.d and not sparse', 1)),
+         sub(Path('src/tensorforge/backend/instructions/compute/primitives/nvidia.py'),
+             'return threads == 32 and dtype in (Datatype.F32, Datatype.F64) and not sparse',
+             'return dtype in (Datatype.F32, Datatype.F64) and not sparse', 1)),
         ('the operand type no longer checked',
-         sub(Path('tensorforge/backend/instructions/compute/primitives/nvidia.py'),
-             'return threads == 32 and dtype == ATOM.d and not sparse',
+         sub(Path('src/tensorforge/backend/instructions/compute/primitives/nvidia.py'),
+             'return threads == 32 and dtype in (Datatype.F32, Datatype.F64) and not sparse',
              'return threads == 32 and not sparse', 1)),
         ('the gate bypassed entirely',
-         sub(Path('tensorforge/backend/instructions/compute/multilinear.py'),
+         sub(Path('src/tensorforge/backend/instructions/compute/multilinear.py'),
              '            return nvidia.supports(self._num_threads, self._idest.datatype,\n'
              '                                   self._second_operand_is_sparse())',
              '            return True', 1)),
         ('the deployment switch flipped without re-recording',
-         sub(Path('tensorforge/backend/instructions/compute/primitives/nvidia.py'),
+         sub(Path('src/tensorforge/backend/instructions/compute/primitives/nvidia.py'),
              'ENABLED = False', 'ENABLED = True', 1)),
     ]),
 
@@ -451,40 +488,40 @@ GROUPS = {
     # lifetime a liveness analysis cannot yet see.
     'rawaccess': ('tests/test_pir_raw_accesses.py', [
         ('a narrowed access set not checked at all',
-         sub(Path('tensorforge/backend/pir/build.py'),
+         sub(Path('src/tensorforge/backend/pir/build.py'),
              '            self._check_declared_accesses(code, accesses, args, defines)',
              '            pass', 1)),
         ('the operand requirement dropped',
-         sub(Path('tensorforge/backend/pir/build.py'),
+         sub(Path('src/tensorforge/backend/pir/build.py'),
              '            if id(v) not in named:',
              '            if False:', 1)),
         ('the declared-access requirement dropped',
-         sub(Path('tensorforge/backend/pir/build.py'),
+         sub(Path('src/tensorforge/backend/pir/build.py'),
              '            if id(v) in shared and not conservative and v not in covered:',
              '            if False:', 1)),
         ('operands accepted but not recorded, so no use edge',
-         sub(Path('tensorforge/backend/pir/build.py'),
+         sub(Path('src/tensorforge/backend/pir/build.py'),
              'return self._emit_op(Op.RAWSTMT, tuple(defines), tuple(args),\n'
              '                             pure=False, movable=False,',
              'return self._emit_op(Op.RAWSTMT, tuple(defines), (),\n'
              '                             pure=False, movable=False,', 1)),
         ('a raw statement made movable by declaring no accesses',
-         sub(Path('tensorforge/backend/pir/build.py'),
+         sub(Path('src/tensorforge/backend/pir/build.py'),
              '                             pure=False, movable=False,',
              '                             pure=False, movable=(accesses == ()),', 1)),
         ('the scope no longer releases',
-         sub(Path('tensorforge/backend/pir/build.py'),
+         sub(Path('src/tensorforge/backend/pir/build.py'),
              '            self._scratch_used = mark',
              '            pass', 1)),
         ('a varalloc name asked to claim a use it cannot have',
-         sub(Path('tensorforge/backend/pir/build.py'),
+         sub(Path('src/tensorforge/backend/pir/build.py'),
              '        self._by_name.pop(str(v), None)\n', '', 1)),
         ('defines accepted but discarded',
-         sub(Path('tensorforge/backend/pir/build.py'),
+         sub(Path('src/tensorforge/backend/pir/build.py'),
              'return self._emit_op(Op.RAWSTMT, tuple(defines), tuple(args),',
              'return self._emit_op(Op.RAWSTMT, (), tuple(args),', 1)),
         ('the budget checked against the mark, not the peak',
-         sub(Path('tensorforge/backend/pir/build.py'),
+         sub(Path('src/tensorforge/backend/pir/build.py'),
              'if max(end, self._scratch_peak) > budget:',
              'if end > budget:', 1)),
     ]),
@@ -492,22 +529,22 @@ GROUPS = {
     # `scratch_scope` declares a packing; this is the check that it holds.
     'scratchcheck': ('tests/test_scratch_check.py', [
         ('a read across a reused window no longer reported',
-         sub(Path('tensorforge/backend/pir/scratch_check.py'),
+         sub(Path('src/tensorforge/backend/pir/scratch_check.py'),
              '                if t.reads and last_write[other] is not None:',
              '                if False:', 1)),
         ('a rewrite between the clobber and the read not noticed',
-         sub(Path('tensorforge/backend/pir/scratch_check.py'),
+         sub(Path('src/tensorforge/backend/pir/scratch_check.py'),
              '                    if mine is None or mine < last_write[other]:',
              '                    if True:', 1)),
         ('windows compared without checking that they overlap',
-         sub(Path('tensorforge/backend/pir/scratch_check.py'),
+         sub(Path('src/tensorforge/backend/pir/scratch_check.py'),
              '            if not win[a].overlaps(win[b]):\n                continue',
              '            if False:\n                continue', 1)),
         ('an undeclared statement passed over in silence',
-         sub(Path('tensorforge/backend/pir/scratch_check.py'),
+         sub(Path('src/tensorforge/backend/pir/scratch_check.py'),
              '                opaque.append(here)', '                pass', 1)),
         ('the allocation counted as a use of its own buffer',
-         sub(Path('tensorforge/backend/pir/scratch_check.py'),
+         sub(Path('src/tensorforge/backend/pir/scratch_check.py'),
              '        if stmt.op == Op.ALLOC:\n            continue',
              '        if False:\n            continue', 1)),
     ]),
