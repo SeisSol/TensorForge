@@ -127,9 +127,13 @@ def test_a_lead_index_gives_its_axis():
 
 
 def test_an_offset_lead_index_is_still_that_axis():
-    """`add_offset` moves whole slots; it cannot move data between lanes, so
-    the distribution is unchanged by definition."""
-    assert (layout_of([VarOffset(LeadIndex(0, 16, 1), 32)])
+    """A slicing shift does not change *which lane holds what*.
+
+    The shift used to be a `VarOffset` wrapped around the index and is now a
+    field on it -- see `LeadIndex._offset`.  Either way the layout is the same
+    axis, which is the property this test is about.
+    """
+    assert (layout_of([LeadIndex(0, 16, 1, offset=32)])
             == RegisterLayout((LaneAxis(16, 1),)))
 
 

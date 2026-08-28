@@ -343,7 +343,7 @@ def test_a_ragged_end_narrows_instead_of_masking():
     the operand looks like.  An explicitly vectorised kernel makes the vector
     12 wide and there is no ragged end to mask.
     """
-    assert _leadloop()._narrow(_FakeWriter(True), 0, None, 12) == 12
+    assert _leadloop()._narrow(_FakeWriter(True), 0, None, 12) == (12, 0)
 
 
 def test_spmd_keeps_the_mask():
@@ -411,9 +411,12 @@ def test_a_sliced_lead_index_still_takes_the_structured_path():
     ever sent a sliced store back to the text path, where its address is a
     pinned name instead of an operand.
     """
-    from tensorforge.backend.symbol import LeadIndex, VarOffset, unwrap_lead
-    idx = VarOffset(LeadIndex(0, 16, 1), 32)
-    assert not isinstance(idx, LeadIndex)
+    from tensorforge.backend.symbol import LeadIndex, unwrap_lead
+    # Since the merge this *is* a LeadIndex rather than a wrapper around one,
+    # and `unwrap_lead` is what both store paths ask.  `isinstance(...,
+    # LeadIndex)` happens to work again -- but only by accident, and the
+    # narrower test is what sent a sliced store to the text path before.
+    idx = LeadIndex(0, 16, 1, offset=32)
     assert unwrap_lead(idx) is not None
 
 
@@ -430,3 +433,52 @@ def test_the_pointer_override_does_not_move_the_alias_root():
     stmt = b.store(buf, b.const(1.0), 0, pointer='stage1')
     assert stmt.attr('pointer') == 'stage1'
     assert stmt.accesses[0].base is b.alias_root(buf)
+
+
+# --------------------------------------------------------------------------
+# the offset belongs to the lead index, not to a wrapper around it
+# --------------------------------------------------------------------------
+
+def test_add_offset_folds_into_a_lead_index():
+    from tensorforge.backend.symbol import LeadIndex, VarOffset, add_offset
+    out = add_offset(LeadIndex(2, 16, 1), 32)
+    assert isinstance(out, LeadIndex) and not isinstance(out, VarOffset)
+    assert out.offset() == 32
+
+
+def test_offsets_accumulate_rather_than_nest():
+    from tensorforge.backend.symbol import LeadIndex, add_offset
+    assert add_offset(add_offset(LeadIndex(0, 16, 1), 16), 16).offset() == 32
+
+
+def test_wrapping_a_lead_index_is_refused():
+    """The unit mismatch, made unreachable.
+
+    `VarOffset.write_nonlead` adds an element count to a slot index -- for
+    slot 2 shifted by 32 elements over 16 lanes it produced `2 + 32` where the
+    answer is `4`.  Nothing called it, so nothing found it; now nothing can
+    build the state that would.
+    """
+    from tensorforge.backend.symbol import LeadIndex, VarOffset
+    from tensorforge.common.exceptions import InternalError
+    with pytest.raises(InternalError):
+        VarOffset(LeadIndex(2, 16, 1), 32)
+
+
+def test_unwrap_lead_keeps_its_contract():
+    """`(index without the shift applied, shift in elements)`.
+
+    The register callers convert the shift to slots themselves, so handing
+    back an index that had already applied it would count it twice.
+    """
+    from tensorforge.backend.symbol import LeadIndex, unwrap_lead
+    idx, shift = unwrap_lead(LeadIndex(2, 16, 1, offset=32))
+    assert shift == 32 and idx.offset() == 0
+
+
+def test_the_element_view_applies_the_offset_and_the_slot_view_does_not():
+    """The whole reason the offset moved in here: its unit depends on the view,
+    and only the index knows `block` and `width` to convert between them."""
+    from tensorforge.backend.symbol import LeadIndex
+    idx = LeadIndex(2, 16, 1, offset=32)
+    assert idx.write_nonlead() == '2'

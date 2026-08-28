@@ -232,11 +232,31 @@ class LeadIndex:
   """
 
   # TODO: make nonlead a variable
-  def __init__(self, nonlead, block, stride, value=None, width=1):
+  def __init__(self, nonlead, block, stride, value=None, width=1,
+               offset=0):
     self._nonlead = nonlead
     self._block = block
     self._stride = stride
     self._value = value
+    #: A slicing shift, in *elements*.
+    #:
+    #: This used to be a `VarOffset` wrapped around the index, and 649 of the
+    #: 661 offsets in the corpus wrapped a `LeadIndex` -- but the wrapper is
+    #: the wrong place for it, and not only because it is nearly always this
+    #: one case.  The offset's unit depends on which view of the index you
+    #: take: `write`/`build` answer in elements, `write_nonlead`/`build_nonlead`
+    #: answer in *slots*, and converting between them needs `block` and
+    #: `width`, which only this class has.  `VarOffset.write_nonlead` added an
+    #: element count to a slot index and got `2 + 32` where the answer is `4`;
+    #: nothing called it, so nothing noticed.
+    #:
+    #: `unwrap_lead` keeps handing the raw element shift to its caller, which
+    #: is what the register paths convert.  Moving that conversion in here is
+    #: the next step and the one that makes an ESIMD base offset expressible:
+    #: a shift that is not a whole number of slots moves data between lanes,
+    #: which is a shuffle in SPMD and simply a different vector base when the
+    #: work-item holds the wave.
+    self._offset = offset
     #: How many *adjacent* elements this lane holds at this index.  With
     #: `width > 1` the map above scales uniformly:
     #:
@@ -281,7 +301,8 @@ class LeadIndex:
     return self._width
 
   def _key(self):
-    return (self._nonlead, self._block, self._stride, self._value, self._width)
+    return (self._nonlead, self._block, self._stride, self._value,
+            self._width, self._offset)
 
   def __eq__(self, other):
     # Structural, including `nonlead`: this is value equality of the *index*,
@@ -297,8 +318,9 @@ class LeadIndex:
   def __repr__(self):
     tail = '' if self._value is None else f', value={self._value!r}'
     wide = '' if self._width == 1 else f', width={self._width}'
+    off = '' if self._offset == 0 else f', offset={self._offset}'
     return (f'LeadIndex({self._nonlead!r}, block={self._block}, '
-            f'stride={self._stride}{tail}{wide})')
+            f'stride={self._stride}{tail}{wide}{off})')
 
   def is_thread_dependent(self):
     return True
@@ -311,10 +333,23 @@ class LeadIndex:
       inner = (f'(({context.get_vm().get_lexic().thread_idx_x} / '
                f'{self._stride}) % {self._block}) + '
                f'{self._nonlead} * {self._block}')
-      return inner if self._width == 1 else f'({inner}) * {self._width}'
+      out = inner if self._width == 1 else f'({inner}) * {self._width}'
     elif self._block == 1:
-      return f'{self._nonlead}' if self._width == 1 \
-             else f'{self._nonlead} * {self._width}'
+      out = (f'{self._nonlead}' if self._width == 1
+             else f'{self._nonlead} * {self._width}')
+    else:
+      return None
+    # Elements, so the shift goes on as it stands.  The slot view below
+    # deliberately does not apply it: there it would need dividing, and the
+    # register paths do that themselves off `unwrap_lead`.
+    return out if self._offset == 0 else f'({out} + {self._offset})'
+
+  def offset(self):
+    return self._offset
+
+  def with_offset(self, offset):
+    return LeadIndex(self._nonlead, self._block, self._stride, self._value,
+                     self._width, offset)
 
   def nonlead(self):
     return self._nonlead
@@ -363,13 +398,42 @@ class LeadIndex:
       # lane would interleave the slots into each other's lanes.
       if self._width > 1:
         addr = writer.op('mul', INDEX, addr, self._width, hint='vlead')
-      return addr
+      return self._shift(writer, addr)
     if self._width > 1:
-      return writer.op('mul', INDEX, nl, self._width, hint='vlead')
-    return nl
+      return self._shift(writer, writer.op('mul', INDEX, nl, self._width,
+                                           hint='vlead'))
+    return self._shift(writer, nl)
+
+  def _shift(self, writer, addr):
+    """Apply the slicing offset to the *element* view.
+
+    Only here.  `build_nonlead` answers in slots, where the same number would
+    have to be divided by `block * width` first -- and the register callers do
+    that themselves off `unwrap_lead`, because only they know whether a
+    remainder is a shuffle they cannot express.
+    """
+    if self._offset == 0:
+      return addr
+    return writer.op('add', INDEX, addr, self._offset, hint='off')
 
 class VarOffset:
+  """A plain index plus a constant.
+
+  Never a `LeadIndex` -- that combination lives in `LeadIndex._offset`, and
+  the reason is a unit mismatch this class cannot resolve: the offset counts
+  elements, `write_nonlead` answers in slots, and converting between the two
+  needs `block` and `width`, which are the lead index's and not the wrapper's.
+  Before the merge this method returned `2 + 32` where the answer was `4`; it
+  was unreachable, so nothing found it.  The assertion is what keeps it that
+  way now that `add_offset` folds instead of wrapping.
+  """
+
   def __init__(self, variable, offset):
+    if isinstance(variable, LeadIndex):
+      raise InternalError(
+          'a lead index carries its own offset; wrapping one in a VarOffset '
+          'puts an element count where a slot index is expected. Use '
+          'add_offset(), which folds.')
     self.variable = variable
     self.offset = offset
 
@@ -377,11 +441,11 @@ class VarOffset:
     return self.variable.is_thread_dependent()
 
   def write_nonlead(self):
-    # TODO: lead
+    # No unit conversion needed: the wrapped index is never distributed, so
+    # its slot view and its element view are the same number.
     return f'({self.variable.write_nonlead()} + {self.offset})'
 
   def write(self, context: Context):
-    # TODO: lead
     return f'({self.variable.write(context)} + {self.offset})'
 
   def build(self, writer, context: Context):
@@ -400,6 +464,11 @@ def add_offset(x, offset):
     return x + offset
   elif isinstance(x, Immediate):
     return Immediate(x._value + offset, x._type)
+  elif isinstance(x, LeadIndex):
+    # Folded in, not wrapped.  See `LeadIndex._offset`: a wrapper cannot
+    # convert the shift between the element view and the slot view, because
+    # the conversion needs `block` and `width`.
+    return x.with_offset(x.offset() + offset)
   elif isinstance(x, VarOffset):
     return VarOffset(x.variable, x.offset + offset)
   else:
@@ -481,7 +550,12 @@ def unwrap_lead(index):
     shift += index.offset
     index = index.variable
   if isinstance(index, LeadIndex):
-    return index, shift
+    # The contract is unchanged -- `(index, shift in elements)` -- but the
+    # shift now usually comes off the index itself rather than off a wrapper.
+    # The index handed back is the one *without* it applied, because the
+    # register callers convert the shift to slots and would otherwise count
+    # it twice.
+    return index.with_offset(0), shift + index.offset()
   return None
 
 class LeadLoop:
@@ -552,11 +626,12 @@ class LeadLoop:
     """
     if not self._narrow_possible(writer):
       return None
-    if lo is not None or hi is None or actualstart != 0:
+    if hi is None or actualstart != 0:
       return None
-    if hi <= 0 or hi >= self.threads:
+    base = lo or 0
+    if hi <= base or (base == 0 and hi >= self.threads):
       return None
-    if hi * self.width != self.end - self.start:
+    if (hi - base) * self.width != self.end - self.start:
       # The lane bounds are *ceilings* (see `_lane_hi`): at a ragged end one
       # lane holds a vector half inside the box, and the guard is what stops
       # its extra component from being stored.  Narrowing removes the guard,
@@ -568,7 +643,10 @@ class LeadLoop:
       # width policy is free to offer a width that does not divide, and then
       # the two features would silently agree to store past the box.
       return None
-    return hi
+    # `(extent, base)`: a lower bound is not a mask either, it is a vector that
+    # *starts* later.  `LeadIndex` carries the base now that the offset lives
+    # there instead of in a wrapper -- which is what this was waiting for.
+    return hi - base, base * self.width
 
   def _lane_lo(self, offset):
     """The first lane whose vector reaches element `offset`.
@@ -679,9 +757,11 @@ class LeadLoop:
       startIdx = self.start - actualstart * span
       lo = self._lane_lo(startIdx) if startIdx > 0 else None
       hi = self._lane_hi(tail)
-      extent = self._narrow(writer, actualstart, lo, hi)
-      if extent is not None:
-        inner([LeadIndex(actualstart, extent, self.stride, width=self.width)])
+      narrowed = self._narrow(writer, actualstart, lo, hi)
+      if narrowed is not None:
+        extent, base = narrowed
+        inner([LeadIndex(actualstart, extent, self.stride, width=self.width,
+                         offset=base)])
       elif hi > 0 or lo is not None:
         index = LeadIndex(actualstart, self.threads, self.stride,
                           width=self.width)
@@ -690,14 +770,24 @@ class LeadLoop:
       self._peel(inner, actualstart * span + hi * self.width, tail)
     else:
       if self.start % span != 0:
-        index = LeadIndex(actualstart, self.threads, self.stride,
-                          width=self.width)
         # the guard compares against a *lane*, so the bound has to be the
         # in-block remainder.  Without the `* self.threads` this only happened
         # to be right while actualstart == 0, i.e. start < threads; for
         # start=37, threads=32 it read `lead >= 36` and dropped the head block.
-        with self._guard(writer, lead(),
-                         self._lane_lo(self.start - actualstart * span), None):
+        lo = self._lane_lo(self.start - actualstart * span)
+        # Not narrowed, though it is the same shape as the ragged tail seen
+        # from the other end: a vector that starts later rather than one that
+        # stops earlier.  The base offset now exists to say it -- `LeadIndex`
+        # carries it since the `VarOffset` merge -- but `build_address` drops
+        # a sub-slot shift on a register operand (`shift // num_threads` is
+        # zero for it) and asserts it away, which is right in SPMD, where a
+        # partial shift moves data between lanes and no address can express a
+        # shuffle.  Under an explicit vector it is expressible and the
+        # arithmetic has to be written; until then the mask is correct and a
+        # narrowed vector would silently read from the wrong element.
+        index = LeadIndex(actualstart, self.threads, self.stride,
+                          width=self.width)
+        with self._guard(writer, lead(), lo, None):
           inner([index])
       if self.unroll:
         for value in range(realstart, realend):
