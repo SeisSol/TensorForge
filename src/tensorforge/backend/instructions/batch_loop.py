@@ -247,6 +247,32 @@ class BatchLoop(AbstractInstruction):
                 f'the flag guard is one block and cannot be reopened')
         return self._region[:cut], self._region[cut:]
 
+    def _declare_windows_early(self, writer, guarded) -> None:
+        """Declare the shared windows ahead of the flag guard.
+
+        `s0 = &localShrMem0[512]` is where a transfer writes, and the offset
+        comes from `ShrMemOpt` rather than from `batchId0` -- the window is the
+        same for every element.  It was declared by whichever instruction fills
+        it, so it landed inside the guard, and a transfer cannot be issued
+        outside a guard that defines the buffer it fills.
+
+        That was the last thing keeping the moved transfers in: the address
+        bindings came out one commit ago, and `wrap_prefetch` then refused 13
+        loops for reading their own destination.
+
+        Same rule as the addresses, and it holds more easily here: nothing
+        about this declaration depends on the element, so hoisting it cannot
+        observe anything a masked element would not have.
+        """
+        if not self._context.get_user_options().enable_wrap_loads:
+            return
+        for instr in guarded:
+            declare = getattr(instr, 'gen_code_declare', None)
+            if declare is None or not getattr(instr, '_declare', False):
+                continue
+            declare(writer)
+            instr._declare = False
+
     def _address_prefix(self) -> set:
         """The leading address bindings, when a prefetch will need them outside.
 
@@ -397,6 +423,7 @@ class BatchLoop(AbstractInstruction):
         head, guarded = self._split_guard()
         for instr in head:
             instr.gen_code(writer)
+        self._declare_windows_early(writer, guarded)
         cond = self._flag_guard(writer)
         # A real `Op.IF` where the condition is a value.  It was a raw block,
         # which made the whole body one opaque region as far as any pass was
