@@ -12,7 +12,7 @@
 
 namespace tensorforge {
 namespace intel_esimd = sycl::ext::intel::esimd;
-namespace intel_xmx = iesimd::xmx;
+namespace intel_xmx = intel_esimd::xmx;
 
 using TF32 = sycl::ext::intel::experimental::esimd::tfloat32;
 } // namespace tensorforge

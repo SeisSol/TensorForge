@@ -144,7 +144,60 @@ class SyclLexic(Lexic):
   def get_simd(self, fptype, size):
     return f'tensorforge::intel_esimd::simd<{fptype}, {size}>'
 
+  #: The ESIMD math intrinsics, by arity.
+  #:
+  #: Read off `sycl/ext/intel/esimd/math.hpp` rather than assumed from the
+  #: `sycl::` names: the two namespaces do not have the same functions, and a
+  #: `sycl::tanh` applied to a `simd<>` is not a slower tanh, it is a
+  #: compile error -- or, where a conversion exists, one element broadcast.
+  #: What is absent here is absent in the hardware library, so it is declined
+  #: rather than substituted.
+  _ESIMD_UNARY = {
+    Operation.ABS: 'abs', Operation.SQRT: 'sqrt', Operation.RSQRT: 'rsqrt',
+    Operation.EXP: 'exp', Operation.LOG: 'log',
+    Operation.SIN: 'sin', Operation.COS: 'cos',
+    Operation.RCP: 'inv', Operation.TRUNC: 'trunc',
+  }
+  _ESIMD_BINARY = {
+    Operation.MIN: 'min', Operation.MAX: 'max', Operation.POW: 'pow',
+  }
+  #: Spelled with C++ operators, which `simd<>` overloads.
+  _ESIMD_INFIX = {
+    Operation.ADD: '+', Operation.SUB: '-', Operation.MUL: '*',
+    Operation.DIV: '/', Operation.XOR: '^',
+    Operation.LT: '<', Operation.LE: '<=', Operation.GT: '>',
+    Operation.GE: '>=', Operation.EQ: '==', Operation.NEQ: '!=',
+  }
+
+  def _esimd_operation(self, op: Operation, fptype, value1, value2):
+    ns = 'tensorforge::intel_esimd'
+    if op == Operation.COPY:
+      return value1
+    if op == Operation.NEG:
+      return f'(-{value1})'
+    if op in self._ESIMD_UNARY:
+      return f'{ns}::{self._ESIMD_UNARY[op]}({value1})'
+    if op in self._ESIMD_BINARY:
+      return f'{ns}::{self._ESIMD_BINARY[op]}({value1}, {value2})'
+    if op in self._ESIMD_INFIX:
+      return f'({value1} {self._ESIMD_INFIX[op]} {value2})'
+    if op == Operation.NOT:
+      return f'(!{value1})' if fptype == Datatype.BOOL else f'(~{value1})'
+    if op in (Operation.AND, Operation.OR):
+      sym = {Operation.AND: '&', Operation.OR: '|'}[op]
+      if fptype == Datatype.BOOL:
+        sym *= 2
+      return f'({value1} {sym} {value2})'
+    raise NotImplementedError(
+      f'{op} has no ESIMD intrinsic. `sycl::{op.name.lower()}` is not a '
+      f'substitute -- it does not accept a simd<> operand, and where a '
+      f'conversion exists it would silently compute on one element. '
+      f'Composing it from the intrinsics that do exist is a numerics '
+      f'decision, not a spelling one.')
+
   def get_operation(self, op: Operation, fptype, value1, value2):
+    if self.simd_mode:
+      return self._esimd_operation(op, fptype, value1, value2)
     if op == Operation.COPY:
       return value1
     elif op == Operation.ADD:

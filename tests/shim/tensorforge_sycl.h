@@ -241,12 +241,44 @@ public:
   void copy_from(const T *p) { (void)p; }
 
   simd operator+(const simd &) const { return *this; }
+  simd operator-(const simd &) const { return *this; }
   simd operator*(const simd &) const { return *this; }
+  simd operator/(const simd &) const { return *this; }
+  simd operator-() const { return *this; }
   simd &operator+=(const simd &) { return *this; }
 
 private:
   T _v[N > 0 ? N : 1]{};
 };
+
+// -- math ------------------------------------------------------------------
+//
+// Only what `sycl/ext/intel/esimd/math.hpp` actually declares.  A shim with a
+// wider surface than the real header would make `test_syntax.py` accept a
+// call that does not exist -- which is the whole class of defect this check
+// is for, and the reason `sycl::tanh` is deliberately absent here too.
+
+template <typename T, int N> simd<T, N> abs(simd<T, N> x) { return x; }
+template <typename T, int N> simd<T, N> sqrt(simd<T, N> x) { return x; }
+template <typename T, int N> simd<T, N> rsqrt(simd<T, N> x) { return x; }
+template <typename T, int N> simd<T, N> inv(simd<T, N> x) { return x; }
+template <typename T, int N> simd<T, N> exp(simd<T, N> x) { return x; }
+template <typename T, int N> simd<T, N> log(simd<T, N> x) { return x; }
+template <typename T, int N> simd<T, N> sin(simd<T, N> x) { return x; }
+template <typename T, int N> simd<T, N> cos(simd<T, N> x) { return x; }
+template <typename T, int N> simd<T, N> trunc(simd<T, N> x) { return x; }
+template <typename T, int N> simd<T, N> min(simd<T, N> a, simd<T, N>) {
+  return a;
+}
+template <typename T, int N> simd<T, N> max(simd<T, N> a, simd<T, N>) {
+  return a;
+}
+template <typename T, int N> simd<T, N> pow(simd<T, N> a, simd<T, N>) {
+  return a;
+}
+template <typename T, int N, typename U> simd<T, N> pow(simd<T, N> a, U) {
+  return a;
+}
 
 } // namespace intel_esimd
 

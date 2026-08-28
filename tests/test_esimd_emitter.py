@@ -147,3 +147,57 @@ def test_a_subscript_becomes_a_pointer(emitter):
     """
     assert emitter._as_pointer('glb_m0[i + 16 * j]') == 'glb_m0 + (i + 16 * j)'
     assert emitter._as_pointer('x') == '&x'
+
+
+# --------------------------------------------------------------------------
+# math: the ESIMD namespace, or nothing
+# --------------------------------------------------------------------------
+
+def _lexic():
+    from tensorforge.common.vm.lexic.sycl_lexic import SyclLexic
+    return SyclLexic('oneapi', 'intel', explicit_simd=True)
+
+
+@pytest.mark.parametrize('op,expected', [
+    ('ABS', 'intel_esimd::abs(a)'),
+    ('SQRT', 'intel_esimd::sqrt(a)'),
+    ('EXP', 'intel_esimd::exp(a)'),
+    ('LOG', 'intel_esimd::log(a)'),
+    ('SIN', 'intel_esimd::sin(a)'),
+    ('POW', 'intel_esimd::pow(a, b)'),
+    ('MIN', 'intel_esimd::min(a, b)'),
+    ('MAX', 'intel_esimd::max(a, b)'),
+])
+def test_the_esimd_intrinsic_is_used(op, expected):
+    from tensorforge.common.operation import Operation
+    assert expected in _lexic().get_operation(getattr(Operation, op),
+                                              Datatype.F32, 'a', 'b')
+
+
+def test_reciprocal_is_inv_not_a_division():
+    """`1 / x` does not compile against `simd<>`: there is no `operator/`
+    taking an `int` on the left, and the intrinsic exists for this."""
+    from tensorforge.common.operation import Operation
+    out = _lexic().get_operation(Operation.RCP, Datatype.F32, 'a', None)
+    assert 'inv(a)' in out and '1 /' not in out
+
+
+@pytest.mark.parametrize('op', ['TANH', 'TAN', 'ASIN', 'CBRT', 'ATANH'])
+def test_functions_the_hardware_library_lacks_are_declined(op):
+    """Declined, not substituted.
+
+    `sycl::tanh` is not a slower tanh for a `simd<>` operand -- it does not
+    accept one, and where a conversion exists it would compute on a single
+    element and look like it worked.  Composing one from the intrinsics that
+    do exist is a numerics decision and does not belong in a spelling table.
+    """
+    from tensorforge.common.operation import Operation
+    with pytest.raises(NotImplementedError, match='no ESIMD intrinsic'):
+        _lexic().get_operation(getattr(Operation, op), Datatype.F32, 'a', 'b')
+
+
+def test_the_spmd_lexic_is_untouched():
+    from tensorforge.common.operation import Operation
+    from tensorforge.common.vm.lexic.sycl_lexic import SyclLexic
+    spmd = SyclLexic('acpp', 'intel')
+    assert spmd.get_operation(Operation.TANH, Datatype.F32, 'a', None) == 'sycl::tanh(a)'
