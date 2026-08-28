@@ -74,9 +74,8 @@ __launch_bounds__(256)
           #pragma unroll
           for (int32_t v8_i0 = 0; v8_i0 < 1; ++v8_i0) {
             if (v12_g) {
-              int32_t v18_a = v8_i0 + v11_lead;
-              float v25_data = __ldcg(&glb_m1[(v8_i0 + v11_lead)]);
-              r0[v8_i0] = v25_data;
+              float v19_data = __ldcg(&glb_m1[(v8_i0 + v11_lead)]);
+              r0[v8_i0] = v19_data;
             }
           }
           float* __restrict__ s0 = &localShrMem0[0];
@@ -93,52 +92,50 @@ __launch_bounds__(256)
           // r1 = +(r0 * s0) + None
           // [(0, 20), (0, 9)] [(0, 1)]
           float ir1[9]{};
-          int32_t v33_lead = threadIdx.x % 32;
-          if (v33_lead < 20) {
-            float v35_data = r0[0];
-            float v36_data = s0[0];
-            float v38_data = ir1[0];
-            ir1[0] = (v38_data + (v35_data * v36_data));
-            float v41_data = s0[1];
-            float v43_data = ir1[1];
-            ir1[1] = (v43_data + (v35_data * v41_data));
-            float v46_data = s0[2];
-            float v48_data = ir1[2];
-            ir1[2] = (v48_data + (v35_data * v46_data));
-            float v51_data = s0[3];
-            float v53_data = ir1[3];
-            ir1[3] = (v53_data + (v35_data * v51_data));
-            float v56_data = s0[4];
-            float v58_data = ir1[4];
-            ir1[4] = (v58_data + (v35_data * v56_data));
-            float v61_data = s0[5];
-            float v63_data = ir1[5];
-            ir1[5] = (v63_data + (v35_data * v61_data));
-            float v66_data = s0[6];
-            float v68_data = ir1[6];
-            ir1[6] = (v68_data + (v35_data * v66_data));
-            float v71_data = s0[7];
-            float v73_data = ir1[7];
-            ir1[7] = (v73_data + (v35_data * v71_data));
-            float v76_data = s0[8];
-            float v78_data = ir1[8];
-            ir1[8] = (v78_data + (v35_data * v76_data));
+          int32_t v27_lead = threadIdx.x % 32;
+          if (v27_lead < 20) {
+            float v29_data = r0[0];
+            float v30_data = s0[0];
+            float v32_data = ir1[0];
+            ir1[0] = (v32_data + (v29_data * v30_data));
+            float v35_data = s0[1];
+            float v37_data = ir1[1];
+            ir1[1] = (v37_data + (v29_data * v35_data));
+            float v40_data = s0[2];
+            float v42_data = ir1[2];
+            ir1[2] = (v42_data + (v29_data * v40_data));
+            float v45_data = s0[3];
+            float v47_data = ir1[3];
+            ir1[3] = (v47_data + (v29_data * v45_data));
+            float v50_data = s0[4];
+            float v52_data = ir1[4];
+            ir1[4] = (v52_data + (v29_data * v50_data));
+            float v55_data = s0[5];
+            float v57_data = ir1[5];
+            ir1[5] = (v57_data + (v29_data * v55_data));
+            float v60_data = s0[6];
+            float v62_data = ir1[6];
+            ir1[6] = (v62_data + (v29_data * v60_data));
+            float v65_data = s0[7];
+            float v67_data = ir1[7];
+            ir1[7] = (v67_data + (v29_data * v65_data));
+            float v70_data = s0[8];
+            float v72_data = ir1[8];
+            ir1[8] = (v72_data + (v29_data * v70_data));
           }
-          if (v33_lead < 20) {
+          if (v27_lead < 20) {
             #pragma unroll
-            for (int32_t v84_n1 = 0; v84_n1 < 9; ++v84_n1) {
-              int32_t v85_a = 0 + v84_n1;
-              float v87_data = ir1[v84_n1];
-              r1[v84_n1] = v87_data;
+            for (int32_t v78_n1 = 0; v78_n1 < 9; ++v78_n1) {
+              float v80_data = ir1[v78_n1];
+              r1[v78_n1] = v80_data;
             }
           }
           // glb_m0 = store{r>g}(r1);
-          if (v33_lead < 20) {
+          if (v27_lead < 20) {
             #pragma unroll
-            for (int32_t v93_i1 = 0; v93_i1 < 9; ++v93_i1) {
-              int32_t v94_a = 0 + v93_i1;
-              float v96_data = r1[v93_i1];
-              glb_m0[(v33_lead + (v93_i1 * 20))] = v96_data;
+            for (int32_t v86_i1 = 0; v86_i1 < 9; ++v86_i1) {
+              float v88_data = r1[v86_i1];
+              glb_m0[(v27_lead + (v86_i1 * 20))] = v88_data;
             }
           }
           __syncwarp();

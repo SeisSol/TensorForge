@@ -63,22 +63,20 @@ __launch_bounds__(256)
           // glb_m1 = +(glb_m0, dims=[0])
           int32_t v8_lead = threadIdx.x % 32;
           bool v9_own = v8_lead < 16;
-          bool v28_w = v8_lead == 0;
+          bool v21_w = v8_lead == 0;
           #pragma unroll
           for (int32_t v6_k1 = 0; v6_k1 < 16; ++v6_k1) {
-            float v26_sel0;
+            float v19_sel0;
             if (v9_own) {
-              int32_t v15_a = v6_k1 * 16;
-              int32_t v16_a = v8_lead + v15_a;
-              float v24_data = glb_m0[(v8_lead + v15_a)];
-              v26_sel0 = v24_data;
+              float v17_data = glb_m0[(v8_lead + (v6_k1 * 16))];
+              v19_sel0 = v17_data;
             }
             else {
-              v26_sel0 = 0.0f;
+              v19_sel0 = 0.0f;
             }
-            float v27_red = tensorforge::reduction<tensorforge::ReductionOperation<float, tensorforge::Operation::Add>, 16, 1, float>(v26_sel0);
-            if (v28_w) {
-              glb_m1[v6_k1] = v27_red;
+            float v20_red = tensorforge::reduction<tensorforge::ReductionOperation<float, tensorforge::Operation::Add>, 16, 1, float>(v19_sel0);
+            if (v21_w) {
+              glb_m1[v6_k1] = v20_red;
             }
           }
         }

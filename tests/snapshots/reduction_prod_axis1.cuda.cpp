@@ -68,10 +68,8 @@ __launch_bounds__(256)
             float v11_acc0 = 1.0f;
             #pragma unroll
             for (int32_t v10_r1 = 0; v10_r1 < 16; ++v10_r1) {
-              int32_t v17_a = v10_r1 * 16;
-              int32_t v18_a = v8_lead + v17_a;
-              float v26_data = glb_m0[(v8_lead + v17_a)];
-              v11_acc0 = (v11_acc0 * v26_data);
+              float v19_data = glb_m0[(v8_lead + (v10_r1 * 16))];
+              v11_acc0 = (v11_acc0 * v19_data);
             }
             glb_m1[v8_lead] = v11_acc0;
           }

@@ -47,126 +47,115 @@ inline void kernel_kernel_7cc2a3c5b0(sycl::queue *stream, sycl::range<3> group_c
               float r0[32]{};
               // r0 = +(glb_m0) + None
               // [(0, 32)] []
-              int32_t v5_lead = 0 + 0_i32;
-              tensorforge::intel_esimd::simd<float, 32> v8_data;
-              v8_data.copy_from(glb_m0 + (0_i32));
-              tensorforge::intel_esimd::simd<float, 32> v9_data;
-              v9_data.copy_from(r0 + (0));
-              (v9_data + v8_data).copy_to(r0 + (0));
+              tensorforge::intel_esimd::simd<float, 32> v6_data;
+              v6_data.copy_from(glb_m0 + (0_i32));
+              tensorforge::intel_esimd::simd<float, 32> v7_data;
+              v7_data.copy_from(r0 + (0));
+              (v7_data + v6_data).copy_to(r0 + (0));
               float r1[96]{};
               // r1 = +(glb_m1) + None
               // [(0, 32), (0, 3)] []
-              int32_t v14_a = 0_i32 + 0;
-              tensorforge::intel_esimd::simd<float, 32> v18_data;
-              v18_data.copy_from(glb_m1 + (0_i32));
+              tensorforge::intel_esimd::simd<float, 32> v13_data;
+              v13_data.copy_from(glb_m1 + (0_i32));
+              tensorforge::intel_esimd::simd<float, 32> v14_data;
+              v14_data.copy_from(r1 + (0));
+              (v14_data + v13_data).copy_to(r1 + (0));
               tensorforge::intel_esimd::simd<float, 32> v19_data;
-              v19_data.copy_from(r1 + (0));
-              (v19_data + v18_data).copy_to(r1 + (0));
-              int32_t v23_a = 0_i32 + 32;
-              tensorforge::intel_esimd::simd<float, 32> v27_data;
-              v27_data.copy_from(glb_m1 + (32_i32));
-              tensorforge::intel_esimd::simd<float, 32> v28_data;
-              v28_data.copy_from(r1 + (32));
-              (v28_data + v27_data).copy_to(r1 + (32));
-              int32_t v32_a = 0_i32 + 64;
-              tensorforge::intel_esimd::simd<float, 32> v36_data;
-              v36_data.copy_from(glb_m1 + (64_i32));
-              tensorforge::intel_esimd::simd<float, 32> v37_data;
-              v37_data.copy_from(r1 + (64));
-              (v37_data + v36_data).copy_to(r1 + (64));
+              v19_data.copy_from(glb_m1 + (32_i32));
+              tensorforge::intel_esimd::simd<float, 32> v20_data;
+              v20_data.copy_from(r1 + (32));
+              (v20_data + v19_data).copy_to(r1 + (32));
+              tensorforge::intel_esimd::simd<float, 32> v25_data;
+              v25_data.copy_from(glb_m1 + (64_i32));
+              tensorforge::intel_esimd::simd<float, 32> v26_data;
+              v26_data.copy_from(r1 + (64));
+              (v26_data + v25_data).copy_to(r1 + (64));
               float r2[96]{};
               // r2 = +(r0) + None
               // [(0, 32), (0, 3)] []
-              tensorforge::intel_esimd::simd<float, 32> v40_data;
-              v40_data.copy_from(r0 + (0));
-              tensorforge::intel_esimd::simd<float, 32> v41_data;
-              v41_data.copy_from(r2 + (0));
-              (v41_data + v40_data).copy_to(r2 + (0));
-              tensorforge::intel_esimd::simd<float, 32> v44_data;
-              v44_data.copy_from(r2 + (32));
-              (v44_data + v40_data).copy_to(r2 + (32));
-              tensorforge::intel_esimd::simd<float, 32> v47_data;
-              v47_data.copy_from(r2 + (64));
-              (v47_data + v40_data).copy_to(r2 + (64));
+              tensorforge::intel_esimd::simd<float, 32> v29_data;
+              v29_data.copy_from(r0 + (0));
+              tensorforge::intel_esimd::simd<float, 32> v30_data;
+              v30_data.copy_from(r2 + (0));
+              (v30_data + v29_data).copy_to(r2 + (0));
+              tensorforge::intel_esimd::simd<float, 32> v33_data;
+              v33_data.copy_from(r2 + (32));
+              (v33_data + v29_data).copy_to(r2 + (32));
+              tensorforge::intel_esimd::simd<float, 32> v36_data;
+              v36_data.copy_from(r2 + (64));
+              (v36_data + v29_data).copy_to(r2 + (64));
               float r3[96]{};
               // r3 = +(r1) + name: r2, type: SymbolType.Register, lead: [0]
               // [(0, 32), (0, 3)] []
               float ir3[96]{};
-              tensorforge::intel_esimd::simd<float, 32> v51_data;
-              v51_data.copy_from(r1 + (0));
-              tensorforge::intel_esimd::simd<float, 32> v52_data;
-              v52_data.copy_from(ir3 + (0));
-              (v52_data + v51_data).copy_to(ir3 + (0));
-              tensorforge::intel_esimd::simd<float, 32> v54_data;
-              v54_data.copy_from(r1 + (32));
-              tensorforge::intel_esimd::simd<float, 32> v55_data;
-              v55_data.copy_from(ir3 + (32));
-              (v55_data + v54_data).copy_to(ir3 + (32));
-              tensorforge::intel_esimd::simd<float, 32> v57_data;
-              v57_data.copy_from(r1 + (64));
-              tensorforge::intel_esimd::simd<float, 32> v58_data;
-              v58_data.copy_from(ir3 + (64));
-              (v58_data + v57_data).copy_to(ir3 + (64));
+              tensorforge::intel_esimd::simd<float, 32> v40_data;
+              v40_data.copy_from(r1 + (0));
+              tensorforge::intel_esimd::simd<float, 32> v41_data;
+              v41_data.copy_from(ir3 + (0));
+              (v41_data + v40_data).copy_to(ir3 + (0));
+              tensorforge::intel_esimd::simd<float, 32> v43_data;
+              v43_data.copy_from(r1 + (32));
+              tensorforge::intel_esimd::simd<float, 32> v44_data;
+              v44_data.copy_from(ir3 + (32));
+              (v44_data + v43_data).copy_to(ir3 + (32));
+              tensorforge::intel_esimd::simd<float, 32> v46_data;
+              v46_data.copy_from(r1 + (64));
+              tensorforge::intel_esimd::simd<float, 32> v47_data;
+              v47_data.copy_from(ir3 + (64));
+              (v47_data + v46_data).copy_to(ir3 + (64));
               #pragma unroll
-              for (int32_t v60_n0 = 0; v60_n0 < 1; ++v60_n0) {
-                int32_t v62_a = v60_n0 * 32;
+              for (int32_t v49_n0 = 0; v49_n0 < 1; ++v49_n0) {
+                int32_t v51_a = v49_n0 * 32;
                 #pragma unroll
-                for (int32_t v61_n1 = 0; v61_n1 < 3; ++v61_n1) {
-                  int32_t v63_a = v61_n1 * 32;
-                  int32_t v64_a = v62_a + v63_a;
-                  int32_t v67_a = v62_a + v63_a;
-                  tensorforge::intel_esimd::simd<float, 32> v68_data;
-                  v68_data.copy_from(ir3 + (v67_a));
-                  int32_t v71_a = v62_a + v63_a;
-                  tensorforge::intel_esimd::simd<float, 32> v75_data;
-                  v75_data.copy_from(r2 + (v67_a));
-                  (v75_data + v68_data).copy_to(r3 + (v67_a));
+                for (int32_t v50_n1 = 0; v50_n1 < 3; ++v50_n1) {
+                  int32_t v53_a = v51_a + (v50_n1 * 32);
+                  tensorforge::intel_esimd::simd<float, 32> v54_data;
+                  v54_data.copy_from(ir3 + (v53_a));
+                  tensorforge::intel_esimd::simd<float, 32> v58_data;
+                  v58_data.copy_from(r2 + (v53_a));
+                  (v58_data + v54_data).copy_to(r3 + (v53_a));
                 }
               }
               float r4[96]{};
               // r4 = +(r3) + None
               // [(0, 32), (0, 3)] []
               float ir4[96]{};
-              tensorforge::intel_esimd::simd<float, 32> v82_data;
-              v82_data.copy_from(r3 + (0));
-              tensorforge::intel_esimd::simd<float, 32> v83_data;
-              v83_data.copy_from(ir4 + (0));
-              (v83_data + v82_data).copy_to(ir4 + (0));
-              tensorforge::intel_esimd::simd<float, 32> v85_data;
-              v85_data.copy_from(r3 + (32));
-              tensorforge::intel_esimd::simd<float, 32> v86_data;
-              v86_data.copy_from(ir4 + (32));
-              (v86_data + v85_data).copy_to(ir4 + (32));
-              tensorforge::intel_esimd::simd<float, 32> v88_data;
-              v88_data.copy_from(r3 + (64));
-              tensorforge::intel_esimd::simd<float, 32> v89_data;
-              v89_data.copy_from(ir4 + (64));
-              (v89_data + v88_data).copy_to(ir4 + (64));
+              tensorforge::intel_esimd::simd<float, 32> v65_data;
+              v65_data.copy_from(r3 + (0));
+              tensorforge::intel_esimd::simd<float, 32> v66_data;
+              v66_data.copy_from(ir4 + (0));
+              (v66_data + v65_data).copy_to(ir4 + (0));
+              tensorforge::intel_esimd::simd<float, 32> v68_data;
+              v68_data.copy_from(r3 + (32));
+              tensorforge::intel_esimd::simd<float, 32> v69_data;
+              v69_data.copy_from(ir4 + (32));
+              (v69_data + v68_data).copy_to(ir4 + (32));
+              tensorforge::intel_esimd::simd<float, 32> v71_data;
+              v71_data.copy_from(r3 + (64));
+              tensorforge::intel_esimd::simd<float, 32> v72_data;
+              v72_data.copy_from(ir4 + (64));
+              (v72_data + v71_data).copy_to(ir4 + (64));
               #pragma unroll
-              for (int32_t v91_n0 = 0; v91_n0 < 1; ++v91_n0) {
-                int32_t v93_a = v91_n0 * 32;
+              for (int32_t v74_n0 = 0; v74_n0 < 1; ++v74_n0) {
+                int32_t v76_a = v74_n0 * 32;
                 #pragma unroll
-                for (int32_t v92_n1 = 0; v92_n1 < 3; ++v92_n1) {
-                  int32_t v94_a = v92_n1 * 32;
-                  int32_t v95_a = v93_a + v94_a;
-                  int32_t v98_a = v93_a + v94_a;
-                  tensorforge::intel_esimd::simd<float, 32> v99_data;
-                  v99_data.copy_from(ir4 + (v98_a));
-                  v99_data.copy_to(r4 + (v98_a));
+                for (int32_t v75_n1 = 0; v75_n1 < 3; ++v75_n1) {
+                  int32_t v78_a = v76_a + (v75_n1 * 32);
+                  tensorforge::intel_esimd::simd<float, 32> v79_data;
+                  v79_data.copy_from(ir4 + (v78_a));
+                  v79_data.copy_to(r4 + (v78_a));
                 }
               }
               // glb_m2 = store{r>g}(r4);
               #pragma unroll
-              for (int32_t v103_i0 = 0; v103_i0 < 1; ++v103_i0) {
-                int32_t v105_a = v103_i0 * 32;
+              for (int32_t v83_i0 = 0; v83_i0 < 1; ++v83_i0) {
+                int32_t v85_a = v83_i0 * 32;
                 #pragma unroll
-                for (int32_t v104_i1 = 0; v104_i1 < 3; ++v104_i1) {
-                  int32_t v106_a = v104_i1 * 32;
-                  int32_t v107_a = v105_a + v106_a;
-                  int32_t v110_a = v105_a + v106_a;
-                  tensorforge::intel_esimd::simd<float, 32> v111_data;
-                  v111_data.copy_from(r4 + (v110_a));
-                  v111_data.copy_to(glb_m2 + (v110_a));
+                for (int32_t v84_i1 = 0; v84_i1 < 3; ++v84_i1) {
+                  int32_t v87_a = v85_a + (v84_i1 * 32);
+                  tensorforge::intel_esimd::simd<float, 32> v88_data;
+                  v88_data.copy_from(r4 + (v87_a));
+                  v88_data.copy_to(glb_m2 + (v87_a));
                 }
               }
             }

@@ -68,9 +68,8 @@ __launch_bounds__(256)
             #pragma unroll
             for (int32_t v10_k1 = 0; v10_k1 < 16; ++v10_k1) {
               int32_t v16_a = v10_k1 * 16;
-              int32_t v17_a = v8_lead + v16_a;
-              float v25_data = glb_m0[(v8_lead + v16_a)];
-              glb_m1[(v8_lead + v16_a)] = (logf(v25_data));
+              float v18_data = glb_m0[(v8_lead + v16_a)];
+              glb_m1[(v8_lead + v16_a)] = (logf(v18_data));
             }
           }
           __syncwarp();

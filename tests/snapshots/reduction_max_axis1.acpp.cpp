@@ -46,14 +46,11 @@ inline void kernel_kernel_23e9c13a7a(sycl::queue *stream, sycl::range<3> group_c
               for (int32_t v5_k0 = 0; v5_k0 < 1; ++v5_k0) {
                 int32_t v11_lead = v5_k0 * 16;
                 int32_t v12_lead = v4_lead + v11_lead;
-                int32_t v19_lead = v4_lead + v11_lead;
                 float v7_acc0 = -INFINITY;
                 #pragma unroll
                 for (int32_t v6_r1 = 0; v6_r1 < 16; ++v6_r1) {
-                  int32_t v13_a = v6_r1 * 16;
-                  int32_t v14_a = v12_lead + v13_a;
-                  float v22_data = glb_m0[(v19_lead + v13_a)];
-                  v7_acc0 = (sycl::max(float(v7_acc0), float(v22_data)));
+                  float v15_data = glb_m0[(v12_lead + (v6_r1 * 16))];
+                  v7_acc0 = (sycl::max(float(v7_acc0), float(v15_data)));
                 }
                 glb_m1[(v4_lead + v11_lead)] = v7_acc0;
               }

@@ -53,45 +53,39 @@ inline void kernel_kernel_0b2fc070b9(sycl::queue *stream, sycl::range<3> group_c
               // [(0, 2), (0, 2)] [(0, 2)]
               __float128 ir0[2]{};
               int32_t v8_lead = item.get_local_id(0) % 2;
-              int32_t v14_a = v8_lead + 0;
-              __float128 v21_data = glb_m1[v8_lead];
-              __float128 v22_data = s0[0];
-              __float128 v24_data = ir0[0];
-              ir0[0] = (v24_data + (v21_data * v22_data));
-              int32_t v31_a = v8_lead + 0;
-              __float128 v38_data = glb_m1[v8_lead];
-              __float128 v39_data = s0[2];
-              __float128 v41_data = ir0[1];
-              ir0[1] = (v41_data + (v38_data * v39_data));
-              int32_t v51_a = v8_lead + 2;
-              __float128 v58_data = glb_m1[(v8_lead + 2)];
-              __float128 v59_data = s0[1];
-              __float128 v61_data = ir0[0];
-              ir0[0] = (v61_data + (v58_data * v59_data));
-              int32_t v68_a = v8_lead + 2;
-              __float128 v75_data = glb_m1[(v8_lead + 2)];
-              __float128 v76_data = s0[3];
-              __float128 v78_data = ir0[1];
-              ir0[1] = (v78_data + (v75_data * v76_data));
+              __float128 v15_data = glb_m1[v8_lead];
+              __float128 v16_data = s0[0];
+              __float128 v18_data = ir0[0];
+              ir0[0] = (v18_data + (v15_data * v16_data));
+              __float128 v26_data = glb_m1[v8_lead];
+              __float128 v27_data = s0[2];
+              __float128 v29_data = ir0[1];
+              ir0[1] = (v29_data + (v26_data * v27_data));
+              __float128 v40_data = glb_m1[(v8_lead + 2)];
+              __float128 v41_data = s0[1];
+              __float128 v43_data = ir0[0];
+              ir0[0] = (v43_data + (v40_data * v41_data));
+              __float128 v51_data = glb_m1[(v8_lead + 2)];
+              __float128 v52_data = s0[3];
+              __float128 v54_data = ir0[1];
+              ir0[1] = (v54_data + (v51_data * v52_data));
               #pragma unroll
-              for (int32_t v83_n0 = 0; v83_n0 < 1; ++v83_n0) {
+              for (int32_t v59_n0 = 0; v59_n0 < 1; ++v59_n0) {
                 #pragma unroll
-                for (int32_t v84_n1 = 0; v84_n1 < 2; ++v84_n1) {
-                  int32_t v85_a = v83_n0 + v84_n1;
-                  int32_t v86_a = v83_n0 + v84_n1;
-                  __float128 v87_data = ir0[v86_a];
-                  r0[v86_a] = v87_data;
+                for (int32_t v60_n1 = 0; v60_n1 < 2; ++v60_n1) {
+                  int32_t v61_a = v59_n0 + v60_n1;
+                  __float128 v62_data = ir0[v61_a];
+                  r0[v61_a] = v62_data;
                 }
               }
               // glb_m0 = store{r>g}(r0);
               #pragma unroll
-              for (int32_t v92_i0 = 0; v92_i0 < 1; ++v92_i0) {
-                int32_t v101_lead = v8_lead + (v92_i0 * 2);
+              for (int32_t v67_i0 = 0; v67_i0 < 1; ++v67_i0) {
+                int32_t v75_lead = v8_lead + (v67_i0 * 2);
                 #pragma unroll
-                for (int32_t v93_i1 = 0; v93_i1 < 2; ++v93_i1) {
-                  int32_t v94_a = v92_i0 + v93_i1;
-                  __float128 v96_data = r0[(v92_i0 + v93_i1)];
-                  glb_m0[(v101_lead + (v93_i1 * 2))] = v96_data;
+                for (int32_t v68_i1 = 0; v68_i1 < 2; ++v68_i1) {
+                  __float128 v70_data = r0[(v67_i0 + v68_i1)];
+                  glb_m0[(v75_lead + (v68_i1 * 2))] = v70_data;
                 }
               }
             }

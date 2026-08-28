@@ -46,12 +46,10 @@ inline void kernel_kernel_ba8a743602(sycl::queue *stream, sycl::range<3> group_c
                 int32_t v4_lead = v2_k0 * 16;
                 #pragma unroll
                 for (int32_t v3_k1 = 0; v3_k1 < 16; ++v3_k1) {
-                  int32_t v6_a = v3_k1 * 16;
-                  int32_t v7_a = v4_lead + v6_a;
-                  int32_t v11_a = v4_lead + v6_a;
-                  tensorforge::intel_esimd::simd<float, 16> v12_data;
-                  v12_data.copy_from(glb_m0 + (v11_a));
-                  (tensorforge::intel_esimd::inv(v12_data)).copy_to(glb_m1 + (v11_a));
+                  int32_t v7_a = v4_lead + (v3_k1 * 16);
+                  tensorforge::intel_esimd::simd<float, 16> v8_data;
+                  v8_data.copy_from(glb_m0 + (v7_a));
+                  (tensorforge::intel_esimd::inv(v8_data)).copy_to(glb_m1 + (v7_a));
                 }
               }
             }
