@@ -134,7 +134,14 @@ def _check_scope(body: Tuple[Stmt, ...], live: set, diag: List[str],
             if wide:
                 need = wide[0].type.length * wide[0].type.base.size()
                 claim = s.attr('align')
-                if claim is None:
+                if claim == 'relaxed':
+                    # Spelled with an element-aligned type, so there is no
+                    # alignment to prove: the compiler splits the access
+                    # rather than emitting one the hardware needs aligned.
+                    # The register side takes this route because a private
+                    # address cannot be made contiguous at all.
+                    pass
+                elif claim is None:
                     diag.append(
                         f'{s.op}: {wide[0].type} access carries no alignment '
                         f'claim; a {need}-byte reinterpret cast needs one and '

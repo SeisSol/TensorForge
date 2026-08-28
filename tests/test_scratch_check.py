@@ -165,13 +165,7 @@ def _bodies(case: str, backend: str, arch: str):
 # value, 10 before the transfers became `copy.async`.  The five
 # `cuda::pipeline` statements and the two miscategorised comments went with
 # that last one: the pipeline calls because there is no object left to drive,
-# the comments because the block that carried them did.  And 0 with the last
-# three: `Symbol.store` routes global memory through `Op.STORE`, so the raw
-# assignments that were left declare their accesses like everything else.
-#
-# Both entries are zero now, which means the ratchet has done its job and the
-# equality assertion below is the only thing still worth having -- it is what
-# turns a *new* opaque statement into a failure instead of a slow drift back.
+# the comments because the block that carried them did.
 STILL_OPAQUE = {"rectangular.py": 0, "square_notrans.py": 0}
 
 

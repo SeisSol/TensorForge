@@ -139,7 +139,11 @@ class CudaLexic(Lexic):
   def wait_async(self, prior):
     return f'__pipeline_wait_prior({prior});'
 
-  def get_fptype(self, fptype, length=1):
+  def get_fptype(self, fptype, length=1, relaxed=False):
+    if relaxed:
+      # Element alignment only: the compiler splits the access rather than
+      # emitting one the hardware requires to be aligned.
+      return f'tensorforge::VectorRelaxedT<{fptype}, {length}>'
     if length <= 4:
       suffix = f'{length}' if length > 1 else ''
       return f'{fptype}{suffix}'

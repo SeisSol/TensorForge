@@ -53,6 +53,12 @@ constexpr std::int64_t operator"" _i64(unsigned long long value) {
 namespace tfshim {
 template <typename T, std::size_t N> struct Vec {
   typedef T type __attribute__((__vector_size__(N * sizeof(T))));
+  // Same width, element alignment only.  The register side of a staging
+  // transfer uses this: a private address cannot be made to name a
+  // contiguous 16 bytes, so there is no alignment to prove there and an
+  // over-aligned type cast onto a 4-byte-aligned array would be undefined.
+  typedef T relaxed
+      __attribute__((__vector_size__(N * sizeof(T)), __aligned__(sizeof(T))));
 };
 } // namespace tfshim
 
@@ -162,6 +168,9 @@ namespace tensorforge {
 template <typename T, std::size_t N>
 using VectorT = typename tfshim::Vec<T, N>::type;
 
+template <typename T, std::size_t N>
+using VectorRelaxedT = typename tfshim::Vec<T, N>::relaxed;
+
 constexpr std::size_t GlobalMemspace = 1;
 constexpr std::size_t ConstantMemspace = 4;
 
@@ -229,4 +238,13 @@ static_assert(sizeof(tensorforge::VectorT<float, 4>) == 4 * sizeof(float),
               "passes through it is now meaningless");
 static_assert(sizeof(tensorforge::VectorT<double, 2>) == 2 * sizeof(double),
               "VectorT lost its vector_size attribute");
+// The relaxed twin is the same width and deliberately *not* the same
+// alignment.  If these two ever agree, the twin has stopped being one and
+// every register-side cast is back to claiming an alignment it does not have.
+static_assert(sizeof(tensorforge::VectorRelaxedT<float, 4>) ==
+                  4 * sizeof(float),
+              "VectorRelaxedT lost its vector_size attribute");
+static_assert(alignof(tensorforge::VectorRelaxedT<float, 4>) == alignof(float),
+              "VectorRelaxedT is over-aligned: it exists to be castable onto "
+              "an array that only has element alignment");
 #endif // SEISSOL_TESTS_SHIM_TENSORFORGE_HOST_H_

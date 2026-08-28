@@ -135,8 +135,9 @@ class HipLexic(CudaLexic):
       return super().wait_async_regs(prior)
     return self.wait_async(prior)
 
-  def get_fptype(self, fptype, length=1):
-    return f'tensorforge::VectorT<{fptype}, {length}>'
+  def get_fptype(self, fptype, length=1, relaxed=False):
+    kind = 'VectorRelaxedT' if relaxed else 'VectorT'
+    return f'tensorforge::{kind}<{fptype}, {length}>'
 
   def glb_store(self, lhs, rhs, nontemporal=False):
     if nontemporal and self._underlying_hardware == 'amd':

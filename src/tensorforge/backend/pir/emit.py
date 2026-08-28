@@ -310,7 +310,8 @@ class Emitter:
             return self.name(base)
         return getattr(base, 'name', str(base))
 
-    def elem_access(self, base: Operand, addr: str, t) -> str:
+    def elem_access(self, base: Operand, addr: str, t,
+                    relaxed: bool = False) -> str:
         """``base[addr]``, reinterpreted when the value is wider than one element.
 
         A buffer is typed by its element, so a vector-typed access reads or
@@ -328,8 +329,18 @@ class Emitter:
         """
         access = f'{self.base_name(base)}[{addr}]'
         if isinstance(t, ScalarType) and t.length is not None:
-            return f'*({self.ctype(t)}*)&{access}'
+            return f'*({self._vector_ctype(t, relaxed)}*)&{access}'
         return access
+
+    def _vector_ctype(self, t, relaxed: bool) -> str:
+        lex = self._lexic()
+        if lex is None:
+            return self.ctype(t)
+        try:
+            return lex.get_fptype(t.base.ctype(), t.length, relaxed=relaxed)
+        except TypeError:
+            # A lexic that predates the flag spells one type for both.
+            return lex.get_fptype(t.base.ctype(), t.length)
 
     # -- driver ------------------------------------------------------------ #
 
@@ -496,7 +507,8 @@ class Emitter:
             v = s.target[0]
             addr = self.address(s.args[0], s.args[1:])
             nontemporal = s.attr('nontemporal')
-            access = self.elem_access(s.args[0], addr, v.type)
+            access = self.elem_access(s.args[0], addr, v.type,
+                                      s.attr('align') == 'relaxed')
             if nontemporal:
                 self.declare(v, f'{lex.glb_load(access, True)}', s)
             else:
@@ -520,7 +532,8 @@ class Emitter:
             addr = self.address(s.args[0], s.args[2:])
             val = s.args[1]
             vt = val.type if isinstance(val, Value) else None
-            access = self.elem_access(s.args[0], addr, vt)
+            access = self.elem_access(s.args[0], addr, vt,
+                                      s.attr('align') == 'relaxed')
             # A store to global memory goes through the lexic, the same way
             # `Op.LOAD` above goes through `glb_load`: the nontemporal hint is
             # `__stcg` on NVIDIA and `__builtin_nontemporal_store` on AMD, and

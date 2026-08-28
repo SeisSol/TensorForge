@@ -664,7 +664,10 @@ class IRBuilder:
         if nontemporal:
             attrs += [('nontemporal', nontemporal)]
         if align is not None:
-            # What the *caller* proved about this address, in bytes.  A wide
+            # Either a byte count -- what the caller proved about this
+            # address -- or the string `'relaxed'`, meaning the access is
+            # spelled with a type that declares element alignment and so
+            # needs no proof.  What the*caller* proved about this address, in bytes.  A wide
             # access is spelled as a reinterpret cast, and the cast's legality
             # is not recoverable from the IR: the address is an expression,
             # often a string.  So it is carried rather than derived, and

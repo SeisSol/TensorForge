@@ -22,6 +22,22 @@ namespace tensorforge {
 // exchange.
 inline constexpr unsigned FullWarpMask = 0xffffffffu;
 
+// CUDA's own `float2`/`float4` are `__align__(8)`/`__align__(16)`, which is
+// right for a global access and wrong for a private one: a register staging
+// array is 4-byte aligned by every rule that applies to it, and casting an
+// over-aligned type onto it is undefined however reliably the compiler has
+// been getting away with it.  This is the same pair `hip.h` declares -- the
+// natural width for a base that proves it, and an element-aligned twin for a
+// base that does not.
+template <typename T, std::size_t N> struct VectorOf {
+  typedef T type __attribute__((__vector_size__(N * sizeof(T))));
+  typedef T relaxed
+      __attribute__((__vector_size__(N * sizeof(T)), __aligned__(sizeof(T))));
+};
+
+template <typename T, std::size_t N>
+using VectorRelaxedT = typename VectorOf<T, N>::relaxed;
+
 __device__ __forceinline__ int lane_id() {
   int lane;
   asm("mov.u32 %0, %%laneid" : "=r"(lane)::);

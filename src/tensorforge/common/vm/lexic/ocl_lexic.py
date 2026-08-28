@@ -49,7 +49,12 @@ class OpenCLLexic(Lexic):
   def kernel_range_object(self, name, values):
     return f"cl::sycl::range<3> {name} ({values})"
 
-  def get_fptype(self, fptype, length=1):
+  def get_fptype(self, fptype, length=1, relaxed=False):
+    # `sycl::vec` carries its own alignment and there is no relaxed spelling
+    # for it, so the flag is accepted and ignored rather than silently
+    # changing the type.  A relaxed access on this backend is therefore only
+    # as legal as `sycl::vec` makes it, which is why `widths_for` has to keep
+    # answering from a base that proves what it needs.
     return f'sycl::vec<{fptype}, {length}>'
 
 # TODO: nontemporal load/store

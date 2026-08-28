@@ -180,3 +180,29 @@ def test_the_store_is_checked_against_the_stored_value():
     v = b.load(buf(b), 'i', type_=F32X2, hint='lin', align=8)
     b.store(buf(b), v, 'j')
     assert any('no alignment claim' in d for d in verify_diags(b.finish()))
+
+
+def test_a_relaxed_access_needs_no_alignment_proof():
+    """The register side of a staging transfer.
+
+    A private address cannot be made to name a contiguous 16 bytes -- AMDGPU
+    interleaves the lanes at dword granularity -- so demanding an alignment
+    there can only force an `alignas` that pads the scratch frame without
+    buying a wide transfer. The access declares element alignment instead and
+    the compiler splits it, which is what the hardware does regardless.
+    """
+    b = builder()
+    v = b.load(buf(b), 'i', type_=F32X4, hint='lin', align=16)
+    b.store(buf(b), v, 'j', align='relaxed')
+    assert verify_diags(b.finish()) == []
+
+
+def test_relaxed_is_not_a_way_to_skip_the_check_on_the_other_side():
+    """It says something specific, not "never mind".
+
+    The global read still has to prove 16 bytes: that one is a real hardware
+    alignment requirement, and no spelling relaxes `LDG.128`.
+    """
+    b = builder()
+    b.load(buf(b), 'i', type_=F32X4, hint='lin', align=8)
+    assert any('needs 16-byte' in d for d in verify_diags(b.finish()))

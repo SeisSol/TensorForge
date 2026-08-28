@@ -45,19 +45,25 @@ class RegisterAlloc(AbstractInstruction):
       # builder.  On the unmigrated path it is the Writer, which has no
       # structured alloc, so that path keeps emitting the line.
       if hasattr(writer, 'alloc') and callable(getattr(writer, 'alloc')):
-        # Aligned as far as one wide access could use, so that a width may be
-        # chosen from a guarantee this declaration actually makes.  It also
-        # breaks a circularity: the width is the minimum over both bases, and
-        # if the register end were decided from the width there would be
-        # nothing to start from.
-        from tensorforge.backend.instructions.memory import vectorize
-        align = vectorize.register_array_align(
-            self._dest.obj.size * datatype.size())
+        # Deliberately *not* over-aligned.  An earlier version declared this
+        # `alignas(16)` so a wide access could be cast onto it; that was a
+        # category error.  A register array lives in the private address
+        # space, where AMDGPU interleaves the lanes at dword granularity --
+        # `(private_addr / 4) * wave_size * 4 + lane * 4 + private_addr % 4`.
+        # Four consecutive private dwords are `wave_size * 4` bytes apart in
+        # the backing memory, so a 16-byte-aligned private address does not
+        # name a contiguous 16 bytes and a wide private access cannot be one
+        # transfer however it is aligned.  The alignment bought nothing there
+        # and padded the scratch frame, which is occupancy.
+        #
+        # In the case that matters the array is promoted and there is no
+        # address at all.  What the cast needs is to be well-defined C++, and
+        # that is what the relaxed vector type is for -- see
+        # `Symbol._linear_claim`.
         value = writer.alloc(datatype, (self._dest.obj.size,),
                              MemSpace.REGISTER,
                              hint=self._dest.obj.name,
                              extern=self._dest.obj.name,
-                             align=align if align > datatype.size() else None,
                              init=init_values_list)
         # Publish it, so a consumer built into this same body addresses the
         # buffer as a value rather than by interpolating the name.  Consumers

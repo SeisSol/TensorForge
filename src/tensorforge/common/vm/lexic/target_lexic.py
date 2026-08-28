@@ -207,8 +207,10 @@ class TargetLexic(Lexic):
       headers += ['unordered_map']
     return headers
 
-  def get_fptype(self, fptype, length=1):
-    return f'__attribute__ ((vector_size (sizeof({fptype}) * {length}))) {fptype}'
+  def get_fptype(self, fptype, length=1, relaxed=False):
+    align = f', aligned (sizeof({fptype}))' if relaxed else ''
+    return (f'__attribute__ ((vector_size (sizeof({fptype}) * {length})'
+            f'{align})) {fptype}')
 
   def get_operation(self, op: Operation, fptype, value1, value2):
     fpsuffix = 'f' if fptype == Datatype.F32 else ''

@@ -17,6 +17,12 @@ from tensorforge.common.matrix.spp import BoundingBoxSPP
 
 import numpy as np
 
+#: A wide access that does not prove an alignment but is spelled with a type
+#: that declares only element alignment.  Legal at any base; the compiler
+#: splits it rather than emitting a transfer the hardware needs aligned.
+RELAXED = 'relaxed'
+
+
 class SymbolType(enum.Enum):
   Batch = 1
   Global = 2
@@ -653,13 +659,16 @@ class Symbol:
     elem = self.get_fptype().size()
     base = self.linear_align_bytes()
     if self.stype == SymbolType.Register:
-      # The register address is the slot, not the element: `index //
-      # num_threads`.  So it is the slot that has to divide.
-      off = (index // self.num_threads) if isinstance(index, int) else None
-    else:
-      # `index + threadIdx.x * vec`: the lane term is a multiple of `vec` by
-      # construction, so only the base offset can break the alignment.
-      off = index if isinstance(index, int) else None
+      # `RELAXED`, not a number.  A private address cannot be made to name a
+      # contiguous 16 bytes -- AMDGPU interleaves the lanes at dword
+      # granularity -- so there is no alignment to prove here and demanding
+      # one would only force an `alignas` that pads the scratch frame without
+      # buying a wide transfer.  The access is spelled with the relaxed
+      # vector type instead, which is well-defined at element alignment.
+      return RELAXED
+    # `index + threadIdx.x * vec`: the lane term is a multiple of `vec` by
+    # construction, so only the base offset can break the alignment.
+    off = index if isinstance(index, int) else None
     if off is None:
       # A symbolic offset proves nothing.  Answering the element size makes
       # `verify` reject any wide access built on one, which is the intent:
@@ -692,24 +701,19 @@ class Symbol:
     * **SharedMem/Scratch**: 16, and not by assumption -- `_suballocate`
       rounds every window start up to `16 // elem.size()` elements for this
       reason, so the property holds however the windows were requested.
-    * **Register**: what `allocate.py` declares, which is
-      `vectorize.register_array_align` of the array's size.  A plain `float
-      r[8]` is not `float4`-aligned by any rule, and the compiler
-      over-aligning it in practice is not a guarantee to cast on -- so the
-      array is declared `alignas`, and this reads back the same rule rather
-      than a second one that could drift from it.
+    * **Register**: the element size, and that is not a limitation to work
+      around.  A register array is in the private address space, which
+      AMDGPU interleaves per lane at dword granularity, so no alignment of a
+      private address makes a wide access contiguous -- and in the case that
+      matters the array is promoted and has no address.  A wide *register*
+      access is therefore spelled with the relaxed vector type instead of
+      demanding an alignment, and the width is decided by the other end.
     """
-    from tensorforge.backend.instructions.memory import vectorize
     elem = self.get_fptype().size()
     if self.stype in (SymbolType.SharedMem, SymbolType.Scratch):
       return max(elem, 16)
     if self.stype in (SymbolType.Global, SymbolType.Data, SymbolType.Batch):
       return max(elem, getattr(self.obj, 'alignment', 0) or 0)
-    if self.stype == SymbolType.Register:
-      size = getattr(self.obj, 'size', None)
-      if size is None:
-        return elem
-      return max(elem, vectorize.register_array_align(size * elem))
     return elem
 
   def clone(self):

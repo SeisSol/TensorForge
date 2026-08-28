@@ -471,18 +471,21 @@ class GlbToRegLoader(MemoryInstruction, LoadInstruction):
       # TODO: box better?
       total_size = self._src.obj.spp.count_nz()
 
-      # The widths are no longer a list with the interesting entries commented
-      # out.  A transfer is as wide as the *narrower* of its two bases allows,
-      # and both have to prove it -- the read is a reinterpret cast and so is
-      # the write.  Today the destination is a register array with only its
-      # natural alignment, so this comes out as `[1]` on its own and the
-      # emitted code is unchanged; it opens up when the array is declared
-      # aligned, which is a fact about the allocation rather than an edit
-      # here.
+      # The width comes from the *source*, and only from the source.  An
+      # earlier version took the minimum over both ends, which was wrong in a
+      # way that quietly disabled the whole path: the destination is a
+      # register array in the private address space, where AMDGPU interleaves
+      # the lanes at dword granularity, so no alignment of a private address
+      # names a contiguous 16 bytes and asking that end to prove one can only
+      # ever answer "4".  The register side is spelled with the relaxed
+      # vector type instead -- legal at any alignment, split by the compiler
+      # if the array survives to be addressed at all, and free when it is
+      # promoted, which is the case that matters.
+      #
+      # So what is being decided here is the width of the *global* read, which
+      # is the access with a real hardware alignment requirement.
       elem = self._src.get_fptype().size()
-      widths = vectorize.widths_for(
-          elem, min(self._src.linear_align_bytes(),
-                    self._dest.linear_align_bytes()))
+      widths = vectorize.widths_for(elem, self._src.linear_align_bytes())
       hops, tail = vectorize.plan_hops(total_size, self._num_threads, widths)
 
       for i, g in hops:
