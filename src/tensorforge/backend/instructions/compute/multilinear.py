@@ -144,7 +144,15 @@ class MultilinearInstruction(ComputeInstruction):
     def _analyze(self):
         self._check_offsets()
 
-        targetrank = 0
+        # The destination decides how many indices this operation writes; the
+        # operands only say which of them they carry.  Deriving the rank from
+        # the operands alone drops any index none of them mentions --- which is
+        # exactly what a broadcast is: `t4[32x3] = t2[32]` has one operand
+        # targeting `[0]`, and dimension 1 vanished, so the loop nest ran over
+        # `n0` only and wrote one slot per lead block instead of three.  An
+        # operand that lacks an index is read at the same address for every
+        # value of it, which is the broadcast; the index still has to exist.
+        targetrank = self._dest_obj.bbox.rank()
         for i, op in enumerate(self._ops):
             for j in range(op.bbox.rank()):
                 targetrank = max(self._target[i][j] + 1, targetrank)

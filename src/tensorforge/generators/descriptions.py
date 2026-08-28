@@ -24,7 +24,15 @@ class MultilinearDescr(OperationDescription):
     self.ops = ops
     self.target = target
     self.permute = permute
-    self.add = add
+    # `add` says whether this operation accumulates, and --- when it is a list
+    # --- which of the destination's indices the tensor being added carries,
+    # the way `target` does for an operand.  yateto states only the bool today,
+    # so `True` means "all of them", which is what the destination read back
+    # always has.  Keeping the two apart matters because a tensor with fewer
+    # indices than the destination is a broadcast, and indexing it with the
+    # ones it does not have reads somewhere else entirely.
+    self.add_dims = list(add) if isinstance(add, (list, tuple)) else None
+    self.add = bool(add) if not isinstance(add, (list, tuple)) else True
 
     self.dest.tensor.set_data_flow_direction(DataFlowDirection.SINK)
     for op in self.ops:

@@ -679,7 +679,7 @@ inline void kernel_kernel_671a350836(sycl::queue *stream, sycl::range<3> group_c
               float v2654_data = glb_m0[((v6_lead + 32_i32) + 768)];
               float v2657_data = ir0[155];
               ir0[155] = (v2657_data + (v2654_data * v105_data));
-              float r1[156]{};
+              float r1[12]{};
               // r1 = +(r0) + name: glb_m2, type: SymbolType.Global, lead: [0]
               // [(20, 35), (0, 1), (0, 6)] []
               float ir1[12]{};

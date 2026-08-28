@@ -828,3 +828,137 @@ def test_data_of_the_wrong_shape_is_rejected_at_construction():
 
     with pytest.raises(GenerationError, match="has shape"):
         Tensor([], Addressing.SCALAR, data=np.array([13.0]))
+
+
+# ----------------------------------------------------------------------
+# An index no operand carries is a broadcast, not a missing index
+# ----------------------------------------------------------------------
+
+_REG_DECL_ANY = re.compile(r"float (i?r\d+)\[(\d+)\]")
+_FOR_DECL = re.compile(r"for \(int32_t (\w+) = (-?\d+); \w+ < (-?\d+);")
+_INT_ASSIGN = re.compile(r"int32_t (\w+) = (.+);$")
+_REG_ACCESS = re.compile(r"\b(i?r\d+)\[(\w+)\]")
+
+
+def _register_bounds(src):
+    """(too short, over-allocated) for every register array in a kernel.
+
+    Names in the generated code are unique, so the loop ranges and the
+    `int32_t` assignments can be collected once and every access resolved
+    against them.  This catches what the numeric oracle cannot: the host
+    interpreter keeps registers in an unbounded dict, so a short array reads
+    and writes past its end and still gets the right answer, while on a GPU
+    `float r5[1]` is one register and index 2 is whatever follows it.
+    """
+    lines = src.splitlines()
+    sizes, ranges, env = {}, {}, {}
+    for line in lines:
+        t = line.strip()
+        m = _REG_DECL_ANY.search(t)
+        if m:
+            sizes[m.group(1)] = int(m.group(2))
+        m = _FOR_DECL.search(t)
+        if m:
+            ranges[m.group(1)] = (int(m.group(2)), int(m.group(3)) - 1)
+            continue
+        m = _INT_ASSIGN.match(t)
+        if m:
+            env[m.group(1)] = m.group(2)
+
+    def expand(expr):
+        for _ in range(16):
+            new = re.sub(r"\b(v\w+)\b",
+                         lambda mm: f"({env[mm.group(1)]})"
+                         if mm.group(1) in env else mm.group(1), expr)
+            if new == expr:
+                return new
+            expr = new
+        return expr
+
+    used = {}
+    for line in lines:
+        if _REG_DECL_ANY.search(line):
+            continue                       # `float r0[1]{};` is not an access
+        for m in _REG_ACCESS.finditer(line):
+            name, idx = m.group(1), m.group(2)
+            if name not in sizes:
+                continue
+            expr = re.sub(r"\(threadIdx\.x % \d+\)", "0", expand(idx))
+            expr = re.sub(r"threadIdx\.x", "0", expr)
+            loop_vars = [v for v in set(re.findall(r"\b(v\w+)\b", expr))
+                         if v in ranges]
+            if len(loop_vars) > 6:
+                continue
+            for combo in itertools.product(
+                    *[range(ranges[v][0], ranges[v][1] + 1) for v in loop_vars]):
+                try:
+                    val = eval(expr, {"__builtins__": {}},
+                               dict(zip(loop_vars, combo)))
+                except Exception:
+                    break
+                if isinstance(val, int):
+                    used[name] = max(used.get(name, -1), val)
+    short = [(n, used[n] + 1, sizes[n]) for n in used if used[n] >= sizes[n]]
+    over = [(n, used[n] + 1, sizes[n]) for n in used if used[n] + 1 < sizes[n]]
+    return short, over
+
+
+@pytest.mark.parametrize("backend,arch", [("cuda", "sm_86"), ("hip", "gfx90a")])
+def test_broadcast_covers_the_destination(backend, arch):
+    """An index no operand carries still has to be iterated.
+
+    `t4[32x3] = t2[32]` has one operand targeting `[0]`, so nothing in the
+    operation mentions index 1.  The rank came from the operands alone, so the
+    index vanished: the loop nest ran over `n0` and wrote one slot per lead
+    block where three were needed.  The destination decides how many indices
+    are written; an operand that lacks one is read at the same address for
+    every value of it, which is the broadcast.
+    """
+    src = _generate("broadcast_then_accumulate", backend, arch).get_kernel()
+    ranges = re.findall(r"//\s*(\[\(.*?\)\]) \[", src)
+    assert ranges, "no compute ranges in the generated source"
+    # exactly one operation here has a rank-1 destination (`t2 = A`); every
+    # other writes the rank-2 `t4` or `O`.  The broadcast used to make a second
+    # one rank-1, which is the index going missing.
+    rank1 = [r for r in ranges if "), (" not in r]
+    assert len(rank1) == 1, (
+        f"{len(rank1)} operations cover one index where only `t2 = A` should: "
+        f"{ranges}")
+
+
+@pytest.mark.parametrize("backend,arch", [("cuda", "sm_86"), ("hip", "gfx90a")])
+def test_register_arrays_match_what_is_written(backend, arch):
+    """...and the arrays are sized for it.
+
+    The accumulation onto the broadcast took its size from the rank-1 image
+    left behind --- what it reads, not what it writes --- and came out with one
+    slot where the store walks three.  One array too short, one too long.
+    """
+    src = _generate("broadcast_then_accumulate", backend, arch).get_kernel()
+    short, over = _register_bounds(src)
+    assert not short, f"register array(s) too short: {short}"
+    assert not over, f"register array(s) over-allocated: {over}"
+
+
+def test_broadcast_accumulation_is_refused_rather_than_miscompiled():
+    """`add` as a list is accepted, and rejected when it cannot be honoured.
+
+    yateto states `add` as a bool today; the array form is meant to say which
+    of the destination's indices the tensor being added carries.  `prev` here
+    is the destination read back, at the destination's full rank, so there is
+    nothing to index it with along an index it does not have.  Say so instead
+    of reading somewhere else.
+    """
+    from tensorforge.common.exceptions import GenerationError
+
+    module = _load("broadcast_then_accumulate")
+    ctx = Context(arch="sm_86", backend="cuda", fp_type=Datatype.F32)
+
+    agrees = module.descr_list()
+    next(d for d in agrees if d.add).add_dims = [0, 1]
+    Generator(agrees, ctx).generate()      # same as the bool, so it builds
+
+    partial = module.descr_list()
+    next(d for d in partial if d.add).add_dims = [0]
+    with pytest.raises(GenerationError, match="broadcast accumulation"):
+        Generator(partial, ctx).generate()

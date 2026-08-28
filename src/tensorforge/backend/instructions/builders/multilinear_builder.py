@@ -72,6 +72,19 @@ class MultilinearBuilder(AbstractBuilder):
     self._descr = descr
 
     self._add = descr.add
+    # yateto states `add` as a bool today; the array form is meant to say which
+    # of the destination's indices the tensor being added carries.  Accumulating
+    # onto fewer indices than the destination has is a broadcast accumulation,
+    # and `prev` here is the destination read back --- at the destination's full
+    # rank --- so there is nothing to index it with along a missing one.  Take
+    # the array when it agrees with the destination and refuse when it does not,
+    # rather than reading somewhere else and calling it an answer.
+    add_dims = getattr(descr, 'add_dims', None)
+    if add_dims is not None and set(add_dims) != set(range(self._dest_obj.bbox.rank())):
+      raise GenerationError(
+          f'accumulating onto indices {sorted(add_dims)} of a rank-'
+          f'{self._dest_obj.bbox.rank()} destination is a broadcast '
+          f'accumulation, which is not implemented')
 
     self._mem_regions = [None] * len(self._ops)
     # per operand: which of its dimensions is spread across lanes
@@ -738,24 +751,21 @@ class MultilinearBuilder(AbstractBuilder):
     threads = self._num_threads
     lead_dim = [0] # [t for t in self._descr.target[0] if t >= 0]
 
-    # TODO: shrink to enumerate(self._dest_obj.bbox.sizes())
+    # This array holds the operation's *result*, so it is sized from what the
+    # operation writes: the destination's box, in the shifted origin the
+    # compute and the store both index it in.  `_analyze` may narrow the range
+    # below that --- an operand covering less than the destination declares ---
+    # which leaves slots unused, and that is harmless.
     #
-    # Which frame the box is already in decides whether theta still has to be
-    # applied.  An accumulation takes the bias image's box, and that image is
-    # staged through `_dest_preload_view` --- in the tensor's own lead
-    # coordinates, theta included.  The descriptor's own box is not: it is
-    # stated relative to the slice, and theta is what moves it.  Adding theta
-    # to the first counts it twice, which lands the range in the wrong
-    # block(s): for `m2[20:35, 12] += ...` with 32 lanes it gave one register
-    # slot where the range spans two, so the store --- which walks the two
-    # blocks `_analyze` found --- read past the end of the array.  Order 4
-    # never showed it because every window fell inside one block.
-    if self._add:
-      bbox = self._get_target_symbol().data_view._bbox
-      shift = 0
-    else:
-      bbox = self._dest_obj.bbox
-      shift = self._theta
+    # An accumulation used to take the *bias image's* box instead.  That is
+    # what the operation reads, not what it writes, and the two part company
+    # whenever the image does not match the destination: a broadcast leaves a
+    # rank-1 image behind for a rank-2 destination, and the array came out
+    # with one slot where the store walks three.  The destination's box says
+    # the same thing as a matching image and stays right when it does not
+    # match, so ask it directly.
+    bbox = self._dest_obj.bbox
+    shift = self._theta
 
     for d in range(bbox.rank()):
       dim = bbox.size(d)

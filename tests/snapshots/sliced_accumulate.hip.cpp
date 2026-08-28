@@ -420,7 +420,7 @@ __launch_bounds__(256)
             }
           }
           // wait(r4 = load{g>r}(glb_m4););
-          float r5[16]{};
+          float r5[8]{};
           // r5 = +(r3 * r4) + None
           // [(0, 32), (0, 8)] [(0, 12)]
           auto& ir5 = r5;
@@ -579,7 +579,7 @@ __launch_bounds__(256)
           r7[2] = v194_lin;
           // wait(r6 = load{g>r}(glb_m5););
           // wait(r7 = load{g>r}(glb_m6););
-          float r8[16]{};
+          float r8[8]{};
           // r8 = +(r6 * r7) + None
           // [(0, 32), (0, 8)] [(0, 12)]
           auto& ir8 = r8;

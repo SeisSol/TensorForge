@@ -574,7 +574,7 @@ __launch_bounds__(256)
           ir1[153] = v183_acc;
           ir1[154] = v184_acc;
           ir1[155] = v185_acc;
-          float r2[156]{};
+          float r2[12]{};
           // r2 = +(r1) + None
           // [(20, 35), (0, 1), (0, 6)] []
           auto& ir2 = r2;
