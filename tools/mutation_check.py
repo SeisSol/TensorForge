@@ -105,6 +105,30 @@ GROUPS = {
     # The PTX node.  Its numbering check is the one that matters: a mismatch
     # reads different registers and still compiles.
     # A tile's permutation lives on the buffer so no access can forget it.
+    # The bank model.  Every mistake it made over-reported, which is the
+    # direction that gets a check ignored.
+    'banks': ('tests/test_bank_conflicts.py', [
+        ('the vector width is read from a single identifier again',
+         sub(Path('tools/bank_conflicts.py'),
+             "([^)]*?)\\s*\\*\\s*\\)\\s*&", "(\\w+)\\s*\\*\\s*\\)\\s*&", 1)),
+        ('the element size and the access span folded back together',
+         sub(Path('tools/bank_conflicts.py'), '            byte = a * base_bytes',
+             '            byte = a * base_bytes * width', 1)),
+        ('a cast store counted as a load',
+         sub(Path('tools/bank_conflicts.py'),
+             "            written = (line.strip().startswith(f'{name}[')",
+             "            written = (False and line.strip().startswith(f'{name}[')", 1)),
+        ('guards ignored, so inactive lanes count',
+         sub(Path('tools/bank_conflicts.py'), '            lanes = _lanes_under([c for _, c in guard])',
+             '            lanes = None', 1)),
+        ('an unreadable guard narrows the lanes to nothing',
+         sub(Path('tools/bank_conflicts.py'), '    return sorted(lanes) or list(range(LANES))',
+             '    return sorted(lanes)', 1)),
+        ('the phase model dropped, so a wide access reads as conflicting',
+         sub(Path('tools/bank_conflicts.py'), '    per_phase = max(1, (BANKS * BANK_BYTES) // span)',
+             '    per_phase = len(lanes)', 1)),
+    ]),
+
     'swizzle': ('tests/test_pir_swizzle.py', [
         ('the load stops applying it',
          sub(Path('src/tensorforge/backend/pir/build.py'),
