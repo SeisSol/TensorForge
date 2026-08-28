@@ -5,7 +5,7 @@ from typing import Tuple, Dict, List
 from tensorforge.common.context import Context
 from tensorforge.common.basic_types import Addressing
 from tensorforge.backend.scopes import Scopes
-from tensorforge.backend.symbol import Symbol, SymbolType, SymbolView
+from tensorforge.backend.symbol import DataView, Symbol, SymbolType, SymbolView
 from tensorforge.backend.instructions.allocate import RegisterAlloc
 from tensorforge.backend.instructions.memory.load import GlbToShrLoader, GlbToRegLoader
 from tensorforge.backend.instructions.memory.store import StoreRegToGlb, StoreRegToShr, StoreRegToReg
@@ -19,7 +19,8 @@ from tensorforge.generators.descriptions import MultilinearDescr
 from tensorforge.backend.instructions.builders.allocator_builder import AbstractBuilder
 from tensorforge.common.operation import AddOperator, MulOperator
 from tensorforge.backend.data_types import RegMemObject
-from tensorforge.backend.instructions.abstract_instruction import AbstractInstruction
+from tensorforge.backend.instructions.abstract_instruction import (
+    AbstractInstruction, _explicit_simd)
 
 
 class MultilinearBuilder(AbstractBuilder):
@@ -698,7 +699,15 @@ class MultilinearBuilder(AbstractBuilder):
       else:
         # same slot count as DataView.get_dim_slots / _iregs / the addressing
         # side.  `ceil((u-l)/T)` disagrees once [l,u) straddles a block border.
-        regsize *= -(-bbox.upper()[d] // threads) - bbox.lower()[d] // threads
+        #
+        # `lead_lanes` is the second factor and comes from the same function
+        # the addressing side calls: one entry per slot when the lane is the
+        # thread, `threads` entries when the work-item holds the whole wave.
+        # Sizing this per thread while addressing it per work-item is what
+        # made twenty-one kernels read past the end of an array -- and *that*
+        # compiled, which is why it needs one source and not two.
+        regsize *= (-(-bbox.upper()[d] // threads) - bbox.lower()[d] // threads
+                    ) * DataView.lead_lanes(None, _explicit_simd(self._context), threads)
         threads //= dim
     name = self._name_registers()
     regmem = RegMemObject(name, regsize, spp=None if operand.obj.is_dense() else operand.obj.spp)
@@ -787,7 +796,8 @@ class MultilinearBuilder(AbstractBuilder):
         # exactly the price of not needing a shuffle.
         r_start = (bbox.lower()[d] + shift) // threads
         r_end = (bbox.upper()[d] + shift + threads - 1) // threads
-        regsize *= r_end - r_start
+        regsize *= (r_end - r_start) * DataView.lead_lanes(
+            None, _explicit_simd(self._context), threads)
         threads //= dim # TODO?
     name = self._name_registers()
     regmem = RegMemObject(name, regsize)

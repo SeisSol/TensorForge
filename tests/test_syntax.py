@@ -103,15 +103,12 @@ NOT_YET_ESIMD = {
     # index does not carry yet.
     "bbox_shared_lower.esimd.cpp": "predicated store",
     "lead_window_spans_two_blocks.esimd.cpp": "predicated store",
-    # A vector value assigned into a scalar slot.  The register array is still
-    # sized for SPMD: `float ir0[8]` is one slot per thread times eight
-    # non-lead entries, while a work-item that holds all twelve lanes needs
-    # `12 * 8`.  Twenty-one snapshots read past the end of such an array --
-    # which *compiles*, so this one is worth more than the six that do not.
-    "gemm_trans_a_20x12.esimd.cpp": "register array sized per thread, not per work-item",
-    "gemm_trans_b_12x16.esimd.cpp": "register array sized per thread, not per work-item",
-    "slice_chain_three.esimd.cpp": "register array sized per thread, not per work-item",
-    "temp_two_writers.esimd.cpp": "register array sized per thread, not per work-item",
+    # A vector assigned into a scalar slot, on a path `Op.STORE` has not
+    # reached: `Symbol.store` still writes text where `base` overrides the
+    # pointer name, and a rotating shared buffer does exactly that.
+    "gemm_trans_a_20x12.esimd.cpp": "store on the text path (pointer override)",
+    "gemm_trans_b_12x16.esimd.cpp": "store on the text path (pointer override)",
+    "temp_two_writers.esimd.cpp": "store on the text path (pointer override)",
 }
 
 

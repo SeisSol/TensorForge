@@ -365,3 +365,35 @@ def test_a_later_slot_is_not_narrowed():
 
 def test_a_full_width_block_needs_no_narrowing():
     assert _leadloop(end=16)._narrow(_FakeWriter(True), 0, None, 16) is None
+
+
+# --------------------------------------------------------------------------
+# a register slot is a run of lanes, not a single entry
+# --------------------------------------------------------------------------
+
+def test_a_slot_is_one_entry_per_thread_in_spmd():
+    """The lane *is* the thread, so the other lanes' entries live in the other
+    threads' private arrays and this one holds a single entry per slot."""
+    from tensorforge.backend.symbol import DataView
+    assert DataView.lead_lanes(None, False, 16) == 1
+
+
+def test_a_slot_is_a_run_of_lanes_when_the_work_item_holds_the_wave():
+    """Every lane's entry is in *this* array, so a slot is `threads` of them.
+
+    Sizing per thread while addressing per work-item is what made twenty-one
+    kernels read past the end of an array -- and that compiled, which is why
+    the allocation and the addressing call one function instead of repeating
+    a formula that already exists in three places.
+    """
+    from tensorforge.backend.symbol import DataView
+    assert DataView.lead_lanes(None, True, 16) == 16
+
+
+def test_narrowing_refuses_a_straddling_vector():
+    """With `width > 1` the lane bounds are ceilings, so at a ragged end one
+    lane holds a vector half inside the box; the guard is what stops its extra
+    component from being stored, and narrowing removes the guard."""
+    from tensorforge.backend.symbol import LeadLoop
+    loop = LeadLoop('i', 0, 9, 16, stride=1, width=2)
+    assert loop._narrow(_FakeWriter(True), 0, None, 5) is None

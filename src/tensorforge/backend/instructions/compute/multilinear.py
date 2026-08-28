@@ -13,6 +13,7 @@ from tensorforge.common.operation import ReductionOperator
 from typing import Union, List
 from tensorforge.common.basic_types import Datatype
 from tensorforge.backend.pir.core import MemSpace
+from tensorforge.backend.instructions.abstract_instruction import _explicit_simd
 from tensorforge.backend.writer import Writer
 
 from tensorforge.common.matrix.tensor import Tensor
@@ -222,6 +223,13 @@ class MultilinearInstruction(ComputeInstruction):
         self._iregs = 1
         if len(self._ns) > 0:
             self._iregs = -(-self._ns[0][1] // self._num_threads) - self._ns[0][0] // self._num_threads
+            # The third copy of the slot-count formula, and the third place
+            # that has to agree with the addressing side about how many
+            # entries one slot takes.  `DataView.lead_lanes` is that number:
+            # one per slot when the lane is the thread, `num_threads` when the
+            # work-item holds the whole wave.
+            self._iregs *= DataView.lead_lanes(
+                None, _explicit_simd(self._context), self._num_threads)
         for l,u in self._ns[1:]:
             self._iregs *= u - l
 

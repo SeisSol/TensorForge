@@ -85,6 +85,22 @@ class DataView:
     assert index >= 0 and index < len(self.shape)
     return self._bbox.size(index)
 
+  def lead_lanes(self, explicit_simd: bool, num_threads: int) -> int:
+    """How many register entries one slot of a lead dimension occupies.
+
+    One in SPMD: the lane is the thread, so a thread's private array holds a
+    single entry per slot and the other lanes' entries live in the other
+    threads' arrays.  `num_threads` when the work-item holds the whole wave:
+    every lane's entry is in *this* array, so a slot is a run of that many.
+
+    On the type this is the same number twice -- the allocation's size and the
+    address's stride -- and they have to agree or the next dimension aliases
+    onto this one.  There were already two copies of the slot-count formula
+    for that reason (see `get_dim_slots`), and this is deliberately not a
+    third: both sides call here.
+    """
+    return num_threads if explicit_simd else 1
+
   def get_dim_slots(self, index, num_threads):
     """Per-thread slots a thread-distributed dimension occupies.
 
@@ -505,6 +521,18 @@ class LeadLoop:
     if lo is not None or hi is None or actualstart != 0:
       return None
     if hi <= 0 or hi >= self.threads:
+      return None
+    if hi * self.width != self.end - self.start:
+      # The lane bounds are *ceilings* (see `_lane_hi`): at a ragged end one
+      # lane holds a vector half inside the box, and the guard is what stops
+      # its extra component from being stored.  Narrowing removes the guard,
+      # so it may only be done where there is no such lane -- where the
+      # vector extent covers the range exactly.
+      #
+      # Never true on the current corpus, because narrowing only meets
+      # `width == 1` today.  It is a precondition and not an observation: the
+      # width policy is free to offer a width that does not divide, and then
+      # the two features would silently agree to store past the box.
       return None
     return hi
 
@@ -949,11 +977,14 @@ class Symbol:
               f'be applied to a register-resident operand')
           # address = index - lower + shift, and on the lead dimension every
           # one of those three lives in units of whole blocks
+          lanes = self.data_view.lead_lanes(
+              bool(getattr(writer, '_explicit_simd', lambda: False)()),
+              self.num_threads)
           parts.append(term(lead_index,
                             offsets[i] // self.num_threads
                             - shift // self.num_threads,
-                            stride, lead=True))
-          stride *= self.data_view.get_dim_slots(i, self.num_threads)
+                            stride * lanes, lead=True))
+          stride *= self.data_view.get_dim_slots(i, self.num_threads) * lanes
         else:
           parts.append(term(index[i], offsets[i], stride, lead=True))
           stride *= self.data_view.get_dim_size(i)
@@ -1411,7 +1442,7 @@ class Symbol:
     structured = (base is None and not atomic and isinstance(variable, _Value)
                   and isinstance(lead, LeadIndex)
                   and self.stype in (SymbolType.Register, SymbolType.Scratch,
-                                     SymbolType.Global))
+                                     SymbolType.Global, SymbolType.SharedMem))
 
     # Decided *before* the text address is built, not after.  `self.access()`
     # emits the address as IR ops and the last of them carries `escapes`, so
