@@ -413,15 +413,20 @@ class LeadLoop:
     self.neutral = neutral
 
   def _lead(self, context: Context, writer):
-    """`(tid / stride) % threads` --- as IR values, or as text on the legacy path.
+    """Which element of the distributed dimension this lane is at.
 
-    This is where the first thread-dependent value enters the IR: `thread_id`
-    is the one non-uniform source, so everything derived from it is marked
+    This is where the first thread-dependent value enters the IR: it is the
+    one non-uniform source, so everything derived from it is marked
     non-uniform and the barrier-in-divergent-region check becomes live.
+
+    The arithmetic used to be written out here as `(tid / stride) % threads`.
+    That is the SPMD answer, and it is only *an* answer: the explicitly
+    vectorised lowering holds every element of the dimension in one register
+    and returns all `threads` indices at once, which makes the guard below a
+    mask instead of a branch.  Asking the builder is what lets the two
+    differ without this function knowing which one it is talking to.
     """
-    tid = writer.thread_id('x')
-    lane = writer.op('div', INDEX, tid, self.stride, hint='lane')
-    return writer.op('rem', INDEX, lane, self.threads, hint='lead')
+    return writer.lane_index(self.threads, self.stride, hint='lead')
 
   def _guard(self, writer, lead, lo, hi):
     """`lead >= lo && lead < hi`, with either bound optional."""

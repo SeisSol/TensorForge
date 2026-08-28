@@ -1227,7 +1227,8 @@ def cluster_loads(body: Tuple[Stmt, ...], max_pressure: int = 32,
 # --------------------------------------------------------------------------- #
 
 def optimize(body: Tuple[Stmt, ...], dump_hook=None,
-             diagnostics: Optional[List[str]] = None) -> Tuple[Stmt, ...]:
+             diagnostics: Optional[List[str]] = None,
+             explicit_simd: bool = False) -> Tuple[Stmt, ...]:
     """The default pipeline.  ``dump_hook(name, body)`` sees every stage.
 
     ``fold`` runs first: it turns expressions into constants and removes
@@ -1247,6 +1248,13 @@ def optimize(body: Tuple[Stmt, ...], dump_hook=None,
     stages = (('flatten', flatten_scopes), ('fold', fold), ('cse', cse),
               ('loads', load_cse), ('licm', licm),
               ('fold2', fold), ('cse2', cse), ('dce', dce))
+    if explicit_simd:
+        # Not an optimisation here.  A guard over a lane-varying condition is
+        # a mask in this model and there is no branch to lower it to, so the
+        # conversion is the only legal path rather than a trade of one shared
+        # brace for several.  It runs before `fold`, so that the predicates it
+        # attaches take part in the same simplification as everything else.
+        stages = (stages[0], ('if_convert', if_convert)) + stages[1:]
     for name, fn in stages:
         body = fn(body)
         if dump_hook is not None:

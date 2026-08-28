@@ -167,6 +167,33 @@ class EsimdEmitter(Emitter):
                 return
         super()._emit_stmt(s, yield_to)
 
+    def _emit_if(self, s) -> None:
+        """A lane-varying guard is a mask, and a mask is not a branch condition.
+
+        `if (m)` where `m` is a `simd_mask<N>` is not a slow branch -- there is
+        no single bit to test, and the whole work-item would take one arm for
+        all N elements.  What the guard means is that *some* lanes are
+        excluded, which in this model is a property of each statement inside
+        rather than of the region.
+
+        `passes.if_convert` is exactly that transformation and already exists;
+        it is documented as not being in the default pipeline because nothing
+        yet used the freedom it buys.  This lowering does: for an explicitly
+        vectorised kernel the conversion is not an optimisation but the only
+        legal lowering, so reaching here means it did not run or could not
+        convert this guard -- `_convertible` refuses regions containing
+        barriers, nested regions, or raw declarations.
+        """
+        cond = s.cond
+        if isinstance(cond, Value) and cond.layout is not None and cond.distributed:
+            raise IRError(
+                f'branch on a lane-varying condition ({cond!r}): in the ESIMD '
+                f'lowering this is a mask over {cond.lane_span()} lanes, not a '
+                f'branch. It has to be if-converted into per-statement '
+                f'predicates before emission; see passes.if_convert and its '
+                f'`_convertible` preconditions.')
+        super()._emit_if(s)
+
     # -- entry ------------------------------------------------------------- #
 
     def run(self, body) -> None:

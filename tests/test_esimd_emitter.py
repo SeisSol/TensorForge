@@ -201,3 +201,49 @@ def test_the_spmd_lexic_is_untouched():
     from tensorforge.common.vm.lexic.sycl_lexic import SyclLexic
     spmd = SyclLexic('acpp', 'intel')
     assert spmd.get_operation(Operation.TANH, Datatype.F32, 'a', None) == 'sycl::tanh(a)'
+
+
+# --------------------------------------------------------------------------
+# the lane index: a scalar in SPMD, a vector here
+# --------------------------------------------------------------------------
+
+def _builder(backend):
+    from tensorforge.backend.pir.build import IRBuilder
+    ctx = Context(arch='pvc', backend=backend, fp_type=Datatype.F32)
+    return IRBuilder(fptype=Datatype.F32, context=ctx)
+
+
+def test_spmd_asks_the_thread_for_its_lane():
+    b = _builder('acpp')
+    v = b.lane_index(16, 1)
+    assert not v.distributed, "SPMD holds one index per thread"
+
+
+def test_esimd_holds_every_index_at_once():
+    """`which index am I at` has `block` answers when the work-item holds the
+    whole dimension, so the value is the progression `0, 1, ... block-1`."""
+    b = _builder('esimd')
+    v = b.lane_index(16, 1)
+    assert v.distributed and v.lane_span() == 16
+
+
+def test_the_lane_offset_and_the_lane_index_are_different_questions():
+    """Both are `(tid/stride) % block` in SPMD, and they diverge here: the
+    offset a lane contributes to an address is zero (the work-item owns the
+    whole dimension), while the index it is *at* is all of them."""
+    b = _builder('esimd')
+    assert b.lane_offset(16, 1) == 0
+    assert b.lane_index(16, 1).distributed
+
+
+def test_a_mask_is_not_a_branch_condition(emitter):
+    """`if (m)` on a `simd_mask<N>` has no single bit to test.
+
+    Refused with the name of the transformation that would fix it, rather than
+    lowered into a branch that takes one arm for all N elements.
+    """
+    from tensorforge.backend.pir.core import Op, Region, Stmt
+    cond = val(30, ScalarType(Datatype.BOOL), SPREAD16)
+    guard = Stmt(op=Op.IF, args=(cond,), regions=(Region(),))
+    with pytest.raises(IRError, match='if_convert'):
+        emitter._emit_if(guard)

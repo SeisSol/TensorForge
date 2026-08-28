@@ -160,16 +160,18 @@ def _bodies(case: str, backend: str, arch: str):
 # it touches, so the packing is checked rather than partly skipped -- which is
 # what this file claimed to do from the start and could not.
 #
-# The way down, for whoever adds the next entry: 16 before `RegisterAlloc`
-# allocated through the builder, 14 before the `glb_m*` bindings declared
-# their read, 11 before the shared window became a value, 10 before the
-# transfers became `copy.async` and took the `cuda::pipeline` statements with
-# them, 3 while the `__syncwarp()` calls were left.
+# 16 before `RegisterAlloc` allocated through the builder, 14 before the
+# `glb_m*` bindings declared their read, 11 before the shared window became a
+# value, 10 before the transfers became `copy.async`.  The five
+# `cuda::pipeline` statements and the two miscategorised comments went with
+# that last one: the pipeline calls because there is no object left to drive,
+# the comments because the block that carried them did.  And 0 with the last
+# three: `Symbol.store` routes global memory through `Op.STORE`, so the raw
+# assignments that were left declare their accesses like everything else.
 #
-# Zero is not a milestone to defend for its own sake.  An entry appearing here
-# again means a body reasons about something raw, and the number says how
-# much; the useful question is which site emitted it, which
-# tools/ir_opacity.py answers.
+# Both entries are zero now, which means the ratchet has done its job and the
+# equality assertion below is the only thing still worth having -- it is what
+# turns a *new* opaque statement into a failure instead of a slow drift back.
 STILL_OPAQUE = {"rectangular.py": 0, "square_notrans.py": 0}
 
 

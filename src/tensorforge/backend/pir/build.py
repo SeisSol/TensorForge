@@ -399,6 +399,42 @@ class IRBuilder:
         self._emit_op(Op.CALL, (v,), (), attrs=(('callee', f'thread_idx_{axis}'),))
         return v
 
+    def lane_index(self, block: int, stride: int = 1,
+                   hint: str = 'lead') -> Value:
+        """*Which* element of a distributed dimension a lane holds.
+
+        The third of the three questions SPMD answers with one register, and
+        the only one whose answer is not a scalar in both models.
+        :meth:`thread_id` asks which thread; :meth:`lane_offset` asks where a
+        lane's share starts in the address; this asks which index the lane is
+        *at*, which is what a bounds guard compares against.
+
+        SPMD: ``(tid / stride) % block``, one integer per thread.
+
+        Explicitly vectorised: ``0, 1, ... block-1`` as a vector, because the
+        work-item holds every element of the dimension and "which index am I
+        at" has ``block`` answers at once.  A guard over it is therefore a
+        mask, not a branch -- which is a statement about the *whole* enclosing
+        region, so `Op.IF` on a value from here has to be if-converted before
+        it can be emitted.  The ESIMD emitter refuses it otherwise rather than
+        lowering a vector into a branch condition.
+        """
+        if not self._explicit_simd():
+            lane = self.op('div', INDEX, self.thread_id('x'), stride,
+                           hint='lane')
+            return self.op('rem', INDEX, lane, block, hint=hint)
+        # `simd<int, block>(0, 1)`: the ESIMD constructor for a linear
+        # progression.  Emitted through `rawexpr` rather than a new op, since
+        # what makes it a lane index is the layout, not the spelling.
+        return self.rawexpr(
+            f'{self._simd_spelling(block)}(0, 1)',
+            type_=INDEX, hint=hint, pure=True, movable=True,
+            layout=RegisterLayout((LaneAxis(block, stride),)))
+
+    def _simd_spelling(self, block: int) -> str:
+        lex = self.context.get_vm().get_lexic()
+        return lex.get_simd(INDEX.base.ctype(), block)
+
     def lane_offset(self, block: int, stride: int = 1,
                     hint: str = 'lane') -> Operand:
         """The address contribution of one lane within a distributed dimension.
@@ -1011,7 +1047,8 @@ class IRBuilder:
                     f'access or drop the `accesses` argument.')
 
     def rawexpr(self, text: str, *args: Operand, type_=None, hint: str = '',
-                pure: bool = False, movable: bool = False) -> Value:
+                pure: bool = False, movable: bool = False,
+                layout: Optional[RegisterLayout] = None) -> Value:
         """One escape hatch with a *single* convention: ``{0}`` is ``args[0]``.
 
         The result is declared by the emitter; the text is an expression, never
@@ -1025,8 +1062,12 @@ class IRBuilder:
         # same way.  Left off, every elementwise result was untracked -- the
         # text is opaque to the IR, but its *shape* is not, and a raw
         # expression is still elementwise over its operands.
+        # An explicit `layout` overrides the join: a raw expression whose
+        # *text* introduces a distribution its operands do not have -- a lane
+        # index built out of nothing -- can say so, and there is no other way
+        # for it to, since the IR cannot read the text.
         v = self.value(type_, hint=hint, uniform=uniform,
-                       layout=join_layout(args))
+                       layout=layout if layout is not None else join_layout(args))
         self._emit_op(Op.RAWEXPR, (v,), args, pure=pure, movable=movable,
                       effect=Effect.NONE if pure else Effect.UNKNOWN, text=text)
         return v

@@ -227,6 +227,13 @@ public:
     for (int i = 0; i < N; ++i)
       _v[i] = v;
   }
+  /// Linear progression `base, base+step, ...` -- `simd_obj_impl(Ty, Ty)` in
+  /// the real header.  This is how a lane index is built when there is no
+  /// thread id to ask.
+  simd(T base, T step) {
+    for (int i = 0; i < N; ++i)
+      _v[i] = static_cast<T>(base + T(i) * step);
+  }
   template <typename U> explicit simd(U *p) { (void)p; }
 
   template <int Size, int Stride = 1>

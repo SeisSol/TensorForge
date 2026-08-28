@@ -14,6 +14,19 @@ from tensorforge.backend import pir
 from tensorforge.backend.pir.core import Access, Effect, MemSpace
 
 
+def _explicit_simd(context) -> bool:
+  """Whether this kernel is lowered with the lane in the type.
+
+  Asked of the lexic rather than passed down, for the same reason `emit()`
+  asks it: the two lowerings are already distinguished there, and a second
+  place to decide it is a second place for the two to disagree.
+  """
+  try:
+    return bool(context.get_vm().get_lexic().simd_mode)
+  except AttributeError:
+    return False
+
+
 class BarrierScope(IntEnum):
   """How far a synchronisation reaches.
 
@@ -223,7 +236,8 @@ class AbstractInstruction(ABC):
     if os.environ.get('TF_IR_DEBUG'):
       for d in pir.verify(body, strict=False):
         print(f'pir: {d}')
-    pir.emit(pir.optimize(body), writer, context)
+    pir.emit(pir.optimize(body, explicit_simd=_explicit_simd(context)),
+             writer, context)
 
   def through_pir(self, writer: Writer, build) -> None:
     """Route ``build(sink)`` through the pseudo-IR into ``writer``.
@@ -264,7 +278,7 @@ class AbstractInstruction(ABC):
         for d in diag:
           print(f'  {d}')
 
-    body = pir.optimize(body)
+    body = pir.optimize(body, explicit_simd=_explicit_simd(self._context))
     if os.environ.get('TF_IR_STATS'):
       print(f'{type(self).__name__}: {sum(1 for _ in pir.walk(body))} Knoten, '
             f'Registerdruck {pir.pressure(body)}')
