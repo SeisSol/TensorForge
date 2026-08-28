@@ -1248,6 +1248,23 @@ def optimize(body: Tuple[Stmt, ...], dump_hook=None,
     statements.  A second run after ``cse2`` was measured and removes nothing
     on the current corpus, so it is not in the pipeline.
 
+    `schedule.hoist_issues` and `schedule.sink_waits` are deliberately *not*
+    here.  Both are correct and both were measured on the corpus: between them
+    they move nothing but comments, on 15 of 232 outputs, and the mean
+    issue-to-wait distance goes 7.7 to 8.1 statements entirely through comments
+    changing places.  The schedule the macro layer produces is already at the
+    fixed point of those two greedy moves --- the wait sits immediately before
+    the read that needs it, and the issue sits immediately after the pointer
+    binding it reads.
+
+    That is worth knowing rather than working around.  The distance that is
+    still missing is not reachable by any local swap: more than half the
+    transfers have five statements or fewer of cover, and getting more means
+    moving an issue across the loop back edge, which is a different
+    transformation with a distance parameter and a prologue.  When that pass
+    exists it will run here, and `schedule_async` after it, since the wait
+    counts describe the final issue order.
+
     ``schedule_async`` runs last on purpose: the wait counts depend on the
     final issue order, so anything that may still move statements has to have
     happened already.
