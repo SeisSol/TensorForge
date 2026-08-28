@@ -16,13 +16,17 @@ def tests_dir():
     if override:
         return override
     import tensorforge
-    repo = os.path.dirname(os.path.dirname(os.path.abspath(tensorforge.__file__)))
-    candidate = os.path.join(repo, "tests")
-    if not os.path.isdir(candidate):
-        raise SystemExit(
-            f"cannot find TensorForge's tests/ next to {tensorforge.__file__}; "
-            f"set TF_TESTS to the directory holding kernel_eval.py")
-    return candidate
+    # walk up from the package: `tests/` sits at the repository root, which is
+    # one level up in a flat layout and two under `src/`
+    here = os.path.dirname(os.path.abspath(tensorforge.__file__))
+    for _ in range(4):
+        here = os.path.dirname(here)
+        candidate = os.path.join(here, "tests")
+        if os.path.isdir(candidate):
+            return candidate
+    raise SystemExit(
+        f"cannot find TensorForge's tests/ above {tensorforge.__file__}; "
+        f"set TF_TESTS to the directory holding kernel_eval.py")
 
 
 def add_tests_to_path():

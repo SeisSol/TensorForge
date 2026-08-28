@@ -55,11 +55,30 @@ def storage_of(descrs):
     return out
 
 
-def make(shapes, written, seed=0):
+def constants_of(descrs):
+    """name -> the values baked into the kernel.
+
+    yateto folds constant matrices and scalars straight into the generated
+    code, so seeding them randomly compares against arithmetic the kernel never
+    does.  A capture carries them; use them."""
+    out = {}
+    for d in descrs:
+        if d is None:
+            continue
+        for x in [d["dest"]] + [o for o in d["ops"] if o]:
+            if x.get("data") is not None:
+                out[x["name"]] = np.asarray(x["data"], dtype=np.float64)
+    return out
+
+
+def make(shapes, written, seed=0, constants=None):
     rng = np.random.default_rng(seed)
+    constants = constants or {}
     out = {}
     for name, shape in shapes.items():
-        if name in written:
+        if name in constants:
+            out[name] = constants[name].reshape(shape or (1,)).astype(np.float64)
+        elif name in written:
             out[name] = np.zeros(shape or (1,), dtype=np.float64)
         else:
             out[name] = rng.standard_normal(shape or (1,))
@@ -116,10 +135,25 @@ def apply(d, arrays):
         subs.append("".join(label(t) for t in tgt))
 
     outs = "".join(label(j) for j in range(out_rank))
+    extent = [rng[j][1] - rng[j][0] for j in range(out_rank)]
     if operands:
-        res = np.einsum(f"{','.join(subs)}->{outs}", *operands) * scalar
+        # An output index no operand carries is a *broadcast*: the same value
+        # goes to every position along it.  einsum cannot state that, so
+        # contract over what is carried and spread the result afterwards.
+        carried = {c for sub in subs for c in sub}
+        kept = "".join(c for c in outs if c in carried)
+        res = np.einsum(f"{','.join(subs)}->{kept}", *operands) * scalar
+        if kept != outs:
+            shape, k = [], 0
+            for c in outs:
+                if c in carried:
+                    shape.append(res.shape[k])
+                    k += 1
+                else:
+                    shape.append(1)
+            res = np.broadcast_to(res.reshape(shape), extent).copy()
     else:
-        res = np.zeros([rng[j][1] - rng[j][0] for j in range(out_rank)]) + scalar
+        res = np.zeros(extent) + scalar
 
     dsl = tuple(slice(rng[j][0] + d["dest"]["offset"][j],
                       rng[j][1] + d["dest"]["offset"][j])
@@ -133,7 +167,7 @@ def apply(d, arrays):
 def run(path, seed=0, kernel=None):
     descrs = load(path, kernel)
     shapes, written = tensors_of(descrs)
-    arrays = make(shapes, written, seed)
+    arrays = make(shapes, written, seed, constants_of(descrs))
     inputs = {k: v.copy() for k, v in arrays.items() if k not in written}
     for d in descrs:
         if d is not None:

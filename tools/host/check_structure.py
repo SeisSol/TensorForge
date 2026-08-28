@@ -33,9 +33,74 @@ def expand(e,env):
         if n==e: break
         e=n
     return e
+
+# --- register array bounds ---------------------------------------------------
+# Names in the generated code are unique, so the loop ranges and the `int32_t`
+# assignments can be collected once per kernel and every access resolved
+# against them.  This catches the class the numeric oracle cannot: the host
+# interpreter stores registers in an unbounded dict, so a short array reads and
+# writes happily past its end and still produces the right answer, while on a
+# GPU `float r5[1]` is one register and index 2 is whatever follows it.
+_DECL_ANY = re.compile(r'float (i?r\d+)\[(\d+)\]')
+_FOR_ANY = re.compile(r'for \(int32_t (\w+) = (-?\d+); \w+ < (-?\d+);')
+_ASSIGN_ANY = re.compile(r'int32_t (\w+) = (.+);$')
+_ACCESS_ANY = re.compile(r'\b(i?r\d+)\[(\w+)\]')
+
+
+def register_bounds(body):
+    """(too short, over-allocated) for the register arrays of one kernel."""
+    sizes, ranges, env = {}, {}, {}
+    for line in body:
+        t = line.strip()
+        m = _DECL_ANY.search(t)
+        if m:
+            sizes[m.group(1)] = int(m.group(2))
+        m = _FOR_ANY.search(t)
+        if m:
+            ranges[m.group(1)] = (int(m.group(2)), int(m.group(3)) - 1)
+            continue
+        m = _ASSIGN_ANY.match(t)
+        if m:
+            env[m.group(1)] = m.group(2)
+
+    def expand(expr):
+        for _ in range(16):
+            new = re.sub(r'\b(v\w+)\b',
+                         lambda mm: f'({env[mm.group(1)]})'
+                         if mm.group(1) in env else mm.group(1), expr)
+            if new == expr:
+                return new
+            expr = new
+        return expr
+
+    used = {}
+    for line in body:
+        if _DECL_ANY.search(line):
+            continue                      # `float r0[1]{};` is not an access
+        for m in _ACCESS_ANY.finditer(line):
+            name, idx = m.group(1), m.group(2)
+            if name not in sizes:
+                continue
+            expr = re.sub(r'\(threadIdx\.x % \d+\)', '0', expand(idx))
+            expr = re.sub(r'threadIdx\.x', '0', expr)
+            vs = [v for v in set(re.findall(r'\b(v\w+)\b', expr)) if v in ranges]
+            if len(vs) > 6:
+                continue
+            for combo in itertools.product(*[range(ranges[v][0], ranges[v][1] + 1)
+                                             for v in vs]):
+                try:
+                    val = eval(expr, {"__builtins__": {}}, dict(zip(vs, combo)))
+                except Exception:
+                    break
+                if isinstance(val, int):
+                    used[name] = max(used.get(name, -1), val)
+    short = [(n, used[n], sizes[n]) for n in used if used[n] >= sizes[n]]
+    over = [(n, used[n] + 1, sizes[n]) for n in used if used[n] + 1 < sizes[n]]
+    return short, over
+
 bad=0
 for k,(s,name) in enumerate(starts):
-    e=min([x for x in ends if x>s]); body=L[s:e]; txt='\n'.join(body)
+    e=min([x for x in ends if x>s], default=len(L)); body=L[s:e]; txt='\n'.join(body)
     produced=[];consumed=set();biases=[];seq=[]
     for l in body:
         t=l.strip()
@@ -86,5 +151,8 @@ for k,(s,name) in enumerate(starts):
     if dup: p.append(f"BIAS REUSED {dup[:3]}")
     if stale: p.append(f"STALE READ {stale[:3]}")
     if oor: p.append(f"OOB READ {oor[:3]}")
+    short, over = register_bounds(body)
+    if short: p.append(f"REG TOO SHORT {short[:3]}")
+    if over: p.append(f"REG OVER-ALLOCATED {over[:3]}")
     if p: bad+=1; print(f"  #{k:2} {name:22} {'; '.join(p)}")
 print(f"flagged: {bad} of {len(starts)}   [{path}]")

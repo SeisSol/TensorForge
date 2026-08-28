@@ -40,7 +40,8 @@ def _sub(x):
                 addressing=str(t.addressing),
                 is_tmp=bool(t.is_tmp),
                 sliced=bool(getattr(x, "sliced", False)),
-                data=(list(t.data) if t.data is not None else None))
+                data=(t.data.tolist() if getattr(t.data, 'tolist', None)
+                      else (list(t.data) if t.data is not None else None)))
 
 
 def main():
