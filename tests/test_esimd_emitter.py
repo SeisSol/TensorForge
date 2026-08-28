@@ -343,28 +343,34 @@ def test_a_ragged_end_narrows_instead_of_masking():
     the operand looks like.  An explicitly vectorised kernel makes the vector
     12 wide and there is no ragged end to mask.
     """
-    assert _leadloop()._narrow(_FakeWriter(True), 0, None, 12) == (12, 0)
+    assert _leadloop()._narrow(_FakeWriter(True), 0, None, 12, 0, 12) == (12, 0)
 
 
 def test_spmd_keeps_the_mask():
-    assert _leadloop()._narrow(_FakeWriter(False), 0, None, 12) is None
+    assert _leadloop()._narrow(_FakeWriter(False), 0, None, 12, 0, 12) is None
 
 
-def test_a_lower_bound_is_not_narrowed():
-    """`lane >= 4` needs the vector to *start* at 4, which is a base offset
-    the index does not carry -- narrowing the width alone would keep the
-    address at zero and read the wrong elements."""
-    assert _leadloop(start=4, end=16)._narrow(_FakeWriter(True), 0, 4, None) is None
+def test_a_lower_bound_narrows_to_a_vector_that_starts_later():
+    """`lane >= 4` is not a mask either.
+
+    It needs the vector to *start* at element 4, which is a base offset --
+    `LeadIndex` carries one since the `VarOffset` merge, and
+    `split_lead_shift` puts its leftover lanes into a register address.
+    """
+    out = _leadloop(start=4, end=16)._narrow(_FakeWriter(True), 0, 4, None, 4, 16)
+    assert out == (12, 4)
 
 
-def test_a_later_slot_is_not_narrowed():
-    """A later slot's base is `nonlead * block`, which stops being the right
-    address as soon as `block` is not the slot stride."""
-    assert _leadloop()._narrow(_FakeWriter(True), 1, None, 12) is None
+def test_a_later_slot_folds_into_the_offset():
+    """`nonlead * block` stops being the right base as soon as `block` is the
+    narrowed extent, so the slot goes into the offset and the index is always
+    slot zero."""
+    out = _leadloop(start=0, end=35)._narrow(_FakeWriter(True), 1, None, 3, 16, 19)
+    assert out == (3, 16)
 
 
 def test_a_full_width_block_needs_no_narrowing():
-    assert _leadloop(end=16)._narrow(_FakeWriter(True), 0, None, 16) is None
+    assert _leadloop(end=16)._narrow(_FakeWriter(True), 0, None, 16, 0, 16) is None
 
 
 # --------------------------------------------------------------------------
@@ -396,7 +402,7 @@ def test_narrowing_refuses_a_straddling_vector():
     component from being stored, and narrowing removes the guard."""
     from tensorforge.backend.symbol import LeadLoop
     loop = LeadLoop('i', 0, 9, 16, stride=1, width=2)
-    assert loop._narrow(_FakeWriter(True), 0, None, 5) is None
+    assert loop._narrow(_FakeWriter(True), 0, None, 5, 0, 9) is None
 
 
 # --------------------------------------------------------------------------
@@ -482,3 +488,18 @@ def test_the_element_view_applies_the_offset_and_the_slot_view_does_not():
     from tensorforge.backend.symbol import LeadIndex
     idx = LeadIndex(2, 16, 1, offset=32)
     assert idx.write_nonlead() == '2'
+
+
+def test_a_shift_splits_into_slots_and_lanes():
+    """The two halves are not interchangeable.
+
+    Whole slots keep every element in the lane that held it, so they are a
+    change of register index.  The remainder moves data *between* lanes --
+    a shuffle under SPMD, and simply where the vector starts inside the slot
+    run when the work-item holds the wave.
+    """
+    from tensorforge.backend.symbol import DataView
+    assert DataView.split_lead_shift(32, 16) == (2, 0)
+    assert DataView.split_lead_shift(36, 16) == (2, 4)
+    # width scales the slot, not the lane count
+    assert DataView.split_lead_shift(36, 16, width=2) == (1, 2)

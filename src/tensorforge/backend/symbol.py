@@ -85,6 +85,24 @@ class DataView:
     assert index >= 0 and index < len(self.shape)
     return self._bbox.size(index)
 
+  @staticmethod
+  def split_lead_shift(shift: int, num_threads: int, width: int = 1):
+    """A slicing shift on the lead axis, as ``(whole slots, lanes)``.
+
+    The two halves are not interchangeable and only one of them is always
+    expressible.  Moving by whole slots keeps every element in the lane that
+    held it, so it is a change of register index; the remainder moves data
+    *between* lanes, which under SPMD is a shuffle and not something an
+    address can say -- hence the assertion that has always guarded this.
+
+    When the work-item holds the whole wave there are no lanes to move
+    between: the remainder is simply where the vector starts inside the slot
+    run, and the address can say it.  Which is the difference the assertion
+    now tests for rather than forbidding outright.
+    """
+    span = num_threads * width
+    return shift // span, (shift % span) // width
+
   def lead_lanes(self, explicit_simd: bool, num_threads: int) -> int:
     """How many register entries one slot of a lead dimension occupies.
 
@@ -603,50 +621,53 @@ class LeadLoop:
     """Whether this lowering can replace a guard with a narrower vector."""
     return bool(getattr(writer, '_explicit_simd', lambda: False)())
 
-  def _narrow(self, writer, actualstart, lo, hi):
-    """The lane extent to use instead of a guard, or None to keep the guard.
+  def _narrow(self, writer, slot, lo, hi, elem_lo, elem_hi):
+    """A guarded block as a shorter vector, or None to keep the guard.
 
-    A guard on the lead axis is almost always a *ragged end*: the dimension is
-    12 elements wide, the wave is 16, and lanes 12..15 are masked off.  In SPMD
-    that mask is unavoidable -- the wave is 16 threads whatever the operand
-    looks like.  Explicitly vectorised, the vector width is a compile-time
-    choice, so the honest answer is a 12-wide vector and no mask at all.
+    A guard on the lead axis is a *ragged edge*: the dimension is 12 elements
+    wide, the wave is 16, and lanes 12..15 are masked off.  In SPMD that mask
+    is unavoidable -- the wave is 16 threads whatever the operand looks like.
+    Explicitly vectorised, the vector width is a compile-time choice, so the
+    honest answer is a 12-wide vector and no mask at all.
 
-    Measured over the corpus: 249 of 270 lead guards are a pure upper bound
-    (`lane < hi`), 21 are a pure lower bound, and none has both -- so no
-    interior window arises and nothing here needs a scatter.
+    `lo`/`hi` are lane bounds and `elem_lo`/`elem_hi` the element range the
+    block actually covers.  Both are passed rather than re-derived: the three
+    call sites (a single-slot block, a wave-unaligned head, a ragged tail)
+    each intersect the range differently, and deriving it here once got two of
+    the three wrong before it was passed in.
 
-    Only the upper-bound case is narrowed, and only from slot zero.  A lower
-    bound would need the vector to *start* at `lo`, which is a base offset the
-    index does not currently carry; and a later slot's base is `nonlead *
-    block`, which stops being the right address once `block` is not the slot
-    stride any more.  Both are real, both need a decision about what
-    `LeadIndex` should carry, and guessing here would put a wrong address
-    behind a correct-looking type.
+    Returns `(extent in lanes, base offset in elements)`.  The slot goes into
+    the offset, so the index is always slot zero -- `nonlead * block` stops
+    being the right base as soon as `block` is the narrowed extent rather than
+    the slot stride, and folding the slot in removes that trap instead of
+    documenting it.
     """
     if not self._narrow_possible(writer):
       return None
-    if hi is None or actualstart != 0:
-      return None
+    if hi is None:
+      hi = self.threads
     base = lo or 0
-    if hi <= base or (base == 0 and hi >= self.threads):
+    if hi <= base or (hi - base) >= self.threads and slot == 0 and base == 0:
       return None
-    if (hi - base) * self.width != self.end - self.start:
+    if (hi - base) * self.width != elem_hi - elem_lo:
       # The lane bounds are *ceilings* (see `_lane_hi`): at a ragged end one
       # lane holds a vector half inside the box, and the guard is what stops
       # its extra component from being stored.  Narrowing removes the guard,
-      # so it may only be done where there is no such lane -- where the
-      # vector extent covers the range exactly.
+      # so it may only be done where there is no such lane -- where the vector
+      # extent covers the range exactly.
       #
       # Never true on the current corpus, because narrowing only meets
       # `width == 1` today.  It is a precondition and not an observation: the
       # width policy is free to offer a width that does not divide, and then
       # the two features would silently agree to store past the box.
       return None
-    # `(extent, base)`: a lower bound is not a mask either, it is a vector that
-    # *starts* later.  `LeadIndex` carries the base now that the offset lives
-    # there instead of in a wrapper -- which is what this was waiting for.
-    return hi - base, base * self.width
+    # Neither bound is a mask.  A lower one is a vector that *starts* later,
+    # an upper one is a vector that stops earlier, and a later slot is a
+    # vector that starts a whole slot run in.  All three are a base offset in
+    # elements, which `LeadIndex` carries since the offset moved out of
+    # `VarOffset` -- and which `split_lead_shift` can put into a register
+    # address now that the leftover lanes have a run to sit in.
+    return hi - base, elem_lo
 
   def _lane_lo(self, offset):
     """The first lane whose vector reaches element `offset`.
@@ -757,10 +778,12 @@ class LeadLoop:
       startIdx = self.start - actualstart * span
       lo = self._lane_lo(startIdx) if startIdx > 0 else None
       hi = self._lane_hi(tail)
-      narrowed = self._narrow(writer, actualstart, lo, hi)
+      # one slot, and the range is the loop's own
+      narrowed = self._narrow(writer, actualstart, lo, hi,
+                              self.start, self.end)
       if narrowed is not None:
         extent, base = narrowed
-        inner([LeadIndex(actualstart, extent, self.stride, width=self.width,
+        inner([LeadIndex(0, extent, self.stride, width=self.width,
                          offset=base)])
       elif hi > 0 or lo is not None:
         index = LeadIndex(actualstart, self.threads, self.stride,
@@ -775,20 +798,23 @@ class LeadLoop:
         # to be right while actualstart == 0, i.e. start < threads; for
         # start=37, threads=32 it read `lead >= 36` and dropped the head block.
         lo = self._lane_lo(self.start - actualstart * span)
-        # Not narrowed, though it is the same shape as the ragged tail seen
-        # from the other end: a vector that starts later rather than one that
-        # stops earlier.  The base offset now exists to say it -- `LeadIndex`
-        # carries it since the `VarOffset` merge -- but `build_address` drops
-        # a sub-slot shift on a register operand (`shift // num_threads` is
-        # zero for it) and asserts it away, which is right in SPMD, where a
-        # partial shift moves data between lanes and no address can express a
-        # shuffle.  Under an explicit vector it is expressible and the
-        # arithmetic has to be written; until then the mask is correct and a
-        # narrowed vector would silently read from the wrong element.
-        index = LeadIndex(actualstart, self.threads, self.stride,
-                          width=self.width)
-        with self._guard(writer, lead(), lo, None):
-          inner([index])
+        # The head block of a wave-unaligned range, and the same shape as the
+        # ragged tail seen from the other end: a vector that starts later
+        # rather than one that stops earlier.  `DataView.split_lead_shift`
+        # is what makes it addressable -- the leftover lanes are a
+        # displacement inside the slot run, which exists only when the run is
+        # longer than one entry.
+        narrowed = self._narrow(writer, actualstart, lo, None,
+                                self.start, (actualstart + 1) * span)
+        if narrowed is not None:
+          extent, base = narrowed
+          inner([LeadIndex(0, extent, self.stride,
+                           width=self.width, offset=base)])
+        else:
+          index = LeadIndex(actualstart, self.threads, self.stride,
+                            width=self.width)
+          with self._guard(writer, lead(), lo, None):
+            inner([index])
       if self.unroll:
         for value in range(realstart, realend):
           inner([LeadIndex(value, self.threads, self.stride,
@@ -799,15 +825,20 @@ class LeadLoop:
           inner([LeadIndex(str(loop.induction), self.threads, self.stride,
                            loop.induction, width=self.width)])
       if self.end % span != 0:
-        # Not narrowed: this is the tail slot of a *multi*-slot dimension, so
-        # its base is `(actualend - 1) * threads` and narrowing `block` would
-        # move it.  See `_narrow`.
         hi = self._lane_hi(tail)
         if hi > 0:
-          index = LeadIndex(actualend - 1, self.threads, self.stride,
-                            width=self.width)
-          with self._guard(writer, lead(), None, hi):
-            inner([index])
+          # the tail block starts at its slot boundary and stops at `end`
+          narrowed = self._narrow(writer, actualend - 1, None, hi,
+                                  (actualend - 1) * span, self.end)
+          if narrowed is not None:
+            extent, base = narrowed
+            inner([LeadIndex(0, extent, self.stride, width=self.width,
+                             offset=base)])
+          else:
+            index = LeadIndex(actualend - 1, self.threads, self.stride,
+                              width=self.width)
+            with self._guard(writer, lead(), None, hi):
+              inner([index])
         self._peel(inner, realend * span + hi * self.width, tail)
 
 class Loop:
@@ -1126,19 +1157,24 @@ class Symbol:
         lead = unwrap_lead(index[i])
         if lead is not None:
           lead_index, shift = lead
-          assert shift % self.num_threads == 0, (
+          simd = bool(getattr(writer, '_explicit_simd', lambda: False)())
+          lanes = self.data_view.lead_lanes(simd, self.num_threads)
+          slot_shift, lane_shift = DataView.split_lead_shift(
+              shift, self.num_threads, lead_index.width)
+          assert simd or lane_shift == 0, (
               f'{self.name}: lead-dimension slicing offset {shift} is not a '
               f'multiple of {self.num_threads}; only whole thread-blocks can '
               f'be applied to a register-resident operand')
-          # address = index - lower + shift, and on the lead dimension every
-          # one of those three lives in units of whole blocks
-          lanes = self.data_view.lead_lanes(
-              bool(getattr(writer, '_explicit_simd', lambda: False)()),
-              self.num_threads)
+          # address = index - lower + shift, and on the lead dimension the
+          # first two live in units of whole slots.  So does the shift, except
+          # for the lanes it leaves over -- those are a displacement *within*
+          # the slot run, which only exists when the run is more than one
+          # entry long.
           parts.append(term(lead_index,
-                            offsets[i] // self.num_threads
-                            - shift // self.num_threads,
+                            offsets[i] // self.num_threads - slot_shift,
                             stride * lanes, lead=True))
+          if lane_shift:
+            parts.append(lane_shift * stride)
           stride *= self.data_view.get_dim_slots(i, self.num_threads) * lanes
         else:
           parts.append(term(index[i], offsets[i], stride, lead=True))
@@ -1197,6 +1233,9 @@ class Symbol:
         lead = unwrap_lead(index[i])
         if lead is not None:
           lead_index, shift = lead
+          # Unconditional here, unlike the structured path above: this is the
+          # SPMD spelling, where a lane is a thread and a sub-slot shift is a
+          # shuffle.  An explicitly vectorised kernel does not reach it.
           assert shift % self.num_threads == 0, (
               f'{self.name}: lead-dimension slicing offset {shift} is not a '
               f'multiple of {self.num_threads}; only whole thread-blocks can '

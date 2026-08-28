@@ -96,20 +96,16 @@ KNOWN_BAD_BACKENDS: dict = {}
 #: changed which cases failed and why -- and a heuristic that quietly
 #: misclassifies is worse than no heuristic, because the entry it wrongly
 #: excuses looks reviewed.
-NOT_YET_ESIMD = {
-    # All three the same thing: a guard that narrowing cannot remove -- a
-    # lower bound (`lane >= lo`) or a later slot -- so the store keeps a
-    # predicate, and a `simd_mask` is not a branch condition.
-    #
-    # Both need the vector to *start* somewhere other than element zero, which
-    # is a base offset `LeadIndex` does not carry; see `LeadLoop._narrow` for
-    # why guessing it would put a wrong address behind a correct-looking type.
-    # That is now the only thing between this corpus and a fully well-formed
-    # ESIMD lowering.
-    "bbox_shared_lower.esimd.cpp": "predicated store: needs a base offset",
-    "gemm_trans_a_20x12.esimd.cpp": "predicated store: needs a base offset",
-    "lead_window_spans_two_blocks.esimd.cpp": "predicated store: needs a base offset",
-}
+#: Empty, and the mechanism stays because emptying it was the point.
+#:
+#: It held six ESIMD snapshots that reached a predicated store: a guard on the
+#: lead axis that narrowing could not remove, because the vector had to
+#: *start* somewhere other than element zero and `LeadIndex` had no base
+#: offset to say it with.  It has one since the `VarOffset` merge, and
+#: `DataView.split_lead_shift` puts the leftover lanes into a register address
+#: -- so a head block, a ragged tail and a later slot are all just a vector
+#: with a base now, and no mask survives the corpus.
+NOT_YET_ESIMD: dict = {}
 
 
 def _known_bad(path) -> str:
