@@ -148,10 +148,27 @@ class GetElementPtr(AbstractInstruction):
     """
     if hasattr(writer, 'decl_expr'):
       from tensorforge.backend.pir.core import BufferType
+      from .abstract_instruction import AbstractInstruction
+      # Name the element index as an operand where there is one to name.  The
+      # address is `&m2[batchId0 * 324 + ...]`, and with `batchId0` only in
+      # the text a pass that moves this binding to another element has nothing
+      # to substitute -- which is exactly why `wrap_prefetch` could not
+      # advance a transfer that reads through it.
+      text = rhs.replace('{', '{{').replace('}', '}}')
+      args = ()
+      ind = (AbstractInstruction._induction_value[-1]
+             if AbstractInstruction._induction_value else None)
+      # Only for the loop's *own* index.  `batch_index()` is `batchId1` for a
+      # lookahead binding -- the peeled prologue's -- and substituting the
+      # induction there rewrites element k+1 back to element k, silently.
+      if (ind is not None and self._batch_offset == 0
+              and self.batch_index() in rhs):
+        text = text.replace(self.batch_index(), '{0}')
+        args = (ind,)
       value = writer.decl_expr(
-          lhs, rhs.replace('{', '{{').replace('}', '}}'),
+          lhs, text,
           BufferType(self._dest.get_fptype(), (1,), MemSpace.GLOBAL),
-          self._src, kind=Effect.READ, hint=self._dest.name,
+          self._src, args=args, kind=Effect.READ, hint=self._dest.name,
           extern=self._dest.name, alias_root=self._src)
       self._dest.set_pir_buffer(writer, value)
     else:

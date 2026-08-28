@@ -227,12 +227,45 @@ def _wrap_one(loop: Stmt, make_value,
                     'copy of it is not enough for a distance of one '
                     'iteration: ceil((d+1)/n) with d = n is 2')
 
-    # The group moves to the *next* element.
-    rewritten = [substitute((g,), next_index)[0] for g in group]
-    if all(not isinstance(a, Value) or a.id not in next_index
-           for g in group for a in g.args):
+    # The destination has to exist before the loop, or the prologue cannot
+    # name it.  `s4 = &localShrMem0[..]` is declared inside the loop body, and
+    # the peeled transfer is emitted before it: the peel then writes through a
+    # value whose `extern` name is bound later, so the generated code uses
+    # `v33_s4` above the line that declares `s4`.  It renders and does not
+    # compile, which is the failure mode `test_syntax` exists for and the
+    # corpus alone would not show.
+    #
+    # Declaring the window ahead of the loop is the fix, and it is the same
+    # move that took the address bindings and the windows out of the guard --
+    # one scope further out.  Until then this declines rather than emitting
+    # something that cannot build.
+    defined_in_loop = {t.id for st in region.body for t in st.target}
+    if guard_at is not None:
+        defined_in_loop |= {t.id for st in region.body[guard_at].regions[0].body
+                            for t in st.target}
+    if any(isinstance(a, Value) and a.id in defined_in_loop
+           for g in group for a in g.args[:1]):
+        raise Refusal('the destination is declared inside the loop, so a '
+                      'peeled transfer would name it before it exists')
+
+    # The group moves to the *next* element -- and so does everything it
+    # reads that names the element.
+    #
+    # A transfer reads through `glb_m2`, a pointer already offset by
+    # `batchId0`, so the index does not appear in the transfer's operands at
+    # all: it appears in the binding.  Substituting into the group alone finds
+    # nothing to substitute.  What has to move is the backward slice: every
+    # statement the group transitively reads that mentions the induction, with
+    # the successor index put in its place.  That slice *is* the rolling
+    # pointer the old macro-level pipeline built by hand.
+    slice_ = _index_slice(region, group, next_index)
+    if not slice_ and all(not isinstance(a, Value) or a.id not in next_index
+                          for g in group for a in g.args):
         raise Refusal('the transfer does not name an index this loop knows '
                       'how to advance')
+    advanced, advance_map = _advance(slice_, next_index, make_value)
+    rewritten = [substitute((g,), {**next_index, **advance_map})[0]
+                 for g in group]
 
     tokens = [g.target[0] for g in group]
     carried = [make_value(t.type, 'cp') for t in tokens]
@@ -245,7 +278,7 @@ def _wrap_one(loop: Stmt, make_value,
         body[[i for i, s in enumerate(body) if s is wait][0]] = new_wait
         at = min(i for i, s in enumerate(body)
                  if s is new_wait or s is wait)
-        body[at:at] = rewritten
+        body[at:at] = advanced + rewritten
     else:
         guard = region.body[guard_at]
         inner = [s for s in guard.regions[0].body if s not in group]
@@ -256,7 +289,7 @@ def _wrap_one(loop: Stmt, make_value,
         body = list(region.body)
         body[guard_at] = replace(guard, regions=(
             replace(guard.regions[0], body=tuple(inner)),))
-        body[guard_at:guard_at] = rewritten
+        body[guard_at:guard_at] = advanced + rewritten
 
     term = region.terminator
     yielded = (term.args if term is not None else ()) + tuple(tokens)
@@ -267,17 +300,89 @@ def _wrap_one(loop: Stmt, make_value,
     # Not `induction - 1` and not `0` -- the loop's own `lo`, which is where
     # the first iteration would have issued from.
     lo = loop.loop_bounds[0]
-    peel = [replace(substitute((g,), {loop.induction.id: lo})[0],
-                    target=(make_value(g.target[0].type, 'cp'),))
-            for g in group]
+    peel_slice, peel_map = _advance(slice_, {loop.induction.id: lo},
+                                    make_value)
+    peel = peel_slice + [
+        replace(substitute((g,), {loop.induction.id: lo, **peel_map})[0],
+                target=(make_value(g.target[0].type, 'cp'),))
+        for g in group]
 
     results = [make_value(t.type, 'cp') for t in tokens]
     new_loop = replace(
         loop,
         target=loop.target + tuple(results),
-        args=loop.args + tuple(p.target[0] for p in peel),
+        args=loop.args + tuple(p.target[0] for p in peel[-len(group):]),
         regions=(replace(region, args=region.args + tuple(carried),
                          body=tuple(body)),))
     drain = Stmt(op=Op.WAIT, args=tuple(results), pure=False, movable=True,
                  effect=wait.effect, accesses=wait.accesses)
     return list(peel) + [new_loop, drain]
+
+
+def _index_slice(region: Region, group: Sequence[Stmt],
+                 next_index: Dict[int, Value]) -> List[Stmt]:
+    """The statements the group reads that lead back to the element index.
+
+    Backwards from the group's operands, through the loop's own region only:
+    anything inside the guard has already been refused, and anything outside
+    the loop does not depend on the iteration.  A statement joins the slice if
+    it defines something the slice reads *and* it, or something it reads,
+    names an index the loop can advance.
+
+    Only pure, movable statements with no writes.  The slice is *duplicated*,
+    not moved -- the current element still needs its own copy -- so a member
+    that wrote anything would write it twice.
+    """
+    by_def = {t.id: s for s in region.body for t in s.target}
+    want = {a.id for g in group for a in g.args if isinstance(a, Value)}
+    slice_: List[Stmt] = []
+    seen = set()
+    changed = True
+    while changed:
+        changed = False
+        for s in region.body:
+            if id(s) in seen or not s.target:
+                continue
+            if not any(t.id in want for t in s.target):
+                continue
+            if s.has_side_effects or not s.movable or s.regions:
+                continue
+            if any(a.writes for a in s.accesses):
+                continue
+            seen.add(id(s))
+            slice_.append(s)
+            want |= {a.id for a in s.args if isinstance(a, Value)}
+            changed = True
+    # Keep only what actually leads to the index; a binding that does not
+    # mention it is the same for every element and must not be duplicated.
+    keep = []
+    reaches = set(next_index)
+    for s in reversed(slice_):
+        if any(isinstance(a, Value) and a.id in reaches for a in s.args):
+            keep.append(s)
+            reaches |= {t.id for t in s.target}
+    order = {id(s): i for i, s in enumerate(region.body)}
+    return sorted(keep, key=lambda s: order[id(s)])
+
+
+def _advance(slice_: Sequence[Stmt], mapping: Dict[int, Value],
+             make_value) -> Tuple[List[Stmt], Dict[int, Value]]:
+    """Clone the slice with the index replaced; return the clones and a map.
+
+    The clones drop `decl` and `extern`.  Those carry a declarator the caller
+    wrote with a name in it, and a second statement declaring `glb_m2` would
+    be a redefinition rather than a second pointer.  Without them the emitter
+    names the value itself and renders the type, which for a buffer is a
+    plain pointer -- `const` and `__restrict__` are lost on the clone, which
+    costs optimisation and not correctness.
+    """
+    out: List[Stmt] = []
+    sub = dict(mapping)
+    for s in slice_:
+        fresh = tuple(make_value(t.type, t.hint or 'adv') for t in s.target)
+        clone = replace(substitute((s,), sub)[0], target=fresh,
+                        attrs=tuple(a for a in s.attrs
+                                    if a[0] not in ('decl', 'extern')))
+        out.append(clone)
+        sub.update({t.id: f for t, f in zip(s.target, fresh)})
+    return out, {k: v for k, v in sub.items() if k not in mapping}

@@ -525,6 +525,7 @@ class BatchLoop(AbstractInstruction):
                     # reads -- which is what happened the first time, silently
                     # and only in the generated text.
                     self._induction = loop.induction
+                    AbstractInstruction._induction_value.append(loop.induction)
                     try:
                         self._lookahead_bindings(writer)
                         # The first lookahead binding is what this loop calls
@@ -535,6 +536,7 @@ class BatchLoop(AbstractInstruction):
                         self._emit_body(writer)
                         self._advance_stage_counter(writer)
                     finally:
+                        AbstractInstruction._induction_value.pop()
                         self._induction = None
                 return
             with writer.For(f'size_t {self._batch(0)} = {self._start}; '

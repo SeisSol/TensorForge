@@ -202,6 +202,15 @@ class AbstractInstruction(ABC):
   # `copy.async` and its `wait` --- issued by two different instructions ---
   # end up in the same body.
   _shared_body: List = []
+  #: The loop induction *value* while a batch-loop body is being built.
+  #:
+  #: An address binding spells `batchId0` into its text, which the IR cannot
+  #: see -- so `substitute` finds nothing to rewrite when a pass moves the
+  #: binding to another element, and `licm` sees a computation with no inputs.
+  #: Naming it as an operand is what makes the dependency a def-use edge; this
+  #: is how the value reaches the instruction that needs to name it.
+  _induction_value: list = []
+
 
   @classmethod
   @contextmanager
