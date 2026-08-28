@@ -82,7 +82,8 @@ def _its_wait(region: Region, token: Value) -> Tuple[int, Stmt]:
 
 
 def wrap_prefetch(body: Tuple[Stmt, ...], make_value,
-                  next_index: Dict[int, Value]) -> Tuple[Stmt, ...]:
+                  next_index: Optional[Dict[int, Value]] = None,
+                  report: Optional[List[str]] = None) -> Tuple[Stmt, ...]:
     """Move each loop's single async issue one iteration earlier.
 
     ``next_index`` maps an operand id to the value that names the *next*
@@ -100,9 +101,20 @@ def wrap_prefetch(body: Tuple[Stmt, ...], make_value,
         if s.op is not Op.FOR:
             out.append(s)
             continue
+        mapping = next_index
+        if mapping is None:
+            nxt = s.attr('next')
+            mapping = ({s.induction.id: nxt} if nxt is not None else None)
+        if mapping is None:
+            if report is not None:
+                report.append('loop does not name its successor index')
+            out.append(s)
+            continue
         try:
-            out.extend(_wrap_one(s, make_value, next_index))
-        except Refusal:
+            out.extend(_wrap_one(s, make_value, mapping))
+        except Refusal as why:
+            if report is not None:
+                report.append(str(why))
             out.append(s)
     return tuple(out)
 

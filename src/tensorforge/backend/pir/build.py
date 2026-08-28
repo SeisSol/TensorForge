@@ -961,7 +961,7 @@ class IRBuilder:
     def for_(self, lo: Operand, hi: Operand, step: Operand = 1,
              inits: Sequence[Operand] = (), types: Sequence[Any] = (),
              unroll: bool = False, hint: str = 'i', extern: str = None,
-             ctype: str = None) -> '_ForHandle':
+             ctype: str = None, next_index=None) -> '_ForHandle':
         """A loop.  ``extern`` and ``ctype`` are for loops the macro layer owns.
 
         An inner loop is the IR's own: it picks the induction variable's name
@@ -976,7 +976,7 @@ class IRBuilder:
         being needed as they migrate.
         """
         return _ForHandle(self, lo, hi, step, tuple(inits), tuple(types),
-                          unroll, hint, extern, ctype)
+                          unroll, hint, extern, ctype, next_index)
 
     def if_(self, cond: Operand, attrs: Tuple = ()) -> '_IfHandle':
         """Guard without results --- the common case (bounds checks)."""
@@ -1485,11 +1485,15 @@ class _RawBlock:
 
 class _ForHandle:
     def __init__(self, builder, lo, hi, step, inits, types, unroll, hint,
-                 extern=None, ctype=None):
+                 extern=None, ctype=None, next_index=None):
         if len(inits) != len(types):
             raise IRError('for_: one result type per init value required')
         self._extern = extern
         self._ctype = ctype
+        # What this loop calls the *next* element.  A clamped successor index
+        # is a property of the traversal, which the loop knows and the IR does
+        # not, so `wrap_prefetch` reads it here rather than deriving it.
+        self._next_index = next_index
         self.builder = builder
         self._args = (lo, hi, step) + inits
         self._types = types
@@ -1545,6 +1549,8 @@ class _ForHandle:
             attrs = attrs + (('extern', self._extern),)
         if self._ctype is not None:
             attrs = attrs + (('ctype', self._ctype),)
+        if self._next_index is not None:
+            attrs = attrs + (('next', self._next_index),)
         self.builder.emit(Stmt(op=Op.FOR, target=self.results, args=self._args,
                                regions=(region,), pure=False, movable=False,
                                attrs=attrs))

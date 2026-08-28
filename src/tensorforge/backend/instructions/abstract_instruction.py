@@ -233,6 +233,15 @@ class AbstractInstruction(ABC):
     finally:
       cls._shared_body.pop()
     body = builder.finish()
+    opts = context.get_user_options()
+    if getattr(opts, 'enable_wrap_loads', False):
+        from tensorforge.backend.pir.wrap import wrap_prefetch
+        why: list = []
+        body = wrap_prefetch(body, lambda ty, hint: builder.value(ty, hint=hint),
+                             report=why)
+        if os.environ.get('TF_IR_DEBUG'):
+            for w in why:
+                print(f'wrap: declined -- {w}')
     if os.environ.get('TF_IR_DEBUG'):
       for d in pir.verify(body, strict=False):
         print(f'pir: {d}')

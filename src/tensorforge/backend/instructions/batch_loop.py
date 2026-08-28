@@ -63,6 +63,8 @@ class BatchLoop(AbstractInstruction):
         # Set by the pipelining pass; emits a rolling iteration counter.  Not
         # emitted otherwise, so a disabled pass leaves the text unchanged.
         self._induction = None
+        self._first_lookahead = None
+        self._loop_handle = None
         self._stage_depth: Optional[int] = None
         # ids of leading region instructions emitted outside the flag guard
         self._unguarded: set = set()
@@ -323,6 +325,7 @@ class BatchLoop(AbstractInstruction):
             return
         from tensorforge.backend.pir.core import INDEX
         prev = self._induction
+        first = None
         for n in range(1, self._lookahead + 1):
             prev = writer.decl_expr(
                 f'const auto {self._batch(n)}',
@@ -330,6 +333,9 @@ class BatchLoop(AbstractInstruction):
                 f'{{0}} + {self._stride} : {{0}}',
                 INDEX, None, args=(prev,), hint=self._batch(n),
                 extern=self._batch(n))
+            if first is None:
+                first = prev
+        self._first_lookahead = first
 
     def _declare_stage_counter(self, writer) -> None:
         if self._stage_depth is None:
@@ -444,6 +450,7 @@ class BatchLoop(AbstractInstruction):
                 with writer.for_(self._start, self._num_elements(),
                                  self._stride, extern=self._batch(0),
                                  ctype='size_t') as loop:
+                    self._loop_handle = loop
                     # The induction *value*, not just its name.  Anything
                     # inside that mentions `batchId0` has to say so as an
                     # operand, or the IR sees a computation with no inputs and
@@ -453,6 +460,11 @@ class BatchLoop(AbstractInstruction):
                     self._induction = loop.induction
                     try:
                         self._lookahead_bindings(writer)
+                        # The first lookahead binding is what this loop calls
+                        # the next element, and `wrap_prefetch` needs exactly
+                        # that: it moves a transfer one iteration earlier and
+                        # has no way to know how the traversal clamps.
+                        loop._next_index = self._first_lookahead
                         self._emit_body(writer)
                         self._advance_stage_counter(writer)
                     finally:
