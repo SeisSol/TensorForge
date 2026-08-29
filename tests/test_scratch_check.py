@@ -98,7 +98,8 @@ def test_windows_that_do_not_overlap_are_not_compared():
     b.store(a, b.rawexpr('1.0f', hint='v'), i)
     b.store(c, b.rawexpr('2.0f', hint='v'), i)
     b.load(a, i, hint='d')
-    assert sc.windows(b.finish())
+    placed, unplaced = sc.windows(b.finish())
+    assert placed and not unplaced
     violations, _ = sc.check_reuse(b.finish())
     assert not violations
 

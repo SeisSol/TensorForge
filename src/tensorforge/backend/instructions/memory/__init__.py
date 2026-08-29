@@ -158,23 +158,22 @@ class AbstractShrMemWrite(MemoryInstruction):
   def gen_code_declare(self, writer: Writer) -> None:
     if self._declare:
       offset = self._stage_offset()
-      if (hasattr(writer, 'alloc') and callable(getattr(writer, 'alloc'))
-          and self._stages == 1):
+      if hasattr(writer, 'alloc') and callable(getattr(writer, 'alloc')):
         # The window is a value, so a read through it declares what it
         # touches instead of naming it.  `extern` because the consumers still
         # spell `s0` out, same as the register tiles.
         #
-        # Only where the offset is a number.  A rotating buffer's offset
-        # carries the stage expression, and the scratch check orders windows
-        # by their start to prove that two of them do not overlap -- a
-        # symbolic start cannot be ordered against a numeric one, and letting
-        # it through makes the check compare an int with a string rather than
-        # decline.  The rotating case keeps the text until the offset itself
-        # is a value.
+        # Rotating buffers included.  Their offset carries the stage
+        # expression, and `scratch_check` used to compare it against numeric
+        # starts and raise; it reports them as unplaced now, which is the
+        # honest answer -- it cannot order a symbolic start, so it declines to
+        # judge that window rather than judging it wrongly.
         value = writer.alloc(self._dest.get_fptype(), (self.stage_size(),),
                              MemSpace.SHARED, hint=self._dest.name,
                              extern=self._dest.name,
-                             arena=self._arena(), offset=int(offset),
+                             arena=self._arena(),
+                             offset=int(offset) if offset.isdigit()
+                             else offset,
                              restrict=self._vm.get_lexic().restrict_kw,
                              swizzle=self._swizzle())
         self._dest.set_pir_buffer(writer, value)

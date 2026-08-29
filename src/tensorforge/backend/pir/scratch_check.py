@@ -89,9 +89,22 @@ def _walk(body: Sequence[Stmt], pos: List[int]) -> Iterator[Tuple[int, Stmt]]:
             yield from _walk(region.body, pos)
 
 
-def windows(body: Sequence[Stmt]) -> Dict[int, Window]:
-    """The offsets the suballocator handed out, read back off the body."""
+def windows(body: Sequence[Stmt]) -> Tuple[Dict[int, Window], List[int]]:
+    """The offsets the suballocator handed out, read back off the body.
+
+    Returns the windows it could place and the ids of the ones it could not.
+
+    A rotating buffer's offset carries the stage expression --
+    ``1216 + (stage % 2) * 512`` -- and there is no integer to order it
+    against the numeric ones.  Ordering windows by their start is how the
+    check proves two of them do not overlap, so a symbolic start is not a
+    window this check can reason about.  Reporting it is the point: the
+    alternative was comparing an int against a string, which raised where it
+    should have declined, and the alternative to *that* was excluding rotation
+    from the structured path entirely.
+    """
     out: Dict[int, Window] = {}
+    unplaced: List[int] = []
     for _, stmt in _walk(body, [0]):
         if stmt.op != Op.ALLOC:
             continue
@@ -99,10 +112,14 @@ def windows(body: Sequence[Stmt]) -> Dict[int, Window]:
         offset = attrs.get('offset')
         arena = attrs.get('arena')
         for t in stmt.target:
-            if getattr(t.type, 'space', None) == MemSpace.SHARED:
-                out[id(t)] = Window(offset if offset is not None else 0,
-                                    t.type.volume, arena)
-    return out
+            if getattr(t.type, 'space', None) != MemSpace.SHARED:
+                continue
+            if offset is not None and not isinstance(offset, int):
+                unplaced.append(id(t))
+                continue
+            out[id(t)] = Window(offset if offset is not None else 0,
+                                t.type.volume, arena)
+    return out, unplaced
 
 
 def touches(body: Sequence[Stmt], keys) -> Tuple[List[Touch], List[int]]:
@@ -156,10 +173,11 @@ def check_reuse(body: Sequence[Stmt]) -> Tuple[List[Violation], List[int]]:
     to declare their accesses.  A non-empty second list means the first is not
     a clean bill of health.
     """
-    win = windows(body)
+    win, unplaced = windows(body)
     if len(win) < 2:
-        return [], []
+        return [], list(unplaced)
     all_touches, opaque = touches(body, set(win))
+    opaque = list(opaque) + list(unplaced)
     by_id = {t.buffer and id(t.buffer): t.buffer for t in all_touches}
 
     violations: List[Violation] = []
