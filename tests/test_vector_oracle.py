@@ -55,6 +55,25 @@ def _destination(name, widen, blocking=1, threads=64):
     return src, out
 
 
+@pytest.mark.parametrize('blocking', [1, 2, 4])
+@pytest.mark.parametrize('vcase', VEC_CASES)
+def test_blocking_does_not_move_the_destination(vcase, blocking):
+    """More than one vector per lane, which is where the two readings of a
+    slot number stopped agreeing.
+
+    `build` answers in elements and `build_nonlead` in register floats, and
+    the width separates them; taking the scaled one in both applied it twice.
+    At one slot per lane -- every arrangement the width alone produces -- the
+    slot is 0 and the two readings agree, so nothing showed it until a lane
+    held two.
+    """
+    _, base = _destination(vcase, widen=False)
+    _, wide = _destination(vcase, widen=True, blocking=blocking)
+    assert set(base) == set(wide)
+    for key in sorted(base):
+        assert base[key] == pytest.approx(wide[key], abs=1e-4), key
+
+
 @pytest.mark.parametrize('vcase', VEC_CASES)
 def test_the_widened_kernel_writes_the_same_numbers(vcase):
     """The check that would have caught the store-side lane mismatch.

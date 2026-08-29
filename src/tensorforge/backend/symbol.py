@@ -398,7 +398,20 @@ class LeadIndex:
     return writer.op('mul', INDEX, nl, self._width, hint='vslot')
 
   def build(self, writer, context: Context):
-    nl = self.build_nonlead(writer, context)
+    # The *raw* slot, not `build_nonlead`'s.  The two are different views of
+    # the same number and scaling is what separates them: `build_nonlead`
+    # answers in register floats, where a slot spans `width` of them, while
+    # this answers in elements and applies the width once to the whole
+    # address below.  Taking the scaled one here applied it twice --
+    # `(lane + slot*width*block) * width` instead of `(lane + slot*block) *
+    # width`.
+    #
+    # Invisible at one slot per lane, which is every arrangement the width
+    # alone produces, because `slot` is 0 and both readings agree.  It
+    # appears the moment a lane holds two, which is exactly what register
+    # blocking does -- and it showed up as the destination being written at
+    # eight of sixteen rows per column and one column too far.
+    nl = self._nonlead if self._value is None else self._value
     if self._block > 1:
       # The lane's share of this dimension, asked of the builder rather than
       # spelled out here.  The arithmetic used to be inline -- `(tid/stride) %
