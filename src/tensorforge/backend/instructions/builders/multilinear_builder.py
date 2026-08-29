@@ -35,6 +35,7 @@ class MultilinearBuilder(AbstractBuilder):
     self._num_threads = num_threads
     self._lead_width = lead_width
 
+
     self._counter = 0
     self._counter_shr_reg = 0
     self._loaders_cache: Dict[Symbol, AbstractInstruction] = {}
@@ -65,6 +66,20 @@ class MultilinearBuilder(AbstractBuilder):
     # storage coordinates.  Filled by plan(); see there.
     self._operand_union = {}
     self._temporaries = {}
+
+
+  def _k_width(self, descr) -> int:
+    """How many reduction steps one body should cover for this operator.
+
+    Decided per operator rather than per section, unlike the lead width: the
+    reduction does not touch the register image that the descriptors of a
+    section share, so one operator taking a wider group does not constrain
+    its neighbours.
+    """
+    from tensorforge.backend.instructions.memory import vectorize
+    if vectorize.K_WIDTH <= 1:
+      return 1
+    return vectorize.K_WIDTH
 
   def build(self, ops: List[Symbol], dest_obj: Tensor, descr: MultilinearDescr):
     self._reset()
@@ -922,7 +937,8 @@ class MultilinearBuilder(AbstractBuilder):
                                    sumOperation=AddOperator(),
                                    dest_obj=self._dest_obj,
                                    theta=self._theta,
-                                   lead_width=getattr(self, '_lead_width', 1)))
+                                   lead_width=getattr(self, '_lead_width', 1),
+                                   k_width=self._k_width(self._descr)))
 
   def _prev_offset(self, prev):
     """Where the accumulation bias sits, relative to the loop indices.

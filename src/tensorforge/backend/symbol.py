@@ -482,6 +482,12 @@ def add_offset(x, offset):
     return x + offset
   elif isinstance(x, Immediate):
     return Immediate(x._value + offset, x._type)
+  elif isinstance(x, VecIndex):
+    # Folded in as well, and for the opposite reason to `LeadIndex`: the
+    # shift is already in element units here, so it goes straight through --
+    # but wrapping would hide the `VecIndex` from `vec_width_of` and the
+    # access would quietly load one element where it meant to load `width`.
+    return VecIndex(add_offset(x.value, offset), x.width)
   elif isinstance(x, LeadIndex):
     # Folded in, not wrapped.  See `LeadIndex._offset`: a wrapper cannot
     # convert the shift between the element view and the slot view, because
@@ -530,6 +536,73 @@ def layout_of(index, num_threads=None):
     return None
   layout = RegisterLayout(tuple(l.layout().axis(0) for l in leads))
   return layout if layout.tiles(num_threads) else None
+
+
+class VecIndex:
+  """A plain index that additionally reads `width` consecutive elements.
+
+  `LeadIndex` carries a width too, but the two are not the same thing and
+  cannot be merged.  A lead index names a *distributed* axis, so its width
+  scales the whole address -- lane `l` starts `width` elements after lane
+  `l-1`.  This one names an ordinary axis, usually the reduction, where the
+  index already *is* the element offset and the vector simply continues from
+  it; scaling would skip `width - 1` elements out of every `width`.
+
+  Only ever valid on an operand's contiguous axis.  `B[k,n] .. B[k+V-1,n]`
+  are adjacent because `k` is `B`'s leading dimension; the same index on `A`,
+  whose contiguous axis is `m`, names values `ldA` apart and no load fetches
+  them together.
+  """
+
+  def __init__(self, value, width: int):
+    if width < 1:
+      raise InternalError(f'vector width must be >= 1, got {width}')
+    self._value = value
+    self._width = width
+
+  @property
+  def width(self) -> int:
+    return self._width
+
+  @property
+  def value(self):
+    return self._value
+
+  def __eq__(self, other):
+    return (isinstance(other, VecIndex) and self._value == other._value
+            and self._width == other._width)
+
+  def __hash__(self):
+    return hash((VecIndex, self._value, self._width))
+
+  def __repr__(self):
+    return f'VecIndex({self._value!r}, width={self._width})'
+
+  def is_thread_dependent(self):
+    return getattr(self._value, 'is_thread_dependent', lambda: False)()
+
+  def build(self, writer, context: Context):
+    # No scaling: see the class docstring.
+    v = self._value
+    return v.build(writer, context) if hasattr(v, 'build') else v
+
+  def build_nonlead(self, writer, context: Context):
+    return self.build(writer, context)
+
+  def write(self, context: Context):
+    v = self._value
+    return v.write(context) if hasattr(v, 'write') else str(v)
+
+
+def vec_width_of(index) -> int:
+  """The width a non-distributed axis of this access carries."""
+  for idx in index:
+    inner = idx
+    while hasattr(inner, 'inner'):
+      inner = inner.inner
+    if isinstance(inner, VecIndex):
+      return inner.width
+  return 1
 
 
 def lead_width_of(index) -> int:
@@ -1654,7 +1727,11 @@ class Symbol:
           # claim that is wrong is worse than one that is weak.  The relaxed
           # type is legal at any base; tightening it needs the constant part
           # of the address modelled, which is its own step.
-          w = lead_width_of(index)
+          # At most one of these is ever greater than one for a given
+          # symbol: the lead width lives on the distributed axis and the
+          # vector width on the contiguous one, and no operand has the same
+          # axis in both roles.  `A` is wide in `m`, `B` in `k`.
+          w = max(lead_width_of(index), vec_width_of(index))
           ltype = (ScalarType(self.get_fptype()) if w == 1
                    else ScalarType(self.get_fptype(), w))
           return writer.load(self, self.address_value(writer, context, index),

@@ -5,7 +5,7 @@ from typing import Union
 import math
 from . import ComputeInstruction
 from tensorforge.common.matrix.boundingbox import BoundingBox
-from tensorforge.backend.symbol import SymbolType, add_offset, Symbol, SymbolView, DataView, Loop, LeadLoop, write_loops, LeadIndex, LinearizedLoop, Immediate
+from tensorforge.backend.symbol import VecIndex, SymbolType, add_offset, Symbol, SymbolView, DataView, Loop, LeadLoop, write_loops, LeadIndex, LinearizedLoop, Immediate
 from tensorforge.common.exceptions import InternalError, GenerationError
 from tensorforge.backend.writer import Writer
 from tensorforge.common.context import Context
@@ -26,6 +26,19 @@ import numpy as np
 
 from copy import copy
 
+def _contiguous_first_axis(sym) -> bool:
+    """Whether axis 0 of this symbol is the one adjacent in memory.
+
+    The condition a wide load along that axis rests on, and it is a property
+    of the *view* rather than of the tensor: a transposed operand has the same
+    tensor and a stride that makes the values `ld` apart.
+    """
+    try:
+        return sym.data_view.get_dim_strides()[0] == 1
+    except Exception:
+        return False
+
+
 class MultilinearInstruction(ComputeInstruction):
     def __init__(self,
                context: Context,
@@ -41,6 +54,7 @@ class MultilinearInstruction(ComputeInstruction):
                blockcount: int=1,
                theta: int=0,
                lead_width: int=1,
+               k_width: int=1,
                prev_offset=None):
         super(MultilinearInstruction, self).__init__(context)
         self._dest = dest
@@ -56,6 +70,12 @@ class MultilinearInstruction(ComputeInstruction):
         #: already reduced to match, so `threads * lead_width` is what the
         #: lane count was before -- see `vectorize.lead_threads_and_width`.
         self._lead_width = lead_width
+        #: Reduction steps one body covers.  The innermost `k` loop steps by
+        #: this, and the body emits that many products into one accumulator
+        #: before writing it back -- so the destination is read and written
+        #: once per group instead of once per step, and the operand whose
+        #: contiguous axis *is* `k` is loaded once as a vector of that width.
+        self._k_width = k_width
         self._blockcount = blockcount
         # origin of the lead loop, chosen by the builder so that a register-
         # resident operand's lane assignment lines up (see
@@ -343,6 +363,16 @@ class MultilinearInstruction(ComputeInstruction):
             loopmap[f'k{i}'] = len(loopstack) + len(outerLoops)
             if -i-1 not in self._lead_dims:
                 step = matrixK if i == len(self._ks) - 1 else 1
+                if (i == len(self._ks) - 1 and self._k_width > 1
+                        and (self._sparseK[i] or force_unroll)):
+                    # Unrolled only.  The last group of a ragged extent is
+                    # shorter than the rest, and knowing *how much* shorter is
+                    # what lets the body emit the right number of products.
+                    # In an unrolled loop the induction value is a Python
+                    # integer and the answer is a compile-time count; in a
+                    # real `for` it would be a runtime comparison per step,
+                    # which costs more than the loads it saves.
+                    step *= self._k_width
                 loop = [Loop(f'k{i}', dimmin, dimmax, step, unroll=self._sparseK[i] or force_unroll)]
                 if self._sparseK[i] or force_unroll or True:# and False:
                     loopstack += loop
@@ -383,23 +413,48 @@ class MultilinearInstruction(ComputeInstruction):
                 [varlist[loopmap[f'n{i}']] for i, _ in enumerate(self._ns)])
             ftype = (ScalarType(self._idest.get_fptype()) if width == 1
                      else ScalarType(self._idest.get_fptype(), width))
-            data = []
-            for i, op in enumerate(self._ops):
-                v = op.symbol.load(writer, self._context, None,
-                                   [add_offset(varlist[loopmap[nk]], self._eff_offset(i, j))
-                                    for j, nk in enumerate(self._opdim_to_nks[i])],
-                                   False)
-                if v is None:
-                    # zero; no data
+            steps, kslot = self._k_group(varlist, loopmap)
+
+            # One vector load per operand whose contiguous axis is the
+            # reduction, hoisted out of the group: `B[k,n] .. B[k+V-1,n]` are
+            # adjacent, so the `V` steps below take their operand from
+            # components of a single load instead of from `V` loads.
+            packs = self._k_packs(writer, varlist, loopmap, kslot, len(steps))
+
+            prod = None
+            for c, kval in enumerate(steps):
+                terms = []
+                for i, op in enumerate(self._ops):
+                    if (i, c) in packs:
+                        v = packs[(i, c)]
+                    else:
+                        idx = [add_offset(varlist[loopmap[nk]]
+                                          if nk != kslot else kval,
+                                          self._eff_offset(i, j))
+                               for j, nk in enumerate(self._opdim_to_nks[i])]
+                        v = op.symbol.load(writer, self._context, None, idx,
+                                           False)
+                    if v is None:
+                        # zero; no data
+                        return
+                    terms.append(self._splat(writer, ftype, v))
+                if len(terms) == 0:
+                    # also zero
                     return
-                data.append(self._splat(writer, ftype, v))
-            if len(data) == 0:
-                # also zero
+                term = terms[0]
+                for i in range(1, len(terms)):
+                    term = self._emit_binop(writer, ftype,
+                                            self._productOperation,
+                                            term, terms[i])
+                # Accumulated inside the group, so the destination is read and
+                # written once rather than once per reduction step.  Sound
+                # because the sum operation is associative over the reduction
+                # axis by construction -- it is the same operation the loop
+                # itself is folding with.
+                prod = term if prod is None else self._emit_binop(
+                    writer, ftype, self._sumOperation, prod, term)
+            if prod is None:
                 return
-            prod = data[0]
-            for i in range(1, len(data)):
-                prod = self._emit_binop(writer, ftype, self._productOperation,
-                                        prod, data[i])
             ns = [varlist[loopmap[f'n{i}']] for i, _ in enumerate(self._ns)]
             value = self._vdest.load(writer, self._context, None, ns, False)
             if value is None:
@@ -409,6 +464,64 @@ class MultilinearInstruction(ComputeInstruction):
             self._vdest.store(writer, self._context, total, ns, False)
 
         write_loops(self._context, writer, loopstack, nonlead_writer)
+
+    def _k_group(self, varlist, loopmap):
+        """The reduction values this body covers, and which slot they fill.
+
+        `(values, slot)`.  At `k_width == 1` that is the single value the loop
+        handed over and the behaviour is unchanged.  Wider, the loop steps by
+        `k_width` and this expands the base into the group -- clipped at the
+        extent, so a ragged reduction simply gets a shorter last group.  No
+        guard and no masking: unlike the lead dimension, a reduction has no
+        lanes to leave half-valid, the leftover steps are just fewer terms in
+        the same sum.
+        """
+        if not self._ks:
+            return [None], None
+        slot = f'k{len(self._ks) - 1}'
+        base = varlist[loopmap[slot]]
+        if self._k_width == 1 or not isinstance(base, Immediate):
+            return [base], slot
+        _, kmax = self._ks[-1]
+        first = base._value
+        return ([Immediate(first + c, base._type)
+                 for c in range(min(self._k_width, kmax - first))], slot)
+
+    def _k_packs(self, writer, varlist, loopmap, kslot, steps):
+        """One wide load per operand contiguous along the reduction axis.
+
+        Returns `{(operand, step): value}` for the operands that could be
+        loaded once for the whole group.  An operand qualifies when the
+        reduction is its *own* leading dimension -- then the `steps` values it
+        contributes are adjacent in memory and one load fetches them all.
+        `A`, whose leading dimension is `m`, does not qualify: its reduction
+        values are `ldA` apart and no load reaches them together.
+
+        This removes loads, not splats.  Each component still feeds its own
+        product against its own `A`, and each still needs its own broadcast
+        into the vector width.
+        """
+        packs = {}
+        if steps < 2 or kslot is None:
+            return packs
+        for i, op in enumerate(self._ops):
+            nks = self._opdim_to_nks[i]
+            if not nks or nks[0] != kslot or len(nks) < 2:
+                continue
+            sym = op.symbol
+            if not _contiguous_first_axis(sym):
+                continue
+            base = varlist[loopmap[kslot]]
+            idx = [add_offset(VecIndex(base, steps) if j == 0
+                              else varlist[loopmap[nk]],
+                              self._eff_offset(i, j))
+                   for j, nk in enumerate(nks)]
+            v = sym.load(writer, self._context, None, idx, False)
+            if v is None or getattr(v.type, 'length', None) != steps:
+                continue
+            for c in range(steps):
+                packs[(i, c)] = writer.extract(v, c)
+        return packs
 
     def _splat(self, writer, ftype, v):
         """A scalar operand broadcast into every component of the vector.

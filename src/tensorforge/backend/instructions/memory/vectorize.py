@@ -42,6 +42,11 @@ LEAD_VECTORIZE = os.environ.get('TF_LEAD_VEC', '') not in ('', '0')
 #: width is an instruction one -- they want separate measurements.
 LEAD_BLOCKING = int(os.environ.get('TF_LEAD_BLOCK', '1') or '1')
 
+#: Reduction steps one body covers.  Independent of the lead width: it removes
+#: loads of the broadcast operand rather than instructions on the vectorised
+#: one, and it works with or without a lead width at all.
+K_WIDTH = int(os.environ.get('TF_K_WIDTH', '1') or '1')
+
 #: No target loads more than 16 bytes in one instruction: `LDG.128`/`LDS.128`
 #: on NVIDIA, `global_load_dwordx4`/`ds_read_b128` on AMD.  So `double4` is
 #: not a width, and `float4` is the widest there is.
