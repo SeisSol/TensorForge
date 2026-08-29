@@ -111,3 +111,67 @@ def test_a_cast_store_is_not_counted_as_a_load():
 def test_an_address_that_is_not_static_is_reported_not_guessed():
     with pytest.raises(bc.Unresolved):
         bc.ways("someRuntimeValue + threadIdx.x", 4, 1)
+
+
+# --------------------------------------------------------------------------- #
+# What the census could not see
+# --------------------------------------------------------------------------- #
+
+def test_a_loop_variable_is_resolved_at_its_initialiser():
+    """An unresolved access is one the census does not count, which is a blind
+    spot and not a caveat.  77 of them were loop variables.
+
+    Substituting the initialiser is sound because these are bounds over tensor
+    dimensions: every lane in the wave is on the same iteration, so the value
+    shifts every lane's address by the same amount and the bank pattern is
+    unchanged.  Anything lane-dependent reaches the address through
+    `threadIdx`, which is substituted separately.
+    """
+    source = ("float* tile = &arena[0];\n"
+              "for (int32_t i = 0; i < 6; i += 1) {\n"
+              "  float x = tile[threadIdx.x + i * 16];\n"
+              "}\n")
+    got = [bc.ways(bc._resolve(index, defs), base, width, lanes)
+           for _n, index, base, width, _k, defs, lanes in bc.accesses(source)]
+    assert got == [1], got
+
+
+def test_an_identifier_that_is_not_a_generator_name_is_still_substituted():
+    """`_resolve` matched only `v{n}` names, so a definition sitting in the
+    table went unused because the variable was called `i`."""
+    assert bc._resolve('i * 16', {'i': '0'}) == '(0) * 16'
+
+
+@pytest.mark.parametrize("expr", [
+    "threadIdx.x + threadIdx.y * blockDim.x",
+    "threadIdx.x + blockIdx.x * 32",
+])
+def test_the_warp_uniform_builtins_do_not_stop_the_census(expr):
+    """They shift every lane's address equally, so they cannot create or
+    remove a conflict -- and refusing the access left it uncounted."""
+    assert bc.ways(expr, 4, 1) == 1
+
+
+def test_a_genuinely_unknown_symbol_is_still_refused():
+    """The point is to resolve what is knowable, not to guess."""
+    with pytest.raises(bc.Unresolved):
+        bc.ways("someRuntimeValue + threadIdx.x", 4, 1)
+
+
+def test_a_member_access_is_not_a_substitutable_name():
+    """`threadIdx.x` ends in an identifier that a word boundary matches, so
+    widening the resolver rewrote the thread index into whatever `x` was.  The
+    result was a self-referential expression 25 levels deep."""
+    assert bc._resolve('threadIdx.x + i', {'x': '99', 'i': '0'}) \
+        == 'threadIdx.x + (0)'
+
+
+def test_a_loaded_value_is_not_an_address_expression():
+    """`float x = tile[...]` defines `x` from memory, not from the lane.
+    Substituting it into an address produces something that is neither."""
+    source = ("float* tile = &arena[0];\n"
+              "float x = tile[threadIdx.x];\n"
+              "float y = tile[threadIdx.x + 1];\n")
+    for _n, index, base, width, _k, defs, lanes in bc.accesses(source):
+        assert 'x' not in defs and 'y' not in defs
+        assert bc.ways(bc._resolve(index, defs), base, width, lanes) == 1

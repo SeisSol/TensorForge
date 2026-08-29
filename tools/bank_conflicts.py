@@ -60,6 +60,19 @@ _WINDOW = re.compile(
     r'^\s*(?:const\s+)?(\w+)\s*\*\s*(?:__restrict__\s+)?(\w+)\s*=\s*&\s*(\w+)\[')
 _ASSIGN = re.compile(r'^\s*(?:const\s+)?[\w:<>,\s*]+?\s(\w+)\s*=\s*([^;]+);\s*$')
 
+#: `for (int32_t v18_i1 = 0; ...)`.  A loop variable is never declared by a
+#: statement the assignment pattern can see, so 77 accesses in the corpus came
+#: back unresolved -- and an unresolved access is one the census does not
+#: count, which is a blind spot rather than a caveat.
+#:
+#: Substituting the initialiser is sound because these are loop bounds over
+#: tensor dimensions: every lane in the wave is on the same iteration, so the
+#: value shifts every lane's address by the same amount and leaves the bank
+#: pattern exactly as it was.  Anything lane-dependent reaches the address
+#: through `threadIdx`, which is substituted separately.
+_FOR_INIT = re.compile(r'\bfor\s*\(\s*(?:const\s+)?[\w:<>,\s*]+?\s(\w+)\s*=\s*'
+                       r'([^;]+);')
+
 _ELEM_BYTES = {'float': 4, 'double': 8, 'int32_t': 4, 'uint32_t': 4,
                'int64_t': 8, '__half': 2}
 
@@ -121,6 +134,13 @@ def _to_python(expr: str) -> str:
     literals, `threadIdx.x` -- differs between the two languages.
     """
     expr = expr.replace('threadIdx.x', 'tid')
+    # Uniform within a warp, so they shift every lane's address equally and
+    # leave the bank pattern alone.  `threadIdx.y` indexes the warp inside the
+    # block and `blockDim`/`blockIdx` are the same for all of them; refusing
+    # the access instead left three of them uncounted.
+    expr = expr.replace('threadIdx.y', '0').replace('threadIdx.z', '0')
+    expr = re.sub(r'\bblockDim\.[xyz]\b', str(LANES), expr)
+    expr = re.sub(r'\bblockIdx\.[xyz]\b', '0', expr)
     expr = re.sub(r'\b(\d+)_i(?:8|16|32|64)\b', r'\1', expr)   # typed literals
     expr = re.sub(r'(?<![/])/(?![/])', '//', expr)
     return expr
@@ -173,9 +193,18 @@ class _Lane(ast.NodeVisitor):
 
 
 def _resolve(expr: str, defs: dict, depth: int = 24) -> str:
-    """Substitute local definitions until only `tid` and literals are left."""
+    """Substitute local definitions until only `tid` and literals are left.
+
+    Any identifier that has a definition, not only the generator's own
+    `v{n}` names: a loop variable is spelled `i`, and matching the allocator's
+    naming convention meant 38 accesses in `accumulate_chain` stayed
+    unresolved while their definition sat in the table.
+    """
     for _ in range(depth):
-        grown = re.sub(r'\b(v\d+\w*)\b',
+        # Not after a dot: `threadIdx.x` ends in an identifier that a plain
+        # word boundary happily matches, and substituting there rewrites the
+        # thread index into whatever `x` happened to be.
+        grown = re.sub(r'(?<![.\w])([A-Za-z_]\w*)\b',
                        lambda m: f'({defs[m.group(1)]})' if m.group(1) in defs
                        else m.group(0), expr)
         if grown == expr:
@@ -226,8 +255,14 @@ def accesses(source: str):
             ctype, name, _arena = m.groups()
             windows[name] = _ELEM_BYTES.get(ctype, 4)
             continue
+        m = _FOR_INIT.search(line)
+        if m and 'threadIdx' not in m.group(2):
+            defs.setdefault(m.group(1), m.group(2))
         m = _ASSIGN.match(line)
-        if m and '[' not in m.group(1):
+        # The right-hand side has to be an expression, not a memory read: a
+        # loaded value is not a function of the lane, and substituting one
+        # into an address produces something that is neither.
+        if m and '[' not in m.group(1) and '[' not in m.group(2):
             defs[m.group(1)] = m.group(2)
 
     depth = 0

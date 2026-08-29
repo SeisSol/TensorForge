@@ -108,6 +108,17 @@ GROUPS = {
     # The bank model.  Every mistake it made over-reported, which is the
     # direction that gets a check ignored.
     'banks': ('tests/test_bank_conflicts.py', [
+        ('loop variables go unresolved again',
+         sub(Path('tools/bank_conflicts.py'),
+             "        m = _FOR_INIT.search(line)", '        m = None', 1)),
+        ('the resolver substitutes after a dot',
+         sub(Path('tools/bank_conflicts.py'),
+             r"        grown = re.sub(r'(?<![.\w])([A-Za-z_]\w*)\b',",
+             r"        grown = re.sub(r'\b([A-Za-z_]\w*)\b',", 1)),
+        ('a loaded value taken as an address expression',
+         sub(Path('tools/bank_conflicts.py'),
+             "if m and '[' not in m.group(1) and '[' not in m.group(2):",
+             "if m and '[' not in m.group(1):", 1)),
         ('the vector width is read from a single identifier again',
          sub(Path('tools/bank_conflicts.py'),
              "([^)]*?)\\s*\\*\\s*\\)\\s*&", "(\\w+)\\s*\\*\\s*\\)\\s*&", 1)),
