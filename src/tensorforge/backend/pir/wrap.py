@@ -170,13 +170,22 @@ def _its_wait(region: Region, token: Value) -> Tuple[int, Stmt]:
 
 def wrap_prefetch(body: Tuple[Stmt, ...], make_value,
                   next_index: Optional[Dict[int, Value]] = None,
-                  report: Optional[List[str]] = None) -> Tuple[Stmt, ...]:
+                  report: Optional[List[str]] = None,
+                  assume_rotated: bool = False) -> Tuple[Stmt, ...]:
     """Move each loop's single async issue one iteration earlier.
 
     ``next_index`` maps an operand id to the value that names the *next*
     element -- the loop's lookahead binding.  The pass does not invent it: a
     clamped successor index is a property of how the loop is traversed, which
     the loop knows and the IR does not.
+
+    ``assume_rotated`` drops the one refusal that is about *space* rather than
+    about legality: with two copies of the destination, the transfer for k+1
+    no longer lands in the buffer k is reading.  It exists so the question
+    "would rotation help here" can be asked of the pass itself rather than of
+    a second predicate written to imitate it -- because the decision to
+    allocate two copies has to be made before the body exists, and a copy of
+    these criteria kept elsewhere is a copy that drifts.
 
     ``make_value(type, hint)`` mints the carried token, the loop result and
     the prologue's.  A factory rather than a builder, because the statements
@@ -198,7 +207,7 @@ def wrap_prefetch(body: Tuple[Stmt, ...], make_value,
             out.append(s)
             continue
         try:
-            out.extend(_wrap_one(s, make_value, mapping))
+            out.extend(_wrap_one(s, make_value, mapping, assume_rotated))
         except Refusal as why:
             if report is not None:
                 report.append(str(why))
@@ -207,7 +216,8 @@ def wrap_prefetch(body: Tuple[Stmt, ...], make_value,
 
 
 def _wrap_one(loop: Stmt, make_value,
-              next_index: Dict[int, Value]) -> Sequence[Stmt]:
+              next_index: Dict[int, Value],
+              assume_rotated: bool = False) -> Sequence[Stmt]:
     region = loop.regions[0]
     if any(isinstance(a.type, TokenType) for a in region.args):
         raise Refusal('this loop already carries a token')
@@ -260,7 +270,7 @@ def _wrap_one(loop: Stmt, make_value,
     # destination and accepted a transfer that fills the buffer the current
     # element is still reading -- the exact race this check exists to refuse,
     # slipping through because the read was two regions down.
-    scan = [st for st, _ in walk(region.body)]
+    scan = [] if assume_rotated else [st for st, _ in walk(region.body)]
     for s in scan:
         if s in group or s.op is Op.WAIT or s.op is Op.IF:
             continue
