@@ -37,17 +37,61 @@ def quad_perm(ctrl: int) -> Tuple[int, int, int, int]:
 
 
 def dpp(ctrl: int, vals: Sequence) -> Lanes:
-    """`dpp<ctrl, 0xf, 0xf, true>` restricted to the quad-permute range.
+    """`dpp<ctrl, 0xf, 0xf, true>`, quad permute and row rotate.
 
-    Full row and wave controls are not modelled: nothing in the table needs
-    them, and a half-modelled instruction would be worse than an absent one.
+    0x121-0x12F is `row_ror:n`: within each row of sixteen, lane `l` reads
+    lane `(l + n) % 16`. Modelled because `swap<16>` is `row_ror:8` and that
+    is the only way to check what `swap` does.
+
+    `row_shl` and `row_shr` stay unmodelled even though they sit next door,
+    and the wave controls likewise: nothing names them, and a half-modelled
+    instruction would be worse than an absent one.
     """
+    if 0x121 <= ctrl <= 0x12F:
+        n = ctrl - 0x120
+        return [vals[(l & ~15) + ((l + n) % 16)] for l in range(len(vals))]
     if ctrl > 0xFF:
         raise NotImplementedError(
-            f'dpp ctrl 0x{ctrl:x} is outside the quad-permute range; '
-            f'model it before putting an instruction that uses it in the table')
+            f'dpp ctrl 0x{ctrl:x} is outside the quad-permute and row-rotate '
+            f'ranges; model it before putting an instruction that uses it in '
+            f'the table')
     perm = quad_perm(ctrl)
     return [vals[(l & ~3) + perm[l % 4]] for l in range(len(vals))]
+
+
+def swizzle(and_mask: int, or_mask: int, xor_mask: int,
+            vals: Sequence) -> Lanes:
+    """`tensorforge::swizzle<And, Or, Xor>`.
+
+    `ds_swizzle_b32` in bitmask mode: lane `l` reads `((l & and) | or) ^ xor`
+    of its own group of 32. The grouping matters -- the masks are five bits
+    and cannot reach across the halves of a wave64 -- so the high bit of the
+    lane is carried through untouched.
+    """
+    return [vals[(l & ~31) | ((((l & 31) & and_mask) | or_mask) ^ xor_mask)]
+            for l in range(len(vals))]
+
+
+def swap(vals: Sequence, block: int) -> Lanes:
+    """`tensorforge::swap<Block>`, from the branch that Block selects.
+
+    Each branch is modelled from its own source rather than from the map the
+    template documents, which is the point: the template documented one map
+    and two of its branches implemented another.
+    """
+    if block == 1:
+        return list(vals)
+    if block == 64:
+        return [vals[(l % 32) + (1 - l // 32) * 32] for l in range(len(vals))]
+    if block in (8, 32):
+        return swizzle(0x1f, 0x0, block // 2, vals)
+    if block == 16:
+        return dpp(0x128, vals)
+    if block == 4:
+        return dpp(0b01001110, vals)
+    if block == 2:
+        return dpp(0b10110001, vals)
+    raise NotImplementedError(f'swap<{block}> has no branch in hip.h')
 
 
 # --------------------------------------------------------------------------- #

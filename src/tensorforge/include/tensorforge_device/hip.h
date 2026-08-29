@@ -237,6 +237,26 @@ __device__ __forceinline__ auto permlane16(T value) -> T {
 #endif
 */
 
+/// Exchange the two halves of every `Block`-sized group of lanes.
+///
+/// Lane `i` reads lane `i ^ (Block / 2)`: one bit of the lane index toggled,
+/// bit `log2(Block) - 1`.  That is the butterfly step, and it is what makes
+/// the primitive compose --- a sequence of `swap`s is a permutation of the
+/// lane index bits, which is how a register reordering into a matrix fragment
+/// gets built.
+///
+/// The branches used to implement two different maps.  `Block` 4, 16 and 64
+/// toggled one bit, as above; `Block` 8 and 32 read lane `i ^ (Block - 1)`,
+/// the *mirror* lane, which the comment in `reduction` also described.  Both
+/// are defensible readings of the name and nothing here could tell them
+/// apart: the sole caller is a butterfly reduction, where each group is
+/// already uniform, so any lane of the neighbouring group answers and the two
+/// maps are indistinguishable.
+///
+/// They are not indistinguishable to anything that needs an exact
+/// permutation.  One bit toggled is the useful one -- mirroring flips every
+/// low bit at once, which does not compose into an arbitrary bit permutation
+/// -- so that is what this is, for every `Block`.
 template <std::size_t Block, typename T>
 __device__ __forceinline__ T swap(T value) {
   if constexpr (Block == 1) {
@@ -248,7 +268,7 @@ __device__ __forceinline__ T swap(T value) {
   } else if constexpr (Block == 32 || Block == 8) {
     constexpr auto AndMask = 0x1f;
     constexpr auto OrMask = 0x0;
-    constexpr auto XorMask = Block - 1;
+    constexpr auto XorMask = Block / 2;
     return swizzle<AndMask, OrMask, XorMask>(value);
   } else if constexpr (Block == 16) {
     return dpp<0x128, 0xf, 0xf, true>(value);
@@ -765,11 +785,15 @@ __device__ __forceinline__ T reduction(const T &value) {
     return ballotReduction<Op, Block, Subblock>(value);
   }
 
-  // `swap<N>` exchanges with the mirror lane of an N-sized group.  Once each
-  // Subblock-sized group holds a uniform value, mirroring across `2*Subblock`
-  // pairs each group with its neighbour, which is the butterfly step -- so the
-  // width has to grow with the recursion.  `swap<Block>` repeated the same
-  // full-width exchange at every level instead.
+  // `swap<N>` exchanges the two halves of an N-sized group.  Once each
+  // Subblock-sized group holds a uniform value, exchanging across
+  // `2*Subblock` pairs each group with its neighbour, which is the butterfly
+  // step -- so the width has to grow with the recursion.  `swap<Block>`
+  // repeated the same full-width exchange at every level instead.
+  //
+  // This reads any lane of the neighbouring group, and the group is uniform,
+  // so it cannot tell which lane it got. That is why `swap` could carry two
+  // different maps for as long as this was its only caller.
   const auto other = swap<(Subblock << 1)>(value);
   const auto result = Op::applyOperation(value, other);
   // Argument order is <Op, Block, Subblock, T>: `T` was being passed where
