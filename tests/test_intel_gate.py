@@ -303,3 +303,22 @@ def test_every_fragment_slot_is_used_exactly_once():
             seen = sorted(off(atom, i, j)
                           for i in range(dims[0]) for j in range(dims[1]))
             assert seen == list(range(n_slots)), name
+
+
+def test_tf32_is_its_own_type_and_four_bytes_wide():
+    """A storage format, not an arithmetic one: values are converted into it
+    and handed to an instruction, and nothing in the generator computes with
+    it.  Spelling it `F32` is a lie no front end catches -- `simd<float, 128>`
+    and `simd<tf32, 128>` are both well-formed and only one is the operand."""
+    assert Datatype.TF32.size() == 4
+    assert Datatype.TF32 is not Datatype.F32
+    assert Datatype.TF32.ctype() == 'tensorforge::tf32'
+
+
+def test_both_matrix_paths_name_the_same_type():
+    """The NVIDIA halves used to be `U32` -- "four bytes of something", chosen
+    because `splitFloatTF32` took `uint32_t&`.  It still does on CUDA, where
+    the PTX constraint letter forces a typedef; what changed is that the
+    *generator* now knows what those four bytes are."""
+    from tensorforge.backend.instructions.compute.primitives import nvidia
+    assert nvidia.TF32_HALF.base is Datatype.TF32

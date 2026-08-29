@@ -87,11 +87,20 @@ class Datatype(enum.Enum):
   I16 = 21
   I32 = 22
   I64 = 23
-  # Unsigned, and only where a vendor signature demands it.  `splitFloatTF32`
-  # takes `uint32_t &`, so an `I32` there does not bind and the kernel does not
-  # compile -- which is the only reason this member exists.  Nothing in the
-  # generator computes with it.
+  # Unsigned, and only where a vendor signature demands it.  An `I32` does not
+  # bind to a `uint32_t &`, so the kernel does not compile -- which is the only
+  # reason this member exists.  Nothing in the generator computes with it.
   U32 = 32
+  # The 19-bit E8M10 the matrix units multiply: 1 sign, 8 exponent, 10
+  # mantissa, stored in 32 bits.  A storage type and not an arithmetic one --
+  # nothing here computes with it, values are *converted into* it and handed
+  # to an instruction.
+  #
+  # It earns a member because spelling it `F32` is a lie no front end catches.
+  # `simd<float, 128>` and `simd<tf32, 128>` are both well-formed and both
+  # accepted by `xmx::dpas`; only one is the instruction's operand, and the
+  # difference is 13 mantissa bits computed on silently.
+  TF32 = 33
 
   def size(self):
     if self == self.F32:
@@ -109,6 +118,8 @@ class Datatype(enum.Enum):
     elif self == self.I32:
       return 4
     elif self == self.U32:
+      return 4
+    elif self == self.TF32:
       return 4
     elif self == self.I8:
       return 1
@@ -154,6 +165,11 @@ class Datatype(enum.Enum):
       return f'{int(value)}_i32'
     elif self == self.U32:
       return f'{int(value)}u'
+    elif self == self.TF32:
+      # Through a float: the type is a storage format, and every platform's
+      # spelling of it converts from one.  There is no TF32 literal syntax to
+      # write instead.
+      return f'tensorforge::tf32({float(value):.16}f)'
     elif self == self.I64:
       return f'{int(value)}_i64'
 
@@ -169,7 +185,8 @@ class Datatype(enum.Enum):
            Datatype.I16: 'int16_t',
            Datatype.I32: 'int32_t',
            Datatype.I64: 'int64_t',
-           Datatype.U32: 'uint32_t',}
+           Datatype.U32: 'uint32_t',
+           Datatype.TF32: 'tensorforge::tf32',}
     return map[fp]
 
   def ctype(self):
@@ -187,7 +204,8 @@ class Datatype(enum.Enum):
            'int16_t': Datatype.I16,
            'int32_t': Datatype.I32,
            'int64_t': Datatype.I64,
-           'uint32_t': Datatype.U32}
+           'uint32_t': Datatype.U32,
+           'tensorforge::tf32': Datatype.TF32}
     return map[as_str]
 
   @classmethod

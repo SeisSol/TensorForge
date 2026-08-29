@@ -8,10 +8,19 @@ from tensorforge.backend.pir.core import (INDEX, Access, Effect, MemSpace,
                                           ScalarType, Value)
 from tensorforge.backend.writer import Writer
 
-#: `splitFloatTF32` takes `uint32_t &`, so the halves cannot be `I32`: the
-#: reference would not bind and the kernel would not compile.  That signature
-#: is the whole reason `Datatype.U32` exists.
-TF32_HALF = ScalarType(Datatype.U32)
+#: The two halves an FP32 value splits into for `mma.sync ... .tf32`.
+#:
+#: `Datatype.TF32` now, not `U32`.  The old spelling said "four bytes of
+#: something" and was chosen because `splitFloatTF32` took `uint32_t &` -- it
+#: still does, since `tensorforge::tf32` is a typedef on CUDA and has to be
+#: (the halves go into PTX under `"r"`, which binds a register and not a class
+#: type).  What changes is what the *generator* knows: a value of this type is
+#: a converted operand of a matrix instruction, not an integer that happens to
+#: be four bytes wide.
+#:
+#: The same member serves the Intel path, where the C++ type is
+#: `esimd::tfloat32` and the distinction is enforced by the compiler.
+TF32_HALF = ScalarType(Datatype.TF32)
 
 
 def tfconvert(writer: Writer, variables):

@@ -394,15 +394,25 @@ intel_esimd::simd<T, N> dpas(intel_esimd::simd<CT, N> C,
 /// Stand-in for `sycl::ext::intel::experimental::esimd::tfloat32`: a distinct
 /// type that converts from and to float, which is all the generator needs it
 /// to be here.
-class TF32 {
+class tf32 {
 public:
-  TF32() = default;
-  TF32(float v) : _v(v) {}
+  tf32() = default;
+  tf32(float v) : _v(v) {}
   operator float() const { return _v; }
 
 private:
   float _v = 0.0f;
 };
+using TF32 = tf32;
+
+/// Mirrors the signature in `isycl.h`: the destinations are one-element views
+/// into a fragment, so they are templates and go by value.
+template <typename UpperT, typename LowerT, typename ValueT>
+void splitFloatTF32(UpperT upper, LowerT lower, ValueT value) {
+  upper = static_cast<tf32>(value);
+  const auto upperF = static_cast<float>(static_cast<tf32>(value));
+  lower = static_cast<tf32>(value - upperF);
+}
 
 } // namespace tensorforge
 

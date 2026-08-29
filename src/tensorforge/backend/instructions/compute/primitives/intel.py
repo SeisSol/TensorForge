@@ -45,6 +45,7 @@ products.  Emulation is for FP32, where three products against 52 TF is a
 gain.
 """
 
+from tensorforge.backend.pir.core import SCALAR_LAYOUT, ScalarType
 from tensorforge.common.basic_types import Datatype
 
 #: Fixed by the hardware; the header asserts it.
@@ -356,43 +357,119 @@ def _fragment(writer, dtype, count, hint):
                           layout=SCALAR_LAYOUT)
 
 
+def _fragment(writer, dtype, count, hint):
+    """A DPAS fragment: `count` elements, held whole by one work-item.
+
+    `SCALAR_LAYOUT` and not a lane axis, and the distinction is the point.  A
+    fragment is not "one element per lane" -- its element order is the
+    hardware's (see `a_offset` and friends), and the work-item owns all of it.
+    The width therefore lives on `ScalarType.length`, the slot axis, which the
+    ESIMD emitter also spells as a `simd`.
+    """
+    return writer.declare(ScalarType(dtype, count), hint=hint, init='{}',
+                          layout=SCALAR_LAYOUT)
+
+
+def _slot(writer, frag, index, hint):
+    """A one-element view into a fragment, to be written through."""
+    return writer.rawexpr(f'{{0}}.template select<1, 1>({index})', frag,
+                          type_=frag.type, hint=hint, pure=True)
+
+
+def _stage(writer, load, hi, lo, atom, offset, coords, i0, j0, ilim, jlim,
+           swap=False):
+    """Write one operand into its fragment, split into its two TF32 halves.
+
+    Returns False if a callback declines an element, which sends the caller
+    back to the generic path rather than leaving a hole: an uninitialised slot
+    is a wrong product, not a missing one.
+    """
+    for i, j in coords:
+        if i0 + i >= ilim or j0 + j >= jlim:
+            continue
+        v = (load(writer, None, j0 + j, i0 + i) if swap
+             else load(writer, None, i0 + i, j0 + j))
+        if v is None or v is False:
+            return False
+        slot = offset(atom, i, j)
+        # A call for its effect: `splitFloatTF32` writes through references, so
+        # it is not an SSA producer.  `writes` names the two fragments, which
+        # is what lets two elements staged into different slots be seen not to
+        # conflict.
+        writer.call_stmt('tensorforge::splitFloatTF32',
+                         _slot(writer, hi, slot, 'hs'),
+                         _slot(writer, lo, slot, 'ls'),
+                         v, writes=(hi, lo))
+    return True
+
+
 def dpas_matmul(writer, C, A, B, M, N, K, kx, threads, dtype, ctx):
     """`C += A x B` through XMX, with FP32 emulated over three TF32 products.
 
-    The layout is settled and checked: `a_offset`, `b_offset` and `c_offset`
+    The layout is derived and checked: `a_offset`, `b_offset` and `c_offset`
     come out of the vISA pseudo-code, `reference` is that pseudo-code
     transcribed, and `tests/test_intel_gate.py` places a matrix through the
-    offsets, runs the transcription and compares against `C + A @ B`.  That
-    was the part no C++ front end could verify, and it is verified.
+    offsets, runs the transcription and compares against `C + A @ B`.
 
-    What blocks the emission is smaller and concrete: **there is no
-    `Datatype.TF32`**.  A fragment is `simd<TF32, 128>`, so its type has to be
-    `ScalarType(Datatype.TF32, 128)` -- and `Datatype` has F32, F64, F16,
-    BF16, F128, BOOL and the integers, with no room to say "the 19-bit
-    E8M10 the systolic array eats".
+    Three products, not four: `lo*lo` falls below the accumulator's rounding.
+    The same arrangement as `nvidia.py`'s `mma.sync ... .tf32`, and it has to
+    be -- the error analysis belongs to the split, not to either instruction.
 
-    Spelling it `F32` would be a lie the emitter cannot catch: `simd<float,
-    128>` and `simd<TF32, 128>` are both well-formed, both accepted by
-    `dpas` in a shim, and only one of them is the instruction's operand.  So
-    the type goes in first, with `ctype`, `size` and `literal`, and this
-    follows.  Sketch of what follows, so it is not re-derived:
+    **Blocked on the staging, and on a model mismatch rather than a spelling.**
+    The body below fills each fragment slot with one `splitFloatTF32`, which
+    assumes the operand callbacks hand over scalars.  Under this lowering they
+    hand over `simd<float, threads>` -- the lead dimension is already spread
+    across a vector -- so `tf32(value)` gets a vector where it wants an
+    element, and 64 scalar splits would be the wrong shape even if it bound.
 
-    * one fragment per operand half (`ahi`, `alo`, `bhi`, `blo`) plus the
-      accumulator, each `writer.declare(ScalarType(TF32, n),
-      layout=SCALAR_LAYOUT)` -- `SCALAR_LAYOUT` and not a lane axis, because a
-      fragment's element order is the hardware's and the work-item owns all of
-      it;
-    * `splitFloatTF32` per element into `select<1,1>(offset(atom, i, j))`, as
-      a `call_stmt` with `writes=(hi, lo)` so two slots provably do not
-      conflict;
-    * three `dpas` over `(bhi, ahi)`, `(bhi, alo)`, `(blo, ahi)`; `lo*lo`
-      falls below the accumulator's rounding, which is why `TF32_TERMS` is 3
-      and the same reason `nvidia.py` uses three.
+    A fragment is held whole by one work-item in the hardware's element order,
+    and the operand is already a vector in the *lane* order.  Going between
+    them is a reformat -- `select` and `replicate` over whole vectors -- not a
+    loop over elements.  That is a real piece of design and it is the next
+    step; the emission is kept because everything around the reformat (the
+    fragments, the three products, the accumulator read-out) is settled, and
+    only the middle is not.
     """
+    atom = atom_for(dtype)
+    if atom is None:
+        return False
     raise NotImplementedError(
-        'DPAS emission needs Datatype.TF32; see the docstring. The fragment '
-        'layout itself is settled -- a_offset/b_offset/c_offset are derived '
-        'from the vISA pseudo-code and checked against C + A @ B.')
+        'DPAS staging assumes scalar operands; under this lowering the '
+        'operand callbacks return lane-distributed vectors. See the '
+        'docstring -- the fix is a vector-to-vector reformat, not a scalar '
+        'loop.')
+    acc_ct = dtype.ctype()
+
+    for m0 in range(0, M, atom.m):
+        for n0 in range(0, N, atom.n):
+            acc = _fragment(writer, dtype, atom.c_elems, 'dacc')
+            for k0 in range(0, K + kx, atom.k):
+                ahi = _fragment(writer, Datatype.TF32, atom.a_elems, 'ahi')
+                alo = _fragment(writer, Datatype.TF32, atom.a_elems, 'alo')
+                bhi = _fragment(writer, Datatype.TF32, atom.b_elems, 'bhi')
+                blo = _fragment(writer, Datatype.TF32, atom.b_elems, 'blo')
+                if not _stage(writer, A, ahi, alo, atom, a_offset,
+                              [(m, k) for m in range(atom.m)
+                               for k in range(atom.k)], m0, k0, M, K + kx):
+                    return False
+                if not _stage(writer, B, bhi, blo, atom, b_offset,
+                              [(k, n) for k in range(atom.k)
+                               for n in range(atom.n)], k0, n0, K + kx, N,
+                              swap=True):
+                    return False
+                for bf, af in ((bhi, ahi), (bhi, alo), (blo, ahi)):
+                    writer.assign(acc, writer.rawexpr(
+                        f'tensorforge::intel_xmx::dpas<{atom.depth}, '
+                        f'{atom.repeat}, {acc_ct}>({{0}}, {{1}}, {{2}})',
+                        acc, bf, af, type_=acc.type, hint='dp', pure=True))
+            for m in range(atom.m):
+                for n in range(atom.n):
+                    if m0 + m >= M or n0 + n >= N:
+                        continue
+                    C(writer, writer.extract(acc, c_offset(atom, m, n),
+                                             ScalarType(dtype)),
+                      m0 + m, n0 + n)
+    return True
 
 
 def matmul(writer, C, A, B, M, N, K, kx, threads, dtype, sparse, ctx):

@@ -221,7 +221,23 @@ public:
 };
 // #endif
 
-__device__ __forceinline__ void splitFloatTF32(uint32_t &upper, uint32_t &lower,
+/// The 19-bit E8M10 the tensor cores multiply, as its bit pattern.
+///
+/// A typedef and not a wrapper struct, and the reason is the constraint
+/// letter: the halves go straight into `mma.sync` as `"r"` operands, which
+/// binds a 32-bit *register* and not a class type -- so a struct around the
+/// same four bytes would not compile, however much better it would document
+/// itself.
+///
+/// The distinction is therefore not enforced here.  It is enforced where it
+/// can be and where it matters: on the Intel side `tf32` is
+/// `esimd::tfloat32`, a real class, and `simd<float, N>` will not pass for
+/// `simd<tf32, N>` there.  Both spellings are well-formed C++ and only one is
+/// the instruction's operand, so the check belongs on the side that can make
+/// it.
+using tf32 = uint32_t;
+
+__device__ __forceinline__ void splitFloatTF32(tf32 &upper, tf32 &lower,
                                                float value) {
   asm("cvt.rna.tf32.f32 %0, %1;\n" : "=r"(upper) : "f"(value));
   const auto upperF = *reinterpret_cast<float *>(&upper);

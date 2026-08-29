@@ -568,13 +568,15 @@ def test_a_replicated_vector_is_still_a_simd(emitter):
 
 
 def test_dpas_emission_names_what_it_is_missing():
-    """Not a stub: the layout is settled, one type is not.
+    """Not a stub: the layout is settled, the staging is not.
 
-    Failing loudly with the reason beats emitting `simd<float, 128>` where
-    `simd<TF32, 128>` belongs -- both are well-formed and only one is the
-    instruction's operand.
+    And the blocker is a model mismatch rather than a spelling -- the operand
+    callbacks hand over lane-distributed vectors while a fragment wants the
+    hardware's element order, so going between them is a reformat and not a
+    loop over scalars.  Failing loudly with that beats emitting something
+    well-formed that stages the wrong thing.
     """
     from tensorforge.backend.instructions.compute.primitives import intel
-    with pytest.raises(NotImplementedError, match='Datatype.TF32'):
+    with pytest.raises(NotImplementedError, match='lane-distributed'):
         intel.dpas_matmul(None, None, None, None, 8, 16, 8, 0, 16,
                           Datatype.F32, None)

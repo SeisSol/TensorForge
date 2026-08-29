@@ -228,7 +228,16 @@ template <int Row> float2 movdpp16(float2 a);
 template <int Row> float movdpp16(float a);
 
 // cuda.h
-void splitFloatTF32(std::uint32_t &upper, std::uint32_t &lower, float value);
+//
+// `tf32` is a typedef for `std::uint32_t` there and has to be: the halves go
+// into `mma.sync` under the `"r"` constraint, which binds a 32-bit register
+// and not a class type.  The name still earns its place -- the generator
+// spells the halves `Datatype.TF32` now rather than "four bytes of something"
+// -- and on the Intel side the same name *is* a distinct class, which is
+// where the mix-up it guards against can actually happen.
+using tf32 = std::uint32_t;
+
+void splitFloatTF32(tf32 &upper, tf32 &lower, float value);
 
 } // namespace tensorforge
 
