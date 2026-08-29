@@ -304,11 +304,13 @@ class AbstractInstruction(ABC):
         for d in diag:
           print(f'  {d}')
 
-    body = pir.optimize(body, explicit_simd=_explicit_simd(self._context))
+    simd = _explicit_simd(self._context)
+    body = pir.optimize(body, explicit_simd=simd)
     if os.environ.get('TF_IR_STATS'):
       print(f'{type(self).__name__}: {sum(1 for _ in pir.walk(body))} Knoten, '
             f'Registerdruck {pir.pressure(body)} Werte, '
-            f'{pir.pressure(body, in_bytes=True)} B')
+            f'{pir.pressure(body, in_bytes=True, explicit_simd=simd)} B '
+            f'({"pro Work-Item" if simd else "pro Lane"})')
     pir.emit(body, writer, self._context)
 
   def get_headers(self) -> List[str]:

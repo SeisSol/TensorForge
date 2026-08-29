@@ -990,13 +990,19 @@ def _index(body: Tuple[Stmt, ...], start: int = 0):
     return order, span
 
 
-def pressure(body: Tuple[Stmt, ...], in_bytes: bool = False) -> int:
+def pressure(body: Tuple[Stmt, ...], in_bytes: bool = False,
+             explicit_simd: bool = True) -> int:
     """Peak simultaneously live SSA values, or the bytes they occupy.
 
-    `in_bytes` is what an explicitly vectorised kernel has to ask.  A count
-    treats `simd<float, 16>` and `float` as one apiece, which is right when a
-    value is one register per thread and wrong by the wave width when the
-    work-item holds the whole wave.  See `register_bytes`.
+    `in_bytes` is what a caller comparing against a register budget has to
+    ask.  A count treats `simd<float, 16>` and `float` as one apiece, and it
+    cannot see register arrays at all -- which is the larger blind spot: the
+    SSA values of `lead_window_spans_two_blocks` peak at 540 bytes while its
+    `float r0[4992]` is 19 KB.
+
+    `explicit_simd` says whose registers are being counted, and the byte form
+    is wrong on the wrong setting rather than merely imprecise.  See
+    `register_bytes`.
 
     The bound every scheduling decision needs: hoisting a load away from its
     use, unrolling further, or deepening a software pipeline all buy latency
@@ -1009,13 +1015,14 @@ def pressure(body: Tuple[Stmt, ...], in_bytes: bool = False) -> int:
     one statement that mentions it.
     """
     values = _value_index(body) if in_bytes else {}
-    weight = ((lambda vid: register_bytes(values[vid]) if vid in values else 0)
+    weight = ((lambda vid: register_bytes(values[vid], explicit_simd)
+               if vid in values else 0)
               if in_bytes else (lambda vid: 1))
     # Register arrays are live for the whole body, so they are a constant
     # added to every point rather than something the sweep can see rise and
     # fall.  Added once here instead of extending their live ranges, which
     # would say the same thing less clearly.
-    floor = (sum(register_bytes(v) for v in values.values()
+    floor = (sum(register_bytes(v, explicit_simd) for v in values.values()
                  if isinstance(v.type, BufferType)) if in_bytes else 0)
     order, span = _index(body)
     pos: Dict[int, int] = {}          # statement identity -> index
@@ -1083,7 +1090,7 @@ def _value_index(body: Tuple[Stmt, ...]) -> Dict[int, Value]:
     return out
 
 
-def register_bytes(v: Value) -> int:
+def register_bytes(v: Value, explicit_simd: bool = True) -> int:
     """How much register file one live value occupies.
 
     Not the same question as "how many values are live", and the difference is
@@ -1102,6 +1109,23 @@ def register_bytes(v: Value) -> int:
     estimate: it is what SPMD would need, so the number never *over*states,
     and a caller comparing against a budget stays on the safe side of a value
     it cannot size.
+
+    `explicit_simd` is which of the two is being asked, and it has to be
+    asked. Under SPMD the lane axis is *threads*, so multiplying by it gives
+    the wave's total register file rather than one lane's, and the two halves
+    of the sum end up in different units -- a register array is per lane on
+    that path and a scalar would be per wave.
+
+    That is not academic. Doubling the lane count halves every array, and
+    under the wave-total reading it also doubles what each live value costs --
+    so that term scales as `lanes * count(lanes)`: flat where the count halves
+    with the lanes, doubled where it does not. The only movement left is the
+    array's, and the array is the smaller term. Over the cases where the lane
+    ceiling binds on gfx90a the median ratio at 64 lanes against 32 is 1.03
+    for the wave total and 0.57 per lane -- and 0.57 is what the register
+    slots do, which is what the figure is meant to track. A search minimising
+    the wave total would keep 32 lanes precisely where 64 is what relieves the
+    pressure.
     """
     t = v.type
     if isinstance(t, BufferType):
@@ -1119,7 +1143,7 @@ def register_bytes(v: Value) -> int:
     if not isinstance(t, ScalarType):
         return 0                      # tokens name an event, not storage
     lanes = 1
-    if v.layout is not None:
+    if explicit_simd and v.layout is not None:
         for axis in v.layout.axes:
             lanes *= axis.block
     return lanes * (t.length or 1) * t.base.size()
