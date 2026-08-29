@@ -53,8 +53,16 @@ derivations, both checked against the 32 rows the tool does give:
 
 `established()` is the strict query and `covers()` the permissive one.  An
 emitter that would rather decline than act on a derivation asks the first.
+
+`position` answers "where does this element go", which is the question for
+reading a table.  Staging asks the other one --- "this lane, this register:
+which element do I fetch" --- and asks it of a *runtime* lane.  `element_at`
+inverts the map, and `index_terms` gives the same answer as a shift-and-mask
+form an emitter can put in an address, which is what the NVIDIA path spells
+out as raw index strings per instruction.
 """
 
+from dataclasses import dataclass
 from enum import Enum
 from typing import Dict, Optional, Tuple
 
@@ -413,3 +421,103 @@ def established(op) -> bool:
     on a rule that has never met the hardware it is being applied to.
     """
     return all(provenance(op, w) is Provenance.MEASURED for w in 'ABD')
+
+
+# --------------------------------------------------------------------------- #
+# the other direction: which element does a lane hold
+# --------------------------------------------------------------------------- #
+
+#: Which axes an operand is indexed by, in the order `index_terms` names them.
+#: `A[m][k]`, `B[k][n]`, `D[m][n]` --- so `first` and `second` mean different
+#: things per operand and the contraction is `second` for A and `first` for B.
+AXES = ('block', 'first', 'second')
+
+
+@dataclass(frozen=True)
+class Term:
+    """One shift-and-mask contribution to a matrix index.
+
+    ``((source >> shift) & mask) * weight``, summed over the terms of an axis.
+    `source` is `'lane'` or `'slot'`: a fragment's index generally comes from
+    both, and which bits come from where is the whole content of the layout.
+    """
+
+    source: str
+    shift: int
+    mask: int
+    weight: int
+
+    def evaluate(self, slot: int, lane: int) -> int:
+        source = lane if self.source == 'lane' else slot
+        return ((source >> self.shift) & self.mask) * self.weight
+
+
+def _bit_sources(bits: Tuple[int, ...]):
+    """Per index bit, where it is read from -- `(source, position)`."""
+    for weight in bits:
+        if weight < 0:
+            yield 'slot', (-weight).bit_length() - 1
+        else:
+            yield 'lane', weight.bit_length() - 1
+
+
+def index_terms(op, which: str, axis: str) -> Optional[Tuple[Term, ...]]:
+    """How to compute one index of an operand from a lane and a slot.
+
+    The layout sends each index bit to one lane or slot bit, so inverting it
+    is a bit gather -- and contiguous runs collapse, which is what keeps the
+    result short enough to sit in an address.  `B`'s `n` for
+    `mfma_f64_16x16x4f64` comes out as a single ``lane & 15`` and its `k` as a
+    single ``(lane >> 4) & 3``.
+
+    Returns `None` when the operand has no layout, for the same reason
+    `position` does.
+    """
+    row = _row(op)
+    if row is None:
+        return None
+    bits = row[{'A': 0, 'B': 3, 'D': 6}[which.upper()]:][:3]
+    if bits[0] is None:
+        return None
+    bits = bits[AXES.index(axis)]
+
+    terms, run = [], None
+    for offset, (source, place) in enumerate(_bit_sources(bits)):
+        if (run is not None and run[0] == source
+                and place == run[1] + run[2]):
+            run = (source, run[1], run[2] + 1, run[3])
+        else:
+            if run is not None:
+                terms.append(Term(run[0], run[1], (1 << run[2]) - 1, 1 << run[3]))
+            run = (source, place, 1, offset)
+    if run is not None:
+        terms.append(Term(run[0], run[1], (1 << run[2]) - 1, 1 << run[3]))
+    return tuple(terms)
+
+
+def element_at(op, which: str, slot: int, lane: int):
+    """`(block, first, second)` held by one register of one lane.
+
+    The inverse of `position`, and many-to-one where the operand is
+    replicated: the RDNA 3 fragments answer the same element for lane `l` and
+    lane `l + 16`.
+
+    Gathered bit by bit rather than through `index_terms`, so that the two
+    are independent and the grouping in `index_terms` -- which is where a
+    collapsed run can go wrong without changing any single bit -- has
+    something to be checked against.
+    """
+    row = _row(op)
+    if row is None:
+        return None
+    bits = row[{'A': 0, 'B': 3, 'D': 6}[which.upper()]:][:3]
+    if bits[0] is None:
+        return None
+    out = []
+    for axis_bits in bits:
+        value = 0
+        for offset, (source, place) in enumerate(_bit_sources(axis_bits)):
+            if ((lane if source == 'lane' else slot) >> place) & 1:
+                value |= 1 << offset
+        out.append(value)
+    return tuple(out)

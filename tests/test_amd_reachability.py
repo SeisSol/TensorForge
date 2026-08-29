@@ -84,6 +84,17 @@ KEPT_UNREACHABLE = {
         "rows for the generations the calculator does not reach",
     "_row":
         "measured row or derived one; reached only from `position`",
+    "AXES":
+        "names the operand index order for `index_terms`",
+    "Term":
+        "one shift-and-mask contribution to a fragment address",
+    "_bit_sources":
+        "reads the table the other way; reached from `element_at` and "
+        "`index_terms`",
+    "index_terms":
+        "fragment addressing for a staging emitter, which is not written",
+    "element_at":
+        "the inverse of `position`; same call site, not written yet",
     "position":
         "fragment placement; the emitter that stages an operand into one is "
         "not written",

@@ -349,3 +349,166 @@ def test_the_native_f32_and_f64_wmmas_place_k_in_the_lane():
         assert not op.lane_batched()
         lanes = {layouts.position(op, "B", k, 0)[1] for k in range(op.k)}
         assert lanes == {0, 16}, f"{name}: k takes the top lane bit"
+
+
+# --------------------------------------------------------------------------- #
+# the inverse: what a lane has to fetch
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.parametrize("op", catalog.MATRIX_OPS, ids=lambda op: op.builtin)
+def test_element_at_inverts_position(op):
+    """Round trip, over every element of every operand.
+
+    `position` answers where an element goes and `element_at` which element a
+    register holds. A staging emitter needs the second and a table reader the
+    first; they are the same claim from two ends, and a fragment that fills
+    its registers exactly cannot have one right and the other wrong without
+    the round trip catching it.
+    """
+    extents = {"A": (op.m, op.k), "B": (op.k, op.n), "D": (op.m, op.n)}
+    for which, (e1, e2) in extents.items():
+        if not layouts.covers(op, which):
+            continue
+        for block in range(op.blocks):
+            for first in range(e1):
+                for second in range(e2):
+                    slot, lane = layouts.position(op, which, first, second, block)
+                    assert layouts.element_at(op, which, slot, lane) == (
+                        block, first, second), (
+                        f"{op.builtin} {which}[{first}][{second}] block {block}")
+
+
+@pytest.mark.parametrize("op", catalog.MATRIX_OPS, ids=lambda op: op.builtin)
+def test_the_shift_and_mask_form_agrees_with_the_bit_gather(op):
+    """`index_terms` collapses runs of bits; `element_at` does not.
+
+    The grouping is where this can go wrong quietly: merging two bits that are
+    adjacent in the index but not in the lane produces a form that is right
+    for every value with at most one of them set, which includes every value a
+    spot check would try.
+    """
+    for which in "ABD":
+        if not layouts.covers(op, which):
+            continue
+        frag = {"A": op.a, "B": op.b, "D": op.d}[which]
+        for slot in range(frag.per_lane):
+            for lane in range(op.wave):
+                built = tuple(
+                    sum(t.evaluate(slot, lane)
+                        for t in layouts.index_terms(op, which, axis))
+                    for axis in layouts.AXES)
+                assert built == layouts.element_at(op, which, slot, lane), (
+                    f"{op.builtin} {which} slot {slot} lane {lane}")
+
+
+@pytest.mark.parametrize("op", catalog.MATRIX_OPS, ids=lambda op: op.builtin)
+def test_an_address_costs_a_handful_of_terms(op):
+    """The point of collapsing runs: fragments are cheap to address.
+
+    Three shift-and-mask terms is the worst case in the whole catalogue: an
+    address is a couple of VALU operations, not a bit gather. Which is what
+    makes reading a fragment straight out of shared memory a real option
+    rather than a table lookup per element.
+    """
+    for which in "ABD":
+        if not layouts.covers(op, which):
+            continue
+        for axis in layouts.AXES:
+            terms = layouts.index_terms(op, which, axis)
+            assert len(terms) <= 3, (
+                f"{op.builtin} {which} {axis} needs {len(terms)} terms")
+
+
+def test_a_third_term_is_the_contraction_coming_back_to_the_slots():
+    """Not a family quirk: the granule rule's third branch, priced.
+
+    `k` takes the low slot bits, then the lane rows, then returns to the
+    higher slots -- and that return is the third term. So it appears exactly
+    when `k` outruns `granule * rows`, which is every wide-K instruction:
+    gfx950's, RDNA 4's, gfx1250's. The narrow ones next to them, at the same
+    shape, need two.
+
+    Two instructions fix the statement between them. RDNA 3 holds its operand
+    twice over, so there is no lane row to hop through and all four bits of
+    `k` stay in the slots as one run -- a single term. `wmma_f64_16x16x4_f64`
+    holds one element per eight bytes, so the granule is one and there is no
+    slot run to leave in the first place. A return needs both somewhere to
+    have gone and somewhere to have left.
+
+    Worth pinning because it is the cost the paths this work is heading
+    towards will pay, and because an earlier version of this test asserted
+    the wrong cause -- that only accumulators reach three -- which is true of
+    every instruction the calculator measured and false of four it did not.
+    """
+    def returns_to_slots(op, which):
+        frag = op.a if which == "A" else op.b
+        extent = op.m if which == "A" else op.n
+        granule = max(1, min(8 // frag.dtype.size(), frag.per_lane))
+        rows = max(1, op.wave
+                   // (extent * op.blocks * op.replication(which.lower())))
+        # Three conditions, and each is failed by a real instruction. The
+        # granule has to put something in the slots first -- F64 holds one
+        # element per eight bytes, so there is no run to leave. There has to
+        # be a lane row to hop through -- RDNA 3 holds its operand twice over
+        # and has none. And `k` has to outrun both, or it never returns.
+        return granule > 1 and rows > 1 and op.k > granule * rows
+
+    for op in catalog.MATRIX_OPS:
+        for which in "AB":
+            if not layouts.covers(op, which):
+                continue
+            axis = "second" if which == "A" else "first"
+            three = len(layouts.index_terms(op, which, axis)) == 3
+            assert three == returns_to_slots(op, which), op.builtin
+
+    wide = next(o for o in catalog.MATRIX_OPS
+                if o.builtin == "mfma_f32_16x16x32_bf16")
+    narrow = next(o for o in catalog.MATRIX_OPS
+                  if o.builtin == "mfma_f32_16x16x16bf16_1k")
+    assert len(layouts.index_terms(wide, "A", "second")) == 3
+    assert len(layouts.index_terms(narrow, "A", "second")) == 2
+
+
+def test_the_bf16_tile_reads_its_contraction_out_of_one_register():
+    """What the layout says about staging the 4x4 BF16 tile.
+
+    `k` comes entirely from the slot, so the four BF16 a lane holds are `k =
+    0..3` of one row -- contiguous. With `k` the fastest axis in shared
+    memory that is a single 64-bit read per lane, at ``(lane & 3) * pitch +
+    ((lane >> 2) & 15) * blockpitch``. No cross-lane movement at all on the
+    operand side, which is what the shifts-and-swizzles question was really
+    asking.
+    """
+    op = next(o for o in catalog.MATRIX_OPS
+              if o.builtin == "mfma_f32_4x4x4bf16_1k")
+    k_terms = layouts.index_terms(op, "A", "second")
+    assert len(k_terms) == 1 and k_terms[0].source == "slot"
+    assert [t.source for t in layouts.index_terms(op, "A", "first")] == ["lane"]
+
+    for lane in range(op.wave):
+        rows = {layouts.element_at(op, "A", slot, lane)[1]
+                for slot in range(op.a.per_lane)}
+        contraction = [layouts.element_at(op, "A", slot, lane)[2]
+                       for slot in range(op.a.per_lane)]
+        assert len(rows) == 1, "one row per lane"
+        assert contraction == [0, 1, 2, 3], "contiguous in k"
+
+
+def test_the_fp64_tile_takes_its_contraction_from_the_lane():
+    """And what it says about the FP64 one, which is the harder case.
+
+    `k` comes from the top two lane bits and the row from the low four, so a
+    lane fetches a single element at ``(lane & 15) * pitch + ((lane >> 4) &
+    3)``. Cheap to address -- and it means sixteen lanes carry the leading
+    dimension while four carry the contraction, which is the reason this
+    instruction cannot be fed from the register path.
+    """
+    op = next(o for o in catalog.MATRIX_OPS if o.builtin == "mfma_f64_16x16x4f64")
+    assert op.b.per_lane == 1
+    n_terms = layouts.index_terms(op, "B", "second")
+    k_terms = layouts.index_terms(op, "B", "first")
+    assert n_terms == (layouts.Term("lane", 0, 15, 1),)
+    assert k_terms == (layouts.Term("lane", 4, 3, 1),)
+
+    leading = {layouts.element_at(op, "B", 0, lane)[2] for lane in range(op.wave)}
+    assert len(leading) == 16, "a quarter of the wave's lanes, four times over"
