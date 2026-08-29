@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 SeisSol Group
 #
 # SPDX-License-Identifier: MIT
-from typing import List, Union, Type
+from typing import List, Optional, Union, Type
 from copy import deepcopy
 import hashlib
 from tensorforge.generators.descriptions import OperationDescription, MultilinearDescr, ElementwiseDescr, RegionDescription, ReductionDescr
@@ -14,6 +14,8 @@ from tensorforge.backend.opt.inspect import async_depth, format_diagnostics, ver
 from tensorforge.backend.scopes import Scopes
 from tensorforge.backend.residency import Residency
 from tensorforge.backend.section_plan import SectionPlan
+from tensorforge.generators import lanes as lane_config
+from tensorforge.generators.lanes import LaneConfig
 from tensorforge.backend.temporaries import Temporaries
 from tensorforge.backend.symbol import Symbol, SymbolType
 from tensorforge.backend.instructions.abstract_instruction import AbstractInstruction
@@ -103,7 +105,8 @@ class Generator:
   def __init__(self,
                gemm_list: List[OperationDescription],
                context: Context,
-               thread_block_policy_type: Type[AbstractThreadBlockPolicy] = RegmaxBlockPolicy):
+               thread_block_policy_type: Type[AbstractThreadBlockPolicy] = RegmaxBlockPolicy,
+               lanes: Optional[LaneConfig] = None):
     self.descr_list: List[OperationDescription] = gemm_list
     self._context: Context = context
     self._thread_block_policy_type: Type[AbstractThreadBlockPolicy] = thread_block_policy_type
@@ -121,6 +124,11 @@ class Generator:
     self._num_threads: int = 0
     self._num_active_threads: int = 0
     self._lead_width: int = 1
+    #: An explicit lane geometry, or None to take the one the descriptors ask
+    #: for.  Overriding it is how a caller says "build this with 64 lanes
+    #: instead" -- the thing a search over configurations needs and a constant
+    #: cannot offer.
+    self._lanes: Optional[LaneConfig] = lanes
 
     self._section: Section = Section()
     self._sections: List[Section] = []
@@ -390,28 +398,11 @@ class Generator:
     self._header = f'{self._generate_launcher_proto(with_defaults=True)};\n'
 
   def _deduce_num_threads(self):
-    widths = []
-    for descr in self.descr_list:
-      num_threads, num_active_threads = descr.get_num_threads(self._context)
-
-      self._num_threads = max(num_threads, self._num_threads)
-      self._num_active_threads = max(num_active_threads, self._num_active_threads)
-      widths.append(getattr(descr, 'lead_width', lambda _c: 1)(self._context))
-
-    # The *minimum*, where the thread count is a maximum, and the asymmetry is
-    # not an oversight.  One register image is shared across the descriptors
-    # of a section, so a width one of them cannot take is a width none of them
-    # may take; a lane count one of them needs is a lane count all of them
-    # must have.
-    self._lead_width = min(widths) if widths else 1
-
-    compress = True
-    for gemm_descr in self.descr_list:
-      if isinstance(gemm_descr, ElementwiseDescr):
-        compress = False
-        break
-    if compress:
-      self._num_threads = min(32, self._num_threads)
+    """Adopt the section's lane geometry: the caller's, or the deduced one."""
+    config = self._lanes or lane_config.deduce(self.descr_list, self._context)
+    self._num_threads = config.num_threads
+    self._num_active_threads = config.num_active_threads
+    self._lead_width = config.lead_width
 
   def _emit_global_ir(self):
     nonfirst_block = len(self._sections) > 0
