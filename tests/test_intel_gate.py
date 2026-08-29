@@ -20,6 +20,7 @@ import pytest
 
 from tensorforge.backend.instructions.compute.primitives import intel
 from tensorforge.common.basic_types import Datatype
+from tensorforge.backend.instructions.compute.matmul import MatmulOperands
 
 
 # --------------------------------------------------------------------------
@@ -126,9 +127,11 @@ def test_a_sparse_operand_falls_through():
     """The register path contracts over B's lanes, and a sparse operand is
     loaded by linear index rather than as a lane-distributed vector.  Declining
     sends the caller to the generic path, which handles it."""
-    assert intel.matmul(None, None, None, None, 1, 1, 1, 0, 16,
-                        Datatype.F32, sparse=lambda k, j: True,
-                        ctx=None) is False
+    ops = MatmulOperands(A=None, B=None, C=None,
+                         sparse=lambda k, j: True,
+                         lead_slots=1, lead_elements=16, n=1, k=1, kx=0,
+                         threads=16, dtype=Datatype.F32)
+    assert intel.matmul(None, ops, None) is False
 
 
 # --------------------------------------------------------------------------

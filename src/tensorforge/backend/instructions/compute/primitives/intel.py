@@ -457,14 +457,29 @@ def dpas_matmul(writer, C, A, B, M, N, K, kx, threads, dtype, ctx):
     return True
 
 
-def matmul(writer, C, A, B, M, N, K, kx, threads, dtype, sparse, ctx):
+def scratch(dtype):
+    """Nothing: both paths here hold their fragments in registers."""
+    return 0
+
+
+def matmul(writer, ops, ctx):
     """Pick a path, or decline so the caller falls through to the generic one.
 
     Two, and they are not variations of each other.  DPAS is a systolic
     product with staged fragments; the register-only path is an FMA chain with
     a free broadcast.  Which wins is a measurement, not a preference, and
     neither flag is on by accident.
+
+    Either may decline after it has emitted, when an operand it needs turns
+    out to have no value: whether the shape is servable is not fully knowable
+    before the loads are attempted.  The caller emits this inside
+    `Writer.speculative` and discards on `False`, which is what makes a
+    partial attempt cost nothing.
     """
+    C, A, B = ops.C, ops.A, ops.B
+    M, N, K, kx = ops.lead_slots, ops.n, ops.k, ops.kx
+    threads, dtype, sparse = ops.threads, ops.dtype, ops.sparse
+
     if sparse:
         return False
     if ENABLED:

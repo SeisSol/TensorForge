@@ -52,8 +52,12 @@ MODULES = ["nvidia"]
 #: right, not something `matmul` reaches -- the gate is asked *before* the
 #: emitter, which is the whole change that made this file live -- and
 #: `ENABLED` likewise: it is a module-level constant the caller consults, and
-#: without it here the deployment switch reads as dead.
-ENTRIES = ["matmul", "supports", "shmsize", "ENABLED"]
+#: without it here the deployment switch reads as dead.  `scratch` is the
+#: third: what the path needs staged has to be answerable before any body
+#: exists, so it cannot sit behind the emitter.  `shmsize` is reached through
+#: it and is listed as well, since a direct reader is free to size a buffer
+#: without going through the routing table.
+ENTRIES = ["matmul", "supports", "shmsize", "scratch", "ENABLED"]
 
 # Unreachable on purpose.  Each entry would need a reason that says why
 # deleting it would be worse than keeping it.  There are none.

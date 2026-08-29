@@ -10,8 +10,8 @@ second module-level definition of a name that silently replaced the first.
 None of it was caught by the tests, because unreachable code cannot fail.
 
 So the property is asserted directly rather than left to review.  Reachability
-is computed over the call graph from the single entry point `multilinear.py`
-uses, which is a stronger statement than test coverage: coverage says "no case
+is computed over the call graph from the entry points `multilinear.py` uses,
+which is a stronger statement than test coverage: coverage says "no case
 happened to run this", reachability says "no case can".
 
 The allow-list is the interesting part.  Adding a name to it is a deliberate
@@ -36,7 +36,11 @@ AMD = (Path(__file__).parent.parent / "src" / "tensorforge" / "backend" /
 MODULES = ["__init__", "arch", "caps", "features", "catalog", "layouts",
            "relayout", "select", "emitters", "codegen", "unused"]
 
-ENTRY = "matmul"
+#: What the dispatch calls into this package.  Two, and both are entry points
+#: in the same sense: one is asked before generation what has to be reserved,
+#: the other emits.  Computing reachability from the emitter alone would count
+#: the first as dead.
+ENTRIES = ["matmul", "scratch"]
 
 # Unreachable on purpose.  Each entry needs a reason that says why deleting it
 # would be worse than keeping it.
@@ -114,12 +118,13 @@ KEPT_UNREACHABLE = {
 
 @pytest.fixture(scope="module")
 def analysis():
-    return reachability.analyse(AMD, MODULES, [ENTRY])
+    return reachability.analyse(AMD, MODULES, ENTRIES)
 
 
-def test_entry_point_exists(analysis):
+def test_entry_points_exist(analysis):
     defs, _ = analysis
-    assert ENTRY in defs, f"{ENTRY}() is what multilinear.py calls"
+    missing = [e for e in ENTRIES if e not in defs]
+    assert not missing, f"{missing} is what multilinear.py calls"
 
 
 def test_no_name_is_defined_twice(analysis):
@@ -141,7 +146,7 @@ def test_nothing_is_unreachable_without_a_reason(analysis):
     unreachable = set(defs) - reach
     undeclared = unreachable - set(KEPT_UNREACHABLE)
     assert not undeclared, (
-        f"unreachable from {ENTRY}(): {sorted(undeclared)}. "
+        f"unreachable from {ENTRIES}: {sorted(undeclared)}. "
         f"Delete it, wire it up, or add it to KEPT_UNREACHABLE with a reason.")
 
 

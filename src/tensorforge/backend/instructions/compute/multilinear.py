@@ -21,6 +21,21 @@ from tensorforge.common.matrix.tensor import Tensor
 from .primitives import nvidia as nvidia
 from .primitives import amd as amd
 from .primitives import intel as intel
+from .matmul import MatmulOperands
+
+#: Which module owns the matrix paths for a vendor.  One row per target, and
+#: every question the dispatch asks goes to the same row -- so what gets
+#: emitted and what gets reserved for it cannot be answered by two different
+#: tables that then disagree.
+_VENDOR_MODULES = {
+    'amd': amd,
+    'nvidia': nvidia,
+    'intel': intel,
+}
+
+
+def _vendor_module(context):
+    return _VENDOR_MODULES.get(context.get_vm().get_hw_descr().vendor)
 
 import numpy as np
 
@@ -727,23 +742,24 @@ class MultilinearInstruction(ComputeInstruction):
                         spec.discard()
                 return res
 
-            if self._context.get_vm().get_hw_descr().vendor == 'amd':
-                amd.matmul(writer, C, A, B, M, N, K, kx, self._num_threads, self._idest.datatype, sparse, self._context)
-            elif self._context.get_vm().get_hw_descr().vendor == 'nvidia':
-                return nvidia.matmul(writer, C, A, B, Mx, N, K, kx, self._num_threads, self._idest.datatype, sparse, self._context, 'tempShrMem', self.temp_shmem())
-            elif self._context.get_vm().get_hw_descr().vendor == 'intel':
-                # `M`, not `Mx`.  The two are different counts and the choice
-                # follows the operand model, not the vendor: `M` is the slot
-                # count (`ceil(lead / threads)`) and `Mx` the element count.
-                # `unwindI` maps its argument with `i % M`, so a register path
-                # that iterates to `Mx` asks for the same index `threads`
-                # times over and gets the same value back -- which is not an
-                # error anywhere, just the same product accumulated into
-                # everything.  AMD passes `M` for exactly this reason; NVIDIA
-                # passes `Mx` because it stages through shared memory and
-                # works in elements.
-                return intel.matmul(writer, C, A, B, M, N, K, kx, self._num_threads, self._idest.datatype, sparse, self._context)
-            return True
+            module = _vendor_module(self._context)
+            if module is None:
+                return False
+
+            ops = MatmulOperands(
+                A=A, B=B, C=C, sparse=sparse,
+                lead_slots=M, lead_elements=Mx, n=N, k=K, kx=kx,
+                threads=self._num_threads, dtype=self._idest.datatype)
+
+            # A path may find out mid-emission that it cannot serve the shape,
+            # and saying so has to leave the body as it found it -- otherwise
+            # the generic nest below writes a second set of products on top of
+            # a partial one, and both are emitted.
+            with writer.speculative() as spec:
+                taken = module.matmul(writer, ops, self._context)
+                if not taken:
+                    spec.discard()
+            return taken
         return False
 
     def _apply_linear(self, writer: Writer):
@@ -905,6 +921,16 @@ class MultilinearInstruction(ComputeInstruction):
         return f'{self._dest.name} = {self._sumOperation}({f" {self._productOperation} ".join(op.symbol.name for op in self._ops)}) {self._sumOperation} {self._prev}' # TODO: dimensions
 
     def temp_shmem(self):
-        if self._is_matmul() and self._context.get_vm().get_hw_descr().vendor in ['nvidia']:
-            return nvidia.shmsize(1, self._idest.datatype)
-        return 0
+        """What the path this operation will take needs staged.
+
+        Asked before any body is built, so it has to reach the same conclusion
+        as the dispatch does later from the same two questions: whether a
+        matrix path is taken at all, and which module owns it.  Naming the
+        vendor here a second time is what lets the two answers drift, and a
+        reservation that disagrees with the emission is either a buffer nobody
+        writes or an overrun.
+        """
+        module = _vendor_module(self._context)
+        if module is None or not self._is_matmul():
+            return 0
+        return module.scratch(self._idest.datatype)

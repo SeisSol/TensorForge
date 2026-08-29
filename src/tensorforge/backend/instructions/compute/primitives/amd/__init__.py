@@ -72,7 +72,12 @@ __all__ = [
 ]
 
 
-def matmul(writer, C, A, B, M, N, K, kx, threads, dtype, sparse, ctx):
+def scratch(dtype):
+    """Nothing: both paths here keep their operands in registers."""
+    return 0
+
+
+def matmul(writer, ops, ctx):
     """Matrix path where a tile fits, DPP everywhere else.
 
     The condition used to be `cdna1(ctx) and not gfx1251(ctx) and dtype ==
@@ -89,7 +94,12 @@ def matmul(writer, C, A, B, M, N, K, kx, threads, dtype, sparse, ctx):
     already serves it --- now because no tile fits rather than because the
     condition names F32.
     """
+    C, A, B = ops.C, ops.A, ops.B
+    M, N, K, kx = ops.lead_slots, ops.n, ops.k, ops.kx
+    threads, dtype, sparse = ops.threads, ops.dtype, ops.sparse
+
     if not sparse and mfma_tile_for(threads, dtype, ctx) is not None:
         matmul32(writer, C, A, B, M, N, K, kx, threads, dtype, sparse, ctx)
     else:
         matmuldpp(writer, 0, C, A, B, M, N, K, kx, threads, dtype, sparse, ctx)
+    return True

@@ -190,7 +190,22 @@ def shmsize(stages, dtype):
 
     return 32 * max(aregs + bregs, cregs)
 
-def matmul(writer, C, A, B, M, N, K, kx, threads, dtype, sparse, ctx, shmptr, shmsize):
+def scratch(dtype):
+    """One set of staging tiles, sized off the same atom the emitter picks.
+
+    Asked before generation, so it cannot depend on anything the body decides.
+    """
+    return shmsize(1, dtype)
+
+
+def matmul(writer, ops, ctx):
+    C, A, B = ops.C, ops.A, ops.B
+    # Elements, and the loop below walks them in strides of `threads`.  The
+    # accessors take slots, so `i // threads` is what reaches them.
+    M = ops.lead_elements
+    N, K, kx = ops.n, ops.k, ops.kx
+    threads, dtype, sparse = ops.threads, ops.dtype, ops.sparse
+
     def threadrange(start, size):
         conditions = []
         if start > 0:

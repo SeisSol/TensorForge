@@ -29,6 +29,7 @@ import pytest
 
 from tensorforge.backend.instructions.compute.primitives import amd
 from tensorforge.common.basic_types import Datatype
+from tensorforge.backend.instructions.compute.matmul import MatmulOperands
 
 
 class _Recorder:
@@ -89,8 +90,11 @@ def _run(M, N, K, threads=32, arch="gfx90a"):
 
     writer = IRBuilder(Datatype.F32)
     rec = _Recorder()
-    amd.matmul(writer, rec, _operand, _operand, M, N, K, 0, threads,
-               Datatype.F32, None, _FakeCtx(arch))
+    ops = MatmulOperands(A=_operand, B=_operand, C=rec, sparse=None,
+                         lead_slots=M, lead_elements=M * threads,
+                         n=N, k=K, kx=0,
+                         threads=threads, dtype=Datatype.F32)
+    amd.matmul(writer, ops, _FakeCtx(arch))
     return rec
 
 
