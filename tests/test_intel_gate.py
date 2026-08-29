@@ -229,3 +229,77 @@ def test_one_b_vector_per_output_column():
     one vector broadcast lane by lane -- which is the whole arrangement."""
     per = _products(_esimd_kernel('square_notrans'))
     assert len({b for v in per.values() for b, _, _ in v}) == len(per)
+
+
+# --------------------------------------------------------------------------
+# the fragment layout, checked against what the instruction is supposed to do
+# --------------------------------------------------------------------------
+
+def _flatten(atom, A, B, C):
+    a = [0.0] * atom.a_elems
+    b = [0.0] * atom.b_elems
+    c = [0.0] * atom.c_elems
+    for m in range(atom.m):
+        for k in range(atom.k):
+            a[intel.a_offset(atom, m, k)] = A[m][k]
+    for k in range(atom.k):
+        for n in range(atom.n):
+            b[intel.b_offset(atom, k, n)] = B[k][n]
+    for m in range(atom.m):
+        for n in range(atom.n):
+            c[intel.c_offset(atom, m, n)] = C[m][n]
+    return a, b, c
+
+
+@pytest.mark.parametrize('name', sorted(intel.ATOMS))
+def test_the_transcribed_instruction_is_a_matrix_product(name):
+    """The check that makes the layout a fact rather than a reading.
+
+    `reference` is the vISA pseudo-code transcribed, and the offset functions
+    are how an (m, k) or (k, n) lands in a fragment.  Neither is verifiable on
+    its own -- but if placing a matrix through the offsets and running the
+    transcription gives `C + A @ B`, then both are right together, and that is
+    exactly the thing no C++ front end can check.
+    """
+    import random
+    atom = intel.ATOMS[name]
+    random.seed(7)
+    A = [[random.uniform(-1, 1) for _ in range(atom.k)] for _ in range(atom.m)]
+    B = [[random.uniform(-1, 1) for _ in range(atom.n)] for _ in range(atom.k)]
+    C = [[random.uniform(-1, 1) for _ in range(atom.n)] for _ in range(atom.m)]
+    a, b, c = _flatten(atom, A, B, C)
+    out = intel.reference(atom, c, b, a)
+    for m in range(atom.m):
+        for n in range(atom.n):
+            want = C[m][n] + sum(A[m][k] * B[k][n] for k in range(atom.k))
+            assert abs(out[intel.c_offset(atom, m, n)] - want) < 1e-12
+
+
+def test_a_thirty_two_bit_operand_leaves_src1_row_major():
+    """The packing is what makes Src1 "neither row-major nor column major",
+    and a 32-bit element leaves nothing to pack."""
+    atom = intel.ATOMS['tf32']
+    for k in range(atom.k):
+        for n in range(atom.n):
+            assert intel.b_offset(atom, k, n) == k * atom.n + n
+
+
+def test_a_sixteen_bit_operand_packs_two_depths_into_one_dword():
+    """And then it is *not* row-major -- `B[0][n]` and `B[1][n]` are adjacent,
+    which is the whole reason the spec spends a paragraph on Src1."""
+    atom = intel.ATOMS['bf16']
+    assert intel.b_offset(atom, 1, 0) - intel.b_offset(atom, 0, 0) == 1
+    assert intel.b_offset(atom, 0, 1) - intel.b_offset(atom, 0, 0) == 2
+
+
+def test_every_fragment_slot_is_used_exactly_once():
+    """A permutation, not merely a map into the right range: a collision would
+    silently drop an element and a gap would read an uninitialised one."""
+    for name, atom in intel.ATOMS.items():
+        for off, n_slots, dims in (
+                (intel.a_offset, atom.a_elems, (atom.m, atom.k)),
+                (intel.b_offset, atom.b_elems, (atom.k, atom.n)),
+                (intel.c_offset, atom.c_elems, (atom.m, atom.n))):
+            seen = sorted(off(atom, i, j)
+                          for i in range(dims[0]) for j in range(dims[1]))
+            assert seen == list(range(n_slots)), name

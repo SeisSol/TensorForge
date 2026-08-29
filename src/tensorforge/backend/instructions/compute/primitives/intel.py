@@ -141,6 +141,98 @@ TF32_TERMS = 3
 ENABLED = False
 
 
+# --------------------------------------------------------------------------- #
+# Where an element sits in a fragment
+# --------------------------------------------------------------------------- #
+#
+# Read off the pseudo-code in `documentation/visa/instructions/DPAS.md`, not
+# guessed.  The loop is::
+#
+#     k = 0
+#     for r in 0 .. RC-1:
+#         temp = Src0.R[r]
+#         for d in 0 .. SD-1:
+#             m = d / SRC1_OPERANDS_PER_CHAN          # which GRF of Src1
+#             n = (d % SRC1_OPERANDS_PER_CHAN) * OPS_PER_CHAN
+#             for i in 0 .. Exec_size-1:
+#                 temp.F[i] += dot(Src1.R[m].DW[i].n, Src2.k)
+#             k += OPS_PER_CHAN
+#         dst.R[r] = temp
+#
+#     Dst, Src0 advance one GRF per repeat; Src2 advances 8*OPS_PER_CHAN;
+#     Src1 stays put.
+#
+# `R[j]` is the j-th GRF and `DW[i]` its i-th dword, so in the flat 1-D view a
+# GRF is `Exec_size` elements wide for a 32-bit type.  Substituting gives the
+# three functions below.
+
+
+def src1_operands_per_chan(atom: DpasAtom) -> int:
+    return 32 // (atom.ops_per_channel * atom.elem_bits)
+
+
+def a_offset(atom: DpasAtom, m: int, k: int) -> int:
+    """Src2: `Src2.k` within repeat `m`, which advances `8 * OPS_PER_CHAN`.
+
+    Row-major over (M, K) -- the spec says so in words too ("Dst, Src0, Src2
+    are laid out in row-major in this 1-D memory space").
+    """
+    return m * atom.k + k
+
+
+def b_offset(atom: DpasAtom, k: int, n: int) -> int:
+    """Src1: `Src1.R[m].DW[n_chan]`, at element `n_elem` inside that dword.
+
+    The layout the spec calls "neither row-major nor column major".  With
+    `m = d / SRC1_OPERANDS_PER_CHAN` selecting the GRF, the channel `i`
+    selecting the dword within it, and `n = (d % ...) * OPS_PER_CHAN` the
+    element inside the dword, a flat index is::
+
+        m * (Exec_size * elems_per_dword) + i * elems_per_dword + n
+
+    For a 32-bit element `SRC1_OPERANDS_PER_CHAN` is 1 and one dword holds one
+    element, so this collapses to `k * N + n` -- plain row-major.  The packing
+    is what makes Src1 unusual, and a 32-bit type leaves nothing to pack.
+    """
+    per_chan = src1_operands_per_chan(atom)
+    elems_per_dword = 32 // atom.elem_bits
+    grf = k // (per_chan * atom.ops_per_channel)
+    within = (k % (per_chan * atom.ops_per_channel))
+    return (grf * atom.n * elems_per_dword + n * elems_per_dword + within)
+
+
+def c_offset(atom: DpasAtom, m: int, n: int) -> int:
+    """Dst/Src0: one GRF per repeat, channel `i` within it."""
+    return m * atom.n + n
+
+
+def reference(atom: DpasAtom, c, b, a):
+    """The instruction, in Python, transcribed from the pseudo-code.
+
+    Not for generating anything -- it is the check that the three offset
+    functions above are the same layout the hardware uses.  Comparing it
+    against an ordinary `C + A @ B` is what turns "this is what I read in the
+    spec" into "and reading it that way reproduces a matrix product".
+    """
+    out = list(c)
+    per_chan = src1_operands_per_chan(atom)
+    for r in range(atom.m):
+        k = 0
+        for d in range(atom.depth):
+            grf = d // per_chan
+            n_el = (d % per_chan) * atom.ops_per_channel
+            for i in range(atom.n):
+                acc = 0.0
+                for o in range(atom.ops_per_channel):
+                    elems_per_dword = 32 // atom.elem_bits
+                    bi = (grf * atom.n * elems_per_dword
+                          + i * elems_per_dword + n_el + o)
+                    acc += b[bi] * a[r * atom.k + k + o]
+                out[r * atom.n + i] += acc
+            k += atom.ops_per_channel
+    return out
+
+
 def supports(threads, dtype, sparse) -> bool:
     """Whether `matmul` can emit for this shape, asked *before* it is called.
 
@@ -250,25 +342,72 @@ def broadcast_matmul(writer, C, A, B, M, N, K, kx, threads, dtype, ctx):
     return True
 
 
-def matmul(writer, C, A, B, M, N, K, kx, threads, dtype, sparse, ctx):
-    """Neither path is deployed; `_is_matmul` asks before calling.
+def _fragment(writer, dtype, count, hint):
+    """A DPAS fragment: `count` elements, held whole by one work-item.
 
-    Returning `False` means the caller falls through to the generic path,
-    which is the correct behaviour for a path that is not on.
-
-    What DPAS will need, when there is a machine to check it against:
-
-    * A and B staged row-major into `simd<TF32, M*K>` and `simd<TF32, K*N>`
-      -- see the module docstring; for TF32 the vISA layout is plain
-      row-major for all three operands.
-    * three `xmx::dpas` per product, over `(hi,hi)`, `(hi,lo)`, `(lo,hi)`;
-      see `TF32_TERMS`.
-    * the accumulator's layout left untracked, exactly as the MFMA path leaves
-      its own: `None` means unknown, and every check treats an unknown layout
-      as distinct from every other, so a pass stays conservative.  A wrong
-      layout is not conservative.
+    `SCALAR_LAYOUT` and not a lane axis, and the distinction is the point.  A
+    fragment is not "one element per lane" -- its element order is the
+    hardware's (see `a_offset` and friends), and the work-item owns all of it.
+    The width therefore lives on `ScalarType.length`, which is the slot axis,
+    and the emitter spells that as a `simd` too.
     """
-    if BROADCAST_ENABLED and not sparse:
+    from tensorforge.backend.pir.core import SCALAR_LAYOUT, ScalarType
+    return writer.declare(ScalarType(dtype, count), hint=hint, init='{}',
+                          layout=SCALAR_LAYOUT)
+
+
+def dpas_matmul(writer, C, A, B, M, N, K, kx, threads, dtype, ctx):
+    """`C += A x B` through XMX, with FP32 emulated over three TF32 products.
+
+    The layout is settled and checked: `a_offset`, `b_offset` and `c_offset`
+    come out of the vISA pseudo-code, `reference` is that pseudo-code
+    transcribed, and `tests/test_intel_gate.py` places a matrix through the
+    offsets, runs the transcription and compares against `C + A @ B`.  That
+    was the part no C++ front end could verify, and it is verified.
+
+    What blocks the emission is smaller and concrete: **there is no
+    `Datatype.TF32`**.  A fragment is `simd<TF32, 128>`, so its type has to be
+    `ScalarType(Datatype.TF32, 128)` -- and `Datatype` has F32, F64, F16,
+    BF16, F128, BOOL and the integers, with no room to say "the 19-bit
+    E8M10 the systolic array eats".
+
+    Spelling it `F32` would be a lie the emitter cannot catch: `simd<float,
+    128>` and `simd<TF32, 128>` are both well-formed, both accepted by
+    `dpas` in a shim, and only one of them is the instruction's operand.  So
+    the type goes in first, with `ctype`, `size` and `literal`, and this
+    follows.  Sketch of what follows, so it is not re-derived:
+
+    * one fragment per operand half (`ahi`, `alo`, `bhi`, `blo`) plus the
+      accumulator, each `writer.declare(ScalarType(TF32, n),
+      layout=SCALAR_LAYOUT)` -- `SCALAR_LAYOUT` and not a lane axis, because a
+      fragment's element order is the hardware's and the work-item owns all of
+      it;
+    * `splitFloatTF32` per element into `select<1,1>(offset(atom, i, j))`, as
+      a `call_stmt` with `writes=(hi, lo)` so two slots provably do not
+      conflict;
+    * three `dpas` over `(bhi, ahi)`, `(bhi, alo)`, `(blo, ahi)`; `lo*lo`
+      falls below the accumulator's rounding, which is why `TF32_TERMS` is 3
+      and the same reason `nvidia.py` uses three.
+    """
+    raise NotImplementedError(
+        'DPAS emission needs Datatype.TF32; see the docstring. The fragment '
+        'layout itself is settled -- a_offset/b_offset/c_offset are derived '
+        'from the vISA pseudo-code and checked against C + A @ B.')
+
+
+def matmul(writer, C, A, B, M, N, K, kx, threads, dtype, sparse, ctx):
+    """Pick a path, or decline so the caller falls through to the generic one.
+
+    Two, and they are not variations of each other.  DPAS is a systolic
+    product with staged fragments; the register-only path is an FMA chain with
+    a free broadcast.  Which wins is a measurement, not a preference, and
+    neither flag is on by accident.
+    """
+    if sparse:
+        return False
+    if ENABLED:
+        return dpas_matmul(writer, C, A, B, M, N, K, kx, threads, dtype, ctx)
+    if BROADCAST_ENABLED:
         return broadcast_matmul(writer, C, A, B, M, N, K, kx, threads, dtype,
                                 ctx)
     return False

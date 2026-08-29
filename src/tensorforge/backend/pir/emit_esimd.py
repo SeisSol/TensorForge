@@ -71,6 +71,19 @@ class EsimdEmitter(Emitter):
             # the collection into an exception before anything sees this.
             return f'/* untracked: {value!r} */ {super().ctype(t, value)}'
 
+        if not value.distributed and (t.length or 1) > 1:
+            # Replicated but still a vector: its width comes from the slot
+            # axis rather than the lane axis.  A DPAS fragment is the case --
+            # a `simd<TF32, 128>` whose element order the hardware fixes, held
+            # whole by one work-item and spread over no lanes at all.
+            #
+            # Still a `simd`, not the `sycl::vec` the base emitter would spell:
+            # a `vec` has no `select`, no `copy_from` and nothing a fragment is
+            # written through.  Under this lowering *every* vector is a `simd`;
+            # what differs between the two cases is only where the width comes
+            # from.
+            return self.simd_type(t.base.ctype(), t.length)
+
         if not value.distributed:
             # Replicated: every lane holds the whole thing, which is exactly
             # what a scalar is.  Note this is *not* the same answer as the

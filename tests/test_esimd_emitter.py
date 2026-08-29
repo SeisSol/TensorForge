@@ -551,3 +551,30 @@ def test_a_register_allocation_is_register_file():
     shared = V(id=65, type=BufferType(Datatype.F32, (128,), MemSpace.SHARED))
     assert register_bytes(reg) == 128 * 4
     assert register_bytes(shared) == 0, 'shared memory costs no registers'
+
+
+def test_a_replicated_vector_is_still_a_simd(emitter):
+    """Its width comes from the slot axis, not the lane axis -- and it is a
+    `simd` either way.
+
+    A `sycl::vec` has no `select`, no `copy_from` and nothing a fragment is
+    written through, so spelling a replicated vector that way compiles the
+    declaration and fails at every use.  Under this lowering every vector is a
+    `simd`; what differs is only where the width came from.
+    """
+    v = val(70, ScalarType(Datatype.F32, 128), SCALAR_LAYOUT)
+    out = emitter.ctype(v.type, v)
+    assert 'simd<float, 128>' in out and 'vec' not in out
+
+
+def test_dpas_emission_names_what_it_is_missing():
+    """Not a stub: the layout is settled, one type is not.
+
+    Failing loudly with the reason beats emitting `simd<float, 128>` where
+    `simd<TF32, 128>` belongs -- both are well-formed and only one is the
+    instruction's operand.
+    """
+    from tensorforge.backend.instructions.compute.primitives import intel
+    with pytest.raises(NotImplementedError, match='Datatype.TF32'):
+        intel.dpas_matmul(None, None, None, None, 8, 16, 8, 0, 16,
+                          Datatype.F32, None)
