@@ -29,7 +29,7 @@ from tensorforge.common.exceptions import GenerationError
 from .core import (BOOL, INDEX, SCALAR_LAYOUT, TOKEN, Access, BufferType,
                    Effect, IRError,
                    LaneAxis, MemSpace, Op, Operand, Region, RegisterLayout,
-                   ScalarType, Stmt, TokenType, Value, XorSwizzle, dump,
+                   ScalarType, Stmt, TokenType, Value, XorSwizzle, dump, walk,
                    join_layout, Uniformity)
 
 
@@ -651,22 +651,6 @@ class IRBuilder:
         elif space == MemSpace.SHARED:
             attrs = self._suballocate(v, elem)
             self._shared_buffers.append(v)
-        if swizzle is not None and extern is not None:
-            # A swizzle is only sound if *every* access applies it, and `load`
-            # and `store` are what apply it.  `extern` says the opposite: the
-            # name is spelled out by code that does not go through them.
-            #
-            # Measured on the corpus, all 5650 accesses to a shared symbol
-            # take the text path today, so a swizzle here would silently do
-            # nothing -- and the moment one of them becomes structured, the
-            # store and the load would disagree about where an element lives.
-            # That is a wrong kernel, not a slow one, and it would appear on
-            # an unrelated commit.
-            raise IRError(
-                f'{hint!r}: a swizzled buffer cannot be extern. The name is '
-                f'spelled out by code that does not go through load/store, so '
-                f'the permutation would be applied to some accesses and not '
-                f'others. Convert those accesses first.')
         if extern is not None:
             # A name the macro layer owns and other instructions still spell
             # out as text.  Transitional, and measurably so: with one PIR body
@@ -772,7 +756,13 @@ class IRBuilder:
         buffer is swizzled, which is the property that makes it safe to turn
         on for a tile that already works.
         """
-        t = getattr(base, 'type', None)
+        # A `Symbol` base resolves to its buffer the same way the rest of the
+        # access path does.  Reading `.type` off the base alone missed every
+        # macro-level window -- `Symbol.load` passes the symbol, not the value
+        # -- so a swizzle set at the alloc was accepted and then applied to
+        # nothing.
+        buf = base.pir_buffer(self) if hasattr(base, 'pir_buffer') else base
+        t = getattr(buf if buf is not None else base, 'type', None)
         swz = getattr(t, 'swizzle', None)
         if swz is None:
             return index
@@ -1527,7 +1517,48 @@ class IRBuilder:
     def finish(self) -> Tuple[Stmt, ...]:
         if len(self._stack) != 1:
             raise IRError(f'{len(self._stack) - 1} scope(s) left open')
-        return tuple(self._stack[0].body)
+        body = tuple(self._stack[0].body)
+        self._check_swizzles_are_total(body)
+        return body
+
+    def _check_swizzles_are_total(self, body: Tuple[Stmt, ...]) -> None:
+        """No access to a swizzled buffer may bypass `load` and `store`.
+
+        The earlier form of this asked whether the buffer was `extern`, which
+        was the same question only for as long as every named access was text.
+        It is not the same question: `extern` is about the *name* escaping, and
+        what matters is whether an *access* does.  A buffer whose name the
+        macro layer owns is fine as long as every read and write of it goes
+        through the two methods that apply the permutation.
+
+        Asked here, over the finished body, because that is the first point at
+        which the answer is knowable -- the buffer is allocated long before its
+        accesses are emitted.  The failure it prevents is the bad kind: a
+        permutation applied to some accesses and not others is a store and a
+        load that disagree about where an element lives, which is a wrong
+        kernel and not a slow one.
+        """
+        swizzled = {}
+        for stmt, _ in walk(body):
+            if stmt.op != Op.ALLOC:
+                continue
+            for t in stmt.target:
+                if getattr(t.type, 'swizzle', None) is not None:
+                    swizzled[str(t)] = t
+        if not swizzled:
+            return
+        for stmt, _ in walk(body):
+            text = stmt.text
+            if not text:
+                continue
+            for name, v in swizzled.items():
+                if _names_in(text, name):
+                    raise IRError(
+                        f'{name} is swizzled but is named in raw text: '
+                        f'{text.strip()[:70]!r}. The permutation is applied by '
+                        f'load and store; an access that goes around them '
+                        f'reads a different element than the one that wrote '
+                        f'it. Convert that access, or drop the swizzle.')
 
     def dump(self) -> str:
         return dump(tuple(self._stack[0].body))

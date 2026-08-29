@@ -58,7 +58,7 @@ inline void kernel_kernel_0b2fc070b9(sycl::queue *stream, sycl::range<3> group_c
               __float128 v18_data = ir0[0];
               ir0[0] = (v18_data + (v15_data * v16_data));
               __float128 v26_data = glb_m1[v8_lead];
-              __float128 v27_data = s0[2];
+              __float128 v27_data = s0[3];
               __float128 v29_data = ir0[1];
               ir0[1] = (v29_data + (v26_data * v27_data));
               __float128 v40_data = glb_m1[(v8_lead + 2)];
@@ -66,7 +66,7 @@ inline void kernel_kernel_0b2fc070b9(sycl::queue *stream, sycl::range<3> group_c
               __float128 v43_data = ir0[0];
               ir0[0] = (v43_data + (v40_data * v41_data));
               __float128 v51_data = glb_m1[(v8_lead + 2)];
-              __float128 v52_data = s0[3];
+              __float128 v52_data = s0[2];
               __float128 v54_data = ir0[1];
               ir0[1] = (v54_data + (v51_data * v52_data));
               #pragma unroll

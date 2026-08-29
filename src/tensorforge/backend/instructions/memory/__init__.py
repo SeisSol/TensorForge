@@ -157,11 +157,36 @@ class AbstractShrMemWrite(MemoryInstruction):
                              MemSpace.SHARED, hint=self._dest.name,
                              extern=self._dest.name,
                              arena=self._arena(), offset=int(offset),
-                             restrict=self._vm.get_lexic().restrict_kw)
+                             restrict=self._vm.get_lexic().restrict_kw,
+                             swizzle=self._swizzle())
         self._dest.set_pir_buffer(writer, value)
       else:
         lhs = f'{self._fp_as_str}* {self._vm.get_lexic().restrict_kw} {self._dest.name}'
         writer(f'{lhs} = &{self._arena()}[{offset}];')
+
+  def _swizzle(self):
+    """A row permutation for this window, when one is both legal and useful.
+
+    A tile written a row at a time and read a column at a time costs a bank
+    cycle per lane: `s0[(threadIdx.x % 32) * 32]` puts every lane in bank 0
+    with a different address, which `tools/bank_conflicts.py` reports as
+    32-way.  Permuting the columns per row costs nothing and clears it, and
+    leaves a row-wise access exactly as good -- it reaches the same banks in a
+    different order.
+
+    Only for a power-of-two row width, which is what makes `k ^ (n % width)`
+    stay inside the row.  Everything else keeps the plain layout: a tile 13
+    wide has no conflict worth this, and a permutation that carried across
+    rows would be a different element, not a slower one.
+    """
+    from tensorforge.backend.pir.core import XorSwizzle
+    view = self._dest.data_view
+    if view is None or len(view.shape) < 2:
+      return None
+    width = view.shape[0]
+    if width < 2 or width & (width - 1):
+      return None
+    return XorSwizzle(width)
 
   def compute_shared_mem_size(self) -> int:
     # What the region allocator must reserve: every stage at once.  Returning

@@ -180,21 +180,41 @@ def test_padding_would_not_have_worked():
 # Where it may not go
 # --------------------------------------------------------------------------- #
 
-def test_a_swizzled_buffer_cannot_be_extern():
-    """`extern` means the name is spelled out by code that does not go through
-    `load` and `store` --- and those are what apply the permutation.
+def test_an_extern_buffer_may_be_swizzled_if_nothing_names_it_in_text():
+    """`extern` is about the *name* escaping; what matters is whether an
+    *access* does.
 
-    This is the one way the mechanism can produce a wrong kernel rather than a
-    slow one, so it is refused rather than documented.  Measured on the corpus,
-    every access to a shared *symbol* takes the text path today, so a swizzle
-    there would silently do nothing; the danger is the day one of them becomes
-    structured and the store and the load stop agreeing about where an element
-    lives.  That would arrive on an unrelated commit.
+    Those were the same question only while every named access was text.  The
+    macro layer's windows are extern -- other instructions still spell `s0`
+    out -- and every read and write of one now goes through `load` and `store`,
+    which is what applies the permutation.
     """
     b = builder()
-    with pytest.raises(IRError, match="cannot be extern"):
-        b.alloc(Datatype.F32, (64,), MemSpace.SHARED, hint='s0', extern='s0',
-                arena='arena', offset=0, swizzle=XorSwizzle(8))
+    tile = b.alloc(Datatype.F32, (64,), MemSpace.SHARED, hint='s0', extern='s0',
+                   arena='arena', offset=0, swizzle=XorSwizzle(8))
+    idx = b.rawexpr('threadIdx.x', type_=INDEX, hint='a')
+    b.load(tile, idx, hint='v')
+    assert b.finish()
+
+
+def test_a_raw_access_to_a_swizzled_buffer_is_refused():
+    """The failure the earlier guard was aiming at, asked properly.
+
+    A permutation applied to some accesses and not others is a store and a
+    load that disagree about where an element lives: a wrong kernel, not a
+    slow one.  Checked over the finished body, because that is the first point
+    at which the answer is knowable -- the buffer is allocated long before its
+    accesses are emitted.
+    """
+    b = builder()
+    tile = b.alloc(Datatype.F32, (64,), MemSpace.SHARED, hint='s0',
+                   swizzle=XorSwizzle(8))
+    # No `accesses` argument, so the statement is conservative and the
+    # earlier check does not object -- which is the case that has to reach the
+    # one at `finish`.
+    b(f'float x = {tile}[0];')
+    with pytest.raises(IRError, match="named in raw text"):
+        b.finish()
 
 
 def test_extern_without_a_swizzle_is_still_fine():

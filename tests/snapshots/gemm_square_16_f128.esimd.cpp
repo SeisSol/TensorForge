@@ -57,7 +57,7 @@ inline void kernel_kernel_0b2fc070b9(sycl::queue *stream, sycl::range<3> group_c
               tensorforge::intel_esimd::simd<__float128, 2> v12_data;
               v12_data.copy_from(ir0 + (0));
               (v12_data + (v9_data * v10_data)).copy_to(ir0 + (0));
-              __float128 v18_data = s0[2];
+              __float128 v18_data = s0[3];
               tensorforge::intel_esimd::simd<__float128, 2> v20_data;
               v20_data.copy_from(ir0 + (2));
               (v20_data + (v9_data * v18_data)).copy_to(ir0 + (2));
@@ -67,7 +67,7 @@ inline void kernel_kernel_0b2fc070b9(sycl::queue *stream, sycl::range<3> group_c
               tensorforge::intel_esimd::simd<__float128, 2> v28_data;
               v28_data.copy_from(ir0 + (0));
               (v28_data + (v25_data * v26_data)).copy_to(ir0 + (0));
-              __float128 v34_data = s0[3];
+              __float128 v34_data = s0[2];
               tensorforge::intel_esimd::simd<__float128, 2> v36_data;
               v36_data.copy_from(ir0 + (2));
               (v36_data + (v25_data * v34_data)).copy_to(ir0 + (2));
