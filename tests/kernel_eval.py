@@ -36,13 +36,19 @@ _DECL = re.compile(
     # onto it, and the oracle has to read past it to find the array.
     r'^(?:alignas\s*\(\s*\d+\s*\)\s+)?'
     r'(?:const\s+)?(?:__restrict__\s+)?'
-    r'(?:float|double|int32_t|int|unsigned|size_t|bool|auto|__float128|char)'
+    r'(?:tensorforge::Vector(?:Relaxed)?T\s*<[^>]*>|float[234]|double[234]|'
+    r'float|double|int32_t|int|unsigned|size_t|bool|auto|__float128|char)'
     r'(?P<ptr>\s*\*(?:\s*const)?(?:\s*__restrict__)?)?\s+'
     r'(?P<name>\w+)\s*(?P<arr>\[\s*(?P<dim>\d+)\s*\])?\s*'
     r'(?:\{\s*\}|=\s*(?P<init>.+))?$')
 _FOR = re.compile(r'^for\s*\((?:const\s+)?\w+\s+(?P<v>\w+)\s*=\s*(?P<a>.+?);'
                   r'\s*\w+\s*(?P<cmp><=?|>=?)\s*(?P<b>.+?);\s*(?P<step>.+?)\)$')
 _IF = re.compile(r'^if\s*\((?P<c>.*)\)$')
+#: A declaration whose type is a namespaced vector type.
+_VEC_DECL = re.compile(r'^tensorforge::Vector(?:Relaxed)?T\s*<[^>]*>\s+\w+')
+#: `*(SomeVecType*)&name[expr] = value`, captured for the interpreter
+_VEC_STORE = re.compile(
+    r'^\*\s*\(([^()]*?)\s*\*\)\s*&\s*(\w+)\s*\[(.+?)\]\s*=\s*(.+?);?$')
 #: `*(SomeVecType*)&name[expr] = value`
 _VEC_ASSIGN = re.compile(r'^\*\s*\([^)]*\)\s*&\s*\w+\s*\[.*\]\s*=')
 
@@ -89,6 +95,31 @@ class Ptr:
         return Ptr(self.mem, self.base, self.off + int(n))
 
 
+class Vec(tuple):
+    """A short vector value: `VectorT<T, N>`, `floatN`, or a `{a, b}` list.
+
+    Arithmetic is elementwise, which is what the generated code means by it --
+    the device types are GNU vector types, not structs.  Mixing with a scalar
+    is deliberately *not* supported: the generator splats a broadcast operand
+    into a full vector before the product, so a scalar meeting a vector here
+    means the splat went missing and silently broadcasting it would hide
+    exactly that.
+    """
+
+    def _zip(self, other, op):
+        if not isinstance(other, Vec):
+            raise Abort(f'vector op with a scalar {other!r}: the splat is missing')
+        if len(self) != len(other):
+            raise Abort(f'vector width mismatch: {len(self)} vs {len(other)}')
+        return Vec(op(a, b) for a, b in zip(self, other))
+
+    def __add__(self, o): return self._zip(o, lambda a, b: a + b)
+    def __sub__(self, o): return self._zip(o, lambda a, b: a - b)
+    def __mul__(self, o): return self._zip(o, lambda a, b: a * b)
+    def __truediv__(self, o): return self._zip(o, lambda a, b: a / b)
+    def __neg__(self): return Vec(-a for a in self)
+
+
 class Abort(Exception):
     """Raised when the interpreter meets something outside its subset."""
 
@@ -103,6 +134,29 @@ def _py(expr: str) -> str:
     e = re.sub(r'\b__ldg\s*\(\s*&', 'DEREF(', e)
     e = e.replace('&&', ' and ').replace('||', ' or ')
     e = re.sub(r'(?<![=!<>&|])!(?!=)', ' not ', e)
+    # `*(SomeVecType*)&p[i]` -> `VLOAD(ADDR(p, i), N)`.  Done before the
+    # `&p[i]` rewrite below so the address form is still intact to match on.
+    def _vec_width(ty: str) -> int:
+        m = re.search(r'<[^,>]*,\s*(\d+)\s*>', ty) or re.search(r'(\d)\s*$', ty.strip())
+        return int(m.group(1)) if m else 1
+    pat = re.compile(r'\*\s*\(([^()]*?)\s*\*\)\s*&(\w+)\[')
+    out, i = [], 0
+    while i < len(e):
+        m = pat.match(e, i)
+        if not m:
+            out.append(e[i]); i += 1; continue
+        depth, j = 1, m.end()
+        while j < len(e) and depth:
+            depth += (e[j] == '[') - (e[j] == ']')
+            j += 1
+        out.append(f'VLOAD({_vec_width(m.group(1))}, {m.group(2)}, '
+                   + e[m.end():j - 1] + ')')
+        i = j
+    e = ''.join(out)
+    # `{a, b}` in an expression is a vector literal.  A bare `{}` is
+    # zero-initialisation and is handled by `_DECL`, so it never reaches here.
+    e = re.sub(r'\{\s*([^{}]+?)\s*\}', r'VEC(\1)', e)
+
     out, i = [], 0                                    # &p[i] -> ADDR(p, i)
     while i < len(e):
         m = re.compile(r'&(\w+)\[').match(e, i)
@@ -144,6 +198,8 @@ class Interp:
         self.budget = limit
         self.env['DEREF'] = lambda p, i=0: p[i] if isinstance(p, Ptr) else p
         self.env['ADDR'] = lambda p, i: (p + i) if isinstance(p, Ptr) else p
+        self.env['VEC'] = lambda *xs: Vec(xs)
+        self.env['VLOAD'] = lambda n, p, i: Vec(p[i + k] for k in range(n))
         for fn in ('min', 'max', 'abs'):
             self.env[fn] = __builtins__[fn] if isinstance(__builtins__, dict) \
                 else getattr(__builtins__, fn)
@@ -199,6 +255,24 @@ class Interp:
         if am:
             self.env[am.group(1)] = self.ev(am.group(2))   # alias: same object
             return
+        vm = _VEC_STORE.match(stmt)
+        if vm:
+            # `*(SomeVecType*)&name[expr] = value;`  The components go to
+            # consecutive slots, which is the whole content of a wide store --
+            # and the reason this had to be modelled rather than skipped: a
+            # cyclic reader of a blocked image produces plausible code and
+            # wrong numbers, and nothing else in the harness looks at numbers.
+            _ty, name, idx, rhs = vm.groups()
+            base = self.env.get(name)
+            if base is None:
+                raise Abort(f'store into unknown {name!r}')
+            val = self.ev(rhs)
+            start = int(self.ev(idx))
+            if not isinstance(val, Vec):
+                val = Vec([val])
+            for k, comp in enumerate(val):
+                base[start + k] = comp
+            return
         if '::' in stmt and _VEC_ASSIGN.match(stmt):
             # A widened store: `*(tensorforge::VectorRelaxedT<float,2>*)&r[i]
             # = v;`.  The `'::' in stmt` catch-all below was written for
@@ -213,7 +287,13 @@ class Interp:
             # abort is the honest answer and a silent skip is the dangerous
             # one.
             raise Abort(f'vector assignment not modelled: {stmt!r}')
-        if 'pipeline' in stmt or '::' in stmt:
+        if ('pipeline' in stmt or '::' in stmt) and not _VEC_DECL.match(stmt):
+            # The catch-all was written for `cuda::pipeline` and friends, which
+            # have no effect on the values compared here.  A declaration whose
+            # *type* is namespaced is not one of those: swallowing
+            # `tensorforge::VectorT<float,2> v = ...` leaves the name unbound
+            # and every later use aborts -- or worse, would have been skipped
+            # too and the kernel evaluated to nothing at all.
             return
         if m and m.group('name') not in ('return',):
             name = m.group('name')
@@ -243,7 +323,13 @@ class Interp:
             return                      # the shared arena, modelled as a base
         if re.match(r'^(?:const\s+)?auto\s*\*?\s*\w+', stmt) and '=' not in stmt:
             return
-        if 'pipeline' in stmt or '::' in stmt:
+        if ('pipeline' in stmt or '::' in stmt) and not _VEC_DECL.match(stmt):
+            # The catch-all was written for `cuda::pipeline` and friends, which
+            # have no effect on the values compared here.  A declaration whose
+            # *type* is namespaced is not one of those: swallowing
+            # `tensorforge::VectorT<float,2> v = ...` leaves the name unbound
+            # and every later use aborts -- or worse, would have been skipped
+            # too and the kernel evaluated to nothing at all.
             return                      # cuda::pipeline and friends: no effect
                                         # on the values we compare
         raise Abort(f'unsupported statement {stmt!r}')
