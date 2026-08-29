@@ -423,7 +423,6 @@ class BatchLoop(AbstractInstruction):
         head, guarded = self._split_guard()
         for instr in head:
             instr.gen_code(writer)
-        self._declare_windows_early(writer, guarded)
         cond = self._flag_guard(writer)
         # A real `Op.IF` where the condition is a value.  It was a raw block,
         # which made the whole body one opaque region as far as any pass was
@@ -508,6 +507,12 @@ class BatchLoop(AbstractInstruction):
             # TODO: OMP target
             # TODO: maybe iterate over adjacent elements? (for indirect pointers)
             self._declare_stage_counter(writer)
+            # Before the loop, not merely before the guard.  The window is the
+            # same for every element, and a peeled transfer is emitted outside
+            # the loop -- with the declaration inside it, the prologue names a
+            # value whose `extern` binding happens later and the result renders
+            # but does not compile.
+            self._declare_windows_early(writer, list(self._region))
             if hasattr(writer, 'for_'):
                 # `extern` and `ctype` because the name and the type are the
                 # macro layer's: `batchId0` is spelled out by the lookahead

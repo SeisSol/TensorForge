@@ -212,9 +212,12 @@ def _wrap_one(loop: Stmt, make_value,
     # a pass that quietly assumed someone else had done it would be wrong in
     # exactly the cases where nobody had.
     dst_writes = [a for g in group for a in g.accesses if a.writes]
-    scan = list(region.body)
-    if guard_at is not None:
-        scan += list(region.body[guard_at].regions[0].body)
+    # The whole subtree, not the top level.  The compute reads its operand
+    # inside nested loops, so a one-level scan found no read of the
+    # destination and accepted a transfer that fills the buffer the current
+    # element is still reading -- the exact race this check exists to refuse,
+    # slipping through because the read was two regions down.
+    scan = [st for st, _ in walk(region.body)]
     for s in scan:
         if s in group or s.op is Op.WAIT or s.op is Op.IF:
             continue
