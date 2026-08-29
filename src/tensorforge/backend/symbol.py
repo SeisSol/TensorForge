@@ -1406,6 +1406,9 @@ class Symbol:
                 cond1 = writer.op('ge', BOOL, idxvar, rngS)
                 cond2 = writer.op('lt', BOOL, idxvar, rngE)
                 cond = writer.op('and', BOOL, cond1, cond2, hint='cond')
+
+                sel = writer.if_else(cond, (ScalarType(self.get_fptype()),))
+
                 with sel.then():
                   local_load = writer.load(self, validx, type_=ScalarType(self.get_fptype()), hint='data',
                                           layout=layout_of(validx, self.num_threads))
@@ -1441,7 +1444,7 @@ class Symbol:
               idxvar = writer.op('sub', INDEX, strindex, offset, hint='idx')
             cond = writer.op('eq', BOOL, idxvar, runIdx[pos], hint='cond')
 
-            sel = writer.if_else(cond)
+            sel = writer.if_else(cond, (ScalarType(self.get_fptype()),))
 
             with sel.then():
               wrote_here = self.encode_values(pos + 1, runIdx, writer, context, index, nontemp, leadidx)
