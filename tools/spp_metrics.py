@@ -28,6 +28,16 @@ What each number is for:
     so neither belongs in shared memory; the number decides between immediates
     in the instruction stream and a scalar load from constant space.
 
+``covers``
+    The same tiling question with the alignment relaxed.  A run long enough to
+    fill a `W`-wide access does not have to begin at a multiple of `W`, and the
+    corpus shows the gap that costs: four fifths of the non-zeros sit in runs
+    of at least four while an aligned four-wide tile is only half full.  Three
+    placements are scored -- boundaries fixed at multiples of `W`, boundaries
+    shifted by one offset per line, and boundaries placed freely -- because
+    they differ less in how much they store than in what the index side costs
+    to say where the windows are.
+
 ``values``
     How many distinct values there are, and how many of them the hardware
     encodes for free.  AMD's inline constants cover a set that the ADER-DG
@@ -102,6 +112,27 @@ class BlockStats:
 
 
 @dataclass
+class CoverStats:
+    """A cover of one axis by fixed-width windows, under one placement rule."""
+
+    axis: int
+    width: int
+    mode: str
+    windows: int
+    stored: int
+    nnz: int
+    metadata: int
+
+    @property
+    def fill(self) -> float:
+        return self.nnz / self.stored if self.stored else 0.0
+
+    @property
+    def padding(self) -> int:
+        return self.stored - self.nnz
+
+
+@dataclass
 class PatternMetrics:
     name: str
     shape: Tuple[int, ...]
@@ -109,6 +140,7 @@ class PatternMetrics:
     volume: int
     runs: Dict[int, RunStats]
     blocks: Dict[Tuple[int, ...], BlockStats]
+    covers: Dict[Tuple[int, int, str], CoverStats]
     distinct_values: Optional[int]
     inline_fraction: Optional[float]
 
@@ -193,6 +225,76 @@ def _blocks_of(mask: np.ndarray, shape: Sequence[int]) -> BlockStats:
                       nnz=int(mask.sum()))
 
 
+COVER_MODES = ('aligned', 'shifted', 'free')
+
+
+def _windows_aligned(positions: np.ndarray, width: int, offset: int) -> int:
+    """Occupied windows when the boundaries sit at ``offset`` mod ``width``."""
+    return int(np.unique((positions - offset) // width).size)
+
+
+def _windows_free(positions: np.ndarray, width: int) -> int:
+    """Fewest ``width``-wide windows that cover every position.
+
+    Greedy from the left is optimal here: the leftmost uncovered position has
+    to be in some window, and no window covering it reaches further right than
+    the one that starts on it.
+    """
+    count = 0
+    reach = -1
+    for p in positions:
+        if p > reach:
+            count += 1
+            reach = p + width - 1
+    return count
+
+
+def _cover_along(mask: np.ndarray, axis: int, width: int,
+                 mode: str) -> CoverStats:
+    if mode not in COVER_MODES:
+        raise ValueError(f'unknown placement {mode!r}')
+    moved = np.moveaxis(mask, axis, -1)
+    flat = moved.reshape(-1, moved.shape[-1])
+    extent = flat.shape[-1]
+
+    windows = 0
+    metadata = 0
+    lines = 0
+    for line in flat:
+        positions = np.flatnonzero(line)
+        if positions.size == 0:
+            # An empty line is skipped at generation time and stores nothing,
+            # so it must not be charged for a base or an offset either.
+            continue
+        lines += 1
+        if mode == 'aligned':
+            here = _windows_aligned(positions, width, 0)
+        elif mode == 'shifted':
+            here = min(_windows_aligned(positions, width, s)
+                       for s in range(width))
+        else:
+            here = _windows_free(positions, width)
+        windows += here
+
+        if mode == 'free':
+            # Every window needs its start said outright; 16 bits covers any
+            # extent these operators reach.  Plus a count for the line.
+            metadata += 2 * here + 2
+        else:
+            # The occupied windows are a bitmap over the line's window grid,
+            # and the compressed base of a window is the masked bit count
+            # below it -- one instruction, no table.  Shifted placement adds
+            # the line's own offset, which is smaller than ``width``.
+            grid = math.ceil((extent + width - 1) / width)
+            metadata += 4 * math.ceil(grid / 32) + 4
+            if mode == 'shifted':
+                metadata += 1
+
+    return CoverStats(axis=axis, width=width, mode=mode, windows=windows,
+                      stored=windows * width, nnz=int(mask.sum()),
+                      metadata=metadata)
+
+
 def _value_stats(values, mask: np.ndarray,
                  tol: float) -> Tuple[Optional[int], Optional[float]]:
     if values is None:
@@ -210,6 +312,8 @@ def _value_stats(values, mask: np.ndarray,
 
 def measure(pattern, name: str = '', values=None,
             tile_shapes: Sequence[Sequence[int]] = (),
+            cover_widths: Sequence[int] = (),
+            cover_axes: Sequence[int] = (0,),
             tol: float = 1e-12) -> PatternMetrics:
     """Every Phase-1 number for one pattern.
 
@@ -234,6 +338,9 @@ def measure(pattern, name: str = '', values=None,
         volume=int(mask.size),
         runs={a: _runs_along(mask, a) for a in range(mask.ndim)},
         blocks={tuple(t): _blocks_of(mask, t) for t in tile_shapes},
+        covers={(a, w, m): _cover_along(mask, a, w, m)
+                for a in cover_axes for w in cover_widths
+                for m in COVER_MODES},
         distinct_values=distinct,
         inline_fraction=inline,
     )

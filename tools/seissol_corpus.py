@@ -48,6 +48,10 @@ TILES_LEFT = ((1, 4), (4, 4), (16, 4), (32, 4))
 #: The same shapes for an operand whose contraction axis is axis 0.
 TILES_RIGHT = ((4, 1), (4, 4), (4, 16), (4, 32))
 
+#: Access widths to score the window placements at.  Four is the FP64
+#: contraction extent and two is what a `float2` on the lead axis asks for.
+COVER_WIDTHS = (2, 4, 8)
+
 #: A family name with its instance index stripped: ``kDivM(0)`` -> ``kDivM``.
 _INSTANCE = re.compile(r'\(\s*\d+(?:\s*,\s*\d+)*\s*\)\s*$')
 
@@ -92,7 +96,8 @@ def measure_file(path: Path) -> List[Tuple[str, str, PatternMetrics]]:
                       if t[0] <= arr.shape[0] and t[1] <= arr.shape[1])
         results.append((str(basis), fam,
                         measure(arr, name=f'{basis}/{name}', values=arr,
-                                tile_shapes=tiles)))
+                                tile_shapes=tiles,
+                                cover_widths=COVER_WIDTHS)))
     return results
 
 
@@ -152,6 +157,17 @@ def report(paths: List[Path]) -> Tuple[str, dict]:
                 meta['bitmap'] += m.metadata_bytes(0, 1)['bitmap']
                 meta['bitmap_g4'] += m.metadata_bytes(0, 4)['bitmap']
             a['metadata'] = meta
+            covers = {}
+            for key in ms[0].covers:
+                stored = sum(m.covers[key].stored for m in ms)
+                axis, width, mode = key
+                covers[f'{axis}/{width}/{mode}'] = {
+                    'fill': sum(m.covers[key].nnz for m in ms) / stored,
+                    'stored': stored,
+                    'windows': sum(m.covers[key].windows for m in ms),
+                    'metadata': sum(m.covers[key].metadata for m in ms),
+                }
+            a['covers'] = covers
             rows.append(a)
         blob[str(order_of(path))] = [r for r in rows
                                      if r['basis'] == order_of(path)]
