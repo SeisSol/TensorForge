@@ -1698,6 +1698,30 @@ class _ForHandle:
         return False
 
     def yield_(self, *values: Operand):
+        """Yield the loop-carried values, and settle their distribution.
+
+        An `iter_arg` takes its layout from the `init` it starts at, which is
+        right whenever the init has one.  A reduction's does not: it starts at
+        the operator's neutral element, a bare literal, and the accumulator
+        only becomes lane-distributed once the body combines it with something
+        that is.
+
+        So the arg adopts the yielded value's layout when it has none of its
+        own.  The two are the same distribution by construction -- an
+        `iter_arg` and what is yielded back into it are one value seen at the
+        two ends of the back edge, and a loop whose carried value changed
+        distribution between them would not be expressible at all.
+
+        Patched rather than passed in, because the yield is the first moment
+        it is known: the body has to be built to find out what the
+        accumulation produces, and the arg is what the body was built against.
+        """
+        for arg, val in zip(self.iter_args, values):
+            if (arg.layout is None and isinstance(val, Value)
+                    and val.layout is not None):
+                object.__setattr__(arg, 'layout', val.layout)
+                if val.uniformity < arg.uniformity:
+                    object.__setattr__(arg, 'uniformity', val.uniformity)
         return self.builder.yield_(*values)
 
     @property

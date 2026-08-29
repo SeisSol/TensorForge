@@ -347,6 +347,14 @@ class Emitter:
             return f'*({self._vector_ctype(t, relaxed)}*)&{access}'
         return access
 
+    def initialiser(self, v: Value, name: str, expr: str) -> str:
+        """The declaration that starts a loop-carried value at `expr`.
+
+        Its own method because the two lowerings spell it differently, and the
+        difference is not cosmetic: see `EsimdEmitter.initialiser`.
+        """
+        return f'{self.ctype(v.type, v)} {name} = {expr};'
+
     def _vector_ctype(self, t, relaxed: bool) -> str:
         lex = self._lexic()
         if lex is None:
@@ -744,7 +752,7 @@ class Emitter:
                 continue
             nm = self.name(arg)
             self.bind(res, nm)
-            w(f'{self.ctype(arg.type, arg)} {nm} = {self.operand(init, arg.type)};')
+            w(self.initialiser(arg, nm, self.operand(init, arg.type)))
             targets.append(nm)
 
         extern = s.attr('extern')

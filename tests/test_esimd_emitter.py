@@ -659,3 +659,37 @@ def test_spmd_is_not_warned_about():
         _w.simplefilter('always', RegisterBudgetWarning)
         _check_register_budget((), False, ctx, 'x')
     assert not caught
+
+
+# --------------------------------------------------------------------------
+# a reduction's accumulator
+# --------------------------------------------------------------------------
+
+def test_a_loop_carried_value_adopts_the_distribution_it_is_yielded():
+    """An `iter_arg` takes its layout from its `init`, and a reduction's init
+    is the operator's neutral element -- a bare literal with no distribution.
+    The accumulator only becomes lane-distributed once the body combines it
+    with something that is, so the yield is the first moment it is known.
+    """
+    from tensorforge.backend.pir.build import IRBuilder
+    from tensorforge.backend.pir.core import ScalarType
+    b = _builder('esimd')
+    loop = b.for_(0, 4, 1, inits=(0.0,), types=(ScalarType(Datatype.F32),))
+    with loop:
+        acc = loop.iter_args[0]
+        assert acc.layout is None, 'a literal init carries no distribution'
+        spread = b.value(ScalarType(Datatype.F32), layout=SPREAD16)
+        loop.yield_(spread)
+    assert loop.iter_args[0].layout == SPREAD16
+
+
+def test_a_vector_accumulator_is_direct_initialised(emitter):
+    """`simd<float, 16> acc = 0.0f;` does not compile.
+
+    ESIMD makes the broadcast constructor explicit on purpose -- filling a
+    vector from a scalar is a decision, not a conversion -- and a reduction
+    starting at its neutral element is exactly that case.
+    """
+    v = val(80, F32, SPREAD16)
+    out = emitter.initialiser(v, 'acc', '0.0f')
+    assert out == 'tensorforge::intel_esimd::simd<float, 16> acc(0.0f);'

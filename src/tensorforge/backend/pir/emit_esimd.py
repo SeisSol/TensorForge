@@ -125,6 +125,21 @@ class EsimdEmitter(Emitter):
             raise IRError('the ESIMD emitter needs a lexic with get_simd()')
         return get(elem, width)
 
+    def initialiser(self, v: Value, name: str, expr: str) -> str:
+        """Direct-initialisation, because the broadcast constructor is explicit.
+
+        `simd<float, 16> acc = 0.0f;` does not compile: ESIMD makes the
+        broadcast constructor `explicit`, on purpose -- filling a vector from
+        a scalar is a decision and not a conversion.  `simd<float, 16>
+        acc(0.0f)` says the same thing and is what is meant.
+
+        It comes up because a reduction starts its accumulator at the
+        operator's neutral element, which is a literal; the accumulator itself
+        is lane-distributed, so the two sides of the `=` genuinely differ in
+        shape.
+        """
+        return f'{self.ctype(v.type, v)} {name}({expr});'
+
     def _vector_ctype(self, t, relaxed: bool) -> str:
         """Every vector is a `simd` here, whatever its width came from.
 
