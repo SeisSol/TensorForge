@@ -567,16 +567,17 @@ def test_a_replicated_vector_is_still_a_simd(emitter):
     assert 'simd<float, 128>' in out and 'vec' not in out
 
 
-def test_dpas_emission_names_what_it_is_missing():
-    """Not a stub: the layout is settled, the staging is not.
-
-    And the blocker is a model mismatch rather than a spelling -- the operand
-    callbacks hand over lane-distributed vectors while a fragment wants the
-    hardware's element order, so going between them is a reformat and not a
-    loop over scalars.  Failing loudly with that beats emitting something
-    well-formed that stages the wrong thing.
-    """
+def test_dpas_emission_declines_a_wave_it_cannot_use():
+    """`ExecutionSize` is 16 for every type in the table, and under this
+    lowering the vector width *is* the thread count -- so another width is a
+    different instruction, not a narrower use of this one."""
     from tensorforge.backend.instructions.compute.primitives import intel
-    with pytest.raises(NotImplementedError, match='lane-distributed'):
-        intel.dpas_matmul(None, None, None, None, 8, 16, 8, 0, 16,
-                          Datatype.F32, None)
+    assert intel.dpas_matmul(None, None, None, None, 8, 16, 8, 0, 32,
+                             Datatype.F32, None) is False
+
+
+def test_dpas_emission_declines_a_type_without_an_atom():
+    """FP64 has no DPAS at all; the caller falls through to the generic path."""
+    from tensorforge.backend.instructions.compute.primitives import intel
+    assert intel.dpas_matmul(None, None, None, None, 8, 16, 8, 0, 16,
+                             Datatype.F64, None) is False

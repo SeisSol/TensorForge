@@ -208,7 +208,9 @@ public:
   simd_view &operator=(const simd_view<T, N, S2, St2> &) {
     return *this;
   }
-  simd_view &operator=(const simd<T, Size> &) { return *this; }
+  template <typename U, int M> simd_view &operator=(const simd<U, M> &) {
+    return *this;
+  }
   simd_view &operator=(T v) {
     _base[0] = v;
     return *this;
@@ -233,6 +235,18 @@ public:
   /// -- it is what turns a `simd<float, N>` into the `simd<TF32, N>` a DPAS
   /// operand has to be.
   template <typename U> simd(const simd<U, N> &) {}
+  /// From a view of any parent width: `simd<float, 8>(frag.select<8,1>(k))`
+  /// is how a run is read back out, and the view's type carries the parent's
+  /// length, not the run's.
+  template <typename U, int PN, int Sz, int St>
+  explicit simd(const simd_view<U, PN, Sz, St> &) {}
+  /// Assigning a view *into* a vector is an ordinary read of the run it
+  /// names, and the accumulator read-out does exactly that:
+  /// `acc.select<16, 1>(m * 16)` is one output column.
+  template <typename U, int PN, int Sz, int St>
+  simd &operator=(const simd_view<U, PN, Sz, St> &) {
+    return *this;
+  }
 
   /// Linear progression `base, base+step, ...` -- `simd_obj_impl(Ty, Ty)` in
   /// the real header.  This is how a lane index is built when there is no
@@ -405,13 +419,20 @@ private:
 };
 using TF32 = tf32;
 
-/// Mirrors the signature in `isycl.h`: the destinations are one-element views
-/// into a fragment, so they are templates and go by value.
-template <typename UpperT, typename LowerT, typename ValueT>
+/// Mirrors the signature in `isycl.h`: a whole run at a time, with the
+/// destinations as views into a fragment, so they are templates by value.
+template <int N, typename UpperT, typename LowerT, typename ValueT>
 void splitFloatTF32(UpperT upper, LowerT lower, ValueT value) {
-  upper = static_cast<tf32>(value);
-  const auto upperF = static_cast<float>(static_cast<tf32>(value));
-  lower = static_cast<tf32>(value - upperF);
+  // `N` is explicit at the call site rather than deduced: all three operands
+  // can be views into larger fragments -- `Src2` is filled a repeat row at a
+  // time out of an operand that is itself a run -- and a view carries the
+  // *parent's* length in its type, so nothing here could deduce the run
+  // width from it.
+  const intel_esimd::simd<float, N> v(value);
+  const intel_esimd::simd<tf32, N> hi(v);
+  const intel_esimd::simd<float, N> hiF(hi);
+  upper = hi;
+  lower = intel_esimd::simd<tf32, N>(v - hiF);
 }
 
 } // namespace tensorforge

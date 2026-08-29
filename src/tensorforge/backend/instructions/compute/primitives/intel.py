@@ -134,11 +134,19 @@ TF32_TERMS = 3
 #: given shape -- that second question is `supports()`.  Two different facts,
 #: so two names, and only this one is a decision about the generator.
 #:
-#: Parked pending a run on real hardware -- but for the same reason as the
-#: NVIDIA path now, not a sharper one.  The fragment layout turned out to be
-#: specified (see the module docstring); what is left unverified is the same
-#: class of thing `nvidia.py` names: an arrangement a front end cannot check,
-#: on an instruction nothing in this repository executes.
+#: Parked pending a run on real hardware, and by now for the same reason as
+#: the NVIDIA path rather than a sharper one.
+#:
+#: What used to block it is settled.  The fragment layout is derived from the
+#: vISA pseudo-code and checked by placing a matrix through the offsets,
+#: running the transcription and comparing against `C + A @ B`; the operand
+#: mapping (Src1 is this generator's A, Src2 its B) is checked the same way;
+#: and 29 of the 31 emitted kernels are well-formed with 11 of them carrying
+#: real `dpas` calls.
+#:
+#: What is left is what no front end can answer: whether three TF32 products
+#: through a systolic array give the FP32 result the generic path gives, on a
+#: machine.  That is a run, not an argument.
 ENABLED = False
 
 
@@ -349,20 +357,6 @@ def _fragment(writer, dtype, count, hint):
     `SCALAR_LAYOUT` and not a lane axis, and the distinction is the point.  A
     fragment is not "one element per lane" -- its element order is the
     hardware's (see `a_offset` and friends), and the work-item owns all of it.
-    The width therefore lives on `ScalarType.length`, which is the slot axis,
-    and the emitter spells that as a `simd` too.
-    """
-    from tensorforge.backend.pir.core import SCALAR_LAYOUT, ScalarType
-    return writer.declare(ScalarType(dtype, count), hint=hint, init='{}',
-                          layout=SCALAR_LAYOUT)
-
-
-def _fragment(writer, dtype, count, hint):
-    """A DPAS fragment: `count` elements, held whole by one work-item.
-
-    `SCALAR_LAYOUT` and not a lane axis, and the distinction is the point.  A
-    fragment is not "one element per lane" -- its element order is the
-    hardware's (see `a_offset` and friends), and the work-item owns all of it.
     The width therefore lives on `ScalarType.length`, the slot axis, which the
     ESIMD emitter also spells as a `simd`.
     """
@@ -370,105 +364,96 @@ def _fragment(writer, dtype, count, hint):
                           layout=SCALAR_LAYOUT)
 
 
-def _slot(writer, frag, index, hint):
-    """A one-element view into a fragment, to be written through."""
-    return writer.rawexpr(f'{{0}}.template select<1, 1>({index})', frag,
-                          type_=frag.type, hint=hint, pure=True)
+def _run(writer, frag, start, size, hint):
+    """A contiguous run of a fragment, as a value of the *run's* type.
 
-
-def _stage(writer, load, hi, lo, atom, offset, coords, i0, j0, ilim, jlim,
-           swap=False):
-    """Write one operand into its fragment, split into its two TF32 halves.
-
-    Returns False if a callback declines an element, which sends the caller
-    back to the generic path rather than leaving a hole: an uninitialised slot
-    is a wrong product, not a missing one.
+    `ScalarType(base, size)` and not the parent's: a view is 16 wide even when
+    it looks into 128, and typing it by the fragment makes the accumulator
+    read-out claim to store 128 elements where it stores one output column.
     """
-    for i, j in coords:
-        if i0 + i >= ilim or j0 + j >= jlim:
-            continue
-        v = (load(writer, None, j0 + j, i0 + i) if swap
-             else load(writer, None, i0 + i, j0 + j))
-        if v is None or v is False:
-            return False
-        slot = offset(atom, i, j)
-        # A call for its effect: `splitFloatTF32` writes through references, so
-        # it is not an SSA producer.  `writes` names the two fragments, which
-        # is what lets two elements staged into different slots be seen not to
-        # conflict.
-        writer.call_stmt('tensorforge::splitFloatTF32',
-                         _slot(writer, hi, slot, 'hs'),
-                         _slot(writer, lo, slot, 'ls'),
-                         v, writes=(hi, lo))
-    return True
+    return writer.rawexpr(f'{{0}}.template select<{size}, 1>({start})', frag,
+                          type_=ScalarType(frag.type.base, size), hint=hint,
+                          pure=True)
+
+
+#: Which of this generator's operands is which of the instruction's.
+#:
+#: `C(i,j) = sum_k A(i,k) * B(j,k)` onto `D(m,n) = sum_k Ad(m,k) * Bd(k,n)`.
+#: DPAS's `N` is the execution size, which under this lowering is the wave --
+#: and the wave is where the *lead* dimension lives.  So `n` is `i`, `m` is
+#: `j`, and the two operands cross over:
+#:
+#:     Src1 (the instruction's B) is this generator's A, indexed (k, i)
+#:     Src2 (the instruction's A) is this generator's B, indexed (j, k)
+#:
+#: Which is not a guess either -- `test_intel_gate.py` runs the transcribed
+#: instruction with the operands placed this way and checks it against
+#: `sum_k A(i,k) * B(j,k)`.
+#:
+#: The reformat falls out of it.  `b_offset(k, n) = k*N + n`, so the sixteen
+#: lanes an operand load already returns land in sixteen *consecutive* slots;
+#: `a_offset(m, k) = m*K + k` does the same for eight.  Every transfer between
+#: a lane vector and a fragment is a contiguous run, which is why this is a
+#: handful of `select`s rather than a loop over elements.
 
 
 def dpas_matmul(writer, C, A, B, M, N, K, kx, threads, dtype, ctx):
     """`C += A x B` through XMX, with FP32 emulated over three TF32 products.
 
-    The layout is derived and checked: `a_offset`, `b_offset` and `c_offset`
-    come out of the vISA pseudo-code, `reference` is that pseudo-code
-    transcribed, and `tests/test_intel_gate.py` places a matrix through the
-    offsets, runs the transcription and compares against `C + A @ B`.
-
     Three products, not four: `lo*lo` falls below the accumulator's rounding.
     The same arrangement as `nvidia.py`'s `mma.sync ... .tf32`, and it has to
     be -- the error analysis belongs to the split, not to either instruction.
-
-    **Blocked on the staging, and on a model mismatch rather than a spelling.**
-    The body below fills each fragment slot with one `splitFloatTF32`, which
-    assumes the operand callbacks hand over scalars.  Under this lowering they
-    hand over `simd<float, threads>` -- the lead dimension is already spread
-    across a vector -- so `tf32(value)` gets a vector where it wants an
-    element, and 64 scalar splits would be the wrong shape even if it bound.
-
-    A fragment is held whole by one work-item in the hardware's element order,
-    and the operand is already a vector in the *lane* order.  Going between
-    them is a reformat -- `select` and `replicate` over whole vectors -- not a
-    loop over elements.  That is a real piece of design and it is the next
-    step; the emission is kept because everything around the reformat (the
-    fragments, the three products, the accumulator read-out) is settled, and
-    only the middle is not.
     """
     atom = atom_for(dtype)
-    if atom is None:
+    if atom is None or threads != atom.n:
         return False
-    raise NotImplementedError(
-        'DPAS staging assumes scalar operands; under this lowering the '
-        'operand callbacks return lane-distributed vectors. See the '
-        'docstring -- the fix is a vector-to-vector reformat, not a scalar '
-        'loop.')
     acc_ct = dtype.ctype()
+    depth = K + kx
 
-    for m0 in range(0, M, atom.m):
-        for n0 in range(0, N, atom.n):
-            acc = _fragment(writer, dtype, atom.c_elems, 'dacc')
-            for k0 in range(0, K + kx, atom.k):
-                ahi = _fragment(writer, Datatype.TF32, atom.a_elems, 'ahi')
-                alo = _fragment(writer, Datatype.TF32, atom.a_elems, 'alo')
-                bhi = _fragment(writer, Datatype.TF32, atom.b_elems, 'bhi')
-                blo = _fragment(writer, Datatype.TF32, atom.b_elems, 'blo')
-                if not _stage(writer, A, ahi, alo, atom, a_offset,
-                              [(m, k) for m in range(atom.m)
-                               for k in range(atom.k)], m0, k0, M, K + kx):
+    for j0 in range(0, N, atom.m):
+        rows = min(atom.m, N - j0)
+        acc = _fragment(writer, dtype, atom.c_elems, 'dacc')
+        for k0 in range(0, depth, atom.k):
+            ahi = _fragment(writer, Datatype.TF32, atom.a_elems, 'ahi')
+            alo = _fragment(writer, Datatype.TF32, atom.a_elems, 'alo')
+            bhi = _fragment(writer, Datatype.TF32, atom.b_elems, 'bhi')
+            blo = _fragment(writer, Datatype.TF32, atom.b_elems, 'blo')
+
+            # Src1 <- this generator's A: one lane vector per contraction step.
+            for k in range(min(atom.k, depth - k0)):
+                v = A(writer, None, 0, k0 + k)
+                if v is None or v is False:
                     return False
-                if not _stage(writer, B, bhi, blo, atom, b_offset,
-                              [(k, n) for k in range(atom.k)
-                               for n in range(atom.n)], k0, n0, K + kx, N,
-                              swap=True):
+                off = b_offset(atom, k, 0)
+                writer.call_stmt(f'tensorforge::splitFloatTF32<{atom.n}>',
+                                 _run(writer, bhi, off, atom.n, 'bh'),
+                                 _run(writer, blo, off, atom.n, 'bl'),
+                                 v, writes=(bhi, blo))
+
+            # Src2 <- this generator's B: one run per repeat row.
+            for m in range(rows):
+                v = B(writer, None, j0 + m, k0 // threads)
+                if v is None or v is False:
                     return False
-                for bf, af in ((bhi, ahi), (bhi, alo), (blo, ahi)):
-                    writer.assign(acc, writer.rawexpr(
-                        f'tensorforge::intel_xmx::dpas<{atom.depth}, '
-                        f'{atom.repeat}, {acc_ct}>({{0}}, {{1}}, {{2}})',
-                        acc, bf, af, type_=acc.type, hint='dp', pure=True))
-            for m in range(atom.m):
-                for n in range(atom.n):
-                    if m0 + m >= M or n0 + n >= N:
-                        continue
-                    C(writer, writer.extract(acc, c_offset(atom, m, n),
-                                             ScalarType(dtype)),
-                      m0 + m, n0 + n)
+                off = a_offset(atom, m, 0)
+                writer.call_stmt(f'tensorforge::splitFloatTF32<{atom.k}>',
+                                 _run(writer, ahi, off, atom.k, 'ah'),
+                                 _run(writer, alo, off, atom.k, 'al'),
+                                 _run(writer, v, 0, atom.k, 'bk'),
+                                 writes=(ahi, alo))
+
+            for bf, af in ((bhi, ahi), (bhi, alo), (blo, ahi)):
+                writer.assign(acc, writer.rawexpr(
+                    f'tensorforge::intel_xmx::dpas<{atom.depth}, '
+                    f'{atom.repeat}, {acc_ct}>({{0}}, {{1}}, {{2}})',
+                    acc, bf, af, type_=acc.type, hint='dp', pure=True))
+
+        # Read-out is a run too: `c_offset(m, n) = m*N + n`, so one output
+        # column is `acc.select<N, 1>(m * N)` -- already the shape the store
+        # wants.
+        for m in range(rows):
+            C(writer, _run(writer, acc, c_offset(atom, m, 0), atom.n, 'cr'),
+              0, j0 + m)
     return True
 
 

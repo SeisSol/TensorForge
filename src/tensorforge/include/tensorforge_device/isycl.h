@@ -22,28 +22,32 @@ using tf32 = sycl::ext::intel::experimental::esimd::tfloat32;
 /// Kept for the existing spelling in `isycl.h`'s own helpers.
 using TF32 = tf32;
 
-/// Split a float into the two TF32 halves a DPAS multiplies.
+/// Split a vector of floats into the two TF32 halves a DPAS multiplies.
 ///
 /// The same arrangement as `splitFloatTF32` in `cuda.h`, and it has to be:
-/// both feed a three-term product whose error analysis is the split's, not
+/// both feed a three-term product whose error analysis is the split's and not
 /// the instruction's.  TF32 keeps 11 mantissa bits against FP32's 24, so
 /// `upper` holds the top 11 and `lower` the next 11 of what is left; the
 /// remaining two fall below what the accumulator distinguishes.
 ///
-/// The destinations are templates because a DPAS fragment is staged one
-/// element at a time, so what arrives is `frag.select<1, 1>(slot)` -- a view
-/// into a vector, not a vector.  A signature taking `simd<tf32, N>&` cannot
-/// bind one, and taking the fragment plus an index instead would put the
-/// layout arithmetic in two places.  Views are proxies and go by value.
-template <typename UpperT, typename LowerT, typename ValueT>
+/// A whole vector at a time, and the destinations are templates, because a
+/// DPAS fragment is filled by *runs*: `Src1[k * N + n]` is `A(n, k)`, so the
+/// sixteen lanes an operand load already returns land in sixteen consecutive
+/// slots.  What arrives here is therefore `frag.select<16, 1>(k * 16)` -- a
+/// view into a vector -- and a signature taking `simd<tf32, N> &` cannot bind
+/// one.  Views are proxies and go by value.
+template <int N, typename UpperT, typename LowerT, typename ValueT>
 ESIMD_INLINE void splitFloatTF32(UpperT upper, LowerT lower, ValueT value) {
-  // Explicit both ways.  The conversion is implicit in ESIMD, but spelling it
-  // out is what makes the two roundings visible: this is where the 13
-  // mantissa bits FP32 has over TF32 are dropped, and the next line is where
-  // they are picked back up.
-  upper = static_cast<tf32>(value);
-  const auto upperF = static_cast<float>(static_cast<tf32>(value));
-  lower = static_cast<tf32>(value - upperF);
+  // `N` is explicit at the call site rather than deduced: all three operands
+  // can be views into larger fragments -- `Src2` is filled a repeat row at a
+  // time out of an operand that is itself a run -- and a view carries the
+  // *parent's* length in its type, so nothing here could deduce the run
+  // width from it.
+  const intel_esimd::simd<float, N> v(value);
+  const intel_esimd::simd<tf32, N> hi(v);
+  const intel_esimd::simd<float, N> hiF(hi);
+  upper = hi;
+  lower = intel_esimd::simd<tf32, N>(v - hiF);
 }
 
 } // namespace tensorforge

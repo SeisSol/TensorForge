@@ -125,6 +125,18 @@ class EsimdEmitter(Emitter):
             raise IRError('the ESIMD emitter needs a lexic with get_simd()')
         return get(elem, width)
 
+    def _vector_ctype(self, t, relaxed: bool) -> str:
+        """Every vector is a `simd` here, whatever its width came from.
+
+        The base emitter asks the lexic for a `sycl::vec`, which is right for
+        an SPMD load of four consecutive elements and wrong for anything this
+        lowering does with it: a `vec` has no `select`, no `copy_from`, and
+        nothing a DPAS fragment is written through.  `ctype` already answers
+        this way; the two have to agree, or a fragment is declared one way and
+        assigned the other.
+        """
+        return self.simd_type(t.base.ctype(), t.length)
+
     # -- addressing -------------------------------------------------------- #
 
     def _thread_idx(self, axis: str) -> str:
