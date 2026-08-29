@@ -741,6 +741,7 @@ class MultilinearBuilder(AbstractBuilder):
                                      src=operand,
                                      num_threads=self._num_threads,
                                      linearize = linearize,
+                                     lead_width = self._lead_width,
                                      src_bbox = bbox,
                                      src_offset = opview.offset)
     return SymbolView(registers, bbox), load_op
@@ -1004,6 +1005,7 @@ class MultilinearBuilder(AbstractBuilder):
                                               src=store_regs,
                                               dest=store_dest,
                                               num_threads=self._num_threads,
+                                              lead_width=self._lead_width,
                                               atomic=update,
                                               dest_offset=shift,
                                               dest_bbox=promise,
@@ -1068,6 +1070,7 @@ class MultilinearBuilder(AbstractBuilder):
                                                   dest=dest_symbol,
                                                   shr_mem=self._shr_mem,
                                                   num_threads=self._num_threads,
+                                                  lead_width=self._lead_width,
                                                   dest_bbox=self._dest_union.get(id(self._dest_obj.tensor)),
                                                   dest_offset=self._store_offset()))
           return
@@ -1098,6 +1101,7 @@ class MultilinearBuilder(AbstractBuilder):
                                                   src=self._temp_regs,
                                                   dest=dest_symbol,
                                                   num_threads=self._num_threads,
+                                                  lead_width=self._lead_width,
                                                   atomic=True,
                                                   dest_offset=self._store_offset(),
                                                   dest_bbox=self._promised_box(),
@@ -1119,6 +1123,7 @@ class MultilinearBuilder(AbstractBuilder):
                                                   src=self._temp_regs,
                                                   dest=dest_symbol,
                                                   num_threads=self._num_threads,
+                                                  lead_width=self._lead_width,
                                                   atomic=None,
                                                   dest_offset=self._store_offset(),
                                                   dest_bbox=self._promised_box(),
@@ -1146,6 +1151,7 @@ class MultilinearBuilder(AbstractBuilder):
                                                 dest=dest_symbol,
                                                 shr_mem=self._shr_mem,
                                                 num_threads=self._num_threads,
+                                                lead_width=self._lead_width,
                                                 dest_bbox=self._dest_union.get(id(self._dest_obj.tensor)),
                                                 dest_offset=self._store_offset()))
         return
@@ -1178,6 +1184,7 @@ class MultilinearBuilder(AbstractBuilder):
                                                   src=store_regs,
                                                   dest=store_global,
                                                   num_threads=self._num_threads,
+                                                  lead_width=self._lead_width,
                                                   atomic=update,
                                                   dest_offset=shift,
                                                   dest_bbox=self._promised.get(name),

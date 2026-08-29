@@ -781,8 +781,13 @@ class MultilinearInstruction(ComputeInstruction):
             if i not in self._lead_dims or threads == 0:
                 loopstack += [Loop(f'n{i}', dimmin, dimmax, 1, unroll=unroll)]
             else:
-                loopstack += [LeadLoop(f'n{i}', dimmin, dimmax, threads, stride, unroll=unroll)]
-                threads //= dimmax - dimmin
+                # Same width as `_apply_nonlead`.  This nest walks the *same*
+                # register image -- it is the beta/prologue pass over the
+                # destination -- so a cyclic walk here and a blocked one there
+                # disagree about which lane owns which element.
+                loopstack += [LeadLoop(f'n{i}', dimmin, dimmax, threads, stride,
+                                       unroll=unroll, width=self._lead_width)]
+                threads //= max(1, -(-(dimmax - dimmin) // self._lead_width))
                 stride *= dimmax - dimmin
 
         def _dim_covered(i, var):

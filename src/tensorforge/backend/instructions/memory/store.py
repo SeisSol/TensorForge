@@ -47,6 +47,8 @@ class StoreRegToReg(MemoryInstruction):
     self._dest: Symbol = dest
     self._src: Symbol = src#.clone()
     self._num_threads: int = num_threads
+    #: See `gen_code_inner`: the register image is blocked by this.
+    self._lead_width: int = lead_width
     view: DataView = self._dest.data_view
 
   def gen_code_inner(self, writer: Writer) -> None:
@@ -54,7 +56,15 @@ class StoreRegToReg(MemoryInstruction):
     src_bbox = self._src.data_view.get_bbox()
 
     loops = []
-    loops += [LeadLoop('i0', src_bbox.lower()[0], src_bbox.upper()[0], self._num_threads, 1)]
+    # The width the compute instruction used, not 1.  The register image is
+    # blocked by it -- lane `l` holds elements `w*l .. w*l+w-1` -- and reading
+    # it back cyclically maps register float `r` to element `l + r*threads`
+    # instead of `w*(l + slot*block) + c`.  Fourteen of sixteen entries land
+    # in the wrong place for `w = 2`, silently: the code compiles, the
+    # snapshot looks plausible, and the only thing that would notice is a
+    # numerical check the host oracle cannot yet run.
+    loops += [LeadLoop('i0', src_bbox.lower()[0], src_bbox.upper()[0],
+                       self._num_threads, 1, width=self._lead_width)]
     for i in range(1, src_bbox.rank()):
       loops += [Loop(f'i{i}', src_bbox.lower()[i], src_bbox.upper()[i], 1)]
 
@@ -77,6 +87,7 @@ class StoreRegToShr(AbstractShrMemWrite):
                dest: Symbol,
                shr_mem: Symbol,
                num_threads: int,
+               lead_width: int = 1,
                dest_bbox=None,
                dest_offset=None):
     super(StoreRegToShr, self).__init__(context)
@@ -112,6 +123,8 @@ class StoreRegToShr(AbstractShrMemWrite):
     self._src: Symbol = src#.clone()
     self._shr_mem: Symbol = shr_mem
     self._num_threads: int = num_threads
+    #: See `gen_code_inner`: the register image is blocked by this.
+    self._lead_width: int = lead_width
     self._shr_mem_offset: Union[int, None] = None
     view: DataView = self._dest.data_view
     self._shm_volume: int = view.get_volume()
@@ -121,7 +134,15 @@ class StoreRegToShr(AbstractShrMemWrite):
     src_bbox = self._src.data_view.get_bbox()
 
     loops = []
-    loops += [LeadLoop('i0', src_bbox.lower()[0], src_bbox.upper()[0], self._num_threads, 1)]
+    # The width the compute instruction used, not 1.  The register image is
+    # blocked by it -- lane `l` holds elements `w*l .. w*l+w-1` -- and reading
+    # it back cyclically maps register float `r` to element `l + r*threads`
+    # instead of `w*(l + slot*block) + c`.  Fourteen of sixteen entries land
+    # in the wrong place for `w = 2`, silently: the code compiles, the
+    # snapshot looks plausible, and the only thing that would notice is a
+    # numerical check the host oracle cannot yet run.
+    loops += [LeadLoop('i0', src_bbox.lower()[0], src_bbox.upper()[0],
+                       self._num_threads, 1, width=self._lead_width)]
     for i in range(1, src_bbox.rank()):
       loops += [Loop(f'i{i}', src_bbox.lower()[i], src_bbox.upper()[i], 1)]
 
@@ -147,6 +168,7 @@ class StoreRegToGlb(AbstractInstruction):
                dest: Symbol,
                num_threads: int,
                atomic,
+               lead_width: int = 1,
                dest_offset=None,
                dest_bbox=None,
                zero_fill=True):
@@ -177,6 +199,8 @@ class StoreRegToGlb(AbstractInstruction):
     self._dest: Symbol = dest
     self._src: Symbol = src#.clone()
     self._num_threads: int = num_threads
+    #: See `gen_code_inner`: the register image is blocked by this.
+    self._lead_width: int = lead_width
     self._is_ready: bool = True
     self._atomic = atomic
     # logical->storage shift of the destination slice.  `src` (registers) is
@@ -224,7 +248,11 @@ class StoreRegToGlb(AbstractInstruction):
       # the register array holds, which the `needsLoad` test below cannot see
       # (it recognises `Immediate` only).  What the promise covers beyond it
       # gets its own nest below, which writes zeros and never touches `src`.
-      loops += [LeadLoop('i0', src_bbox.lower()[0], src_bbox.upper()[0], self._num_threads, 1)]
+      # Widened like the other two: the register image is blocked by the
+      # compute width, so reading it back cyclically would put fourteen of
+      # sixteen entries in the wrong place for `w = 2`.
+      loops += [LeadLoop('i0', src_bbox.lower()[0], src_bbox.upper()[0],
+                         self._num_threads, 1, width=self._lead_width)]
       for i in range(1, src_bbox.rank()):
         unroll = (src_bbox.lower()[i], src_bbox.upper()[i]) != (dest_bbox.lower()[i], dest_bbox.upper()[i])
         lower = min(src_bbox.lower()[i], dest_bbox.lower()[i])

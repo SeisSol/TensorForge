@@ -38,6 +38,9 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
     self._src = kwargs['src']
     self._shr_mem = kwargs['shr_mem']
     self._num_threads = kwargs['num_threads']
+    #: A shared image is not blocked -- the compute path reads it by element,
+    #: not by lane -- so this stays 1 unless a caller says otherwise.
+    self._lead_width = kwargs.get('lead_width', 1)
     self._permute: None = kwargs['permute']
     self._manual_unroll_threshold = 4
     self._no_memcpy = kwargs['no_memcpy'] if 'no_memcpy' in kwargs else False
@@ -171,7 +174,12 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
     if self._needs_reorder:
       src_bbox = self._src.data_view.get_bbox()
       loops = []
-      loops += [LeadLoop('i0', src_bbox.lower()[0], src_bbox.upper()[0], self._num_threads, 1)]
+      # Same width as the compute instruction that reads this image, for the
+      # same reason as in `store.py`: the register array is blocked by it, and
+      # filling it cyclically while the compute reads it blocked puts most
+      # entries in the wrong place without any diagnostic.
+      loops += [LeadLoop('i0', src_bbox.lower()[0], src_bbox.upper()[0],
+                         self._num_threads, 1, width=self._lead_width)]
       for i in range(1, src_bbox.rank()):
         loops += [Loop(f'i{i}', src_bbox.lower()[i], src_bbox.upper()[i], 1)]
 
@@ -412,6 +420,7 @@ class GlbToRegLoader(MemoryInstruction, LoadInstruction):
                dest: Symbol,
                num_threads: int,
                linearize: bool,
+               lead_width: int = 1,
                src_bbox=None,
                src_offset=None):
     super(GlbToRegLoader, self).__init__(context)
@@ -452,6 +461,9 @@ class GlbToRegLoader(MemoryInstruction, LoadInstruction):
     self._dest: Symbol = dest
     self._src: Symbol = src#.clone()
     self._num_threads: int = num_threads
+    #: The register image this loader fills is blocked by this; see
+    #: `gen_code_inner`.
+    self._lead_width: int = lead_width
     self._is_ready: bool = True
     self._linearize = linearize
 
@@ -580,7 +592,7 @@ class GlbToRegLoader(MemoryInstruction, LoadInstruction):
       for i in range(src_bbox.rank()):
         if i == lead_pos:
           loops += [LeadLoop(f'i{i}', src_bbox.lower()[i], src_bbox.upper()[i],
-                             self._num_threads, 1)]
+                             self._num_threads, 1, width=self._lead_width)]
         else:
           loops += [Loop(f'i{i}', src_bbox.lower()[i], src_bbox.upper()[i], 1)]
 
