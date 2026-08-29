@@ -304,9 +304,14 @@ def _wrap_one(loop: Stmt, make_value,
     # statement the group transitively reads that mentions the induction, with
     # the successor index put in its place.  That slice *is* the rolling
     # pointer the old macro-level pipeline built by hand.
+    # The whole subtree, since a section member may be a hop loop and the
+    # index it reads is an operand of a statement inside it, not of the block.
+    def _names_index(st):
+        return any(isinstance(a, Value) and a.id in next_index
+                   for x, _ in walk((st,)) for a in x.args)
+
     slice_ = _index_slice(region, group, next_index)
-    if not slice_ and all(not isinstance(a, Value) or a.id not in next_index
-                          for g in group for a in g.args):
+    if not slice_ and not any(_names_index(g) for g in group):
         raise Refusal('the transfer does not name an index this loop knows '
                       'how to advance')
     advanced, advance_map = _advance(slice_, next_index, make_value)
@@ -380,7 +385,8 @@ def _index_slice(region: Region, group: Sequence[Stmt],
     that wrote anything would write it twice.
     """
     by_def = {t.id: s for s in region.body for t in s.target}
-    want = {a.id for g in group for a in g.args if isinstance(a, Value)}
+    want = {a.id for g in group for x, _ in walk((g,))
+            for a in x.args if isinstance(a, Value)}
     slice_: List[Stmt] = []
     seen = set()
     changed = True

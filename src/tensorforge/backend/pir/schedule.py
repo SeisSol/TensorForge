@@ -126,9 +126,14 @@ def may_cross(mover: Stmt, fixed: Stmt) -> bool:
     move.  What still matters about the fixed statement is what it *touches*,
     and `touches` says that for a whole subtree or says nothing at all.
     """
-    if not mover.movable or mover.effect & _WALL:
-        return False
-    tm, tf = touches(mover), _touches_fixed(fixed)
+    # Describable, not movable.  Since the mover may be a whole section --
+    # a hop loop moved as a unit -- it is a `rawblock`, and a raw block is
+    # `movable=False` because its head is text a pass cannot read.  That is an
+    # answer to "may a pass relocate this on its own", which is not the
+    # question here: the caller has already decided to move it, and asks only
+    # what crossing costs.  What still has to hold is that both sides can be
+    # described, which is what `touches` answers for a subtree.
+    tm, tf = _touches_fixed(mover), _touches_fixed(fixed)
     if tm is None or tf is None:
         return False
     if _defines(mover) & _uses(fixed) or _defines(fixed) & _uses(mover):
