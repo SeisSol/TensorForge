@@ -794,7 +794,8 @@ class IRBuilder:
              other: Optional[Operand] = None,
              layout: Optional[RegisterLayout] = None,
              align: Optional[int] = None,
-             nontemporal: bool = False) -> Value:
+             nontemporal: bool = False,
+             extern: str = None) -> Value:
         """``layout`` is how the loaded value ends up spread over the lanes.
 
         A load is where a distribution *enters* the IR: every later layout is
@@ -832,6 +833,12 @@ class IRBuilder:
             # makes "nobody checked" a state the IR cannot be in, without the
             # IR having to understand the arithmetic.
             attrs += [('align', align)]
+        if extern:
+            # The name the macro layer already handed out.  A load that has to
+            # produce a particular identifier used to be text for that reason
+            # alone, which cost every pass its view of an access that was
+            # otherwise fully described.
+            attrs += [('extern', extern)]
         attrs = tuple(attrs)
 
         self._emit_op(Op.LOAD, (v,), (base,) + tuple(indices),

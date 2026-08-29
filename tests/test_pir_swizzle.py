@@ -203,3 +203,26 @@ def test_extern_without_a_swizzle_is_still_fine():
     b = builder()
     assert b.alloc(Datatype.F32, (64,), MemSpace.SHARED, hint='s0',
                    extern='s0', arena='arena', offset=0) is not None
+
+
+def test_a_named_load_still_takes_the_structured_path():
+    """The prerequisite that made the rest of this reachable.
+
+    `Symbol.load` used to leave the structured path whenever the consumer
+    needed a particular identifier, which was almost always.  Measured on the
+    cases with the worst bank conflicts, all 5650 accesses to a shared symbol
+    took the text path -- so a swizzle on such a buffer would have applied to
+    nothing, and would have become wrong rather than useless the moment one of
+    them was converted.
+
+    `extern` on the load supplies the name, so the address goes in as an
+    operand and the emitted line is unchanged.
+    """
+    b = builder()
+    tile = b.alloc(Datatype.F32, (64,), MemSpace.SHARED, hint='s0')
+    idx = b.rawexpr('threadIdx.x', type_=INDEX, hint='a')
+    v = b.load(tile, idx, hint='data', extern='v42_data')
+    b('use(v42_data);', v, accesses=())
+    text = emitted(b.finish())
+    assert 'float v42_data = ' in text, text
+    assert 'use(v42_data);' in text

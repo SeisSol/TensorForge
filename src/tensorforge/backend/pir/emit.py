@@ -525,10 +525,18 @@ class Emitter:
             nontemporal = s.attr('nontemporal')
             access = self.elem_access(s.args[0], addr, v.type,
                                       s.attr('align') == 'relaxed')
+            # `extern` is the name the macro layer already gave this value.
+            # Emitting under it is what lets a named load take the structured
+            # path: the consumer still spells `v58_data`, while the address is
+            # an operand rather than a string, so aliasing, liveness and the
+            # swizzle all see the access.
+            named = s.attr('extern')
             if nontemporal:
-                self.declare(v, f'{lex.glb_load(access, True)}', s)
+                self.declare(v, f'{lex.glb_load(access, True)}', s, name=named)
             else:
-                self.declare(v, access, s)
+                self.declare(v, access, s, name=named)
+            if named:
+                self.bind(v, named)
             return
 
         if op == Op.LOAD_ASYNC:

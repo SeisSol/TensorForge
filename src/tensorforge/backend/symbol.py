@@ -1665,6 +1665,29 @@ class Symbol:
             access, ScalarType(self.get_fptype()), self,
             args=_operands(variable, addrs),
             hint='data', layout=layout_of(index, self.num_threads))
+      # A named load is still a load.  It took the text path for one reason --
+      # the consumer needs a particular identifier -- and `extern` supplies
+      # that, so the address goes in as an operand instead of a string.  What
+      # the string form could declare was the symbol and the effect; what it
+      # could not was *which address*, and that is what aliasing, liveness and
+      # a swizzled buffer all read.
+      #
+      # The same two exclusions as the value form above: a broadcast is a load
+      # wrapped in a vendor intrinsic, and a Scalar is not a subscripted access
+      # at all, so `Op.LOAD` would invent an index that was never there.
+      if (access is pre_access and self.stype in (
+              SymbolType.Register, SymbolType.Scratch, SymbolType.SharedMem,
+              SymbolType.Batch, SymbolType.Global)):
+        from tensorforge.backend.pir.core import ScalarType
+        w = lead_width_of(index)
+        ltype = (ScalarType(self.get_fptype()) if w == 1
+                 else ScalarType(self.get_fptype(), w))
+        writer.load(self, self.address_value(writer, context, index),
+                    type_=ltype, hint='data',
+                    align=None if w == 1 else RELAXED,
+                    layout=layout_of(index, self.num_threads),
+                    nontemporal=nontemp, extern=str(variable))
+        return True
       if self.stype == SymbolType.Global:
         writer(f'{self.get_fptype()} {variable} = {context.get_vm().get_lexic().glb_load(variable, access, nontemp)};', self, Effect.READ, args=_operands(variable, addrs))
       else:
