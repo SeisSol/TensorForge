@@ -87,16 +87,10 @@ class Call(Enum):
 MANTISSA = {
     Datatype.F64: 53,
     Datatype.F32: 24,
+    Datatype.TF32: 11,
     Datatype.F16: 11,
     Datatype.BF16: 8,
 }
-
-#: XF32's significand width, asserted rather than read: AMD documents the
-#: format as TF32-shaped, and TF32 is 10 stored bits plus the implicit one.
-#: It is the one number in this module that no vendored table confirms.  The
-#: only thing depending on it is how many products a split needs, so a wrong
-#: value shows up as an accuracy result rather than as a wrong kernel.
-XF32_MANTISSA = 11
 
 
 @dataclass(frozen=True)
@@ -142,9 +136,16 @@ class MatrixOp:
     #: the row honest in each direction --- offering the instruction where the
     #: hardware lacks it, or naming a feature clang would reject.
     gate: Optional[str] = None
-    #: Significand bits of the *arithmetic*, when it is narrower than the
-    #: operand type suggests.  `None` means "whatever `a.dtype` has".
-    mantissa: Optional[int] = None
+    #: The format the matrix unit multiplies in, when it is narrower than the
+    #: register type suggests.  `None` means "whatever `a.dtype` is".
+    #:
+    #: The pair only comes apart for XF32, and there it has to: the operand
+    #: arrives in `float` registers -- the builtin takes `_ExtVector<2,
+    #: float>` and no conversion instruction exists -- and 13 mantissa bits
+    #: are dropped inside the unit.  `a.dtype` is what the call site writes,
+    #: this is what the arithmetic does, and spelling both `F32` is a lie no
+    #: front end catches.  Which is the reason `Datatype.TF32` exists.
+    arithmetic: Optional[Datatype] = None
 
     def __post_init__(self):
         for name, frag, extent in (('a', self.a, self.m * self.k),
@@ -173,7 +174,7 @@ class MatrixOp:
 
     @property
     def significand(self) -> int:
-        return self.mantissa or MANTISSA[self.a.dtype]
+        return MANTISSA[self.arithmetic or self.a.dtype]
 
     def replication(self, which: str = 'a') -> int:
         """How many times over the wave holds each element of an operand.
@@ -284,7 +285,7 @@ class MatrixOp:
 # The entries
 # --------------------------------------------------------------------------- #
 
-def _ops(feature, call, wave, rows, mantissa=None, gate=None):
+def _ops(feature, call, wave, rows, arithmetic=None, gate=None):
     """One feature's rows.
 
     A row is ``(builtin, m, n, k, blocks, in_dtype, in_per_lane, out_dtype,
@@ -295,12 +296,14 @@ def _ops(feature, call, wave, rows, mantissa=None, gate=None):
         MatrixOp(builtin=builtin, m=m, n=n, k=k, blocks=blocks, wave=wave,
                  a=Fragment(din, wa), b=Fragment(din, wa),
                  d=Fragment(dout, wd),
-                 feature=feature, call=call, mantissa=mantissa,
+                 feature=feature, call=call, arithmetic=arithmetic,
                  gate=gate)
         for builtin, m, n, k, blocks, din, wa, dout, wd in rows)
 
 
-F32, F64, F16, BF16 = (Datatype.F32, Datatype.F64, Datatype.F16, Datatype.BF16)
+F32, F64, F16, BF16 = (Datatype.F32, Datatype.F64, Datatype.F16,
+                       Datatype.BF16)
+TF32 = Datatype.TF32
 
 #: gfx908 and up.  The K=1 F32 tiles are what `matmul32` emits today; the rest
 #: of the block is the same generation's F16 and two-wide BF16.
@@ -324,13 +327,16 @@ _MAI = _ops('mai-insts', Call.MFMA, 64, (
 
 #: gfx942 only, and not carried forward to gfx950 --- a path built on it does
 #: not survive the next generation.  The operands are `float` and the
-#: arithmetic is not: this is the AMD counterpart of the 3xTF32 path in
-#: `primitives/nvidia.py`, and its split is smaller than BF16's because the
-#: format keeps three more significand bits.
+#: arithmetic is not: XF32 *is* TF32, the same E8M10 the NVIDIA and Intel
+#: paths already name, so it is spelled with the same `Datatype` and shares
+#: their significand width rather than carrying a second constant that says
+#: eleven for a second time.  Which makes this the AMD counterpart of the
+#: 3xTF32 path in `primitives/nvidia.py`, and its split smaller than BF16's
+#: because the format keeps three more significand bits.
 _XF32 = _ops('xf32-insts', Call.MFMA, 64, (
     ('mfma_f32_16x16x8_xf32', 16, 16,  8,  1, F32,  2, F32,  4),
     ('mfma_f32_32x32x4_xf32', 32, 32,  4,  1, F32,  2, F32, 16),
-), mantissa=XF32_MANTISSA, gate='mai-insts')
+), arithmetic=TF32, gate='mai-insts')
 
 #: gfx90a and up: four-wide BF16 operands (`_1k`), and FP64.
 #:

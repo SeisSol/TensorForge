@@ -38,11 +38,12 @@ from tensorforge.common.basic_types import Datatype
 from .arch import amdarch, cdna2, gfx1250, gfx1251, rdna
 from .caps import has_fmacdpp4, has_fmacdpp8, has_fmacdpp16
 from .catalog import (DEFINED_TRANSPOSES, MANTISSA, MATRIX_OPS, MFMA_TILES,
-                      NOT_MODELLED, XF32_MANTISSA, Call, Fragment, MatrixOp,
+                      NOT_MODELLED, Call, Fragment, MatrixOp,
                       MfmaTile, lane_batched_ops, mfma_tile_for, ops_for,
                       split_products, split_terms, usable_mfma_tiles)
 from .features import FEATURE_TARGETS, has_feature, wave_size
-from .layouts import FRAGMENT_BITS, covers, position
+from .layouts import (FRAGMENT_BITS, Provenance, covers, established,
+                      position, provenance)
 from .codegen import hfma, matmul32, matmuldpp
 from .emitters import fmadpp, fmadpp4, fmadpp8, fmadpp16, fmascalar
 from .relayout import (BROADCAST, MOVDPP16, RELAYOUTS, TRANSPOSE4X4, Relayout,
@@ -56,11 +57,12 @@ __all__ = [
     'has_fmacdpp4', 'has_fmacdpp8', 'has_fmacdpp16',
     'FEATURE_TARGETS', 'has_feature', 'wave_size',
     'Call', 'Fragment', 'MatrixOp', 'MATRIX_OPS', 'MANTISSA',
-    'XF32_MANTISSA', 'NOT_MODELLED', 'ops_for', 'split_terms',
+    'NOT_MODELLED', 'ops_for', 'split_terms',
     'split_products',
     'MfmaTile', 'DEFINED_TRANSPOSES', 'MFMA_TILES', 'usable_mfma_tiles',
     'lane_batched_ops', 'mfma_tile_for',
-    'FRAGMENT_BITS', 'covers', 'position',
+    'FRAGMENT_BITS', 'Provenance', 'covers', 'established',
+    'position', 'provenance',
     'wanted_fmadpp_step', 'select_fmadpp_step',
     'Relayout', 'RELAYOUTS', 'BROADCAST', 'MOVDPP16', 'TRANSPOSE4X4',
     'find_relayout',

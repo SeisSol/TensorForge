@@ -72,9 +72,11 @@ def test_the_table_covers_exactly_what_the_calculator_knows():
     assert uncovered, "the calculator does not reach every catalogue entry"
 
 
-@pytest.mark.parametrize("op", [o for o in catalog.MATRIX_OPS
-                                if layouts.covers(o)],
-                         ids=lambda op: op.builtin)
+MEASURED = [o for o in catalog.MATRIX_OPS if layouts.established(o)]
+DERIVED = [o for o in catalog.MATRIX_OPS if not layouts.established(o)]
+
+
+@pytest.mark.parametrize("op", MEASURED, ids=lambda op: op.builtin)
 def test_every_element_lands_where_the_calculator_puts_it(op):
     """Every element of every operand, not a sample.
 
@@ -93,9 +95,7 @@ def test_every_element_lands_where_the_calculator_puts_it(op):
                         f"{op.builtin} {which}[{first}][{second}] block {block}")
 
 
-@pytest.mark.parametrize("op", [o for o in catalog.MATRIX_OPS
-                                if layouts.covers(o)],
-                         ids=lambda op: op.builtin)
+@pytest.mark.parametrize("op", catalog.MATRIX_OPS, ids=lambda op: op.builtin)
 def test_a_fragment_fills_its_registers_exactly(op):
     """Every (slot, lane) an operand owns holds exactly one element.
 
@@ -108,6 +108,8 @@ def test_a_fragment_fills_its_registers_exactly(op):
     extents = {"A": (op.a, op.m, op.k), "B": (op.b, op.k, op.n),
                "D": (op.d, op.m, op.n)}
     for which, (frag, e1, e2) in extents.items():
+        if not layouts.covers(op, which):
+            continue
         seen = {}
         for block in range(op.blocks):
             for first in range(e1):
@@ -124,9 +126,7 @@ def test_a_fragment_fills_its_registers_exactly(op):
             f"{op.builtin} {which}: two elements share a position")
 
 
-@pytest.mark.parametrize("op", [o for o in catalog.MATRIX_OPS
-                                if layouts.covers(o)],
-                         ids=lambda op: op.builtin)
+@pytest.mark.parametrize("op", MEASURED, ids=lambda op: op.builtin)
 def test_replication_agrees_between_llvm_and_amd(op):
     """Two sources, one number, nothing forcing them to agree.
 
@@ -159,9 +159,7 @@ def test_the_tempting_rule_is_wrong_and_stays_written_down():
                 i + op.m * op.blocks * (k // op.a.per_lane))
 
     agree, disagree = set(), set()
-    for op in catalog.MATRIX_OPS:
-        if not layouts.covers(op):
-            continue
+    for op in MEASURED:
         ok = all(layouts.position(op, "A", i, k) == by_rule(op, i, k)
                  for i in range(op.m) for k in range(op.k))
         (agree if ok else disagree).add(op.builtin)
@@ -221,3 +219,133 @@ def test_the_k1_f32_tiles_keep_the_contraction_out_of_the_lanes():
         lanes = {layouts.position(op, "B", 0, n)[1] for n in range(op.n)}
         assert lanes == set(range(op.n)), (
             f"{op.builtin}: N is the low lane bits, so blocks can carry the rest")
+
+
+# --------------------------------------------------------------------------- #
+# the two derivations, against the generations that were measured
+# --------------------------------------------------------------------------- #
+
+def test_the_contraction_rule_reproduces_every_measured_row():
+    """One rule for A and B, checked against all 32.
+
+    Eight bytes of contiguous `k` per lane in the low slot bits, then whatever
+    lane rows the index, the blocks and the replication have left, then back
+    to the higher slots. It is what lets the gfx950 and gfx125x rows be
+    derived rather than guessed -- and the reason to trust it across a
+    generation boundary is that it already crosses one: RDNA 3 and RDNA 4
+    place `k` differently and the rule produces both, because the lane bit
+    RDNA 3 spends on duplication is the one RDNA 4 spends on `k`.
+    """
+    for op in MEASURED:
+        row = layouts.FRAGMENT_BITS[op.builtin]
+        assert row[2] == layouts._contraction_bits(op, "A"), f"{op.builtin} A"
+        assert row[4] == layouts._contraction_bits(op, "B"), f"{op.builtin} B"
+        assert row[1] == layouts._index_bits(op.m), f"{op.builtin} A index"
+        assert row[5] == layouts._index_bits(op.n), f"{op.builtin} B index"
+
+
+def test_the_granule_is_eight_bytes_and_the_cap_matters():
+    """The two corrections that turn a plausible rule into a correct one.
+
+    A first attempt used `slot = k % per_lane`, which reproduces every CDNA
+    row and fails on RDNA 4. A second used a fixed four-element granule, which
+    fails on `mfma_f32_16x16x8bf16` -- two BF16 per lane, so the granule
+    cannot be four -- and on RDNA 3, where replication has already taken the
+    lane row the rule wanted to give `k`.
+    """
+    narrow = next(o for o in MEASURED if o.builtin == "mfma_f32_16x16x8bf16")
+    assert narrow.b.per_lane == 2
+    assert layouts._contraction_bits(narrow, "A") == (-1, 16, 32)
+
+    rdna3 = next(o for o in MEASURED
+                 if o.builtin == "wmma_f32_16x16x16_bf16_w32")
+    rdna4 = next(o for o in MEASURED
+                 if o.builtin == "wmma_f32_16x16x16_bf16_w32_gfx12")
+    assert rdna3.replication("a") == 2 and rdna4.replication("a") == 1
+    assert 16 not in layouts._contraction_bits(rdna3, "A"), (
+        "RDNA 3 has no lane row to spare: the operand is there twice")
+    assert 16 in layouts._contraction_bits(rdna4, "A"), (
+        "RDNA 4 stops duplicating and spends that lane bit on k")
+
+
+def test_the_accumulator_has_no_rule_and_the_families_disagree():
+    """Three D layouts at one shape, which is why D is not derived by rule.
+
+    `mfma_f32_16x16x4f32`, `mfma_f64_16x16x4f64` and RDNA 4's 16x16x16 are all
+    16x16, one block, four accumulator elements per lane, wave64. All three
+    place `i` differently. Pinned here so that a later attempt to unify the
+    table has to argue with a test rather than with a comment.
+    """
+    shape = [o for o in MEASURED
+             if (o.m, o.n, o.blocks, o.d.per_lane, o.wave) == (16, 16, 1, 4, 64)]
+    variants = {layouts.FRAGMENT_BITS[o.builtin][7] for o in shape}
+    assert len(variants) == 3, sorted(variants)
+    assert variants == {(-1, -2, 16, 32), (16, 32, -1, -2), (-1, -2, 32, 16)}
+
+
+# --------------------------------------------------------------------------- #
+# what is derived, and what deliberately is not
+# --------------------------------------------------------------------------- #
+
+def test_gfx950_gets_a_full_row_from_the_cdna_precedent():
+    """CDNA 4's additions are CDNA MFMAs, so CDNA is the precedent.
+
+    For A and B by rule; for D because every measured CDNA MFMA at that shape
+    with an F32 accumulator agrees, across `mai-insts`, `gfx90a-insts` and
+    `xf32-insts`. A unanimous precedent across three subtarget features is a
+    different kind of claim from an extrapolation across an architecture.
+    """
+    gfx950 = [o for o in catalog.MATRIX_OPS if o.feature == "gfx950-insts"]
+    assert len(gfx950) == 4
+    for op in gfx950:
+        assert layouts.covers(op), op.builtin
+        assert not layouts.established(op), "derived, and it should say so"
+        for which in "ABD":
+            assert layouts.provenance(op, which) is layouts.Provenance.DERIVED
+
+    wide = next(o for o in gfx950 if o.builtin == "mfma_f32_16x16x32_bf16")
+    narrow = next(o for o in MEASURED
+                  if o.builtin == "mfma_f32_16x16x16bf16_1k")
+    for i in range(16):
+        for j in range(16):
+            assert (layouts.position(wide, "D", i, j)
+                    == layouts.position(narrow, "D", i, j))
+
+
+def test_gfx125x_gets_no_accumulator_because_there_is_no_precedent():
+    """The absence is the finding, not a gap left over.
+
+    RDNA 3 and RDNA 4 place their accumulators differently at the same shape,
+    so "gfx125x resembles RDNA 4" does not reach D: the previous generation
+    boundary already moved it. A and B are derived because the rule crossed
+    that same boundary and came out right.
+
+    `covers(op)` without an operand is therefore False for these, and an
+    emitter that asks it declines rather than placing an accumulator on the
+    strength of a resemblance.
+    """
+    gfx125x = [o for o in catalog.MATRIX_OPS
+               if o.feature in ("wmma-n16-insts", "gfx1250-insts",
+                                "gfx1251-gemm-insts")]
+    assert len(gfx125x) == 4
+    for op in gfx125x:
+        assert layouts.covers(op, "A") and layouts.covers(op, "B")
+        assert not layouts.covers(op, "D")
+        assert not layouts.covers(op)
+        assert layouts.position(op, "D", 0, 0) is None
+
+
+def test_the_native_f32_and_f64_wmmas_place_k_in_the_lane():
+    """What the derivation says about the two rows that matter for SeisSol.
+
+    gfx1250's F32 and gfx1251's F64 WMMA are 16x16x4 with two elements per
+    lane, so the eight-byte granule is one element and `k` splits one bit to
+    the slot and one to the lane. Which puts them in the same position as the
+    FP64 MFMAs: part of the lane index is the contraction, so they are not
+    lane-batched either and want the same staging.
+    """
+    for name in ("wmma_f32_16x16x4_f32", "wmma_f64_16x16x4_f64"):
+        op = next(o for o in catalog.MATRIX_OPS if o.builtin == name)
+        assert not op.lane_batched()
+        lanes = {layouts.position(op, "B", k, 0)[1] for k in range(op.k)}
+        assert lanes == {0, 16}, f"{name}: k takes the top lane bit"

@@ -68,6 +68,22 @@ KEPT_UNREACHABLE = {
         "catalogue query; the emitter that selects from it is not written",
     "_place":
         "the table's decoder; reached only from `position`",
+    "Provenance":
+        "says whether a row is measured or derived; read by `established`",
+    "provenance":
+        "same, per operand; no emitter asks yet",
+    "established":
+        "the strict query an emitter uses to decline a derived layout",
+    "_index_bits":
+        "half the A/B derivation; reached only from `_derived`",
+    "_contraction_bits":
+        "the other half; reached only from `_derived`",
+    "_accumulator_precedent":
+        "looks for a unanimous D; reached only from `_derived`",
+    "_derived":
+        "rows for the generations the calculator does not reach",
+    "_row":
+        "measured row or derived one; reached only from `position`",
     "position":
         "fragment placement; the emitter that stages an operand into one is "
         "not written",

@@ -37,11 +37,25 @@ regeneration input, not a dependency: it is an argparse script rather than a
 library, it covers CDNA 1--3 and RDNA 3--4 and not gfx950 or gfx125x, and code
 generation must not need it to run.
 
-An instruction it does not cover has no row, and therefore no fragment.  That
-is the intended outcome: no row means an emitter cannot place the operand and
-declines, rather than placing it on a guess.
+An instruction the tool does not reach --- gfx950 and gfx125x --- gets what
+can be *derived* and nothing more, and `provenance` says which is which.  Two
+derivations, both checked against the 32 rows the tool does give:
+
+* **A and B** follow one rule, below, that reproduces all 32 measured rows.
+  It survives the RDNA 3 to RDNA 4 change, which is the strongest evidence
+  available that it survives the next one.
+* **D** follows no rule.  Three families disagree at the same shape, and one
+  of the disagreements is between RDNA 3 and RDNA 4 --- so for gfx125x there
+  is no precedent to extrapolate from and those instructions have no D row at
+  all.  For gfx950 there is: every CDNA MFMA with an F32 accumulator of that
+  shape agrees, across three subtarget features, and gfx950's additions are
+  CDNA MFMAs with F32 accumulators.
+
+`established()` is the strict query and `covers()` the permissive one.  An
+emitter that would rather decline than act on a derivation asks the first.
 """
 
+from enum import Enum
 from typing import Dict, Optional, Tuple
 
 #: builtin -> (A block, A first, A second, B ..., D ...), each a tuple with one
@@ -224,6 +238,115 @@ FRAGMENT_BITS: Dict[str, Tuple[Tuple[int, ...], ...]] = {
 }
 
 
+class Provenance(Enum):
+    """Where a row came from."""
+
+    #: Read out of AMD's calculator and checked against the vendored extract.
+    MEASURED = 'amd_matrix_instruction_calculator'
+    #: Produced by the rules below from the measured rows.  Internally
+    #: consistent --- it is a bijection onto the operand's registers with the
+    #: replication LLVM's widths imply --- and not confirmed against hardware.
+    DERIVED = 'derived from a measured generation'
+
+
+def _index_bits(extent: int) -> Tuple[int, ...]:
+    """The operand's own index, in the low lane bits.
+
+    True of all 32 measured rows without exception, for `A`'s `m` and for
+    `B`'s `n`.  It is the one part of a fragment that never moves.
+    """
+    return tuple(1 << b for b in range(extent.bit_length() - 1))
+
+
+def _contraction_bits(op, which: str) -> Tuple[int, ...]:
+    """Where `k` goes, for A or B.
+
+    A lane holds *eight bytes* of contiguous `k` --- four BF16, two F32, one
+    F64 --- and that granule is the low slot bits.  Whatever `k` is left goes
+    to the lane rows the index and the blocks have not used, and whatever is
+    left after *that* goes back to the higher slots.
+
+    Three things fall out of it that are worth naming, because each is a case
+    where a simpler rule gives the wrong answer:
+
+    * The granule cannot exceed what a lane holds.  `mfma_f32_16x16x8bf16`
+      keeps two BF16 per lane, not four.
+    * Replication eats lane rows before `k` does.  RDNA 3 holds its operand
+      twice over, so there are no rows left and `k` sits entirely in the
+      slots; RDNA 4 stops duplicating and spends that same lane bit on `k`.
+      Same rule, and the difference between the two generations comes out of
+      it rather than being written down twice.
+    * `k` can come back to the slots after taking a lane bit.  RDNA 4 puts
+      bits 0, 1 and 3 of `k` in the slots and bit 2 in the lane, which no
+      contiguous split produces.
+    """
+    extent = op.m if which == 'A' else op.n
+    frag = op.a if which == 'A' else op.b
+    granule = max(1, min(8 // frag.dtype.size(), frag.per_lane))
+    rows = max(1, op.wave // (extent * op.blocks * op.replication(which.lower())))
+
+    bits, step = [], 1
+    while step < op.k:
+        if step < granule:
+            bits.append(-step)                          # inside the granule
+        elif step < granule * rows:
+            bits.append(extent * op.blocks * (step // granule))   # a lane row
+        else:
+            bits.append(-(step // rows))                # back to the slots
+        step *= 2
+    return tuple(bits)
+
+
+def _accumulator_precedent(op) -> Optional[Tuple[Tuple[int, ...], ...]]:
+    """The measured `D` of the same shape, family and accumulator type.
+
+    `D` is the part with no rule: `mfma_f32_16x16x4f32` and
+    `mfma_f64_16x16x4f64` are the same shape, the same block count and the
+    same four accumulator elements per lane, and they split `i` between slot
+    and lane in opposite directions.  RDNA 3 and RDNA 4 disagree too.
+
+    So this does not extrapolate --- it looks for a precedent that is
+    unanimous, and returns nothing when there is not one.  For gfx950 there
+    is: every CDNA MFMA at that shape with an F32 accumulator agrees, across
+    `mai-insts`, `gfx90a-insts` and `xf32-insts`.  For gfx125x there is not,
+    and those instructions get no `D`.
+    """
+    from .catalog import MATRIX_OPS, Call
+    found = set()
+    for other in MATRIX_OPS:
+        row = FRAGMENT_BITS.get(other.builtin)
+        if row is None or other.builtin == op.builtin:
+            continue
+        if (other.call, other.wave) != (op.call, op.wave):
+            continue
+        if (other.m, other.n, other.blocks) != (op.m, op.n, op.blocks):
+            continue
+        if (other.d.dtype, other.d.per_lane) != (op.d.dtype, op.d.per_lane):
+            continue
+        found.add(row[6:9])
+    if op.call is not Call.MFMA or len(found) != 1:
+        return None
+    return found.pop()
+
+
+def _derived(op):
+    """A whole row for an instruction the calculator does not reach."""
+    if op.blocks != 1:
+        # Every uncovered instruction is single-block, so the block bits are
+        # empty. A multi-block one would need its block placement derived too,
+        # and that has no precedent worth guessing from.
+        return None
+    accumulator = _accumulator_precedent(op)
+    return ((), _index_bits(op.m), _contraction_bits(op, 'A'),
+            (), _contraction_bits(op, 'B'), _index_bits(op.n)) + (
+            accumulator if accumulator is not None else (None, None, None))
+
+
+def _row(op):
+    measured = FRAGMENT_BITS.get(op.builtin)
+    return measured if measured is not None else _derived(op)
+
+
 def _place(bits: Tuple[int, ...], value: int) -> Tuple[int, int]:
     slot = lane = 0
     for bit, weight in enumerate(bits):
@@ -248,10 +371,12 @@ def position(op, which: str, first: int, second: int,
     element.  `MatrixOp.replication` says how many hold it; the RDNA 3
     fragments are the ones where that is not 1.
     """
-    row = FRAGMENT_BITS.get(op.builtin)
+    row = _row(op)
     if row is None:
         return None
     blk, one, two = row[{'A': 0, 'B': 3, 'D': 6}[which.upper()]:][:3]
+    if blk is None:
+        return None
     slot, lane = _place(blk, block)
     for bits, value in ((one, first), (two, second)):
         s, l = _place(bits, value)
@@ -260,6 +385,31 @@ def position(op, which: str, first: int, second: int,
     return slot, lane
 
 
-def covers(op) -> bool:
-    """Is this instruction's fragment layout established?"""
-    return op.builtin in FRAGMENT_BITS
+def provenance(op, which: str = 'A') -> Optional[Provenance]:
+    """Where this operand's layout came from, or `None` if it has none."""
+    if op.builtin in FRAGMENT_BITS:
+        return Provenance.MEASURED
+    row = _derived(op)
+    if row is None or row[{'A': 0, 'B': 3, 'D': 6}[which.upper()]] is None:
+        return None
+    return Provenance.DERIVED
+
+
+def covers(op, which: Optional[str] = None) -> bool:
+    """Is there a layout at all -- measured or derived?
+
+    Per operand, because the answer differs between them: the gfx125x WMMAs
+    have A and B and no D.
+    """
+    if which is not None:
+        return provenance(op, which) is not None
+    return all(provenance(op, w) is not None for w in 'ABD')
+
+
+def established(op) -> bool:
+    """Is every operand's layout measured rather than derived?
+
+    The query for an emitter that would rather decline than place an operand
+    on a rule that has never met the hardware it is being applied to.
+    """
+    return all(provenance(op, w) is Provenance.MEASURED for w in 'ABD')

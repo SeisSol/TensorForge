@@ -412,6 +412,29 @@ def test_xf32_needs_fewer_terms_than_bf16():
     assert len(catalog.split_products(2)) == 3
 
 
+def test_xf32_is_tf32_and_says_so():
+    """One format, one spelling, one significand width.
+
+    AMD's XF32 is the same E8M10 as NVIDIA's TF32, which `Datatype.TF32`
+    already names and `intel.py` already counts terms against. Carrying a
+    private constant here would have said eleven a second time, in a place
+    where nothing forces the two to stay equal.
+
+    The register type stays `F32`, and that is not a loose end: the builtin
+    takes `_ExtVector<2, float>` and there is no conversion instruction, so
+    the operand really is a float that the unit truncates. `a.dtype` is what
+    the call site writes and `arithmetic` is what it computes in.
+    """
+    xf32 = next(o for o in catalog.MATRIX_OPS if "xf32" in o.builtin)
+    assert xf32.a.dtype is Datatype.F32, "the call site hands it floats"
+    assert xf32.arithmetic is Datatype.TF32
+    assert xf32.significand == catalog.MANTISSA[Datatype.TF32] == 11
+
+    for op in catalog.MATRIX_OPS:
+        if op.arithmetic is None:
+            assert op.significand == catalog.MANTISSA[op.a.dtype]
+
+
 def test_a_direct_row_needs_a_single_term():
     op = next(o for o in catalog.MATRIX_OPS if o.builtin == "mfma_f64_4x4x4f64")
     assert catalog.split_terms(op, Datatype.F64) == 1
