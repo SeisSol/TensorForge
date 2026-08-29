@@ -130,6 +130,13 @@ GROUPS = {
     ]),
 
     'swizzle': ('tests/test_pir_swizzle.py', [
+        ('the C tile loses its swizzle',
+         sub(Path('src/tensorforge/backend/instructions/compute/primitives/nvidia.py'),
+             "hint='ctile', swizzle=XorSwizzle(threads))", "hint='ctile')", 1)),
+        ('the C tile takes the B tile\'s width',
+         sub(Path('src/tensorforge/backend/instructions/compute/primitives/nvidia.py'),
+             "hint='ctile', swizzle=XorSwizzle(threads))",
+             "hint='ctile', swizzle=XorSwizzle(atom.k))", 1)),
         ('a named load falls back to text',
          sub(Path('src/tensorforge/backend/pir/build.py'),
              "            attrs += [('extern', extern)]",
@@ -207,8 +214,8 @@ GROUPS = {
              '                 *, movable: bool = True) -> Stmt:', 1)),
         ('uint32_t collapsed onto int32_t',
          sub(Path('src/tensorforge/common/basic_types.py'),
-             "           Datatype.U32: 'uint32_t',}",
-             "           Datatype.U32: 'int32_t',}", 1)),
+             "           Datatype.U32: 'uint32_t',",
+             "           Datatype.U32: 'int32_t',", 1)),
     ]),
 
     'cdecl': ('tests/test_flatten_scopes.py', [

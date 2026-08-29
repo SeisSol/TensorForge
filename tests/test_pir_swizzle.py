@@ -246,3 +246,46 @@ def test_a_named_load_still_takes_the_structured_path():
     text = emitted(b.finish())
     assert 'float v42_data = ' in text, text
     assert 'use(v42_data);' in text
+
+
+# --------------------------------------------------------------------------- #
+# The width is a per-tile choice, not a constant
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.parametrize("name,access,lanes,widths", [
+    # (pattern, active lanes, {width: expected ways})
+    ("B fragment load", lambda i, t: (t % 4) + (t // 4) * 8, 32,
+     {None: 2, 8: 1, 16: 2, 32: 2}),
+    ("C fragment load", lambda i, t: (t % 16) * 8, 16,
+     {None: 4, 8: 2, 16: 1, 32: 1}),
+    ("C staging store", lambda i, t: t * 2, 32,
+     {None: 2, 8: 2, 16: 2, 32: 1}),
+])
+def test_no_single_width_serves_every_tile(name, access, lanes, widths):
+    """Which is why the width is chosen per buffer and not fixed.
+
+    The B fragment wants 8 and the C tile wants 32, and each is 2-way under
+    the other's choice.  A constant would have looked like a simplification
+    and cost one of them.
+    """
+    for width, want in widths.items():
+        swz = XorSwizzle(width) if width else None
+        f = (lambda t: swz.apply(access(None, t))) if swz else (
+            lambda t: access(None, t))
+        assert _ways(f, lanes) == want, (
+            f"{name} under {'xor%d' % width if width else 'no swizzle'}")
+
+
+@pytest.mark.parametrize("stride", [9, 13])
+def test_an_odd_stride_is_already_clean_and_a_swizzle_would_hurt(stride):
+    """Why the gate stays conservative.
+
+    A row width coprime with 32 spreads a column read over all the banks by
+    itself.  Permuting it moves elements the plain layout had already placed
+    well, and the access gets worse -- so a swizzle applied to everything
+    would trade a real win on some tiles for a real loss on others.
+    """
+    plain = lambda t: t * stride
+    assert _ways(plain, 32) == 1
+    for width in (8, 16, 32):
+        assert _ways(lambda t: XorSwizzle(width).apply(plain(t)), 32) > 1

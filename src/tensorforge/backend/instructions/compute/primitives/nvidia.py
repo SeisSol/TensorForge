@@ -277,8 +277,20 @@ def matmul(writer, C, A, B, M, N, K, kx, threads, dtype, sparse, ctx, shmptr, sh
         Bshm = writer.alloc(atom.d, (bregs * threads,), MemSpace.SHARED,
                             hint='btile', swizzle=XorSwizzle(atom.k))
     with writer.scratch_scope():
+        # Written lane-strided across the whole warp and read row-strided by
+        # `atom.n`, so it collides both ways: 4-way on the read, 2-way on the
+        # write.  The width is the wave, not the row -- and it has to be
+        # chosen per tile rather than fixed, because no single value serves
+        # every access here.  Measured over the four patterns this path emits:
+        #
+        #             none   xor8  xor16  xor32
+        #   B load     2-w    1-w    2-w    2-w
+        #   C load     4-w    2-w    1-w    1-w
+        #   C store    2-w    2-w    2-w    1-w
+        #
+        # `tools/bank_conflicts.py` is what keeps those honest.
         Cshm = writer.alloc(atom.d, (cregs * threads,), MemSpace.SHARED,
-                            hint='ctile')
+                            hint='ctile', swizzle=XorSwizzle(threads))
 
     x4type = {
         Datatype.F32: 'float4',
