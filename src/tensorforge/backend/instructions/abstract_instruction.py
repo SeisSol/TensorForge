@@ -8,6 +8,7 @@ from tensorforge.common.context import Context, VM
 from tensorforge.backend.writer import Writer
 from tensorforge.common.exceptions import InternalError
 import os
+import warnings
 from contextlib import contextmanager
 
 from tensorforge.backend import pir
@@ -25,6 +26,47 @@ def _explicit_simd(context) -> bool:
     return bool(context.get_vm().get_lexic().simd_mode)
   except AttributeError:
     return False
+
+
+def _check_register_budget(body, simd: bool, context, where: str) -> None:
+  """Warn when a body asks for more register file than a thread has.
+
+  Nothing enforced this before because nothing came close: under SPMD a value
+  is one register per thread and a register-resident tile is split across the
+  threads that hold it.  Under an explicit vector the work-item holds the
+  *whole* tile -- `align(lead, threads) x nonlead` elements -- and 11 of the
+  corpus's 46 ESIMD kernels are over the 8 kB a PVC thread gets, the worst by
+  a factor of five.
+
+  A warning and not an error, deliberately.  Spilling to scratch is slow and
+  correct, the compiler already does it silently, and refusing to generate
+  would take a working kernel away over a budget this generator cannot
+  enforce anyway -- `[[intel::grf_size(256)]]` doubles it at the cost of
+  halving the threads in flight, which is a decision and not a fallback.  What
+  was missing is that nobody was told.
+
+  Narrowing the vector barely helps, and it is worth saying why: `lanes *
+  slots` is the lead dimension rounded up to a multiple of the thread count,
+  so a narrower vector trims the rounding waste (56 rows: 504 elements at 8
+  threads against 576 at 16) and leaves `lead x nonlead` alone.  The lever is
+  how much of the operator one work-item owns, not how wide its registers are.
+  """
+  budget = getattr(context.get_vm().get_hw_descr(), 'max_reg_per_thread', None)
+  if not simd or budget is None:
+    return
+  used = pir.pressure(body, in_bytes=True, explicit_simd=simd)
+  if used > budget:
+    warnings.warn(
+        f'{where}: {used} B of register file per work-item against a budget '
+        f'of {budget} B -- this body will spill to scratch. The tile is '
+        f'align(lead, threads) x nonlead elements, so a narrower vector does '
+        f'not shrink it; what changes it is how much of the operator one '
+        f'work-item owns.',
+        RegisterBudgetWarning, stacklevel=2)
+
+
+class RegisterBudgetWarning(UserWarning):
+  """A body needs more register file per thread than the target provides."""
 
 
 class BarrierScope(IntEnum):
@@ -246,6 +288,8 @@ class AbstractInstruction(ABC):
       for d in pir.verify(body, strict=False):
         print(f'pir: {d}')
     body = pir.optimize(body, explicit_simd=_explicit_simd(context))
+    _check_register_budget(body, _explicit_simd(context), context,
+                           'shared body')
     if getattr(context.get_user_options(), 'enable_wrap_loads', False):
       # After `optimize`, not before.  The transfers sit inside the anonymous
       # scopes the loaders open, and `flatten_scopes` is what removes them --
@@ -306,12 +350,17 @@ class AbstractInstruction(ABC):
 
     simd = _explicit_simd(self._context)
     body = pir.optimize(body, explicit_simd=simd)
+    self._check_register_budget(body, simd)
     if os.environ.get('TF_IR_STATS'):
       print(f'{type(self).__name__}: {sum(1 for _ in pir.walk(body))} Knoten, '
             f'Registerdruck {pir.pressure(body)} Werte, '
             f'{pir.pressure(body, in_bytes=True, explicit_simd=simd)} B '
             f'({"pro Work-Item" if simd else "pro Lane"})')
     pir.emit(body, writer, self._context)
+
+  def _check_register_budget(self, body, simd: bool) -> None:
+    """See the module-level `_check_register_budget`."""
+    _check_register_budget(body, simd, self._context, type(self).__name__)
 
   def get_headers(self) -> List[str]:
     return []

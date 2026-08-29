@@ -616,3 +616,46 @@ def test_an_explicit_vector_has_nobody_to_wait_for():
     assert _sync(16, 'esimd') is BarrierScope.SIMD
     assert _sync(32, 'esimd') is BarrierScope.SIMD
     assert _sync(64, 'esimd') is BarrierScope.SIMD
+
+
+# --------------------------------------------------------------------------
+# the register budget
+# --------------------------------------------------------------------------
+
+def test_only_pvc_states_a_per_thread_budget():
+    """Absent means "not stated", not "unlimited".
+
+    A default would quietly pass everything, which is the failure mode a
+    budget check exists to avoid.
+    """
+    from tensorforge.common.vm.hw_descr import hw_descr_factory
+    assert hw_descr_factory('pvc', 'oneapi').max_reg_per_thread == 8 * 1024
+    assert hw_descr_factory('sm_86', 'cuda').max_reg_per_thread is None
+
+
+def test_a_narrower_vector_does_not_shrink_the_tile():
+    """`lanes * slots` is the lead dimension rounded up to a multiple of the
+    thread count, so a narrower vector trims the rounding waste and leaves
+    `lead * nonlead` alone.  Which is why the budget warning points at how
+    much of the operator a work-item owns rather than at the vector width.
+    """
+    def tile(lead, nonlead, threads):
+        return -(-lead // threads) * threads * nonlead
+
+    assert tile(64, 78, 8) == tile(64, 78, 16) == tile(64, 78, 32) == 4992
+    # 56 does not divide 16, so the rounding waste *is* visible -- and small
+    assert tile(56, 9, 8) == 504
+    assert tile(56, 9, 16) == 576
+
+
+def test_spmd_is_not_warned_about():
+    """The check is about a work-item holding a whole tile, which is what this
+    lowering does and SPMD does not."""
+    from tensorforge.backend.instructions.abstract_instruction import (
+        _check_register_budget, RegisterBudgetWarning)
+    import warnings as _w
+    ctx = Context(arch='pvc', backend='acpp', fp_type=Datatype.F32)
+    with _w.catch_warnings(record=True) as caught:
+        _w.simplefilter('always', RegisterBudgetWarning)
+        _check_register_budget((), False, ctx, 'x')
+    assert not caught

@@ -116,6 +116,11 @@
 
 # Intel
 - arch: pvc
+  # Xe-HPC: 128 general registers of 64 bytes per thread, or 256 with the
+  # large-GRF mode ([[intel::grf_size(256)]]).  The smaller one is the default
+  # and the honest budget -- a kernel that only fits in large GRF halves the
+  # threads in flight, which is a decision and not a fallback.
+  max_reg_per_thread: 8kB
   vec_unit_length: 16
   max_local_mem_size_per_block: 128kB
   max_num_threads: 512

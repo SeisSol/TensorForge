@@ -28,6 +28,22 @@ class HwDecription:
     self.max_local_mem_size_per_block = parseBytes(param_table['max_local_mem_size_per_block'])
     self.max_threads_per_block = param_table['max_num_threads']
     self.max_reg_per_block = parseBytes(param_table['max_reg_per_block'])
+    #: Register file one *thread* -- or, where the whole wave is one work-item,
+    #: one work-item -- may use before it spills.
+    #:
+    #: Not `max_reg_per_block / max_threads_per_block`.  That quotient is what
+    #: the occupancy heuristics want and it is a different number: a block may
+    #: run fewer threads than the maximum and each of them still cannot exceed
+    #: the per-thread file.  Under SPMD nothing here approached the limit, so
+    #: the distinction never came up; under an explicit vector a value is
+    #: `lanes` wide and ten of the corpus's 46 ESIMD kernels are over it.
+    #:
+    #: Absent means "not stated for this target", which is different from
+    #: "unlimited" -- consumers check for None rather than comparing against a
+    #: default that would quietly pass everything.
+    self.max_reg_per_thread = (
+        parseBytes(param_table['max_reg_per_thread'])
+        if param_table.get('max_reg_per_thread') is not None else None)
     self.max_threads_per_sm = param_table['max_threads_per_sm']
     self.max_block_per_sm = param_table['max_block_per_sm']
     self.vendor = param_table['name']
