@@ -1,0 +1,1 @@
+FAILED: IRError: 1 value(s) have no tracked distribution and cannot be given an ESIMD type: %v16_acc0:float. Every declaration needs to know how the value is spread over the lanes; in the SPMD lowering that is carried by the index expression instead, which is why these got this far untracked.

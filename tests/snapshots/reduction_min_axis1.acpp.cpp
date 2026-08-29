@@ -41,18 +41,18 @@ inline void kernel_kernel_08888e2501(sycl::queue *stream, sycl::range<3> group_c
               const float *const __restrict__ glb_m0 = &m0[batchId0 * 256 + 0 + m0_extraOffset];
               float *const __restrict__ glb_m1 = &m1[batchId0 * 16 + 0 + m1_extraOffset];
               // glb_m1 = min(glb_m0, dims=[1])
-              int32_t v4_lead = item.get_local_id(0) % 16;
+              int32_t v6_lead = item.get_local_id(0) % 16;
               #pragma unroll
-              for (int32_t v5_k0 = 0; v5_k0 < 1; ++v5_k0) {
-                int32_t v11_lead = v5_k0 * 16;
-                int32_t v12_lead = v4_lead + v11_lead;
-                float v7_acc0 = INFINITY;
+              for (int32_t v7_k0 = 0; v7_k0 < 1; ++v7_k0) {
+                int32_t v13_lead = v7_k0 * 16;
+                int32_t v14_lead = v6_lead + v13_lead;
+                float v9_acc0 = INFINITY;
                 #pragma unroll
-                for (int32_t v6_r1 = 0; v6_r1 < 16; ++v6_r1) {
-                  float v15_data = glb_m0[(v12_lead + (v6_r1 * 16))];
-                  v7_acc0 = (sycl::min(float(v7_acc0), float(v15_data)));
+                for (int32_t v8_r1 = 0; v8_r1 < 16; ++v8_r1) {
+                  float v17_data = glb_m0[(v14_lead + (v8_r1 * 16))];
+                  v9_acc0 = (sycl::min(float(v9_acc0), float(v17_data)));
                 }
-                glb_m1[(v4_lead + v11_lead)] = v7_acc0;
+                glb_m1[(v6_lead + v13_lead)] = v9_acc0;
               }
             }
           }
