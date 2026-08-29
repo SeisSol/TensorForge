@@ -35,13 +35,31 @@ class MemoryInstruction(AbstractInstruction):
     # consumed by later instructions.
     if self._declare:
       self.gen_code_declare(sink)
+
+    # The braces are only for the write-side alias of a rotating buffer, which
+    # has to be scope-local so it cannot clash with the consumer's pointer of
+    # the same name.  Every other transfer names nothing that could clash --
+    # its temporaries are values the shared allocator numbers -- and opening a
+    # scope for them is not free: an opaque block head is a wall the async
+    # scheduler gives up its state at and nothing reorders across, which is
+    # exactly the stretch `WrapLoads` wants to move a transfer along.
+    #
+    # `flatten_scopes` splices away the ones that declare nothing, so the
+    # emitted source does not change.  What changes is that they are no longer
+    # built, and therefore no longer in the way of the passes that run before
+    # it.
+    gen_write_base = getattr(self, 'gen_write_base', None)
+    needs_scope = gen_write_base is not None and getattr(
+        self, 'rotates', lambda: False)()
+
+    if not needs_scope:
+      sink.Comment(self.__str__())
+      self.gen_code_inner(sink)
+      return
+
     with sink.Scope():
       sink.Comment(self.__str__())
-      # A rotating buffer needs its write-side alias here, inside the scope,
-      # so it cannot clash with the consumer's pointer of the same name.
-      gen_write_base = getattr(self, 'gen_write_base', None)
-      if gen_write_base is not None:
-        gen_write_base(sink)
+      gen_write_base(sink)
       self.gen_code_inner(sink)
 
 class AbstractShrMemWrite(MemoryInstruction):

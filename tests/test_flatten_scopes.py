@@ -120,3 +120,29 @@ def test_the_masking_that_hid_it():
     assert _has_scope(with_array)
     assert _has_scope(without), (
         "the region survived only because of the array beside it")
+
+
+def test_a_transfer_opens_no_scope_unless_its_buffer_rotates():
+    """The braces exist for one thing, so they are opened for one thing.
+
+    `MemoryInstruction.gen_ir` wrapped every transfer body in `{ }` so that a
+    rotating buffer's write-side alias could not clash with the consumer's
+    pointer of the same name.  Nothing else it emits can clash -- the
+    temporaries are values the shared allocator numbers -- and the brace is not
+    free: an opaque block head is a wall the async scheduler gives up its state
+    at and nothing reorders across, sitting in exactly the stretch `WrapLoads`
+    wants to move a transfer along.
+
+    `flatten_scopes` removed the ones that declared nothing, so this changed no
+    emitted source.  It changed 594 blocking nodes into none, at build time,
+    where the passes that matter run.
+    """
+    import inspect
+
+    from tensorforge.backend.instructions import memory
+
+    src = inspect.getsource(memory.MemoryInstruction.gen_ir)
+    assert 'rotates' in src, (
+        'the scope is opened unconditionally again; it is a wall for every '
+        'transfer, not only the rotating ones')
+    assert src.count('sink.Scope()') == 1
