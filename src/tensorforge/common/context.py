@@ -56,6 +56,26 @@ class Options:
 
 
 class Context:
+  #: Whether every emitted body should report its peak register footprint.
+  #:
+  #: Off by default: the figure costs a liveness walk per body, and only a
+  #: caller searching over configurations reads it.  `lanes.search` turns it
+  #: on for the builds it does and puts it back afterwards.
+  measure_pressure: bool = False
+
+  #: The largest figure reported so far, in bytes per lane, or None.
+  #:
+  #: Here rather than on the instruction that measured it, because the body
+  #: that matters has no instruction: with wide bodies a whole section is one
+  #: body, emitted by `AbstractInstruction.shared_body`, which is a
+  #: classmethod and has only the context to hand.  A maximum, since a
+  #: register budget is per kernel and the widest body is what has to fit.
+  peak_pressure = None
+
+  def record_pressure(self, value: int) -> None:
+    if self.peak_pressure is None or value > self.peak_pressure:
+      self.peak_pressure = value
+
   def __init__(self,
                arch: str,
                backend: str,

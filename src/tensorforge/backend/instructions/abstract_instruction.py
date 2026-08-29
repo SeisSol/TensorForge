@@ -307,6 +307,10 @@ class AbstractInstruction(ABC):
       if os.environ.get('TF_IR_DEBUG'):
         for w in why:
           print(f'wrap: declined -- {w}')
+    if getattr(context, 'measure_pressure', False):
+      context.record_pressure(
+          pir.pressure(body, in_bytes=True,
+                       explicit_simd=_explicit_simd(context)))
     pir.emit(body, writer, context)
 
   def through_pir(self, writer: Writer, build) -> None:
@@ -351,6 +355,14 @@ class AbstractInstruction(ABC):
     simd = _explicit_simd(self._context)
     body = pir.optimize(body, explicit_simd=simd)
     self._check_register_budget(body, simd)
+    # Reported here because this is where the body exists: it is discarded
+    # after `emit`, so anything wanting a number about it has to take it now.
+    # Computing it always would put a liveness walk into every generation for
+    # the sake of the callers that search over configurations, and they are
+    # the only ones that read it.
+    if getattr(self._context, 'measure_pressure', False):
+      self._context.record_pressure(
+          pir.pressure(body, in_bytes=True, explicit_simd=simd))
     if os.environ.get('TF_IR_STATS'):
       print(f'{type(self).__name__}: {sum(1 for _ in pir.walk(body))} Knoten, '
             f'Registerdruck {pir.pressure(body)} Werte, '

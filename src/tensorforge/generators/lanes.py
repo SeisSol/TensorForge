@@ -94,3 +94,74 @@ def deduce(descr_list: List[OperationDescription],
     return LaneConfig(num_threads=num_threads,
                       num_active_threads=num_active,
                       lead_width=min(widths) if widths else 1)
+
+
+def candidates(descr_list: List[OperationDescription],
+               context: Context) -> List[LaneConfig]:
+    """The lane geometries worth building this section at, widest first.
+
+    Two today: what the descriptors ask for under the default ceiling, and the
+    same at the wave width.  They coincide wherever the ceiling does not bind,
+    which is every target whose wave is 32 or narrower -- so on NVIDIA and on
+    RDNA there is one candidate and no search to run.
+
+    Deduplicated by lane count rather than by config, since two ceilings that
+    land on the same width give the same kernel and building it twice buys a
+    tie.
+    """
+    seen = {}
+    for ceiling in (None, DEFAULT_LANE_CEILING):
+        config = deduce(descr_list, context, ceiling=ceiling)
+        seen.setdefault(config.num_threads, config)
+    return [seen[k] for k in sorted(seen, reverse=True)]
+
+
+def search(descr_factory, context: Context,
+           options: Optional[List[LaneConfig]] = None):
+    """Build the kernel at each candidate geometry and keep the tightest.
+
+    `descr_factory` returns a fresh descriptor list per attempt.  A list would
+    also work -- generating twice from one is idempotent -- but a factory says
+    that this builds repeatedly, which a caller passing a list it still holds
+    a reference to should know.
+
+    The objective is peak register footprint per lane, summed over nothing:
+    the *maximum* over the kernel's bodies, because a budget is per kernel and
+    the widest body is what has to fit.
+
+    Ranking only, and deliberately.  Measured against `hipcc` over the corpus
+    on gfx90a and gfx942, the model picks the same configuration the compiler
+    gives fewer registers to in 7 of 8 decided cases, and in 3 of 3 of the
+    cases where the choice changes occupancy at all -- there by a factor of
+    two each time. What it cannot do is say whether a configuration *fits*:
+    registers per model byte spread over a factor of 72, so there is no
+    threshold in it, only an order.
+
+    Returns `(config, results)` where `results` maps lane count to the peak
+    figure, so a caller can see how close the decision was.
+    """
+    options = options or candidates(descr_factory(), context)
+    if len(options) == 1:
+        return options[0], {options[0].num_threads: None}
+
+    from tensorforge.generators.generator import Generator
+
+    was = context.measure_pressure
+    context.measure_pressure = True
+    scores = {}
+    try:
+        for config in options:
+            gen = Generator(descr_factory(), context, lanes=config)
+            gen.generate()
+            scores[config.num_threads] = gen.peak_pressure
+    finally:
+        context.measure_pressure = was
+
+    # A build that measured nothing is not a build that measured zero: it has
+    # no bodies the flag reached, and picking it for scoring lowest would be
+    # picking it for having said nothing.
+    scored = {k: v for k, v in scores.items() if v}
+    if not scored:
+        return options[0], scores
+    best = min(scored, key=lambda k: scored[k])
+    return next(c for c in options if c.num_threads == best), scores

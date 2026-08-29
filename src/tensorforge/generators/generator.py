@@ -129,6 +129,11 @@ class Generator:
     #: instead" -- the thing a search over configurations needs and a constant
     #: cannot offer.
     self._lanes: Optional[LaneConfig] = lanes
+    #: Peak register footprint over this kernel's bodies, in bytes per lane,
+    #: or None when the context did not ask for it.  A maximum and not a sum,
+    #: because the budget is per kernel and the widest body is what has to
+    #: fit.
+    self.peak_pressure: Optional[int] = None
 
     self._section: Section = Section()
     self._sections: List[Section] = []
@@ -161,6 +166,12 @@ class Generator:
       instr.set_threadconfig_pre(self._num_threads, mults)
 
   def generate(self):
+    # Reset rather than only read at the end: a context outlives one generator
+    # -- a search builds several against the same one -- so a figure left over
+    # from a previous build would be attributed to this one, and a maximum
+    # never falls back on its own.
+    self._context.peak_pressure = None
+
     self.register()
 
     self._deduce_num_threads()
@@ -351,6 +362,7 @@ class Generator:
             instruction.gen_code(writer)
 
     self._kernel = writer.get_src()
+    self.peak_pressure = self._context.peak_pressure
 
   def _generate_launcher(self):
     writer = Writer()

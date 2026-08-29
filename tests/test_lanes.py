@@ -171,3 +171,98 @@ def test_the_default_is_a_measurement_and_says_so():
     src = inspect.getsource(lanes)
     assert 'slower' in src, (
         'the ceiling no longer records why it is 32')
+
+
+# ----------------------------------------------------------------------
+# and it can be searched over
+# ----------------------------------------------------------------------
+
+def test_a_target_whose_wave_the_ceiling_does_not_bind_has_one_candidate():
+    """So there is no search to run, and none is run.
+
+    NVIDIA reports a 32-wide wave and RDNA a 32-wide one too, so the ceiling
+    is a no-op there and both ceilings land on the same width.  Measured on
+    gfx1150, not one of the 65 corpus cases had two configurations to choose
+    between -- which is the control that says the ceiling only ever bites
+    where the wave is 64.
+    """
+    for arch, backend in (("sm_86", "cuda"), ("gfx1150", "hip")):
+        ctx = _ctx(arch, backend, Datatype.F64)
+        assert len(lanes.candidates(_gemm(56, 9, 56, Datatype.F64), ctx)) == 1
+
+
+def test_a_wave64_target_has_two_and_they_are_ordered_widest_first():
+    ctx = _ctx("gfx90a", "hip", Datatype.F64)
+    options = lanes.candidates(_gemm(56, 9, 56, Datatype.F64), ctx)
+    assert [c.num_threads for c in options] == [64, 32]
+
+
+def test_the_search_measures_nothing_when_there_is_nothing_to_choose():
+    """One candidate means no build, so no figure and no cost.
+
+    Reported as None rather than as a number, because a caller that reads a
+    score has to be able to tell "not measured" from "measured zero".
+    """
+    ctx = _ctx("sm_86", "cuda", Datatype.F64)
+    config, scores = lanes.search(
+        lambda: _gemm(56, 9, 56, Datatype.F64), ctx)
+    assert scores == {config.num_threads: None}
+
+
+def test_the_search_picks_the_configuration_with_the_lower_footprint():
+    """And on the case that runs out of registers, it picks the wide one.
+
+    `chain_five`-shaped: a contraction whose lead dimension takes the full
+    wave.  At 32 lanes hipcc gives it 256 VGPRs and 108 AGPRs on gfx90a, which
+    is the ceiling, and an occupancy of 1; at 64 lanes 207 and 16, and an
+    occupancy of 2.
+    """
+    ctx = _ctx("gfx90a", "hip", Datatype.F64)
+    config, scores = lanes.search(
+        lambda: _gemm(56, 9, 56, Datatype.F64), ctx)
+
+    assert set(scores) == {32, 64}
+    assert scores[64] < scores[32]
+    assert config.num_threads == 64
+
+
+def test_the_search_leaves_the_measurement_flag_as_it_found_it():
+    """It costs a liveness walk per body, so it does not stay on."""
+    ctx = _ctx("gfx90a", "hip", Datatype.F64)
+    assert not ctx.measure_pressure
+    lanes.search(lambda: _gemm(56, 9, 56, Datatype.F64), ctx)
+    assert not ctx.measure_pressure
+
+
+def test_a_generator_reports_its_own_peak_and_not_a_previous_one():
+    """A context outlives a generator; a search builds several against one.
+
+    A maximum never falls back on its own, so a figure left from the previous
+    build would be attributed to the next one -- and the next one is the
+    narrower configuration exactly when the search is worth running.
+    """
+    ctx = _ctx("gfx90a", "hip", Datatype.F64)
+    ctx.measure_pressure = True
+    try:
+        wide = Generator(_gemm(56, 9, 56, Datatype.F64), ctx,
+                         lanes=lanes.deduce(_gemm(56, 9, 56, Datatype.F64),
+                                            ctx, ceiling=None))
+        wide.generate()
+        narrow = Generator(_gemm(56, 9, 56, Datatype.F64), ctx,
+                           lanes=lanes.deduce(_gemm(56, 9, 56, Datatype.F64),
+                                              ctx))
+        narrow.generate()
+    finally:
+        ctx.measure_pressure = False
+
+    assert wide.peak_pressure < narrow.peak_pressure, (
+        f"the second build reported {narrow.peak_pressure}, which is the "
+        f"first build's {wide.peak_pressure} carried over")
+
+
+def test_generating_without_the_flag_reports_nothing():
+    """The default path pays nothing for a figure nobody asked for."""
+    ctx = _ctx("gfx90a", "hip", Datatype.F64)
+    g = Generator(_gemm(56, 9, 56, Datatype.F64), ctx)
+    g.generate()
+    assert g.peak_pressure is None
