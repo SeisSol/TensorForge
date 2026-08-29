@@ -113,40 +113,48 @@ def _sole_async(region: Region) -> Tuple[int, Stmt, Optional[int]]:
     `_split_guard` already applies to barriers and for the same reason: what
     the next iteration depends on cannot be conditional on this one.
     """
-    direct = [s for s in region.body
-              if s.op in (Op.COPY_ASYNC, Op.LOAD_ASYNC)]
-    guards = [(i, s) for i, s in enumerate(region.body) if s.op is Op.IF]
-    inside = []
-    for gi, g in guards:
-        for s in g.regions[0].body:
-            if s.op in (Op.COPY_ASYNC, Op.LOAD_ASYNC):
-                inside.append((gi, s))
-    if direct and inside:
-        raise Refusal('transfers on both sides of the guard; which of them is '
-                      'the transfer is then a choice rather than a fact')
+    def _carries_async(st):
+        return any(x.op in (Op.COPY_ASYNC, Op.LOAD_ASYNC)
+                   for x, _ in walk((st,)))
+
+    guards = [(i, g) for i, g in enumerate(region.body) if g.op is Op.IF]
     if len(guards) > 1:
         raise Refusal('more than one guard in the body; which one a transfer '
                       'must leave is then a choice rather than a fact')
-    group = direct or [s for _, s in inside]
+    direct = [st for st in region.body
+              if st.op is not Op.IF and _carries_async(st)]
+    inside = ([st for st in guards[0][1].regions[0].body if _carries_async(st)]
+              if guards else [])
+    if direct and inside:
+        raise Refusal('transfers on both sides of the guard; which of them is '
+                      'the transfer is then a choice rather than a fact')
+    group = direct or inside
     if not group:
         raise Refusal('no async transfer in the body')
-    guard_at = inside[0][0] if inside else None
+    guard_at = guards[0][0] if inside else None
 
-    # One wait for all of them, or they are not one transfer.  A macro copy is
-    # split into hops of 4, 2 and 1 elements per lane plus a predicated tail,
-    # each its own `copy.async`, and `LoadWait` retires the lot with a single
-    # `wait` naming every token.  So "several issues" is not several transfers
-    # -- it is one transfer in pieces, and the group is exactly what that wait
-    # consumes.  If the tokens go to different waits, they are independent
-    # transfers and choosing between them would be a schedule.
+    # The unit is a *section*, not a set of statements.
+    #
+    # A macro copy is split into hops of 4, 2 and 1 elements per lane plus a
+    # predicated tail.  Some hops are direct statements; the rest are inside
+    # an unrolled loop.  Collecting only the direct ones left the loop
+    # standing between a transfer and its wait, writing the same buffer -- so
+    # the pass refused to move a transfer past itself, and said so as `both
+    # touch s0`.
+    #
+    # Widening the group to reach *into* the loop would be wrong: pulling
+    # statements out of a loop changes how many times they run.  What crosses
+    # the back edge is every top-level statement whose subtree issues, the
+    # loop included and whole.
     scope = (region.body[guard_at].regions[0].body if guard_at is not None
              else region.body)
-    tokens = {t.id for s in group for t in s.target}
+    tokens = {t.id for st in group for x, _ in walk((st,)) for t in x.target
+              if x.op in (Op.COPY_ASYNC, Op.LOAD_ASYNC)}
     waits = [w for w in scope if w.op is Op.WAIT
              and any(isinstance(a, Value) and a.id in tokens for a in w.args)]
     if len(waits) != 1:
-        raise Refusal(f'{len(group)} transfers retired by {len(waits)} waits; '
-                      f'a group is what one wait consumes')
+        raise Refusal(f'{len(tokens)} transfers retired by {len(waits)} '
+                      f'waits; a group is what one wait consumes')
     if not tokens <= {a.id for a in waits[0].args if isinstance(a, Value)}:
         raise Refusal('the wait does not name every token of the group')
     return group, waits[0], guard_at
