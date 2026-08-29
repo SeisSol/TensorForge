@@ -33,8 +33,8 @@ AMD = (Path(__file__).parent.parent / "src" / "tensorforge" / "backend" /
 #: all of them at once: a name that is unreachable only because it sits in
 #: another file is still unreachable, and splitting a module must not be a way
 #: to launder dead code past this check.
-MODULES = ["__init__", "arch", "caps", "catalog", "relayout", "select",
-           "emitters", "codegen", "unused"]
+MODULES = ["__init__", "arch", "caps", "features", "catalog", "layouts",
+           "relayout", "select", "emitters", "codegen", "unused"]
 
 ENTRY = "matmul"
 
@@ -66,6 +66,13 @@ KEPT_UNREACHABLE = {
     # what `test_allow_list_does_not_outlive_its_entries` enforces.
     "ops_for":
         "catalogue query; the emitter that selects from it is not written",
+    "_place":
+        "the table's decoder; reached only from `position`",
+    "position":
+        "fragment placement; the emitter that stages an operand into one is "
+        "not written",
+    "covers":
+        "guards `position`; same call site, not written yet",
     "lane_batched_ops":
         "the same precondition asked of the whole catalogue; the F32 policy "
         "reaches it through MFMA_TILES instead",

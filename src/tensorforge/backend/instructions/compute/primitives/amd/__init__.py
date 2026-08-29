@@ -11,6 +11,7 @@ the bugs that came out of this file:
 * `caps`     -- what its runtime defines
 * `features` -- which LLVM subtarget features it has
 * `catalog`  -- what a matrix instruction is
+* `layouts`  -- where each element of its operands sits
 * `relayout` -- which instruction turns one lane distribution into another
 * `select`   -- which instruction width to use
 * `emitters` -- how to write one instruction down
@@ -41,6 +42,7 @@ from .catalog import (DEFINED_TRANSPOSES, MANTISSA, MATRIX_OPS, MFMA_TILES,
                       MfmaTile, lane_batched_ops, mfma_tile_for, ops_for,
                       split_products, split_terms, usable_mfma_tiles)
 from .features import FEATURE_TARGETS, has_feature, wave_size
+from .layouts import FRAGMENT_BITS, covers, position
 from .codegen import hfma, matmul32, matmuldpp
 from .emitters import fmadpp, fmadpp4, fmadpp8, fmadpp16, fmascalar
 from .relayout import (BROADCAST, MOVDPP16, RELAYOUTS, TRANSPOSE4X4, Relayout,
@@ -58,6 +60,7 @@ __all__ = [
     'split_products',
     'MfmaTile', 'DEFINED_TRANSPOSES', 'MFMA_TILES', 'usable_mfma_tiles',
     'lane_batched_ops', 'mfma_tile_for',
+    'FRAGMENT_BITS', 'covers', 'position',
     'wanted_fmadpp_step', 'select_fmadpp_step',
     'Relayout', 'RELAYOUTS', 'BROADCAST', 'MOVDPP16', 'TRANSPOSE4X4',
     'find_relayout',
