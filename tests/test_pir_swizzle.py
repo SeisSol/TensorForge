@@ -289,3 +289,55 @@ def test_an_odd_stride_is_already_clean_and_a_swizzle_would_hurt(stride):
     assert _ways(plain, 32) == 1
     for width in (8, 16, 32):
         assert _ways(lambda t: XorSwizzle(width).apply(plain(t)), 32) > 1
+
+
+# --------------------------------------------------------------------------- #
+# Choosing the width for a macro window
+# --------------------------------------------------------------------------- #
+
+def _window_width(volume, banks=32):
+    """The rule `AbstractShrMemWrite._swizzle` applies, in one place to test."""
+    width = 1
+    while width * 2 <= banks and volume % (width * 2) == 0:
+        width *= 2
+    return width
+
+
+@pytest.mark.parametrize("rows,cols,want", [
+    (32, 16, 32),   # 512
+    (16, 16, 32),   # 256 -- takes 32, not the row width, and reads 1-way
+    (56, 13, 8),    # 728 = 8 * 91; the row-width rule declined outright
+    (12, 8, 32),    # 96
+    (32, 32, 32),   # 1024, capped at the bank count
+    (9, 9, 1),      # 81 is odd: no swizzle, and that is the right answer
+    (13, 13, 1),    # 169
+])
+def test_the_width_divides_the_volume(rows, cols, want):
+    assert _window_width(rows * cols) == want
+
+
+@pytest.mark.parametrize("rows,cols", [(32, 16), (16, 16), (56, 13), (12, 8),
+                                       (9, 9), (13, 13), (12, 12)])
+def test_the_permutation_never_leaves_the_buffer(rows, cols):
+    """Why the width has to divide the volume rather than match the row.
+
+    The permutation maps each block of `width` elements onto itself, so a
+    buffer whose last block is partial has indices that permute past its end:
+    728 elements swizzled at 32 puts eight of them into the next window.
+    Shared memory, silently, which is the worst failure available here.
+    """
+    volume = rows * cols
+    width = _window_width(volume)
+    if width < 2:
+        return
+    swz = XorSwizzle(width)
+    images = [swz.apply(i) for i in range(volume)]
+    assert max(images) < volume, "the permutation escaped the buffer"
+    assert sorted(images) == list(range(volume)), "not a bijection"
+
+
+def test_an_odd_volume_declines_rather_than_falls_back():
+    """A row width coprime with 32 already spreads a column read over every
+    bank; permuting it would move elements the plain layout had placed well."""
+    for volume in (81, 169, 91):
+        assert _window_width(volume) == 1

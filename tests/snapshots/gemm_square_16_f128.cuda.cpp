@@ -97,14 +97,14 @@ __launch_bounds__(256)
           __float128 v31_data = s0[0];
           __float128 v33_data = ir1[0];
           ir1[0] = (v33_data + (v30_data * v31_data));
-          __float128 v36_data = s0[3];
+          __float128 v36_data = s0[2];
           __float128 v38_data = ir1[1];
           ir1[1] = (v38_data + (v30_data * v36_data));
           __float128 v43_data = r0[1];
           __float128 v44_data = s0[1];
           __float128 v46_data = ir1[0];
           ir1[0] = (v46_data + (v43_data * v44_data));
-          __float128 v49_data = s0[2];
+          __float128 v49_data = s0[3];
           __float128 v51_data = ir1[1];
           ir1[1] = (v51_data + (v43_data * v49_data));
           #pragma unroll

@@ -164,6 +164,10 @@ class AbstractShrMemWrite(MemoryInstruction):
         lhs = f'{self._fp_as_str}* {self._vm.get_lexic().restrict_kw} {self._dest.name}'
         writer(f'{lhs} = &{self._arena()}[{offset}];')
 
+  #: Shared memory is 32 banks wide on both vendors, so there is nothing to
+  #: gain from permuting over a longer period than that.
+  _BANKS = 32
+
   def _swizzle(self):
     """A row permutation for this window, when one is both legal and useful.
 
@@ -183,8 +187,30 @@ class AbstractShrMemWrite(MemoryInstruction):
     view = self._dest.data_view
     if view is None or len(view.shape) < 2:
       return None
-    width = view.shape[0]
-    if width < 2 or width & (width - 1):
+
+    # The width has to divide the *volume*, not merely be the row width.  The
+    # permutation maps each block of `width` elements onto itself, so a buffer
+    # whose last block is partial has indices that permute past its end -- 728
+    # elements swizzled at 32 puts eight of them into the next window.  Shared
+    # memory, silently, which is the worst failure available here.
+    #
+    # The largest power of two dividing the volume is safe by construction and
+    # is also the better choice: a 16x16 tile takes 32 rather than 16 and its
+    # column read goes 2-way to 1-way, and a 56x13 window takes 8 where the
+    # row-width rule declined outright, 8-way to 4-way.
+    #
+    # An odd volume yields 1, which is no swizzle -- and that is the right
+    # answer rather than a fallback.  A row width coprime with 32 already
+    # spreads a column read over every bank, so permuting it would move
+    # elements the plain layout had placed well: strides 9 and 13 are 1-way
+    # untouched and 2- or 3-way under any width.
+    volume = 1
+    for n in view.shape:
+      volume *= n
+    width = 1
+    while width * 2 <= self._BANKS and volume % (width * 2) == 0:
+      width *= 2
+    if width < 2:
       return None
     return XorSwizzle(width)
 
