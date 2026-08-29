@@ -54,7 +54,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 from .core import (Op, Region, Stmt, TokenType, Value, accesses_conflict,
                    walk)
 from .passes import substitute
-from .schedule import can_reorder
+from .schedule import can_reorder, is_wall, may_cross
 
 
 class Refusal(Exception):
@@ -192,8 +192,10 @@ def _wrap_one(loop: Stmt, make_value,
 
     between = [s for s in scope[first:i_wait] if s not in group]
     for s in between:
-        if not all(can_reorder(g, s) for g in group):
-            raise Refusal('the issue may not cross a statement between it '
+        if not all(may_cross(g, s) for g in group):
+            why = 'wall' if is_wall(s) else 'conflict'
+            raise Refusal(f'the issue may not cross a `{s.op}` ({why}) '
+                          'between it '
                           'and its wait, so it may not cross the back edge '
                           'either')
 

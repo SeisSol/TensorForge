@@ -77,13 +77,88 @@ def _uses(s: Stmt) -> Set[int]:
 
 
 def is_wall(s: Stmt) -> bool:
-    """Nothing crosses this statement."""
-    return bool(s.effect & _WALL) or not s.movable or bool(s.regions)
+    """Nothing crosses this statement.
+
+    A region is no longer one by itself.  It was, and the docstring said the
+    cheap thing was to treat it as a wall until something needed better --
+    which turned out to be six of the corpus's loops, where the statement
+    between a transfer and its wait is a `rawblock` and nothing else.
+
+    What replaces the blanket rule is `touches`: a region's accesses are the
+    union of its body's, and it is a wall only when something *inside* it is.
+    That keeps the conservatism where it belongs -- a barrier or an unknown
+    effect anywhere in the subtree still stops everything -- and drops it
+    where a loop merely reads and writes buffers it declares.
+    """
+    return bool(s.effect & _WALL) or not s.movable or touches(s) is None
+
+
+def touches(s: Stmt) -> Optional[Tuple]:
+    """Every access in this statement's subtree, or None if it is a wall.
+
+    None means "assume the worst": something in there carries an unknown
+    effect, orders threads, or refuses to move, and no union of accesses can
+    describe what crossing it would mean.
+    """
+    if s.effect & _WALL or not s.movable:
+        return None
+    out = list(s.accesses)
+    for r in s.regions:
+        for inner, _ in walk(r.body):
+            if inner.effect & _WALL or not inner.movable:
+                return None
+            out.extend(inner.accesses)
+    return tuple(out)
+
+
+def may_cross(mover: Stmt, fixed: Stmt) -> bool:
+    """May ``mover`` be emitted on the other side of ``fixed``?
+
+    Directional, and the direction is the point.  `can_reorder` asks whether
+    two statements may *swap*, so both have to be movable -- and a raw block
+    is not, because its head is text whose semantics the IR cannot read.  But
+    a transfer moving past a loop does not move the loop: the block stays
+    exactly where it is, and whether it could have moved is not a question
+    anyone asked.
+
+    That distinction cost six of the corpus's loops, where the only thing
+    between a transfer and its wait is a `rawblock` that nobody wanted to
+    move.  What still matters about the fixed statement is what it *touches*,
+    and `touches` says that for a whole subtree or says nothing at all.
+    """
+    if not mover.movable or mover.effect & _WALL:
+        return False
+    tm, tf = touches(mover), _touches_fixed(fixed)
+    if tm is None or tf is None:
+        return False
+    if _defines(mover) & _uses(fixed) or _defines(fixed) & _uses(mover):
+        return False
+    return not any(accesses_conflict(x, y) for x in tm for y in tf)
+
+
+def _touches_fixed(s: Stmt) -> Optional[Tuple]:
+    """`touches` for a statement that is not being asked to move.
+
+    Same walk, without the movability test: an immovable statement can still
+    be described, and a description is all that crossing it needs.  A barrier
+    or an unknown effect anywhere inside still returns None, because those are
+    about what crossing *means* rather than about who moves.
+    """
+    if s.effect & _WALL:
+        return None
+    out = list(s.accesses)
+    for r in s.regions:
+        for inner, _ in walk(r.body):
+            if inner.effect & _WALL:
+                return None
+            out.extend(inner.accesses)
+    return tuple(out)
 
 
 def can_reorder(a: Stmt, b: Stmt) -> bool:
     """May ``b``, which currently follows ``a``, be emitted before it?"""
-    if is_wall(a) or is_wall(b):
+    ta, tb = touches(a), touches(b)
+    if ta is None or tb is None:
         return False
     if _defines(a) & _uses(b):
         return False                    # b reads what a wrote
@@ -91,8 +166,8 @@ def can_reorder(a: Stmt, b: Stmt) -> bool:
         return False                    # a reads what b will write
     if _defines(a) & _defines(b):
         return False
-    for x in a.accesses:
-        for y in b.accesses:
+    for x in ta:
+        for y in tb:
             if accesses_conflict(x, y):
                 return False
     return True
