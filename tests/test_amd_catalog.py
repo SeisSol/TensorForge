@@ -147,8 +147,14 @@ def test_scale_rejects_a_thread_count_the_tile_does_not_divide():
 
 @pytest.mark.parametrize("arch", ARCHS)
 def test_tiles_are_offered_only_where_mfma_exists(arch):
+    """`mai-insts`, where a family range used to stand in for it.
+
+    The two agree on every target here and differ on gfx90b--gfx90f, which
+    `cdna1`'s `>= 0x90a` admitted and the hardware does not have. The
+    predicate is gone; this is the property it was carrying.
+    """
     ctx = _ctx(arch)
-    expected = amd.cdna1(ctx) and not amd.gfx1251(ctx)
+    expected = amd.has_feature(ctx, "mai-insts")
     got = bool(amd.usable_mfma_tiles(32, Datatype.F32, ctx))
     assert got == expected, f"{arch}: MFMA offered={got}, expected={expected}"
 
@@ -410,3 +416,115 @@ def test_a_direct_row_needs_a_single_term():
     op = next(o for o in catalog.MATRIX_OPS if o.builtin == "mfma_f64_4x4x4f64")
     assert catalog.split_terms(op, Datatype.F64) == 1
     assert catalog.split_products(1) == ((0, 0),)
+
+
+# --------------------------------------------------------------------------- #
+# cbsz, and which instructions the lane-batched scheme can feed
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.parametrize("op", [o for o in catalog.MATRIX_OPS if o.broadcast],
+                         ids=lambda op: op.builtin)
+def test_cbsz_never_names_a_block_the_instruction_does_not_have(op):
+    """The bound that `threads // block` did not respect.
+
+    `cbsz` selects a broadcast group, so it cannot exceed `log2(blocks)`. That
+    was invisible while every entry had `k == 1`, because there `blocks ==
+    wave // n` makes `threads // n` and `blocks` the same number at a full
+    wave. `mfma_f64_4x4x4f64` has four blocks and sixteen lanes per row, and
+    the old expression asked it for `cbsz = 4`.
+    """
+    for threads in (4, 8, 16, 32, 64):
+        if threads % op.n:
+            continue
+        assert 0 <= op.cbsz(threads) <= max(op.blocks - 1, 0).bit_length()
+        assert 2 ** op.cbsz(threads) <= op.blocks
+
+
+def test_cbsz_reproduces_the_hand_written_table():
+    """Same numbers as before, from the instruction instead of the tile.
+
+    `LEGACY_SCALE` is reproduced exactly, which is what makes this a
+    refactoring of the K=1 path rather than a change to it.
+    """
+    for block, table in LEGACY_SCALE.items():
+        op = next(o for o in catalog.MATRIX_OPS
+                  if o.m == o.n == block and o.k == 1
+                  and o.a.dtype is Datatype.F32)
+        for threads, expected in table.items():
+            assert op.cbsz(threads) == expected, (
+                f"{op.builtin} at {threads} threads")
+
+
+def test_only_the_k1_f32_tiles_are_lane_batched():
+    """The precondition, spelled out over the whole catalogue.
+
+    `matmul32` puts the leading dimension in the lanes and one contraction
+    value per instruction, so the instruction's `n * blocks` has to be the
+    whole wave -- which, at one element per lane, is the same statement as
+    `k == 1`. This is the test that changes when the staging that puts k into
+    lanes lands.
+    """
+    got = {op.builtin for op in catalog.MATRIX_OPS if op.lane_batched()}
+    assert got == {"mfma_f32_4x4x1f32", "mfma_f32_16x16x1f32",
+                   "mfma_f32_32x32x1f32"}
+
+
+@pytest.mark.parametrize("op", catalog.MATRIX_OPS, ids=lambda op: op.builtin)
+def test_lane_batching_is_exactly_k_equals_one(op):
+    """The equivalence the docstring derives, checked rather than asserted."""
+    scalar_square = (op.a.per_lane == 1 and op.b.per_lane == 1
+                     and op.m == op.n)
+    if scalar_square:
+        assert op.lane_batched() == (op.k == 1)
+        assert (op.n * op.blocks == op.wave) == (op.k == 1)
+
+
+def test_the_fp64_mfmas_are_offered_but_not_lane_batched():
+    """Both exist on gfx90a and neither fits today's loop.
+
+    Which contradicts what a matching per-lane width suggests: A and B are one
+    element per lane, the same as the K=1 F32 tiles. The difference is the
+    assignment, not the width -- `k == 4` means two of the six lane bits carry
+    the contraction, and the generator's data operand carries the leading
+    dimension there.
+    """
+    ctx = _ctx("gfx90a", Datatype.F64)
+    offered = {op.builtin for op in catalog.ops_for(Datatype.F64, ctx)}
+    assert offered == {"mfma_f64_4x4x4f64", "mfma_f64_16x16x4f64"}
+    for op in catalog.ops_for(Datatype.F64, ctx):
+        assert op.a.per_lane == 1 and op.b.per_lane == 1
+        assert not op.lane_batched()
+    assert not catalog.lane_batched_ops(Datatype.F64, ctx)
+
+
+@pytest.mark.parametrize("arch", ARCHS)
+@pytest.mark.parametrize("dtype", [Datatype.F32, Datatype.F64])
+def test_the_router_and_the_emitter_ask_the_same_question(arch, dtype):
+    """`matmul()` gates on `mfma_tile_for`; so does `matmul32`.
+
+    They used to ask differently -- a family predicate at the router, a
+    `next()` without a default at the emitter -- and a disagreement surfaced
+    as `StopIteration` out of code generation.
+    """
+    ctx = _ctx(arch, dtype)
+    for threads in (4, 16, 32, 64):
+        tile = catalog.mfma_tile_for(threads, dtype, ctx)
+        if tile is not None:
+            assert tile.block == 4
+            assert tile.op.lane_batched()
+            tile.scale(threads)          # must not raise
+        else:
+            assert not [t for t in amd.usable_mfma_tiles(threads, dtype, ctx)
+                        if t.block == 4]
+
+
+def test_f64_still_takes_the_dpp_path():
+    """Now because no tile fits, not because the condition named F32.
+
+    `fmacdpp16(double&, double, double)` is in the runtime and `select` picks
+    it on CDNA 2, so F64 is served -- the point is that the reason is now a
+    structural one the catalogue states.
+    """
+    for arch in ("gfx90a", "gfx942", "gfx950"):
+        assert catalog.mfma_tile_for(64, Datatype.F64,
+                                     _ctx(arch, Datatype.F64)) is None

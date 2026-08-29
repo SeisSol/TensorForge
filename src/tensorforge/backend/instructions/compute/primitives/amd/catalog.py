@@ -213,6 +213,72 @@ class MatrixOp:
         """
         return threads == self.wave
 
+    def cbsz(self, threads: int) -> int:
+        """How many blocks share one A operand: the instruction's `cbsz`.
+
+        `min(blocks, threads // n)`, because two different things bound it.
+        The instruction cannot broadcast to more blocks than it has, and the
+        scheme cannot broadcast across more lanes than one multiplication
+        owns: below a full wave, several multiplications share it and each
+        needs its own A.
+
+        This was `threads // block`, and it was right for as long as every
+        entry had `k == 1` --- there `blocks == wave // n` and the two
+        expressions agree, which is why a table of hand-written constants and
+        then a formula both reproduced the same numbers.  They stop agreeing
+        at the first `k > 1` entry: `mfma_f64_4x4x4f64` has four blocks where
+        `threads // n` is sixteen, and a `cbsz` of 4 on a four-block
+        instruction names a block that does not exist.
+        """
+        if threads <= 0 or threads % self.n:
+            raise ValueError(f'{self.builtin} needs threads to be a multiple '
+                             f'of {self.n}, got {threads}')
+        return min(self.blocks, threads // self.n).bit_length() - 1
+
+    def lane_batched(self) -> bool:
+        """Does the scheme `matmul32` implements fit this instruction?
+
+        That scheme maps the generator's dimensions onto the instruction's
+        like this:
+
+        * the instruction's **M** takes the output columns, which live in the
+          accumulator's registers;
+        * the instruction's **N**, times the block count, takes the *lanes*,
+          which carry the generator's leading dimension;
+        * the instruction's **K** takes the contraction, one value per
+          instruction, selected through `abid`.
+
+        The middle line is the constraint.  The lanes have to be entirely the
+        leading dimension, so ``n * blocks`` has to be the whole wave --- and
+        with one element per lane the operand invariant makes that the same
+        statement as ``k == 1``::
+
+            b.per_lane * wave == k * n * blocks     (the invariant)
+            b.per_lane == 1
+            => n * blocks == wave / k
+
+        Against the *wave*, not the thread count.  Below a full wave several
+        multiplications share it and each still sees whole blocks; what
+        narrows then is the broadcast, which is `cbsz`\'s business.  Writing
+        this against `threads` would refuse the 32-thread case that works
+        today.
+
+        So every `k > 1` instruction spends part of its lane index on the
+        contraction.  The generator's data operand does not have it there: it
+        carries the leading dimension in lanes and the contraction in
+        registers, because `unwindI` hands the leading dimension a `LeadIndex`
+        and `unwindK(..., full=True)` hands the contraction a plain one.
+
+        Which makes the FP64 MFMAs *not* a drop-in for this path, contrary to
+        what a matching per-lane width suggests.  Same width, different
+        assignment: fitting them is not a matter of a wider tile but of
+        staging the data operand so that k reaches the lanes --- the same
+        staging the split-precision paths need for their k-vectors.
+        """
+        return (self.a.per_lane == 1 and self.b.per_lane == 1
+                and self.k == 1 and self.m == self.n
+                and self.n * self.blocks == self.wave)
+
 
 # --------------------------------------------------------------------------- #
 # The entries
@@ -354,6 +420,19 @@ def ops_for(dtype, ctx, threads=None):
     return tuple(sorted(out, key=lambda op: (-op.m * op.n, -op.k, op.builtin)))
 
 
+def lane_batched_ops(dtype, ctx):
+    """Every catalogue entry the lane-batched scheme could emit, largest first.
+
+    The F32 policy does not go through this --- it goes through `MFMA_TILES`,
+    which carries the transposes as well.  This is the same question asked of
+    the whole catalogue, for the emitter that will need it: it is what says
+    that widening the type check to F64 finds nothing, rather than finding
+    `mfma_f64_16x16x4f64` and feeding it wrongly.
+    """
+    return tuple(op for op in ops_for(dtype, ctx)
+                 if op.broadcast and op.lane_batched())
+
+
 def split_terms(op, dtype) -> int:
     """Operand terms whose sum reproduces a `dtype` significand.
 
@@ -434,10 +513,17 @@ _TILE_TRANSPOSES = {
 
 @dataclass(frozen=True)
 class MfmaTile:
-    """One square K=1 MFMA tile: the intrinsic, and how its A operand is fed."""
+    """One square K=1 MFMA tile: the intrinsic, and how its A operand is fed.
 
-    block: int
-    builtin: str
+    A `MatrixOp` plus the one fact the catalogue does not carry --- the
+    cross-lane transpose that feeds A.  That transpose is *ours*: it is how
+    this generator arranges the operand, not something the instruction
+    requires, and it is the reason this type still exists beside `MatrixOp`.
+    Everything else is delegated, so the intrinsic name and the broadcast
+    control have one source and the check against LLVM covers them.
+    """
+
+    op: MatrixOp
     #: Cross-lane transpose applied to the A registers before the tile runs.
     #: `None` means the tile needs none; a name that `hip.h` does not define
     #: means the tile is unusable, which `available_for` reports.
@@ -450,13 +536,26 @@ class MfmaTile:
     #: `transpose4x4b32` has it; `transpose16x16b32` is in-place only.
     transpose_has_separate_outputs: bool = False
 
+    @property
+    def block(self) -> int:
+        """The square tile width."""
+        return self.op.m
+
+    @property
+    def builtin(self) -> str:
+        return self.op.callee
+
     def scale(self, threads: int) -> int:
-        """The intrinsic's `cbsz`: how many lanes share one tile row."""
+        """The intrinsic's `cbsz`, from the instruction rather than the tile.
+
+        `MatrixOp.cbsz` says why the two used to be the same expression and
+        are not one.
+        """
         if not self.fits(threads):
             raise ValueError(
                 f'{self.builtin} needs threads to be a multiple of '
                 f'{self.block}, got {threads}')
-        return (threads // self.block).bit_length() - 1
+        return self.op.cbsz(threads)
 
     def fits(self, threads: int) -> bool:
         return threads >= self.block and threads % self.block == 0
@@ -481,6 +580,8 @@ class MfmaTile:
             return False
         if not self.fits(threads):
             return False
+        if not self.op.lane_batched():
+            return False
         return self.transpose is None or self.transpose in DEFINED_TRANSPOSES
 
 
@@ -489,7 +590,7 @@ def _tile(block):
               if o.m == o.n == block and o.k == 1
               and o.a.dtype is Datatype.F32)
     transpose, separate = _TILE_TRANSPOSES[block]
-    return MfmaTile(block, op.callee, transpose, separate)
+    return MfmaTile(op, transpose, separate)
 
 
 #: Derived from `MATRIX_OPS`, so the intrinsic names have one source and the
@@ -502,3 +603,20 @@ def usable_mfma_tiles(threads, dtype, ctx):
     return tuple(sorted((t for t in MFMA_TILES
                          if t.available_for(threads, dtype, ctx)),
                         key=lambda t: -t.block))
+
+
+def mfma_tile_for(threads, dtype, ctx):
+    """The tile `matmul32` would emit here, or `None`.
+
+    One function, asked twice: once by `matmul()` deciding which path to take
+    and once by `matmul32` picking the tile. They used to ask different
+    questions --- a family predicate at the router, a `next()` over the usable
+    tiles at the emitter --- and agreed only because both happened to be true
+    on the same targets. A router that says yes where the emitter finds
+    nothing raises `StopIteration` out of code generation, which is not a
+    diagnosis of anything.
+    """
+    # Policy, not capability: the 16-wide tile needs a staging step that is
+    # not written and the 32-wide one has no transpose in the runtime.
+    return next((t for t in usable_mfma_tiles(threads, dtype, ctx)
+                 if t.block == 4), None)

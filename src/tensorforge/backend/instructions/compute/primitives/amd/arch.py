@@ -29,8 +29,11 @@ def cdna2(ctx):
     return (amdarch(ctx) < 0x1000 and amdarch(ctx) >= 0x90a) or gfx1251(ctx)
 
 
-def cdna1(ctx):
-    return cdna2(ctx) or amdarch(ctx) == 0x908
+# `cdna1` used to sit here, and its only caller was the matmul router asking
+# "does this target have MFMA".  That is `features.has_feature(ctx,
+# 'mai-insts')`, which answers it without admitting gfx90b--gfx90f the way a
+# range does.  Removed rather than left unreferenced: an unused family
+# predicate is the shape the gfx900 bug came in.
 
 
 def rdna(ctx):

@@ -34,12 +34,12 @@ property.
 
 from tensorforge.common.basic_types import Datatype
 
-from .arch import amdarch, cdna1, cdna2, gfx1250, gfx1251, rdna
+from .arch import amdarch, cdna2, gfx1250, gfx1251, rdna
 from .caps import has_fmacdpp4, has_fmacdpp8, has_fmacdpp16
 from .catalog import (DEFINED_TRANSPOSES, MANTISSA, MATRIX_OPS, MFMA_TILES,
                       NOT_MODELLED, XF32_MANTISSA, Call, Fragment, MatrixOp,
-                      MfmaTile, ops_for, split_products, split_terms,
-                      usable_mfma_tiles)
+                      MfmaTile, lane_batched_ops, mfma_tile_for, ops_for,
+                      split_products, split_terms, usable_mfma_tiles)
 from .features import FEATURE_TARGETS, has_feature, wave_size
 from .codegen import hfma, matmul32, matmuldpp
 from .emitters import fmadpp, fmadpp4, fmadpp8, fmadpp16, fmascalar
@@ -50,13 +50,14 @@ from .unused import (mfma_emu_bf16_f32, mfma_emu_f16_f32, mfma_emu_int8,
                      wmma3atom)
 
 __all__ = [
-    'amdarch', 'cdna1', 'cdna2', 'gfx1250', 'gfx1251', 'rdna',
+    'amdarch', 'cdna2', 'gfx1250', 'gfx1251', 'rdna',
     'has_fmacdpp4', 'has_fmacdpp8', 'has_fmacdpp16',
     'FEATURE_TARGETS', 'has_feature', 'wave_size',
     'Call', 'Fragment', 'MatrixOp', 'MATRIX_OPS', 'MANTISSA',
     'XF32_MANTISSA', 'NOT_MODELLED', 'ops_for', 'split_terms',
     'split_products',
     'MfmaTile', 'DEFINED_TRANSPOSES', 'MFMA_TILES', 'usable_mfma_tiles',
+    'lane_batched_ops', 'mfma_tile_for',
     'wanted_fmadpp_step', 'select_fmadpp_step',
     'Relayout', 'RELAYOUTS', 'BROADCAST', 'MOVDPP16', 'TRANSPOSE4X4',
     'find_relayout',
@@ -67,9 +68,23 @@ __all__ = [
 
 
 def matmul(writer, C, A, B, M, N, K, kx, threads, dtype, sparse, ctx):
-    if cdna1(ctx) and not gfx1251(ctx) and not sparse and dtype == Datatype.F32:
-        # 4x4 matmuls are (probably) only available for CDNA 1-4
+    """Matrix path where a tile fits, DPP everywhere else.
+
+    The condition used to be `cdna1(ctx) and not gfx1251(ctx) and dtype ==
+    F32` --- a family predicate and a type check standing in for a structural
+    property.  It gave the right answer, and it gave it for a reason that does
+    not survive contact with the rest of the catalogue: widening the type
+    check to F64 would have routed `mfma_f64_16x16x4f64` into a loop that
+    cannot feed it, because that instruction spends two of its lane bits on
+    the contraction and the data operand carries the leading dimension there.
+    `MatrixOp.lane_batched` states that as one equation and
+    `mfma_tile_for` asks it.
+
+    So F64 still takes the DPP path, which is where `fmacdpp16(double&, ...)`
+    already serves it --- now because no tile fits rather than because the
+    condition names F32.
+    """
+    if not sparse and mfma_tile_for(threads, dtype, ctx) is not None:
         matmul32(writer, C, A, B, M, N, K, kx, threads, dtype, sparse, ctx)
     else:
-        # DPP matmul
         matmuldpp(writer, 0, C, A, B, M, N, K, kx, threads, dtype, sparse, ctx)

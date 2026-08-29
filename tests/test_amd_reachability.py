@@ -66,6 +66,9 @@ KEPT_UNREACHABLE = {
     # what `test_allow_list_does_not_outlive_its_entries` enforces.
     "ops_for":
         "catalogue query; the emitter that selects from it is not written",
+    "lane_batched_ops":
+        "the same precondition asked of the whole catalogue; the F32 policy "
+        "reaches it through MFMA_TILES instead",
     "split_terms":
         "split-precision arithmetic; no emitter consumes it yet",
     "split_products":

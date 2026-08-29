@@ -8,7 +8,7 @@ from tensorforge.common.basic_types import Datatype
 from tensorforge.backend.writer import Writer
 from tensorforge.backend.pir.core import ScalarType
 from .arch import cdna2, gfx1251, rdna
-from .catalog import usable_mfma_tiles
+from .catalog import mfma_tile_for
 from .emitters import fmadpp4, fmadpp8, fmadpp16, fmascalar
 from .relayout import (MOVDPP16, TRANSPOSE4X4, find_relayout,
                        fmadpp_operand_layout)
@@ -283,8 +283,16 @@ def matmul32(writer: Writer, C, B, A, M, N, K, kx, threads, dtype, sparse, ctx):
         # 4-wide tile is reachable today: the 16-wide one needs a shared-memory
         # staging step that is not written, and the 32-wide one has no
         # transpose in the runtime, which `available_for` already refuses.
-        tiles = usable_mfma_tiles(threads, dtype, ctx)
-        tile = next(t for t in tiles if t.block == 4)
+        #
+        # `matmul()` is the gate; this is the guard for a direct caller, and
+        # both ask `mfma_tile_for`.  A `next()` without a default raised
+        # `StopIteration` here instead, which unwinds out of generation as an
+        # unrelated-looking error.
+        tile = mfma_tile_for(threads, dtype, ctx)
+        if tile is None:
+            raise ValueError(
+                f'no MFMA tile for {dtype} at {threads} threads; '
+                f'matmul() should have taken the DPP path')
 
         start = 0
         # A tail of 0 or 1 columns is cheaper through DPP; 2 or 3 are cheaper
