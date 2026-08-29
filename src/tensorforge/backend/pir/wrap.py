@@ -51,10 +51,45 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import Dict, List, Optional, Sequence, Tuple
 
-from .core import (Op, Region, Stmt, TokenType, Value, accesses_conflict,
-                   walk)
+from .core import (Effect, Op, Region, Stmt, TokenType, Value,
+                   accesses_conflict, walk)
 from .passes import substitute
-from .schedule import can_reorder, is_wall, may_cross
+from .schedule import (_defines, _touches_fixed, _uses, can_reorder,
+                       is_wall, may_cross, touches)
+
+
+def _why_not(group: Sequence[Stmt], fixed: Stmt) -> str:
+    """Name what blocks a crossing, because "a rawblock" is not a reason.
+
+    The refusal that cost the most to diagnose said only that a `rawblock` was
+    in the way.  It was in the way because it *writes the same shared buffer*
+    the transfer does -- which, once said out loud, is not an obstacle at all
+    but a symptom: a macro copy is split into hops, some of them direct
+    statements of the guard and the rest inside an unrolled loop, and the
+    group only ever collected the direct ones.  The block is the same
+    transfer, and the pass was refusing to move a transfer past itself.
+    """
+    if not fixed.movable:
+        detail = 'immovable'
+    elif fixed.effect & (Effect.BARRIER | Effect.UNKNOWN):
+        detail = 'barrier or unknown effect'
+    else:
+        detail = 'undescribable subtree'
+    tf = _touches_fixed(fixed)
+    if tf is None:
+        return detail
+    for g in group:
+        tm = touches(g)
+        for x in tm or ():
+            for y in tf:
+                if accesses_conflict(x, y):
+                    base = getattr(y.base, 'name', None) or getattr(
+                        y.base, 'hint', y.base)
+                    return f'both touch {base}'
+    if any(_defines(g) & _uses(fixed) or _defines(fixed) & _uses(g)
+           for g in group):
+        return 'def-use'
+    return detail
 
 
 class Refusal(Exception):
@@ -193,11 +228,9 @@ def _wrap_one(loop: Stmt, make_value,
     between = [s for s in scope[first:i_wait] if s not in group]
     for s in between:
         if not all(may_cross(g, s) for g in group):
-            why = 'wall' if is_wall(s) else 'conflict'
-            raise Refusal(f'the issue may not cross a `{s.op}` ({why}) '
-                          'between it '
-                          'and its wait, so it may not cross the back edge '
-                          'either')
+            raise Refusal(f'the issue may not cross a `{s.op}` between it and '
+                          f'its wait ({_why_not(group, s)}), so it may not '
+                          f'cross the back edge either')
 
     # The destination must not be read anywhere in the body.
     #
