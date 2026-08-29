@@ -54,6 +54,12 @@ class ReductionInstruction(ComputeInstruction):
         self._gemm_meta_data = None
         self.registers = None
 
+        # Dropping the contracted axes renumbers what is left, but not what
+        # the destination *is*: it is declared at the rank it keeps, so the box
+        # it states is the box this operation writes.
+        self.claim_destination(self._dest)
+        self.check_addressable([self._dest, self._op], 'reduction')
+
         for view in (dest, src):
             view.symbol.add_user(self)
 

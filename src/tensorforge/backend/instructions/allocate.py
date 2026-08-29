@@ -6,7 +6,7 @@ from tensorforge.common.context import Context
 from tensorforge.backend.symbol import Symbol
 from tensorforge.common.basic_types import GeneralLexicon
 from tensorforge.backend.writer import Writer
-from tensorforge.backend.pir.core import MemSpace
+from tensorforge.backend.pir.core import Effect, MemSpace
 from .abstract_instruction import AbstractInstruction
 
 
@@ -89,19 +89,65 @@ class ShrMemAlloc(AbstractInstruction):
     dest.add_user(self)
 
   def gen_ir(self, writer: Writer):
+    """Bind the kernel's one shared arena, and the two windows into it.
+
+    Not an allocation, despite the name.  `declare_shared_memory` reinterprets
+    a pointer the launch configuration supplies -- dynamic shared memory on
+    CUDA and HIP, and on SYCL an accessor declared in the kernel signature, so
+    there it is nothing at all.  There is no array to declare and no size for
+    `Op.ALLOC` to carry, which is why this is the one buffer in the section
+    that keeps a name: it exists before any body does.
+
+    The two windows are ordinary bindings, and were three bare statements --
+    `Effect.UNKNOWN`, conflicting with every access in the body and pinning
+    everything on both sides.  As values they declare what they touch and
+    carry a def-use edge, so a scheduler knows a read through a window cannot
+    rise above the binding of it.
+
+    Recorded against the arena, not against themselves: `may_alias` treats
+    distinct bases as never aliasing, so a window claiming its own identity
+    would let a write through the arena reorder past a read through the
+    window.
+    """
     shrmem_obj = self._dest.obj
     common_shrmem = f'{GeneralLexicon.TOTAL_SHR_MEM}'
     common_shrmem_size = shrmem_obj.get_total_size()
-    if common_shrmem_size > 0:
-      shr_mem_decl = self._vm.get_lexic().declare_shared_memory(name=common_shrmem,
-                                                        precision=self._vm.fp_as_str())
+    if common_shrmem_size <= 0:
+      return
 
+    lexic = self._vm.get_lexic()
+    shr_mem_decl = lexic.declare_shared_memory(name=common_shrmem,
+                                               precision=self._vm.fp_as_str())
+    address = (f'{shrmem_obj.get_size_per_mult()} * {lexic.thread_idx_y} '
+               f'+ {shrmem_obj.get_global_size()}')
+
+    if not hasattr(writer, 'decl_expr'):
       if shr_mem_decl:
         writer(f'{shr_mem_decl};')
-
-      address = f'{shrmem_obj.get_size_per_mult()} * {self._vm.get_lexic().thread_idx_y} + {shrmem_obj.get_global_size()}'
       writer(f'{self._fp_as_str}* {shrmem_obj.name} = &{common_shrmem}[{address}];')
       writer(f'{self._fp_as_str}* tempShrMem = &{shrmem_obj.name}[{shrmem_obj.get_temp_offset()}];')
+      return
+
+    from tensorforge.backend.pir.core import BufferType, MemSpace as _MemSpace
+
+    def window(name, decl, text, size):
+      return writer.decl_expr(
+          decl, text.replace('{', '{{').replace('}', '}}'),
+          BufferType(self._context.fp_type, (size,), _MemSpace.SHARED),
+          self._dest, kind=Effect.READ, hint=name, extern=name,
+          alias_root=self._dest)
+
+    if shr_mem_decl:
+      # The arena itself: a reinterpret of the launch's pointer, so its
+      # declarator carries the cast and there is no type to render it from.
+      decl, _, rhs = shr_mem_decl.partition(' = ')
+      window(common_shrmem, decl, rhs, common_shrmem_size)
+
+    window(shrmem_obj.name, f'{self._fp_as_str}* {shrmem_obj.name}',
+           f'&{common_shrmem}[{address}]', shrmem_obj.get_size_per_mult())
+    window('tempShrMem', f'{self._fp_as_str}* tempShrMem',
+           f'&{shrmem_obj.name}[{shrmem_obj.get_temp_offset()}]',
+           common_shrmem_size - shrmem_obj.get_temp_offset())
 
   def is_ready(self):
     shrmem_obj = self._dest.obj

@@ -7,6 +7,7 @@ from tensorforge.common.exceptions import GenerationError, InternalError
 from tensorforge.common.context import Context
 from tensorforge.common.basic_types import DataFlowDirection, Datatype
 from tensorforge.common.operation import Operation, ReductionOperator
+from tensorforge.common.matrix.boundingbox import BoundingBox
 from tensorforge.common.matrix.tensor import Tensor, SubTensor
 from tensorforge.common.basic_types import Addressing
 
@@ -15,6 +16,43 @@ from typing import List
 class OperationDescription:
   def barrier(self):
     return False
+
+  def reads(self) -> List:
+    """The views this operation reads, tensor-carrying ones only.
+
+    A scalar constant is not a read of anything, so it does not appear here
+    even where a descriptor accepts one as an operand.
+    """
+    return []
+
+  def writes(self):
+    """The view this operation writes, or None if it writes nothing."""
+    return None
+
+  def effective_boxes(self):
+    """`(reads, write)` after any range narrowing, in tensor coordinates.
+
+    `reads` maps tensor -> BoundingBox, `write` is the destination's box.
+    `None` when the descriptor's shapes do not line up well enough to say.
+
+    Declared and effective part company only where an operation derives its
+    iteration range from its operands rather than from its destination, which
+    is the contraction's case and nobody else's: a pointwise operation and a
+    reduction both iterate exactly what they declare.  So this is the answer
+    for everything except `MultilinearDescr`, which overrides it.
+    """
+    dest = self.writes()
+    if dest is None:
+      return None
+    reads = {}
+    for op in self.reads():
+      tensor = getattr(op, 'tensor', None)
+      if tensor is None:
+        continue
+      box = op.storage_box()
+      prev = reads.get(tensor)
+      reads[tensor] = box if prev is None else prev.unite(box)
+    return reads, dest.storage_box()
 
 class MultilinearDescr(OperationDescription):
   def __init__(self, dest: Tensor, ops: List[Tensor], target, permute, add: bool = False,
@@ -107,6 +145,60 @@ class MultilinearDescr(OperationDescription):
   def matrix_list(self):
     return [self.dest] + [op for op in self.ops]
 
+  def reads(self):
+    return list(self.ops)
+
+  def writes(self):
+    return self.dest
+
+  def effective_boxes(self):
+    """The intersection `MultilinearInstruction._analyze` will perform.
+
+    A declared operand box is an upper bound on what that operand contributes:
+    `_analyze` intersects the boxes of everything sharing a target index, and
+    the destination's, and iterates only that.  So an accumulation onto the
+    whole destination from an operand spanning half of it writes half, and a
+    read declared over the whole tensor from such an operand reads half.
+
+    Comparing declared reads against actual writes therefore compares two
+    different things, and the elastic ADER kernels are where that bites:
+    `t += Q_face * c` declares the whole tensor on every term while each term
+    covers only the rows its own face touches.  Replaying the intersection
+    here is what makes both sides the same kind of statement.
+    """
+    ranges = {}
+
+    def narrow(t, lo, hi):
+      prev = ranges.get(t)
+      ranges[t] = (max(prev[0], lo), min(prev[1], hi)) if prev else (lo, hi)
+
+    ops = list(self.ops or [])
+    targets = list(self.target or [])
+    dest = self.dest
+    if dest is None or len(ops) != len(targets):
+      return None
+    for op, target in zip(ops, targets):
+      if getattr(op, 'bbox', None) is None or len(target) != op.bbox.rank():
+        return None
+      for j, t in enumerate(target):
+        narrow(t, op.bbox.lower()[j], op.bbox.upper()[j])
+    for j in range(dest.bbox.rank()):
+      narrow(j, dest.bbox.lower()[j], dest.bbox.upper()[j])
+
+    reads = {}
+    for op, target in zip(ops, targets):
+      tensor = getattr(op, 'tensor', None)
+      if tensor is None:
+        continue
+      box = BoundingBox(
+          [ranges[t][0] + op.offset[j] for j, t in enumerate(target)],
+          [ranges[t][1] + op.offset[j] for j, t in enumerate(target)])
+      prev = reads.get(tensor)
+      reads[tensor] = box if prev is None else prev.unite(box)
+    return reads, BoundingBox(
+        [ranges[j][0] + dest.offset[j] for j in range(dest.bbox.rank())],
+        [ranges[j][1] + dest.offset[j] for j in range(dest.bbox.rank())])
+
   def __str__(self):
     desttarget = [i for i in range(self.dest.bbox.rank())]
     return f'{self.dest}{desttarget} {"+" if self.add else ""}= {"×".join(f"{op}{optarget}" for op, optarget in zip(self.ops, self.target))}'
@@ -193,6 +285,12 @@ class ElementwiseDescr(OperationDescription):
     vul = context.get_vm().get_hw_descr().vec_unit_length
     return vul, vul
 
+  def reads(self):
+    return self.tensor_srcs()
+
+  def writes(self):
+    return self.dest
+
   def matrix_list(self):
     # Sources first, destination last.  Operand *order* here determines the
     # launcher's parameter order via Generator._name_operands, and the old
@@ -249,6 +347,12 @@ class ReductionDescr(OperationDescription):
   def get_num_threads(self, context: Context):
     vul = context.get_vm().get_hw_descr().vec_unit_length
     return vul, vul
+
+  def reads(self):
+    return [self.var]
+
+  def writes(self):
+    return self.dest
 
   def matrix_list(self):
     return [self.var, self.dest]

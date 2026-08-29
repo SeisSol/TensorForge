@@ -10,10 +10,14 @@ class BoundingBox:
         self._upper = tuple(upper)
 
     def intersect(self, other):
-        return BoundingBox([max(sl, ol) for sl, ol in zip(self.lower, other.lower)], [min(sl, ol) for sl, ol in zip(self.upper, other.upper)])
+        return BoundingBox(
+            [max(sl, ol) for sl, ol in zip(self.lower(), other.lower())],
+            [min(sl, ol) for sl, ol in zip(self.upper(), other.upper())])
 
     def unite(self, other):
-        return BoundingBox([min(sl, ol) for sl, ol in zip(self.lower, other.lower)], [max(sl, ol) for sl, ol in zip(self.upper, other.upper)])
+        return BoundingBox(
+            [min(sl, ol) for sl, ol in zip(self.lower(), other.lower())],
+            [max(sl, ol) for sl, ol in zip(self.upper(), other.upper())])
 
     def __rand__(self, other):
         return self.intersect(other)

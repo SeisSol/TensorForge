@@ -3,8 +3,10 @@
 # SPDX-License-Identifier: MIT
 from ..abstract_instruction import AbstractInstruction
 from abc import abstractmethod
+from tensorforge.backend.symbol import DataView, SymbolType
 from tensorforge.backend.writer import Writer
 from tensorforge.common.exceptions import InternalError
+from tensorforge.common.matrix.tensor import Tensor
 
 class ComputeInstruction(AbstractInstruction):
   @staticmethod
@@ -54,6 +56,54 @@ class ComputeInstruction(AbstractInstruction):
   @abstractmethod
   def get_operands(self):
     return []
+
+  def claim_destination(self, view, bbox=None) -> None:
+    """Give a fresh register array the shape this operation writes into it.
+
+    A register array is allocated with a slot count and nothing else; what
+    those slots *mean* is decided by whoever writes them, so the array is not
+    addressable until an instruction says so.  The multilinear says it inside
+    `_analyze`, from the intersected range it ends up iterating, which is why
+    it was the only operation that could write one -- and therefore the only
+    one that could produce a temporary at all.
+
+    `bbox` is for an operation whose destination is indexed in a different
+    origin than it is declared in.  Everything but the contraction indexes at
+    the box it declares and leaves it alone.
+
+    Silent on a destination that already has a view: a global or shared symbol
+    gets one from its tensor, and an array being accumulated into across
+    several operations keeps the one the first of them established.
+    """
+    symbol = view.symbol
+    if symbol.data_view is not None:
+      return
+    if symbol.stype not in (SymbolType.Register, SymbolType.Scratch):
+      raise InternalError(
+          f'{symbol.name} is in {symbol.stype} and has no data view; only a '
+          f'register array is shaped by the operation that writes it')
+    box = view.bbox if bbox is None else bbox
+    symbol.data_view = DataView(shape=box.sizes(),
+                                permute=list(range(box.rank())),
+                                bbox=box)
+
+  @staticmethod
+  def check_addressable(views, what: str) -> None:
+    """Every operand has to be something an address can be computed for.
+
+    A tensor-backed symbol carries its shape; a register array carries one
+    once the operation that writes it has said so.  Anything else -- a shared
+    memory window, a scalar -- has no element to index.
+    """
+    for view in views:
+      if isinstance(view.symbol.obj, Tensor):
+        continue
+      if view.symbol.stype in (SymbolType.Register, SymbolType.Scratch) \
+          and view.symbol.data_view is not None:
+        continue
+      raise InternalError(
+          f'{what}: {view.symbol.name} is neither a tensor nor a shaped '
+          f'register array, so it cannot be indexed')
 
   @abstractmethod
   def gen_code_inner(self, writer: Writer):

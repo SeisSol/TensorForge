@@ -180,6 +180,19 @@ class SubTensor(TensorWrapper):
         # backend to guess.
         self.sliced = sliced or any(o != 0 for o in self.offset)
 
+    def storage_box(self) -> BoundingBox:
+        """This view's box in the *tensor's* coordinates.
+
+        A view states a box in its own index space plus the offset at which
+        that space sits in the tensor.  Anything comparing two views of one
+        tensor -- a union of reads, a coverage test -- has to do it in the
+        tensor's coordinates, and doing the addition at each site is how two
+        of them come to disagree about whether the offset is already included.
+        """
+        return BoundingBox(
+            [l + o for l, o in zip(self.bbox.lower(), self.offset)],
+            [u + o for u, o in zip(self.bbox.upper(), self.offset)])
+
     def __str__(self):
         return f'{self.tensor}({self.bbox})'
 

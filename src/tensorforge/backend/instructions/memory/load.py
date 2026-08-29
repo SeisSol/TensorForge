@@ -358,9 +358,6 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
   def get_dest(self) -> Symbol:
     return self._dest
 
-  def get_permute(self) -> List[int]:
-    return self._permute
-
   def _check(self) -> None:
     #if self._src.stype != SymbolType.Global:
     #  raise InternalError('shr-load: `src` operand is not in global mem.')

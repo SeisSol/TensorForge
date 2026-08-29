@@ -52,24 +52,49 @@ def _run(name, *args, timeout=900):
     return proc.stdout
 
 
+#: The targets `tools/ir_opacity.py` sweeps, which is a subset of the four
+#: `test_snapshots` records.
+_OPACITY_BACKENDS = ("hip", "cuda")
+
+
+def _snapshot_generates(backend: str) -> set:
+    """Case names whose recorded snapshot on `backend` is generated source.
+
+    The harness writes a snapshot for a case that refuses to generate too, and
+    it starts with `FAILED:`.  Reading that back gives an expectation that
+    calibrates itself: a case added to the corpus updates it by being recorded,
+    and a case that stops generating shows up as a snapshot diff first, where
+    it belongs, rather than here.
+    """
+    out = set()
+    for path in (ROOT / "tests" / "snapshots").glob(f"*.{backend}.cpp"):
+        if not path.read_text().startswith("FAILED:"):
+            out.add(path.name[:-len(f".{backend}.cpp")])
+    return out
+
+
 def test_ir_opacity_still_generates_the_corpus():
     """The specific regression: `112 generated, 4 failed` became `0, 116`.
 
-    The four that do not generate are `beta_nonzero` and `temp_partial_write`
-    on both targets, and they are expected to fail; the bound is loose so that
-    one more joining them is not a test failure, while the wrapper breaking
-    again is.
+    What the tool reports as generated has to agree with what the corpus
+    actually generates, which the snapshots already state.  Comparing against
+    them rather than against a fraction of the corpus keeps the check exact
+    while the number of deliberately non-generating cases moves: the mixed
+    descriptor cases are seven of them, and a bound tight enough to catch a
+    broken wrapper before them is one they now trip.
     """
     out = _run("ir_opacity.py", "--cases")
     m = re.search(r"corpus: (\d+) cases x (\d+) targets, (\d+) generated, "
                   r"(\d+) failed", out)
     assert m, f"the corpus summary line is gone:\n{out[-1500:]}"
     cases, targets, generated, failed = (int(g) for g in m.groups())
-    total = cases * targets
-    assert generated > 0.9 * total, (
-        f"only {generated} of {total} generated. If the generator is fine, "
-        f"the tool has stopped measuring -- check that its wrapper still "
-        f"matches the signature it wraps.")
+
+    expected = sum(len(_snapshot_generates(b)) for b in _OPACITY_BACKENDS)
+    assert generated == expected, (
+        f"the tool reports {generated} of {cases * targets} generated, but "
+        f"the snapshots record {expected} generating on {list(_OPACITY_BACKENDS)}. "
+        f"If the generator is fine, the tool has stopped measuring -- check "
+        f"that its wrapper still matches the signature it wraps.")
 
 
 def test_ir_opacity_attributes_what_it_counts():

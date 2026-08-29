@@ -154,20 +154,24 @@ def test_no_instruction_hardcodes_the_lane_axis(cls):
         "from the symbol")
 
 
-def test_the_destination_register_image_states_its_lane_axis():
-    """`_alloc_register_array` sets it rather than leaving the default.
+def test_a_register_array_states_its_lane_axis():
+    """Whoever counts the slots also tells the symbol.
 
-    It counts register slots from the lane axis, so it already knew; the
-    symbol just did not get told, and a reader taking `lead_dims` got the
-    constructor's guess instead of the builder's answer.
+    The count is taken from the lane axis, so the answer is known right there;
+    the symbol just did not get told, and a reader taking `lead_dims` got the
+    constructor's guess instead. Both now come from the one argument
+    `Temporaries.register_array` is given, which is what keeps them from
+    parting company.
     """
     import inspect
 
-    from tensorforge.backend.instructions.builders import multilinear_builder
+    from tensorforge.backend import temporaries
 
-    source = inspect.getsource(multilinear_builder.MultilinearBuilder
-                               ._alloc_register_array)
-    assert "registers.lead_dims" in source
+    source = inspect.getsource(temporaries.Temporaries.register_array)
+    assert "registers.lead_dims = [lead_pos]" in source
+    assert "d != lead_pos" in source, (
+        "the slot count no longer keys on the same lane axis the symbol is "
+        "given")
 
 
 # --- end to end ---------------------------------------------------------- #

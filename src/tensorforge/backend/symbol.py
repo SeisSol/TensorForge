@@ -1469,7 +1469,12 @@ class Symbol:
     if self.stype == SymbolType.Register:
       addr = index // self.num_threads
     else:
-      addr = f'{index} + threadIdx.x * {vec}'
+      # Asked of the lexic, not spelled.  `threadIdx.x` stood here and was
+      # correct by accident on the two backends that reach this path
+      # today; it names nothing in a SYCL kernel, so the first target
+      # whose placement sends an operand through here emits a kernel
+      # that does not compile.
+      addr = f'{index} + {context.get_vm().get_lexic().thread_idx_x} * {vec}'
     access = f'{self.name}[{addr}]'
 
     if variable is None:
@@ -1574,7 +1579,12 @@ class Symbol:
     if self.stype == SymbolType.Register:
       addr = index // self.num_threads
     else:
-      addr = f'{index} + threadIdx.x * {vec}'
+      # Asked of the lexic, not spelled.  `threadIdx.x` stood here and was
+      # correct by accident on the two backends that reach this path
+      # today; it names nothing in a SYCL kernel, so the first target
+      # whose placement sends an operand through here emits a kernel
+      # that does not compile.
+      addr = f'{index} + {context.get_vm().get_lexic().thread_idx_x} * {vec}'
     access = f'{name}[{addr}]'
 
     # `base` is the symbol's own name for everything except a rotating
@@ -1647,100 +1657,99 @@ class Symbol:
       assert False
       return self.encode_values(0, [0] * len(index), writer, context, index, nontemp, leadidxidx)
     else:
-      # Whether the load will be a broadcast, decided *before* the text
-      # address is built.
+      # Whether this read is a lane broadcast, and at which index, resolved
+      # *before* any address is built.
       #
-      # `self.access()` pins its result -- the name is meant to be spliced
-      # into raw text -- and a pinned value survives DCE whether or not any
-      # text ends up referring to it.  Building one for a load that then
-      # takes the structured path leaves a second, identical address chain in
-      # the output with nothing reading it.  Three such declarations per
-      # kernel is not a correctness problem; it is why `gemm_square_16.cuda`
-      # has ten `int32_t` declarations of which three are never read, and why
-      # a snapshot diff is harder to read than it needs to be.
-      #
-      # Same repair as `Symbol.store`, which had the same shape.
-      _bcast = False
-      if self.stype in (SymbolType.Register, SymbolType.Scratch) \
-              and len(self.lead_dims) == 1:
-        _idx = index[self.lead_dims[0]]
-        _bcast = (isinstance(_idx, (float, int, np.int32, np.int64))
-                  or not _idx.is_thread_dependent())
-      if (variable is None and not _bcast and self.stype in (
-              SymbolType.Register, SymbolType.Scratch, SymbolType.SharedMem,
-              SymbolType.Batch, SymbolType.Global)):
-        from tensorforge.backend.pir.core import ScalarType
-        w = lead_width_of(index)
-        ltype = (ScalarType(self.get_fptype()) if w == 1
-                 else ScalarType(self.get_fptype(), w))
-        return writer.load(self, self.address_value(writer, context, index),
-                           type_=ltype, hint='data',
-                           align=None if w == 1 else RELAXED,
-                           layout=layout_of(index, self.num_threads),
-                           nontemporal=nontemp)
-
-      pre_access = self.access(context, index, writer, addrs)
+      # Both halves of that matter.  `self.access()` pins its result -- the
+      # name is meant to be spliced into raw text -- and a pinned value
+      # survives DCE whether or not any text ends up referring to it, so
+      # building one for a load that then takes the structured path leaves a
+      # second, identical address chain with nothing reading it.  And the
+      # broadcast needs its own index: it reads slot `lane // num_threads` and
+      # selects lane `lane % num_threads`, which is not the index the caller
+      # passed.
+      bc_lane, bc_index = None, None
       if self.stype == SymbolType.Register or self.stype == SymbolType.Scratch:
         assert len(self.lead_dims) == 1
         idx = index[self.lead_dims[0]]
         if isinstance(idx, (float, int, np.int32, np.int64)) or not idx.is_thread_dependent():
           if isinstance(idx, (float, int, np.int32, np.int64)):
             idx = Immediate(idx, Datatype.I32)
-          # doesn't work
           if isinstance(idx, Variable):
-            writevar = idx.write_nonlead()
-            pre_access = self.access(context, index, writer, addrs)
-            access = context.get_vm().get_lexic().broadcast(pre_access, writevar, self.num_threads)
+            bc_lane, bc_index = idx.write_nonlead(), list(index)
           else:
-            index2 = list(index)
-            index2[self.lead_dims[0]] = LeadIndex(idx._value // self.num_threads, self.num_threads, 1)
-            pre_access = self.access(context, index2, writer, addrs)
+            bc_index = list(index)
+            bc_index[self.lead_dims[0]] = LeadIndex(
+                idx._value // self.num_threads, self.num_threads, 1)
+            bc_lane = idx._value % self.num_threads
+      read_index = bc_index if bc_index is not None else index
 
-            writevar = idx._value % self.num_threads
-            access = context.get_vm().get_lexic().broadcast(pre_access, writevar, self.num_threads)
-        else:
-          access = pre_access
+      if variable is None and self.stype in (
+              SymbolType.Register, SymbolType.Scratch, SymbolType.SharedMem,
+              SymbolType.Batch, SymbolType.Global):
+        # The dereference itself, with the address as an operand rather than
+        # as a name spliced into a string.  Everything the string version
+        # declared -- the symbol it reads, the effect, the layout -- survives;
+        # what it could not say is that `base` and the address are *operands*,
+        # so a pass could neither see the def-use edge to the address nor
+        # recognise two reads of the same place.
+        #
+        # A Scalar stays on the text path below: it is not a subscripted
+        # access at all -- `access` returns the bare name -- so `Op.LOAD`
+        # would invent a `[0]` that never existed.
+        #
+        # `RELAXED` rather than a byte count, for every space and not only
+        # for registers.  A shared window *is* 16-byte aligned and the
+        # address *is* a multiple of the width, but a sliced operand adds a
+        # constant that this call cannot see the divisibility of, and a
+        # claim that is wrong is worse than one that is weak.  The relaxed
+        # type is legal at any base; tightening it needs the constant part
+        # of the address modelled, which is its own step.
+        #
+        # At most one of the two widths is ever greater than one for a given
+        # symbol: the lead width lives on the distributed axis and the vector
+        # width on the contiguous one, and no operand has the same axis in
+        # both roles.  `A` is wide in `m`, `B` in `k`.
+        from tensorforge.backend.pir.core import ScalarType
+        w = max(lead_width_of(read_index), vec_width_of(read_index))
+        ltype = (ScalarType(self.get_fptype()) if w == 1
+                 else ScalarType(self.get_fptype(), w))
+        value = writer.load(self,
+                            self.address_value(writer, context, read_index),
+                            type_=ltype, hint='data',
+                            align=None if w == 1 else RELAXED,
+                            layout=layout_of(read_index, self.num_threads),
+                            nontemporal=nontemp)
+        if bc_lane is None:
+          return value
+        # A broadcast is a load *wrapped* in a vendor intrinsic, and it used
+        # to be spelled whole: the buffer named inside a string, which is what
+        # kept the name alive for every register tile a contraction reads from
+        # a single lane.  Split, the load is an ordinary structured read and
+        # only the intrinsic is text -- with the value as its operand, so the
+        # buffer needs no name.
+        #
+        # It also lets four broadcasts of four different lanes of one tile
+        # share the read they all perform, which they could not while it sat
+        # inside a string.
+        #
+        # `pure` and `movable`: reading one lane of a register image has no
+        # effect and the same operands give the same result, so the emitter
+        # may inline it into the use, which keeps the emitted source the shape
+        # it was.
+        text = context.get_vm().get_lexic().broadcast(
+            '{0}', bc_lane, self.num_threads)
+        return writer.rawexpr(text, value, type_=ltype, hint='bc',
+                              pure=True, movable=True)
+
+      pre_access = self.access(context, read_index, writer, addrs)
+      if bc_lane is not None:
+        access = context.get_vm().get_lexic().broadcast(
+            pre_access, bc_lane, self.num_threads)
       else:
         access = pre_access
       if variable is None:
-        # structured: the consumer takes the value, not a name
         from tensorforge.backend.pir.core import ScalarType
-        if access is pre_access and self.stype in (
-                SymbolType.Register, SymbolType.Scratch,
-                SymbolType.SharedMem, SymbolType.Batch, SymbolType.Global):
-          # The dereference itself, with the address as an operand rather than
-          # as a name spliced into a string.  Everything the string version
-          # declared -- the symbol it reads, the effect, the layout -- survives;
-          # what it could not say is that `base` and the address are *operands*,
-          # so a pass could neither see the def-use edge to the address nor
-          # recognise two reads of the same place.
-          #
-          # Two kinds stay on the text path.  A broadcast (`access is not
-          # pre_access`) is a load wrapped in a vendor intrinsic, and splitting
-          # it here would leave a named temporary the source does not have.  A
-          # Scalar is not a subscripted access at all -- `access` returns the
-          # bare name -- so `Op.LOAD` would invent a `[0]` that never existed.
-          # The width the lead index carries, on the type -- the address is
-          # already scaled by it, because `LeadIndex.build` multiplies.
-          #
-          # `RELAXED` rather than a byte count, for every space and not only
-          # for registers.  A shared window *is* 16-byte aligned and the
-          # address *is* a multiple of the width, but a sliced operand adds a
-          # constant that this call cannot see the divisibility of, and a
-          # claim that is wrong is worse than one that is weak.  The relaxed
-          # type is legal at any base; tightening it needs the constant part
-          # of the address modelled, which is its own step.
-          # At most one of these is ever greater than one for a given
-          # symbol: the lead width lives on the distributed axis and the
-          # vector width on the contiguous one, and no operand has the same
-          # axis in both roles.  `A` is wide in `m`, `B` in `k`.
-          w = max(lead_width_of(index), vec_width_of(index))
-          ltype = (ScalarType(self.get_fptype()) if w == 1
-                   else ScalarType(self.get_fptype(), w))
-          return writer.load(self, self.address_value(writer, context, index),
-                             type_=ltype, hint='data',
-                             align=None if w == 1 else RELAXED,
-                             layout=layout_of(index, self.num_threads), nontemporal = nontemp)
         return writer.load_expr(
             access, ScalarType(self.get_fptype()), self,
             args=_operands(variable, addrs),
@@ -1752,14 +1761,14 @@ class Symbol:
       # could not was *which address*, and that is what aliasing, liveness and
       # a swizzled buffer all read.
       #
-      # The same two exclusions as the value form above: a broadcast is a load
-      # wrapped in a vendor intrinsic, and a Scalar is not a subscripted access
-      # at all, so `Op.LOAD` would invent an index that was never there.
-      if (access is pre_access and self.stype in (
+      # A broadcast still stays on the text path here: the value form above
+      # splits it into a load and a wrapper, which needs a value to wrap, and
+      # a named load has to produce the name itself.
+      if (bc_lane is None and self.stype in (
               SymbolType.Register, SymbolType.Scratch, SymbolType.SharedMem,
               SymbolType.Batch, SymbolType.Global)):
         from tensorforge.backend.pir.core import ScalarType
-        w = lead_width_of(index)
+        w = max(lead_width_of(index), vec_width_of(index))
         ltype = (ScalarType(self.get_fptype()) if w == 1
                  else ScalarType(self.get_fptype(), w))
         writer.load(self, self.address_value(writer, context, index),

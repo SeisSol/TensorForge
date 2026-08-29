@@ -147,16 +147,27 @@ def test_a_scalar_load_gains_no_subscript():
 
 
 @pytest.mark.parametrize("backend,arch", [("hip", "gfx90a")])
-def test_a_broadcast_stays_inside_its_intrinsic(backend, arch):
-    """The lane broadcast wraps the access; it does not read a named temporary.
+def test_a_broadcast_reads_a_value_and_not_a_named_buffer(backend, arch):
+    """The load is structured; only the intrinsic around it is text.
 
-    `Op.LOAD` is impure, so the emitter will not inline it into the intrinsic
-    call. Migrating this case would therefore add a temporary per broadcast,
-    which is a change to the generated code with nothing bought for it.
+    It used to be spelled whole -- `broadcast<16, 1, 0>(r1[0])` -- with the
+    buffer named inside a string, which is what kept a register tile's name
+    alive for every contraction that reads one lane of it.  Split, the read is
+    an ordinary `Op.LOAD` and the intrinsic takes its value as an operand.
+
+    The reason to do it is not tidiness.  Four broadcasts of four *different*
+    lanes of one tile are four reads of the same place, and while the read sat
+    inside the string no pass could see that: `gemm_trans_b_12x16` emitted
+    `broadcast<16,1,L>(r1[0])` four times over and dropped 30 lines when CSE
+    was finally able to share the load.
     """
     src = _generate("chain_three", backend, arch)
-    for call in re.findall(r'__shfl\w*\(([^;]+)\)', src):
-        assert '[' in call or 'v' in call, call
+    calls = re.findall(r'(?:__shfl\w*|tensorforge::(?:readlane|broadcast<[^>]*>))'
+                       r'\(([^;]+)\)', src)
+    assert calls, "the corpus stopped exercising the broadcast path"
+    for call in calls:
+        assert '[' not in call, (
+            f"a broadcast still subscripts a named buffer: {call}")
 
 
 def test_the_exceptions_are_reachable_at_all():
@@ -177,7 +188,16 @@ def test_the_exceptions_are_reachable_at_all():
     # `atomic_store` returns an expression rather than a statement, and takes
     # operands the op has no place for.
     assert 'atomic' in src, 'the atomic exception vanished'
-    assert 'access is pre_access' in src, 'the broadcast exception vanished'
+    # The broadcast used to be checked here as a second exception.  It is not
+    # one any more: the load goes through `Op.LOAD` like every other read and
+    # only the intrinsic wrapping it stays text, with the loaded value as its
+    # operand.  What is left on the text path is `atomic` -- `atomic_store`
+    # returns an expression rather than a statement -- and the scalar, which
+    # is not a subscripted access at all.
+    # The scalar is excluded by not appearing in the list of kinds the
+    # structured path accepts, so what is checked is the list itself.
+    assert 'SymbolType.SharedMem' in src and 'SymbolType.Global' in src, (
+        'the structured-load kind list vanished')
 
 
 # ---------------------------------------------------------------------- #

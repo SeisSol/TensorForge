@@ -43,9 +43,12 @@ class ElementwiseInstruction(ComputeInstruction):
         self._gemm_meta_data = None
         self.registers = None
 
-        for view in self._tensor_srcs() + [self._dest]:
-            if not isinstance(view.symbol.obj, Tensor):
-                raise InternalError('elementwise: operand is not a tensor')
+        # A destination this operation produces into is shaped here: iteration
+        # axis `i` is axis `i` of the destination, so what it writes is exactly
+        # the box it declares.
+        self.claim_destination(self._dest)
+        self.check_addressable(self._tensor_srcs() + [self._dest],
+                               'elementwise')
 
         # From the symbols, not assumed to be axis 0.  Every operand shares
         # the destination's shape -- `ElementwiseDescr` checks that -- so

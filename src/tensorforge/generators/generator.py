@@ -12,12 +12,15 @@ from tensorforge.backend.data_types import ShrMemObject, RegMemObject
 from tensorforge.backend.opt import OptimizationStage
 from tensorforge.backend.opt.inspect import async_depth, format_diagnostics, verify
 from tensorforge.backend.scopes import Scopes
-from tensorforge.backend.symbol import Symbol, SymbolType, SymbolView
+from tensorforge.backend.residency import Residency
+from tensorforge.backend.section_plan import SectionPlan
+from tensorforge.backend.temporaries import Temporaries
+from tensorforge.backend.symbol import Symbol, SymbolType
 from tensorforge.backend.instructions.abstract_instruction import AbstractInstruction
-from tensorforge.backend.instructions.compute.elementwise import ElementwiseInstruction
-from tensorforge.backend.instructions.compute.reduction import ReductionInstruction
 from tensorforge.backend.instructions.builders.loader_builder import GlobalLoaderBuilder
 from tensorforge.backend.instructions.builders.multilinear_builder import MultilinearBuilder
+from tensorforge.backend.instructions.builders.pointwise_builders import (
+    ElementwiseBuilder, ReductionBuilder)
 from tensorforge.backend.instructions.builders.ptr_manip_builder import GetElementPtrBuilder
 from tensorforge.backend.instructions.builders.allocator_builder import ShrMemAllocBuilder
 from tensorforge.backend.instructions.sync_block import SyncThreads, SyncBlock, SyncGrid
@@ -483,47 +486,45 @@ class Generator:
         self._section.ir.extend(builder.get_instructions())
 
     self._scopes.add_scope()
-    # generate GEMM and store operations
-    builder = MultilinearBuilder(self._context,
-                          self._scopes,
+    # Both of these belong to the section rather than to any one builder.
+    #
+    # The plan is the section's read/write geometry, computed once from the
+    # descriptor list; the residency is where the section's values currently
+    # are, which every operation reads and writes as it goes.
+    #
+    # The residency's lifetime is the section's, deliberately.  Carrying one
+    # across a barrier would push its writebacks past the barrier that was
+    # supposed to publish them.
+    plan = SectionPlan(descr_list, self._scopes)
+    residency = Residency(self._context,
                           self._scopes.get_symbol(self._section.shr_mem_obj),
                           self._num_threads,
                           self._lead_width)
-    # builder.build_prologue()
+    temporaries = Temporaries(self._context, self._scopes, self._num_threads)
 
-    def get_symbol_view(op):
-      symbol = self._scopes.get_symbol(op.tensor)
-      return SymbolView(symbol, op.bbox, op.offset)
+    # One builder per kind of operation, all sharing the section's plan,
+    # residency and temporaries.  The list is ordered: `GemmDescr` is a
+    # `MultilinearDescr`, so the first match wins rather than the exact type.
+    common = (self._context, self._scopes,
+              self._scopes.get_symbol(self._section.shr_mem_obj),
+              self._num_threads, plan, residency, temporaries,
+              self._lead_width)
+    builders = [
+        (MultilinearDescr, MultilinearBuilder(*common)),
+        (ElementwiseDescr, ElementwiseBuilder(*common)),
+        (ReductionDescr, ReductionBuilder(*common)),
+    ]
 
-    builder.plan(descr_list)
+    for descr in descr_list:
+      for kind, builder in builders:
+        if isinstance(descr, kind):
+          builder.build(descr)
+          self._section.ir.extend(builder.get_instructions())
+          break
 
-    for gemm_descr in descr_list:
-      if isinstance(gemm_descr, MultilinearDescr):
-        builder.build(ops=[get_symbol_view(op) for op in gemm_descr.ops],
-                        dest_obj=gemm_descr.dest,
-                        descr=gemm_descr)
-        self._section.ir.extend(builder.get_instructions())
-      if isinstance(gemm_descr, ElementwiseDescr):
-        self._section.ir.append(ElementwiseInstruction(
-            self._context,
-            gemm_descr.op,
-            get_symbol_view(gemm_descr.dest),
-            [s if isinstance(s, (int, float)) else get_symbol_view(s)
-             for s in gemm_descr.srcs],
-            gemm_descr.prefer_align,
-            self._num_threads))
-      if isinstance(gemm_descr, ReductionDescr):
-        self._section.ir.append(ReductionInstruction(
-            self._context,
-            get_symbol_view(gemm_descr.dest),
-            get_symbol_view(gemm_descr.var),
-            gemm_descr.dims,
-            gemm_descr.op,
-            gemm_descr.prefer_align,
-            self._num_threads))
-
-    builder.build_epilogue()
-    self._section.ir.extend(builder.get_instructions())
+    # Anything the section still holds only in registers has to reach memory
+    # before the section ends.
+    self._section.ir.extend(residency.flush_all())
 
   def _deduce_mults_per_block(self):
     policy = self._thread_block_policy_type(self._context,

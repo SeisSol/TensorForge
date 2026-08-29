@@ -1,72 +1,36 @@
 # SPDX-FileCopyrightText: 2026 SeisSol Group
 #
 # SPDX-License-Identifier: MIT
-from typing import Tuple, Dict, List
-from tensorforge.common.context import Context
+from typing import Tuple
 from tensorforge.common.basic_types import Addressing
-from tensorforge.backend.scopes import Scopes
-from tensorforge.backend.symbol import DataView, Symbol, SymbolType, SymbolView
-from tensorforge.backend.instructions.allocate import RegisterAlloc
+from tensorforge.backend.symbol import Symbol, SymbolType, SymbolView
 from tensorforge.backend.instructions.memory.load import GlbToShrLoader, GlbToRegLoader
 from tensorforge.backend.instructions.memory.store import StoreRegToGlb, StoreRegToShr, StoreRegToReg
 from tensorforge.backend.instructions.sync_block import SyncThreads
 from tensorforge.backend.instructions.compute.multilinear import MultilinearInstruction
 from tensorforge.common.matrix.tensor import Tensor
 from tensorforge.common.exceptions import InternalError, GenerationError
-import itertools
 from tensorforge.common.matrix.boundingbox import BoundingBox
 from tensorforge.generators.descriptions import MultilinearDescr
-from tensorforge.backend.instructions.builders.allocator_builder import AbstractBuilder
+from tensorforge.backend.instructions.builders.operation_builder import OperationBuilder
+from tensorforge.backend.instructions.abstract_instruction import _explicit_simd
+from tensorforge.backend.placement import (Placement, ResultPlacement,
+                                           choose_operand_placement,
+                                           choose_result_placement,
+                                           legal_operand_placements,
+                                           legal_result_placements,
+                                           policy_for, result_is_atomic)
 from tensorforge.common.operation import AddOperator, MulOperator
-from tensorforge.backend.data_types import RegMemObject
-from tensorforge.backend.instructions.abstract_instruction import (
-    AbstractInstruction, _explicit_simd)
 
 
-class MultilinearBuilder(AbstractBuilder):
-  def __init__(self,
-               context: Context,
-               scopes: Scopes,
-               shr_mem: Symbol,
-               num_threads: int,
-               lead_width: int = 1):
-    super(MultilinearBuilder, self).__init__(context, scopes)
-    self._shr_mem = shr_mem
-    self._num_threads = num_threads
-    self._lead_width = lead_width
-
-
-    self._counter = 0
-    self._counter_shr_reg = 0
-    self._loaders_cache: Dict[Symbol, AbstractInstruction] = {}
-
-    self._ops = None
-    self._dest_obj = None
-    self._descr = None
-
-    self._mem_regions = None
-
-    self._temp_regs = None
-    self._dest_regs = None
-
-    self._use_registers_always = self._context.get_vm().get_hw_descr().vendor in ['amd', 'nvidia']
-    self._preload_registers = self._context.get_vm().get_hw_descr().vendor in ['amd', 'nvidia']
-    self._preload_shmem = self._context.get_vm().get_hw_descr().vendor in [] #['nvidia']
-    self._atomic_update = self._context.get_vm().get_hw_descr().vendor in ['amd'] # , 'nvidia' # ?
-    self._deferred_stores = {}
-    # per pending writeback: the box its producing descriptor undertook to
-    # define, so the deferred store zero-fills exactly what `_analyze` narrowed
-    # away and nothing else
-    self._promised = {}
-    # what each deferred/staged image actually holds, so a later consumer
-    # can tell whether reusing it is sound: position `r` of the image holds
-    # tensor element `r + shift`, for `r` inside `covered`.
-    self._staged_view = {}
-    # tensor symbol name -> union of every operand access, in tensor
-    # storage coordinates.  Filled by plan(); see there.
-    self._operand_union = {}
-    self._temporaries = {}
-
+class MultilinearBuilder(OperationBuilder):
+  def __init__(self, *args, **kwargs):
+    super().__init__(*args, **kwargs)
+    #: What this hardware prefers among the placements that are legal.  Only
+    #: preferences: nothing here can make a correct kernel incorrect, and the
+    #: legality half is asked separately at each decision.
+    self._policy = policy_for(self._context.get_vm().get_hw_descr(),
+                              explicit_simd=_explicit_simd(self._context))
 
   def _k_width(self, descr) -> int:
     """How many reduction steps one body should cover for this operator.
@@ -81,12 +45,16 @@ class MultilinearBuilder(AbstractBuilder):
       return 1
     return vectorize.K_WIDTH
 
-  def build(self, ops: List[Symbol], dest_obj: Tensor, descr: MultilinearDescr):
-    self._reset()
+  def resolve_operands(self, descr):
+    """Stage every operand where this operation wants to read it.
 
-    self._ops = ops
-    self._dest_obj = dest_obj
+    Not the base's answer: a contraction does not have to settle a value back
+    into memory to use it.  It consults the residency, takes a register image
+    where the lane axis agrees, and stages afresh where it does not.
+    """
     self._descr = descr
+    self._dest_obj = descr.dest
+    self._ops = [self.view_of(op) for op in descr.ops]
 
     self._add = descr.add
     # yateto states `add` as a bool today; the array form is meant to say which
@@ -110,18 +78,24 @@ class MultilinearBuilder(AbstractBuilder):
     for i in range(len(self._ops)):
         self._make_load_op(i)
     self._insert_sync_block()
+    return self._mem_regions
+
+  def alloc_destination(self, descr, operands):
+    """The accumulator, in the shifted origin the lead loop runs in."""
     self._theta = self._lead_origin_shift()
     self._temp_regs = self._alloc_register_array()
+    return self._temp_regs
+
+  def emit_compute(self, descr, operands, dest) -> None:
     self._make_compute()
     self._insert_sync_block()
+
+  def record_result(self, descr, dest) -> None:
     self._make_store()
     self._insert_sync_block()
 
   # TODO: check if we always can allow a direct global memory load
   def _make_load_op(self, i):
-
-    prefer_broadcast = self._context.get_vm().get_hw_descr().vendor in ['amd']
-
     has_lead_dim = 0 in self._descr.target[i]
     transpose = self._descr.permute[i] != [j for j in range(len(self._descr.target[i]))]
 
@@ -139,8 +113,23 @@ class MultilinearBuilder(AbstractBuilder):
     lead_pos = self._descr.target[i].index(0) if has_lead_dim else 0
     self._lead_pos[i] = lead_pos
 
-    needs_reload = (transpose or not has_lead_dim) and not prefer_broadcast
-    needs_reload2 = transpose or not has_lead_dim
+    # Whether this operand's lane axis is where a reader expects it.  A
+    # legality fact and nothing else: it does not change with the vendor, and
+    # the staging shift and the choice of loader both key on it even where the
+    # hardware can read the operand in place anyway.
+    lane_axis_needs_moving = transpose or not has_lead_dim
+
+    symbol = self._ops[i].symbol
+    addressable = not (
+        symbol.stype in (SymbolType.Scalar, SymbolType.Data)
+        or (isinstance(symbol.obj, Tensor) and len(symbol.obj.shape) == 0)
+        or getattr(symbol.obj, 'addressing', None) == Addressing.NONE)
+    placement = choose_operand_placement(
+        legal_operand_placements(addressable=addressable,
+                                 transposed=transpose,
+                                 carries_lead_dim=has_lead_dim,
+                                 policy=self._policy),
+        self._policy)
 
     name = self._ops[i].symbol.name
 
@@ -153,35 +142,36 @@ class MultilinearBuilder(AbstractBuilder):
     #     global memory still holds the value and the ordinary path re-stages
     #     it in the orientation this operand wants;
     #   * a pending store of a temporary has to go out to shared memory first,
-    #     which is exactly what `needs_reload` already does (and what the CUDA
+    #     which is exactly what a shared placement already does (and what the CUDA
     #     path does for every transposed operand anyway).
-    staged = self._deferred_stores.get(name)
+    staged = self._residency.get(name)
     if staged is not None and not self._lane_axis_matches(name, lead_pos):
-      if staged[0] is staged[1]:
-        del self._deferred_stores[name]
-        self._staged_view.pop(name, None)
+      if staged.is_preload:
+        self._residency.drop(name)
       else:
-        needs_reload = True
+        # legality, not preference: the image cannot serve, and only a copy
+        # through shared memory can move the lane axis
+        placement = Placement.SHARED
 
     # The linearized load packs the operand flat --- storage element `f` goes
     # to lane `f % T`, slot `f // T` --- which can only ever make the *first*
     # dimension the lane axis.  With the lane axis elsewhere the flat packing
     # and the per-dimension addressing describe different images, so take the
     # dimension-wise loader instead; it is correct for any lane axis.
-    linearize = needs_reload2 and lead_pos == 0
+    linearize = lane_axis_needs_moving and lead_pos == 0
 
-    if name in self._deferred_stores and self._resolve_reuse(i, name):
-      if needs_reload:
-        src, dest, _ = self._deferred_stores[name]
+    if name in self._residency and self._resolve_reuse(i, name):
+      entry = self._residency.get(name)
+      if placement is Placement.SHARED:
         self._instructions.append(StoreRegToShr(context=self._context,
-                                                src=src,
-                                                dest=dest,
+                                                src=entry.image,
+                                                dest=entry.home,
                                                 shr_mem=self._shr_mem,
                                                 num_threads=self._num_threads))
-        del self._deferred_stores[name]
-        self._ops[i].symbol = dest
+        self._residency.drop(name)
+        self._ops[i].symbol = entry.home
       else:
-        self._ops[i].symbol, _, _ = self._deferred_stores[name]
+        self._ops[i].symbol = entry.image
 
     if self._ops[i].symbol.stype == SymbolType.Scalar or self._ops[i].symbol.stype == SymbolType.Data \
       or (isinstance(self._ops[i].symbol.obj, Tensor) and len(self._ops[i].symbol.obj.shape) == 0): # <-- quasi-scalar
@@ -189,340 +179,49 @@ class MultilinearBuilder(AbstractBuilder):
     else:
 
       if self._ops[i].symbol.stype == SymbolType.Global:
-        if needs_reload and self._ops[i].symbol.obj.addressing != Addressing.NONE:
+        if placement is Placement.SHARED and self._ops[i].symbol.obj.addressing != Addressing.NONE:
           shift = self._stage_shift(i, absorb_lead=False)
           staged, load_op = self._make_loader_and_symbol(self._stage_view(i, shift), is_transpose=self._descr.permute[i])
           self._mem_regions[i] = self._staged_region(i, staged, shift)
-          self._loaders_cache[self._mem_regions[i]] = load_op
           self._instructions.append(load_op)
         else:
-          if self._preload_registers and self._ops[i].symbol.obj.addressing != Addressing.NONE:
+          if placement is Placement.REGISTER and self._ops[i].symbol.obj.addressing != Addressing.NONE:
             # only register-preload dense matrices for now
-            shift = self._stage_shift(i, absorb_lead=not needs_reload2)
+            shift = self._stage_shift(i, absorb_lead=not lane_axis_needs_moving)
             staged, load_op = self._make_loader_and_symbol_reg(
                 self._stage_view(i, shift), linearize=linearize,
                 lead_pos=lead_pos)
             self._mem_regions[i] = self._staged_region(i, staged, shift)
-            self._deferred_stores[self._ops[i].symbol.name] = self._mem_regions[i].symbol, self._mem_regions[i].symbol, None
-            self._record_staged(self._ops[i].symbol.name,
-                                self._mem_regions[i].symbol.data_view.get_bbox(),
-                                shift)
+            self._residency.record_preload(
+                self._ops[i].symbol.name, self._mem_regions[i].symbol,
+                self._mem_regions[i].symbol.data_view.get_bbox(), shift)
             self._instructions.append(load_op)
-          elif self._preload_shmem and self._ops[i].symbol.obj.addressing != Addressing.NONE:
+          elif placement is Placement.SHARED and self._ops[i].symbol.obj.addressing != Addressing.NONE:
             # only register-preload dense matrices for now
             shift = self._stage_shift(i, absorb_lead=False)
             staged, load_op = self._make_loader_and_symbol(self._stage_view(i, shift), None)
             self._mem_regions[i] = self._staged_region(i, staged, shift)
-            self._deferred_stores[self._ops[i].symbol.name] = self._mem_regions[i].symbol, self._mem_regions[i].symbol, None
-            self._record_staged(self._ops[i].symbol.name,
-                                self._mem_regions[i].symbol.data_view.get_bbox(),
-                                shift)
+            self._residency.record_preload(
+                self._ops[i].symbol.name, self._mem_regions[i].symbol,
+                self._mem_regions[i].symbol.data_view.get_bbox(), shift)
             self._instructions.append(load_op)
           else:
             # Note: operand will reside in glb. mem for gemm operation
             self._mem_regions[i] = self._ops[i]
 
       elif self._ops[i].symbol.stype == SymbolType.SharedMem or self._ops[i].symbol.stype == SymbolType.Register:
-        if self._ops[i].symbol in self._loaders_cache.keys():
-          # Note: this condition means the symbol `self._ops[i].symbol` has been loaded
-          # to shr. mem. before. Let's check whether loaded data can be reused
-          prev_loader = self._loaders_cache[self._ops[i].symbol]
-
-          # we only need to reload/globally load, if we even need a leading dimension
-          if self._descr.permute[i] != prev_loader.get_permute() and has_lead_dim:
-            if not transpose:
-              # means: data loaded to shr. mem. cannot be reused. Because `op1` not need to be transposed
-              # we don't need to load it to shr. mem. Instead, it will be taken from glb. mem.
-              # we don't need delete previous (aliased) symbol
-              self._mem_regions[i] = SymbolView(prev_loader.get_src(),
-                                               self._ops[i].bbox, self._ops[i].offset)
-            else:
-              # means: data cannot be reused. we need to reload it again and traspose on the fly.
-              # additionally, we need to remove aliased symbol to avoid clashes
-              # self._scopes.delete_symbol(self._ops[i].symbol)
-              self._scopes.add_scope()
-              prev_symbol = prev_loader.get_src()
-              # NOTE: this call was missing its `is_transpose` argument entirely
-              # (TypeError if the branch is ever reached); re-staging the original
-              # global source wants this operation's own permutation.
-              self._mem_regions[i], load_op = self._make_loader_and_symbol(
-                  SymbolView(prev_symbol, self._ops[i].bbox, self._ops[i].offset),
-                  is_transpose=self._descr.permute[i])
-              self._loaders_cache[self._mem_regions[i]] = load_op
-              self._instructions.append(load_op)
-          else:
-            # means: data can be fully reused
-            self._mem_regions[i] = self._ops[i]
-
-        else:
-          self._mem_regions[i] = self._ops[i]
+        # An operand that already sits in shared memory or in registers is
+        # read where it is.  Deciding to re-stage it in a different
+        # orientation would need a record of which orientation the existing
+        # image has; the residency entry carries that, and
+        # `_lane_axis_matches` above is what consults it.
+        self._mem_regions[i] = self._ops[i]
       else:
         raise InternalError(f'gemm-builder: op{i} ({self._ops[i].symbol.name}) must be either in shr or glb mem, given: {self._ops[i].symbol.stype}')
 
-  def plan(self, descr_list):
-    """Size every staging to the union of the slices that will read it.
-
-    A tensor's staging is created by whichever operation touches it first and,
-    because `_deferred_stores` is keyed by name and lives for the whole kernel,
-    is then handed to every later operation on that tensor.  Sizing it to the
-    first consumer's slice therefore starves all the others --- which is what
-    `_resolve_reuse` had to refuse.  The full descriptor list is known before
-    codegen, so the union can simply be taken up front.
-
-    The union is kept in *tensor storage* coordinates and the staged image is
-    indexed the same way.  That makes the mapping the identity: every consumer
-    keeps the offset it already states against the tensor, nothing is rebased,
-    and containment holds by construction.
-
-    Destinations are deliberately not counted --- they are produced, not
-    staged, and their range is whatever `_analyze` intersects it down to.
-    """
-    self._operand_union = {}
-    # same, but over destinations: what a tensor's writes cover, and how many
-    # descriptors contribute.  A temporary written by exactly one operation can
-    # stay in registers until someone asks for it; one written in slices has to
-    # be assembled somewhere, because each operation only ever holds its own
-    # slice in `_temp_regs`.
-    self._dest_union = {}
-    self._read_union = {}
-    # every box each writer of a destination states; the count is how many
-    # writers there are, and whether they all match the union is whether the
-    # tensor is assembled from pieces
-    # every individual write box, not just their union: two writes to [0,2) and
-    # [8,10) union to [0,10), so a union-against-union test would wave through
-    # a read of [2,8) that nothing ever wrote
-    self._dest_boxes = {}
-    self._read_tensors = {}
-    self._eff_reads = {}
-    self._eff_writes = {}
-    for descr in descr_list:
-      if not isinstance(descr, MultilinearDescr):
-        continue
-      for op in descr.ops:
-        tensor = getattr(op, 'tensor', None)
-        if tensor is None:
-          continue
-        lower = [l + o for l, o in zip(op.bbox.lower(), op.offset)]
-        upper = [u + o for u, o in zip(op.bbox.upper(), op.offset)]
-
-        # Keyed by tensor, and recorded *before* the symbol lookup: a temporary
-        # has no symbol until the operation that first writes it creates one,
-        # so guarding this on the lookup left every temporary with an empty
-        # read union --- and `_written_in_slices` then saw nothing to cover and
-        # happily deferred a store that only held part of the tensor.
-        rkey = id(tensor)
-        rprev = self._read_union.get(rkey)
-        rlo, rup = list(lower), list(upper)
-        if rprev is not None:
-          rlo = [min(a, b) for a, b in zip(rprev.lower(), rlo)]
-          rup = [max(a, b) for a, b in zip(rprev.upper(), rup)]
-        self._read_union[rkey] = BoundingBox(rlo, rup)
-        self._read_tensors[tensor] = self._read_union[rkey]
-
-        # The staging union is keyed by symbol name, which only exists for
-        # tensors that are already materialised somewhere.
-        symbol = self._scopes.get_symbol(tensor)
-        if symbol is None:
-          continue
-        prev = self._operand_union.get(symbol.name)
-        if prev is not None:
-          lower = [min(a, b) for a, b in zip(prev.lower(), lower)]
-          upper = [max(a, b) for a, b in zip(prev.upper(), upper)]
-        self._operand_union[symbol.name] = BoundingBox(lower, upper)
-
-      dest = getattr(descr, 'dest', None)
-      tensor = getattr(dest, 'tensor', None) if dest is not None else None
-      if tensor is not None:
-        # keyed by tensor, not by symbol name: a temporary has no symbol until
-        # the operation that first writes it creates one, which is long after
-        # plan() has run
-        key = id(tensor)
-        lower = [l + o for l, o in zip(dest.bbox.lower(), dest.offset)]
-        upper = [u + o for u, o in zip(dest.bbox.upper(), dest.offset)]
-        prev = self._dest_union.get(key)
-        if prev is not None:
-          lower = [min(a, b) for a, b in zip(prev.lower(), lower)]
-          upper = [max(a, b) for a, b in zip(prev.upper(), upper)]
-        self._dest_union[key] = BoundingBox(lower, upper)
-        self._dest_boxes.setdefault(key, []).append(
-            BoundingBox([l + o for l, o in zip(dest.bbox.lower(), dest.offset)],
-                        [u + o for u, o in zip(dest.bbox.upper(), dest.offset)]))
-
-      eff = self._effective_boxes(descr)
-      if eff is not None:
-        eff_reads, eff_write = eff
-        for t, box in eff_reads.items():
-          prev = self._eff_reads.get(t)
-          self._eff_reads[t] = box if prev is None else BoundingBox(
-              [min(a, b) for a, b in zip(prev.lower(), box.lower())],
-              [max(a, b) for a, b in zip(prev.upper(), box.upper())])
-        if tensor is not None:
-          self._eff_writes.setdefault(id(tensor), []).append(eff_write)
-
-    self._check_initialised()
-
-  def _effective_boxes(self, descr):
-    """Read and write boxes after the range intersection, in tensor coords.
-
-    A descriptor's declared operand box is an upper bound on what that operand
-    contributes; `_analyze` intersects the boxes of everything sharing a target
-    index (and the destination) and iterates only that. Checking declared reads
-    against actual writes therefore flags regions that are never touched --- so
-    the intersection has to be replayed here to compare like with like.
-
-    Returns `(reads, write)` where `reads` maps tensor -> BoundingBox and
-    `write` is the destination's box, or `None` when the shapes do not line up.
-    """
-    ranges = {}
-
-    def narrow(t, lo, hi):
-      prev = ranges.get(t)
-      ranges[t] = (max(prev[0], lo), min(prev[1], hi)) if prev else (lo, hi)
-
-    ops = list(getattr(descr, 'ops', []) or [])
-    targets = list(getattr(descr, 'target', []) or [])
-    dest = getattr(descr, 'dest', None)
-    if dest is None or len(ops) != len(targets):
-      return None
-    for op, target in zip(ops, targets):
-      if getattr(op, 'bbox', None) is None or len(target) != op.bbox.rank():
-        return None
-      for j, t in enumerate(target):
-        narrow(t, op.bbox.lower()[j], op.bbox.upper()[j])
-    for j in range(dest.bbox.rank()):
-      narrow(j, dest.bbox.lower()[j], dest.bbox.upper()[j])
-
-    reads = {}
-    for op, target in zip(ops, targets):
-      tensor = getattr(op, 'tensor', None)
-      if tensor is None:
-        continue
-      lo = [ranges[t][0] + op.offset[j] for j, t in enumerate(target)]
-      hi = [ranges[t][1] + op.offset[j] for j, t in enumerate(target)]
-      box = BoundingBox(lo, hi)
-      prev = reads.get(tensor)
-      if prev is not None:
-        box = BoundingBox([min(a, b) for a, b in zip(prev.lower(), lo)],
-                          [max(a, b) for a, b in zip(prev.upper(), hi)])
-      reads[tensor] = box
-    wlo = [ranges[j][0] + dest.offset[j] for j in range(dest.bbox.rank())]
-    whi = [ranges[j][1] + dest.offset[j] for j in range(dest.bbox.rank())]
-    return reads, BoundingBox(wlo, whi)
-
-  def _uncovered(self, key, read):
-    """The first sub-box of `read` that no write covers, or None.
-
-    Coordinate compression: cut every dimension at all the box boundaries that
-    fall inside `read`.  Each resulting cell then lies either wholly inside or
-    wholly outside every write box, so "is this cell covered" is an exact test
-    and the whole check is exact rather than conservative.
-    """
-    boxes = self._eff_writes.get(key, [])
-    rank = read.rank()
-    if rank == 0 or not boxes or any(b.rank() != rank for b in boxes):
-      return None
-    cuts = []
-    for j in range(rank):
-      lo, hi = read.lower()[j], read.upper()[j]
-      if lo >= hi:
-        return None                      # empty read, nothing to cover
-      pts = {lo, hi}
-      for b in boxes:
-        for v in (b.lower()[j], b.upper()[j]):
-          if lo < v < hi:
-            pts.add(v)
-      cuts.append(sorted(pts))
-    for corner in itertools.product(*[range(len(c) - 1) for c in cuts]):
-      lo = [cuts[j][corner[j]] for j in range(rank)]
-      hi = [cuts[j][corner[j] + 1] for j in range(rank)]
-      if any(all(b.lower()[j] <= lo[j] and hi[j] <= b.upper()[j]
-                 for j in range(rank)) for b in boxes):
-        continue
-      return BoundingBox(lo, hi)
-    return None
-
-  def _check_initialised(self):
-    """Refuse to read a temporary where nothing ever wrote.
-
-    A temporary is created by the kernel, so anything read outside what the
-    kernel writes is whatever the shared or global allocation happened to
-    contain.  Global inputs and outputs are exempt: an input is legitimately
-    never written, and an output may hold a value the caller put there.
-
-    Filling the gap with zeros is the obvious other answer, and the right one
-    once a declaration instruction owns the buffer.  Until then this refuses,
-    because a silently undefined summand is exactly the failure mode that took
-    the longest to find in this area.
-    """
-    for tensor, read in self._eff_reads.items():
-      if not getattr(tensor, 'is_tmp', False):
-        continue
-      key = id(tensor)
-      if key not in self._eff_writes:
-        raise GenerationError(
-            f'{getattr(tensor, "alias", None) or tensor}: temporary is read '
-            f'over {read} but never written')
-      gap = self._uncovered(key, read)
-      if gap is not None:
-        raise GenerationError(
-            f'{getattr(tensor, "alias", None) or tensor}: temporary is read '
-            f'over {read} but {gap} is never written by any operation '
-            f'(writes: {self._eff_writes[key]}). Zero-filling the gap needs a '
-            f'declaration instruction that owns the buffer.')
-
-  def _written_in_slices(self, tensor):
-    """Does this tensor get assembled from several writes?
-
-    Deferring the store is right while one operation writes the whole thing:
-    the value can stay in registers and be handed straight to the next
-    consumer.  With several writers each operation holds only its own slice, so
-    the deferred entry --- there is one per name --- would keep whichever came
-    last and silently lose the rest.  Those have to go into the shared buffer
-    as they are produced.
-
-    Several writers are *not* by themselves such a case.  An accumulation
-    chain --- `d = a1 b1` followed by `d += a2 b2` and so on, which is what a
-    yateto flux or ADER derivative kernel looks like --- has every writer
-    covering the same box, each reading what the previous one produced.  There
-    the last accumulator holds the whole tensor, deferring is exactly right,
-    and forcing the store out per term costs a global round trip on every
-    term.  So the question is not how many writers there are but whether any
-    of them writes less than the union.
-
-    Ask it of what each writer *actually* writes, not of what its descriptor
-    declares.  `_analyze` intersects the range down to what the operands
-    support, so an accumulation onto the whole box from an operand that spans
-    half of it writes half --- the elastic ADER kernels are full of
-    `t += Q_face * c`, all declaring the whole tensor and each covering the
-    rows its own face touches.  Judged on the declared boxes those look like
-    one writer covering everything, and the register image left behind holds
-    only the last one's rows; the read that follows then wants the union and
-    finds half of it.
-    """
-    boxes = self._eff_writes.get(id(tensor)) or self._dest_boxes.get(id(tensor), [])
-    union = None
-    for b in boxes:
-      union = b if union is None else BoundingBox(
-          [min(l, o) for l, o in zip(union.lower(), b.lower())],
-          [max(u, o) for u, o in zip(union.upper(), b.upper())])
-    if union is not None and any(
-        b.lower()[j] > union.lower()[j] or b.upper()[j] < union.upper()[j]
-        for b in boxes for j in range(union.rank())):
-      return True
-    # one writer is still not enough if it does not cover everything that gets
-    # read back: `_analyze` intersects `_ns` down to what the operands support,
-    # so a single store can easily be narrower than the declared destination
-    written = self._dest_union.get(id(tensor))
-    read = self._read_union.get(id(tensor))
-    if written is None or read is None:
-      return False
-    return any(read.lower()[j] < written.lower()[j]
-               or read.upper()[j] > written.upper()[j]
-               for j in range(written.rank()))
-
   def _union_of(self, i):
     view = self._ops[i]
-    union = self._operand_union.get(view.symbol.name)
+    union = self._plan.operand_union(view.symbol.name)
     if union is None:
       union = BoundingBox([l + o for l, o in zip(view.bbox.lower(), view.offset)],
                           [u + o for u, o in zip(view.bbox.upper(), view.offset)])
@@ -576,15 +275,15 @@ class MultilinearBuilder(AbstractBuilder):
     Only register images have a lane axis at all; a shared-memory staging is
     a verbatim copy and serves any orientation.
     """
-    staged_src, _, _ = self._deferred_stores[name]
-    if staged_src.stype not in (SymbolType.Register, SymbolType.Scratch):
+    image = self._residency.get(name).image
+    if image.stype not in (SymbolType.Register, SymbolType.Scratch):
       return True
-    return staged_src.lead_dims == [lead_pos]
+    return image.lead_dims == [lead_pos]
 
   def _resolve_reuse(self, i, name):
     """Decide whether the already-staged image can serve this operand.
 
-    `_deferred_stores` is keyed by the global symbol's name and lives for the
+    The residency is keyed by the global symbol's name and lives for the
     whole kernel, so any later operation on the same tensor inherits the
     earlier staging regardless of which slice it asks for.  Two things follow.
 
@@ -596,54 +295,37 @@ class MultilinearBuilder(AbstractBuilder):
     consumer wants a different part, what can be done depends on where the
     authoritative copy lives:
 
-      * a *preload* of a global input (`src is dest`, both the staged symbol):
-        global memory still holds the value, so the entry is simply dropped and
-        the ordinary path stages the range that is actually wanted;
-      * a *pending store* of a temporary (`dest` is the global symbol): the
-        value exists only in registers and the missing part was produced by
-        some other instruction, so there is nothing to fall back on.
+      * a *preload*: global memory still holds the value, so the entry is
+        simply dropped and the ordinary path stages the range that is actually
+        wanted;
+      * a *writeback*: the value exists only in registers and the missing part
+        was produced by some other instruction, so there is nothing to fall
+        back on.
 
     Sizing the staging to the union of all consumers would avoid the second
     case entirely; until then it is refused loudly rather than miscompiled.
     """
-    covered, shift = self._staged_view.get(name, (None, None))
+    entry = self._residency.get(name)
     view = self._ops[i]
-    if covered is None:
+    if entry.covered is None:
       if any(o != 0 for o in view.offset):
         raise GenerationError(
             f'{name}: reusing a staged image whose covered range was not '
             f'recorded, with a non-zero slicing offset {view.offset}')
       return True
 
-    for j in range(view.bbox.rank()):
-      lo = view.bbox.lower()[j] + view.offset[j] - shift[j]
-      hi = view.bbox.upper()[j] + view.offset[j] - shift[j]
-      if lo < covered.lower()[j] or hi > covered.upper()[j]:
-        staged_src, staged_dest, _ = self._deferred_stores[name]
-        # A *preload* stages a global input and records `src is dest`; global
-        # memory still holds the value, so dropping the entry and staging the
-        # wanted range afresh is sound.  A *pending store* has a register array
-        # as `src` and the destination symbol as `dest` --- discriminating on
-        # `dest.stype` instead misreads the shared-memory temporary that
-        # _make_store creates, drops it, and loses both the value and the
-        # symbol's data view.
-        if staged_src is staged_dest:
-          # preload of a global input: drop it and stage afresh
-          del self._deferred_stores[name]
-          self._staged_view.pop(name, None)
-          return False
-        raise GenerationError(
-            f'{name}: operand wants [{lo},{hi}) in dim {j} but the staged '
-            f'image only covers [{covered.lower()[j]},{covered.upper()[j]}), '
-            f'and the value exists only in registers. Serving several '
-            f'disjoint slices of one tensor needs the staging sized to their '
-            f'union.')
+    if not entry.holds(view.bbox, view.offset):
+      if entry.is_preload:
+        self._residency.drop(name)
+        return False
+      raise GenerationError(
+          f'{name}: operand wants {view.bbox} at offset {view.offset} but the '
+          f'staged image only covers {entry.covered} at shift {entry.shift}, '
+          f'and the value exists only in registers. Serving several disjoint '
+          f'slices of one tensor needs the staging sized to their union.')
 
-    view.offset = [o - s for o, s in zip(view.offset, shift)]
+    view.offset = [o - s for o, s in zip(view.offset, entry.shift)]
     return True
-
-  def _record_staged(self, name, covered, shift):
-    self._staged_view[name] = (covered, list(shift))
 
   def _lead_origin_shift(self):
     """Pick the origin of the lead loop.
@@ -692,10 +374,6 @@ class MultilinearBuilder(AbstractBuilder):
   def _make_loader_and_symbol_reg(self, opview, linearize,
                                   lead_pos: int = 0) -> Tuple[Symbol, GlbToRegLoader]:
     operand = opview.symbol
-    regsize = 1
-    threads = self._num_threads
-    # the dimension spread across lanes; the rest goes into slots
-    lead_dim = [lead_pos]
 
     # the register image holds the operand's *logical* region: GlbToRegLoader
     # consumes the slicing offset while loading, so everything downstream of
@@ -709,31 +387,9 @@ class MultilinearBuilder(AbstractBuilder):
     else:
       bbox = opview.bbox
 
-    for d in range(bbox.rank()):
-      dim = bbox.size(d)
-      if d not in lead_dim or threads == 0:
-        regsize *= dim
-      else:
-        # same slot count as DataView.get_dim_slots / _iregs / the addressing
-        # side.  `ceil((u-l)/T)` disagrees once [l,u) straddles a block border.
-        #
-        # `lead_lanes` is the second factor and comes from the same function
-        # the addressing side calls: one entry per slot when the lane is the
-        # thread, `threads` entries when the work-item holds the whole wave.
-        # Sizing this per thread while addressing it per work-item is what
-        # made twenty-one kernels read past the end of an array -- and *that*
-        # compiled, which is why it needs one source and not two.
-        regsize *= (-(-bbox.upper()[d] // threads) - bbox.lower()[d] // threads
-                    ) * DataView.lead_lanes(None, _explicit_simd(self._context), threads)
-        threads //= dim
-    name = self._name_registers()
-    regmem = RegMemObject(name, regsize, spp=None if operand.obj.is_dense() else operand.obj.spp)
-    registers = Symbol(name=name, stype=SymbolType.Register, obj=regmem)
-    registers.lead_dims = [lead_pos]
-    registers.num_threads = self._num_threads
-    registers.datatype = self._context.fp_type
-    self._scopes.add_symbol(registers)
-    registerAlloc = RegisterAlloc(self._context, registers, regsize, 0.0)
+    registers, registerAlloc = self._temporaries.register_array(
+        bbox, lead_pos,
+        spp=None if operand.obj.is_dense() else operand.obj.spp)
     self._instructions.append(registerAlloc)
 
     load_op = GlbToRegLoader(context=self._context,
@@ -748,7 +404,7 @@ class MultilinearBuilder(AbstractBuilder):
 
   def _make_loader_and_symbol(self, opview, is_transpose) -> Tuple[Symbol, GlbToShrLoader]:
     operand = opview.symbol
-    shr_mem_region = Symbol(name=self._name_shr_reg(),
+    shr_mem_region = Symbol(name=self._temporaries.next_shared_name(),
                             stype=SymbolType.SharedMem,
                             obj=operand.obj)
 
@@ -767,71 +423,37 @@ class MultilinearBuilder(AbstractBuilder):
     # here rather than having to be consumed the way the register path does.
     return SymbolView(shr_mem_region, opview.bbox, opview.offset), load_op
 
-  def _name_registers(self):
-    name = f'r{self._counter}'
-    self._counter += 1
-    return name
-
   def _alloc_register_array(self):
-    regsize = 1
-    threads = self._num_threads
-    # One statement of the lane axis, used twice below: to count the register
-    # slots, and -- at the bottom -- to tell the symbol.  It was two, and the
-    # symbol's half was the constructor default rather than anything said
-    # here, so a change to one would not have moved the other.
-    #
-    # 0 because `MultilinearDescr._lead_dim` aligns the thread count to the
-    # destination's axis 0, and the whole multilinear path is built on that.
-    # The commented-out alternative that stood here, `[t for t in
-    # self._descr.target[0] if t >= 0]`, is where a per-operand answer would
-    # come from once there is one.
-    lead_pos = 0
-    lead_dim = [lead_pos]
+    """The array this operation accumulates its result into.
 
-    # This array holds the operation's *result*, so it is sized from what the
-    # operation writes: the destination's box, in the shifted origin the
-    # compute and the store both index it in.  `_analyze` may narrow the range
-    # below that --- an operand covering less than the destination declares ---
-    # which leaves slots unused, and that is harmless.
-    #
-    # An accumulation used to take the *bias image's* box instead.  That is
-    # what the operation reads, not what it writes, and the two part company
-    # whenever the image does not match the destination: a broadcast leaves a
-    # rank-1 image behind for a rank-2 destination, and the array came out
-    # with one slot where the store walks three.  The destination's box says
-    # the same thing as a matching image and stays right when it does not
-    # match, so ask it directly.
-    bbox = self._dest_obj.bbox
-    shift = self._theta
+    Sized from what the operation *writes*: the destination's box, in the
+    theta-shifted origin the compute and the store both index it in.
+    `_analyze` may narrow the range below that --- an operand covering less
+    than the destination declares --- which leaves slots unused, and that is
+    harmless.
 
-    for d in range(bbox.rank()):
-      dim = bbox.size(d)
-      if d not in lead_dim or threads == 0:
-        regsize *= dim
-      else:
-        # the accumulator is indexed in the shifted origin, so the slot count
-        # follows the shifted range.  Straddling one more block boundary is
-        # exactly the price of not needing a shuffle.
-        r_start = (bbox.lower()[d] + shift) // threads
-        r_end = (bbox.upper()[d] + shift + threads - 1) // threads
-        regsize *= (r_end - r_start) * DataView.lead_lanes(
-            None, _explicit_simd(self._context), threads)
-        threads //= dim # TODO?
-    name = self._name_registers()
-    regmem = RegMemObject(name, regsize)
-    registers = Symbol(name=name, stype=SymbolType.Register, obj=regmem)
-    registers.lead_dims = [lead_pos]
-    registers.num_threads = self._num_threads
-    registers.datatype = self._context.fp_type
-    self._scopes.add_symbol(registers)
-    registerAlloc = RegisterAlloc(self._context, registers, regsize, 0.0)
+    An accumulation used to take the *bias image's* box instead.  That is what
+    the operation reads, not what it writes, and the two part company whenever
+    the image does not match the destination: a broadcast leaves a rank-1
+    image behind for a rank-2 destination, and the array came out with one
+    slot where the store walks three.  The destination's box says the same
+    thing as a matching image and stays right when it does not match, so ask
+    it directly.
+
+    The lane axis is 0 because `MultilinearDescr._lead_dim` aligns the thread
+    count to the destination's axis 0 and the whole multilinear path is built
+    on that.  A per-operand answer would come from
+    `[t for t in self._descr.target[0] if t >= 0]` once there is one.
+    """
+    registers, registerAlloc = self._temporaries.register_array(
+        self._dest_obj.bbox, lead_pos=0, shift=self._theta)
     self._instructions.append(registerAlloc)
     return registers
 
   def _target_image_fits(self, name):
     """Does the image staged under `name` hold exactly this destination?
 
-    `_deferred_stores` and `_staged_view` are keyed by symbol name and live for
+    The residency is keyed by symbol name and lives for
     the whole kernel, so what a destination finds under its name may have been
     staged for something else entirely --- most often an *operand* read of a
     different slice of the same tensor.  Taking it as the accumulation bias
@@ -842,17 +464,12 @@ class MultilinearBuilder(AbstractBuilder):
     An accumulation chain onto the same box --- the case the reuse exists for
     --- has the staged region equal to the destination's, so require that.
     """
-    staged = self._staged_view.get(name)
-    if staged is None:
+    entry = self._residency.get(name)
+    if entry is None or entry.covered is None \
+        or entry.covered.rank() != self._dest_obj.bbox.rank():
       return False
-    covered, shift = staged
-    if covered is None or covered.rank() != self._dest_obj.bbox.rank():
-      return False
-    want = ([l + o for l, o in zip(self._dest_obj.bbox.lower(), self._dest_obj.offset)],
-            [u + o for u, o in zip(self._dest_obj.bbox.upper(), self._dest_obj.offset)])
-    have = ([l + s for l, s in zip(covered.lower(), shift)],
-            [u + s for u, s in zip(covered.upper(), shift)])
-    return have == want
+    want = self._dest_obj.storage_box()
+    return entry.region() == (list(want.lower()), list(want.upper()))
 
   def _dest_preload_view(self, dest_symbol):
     """The destination, staged in the tensor's own lead coordinates.
@@ -890,35 +507,38 @@ class MultilinearBuilder(AbstractBuilder):
     dest_symbol = self._scopes.get_symbol(self._dest_obj.tensor)
     if dest_symbol is None:
       return None
-    if (dest_symbol.name in self._deferred_stores
+    if (dest_symbol.name in self._residency
         and not self._target_image_fits(dest_symbol.name)):
       # staged for something else: it cannot serve as this destination.  A
       # pending writeback still has to reach memory, which is exactly what
       # `_invalidate_residency` does; a preload is simply dropped and the
       # ordinary path below stages the region this operation needs.
       self._invalidate_residency(dest_symbol.name)
-    if dest_symbol.name in self._deferred_stores:
-      dest_registers,_,_ = self._deferred_stores[dest_symbol.name]
-      return dest_registers
-    elif self._atomic_update and prev:
+    if dest_symbol.name in self._residency:
+      return self._residency.get(dest_symbol.name).image
+    elif self._policy.atomic_accumulation and prev:
       # should be found in the previous step already
       return None
-    elif self._preload_registers and dest_symbol.stype == SymbolType.Global and not self._atomic_update and not next:
+    elif (self._policy.preload_operands_into_registers
+          and dest_symbol.stype == SymbolType.Global
+          and not self._policy.atomic_accumulation and not next):
       symbol, load_op = self._make_loader_and_symbol_reg(
           self._dest_preload_view(dest_symbol), False)
-      self._deferred_stores[dest_symbol.name] = symbol.symbol, symbol.symbol, None
-      self._record_staged(dest_symbol.name,
-                          symbol.symbol.data_view.get_bbox(),
-                          [0] + list(self._dest_obj.offset[1:]))
+      self._residency.record_preload(
+          dest_symbol.name, symbol.symbol,
+          symbol.symbol.data_view.get_bbox(),
+          [0] + list(self._dest_obj.offset[1:]))
       self._instructions.append(load_op)
       return symbol.symbol
-    elif self._preload_shmem and dest_symbol.stype == SymbolType.Global and not self._atomic_update and not next:
+    elif (self._policy.preload_operands_into_shared
+          and dest_symbol.stype == SymbolType.Global
+          and not self._policy.atomic_accumulation and not next):
       symbol, load_op = self._make_loader_and_symbol(
           self._dest_preload_view(dest_symbol), None)
-      self._deferred_stores[dest_symbol.name] = symbol.symbol, symbol.symbol, None
-      self._record_staged(dest_symbol.name,
-                          symbol.symbol.data_view.get_bbox(),
-                          [0] + list(self._dest_obj.offset[1:]))
+      self._residency.record_preload(
+          dest_symbol.name, symbol.symbol,
+          symbol.symbol.data_view.get_bbox(),
+          [0] + list(self._dest_obj.offset[1:]))
       self._instructions.append(load_op)
       return symbol.symbol
     else:
@@ -971,51 +591,19 @@ class MultilinearBuilder(AbstractBuilder):
             for j, o in enumerate(self._dest_obj.offset)]
 
   def _invalidate_residency(self, name):
-    """The register image of `name` is about to stop being the newest copy.
+    """The image of `name` is about to stop being the newest copy.
 
     `_get_target_symbol` preloads a global destination into registers and
     records that image so the *next* operation on the same tensor can
-    accumulate straight into it.  That is only sound while the image stays
-    the newest copy.  As soon as this operation writes memory from a
-    different array --- which is what the eager-store paths below do --- the
-    recorded image is one accumulation step behind, and leaving it in place
-    hands every later `+=` a stale bias: each step then computes
-    `preload + own term` and overwrites the previous one, so the destination
-    ends up holding the first write plus the *last* term and nothing in
-    between.
-
-    Which of the two kinds of entry this is decides what "invalidate" means,
-    on the same `src is dest` discriminator `_resolve_reuse` uses.  A preload
-    is a copy of something global memory still holds, so it is simply
-    dropped.  A pending writeback is the *only* copy of a result that has not
-    reached memory yet; dropping that would lose it, so it goes out first.
+    accumulate straight into it.  That is only sound while the image stays the
+    newest copy.  As soon as this operation writes memory from a different
+    array --- which is what the eager-store paths below do --- the recorded
+    image is one accumulation step behind, and leaving it in place hands every
+    later `+=` a stale bias: each step then computes `preload + own term` and
+    overwrites the previous one, so the destination ends up holding the first
+    write plus the *last* term and nothing in between.
     """
-    entry = self._deferred_stores.pop(name, None)
-    promise = self._promised.pop(name, None)
-    _, shift = self._staged_view.pop(name, (None, None))
-    if entry is None:
-      return
-    store_regs, store_dest, update = entry
-    if store_regs is store_dest:
-      return                                    # preload: memory still has it
-    if store_dest.stype == SymbolType.Global:
-      if shift is None:
-        shift = [0] * store_dest.data_view.rank()
-      self._instructions.append(StoreRegToGlb(context=self._context,
-                                              src=store_regs,
-                                              dest=store_dest,
-                                              num_threads=self._num_threads,
-                                              lead_width=self._lead_width,
-                                              atomic=update,
-                                              dest_offset=shift,
-                                              dest_bbox=promise,
-                                              zero_fill=promise is not None))
-    else:
-      self._instructions.append(StoreRegToShr(context=self._context,
-                                              src=store_regs,
-                                              dest=store_dest,
-                                              shr_mem=self._shr_mem,
-                                              num_threads=self._num_threads))
+    self._instructions.extend(self._residency.flush(name))
 
   def _promised_box(self):
     """What this operation undertakes to define, in the accumulator's frame.
@@ -1060,7 +648,7 @@ class MultilinearBuilder(AbstractBuilder):
     if self._dest_obj.tensor in self._scopes:
       dest_symbol = self._scopes.get_symbol(self._dest_obj.tensor)
       if dest_symbol.stype == SymbolType.SharedMem:
-        if self._written_in_slices(self._dest_obj.tensor):
+        if self._plan.written_in_slices(self._dest_obj.tensor):
           self._invalidate_residency(dest_symbol.name)
           # assembled from several writes: this slice has to land in the shared
           # buffer now, since `_temp_regs` only ever holds our own part and the
@@ -1071,22 +659,29 @@ class MultilinearBuilder(AbstractBuilder):
                                                   shr_mem=self._shr_mem,
                                                   num_threads=self._num_threads,
                                                   lead_width=self._lead_width,
-                                                  dest_bbox=self._dest_union.get(id(self._dest_obj.tensor)),
+                                                  dest_bbox=self._plan.dest_union(self._dest_obj.tensor),
                                                   dest_offset=self._store_offset()))
           return
         # see note below (but update to the new temp regs)
-        self._deferred_stores[dest_symbol.name] = (self._temp_regs, dest_symbol, None)
-        self._record_staged(dest_symbol.name,
-                          # the *actual* range the accumulator ended up with:
-                          # _analyze intersects the operands, so _ns can be
-                          # strictly smaller than the declared destination box
-                          self._temp_regs.data_view.get_bbox(),
-                            self._store_offset())
+        self._residency.record_writeback(
+            dest_symbol.name, self._temp_regs, dest_symbol,
+            # the *actual* range the accumulator ended up with: _analyze
+            # intersects the operands, so _ns can be strictly smaller than
+            # the declared destination box
+            covered=self._temp_regs.data_view.get_bbox(),
+            shift=self._store_offset())
       elif dest_symbol.stype == SymbolType.Global:
-        in_slices = self._written_in_slices(self._dest_obj.tensor)
-        can_use_atomic = self._atomic_update and self._add and (dest_symbol.name not in self._deferred_stores or self._deferred_stores[dest_symbol.name][2] is not None)
+        in_slices = self._plan.written_in_slices(self._dest_obj.tensor)
+        pending = self._residency.get(dest_symbol.name)
+        atomic = result_is_atomic(
+            accumulating=self._add,
+            pending_is_atomic=pending is None or pending.atomic is not None,
+            policy=self._policy)
+        result = choose_result_placement(
+            legal_result_placements(written_in_slices=in_slices),
+            atomic=atomic, policy=self._policy)
         # A destination assembled from several writes cannot be kept in
-        # registers: `_deferred_stores` holds one entry per name, so a second
+        # registers: the residency holds one entry per name, so a second
         # slice would displace the first and its whole contribution would be
         # computed and thrown away.
         #
@@ -1096,7 +691,7 @@ class MultilinearBuilder(AbstractBuilder):
         # of at the epilogue; there is nothing to serialise, since an atomic
         # add is order-independent by construction.  With a single covering
         # writer deferring still pays --- it saves the read-modify-write.
-        if can_use_atomic and in_slices:
+        if result is ResultPlacement.MEMORY and atomic:
           self._instructions.append(StoreRegToGlb(context=self._context,
                                                   src=self._temp_regs,
                                                   dest=dest_symbol,
@@ -1106,17 +701,16 @@ class MultilinearBuilder(AbstractBuilder):
                                                   dest_offset=self._store_offset(),
                                                   dest_bbox=self._promised_box(),
                                                   zero_fill=not self._add))
-        elif can_use_atomic or (self._use_registers_always and not in_slices):
-          update = True if can_use_atomic else None
-          self._deferred_stores[dest_symbol.name] = (self._temp_regs, dest_symbol, update)
-          self._promised[dest_symbol.name] = (
-              self._promised_box() if not self._add else None)
-          self._record_staged(dest_symbol.name,
-                          # the *actual* range the accumulator ended up with:
-                          # _analyze intersects the operands, so _ns can be
-                          # strictly smaller than the declared destination box
-                          self._temp_regs.data_view.get_bbox(),
-                              self._store_offset())
+        elif result is ResultPlacement.REGISTER:
+          self._residency.record_writeback(
+              dest_symbol.name, self._temp_regs, dest_symbol,
+              # the *actual* range the accumulator ended up with: _analyze
+              # intersects the operands, so _ns can be strictly smaller than
+              # the declared destination box
+              covered=self._temp_regs.data_view.get_bbox(),
+              shift=self._store_offset(),
+              atomic=True if atomic else None,
+              promise=self._promised_box() if not self._add else None)
         else:
           self._invalidate_residency(dest_symbol.name)
           self._instructions.append(StoreRegToGlb(context=self._context,
@@ -1139,53 +733,25 @@ class MultilinearBuilder(AbstractBuilder):
       if not self._dest_obj.tensor.is_tmp:
         raise InternalError(f'gemm-buider: `res` is not in scopes and thus must be tmp')
 
-      dest_symbol = Symbol(name=self._name_shr_reg(),
-                            stype=SymbolType.SharedMem,
-                            obj=self._dest_obj.tensor)
-
-      # do not swap matrix layout in global memory until we need to
-      self._scopes.add_symbol(dest_symbol)
-      if self._written_in_slices(self._dest_obj.tensor):
+      dest_symbol = self._temporaries.shared_symbol(self._dest_obj.tensor)
+      if self._plan.written_in_slices(self._dest_obj.tensor):
         self._instructions.append(StoreRegToShr(context=self._context,
                                                 src=self._temp_regs,
                                                 dest=dest_symbol,
                                                 shr_mem=self._shr_mem,
                                                 num_threads=self._num_threads,
                                                 lead_width=self._lead_width,
-                                                dest_bbox=self._dest_union.get(id(self._dest_obj.tensor)),
+                                                dest_bbox=self._plan.dest_union(self._dest_obj.tensor),
                                                 dest_offset=self._store_offset()))
         return
-      self._deferred_stores[dest_symbol.name] = (self._temp_regs, dest_symbol, None)
-      self._record_staged(dest_symbol.name,
-                          # the *actual* range the accumulator ended up with:
-                          # _analyze intersects the operands, so _ns can be
-                          # strictly smaller than the declared destination box
-                          self._temp_regs.data_view.get_bbox(),
-                          self._store_offset())
+      self._residency.record_writeback(
+          dest_symbol.name, self._temp_regs, dest_symbol,
+          # the *actual* range the accumulator ended up with: _analyze
+          # intersects the operands, so _ns can be strictly smaller than the
+          # declared destination box
+          covered=self._temp_regs.data_view.get_bbox(),
+          shift=self._store_offset())
 
   def _insert_sync_block(self):
     self._instructions.append(SyncThreads(context=self._context,
                                           num_threads_per_mult=self._num_threads))
-
-  def _name_shr_reg(self):
-    name = f's{self._counter_shr_reg}'
-    self._counter_shr_reg += 1
-    return name
-
-  def build_epilogue(self):
-    self._reset()
-    for name, (store_regs, store_global, update) in self._deferred_stores.items():
-      if store_global.stype == SymbolType.Global:
-        # each entry carries its own offset; _store_offset() would hand out the
-        # last build's, which is only right when there is a single entry
-        _, shift = self._staged_view.get(
-            name, (None, [0] * store_global.data_view.rank()))
-        self._instructions.append(StoreRegToGlb(context=self._context,
-                                                  src=store_regs,
-                                                  dest=store_global,
-                                                  num_threads=self._num_threads,
-                                                  lead_width=self._lead_width,
-                                                  atomic=update,
-                                                  dest_offset=shift,
-                                                  dest_bbox=self._promised.get(name),
-                                                  zero_fill=self._promised.get(name) is not None))

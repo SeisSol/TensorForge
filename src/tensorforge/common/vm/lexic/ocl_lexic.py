@@ -44,7 +44,8 @@ class OpenCLLexic(Lexic):
     return f'item.get_sub_group()'
 
   def broadcast(self, variable, lane, block=None, subblock=None):
-    return f'group_broadcast(-1, {variable}, {lane})'
+    return (f'sycl::group_broadcast({self.active_sub_group_mask()}, '
+              f'{variable}, {lane})')
 
   def kernel_range_object(self, name, values):
     return f"cl::sycl::range<3> {name} ({values})"
