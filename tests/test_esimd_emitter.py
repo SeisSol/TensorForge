@@ -693,3 +693,69 @@ def test_a_vector_accumulator_is_direct_initialised(emitter):
     v = val(80, F32, SPREAD16)
     out = emitter.initialiser(v, 'acc', '0.0f')
     assert out == 'tensorforge::intel_esimd::simd<float, 16> acc(0.0f);'
+
+
+# --------------------------------------------------------------------------
+# a cross-lane reduction, where there are no lanes to cross
+# --------------------------------------------------------------------------
+
+def _lexic(simd=True):
+    from tensorforge.common.vm.lexic.sycl_lexic import SyclLexic
+    return SyclLexic('oneapi' if simd else 'acpp', 'intel', explicit_simd=simd)
+
+
+@pytest.mark.parametrize('op,spelling', [
+    ('ADD', 'reduce<float>(v, std::plus<>())'),
+    ('MUL', 'reduce<float>(v, std::multiplies<>())'),
+    ('MAX', 'hmax<float>(v)'),
+    ('MIN', 'hmin<float>(v)'),
+])
+def test_the_esimd_entry_points(op, spelling):
+    from tensorforge.common.operation import Operation
+    out = _lexic().reduction('v', getattr(Operation, op), Datatype.F32, 16)
+    assert spelling in out
+
+
+def test_the_result_is_a_scalar_not_a_broadcast():
+    """The reduction *collapses* the lane axis.
+
+    In SPMD an all-reduce leaves every thread holding a copy and "the result"
+    is that copy, so the two readings coincide.  Here they do not: broadcasting
+    back produced `glb_m1[k] = simd<float, 16>(...)`, a sixteen-wide value
+    assigned to a scalar destination.  A caller that wants it in every lane
+    spells `simd<T, N>(scalar)` itself.
+    """
+    from tensorforge.common.operation import Operation
+    out = _lexic().reduction('v', Operation.ADD, Datatype.F32, 16)
+    assert not out.startswith('tensorforge::intel_esimd::simd<')
+
+
+def test_nothing_to_combine_is_the_value_itself():
+    from tensorforge.common.operation import Operation
+    assert _lexic().reduction('v', Operation.ADD, Datatype.F32, 16, 16) == 'v'
+
+
+def test_a_segmented_reduction_is_declined():
+    """The SPMD butterfly stops at `subblock`, leaving each group its own
+    answer.  Expressible here as a two-dimensional region, but nothing asks
+    for it -- every reduction in the corpus is block=16, subblock=1 -- and an
+    untested butterfly for a case with no caller is how the old `simd_mode`
+    branches came about."""
+    from tensorforge.common.operation import Operation
+    with pytest.raises(NotImplementedError, match='segmented'):
+        _lexic().reduction('v', Operation.ADD, Datatype.F32, 16, 4)
+
+
+def test_bitwise_reductions_have_no_entry_point():
+    from tensorforge.common.operation import Operation
+    with pytest.raises(NotImplementedError, match='no ESIMD entry point'):
+        _lexic().reduction('v', Operation.XOR, Datatype.I32, 16)
+
+
+def test_spmd_sycl_still_declines_and_says_why():
+    """`reduce_over_group` answers for `subblock == 1` and `block == the
+    sub-group size`, and the lexic cannot see the sub-group size to check the
+    second -- a reduction over the wrong width is wrong quietly."""
+    from tensorforge.common.operation import Operation
+    with pytest.raises(NotImplementedError, match='sub-group size'):
+        _lexic(simd=False).reduction('v', Operation.ADD, Datatype.F32, 16)

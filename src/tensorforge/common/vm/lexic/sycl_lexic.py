@@ -203,6 +203,67 @@ class SyclLexic(Lexic):
       f'Composing it from the intrinsics that do exist is a numerics '
       f'decision, not a spelling one.')
 
+  #: The ESIMD spelling of each all-reduce, by the `Operation` it lowers from.
+  #:
+  #: `reduce` covers only `std::plus` and `std::multiplies` -- its other
+  #: branches fall through to nothing -- and min/max have their own entry
+  #: points.  Bitwise reductions have neither, which is why they are absent
+  #: rather than spelled optimistically.
+  _ESIMD_REDUCE = {
+    Operation.ADD: 'reduce<{t}>({v}, std::plus<>())',
+    Operation.MUL: 'reduce<{t}>({v}, std::multiplies<>())',
+    Operation.MAX: 'hmax<{t}>({v})',
+    Operation.MIN: 'hmin<{t}>({v})',
+  }
+
+  def reduction(self, variable, optype, fptype, block, subblock=1):
+    """An all-reduce across `block` lanes, in groups of `subblock`.
+
+    Under an explicit vector this is not a cross-lane construct at all: the
+    lanes are elements of one work-item's register, so the reduction is an
+    operation on a `simd<T, N>` and the "all" part is a broadcast back.
+
+    Only the whole-vector case, and the omission is deliberate.  The SPMD
+    butterfly is `for (i = Block/2; i >= Subblock; i >>= 1) result =
+    Op(result, shfl_xor(result, i))`, which for `Subblock > 1` leaves each
+    group of `Subblock` lanes with its own answer.  That is expressible here
+    -- a two-dimensional region, `select<N/(2i), 2i, i, 1>`, is exactly the
+    pairing -- but nothing asks for it: every reduction in the corpus is
+    `block=16, subblock=1`.  Writing an untested butterfly for a case with no
+    caller is how the `simd_mode` branches got there in the first place.
+    """
+    if block == subblock:
+      # Nothing to combine: each group is one lane wide already.
+      return variable
+    if not self.simd_mode:
+      raise NotImplementedError(
+          f'{type(self).__name__} has no SPMD cross-lane reduction. '
+          f'`sycl::reduce_over_group(item.get_sub_group(), ...)` answers this '
+          f'for subblock == 1 and block == the sub-group size, but the lexic '
+          f'cannot see the sub-group size to check the second condition, and '
+          f'a reduction over the wrong width is wrong quietly.')
+    if subblock != 1:
+      raise NotImplementedError(
+          f'segmented reduction (block={block}, subblock={subblock}) is not '
+          f'emitted; see SyclLexic.reduction')
+    if optype not in self._ESIMD_REDUCE:
+      raise NotImplementedError(
+          f'reduction over {optype} has no ESIMD entry point')
+    ctype = fptype.ctype()
+    call = self._ESIMD_REDUCE[optype].format(t=ctype, v=variable)
+    # A scalar, not broadcast back.
+    #
+    # In SPMD the two are the same statement -- an all-reduce leaves every
+    # thread holding a copy, and "the result" is that copy.  Here they are
+    # not: the reduction *collapses* the lane axis, so its result is one
+    # value, and a caller that stores it stores one element.  Broadcasting it
+    # back into a vector produced `glb_m1[k] = simd<float, 16>(...)`, a
+    # sixteen-wide value assigned to a scalar destination.
+    #
+    # A caller that does want it in every lane spells that itself, and
+    # `simd<T, N>(scalar)` is what it spells.
+    return f'tensorforge::intel_esimd::{call}'
+
   def get_simd_mask(self, size):
     """`simd_mask<N>`: the type a comparison over a `simd<T, N>` produces.
 

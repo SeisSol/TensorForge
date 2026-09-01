@@ -228,9 +228,19 @@ class ReductionInstruction(ComputeInstruction):
         partial = self._lane_partial(writer, index, src_lead, lead)
         total = self._cross_lane(writer, partial, src_lead)
 
-        # `reduction` is an all-reduce, so every lane holds the answer and
-        # letting them all write would be a race on one address rather than a
-        # disagreement.  Still a race, so it is guarded.
+        # In SPMD `reduction` is an all-reduce, so every lane holds the answer
+        # and letting them all write would be a race on one address rather
+        # than a disagreement.  Still a race, so it is guarded.
+        #
+        # Under an explicit vector there is nobody to guard against.  The
+        # reduction *collapses* the lane axis -- its result is one value in
+        # one work-item -- so there is no second writer, and a guard would be
+        # `if (mask)` over a comparison against a vector lane index, which is
+        # not a branch condition at all.
+        if writer._explicit_simd():
+            self._dest.symbol.store(writer, self._context, total,
+                                    self._dest_index(kept, varlist), False)
+            return
         with writer.if_(writer.op('eq', BOOL, lead, 0, hint='w')):
             self._dest.symbol.store(writer, self._context, total,
                                     self._dest_index(kept, varlist), False)
@@ -292,14 +302,17 @@ class ReductionInstruction(ComputeInstruction):
         return acc
 
     def _lane(self, writer: Writer):
-        """`threadIdx.x % num_threads` -- the same lane index `LeadLoop` builds.
+        """Which element of the distributed dimension this lane is at.
 
-        Spelled here rather than borrowed because `LeadLoop._lead` only exists
-        inside its own `write`, and CSE merges the two anyway.
+        `writer.lane_index`, not `threadIdx.x % num_threads` spelled out.  The
+        arithmetic here was the SPMD answer written as though it were the only
+        one -- and it is not: an explicitly vectorised lowering holds every
+        element at once, so the answer is a vector of all `num_threads`
+        indices rather than one of them.
+
+        Same call `LeadLoop._lead` makes, so `cse` still merges the two.
         """
-        from tensorforge.backend.pir.core import INDEX
-        tid = writer.thread_id('x')
-        return writer.op('rem', INDEX, tid, self._num_threads, hint='lead')
+        return writer.lane_index(self._num_threads, 1, hint='lead')
 
     def _exchange_width(self, src_lead: int) -> int:
         """How many lanes the fold actually has to cross.

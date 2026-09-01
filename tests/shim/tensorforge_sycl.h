@@ -24,6 +24,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <utility>
 
 // from include/tensorforge_device/base.h
@@ -380,6 +381,17 @@ template <typename T, int N, typename U>
 simd_mask<N> operator!=(const simd<T, N> &, U) {
   return {};
 }
+
+/// Whole-vector reductions.  `reduce` covers `std::plus` and
+/// `std::multiplies` only -- the real header's other branches fall through to
+/// nothing -- and min/max have their own entry points, which is why the
+/// lexic's table has four rows and not seven.
+template <typename T0, typename T1, int N, typename BinaryOperation>
+T0 reduce(simd<T1, N>, BinaryOperation) {
+  return T0{};
+}
+template <typename T0, typename T1, int N> T0 hmax(simd<T1, N>) { return T0{}; }
+template <typename T0, typename T1, int N> T0 hmin(simd<T1, N>) { return T0{}; }
 
 } // namespace intel_esimd
 
