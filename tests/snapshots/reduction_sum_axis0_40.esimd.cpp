@@ -1,1 +1,1 @@
-FAILED: NotImplementedError: SyclLexic has no cross-lane reduction; see Lexic.reduction
+FAILED: IRError: branch on a lane-varying condition (%~v17_own:bool/layout<16>): in the ESIMD lowering this is a mask over 16 lanes, not a branch. It has to be if-converted into per-statement predicates before emission; see passes.if_convert and its `_convertible` preconditions.

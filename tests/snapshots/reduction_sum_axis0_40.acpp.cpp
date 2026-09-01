@@ -1,1 +1,1 @@
-FAILED: NotImplementedError: SyclLexic has no cross-lane reduction; see Lexic.reduction
+FAILED: NotImplementedError: SyclLexic has no SPMD cross-lane reduction. `sycl::reduce_over_group(item.get_sub_group(), ...)` answers this for subblock == 1 and block == the sub-group size, but the lexic cannot see the sub-group size to check the second condition, and a reduction over the wrong width is wrong quietly.

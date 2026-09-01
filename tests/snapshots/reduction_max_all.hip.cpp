@@ -61,23 +61,23 @@ __launch_bounds__(256)
           const float *const __restrict__ glb_m0 = &m0[batchId0 * 256 + 0 + m0_extraOffset];
           float *const __restrict__ glb_m1 = &m1[batchId0 * 1 + 0 + m1_extraOffset];
           // glb_m1 = max(glb_m0, dims=[0, 1])
-          int32_t v7_lead = threadIdx.x % 32;
-          float v22_sel0;
-          if (v7_lead < 16) {
-            float v10_acc0 = -INFINITY;
+          int32_t v8_lead = threadIdx.x % 32;
+          float v23_sel0;
+          if (v8_lead < 16) {
+            float v11_acc0 = -INFINITY;
             #pragma unroll
-            for (int32_t v9_r1 = 0; v9_r1 < 16; ++v9_r1) {
-              float v18_data = glb_m0[(v7_lead + (v9_r1 * 16))];
-              v10_acc0 = (fmaxf(v10_acc0, v18_data));
+            for (int32_t v10_r1 = 0; v10_r1 < 16; ++v10_r1) {
+              float v19_data = glb_m0[(v8_lead + (v10_r1 * 16))];
+              v11_acc0 = (fmaxf(v11_acc0, v19_data));
             }
-            v22_sel0 = v10_acc0;
+            v23_sel0 = v11_acc0;
           }
           else {
-            v22_sel0 = -INFINITY;
+            v23_sel0 = -INFINITY;
           }
-          float v23_red = tensorforge::reduction<tensorforge::ReductionOperation<float, tensorforge::Operation::Max>, 16, 1, float>(v22_sel0);
-          if (v7_lead == 0) {
-            glb_m1[0] = v23_red;
+          float v24_red = tensorforge::reduction<tensorforge::ReductionOperation<float, tensorforge::Operation::Max>, 16, 1, float>(v23_sel0);
+          if (v8_lead == 0) {
+            glb_m1[0] = v24_red;
           }
         }
       }
