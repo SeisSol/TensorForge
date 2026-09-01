@@ -9,7 +9,7 @@ Reports, per kernel:
   DROPPED      a multilinear result that is neither stored nor read again
   BIAS REUSED  a register array serving as the bias of two accumulations
   STALE READ   a load overtaken by a store to the tensor it reads
-  OOB READ     a store indexing past the end of its accumulator
+  REG OOB      a register array indexed outside the range it was declared with
 
 Each of these was a real defect at some point; they are cheap enough to run
 over every dump.
@@ -24,16 +24,6 @@ COMPUTE=re.compile(r'//\s*(\w+) = \+\(([^)]*)\) \+ (?:None|name: (\w+))')
 STORED=re.compile(r'//\s*\w+ = store\{r>[gs]\}\((?:\w+,\s*)?(\w+)\)')
 GLBLOAD=re.compile(r'//\s*(\w+) = load\{g>r\}\((glb_\w+)\);')
 GLBSTORE=re.compile(r'//\s*(glb_\w+) = store\{r>g\}\((\w+)\);')
-HEAD=GLBSTORE; DECL=re.compile(r'float (r\d+)\[(\d+)\]')
-ASSIGN=re.compile(r'int32_t (\w+) = (.+);$'); SRCRD=re.compile(r'float value = (r\d+)\[(\w+)\];')
-FOR=re.compile(r'for \(int32_t (\w+) = (-?\d+); \w+ < (-?\d+);')
-def expand(e,env):
-    for _ in range(14):
-        n=re.sub(r'\b(v\d+\w*)\b', lambda m: f'({env[m.group(1)]})' if m.group(1) in env else m.group(1), e)
-        if n==e: break
-        e=n
-    return e
-
 # --- register array bounds ---------------------------------------------------
 # Names in the generated code are unique, so the loop ranges and the `int32_t`
 # assignments can be collected once per kernel and every access resolved
@@ -44,11 +34,14 @@ def expand(e,env):
 _DECL_ANY = re.compile(r'float (i?r\d+)\[(\d+)\]')
 _FOR_ANY = re.compile(r'for \(int32_t (\w+) = (-?\d+); \w+ < (-?\d+);')
 _ASSIGN_ANY = re.compile(r'int32_t (\w+) = (.+);$')
-_ACCESS_ANY = re.compile(r'\b(i?r\d+)\[(\w+)\]')
+#: The index of a register access is an expression, not only a name:
+#: `r2[(v1509_a + v1505_n2)]` is as much an access as `ir3[v1507_a]`, and the
+#: composed spelling is the one a wrong base offset hides in.
+_ACCESS_ANY = re.compile(r'\b(i?r\d+)\[([^\[\]]+)\]')
 
 
 def register_bounds(body):
-    """(too short, over-allocated) for the register arrays of one kernel."""
+    """(out of bounds, over-allocated) for the register arrays of one kernel."""
     sizes, ranges, env = {}, {}, {}
     for line in body:
         t = line.strip()
@@ -84,19 +77,28 @@ def register_bounds(body):
             expr = re.sub(r'\(threadIdx\.x % \d+\)', '0', expand(idx))
             expr = re.sub(r'threadIdx\.x', '0', expr)
             vs = [v for v in set(re.findall(r'\b(v\w+)\b', expr)) if v in ranges]
-            if len(vs) > 6:
+            if len(vs) > 12:
                 continue
-            for combo in itertools.product(*[range(ranges[v][0], ranges[v][1] + 1)
-                                             for v in vs]):
+            # The index arithmetic is affine in the loop counters, so the
+            # extremes sit on the corners of the iteration box and the interior
+            # holds nothing the corners do not already show.
+            for combo in itertools.product(*[ranges[v] for v in vs]):
                 try:
                     val = eval(expr, {"__builtins__": {}}, dict(zip(vs, combo)))
                 except Exception:
                     break
                 if isinstance(val, int):
-                    used[name] = max(used.get(name, -1), val)
-    short = [(n, used[n], sizes[n]) for n in used if used[n] >= sizes[n]]
-    over = [(n, used[n] + 1, sizes[n]) for n in used if used[n] + 1 < sizes[n]]
-    return short, over
+                    low, high = used.get(name, (val, val))
+                    used[name] = (min(low, val), max(high, val))
+    # Both directions matter: an index past the end reaches into the next
+    # array, a negative one into whatever the allocator put in front, and the
+    # second is the easier one to write, because a base offset that should be
+    # zero only has to be off by one.
+    oob = [(n, low, high, sizes[n]) for n, (low, high) in used.items()
+           if low < 0 or high >= sizes[n]]
+    over = [(n, high + 1, sizes[n]) for n, (low, high) in used.items()
+            if low >= 0 and high + 1 < sizes[n]]
+    return oob, over
 
 bad=0
 for k,(s,name) in enumerate(starts):
@@ -126,33 +128,12 @@ for k,(s,name) in enumerate(starts):
             if seq[j][0]=='compute' and reg in seq[j][2]:
                 if any(kk=='store' and tt==tensor for kk,tt,_ in seq[i+1:j]): stale.append((reg,tensor))
                 break
-    sizes={m.group(1):int(m.group(2)) for m in (DECL.search(x) for x in body) if m}
-    oor=[]
-    for i,l in enumerate(body):
-        if not HEAD.search(l): continue
-        env={};rng=[]
-        for t in (x.strip() for x in body[i+1:i+700]):
-            if HEAD.search(t) or re.match(r'//\s*\w+ = (load|\+\()',t): break
-            m=FOR.search(t)
-            if m:
-                v=re.search(r'int32_t (\w+) =',t).group(1); rng.append((v,int(m.group(2)),int(m.group(3))-1)); continue
-            m=ASSIGN.match(t)
-            if m: env[m.group(1)]=m.group(2)
-            m=SRCRD.match(t)
-            if not m: continue
-            reg,idx=m.group(1),re.sub(r'\(threadIdx\.x % \d+\)','0',expand(m.group(2),env))
-            names=[v for v,_,_ in rng]
-            for combo in itertools.product(*[(a,b) for _,a,b in rng]):
-                try: val=eval(idx,{'__builtins__':{}},dict(zip(names,combo)))
-                except Exception: break
-                if reg in sizes and not 0<=val<sizes[reg]: oor.append((reg,val,sizes[reg]))
     p=[]
     if lost: p.append(f"DROPPED {lost[:4]}")
     if dup: p.append(f"BIAS REUSED {dup[:3]}")
     if stale: p.append(f"STALE READ {stale[:3]}")
-    if oor: p.append(f"OOB READ {oor[:3]}")
-    short, over = register_bounds(body)
-    if short: p.append(f"REG TOO SHORT {short[:3]}")
+    oob, over = register_bounds(body)
+    if oob: p.append(f"REG OOB {oob[:3]}")
     if over: p.append(f"REG OVER-ALLOCATED {over[:3]}")
     if p: bad+=1; print(f"  #{k:2} {name:22} {'; '.join(p)}")
 print(f"flagged: {bad} of {len(starts)}   [{path}]")
