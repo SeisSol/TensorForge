@@ -81,6 +81,70 @@ _REMARK = re.compile(
     r'(?:\[[^\]]*\])?\s*:\s*(?P<value>-?[0-9]+)\b')
 
 
+#: `nvcc -Xptxas=-v` -- a different shape entirely, and a stable one::
+#:
+#:     ptxas info    : Used 93 registers, 7136 bytes smem, 432 bytes cmem[0]
+#:     ptxas info    : 0 bytes stack frame, 12 bytes spill stores, ...
+#:
+#: A comma-separated list of `<number> <unit> <what>` with the register count
+#: written the other way round, so it takes two patterns rather than one.
+_PTXAS_REGS = re.compile(r'Used\s+(?P<value>\d+)\s+registers')
+_PTXAS_FIELD = re.compile(
+    r'(?P<value>\d+)\s+bytes\s+(?P<field>smem|spill stores|spill loads|'
+    r'stack frame|lmem)')
+
+#: What `icpx` says about an Intel AOT build.  There is no per-kernel resource
+#: remark to parse: IGC reports the register count only into a shader dump
+#: (`IGC_ShaderDumpEnable=1`, then the `.asm` files under `/tmp/IntelIGC`),
+#: which is a directory to scrape rather than a stream to read, and its format
+#: moves with the driver.  What it does say on the command line is when a
+#: kernel spills, and that is the signal that decides whether a configuration
+#: blew the register file.
+_IGC_SPILL = re.compile(
+    r"(?:kernel|Kernel)\s+.*?\bspill(?:s|ed)?\b.*?(?P<value>\d+)\s*bytes"
+    r"|spill(?:ed)?\s+(?P<value2>\d+)\s*bytes", re.I)
+
+
+def parse_ptxas(stderr: str) -> Dict[str, int]:
+    """`nvcc -Xptxas=-v` output, in the same keys the AMD path produces.
+
+    Registers land under `vgprs` deliberately.  NVIDIA has one register file
+    where CDNA has two, so the comparison the report makes -- `vgprs + agprs`
+    -- reads correctly with `agprs` absent, and the caller needs no per-vendor
+    case for the one thing it does with the numbers.
+    """
+    fields: Dict[str, int] = {}
+    for m in _PTXAS_REGS.finditer(stderr):
+        fields['vgprs'] = max(fields.get('vgprs', 0), int(m.group('value')))
+    spill = 0
+    for m in _PTXAS_FIELD.finditer(stderr):
+        key = m.group('field').replace(' ', '')
+        value = int(m.group('value'))
+        if key in ('spillstores', 'spillloads'):
+            spill = max(spill, value)
+        elif key == 'stackframe':
+            fields['scratch'] = max(fields.get('scratch', 0), value)
+        elif key == 'smem':
+            fields['ldssize'] = max(fields.get('ldssize', 0), value)
+    if spill:
+        fields['vgprsspill'] = spill
+    return fields
+
+
+def parse_igc(stderr: str) -> Dict[str, int]:
+    """What an Intel AOT build reports, which is spills and nothing else.
+
+    Returned with no register count at all rather than with a zero: the two
+    have to stay distinguishable, since a caller comparing configurations on a
+    missing number would rank them as equal instead of declining to rank them.
+    """
+    fields: Dict[str, int] = {}
+    for m in _IGC_SPILL.finditer(stderr):
+        value = int(m.group('value') or m.group('value2'))
+        fields['vgprsspill'] = max(fields.get('vgprsspill', 0), value)
+    return fields
+
+
 def parse_remarks(stderr: str) -> Dict[str, int]:
     """Every `name: integer` remark, keyed by a squashed lower-case name.
 
@@ -163,13 +227,15 @@ def load_cases(pattern: str) -> List:
     return out
 
 
-def generate(mod, arch: str, ceiling: Optional[int]):
+def generate(mod, arch: str, ceiling: Optional[int],
+             backend: Backend = None):
     """`(source, measurement)` for one case at one lane configuration."""
     peak, hook, original = _peak_pressure_hook()
     import tensorforge.backend.instructions.abstract_instruction as ai
     pir.emit, ai.pir.emit = hook, hook
     try:
-        ctx = Context(arch=arch, backend='hip',
+        ctx = Context(arch=arch,
+                      backend=(backend or BACKENDS['hip']).generator_backend,
                       fp_type=getattr(mod, 'DTYPE', None))
         config = lanes.deduce(mod.descr_list(), ctx, ceiling=ceiling)
         gen = Generator(mod.descr_list(), ctx, lanes=config)
@@ -191,51 +257,120 @@ def generate(mod, arch: str, ceiling: Optional[int]):
 
 # -- compilation ----------------------------------------------------------- #
 
-def translation_unit(kernel: str) -> str:
-    """The kernel under the real device header, not the host shim.
+@dataclass(frozen=True)
+class Backend:
+    """One toolchain: how to build for it and how to read what it says.
 
-    `tests/harness/syntax.py` puts a shim on top so that a host `g++` accepts
-    device code, which is right for a syntax check and wrong here: the numbers
-    only mean anything if the device compiler sees what it will actually see.
+    Three of them, and they are not equally informative -- which is the point
+    of naming them apart rather than branching inside one function.  AMD
+    reports every field per kernel, NVIDIA reports registers and spills,
+    Intel reports only that a kernel spilled.  A caller gets what the
+    toolchain gives and can tell absence from zero.
     """
-    return ('#include <hip/hip_runtime.h>\n'
-            '#include "tensorforge_device/hip.h"\n\n'
-            f'{kernel}\n')
+
+    name: str
+    generator_backend: str
+    headers: str
+    compiler_env: str
+    default_compiler: str
+    parse: object
+
+    def command(self, compiler: str, arch: str, src: Path, obj: Path,
+                include: Path, extra: List[str]) -> List[str]:
+        raise NotImplementedError
+
+    def translation_unit(self, kernel: str) -> str:
+        """The kernel under the real device headers, not the host shim.
+
+        `tests/harness/syntax.py` puts a shim on top so a host `g++` accepts
+        device code, which is right for a syntax check and wrong here: the
+        numbers only mean anything if the device compiler sees what it will
+        actually see.
+        """
+        return f'{self.headers}\n\n{kernel}\n'
 
 
-def compile_and_read(kernel: str, arch: str, hipcc: str,
+@dataclass(frozen=True)
+class HipBackend(Backend):
+    def command(self, compiler, arch, src, obj, include, extra):
+        return [compiler, '-x', 'hip', f'--offload-arch={arch}', '-O3', '-c',
+                '-Rpass-analysis=kernel-resource-usage',
+                '-I', str(include), *extra, str(src), '-o', str(obj)]
+
+
+@dataclass(frozen=True)
+class CudaBackend(Backend):
+    def command(self, compiler, arch, src, obj, include, extra):
+        return [compiler, '-x', 'cu', f'-arch={arch}', '-O3', '-c',
+                '-Xptxas=-v', '-I', str(include), *extra,
+                str(src), '-o', str(obj)]
+
+
+@dataclass(frozen=True)
+class SyclBackend(Backend):
+    def command(self, compiler, arch, src, obj, include, extra):
+        # Ahead of time, because a JIT build never reaches IGC and so never
+        # says anything about registers at all.
+        return [compiler, '-fsycl', '-fsycl-targets=spir64_gen', '-O3', '-c',
+                '-Xsycl-target-backend', f'-device {arch}',
+                '-I', str(include), *extra, str(src), '-o', str(obj)]
+
+
+BACKENDS = {
+    'hip': HipBackend(
+        name='hip', generator_backend='hip',
+        headers=('#include <hip/hip_runtime.h>\n'
+                 '#include "tensorforge_device/hip.h"'),
+        compiler_env='TF_HIPCC', default_compiler='hipcc',
+        parse=lambda err: parse_remarks(err)),
+    'cuda': CudaBackend(
+        name='cuda', generator_backend='cuda',
+        headers='#include "tensorforge_device/cuda.h"',
+        compiler_env='TF_NVCC', default_compiler='nvcc',
+        parse=lambda err: parse_ptxas(err)),
+    'sycl': SyclBackend(
+        name='sycl', generator_backend='acpp',
+        headers=('#include <sycl/sycl.hpp>\n'
+                 '#include "tensorforge_device/isycl.h"'),
+        compiler_env='TF_ICPX', default_compiler='icpx',
+        parse=lambda err: parse_igc(err)),
+}
+
+
+def compile_and_read(kernel: str, arch: str, compiler: str, backend: Backend,
                      extra: List[str]) -> Dict[str, int]:
-    """Compile for `arch` and return whatever resource remarks came back."""
+    """Compile for `arch` and return whatever the toolchain reported."""
     with tempfile.TemporaryDirectory() as tmp:
-        src = Path(tmp) / 'k.hip.cpp'
-        src.write_text(translation_unit(kernel))
-        cmd = [hipcc, '-x', 'hip', f'--offload-arch={arch}', '-O3', '-c',
-               '-Rpass-analysis=kernel-resource-usage',
-               '-I', str(ROOT / 'src' / 'tensorforge' / 'include'),
-               *extra, str(src), '-o', str(Path(tmp) / 'k.o')]
+        src = Path(tmp) / f'k.{backend.name}.cpp'
+        src.write_text(backend.translation_unit(kernel))
+        cmd = backend.command(compiler, arch, src, Path(tmp) / 'k.o',
+                              ROOT / 'src' / 'tensorforge' / 'include', extra)
         proc = subprocess.run(cmd, capture_output=True, text=True)
     if proc.returncode != 0:
         head = (proc.stderr.strip().splitlines() or ['(no output)'])[:4]
         raise RuntimeError('\n'.join(head))
 
-    fields = parse_remarks(proc.stderr)
-    if not fields:
+    fields = backend.parse(proc.stderr)
+    if not fields and backend.name != 'sycl':
+        # Not an error on SYCL: a clean build there says nothing, because
+        # there is nothing per kernel to say -- silence means "did not spill".
         sample = '\n'.join(proc.stderr.strip().splitlines()[:6]) or '(silent)'
         raise RuntimeError(
-            'no kernel-resource-usage remarks were parsed. Either this hipcc '
-            'predates -Rpass-analysis=kernel-resource-usage, or it prints a '
-            f'shape this does not read. What it printed:\n{sample}')
+            f'nothing was parsed from {compiler}. Either it is older than the '
+            f'flag this asks for, or it prints a shape this does not read. '
+            f'What it printed:\n{sample}')
     return fields
 
 
-def measure(mod, arch: str, hipcc: Optional[str], extra: List[str]
-            ) -> List[Measurement]:
+def measure(mod, arch: str, hipcc: Optional[str], extra: List[str],
+            backend: Backend = None) -> List[Measurement]:
     out = []
+    backend = backend or BACKENDS['hip']
     for ceiling in (lanes.DEFAULT_LANE_CEILING, None):
-        src, m = generate(mod, arch, ceiling)
+        src, m = generate(mod, arch, ceiling, backend)
         if src is not None and hipcc:
             try:
-                f = compile_and_read(src, arch, hipcc, extra)
+                f = compile_and_read(src, arch, hipcc, backend, extra)
                 m.vgprs = f.get('vgprs')
                 m.agprs = f.get('agprs')
                 m.sgprs = f.get('sgprs')
@@ -355,10 +490,19 @@ def _pearson(xs: List[float], ys: List[float]) -> float:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument('--arch', default='gfx90a')
-    ap.add_argument('--hipcc', default=os.environ.get('TF_HIPCC'),
-                    help='defaults to $TF_HIPCC, else whichever hipcc is on '
-                         'PATH; omit compilation entirely with --model-only')
+    ap.add_argument('--backend', default='hip', choices=sorted(BACKENDS),
+                    help='which toolchain to ask. They do not answer equally: '
+                         'hip reports every field per kernel, cuda reports '
+                         'registers and spills, sycl reports only that a '
+                         'kernel spilled -- IGC puts the register count in a '
+                         'shader dump, not on the command line')
+    ap.add_argument('--arch', default=None,
+                    help='defaults to gfx90a / sm_80 / pvc for the backend')
+    ap.add_argument('--compiler', '--hipcc', dest='compiler',
+                    default=None,
+                    help="defaults to the backend's environment variable "
+                         '($TF_HIPCC, $TF_NVCC, $TF_ICPX), else the compiler '
+                         'on PATH; omit compilation with --model-only')
     ap.add_argument('--cases', default='*')
     ap.add_argument('--jobs', type=int, default=os.cpu_count() or 1)
     ap.add_argument('--model-only', action='store_true',
@@ -370,31 +514,37 @@ def main() -> int:
                     help='extra flags passed through to hipcc')
     args = ap.parse_args()
 
-    hipcc = None if args.model_only else (args.hipcc or shutil.which('hipcc'))
-    if not args.model_only and not hipcc:
-        print('no hipcc found; pass --hipcc or set TF_HIPCC, or use '
-              '--model-only', file=sys.stderr)
+    backend = BACKENDS[args.backend]
+    args.arch = args.arch or {'hip': 'gfx90a', 'cuda': 'sm_80',
+                              'sycl': 'pvc'}[args.backend]
+    compiler = None if args.model_only else (
+        args.compiler or os.environ.get(backend.compiler_env)
+        or shutil.which(backend.default_compiler))
+    if not args.model_only and not compiler:
+        print(f'no {backend.default_compiler} found; pass --compiler or set '
+              f'${backend.compiler_env}, or use --model-only', file=sys.stderr)
         return 2
 
     mods = load_cases(args.cases)
     if not mods:
         print(f'no case matches {args.cases!r}', file=sys.stderr)
         return 2
-    print(f'{len(mods)} Fälle, arch={args.arch}, '
-          f'{"nur Modell" if not hipcc else hipcc}')
+    print(f'{len(mods)} Fälle, backend={backend.name}, arch={args.arch}, '
+          f'{"nur Modell" if not compiler else compiler}')
 
     rows: List[Measurement] = []
     # Generation mutates module-level hooks, so it runs serially; only the
     # compilations, which are the slow part, are spread out.
-    plans = [(mod, generate(mod, args.arch, c))
+    plans = [(mod, generate(mod, args.arch, c, backend))
              for mod in mods
              for c in (lanes.DEFAULT_LANE_CEILING, None)]
 
     def finish(item):
         mod, (src, m) = item
-        if src is not None and hipcc:
+        if src is not None and compiler:
             try:
-                f = compile_and_read(src, args.arch, hipcc, args.cflags)
+                f = compile_and_read(src, args.arch, compiler, backend,
+                                     args.cflags)
                 m.vgprs, m.agprs = f.get('vgprs'), f.get('agprs')
                 m.sgprs, m.scratch = f.get('sgprs'), f.get('scratchsize')
                 m.spills = ((f.get('vgprsspill') or 0)
@@ -410,7 +560,7 @@ def main() -> int:
     if args.json:
         args.json.write_text(json.dumps([asdict(r) for r in rows], indent=2))
         print(f'geschrieben: {args.json}')
-    return report(rows, args.verbose, model_only=not hipcc)
+    return report(rows, args.verbose, model_only=not compiler)
 
 
 if __name__ == '__main__':

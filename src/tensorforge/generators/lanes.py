@@ -137,8 +137,21 @@ def search(descr_factory, context: Context,
     registers per model byte spread over a factor of 72, so there is no
     threshold in it, only an order.
 
+    A candidate that does not build is not a candidate.  It is skipped and its
+    entry records the exception, because building at a given width is not a
+    given: on Intel the two candidates are 32 and the 16-wide vector unit, and
+    the wider one leaves a barrier in a batch loop at group scope, which
+    `verify` refuses -- so on that target the configuration that fails is the
+    *default* one, and a search that propagated the failure would be unusable
+    exactly where it has something to offer.
+
+    If nothing builds, the first exception is re-raised: an empty result and a
+    kernel that cannot be generated are different situations, and the caller
+    needs the second one to look like one.
+
     Returns `(config, results)` where `results` maps lane count to the peak
-    figure, so a caller can see how close the decision was.
+    figure -- or to the exception for a candidate that did not build -- so a
+    caller can see how close the decision was and what it passed over.
     """
     options = options or candidates(descr_factory(), context)
     if len(options) == 1:
@@ -149,10 +162,16 @@ def search(descr_factory, context: Context,
     was = context.measure_pressure
     context.measure_pressure = True
     scores = {}
+    failed = []
     try:
         for config in options:
-            gen = Generator(descr_factory(), context, lanes=config)
-            gen.generate()
+            try:
+                gen = Generator(descr_factory(), context, lanes=config)
+                gen.generate()
+            except Exception as exc:
+                scores[config.num_threads] = exc
+                failed.append(exc)
+                continue
             scores[config.num_threads] = gen.peak_pressure
     finally:
         context.measure_pressure = was
@@ -160,8 +179,13 @@ def search(descr_factory, context: Context,
     # A build that measured nothing is not a build that measured zero: it has
     # no bodies the flag reached, and picking it for scoring lowest would be
     # picking it for having said nothing.
-    scored = {k: v for k, v in scores.items() if v}
+    scored = {k: v for k, v in scores.items()
+              if isinstance(v, int) and v}
     if not scored:
-        return options[0], scores
+        if len(failed) == len(options):
+            raise failed[0]
+        built = [c for c in options
+                 if not isinstance(scores.get(c.num_threads), Exception)]
+        return built[0], scores
     best = min(scored, key=lambda k: scored[k])
     return next(c for c in options if c.num_threads == best), scores

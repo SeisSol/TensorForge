@@ -120,7 +120,7 @@ def test_the_translation_unit_uses_the_real_device_header():
     for a syntax check and wrong here: a register count only means something
     if the device compiler saw what it will actually see.
     """
-    tu = ru.translation_unit('__global__ void k() {}')
+    tu = ru.BACKENDS['hip'].translation_unit('__global__ void k() {}')
     assert 'hip/hip_runtime.h' in tu
     assert 'tensorforge_device/hip.h' in tu
     assert 'shim' not in tu
@@ -136,3 +136,99 @@ def test_the_comparison_counts_both_register_files(field):
     import inspect
     src = inspect.getsource(ru.report)
     assert f'.{field}' in src
+
+
+# ----------------------------------------------------------------------
+# nvcc, whose format is different and equally unguessable
+# ----------------------------------------------------------------------
+
+PTXAS = """\
+ptxas info    : 218125 bytes gmem, 920 bytes cmem[3]
+ptxas info    : Compiling entry function '_Z6kernelPf' for 'sm_80'
+ptxas info    : Function properties for _Z6kernelPf
+    0 bytes stack frame, 12 bytes spill stores, 12 bytes spill loads
+ptxas info    : Used 93 registers, 7136 bytes smem, 432 bytes cmem[0], 64 bytes cmem[2]
+"""
+
+
+def test_the_register_count_is_written_the_other_way_round():
+    """`Used 93 registers`, where everything else is `<n> bytes <what>`.
+
+    Two patterns, not one, and a single pattern over `<n> <unit> <what>` would
+    silently drop the field the whole tool is about.
+    """
+    assert ru.parse_ptxas(PTXAS)['vgprs'] == 93
+
+
+def test_the_registers_land_under_the_amd_key():
+    """NVIDIA has one register file where CDNA has two.
+
+    The report compares on `vgprs + agprs`, so putting the count under `vgprs`
+    and leaving `agprs` absent makes that read correctly with no per-vendor
+    case at the one place the numbers are used.
+    """
+    f = ru.parse_ptxas(PTXAS)
+    assert 'vgprs' in f and 'agprs' not in f
+
+
+def test_spill_stores_and_loads_collapse_to_one_figure():
+    """They are two views of the same traffic; the larger is the honest one."""
+    assert ru.parse_ptxas(PTXAS)['vgprsspill'] == 12
+
+
+def test_the_cmem_numbers_are_not_mistaken_for_shared_memory():
+    """`432 bytes cmem[0]` is constant memory, and is not a resource here."""
+    f = ru.parse_ptxas(PTXAS)
+    assert f['ldssize'] == 7136
+
+
+def test_a_clean_ptxas_build_still_reports_the_registers():
+    clean = PTXAS.replace('12 bytes spill stores, 12 bytes spill loads',
+                          '0 bytes spill stores, 0 bytes spill loads')
+    f = ru.parse_ptxas(clean)
+    assert f['vgprs'] == 93 and 'vgprsspill' not in f
+
+
+# ----------------------------------------------------------------------
+# Intel, which answers less, and has to say so rather than say zero
+# ----------------------------------------------------------------------
+
+def test_an_intel_build_reports_spills_and_no_register_count():
+    """IGC puts the count in a shader dump, not on the command line.
+
+    `IGC_ShaderDumpEnable=1` writes `.asm` files under `/tmp/IntelIGC`, which
+    is a directory to scrape rather than a stream to read, and whose format
+    moves with the driver.  What reaches the command line is the spill
+    warning, and that is the signal that decides whether a configuration blew
+    the register file.
+    """
+    err = ("warning: kernel _ZTS6kernel  compiled SIMD16 allocated 128 regs "
+           "and spilled around 384 bytes\n")
+    f = ru.parse_igc(err)
+    assert f.get('vgprsspill') == 384
+    assert 'vgprs' not in f, (
+        'a register count that was never reported must stay absent, not '
+        'become zero -- a caller comparing configurations on a missing '
+        'number would rank them equal instead of declining to rank them')
+
+
+def test_a_silent_intel_build_is_not_an_error():
+    """Nothing to say means it did not spill, which is the good case."""
+    assert ru.parse_igc('') == {}
+
+
+@pytest.mark.parametrize("name,arch", [("hip", "gfx90a"), ("cuda", "sm_80"),
+                                       ("sycl", "pvc")])
+def test_each_backend_builds_a_command_and_its_own_headers(name, arch):
+    """And each asks its own compiler for its own flag.
+
+    Held together because the three differ in every part -- the flag, the
+    header, the way the architecture is named -- and a shared function with
+    three branches inside it is where those quietly drift into each other.
+    """
+    b = ru.BACKENDS[name]
+    cmd = b.command('cc', arch, Path('k.cpp'), Path('k.o'), Path('/inc'), [])
+    assert cmd[0] == 'cc' and str(Path('k.cpp')) in cmd
+    assert any(arch in part for part in cmd)
+    assert 'tensorforge_device' in b.translation_unit('void k() {}')
+    assert 'shim' not in b.translation_unit('void k() {}')

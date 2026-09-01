@@ -30,6 +30,7 @@ from tensorforge.common.context import Context
 from tensorforge.common.matrix.boundingbox import BoundingBox
 from tensorforge.common.matrix.tensor import SubTensor, Tensor
 from tensorforge.generators import lanes
+from tensorforge.common.exceptions import GenerationError
 from tensorforge.generators.descriptions import GemmDescr
 from tensorforge.generators.generator import Generator
 from tensorforge.generators import elementwise as ew
@@ -266,3 +267,61 @@ def test_generating_without_the_flag_reports_nothing():
     g = Generator(_gemm(56, 9, 56, Datatype.F64), ctx)
     g.generate()
     assert g.peak_pressure is None
+
+def test_a_candidate_that_does_not_build_is_not_a_candidate():
+    """And on Intel the one that fails is the *default* one.
+
+    The two candidates there are 32 and the 16-wide vector unit, and the wider
+    one leaves a barrier inside a batch loop at group scope, which `verify`
+    refuses for a trip count that is only simd-uniform.  A search that
+    propagated the failure would be unusable on precisely the target where the
+    narrower option is what makes the kernel generate at all.
+
+    Over the corpus on acpp the search now completes for 65 of 67 cases and
+    picks the 16-wide option for 52 of them; the two it does not complete are
+    the ones where neither width builds.
+    """
+    ctx = _ctx("pvc", "acpp", Datatype.F64)
+    assert [c.num_threads for c in
+            lanes.candidates(_gemm(56, 9, 56, Datatype.F64), ctx)] == [32, 16]
+
+    calls = {"n": 0}
+    real = Generator.generate
+
+    def flaky(self):
+        # the wider candidate refuses, the narrower one builds
+        calls["n"] += 1
+        if self._lanes and self._lanes.num_threads > 16:
+            raise GenerationError("group barrier under a simd-uniform loop")
+        return real(self)
+
+    Generator.generate = flaky
+    try:
+        config, scores = lanes.search(
+            lambda: _gemm(56, 9, 56, Datatype.F64), ctx)
+    finally:
+        Generator.generate = real
+
+    assert calls["n"] == 2, "both candidates should have been tried"
+    assert config.num_threads == 16
+    assert isinstance(scores[32], GenerationError)
+
+
+def test_a_kernel_that_builds_at_no_width_still_raises():
+    """An empty result and an ungeneratable kernel are different situations.
+
+    The caller needs the second one to look like one, rather than getting back
+    a configuration that was never shown to work.
+    """
+    ctx = _ctx("gfx90a", "hip", Datatype.F64)
+    real = Generator.generate
+
+    def always_fails(self):
+        raise GenerationError("nope")
+
+    Generator.generate = always_fails
+    try:
+        with pytest.raises(GenerationError, match="nope"):
+            lanes.search(lambda: _gemm(56, 9, 56, Datatype.F64), ctx)
+    finally:
+        Generator.generate = real
