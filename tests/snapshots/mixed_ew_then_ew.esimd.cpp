@@ -55,16 +55,15 @@ inline void kernel_kernel_f2b477f03e(sycl::queue *stream, sycl::range<3> group_c
               for (int32_t v15_i1 = 0; v15_i1 < 8; ++v15_i1) {
                 tensorforge::intel_esimd::simd<float, 8> v18_data;
                 v18_data.copy_from(r0 + ((v15_i1 * 16)));
-                int32_t v21_a = v15_i1 * 8;
-                v18_data.copy_to(s0 + ((v21_a ^ ((v21_a >> 5) & 31))));
+                v18_data.copy_to(s0 + ((v15_i1 * 8)));
               }
               // glb_m1 = neg(s0)
               #pragma unroll
-              for (int32_t v26_k1 = 0; v26_k1 < 8; ++v26_k1) {
-                int32_t v29_a = v26_k1 * 8;
-                tensorforge::intel_esimd::simd<float, 8> v34_data;
-                v34_data.copy_from(s0 + ((v29_a ^ ((v29_a >> 5) & 31))));
-                ((-v34_data)).copy_to(glb_m1 + (v29_a));
+              for (int32_t v23_k1 = 0; v23_k1 < 8; ++v23_k1) {
+                int32_t v26_a = v23_k1 * 8;
+                tensorforge::intel_esimd::simd<float, 8> v28_data;
+                v28_data.copy_from(s0 + (v26_a));
+                ((-v28_data)).copy_to(glb_m1 + (v26_a));
               }
             }
           }

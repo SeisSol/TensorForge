@@ -341,3 +341,58 @@ def test_an_odd_volume_declines_rather_than_falls_back():
     bank; permuting it would move elements the plain layout had placed well."""
     for volume in (81, 169, 91):
         assert _window_width(volume) == 1
+
+
+# --------------------------------------------------------------------------- #
+# Where a permutation must not go
+# --------------------------------------------------------------------------- #
+
+def test_a_contiguous_run_does_not_survive_an_element_permutation():
+    """Why a bulk or vector access rules the swizzle out.
+
+    `memcpy_async` and ESIMD's `copy_from` both move several *contiguous*
+    positions at once, and the permutation acts per element: the components
+    arrive transposed, and once the block key exceeds the run they come from
+    outside it altogether.
+    """
+    swz = XorSwizzle(8)
+    # a four-wide run starting at 12: the block key is 1, so pairs swap
+    assert [swz.apply(i) for i in range(12, 16)] == [13, 12, 15, 14]
+    # the elements are all still in the block, just not in order -- which is
+    # the good case; a key wider than the run takes them out of it
+    assert sorted(swz.apply(i) for i in range(12, 16)) == list(range(12, 16))
+    assert swz.apply(4) == 4 and swz.apply(36) == 32, (
+        'a run at 36 leaves its own four positions entirely')
+
+
+def test_a_granular_permutation_would_keep_them_together():
+    """Recorded because it is the option, not a defect.
+
+    Permuting *granules* of `g` elements moves the components of one vector
+    together and in order.  It costs exactly the spreading it preserves: a
+    coarser unit has proportionally fewer distinct keys, so a stride-32 column
+    read goes 1-way at granule 1, 2-way at granule 2, 4-way at granule 4.
+    """
+    def granular(width, g):
+        def f(i):
+            gran, off = divmod(i, g)
+            return (gran ^ ((gran // width) % width)) * g + off
+        return f
+
+    for g in (2, 4):
+        f = granular(8, g)
+        for start in range(0, 64, g):
+            run = [f(start + k) for k in range(g)]
+            assert run == list(range(run[0], run[0] + g)), (
+                f'granule {g} split a run at {start}: {run}')
+
+    def ways(f, stride):
+        per = {}
+        for t in range(32):
+            a = f(t * stride)
+            per.setdefault(a % 32, set()).add(a)
+        return max(len(v) for v in per.values())
+
+    assert ways(granular(32, 1), 32) == 1
+    assert ways(granular(16, 2), 32) == 2
+    assert ways(granular(8, 4), 32) == 4

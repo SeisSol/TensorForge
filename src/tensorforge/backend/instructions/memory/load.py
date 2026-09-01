@@ -274,8 +274,15 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
       else:
         typeprefix = ''
 
-      structured = self._use_cuda_memcpy and self._structured_copy(writer)
-      if structured:
+      # `_use_cuda_memcpy` used to gate this, which meant every non-NVIDIA
+      # transfer wrote the window as raw text -- `s0[...] = glb_load(...)`
+      # with the address built by `access_address`, never passing through
+      # `store`.  Two consequences, and the second is the one that matters:
+      # nothing could see what the transfer touched, and a permuted window was
+      # read through `load` and written around it.  The reads applied the
+      # swizzle and the writes did not.
+      structured = self._structured_copy(writer)
+      if structured and self._use_cuda_memcpy:
         # One `copy.async` per hop, carrying the hop's extent.  The vector
         # width stops being a cast on both sides of an assignment and becomes
         # `elems`, which is what the emitter needs anyway to check the
@@ -285,6 +292,26 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
         def write_load(lhs, rhs, _d=dst_buf, _s=src_buf, _n=increment):
           self._tokens.append(writer.copy_async(
               _d, _s, dst_index=(lhs,), src_index=(rhs,), elems=_n))
+      elif structured:
+        # No async engine, so the transfer is a load and a store -- which is
+        # what it always was, spelled in a way every pass can read.
+        from tensorforge.backend.pir.core import (LaneAxis, RegisterLayout,
+                                                   ScalarType)
+        fpt = self._dest.get_fptype()
+        # A staging transfer is lane-linear: `contiguous_index` is
+        # `increment * linear_idx() + ...`, so lane `t` carries granule `t`,
+        # and `increment` is a vector width rather than a lane stride.  The
+        # ESIMD lowering needs this said -- an SPMD backend can leave the
+        # distribution in the index expression, a vector one cannot.
+        xfer_layout = RegisterLayout((LaneAxis(self._num_threads, 1),))
+        dst_buf = self._dest.pir_buffer(writer)
+        src_buf = self._src.pir_buffer(writer)
+        def write_load(lhs, rhs, _d=dst_buf, _s=src_buf, _n=increment,
+                       _t=fpt, _nt=nontemporal, _l=xfer_layout):
+          ltype = ScalarType(_t) if _n == 1 else ScalarType(_t, _n)
+          value = writer.load(_s, rhs, type_=ltype, hint='ld',
+                              nontemporal=_nt, layout=_l)
+          writer.store(_d, value, lhs)
       elif self._use_cuda_memcpy:
         elsize = self._dest.get_fptype().size() * increment
         def write_load(lhs, rhs):

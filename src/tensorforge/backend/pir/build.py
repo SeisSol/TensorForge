@@ -1543,13 +1543,29 @@ class IRBuilder:
             if stmt.op != Op.ALLOC:
                 continue
             for t in stmt.target:
-                if getattr(t.type, 'swizzle', None) is not None:
-                    swizzled[str(t)] = t
+                if getattr(t.type, 'swizzle', None) is None:
+                    continue
+                swizzled[str(t)] = t
+                # Also the name the macro layer gave it, which is what raw
+                # text spells.  Checking only the value's own identifier is
+                # how an unpermuted `memcpy_async` into a swizzled window got
+                # past this: it writes `s0[...]`, not `v12_s0[...]`.
+                #
+                # Only half a guard even so, and worth saying plainly: the
+                # copy is emitted by a *different* instruction's body, which
+                # is what `extern` is for, so a check over one body cannot see
+                # it.  The loader declines the swizzle in that case instead;
+                # this catches the same mistake made locally.
+                extern = stmt.attr('extern')
+                if extern:
+                    swizzled[str(extern)] = t
         if not swizzled:
             return
         for stmt, _ in walk(body):
             text = stmt.text
-            if not text:
+            if not text or text.strip().startswith('//'):
+                # A comment naming the buffer describes it, it does not access
+                # it.
                 continue
             for name, v in swizzled.items():
                 if _names_in(text, name):

@@ -29,12 +29,19 @@ and is wrong -- which is the failure mode the ESIMD stubs already had once.
 
 from __future__ import annotations
 
+import re
+
 from typing import Any, Optional
 
 from tensorforge.common.basic_types import Datatype
 
 from .core import IRError, Op, ScalarType, TokenType, Value
 from .emit import Emitter, _folds_predicate
+
+
+#: `*(VectorT<float, 4>*)&p[i]` -- how the base emitter spells a
+#: vector-width access.
+_VECTOR_ACCESS = re.compile(r'^\*\(\s*[^)]*?\s*\*\s*\)\s*&\s*(.*)$')
 
 
 class EsimdEmitter(Emitter):
@@ -241,6 +248,17 @@ class EsimdEmitter(Emitter):
         arithmetic in one place -- it is the same expression either way, and
         two builders of it would drift.
         """
+        m = _VECTOR_ACCESS.match(access.strip())
+        if m:
+            # A vector-width access arrives already wrapped in a reinterpret
+            # cast, and the cast has to come off first: splitting
+            # `*(simd<float,4>*)&p[i]` at the subscript alone yields
+            # `*(simd<float,4>*)&p + (i)`, which dereferences the pointer and
+            # then adds the index to the *value*.  Ill-formed, which is the
+            # good case; a shape that compiled would have read the wrong
+            # address.  `copy_from` takes the width from the `simd` it fills,
+            # so the cast carries nothing here.
+            access = m.group(1)
         if access.endswith(']') and '[' in access:
             base, _, idx = access[:-1].partition('[')
             return f'{base} + ({idx})'

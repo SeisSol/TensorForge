@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 SeisSol Group
 #
 # SPDX-License-Identifier: MIT
-from ..abstract_instruction import AbstractInstruction
+from ..abstract_instruction import AbstractInstruction, _explicit_simd
 from abc import abstractmethod
 from tensorforge.backend.writer import Writer
 from typing import Union
@@ -175,7 +175,7 @@ class AbstractShrMemWrite(MemoryInstruction):
                              offset=int(offset) if offset.isdigit()
                              else offset,
                              restrict=self._vm.get_lexic().restrict_kw,
-                             swizzle=self._swizzle())
+                             swizzle=self._swizzle(writer))
         self._dest.set_pir_buffer(writer, value)
       else:
         lhs = f'{self._fp_as_str}* {self._vm.get_lexic().restrict_kw} {self._dest.name}'
@@ -185,7 +185,7 @@ class AbstractShrMemWrite(MemoryInstruction):
   #: gain from permuting over a longer period than that.
   _BANKS = 32
 
-  def _swizzle(self):
+  def _swizzle(self, writer=None):
     """A row permutation for this window, when one is both legal and useful.
 
     A tile written a row at a time and read a column at a time costs a bank
@@ -204,6 +204,34 @@ class AbstractShrMemWrite(MemoryInstruction):
     view = self._dest.data_view
     if view is None or len(view.shape) < 2:
       return None
+
+    # Not under an explicit-SIMD lowering.  There a transfer is a `copy_from`
+    # over a whole `simd<N>`, which reads N *contiguous* positions -- and the
+    # permutation acts per element, so the vector's components arrive
+    # transposed, or from outside the run once the block key exceeds N.
+    #
+    # A permutation over *granules* of N would keep those runs intact; the
+    # elements of one vector move together and stay in order.  It costs
+    # exactly the spreading it preserves, though -- granule 1 takes a
+    # stride-32 column read to 1-way, granule 2 to 2-way, granule 4 to 4-way,
+    # because a coarser unit has proportionally fewer distinct keys.  That is
+    # a real option and a real trade, and it is not this change.
+    if _explicit_simd(self._context):
+      return None
+
+    # Only when every write to this window will be a structured store.
+    # `GlbToShrLoader` falls back to raw text when the *source* has no buffer
+    # in this body -- `addressing_none` reads through `ptr_glb_m1`, which
+    # `ptr_manip` binds only on the structured path -- and a raw write does not
+    # go through `store`, so it would not permute while every read did.
+    #
+    # Asked here rather than caught later on purpose: the guard at `finish`
+    # can only raise by then, because the permutation is already baked into
+    # every index it emitted.  Declining is the only response available before
+    # that, and it needs the same question asked earlier.
+    if writer is not None and hasattr(self, '_src'):
+      if self._src.pir_buffer(writer) is None:
+        return None
 
     # The width has to divide the *volume*, not merely be the row width.  The
     # permutation maps each block of `width` elements onto itself, so a buffer
