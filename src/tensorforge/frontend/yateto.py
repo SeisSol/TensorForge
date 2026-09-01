@@ -21,8 +21,12 @@ from tensorforge.ir.data.memory import Logical
 import numpy as np
 
 class GpuKernelGeneratorV1:
-  def __init__(self, arch):
+  def __init__(self, arch, attrs=None):
     self._arch = arch
+    #: The attributes yateto attached to this kernel, or None when yateto has
+    #: no attribute channel to attach them with.  Passed on untouched; the
+    #: Generator is what reads them.
+    self._attrs = attrs
     self._cache = {}
     self._tmp_matrices = {}
 
@@ -212,7 +216,8 @@ class GpuKernelGeneratorV1:
 
     # print(self._ir_list)
 
-    tensorforge_generator = TensorForgeGenerator(self._descr_list, context)
+    tensorforge_generator = TensorForgeGenerator(self._descr_list, context,
+                                                attrs=self._attrs)
     tensorforge_generator.generate()
 
     cpp(f'{self._gen_call_site(tensorforge_generator)}')
@@ -452,8 +457,15 @@ class TensorForgeWriter:
     return self._generator.get_header()
 
 class YatetoFrontend:
-  def __init__(self, arch):
-    self.generator = GpuKernelGeneratorV1(arch)
+  def __init__(self, arch, attrs=None):
+    """The routine exporter yateto instantiates, once per kernel.
+
+    ``attrs`` carries the per-kernel switches from ``Generator.add``.  A
+    yateto that does not know about them calls this with ``arch`` alone, and
+    the default then selects the kernel surface that predates the channel --
+    a flag mask on every kernel, checked against ``nullptr``.
+    """
+    self.generator = GpuKernelGeneratorV1(arch, attrs)
 
   def generate(self, cpp, cache):
     self.generator.generate(cpp, cache)

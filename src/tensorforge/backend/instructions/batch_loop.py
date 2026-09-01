@@ -27,7 +27,7 @@ import os
 from enum import Enum
 from typing import List, Optional, Tuple
 
-from tensorforge.common.basic_types import GeneralLexicon
+from tensorforge.common.basic_types import FlagMode, GeneralLexicon
 from tensorforge.common.context import Context
 from tensorforge.common.exceptions import InternalError
 
@@ -50,13 +50,17 @@ class BatchLoop(AbstractInstruction):
                  start: str,
                  stride: str,
                  region: List[AbstractInstruction],
-                 lookahead: int = 2):
+                 lookahead: int = 2,
+                 flags: FlagMode = FlagMode.OPTIONAL):
         super().__init__(context)
         self._section_index = section_index
         self._mode = mode
         self._start = start
         self._stride = stride
         self._region = list(region)
+        # whether this section has a `flags{i}` parameter, and whether it may
+        # be null; `ABSENT` leaves the body unguarded
+        self._flags = flags
         # how many elements ahead are bound as batchid1, batchid2, ... for
         # prefetching; only the strided loop rebinds them per iteration
         self._lookahead = lookahead
@@ -345,26 +349,29 @@ class BatchLoop(AbstractInstruction):
     def _flag_guard(self, writer):
         """The per-element mask, as one definition where the IR can hold it.
 
-        It used to be three statements and a block: `bool allowed = true;`,
-        then a guarded assignment.  Two assignments to one name is not a value,
-        so the `if (allowed)` around the body had to be raw text as well, and
-        the body could say nothing about the condition it ran under.
+        One definition and not a `bool` reassigned under an `if`: two
+        assignments to one name is not a value, so the `if (allowed)` around
+        the body would have to be raw text as well, and the body could say
+        nothing about the condition it runs under.
 
-        A conditional expression says the same thing once.  `?:` short-circuits,
-        so `flags0[batchId0]` is still read only when the pointer is non-null ---
-        which is the whole reason for the two-step shape.
+        `OPTIONAL` spells the null check as a conditional expression for the
+        same reason.  `?:` short-circuits, so `flags0[batchId0]` is still read
+        only when the pointer is non-null, and it is still one value.
+        `REQUIRED` has no null to check: the parameter has no default, so the
+        caller supplied a pointer.
         """
         flags = f'{GeneralLexicon.FLAGS_NAME}{self._section_index}'
+        read = f'static_cast<bool>({flags}[{{0}}])'
+        if self._flags is FlagMode.OPTIONAL:
+            read = f'{flags} == nullptr ? true : {read}'
         if hasattr(writer, 'decl_expr') and self._induction is not None:
             from tensorforge.backend.pir.core import BOOL, Effect, MemSpace
             return writer.decl_expr(
-                'const bool allowed',
-                f'{flags} == nullptr ? true : static_cast<bool>({flags}[{{0}}])',
+                'const bool allowed', read,
                 BOOL, None, args=(self._induction,), kind=Effect.READ,
                 space=MemSpace.GLOBAL, hint='allowed', extern='allowed')
         writer(f'const bool allowed = '
-               f'{flags} == nullptr ? true : '
-               f'static_cast<bool>({flags}[{self._batch(0)}]);')
+               f'{read.format(self._batch(0))};')
         return 'allowed'
 
     def _lookahead_bindings(self, writer) -> None:
@@ -423,28 +430,39 @@ class BatchLoop(AbstractInstruction):
         head, guarded = self._split_guard()
         for instr in head:
             instr.gen_code(writer)
+        if self._flags is FlagMode.ABSENT:
+            # Nothing to skip against, so no condition and no block.  The
+            # split above still holds: `head` is what has to run for every
+            # element, and running it first keeps the order the pipelining
+            # pass arranged whether or not a guard follows it.
+            self._emit_guarded(writer, guarded)
+            return
         cond = self._flag_guard(writer)
-        # A real `Op.IF` where the condition is a value.  It was a raw block,
-        # which made the whole body one opaque region as far as any pass was
-        # concerned -- `wrap_prefetch` looked into the loop, found the guard,
-        # and reported no transfers because none were *its* statements.
+        # A real `Op.IF` where the condition is a value.  A raw block would
+        # make the whole body one opaque region as far as any pass is
+        # concerned -- `wrap_prefetch` looks into the loop, finds the guard,
+        # and would report no transfers because none are *its* statements.
         guard = (writer.if_(cond) if hasattr(writer, 'if_')
                  and not isinstance(cond, str) else writer.If(cond))
         with guard:
-            if AbstractInstruction._shared_body:
-                # Already inside one -- opened by `gen_code` around the loop.
+            self._emit_guarded(writer, guarded)
+
+    def _emit_guarded(self, writer, guarded) -> None:
+        """The part of the region that a mask, if there is one, may skip."""
+        if AbstractInstruction._shared_body:
+            # Already inside one -- opened by `gen_code` around the loop.
+            for instr in guarded:
+                instr.gen_code(writer)
+        elif self._wide_bodies():
+            # one body for every instruction of the region
+            budget = max((i.temp_shmem() for i in guarded), default=0)
+            with AbstractInstruction.shared_body(self._context, writer,
+                                                 scratch=budget):
                 for instr in guarded:
                     instr.gen_code(writer)
-            elif self._wide_bodies():
-                # one body for every instruction of the region
-                budget = max((i.temp_shmem() for i in guarded), default=0)
-                with AbstractInstruction.shared_body(self._context, writer,
-                                                     scratch=budget):
-                    for instr in guarded:
-                        instr.gen_code(writer)
-            else:
-                for instr in guarded:
-                    instr.gen_code(writer)
+        else:
+            for instr in guarded:
+                instr.gen_code(writer)
 
     def _wide_bodies(self) -> bool:
         """One PIR body for the whole region, or one per instruction.

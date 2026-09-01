@@ -233,3 +233,41 @@ class GeneralLexicon:
   TOTAL_SHR_MEM = 'totalShrMem'
   LOCAL_SHR_MEM = 'localShrMem'
   REG_NAME = 'reg'
+
+
+class FlagMode(enum.Enum):
+  """What the per-element flag mask costs a kernel that does not use one.
+
+  The mask is a ``unsigned*`` parameter per section plus a guard around the
+  loop body, and a kernel whose caller never skips an element pays for both.
+  Which of the three shapes a kernel gets is decided by the frontend that
+  builds it, from the attributes the caller passed at kernel creation:
+
+  ``ABSENT``
+      No parameter and no guard.  The caller did not ask for a mask, so
+      naming one is a compile error rather than a silently ignored write.
+  ``REQUIRED``
+      Parameter without a default, dereferenced unconditionally.  The caller
+      asked for the mask and therefore has to supply it.
+  ``OPTIONAL``
+      Parameter defaulting to ``nullptr``, guarded by a null check.  This is
+      what a frontend that passes no attributes at all gets, so a caller that
+      predates the attribute channel keeps working unchanged.
+  """
+
+  ABSENT = 'absent'
+  REQUIRED = 'required'
+  OPTIONAL = 'optional'
+
+  @classmethod
+  def from_attrs(cls, attrs):
+    """The mode a kernel attribute dictionary asks for.
+
+    ``None`` is not the empty dictionary here: it means the frontend has no
+    attributes to give, which is answered with ``OPTIONAL``.  An empty
+    dictionary comes from a frontend that does have them and left the mask
+    out, which is ``ABSENT``.
+    """
+    if attrs is None:
+      return cls.OPTIONAL
+    return cls.REQUIRED if attrs.get(GeneralLexicon.FLAGS_NAME, False) else cls.ABSENT

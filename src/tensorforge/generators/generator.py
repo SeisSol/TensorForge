@@ -6,7 +6,7 @@ from copy import deepcopy
 import hashlib
 from tensorforge.generators.descriptions import OperationDescription, MultilinearDescr, ElementwiseDescr, RegionDescription, ReductionDescr
 from tensorforge.common.context import Context
-from tensorforge.common.basic_types import Addressing, GeneralLexicon, DataFlowDirection
+from tensorforge.common.basic_types import Addressing, FlagMode, GeneralLexicon, DataFlowDirection
 from tensorforge.common.helper import get_extra_offset_name
 from tensorforge.backend.data_types import ShrMemObject, RegMemObject
 from tensorforge.backend.opt import OptimizationStage
@@ -106,9 +106,16 @@ class Generator:
                gemm_list: List[OperationDescription],
                context: Context,
                thread_block_policy_type: Type[AbstractThreadBlockPolicy] = RegmaxBlockPolicy,
-               lanes: Optional[LaneConfig] = None):
+               lanes: Optional[LaneConfig] = None,
+               attrs: Optional[dict] = None):
     self.descr_list: List[OperationDescription] = gemm_list
     self._context: Context = context
+    #: Switches the frontend's caller set on this kernel, or None from a
+    #: frontend that has no attribute channel.  Only the flag mask reads
+    #: these; the distinction between None and {} is what keeps a frontend
+    #: without one generating the same kernels it did before.
+    self._attrs: Optional[dict] = attrs
+    self._flags: FlagMode = FlagMode.from_attrs(attrs)
     self._thread_block_policy_type: Type[AbstractThreadBlockPolicy] = thread_block_policy_type
     self._base_kernel_name: Union[str, None] = None
 
@@ -152,6 +159,14 @@ class Generator:
 
   def set_kernel_name(self, name):
     self._base_kernel_name = name
+
+  def flag_mode(self) -> FlagMode:
+    """Whether this kernel takes a per-element flag mask, and how.
+
+    The launcher signature follows from it, so a caller that emits the call
+    site (a test driver, a frontend) has to be able to ask.
+    """
+    return self._flags
 
   def register(self):
     self._collect_tmp_matrices()
@@ -214,7 +229,8 @@ class Generator:
                        mode=self._batch_loop_mode(),
                        start=start,
                        stride=stride,
-                       region=self._section.ir)
+                       region=self._section.ir,
+                       flags=self._flags)
 
       # The prologue stays *out* of the rewritable stream.  Its shared-memory
       # symbols are allocated by ShrMemObject.alloc_global, a separate bump
@@ -625,6 +641,14 @@ class Generator:
     sha = hashlib.new('md5', usedforsecurity=False)
     sha.update(', '.join(long_name).encode())
     sha.update(descrs.encode())
+    # `REQUIRED` and `OPTIONAL` have the same parameter list and different
+    # bodies, so parameters alone do not identify the kernel: two kernels
+    # differing only in the mask shape would collide on one name, and the
+    # routine cache keeps whichever it saw first.  `OPTIONAL` stays out of the
+    # hash so that names a caller without attributes gets do not depend on
+    # this at all.
+    if self._flags is not FlagMode.OPTIONAL:
+      sha.update(self._flags.value.encode())
     md5encoding = sha.hexdigest()
     self._base_kernel_name = f'kernel_{md5encoding[:Generator.NAME_ENCODING_LENGTH]}'
 
@@ -664,11 +688,15 @@ class Generator:
     for i, section in enumerate(self._sections):
       params.append(f'{batch_size_type} {GeneralLexicon.NUM_ELEMENTS}{i}')
 
-    flags_type = 'unsigned*' if with_types else ''
-    default_flags_value = '= nullptr' if with_defaults else ''
+    if self._flags is not FlagMode.ABSENT:
+      flags_type = 'unsigned*' if with_types else ''
+      # A mask the kernel dereferences unconditionally has no default: the
+      # signature is where "you have to pass one" is stated.
+      defaulted = with_defaults and self._flags is FlagMode.OPTIONAL
+      default_flags_value = '= nullptr' if defaulted else ''
 
-    for i, section in enumerate(self._sections):
-      params.append(f'{flags_type} {GeneralLexicon.FLAGS_NAME}{i} {default_flags_value}')
+      for i, section in enumerate(self._sections):
+        params.append(f'{flags_type} {GeneralLexicon.FLAGS_NAME}{i} {default_flags_value}')
 
     return params
 
@@ -718,7 +746,8 @@ class Generator:
     args = self._generate_base_params_list(symbol_list=symbols,
                                                 with_types=False)
 
-    args.append(f'{GeneralLexicon.FLAGS_NAME}')
+    if self._flags is not FlagMode.ABSENT:
+      args.append(f'{GeneralLexicon.FLAGS_NAME}')
     args.append(f'{GeneralLexicon.STREAM_PTR_STR}')
     str_args = ', '.join(args)
     return f'launcher_{self._base_kernel_name}({str_args});'
@@ -748,15 +777,20 @@ class Generator:
           args.append(offset_name_map[symbol.obj.alias])
 
     flags = []
+    regions = 0
     for desc in self.descr_list:
       if isinstance(desc, RegionDescription):
+        regions += 1
         args.append(f'{desc.name}.numElements')
         flags.append(f'{desc.name}.flags')
-    if len(flags) == 0:
+    if regions == 0:
       args.append(f'numElements')
       flags.append(f'flags')
 
-    args += flags
+    # The element counts are always arguments; the masks beside them are only
+    # arguments when the signature has parameters for them.
+    if self._flags is not FlagMode.ABSENT:
+      args += flags
 
     args.append('streamPtr')
 
