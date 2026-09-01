@@ -35,7 +35,7 @@ _FLOAT_TYPES = frozenset({Datatype.F16, Datatype.F32, Datatype.F64})
 
 
 def verify(body: Tuple[Stmt, ...], strict: bool = True) -> List[str]:
-    """Structural + SSA + uniformity checks.
+    """Structural, SSA, uniformity and buffer-bounds checks.
 
     Returns a list of diagnostics.  With ``strict`` it raises on the first
     batch instead, which is what ``gen_ir`` should do in debug builds.
@@ -52,9 +52,95 @@ def verify(body: Tuple[Stmt, ...], strict: bool = True) -> List[str]:
 
     _check_scope(body, set(), diag, reachable_at=Uniformity.GRID)
     diag.extend(_check_dangling_names(body))
+    diag.extend(_check_buffer_bounds(body))
 
     if diag and strict:
         raise IRError('pseudo-IR verification failed:\n  ' + '\n  '.join(diag))
+    return diag
+
+
+def _check_buffer_bounds(body: Tuple[Stmt, ...]) -> List[str]:
+    """Every access lands inside the buffer it names.
+
+    A register array is a fixed number of registers, and an index one past
+    either end is a neighbouring register or a spill slot -- a value that is
+    wrong without being absent, so it survives every check that asks whether
+    something was computed.  A host interpreter does not see it either: it
+    keeps registers in a dict, serves index -1, and answers.
+
+    Only what the IR can resolve is checked.  The index of an access built
+    through `Symbol.build_address` is an expression tree over loop counters
+    with stated bounds, which is enough to bound it; an index that arrives as
+    raw text is opaque and passes silently.  Which accesses those are shifts
+    as the migration proceeds, so this reports what it can prove wrong rather
+    than claiming coverage it does not have.
+    """
+    sizes: Dict[str, int] = {}
+    counters: Dict[int, Tuple[int, int]] = {}
+    defs: Dict[int, Stmt] = {}
+
+    for s, _ in walk(body):
+        for t in s.target:
+            defs[t.id] = s
+        if s.op == Op.ALLOC and isinstance(getattr(s.target[0], 'type', None),
+                                           BufferType):
+            buffer = s.target[0].type
+            if buffer.space == MemSpace.REGISTER and buffer.shape:
+                count = 1
+                for extent in buffer.shape:
+                    count *= extent
+                sizes[s.target[0].hint] = count
+        if s.op == Op.FOR and s.regions and len(s.args) >= 3:
+            start, stop, step = s.args[0], s.args[1], s.args[2]
+            if all(isinstance(a, int) for a in (start, stop, step)) and step > 0:
+                for counter in s.regions[0].args:
+                    counters[counter.id] = (start, stop - 1)
+
+    def bounds(x: Operand, depth: int = 0) -> Optional[Tuple[int, int]]:
+        if isinstance(x, int):
+            return (x, x)
+        if not isinstance(x, Value) or depth > 24:
+            return None
+        if x.id in counters:
+            return counters[x.id]
+        s = defs.get(x.id)
+        if s is None:
+            return None
+        if s.op == Op.CONST and s.args and isinstance(s.args[0], int):
+            return (s.args[0], s.args[0])
+        if s.op not in ('add', 'sub', 'mul') or len(s.args) != 2:
+            return None
+        left, right = bounds(s.args[0], depth + 1), bounds(s.args[1], depth + 1)
+        if left is None or right is None:
+            return None
+        if s.op == 'add':
+            return (left[0] + right[0], left[1] + right[1])
+        if s.op == 'sub':
+            return (left[0] - right[1], left[1] - right[0])
+        corners = [a * b for a in left for b in right]
+        return (min(corners), max(corners))
+
+    diag: List[str] = []
+    for s, _ in walk(body):
+        if s.op == Op.LOAD:
+            base, index = (s.args + (None, None))[0], (s.args + (None, None))[1]
+        elif s.op == Op.STORE:
+            base, index = (s.args + (None,) * 3)[0], (s.args + (None,) * 3)[2]
+        else:
+            continue
+        # A buffer reaches an access either as the symbol it was declared
+        # for or as the `alloc` result itself, and both spell the same
+        # array.
+        name = getattr(base, 'name', None) or getattr(base, 'hint', None)
+        if name not in sizes or index is None:
+            continue
+        span = bounds(index)
+        if span is None:
+            continue
+        low, high = span
+        if low < 0 or high >= sizes[name]:
+            diag.append(f'{s.op}: {name} holds {sizes[name]} elements and is '
+                        f'addressed at {low}..{high}')
     return diag
 
 
