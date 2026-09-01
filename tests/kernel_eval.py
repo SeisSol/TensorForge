@@ -132,6 +132,12 @@ def _py(expr: str) -> str:
     e = re.sub(r'\b(?:static_cast|reinterpret_cast|const_cast)\s*<[^>]*>\s*', '', e)
     e = re.sub(r'\b__ldcg\s*\(\s*&', 'DEREF(', e)
     e = re.sub(r'\b__ldg\s*\(\s*&', 'DEREF(', e)
+    # `readlane(v, L)` reads lane `L`'s copy of `v`.  Captured as a *name*
+    # rather than a value: by the time Python evaluated the argument it would
+    # already hold this lane's copy, which is the one thing the call is not
+    # asking for.
+    e = re.sub(r'\btensorforge::readlane\s*\(\s*(\w+)\s*,\s*([^),]+)\)',
+               r'READLANE("\1", \2)', e)
     e = e.replace('&&', ' and ').replace('||', ' or ')
     e = re.sub(r'(?<![=!<>&|])!(?!=)', ' not ', e)
     # `*(SomeVecType*)&p[i]` -> `VLOAD(ADDR(p, i), N)`.  Done before the
@@ -198,6 +204,11 @@ class Interp:
         self.budget = limit
         self.env['DEREF'] = lambda p, i=0: p[i] if isinstance(p, Ptr) else p
         self.env['ADDR'] = lambda p, i: (p + i) if isinstance(p, Ptr) else p
+        #: The other lanes of the wave, set by `Lockstep`.  Empty for a
+        #: single-lane run, where a cross-lane read has no defined answer and
+        #: says so instead of quietly returning this lane's copy.
+        self.peers: List['Interp'] = []
+        self.env['READLANE'] = self._readlane
         self.env['VEC'] = lambda *xs: Vec(xs)
         self.env['VLOAD'] = lambda n, p, i: Vec(p[i + k] for k in range(n))
         for fn in ('min', 'max', 'abs'):
@@ -211,6 +222,30 @@ class Interp:
                          ('tanh', math.tanh), ('sin', math.sin),
                          ('cos', math.cos), ('erf', math.erf)):
             self.env[name] = self.env[name + 'f'] = fn
+
+    def _readlane(self, name: str, lane):
+        """Lane `lane`'s copy of `name`.
+
+        Requires a lockstep run: the lanes have to have reached this point
+        together, or the peer's binding is from a different statement.  In a
+        single-lane run there are no peers and this aborts rather than
+        returning the local copy -- a cross-lane read that silently reads
+        across nothing is how a broadcast disappears from the model without
+        anything noticing.
+        """
+        lane = int(lane)
+        if not self.peers:
+            raise Abort(f'readlane({name!r}, {lane}) outside a lockstep run')
+        if not 0 <= lane < len(self.peers):
+            raise Abort(f'readlane({name!r}, {lane}): no such lane')
+        peer = self.peers[lane]
+        if name not in peer.env:
+            # The lane was masked off where this value was defined.  On the
+            # hardware the register holds whatever it held before, which is
+            # not something to invent a number for.
+            raise Abort(f'readlane({name!r}, {lane}): lane {lane} never '
+                        f'defined it -- it was masked off there')
+        return peer.env[name]
 
     def ev(self, expr: str):
         self.budget -= 1
@@ -394,6 +429,109 @@ def parse(src: str) -> List:
     return block()
 
 
+def _base_env(src: str, mem: Slot, tid: int) -> Dict[str, object]:
+    """The names a kernel body starts with, for one lane."""
+    env = {
+        'threadIdx': type('T', (), {'x': tid, 'y': 0, 'z': 0})(),
+        'blockIdx': type('B', (), {'x': 0, 'y': 0, 'z': 0})(),
+        'blockDim': type('D', (), {'x': 256, 'y': 1, 'z': 1})(),
+        'gridDim': type('G', (), {'x': 1, 'y': 1, 'z': 1})(),
+    }
+    for name in re.findall(r'\b(m\d+)\b', src):
+        env.setdefault(name, Ptr(mem, name))
+    for name in re.findall(r'\b(\w*_extraOffset)\b', src):
+        env.setdefault(name, 0)
+    for name in re.findall(r'\b(numElements\d+)\b', src):
+        env.setdefault(name, 1)
+    for name in re.findall(r'\b(flags\d+)\b', src):
+        env.setdefault(name, None)
+    env['totalShrMemPtr'] = Ptr(mem, 'shr')
+    return env
+
+
+class Lockstep:
+    """Drives a set of lanes through one body together.
+
+    A cross-lane read is only answerable if the lanes have reached the same
+    statement, so they are advanced statement by statement rather than lane by
+    lane. Divergence is handled by partitioning: an `if` runs its arms on the
+    lanes that take them, a `for` iterates while any lane is still in range,
+    and a lane that is masked off simply does not execute the statements
+    inside -- which is why a `readlane` of a value it never defined aborts
+    rather than inventing one.
+    """
+
+    def __init__(self, interps: List['Interp']):
+        self.interps = interps
+        for it in interps:
+            it.peers = interps
+
+    def run(self, block: List, lanes: Optional[List['Interp']] = None) -> None:
+        lanes = self.interps if lanes is None else lanes
+        if not lanes:
+            return
+        for node in block:
+            kind = node[0]
+            if kind == 'expr':
+                for it in lanes:
+                    it.assign(node[1])
+            elif kind == 'if':
+                taken = [it for it in lanes if it.ev(node[1])]
+                other = [it for it in lanes if it not in taken]
+                self.run(node[2], taken)
+                if node[3] is not None:
+                    self.run(node[3], other)
+            elif kind == 'for':
+                v, a, cmp_, b, step = node[1:6]
+                for it in lanes:
+                    it.env[v] = it.ev(a)
+                inc = 1 if '++' in step or '+=' in step else -1
+                while True:
+                    active = [it for it in lanes
+                              if (it.env[v] < it.ev(b) if '<' in cmp_
+                                  else it.env[v] > it.ev(b))]
+                    if not active:
+                        break
+                    self.run(node[6], active)
+                    for it in active:
+                        it.env[v] += (it.ev(step.split('=')[1]) *
+                                      (1 if '+=' in step else -1)
+                                      if ('+=' in step or '-=' in step) else inc)
+                        it.budget -= 1
+                        if it.budget < 0:
+                            raise Abort('budget exhausted')
+            elif kind == 'block':
+                self.run(node[1], lanes)
+
+
+def evaluate_wave(src: str, lanes: int, seed: int = 0,
+                  globals_only: bool = False,
+                  preset: Optional[Dict[str, float]] = None) -> Dict:
+    """Run one kernel body for `lanes` lanes together; return the memory.
+
+    The difference from calling `evaluate` per lane is that the lanes share
+    one memory *and* can see each other's registers, which is what a
+    `readlane` needs. Everything a single-lane run could check, this checks
+    too; what it adds is the cross-lane traffic -- the broadcast of an operand
+    and the peeled tail of a widened lead dimension, neither of which had any
+    numerical coverage before.
+    """
+    body = src[src.index('{'):]
+    mem = Slot(seed)
+    if preset:
+        for name, value in preset.items():
+            for idx in range(_PRESET_SLOTS):
+                mem.write(name, idx, value)
+    interps = []
+    for tid in range(lanes):
+        env = _base_env(src, mem, tid)
+        interps.append(Interp(mem, env))
+    Lockstep(interps).run(parse(body))
+    if globals_only:
+        return {k: v for k, v in mem.data.items() if k[0].startswith('m')}
+    return {(k[0].split('#')[0], k[1]): v for k, v in mem.data.items()}
+
+
 def evaluate(src: str, tid: int = 0, seed: int = 0,
              globals_only: bool = False,
              preset: Optional[Dict[str, float]] = None) -> Dict:
@@ -415,22 +553,7 @@ def evaluate(src: str, tid: int = 0, seed: int = 0,
             # kernel addresses, so over-filling costs nothing
             for idx in range(_PRESET_SLOTS):
                 mem.write(name, idx, value)
-    env = {
-        'threadIdx': type('T', (), {'x': tid, 'y': 0, 'z': 0})(),
-        'blockIdx': type('B', (), {'x': 0, 'y': 0, 'z': 0})(),
-        'blockDim': type('D', (), {'x': 256, 'y': 1, 'z': 1})(),
-        'gridDim': type('G', (), {'x': 1, 'y': 1, 'z': 1})(),
-
-    }
-    for name in re.findall(r'\b(m\d+)\b', src):
-        env.setdefault(name, Ptr(mem, name))
-    for name in re.findall(r'\b(\w*_extraOffset)\b', src):
-        env.setdefault(name, 0)
-    for name in re.findall(r'\b(numElements\d+)\b', src):
-        env.setdefault(name, 1)
-    for name in re.findall(r'\b(flags\d+)\b', src):
-        env.setdefault(name, None)
-    env['totalShrMemPtr'] = Ptr(mem, 'shr')
+    env = _base_env(src, mem, tid)
     interp = Interp(mem, env)
     interp.run(parse(body))
     if globals_only:

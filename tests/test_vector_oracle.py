@@ -102,3 +102,63 @@ def test_the_widened_kernel_is_not_trivially_empty(vcase):
     _, wide = _destination(vcase, widen=True)
     assert wide
     assert any(abs(v) > 1e-9 for v in wide.values())
+
+
+# --------------------------------------------------------------------------- #
+# Cross-lane traffic, which needs the lanes run together
+# --------------------------------------------------------------------------- #
+
+def _wave(name, widen, blocking=1, lanes=32):
+    old = (vectorize.LEAD_VECTORIZE, vectorize.LEAD_BLOCKING)
+    vectorize.LEAD_VECTORIZE, vectorize.LEAD_BLOCKING = widen, blocking
+    try:
+        path = pathlib.Path(__file__).parent / 'cases' / f'{name}.py'
+        spec = importlib.util.spec_from_file_location(name, path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        gen = Generator(mod.descr_list(),
+                        Context(arch='sm_86', backend='cuda',
+                                fp_type=mod.DTYPE))
+        gen.generate()
+        src = gen.get_kernel()
+    finally:
+        vectorize.LEAD_VECTORIZE, vectorize.LEAD_BLOCKING = old
+    return src, kernel_eval.evaluate_wave(src, lanes, seed=11,
+                                          globals_only=True)
+
+
+@pytest.mark.parametrize('vcase', VEC_CASES)
+def test_a_wave_run_agrees_with_the_scalar_kernel(vcase):
+    """The same comparison, with the lanes advanced together.
+
+    Everything a per-lane run could check, this checks too; what it adds is
+    the cross-lane traffic. A `readlane` cannot be answered lane by lane --
+    by the time the argument is evaluated it already holds the *reading*
+    lane's copy, which is the one value the call is not asking for.
+    """
+    _, base = _wave(vcase, widen=False)
+    src, wide = _wave(vcase, widen=True)
+    assert 'VectorT' in src
+    assert set(base) == set(wide)
+    for key in sorted(base):
+        assert base[key] == pytest.approx(wide[key], abs=1e-4), key
+
+
+def test_a_cross_lane_read_outside_a_wave_run_refuses():
+    """Rather than returning the local copy, which is how a broadcast
+    disappears from the model without anything noticing."""
+    interp = kernel_eval.Interp(kernel_eval.Slot(0), {})
+    with pytest.raises(kernel_eval.Abort):
+        interp.env['READLANE']('v1', 3)
+
+
+def test_a_lane_masked_off_at_the_definition_refuses():
+    """On the hardware the register holds whatever it held before, which is
+    not something to invent a number for."""
+    mem = kernel_eval.Slot(0)
+    lanes = [kernel_eval.Interp(mem, {}) for _ in range(4)]
+    kernel_eval.Lockstep(lanes)
+    lanes[1].env['v9'] = 2.5
+    assert lanes[0].env['READLANE']('v9', 1) == 2.5
+    with pytest.raises(kernel_eval.Abort):
+        lanes[0].env['READLANE']('v9', 2)
