@@ -12,6 +12,7 @@ the bugs that came out of this file:
 * `features` -- which LLVM subtarget features it has
 * `catalog`  -- what a matrix instruction is
 * `layouts`  -- where each element of its operands sits
+* `reorder`  -- how to build a fragment from the nest's registers
 * `relayout` -- which instruction turns one lane distribution into another
 * `select`   -- which instruction width to use
 * `emitters` -- how to write one instruction down
@@ -44,6 +45,8 @@ from .catalog import (DEFINED_TRANSPOSES, MANTISSA, MATRIX_OPS, MFMA_TILES,
 from .features import FEATURE_TARGETS, has_feature, wave_size
 from .layouts import (FRAGMENT_BITS, Provenance, covers, established,
                       position, provenance)
+from .reorder import (IDENTITY_DPP, ROW, Move, fragment_cost,
+                      fragment_moves)
 from .codegen import hfma, matmul32, matmuldpp
 from .emitters import fmadpp, fmadpp4, fmadpp8, fmadpp16, fmascalar
 from .relayout import (BROADCAST, MOVDPP16, RELAYOUTS, TRANSPOSE4X4, Relayout,
@@ -63,6 +66,7 @@ __all__ = [
     'lane_batched_ops', 'mfma_tile_for',
     'FRAGMENT_BITS', 'Provenance', 'covers', 'established',
     'position', 'provenance',
+    'IDENTITY_DPP', 'ROW', 'Move', 'fragment_cost', 'fragment_moves',
     'wanted_fmadpp_step', 'select_fmadpp_step',
     'Relayout', 'RELAYOUTS', 'BROADCAST', 'MOVDPP16', 'TRANSPOSE4X4',
     'find_relayout',

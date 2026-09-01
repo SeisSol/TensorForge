@@ -34,7 +34,7 @@ AMD = (Path(__file__).parent.parent / "src" / "tensorforge" / "backend" /
 #: another file is still unreachable, and splitting a module must not be a way
 #: to launder dead code past this check.
 MODULES = ["__init__", "arch", "caps", "features", "catalog", "layouts",
-           "relayout", "select", "emitters", "codegen", "unused"]
+           "reorder", "relayout", "select", "emitters", "codegen", "unused"]
 
 #: What the dispatch calls into this package.  Two, and both are entry points
 #: in the same sense: one is asked before generation what has to be reserved,
@@ -90,6 +90,19 @@ KEPT_UNREACHABLE = {
         "measured row or derived one; reached only from `position`",
     "AXES":
         "names the operand index order for `index_terms`",
+    "Move":
+        "one register into one region of a fragment; the emitter that turns "
+        "these into `swap` and `dppUpdate` calls is not written",
+    "IDENTITY_DPP":
+        "the control that makes `dppUpdate` a merge and not a shuffle",
+    "ROW":
+        "lanes per DPP row, which is what `row_mask` selects",
+    "_swaps_for":
+        "bit mask to `swap` sequence; reached only from `fragment_moves`",
+    "fragment_moves":
+        "the reordering plan; no emitter consumes it yet",
+    "fragment_cost":
+        "prices a plan against staging or against not taking the path",
     "Term":
         "one shift-and-mask contribution to a fragment address",
     "_bit_sources":
