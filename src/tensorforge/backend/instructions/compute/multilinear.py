@@ -22,6 +22,8 @@ from .primitives import nvidia as nvidia
 from .primitives import amd as amd
 from .primitives import intel as intel
 from .matmul import MatmulOperands
+from .strategy import (ComputeShape, Strategy, choose_strategy,
+                       is_contraction, legal_strategies)
 
 #: Which module owns the matrix paths for a vendor.  One row per target, and
 #: every question the dispatch asks goes to the same row -- so what gets
@@ -578,64 +580,37 @@ class MultilinearInstruction(ComputeInstruction):
         return bool(obj) and (not obj.is_dense()
                               or self._ops[1].symbol.data_view.shape[0] < 16)
 
-    def _is_matmul(self):
-        if self._lead_width > 1:
-            # Not a preference: the matrix-core paths own the lane-to-register
-            # mapping of their fragments, and the lead width is a change to
-            # exactly that mapping.  Handing MFMA operands addressed at stride
-            # `width` gives it the right registers in the wrong places, which
-            # is silent -- the generated code compiles and the numbers are
-            # wrong.
-            #
-            # The two are alternative schemes rather than composable ones, and
-            # that was the argument for not forking a vectorised path beside
-            # the WMMAs in the first place.  Whether the packed-VALU
-            # arrangement beats the matrix cores for FP32 is the open question
-            # from the AMD side; this makes the choice explicit instead of
-            # letting one silently corrupt the other.
-            return False
-        vendor = self._context.get_vm().get_hw_descr().vendor
-        if len(self._ops) != 2:
-            return False
-        if vendor == 'amd':
-            return True
-        if vendor == 'nvidia':
-            if not nvidia.ENABLED:
-                return False
-            # Asked, not asserted.  The emitter's preconditions used to be an
-            # `assert` that nothing reached; with the path enabled, a case it
-            # cannot take has to fall through to the generic path instead of
-            # aborting generation.
-            return nvidia.supports(self._num_threads, self._idest.datatype,
-                                   self._second_operand_is_sparse())
-        if vendor == 'intel':
-            # Asked the same way, for the same reason.  The Intel path is
-            # parked one step earlier than NVIDIA's -- see `intel.ENABLED` --
-            # but the gate is written now so that turning it on is a flag and
-            # not a search for the call site.
-            simd = _explicit_simd(self._context)
-            if not (intel.ENABLED or (intel.BROADCAST_ENABLED and simd)):
-                # The register-only path is for the explicitly vectorised
-                # lowering, and the reason is its whole argument: a lane
-                # broadcast is `v[k]` out of this work-item's own registers
-                # there, and a real cross-lane instruction in SPMD.  Taking it
-                # on an Intel target lowered as SPMD would trade a shared
-                # buffer for a `group_broadcast` per product, which is the
-                # trade the AMD path makes deliberately with DPP and this one
-                # does not.
-                return False
-            return intel.supports(self._num_threads, self._idest.datatype,
-                                  self._second_operand_is_sparse())
-        return False
+    def _strategy(self) -> Strategy:
+        """Which arrangement computes this operation.
+
+        Derived on each call rather than stored.  Two callers ask -- the
+        emission below, and `temp_shmem` before any body exists -- and the
+        answer has to be the same for both: a reservation made for one
+        arrangement and an emission of another is either a buffer nobody
+        writes or an overrun.  Everything it reads is fixed by `_analyze`, so
+        deriving it twice cannot disagree with itself the way two stored
+        copies can.
+        """
+        module = _vendor_module(self._context)
+        if module is None or not is_contraction(len(self._ops),
+                                                self._lead_width):
+            return Strategy.GENERIC
+        shape = ComputeShape(threads=self._num_threads,
+                             dtype=self._idest.datatype,
+                             sparse=self._second_operand_is_sparse(),
+                             explicit_simd=_explicit_simd(self._context))
+        offered = module.strategies(shape, self._context)
+        return choose_strategy(legal_strategies(offered),
+                               self._context.get_vm().get_hw_descr().vendor)
 
 
     def _nonleading_dim_test(self, writer: Writer):
         # if len(self._ks) == 0 and len(self._ops) == 1:
         #     return False
 
-        can_use = self._is_matmul()
+        strategy = self._strategy()
 
-        if can_use:
+        if strategy is not Strategy.GENERIC:
             K = 1
             N = 1
             M = 1
@@ -742,10 +717,6 @@ class MultilinearInstruction(ComputeInstruction):
                         spec.discard()
                 return res
 
-            module = _vendor_module(self._context)
-            if module is None:
-                return False
-
             ops = MatmulOperands(
                 A=A, B=B, C=C, sparse=sparse,
                 lead_slots=M, lead_elements=Mx, n=N, k=K, kx=kx,
@@ -756,7 +727,8 @@ class MultilinearInstruction(ComputeInstruction):
             # the generic nest below writes a second set of products on top of
             # a partial one, and both are emitted.
             with writer.speculative() as spec:
-                taken = module.matmul(writer, ops, self._context)
+                taken = _vendor_module(self._context).matmul(
+                    writer, ops, self._context, strategy)
                 if not taken:
                     spec.discard()
             return taken
@@ -930,7 +902,8 @@ class MultilinearInstruction(ComputeInstruction):
         reservation that disagrees with the emission is either a buffer nobody
         writes or an overrun.
         """
-        module = _vendor_module(self._context)
-        if module is None or not self._is_matmul():
+        strategy = self._strategy()
+        if strategy is Strategy.GENERIC:
             return 0
-        return module.scratch(self._idest.datatype)
+        return _vendor_module(self._context).scratch(strategy,
+                                                     self._idest.datatype)

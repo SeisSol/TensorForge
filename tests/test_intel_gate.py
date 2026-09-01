@@ -21,6 +21,8 @@ import pytest
 from tensorforge.backend.instructions.compute.primitives import intel
 from tensorforge.common.basic_types import Datatype
 from tensorforge.backend.instructions.compute.matmul import MatmulOperands
+from tensorforge.backend.instructions.compute.strategy import (
+    ComputeShape, Strategy)
 
 
 # --------------------------------------------------------------------------
@@ -126,12 +128,20 @@ def test_fp32_is_emulated_through_tf32():
 def test_a_sparse_operand_falls_through():
     """The register path contracts over B's lanes, and a sparse operand is
     loaded by linear index rather than as a lane-distributed vector.  Declining
-    sends the caller to the generic path, which handles it."""
+    sends the caller to the generic path, which handles it.
+
+    Twice over, and both matter: the offer is empty so the dispatch never
+    picks a path here, and the emitter still declines when called directly,
+    since nothing stops a caller from naming an arrangement itself."""
+    shape = ComputeShape(threads=16, dtype=Datatype.F32, sparse=True,
+                         explicit_simd=True)
+    assert intel.strategies(shape, None) == frozenset()
+
     ops = MatmulOperands(A=None, B=None, C=None,
                          sparse=lambda k, j: True,
                          lead_slots=1, lead_elements=16, n=1, k=1, kx=0,
                          threads=16, dtype=Datatype.F32)
-    assert intel.matmul(None, ops, None) is False
+    assert intel.matmul(None, ops, None, Strategy.BROADCAST) is False
 
 
 # --------------------------------------------------------------------------

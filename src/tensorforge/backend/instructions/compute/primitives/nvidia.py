@@ -2,6 +2,7 @@
 #
 # SPDX-License-Identifier: MIT
 from tensorforge.common.basic_types import Datatype
+from ..strategy import Strategy
 from tensorforge.backend.pir.core import (INDEX, Access, Effect, MemSpace,
                                           XorSwizzle,
                                           Uniformity,
@@ -190,15 +191,30 @@ def shmsize(stages, dtype):
 
     return 32 * max(aregs + bregs, cregs)
 
-def scratch(dtype):
+def strategies(shape, ctx):
+    """What this target can emit for this shape.
+
+    One arrangement, and it is off: `ENABLED` is the deployment switch and
+    `supports` the shape gate.  Asking both here rather than at the call site
+    is what keeps a shape this cannot serve falling through to the nest
+    instead of reaching an assertion inside the emitter.
+    """
+    if ENABLED and supports(shape.threads, shape.dtype, shape.sparse):
+        return frozenset({Strategy.MATRIX})
+    return frozenset()
+
+
+def scratch(strategy, dtype):
     """One set of staging tiles, sized off the same atom the emitter picks.
 
     Asked before generation, so it cannot depend on anything the body decides.
     """
+    if strategy is not Strategy.MATRIX:
+        return 0
     return shmsize(1, dtype)
 
 
-def matmul(writer, ops, ctx):
+def matmul(writer, ops, ctx, strategy):
     C, A, B = ops.C, ops.A, ops.B
     # Elements, and the loop below walks them in strides of `threads`.  The
     # accessors take slots, so `i // threads` is what reaches them.

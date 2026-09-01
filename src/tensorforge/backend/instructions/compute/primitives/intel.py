@@ -47,6 +47,7 @@ gain.
 
 from tensorforge.backend.pir.core import SCALAR_LAYOUT, ScalarType
 from tensorforge.common.basic_types import Datatype
+from ..strategy import Strategy
 
 #: Fixed by the hardware; the header asserts it.
 SYSTOLIC_DEPTH = 8
@@ -457,18 +458,43 @@ def dpas_matmul(writer, C, A, B, M, N, K, kx, threads, dtype, ctx):
     return True
 
 
-def scratch(dtype):
-    """Nothing: both paths here hold their fragments in registers."""
+def strategies(shape, ctx):
+    """What this target can emit for this shape.
+
+    Two arrangements, and they are not variations of each other.  DPAS is a
+    systolic product with staged fragments; the broadcast chain is an FMA
+    chain over the lanes.  Which wins is a measurement, not a preference, and
+    neither flag is on by accident.
+
+    The broadcast chain is offered only under the explicitly vectorised
+    lowering, and that is its whole argument: a lane broadcast is `v[k]` out
+    of this work-item's own registers there, and a real cross-lane
+    instruction in SPMD.  Offering it on an Intel target lowered as SPMD would
+    trade a shared buffer for a `group_broadcast` per product, which is the
+    trade the DPP chain makes deliberately and this one does not.
+
+    Not the same question as `placement.broadcast_without_staging`, which asks
+    whether a mis-oriented operand may be read where it lies and is dropped
+    under the same lowering this one requires.  One is about reaching an
+    operand, the other about what to build the products out of.
+    """
+    if not supports(shape.threads, shape.dtype, shape.sparse):
+        return frozenset()
+    offered = set()
+    if ENABLED:
+        offered.add(Strategy.MATRIX)
+    if BROADCAST_ENABLED and shape.explicit_simd:
+        offered.add(Strategy.BROADCAST)
+    return frozenset(offered)
+
+
+def scratch(strategy, dtype):
+    """Nothing: both arrangements here hold their fragments in registers."""
     return 0
 
 
-def matmul(writer, ops, ctx):
-    """Pick a path, or decline so the caller falls through to the generic one.
-
-    Two, and they are not variations of each other.  DPAS is a systolic
-    product with staged fragments; the register-only path is an FMA chain with
-    a free broadcast.  Which wins is a measurement, not a preference, and
-    neither flag is on by accident.
+def matmul(writer, ops, ctx, strategy):
+    """Emit the arrangement the caller chose, or decline.
 
     Either may decline after it has emitted, when an operand it needs turns
     out to have no value: whether the shape is servable is not fully knowable
@@ -482,9 +508,9 @@ def matmul(writer, ops, ctx):
 
     if sparse:
         return False
-    if ENABLED:
+    if strategy is Strategy.MATRIX:
         return dpas_matmul(writer, C, A, B, M, N, K, kx, threads, dtype, ctx)
-    if BROADCAST_ENABLED:
+    if strategy is Strategy.BROADCAST:
         return broadcast_matmul(writer, C, A, B, M, N, K, kx, threads, dtype,
                                 ctx)
     return False

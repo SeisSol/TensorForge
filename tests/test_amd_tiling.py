@@ -30,6 +30,8 @@ import pytest
 from tensorforge.backend.instructions.compute.primitives import amd
 from tensorforge.common.basic_types import Datatype
 from tensorforge.backend.instructions.compute.matmul import MatmulOperands
+from tensorforge.backend.instructions.compute.strategy import (
+    ComputeShape, choose_strategy, legal_strategies)
 
 
 class _Recorder:
@@ -85,6 +87,11 @@ def _operand(writer, var, *idx):
     return writer.declare(hint="op") if var is None else True
 
 
+def ops_shape(ops):
+    return ComputeShape(threads=ops.threads, dtype=ops.dtype,
+                        sparse=bool(ops.sparse), explicit_simd=False)
+
+
 def _run(M, N, K, threads=32, arch="gfx90a"):
     from tensorforge.backend.pir.build import IRBuilder
 
@@ -94,7 +101,14 @@ def _run(M, N, K, threads=32, arch="gfx90a"):
                          lead_slots=M, lead_elements=M * threads,
                          n=N, k=K, kx=0,
                          threads=threads, dtype=Datatype.F32)
-    amd.matmul(writer, ops, _FakeCtx(arch))
+    ctx = _FakeCtx(arch)
+    # The routing the dispatch performs, run here rather than restated: what
+    # these tests are about is the tiling `matmul` emits for the arrangement
+    # it is given, and picking that arrangement by hand would let the test
+    # keep passing for a shape the dispatch has stopped sending here.
+    strategy = choose_strategy(legal_strategies(amd.strategies(ops_shape(ops),
+                                                               ctx)), 'amd')
+    amd.matmul(writer, ops, ctx, strategy)
     return rec
 
 

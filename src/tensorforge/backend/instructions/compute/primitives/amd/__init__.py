@@ -36,6 +36,8 @@ property.
 
 from tensorforge.common.basic_types import Datatype
 
+from ...strategy import Strategy
+
 from .arch import amdarch, cdna2, gfx1250, gfx1251, rdna
 from .caps import has_fmacdpp4, has_fmacdpp8, has_fmacdpp16
 from .catalog import (DEFINED_TRANSPOSES, MANTISSA, MATRIX_OPS, MFMA_TILES,
@@ -76,33 +78,43 @@ __all__ = [
 ]
 
 
-def scratch(dtype):
-    """Nothing: both paths here keep their operands in registers."""
+def strategies(shape, ctx):
+    """What this target can emit for this shape.
+
+    The DPP chain always: a broadcast modifier on the multiply needs nothing
+    of the shape, and where the widest form does not link, `select.py` falls
+    to a narrower one rather than to nothing.
+
+    A matrix core only where a tile fits, which is a structural question and
+    not a family or a type one.  `mfma_f64_16x16x4f64` spends two of its lane
+    bits on the contraction, so the data operand carries the leading dimension
+    there and the lane-batched loop cannot feed it; `MatrixOp.lane_batched`
+    states that as one equation and `mfma_tile_for` asks it.  F64 therefore
+    lands on DPP -- where `fmacdpp16(double&, ...)` serves it -- because no
+    tile fits, rather than because a condition names the type.
+
+    A sparse second operand is read by linear index, which no fragment layout
+    accepts; the DPP chain has a branch for it and takes it.
+    """
+    offered = {Strategy.DPP}
+    if not shape.sparse \
+            and mfma_tile_for(shape.threads, shape.dtype, ctx) is not None:
+        offered.add(Strategy.MATRIX)
+    return frozenset(offered)
+
+
+def scratch(strategy, dtype):
+    """Nothing: both arrangements here keep their operands in registers."""
     return 0
 
 
-def matmul(writer, ops, ctx):
-    """Matrix path where a tile fits, DPP everywhere else.
-
-    The condition used to be `cdna1(ctx) and not gfx1251(ctx) and dtype ==
-    F32` --- a family predicate and a type check standing in for a structural
-    property.  It gave the right answer, and it gave it for a reason that does
-    not survive contact with the rest of the catalogue: widening the type
-    check to F64 would have routed `mfma_f64_16x16x4f64` into a loop that
-    cannot feed it, because that instruction spends two of its lane bits on
-    the contraction and the data operand carries the leading dimension there.
-    `MatrixOp.lane_batched` states that as one equation and
-    `mfma_tile_for` asks it.
-
-    So F64 still takes the DPP path, which is where `fmacdpp16(double&, ...)`
-    already serves it --- now because no tile fits rather than because the
-    condition names F32.
-    """
+def matmul(writer, ops, ctx, strategy):
+    """Emit the arrangement the caller chose."""
     C, A, B = ops.C, ops.A, ops.B
     M, N, K, kx = ops.lead_slots, ops.n, ops.k, ops.kx
     threads, dtype, sparse = ops.threads, ops.dtype, ops.sparse
 
-    if not sparse and mfma_tile_for(threads, dtype, ctx) is not None:
+    if strategy is Strategy.MATRIX:
         matmul32(writer, C, A, B, M, N, K, kx, threads, dtype, sparse, ctx)
     else:
         matmuldpp(writer, 0, C, A, B, M, N, K, kx, threads, dtype, sparse, ctx)
