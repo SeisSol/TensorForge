@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from typing import List
 
 from tensorforge.backend.symbol import SymbolType
-from tensorforge.common.basic_types import Addressing, DataFlowDirection
+from tensorforge.common.basic_types import Addressing, DataFlowDirection, FlagMode
 
 from .layout import ctype, volume
 
@@ -363,17 +363,39 @@ def emit(generator, backend: str, default_batch: int) -> str:
             # launcher signature in generator output).
             if op.addressing != "none":
                 call_args.append("0u")
-    # The launcher signature has one ``numElements{i}`` and one
-    # ``flags{i}`` parameter per section (see
-    # generator.py:_generate_base_params_list at 529 / 535). With a
-    # single descr or only fence-less chains the section count is 1 —
-    # the default. ``GridFenceDescr`` / ``GridBarrierDescr`` between
-    # descrs split sections, raising the count.
+    # The launcher signature has one ``numElements{i}`` parameter per
+    # section. With a single descr or only fence-less chains the section
+    # count is 1 — the default. ``GridFenceDescr`` / ``GridBarrierDescr``
+    # between descrs split sections, raising the count.
     num_sections = len(getattr(generator, "_sections", [None]))
     for _ in range(num_sections):
         call_args.append("batch")
+    # Whether a ``flags{i}`` parameter sits beside each of them is the
+    # kernel's flag mode; see ``FlagMode``.
+    flag_mode = generator.flag_mode()
+    if flag_mode is FlagMode.REQUIRED:
+        # An all-ones mask enables every element, so the kernel computes
+        # what the reference computes. The alternative — masking some
+        # elements off — needs an oracle that knows which, and the point
+        # here is the signature, not the masking semantics.
+        allocs_host.append(
+            "    unsigned* h_flags = (unsigned*)std::malloc(batch * sizeof(unsigned));\n"
+            "    if (!h_flags) die(\"host alloc\");\n"
+            "    for (size_t i = 0; i < batch; ++i) h_flags[i] = 1u;"
+        )
+        allocs_dev.append(
+            "    unsigned* d_flags = nullptr;\n"
+            "    DEV_MALLOC(d_flags, batch * sizeof(unsigned));"
+        )
+        h2d.append(
+            "    DEV_MEMCPY_H2D(d_flags, h_flags, batch * sizeof(unsigned));"
+        )
+        frees.append("    DEV_FREE(d_flags);\n    std::free(h_flags);")
     for _ in range(num_sections):
-        call_args.append("nullptr")        # flags{i}: no skip-flags in tests
+        if flag_mode is FlagMode.REQUIRED:
+            call_args.append("d_flags")
+        elif flag_mode is FlagMode.OPTIONAL:
+            call_args.append("nullptr")    # flags{i}: no skip-flags in tests
     call_args.append("DEV_STREAM_PTR(stream)")
     launcher_call = f"{launcher_fn}({', '.join(call_args)})"
 

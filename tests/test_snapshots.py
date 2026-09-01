@@ -68,7 +68,8 @@ def _render(case, backend: str, arch: str) -> str:
     try:
         ctx = Context(arch=arch, backend=backend,
                       fp_type=getattr(case, "DTYPE", None))
-        gen = Generator(case.descr_list(), ctx)
+        gen = Generator(case.descr_list(), ctx,
+                        attrs=getattr(case, "ATTRS", None))
         gen.generate()
     except Exception as exc:                      # noqa: BLE001 -- recorded
         # `repr` of the args, not of the exception object: the latter can

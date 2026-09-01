@@ -91,7 +91,7 @@ def run_case(case, target: Target, cache_root: Path,
 
     descr_list = case.descr_list()
     ctx = Context(arch=target.arch, backend=target.backend, fp_type=dt)
-    gen = Generator(descr_list, ctx)
+    gen = Generator(descr_list, ctx, attrs=getattr(case, "ATTRS", None))
     gen.generate()
 
     # Build or fetch cached executable.

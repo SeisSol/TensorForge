@@ -148,6 +148,7 @@ Optional module-level knobs the harness recognises:
 | `INPUT_TRANSFORM` | `Dict[str, fn]`    | optional; per-input domain shaping, applied before both kernel and reference see the values         |
 | `XFAIL`           | `bool`             | optional; when true, conftest attaches `pytest.mark.xfail(strict=True, run=True)`                   |
 | `XFAIL_REASON`    | `str`              | optional but required-with-XFAIL; what's broken upstream and what fix turns the marker into xpass  |
+| `ATTRS`           | `dict`             | optional; the kernel attributes a frontend would pass. Omitting it is *not* `{}`: no `ATTRS` means the flag mask is generated with a null check (what a frontend without attributes gets), `{}` means no mask at all, `{"flags": True}` means a mask the launcher requires |
 
 ### Elementwise cases
 
