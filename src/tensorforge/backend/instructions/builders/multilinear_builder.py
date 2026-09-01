@@ -497,10 +497,17 @@ class MultilinearBuilder(OperationBuilder):
     offset = list(self._dest_obj.offset)
     if not offset:
       return SymbolView(dest_symbol, bbox, offset)
+    # The slot-aligned part of the offset stays in the offset, so the loader
+    # consumes it and the image lands in the same lane and the same slot the
+    # lead loop addresses.  Only the remainder below a slot boundary goes into
+    # the box, which is what puts the image in the loop's frame rather than the
+    # tensor's -- `theta` is that remainder, and every other participant is
+    # shifted by it too.
+    shift = offset[0] - offset[0] % self._num_threads if self._num_threads else 0
     lower, upper = list(bbox.lower()), list(bbox.upper())
-    lower[0] += offset[0]
-    upper[0] += offset[0]
-    offset[0] = 0
+    lower[0] += offset[0] - shift
+    upper[0] += offset[0] - shift
+    offset[0] = shift
     return SymbolView(dest_symbol, BoundingBox(lower, upper), offset)
 
   def _get_target_symbol(self, prev=False, next=False):
@@ -522,23 +529,23 @@ class MultilinearBuilder(OperationBuilder):
     elif (self._policy.preload_operands_into_registers
           and dest_symbol.stype == SymbolType.Global
           and not self._policy.atomic_accumulation and not next):
-      symbol, load_op = self._make_loader_and_symbol_reg(
-          self._dest_preload_view(dest_symbol), False)
+      view = self._dest_preload_view(dest_symbol)
+      symbol, load_op = self._make_loader_and_symbol_reg(view, False)
       self._residency.record_preload(
           dest_symbol.name, symbol.symbol,
           symbol.symbol.data_view.get_bbox(),
-          [0] + list(self._dest_obj.offset[1:]))
+          list(view.offset))
       self._instructions.append(load_op)
       return symbol.symbol
     elif (self._policy.preload_operands_into_shared
           and dest_symbol.stype == SymbolType.Global
           and not self._policy.atomic_accumulation and not next):
-      symbol, load_op = self._make_loader_and_symbol(
-          self._dest_preload_view(dest_symbol), None)
+      view = self._dest_preload_view(dest_symbol)
+      symbol, load_op = self._make_loader_and_symbol(view, None)
       self._residency.record_preload(
           dest_symbol.name, symbol.symbol,
           symbol.symbol.data_view.get_bbox(),
-          [0] + list(self._dest_obj.offset[1:]))
+          list(view.offset))
       self._instructions.append(load_op)
       return symbol.symbol
     else:
