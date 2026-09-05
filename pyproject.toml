@@ -31,5 +31,8 @@ readme = {file = ["README.md"], content-type = "text/markdown"}
 version = {file = ["tensorforge/VERSION"]}
 dependencies = {file = ["requirements.txt"]}
 
+[tool.setuptools.packages.find]
+where = ['src']
+
 [tool.setuptools.package-data]
-"*" = ["*.*"]
+tensorforge = ["*.*"]
