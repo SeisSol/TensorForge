@@ -287,6 +287,14 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
         # width stops being a cast on both sides of an assignment and becomes
         # `elems`, which is what the emitter needs anyway to check the
         # transfer size against `copy_async_sizes()`.
+        # The same claim the synchronous branch below records.  A `copy.async`
+        # distributes its destination exactly as a load-and-store pair does --
+        # the engine moves the bytes, not the mapping -- so leaving it unsaid
+        # here made the answer depend on which transfer the target happens to
+        # use.  66% of the staged reads on CUDA had no claim behind them for
+        # that reason; see `tools/staging_census.py`.
+        self._dest._record_linear_layout(dst_offset, increment,
+                                         self._num_threads, writer)
         dst_buf = self._destination_buffer(writer)
         src_buf = self._src.pir_buffer(writer)
         def write_load(lhs, rhs, _d=dst_buf, _s=src_buf, _n=increment):
