@@ -38,7 +38,8 @@ def _ops(recorder, n, threads=32, lead_slots=2, sparse=None):
                           lead_slots=lead_slots,
                           lead_elements=lead_slots * threads,
                           n=n, k=8, kx=0, threads=threads,
-                          dtype=Datatype.F32)
+                          a=Datatype.F32, b=Datatype.F32,
+                          accumulator=Datatype.F32)
 
 
 # -- it names no target ---------------------------------------------------- #
@@ -118,7 +119,7 @@ def test_amd_prefers_the_fused_broadcast(hip):
     no instruction of its own.  Both are offered; the ranking is what says
     which is taken, and turning it around is a measurement rather than an
     edit to a gate."""
-    shape = ComputeShape(threads=32, dtype=Datatype.F64, sparse=False,
+    shape = ComputeShape(threads=32, accumulator=Datatype.F64, sparse=False,
                          explicit_simd=False)
     offered = amd.strategies(shape, hip)
     assert {Strategy.DPP, Strategy.BROADCAST} <= offered
@@ -126,6 +127,6 @@ def test_amd_prefers_the_fused_broadcast(hip):
 
 
 def test_amd_offers_neither_chain_a_sparse_operand_it_cannot_read(hip):
-    shape = ComputeShape(threads=32, dtype=Datatype.F32, sparse=True,
+    shape = ComputeShape(threads=32, accumulator=Datatype.F32, sparse=True,
                          explicit_simd=False)
     assert amd.strategies(shape, hip) == frozenset({Strategy.DPP})

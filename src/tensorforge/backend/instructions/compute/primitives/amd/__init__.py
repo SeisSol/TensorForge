@@ -105,12 +105,12 @@ def strategies(shape, ctx):
         # through `readlane`.  It cannot read a sparse operand, which is the
         # one thing the DPP branch does that this does not.
         offered.add(Strategy.BROADCAST)
-        if mfma_tile_for(shape.threads, shape.dtype, ctx) is not None:
+        if mfma_tile_for(shape.threads, shape.accumulator, ctx) is not None:
             offered.add(Strategy.MATRIX)
     return frozenset(offered)
 
 
-def scratch(strategy, dtype):
+def scratch(strategy, accumulator):
     """Nothing: both arrangements here keep their operands in registers."""
     return 0
 
@@ -133,7 +133,7 @@ def plan(strategy, shape, n, ctx):
     """
     if strategy is not Strategy.MATRIX:
         return whole(strategy, n)
-    tile = mfma_tile_for(shape.threads, shape.dtype, ctx)
+    tile = mfma_tile_for(shape.threads, shape.accumulator, ctx)
     boundary = ((n // tile.block) * tile.block) if n % tile.block < 2 else n
     if boundary >= n:
         return whole(Strategy.MATRIX, n)
@@ -149,11 +149,19 @@ def matmul(writer, ops, ctx, span):
     """Emit one span of the plan."""
     C, A, B = ops.C, ops.A, ops.B
     M, N, K, kx = ops.lead_slots, ops.n, ops.k, ops.kx
-    threads, dtype, sparse = ops.threads, ops.dtype, ops.sparse
+    threads, dtype, sparse = ops.threads, ops.accumulator, ops.sparse
 
     if span.strategy is Strategy.BROADCAST:
         return broadcast.matmul(writer, ops, ctx, span)
     if span.strategy is Strategy.MATRIX:
+        tile = mfma_tile_for(threads, dtype, ctx)
+        if (ops.a, ops.b) != (tile.op.a.dtype, tile.op.b.dtype):
+            # The tile was selected by what it accumulates in; what it
+            # multiplies is a separate property of the same entry.  Where the
+            # two operands do not already arrive as its fragments want them,
+            # reaching this instruction is a split, and that is not what this
+            # emitter does.
+            return False
         matmul32(writer, C, A, B, M, N, K, kx, threads, dtype, sparse, ctx,
                  span.start, span.stop)
     else:

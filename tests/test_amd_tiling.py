@@ -89,7 +89,7 @@ def _operand(writer, var, *idx):
 
 
 def ops_shape(ops):
-    return ComputeShape(threads=ops.threads, dtype=ops.dtype,
+    return ComputeShape(threads=ops.threads, accumulator=ops.accumulator,
                         sparse=bool(ops.sparse), explicit_simd=False)
 
 
@@ -101,7 +101,8 @@ def _run(M, N, K, threads=32, arch="gfx90a"):
     ops = MatmulOperands(A=_operand, B=_operand, C=rec, sparse=None,
                          lead_slots=M, lead_elements=M * threads,
                          n=N, k=K, kx=0,
-                         threads=threads, dtype=Datatype.F32)
+                         threads=threads, a=Datatype.F32,
+                         b=Datatype.F32, accumulator=Datatype.F32)
     ctx = _FakeCtx(arch)
     # The routing the dispatch performs, run here rather than restated: what
     # these tests are about is the tiling `matmul` emits for the plan it is
@@ -170,7 +171,8 @@ def _plan_for(N, threads=32, arch="gfx90a"):
     ops = MatmulOperands(A=_operand, B=_operand, C=None, sparse=None,
                          lead_slots=2, lead_elements=2 * threads,
                          n=N, k=8, kx=0,
-                         threads=threads, dtype=Datatype.F32)
+                         threads=threads, a=Datatype.F32,
+                         b=Datatype.F32, accumulator=Datatype.F32)
     return _plan(ops, _FakeCtx(arch))
 
 

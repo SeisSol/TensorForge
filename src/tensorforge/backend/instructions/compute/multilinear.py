@@ -608,7 +608,7 @@ class MultilinearInstruction(ComputeInstruction):
                                                 self._lead_width):
             return whole(Strategy.GENERIC, n)
         shape = ComputeShape(threads=self._num_threads,
-                             dtype=self._idest.datatype,
+                             accumulator=self._idest.get_fptype(),
                              sparse=self._second_operand_is_sparse(),
                              explicit_simd=_explicit_simd(self._context))
         chosen = choose_strategy(
@@ -741,7 +741,10 @@ class MultilinearInstruction(ComputeInstruction):
             ops = MatmulOperands(
                 A=A, B=B, C=C, sparse=sparse,
                 lead_slots=M, lead_elements=Mx, n=N, k=K, kx=kx,
-                threads=self._num_threads, dtype=self._idest.datatype)
+                threads=self._num_threads,
+                a=self._ops[0].symbol.get_fptype(),
+                b=self._ops[1].symbol.get_fptype(),
+                accumulator=self._idest.get_fptype())
 
             # A path may find out mid-emission that it cannot serve the shape,
             # and saying so has to leave the body as it found it -- otherwise
@@ -930,5 +933,5 @@ class MultilinearInstruction(ComputeInstruction):
         module = _vendor_module(self._context)
         # The most any one span needs, not the sum: the spans run in sequence
         # and nothing an arrangement stages outlives the columns it computed.
-        return max(module.scratch(span.strategy, self._idest.datatype)
+        return max(module.scratch(span.strategy, self._idest.get_fptype())
                    for span in plan)

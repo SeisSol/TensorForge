@@ -203,19 +203,19 @@ def strategies(shape, ctx):
     is what keeps a shape this cannot serve falling through to the nest
     instead of reaching an assertion inside the emitter.
     """
-    if ENABLED and supports(shape.threads, shape.dtype, shape.sparse):
+    if ENABLED and supports(shape.threads, shape.accumulator, shape.sparse):
         return frozenset({Strategy.MATRIX})
     return frozenset()
 
 
-def scratch(strategy, dtype):
+def scratch(strategy, accumulator):
     """One set of staging tiles, sized off the same atom the emitter picks.
 
     Asked before generation, so it cannot depend on anything the body decides.
     """
     if strategy is not Strategy.MATRIX:
         return 0
-    return shmsize(1, dtype)
+    return shmsize(1, accumulator)
 
 
 def plan(strategy, shape, n, ctx):
@@ -234,7 +234,7 @@ def matmul(writer, ops, ctx, span):
     # accessors take slots, so `i // threads` is what reaches them.
     M = ops.lead_elements
     N, K, kx = span.stop, ops.k, ops.kx
-    threads, dtype, sparse = ops.threads, ops.dtype, ops.sparse
+    threads, dtype, sparse = ops.threads, ops.accumulator, ops.sparse
 
     def threadrange(start, size):
         conditions = []

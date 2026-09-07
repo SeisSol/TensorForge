@@ -133,14 +133,15 @@ def test_a_sparse_operand_falls_through():
     Twice over, and both matter: the offer is empty so the dispatch never
     picks a path here, and the emitter still declines when called directly,
     since nothing stops a caller from naming an arrangement itself."""
-    shape = ComputeShape(threads=16, dtype=Datatype.F32, sparse=True,
+    shape = ComputeShape(threads=16, accumulator=Datatype.F32, sparse=True,
                          explicit_simd=True)
     assert intel.strategies(shape, None) == frozenset()
 
     ops = MatmulOperands(A=None, B=None, C=None,
                          sparse=lambda k, j: True,
                          lead_slots=1, lead_elements=16, n=1, k=1, kx=0,
-                         threads=16, dtype=Datatype.F32)
+                         threads=16, a=Datatype.F32, b=Datatype.F32,
+                         accumulator=Datatype.F32)
     assert intel.matmul(None, ops, None, Strategy.BROADCAST) is False
 
 

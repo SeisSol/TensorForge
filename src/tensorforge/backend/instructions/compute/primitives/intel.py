@@ -419,7 +419,7 @@ def strategies(shape, ctx):
     under the same lowering this one requires.  One is about reaching an
     operand, the other about what to build the products out of.
     """
-    if not supports(shape.threads, shape.dtype, shape.sparse):
+    if not supports(shape.threads, shape.accumulator, shape.sparse):
         return frozenset()
     offered = set()
     if ENABLED:
@@ -429,7 +429,7 @@ def strategies(shape, ctx):
     return frozenset(offered)
 
 
-def scratch(strategy, dtype):
+def scratch(strategy, accumulator):
     """Nothing: both arrangements here hold their fragments in registers."""
     return 0
 
@@ -460,7 +460,7 @@ def matmul(writer, ops, ctx, span):
     """
     C, A, B = ops.C, ops.A, ops.B
     M, N, K, kx = ops.lead_slots, ops.n, ops.k, ops.kx
-    threads, dtype, sparse = ops.threads, ops.dtype, ops.sparse
+    threads, dtype, sparse = ops.threads, ops.accumulator, ops.sparse
 
     if sparse:
         return False
@@ -471,5 +471,11 @@ def matmul(writer, ops, ctx, span):
         # caller that does should hear so rather than get the whole output.
         return False
     if span.strategy is Strategy.MATRIX:
+        if Datatype.F32 not in (ops.a, ops.b) or ops.a != ops.b:
+            # `splitFloatTF32` takes an F32 apart; handed anything else it
+            # would produce two halves of a number it never had.  The atom is
+            # chosen by the accumulator, so nothing upstream has checked what
+            # the operands arrive as.
+            return False
         return dpas_matmul(writer, C, A, B, M, N, K, kx, threads, dtype, ctx)
     return False

@@ -639,7 +639,8 @@ GROUPS = {
              'return threads == 32 and not sparse', 1)),
         ('the gate bypassed entirely',
          sub(Path('src/tensorforge/backend/instructions/compute/primitives/nvidia.py'),
-             '    if ENABLED and supports(shape.threads, shape.dtype, shape.sparse):',
+             '    if ENABLED and supports(shape.threads, shape.accumulator, '
+             'shape.sparse):',
              '    if ENABLED:', 1)),
         ('the deployment switch flipped without re-recording',
          sub(Path('src/tensorforge/backend/instructions/compute/primitives/nvidia.py'),

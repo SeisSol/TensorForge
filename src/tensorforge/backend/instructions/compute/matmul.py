@@ -22,6 +22,18 @@ asks for the same slot ``threads`` times and gets the same value back: no
 error anywhere, one product accumulated into everything.  Both counts are
 named so that a path has to say which it means.
 
+**Three types, not one.**  `A`, `B` and the accumulator each have their own,
+mirroring the `a`, `b` and `d` fragments a catalogue entry carries.  They
+coincide for everything the front end produces today, which is exactly why
+collapsing them into a single field survives: nothing reads the difference
+until something needs it, and then it is not there to read.
+
+The type the instruction *multiplies in* is deliberately not among them.  An
+emulated path splits an F32 operand into TF32 or BF16 terms and accumulates
+their products; which substrate it picks is a choice it makes out of the
+catalogue against `split_terms`, not something the caller can state.  Putting
+it here would let a caller name an arithmetic the hardware does not have.
+
 **Declining is free only through the writer.**  A path returns ``False`` to
 mean the generic nest should run instead.  The nest calls it inside
 :meth:`Writer.speculative` and discards on a decline, so a path may give up
@@ -76,9 +88,16 @@ class MatmulOperands:
 
     #: Lanes the lead dimension is spread over.
     threads: int
-    #: Accumulator type.  Not the operand type: an emulated path splits its
-    #: operands into a narrower one and this stays what the sum is kept in.
-    dtype: Datatype
+
+    #: Type `A` is read as.
+    a: Datatype
+    #: Type `B` is read as.
+    b: Datatype
+    #: Type the sum is kept in, and the one legality is asked about:
+    #: `MatrixOp.available_for` matches an instruction by `d.dtype`, and the
+    #: catalogue offers a BF16 entry for an F32 accumulator precisely because
+    #: the two are different questions.
+    accumulator: Datatype
 
 
 def scratch(dtype: Datatype) -> int:

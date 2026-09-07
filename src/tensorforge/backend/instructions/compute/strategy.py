@@ -75,9 +75,10 @@ class ComputeShape:
 
     #: Lanes the lead dimension is spread over.
     threads: int
-    #: Accumulator type.  The operand type may be narrower -- an emulated path
-    #: splits its inputs and keeps the sum in this.
-    dtype: Datatype
+    #: Type the sum is kept in.  The role legality is asked about: a matrix
+    #: instruction is selected by the accumulator it produces, and the operand
+    #: types are what an emulated path then has to reach it from.
+    accumulator: Datatype
     #: Whether the second operand is stored sparsely, which decides both how
     #: it is read and which arrangements can read it that way.
     sparse: bool
