@@ -59,6 +59,7 @@ __launch_bounds__(256)
       auto* totalShrMem = reinterpret_cast<float*>(totalShrMemPtr);
       float* localShrMem0 = &totalShrMem[32 * threadIdx.y + 0];
       float* tempShrMem = &localShrMem0[32];
+      float* __restrict__ s0 = &localShrMem0[0];
       for (size_t batchId0 = threadIdx.y + blockDim.y * (blockIdx.x); batchId0 < numElements0; batchId0 += (gridDim.x * blockDim.y)) {
         const auto batchId1 = batchId0 + (gridDim.x * blockDim.y) < numElements0 ? batchId0 + (gridDim.x * blockDim.y) : batchId0;
         const auto batchId2 = batchId1 + (gridDim.x * blockDim.y) < numElements0 ? batchId1 + (gridDim.x * blockDim.y) : batchId1;
@@ -69,16 +70,15 @@ __launch_bounds__(256)
           const float *const __restrict__ glb_m2 = &m2[batchId0 * 9 + 0 + m2_extraOffset];
           float r0[1]{};
           // r0 = load{g>r}(glb_m1);
-          int32_t v14_lead = threadIdx.x % 32;
-          bool v15_g = v14_lead < 20;
+          int32_t v15_lead = threadIdx.x % 32;
+          bool v16_g = v15_lead < 20;
           #pragma unroll
-          for (int32_t v11_i0 = 0; v11_i0 < 1; ++v11_i0) {
-            if (v15_g) {
-              float v22_data = __ldcg(&glb_m1[(v11_i0 + v14_lead)]);
-              r0[v11_i0] = v22_data;
+          for (int32_t v12_i0 = 0; v12_i0 < 1; ++v12_i0) {
+            if (v16_g) {
+              float v23_data = __ldcg(&glb_m1[(v12_i0 + v15_lead)]);
+              r0[v12_i0] = v23_data;
             }
           }
-          float* __restrict__ s0 = &localShrMem0[0];
           // s0 = load{g>s}(glb_m2[0, 1])
           if (threadIdx.x < 9) {
             __pipeline_memcpy_async(&s0[0 + 0 + 1 * threadIdx.x + 0], &glb_m2[0 + 0 + 1 * threadIdx.x + 0], 4);

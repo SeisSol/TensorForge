@@ -59,6 +59,7 @@ __launch_bounds__(256)
       auto* totalShrMem = reinterpret_cast<__float128*>(totalShrMemPtr);
       __float128* localShrMem0 = &totalShrMem[10 * threadIdx.y + 0];
       __float128* tempShrMem = &localShrMem0[8];
+      __float128* __restrict__ s0 = &localShrMem0[0];
       for (size_t batchId0 = threadIdx.y + blockDim.y * (blockIdx.x); batchId0 < numElements0; batchId0 += (gridDim.x * blockDim.y)) {
         const auto batchId1 = batchId0 + (gridDim.x * blockDim.y) < numElements0 ? batchId0 + (gridDim.x * blockDim.y) : batchId0;
         const auto batchId2 = batchId1 + (gridDim.x * blockDim.y) < numElements0 ? batchId1 + (gridDim.x * blockDim.y) : batchId1;
@@ -69,17 +70,16 @@ __launch_bounds__(256)
           const __float128 *const __restrict__ glb_m2 = &m2[batchId0 * 4 + 0 + m2_extraOffset];
           __float128 r0[2]{};
           // r0 = load{g>r}(glb_m1);
-          int32_t v13_lead = threadIdx.x % 2;
+          int32_t v14_lead = threadIdx.x % 2;
           #pragma unroll
-          for (int32_t v14_i0 = 0; v14_i0 < 1; ++v14_i0) {
-            int32_t v20_lead = v13_lead + (v14_i0 * 2);
+          for (int32_t v15_i0 = 0; v15_i0 < 1; ++v15_i0) {
+            int32_t v21_lead = v14_lead + (v15_i0 * 2);
             #pragma unroll
-            for (int32_t v15_i1 = 0; v15_i1 < 2; ++v15_i1) {
-              __float128 v23_data = __ldcg(&glb_m1[(v20_lead + (v15_i1 * 2))]);
-              r0[(v14_i0 + v15_i1)] = v23_data;
+            for (int32_t v16_i1 = 0; v16_i1 < 2; ++v16_i1) {
+              __float128 v24_data = __ldcg(&glb_m1[(v21_lead + (v16_i1 * 2))]);
+              r0[(v15_i0 + v16_i1)] = v24_data;
             }
           }
-          __float128* __restrict__ s0 = &localShrMem0[0];
           // s0 = load{g>s}(glb_m2[0, 1])
           __pipeline_memcpy_async(&s0[0 + 0 + 1 * threadIdx.x + 0], &glb_m2[0 + 0 + 1 * threadIdx.x + 0], 16);
           __pipeline_commit();
@@ -119,7 +119,7 @@ __launch_bounds__(256)
           // glb_m0 = store{r>g}(r1);
           #pragma unroll
           for (int32_t v67_i0 = 0; v67_i0 < 1; ++v67_i0) {
-            int32_t v75_lead = v13_lead + (v67_i0 * 2);
+            int32_t v75_lead = v14_lead + (v67_i0 * 2);
             #pragma unroll
             for (int32_t v68_i1 = 0; v68_i1 < 2; ++v68_i1) {
               __float128 v70_data = r1[(v67_i0 + v68_i1)];

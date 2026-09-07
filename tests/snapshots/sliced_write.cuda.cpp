@@ -59,6 +59,7 @@ __launch_bounds__(256)
       auto* totalShrMem = reinterpret_cast<float*>(totalShrMemPtr);
       float* localShrMem0 = &totalShrMem[192 * threadIdx.y + 0];
       float* tempShrMem = &localShrMem0[192];
+      float* __restrict__ s0 = &localShrMem0[0];
       for (size_t batchId0 = threadIdx.y + blockDim.y * (blockIdx.x); batchId0 < numElements0; batchId0 += (gridDim.x * blockDim.y)) {
         const auto batchId1 = batchId0 + (gridDim.x * blockDim.y) < numElements0 ? batchId0 + (gridDim.x * blockDim.y) : batchId0;
         const auto batchId2 = batchId1 + (gridDim.x * blockDim.y) < numElements0 ? batchId1 + (gridDim.x * blockDim.y) : batchId1;
@@ -69,17 +70,16 @@ __launch_bounds__(256)
           const float *const __restrict__ glb_m2 = &m2[batchId0 * 169 + 0 + m2_extraOffset];
           float r0[3]{};
           // r0 = load{g>r}(glb_m1);
-          int32_t v13_lead = threadIdx.x % 32;
+          int32_t v14_lead = threadIdx.x % 32;
           #pragma unroll
-          for (int32_t v14_i0 = 0; v14_i0 < 1; ++v14_i0) {
-            int32_t v20_lead = v13_lead + (v14_i0 * 32);
+          for (int32_t v15_i0 = 0; v15_i0 < 1; ++v15_i0) {
+            int32_t v21_lead = v14_lead + (v15_i0 * 32);
             #pragma unroll
-            for (int32_t v15_i1 = 10; v15_i1 < 13; ++v15_i1) {
-              float v23_data = __ldcg(&glb_m1[(v20_lead + (v15_i1 * 32))]);
-              r0[(v14_i0 + (v15_i1 - 10))] = v23_data;
+            for (int32_t v16_i1 = 10; v16_i1 < 13; ++v16_i1) {
+              float v24_data = __ldcg(&glb_m1[(v21_lead + (v16_i1 * 32))]);
+              r0[(v15_i0 + (v16_i1 - 10))] = v24_data;
             }
           }
-          float* __restrict__ s0 = &localShrMem0[0];
           // s0 = load{g>s}(glb_m2[0, 1])
           #pragma unroll
           for (int32_t i = 0; i < 5; i += 1) {
@@ -177,26 +177,26 @@ __launch_bounds__(256)
           #pragma unroll
           for (int32_t v158_i0 = 0; v158_i0 < 1; ++v158_i0) {
             int32_t v163_lead = v158_i0 * 32;
-            glb_m0[(v13_lead + v163_lead)] = 0.0f;
-            glb_m0[((v13_lead + v163_lead) + 32)] = 0.0f;
-            glb_m0[((v13_lead + v163_lead) + 64)] = 0.0f;
-            glb_m0[((v13_lead + v163_lead) + 96)] = 0.0f;
-            glb_m0[((v13_lead + v163_lead) + 128)] = 0.0f;
-            glb_m0[((v13_lead + v163_lead) + 160)] = 0.0f;
+            glb_m0[(v14_lead + v163_lead)] = 0.0f;
+            glb_m0[((v14_lead + v163_lead) + 32)] = 0.0f;
+            glb_m0[((v14_lead + v163_lead) + 64)] = 0.0f;
+            glb_m0[((v14_lead + v163_lead) + 96)] = 0.0f;
+            glb_m0[((v14_lead + v163_lead) + 128)] = 0.0f;
+            glb_m0[((v14_lead + v163_lead) + 160)] = 0.0f;
             float v202_data = r1[v158_i0];
-            glb_m0[((v13_lead + v163_lead) + 192)] = v202_data;
+            glb_m0[((v14_lead + v163_lead) + 192)] = v202_data;
             float v210_data = r1[(v158_i0 + 1)];
-            glb_m0[((v13_lead + v163_lead) + 224)] = v210_data;
+            glb_m0[((v14_lead + v163_lead) + 224)] = v210_data;
             float v218_data = r1[(v158_i0 + 2)];
-            glb_m0[((v13_lead + v163_lead) + 256)] = v218_data;
+            glb_m0[((v14_lead + v163_lead) + 256)] = v218_data;
             float v226_data = r1[(v158_i0 + 3)];
-            glb_m0[((v13_lead + v163_lead) + 288)] = v226_data;
+            glb_m0[((v14_lead + v163_lead) + 288)] = v226_data;
             float v234_data = r1[(v158_i0 + 4)];
-            glb_m0[((v13_lead + v163_lead) + 320)] = v234_data;
+            glb_m0[((v14_lead + v163_lead) + 320)] = v234_data;
             float v242_data = r1[(v158_i0 + 5)];
-            glb_m0[((v13_lead + v163_lead) + 352)] = v242_data;
+            glb_m0[((v14_lead + v163_lead) + 352)] = v242_data;
             float v250_data = r1[(v158_i0 + 6)];
-            glb_m0[((v13_lead + v163_lead) + 384)] = v250_data;
+            glb_m0[((v14_lead + v163_lead) + 384)] = v250_data;
           }
           __syncwarp();
         }

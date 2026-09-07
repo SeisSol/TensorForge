@@ -60,6 +60,7 @@ __launch_bounds__(256)
       auto* totalShrMem = reinterpret_cast<float*>(totalShrMemPtr);
       float* localShrMem0 = &totalShrMem[112 * threadIdx.y + 0];
       float* tempShrMem = &localShrMem0[96];
+      float* __restrict__ s0 = &localShrMem0[0];
       for (size_t batchId0 = threadIdx.y + blockDim.y * (blockIdx.x); batchId0 < numElements0; batchId0 += (gridDim.x * blockDim.y)) {
         const auto batchId1 = batchId0 + (gridDim.x * blockDim.y) < numElements0 ? batchId0 + (gridDim.x * blockDim.y) : batchId0;
         const auto batchId2 = batchId1 + (gridDim.x * blockDim.y) < numElements0 ? batchId1 + (gridDim.x * blockDim.y) : batchId1;
@@ -70,15 +71,14 @@ __launch_bounds__(256)
           const float *const __restrict__ glb_m2 = &m2[batchId0 * 81 + 0 + m2_extraOffset];
           float r0[9]{};
           // r0 = load{g>r}(glb_m1);
-          int32_t v13_lead = threadIdx.x % 16;
-          if (v13_lead < 9) {
+          int32_t v14_lead = threadIdx.x % 16;
+          if (v14_lead < 9) {
             #pragma unroll
-            for (int32_t v15_i1 = 0; v15_i1 < 9; ++v15_i1) {
-              float v23_data = __ldcg(&glb_m1[(v13_lead + (v15_i1 * 9))]);
-              r0[v15_i1] = v23_data;
+            for (int32_t v16_i1 = 0; v16_i1 < 9; ++v16_i1) {
+              float v24_data = __ldcg(&glb_m1[(v14_lead + (v16_i1 * 9))]);
+              r0[v16_i1] = v24_data;
             }
           }
-          float* __restrict__ s0 = &localShrMem0[0];
           // s0 = load{g>s}(glb_m2[0, 1])
           #pragma unroll
           for (int32_t i = 0; i < 5; i += 1) {
@@ -97,7 +97,7 @@ __launch_bounds__(256)
           // r1 = +(r0 * s0) + None
           // [(0, 9), (0, 9)] [(0, 9)]
           float ir1[9]{};
-          if (v13_lead < 9) {
+          if (v14_lead < 9) {
             float v34_data = r0[0];
             float v35_data = s0[0];
             float v37_data = ir1[0];
@@ -127,7 +127,7 @@ __launch_bounds__(256)
             float v77_data = ir1[8];
             ir1[8] = (v77_data + (v34_data * v75_data));
           }
-          if (v13_lead < 9) {
+          if (v14_lead < 9) {
             float v83_data = r0[1];
             float v84_data = s0[1];
             float v86_data = ir1[0];
@@ -157,7 +157,7 @@ __launch_bounds__(256)
             float v126_data = ir1[8];
             ir1[8] = (v126_data + (v83_data * v124_data));
           }
-          if (v13_lead < 9) {
+          if (v14_lead < 9) {
             float v132_data = r0[2];
             float v133_data = s0[2];
             float v135_data = ir1[0];
@@ -187,7 +187,7 @@ __launch_bounds__(256)
             float v175_data = ir1[8];
             ir1[8] = (v175_data + (v132_data * v173_data));
           }
-          if (v13_lead < 9) {
+          if (v14_lead < 9) {
             float v181_data = r0[3];
             float v182_data = s0[3];
             float v184_data = ir1[0];
@@ -217,7 +217,7 @@ __launch_bounds__(256)
             float v224_data = ir1[8];
             ir1[8] = (v224_data + (v181_data * v222_data));
           }
-          if (v13_lead < 9) {
+          if (v14_lead < 9) {
             float v230_data = r0[4];
             float v231_data = s0[4];
             float v233_data = ir1[0];
@@ -247,7 +247,7 @@ __launch_bounds__(256)
             float v273_data = ir1[8];
             ir1[8] = (v273_data + (v230_data * v271_data));
           }
-          if (v13_lead < 9) {
+          if (v14_lead < 9) {
             float v279_data = r0[5];
             float v280_data = s0[5];
             float v282_data = ir1[0];
@@ -277,7 +277,7 @@ __launch_bounds__(256)
             float v322_data = ir1[8];
             ir1[8] = (v322_data + (v279_data * v320_data));
           }
-          if (v13_lead < 9) {
+          if (v14_lead < 9) {
             float v328_data = r0[6];
             float v329_data = s0[6];
             float v331_data = ir1[0];
@@ -307,7 +307,7 @@ __launch_bounds__(256)
             float v371_data = ir1[8];
             ir1[8] = (v371_data + (v328_data * v369_data));
           }
-          if (v13_lead < 9) {
+          if (v14_lead < 9) {
             float v377_data = r0[7];
             float v378_data = s0[7];
             float v380_data = ir1[0];
@@ -337,7 +337,7 @@ __launch_bounds__(256)
             float v420_data = ir1[8];
             ir1[8] = (v420_data + (v377_data * v418_data));
           }
-          if (v13_lead < 9) {
+          if (v14_lead < 9) {
             float v426_data = r0[8];
             float v427_data = s0[8];
             float v429_data = ir1[0];
@@ -367,7 +367,7 @@ __launch_bounds__(256)
             float v469_data = ir1[8];
             ir1[8] = (v469_data + (v426_data * v467_data));
           }
-          if (v13_lead < 9) {
+          if (v14_lead < 9) {
             #pragma unroll
             for (int32_t v476_n1 = 0; v476_n1 < 9; ++v476_n1) {
               float v478_data = ir1[v476_n1];
@@ -375,11 +375,11 @@ __launch_bounds__(256)
             }
           }
           // glb_m0 = store{r>g}(r1);
-          if (v13_lead < 9) {
+          if (v14_lead < 9) {
             #pragma unroll
             for (int32_t v485_i1 = 0; v485_i1 < 9; ++v485_i1) {
               float v487_data = r1[v485_i1];
-              glb_m0[(v13_lead + (v485_i1 * 9))] = v487_data;
+              glb_m0[(v14_lead + (v485_i1 * 9))] = v487_data;
             }
           }
           __syncwarp();
