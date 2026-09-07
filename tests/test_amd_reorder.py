@@ -270,3 +270,109 @@ def test_a_cndmask_region_is_priced_and_a_masked_one_is_not():
     ternary = reorder.Move(0, (32,), reorder.Select.of(range(5), 64))
     assert masked.cost == 2 and ternary.cost == 3
     assert masked.select.free and not ternary.select.free
+
+
+# --------------------------------------------------------------------------- #
+# the accumulator, coming back
+# --------------------------------------------------------------------------- #
+
+ACCUMULATORS = [op for op in catalog.MATRIX_OPS if layouts.covers(op, "D")]
+
+
+def _writeback(op, column):
+    """Execute the gather and return the resulting lane values.
+
+    Each accumulator slot starts tagged with the D element it holds, so a
+    lane of the result should end up holding the output for its own leading
+    dimension element -- which is the property the nest's store assumes and
+    never states.
+    """
+    gathers = reorder.accumulator_gathers(op, column)
+    assert gathers is not None, f"{op.builtin} column {column}"
+
+    result = [None] * op.wave
+    for gather in gathers:
+        lanes = [layouts.element_at(op, "D", gather.slot, lane)
+                 for lane in range(op.wave)]
+        for block in gather.swaps:
+            lanes = wavesim.swap(lanes, block)
+        for lane in gather.select.lanes:
+            result[lane] = (gather.group, lanes[lane])
+    return result
+
+
+@pytest.mark.parametrize("op", ACCUMULATORS, ids=lambda op: op.builtin)
+def test_the_writeback_lands_each_output_in_its_own_lane(op):
+    """Every column, every lane.
+
+    The instruction leaves `D[i][j]` spread over slots and lanes; the nest
+    stores with the leading dimension across the lanes. This is the claim that
+    the gather turns one into the other -- and it fails if the D layout is
+    wrong, which no test that reads the layout table can.
+    """
+    span = op.n * op.blocks
+    for column in range(op.m):
+        got = _writeback(op, column)
+        for lane in range(op.wave):
+            group, local = divmod(lane, span)
+            block, index = divmod(local, op.n)
+            assert got[lane] == (group, (block, column, index)), (
+                f"{op.builtin} column {column} lane {lane}")
+
+
+@pytest.mark.parametrize("op", ACCUMULATORS, ids=lambda op: op.builtin)
+def test_the_writeback_covers_every_lane_exactly_once(op):
+    for column in range(op.m):
+        covered = set()
+        for gather in reorder.accumulator_gathers(op, column):
+            assert not covered & gather.select.lanes, f"{op.builtin}: overlap"
+            covered |= gather.select.lanes
+        assert covered == set(range(op.wave))
+
+
+def test_the_k1_tile_writes_back_without_moving_anything():
+    """The path `matmul32` takes today, out of the general derivation.
+
+    `mfma_f32_4x4x1f32` puts the output column in the accumulator's slot and
+    the leading dimension in the lanes, which is already what the nest wants:
+    one gather per column, no swaps, the whole wave. That is
+    `C(writer, extract(acc, jj), i, j + jj)` written out, and the derivation
+    reducing to it is the same check that the operand side passed.
+    """
+    op = next(o for o in catalog.MATRIX_OPS if o.builtin == "mfma_f32_4x4x1f32")
+    for column in range(op.m):
+        gathers = reorder.accumulator_gathers(op, column)
+        assert len(gathers) == 1
+        assert gathers[0].swaps == ()
+        assert gathers[0].slot == column
+        assert gathers[0].select.lanes == frozenset(range(64))
+    assert reorder.accumulator_cost(op) == 4
+
+
+def test_the_epilogue_is_affordable_where_the_fragment_is_not_free():
+    """The two halves priced against each other.
+
+    `mfma_f64_16x16x4f64` spends eight instructions on one B fragment and 128
+    on the whole writeback -- but the fragment is rebuilt every contraction
+    step and the writeback runs once per output tile. Against a contraction of
+    length K that is 2*K fragment instructions and a fixed 128, so the
+    epilogue stops mattering as soon as K is more than a handful.
+    """
+    op = next(o for o in catalog.MATRIX_OPS
+              if o.builtin == "mfma_f64_16x16x4f64")
+    assert reorder.fragment_cost(op, "B") == 8
+    assert reorder.accumulator_cost(op) == 128
+    assert reorder.accumulator_cost(op) // op.m == 8
+
+
+@pytest.mark.parametrize("op", ACCUMULATORS, ids=lambda op: op.builtin)
+def test_every_writeback_region_is_a_row_mask_too(op):
+    """Recorded like its counterpart on the operand side.
+
+    Both directions come out as whole rows, so `dppUpdate` covers the epilogue
+    as well and nothing here needs a lane id. This is the test that changes if
+    a sub-wave thread count makes the groups narrower than a row.
+    """
+    for column in range(op.m):
+        for gather in reorder.accumulator_gathers(op, column):
+            assert gather.select.kind == "row", f"{op.builtin} column {column}"

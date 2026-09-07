@@ -39,6 +39,12 @@ So a fragment slot costs one `dppUpdate` per region plus the swaps each region
 needs --- for `mfma_f64_16x16x4f64`, four merges and four swaps, once per
 k-block and reused across every output column.
 
+The accumulator comes back the same way, in reverse.  The instruction leaves
+`D[i][j]` spread over the fragment; the nest wants one register per output
+column with the leading dimension across the lanes, which is a set of regions
+and a constant XOR each --- so `accumulator_gathers` is `fragment_moves` read
+backwards, and shares the swap sequences and the select with it.
+
 Nothing here emits.  It answers what to emit, and `tests/test_amd_reorder.py`
 runs the answer through the wave simulator and checks that every lane of the
 result holds what `layouts` says it should.  The plan is *derived* by
@@ -204,6 +210,84 @@ def fragment_moves(op, which: str, slot: int,
         moves.append(Move(contraction, _swaps_for(mask),
                           Select.of((lane for lane, _ in pairs), op.wave)))
     return tuple(moves)
+
+
+@dataclass(frozen=True)
+class Gather:
+    """One accumulator register into one region of one output column.
+
+    The mirror of `Move`: that one names a source the nest holds and a region
+    of the fragment, this one names a source the fragment holds --- a group's
+    accumulator and one of its slots --- and a region of the nest's register.
+    """
+
+    #: Which accumulator.  The instruction covers `n * blocks` of the leading
+    #: dimension, so a wave takes `wave // (n * blocks)` of them, each with
+    #: its own accumulator running over the whole contraction.
+    group: int
+    #: Which register of that accumulator.
+    slot: int
+    #: `swap<Block>` sequence, in order.
+    swaps: Tuple[int, ...]
+    #: Which lanes of the output register this writes.
+    select: Select
+
+    @property
+    def cost(self) -> int:
+        return len(self.swaps) + 1 + (0 if self.select.free else 1)
+
+
+def accumulator_gathers(op, column: int) -> Optional[Tuple[Gather, ...]]:
+    """How to build the nest's register for one output column, or `None`.
+
+    The nest stores through ``C(writer, value, i, j)`` with the leading
+    dimension across the lanes, so lane `l` of the result has to hold the
+    output for leading-dimension element `l`.  Which group covers that element
+    and where inside its accumulator it sits both follow from the layout, and
+    what is left is the same constant XOR per region that the operands need.
+
+    Paid once per output tile rather than once per contraction step, which is
+    why it can afford to be the more expensive half: `mfma_f64_16x16x4f64`
+    spends eight instructions per column against eight for a whole B fragment,
+    but the fragment is rebuilt every k-block and this runs in the epilogue.
+    """
+    if not layouts.covers(op, 'D') or column >= op.m:
+        return None
+    span = op.n * op.blocks
+    if op.wave % span:
+        return None
+
+    regions = {}
+    for lane in range(op.wave):
+        group, local = divmod(lane, span)
+        block, index = divmod(local, op.n)
+        slot, source = layouts.position(op, 'D', column, index, block)
+        regions.setdefault((group, slot), []).append((lane, source))
+
+    gathers = []
+    for (group, slot), pairs in sorted(regions.items()):
+        masks = {lane ^ source for lane, source in pairs}
+        if len(masks) != 1:
+            return None
+        gathers.append(Gather(group, slot, _swaps_for(masks.pop()),
+                              Select.of((lane for lane, _ in pairs), op.wave)))
+    return tuple(gathers)
+
+
+def accumulator_cost(op) -> Optional[int]:
+    """Instructions for the whole writeback, or `None`.
+
+    Every output column, so the epilogue in full.  What it competes with is
+    the contraction loop that filled the accumulators, not a single
+    instruction.
+    """
+    total = 0
+    for column in range(op.m):
+        gathers = accumulator_gathers(op, column)
+        if gathers is None:
+            return None
+        total += sum(gather.cost for gather in gathers)
+    return total
 
 
 def fragment_cost(op, which: str, group: int = 0) -> Optional[int]:

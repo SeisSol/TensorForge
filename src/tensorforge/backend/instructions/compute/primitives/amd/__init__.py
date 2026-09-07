@@ -48,7 +48,8 @@ from .catalog import (DEFINED_TRANSPOSES, MANTISSA, MATRIX_OPS, MFMA_TILES,
 from .features import FEATURE_TARGETS, has_feature, wave_size
 from .layouts import (FRAGMENT_BITS, Provenance, covers, established,
                       position, provenance)
-from .reorder import (BANK, IDENTITY_DPP, ROW, Move, Select,
+from .reorder import (BANK, IDENTITY_DPP, ROW, Gather, Move, Select,
+                      accumulator_cost, accumulator_gathers,
                       fragment_cost, fragment_moves)
 from .codegen import hfma, matmul32, matmuldpp
 from .emitters import fmadpp, fmadpp4, fmadpp8, fmadpp16, fmascalar
@@ -69,7 +70,8 @@ __all__ = [
     'lane_batched_ops', 'mfma_tile_for',
     'FRAGMENT_BITS', 'Provenance', 'covers', 'established',
     'position', 'provenance',
-    'BANK', 'IDENTITY_DPP', 'ROW', 'Move', 'Select',
+    'BANK', 'IDENTITY_DPP', 'ROW', 'Gather', 'Move', 'Select',
+    'accumulator_cost', 'accumulator_gathers',
     'fragment_cost', 'fragment_moves',
     'wanted_fmadpp_step', 'select_fmadpp_step',
     'Relayout', 'RELAYOUTS', 'BROADCAST', 'MOVDPP16', 'TRANSPOSE4X4',

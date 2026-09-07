@@ -93,6 +93,13 @@ KEPT_UNREACHABLE = {
     "Move":
         "one register into one region of a fragment; the emitter that turns "
         "these into `swap` and `dppUpdate` calls is not written",
+    "Gather":
+        "one accumulator register into a region of an output column; the "
+        "emitter that turns these into calls is not written",
+    "accumulator_gathers":
+        "the writeback plan; no emitter consumes it yet",
+    "accumulator_cost":
+        "prices the epilogue against the contraction loop that filled it",
     "Select":
         "which lanes a merge writes, and what that costs; read by `Move`",
     "BANK":
