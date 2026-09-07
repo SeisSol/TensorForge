@@ -330,20 +330,39 @@ GROUPS = {
     'tiling': ('tests/test_amd_tiling.py', [
         ('the boundary ignores the padding decision',
          sub(PKG / '__init__.py',
-             '    boundary = ((n // tile.block) * tile.block) if n % tile.block < 2 else n',
+             '    boundary = ((n // tile.block) * tile.block) \\\n'
+             '        if empty in (0, tile.block - 1) else n',
              '    boundary = (n // tile.block) * tile.block')),
         ('over-corrected: the tail dropped entirely',
          sub(PKG / '__init__.py',
-             '    boundary = ((n // tile.block) * tile.block) if n % tile.block < 2 else n',
+             '    boundary = ((n // tile.block) * tile.block) \\\n'
+             '        if empty in (0, tile.block - 1) else n',
              '    boundary = n')),
         ('padding policy inverted',
          sub(PKG / '__init__.py',
-             'if n % tile.block < 2 else n',
-             'if n % tile.block >= 2 else n')),
+             'if empty in (0, tile.block - 1) else n',
+             'if empty not in (0, tile.block - 1) else n')),
+        ('a block of one real column padded anyway',
+         sub(PKG / '__init__.py',
+             'if empty in (0, tile.block - 1) else n',
+             'if empty == 0 else n')),
         ('the empty span is planned rather than dropped',
          sub(PKG / '__init__.py',
              '    if boundary <= 0:',
              '    if False:')),
+    ]),
+
+    'packing': ('tests/test_packing.py', [
+        ('waste counted from the wrong end',
+         sub(Path('src/tensorforge/backend/instructions/compute/packing.py'),
+             '    return (-max(demand, 0)) % capacity',
+             '    return max(demand, 0) % capacity')),
+        ('packing restarts per product like the unpacked layout',
+         sub(Path('src/tensorforge/backend/instructions/compute/packing.py'),
+             '    pairs = [(product, step) for product in products '
+             'for step in range(steps)]',
+             '    pairs = [(product, 0) for product in products '
+             'for step in range(steps)]')),
     ]),
 
     'catalog': ('tests/test_amd_catalog.py', [

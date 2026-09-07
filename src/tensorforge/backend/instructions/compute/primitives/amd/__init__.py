@@ -36,7 +36,7 @@ property.
 
 from tensorforge.common.basic_types import Datatype
 
-from ... import broadcast
+from ... import broadcast, packing
 from ...strategy import Span, Strategy, whole
 
 from .arch import amdarch, cdna2, gfx1250, gfx1251, rdna
@@ -137,7 +137,15 @@ def plan(strategy, shape, n, ctx):
     if strategy is not Strategy.MATRIX:
         return whole(strategy, n)
     tile = mfma_tile_for(shape.threads, shape.accumulator, ctx)
-    boundary = ((n // tile.block) * tile.block) if n % tile.block < 2 else n
+    # What the last block would spend on zeroes if it ran padded.  Nothing
+    # left over means there is no tail to place; all but one position means
+    # the block would compute a single real column, which the chain does for
+    # the price of that column instead of the price of a block.  Anything
+    # between is cheaper padded, so the block takes it and no second span is
+    # named.
+    empty = packing.waste(n, tile.block)
+    boundary = ((n // tile.block) * tile.block) \
+        if empty in (0, tile.block - 1) else n
     if boundary >= n:
         return whole(Strategy.MATRIX, n)
     if boundary <= 0:
