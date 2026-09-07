@@ -193,6 +193,26 @@ template <typename T> T max(T x, T y) { return x < y ? y : x; }
 
 namespace tensorforge {
 
+// --------------------------------------------------------------------------
+// The vector alias, same as the host shim's.
+//
+// Present here because the SPMD lowering emits `VectorT<float, N>` for a
+// vectorised transfer just as the CUDA and HIP ones do -- it is not an
+// AMD-specific spelling, and this shim's not having it meant `aligned_operands`
+// on acpp compiled everywhere except where it was checked.  It surfaced when
+// the wrapped-syntax test grew from two backends to four; the gap was older
+// than the pass.
+// --------------------------------------------------------------------------
+
+namespace tfshim_vec {
+template <typename T, std::size_t N> struct Vec {
+  typedef T type __attribute__((vector_size(sizeof(T) * N)));
+};
+} // namespace tfshim_vec
+
+template <typename T, std::size_t N>
+using VectorT = typename tfshim_vec::Vec<T, N>::type;
+
 namespace intel_esimd {
 
 template <typename T, int N> class simd;
