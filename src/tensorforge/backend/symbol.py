@@ -1270,6 +1270,30 @@ class Symbol:
           if lane_shift:
             parts.append(lane_shift * stride)
           stride *= self.data_view.get_dim_slots(i, self.num_threads) * lanes
+        elif (i in self.lead_dims
+              and isinstance(index[i], (int, np.integer))):
+          # A *fixed element* of the distributed dimension, which
+          # `unwrap_lead` does not recognise -- it looks for a `LeadIndex`,
+          # and this is a bare integer.  It used to fall through to the branch
+          # below, which treats the index as an ordinary coordinate and takes
+          # it as the register address unchanged: a store to element 34 of a
+          # 35-row operand wrote `r[34]` into an array with eight floats per
+          # lane.
+          #
+          # Nothing reached it before.  A fixed lead element only arises from
+          # a peeled tail, and the tail is what the vectorisation introduced;
+          # the same resolution in `load` was added for the same reason and
+          # this is its other half, so a peeled element is now written and
+          # read at the same place.
+          #
+          # No guard: each lane has its own array, so the lanes that do not
+          # own the element write their own copy and nothing reads it back --
+          # the owner is picked by the `readlane` on the way out.
+          w = self.lead_width
+          slot = (int(index[i]) // w) // self.num_threads
+          parts.append(term(w * slot + int(index[i]) % w,
+                            offsets[i] // self.num_threads, stride, lead=True))
+          stride *= self.data_view.get_dim_slots(i, self.num_threads)
         else:
           parts.append(term(index[i], offsets[i], stride, lead=True))
           stride *= self.data_view.get_dim_size(i)
@@ -1337,6 +1361,30 @@ class Symbol:
           terms.append(writeOffset(lead_index,
                                    offsets[i] // self.num_threads
                                    - shift // self.num_threads, stride))
+          stride *= self.data_view.get_dim_slots(i, self.num_threads)
+        elif (i in self.lead_dims
+              and isinstance(index[i], (int, np.integer))):
+          # A *fixed element* of the distributed dimension.  It used to fall
+          # through to the branch below, which treats the index as an ordinary
+          # coordinate and takes it as the register address unchanged -- so a
+          # store to element 34 of a 35-row operand wrote `r[34]` into an array
+          # with eight floats per lane.
+          #
+          # Nothing reached it before: a fixed lead element only arises from a
+          # peeled tail, and the tail is what the vectorisation introduced.
+          # The resolution is the one `load` already uses for the same case,
+          # and it lives here so both go through it: the element first divides
+          # by the blocking, then distributes, and the remainder picks the
+          # component inside the lane's vector.
+          #
+          # No guard.  Each lane has its own array, so the lanes that do not
+          # own the element write their own copy and nothing reads it back --
+          # the owner is selected by the `readlane` on the way out.
+          w = self.lead_width
+          slot = (int(index[i]) // w) // self.num_threads
+          comp = int(index[i]) % w
+          terms.append(writeOffset(w * slot + comp,
+                                   offsets[i] // self.num_threads, stride))
           stride *= self.data_view.get_dim_slots(i, self.num_threads)
         else:
           terms.append(writeOffset(index[i], offsets[i], stride))
