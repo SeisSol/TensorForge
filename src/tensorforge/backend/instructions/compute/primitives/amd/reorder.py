@@ -3,12 +3,39 @@
 # SPDX-License-Identifier: MIT
 """Building a matrix fragment out of the registers the loop nest holds.
 
-The nest hands a path one register per contraction value, each holding the
-leading dimension across the lanes: register `k`, lane `l` is
-``data[lead = l][k]``.  A matrix instruction wants the other arrangement ---
-part of the contraction in the lane index, the leading dimension crammed into
-whatever lane bits are left.  `layouts` says exactly which; this says how to
-get there without leaving the register file.
+The nest hands the two operands over differently, and which one a plan is for
+decides whether the plan applies at all.
+
+``ops.A``, the operand that shares the leading dimension, arrives as one
+register per contraction value with the leading dimension across the lanes:
+register `k`, lane `l` is ``data[lead = l][k]``.  That is the arrangement
+everything below is written against.
+
+``ops.B``, the shared matrix, arrives *transposed* against it --- the column
+in the registers and the contraction in the lanes, because `unwindK` hands it
+a `LeadIndex` and `unwindI` hands the other one.  A `swap` moves a value
+between lanes and never between a register and a lane, so no sequence of them
+reaches a fragment from there.  `fragment_moves` therefore covers the
+instruction's **B** fragment, which the leading operand feeds, and refuses its
+**A** fragment, which the shared matrix feeds.
+
+That is not a gap in the plan; it is where the instruction does the work
+itself.  `cbsz` and `abid` broadcast one block's A operand to the others, which is how
+`matmul32` feeds a 16-block tile from a single transpose --- and it is
+available exactly where `blocks > 1`.  That is *not* the same as `k == 1`:
+`mfma_f64_4x4x4f64` has four blocks and a contraction of four, so it can
+broadcast its A and still needs the plan below for its B.  What `k == 1` is
+the same statement as is `n * blocks == wave`, which is `lane_batched`, and
+that is a stronger condition than having blocks at all.
+
+Where an instruction has one block --- `mfma_f64_16x16x4f64`, both XF32
+entries, both native gfx125x WMMAs --- there is nothing to broadcast between
+and the A operand needs a register-to-lane exchange first, which is
+`transpose*` in `hip.h` and not this module.
+
+A matrix instruction wants part of the contraction in the lane index and the
+leading dimension crammed into whatever lane bits are left.  `layouts` says
+exactly which; this says how to get there without leaving the register file.
 
 The move is always the same shape, and it is a shape `swap` and `dppUpdate`
 cover between them:
@@ -162,9 +189,29 @@ def _swaps_for(mask: int) -> Tuple[int, ...]:
     return tuple(1 << (bit + 1) for bit in range(6) if mask >> bit & 1)
 
 
+#: Which accessor feeds which fragment, under the assignment this path uses:
+#: the instruction's M takes the output columns and its N takes the leading
+#: dimension.  Stated because the two are not interchangeable and the names
+#: collide --- the instruction's A is the caller's `ops.B`.
+FED_BY = {'A': 'ops.B (shared matrix)', 'B': 'ops.A (leading operand)'}
+
+
+def broadcast_feeds_a(op) -> bool:
+    """Does the instruction fetch its own A operand across the blocks?
+
+    `cbsz` selects a broadcast group and `abid` picks the block to read, so
+    one block's worth of A reaches all of them --- which is why `matmul32`
+    transposes four registers once and feeds sixteen blocks.  It needs blocks
+    to broadcast between, and that is all it needs: `mfma_f64_4x4x4f64` has
+    four of them alongside a contraction of four, so a wider contraction does
+    not cost an instruction its broadcast.
+    """
+    return op.broadcast and op.blocks > 1
+
+
 def fragment_moves(op, which: str, slot: int,
                    group: int = 0) -> Optional[Tuple[Move, ...]]:
-    """How to build one slot of an operand fragment, or `None`.
+    """How to build one slot of the instruction's B fragment, or `None`.
 
     `group` picks which stretch of the leading dimension the fragment covers.
     A fragment holds `n * blocks` of it and a wave holds `wave`, so there are
@@ -182,12 +229,18 @@ def fragment_moves(op, which: str, slot: int,
     Refusing there would decline the cases the masks were never going to
     cover, which is a different thing from the plan not applying.
     """
-    if which.upper() not in ('A', 'B'):
-        return None            # the accumulator is written, not built
-    frag = op.a if which.upper() == 'A' else op.b
+    if which.upper() != 'B':
+        # 'D' is written, not built. 'A' is fed by the shared matrix, which
+        # arrives with the contraction in the lanes -- the transpose of what
+        # every step below assumes, and no `swap` crosses between a register
+        # and a lane. Where `blocks > 1` the instruction fetches its own A
+        # through `cbsz`/`abid`; where it does not, a `transpose*` has to run
+        # first and that is not this module.
+        return None
+    frag = op.b
     if not layouts.covers(op, which) or frag.per_lane <= slot:
         return None
-    extent = op.m if which.upper() == 'A' else op.n
+    extent = op.n
     span = extent * op.blocks
     if op.wave % span or group >= op.wave // span:
         return None
@@ -195,9 +248,7 @@ def fragment_moves(op, which: str, slot: int,
     regions = {}
     for lane in range(op.wave):
         element = layouts.element_at(op, which, slot, lane)
-        block, first, second = element
-        contraction, index = (second, first) if which.upper() == 'A' \
-            else (first, second)
+        block, contraction, index = element
         source = group * span + block * extent + index
         regions.setdefault(contraction, []).append((lane, source))
 
@@ -300,7 +351,7 @@ def fragment_cost(op, which: str, group: int = 0) -> Optional[int]:
     instruction.
     """
     total = 0
-    frag = op.a if which.upper() == 'A' else op.b
+    frag = op.b
     for slot in range(frag.per_lane):
         moves = fragment_moves(op, which, slot, group)
         if moves is None:

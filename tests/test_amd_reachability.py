@@ -93,6 +93,12 @@ KEPT_UNREACHABLE = {
     "Move":
         "one register into one region of a fragment; the emitter that turns "
         "these into `swap` and `dppUpdate` calls is not written",
+    "FED_BY":
+        "which accessor feeds which fragment; the names collide and the "
+        "mapping is not symmetric",
+    "broadcast_feeds_a":
+        "whether the instruction fetches its own A operand; read by the "
+        "emitter that is not written",
     "Gather":
         "one accumulator register into a region of an output column; the "
         "emitter that turns these into calls is not written",

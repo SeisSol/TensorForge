@@ -25,14 +25,14 @@ from harness import wavesim
 from tensorforge.backend.instructions.compute.primitives.amd import (
     catalog, layouts, reorder)
 
-#: Operands whose source is one scalar per lane -- what the loop nest holds.
-#: The 16-bit ones need a split and a pack before any of this applies, which
-#: is a different problem and not this module's.
-SCALAR = [(op, which)
-          for op in catalog.MATRIX_OPS for which in ("A", "B")
-          if layouts.covers(op, which)
-          and (op.a if which == "A" else op.b).dtype in (
-              catalog.Datatype.F32, catalog.Datatype.F64)]
+#: The instruction's B fragment, where the source is one scalar per lane --
+#: what the leading operand hands over. The 16-bit ones need a split and a
+#: pack before any of this applies, which is a different problem and not this
+#: module's; the A fragment is a different problem too, see below.
+SCALAR = [(op, "B")
+          for op in catalog.MATRIX_OPS
+          if layouts.covers(op, "B")
+          and op.b.dtype in (catalog.Datatype.F32, catalog.Datatype.F64)]
 
 
 def _run(op, which, slot, group):
@@ -155,6 +155,7 @@ def test_the_plan_declines_rather_than_approximating():
               if o.builtin == "mfma_f64_16x16x4f64")
     assert reorder.fragment_moves(op, "B", 1) is None, "one slot only"
     assert reorder.fragment_moves(op, "D", 0) is None, "not an input"
+    assert reorder.fragment_moves(op, "A", 0) is None, "not this source"
     assert reorder.fragment_moves(op, "B", 0, group=99) is None
 
 
@@ -376,3 +377,79 @@ def test_every_writeback_region_is_a_row_mask_too(op):
     for column in range(op.m):
         for gather in reorder.accumulator_gathers(op, column):
             assert gather.select.kind == "row", f"{op.builtin} column {column}"
+
+
+# --------------------------------------------------------------------------- #
+# which operand the plan is for, and why not the other one
+# --------------------------------------------------------------------------- #
+
+def test_the_plan_is_for_the_leading_operand_only():
+    """`ops.A` and `ops.B` do not arrive the same way round.
+
+    `multilinear` gives the leading operand `unwindI` for its lead index and a
+    plain index for the contraction, so the contraction sits in registers and
+    the lead in lanes. It gives the shared matrix the reverse -- `unwindK`
+    with `full=False`, a `LeadIndex` on the contraction -- so the contraction
+    is in the lanes and the column in registers.
+
+    A `swap` moves a value between lanes. It never moves one between a
+    register and a lane, so no sequence of them reaches a fragment from the
+    transposed arrangement, and a plan derived as if it could would be
+    self-consistent and wrong. The instruction's B fragment is the one the
+    leading operand feeds; its A fragment is refused.
+    """
+    for op in catalog.MATRIX_OPS:
+        if not layouts.covers(op, "A"):
+            continue
+        assert reorder.fragment_moves(op, "A", 0) is None
+    assert reorder.FED_BY["A"].startswith("ops.B")
+    assert reorder.FED_BY["B"].startswith("ops.A")
+
+
+def test_the_broadcast_covers_the_a_fragment_wherever_there_are_blocks():
+    """The refusal above is not a gap -- but the boundary is not `k == 1`.
+
+    `cbsz` and `abid` push one block's A operand to the others, so an
+    instruction with blocks to spare fetches its own A. That needs `blocks >
+    1` and nothing else: `mfma_f64_4x4x4f64` has four blocks *and* a
+    contraction of four, so it broadcasts its A and still wants the plan for
+    its B. Only a single-block instruction is left needing a register-to-lane
+    exchange.
+
+    Worth pinning, because `blocks > 1` looks interchangeable with `k == 1`
+    and is not. What `k == 1` is equivalent to is `n * blocks == wave`, which
+    is `lane_batched` -- a stronger condition, and the one that decides
+    whether the whole scheme applies rather than whether the broadcast does.
+    """
+    scalar = [op for op in catalog.MATRIX_OPS
+              if op.a.per_lane == 1 and op.b.per_lane == 1
+              and op.a.dtype in (catalog.Datatype.F32, catalog.Datatype.F64)]
+    assert scalar
+    for op in scalar:
+        assert reorder.broadcast_feeds_a(op) == (op.blocks > 1), op.builtin
+        if op.k == 1:
+            assert reorder.broadcast_feeds_a(op), "every K=1 tile has blocks"
+
+    both = next(o for o in scalar if o.builtin == "mfma_f64_4x4x4f64")
+    assert both.k > 1 and reorder.broadcast_feeds_a(both)
+    assert not both.lane_batched(), "blocks alone is not the whole scheme"
+
+
+def test_the_instructions_this_work_targets_all_need_the_exchange():
+    """Which is the next piece, and it is not a swap.
+
+    Both FP64 MFMAs, gfx1250's native F32 WMMA and gfx1251's native F64 one
+    have a single block, so none of them can broadcast its A operand and all
+    four need the register-to-lane exchange. `_TILE_TRANSPOSES` in the
+    catalogue already names which transpose belongs to which width; whether
+    `hip.h` defines the one a 16-wide tile wants is what
+    `DEFINED_TRANSPOSES` answers.
+    """
+    for name in ("mfma_f64_4x4x4f64", "mfma_f64_16x16x4f64",
+                 "wmma_f32_16x16x4_f32", "wmma_f64_16x16x4_f64"):
+        op = next(o for o in catalog.MATRIX_OPS if o.builtin == name)
+        if op.blocks > 1:
+            assert reorder.broadcast_feeds_a(op), name
+        else:
+            assert not reorder.broadcast_feeds_a(op), name
+            assert reorder.fragment_moves(op, "A", 0) is None
