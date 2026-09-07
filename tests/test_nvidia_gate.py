@@ -197,3 +197,53 @@ def test_the_matmul_emits_no_raw_statements(enabled):
         pir_build.IRBuilder.__call__ = original
 
     assert not seen, "raw statements left in the MMA path:\n" + "\n".join(seen)
+
+
+def test_the_matmul_emits_no_raw_index_expressions(enabled):
+    """The addresses are operations, not text.
+
+    Raw statements went first; the addresses stayed as `rawexpr` for a while
+    after, in six shapes over 5908 instances, all of them `threadIdx.x` and
+    constants.  Text is where an address stops being analysable: `cse` cannot
+    merge two identical `rawexpr` nodes because they are not pure, the bank
+    census has to parse the generated source to answer a question the IR could
+    answer directly, and a pass wanting to reason about the access pattern had
+    nothing to reason over.
+
+    A count, not a list, for the same reason as the statement test beside it.
+    """
+    import traceback
+
+    from tensorforge.backend.pir import build as pir_build
+
+    seen = []
+    original = pir_build.IRBuilder.rawexpr
+
+    def rawexpr(self, text, *args, **kwargs):
+        frame = next((f for f in reversed(traceback.extract_stack())
+                      if f.filename.endswith('primitives/nvidia.py')), None)
+        if frame is not None:
+            seen.append(f'nvidia.py:{frame.lineno}: {text.strip()[:60]}')
+        return original(self, text, *args, **kwargs)
+
+    pir_build.IRBuilder.rawexpr = rawexpr
+    try:
+        _generate(CASE_THAT_TAKES_THE_PATH)
+    finally:
+        pir_build.IRBuilder.rawexpr = original
+
+    assert not seen, "raw index expressions left:\n" + "\n".join(seen)
+
+
+def test_the_repeated_thread_reads_collapse(enabled):
+    """What the conversion bought beyond the opacity count.
+
+    Every one of those addresses started with `threadIdx.x`, and a `rawexpr`
+    naming it is opaque and impure, so each was its own read.  As operations
+    they are one value: 660 reads in this kernel became 192, and the kernel
+    lost 234 lines.
+    """
+    source = _generate(CASE_THAT_TAKES_THE_PATH)
+    assert source.count('threadIdx.x') < 300, (
+        f"{source.count('threadIdx.x')} thread-index reads; they are supposed "
+        f"to be hash-consed")

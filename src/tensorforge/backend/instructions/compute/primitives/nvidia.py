@@ -228,6 +228,34 @@ def plan(strategy, shape, n, ctx):
     return whole(strategy, n)
 
 
+def _index(writer, *, sub=0, mod=None, div=None, scale=1, add=0):
+    """A lane-derived index, built as operations rather than spelled out.
+
+    Every address this file computes has the same shape --- the thread index,
+    an optional shift, an optional wrap, a stride and an offset --- and it was
+    written as text six times.  Text is where the address stops being
+    analysable: `cse` cannot merge two identical `rawexpr` nodes (they are not
+    pure), the bank census has to parse the generated source to answer a
+    question the IR could answer directly, and a pass that wanted to reason
+    about the access pattern had nothing to reason over.
+
+    Order is `((tid - sub) % mod / div) * scale + add`, which is the order the
+    six call sites already used.
+    """
+    v = writer.thread_id('x')
+    if sub:
+        v = writer.op('sub', INDEX, v, sub, hint='a')
+    if mod is not None:
+        v = writer.op('rem', INDEX, v, mod, hint='a')
+    if div is not None:
+        v = writer.op('div', INDEX, v, div, hint='a')
+    if scale != 1:
+        v = writer.op('mul', INDEX, v, scale, hint='a')
+    if add:
+        v = writer.op('add', INDEX, v, add, hint='a')
+    return v
+
+
 def matmul(writer, ops, ctx, span):
     C, A, B = ops.C, ops.A, ops.B
     # Elements, and the loop below walks them in strides of `threads`.  The
@@ -378,12 +406,12 @@ def matmul(writer, ops, ctx, span):
                                     with threadrange(trueK, trueSK):
                                         for jj in range(0, atom.n):
                                             writer.store(Bshm, Breg[k // threads, jj],
-                                                         writer.rawexpr(f'(threadIdx.x - {trueK}) % {atom.k} + {jj * atom.k}', type_=INDEX, hint='a'))
+                                                         _index(writer, sub=trueK, mod=atom.k, add=jj * atom.k))
                                     if trueSK != atom.k:
                                         with threadrange(0, atom.k - trueSK):
                                             for jj in range(0, atom.n):
                                                 writer.store(Bshm, Breg[k // threads + 1, jj],
-                                                                     writer.rawexpr(f'(threadIdx.x + {trueSK}) % {atom.k} + {jj * atom.k}', type_=INDEX, hint='a'))
+                                                                     _index(writer, sub=-trueSK, mod=atom.k, add=jj * atom.k))
                                     writer.barrier(Uniformity.MULT)
 
                                     for jj in range(0, nregs):
@@ -396,7 +424,23 @@ def matmul(writer, ops, ctx, span):
                                             # assignment per fragment, and a
                                             # C++ identifier where the IR had a
                                             # value all along.
-                                            Bfrag[kkk + jj * kregs] = writer.load(Bshm, writer.rawexpr(f'(threadIdx.x % {ktile}) + (threadIdx.x / {ktile} + {jj * ntile}) * {atom.k} + {kkk * ktile}', type_=INDEX, hint='a'), hint='b')
+                                            # The fragment layout: the lane's
+                                            # column within the tile, plus its
+                                            # row scaled by the tile width.
+                                            # Two lane terms, so `_index` does
+                                            # not fit and the sum is written
+                                            # out -- still operations, and the
+                                            # two `thread_id` reads are one
+                                            # value after `cse`.
+                                            col = _index(writer, mod=ktile)
+                                            row = _index(writer, div=ktile,
+                                                         add=jj * ntile,
+                                                         scale=atom.k)
+                                            addr = writer.op('add', INDEX, col, row, hint='a')
+                                            if kkk * ktile:
+                                                addr = writer.op('add', INDEX, addr,
+                                                                 kkk * ktile, hint='a')
+                                            Bfrag[kkk + jj * kregs] = writer.load(Bshm, addr, hint='b')
 
                                     for kkk in range(0, min(atom.k, K - k - kk)):
                                         Areg[kkk] = A(writer, None, i // threads, k + kk + kkk)
@@ -424,14 +468,14 @@ def matmul(writer, ops, ctx, span):
                                                         hint='q')
                                                     writer.store(
                                                         Ashm, quad,
-                                                        writer.rawexpr(f'((threadIdx.x - {ii}) % {atom.m}) * {ktile} + {kkk * atom.m}',
-                                                                       type_=INDEX, hint='a'))
+                                                        _index(writer, sub=ii, mod=atom.m, scale=ktile,
+                                                                              add=kkk * atom.m))
                                             writer.barrier(Uniformity.MULT)
 
                                             for kk in range(0, kregs):
                                                 for iii in range(0, mregs):
                                                     #writer(f'{atom.d.ctype()} {Areg2}_{iii + kk * mregs} = {shmptr}[{aoffs} + (threadIdx.x / {ktile}) + (threadIdx.x % {ktile} + {kk * ktile}) * {atom.m} + {iii * mtile}];')
-                                                    Afrag[iii + kk * mregs] = writer.load(Ashm, writer.rawexpr(f'threadIdx.x + {(iii + kk * mregs) * 32}', type_=INDEX, hint='a'), hint='a')
+                                                    Afrag[iii + kk * mregs] = writer.load(Ashm, _index(writer, add=(iii + kk * mregs) * 32), hint='a')
 
                                             atom.generate(writer, ctx, Afrag[:aregs], Bfrag[:bregs],
                                                           [Cvals[i][ii // atom.m] for i in range (cregs)])
@@ -449,12 +493,12 @@ def matmul(writer, ops, ctx, span):
                             for jj in range(0, nregs * 2):
                                 for iii in range(0, mregs):
                                     writer.store(Cshm, Cvals[iii + mregs * jj][ii // atom.m],
-                                        writer.rawexpr(f'threadIdx.x * 2 + {iii} + {jj * 64}', type_=INDEX, hint='a'))
+                                        _index(writer, scale=2, add=iii + jj * 64))
 
                             writer.barrier(Uniformity.MULT)
                             with threadrange(ii, atom.m):
                                 for jj in range(0, atom.n):
-                                    _c = writer.load(Cshm, writer.rawexpr(f'(threadIdx.x % {atom.m}) * {atom.n} + {jj}', type_=INDEX, hint='a'), hint='data')
+                                    _c = writer.load(Cshm, _index(writer, mod=atom.m, scale=atom.n, add=jj), hint='data')
                                     writer.assign(Cout[jj], _c)
                             writer.barrier(Uniformity.MULT)
 

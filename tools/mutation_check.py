@@ -618,6 +618,17 @@ GROUPS = {
     ]),
 
     'gate': ('tests/test_nvidia_gate.py', [
+        ('an address goes back to raw text',
+         sub(Path('src/tensorforge/backend/instructions/compute/primitives/nvidia.py'),
+             "    v = writer.thread_id('x')",
+             "    return writer.rawexpr('threadIdx.x', type_=INDEX, hint='a')\n"
+             "    v = writer.thread_id('x')", 1)),
+        ('the wrap is dropped from the index',
+         sub(Path('src/tensorforge/backend/instructions/compute/primitives/nvidia.py'),
+             '    if mod is not None:', '    if False:', 1)),
+        ('the stride is dropped from the index',
+         sub(Path('src/tensorforge/backend/instructions/compute/primitives/nvidia.py'),
+             '    if scale != 1:', '    if False:', 1)),
         ('a staged fragment goes back to a varalloc name',
          sub(Path('src/tensorforge/backend/instructions/compute/primitives/nvidia.py'),
              '                                        Areg[kkk] = A(writer, None, i // threads, k + kk + kkk)',
