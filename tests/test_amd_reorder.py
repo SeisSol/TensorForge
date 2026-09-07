@@ -453,3 +453,110 @@ def test_the_instructions_this_work_targets_all_need_the_exchange():
         else:
             assert not reorder.broadcast_feeds_a(op), name
             assert reorder.fragment_moves(op, "A", 0) is None
+
+
+# --------------------------------------------------------------------------- #
+# the A fragment, and the contraction order that makes it free
+# --------------------------------------------------------------------------- #
+
+EXCHANGED = [op for op in catalog.MATRIX_OPS if reorder.a_exchange(op)]
+
+TRANSPOSES = {"tensorforge::transpose16x16b32": wavesim.transpose16x16b32,
+              "tensorforge::transpose4x4b32": wavesim.transpose4x4b32}
+
+
+@pytest.mark.parametrize("op", EXCHANGED, ids=lambda op: op.builtin)
+def test_the_transpose_output_is_the_a_fragment(op):
+    """Register `g` of the transpose *is* the fragment for k-group `g`.
+
+    The shared matrix arrives as column-in-registers, contraction-in-lanes.
+    One `transpose16x16b32` swaps those, and what comes out has the column the
+    fragment wants and a contraction running in steps of sixteen down the lane
+    rows -- which is the fragment exactly, once the sum is walked in stride-16
+    groups instead of contiguous fours.
+
+    Nothing moves after the transpose, and the transpose emits all sixteen
+    registers at once, so it is paid once per k-block of 64 rather than once
+    per issue.
+    """
+    exchange = reorder.a_exchange(op)
+    source = [[("sh", col, k) for k in range(op.wave)] for col in range(op.m)]
+    out = TRANSPOSES[exchange.transpose](source)
+
+    for group in range(exchange.groups):
+        for lane in range(op.wave):
+            _, column, k_local = layouts.element_at(op, "A", 0, lane)
+            assert out[group][lane] == (
+                "sh", column, exchange.stride * k_local + group), (
+                f"{op.builtin} group {group} lane {lane}")
+
+
+@pytest.mark.parametrize("op", EXCHANGED, ids=lambda op: op.builtin)
+def test_both_operands_name_the_same_contraction(op):
+    """The joint run, which is the claim that matters.
+
+    Each fragment being individually well-formed says nothing about the
+    product: the instruction sums `A[m][k] * B[k][n]` over its own `k`, so the
+    two fragments have to agree about which real contraction value each of its
+    `k` stands for. Here the A side gets that from the transpose and the B
+    side from taking its source register at a stride, and they have to come
+    out the same.
+
+    And over the whole k-block, every contraction value has to appear exactly
+    once -- a relabelling that dropped or repeated one would still pass every
+    per-fragment check above.
+    """
+    exchange = reorder.a_exchange(op)
+    shared = [[("sh", col, k) for k in range(op.wave)] for col in range(op.m)]
+    data = [[("da", lead, k) for lead in range(op.wave)]
+            for k in range(op.wave)]
+    a_regs = TRANSPOSES[exchange.transpose](shared)
+
+    span = op.n * op.blocks
+    covered = set()
+    for group in range(exchange.groups):
+        for lead_group in range(op.wave // span):
+            fragment = [None] * op.wave
+            for move in reorder.fragment_moves(op, "B", 0, lead_group):
+                lanes = data[exchange.stride * move.contraction + group]
+                for block in move.swaps:
+                    lanes = wavesim.swap(lanes, block)
+                for lane in move.select.lanes:
+                    fragment[lane] = lanes[lane]
+
+            for lane in range(op.wave):
+                _, column, k_a = layouts.element_at(op, "A", 0, lane)
+                _, k_b, index = layouts.element_at(op, "B", 0, lane)
+                assert k_a == k_b, "the layouts disagree about this lane's k"
+                left, right = a_regs[group][lane], fragment[lane]
+                assert left[1] == column
+                assert right[1] == lead_group * span + index
+                assert left[2] == right[2], (
+                    f"{op.builtin}: A holds k={left[2]}, B holds k={right[2]}")
+                covered.add(left[2])
+
+    assert covered == set(range(op.wave)), (
+        "the k-groups do not cover the contraction exactly once")
+
+
+def test_the_exchange_declines_where_the_contraction_reaches_the_register():
+    """Two slots is a further claim, and it is not made here.
+
+    With more than one element per lane the fragment keeps part of its
+    contraction in the register, so the relabelling has to stay injective
+    across slots as well as lane rows. That may well hold -- both XF32 entries
+    and both native gfx125x WMMAs are in that shape -- but it is not what the
+    simulation above checked, so `a_exchange` says nothing about them.
+    """
+    for name in ("mfma_f32_16x16x8_xf32", "wmma_f64_16x16x4_f64"):
+        op = next(o for o in catalog.MATRIX_OPS if o.builtin == name)
+        assert op.a.per_lane > 1
+        assert reorder.a_exchange(op) is None
+
+    wide = next(o for o in catalog.MATRIX_OPS
+                if o.builtin == "mfma_f32_32x32x2f32")
+    assert reorder.a_exchange(wide) is None, "no transpose32x32b32 in hip.h"
+
+    tiled = next(o for o in catalog.MATRIX_OPS
+                 if o.builtin == "mfma_f32_4x4x1f32")
+    assert reorder.a_exchange(tiled) is None, "it broadcasts its own A"

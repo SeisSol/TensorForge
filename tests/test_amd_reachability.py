@@ -93,6 +93,10 @@ KEPT_UNREACHABLE = {
     "Move":
         "one register into one region of a fragment; the emitter that turns "
         "these into `swap` and `dppUpdate` calls is not written",
+    "Exchange":
+        "the transpose and contraction order that feed an A fragment",
+    "a_exchange":
+        "names that transpose; the emitter that calls it is not written",
     "FED_BY":
         "which accessor feeds which fragment; the names collide and the "
         "mapping is not symmetric",

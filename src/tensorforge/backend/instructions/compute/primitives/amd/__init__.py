@@ -49,9 +49,9 @@ from .features import FEATURE_TARGETS, has_feature, wave_size
 from .layouts import (FRAGMENT_BITS, Provenance, covers, established,
                       position, provenance)
 from .reorder import (BANK, FED_BY, IDENTITY_DPP, ROW, Gather, Move,
-                      Select, accumulator_cost, accumulator_gathers,
-                      broadcast_feeds_a, fragment_cost,
-                      fragment_moves)
+                      Select, Exchange, a_exchange, accumulator_cost,
+                      accumulator_gathers, broadcast_feeds_a,
+                      fragment_cost, fragment_moves)
 from .codegen import hfma, matmul32, matmuldpp
 from .emitters import fmadpp, fmadpp4, fmadpp8, fmadpp16, fmascalar
 from .relayout import (BROADCAST, MOVDPP16, RELAYOUTS, TRANSPOSE4X4, Relayout,
@@ -71,7 +71,7 @@ __all__ = [
     'FRAGMENT_BITS', 'Provenance', 'covers', 'established',
     'position', 'provenance',
     'BANK', 'FED_BY', 'IDENTITY_DPP', 'ROW', 'Gather', 'Move', 'Select',
-    'broadcast_feeds_a',
+    'broadcast_feeds_a', 'Exchange', 'a_exchange',
     'accumulator_cost', 'accumulator_gathers',
     'fragment_cost', 'fragment_moves',
     'wanted_fmadpp_step', 'select_fmadpp_step',

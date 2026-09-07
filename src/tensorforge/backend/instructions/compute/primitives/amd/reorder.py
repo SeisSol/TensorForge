@@ -30,8 +30,9 @@ that is a stronger condition than having blocks at all.
 
 Where an instruction has one block --- `mfma_f64_16x16x4f64`, both XF32
 entries, both native gfx125x WMMAs --- there is nothing to broadcast between
-and the A operand needs a register-to-lane exchange first, which is
-`transpose*` in `hip.h` and not this module.
+and the A operand needs a register-to-lane exchange first.  `a_exchange` says
+when one `transpose*` from `hip.h` is the whole answer, and it is a better
+answer than it looks: see below.
 
 A matrix instruction wants part of the contraction in the lane index and the
 leading dimension crammed into whatever lane bits are left.  `layouts` says
@@ -187,6 +188,61 @@ def _swaps_for(mask: int) -> Tuple[int, ...]:
     compare equal.
     """
     return tuple(1 << (bit + 1) for bit in range(6) if mask >> bit & 1)
+
+
+@dataclass(frozen=True)
+class Exchange:
+    """One transpose, and the contraction order that makes it sufficient.
+
+    The shared matrix arrives with the column in the registers and the
+    contraction in the lanes.  `transpose{ext}x{ext}b32` swaps those inside
+    each group of `ext` lanes, so output register `g` at lane `l` holds
+    ``shared[l % ext][ext * (l // ext) + g]``: the column the fragment wants,
+    and a contraction value that runs in steps of `ext` down the lane rows.
+
+    The fragment wants its contraction to run in steps of *one*.  It does not
+    have to: the contraction is a sum, so which values a given instruction
+    issue covers is ours to choose, and choosing the stride-`ext` group
+    ``{g, g + ext, g + 2*ext, ...}`` makes the transpose output *be* the
+    fragment.  No swaps, no permute, no staging --- and the transpose emits
+    all `ext` registers at once, so one of them feeds every issue of a whole
+    k-block rather than one issue.
+
+    Which is why it is worth having a name.  The obvious reading --- walk `k`
+    in contiguous blocks of four and move the operand to match --- needs a
+    gather per source register, because after the transpose the four values a
+    contiguous block wants sit in four *different* registers, one per lane
+    row, and no lane permutation crosses between registers.  Reordering the
+    sum costs nothing and removes the movement entirely.
+    """
+
+    #: The `hip.h` name, as `DEFINED_TRANSPOSES` spells it.
+    transpose: str
+    #: Contraction groups the one transpose produces, and registers it emits.
+    groups: int
+    #: Step between the contraction values inside a group.
+    stride: int
+
+
+def a_exchange(op) -> Optional[Exchange]:
+    """The transpose that feeds this instruction's A fragment, or `None`.
+
+    `None` where the instruction broadcasts its own A, where `hip.h` has no
+    transpose of the right width, or where the fragment keeps part of its
+    contraction in the register --- with more than one element per lane the
+    relabelling has to be injective across slots as well, which is a further
+    claim and not one this has checked.
+    """
+    if broadcast_feeds_a(op) or op.a.per_lane != 1:
+        return None
+    rows = op.wave // (op.m * op.blocks)
+    if op.blocks != 1 or op.k != rows:
+        return None
+    name = f'tensorforge::transpose{op.m}x{op.m}b32'
+    from .catalog import DEFINED_TRANSPOSES
+    if name not in DEFINED_TRANSPOSES:
+        return None
+    return Exchange(name, op.m, op.m)
 
 
 #: Which accessor feeds which fragment, under the assignment this path uses:
