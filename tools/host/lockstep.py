@@ -30,13 +30,20 @@ def extract(path, kernel):
 
 
 def desugar_async(src):
-    """`cuda::memcpy_async` is the shared-memory staging; model it as a copy.
+    """The shared-memory staging, modelled as the copy it is.
 
-    `kernel_eval` skips anything with `::` --- for a pipeline object that is
-    right, but the transfer itself carries the values every consumer reads.
+    Two spellings reach here.  `cuda::memcpy_async` is the pipeline object
+    form, and `kernel_eval` skips anything with `::` --- right for the object,
+    wrong for the transfer, which carries the values every consumer reads.
+    `__pipeline_memcpy_async` is the intrinsic form and has no `::` to be
+    skipped by; it is simply a call the interpreter has no body for, and a
+    staging that silently does nothing leaves every consumer reading zeros.
     """
-    return re.sub(
+    src = re.sub(
         r"cuda::memcpy_async\(\s*&([^,]+?),\s*&([^,]+?),[^;]*\);",
+        r"\1 = \2;", src)
+    return re.sub(
+        r"__pipeline_memcpy_async\(\s*&([^,]+?),\s*&([^,]+?),[^;]*\);",
         r"\1 = \2;", src)
 
 
