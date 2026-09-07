@@ -169,8 +169,7 @@ def _attrs(descr) -> Tuple:
                 bool(getattr(descr, 'strict_match', False)),
                 bool(getattr(descr, 'prefer_align', False)))
     if isinstance(descr, ElementwiseDescr):
-        scalars = tuple(s for s in descr.srcs
-                        if not hasattr(s, 'tensor') and not hasattr(s, 'shape'))
+        scalars = tuple(descr.scalar_srcs())
         return ('elementwise', descr.op, scalars,
                 bool(getattr(descr, 'strict_match', False)),
                 bool(getattr(descr, 'prefer_align', False)))
@@ -194,8 +193,9 @@ def _slots(descr) -> List[Tuple[str, object]]:
         return ([('dest', descr.dest)] +
                 [(f'op{i}', op) for i, op in enumerate(descr.ops)])
     if isinstance(descr, ElementwiseDescr):
+        tensors = descr.tensor_srcs()
         srcs = [(f'src{i}', s) for i, s in enumerate(descr.srcs)
-                if hasattr(s, 'tensor') or hasattr(s, 'shape')]
+                if any(s is t for t in tensors)]
         return [('dest', descr.dest)] + srcs
     if isinstance(descr, ReductionDescr):
         return [('dest', descr.dest), ('var', descr.var)]
@@ -320,6 +320,8 @@ class Generalization:
     skeleton: Skeleton
     holes: Tuple[Tuple[int, ...], ...]
     bindings: Tuple[Tuple[object, ...], ...]
+    template: Tuple[OperationDescription, ...] = ()
+    template_views: Tuple[object, ...] = ()
 
     def __bool__(self) -> bool:
         return True
@@ -399,4 +401,86 @@ def anti_unify(bodies: Sequence[Sequence[OperationDescription]]
 
     bindings = tuple(tuple(views[group[0]] for group in holes)
                      for views in all_views)
-    return Generalization(base, tuple(holes), bindings)
+    return Generalization(base, tuple(holes), bindings,
+                          tuple(bodies[0]), tuple(base_views))
+
+
+# ---------------------------------------------------------------------------
+# Putting a binding back in
+# ---------------------------------------------------------------------------
+
+
+def rebuild(descr: OperationDescription,
+            views: Sequence[object]) -> OperationDescription:
+    """A descriptor of the same kind with the given views in its slots.
+
+    The inverse of :func:`_slots`, and the reason that function fixes an order
+    rather than reporting whatever order the descriptor happens to store.  A
+    descriptor with no slots is returned unchanged, since there is nothing in
+    it a substitution could reach.
+    """
+    slots = _slots(descr)
+    if not slots:
+        return descr
+    if len(views) != len(slots):
+        raise ValueError(f'{type(descr).__name__} takes {len(slots)} operands, '
+                         f'got {len(views)}')
+
+    if isinstance(descr, MultilinearDescr):
+        add = descr.add_dims if descr.add_dims is not None else descr.add
+        return MultilinearDescr(views[0], list(views[1:]),
+                                descr.target, descr.permute, add,
+                                getattr(descr, 'strict_match', False),
+                                getattr(descr, 'prefer_align', False))
+
+    if isinstance(descr, ElementwiseDescr):
+        tensors = descr.tensor_srcs()
+        rest = list(views[1:])
+        srcs = [rest.pop(0) if any(s is t for t in tensors) else s
+                for s in descr.srcs]
+        return ElementwiseDescr(descr.op, views[0], srcs,
+                                getattr(descr, 'strict_match', False),
+                                getattr(descr, 'prefer_align', False))
+
+    if isinstance(descr, ReductionDescr):
+        return ReductionDescr(views[0], views[1], descr.dims, descr.op,
+                              getattr(descr, 'prefer_align', False))
+
+    raise ValueError(f'no way to rebuild a {type(descr).__name__}')
+
+
+def substitute(general: Generalization,
+               bindings: Sequence[object]) -> List[OperationDescription]:
+    """The generalised body with one tensor put in each hole.
+
+    Binding every hole to a constant is what turns the common body back into a
+    particular one, and the round trip -- generalise a family, bind hole by
+    hole, get each member back -- is the property that says the generalisation
+    kept everything it had to.  It is also the specialised form itself: a hole
+    bound to a literal is a hole the emitter never sees.
+
+    A hole covers every slot naming the same tensor, so one binding reaches all
+    of them; that is what keeps a tensor used twice used twice.
+    """
+    if len(bindings) != len(general.holes):
+        raise ValueError(f'{len(general.holes)} hole(s) to fill, '
+                         f'got {len(bindings)}')
+
+    filled = list(general.template_views)
+    for group, view in zip(general.holes, bindings):
+        for slot in group:
+            filled[slot] = view
+
+    out: List[OperationDescription] = []
+    cursor = 0
+    for descr in general.template:
+        width = len(_slots(descr))
+        out.append(rebuild(descr, filled[cursor:cursor + width]))
+        cursor += width
+    return out
+
+
+def instantiate(general: Generalization, member: int
+                ) -> List[OperationDescription]:
+    """The generalised body bound as the ``member``-th input had it."""
+    return substitute(general, general.bindings[member])

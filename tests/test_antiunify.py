@@ -14,7 +14,8 @@ import numpy as np
 import pytest
 
 from tensorforge.analysis.antiunify import (Generalization, Mismatch,
-                                            anti_unify, operand_key, skeleton)
+                                            anti_unify, instantiate,
+                                            operand_key, skeleton, substitute)
 from tensorforge.common.basic_types import Addressing, Datatype
 from tensorforge.common.helper import generate_tmp_matrix
 from tensorforge.common.matrix.boundingbox import BoundingBox
@@ -224,3 +225,78 @@ def test_family_size_does_not_change_the_answer(members):
     assert isinstance(result, Generalization)
     assert result.arity == 1
     assert len(result.bindings) == members
+
+
+# --- putting a binding back in ----------------------------------------------
+
+
+def test_round_trip_returns_each_member():
+    """Generalise a family, bind hole by hole, get the members back.
+
+    The property that says the generalisation kept everything it had to: if
+    binding reproduces every input, nothing that distinguished them was lost
+    into the common part.
+    """
+    bodies = [body(f'fPrT{j}') for j in range(4)]
+    g = anti_unify(bodies)
+    for member, original in enumerate(bodies):
+        assert skeleton(instantiate(g, member))[0] == skeleton(original)[0]
+
+
+def test_round_trip_over_a_chain():
+    def chain(operator_alias):
+        d = tensor('D', [56, 9])
+        a = tensor(operator_alias, [56, 56])
+        b = tensor('B', [56, 9])
+        c = tensor('C', [9, 9])
+        tmp = SubTensor(generate_tmp_matrix(b, c))
+        return [gemm(b, c, tmp), gemm(a, tmp, d)]
+
+    bodies = [chain('A0'), chain('A1'), chain('A2')]
+    g = anti_unify(bodies)
+    for member, original in enumerate(bodies):
+        assert skeleton(instantiate(g, member))[0] == skeleton(original)[0]
+
+
+def test_binding_a_tensor_no_member_used():
+    """A hole takes any interchangeable tensor, not only the ones seen."""
+    g = anti_unify([body('fPrT0'), body('fPrT1')])
+    fresh = tensor('fPrT7', [56, 56])
+    built = substitute(g, [fresh])
+    assert skeleton(built)[0] == skeleton(body('fPrT7'))[0]
+
+
+def test_substitution_is_idempotent():
+    bodies = [body(f'A{j}') for j in range(3)]
+    g = anti_unify(bodies)
+    again = anti_unify([instantiate(g, j) for j in range(3)])
+    assert isinstance(again, Generalization)
+    assert again.arity == g.arity
+    assert again.binding_names() == g.binding_names()
+
+
+def test_one_binding_reaches_every_slot_of_its_hole():
+    def twice(alias):
+        q = tensor('Q', [56, 9])
+        a = tensor(alias, [56, 56])
+        t = SubTensor(generate_tmp_matrix(a, tensor('I', [56, 9])))
+        return [gemm(a, tensor('I', [56, 9]), t), gemm(a, t, q)]
+
+    g = anti_unify([twice('A0'), twice('A1')])
+    built = substitute(g, [tensor('A9', [56, 56])])
+    aliases = [v.tensor.alias for d in built for _, v in
+               [('op0', d.ops[0])]]
+    assert aliases == ['A9', 'A9']
+
+
+def test_wrong_number_of_bindings_is_refused():
+    g = anti_unify([body('A0'), body('A1')])
+    with pytest.raises(ValueError):
+        substitute(g, [])
+    with pytest.raises(ValueError):
+        substitute(g, [tensor('A2', [56, 56]), tensor('A3', [56, 56])])
+
+
+def test_a_body_with_no_holes_rebuilds_unchanged():
+    g = anti_unify([body('A0'), body('A0')])
+    assert skeleton(substitute(g, []))[0] == skeleton(body('A0'))[0]
