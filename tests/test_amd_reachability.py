@@ -34,7 +34,8 @@ AMD = (Path(__file__).parent.parent / "src" / "tensorforge" / "backend" /
 #: another file is still unreachable, and splitting a module must not be a way
 #: to launder dead code past this check.
 MODULES = ["__init__", "arch", "caps", "features", "catalog", "layouts",
-           "reorder", "relayout", "select", "emitters", "codegen", "unused"]
+           "reorder", "relayout", "select", "emitters", "codegen",
+           "exchange_codegen", "unused"]
 
 #: What the dispatch calls into this package.  Two, and both are entry points
 #: in the same sense: one is asked before generation what has to be reserved,
@@ -91,6 +92,20 @@ KEPT_UNREACHABLE = {
     "Move":
         "one register into one region of a fragment; the emitter that turns "
         "these into `swap` and `dppUpdate` calls is not written",
+    "matmul_exchange":
+        "the k>1 matrix path, written and deliberately not routed: wiring it "
+        "up changes every F64 kernel on CDNA 2 and later and the only check "
+        "available here is that it follows its plans",
+    "exchange_op":
+        "which instruction that path would take; the gate `matmul` would ask",
+    "_b_fragment":
+        "one B fragment; reached only from `matmul_exchange`",
+    "_writeback":
+        "one output column; reached only from `matmul_exchange`",
+    "_swapped":
+        "a swap sequence; reached from both of those",
+    "_merge":
+        "a masked merge; reached from both of those",
     "Exchange":
         "the transpose and contraction order that feed an A fragment",
     "a_exchange":
