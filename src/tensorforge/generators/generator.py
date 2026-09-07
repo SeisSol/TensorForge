@@ -9,6 +9,7 @@ from tensorforge.common.context import Context
 from tensorforge.common.basic_types import Addressing, FlagMode, GeneralLexicon, DataFlowDirection
 from tensorforge.common.helper import get_extra_offset_name
 from tensorforge.backend.data_types import ShrMemObject, RegMemObject
+from tensorforge.backend import pir
 from tensorforge.backend.opt import OptimizationStage
 from tensorforge.backend.opt.inspect import async_depth, format_diagnostics, verify
 from tensorforge.backend.scopes import Scopes
@@ -110,6 +111,10 @@ class Generator:
                attrs: Optional[dict] = None):
     self.descr_list: List[OperationDescription] = gemm_list
     self._context: Context = context
+    #: Destination names whose transfer should get two stages, or None to
+    #: work that out.  Set to a concrete set on the throwaway generator that
+    #: works it out, which is what stops it recursing.
+    self._rotate: Optional[set] = None
     #: Switches the frontend's caller set on this kernel, or None from a
     #: frontend that has no attribute channel.  Only the flag mask reads
     #: these; the distinction between None and {} is what keeps a frontend
@@ -184,7 +189,75 @@ class Generator:
     for instr in self._section.stream:
       instr.set_threadconfig_pre(self._num_threads, mults)
 
+  def _rotation_targets(self) -> set:
+    """Which transfers should get a second buffer, asked of the pass itself.
+
+    `ShrMemOpt` sizes the arena before a body exists, so the decision has to
+    be made in advance -- and the only exact answer comes from
+    `wrap_prefetch`, which needs the body.  So the section is built once to
+    ask and once to use the answer.
+
+    `tools/rotation_cost.py` is why it is this way round rather than giving
+    every async transfer two stages: that costs 9% of arena on average and
+    25-29% on the kernels with several transfers, which are the ones a
+    pipeline is for, and shared memory is paid per launch where a second
+    build is paid once.
+
+    The cheap part is knowing when not to ask.  A description list with no
+    shared async transfer cannot benefit, and being wrong about *that* costs
+    a needless query rather than a buffer nobody uses.
+    """
+    from tensorforge.backend.pir import wrap as _wrap
+    from tensorforge.backend.instructions.memory.load import GlbToShrLoader
+
+    names: set = set()
+    original = _wrap.wrap_prefetch
+
+    def asking(body, make_value, next_index=None, report=None,
+               assume_rotated=False):
+      before = original(body, make_value, next_index, [], assume_rotated=True)
+      for stmt, _ in pir.walk(before):
+        if stmt.op is pir.Op.FOR and stmt.target:
+          for x, _ in pir.walk((stmt,)):
+            if x.op in (pir.Op.COPY_ASYNC, pir.Op.LOAD_ASYNC) and x.args:
+              base = getattr(x.args[0], 'hint', None)
+              if base:
+                names.add(base)
+      return original(body, make_value, next_index, report, assume_rotated)
+
+    probe = Generator(self.descr_list, self._context, attrs=self._attrs)
+    probe._rotate = set()
+    _wrap.wrap_prefetch = asking
+    try:
+      probe.generate()
+    except Exception:
+      return set()
+    finally:
+      _wrap.wrap_prefetch = original
+    return names
+
+  def _apply_rotation(self, loop) -> None:
+    """Give the chosen transfers two stages, before anything is allocated."""
+    if self._rotate is None:
+      return
+    if not self._rotate:
+      return
+    from tensorforge.backend.instructions.memory.load import GlbToShrLoader
+    stage = loop.stage_counter_name() if hasattr(
+        loop, 'stage_counter_name') else None
+    if stage is None:
+      return
+    for instr in getattr(loop, 'region', []) or []:
+      if not isinstance(instr, GlbToShrLoader):
+        continue
+      if instr._dest.name not in self._rotate:
+        continue
+      instr.set_stages(2, f'{stage} % 2', f'({stage} + 1) % 2')
+
   def generate(self):
+    if (self._rotate is None
+        and self._context.get_user_options().enable_wrap_loads):
+      self._rotate = self._rotation_targets()
     # Reset rather than only read at the end: a context outlives one generator
     # -- a search builds several against the same one -- so a figure left over
     # from a previous build would be attributed to this one, and a maximum
@@ -246,6 +319,7 @@ class Generator:
       #
       # A peeled prologue from a pipelining pass belongs *here*, ahead of the
       # loop in `instructions`, not in the section prologue.
+      self._apply_rotation(loop)
       opt = OptimizationStage(context=self._context,
                               shr_mem=self._section.shr_mem_obj,
                               instructions=[loop],
