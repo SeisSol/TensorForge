@@ -131,10 +131,6 @@ KEPT_UNREACHABLE = {
     "lane_batched_ops":
         "the same precondition asked of the whole catalogue; the F32 policy "
         "reaches it through MFMA_TILES instead",
-    "split_terms":
-        "split-precision arithmetic; no emitter consumes it yet",
-    "split_products":
-        "split-precision arithmetic; no emitter consumes it yet",
     "NOT_MODELLED":
         "documents the catalogue's boundary; read by the LLVM cross-check",
 }

@@ -47,7 +47,7 @@ gain.
 
 from tensorforge.backend.pir.core import SCALAR_LAYOUT, ScalarType
 from tensorforge.common.basic_types import Datatype
-from .. import broadcast
+from .. import broadcast, split
 from ..strategy import Strategy, whole
 
 #: Fixed by the hardware; the header asserts it.
@@ -123,14 +123,23 @@ ATOMS = {
     'fp16': DpasAtom('fp16', 16, Datatype.F32),
 }
 
+#: Terms the FP32 path splits an operand into.
+#:
+#: Two, and `split.terms(MANTISSA[TF32], F32)` is three: 11 bits at a time
+#: against FP32's 24 needs three terms to cover it exactly, and two carry 22.
+#: The reduction is deliberate and it is what `splitFloatTF32` is built for --
+#: it returns a `(hi, lo)` pair, so the count and the routine's arity are one
+#: fact -- but it is a reduction, and `split.covered` is what it costs.
+TF32_SPLIT_TERMS = 2
+
 #: The number of TF32 products it takes to recover an FP32 multiply.
 #:
-#: TF32 keeps 11 mantissa bits against FP32's 24, so one split leaves the pair
-#: `(hi, lo)` covering about 22 -- and the cross terms `hi*lo` and `lo*hi` make
-#: up the difference.  `lo*lo` falls below the accumulator's rounding and is
-#: dropped, which is the same three-term arrangement `nvidia.py` uses for
-#: `mma.sync ... .tf32`.
-TF32_TERMS = 3
+#: Derived rather than stated: the pair covers about 22 bits and the cross
+#: terms `hi*lo` and `lo*hi` make up the difference, while `lo*lo` sits below
+#: the accumulator's rounding and is dropped.  That is the same three-product
+#: arrangement `nvidia.py` uses for `mma.sync ... .tf32`, and it comes out of
+#: the same formula rather than being asserted twice.
+TF32_TERMS = len(split.products(TF32_SPLIT_TERMS))
 
 #: Whether the path is deployed, as opposed to whether it *can* emit for a
 #: given shape -- that second question is `supports()`.  Two different facts,
@@ -384,7 +393,9 @@ def dpas_matmul(writer, C, A, B, M, N, K, kx, threads, dtype, ctx):
                                  _run(writer, v, 0, atom.k, 'bk'),
                                  writes=(ahi, alo))
 
-            for bf, af in ((bhi, ahi), (bhi, alo), (blo, ahi)):
+            bterms, aterms = (bhi, blo), (ahi, alo)
+            for i, j in split.products(TF32_SPLIT_TERMS):
+                bf, af = bterms[i], aterms[j]
                 writer.assign(acc, writer.rawexpr(
                     f'tensorforge::intel_xmx::dpas<{atom.depth}, '
                     f'{atom.repeat}, {acc_ct}>({{0}}, {{1}}, {{2}})',

@@ -28,6 +28,7 @@ from pathlib import Path
 import pytest
 
 from tensorforge.backend.instructions.compute.primitives import amd
+from tensorforge.backend.instructions.compute import split
 from tensorforge.common.basic_types import Datatype
 from tensorforge.common.context import Context
 
@@ -383,15 +384,15 @@ def test_bf16_needs_three_terms_and_six_products_for_f32():
     """
     op = next(o for o in catalog.MATRIX_OPS
               if o.builtin == "mfma_f32_4x4x4bf16_1k")
-    terms = catalog.split_terms(op, Datatype.F32)
+    terms = split.terms(op.significand, Datatype.F32)
     assert terms == 3
-    products = catalog.split_products(terms)
+    products = split.products(terms)
     assert len(products) == 6
     assert set(products) == {(0, 0), (0, 1), (1, 0), (0, 2), (2, 0), (1, 1)}
 
 
 def test_products_are_ordered_smallest_contribution_first():
-    products = catalog.split_products(3)
+    products = split.products(3)
     weights = [i + j for i, j in products]
     assert weights == sorted(weights, reverse=True), (
         "products are ordered by contribution, largest last")
@@ -409,7 +410,7 @@ def test_xf32_needs_fewer_terms_than_bf16():
     xf32 = next(o for o in catalog.MATRIX_OPS if "xf32" in o.builtin)
     bf16 = next(o for o in catalog.MATRIX_OPS if o.builtin.endswith("bf16_1k"))
     assert xf32.significand > bf16.significand
-    assert len(catalog.split_products(2)) == 3
+    assert len(split.products(2)) == 3
 
 
 def test_xf32_is_tf32_and_says_so():
@@ -437,8 +438,8 @@ def test_xf32_is_tf32_and_says_so():
 
 def test_a_direct_row_needs_a_single_term():
     op = next(o for o in catalog.MATRIX_OPS if o.builtin == "mfma_f64_4x4x4f64")
-    assert catalog.split_terms(op, Datatype.F64) == 1
-    assert catalog.split_products(1) == ((0, 0),)
+    assert split.terms(op.significand, Datatype.F64) == 1
+    assert split.products(1) == ((0, 0),)
 
 
 # --------------------------------------------------------------------------- #

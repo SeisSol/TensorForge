@@ -21,6 +21,7 @@ import pytest
 from tensorforge.backend.instructions.compute.primitives import intel
 from tensorforge.common.basic_types import Datatype
 from tensorforge.backend.instructions.compute.matmul import MatmulOperands
+from tensorforge.backend.instructions.compute import split
 from tensorforge.backend.instructions.compute.strategy import (
     ComputeShape, Strategy)
 
@@ -123,6 +124,9 @@ def test_a_sparse_operand_is_not_a_fragment():
 def test_fp32_is_emulated_through_tf32():
     assert intel.atom_for(Datatype.F32) is intel.ATOMS['tf32']
     assert intel.TF32_TERMS == 3
+    # And it is that because of the split, not because a constant says so.
+    assert intel.TF32_SPLIT_TERMS == 2
+    assert intel.TF32_TERMS == len(split.products(intel.TF32_SPLIT_TERMS))
 
 
 def test_a_sparse_operand_falls_through():

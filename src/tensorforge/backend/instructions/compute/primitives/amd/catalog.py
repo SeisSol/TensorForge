@@ -53,6 +53,8 @@ from math import ceil
 from typing import Optional, Tuple
 
 from tensorforge.common.basic_types import Datatype
+
+from ...split import MANTISSA
 from .features import has_feature, wave_size
 
 
@@ -84,13 +86,9 @@ class Call(Enum):
 #: terms a split-precision emulation needs, so it is stated per *format*, not
 #: per storage type: `xf32` arrives in `float` registers and is rounded to a
 #: narrower significand inside the matrix unit, which no C++ type records.
-MANTISSA = {
-    Datatype.F64: 53,
-    Datatype.F32: 24,
-    Datatype.TF32: 11,
-    Datatype.F16: 11,
-    Datatype.BF16: 8,
-}
+#: Re-exported: the significand widths are a property of the formats, and
+#: `MatrixOp.significand` is the catalogue's reading of them.
+MANTISSA = MANTISSA
 
 
 @dataclass(frozen=True)
@@ -437,44 +435,6 @@ def lane_batched_ops(dtype, ctx):
     """
     return tuple(op for op in ops_for(dtype, ctx)
                  if op.broadcast and op.lane_batched())
-
-
-def split_terms(op, dtype) -> int:
-    """Operand terms whose sum reproduces a `dtype` significand.
-
-    Three BF16 terms cover F32's 24 bits exactly; two cover 16, which is more
-    than TF32 and less than F32.  The formula is here so that the reduced
-    variants are a choice with a number attached rather than a habit ---
-    `mfma_emu_f16_f32` used two F16 terms, which is 22 bits, and nothing said
-    so.
-
-    It says nothing about *range*.  F16 carries five exponent bits, so an F16
-    split of an F32 operand also needs scaling to stay inside them; BF16 and
-    XF32 carry F32's exponent and need none.
-    """
-    return max(1, ceil(MANTISSA[dtype] / op.significand))
-
-
-def split_products(terms: int, keep: Optional[int] = None
-                   ) -> Tuple[Tuple[int, int], ...]:
-    """Which `(i, j)` term products to accumulate, smallest contribution first.
-
-    Term `i` is worth about ``2**(-significand*i)`` of the operand, so the
-    product `(i, j)` is worth ``2**(-significand*(i+j))``: everything with
-    ``i + j >= keep`` sits at or below the target's own rounding error and is
-    dropped.  At ``keep == terms`` that leaves ``terms*(terms+1)/2``
-    products --- six for BF16 into F32, which is what `mfma_emu_bf16_f32`
-    emits.
-
-    Smallest first, so the small contributions accumulate before the large one
-    rounds them off.  The order is free and never worse; how much it buys
-    depends on how much the accumulator already carries from earlier k, which
-    is a measurement rather than a derivation.
-    """
-    keep = terms if keep is None else keep
-    pairs = [(i, j) for i in range(terms) for j in range(terms)
-             if i + j < keep]
-    return tuple(sorted(pairs, key=lambda p: (-(p[0] + p[1]), p)))
 
 
 # --------------------------------------------------------------------------- #

@@ -44,7 +44,7 @@ from .caps import has_fmacdpp4, has_fmacdpp8, has_fmacdpp16
 from .catalog import (DEFINED_TRANSPOSES, MANTISSA, MATRIX_OPS, MFMA_TILES,
                       NOT_MODELLED, Call, Fragment, MatrixOp,
                       MfmaTile, lane_batched_ops, mfma_tile_for, ops_for,
-                      split_products, split_terms, usable_mfma_tiles)
+                      usable_mfma_tiles)
 from .features import FEATURE_TARGETS, has_feature, wave_size
 from .layouts import (FRAGMENT_BITS, Provenance, covers, established,
                       position, provenance)
@@ -64,8 +64,7 @@ __all__ = [
     'has_fmacdpp4', 'has_fmacdpp8', 'has_fmacdpp16',
     'FEATURE_TARGETS', 'has_feature', 'wave_size',
     'Call', 'Fragment', 'MatrixOp', 'MATRIX_OPS', 'MANTISSA',
-    'NOT_MODELLED', 'ops_for', 'split_terms',
-    'split_products',
+    'NOT_MODELLED', 'ops_for',
     'MfmaTile', 'DEFINED_TRANSPOSES', 'MFMA_TILES', 'usable_mfma_tiles',
     'lane_batched_ops', 'mfma_tile_for',
     'FRAGMENT_BITS', 'Provenance', 'covers', 'established',
