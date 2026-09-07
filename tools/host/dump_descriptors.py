@@ -39,6 +39,9 @@ def _sub(x):
                 offset=[int(o) for o in x.offset],
                 addressing=str(t.addressing),
                 is_tmp=bool(t.is_tmp),
+                storage=int(t.storage_volume()),
+                pack=(list(t.storage_map()) if t.storage_map() is not None
+                      else None),
                 sliced=bool(getattr(x, "sliced", False)),
                 data=(t.data.tolist() if getattr(t.data, 'tolist', None)
                       else (list(t.data) if t.data is not None else None)))

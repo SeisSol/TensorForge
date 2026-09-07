@@ -76,7 +76,7 @@ def evaluate(descrs, upto, backend="cuda", arch="sm_86", seed=1):
     shapes, written = ref.tensors_of(prefix)
     storage = ref.storage_of(prefix)
     arrays = ref.make(shapes, written, seed,
-                      ref.constants_of(prefix_descrs(descrs, upto)))
+                      ref.constants_of(prefix_descrs(descrs, upto)), storage)
     # A destination that is *only* accumulated onto must carry a value on
     # entry, or a dropped bias cannot show.  One with an assignment among its
     # writers must not -- see the note in validate_dump.py.

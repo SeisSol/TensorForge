@@ -63,49 +63,6 @@ class DriverOperand:
     pack_index: tuple | None = None
 
 
-def _pack_index(tensor) -> tuple | None:
-    """Which dense cell each storage slot holds, or ``None`` if stored dense.
-
-    Read off the tensor's own ``linear_index``, so the host cannot disagree
-    with the kernel about the order: there is one mapping and both sides use
-    it.  The cells are numbered in F-order over the bounding box, which is the
-    order the harness's per-element view is contiguous in.
-    """
-    if tensor.is_dense():
-        return None
-    shape = tuple(tensor.get_actual_shape())
-    if tuple(tensor.get_real_shape()) != shape:
-        raise NotImplementedError(
-            f"{tensor.alias!r}: a sparse tensor with a bounding box smaller "
-            f"than its shape has two candidate orders and no test pinning "
-            f"which one the kernel means")
-    slots = [-1] * int(tensor.storage_volume())
-    strides = []
-    acc = 1
-    for extent in shape:
-        strides.append(acc)
-        acc *= extent
-    for idx in _indices(shape):
-        if not tensor.spp.is_nz(idx):
-            continue
-        slot = tensor.linear_index(idx)
-        slots[slot] = sum(i * s for i, s in zip(idx, strides))
-    if any(slot < 0 for slot in slots):
-        raise ValueError(
-            f"{tensor.alias!r}: linear_index left storage slots unassigned; "
-            f"the pattern and the index map disagree")
-    return tuple(slots)
-
-
-def _indices(shape):
-    if not shape:
-        yield ()
-        return
-    for rest in _indices(shape[1:]):
-        for i in range(shape[0]):
-            yield (i,) + rest
-
-
 def collect_operands(generator) -> List[DriverOperand]:
     """Walk the generator's global scope and materialize operand metadata.
 
@@ -146,7 +103,7 @@ def collect_operands(generator) -> List[DriverOperand]:
             is_source=is_src,
             is_sink=is_snk,
             storage_volume=int(t.storage_volume()),
-            pack_index=_pack_index(t),
+            pack_index=t.storage_map(),
             # the kernel addresses the *stored* region: memory spans
             # upper - lower and address 0 is `lower`, so the host buffer is
             # bbox-shaped, not shape-shaped (see DataView.get_dim_strides)

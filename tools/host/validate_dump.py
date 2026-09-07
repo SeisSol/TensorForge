@@ -35,7 +35,7 @@ def check(dump, descriptors, kernel, seed=1, nonzero_dest=True):
     shapes, written = reference.tensors_of(prefix)
     storage = reference.storage_of(prefix)
     arrays = reference.make(shapes, written, seed,
-                            reference.constants_of(prefix))
+                            reference.constants_of(prefix), storage)
     # A destination that is *only* accumulated onto must carry a value on
     # entry, or a dropped bias cannot show.  One with an assignment among its
     # writers must not: yateto's contract is that such a tensor is fully

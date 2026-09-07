@@ -122,6 +122,42 @@ class Tensor:
         """
         return self.get_actual_volume() if self.is_dense() else self.memory()
 
+    def storage_map(self):
+        """Which cell of the bounding box each storage slot holds.
+
+        ``None`` when the tensor is stored dense, because then the two orders
+        are the same thing and a map would only be a way to disagree with
+        itself.  Otherwise a tuple of length ``storage_volume``, indexed by
+        slot and giving the F-order position within the bounding box.
+
+        Read off ``linear_index``, so everything that has to agree about the
+        order -- the kernel, the test harness, the host oracle -- agrees by
+        construction rather than by three parallel derivations.
+        """
+        if self.is_dense():
+            return None
+        shape = tuple(self.get_actual_shape())
+        if tuple(self.get_real_shape()) != shape:
+            raise NotImplementedError(
+                f'{self.alias!r}: a sparse tensor with a bounding box smaller '
+                f'than its shape has two candidate orders and nothing pinning '
+                f'which one the kernel means')
+        strides, acc = [], 1
+        for extent in shape:
+            strides.append(acc)
+            acc *= extent
+        slots = [-1] * int(self.storage_volume())
+        for idx in _f_order(shape):
+            if not self.spp.is_nz(idx):
+                continue
+            slots[self.linear_index(idx)] = sum(i * s for i, s
+                                                in zip(idx, strides))
+        if any(slot < 0 for slot in slots):
+            raise ValueError(
+                f'{self.alias!r}: linear_index left storage slots unassigned; '
+                f'the pattern and the index map disagree')
+        return tuple(slots)
+
     def get_actual_shape(self):
         return self.bbox.sizes()
 
@@ -172,6 +208,16 @@ class Tensor:
 
     def __repr__(self):
         return self.gen_descr()
+
+def _f_order(shape):
+    """Every index of ``shape``, first axis fastest."""
+    if not shape:
+        yield ()
+        return
+    for rest in _f_order(shape[1:]):
+        for i in range(shape[0]):
+            yield (i,) + rest
+
 
 class TensorWrapper:
     pass
