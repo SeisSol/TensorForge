@@ -79,7 +79,7 @@ class GetElementPtr(AbstractInstruction):
     if batch_addressing == Addressing.STRIDED:
       # distance between batch elements is the *stored* volume, i.e.
       # prod(upper - lower), not prod(shape)
-      main_offset = f'{self.batch_index()} * {batch_obj.get_actual_volume()}'
+      main_offset = f'{self.batch_index()} * {batch_obj.storage_volume()}'
       sub_offset = f'{batch_obj.get_offset_to_first_element()}'
       address = f'{main_offset} + {sub_offset}{extra_offset}'
       rhs = f'&{self._src.name}[{address}]'

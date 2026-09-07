@@ -9,17 +9,13 @@ sparsity-aware code path in :mod:`multilinear` (cf.\\
 ``multilinear.py:111`` where ``_sparseN`` is set, and ``:432`` where
 the k-loop is unrolled for sparse operands).
 
-Host-side treatment: the buffer is still 256 cells (full storage —
-``Tensor.get_real_volume`` returns 256 regardless of the mask), but
-the values outside the mask are forced to zero via
-``INPUT_TRANSFORM``. This matters because the generator's load path
-copies *all* 256 cells into shared memory; only the compute loop is
-sparsity-aware. If the masked-out cells contained noise, the
-generated kernel would still produce the right answer (those values
-are never multiplied), but a future-fold optimization that bypasses
-masked loads entirely would silently produce a different result —
-zeroing them here mirrors the SeisSol convention and avoids that
-ambiguity.
+Host-side treatment: B is stored compressed, 46 cells per batch
+element rather than 256, in the order ``Tensor.linear_index``
+assigns. The harness packs the dense view into that buffer through
+the operand's ``pack_index``, so the structural zeros are never
+written and never read. ``INPUT_TRANSFORM`` still zeroes them in the
+dense view, which is what makes the plain dense reference below the
+right answer to compare against.
 
 The reference is a plain dense GEMM: since the masked-out cells of B
 are zero, ``A @ B_masked`` equals what the sparse kernel computes.

@@ -105,6 +105,23 @@ class Tensor:
     def memory(self):
         return self.spp.count_nz()
 
+    def storage_volume(self):
+        """Scalars one batch element of this tensor occupies in memory.
+
+        The one place the storage convention is decided, because it was
+        previously decided twice and differently: the batch stride came from
+        the bounding box while the staging loop copied ``count_nz`` cells, so
+        a masked tensor was written densely by the host and read compressed by
+        the kernel.
+
+        A dense tensor is stored over its bounding box -- address zero is the
+        box's lower corner and the buffer spans upper minus lower.  A sparse
+        one is stored compressed, in the order ``linear_index`` assigns, and
+        nothing is reserved for the structural zeros.  A bounding box is the
+        same under either reading, which is why it needs no case of its own.
+        """
+        return self.get_actual_volume() if self.is_dense() else self.memory()
+
     def get_actual_shape(self):
         return self.bbox.sizes()
 
