@@ -155,3 +155,22 @@ def test_the_runner_agrees_with_the_suite():
         "a snapshot stopped compiling and is not in the tracked list")
     for name in syntax.NOT_YET_ESIMD:
         assert name in out, f"{name} is tracked but was not reported"
+
+
+def test_every_mutation_still_applies():
+    """A skipped mutation tests nothing, and reads almost like a pass.
+
+    The harness prints `SKIPPED: the code has moved` when an anchor no longer
+    matches, which is it working -- but in a list of a hundred and thirty the
+    line goes by, and the check it stood for is quietly gone.  Five had
+    accumulated by the time anyone counted.
+
+    Only that each anchor is still findable, not that the mutation is caught:
+    the full harness takes minutes and a test that slow gets deselected, while
+    `--dry-run` is a string search.  Finding the anchor is the part that rots.
+    """
+    out = _run("mutation_check.py", "--dry-run", timeout=300)
+    stale = [ln for ln in out.splitlines()
+             if "no longer testing anything" in ln]
+    assert not stale, ("mutation anchors that no longer match:\n"
+                       + "\n".join(stale))

@@ -107,6 +107,13 @@ GROUPS = {
     # A tile's permutation lives on the buffer so no access can forget it.
     # The bank model.  Every mistake it made over-reported, which is the
     # direction that gets a check ignored.
+    'dryrun': ('tests/test_tools.py::test_every_mutation_still_applies', [
+        ('a stale anchor stops being reported',
+         sub(Path('tools/mutation_check.py'),
+             "                print(f'  {group}: {name}: {exc}')\n                stale += 1",
+             "                pass", 1)),
+    ]),
+
     'banks': ('tests/test_bank_conflicts.py', [
         ('loop variables go unresolved again',
          sub(Path('tools/bank_conflicts.py'),
@@ -320,12 +327,12 @@ GROUPS = {
              '        return True')),
         ('scale formula off by one',
          sub(PKG / 'catalog.py',
-             'return (threads // self.block).bit_length() - 1',
-             'return (threads // self.block).bit_length()')),
+             'return min(self.blocks, threads // self.n).bit_length() - 1',
+             'return min(self.blocks, threads // self.n).bit_length()')),
         ('the fits() check dropped',
          sub(PKG / 'catalog.py',
-             '        if not self.fits(threads):\n            return False\n        return self.transpose is None',
-             '        return self.transpose is None')),
+             '        if not self.fits(threads):\n            return False\n',
+             '')),
     ]),
 
     'layout': ('tests/test_layout.py', [
@@ -448,10 +455,10 @@ GROUPS = {
          sub(SYM, '    if len(loops) == 0:\n      inner(varlist)',
              '    if len(loops) == 0:\n      with writer.Scope():\n        inner(varlist)')),
         ('a scalar routed through Op.LOAD, inventing a subscript',
-         sub(SYM, '''        if access is pre_access and self.stype in (
-                SymbolType.Register, SymbolType.Scratch,
-                SymbolType.SharedMem, SymbolType.Batch, SymbolType.Global):''',
-             '        if access is pre_access:')),
+         sub(SYM, '''      if (bc_lane is None and self.stype in (
+              SymbolType.Register, SymbolType.Scratch, SymbolType.SharedMem,
+              SymbolType.Batch, SymbolType.Global)):''',
+             '      if bc_lane is None:')),
     ]),
 
     'reachability': ('tests/test_amd_reachability.py', [
@@ -579,10 +586,9 @@ GROUPS = {
     'nvidia': ('tests/test_nvidia_reachability.py', [
         ('a second definition of matmul',
          sub(Path('src/tensorforge/backend/instructions/compute/primitives/nvidia.py'),
-             'def matmul(writer, C, A, B, M, N, K, kx, threads, dtype, sparse, ctx, shmptr, shmsize):',
+             'def matmul(writer, ops, ctx, strategy):',
              'def matmul(*args, **kwargs):\n    pass\n\n'
-             'def matmul(writer, C, A, B, M, N, K, kx, threads, dtype, sparse, ctx, shmptr, shmsize):',
-             1)),
+             'def matmul(writer, ops, ctx, strategy):', 1)),
         ('an unreachable helper reintroduced',
          sub(Path('src/tensorforge/backend/instructions/compute/primitives/nvidia.py'),
              'def tfconvert(writer: Writer, variables):',
@@ -616,10 +622,9 @@ GROUPS = {
              'return threads == 32 and dtype in (Datatype.F32, Datatype.F64) and not sparse',
              'return threads == 32 and not sparse', 1)),
         ('the gate bypassed entirely',
-         sub(Path('src/tensorforge/backend/instructions/compute/multilinear.py'),
-             '            return nvidia.supports(self._num_threads, self._idest.datatype,\n'
-             '                                   self._second_operand_is_sparse())',
-             '            return True', 1)),
+         sub(Path('src/tensorforge/backend/instructions/compute/primitives/nvidia.py'),
+             '    if ENABLED and supports(shape.threads, shape.dtype, shape.sparse):',
+             '    if ENABLED:', 1)),
         ('the deployment switch flipped without re-recording',
          sub(Path('src/tensorforge/backend/instructions/compute/primitives/nvidia.py'),
              'ENABLED = False', 'ENABLED = True', 1)),
@@ -761,14 +766,44 @@ def run(group, target, mutations):
     return caught, len(mutations)
 
 
+def _dry_run(wanted):
+    """Report anchors that no longer match, without running a test.
+
+    Applying a mutation costs a full test run; checking that its anchor is
+    still findable costs a string search.  The second is the part that rots --
+    five anchors had gone stale before anyone counted -- and separating them
+    is what lets a test assert freshness without taking minutes.
+    """
+    stale = 0
+    for group in wanted:
+        target, mutations = GROUPS[group]
+        for name, mutation in mutations:
+            try:
+                # `make()` computes the mutated text and writes nothing, so
+                # asking it is enough and there is nothing to undo.
+                mutation()
+            except AssertionError as exc:
+                print(f'  {group}: {name}: {exc}')
+                stale += 1
+    print(f'\n{stale} anchor(s) no longer match')
+    return 1 if stale else 0
+
+
 def main():
     _recover()
-    wanted = sys.argv[1:] or list(GROUPS)
-    total = hit = 0
+    argv = sys.argv[1:]
+    dry = '--dry-run' in argv
+    if dry:
+        argv = [a for a in argv if a != '--dry-run']
+    wanted = argv or list(GROUPS)
     for group in wanted:
         if group not in GROUPS:
             print(f'unknown group {group!r}; have: {", ".join(GROUPS)}')
             return 2
+    if dry:
+        return _dry_run(wanted)
+    total = hit = 0
+    for group in wanted:
         target, mutations = GROUPS[group]
         c, n = run(group, target, mutations)
         hit += c
