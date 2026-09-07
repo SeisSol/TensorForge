@@ -59,6 +59,54 @@ def dpp(ctrl: int, vals: Sequence) -> Lanes:
     return [vals[(l & ~3) + perm[l % 4]] for l in range(len(vals))]
 
 
+def dpp_update(ctrl: int, row_mask: int, bank_mask: int,
+               src: Sequence, old: Sequence) -> Lanes:
+    """`tensorforge::dppUpdate<ctrl, row_mask, bank_mask, true>(src, old)`.
+
+    The move runs over the whole wave and the masks decide which lanes keep
+    the result: `row_mask` bit `r` enables lanes `16r..16r+15`, `bank_mask`
+    bit `b` enables lanes `4b..4b+3` of every enabled row, and a lane needs
+    both. Disabled lanes keep `old`, which is what makes the pair a merge.
+    """
+    moved = dpp(ctrl, src)
+    return [moved[l] if (row_mask >> (l // 16) & 1)
+            and (bank_mask >> ((l % 16) // 4) & 1) else old[l]
+            for l in range(len(src))]
+
+
+def transpose16x16b32(regs: Sequence[Sequence]) -> List[Lanes]:
+    """`tensorforge::transpose16x16b32`, from its own source.
+
+    Sixteen registers over sixteen lanes, built as a butterfly: four
+    `transpose4x4b32` blocks, then an 8x8 stage on `row_ror:4` and `row_ror:12`
+    with alternating bank masks, then a 16x16 stage on `row_ror:8`.
+
+    Two of its controls were the wrong way round when this was written, and
+    that is how it was found. Modelled because nothing checked it. The runtime has had it since before
+    the relayout table, and `test_amd_relayout.py` covers `transpose4x4b32`
+    only -- so what this one does to a lane index was, until now, whatever the
+    reader assumed.
+    """
+    if len(regs) != 16:
+        raise ValueError(f'transpose16x16b32 takes 16 registers, got {len(regs)}')
+    v = []
+    for base in range(0, 16, 4):
+        v += transpose4x4b32(regs[base:base + 4])
+
+    u = [None] * 16
+    for i in range(4):
+        u[i] = dpp_update(0x12c, 0b1111, 0b1010, v[4 + i], v[i])
+        u[4 + i] = dpp_update(0x124, 0b1111, 0b0101, v[i], v[4 + i])
+        u[8 + i] = dpp_update(0x12c, 0b1111, 0b1010, v[12 + i], v[8 + i])
+        u[12 + i] = dpp_update(0x124, 0b1111, 0b0101, v[8 + i], v[12 + i])
+
+    w = [None] * 16
+    for i in range(8):
+        w[i] = dpp_update(0x128, 0b1111, 0b1100, u[8 + i], u[i])
+        w[8 + i] = dpp_update(0x128, 0b1111, 0b0011, u[i], u[8 + i])
+    return w
+
+
 def swizzle(and_mask: int, or_mask: int, xor_mask: int,
             vals: Sequence) -> Lanes:
     """`tensorforge::swizzle<And, Or, Xor>`.
@@ -177,3 +225,36 @@ def lane_axis_of(result: Lanes, threads: int):
                    for a in range(threads) for b in range(threads)):
                 return block, stride
     return None
+
+
+def transpose16x4(regs: Sequence[Sequence]) -> List[Lanes]:
+    """`tensorforge::transpose16x4`, from its own source.
+
+    Four registers against the top two bits of the lane index inside each row
+    of sixteen: an 8x8 butterfly on `row_ror`, then `transpose16x2` on
+    `row_ror:8`. It carried the same swapped pair as the 8x8 stage of
+    `transpose16x16b32`, from the same shape of mistake.
+    """
+    if len(regs) != 4:
+        raise ValueError(f'transpose16x4 takes 4 registers, got {len(regs)}')
+    v = regs
+    u1 = dpp_update(0x12c, 0b1111, 0b1010, v[1], v[0])
+    u2 = dpp_update(0x124, 0b1111, 0b0101, v[0], v[1])
+    u3 = dpp_update(0x12c, 0b1111, 0b1010, v[3], v[2])
+    u4 = dpp_update(0x124, 0b1111, 0b0101, v[2], v[3])
+    w1, w3 = transpose16x2([u1, u3])
+    w2, w4 = transpose16x2([u2, u4])
+    return [w1, w2, w3, w4]
+
+
+def transpose16x2(regs: Sequence[Sequence]) -> List[Lanes]:
+    """`tensorforge::transpose16x2`.
+
+    Unaffected by the swap above: `row_ror:8` is its own inverse over sixteen
+    lanes, so both directions are the same control and there was no pair to
+    get the wrong way round.
+    """
+    if len(regs) != 2:
+        raise ValueError(f'transpose16x2 takes 2 registers, got {len(regs)}')
+    return [dpp_update(0x128, 0b1111, 0b1100, regs[1], regs[0]),
+            dpp_update(0x128, 0b1111, 0b0011, regs[0], regs[1])]
