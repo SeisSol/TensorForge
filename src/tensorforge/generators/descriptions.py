@@ -422,8 +422,83 @@ class GemmDescr(MultilinearDescr):
       ))
       super(GemmDescr, self).__init__(c, [a, b, alpha_tensor], [target_a, target_b, []], [permute_a, permute_b, []], add, strict_match, prefer_align)
 
-class ForDescr:
-  pass
+class ForDescr(OperationDescription):
+  """A run of chunks stated once, with a table of what varies.
+
+  Holds the generalisation of the run rather than a body with placeholders in
+  it: iteration `i` *is* the common body with `bindings[i]` in its holes, so
+  there is one definition of what the loop means and `unroll` is its inverse
+  rather than a second implementation of it.
+
+  The facts that decide the lowering are carried alongside and not recomputed:
+  `dependence` says whether the iterations may be reordered or overlapped,
+  `periods` says whether a hole names its tensors again on a stride, and
+  `escaping` says which of the outputs are read after the loop.  A rotation is
+  legal only where a hole has a period *and* the buffers it skips do not
+  escape; either fact alone chooses wrong.
+  """
+
+  def __init__(self, general, dependence, periods=(), escaping=()):
+    self.general = general
+    self.dependence = dependence
+    self.periods = tuple(periods)
+    self.escaping = tuple(escaping)
+
+  @property
+  def iterations(self) -> int:
+    return len(self.general.bindings)
+
+  @property
+  def arity(self) -> int:
+    return self.general.arity
+
+  @property
+  def sequential(self) -> bool:
+    """Whether the order the iterations were written in is part of the meaning."""
+    return self.dependence.ordered
+
+  def body(self, iteration: int) -> List:
+    from tensorforge.analysis.antiunify import instantiate
+    return instantiate(self.general, iteration)
+
+  def bodies(self) -> List[List]:
+    return [self.body(i) for i in range(self.iterations)]
+
+  def barrier(self):
+    return any(d.barrier() for d in self.general.template)
+
+  def destinations(self) -> List:
+    seen = []
+    for body in self.bodies():
+      for descr in body:
+        dest = descr.writes()
+        if dest is not None and not any(dest.tensor is s.tensor for s in seen):
+          seen.append(dest)
+    return seen
+
+  def reads(self) -> List:
+    seen = []
+    for body in self.bodies():
+      for descr in body:
+        for op in descr.reads():
+          if not any(op.tensor is s.tensor for s in seen):
+            seen.append(op)
+    return seen
+
+  def writes(self):
+    """The destination, when every iteration has the same one.
+
+    A loop that writes several tensors has no single answer, and `None` is the
+    reading the base class already gives to a descriptor that cannot say.  Ask
+    `destinations()` for the set.
+    """
+    dests = self.destinations()
+    return dests[0] if len(dests) == 1 else None
+
+  def __str__(self):
+    order = 'in order' if self.sequential else 'any order'
+    return (f'for {self.iterations} ({self.arity} varying, {order}): '
+            f'{len(self.general.template)} op(s)')
 
 class IfDescr:
   def __init__(self, condition, subdescr):
