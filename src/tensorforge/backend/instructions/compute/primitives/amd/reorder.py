@@ -214,14 +214,51 @@ class Exchange:
     contiguous block wants sit in four *different* registers, one per lane
     row, and no lane permutation crosses between registers.  Reordering the
     sum costs nothing and removes the movement entirely.
+
+    It is not free of everything, though, and `covers` is where that shows.
+    An issue's contraction set is `{g, g + stride, g + 2*stride, ...}` and the
+    stride is forced --- it is the transpose width, because that is where the
+    lane rows put `k`.  So the set is never a contiguous run, and anything
+    that wants one does not get it:
+
+    * **Block sparsity along `k`.**  A 16x16x4 instruction can skip an issue
+      whose four contraction values are all zero, and a 4-deep zero block is
+      exactly that shape under a contiguous walk.  Under this one the four
+      values sit 16 apart and a 4-deep block never covers an issue, so
+      nothing is skippable.  Sparse operands do not reach the matrix path
+      today, so this is a collision with a plan rather than with code --- but
+      it is a real one, and the two cannot both be had from one walk.
+    * **Summation order.**  Same terms, different order.  Benign over 64
+      terms and not a layout question, but generated results move.
+
+    What it does *not* disturb: the accumulator, whose layout has no `k` in
+    it; the leading operand's accessor, which takes `k` as a plain index and
+    does not care in which order it is asked; and the shared operand's, whose
+    `k` argument is a slot and where every group here lives inside one slot.
     """
 
     #: The `hip.h` name, as `DEFINED_TRANSPOSES` spells it.
     transpose: str
     #: Contraction groups the one transpose produces, and registers it emits.
     groups: int
-    #: Step between the contraction values inside a group.
+    #: Step between the contraction values inside a group.  Forced: it is the
+    #: transpose width, because that is where the lane rows put `k`.
     stride: int
+
+    def covers(self, group: int, k: int) -> Tuple[int, ...]:
+        """The contraction values one issue of group `group` sums over."""
+        return tuple(group + self.stride * step for step in range(k))
+
+    @property
+    def contiguous(self) -> bool:
+        """Is an issue's contraction set a contiguous run?
+
+        Never, for stride above one -- and the stride is the transpose width.
+        Here so that a caller wanting a run (block sparsity along `k` is the
+        one that does) asks rather than assumes, and so that the answer is a
+        property of the exchange rather than a remark in a docstring.
+        """
+        return self.stride == 1
 
 
 def a_exchange(op) -> Optional[Exchange]:

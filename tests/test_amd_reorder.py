@@ -560,3 +560,79 @@ def test_the_exchange_declines_where_the_contraction_reaches_the_register():
     tiled = next(o for o in catalog.MATRIX_OPS
                  if o.builtin == "mfma_f32_4x4x1f32")
     assert reorder.a_exchange(tiled) is None, "it broadcasts its own A"
+
+
+# --------------------------------------------------------------------------- #
+# what the reordered sum costs elsewhere
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.parametrize("op", EXCHANGED, ids=lambda op: op.builtin)
+def test_an_issue_never_covers_a_contiguous_run(op):
+    """The one thing the reordering does disturb, pinned.
+
+    An issue sums over `{g, g+stride, ...}` and the stride is the transpose
+    width, because that is where the lane rows put `k`. So an issue's
+    contraction set is never a run -- and a 16x16x4 instruction can skip an
+    issue whose four values are all zero, which under a contiguous walk is
+    exactly a 4-deep zero block and under this one is nothing.
+
+    Sparse operands do not reach the matrix path today, so this collides with
+    a plan rather than with code. Pinned because it is the reason the two
+    cannot both come from one walk, and because whichever is chosen later
+    should have to change this test to do it.
+    """
+    exchange = reorder.a_exchange(op)
+    assert not exchange.contiguous
+    for group in range(exchange.groups):
+        covered = exchange.covers(group, op.k)
+        assert len(set(covered)) == op.k
+        assert covered != tuple(range(covered[0], covered[0] + op.k))
+
+
+@pytest.mark.parametrize("op", EXCHANGED, ids=lambda op: op.builtin)
+def test_the_groups_partition_the_contraction(op):
+    """Every value once, across the groups -- the property the sum needs.
+
+    Reordering a sum is only free if it is still the same sum. The joint
+    simulation checks this for one k-block; this checks the arithmetic of it
+    directly, which is what would catch a stride that shares a factor with
+    the group count.
+    """
+    exchange = reorder.a_exchange(op)
+    depth = exchange.stride * op.k
+    covered = [k for group in range(exchange.groups)
+               for k in exchange.covers(group, op.k)]
+    assert sorted(covered) == list(range(depth))
+
+
+@pytest.mark.parametrize("op", EXCHANGED, ids=lambda op: op.builtin)
+def test_the_accumulator_does_not_care_about_the_order(op):
+    """Why the writeback plan survives the reordering untouched.
+
+    `D[i][j]` has no `k` in it -- the accumulator is where the contraction has
+    already happened -- so `accumulator_gathers` is the same plan whichever
+    order the sum ran in. Worth asserting rather than reasoning about, since
+    it is the half of the emitter that would be expensive to rediscover.
+    """
+    for column in range(op.m):
+        assert reorder.accumulator_gathers(op, column) is not None
+    terms = layouts.index_terms(op, "D", "first") + \
+        layouts.index_terms(op, "D", "second")
+    assert all(term.source in ("lane", "slot") for term in terms)
+
+
+def test_the_exchange_needs_the_whole_shared_tile_live():
+    """The pressure it trades the movement for.
+
+    The transpose consumes sixteen registers and produces sixteen, and it is
+    in place -- `_TILE_TRANSPOSES` records that it has no separate outputs --
+    so it is sixteen registers live and not thirty-two. For
+    `mfma_f64_16x16x4f64` that is thirty-two VGPRs of shared matrix held
+    across a whole k-block, where the DPP chain streams it.
+
+    Not an objection: the contiguous alternative needs the same sixteen
+    columns live to gather from. It is a step change against the path that
+    exists, and order 6 in double is already where the register budget bites.
+    """
+    _, separate = catalog._TILE_TRANSPOSES[16]
+    assert not separate, "in place, so the inputs are the outputs"
