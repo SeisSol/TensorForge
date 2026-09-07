@@ -32,11 +32,6 @@ Nothing here is per-target.  Which targets offer the arrangement is
 
 def matmul(writer, ops, ctx, span):
     """`C[i][j] += B[k][j] * A[i][k]`, entirely in registers."""
-    if ops.sparse:
-        # A sparse second operand is reached through its linear index, and the
-        # contraction here walks `B`'s lanes; there is no lane to broadcast.
-        return False
-
     A, B, C = ops.A, ops.B, ops.C
     M, threads = ops.lead_slots, ops.threads
     depth = ops.k + ops.kx

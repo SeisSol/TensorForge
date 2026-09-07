@@ -1598,6 +1598,28 @@ class Symbol:
       writer(f'tensorforge::VectorT<{self.get_fptype()}, {vec}> {variable} = *(tensorforge::VectorT<{self.get_fptype()}, {vec}>*)&{access};')
     return None
 
+  def _note_layout(self, layout, writer=None):
+    """Record how this symbol's image is distributed, or give up knowing.
+
+    Shared by the fill paths, so two of them cannot record different claims
+    about the same shape in different words.  Two fills that disagree leave it
+    unknown: a silent overwrite would hand the second one's claim to consumers
+    of the first, and unknown is the safe answer.
+
+    The claim is registered for undo, because it belongs to the fill that
+    makes it true -- a speculative attempt that gets discarded emitted no
+    fill.
+    """
+    if layout is None:
+      return
+    if writer is not None and hasattr(writer, 'on_rollback'):
+      previous = self.layout
+      writer.on_rollback(lambda: setattr(self, 'layout', previous))
+    if self.layout is not None and self.layout != layout:
+      self.layout = None
+      return
+    self.layout = layout
+
   def _record_linear_layout(self, index, vec, threads=None, writer=None):
     """Note the distribution a linearized fill leaves behind.
 
@@ -1914,6 +1936,20 @@ class Symbol:
                   and lead is not None and unwrap_lead(lead) is not None
                   and self.stype in (SymbolType.Register, SymbolType.Scratch,
                                      SymbolType.Global, SymbolType.SharedMem))
+
+    if structured and self.stype in (SymbolType.SharedMem,
+                                    SymbolType.Register):
+      # The third fill path, and the third place the same statement was
+      # missing.  A shared image is filled linearly by the loader
+      # (`store_linear`), in bulk by the transfer, or -- here -- one element at
+      # a time by a compute instruction writing an intermediate out of its
+      # registers.  The first two record how the image ends up distributed;
+      # this one did not, so an image written this way read back as unknown.
+      #
+      # Derivable, unlike the linear paths: the index carries a `LeadIndex`,
+      # which is exactly the distribution, so this reports what `layout_of`
+      # already computes rather than restating it.
+      self._note_layout(layout_of(index, self.num_threads), writer)
 
     # Decided *before* the text address is built, not after.  `self.access()`
     # emits the address as IR ops and the last of them carries `escapes`, so

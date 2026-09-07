@@ -257,3 +257,45 @@ def test_a_kept_attempt_keeps_it():
     with b.speculative():
         sym._record_linear_layout(0, 1, threads=16, writer=b)
     assert sym.layout == RegisterLayout((LaneAxis(16, 1),))
+
+
+def test_a_structured_store_records_what_it_distributes():
+    """The third fill path, and the third place the statement was missing.
+
+    A staged image is filled linearly by the loader, in bulk by the transfer,
+    or one element at a time by a compute instruction writing out of its
+    registers.  The first two recorded how the image ends up distributed; the
+    third did not, so an image written that way read back as unknown.
+
+    Derivable here, unlike the linear paths: the index carries a `LeadIndex`,
+    which *is* the distribution, so this reports what `layout_of` already
+    computes rather than restating it.
+    """
+    from tensorforge.backend.symbol import Symbol, SymbolType
+    sym = Symbol.__new__(Symbol)
+    sym.stype = SymbolType.SharedMem
+    sym.layout = None
+    sym._note_layout(RegisterLayout((LaneAxis(16, 1),)))
+    assert sym.layout == RegisterLayout((LaneAxis(16, 1),))
+
+
+def test_an_underivable_store_leaves_it_alone():
+    """`layout_of` answers `None` when it cannot establish the distribution,
+    and `None` is not a claim -- recording it would erase a claim an earlier
+    fill did establish."""
+    from tensorforge.backend.symbol import Symbol, SymbolType
+    sym = Symbol.__new__(Symbol)
+    sym.stype = SymbolType.SharedMem
+    sym.layout = RegisterLayout((LaneAxis(16, 1),))
+    sym._note_layout(None)
+    assert sym.layout == RegisterLayout((LaneAxis(16, 1),))
+
+
+def test_two_fill_paths_disagreeing_leave_it_unknown():
+    from tensorforge.backend.symbol import Symbol, SymbolType
+    sym = Symbol.__new__(Symbol)
+    sym.stype = SymbolType.SharedMem
+    sym.layout = None
+    sym._note_layout(RegisterLayout((LaneAxis(16, 1),)))
+    sym._note_layout(RegisterLayout((LaneAxis(8, 1),)))
+    assert sym.layout is None

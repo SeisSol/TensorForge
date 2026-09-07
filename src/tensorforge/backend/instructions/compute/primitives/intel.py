@@ -265,7 +265,7 @@ def supports(threads, dtype, sparse) -> bool:
     * ``not sparse``.  The sparse operand path loads by linear index, which is
       not a fragment.
     """
-    return threads == EXECUTION_SIZE and dtype == Datatype.F32 and not sparse
+    return threads == EXECUTION_SIZE and dtype == Datatype.F32
 
 
 def atom_for(dtype):
@@ -433,7 +433,7 @@ def strategies(shape, ctx):
     if not supports(shape.threads, shape.accumulator, shape.sparse):
         return frozenset()
     offered = set()
-    if ENABLED:
+    if ENABLED and not shape.sparse:
         offered.add(Strategy.MATRIX)
     if BROADCAST_ENABLED and shape.explicit_simd:
         offered.add(Strategy.BROADCAST)
@@ -473,8 +473,6 @@ def matmul(writer, ops, ctx, span):
     M, N, K, kx = ops.lead_slots, ops.n, ops.k, ops.kx
     threads, dtype, sparse = ops.threads, ops.accumulator, ops.sparse
 
-    if sparse:
-        return False
     if span.strategy is Strategy.BROADCAST:
         return broadcast.matmul(writer, ops, ctx, span)
     if span.start != 0 or span.stop != N:

@@ -117,8 +117,13 @@ def test_fp64_has_no_dpas():
     assert intel.atom_for(Datatype.F64) is None
 
 
-def test_a_sparse_operand_is_not_a_fragment():
-    assert not intel.supports(16, Datatype.F32, True)
+def test_a_sparse_operand_is_still_servable():
+    """It disqualifies DPAS -- a packed operand has no fragment to read -- and
+    not the broadcast chain, which reads `B` by linear index and replicates
+    one lane at a time.  Refusing both over a property only one of them cares
+    about sent every sparse operator to the generic loop; `strategies` drops
+    MATRIX instead."""
+    assert intel.supports(16, Datatype.F32, True)
 
 
 def test_fp32_is_emulated_through_tf32():
@@ -129,24 +134,14 @@ def test_fp32_is_emulated_through_tf32():
     assert intel.TF32_TERMS == len(split.products(intel.TF32_SPLIT_TERMS))
 
 
-def test_a_sparse_operand_falls_through():
-    """The register path contracts over B's lanes, and a sparse operand is
-    loaded by linear index rather than as a lane-distributed vector.  Declining
-    sends the caller to the generic path, which handles it.
-
-    Twice over, and both matter: the offer is empty so the dispatch never
-    picks a path here, and the emitter still declines when called directly,
-    since nothing stops a caller from naming an arrangement itself."""
+def test_dpas_is_not_offered_for_a_packed_operand():
+    """The strategy drops out, not the target."""
+    from tensorforge.backend.instructions.compute.strategy import ComputeShape
+    from tensorforge.backend.instructions.compute.strategy import Strategy
     shape = ComputeShape(threads=16, accumulator=Datatype.F32, sparse=True,
                          explicit_simd=True)
-    assert intel.strategies(shape, None) == frozenset()
-
-    ops = MatmulOperands(A=None, B=None, C=None,
-                         sparse=lambda k, j: True,
-                         lead_slots=1, lead_elements=16, n=1, k=1, kx=0,
-                         threads=16, a=Datatype.F32, b=Datatype.F32,
-                         accumulator=Datatype.F32)
-    assert intel.matmul(None, ops, None, Strategy.BROADCAST) is False
+    assert Strategy.MATRIX not in intel.strategies(shape, None)
+    assert Strategy.BROADCAST in intel.strategies(shape, None)
 
 
 # --------------------------------------------------------------------------
