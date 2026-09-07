@@ -457,6 +457,15 @@ def lane_batched_ops(dtype, ctx):
 #: 16-lane row rather than transposing a 16x16 tile, so they do not fit the
 #: `MfmaTile` shape.  Listing them anyway keeps this set meaning what its name
 #: says, which is what makes the check against the header a real check.
+#: Operand arithmetic -> the runtime's out-parameter split into terms of it.
+#: A copy of a C++ fact, checked against the header the same way
+#: `DEFINED_TRANSPOSES` is: an emulated tile the runtime cannot feed is a call
+#: to an undeclared function, which is the same failure as a missing
+#: transpose and deserves the same guard.
+DEFINED_SPLITS = {
+    Datatype.BF16: 'tensorforge::splitFloatx4BF16',
+}
+
 DEFINED_TRANSPOSES = frozenset({
     'tensorforge::transpose4x4b32',
     'tensorforge::transpose16x16b32',
@@ -569,6 +578,40 @@ def usable_mfma_tiles(threads, dtype, ctx):
     return tuple(sorted((t for t in MFMA_TILES
                          if t.available_for(threads, dtype, ctx)),
                         key=lambda t: -t.block))
+
+
+def emu_tile_for(threads, dtype, ctx):
+    """The tile an emulated path would run here, and how many terms, or `None`.
+
+    The narrow counterpart of `mfma_tile_for`, and it has to be a separate
+    question: every entry that tile selection can reach multiplies in the type
+    it accumulates, so nothing there is ever a split.  What is offered here
+    multiplies in something narrower, which is why it needs a term count
+    beside it.
+
+    Restricted to entries whose k-vector is exactly the block width.  That is
+    not a preference: the loop hands the instruction the registers a `kk` step
+    already holds, and `layouts.position` puts them at the fragment's slots
+    only when the two widths agree.
+    """
+    from ...split import MANTISSA, terms as _terms
+    for op in ops_for(dtype, ctx, threads):
+        if op.arithmetic is not None or op.a.dtype is dtype:
+            continue
+        if op.a.dtype not in DEFINED_SPLITS or op.a.dtype not in MANTISSA:
+            continue
+        if op.n != op.m or op.k != op.m:
+            continue
+        if op.n * op.blocks != wave_size(ctx):
+            continue
+        if op.a.per_lane != op.k or op.b.per_lane != op.k:
+            continue
+        tile = MfmaTile(op=op, transpose='tensorforge::transpose4x4b32',
+                        transpose_has_separate_outputs=True)
+        if not tile.fits(threads) or tile.transpose not in DEFINED_TRANSPOSES:
+            continue
+        return tile, _terms(MANTISSA[op.a.dtype], dtype)
+    return None
 
 
 def mfma_tile_for(threads, dtype, ctx):

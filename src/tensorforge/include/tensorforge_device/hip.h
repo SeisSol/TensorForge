@@ -1165,6 +1165,30 @@ __device__ __forceinline__
           VectorT<short, 4>{i1p2, i2p2, i3p2, i4p2}};
 }
 
+/// The same split with its results as parameters, which is what a generated
+/// kernel can be handed.
+///
+/// A structured binding needs the emitter to write a declaration whose shape
+/// the IR cannot model -- three names bound at once, from a call it would
+/// otherwise treat as one value.  Out-parameters keep each term a value the
+/// generator declared, so a layout can be attached to it and a pass can see
+/// which instruction consumed it.  The same arrangement `splitFloatTF32` uses
+/// in `cuda.h` and `isycl.h`, for the same reason.
+///
+/// Three terms, because BF16 keeps 8 significand bits against FP32's 24 and
+/// three of them cover it exactly.  A caller taking fewer is reducing the
+/// split and `tensorforge::split` is where that is counted.
+__device__ __forceinline__ void splitFloatx4BF16(VectorT<std::int16_t, 4> &t0,
+                                                 VectorT<std::int16_t, 4> &t1,
+                                                 VectorT<std::int16_t, 4> &t2,
+                                                 float i1, float i2, float i3,
+                                                 float i4) {
+  const auto [p0, p1, p2] = splitFloatx4BF16(i1, i2, i3, i4);
+  t0 = p0;
+  t1 = p1;
+  t2 = p2;
+}
+
 __device__ __forceinline__ std::tuple<_Float16, _Float16>
 splitFloatF16(float input) {
   const auto i1 = static_cast<_Float16>(input);

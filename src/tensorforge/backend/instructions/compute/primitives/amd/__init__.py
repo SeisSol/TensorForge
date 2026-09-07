@@ -41,7 +41,8 @@ from ...strategy import Span, Strategy, whole
 
 from .arch import amdarch, cdna2, gfx1250, gfx1251, rdna
 from .caps import has_fmacdpp4, has_fmacdpp8, has_fmacdpp16
-from .catalog import (DEFINED_TRANSPOSES, MANTISSA, MATRIX_OPS, MFMA_TILES,
+from .catalog import (DEFINED_SPLITS, DEFINED_TRANSPOSES, MANTISSA,
+                      MATRIX_OPS, MFMA_TILES, emu_tile_for,
                       NOT_MODELLED, Call, Fragment, MatrixOp,
                       MfmaTile, lane_batched_ops, mfma_tile_for, ops_for,
                       usable_mfma_tiles)
@@ -52,7 +53,7 @@ from .reorder import (BANK, FED_BY, IDENTITY_DPP, ROW, Gather, Move,
                       Select, Exchange, a_exchange, accumulator_cost,
                       accumulator_gathers, broadcast_feeds_a,
                       fragment_cost, fragment_moves)
-from .codegen import hfma, matmul32, matmuldpp
+from .codegen import hfma, matmul32, matmulemu, matmuldpp
 from .emitters import fmadpp, fmadpp4, fmadpp8, fmadpp16, fmascalar
 from .relayout import (BROADCAST, MOVDPP16, RELAYOUTS, TRANSPOSE4X4, Relayout,
                        find_relayout)
@@ -65,6 +66,7 @@ __all__ = [
     'has_fmacdpp4', 'has_fmacdpp8', 'has_fmacdpp16',
     'FEATURE_TARGETS', 'has_feature', 'wave_size',
     'Call', 'Fragment', 'MatrixOp', 'MATRIX_OPS', 'MANTISSA',
+    'DEFINED_SPLITS', 'emu_tile_for', 'matmulemu', 'EMULATION',
     'NOT_MODELLED', 'ops_for',
     'MfmaTile', 'DEFINED_TRANSPOSES', 'MFMA_TILES', 'usable_mfma_tiles',
     'lane_batched_ops', 'mfma_tile_for',
@@ -81,6 +83,19 @@ __all__ = [
     'hfma', 'matmul32', 'matmuldpp', 'matmul',
     'mfma_emu_int8', 'mfma_emu_bf16_f32', 'mfma_emu_f16_f32', 'wmma3atom',
 ]
+
+
+#: Whether the emulated tile is deployed, as opposed to whether one exists
+#: for a shape -- that second question is `emu_tile_for`.  Two facts, so two
+#: names, and only this one is a decision about the generator.
+#:
+#: Parked for the same reason `nvidia.ENABLED` is.  The operand stacking is
+#: derived from `layouts.position` and checked against it, and the split is
+#: the runtime's; what is left is whether three BF16 products through the
+#: matrix unit beat one F32 product through it, on a machine.  That is a run,
+#: not an argument -- and unlike the DPAS case the direct path here is not
+#: merely slower but already fast, so the answer could well be no.
+EMULATION = False
 
 
 def strategies(shape, ctx):
@@ -165,6 +180,11 @@ def matmul(writer, ops, ctx, span):
     if span.strategy is Strategy.BROADCAST:
         return broadcast.matmul(writer, ops, ctx, span)
     if span.strategy is Strategy.MATRIX:
+        emu = emu_tile_for(threads, dtype, ctx) if EMULATION else None
+        if emu is not None and (ops.a, ops.b) == (dtype, dtype):
+            tile, terms = emu
+            return matmulemu(writer, C, A, B, M, N, K, kx, threads, dtype,
+                             sparse, ctx, span.start, span.stop, tile, terms)
         tile = mfma_tile_for(threads, dtype, ctx)
         if (ops.a, ops.b) != (tile.op.a.dtype, tile.op.b.dtype):
             # The tile was selected by what it accumulates in; what it

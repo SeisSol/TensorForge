@@ -9,10 +9,16 @@ from tensorforge.backend.writer import Writer
 from tensorforge.backend.pir.core import ScalarType
 from .arch import cdna2, gfx1251, rdna
 from .catalog import mfma_tile_for
+from ... import split
 from .emitters import fmadpp4, fmadpp8, fmadpp16, fmascalar
 from .relayout import (MOVDPP16, TRANSPOSE4X4, find_relayout,
                        fmadpp_operand_layout)
 from .select import select_fmadpp_step
+
+#: The runtime's BF16 split, in its out-parameter form: each term is a value
+#: the generator declared rather than a name bound by a structured binding,
+#: which is what lets a layout ride on it and a pass see who consumed it.
+SPLIT_BF16 = 'tensorforge::splitFloatx4BF16'
 
 
 def _check_mfma_operand(operand, threads, callee):
@@ -142,6 +148,43 @@ def hfma(writer: Writer, Cs, As, Bs, repeat, datatype, threads, ctx):
                                     func(writer, c, ax[bx], bv, j)
 
 
+def _transpose(writer, tile, ftype, threads, regs):
+    """Exchange the register index with the lane index in a quad.
+
+    Emitted in SSA form where the instruction allows it:
+    `tp(w1..wn, v1..vn)` declares its outputs separately from its
+    inputs, so fresh values come out.  That matters for two
+    reasons beyond tidiness.
+
+    The outputs can carry a layout.  The exchange *changes* the
+    distribution --- afterwards both the register dimension and
+    the lane dimension vary with the lane, which is the one
+    genuinely rank-2 layout this generator produces --- and a
+    value that already exists cannot say so, because
+    `Value.layout` is fixed when the value is created.
+
+    And the inputs are left alone.  Rewriting them underneath
+    whatever else still reads them is what forces `call_stmt` to
+    pin their producers, which in turn bars those loads from
+    being reused.  Returning new values costs four declarations
+    and gives that back.
+
+    `transpose16x16b32` has no such form --- all sixteen
+    parameters are by reference --- so it keeps the in-place path,
+    and its results stay untracked.
+    """
+    if tile.transpose is None:
+        return list(regs)
+    if not tile.transpose_has_separate_outputs:
+        writer.call_stmt(tile.transpose, *regs, writes=tuple(regs))
+        return list(regs)
+    out = [writer.declare(ftype, hint='tp',
+                          layout=TRANSPOSE4X4.produces(threads=threads))
+           for _ in regs]
+    writer.call_stmt(tile.transpose, *out, *regs, writes=tuple(out))
+    return out
+
+
 def matmul32(writer: Writer, C, B, A, M, N, K, kx, threads, dtype, sparse,
              ctx, start, stop):
     with writer.AnonymousScope():
@@ -154,40 +197,7 @@ def matmul32(writer: Writer, C, B, A, M, N, K, kx, threads, dtype, sparse,
             fn = tile.builtin
 
             def transpose(regs):
-                """Exchange the register index with the lane index in a quad.
-
-                Emitted in SSA form where the instruction allows it:
-                `tp(w1..wn, v1..vn)` declares its outputs separately from its
-                inputs, so fresh values come out.  That matters for two
-                reasons beyond tidiness.
-
-                The outputs can carry a layout.  The exchange *changes* the
-                distribution --- afterwards both the register dimension and
-                the lane dimension vary with the lane, which is the one
-                genuinely rank-2 layout this generator produces --- and a
-                value that already exists cannot say so, because
-                `Value.layout` is fixed when the value is created.
-
-                And the inputs are left alone.  Rewriting them underneath
-                whatever else still reads them is what forces `call_stmt` to
-                pin their producers, which in turn bars those loads from
-                being reused.  Returning new values costs four declarations
-                and gives that back.
-
-                `transpose16x16b32` has no such form --- all sixteen
-                parameters are by reference --- so it keeps the in-place path,
-                and its results stay untracked.
-                """
-                if tile.transpose is None:
-                    return list(regs)
-                if not tile.transpose_has_separate_outputs:
-                    writer.call_stmt(tile.transpose, *regs, writes=tuple(regs))
-                    return list(regs)
-                out = [writer.declare(ftype, hint='tp',
-                                      layout=TRANSPOSE4X4.produces(threads=threads))
-                       for _ in regs]
-                writer.call_stmt(tile.transpose, *out, *regs, writes=tuple(out))
-                return out
+                return _transpose(writer, tile, ftype, threads, regs)
 
             # The MFMA accumulator layout is deliberately left untracked.
             #
@@ -299,6 +309,103 @@ def matmul32(writer: Writer, C, B, A, M, N, K, kx, threads, dtype, sparse,
 
 
     # TODO: gfx1200, f'__builtin_amdgcn_wmma_f32_16x16x16_bf16_w32_gfx12'
+
+def matmulemu(writer: Writer, C, B, A, M, N, K, kx, threads, dtype, sparse,
+              ctx, start, stop, tile, terms):
+    """`C += B@A` through a narrower matrix instruction, one tile per term
+    product.
+
+    The same loop `matmul32` runs, over an instruction whose operands are
+    `tile.op.k` contraction values wide rather than one.  Four scalar
+    registers become one k-vector, and that is not a rearrangement this
+    emitter performs: `layouts.position` puts element `(m, k)` of the wide
+    fragment at slot `k` of the lane the narrow fragment puts `(m, 0)` in, so
+    the four registers a `kk` step already holds *are* the four slots.  The
+    same holds of B.  `tests/test_amd_emulation.py` asserts it rather than
+    this comment claiming it, because a wrong stacking here yields a
+    correctly typed operand holding the wrong elements -- which no snapshot
+    would notice.
+
+    One instruction per term product, all accumulating into the same `acc`.
+    That arrangement needs no axis of its own and no epilogue, which is why it
+    works under this mapping without anything being freed for it first: the
+    products are issued in sequence and the accumulator sums them the way it
+    sums the contraction.  `packing.stages` is the layout, and what it costs
+    against packing them into spare positions is `packing.saving`.
+
+    Products come from `split.products` in its order, smallest contribution
+    first, so the small terms land before the large one rounds them off.
+    """
+    products = split.products(terms)
+    op = tile.op
+    width = op.k
+
+    with writer.AnonymousScope():
+        ftype = ScalarType(dtype)
+        block = tile.block
+        scale = tile.scale(threads)
+        fn = op.callee
+        # The split's outputs, and the instruction's operands.  Not `dtype`:
+        # that is what the accumulator keeps, and reaching it is the whole
+        # reason there is more than one product.
+        termtype = ScalarType(Datatype.I16, width)
+        acclayout = None
+
+        def split4(regs, hint):
+            """One operand's `width` registers as `terms` narrow k-vectors."""
+            out = [writer.declare(termtype, hint=hint) for _ in range(terms)]
+            writer.call_stmt(SPLIT_BF16, *out, *regs, writes=tuple(out))
+            return out
+
+        for j in range(start, stop, block):
+            with writer.AnonymousScope():
+                tA = {}
+                for k in range(0, K + kx, threads):
+                    regs = []
+                    for jj in range(min(block, N - j)):
+                        regs += [A(writer, None, j + jj, k // threads)]
+                    for jj in range(min(block, N - j), block):
+                        regs += [writer.const(0.0, ftype)]
+                    tA[k // threads] = _transpose(writer, tile, ftype, threads,
+                                                  regs)
+                for i in range(0, M):
+                    with writer.AnonymousScope():
+                        vtype = ScalarType(dtype, block)
+                        acc = writer.declare(vtype, hint='acc',
+                                             layout=acclayout)
+                        for k in range(0, K + kx, threads):
+                            dk = min(threads, K + kx - k)
+                            for kk in range(0, dk, width):
+                                dkk = min(width, dk - kk)
+                                tB = []
+                                for kkk in range(dkk):
+                                    tB += [B(writer, None, i, k + kk + kkk)]
+                                if any(v is None or v is False for v in tB):
+                                    return False
+                                for kkk in range(dkk, width):
+                                    # A real zero rather than a shorter
+                                    # k-vector: the instruction reads all of
+                                    # its slots and a tail that does not fill
+                                    # them contributes nothing only if they
+                                    # hold nothing.
+                                    tB += [writer.const(0.0, ftype)]
+                                kkm = kk // width
+
+                                aterms = split4(tA[k // threads], 'at')
+                                bterms = split4(tB, 'bt')
+                                for ti, tj in products:
+                                    acc = writer.call(
+                                        fn, vtype,
+                                        aterms[ti], bterms[tj], acc,
+                                        scale, kkm, 0,
+                                        hint='acc', movable=False,
+                                        materialize=True, layout=acclayout)
+
+                        for jj in range(min(block, N - j)):
+                            C(writer, writer.extract(acc, jj, ftype), i,
+                              j + jj)
+    return True
+
 
 def matmuldpp(writer, start, C, A, B, M, N, K, kx, threads, dtype, sparse,
               ctx, stop):

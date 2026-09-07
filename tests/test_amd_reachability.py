@@ -68,8 +68,6 @@ KEPT_UNREACHABLE = {
     # general query and the split arithmetic have no call site yet. They lose
     # their entry here when the emitter that consumes them lands -- which is
     # what `test_allow_list_does_not_outlive_its_entries` enforces.
-    "ops_for":
-        "catalogue query; the emitter that selects from it is not written",
     "_place":
         "the table's decoder; reached only from `position`",
     "Provenance":
