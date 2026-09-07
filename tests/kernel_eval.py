@@ -36,8 +36,14 @@ _DECL = re.compile(
     # onto it, and the oracle has to read past it to find the array.
     r'^(?:alignas\s*\(\s*\d+\s*\)\s+)?'
     r'(?:const\s+)?(?:__restrict__\s+)?'
+    # `uint32_t` was missing, and with it every kernel built with prefetch:
+    # `wrap.py` emits `uint32_t pipeStage0` as its bookkeeping, the
+    # declaration did not match, and the whole configuration aborted at the
+    # first line of the loop.  So the one path that most needed an oracle had
+    # none.
     r'(?:tensorforge::Vector(?:Relaxed)?T\s*<[^>]*>|float[234]|double[234]|'
-    r'float|double|int32_t|int|unsigned|size_t|bool|auto|__float128|char)'
+    r'u?int(?:8|16|32|64)_t|float|double|int|unsigned|size_t|bool|auto|'
+    r'__float128|char)'
     r'(?P<ptr>\s*\*(?:\s*const)?(?:\s*__restrict__)?)?\s+'
     r'(?P<name>\w+)\s*(?P<arr>\[\s*(?P<dim>\d+)\s*\])?\s*'
     r'(?:\{\s*\}|=\s*(?P<init>.+))?$')
