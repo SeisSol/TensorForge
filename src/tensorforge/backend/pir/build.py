@@ -143,6 +143,9 @@ class IRBuilder:
         # copy, one entry per loaded value for `load.async`)
         self._token_results: Dict[int, Tuple[Any, ...]] = {}
         self._token_uniform: Dict[int, bool] = {}
+        #: Undo callbacks for state written outside the body; see
+        #: `on_rollback`.
+        self._undo: List[Any] = []
 
     # -- values ------------------------------------------------------------ #
 
@@ -1126,24 +1129,47 @@ class IRBuilder:
         counter = self._counter
         names = getattr(self._alloc, 'counter', None)
         depth = len(self._stack)
+        undo_mark = len(self._undo)
         spec = _Speculation()
         try:
             yield spec
         except Exception:
-            self._rollback(scope, mark, counter, names, depth)
+            self._rollback(scope, mark, counter, names, depth, undo_mark)
             raise
         if spec.discarded:
-            self._rollback(scope, mark, counter, names, depth)
+            self._rollback(scope, mark, counter, names, depth, undo_mark)
         elif len(self._stack) != depth:
             raise IRError('speculative block left the scope stack unbalanced')
 
-    def _rollback(self, scope, mark, counter, names, depth):
+    def _rollback(self, scope, mark, counter, names, depth, undo_mark=0):
         del scope.body[mark:]
         self._counter = counter
         if names is not None:
             # a discarded probe must not burn names either
             self._alloc.counter = names
         del self._stack[depth:]
+        # State the attempt wrote *outside* the body, newest first.
+        #
+        # Everything above is bookkeeping this builder owns; this is not.  A
+        # fill records on its symbol how the image it writes is distributed
+        # (`Symbol._record_linear_layout`), and that claim is a fact about the
+        # emitted body -- a discarded attempt emitted no fill, so the claim is
+        # not true and must go with it.  Left behind, the second attempt sees
+        # a symbol the first did not, and the same case generates two
+        # different kernels: `test_generation_is_deterministic` caught exactly
+        # that, at 1828 lines against 796.
+        while len(self._undo) > undo_mark:
+            self._undo.pop()()
+
+    def on_rollback(self, undo) -> None:
+        """Register how to undo something this emission did outside the body.
+
+        Callers that mutate state a `_rollback` cannot reach say so here.  The
+        alternative was for `speculative` to know which state exists and
+        snapshot it, which puts the list of everything mutable in the one
+        place that cannot see any of it.
+        """
+        self._undo.append(undo)
 
     # -- legacy Writer facade ---------------------------------------------- #
 

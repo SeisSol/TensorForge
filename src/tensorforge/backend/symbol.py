@@ -1598,7 +1598,7 @@ class Symbol:
       writer(f'tensorforge::VectorT<{self.get_fptype()}, {vec}> {variable} = *(tensorforge::VectorT<{self.get_fptype()}, {vec}>*)&{access};')
     return None
 
-  def _record_linear_layout(self, index, vec, threads=None):
+  def _record_linear_layout(self, index, vec, threads=None, writer=None):
     """Note the distribution a linearized fill leaves behind.
 
     `GlbToRegLoader` stages a flat run: it reads `glb[i + threadIdx.x * g]`
@@ -1642,6 +1642,13 @@ class Symbol:
       # this function has not established.
       return
     layout = RegisterLayout((LaneAxis(threads, 1),))
+    # The claim belongs to the fill that makes it true, so a speculative fill
+    # that gets discarded has to take it back.  Without this the second
+    # attempt sees a symbol the first did not, and the same case generates two
+    # different kernels.
+    if writer is not None and hasattr(writer, 'on_rollback'):
+      previous = self.layout
+      writer.on_rollback(lambda: setattr(self, 'layout', previous))
     if self.layout is not None and self.layout != layout:
       # Two fills disagreeing about the same register image is a defect, and
       # a silent overwrite would hand the second one's claim to consumers of
@@ -1658,7 +1665,7 @@ class Symbol:
     # AbstractShrMemWrite.write_base().
     name = base or self.name
     addrs = []
-    self._record_linear_layout(index, vec, threads)
+    self._record_linear_layout(index, vec, threads, writer)
     if self.stype == SymbolType.Register:
       addr = index // self.num_threads
     else:

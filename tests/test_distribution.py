@@ -202,3 +202,58 @@ def test_two_fills_disagreeing_leave_it_unknown():
     sym._record_linear_layout(0, 1, threads=16)
     sym._record_linear_layout(0, 1, threads=32)
     assert sym.layout is None
+
+
+# --------------------------------------------------------------------------
+# a discarded speculation leaves nothing behind
+# --------------------------------------------------------------------------
+
+def test_a_discarded_attempt_takes_its_layout_claim_back():
+    """The claim belongs to the fill that makes it true.
+
+    A speculative attempt that gets discarded emitted no fill, so the image is
+    not distributed that way and the claim is not true.  Left behind, the
+    second attempt sees a symbol the first did not -- and the same case
+    generates two different kernels.
+
+    `_rollback` restores the body, the value counter, the name counter and the
+    scope stack, all of which the builder owns.  This is state it does not,
+    which is why the mechanism is a registered undo rather than a snapshot:
+    the list of everything mutable would otherwise live in the one place that
+    can see none of it.
+    """
+    from tensorforge.backend.symbol import Symbol, SymbolType
+    from tensorforge.backend.pir.build import IRBuilder
+    from tensorforge.common.context import Context as _Ctx
+
+    b = IRBuilder(fptype=Datatype.F32,
+                  context=_Ctx(arch='pvc', backend='esimd',
+                               fp_type=Datatype.F32))
+    sym = Symbol.__new__(Symbol)
+    sym.stype = SymbolType.SharedMem
+    sym.num_threads = None
+    sym.layout = None
+
+    with b.speculative() as spec:
+        sym._record_linear_layout(0, 1, threads=16, writer=b)
+        assert sym.layout is not None, 'the attempt did record it'
+        spec.discard()
+    assert sym.layout is None, 'and the discard took it back'
+
+
+def test_a_kept_attempt_keeps_it():
+    from tensorforge.backend.symbol import Symbol, SymbolType
+    from tensorforge.backend.pir.build import IRBuilder
+    from tensorforge.common.context import Context as _Ctx
+
+    b = IRBuilder(fptype=Datatype.F32,
+                  context=_Ctx(arch='pvc', backend='esimd',
+                               fp_type=Datatype.F32))
+    sym = Symbol.__new__(Symbol)
+    sym.stype = SymbolType.SharedMem
+    sym.num_threads = None
+    sym.layout = None
+
+    with b.speculative():
+        sym._record_linear_layout(0, 1, threads=16, writer=b)
+    assert sym.layout == RegisterLayout((LaneAxis(16, 1),))

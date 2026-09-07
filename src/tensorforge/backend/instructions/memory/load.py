@@ -316,7 +316,7 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
         # Same call `store_linear` makes for the other fill path, so the two
         # cannot record different claims about the same shape.
         self._dest._record_linear_layout(dst_offset, increment,
-                                         self._num_threads)
+                                         self._num_threads, writer)
         dst_buf = self._dest.pir_buffer(writer)
         src_buf = self._src.pir_buffer(writer)
         def write_load(lhs, rhs, _d=dst_buf, _s=src_buf, _n=increment,
