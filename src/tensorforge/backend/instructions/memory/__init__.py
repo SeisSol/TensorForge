@@ -150,10 +150,36 @@ class AbstractShrMemWrite(MemoryInstruction):
     """
     if not self.rotates():
       return
+    offset = self._stage_offset(self._write_stage_expr)
+    if hasattr(writer, 'alloc') and callable(getattr(writer, 'alloc')):
+      # The write side is a value too, and that is what unblocks the last
+      # exclusion in `_structured_copy`.  A rotating buffer writes a different
+      # stage than its declaration names, so the transfer could not use the
+      # symbol's `pir_buffer` -- that one addresses the half the consumers
+      # read.  It gets its own.
+      self._write_buffer = writer.alloc(
+          self._dest.get_fptype(), (self.stage_size(),), MemSpace.SHARED,
+          hint=self.write_base(), extern=self.write_base(),
+          arena=self._arena(),
+          offset=int(offset) if offset.isdigit() else offset,
+          restrict=self._vm.get_lexic().restrict_kw,
+          swizzle=self._swizzle(writer))
+      self._write_owner = getattr(writer, 'uid', None)
+      return
     lhs = (f'{self._fp_as_str}* {self._vm.get_lexic().restrict_kw} '
            f'{self.write_base()}')
-    writer(f'{lhs} = &{self._arena()}'
-           f'[{self._stage_offset(self._write_stage_expr)}];')
+    writer(f'{lhs} = &{self._arena()}[{offset}];')
+
+  def write_buffer(self, writer):
+    """The value this transfer writes through, if it belongs to this body.
+
+    Same guard as `Symbol.pir_buffer`, and for the same reason: a value
+    belongs to the builder that made it.
+    """
+    owner = getattr(writer, 'uid', None)
+    if owner is None or owner != getattr(self, '_write_owner', None):
+      return None
+    return getattr(self, '_write_buffer', None)
 
   def gen_code_declare(self, writer: Writer) -> None:
     if self._declare:

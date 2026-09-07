@@ -299,8 +299,14 @@ def _wrap_one(loop: Stmt, make_value,
     if guard_at is not None:
         defined_in_loop |= {t.id for st in region.body[guard_at].regions[0].body
                             for t in st.target}
-    if any(isinstance(a, Value) and a.id in defined_in_loop
-           for g in group for a in g.args[:1]):
+    # From the subtree: a section member is a hop loop with no args of its
+    # own, so reading `g.args[:1]` stopped finding the destination the moment
+    # the group became a section -- and a rotating write window *is* declared
+    # inside the loop, because its offset moves with the stage counter.  The
+    # peel then names it before it exists, which renders and does not compile.
+    dests = [x.args[0] for g in group for x, _ in walk((g,))
+             if x.op in (Op.COPY_ASYNC, Op.LOAD_ASYNC) and x.args]
+    if any(isinstance(a, Value) and a.id in defined_in_loop for a in dests):
         raise Refusal('the destination is declared inside the loop, so a '
                       'peeled transfer would name it before it exists')
 

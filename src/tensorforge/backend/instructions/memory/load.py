@@ -287,7 +287,7 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
         # width stops being a cast on both sides of an assignment and becomes
         # `elems`, which is what the emitter needs anyway to check the
         # transfer size against `copy_async_sizes()`.
-        dst_buf = self._dest.pir_buffer(writer)
+        dst_buf = self._destination_buffer(writer)
         src_buf = self._src.pir_buffer(writer)
         def write_load(lhs, rhs, _d=dst_buf, _s=src_buf, _n=increment):
           self._tokens.append(writer.copy_async(
@@ -374,10 +374,23 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
     """
     if not hasattr(writer, 'copy_async'):
       return False
-    if self.write_base() != self._dest.name:
+    if self._src.pir_buffer(writer) is None:
       return False
-    return (self._dest.pir_buffer(writer) is not None
-            and self._src.pir_buffer(writer) is not None)
+    return self._destination_buffer(writer) is not None
+
+  def _destination_buffer(self, writer):
+    """The value this transfer fills.
+
+    Not the symbol's for a rotating buffer: that one addresses the stage the
+    consumers read, and writing through it would overwrite the data they are
+    about to use.  The write window is a value of its own now, which is what
+    lets a rotating transfer stay on the structured path -- rotation and
+    `copy.async` used to exclude each other, and rotation is what the wrap
+    pass needs.
+    """
+    if self.rotates():
+      return self.write_buffer(writer)
+    return self._dest.pir_buffer(writer)
 
   def get_src(self) -> Symbol:
     return self._src
