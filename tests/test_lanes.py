@@ -325,3 +325,113 @@ def test_a_kernel_that_builds_at_no_width_still_raises():
             lanes.search(lambda: _gemm(56, 9, 56, Datatype.F64), ctx)
     finally:
         Generator.generate = real
+
+
+# ----------------------------------------------------------------------
+# what is known exactly, and what is only modelled
+# ----------------------------------------------------------------------
+
+def test_the_resident_block_count_uses_only_what_is_known():
+    """Shared memory per block and threads per block, against their budgets.
+
+    Neither is an estimate: the first is what `ShrMemOpt` allocated and the
+    second is the launch geometry.  The register limit is left out even though
+    the budget for it exists, because applying it would need the register
+    count -- which is the one thing that is not known.
+    """
+    ctx = _ctx("gfx90a", "hip", Datatype.F64)
+    hw = ctx.get_vm().get_hw_descr()
+
+    g = Generator(_gemm(56, 9, 56, Datatype.F64), ctx)
+    g.generate()
+
+    shr = g._section.shr_mem_obj
+    per_block = shr.get_total_size() * ctx.fp_type.size()
+    threads = g._num_threads * shr.get_mults_per_block()
+    expected = min([hw.max_block_per_sm]
+                   + ([hw.max_local_mem_size_per_block // per_block]
+                      if per_block else [])
+                   + ([hw.max_threads_per_sm // threads] if threads else []))
+    assert g.resident_blocks == expected
+
+
+def test_the_lane_count_moves_the_block_shape_as_well():
+    """Which is why the two resources have to be told apart.
+
+    `mults_per_block` is threads-per-block over lanes-per-mult, so doubling
+    the lanes halves it -- and with it the shared memory the block needs.
+    Every contested case in the corpus changes both at once, so a single
+    combined figure would never say which of the two moved.
+    """
+    ctx = _ctx("gfx90a", "hip", Datatype.F64)
+
+    def shape(ceiling):
+        cfg = lanes.deduce(_gemm(56, 9, 56, Datatype.F64), ctx,
+                           ceiling=ceiling)
+        g = Generator(_gemm(56, 9, 56, Datatype.F64), ctx, lanes=cfg)
+        g.generate()
+        shr = g._section.shr_mem_obj
+        return cfg.num_threads, shr.get_mults_per_block(), shr.get_total_size()
+
+    narrow = shape(lanes.DEFAULT_LANE_CEILING)
+    wide = shape(None)
+    assert wide[0] == 2 * narrow[0]
+    assert wide[1] * 2 == narrow[1], "mults per block should have halved"
+
+
+def test_a_tie_keeps_the_configuration_the_descriptors_asked_for():
+    """The model seeing no difference is not a reason to change anything.
+
+    Changing it anyway is exactly where "the wider one measured slower" would
+    bite: six of the fourteen contested cases on gfx90a are ties, and moving
+    all six for no modelled reason would be six chances to lose and none to
+    win.
+    """
+    ctx = _ctx("gfx90a", "hip", Datatype.F64)
+    default = lanes.deduce(_gemm(56, 9, 56, Datatype.F64), ctx)
+    real = Generator.generate
+
+    def flat(self):
+        out = real(self)
+        self.peak_pressure = 1000        # identical for both candidates
+        self.resident_blocks = 10
+        return out
+
+    Generator.generate = flat
+    try:
+        config, scores = lanes.search(
+            lambda: _gemm(56, 9, 56, Datatype.F64), ctx)
+    finally:
+        Generator.generate = real
+
+    assert scores[32] == scores[64]
+    assert config.num_threads == default.num_threads
+
+
+def test_the_exact_bound_outranks_the_model_where_it_speaks():
+    """A fact before a guess.
+
+    Over the corpus the two only ever agree -- the exact term differs on one
+    case, the kernel that runs out of registers, and it points the same way.
+    Stated as an ordering anyway, because the reason to prefer it is not that
+    they agree today.
+    """
+    ctx = _ctx("gfx90a", "hip", Datatype.F64)
+    real = Generator.generate
+
+    def crafted(self):
+        out = real(self)
+        wide = self._lanes.num_threads == 64
+        # the model prefers the wide one; the exact bound prefers the narrow
+        self.peak_pressure = 100 if wide else 900
+        self.resident_blocks = 2 if wide else 8
+        return out
+
+    Generator.generate = crafted
+    try:
+        config, _ = lanes.search(lambda: _gemm(56, 9, 56, Datatype.F64), ctx)
+    finally:
+        Generator.generate = real
+
+    assert config.num_threads == 32, (
+        "the modelled figure won against a measured block count")

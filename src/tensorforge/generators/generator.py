@@ -141,6 +141,10 @@ class Generator:
     #: because the budget is per kernel and the widest body is what has to
     #: fit.
     self.peak_pressure: Optional[int] = None
+    #: Blocks resident per SM under the resources that are known exactly --
+    #: shared memory and threads.  Not the register limit; see
+    #: `_resident_blocks`.
+    self.resident_blocks: Optional[int] = None
 
     self._section: Section = Section()
     self._sections: List[Section] = []
@@ -379,6 +383,40 @@ class Generator:
 
     self._kernel = writer.get_src()
     self.peak_pressure = self._context.peak_pressure
+    self.resident_blocks = self._resident_blocks()
+
+  def _resident_blocks(self) -> Optional[int]:
+    """How many of these blocks fit on one SM, counting what is known exactly.
+
+    Shared memory per block and threads per block are not estimates: the first
+    is what `ShrMemOpt` allocated and the second is the launch geometry, and
+    both budgets are in the hardware description.  So this half of occupancy
+    can be computed rather than modelled -- unlike the register half, where
+    the figure is bytes of live values and the hardware counts registers after
+    allocation, a mapping that spreads over a factor of seventy across the
+    corpus.
+
+    Which makes the two worth keeping apart rather than adding up.  A caller
+    comparing configurations can let this decide where it speaks and fall back
+    on the model where it does not, instead of folding a fact and a guess into
+    one number that is neither.
+
+    The register limit is *not* applied here even though `max_reg_per_block`
+    exists: applying it would need the register count, which is the thing that
+    is not known.
+    """
+    if self._section is None or self._section.shr_mem_obj is None:
+      return None
+    hw = self._context.get_vm().get_hw_descr()
+    shr = self._section.shr_mem_obj
+    per_block = shr.get_total_size() * self._context.fp_type.size()
+    threads = self._num_threads * shr.get_mults_per_block()
+    limits = [hw.max_block_per_sm]
+    if per_block:
+      limits.append(hw.max_local_mem_size_per_block // per_block)
+    if threads:
+      limits.append(hw.max_threads_per_sm // threads)
+    return max(0, min(limits))
 
   def _generate_launcher(self):
     writer = Writer()
