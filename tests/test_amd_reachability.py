@@ -93,6 +93,10 @@ KEPT_UNREACHABLE = {
     "Move":
         "one register into one region of a fragment; the emitter that turns "
         "these into `swap` and `dppUpdate` calls is not written",
+    "Select":
+        "which lanes a merge writes, and what that costs; read by `Move`",
+    "BANK":
+        "lanes per DPP bank, which is what `bank_mask` selects",
     "IDENTITY_DPP":
         "the control that makes `dppUpdate` a merge and not a shuffle",
     "ROW":

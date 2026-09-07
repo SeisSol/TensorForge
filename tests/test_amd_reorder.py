@@ -50,9 +50,8 @@ def _run(op, which, slot, group):
         lanes = [(move.contraction, lane) for lane in range(op.wave)]
         for block in move.swaps:
             lanes = wavesim.swap(lanes, block)
-        for lane in range(op.wave):
-            if move.row_mask >> (lane // reorder.ROW) & 1:
-                result[lane] = lanes[lane]
+        for lane in move.select.lanes:
+            result[lane] = lanes[lane]
     return result
 
 
@@ -96,12 +95,12 @@ def test_the_plan_covers_every_lane_exactly_once(op, which):
     for slot in range(frag.per_lane):
         moves = reorder.fragment_moves(op, which, slot)
         assert moves is not None
-        covered = 0
+        covered = set()
         for move in moves:
-            assert not covered & move.row_mask, f"{op.builtin}: rows overlap"
-            covered |= move.row_mask
-        assert covered == (1 << (op.wave // reorder.ROW)) - 1, (
-            f"{op.builtin}: rows {covered:b} do not cover the wave")
+            assert not covered & move.select.lanes, f"{op.builtin}: overlap"
+            covered |= move.select.lanes
+        assert covered == set(range(op.wave)), (
+            f"{op.builtin}: {len(covered)} of {op.wave} lanes covered")
 
 
 # --------------------------------------------------------------------------- #
@@ -122,6 +121,7 @@ def test_the_fp64_fragment_costs_eight_instructions():
     assert len(moves) == 4
     assert [len(m.swaps) for m in moves] == [0, 1, 1, 2]
     assert [m.row_mask for m in moves] == [0b0001, 0b0010, 0b0100, 0b1000]
+    assert all(m.select.kind == "row" for m in moves)
     assert reorder.fragment_cost(op, "B") == 8
 
     # And the swaps are the two that reach lane bits 4 and 5.
@@ -194,3 +194,79 @@ def test_a_region_never_needs_more_than_two_swaps(op, which):
             assert all(block in (32, 64) or block >= 32 for block in move.swaps), (
                 f"{op.builtin}: a swap below the row width would need a "
                 f"finer select than row_mask")
+
+
+# --------------------------------------------------------------------------- #
+# the select, across what the hardware offers
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.parametrize("lanes,kind", [
+    (range(16), "row"),
+    (range(64), "row"),
+    (list(range(16, 32)), "row"),
+    (list(range(4)) + list(range(16, 20)), "bank"),
+    (list(range(8)), "bank"),
+    (list(range(5)), "cndmask"),
+    ((0, 1), "cndmask"),
+    (range(0, 64, 2), "cndmask"),
+    (list(range(4)) + list(range(20, 24)), "cndmask"),
+])
+def test_the_select_picks_the_cheapest_mechanism(lanes, kind):
+    """`row_mask`, then `bank_mask`, then a ternary.
+
+    The last case is the one that separates a product from a set: four lanes
+    in bank 0 of row 0 and four in bank 1 of row 1. Both rows are enabled and
+    both banks are, so the masks would write eight *more* lanes than asked
+    for. A mask expresses `rows x banks` and nothing else.
+    """
+    assert reorder.Select.of(lanes, 64).kind == kind
+
+
+@pytest.mark.parametrize("lanes", [
+    range(16), range(64), list(range(4)) + list(range(16, 20)), list(range(8)),
+])
+def test_a_mask_writes_exactly_its_region(lanes):
+    """What `free` is claiming, checked rather than asserted.
+
+    A select that reports `row` or `bank` says the merge needs no instruction
+    of its own -- which is only true if the masks reproduce the region
+    exactly. An over-wide mask would corrupt lanes outside it, silently,
+    since they hold the other regions' results.
+    """
+    select = reorder.Select.of(lanes, 64)
+    assert select.free
+    written = {lane for lane in range(64)
+               if select.row_mask >> (lane // reorder.ROW) & 1
+               and select.bank_mask >> ((lane % reorder.ROW) // reorder.BANK) & 1}
+    assert written == set(lanes)
+
+
+def test_every_region_in_the_catalogue_is_still_a_row_mask():
+    """Recorded, not relied on.
+
+    Every plan the catalogue produces today selects whole rows, because a lane
+    bit only carries the contraction once `n * blocks` has used the ones below
+    and that is 16 or 32 everywhere. This test is what tells a later reader
+    that the bank and `cndmask` paths above are exercised by construction
+    rather than by any instruction -- and it is what changes when the
+    accumulator writeback or a sub-wave thread count assigns the dimensions
+    differently.
+    """
+    kinds = {move.select.kind
+             for op, which in SCALAR
+             for slot in range((op.a if which == "A" else op.b).per_lane)
+             for move in reorder.fragment_moves(op, which, slot)}
+    assert kinds == {"row"}
+
+
+def test_a_cndmask_region_is_priced_and_a_masked_one_is_not():
+    """The cost difference the emitter has to see.
+
+    A mask rides on the merge; a ternary is an instruction, plus reading the
+    lane id. `Move.cost` carries that, so a plan can be weighed against
+    staging before anything is emitted rather than after.
+    """
+    masked = reorder.Move(0, (32,), reorder.Select.of(range(16), 64))
+    ternary = reorder.Move(0, (32,), reorder.Select.of(range(5), 64))
+    assert masked.cost == 2 and ternary.cost == 3
+    assert masked.select.free and not ternary.select.free

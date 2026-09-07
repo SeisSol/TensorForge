@@ -18,11 +18,22 @@ cover between them:
   the contraction field replaced by the fragment's own.  A sequence of
   `swap<2**(b+1)>` toggles exactly the bits of that XOR, one instruction per
   set bit.
-* The regions are whole 16-lane rows.  Not by luck: a lane bit only carries
-  the contraction once the leading dimension and the blocks have used the
-  ones below, and that is `n * blocks >= 16` on every instruction in the
-  catalogue.  So `row_mask` reaches them and the select is `dppUpdate`,
-  which needs no lane id.
+* The regions are selected by `dppUpdate`\'s masks, which need no lane id.
+  `row_mask` reaches 16-lane rows and `bank_mask` reaches 4-lane banks inside
+  them, and the two multiply --- a mask writes `rows x banks`, the same bank
+  pattern in every enabled row.  A region that is not a product of those is
+  not reachable by a mask at all and needs a `cndmask`, which is a ternary on
+  the lane id.
+
+Every region in the catalogue today is whole 16-lane rows, so every select is
+a `row_mask`.  That is not luck --- a lane bit only carries the contraction
+once the leading dimension and the blocks have used the ones below, and `n *
+blocks` is 16 or 32 everywhere --- but it is also not a property to build on:
+it holds for *this* assignment of the generator\'s dimensions onto the
+instruction\'s, and the accumulator writeback or a sub-wave thread count
+assigns them differently.  So `Select` covers what the hardware offers rather
+than what the current caller happens to need, and says which mechanism a
+region requires instead of assuming one.
 
 So a fragment slot costs one `dppUpdate` per region plus the swaps each region
 needs --- for `mfma_f64_16x16x4f64`, four merges and four swaps, once per
@@ -49,26 +60,89 @@ IDENTITY_DPP = 0xE4
 #: Lanes per DPP row.  What `row_mask` selects, on every wave size.
 ROW = 16
 
+#: Lanes per DPP bank.  What `bank_mask` selects, inside each row.
+BANK = 4
+
+
+@dataclass(frozen=True)
+class Select:
+    """Which lanes a merge writes into.
+
+    `dppUpdate` masks are free --- they are modifiers on the merge, not
+    instructions --- but they only express a product: `row_mask` picks
+    16-lane rows, `bank_mask` picks 4-lane banks, and a lane is written when
+    both bits are set.  So the same bank pattern applies in every enabled row,
+    and a region that varies between rows, or that splits a bank, is outside
+    them.
+
+    Below a bank there is nothing: the masks stop at four lanes, so a region
+    finer than that is a `cndmask` --- a ternary on the lane id in C++.  That
+    costs the select plus whatever reading the lane id costs, which is why
+    `kind` is worth knowing before an emitter commits to a plan rather than
+    after.
+    """
+
+    #: `'row'`, `'bank'` or `'cndmask'` -- the cheapest mechanism that
+    #: expresses this region.  `'row'` is `'bank'` with every bank enabled,
+    #: named separately because it is the case that needs no bank reasoning.
+    kind: str
+    #: Bit `r` enables lanes `16r` to `16r + 15`.
+    row_mask: int
+    #: Bit `b` enables lanes `4b` to `4b + 3` of every enabled row.
+    bank_mask: int
+    #: The region itself.  What a `cndmask` predicate has to test, and what
+    #: the masks are checked to reproduce.
+    lanes: frozenset
+
+    @classmethod
+    def of(cls, lanes, wave: int) -> 'Select':
+        """The cheapest select for a set of lanes."""
+        lanes = frozenset(lanes)
+        rows = {lane // ROW for lane in lanes}
+        banks = {(lane % ROW) // BANK for lane in lanes}
+        row_mask = sum(1 << row for row in rows)
+        bank_mask = sum(1 << bank for bank in banks)
+
+        product = {row * ROW + bank * BANK + off
+                   for row in rows for bank in banks for off in range(BANK)}
+        if product != lanes:
+            return cls('cndmask', 0, 0, lanes)
+        full = (1 << (ROW // BANK)) - 1
+        return cls('bank' if bank_mask != full else 'row',
+                   row_mask, bank_mask, lanes)
+
+    @property
+    def free(self) -> bool:
+        """Does this cost an instruction of its own?"""
+        return self.kind != 'cndmask'
+
 
 @dataclass(frozen=True)
 class Move:
     """One source register into one region of one fragment slot.
 
-    Emitted as ``acc = dppUpdate<IDENTITY_DPP, row_mask, 0xf, false>(v,
-    acc)``, where `v` is the source register put through `swaps` in order.
+    Emitted as ``acc = dppUpdate<IDENTITY_DPP, row_mask, bank_mask,
+    false>(v, acc)`` where the select is a mask, and as a ternary on the lane
+    id where it is not.  `v` is the source register put through `swaps` in
+    order.
     """
 
     #: Contraction index of the source register the nest holds.
     contraction: int
     #: `swap<Block>` sequence, in order.  Empty when the region does not move.
     swaps: Tuple[int, ...]
-    #: `dppUpdate`'s row mask: bit `r` enables lanes `16r` to `16r + 15`.
-    row_mask: int
+    #: Which lanes this move writes.
+    select: Select
+
+    @property
+    def row_mask(self) -> int:
+        return self.select.row_mask
 
     @property
     def cost(self) -> int:
-        """Instructions: the swaps, and the merge."""
-        return len(self.swaps) + 1
+        """Instructions: the swaps, the merge, and the select if it is not
+        a modifier on it."""
+        return len(self.swaps) + 1 + (0 if self.select.free else 1)
 
 
 def _swaps_for(mask: int) -> Tuple[int, ...]:
@@ -92,10 +166,15 @@ def fragment_moves(op, which: str, slot: int,
     fragments --- each with its own accumulator, all sharing these registers.
 
     `None` when the operand has no layout, when the source is not one scalar
-    per lane, or when the fragment does not have the structure above.  The
-    last is the interesting one: it means an instruction needs more than
-    swaps and a masked merge, and a caller that gets `None` should stay on the
-    generic nest rather than emit something close.
+    per lane, or when a region's lane movement is not a single XOR.  The last
+    is the interesting one: it means an instruction needs more than swaps and
+    a merge, and a caller that gets `None` should stay on the generic nest
+    rather than emit something close.
+
+    A region that no `dppUpdate` mask reaches is *not* a refusal --- `Select`
+    reports `cndmask` and the plan carries the extra instruction in its cost.
+    Refusing there would decline the cases the masks were never going to
+    cover, which is a different thing from the plan not applying.
     """
     if which.upper() not in ('A', 'B'):
         return None            # the accumulator is written, not built
@@ -122,12 +201,8 @@ def fragment_moves(op, which: str, slot: int,
         if len(masks) != 1:
             return None        # not a single XOR: no swap sequence does it
         mask = masks.pop()
-        rows = {lane // ROW for lane, _ in pairs}
-        if any(sum(1 for lane, _ in pairs if lane // ROW == row) != ROW
-               for row in rows):
-            return None        # a partial row: `row_mask` cannot select it
         moves.append(Move(contraction, _swaps_for(mask),
-                          sum(1 << row for row in rows)))
+                          Select.of((lane for lane, _ in pairs), op.wave)))
     return tuple(moves)
 
 

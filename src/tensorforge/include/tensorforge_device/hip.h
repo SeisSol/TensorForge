@@ -59,33 +59,66 @@ __device__ __forceinline__ auto readlane(T value, int lane) -> T {
   return ot.value;
 }
 
+/// Does a type reach the DPP builtins in one piece?
+///
+/// `llvm.amdgcn.update.dpp` is declared over `llvm_any_ty` and
+/// `llvm.amdgcn.mov.dpp` over `llvm_anyint_ty`, so both take a 64-bit operand
+/// and the backend decides what to emit --- one `v_mov_b64_dpp` where the
+/// target has DPP64, two 32-bit moves where it does not, which is what this
+/// header used to do unconditionally.  Splitting here takes that choice away
+/// and costs a `double` twice the DPP moves on every CDNA 2 and later part.
+///
+/// Scalars only, and at most 8 bytes.  A vector or a struct would also be
+/// accepted by `llvm_any_ty`, but what the backend does when legalising one
+/// through a DPP intrinsic is a different question from the one the
+/// signature answers, and the split path below is a known answer.
+template <typename T>
+inline constexpr bool DppNative = std::is_arithmetic_v<T> && sizeof(T) <= 8;
+
 template <int Dpp1, int Dpp2, int Dpp3, bool Dpp4, typename T>
 __device__ __forceinline__ auto dpp(T value) -> T {
-  IntType<T> it;
-  IntType<T> ot;
+  if constexpr (DppNative<T> && sizeof(T) == 8) {
+    // `mov_dpp` is `anyint`, not `any`: the bit pattern goes through as an
+    // integer and comes back, which is a bitcast rather than a conversion.
+    union {
+      T value;
+      long long bits;
+    } cast{value};
+    cast.bits = __builtin_amdgcn_mov_dpp(cast.bits, Dpp1, Dpp2, Dpp3, Dpp4);
+    return cast.value;
+  } else {
+    IntType<T> it;
+    IntType<T> ot;
 
-  it.value = value;
+    it.value = value;
 #pragma unroll
-  for (int i = 0; i < IntType<T>::IntCount; ++i) {
-    ot.ints[i] = __builtin_amdgcn_mov_dpp(it.ints[i], Dpp1, Dpp2, Dpp3, Dpp4);
+    for (int i = 0; i < IntType<T>::IntCount; ++i) {
+      ot.ints[i] = __builtin_amdgcn_mov_dpp(it.ints[i], Dpp1, Dpp2, Dpp3, Dpp4);
+    }
+    return ot.value;
   }
-  return ot.value;
 }
 
 template <int Dpp1, int Dpp2, int Dpp3, bool Dpp4, typename T>
 __device__ __forceinline__ auto dppUpdate(T value, T prev) -> T {
-  IntType<T> it;
-  IntType<T> pt;
-  IntType<T> ot;
+  if constexpr (DppNative<T>) {
+    // `update_dpp` is `any`, so the value goes through as itself and a
+    // `double` needs no bitcast at all.
+    return __builtin_amdgcn_update_dpp(prev, value, Dpp1, Dpp2, Dpp3, Dpp4);
+  } else {
+    IntType<T> it;
+    IntType<T> pt;
+    IntType<T> ot;
 
-  it.value = value;
-  pt.value = prev;
+    it.value = value;
+    pt.value = prev;
 #pragma unroll
-  for (int i = 0; i < IntType<T>::IntCount; ++i) {
-    ot.ints[i] = __builtin_amdgcn_update_dpp(pt.ints[i], it.ints[i], Dpp1, Dpp2,
-                                             Dpp3, Dpp4);
+    for (int i = 0; i < IntType<T>::IntCount; ++i) {
+      ot.ints[i] = __builtin_amdgcn_update_dpp(pt.ints[i], it.ints[i], Dpp1,
+                                               Dpp2, Dpp3, Dpp4);
+    }
+    return ot.value;
   }
-  return ot.value;
 }
 
 template <int MaskAnd, int MaskOr, int MaskXor, typename T>
