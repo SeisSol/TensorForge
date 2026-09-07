@@ -147,6 +147,19 @@ GROUPS = {
              '    per_phase = len(lanes)', 1)),
     ]),
 
+    'ceiling': ('tests/test_tools.py::test_no_shared_access_costs_more_than_four_bank_cycles', [
+        ('the window stops being permuted',
+         sub(Path('src/tensorforge/backend/instructions/memory/__init__.py'),
+             '      if not self._structured_copy(writer):\n        return None',
+             '      if True:\n        return None', 1)),
+        ('the loader question replaced by the proxy that broke',
+         sub(Path('src/tensorforge/backend/instructions/memory/__init__.py'),
+             "    if writer is not None and hasattr(self, '_structured_copy'):\n"
+             "      if not self._structured_copy(writer):",
+             "    if writer is not None and hasattr(self, '_src'):\n"
+             "      if self._src.pir_buffer(writer) is None:", 1)),
+    ]),
+
     'swizzle': ('tests/test_pir_swizzle.py', [
         ('esimd allowed to swizzle, so a vector read reorders itself',
          sub(Path('src/tensorforge/backend/instructions/memory/__init__.py'),

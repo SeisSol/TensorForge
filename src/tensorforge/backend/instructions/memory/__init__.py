@@ -255,8 +255,16 @@ class AbstractShrMemWrite(MemoryInstruction):
     # can only raise by then, because the permutation is already baked into
     # every index it emitted.  Declining is the only response available before
     # that, and it needs the same question asked earlier.
-    if writer is not None and hasattr(self, '_src'):
-      if self._src.pir_buffer(writer) is None:
+    # Asked of the loader, not of every writer: `_structured_copy` is what
+    # decides whether the transfer goes through `store`, and it is the
+    # loader's question.  Asking `self._src.pir_buffer(...)` instead was a
+    # proxy that happened to agree for `GlbToShrLoader` and never did for
+    # `StoreRegToShr`, whose source is a register and has no buffer by
+    # construction -- so when the loader's own bindings moved, every macro
+    # window silently stopped being permuted and 576 accesses went back to
+    # 32-way.  A proxy that agrees today is a proxy that breaks quietly.
+    if writer is not None and hasattr(self, '_structured_copy'):
+      if not self._structured_copy(writer):
         return None
 
     # The width has to divide the *volume*, not merely be the row width.  The

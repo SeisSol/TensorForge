@@ -174,3 +174,34 @@ def test_every_mutation_still_applies():
              if "no longer testing anything" in ln]
     assert not stale, ("mutation anchors that no longer match:\n"
                        + "\n".join(stale))
+
+
+def test_no_shared_access_costs_more_than_four_bank_cycles():
+    """The swizzle stopped being applied and nobody noticed for four commits.
+
+    `_swizzle` asked whether the *source* symbol had a PIR buffer, as a proxy
+    for "every write to this window goes through `store`".  The proxy agreed
+    with the real question for `GlbToShrLoader` and never did for
+    `StoreRegToShr`, whose source is a register and has no buffer by
+    construction; when the loader's bindings moved, every macro window quietly
+    stopped being permuted and 576 accesses went back to 32-way -- every lane
+    in one bank with a different address.
+
+    Nothing failed.  The kernels were correct, the snapshots re-recorded
+    cleanly, and the only symptom was a number in a tool nobody had reason to
+    run.  So the number is a test now.
+
+    A ceiling, not an exact count: the census moves whenever a case is added,
+    and pinning it would mean re-recording on every unrelated change.  What
+    must not happen is a *class* of conflict reappearing.
+    """
+    import re
+
+    out = _run("bank_conflicts.py")
+    counts = {int(m.group(2)): int(m.group(1))
+              for m in re.finditer(r'^\s*(\d+)\s+(\d+)-way\s*$', out, re.M)}
+    assert counts, f"the census printed no histogram:\n{out[-800:]}"
+    worst = max(counts)
+    assert worst <= 4, (
+        f"{counts[worst]} accesses cost {worst} bank cycles; the worst was 4. "
+        f"A permutation is probably not being applied.\n{out[-600:]}")
