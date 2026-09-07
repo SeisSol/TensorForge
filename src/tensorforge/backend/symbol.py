@@ -1038,6 +1038,14 @@ class Symbol:
     #: and the destination accumulator.  The compute instructions read it from
     #: here rather than keeping their own copy.
     self.lead_dims = [0]
+    #: How many adjacent lead-dimension elements one lane of this symbol's
+    #: image holds.  A property of the *image*, not of whoever is walking it:
+    #: every loop over it and every fixed-element access has to resolve
+    #: positions the same way, and three separate bugs came from one of them
+    #: using the cyclic rule while the rest used the blocked one -- the store
+    #: reading back what the compute wrote, `build` double-scaling a slot, and
+    #: a peeled tail element asking the wrong lane for its value.
+    self.lead_width = 1
     #: How this symbol's register image is distributed across the wave, when
     #: that is known.  Set by whoever fills it -- `store_linear` is the only
     #: filler that does so today -- and reported by `load_linear`, so that a
@@ -1691,10 +1699,31 @@ class Symbol:
           if isinstance(idx, Variable):
             bc_lane, bc_index = idx.write_nonlead(), list(index)
           else:
+            # Which lane owns a fixed element, and where in its registers it
+            # sits.  At `lead_width == 1` this is the cyclic rule that was
+            # here before; wider, a lane holds `w` adjacent elements, so the
+            # element first divides by the width and only then distributes.
+            #
+            # This is the resolution a peeled tail element goes through -- the
+            # loop hands it over as a plain integer -- so getting it from the
+            # symbol rather than from the caller is what makes the two agree
+            # without the peel having to know anything.
+            w = self.lead_width
+            bc_lane = (idx._value // w) % self.num_threads
+            # The register float, resolved here rather than carried as a
+            # width: this access reads *one* element, so it has to stay
+            # scalar.  Handing over a width-`w` index would make the load
+            # vector-typed and the value would be the lane's whole pair --
+            # which the generated code then assigned to a scalar slot, a
+            # type error the C++ compiler would have caught and the snapshot
+            # tests would not.
+            #
+            # `w * slot + component`, pre-scaled, so `build_nonlead` returns
+            # it unchanged.
             bc_index = list(index)
             bc_index[self.lead_dims[0]] = LeadIndex(
-                idx._value // self.num_threads, self.num_threads, 1)
-            bc_lane = idx._value % self.num_threads
+                w * ((idx._value // w) // self.num_threads) + idx._value % w,
+                self.num_threads, 1)
       read_index = bc_index if bc_index is not None else index
 
       if variable is None and self.stype in (

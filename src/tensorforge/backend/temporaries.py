@@ -49,6 +49,11 @@ class Temporaries:
         self._shared_counter += 1
         return name
 
+    #: How many adjacent lead-dimension elements one lane of a register image
+    #: holds.  Set by whoever knows the compute arrangement; see
+    #: `Symbol.lead_width`.
+    _lead_width: int = 1
+
     def next_register_name(self) -> str:
         name = f'r{self._register_counter}'
         self._register_counter += 1
@@ -103,6 +108,10 @@ class Temporaries:
                            obj=RegMemObject(name, regsize, spp=spp))
         registers.lead_dims = [lead_pos]
         registers.num_threads = self._num_threads
+        # The blocking of this image, set once here so every access resolves
+        # positions the same way -- the loops that walk it, and the
+        # fixed-element reads that go through the broadcast path.
+        registers.lead_width = getattr(self, '_lead_width', 1)
         registers.datatype = self._context.fp_type
         self._scopes.add_symbol(registers)
         return registers, RegisterAlloc(self._context, registers, regsize, 0.0)

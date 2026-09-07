@@ -322,7 +322,8 @@ class Interp:
             # abort is the honest answer and a silent skip is the dangerous
             # one.
             raise Abort(f'vector assignment not modelled: {stmt!r}')
-        if ('pipeline' in stmt or '::' in stmt) and not _VEC_DECL.match(stmt):
+        if (('pipeline' in stmt or '::' in stmt)
+                and not _VEC_DECL.match(stmt) and 'tensorforge::' not in stmt):
             # The catch-all was written for `cuda::pipeline` and friends, which
             # have no effect on the values compared here.  A declaration whose
             # *type* is namespaced is not one of those: swallowing
@@ -358,7 +359,8 @@ class Interp:
             return                      # the shared arena, modelled as a base
         if re.match(r'^(?:const\s+)?auto\s*\*?\s*\w+', stmt) and '=' not in stmt:
             return
-        if ('pipeline' in stmt or '::' in stmt) and not _VEC_DECL.match(stmt):
+        if (('pipeline' in stmt or '::' in stmt)
+                and not _VEC_DECL.match(stmt) and 'tensorforge::' not in stmt):
             # The catch-all was written for `cuda::pipeline` and friends, which
             # have no effect on the values compared here.  A declaration whose
             # *type* is namespaced is not one of those: swallowing

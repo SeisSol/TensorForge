@@ -632,6 +632,9 @@ class Generator:
                           self._num_threads,
                           self._lead_width)
     temporaries = Temporaries(self._context, self._scopes, self._num_threads)
+    # Every register image this section allocates is blocked the same way, so
+    # the factory carries it rather than each caller passing it along.
+    temporaries._lead_width = self._lead_width
 
     # One builder per kind of operation, all sharing the section's plan,
     # residency and temporaries.  The list is ordered: `GemmDescr` is a
