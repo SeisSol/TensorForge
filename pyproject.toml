@@ -23,16 +23,16 @@ classifiers= [
 dynamic = ["version", "readme", "dependencies"]
 
 [build-system]
-requires = ["setuptools>=61.0.0", "wheel"]
+requires = ["setuptools>=77.0.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.dynamic]
 readme = {file = ["README.md"], content-type = "text/markdown"}
-version = {file = ["tensorforge/VERSION"]}
+version = {file = ["src/tensorforge/VERSION"]}
 dependencies = {file = ["requirements.txt"]}
 
 [tool.setuptools.packages.find]
 where = ['src']
 
 [tool.setuptools.package-data]
-tensorforge = ["*.*"]
+"*" = ["*.*", "VERSION"]

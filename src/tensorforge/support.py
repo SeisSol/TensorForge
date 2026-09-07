@@ -9,9 +9,8 @@ def copy_includes_and_aux(destination, name_as=None):
   if os.path.isdir(destination):
 
     current_dir = os.path.dirname(os.path.abspath(__file__))
-    top_dir, _ = os.path.split(current_dir)
 
-    src = os.path.join(top_dir, "include")
+    src = os.path.join(current_dir, "include")
     trg = name_as if name_as else "include"
     trg = os.path.join(destination, trg)
 
