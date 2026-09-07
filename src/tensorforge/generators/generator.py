@@ -243,10 +243,15 @@ class Generator:
     if not self._rotate:
       return
     from tensorforge.backend.instructions.memory.load import GlbToShrLoader
-    stage = loop.stage_counter_name() if hasattr(
-        loop, 'stage_counter_name') else None
-    if stage is None:
+    if not hasattr(loop, 'request_stage_counter'):
       return
+    # Request it, not merely name it.  `stage_counter_name()` answers what the
+    # counter is called; `_declare_stage_counter` only emits one when a depth
+    # has been requested.  Naming it without requesting it produced kernels
+    # that read `pipeStage0` and never declared it -- which renders, and which
+    # nothing in the suite compiles, because the syntax check runs on
+    # snapshots taken with this flag off.
+    stage = loop.request_stage_counter(2)
     for instr in getattr(loop, 'region', []) or []:
       if not isinstance(instr, GlbToShrLoader):
         continue
