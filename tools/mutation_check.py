@@ -303,18 +303,26 @@ GROUPS = {
              '#if defined(__gfx940__)', 1)),
     ]),
 
+    # The boundary between the two spans, which `plan` states once.  Stating
+    # it twice is what let the spans overlap, so the first two mutations put
+    # the boundary back where each half of that mistake had it.
     'tiling': ('tests/test_amd_tiling.py', [
-        ('the original tail overlap',
-         sub(PKG / 'codegen.py',
-             '        tail = ((N // tile.block) * tile.block) if cap else N',
-             '        tail = (N // tile.block) * tile.block')),
+        ('the boundary ignores the padding decision',
+         sub(PKG / '__init__.py',
+             '    boundary = ((n // tile.block) * tile.block) if n % tile.block < 2 else n',
+             '    boundary = (n // tile.block) * tile.block')),
         ('over-corrected: the tail dropped entirely',
-         sub(PKG / 'codegen.py',
-             '        tail = ((N // tile.block) * tile.block) if cap else N',
-             '        tail = N')),
-        ('cap policy inverted',
-         sub(PKG / 'codegen.py', '        cap = N % tile.block < 2',
-             '        cap = N % tile.block >= 2')),
+         sub(PKG / '__init__.py',
+             '    boundary = ((n // tile.block) * tile.block) if n % tile.block < 2 else n',
+             '    boundary = n')),
+        ('padding policy inverted',
+         sub(PKG / '__init__.py',
+             'if n % tile.block < 2 else n',
+             'if n % tile.block >= 2 else n')),
+        ('the empty span is planned rather than dropped',
+         sub(PKG / '__init__.py',
+             '    if boundary <= 0:',
+             '    if False:')),
     ]),
 
     'catalog': ('tests/test_amd_catalog.py', [
@@ -586,9 +594,9 @@ GROUPS = {
     'nvidia': ('tests/test_nvidia_reachability.py', [
         ('a second definition of matmul',
          sub(Path('src/tensorforge/backend/instructions/compute/primitives/nvidia.py'),
-             'def matmul(writer, ops, ctx, strategy):',
+             'def matmul(writer, ops, ctx, span):',
              'def matmul(*args, **kwargs):\n    pass\n\n'
-             'def matmul(writer, ops, ctx, strategy):', 1)),
+             'def matmul(writer, ops, ctx, span):', 1)),
         ('an unreachable helper reintroduced',
          sub(Path('src/tensorforge/backend/instructions/compute/primitives/nvidia.py'),
              'def tfconvert(writer: Writer, variables):',

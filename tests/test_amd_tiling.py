@@ -38,10 +38,10 @@ from tensorforge.backend.instructions.compute.strategy import (
 class _Recorder:
     """Stands in for the C store callback and records what it is asked to write.
 
-    Wrapping at `matmul` and asking the stack which path is calling avoids
-    wrapping twice: `matmul32` calls `matmuldpp` itself, so instrumenting both
-    would log every store of the inner call a second time and manufacture the
-    very duplicates this is looking for.
+    Which arrangement wrote a given element is read off the stack rather than
+    passed in, so one recorder can be handed to a whole plan and still tell
+    the spans apart -- which is what makes an overlap between two of them
+    visible as an overlap rather than as a doubled count.
     """
 
     def __init__(self):

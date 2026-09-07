@@ -47,6 +47,7 @@ gain.
 
 from tensorforge.backend.pir.core import SCALAR_LAYOUT, ScalarType
 from tensorforge.common.basic_types import Datatype
+from .. import broadcast
 from ..strategy import Strategy, whole
 
 #: Fixed by the hardware; the header asserts it.
@@ -292,66 +293,6 @@ def simd(lexic, elem, count) -> str:
 BROADCAST_ENABLED = True
 
 
-def broadcast_matmul(writer, C, A, B, M, N, K, kx, threads, dtype, ctx):
-    """`C[i][j] += B[k][j] * A[i][k]`, entirely in registers.
-
-    The same shape as the AMD DPP path in `amd/codegen.py`, and preferable
-    here for a reason that is specific to this model: the contraction index of
-    B lives in the *lanes*, so every product needs one of B's lanes broadcast
-    to all of them.  On AMD that is a real cross-lane instruction and the
-    reason `relayout.py` has a table of them; under an explicit vector it is
-    `v[k]`, an element read out of this work-item's own registers.
-
-    A free broadcast is what makes the register-only arrangement beat staging
-    operands through shared memory, which is what the NVIDIA path has to do --
-    there is no barrier, no arena, and no round trip.
-
-    A is per-lane in the output index `i`; B is per-lane in the contraction
-    index `k`.  Two different meanings of "lane" for the two operands, which
-    is exactly what the broadcast reconciles.
-    """
-    # `None` asks the loader for the value rather than for a name to fill in:
-    # these are operands, and an operand whose definition the IR cannot see is
-    # invisible to every pass that reasons about ordering or reuse.
-    a = {}
-    out_layout = None
-    for i in range(M):
-        for k in range(K + kx):
-            v = A(writer, None, i, k)
-            if v is not None and v is not False:
-                a[(i, k)] = v
-                # Taken from the operand rather than constructed: A is indexed
-                # by the same output index the accumulator is, so whatever
-                # distribution its loads came out with is the one to hold.
-                if out_layout is None:
-                    out_layout = v.layout
-
-    for j in range(N):
-        # The accumulator is spread over the lanes exactly like the output it
-        # holds -- one element of the lead dimension per lane.  Declared with
-        # that layout rather than left untracked, because untracked is not a
-        # conservative default here: an explicitly vectorised declaration
-        # cannot be written without it.
-        acc = [writer.declare(hint='acc', layout=out_layout) for _ in range(M)]
-        for k0 in range(0, K + kx, threads):
-            vb = B(writer, None, j, k0 // threads)
-            if vb is None or vb is False:
-                continue
-            for lane in range(min(threads, K + kx - k0)):
-                # One of B's lanes, replicated -- free here, a shuffle on AMD.
-                bk = writer.lane_broadcast(vb, lane, threads)
-                for i in range(M):
-                    operand = a.get((i, k0 + lane))
-                    if operand is None:
-                        continue
-                    writer.accumulate(
-                        acc[i], writer.op('mul', operand.type, bk, operand,
-                                          hint='p'))
-        for i in range(M):
-            C(writer, acc[i], i, j)
-    return True
-
-
 def _fragment(writer, dtype, count, hint):
     """A DPAS fragment: `count` elements, held whole by one work-item.
 
@@ -507,6 +448,10 @@ def plan(strategy, shape, n, ctx):
 def matmul(writer, ops, ctx, span):
     """Emit the arrangement the caller chose, or decline.
 
+    DPAS is what is specific to this target; the broadcast chain is the shared
+    one in `compute/broadcast.py`, offered here because an explicit vector is
+    where its replication is free rather than because it is an Intel idea.
+
     Either may decline after it has emitted, when an operand it needs turns
     out to have no value: whether the shape is servable is not fully knowable
     before the loads are attempted.  The caller emits this inside
@@ -519,13 +464,12 @@ def matmul(writer, ops, ctx, span):
 
     if sparse:
         return False
+    if span.strategy is Strategy.BROADCAST:
+        return broadcast.matmul(writer, ops, ctx, span)
     if span.start != 0 or span.stop != N:
-        # Neither path takes a range; `plan` never asks for one, and a direct
+        # DPAS does not take a range; `plan` never asks for one, and a direct
         # caller that does should hear so rather than get the whole output.
         return False
     if span.strategy is Strategy.MATRIX:
         return dpas_matmul(writer, C, A, B, M, N, K, kx, threads, dtype, ctx)
-    if span.strategy is Strategy.BROADCAST:
-        return broadcast_matmul(writer, C, A, B, M, N, K, kx, threads, dtype,
-                                ctx)
     return False

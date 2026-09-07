@@ -36,6 +36,7 @@ property.
 
 from tensorforge.common.basic_types import Datatype
 
+from ... import broadcast
 from ...strategy import Span, Strategy, whole
 
 from .arch import amdarch, cdna2, gfx1250, gfx1251, rdna
@@ -95,12 +96,17 @@ def strategies(shape, ctx):
     tile fits, rather than because a condition names the type.
 
     A sparse second operand is read by linear index, which no fragment layout
-    accepts; the DPP chain has a branch for it and takes it.
+    accepts and which the broadcast chain has no lane to replicate; the DPP
+    chain has a branch for it and takes it alone.
     """
     offered = {Strategy.DPP}
-    if not shape.sparse \
-            and mfma_tile_for(shape.threads, shape.dtype, ctx) is not None:
-        offered.add(Strategy.MATRIX)
+    if not shape.sparse:
+        # The same chain the DPP one fuses its broadcast into, available here
+        # through `readlane`.  It cannot read a sparse operand, which is the
+        # one thing the DPP branch does that this does not.
+        offered.add(Strategy.BROADCAST)
+        if mfma_tile_for(shape.threads, shape.dtype, ctx) is not None:
+            offered.add(Strategy.MATRIX)
     return frozenset(offered)
 
 
@@ -145,6 +151,8 @@ def matmul(writer, ops, ctx, span):
     M, N, K, kx = ops.lead_slots, ops.n, ops.k, ops.kx
     threads, dtype, sparse = ops.threads, ops.dtype, ops.sparse
 
+    if span.strategy is Strategy.BROADCAST:
+        return broadcast.matmul(writer, ops, ctx, span)
     if span.strategy is Strategy.MATRIX:
         matmul32(writer, C, A, B, M, N, K, kx, threads, dtype, sparse, ctx,
                  span.start, span.stop)

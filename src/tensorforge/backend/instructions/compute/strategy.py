@@ -125,8 +125,12 @@ def legal_strategies(offered: Iterable[Strategy]) -> FrozenSet[Strategy]:
 #: wholesale rather than unpicked from the dispatch.
 PREFERENCES = {
     # Matrix cores where a tile fits; the DPP chain otherwise, which is why
-    # F64 lands there without the order naming a type.
-    'amd': (Strategy.MATRIX, Strategy.DPP, Strategy.GENERIC),
+    # F64 lands there without the order naming a type.  The plain broadcast
+    # chain sits behind it and is reached only for a shape DPP declines,
+    # because the two differ by whether the replication costs an instruction
+    # -- which is a reason to rank them, not to offer only one.
+    'amd': (Strategy.MATRIX, Strategy.DPP, Strategy.BROADCAST,
+            Strategy.GENERIC),
     'nvidia': (Strategy.MATRIX, Strategy.GENERIC),
     # The register-only chain beats staging operands through shared memory
     # here, and whether DPAS beats it in turn is a measurement rather than a
