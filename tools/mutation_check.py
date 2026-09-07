@@ -219,6 +219,14 @@ GROUPS = {
     ]),
 
     'asm': ('tests/test_pir_asm.py', [
+        ('the split goes back to a side-effecting call',
+         sub(Path('src/tensorforge/backend/pir/build.py'),
+             "        self._emit_op(name, vs, tuple(args), pure=True, attrs=attrs)",
+             "        self._emit_op(name, vs, tuple(args), pure=False, attrs=attrs)", 1)),
+        ('only the first result is declared',
+         sub(Path('src/tensorforge/backend/pir/emit.py'),
+             "            for t in s.target:\n                w(f'{self.ctype(t.type, t)} {self.name(t)}{{}};')",
+             "            t = s.target[0]\n            w(f'{self.ctype(t.type, t)} {self.name(t)}{{}};')", 1)),
         ('assign does not declare an access on its target',
          sub(Path('src/tensorforge/backend/pir/build.py'),
              '            accesses=(Access(Effect.WRITE, MemSpace.REGISTER, base=target),),',

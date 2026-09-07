@@ -713,6 +713,18 @@ class Emitter:
             self._emit_if(s)
             return
 
+        # A pure operation with several results.  The vendor spells it as a
+        # call writing through references, which is a property of the
+        # signature and not of the operation -- keeping that spelling out of
+        # the IR is what lets CSE hash-cons it.
+        if len(s.target) > 1:
+            for t in s.target:
+                w(f'{self.ctype(t.type, t)} {self.name(t)}{{}};')
+            outs = ', '.join(self.name(t) for t in s.target)
+            args = ', '.join(self.operand(a) for a in s.args)
+            w(f'{op}({outs}, {args});')
+            return
+
         # generic pure op
         if s.target:
             v = s.target[0]

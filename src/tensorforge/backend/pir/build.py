@@ -368,6 +368,27 @@ class IRBuilder:
                              movable=movable, effect=effect,
                              accesses=accesses, attrs=(('callee', callee),))
 
+    def split_op(self, name: str, types: Sequence, *args: Operand,
+                 hints: Sequence[str] = (), attrs: Tuple = ()) -> Tuple[Value, ...]:
+        """A pure operation with more than one result.
+
+        `splitFloatTF32(uint32_t &upper, uint32_t &lower, float value)` is a
+        function in every sense that matters -- the same input gives the same
+        two halves -- but modelling it as a call that writes through references
+        makes it side-effecting, and CSE skips it.  The corpus splits the same
+        value twice in 15% of cases, with no store and no reload in between.
+
+        The reference-out spelling is the vendor's, not the operation's, so it
+        belongs in the emitter.  Here it is what it is: `n` values from one
+        argument, pure, and hash-consed like any other expression.  `cse`
+        already handles several results -- it zips `s.target` against what it
+        recorded -- so nothing there had to change.
+        """
+        vs = tuple(self.value(t, hint=h)
+                   for t, h in zip(types, list(hints) + [''] * len(types)))
+        self._emit_op(name, vs, tuple(args), pure=True, attrs=attrs)
+        return vs
+
     def asm_stmt(self, template: str, operands: Sequence[Tuple[str, Operand]],
                  *, movable: bool = False) -> Stmt:
         """Inline assembly whose operands are values, not baked-in names.

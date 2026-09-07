@@ -40,13 +40,17 @@ def tfconvert(writer: Writer, variables):
     writing it as one is better than writing it as an intrinsic that happens
     to take a string.
     """
+    # A pure operation with two results, not a call writing through
+    # references.  The reference-out spelling is the vendor's signature and
+    # belongs in the emitter; here the split is what it is, and CSE can
+    # hash-cons it.  The corpus split the same value twice in 15% of cases --
+    # no store and no reload in between, just a second `kk` block asking for
+    # the same fragment.
     out = []
     for variable in variables:
-        upper = writer.declare(TF32_HALF, hint='u')
-        lower = writer.declare(TF32_HALF, hint='l')
-        writer.call_stmt('tensorforge::splitFloatTF32', upper, lower, variable,
-                         writes=(upper, lower))
-        out.append((upper, lower))
+        out.append(writer.split_op('tensorforge::splitFloatTF32',
+                                   (TF32_HALF, TF32_HALF), variable,
+                                   hints=('u', 'l')))
     return out
 
 class MMAMode:
