@@ -2,7 +2,7 @@
 #
 # SPDX-License-Identifier: MIT
 from tensorforge.common.basic_types import Datatype
-from ..strategy import Strategy
+from ..strategy import Strategy, whole
 from tensorforge.backend.pir.core import (INDEX, Access, Effect, MemSpace,
                                           XorSwizzle,
                                           Uniformity,
@@ -214,12 +214,22 @@ def scratch(strategy, dtype):
     return shmsize(1, dtype)
 
 
-def matmul(writer, ops, ctx, strategy):
+def plan(strategy, shape, n, ctx):
+    """One arrangement over the whole output: nothing here splits a tail.
+
+    A partial tile is padded by `threadrange` instead, which the staged
+    fragments make cheap -- the spare lanes read zeroes out of the same tile
+    the real ones do.
+    """
+    return whole(strategy, n)
+
+
+def matmul(writer, ops, ctx, span):
     C, A, B = ops.C, ops.A, ops.B
     # Elements, and the loop below walks them in strides of `threads`.  The
     # accessors take slots, so `i // threads` is what reaches them.
     M = ops.lead_elements
-    N, K, kx = ops.n, ops.k, ops.kx
+    N, K, kx = span.stop, ops.k, ops.kx
     threads, dtype, sparse = ops.threads, ops.dtype, ops.sparse
 
     def threadrange(start, size):
@@ -328,7 +338,7 @@ def matmul(writer, ops, ctx, strategy):
         Datatype.F64: 'double4'
     }[dtype]
 
-    for j in range(0, N, atom.n):
+    for j in range(span.start, N, atom.n):
         with writer.AnonymousScope():
             for k in range(0, K + kx, threads):
                 # `var is None` asks the accessor for the value rather than a

@@ -31,7 +31,8 @@ from tensorforge.backend.instructions.compute.primitives import amd
 from tensorforge.common.basic_types import Datatype
 from tensorforge.backend.instructions.compute.matmul import MatmulOperands
 from tensorforge.backend.instructions.compute.strategy import (
-    ComputeShape, choose_strategy, legal_strategies)
+    ComputeShape, Span, Strategy, choose_strategy, covers,
+    legal_strategies)
 
 
 class _Recorder:
@@ -103,13 +104,21 @@ def _run(M, N, K, threads=32, arch="gfx90a"):
                          threads=threads, dtype=Datatype.F32)
     ctx = _FakeCtx(arch)
     # The routing the dispatch performs, run here rather than restated: what
-    # these tests are about is the tiling `matmul` emits for the arrangement
-    # it is given, and picking that arrangement by hand would let the test
-    # keep passing for a shape the dispatch has stopped sending here.
-    strategy = choose_strategy(legal_strategies(amd.strategies(ops_shape(ops),
-                                                               ctx)), 'amd')
-    amd.matmul(writer, ops, ctx, strategy)
+    # these tests are about is the tiling `matmul` emits for the plan it is
+    # given, and laying that plan out by hand would let the test keep passing
+    # for a shape the dispatch has stopped sending here.
+    for span in _plan(ops, ctx):
+        amd.matmul(writer, ops, ctx, span)
     return rec
+
+
+def _plan(ops, ctx):
+    shape = ops_shape(ops)
+    chosen = choose_strategy(legal_strategies(amd.strategies(shape, ctx)),
+                             'amd')
+    plan = amd.plan(chosen, shape, ops.n, ctx)
+    assert covers(plan, ops.n), plan
+    return plan
 
 
 @pytest.mark.parametrize("N", range(1, 25))
@@ -151,3 +160,45 @@ def test_exact_multiples_leave_nothing_for_the_dpp_path(N):
     rec = _run(M=2, N=N, K=8)
     assert not [s for s in rec.stores if s[0] == "dpp"], \
         f"N={N} divides by 4; the DPP path should have had nothing to do"
+
+
+# --------------------------------------------------------------------------
+# the same two properties, asked of the plan instead of the emitted stores
+# --------------------------------------------------------------------------
+
+def _plan_for(N, threads=32, arch="gfx90a"):
+    ops = MatmulOperands(A=_operand, B=_operand, C=None, sparse=None,
+                         lead_slots=2, lead_elements=2 * threads,
+                         n=N, k=8, kx=0,
+                         threads=threads, dtype=Datatype.F32)
+    return _plan(ops, _FakeCtx(arch))
+
+
+@pytest.mark.parametrize("N", [2, 3, 6, 7, 18, 19, 22, 23])
+def test_the_plan_gives_the_padded_tail_to_the_matrix_span(N):
+    """At `N % 4 >= 2` the tail is cheaper as one padded MFMA block, so the
+    plan is a single span reaching the end rather than two."""
+    plan = _plan_for(N)
+    assert [span.strategy for span in plan] == [Strategy.MATRIX]
+    assert plan[-1].stop == N
+
+
+@pytest.mark.parametrize("N", [5, 9, 21])
+def test_a_short_tail_becomes_a_second_span(N):
+    """One column does not repay padding a block of four, so it goes to the
+    chain -- and the boundary is where the block loop actually stopped."""
+    plan = _plan_for(N)
+    assert [span.strategy for span in plan][-1] is Strategy.DPP
+    assert plan[-1].start == (N // 4) * 4
+
+
+@pytest.mark.parametrize("N", [4, 8, 16, 20])
+def test_exact_multiples_are_one_span(N):
+    assert _plan_for(N) == (Span(Strategy.MATRIX, 0, N),)
+
+
+@pytest.mark.parametrize("N", [1])
+def test_fewer_columns_than_a_block_leave_no_matrix_span(N):
+    """Not an empty span: a plan names the arrangements that run, and one
+    covering no columns is a claim that something happens there."""
+    assert _plan_for(N) == (Span(Strategy.DPP, 0, N),)

@@ -142,12 +142,13 @@ def hfma(writer: Writer, Cs, As, Bs, repeat, datatype, threads, ctx):
                                     func(writer, c, ax[bx], bv, j)
 
 
-def matmul32(writer: Writer, C, B, A, M, N, K, kx, threads, dtype, sparse, ctx):
+def matmul32(writer: Writer, C, B, A, M, N, K, kx, threads, dtype, sparse,
+             ctx, start, stop):
     with writer.AnonymousScope():
 
         ftype = ScalarType(dtype)
 
-        def write_matmul(tile, start, cap):
+        def write_matmul(tile, start, end):
             block = tile.block
             scale = tile.scale(threads)
             fn = tile.builtin
@@ -201,8 +202,8 @@ def matmul32(writer: Writer, C, B, A, M, N, K, kx, threads, dtype, sparse, ctx):
 
             # TODO: use Bctrl for threads in (16, 32)
 
-            # C <- C + B@A
-            end = ((N // block) * block) if cap else N
+            # C <- C + B@A.  `end` bounds the blocks; `N` still bounds the
+            # real columns inside one, which is what pads a partial block.
             for j in range(start, end, block):
                 with writer.AnonymousScope():
                     tA = {}
@@ -294,26 +295,14 @@ def matmul32(writer: Writer, C, B, A, M, N, K, kx, threads, dtype, sparse, ctx):
                 f'no MFMA tile for {dtype} at {threads} threads; '
                 f'matmul() should have taken the DPP path')
 
-        start = 0
-        # A tail of 0 or 1 columns is cheaper through DPP; 2 or 3 are cheaper
-        # as one padded MFMA block.  `cap` says which: capped, `write_matmul`
-        # stops at the last whole block and leaves the tail; uncapped, it pads
-        # the tail block out and does everything.
-        cap = N % tile.block < 2
-        write_matmul(tile, start, cap)
-        # The handoff has to be read off what `write_matmul` *did*, not
-        # recomputed.  `(N // block) * block` is the tail only in the capped
-        # case; when uncapped it points into a block that was already emitted,
-        # and both paths then computed the same columns -- the DPP store
-        # landing last and hiding it.
-        tail = ((N // tile.block) * tile.block) if cap else N
-        matmuldpp(writer, tail, C, B, A, M, N, K, kx, threads, dtype, sparse, ctx)
+        write_matmul(tile, start, stop)
 
 
     # TODO: gfx1200, f'__builtin_amdgcn_wmma_f32_16x16x16_bf16_w32_gfx12'
 
-def matmuldpp(writer, start, C, A, B, M, N, K, kx, threads, dtype, sparse, ctx):
-    if start >= N:
+def matmuldpp(writer, start, C, A, B, M, N, K, kx, threads, dtype, sparse,
+              ctx, stop):
+    if start >= stop:
         # Nothing left for this path.  Worth an early return rather than
         # letting the loops come out empty: the A operands below are loaded
         # before the first `for j`, so falling through would emit a full set
@@ -332,7 +321,7 @@ def matmuldpp(writer, start, C, A, B, M, N, K, kx, threads, dtype, sparse, ctx):
     cx = []
     ax = []
     cb = []
-    for j in range(start, N):
+    for j in range(start, stop):
         cbl = []
         for i in range(M):
             # The accumulator is written by `fmacdpp` through a reference, so
@@ -361,7 +350,7 @@ def matmuldpp(writer, start, C, A, B, M, N, K, kx, threads, dtype, sparse, ctx):
         vA = []
         vB = []
         vC = []
-        for j in range(start, N):
+        for j in range(start, stop):
             for k in range(0, K + kx, threads):
                 vB += [B(writer, None, j, k // threads)]
                 kj = ((K + kx) * (j-start) + k) * M
@@ -370,6 +359,6 @@ def matmuldpp(writer, start, C, A, B, M, N, K, kx, threads, dtype, sparse, ctx):
                 vC += [cx[kj: min(kj + stride, len(cx))]]
         hfma(writer, vC, vB, vA, M, dtype, threads, ctx)
 
-    for j in range(start, N):
+    for j in range(start, stop):
         for i in range(M):
             C(writer, cb[(j-start)*M+i], i, j)

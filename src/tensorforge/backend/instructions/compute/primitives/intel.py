@@ -47,7 +47,7 @@ gain.
 
 from tensorforge.backend.pir.core import SCALAR_LAYOUT, ScalarType
 from tensorforge.common.basic_types import Datatype
-from ..strategy import Strategy
+from ..strategy import Strategy, whole
 
 #: Fixed by the hardware; the header asserts it.
 SYSTOLIC_DEPTH = 8
@@ -493,7 +493,18 @@ def scratch(strategy, dtype):
     return 0
 
 
-def matmul(writer, ops, ctx, strategy):
+def plan(strategy, shape, n, ctx):
+    """One arrangement over the whole output.
+
+    Both paths here pad a partial tile rather than leave it: DPAS reads a
+    fragment whose spare rows are zero, and the broadcast chain simply has
+    fewer accumulators.  Neither gets cheaper by handing the remainder to the
+    other.
+    """
+    return whole(strategy, n)
+
+
+def matmul(writer, ops, ctx, span):
     """Emit the arrangement the caller chose, or decline.
 
     Either may decline after it has emitted, when an operand it needs turns
@@ -508,9 +519,13 @@ def matmul(writer, ops, ctx, strategy):
 
     if sparse:
         return False
-    if strategy is Strategy.MATRIX:
+    if span.start != 0 or span.stop != N:
+        # Neither path takes a range; `plan` never asks for one, and a direct
+        # caller that does should hear so rather than get the whole output.
+        return False
+    if span.strategy is Strategy.MATRIX:
         return dpas_matmul(writer, C, A, B, M, N, K, kx, threads, dtype, ctx)
-    if strategy is Strategy.BROADCAST:
+    if span.strategy is Strategy.BROADCAST:
         return broadcast_matmul(writer, C, A, B, M, N, K, kx, threads, dtype,
                                 ctx)
     return False

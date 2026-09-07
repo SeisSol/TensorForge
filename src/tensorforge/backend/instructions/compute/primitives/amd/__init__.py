@@ -36,7 +36,7 @@ property.
 
 from tensorforge.common.basic_types import Datatype
 
-from ...strategy import Strategy
+from ...strategy import Span, Strategy, whole
 
 from .arch import amdarch, cdna2, gfx1250, gfx1251, rdna
 from .caps import has_fmacdpp4, has_fmacdpp8, has_fmacdpp16
@@ -109,14 +109,46 @@ def scratch(strategy, dtype):
     return 0
 
 
-def matmul(writer, ops, ctx, strategy):
-    """Emit the arrangement the caller chose."""
+def plan(strategy, shape, n, ctx):
+    """How the chosen arrangement is laid out over the output.
+
+    The matrix core covers whole tiles; what is left over is a cost question
+    with a threshold behind it.  A tail of two or three columns is cheaper as
+    one MFMA block with its spare lanes zeroed than as two or three passes of
+    a broadcast chain, and a tail of one is not -- padding a block of four to
+    compute one column spends three quarters of it on zeroes.
+
+    So the tail is a second span rather than a handoff inside the emitter,
+    and the boundary is stated once instead of computed twice.  Computing it
+    twice is what makes the two arrangements overlap: `(n // block) * block`
+    is the tail only when the block loop stopped there, and when it padded
+    through to the end it points into a block already emitted -- both spans
+    then write the same columns, the later store hiding it.
+    """
+    if strategy is not Strategy.MATRIX:
+        return whole(strategy, n)
+    tile = mfma_tile_for(shape.threads, shape.dtype, ctx)
+    boundary = ((n // tile.block) * tile.block) if n % tile.block < 2 else n
+    if boundary >= n:
+        return whole(Strategy.MATRIX, n)
+    if boundary <= 0:
+        # Fewer columns than one block, and too few to repay padding it: there
+        # is no matrix span to name, not an empty one.
+        return whole(Strategy.DPP, n)
+    return (Span(Strategy.MATRIX, 0, boundary),
+            Span(Strategy.DPP, boundary, n))
+
+
+def matmul(writer, ops, ctx, span):
+    """Emit one span of the plan."""
     C, A, B = ops.C, ops.A, ops.B
     M, N, K, kx = ops.lead_slots, ops.n, ops.k, ops.kx
     threads, dtype, sparse = ops.threads, ops.dtype, ops.sparse
 
-    if strategy is Strategy.MATRIX:
-        matmul32(writer, C, A, B, M, N, K, kx, threads, dtype, sparse, ctx)
+    if span.strategy is Strategy.MATRIX:
+        matmul32(writer, C, A, B, M, N, K, kx, threads, dtype, sparse, ctx,
+                 span.start, span.stop)
     else:
-        matmuldpp(writer, 0, C, A, B, M, N, K, kx, threads, dtype, sparse, ctx)
+        matmuldpp(writer, span.start, C, A, B, M, N, K, kx, threads, dtype,
+                  sparse, ctx, span.stop)
     return True

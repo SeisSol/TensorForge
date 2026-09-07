@@ -10,7 +10,7 @@ from tensorforge.common.exceptions import InternalError, GenerationError
 from tensorforge.backend.writer import Writer
 from tensorforge.common.context import Context
 from tensorforge.common.operation import ReductionOperator
-from typing import Union, List
+from typing import Union, List, Tuple
 from tensorforge.common.basic_types import Datatype
 from tensorforge.backend.pir.core import MemSpace
 from tensorforge.backend.instructions.abstract_instruction import _explicit_simd
@@ -22,8 +22,8 @@ from .primitives import nvidia as nvidia
 from .primitives import amd as amd
 from .primitives import intel as intel
 from .matmul import MatmulOperands
-from .strategy import (ComputeShape, Strategy, choose_strategy,
-                       is_contraction, legal_strategies)
+from .strategy import (ComputeShape, Span, Strategy, choose_strategy, covers,
+                       is_contraction, legal_strategies, whole)
 
 #: Which module owns the matrix paths for a vendor.  One row per target, and
 #: every question the dispatch asks goes to the same row -- so what gets
@@ -580,8 +580,19 @@ class MultilinearInstruction(ComputeInstruction):
         return bool(obj) and (not obj.is_dense()
                               or self._ops[1].symbol.data_view.shape[0] < 16)
 
-    def _strategy(self) -> Strategy:
-        """Which arrangement computes this operation.
+    def _output_extent(self) -> int:
+        """Columns the second index spans, flattened.
+
+        Needed before emission as well as during it: a plan is laid out over
+        this, and `temp_shmem` asks for the plan.
+        """
+        n = 1
+        for mi, mx in self._ns[1:]:
+            n *= mx - mi
+        return n
+
+    def _plan(self) -> Tuple[Span, ...]:
+        """Which arrangements compute this operation, over which columns.
 
         Derived on each call rather than stored.  Two callers ask -- the
         emission below, and `temp_shmem` before any body exists -- and the
@@ -591,26 +602,36 @@ class MultilinearInstruction(ComputeInstruction):
         deriving it twice cannot disagree with itself the way two stored
         copies can.
         """
+        n = self._output_extent()
         module = _vendor_module(self._context)
         if module is None or not is_contraction(len(self._ops),
                                                 self._lead_width):
-            return Strategy.GENERIC
+            return whole(Strategy.GENERIC, n)
         shape = ComputeShape(threads=self._num_threads,
                              dtype=self._idest.datatype,
                              sparse=self._second_operand_is_sparse(),
                              explicit_simd=_explicit_simd(self._context))
-        offered = module.strategies(shape, self._context)
-        return choose_strategy(legal_strategies(offered),
-                               self._context.get_vm().get_hw_descr().vendor)
+        chosen = choose_strategy(
+            legal_strategies(module.strategies(shape, self._context)),
+            self._context.get_vm().get_hw_descr().vendor)
+        if chosen is Strategy.GENERIC:
+            return whole(Strategy.GENERIC, n)
+        plan = module.plan(chosen, shape, n, self._context)
+        if not covers(plan, n):
+            raise InternalError(
+                f'{self._context.get_vm().get_hw_descr().vendor} planned '
+                f'{plan} for {n} columns, which does not compute each of them '
+                f'exactly once')
+        return plan
 
 
     def _nonleading_dim_test(self, writer: Writer):
         # if len(self._ks) == 0 and len(self._ops) == 1:
         #     return False
 
-        strategy = self._strategy()
+        plan = self._plan()
 
-        if strategy is not Strategy.GENERIC:
+        if plan[0].strategy is not Strategy.GENERIC:
             K = 1
             N = 1
             M = 1
@@ -727,8 +748,9 @@ class MultilinearInstruction(ComputeInstruction):
             # the generic nest below writes a second set of products on top of
             # a partial one, and both are emitted.
             with writer.speculative() as spec:
-                taken = _vendor_module(self._context).matmul(
-                    writer, ops, self._context, strategy)
+                module = _vendor_module(self._context)
+                taken = all(module.matmul(writer, ops, self._context, span)
+                            for span in plan)
                 if not taken:
                     spec.discard()
             return taken
@@ -902,8 +924,11 @@ class MultilinearInstruction(ComputeInstruction):
         reservation that disagrees with the emission is either a buffer nobody
         writes or an overrun.
         """
-        strategy = self._strategy()
-        if strategy is Strategy.GENERIC:
+        plan = self._plan()
+        if plan[0].strategy is Strategy.GENERIC:
             return 0
-        return _vendor_module(self._context).scratch(strategy,
-                                                     self._idest.datatype)
+        module = _vendor_module(self._context)
+        # The most any one span needs, not the sum: the spans run in sequence
+        # and nothing an arrangement stages outlives the columns it computed.
+        return max(module.scratch(span.strategy, self._idest.datatype)
+                   for span in plan)

@@ -143,3 +143,61 @@ def choose_strategy(legal: FrozenSet[Strategy], vendor: str) -> Strategy:
         if strategy in legal:
             return strategy
     return Strategy.GENERIC
+
+
+# -- laying the arrangements out over the output --------------------------- #
+
+@dataclass(frozen=True)
+class Span:
+    """One arrangement over a half-open range of the output's second index.
+
+    A contraction does not have to be computed by a single arrangement, and on
+    one target it already is not: a matrix core covers whole tiles and the
+    columns left over go through a chain, because two or three of them are
+    cheaper padded into a block and one is cheaper not.  That is a genuine
+    choice with a cost behind it, and stating it as a span makes it one the
+    caller can see -- rather than a handoff between two emitters, where the
+    only way to find out what was decided is to read the generated code.
+
+    The lead index is not divided.  Every arrangement here spreads it over the
+    lanes, so a split along it would cut a wave in half; the second index is
+    walked by the loop and cuts freely.
+    """
+
+    strategy: Strategy
+    #: First column this arrangement computes.
+    start: int
+    #: One past the last.
+    stop: int
+
+    def __len__(self) -> int:
+        return max(0, self.stop - self.start)
+
+
+def whole(strategy: Strategy, n: int) -> Tuple[Span, ...]:
+    """One arrangement over the whole output."""
+    return (Span(strategy, 0, n),)
+
+
+def covers(plan: Iterable[Span], n: int) -> bool:
+    """Whether this plan computes every column exactly once.
+
+    A gap is a column nobody writes and an overlap is one two arrangements
+    both accumulate into; the second is the quieter of the two, since the
+    stores still land and only the value is wrong.
+
+    The nest is special-cased rather than ranged: `_nonleading_dim` walks the
+    whole output and takes no bounds, so a plan may name it only as the whole
+    plan.  Giving it a range is the change that would lift that.
+    """
+    spans = [span for span in plan]
+    if not spans:
+        return n == 0
+    if any(span.strategy is Strategy.GENERIC for span in spans):
+        if len(spans) != 1:
+            return False
+    if any(len(span) <= 0 for span in spans):
+        return False
+    if spans[0].start != 0 or spans[-1].stop != n:
+        return False
+    return all(a.stop == b.start for a, b in zip(spans, spans[1:]))
