@@ -136,22 +136,27 @@ class Tensor:
         """
         if self.is_dense():
             return None
-        shape = tuple(self.get_actual_shape())
-        if tuple(self.get_real_shape()) != shape:
-            raise NotImplementedError(
-                f'{self.alias!r}: a sparse tensor with a bounding box smaller '
-                f'than its shape has two candidate orders and nothing pinning '
-                f'which one the kernel means')
+        # `linear_index` speaks full-tensor coordinates; the dense view a
+        # caller compares against spans the bounding box.  So the slot is
+        # asked of the one and the cell reported in the other, and the box's
+        # lower corner is what separates them.
+        box = tuple(self.get_actual_shape())
+        lower = tuple(self.bbox.lower())
         strides, acc = [], 1
-        for extent in shape:
+        for extent in box:
             strides.append(acc)
             acc *= extent
         slots = [-1] * int(self.storage_volume())
-        for idx in _f_order(shape):
+        for idx in _f_order(tuple(self.get_real_shape())):
             if not self.spp.is_nz(idx):
                 continue
-            slots[self.linear_index(idx)] = sum(i * s for i, s
-                                                in zip(idx, strides))
+            cell = tuple(i - lo for i, lo in zip(idx, lower))
+            if any(c < 0 or c >= extent for c, extent in zip(cell, box)):
+                raise ValueError(
+                    f'{self.alias!r}: a non-zero at {idx} lies outside the '
+                    f'bounding box that is supposed to contain them')
+            slots[self.linear_index(idx)] = sum(c * s for c, s
+                                                in zip(cell, strides))
         if any(slot < 0 for slot in slots):
             raise ValueError(
                 f'{self.alias!r}: linear_index left storage slots unassigned; '

@@ -1431,7 +1431,13 @@ class Symbol:
           # SIMD block-aligned sparsity
 
           offset = self.data_view.get_dim_offsets()[leadidx]
-          strindex = self.build_address(writer, context, index[leadidx])
+          # The lead dimension's own index, not an address: what follows
+          # compares it against plain dimension bounds -- the run's `rngS`
+          # and `rngE`, and the lane block's `bndS` and `bndE` -- so it has
+          # to be counted in elements of that dimension.  `build_address`
+          # answers a different question, over the whole index tuple and
+          # with each term already scaled by its stride.
+          strindex = index[leadidx].build(writer, context)
           rngs = []
           rng = None
           startValue = None
@@ -1454,6 +1460,9 @@ class Symbol:
             rngs += [(rng, self.data_view.get_dim_size(leadidx))]
 
           if len(rngs) > 0:
+            # The layout of what these loads produce is the layout of the
+            # lead index, so it is asked of the index tuple.  The address is
+            # derived from it and carries no layout of its own.
             idxvar = writer.op('sub', INDEX, strindex, offset, hint='idx')
 
             lead = index[leadidx]
@@ -1469,7 +1478,7 @@ class Symbol:
               if rngS <= bndS and rngE >= bndE:
                 assert wrote is None
                 wrote = writer.load(self, validx, type_=ScalarType(self.get_fptype()), hint='data',
-                                          layout=layout_of(validx, self.num_threads))
+                                          layout=layout_of(index, self.num_threads))
                 # writer.access_stmt(f'{variable} = {self.name}[{validx}];', self, Effect.READ)
               elif rngE > bndS and rngS < bndE:
                 cond1 = writer.op('ge', BOOL, idxvar, rngS)
@@ -1480,7 +1489,7 @@ class Symbol:
 
                 with sel.then():
                   local_load = writer.load(self, validx, type_=ScalarType(self.get_fptype()), hint='data',
-                                          layout=layout_of(validx, self.num_threads))
+                                          layout=layout_of(index, self.num_threads))
                   sel.yield_(local_load)
                   # writer.access_stmt(f'{variable} = {self.name}[{validx}];', self, Effect.READ)
                 with sel.otherwise():
