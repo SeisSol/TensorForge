@@ -50,5 +50,44 @@ ESIMD_INLINE void splitFloatTF32(UpperT upper, LowerT lower, ValueT value) {
   lower = intel_esimd::simd<tf32, N>(v - hiF);
 }
 
+/// A segmented all-reduce over a vector: each group of `Subblock` lanes ends
+/// holding the reduction over the lanes that share its position in the group.
+///
+/// The same statement as `tensorforge::reduction` in `cuda.h`, whose body is
+/// `for (i = Block/2; i >= Subblock; i >>= 1) x = Op(x, shfl_xor(x, i))` --
+/// and it has to be the same, because a kernel that reduces differently on
+/// two backends is two kernels.
+///
+/// The shuffle is a two-dimensional region here.  `shfl_xor(x, i)` pairs each
+/// lane with the one `i` away, which within every block of `2i` swaps the two
+/// halves: `select<Block / (2 * i), 2 * i, i, 1>(0)` is all the low halves and
+/// `(i)` all the high ones.  Combining the two views and writing the result
+/// back into both is one butterfly step over the whole vector at once.
+///
+/// `Subblock == Block` is the identity: each group is one lane wide, so there
+/// is nothing to combine.  `Subblock == 1` collapses to a single value, which
+/// the ESIMD `reduce`/`hmax`/`hmin` intrinsics do in one call -- the lexic
+/// prefers those and only reaches here when a group is to be kept.
+template <typename Op, int Block, int Subblock, typename T>
+ESIMD_INLINE intel_esimd::simd<T, Block>
+segmentedReduction(intel_esimd::simd<T, Block> v) {
+  static_assert(Subblock >= 1 && Subblock <= Block,
+                "the kept group cannot be wider than the reduced one");
+  if constexpr (Block > Subblock) {
+    constexpr int I = Block / 2;
+    auto lo = v.template select<Block / (2 * I), 2 * I, I, 1>(0);
+    auto hi = v.template select<Block / (2 * I), 2 * I, I, 1>(I);
+    const intel_esimd::simd<T, Block / 2> combined =
+        Op::applyOperation(lo.read(), hi.read());
+    lo = combined;
+    hi = combined;
+    // Halving the *block* halves the stride: after this step lanes that
+    // differ only in bit `I` agree, so the next pairing is over `Block / 2`.
+    return segmentedReduction<Op, Block / 2, Subblock, T>(v);
+  } else {
+    return v;
+  }
+}
+
 } // namespace tensorforge
 #endif // SEISSOL_TENSORFORGE_INCLUDE_TENSORFORGE_DEVICE_ISYCL_H_

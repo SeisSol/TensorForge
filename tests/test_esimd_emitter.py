@@ -735,15 +735,29 @@ def test_nothing_to_combine_is_the_value_itself():
     assert _lexic().reduction('v', Operation.ADD, Datatype.F32, 16, 16) == 'v'
 
 
-def test_a_segmented_reduction_is_declined():
-    """The SPMD butterfly stops at `subblock`, leaving each group its own
-    answer.  Expressible here as a two-dimensional region, but nothing asks
-    for it -- every reduction in the corpus is block=16, subblock=1 -- and an
-    untested butterfly for a case with no caller is how the old `simd_mode`
-    branches came about."""
+@pytest.mark.parametrize('sub', [2, 4, 8])
+def test_a_segmented_reduction_keeps_its_group(sub):
+    """`subblock > 1` is a different shape, not a narrower one.
+
+    A group survives, so the answer is a *vector* -- unlike the collapse,
+    which is a scalar -- and the intrinsics do not answer it: `reduce` and
+    `hmax` return one value for the whole thing.  `segmentedReduction` in
+    `isycl.h` is the butterfly, and `tests/cpp/esimd_reduction.cpp` checks it
+    computes what the CUDA shuffle version computes.
+    """
     from tensorforge.common.operation import Operation
-    with pytest.raises(NotImplementedError, match='segmented'):
-        _lexic().reduction('v', Operation.ADD, Datatype.F32, 16, 4)
+    out = _lexic().reduction('v', Operation.ADD, Datatype.F32, 16, sub)
+    assert f'segmentedReduction<' in out and f', 16, {sub}, float>' in out
+
+
+def test_the_segmented_form_covers_the_bitwise_operations():
+    """It goes through `ReductionOperation`, which `base.h` defines for every
+    backend -- so unlike the collapse, this shape is not limited to the four
+    the ESIMD intrinsics happen to have."""
+    from tensorforge.common.operation import Operation
+    for op in (Operation.XOR, Operation.AND, Operation.OR):
+        out = _lexic().reduction('v', op, Datatype.I32, 16, 4)
+        assert 'segmentedReduction<' in out
 
 
 def test_bitwise_reductions_have_no_entry_point():

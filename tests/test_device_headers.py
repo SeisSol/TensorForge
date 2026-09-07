@@ -39,19 +39,27 @@ pytestmark = pytest.mark.skipif(
     reason="no host C++ compiler to check the device headers with")
 
 
-def test_reduction_operators_hold_their_contract(tmp_path):
-    binary = tmp_path / "reduction_ops"
-    compile_cmd = [
-        syntax.compiler(), "-std=c++17", "-Wall", "-Wextra", "-Werror",
-        f"-I{INCLUDE}", "-o", str(binary), str(SOURCE),
-    ]
+#: Every executable check under `tests/cpp`.  Listed rather than globbed so
+#: that a file added without being wired up is a missing test rather than a
+#: silently skipped one.
+PROGRAMS = ("reduction_ops.cpp", "esimd_reduction.cpp", "sycl_shim.cpp")
 
-    built = subprocess.run(compile_cmd, capture_output=True, text=True,
-                           timeout=120)
+
+def _build_and_run(tmp_path, name):
+    source = HERE / "cpp" / name
+    binary = tmp_path / name.replace(".cpp", "")
+    built = subprocess.run(
+        [syntax.compiler(), "-std=c++17", "-Wall", "-Wextra", "-Werror",
+         f"-I{INCLUDE}", "-o", str(binary), str(source)],
+        capture_output=True, text=True, timeout=120)
     assert built.returncode == 0, (
-        "tests/cpp/reduction_ops.cpp did not compile; a failing static_assert "
-        "names the property that broke:\n" + (built.stderr or built.stdout))
-
+        f"tests/cpp/{name} did not compile; a failing static_assert names the "
+        f"property that broke:\n" + (built.stderr or built.stdout))
     ran = subprocess.run([str(binary)], capture_output=True, text=True,
                          timeout=60)
     assert ran.returncode == 0, (ran.stderr or ran.stdout)
+
+
+@pytest.mark.parametrize("name", PROGRAMS)
+def test_the_cpp_checks_pass(tmp_path, name):
+    _build_and_run(tmp_path, name)
