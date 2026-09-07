@@ -29,10 +29,6 @@ import kernel_eval
 from tensorforge.common.context import Context, Options
 from tensorforge.generators.generator import Generator
 
-#: Reads its own destination through a rotating buffer whose first stage
-#: nothing fills; see `test_the_known_prefetch_divergence`.
-KNOWN_BAD = {'trans_a'}
-
 TIDS = (0, 1, 7, 15, 16, 31)
 
 
@@ -76,13 +72,17 @@ def _compare(name):
 def test_the_oracle_can_read_a_prefetched_kernel():
     """The gap that hid everything else.
 
-    Without `uint32_t` in the declaration pattern this aborts on the loop's
-    first statement, and every case below silently becomes unevaluable.
+    Without `uint32_t` in the declaration pattern a rotated kernel aborts on
+    the loop's first statement -- `wrap.py` declares `uint32_t pipeStage0`
+    there -- and every case below silently becomes unevaluable.  Stated
+    against the declaration itself rather than against a generated kernel,
+    because whether any case still rotates is a separate question with its own
+    answer below.
     """
+    assert kernel_eval._DECL.match('uint32_t pipeStage0 = 0;')
     src = _generate(_load(next(
         p for p in (pathlib.Path(__file__).parent / 'cases').rglob('*.py')
         if p.stem == 'square_notrans')), True)
-    assert 'uint32_t pipeStage0' in src
     assert kernel_eval.evaluate(src, tid=0, seed=17, globals_only=True)
 
 
@@ -98,14 +98,46 @@ def test_prefetch_does_not_change_the_numbers(name):
                                                     abs=1e-4), key
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    'prefetch turns s1 into a rotating buffer -- the compute reads '
-    '`(pipeStage0 % 2) * 320` and the transfer fills `((pipeStage0 + 1) % 2) '
-    '* 320` -- but nothing fills the stage the first iteration reads. There '
-    'is no prologue transfer before the batch loop, so iteration 0 computes '
-    'from whatever the shared arena held.'))
-def test_the_known_prefetch_divergence():
+def test_a_rotation_is_only_granted_where_the_wrap_survives_it():
+    """The invariant: rotated if and only if wrapped.
+
+    The rotation is decided before a body exists, by asking the pass whether
+    it *would* wrap -- and that question used to be put to an unrotated body,
+    where the windows are static and declared ahead of the loop.  Granting the
+    rotation then declares the write window inside the loop, because its
+    offset moves with the stage counter, and that is one of the pass's own
+    refusal conditions.  So a transfer could be accepted while unrotated,
+    rotated on the strength of that, and declined for a reason the rotation
+    created.
+
+    What came out was not a missed optimisation: the compute reads stage
+    `pipeStage % 2` while the transfer fills the other one, so no iteration
+    ever fills the stage it reads and the first element computes from whatever
+    the arena held.  `trans_a` did exactly that -- 192 of 432 destination
+    entries wrong, stable across seeds.
+    """
     plain, wrapped = _compare('trans_a')
     for key in sorted(set(plain) | set(wrapped)):
         assert plain.get(key, 0.0) == pytest.approx(wrapped.get(key, 0.0),
                                                     abs=1e-4), key
+
+
+def test_no_case_in_the_corpus_currently_earns_a_rotation():
+    """Recorded, because the fix above has a cost and it should be visible.
+
+    Every shared transfer that qualified before now fails the confirming
+    probe, for one reason: a rotating write window is declared inside the
+    loop and the peeled transfer would name it before it exists.  The pass
+    says so itself.  Declaring that window ahead of the loop is the fix --
+    the same move that took the address bindings and the static windows out
+    of the guard, one scope further -- and until it is made, rotation is off
+    rather than wrong.
+
+    This asserts the *current* state.  When the window is hoisted it should
+    fail, and that failure is the signal to delete it.
+    """
+    for name in ['trans_a', 'square_notrans', 'rectangular']:
+        path = next(p for p in
+                    (pathlib.Path(__file__).parent / 'cases').rglob('*.py')
+                    if p.stem == name)
+        assert 'pipeStage' not in _generate(_load(path), True)

@@ -234,7 +234,50 @@ class Generator:
       return set()
     finally:
       _wrap.wrap_prefetch = original
-    return names
+    if not names:
+      return names
+
+    # Ask again, this time of the body the answer *produces*.  The first probe
+    # runs unrotated, so the windows are static and declared ahead of the loop;
+    # granting the rotation then declares the write window *inside* it, because
+    # its offset moves with the stage counter -- and that is one of the pass's
+    # refusal conditions.  So a transfer could be accepted while unrotated,
+    # rotated on the strength of that, and then declined for a reason the
+    # rotation itself created.
+    #
+    # Rotated-and-not-wrapped is not a missed optimisation, it is wrong code:
+    # the compute reads stage `pipeStage % 2` and the transfer fills the other
+    # one, so no iteration ever fills the stage it reads and the first element
+    # computes from whatever the arena held.  `trans_a` did exactly that.
+    #
+    # Hence the invariant this restores: rotated if and only if wrapped.
+    confirmed: set = set()
+    original2 = _wrap.wrap_prefetch
+
+    def confirming(body, make_value, next_index=None, report=None,
+                   assume_rotated=False):
+      # `assume_rotated=True`: the buffers really are rotated in this build, so
+      # the refusal that exists only for a single copy does not apply.
+      after = original2(body, make_value, next_index, report, True)
+      for stmt, _ in pir.walk(after):
+        if stmt.op is pir.Op.FOR and stmt.target:
+          for x, _ in pir.walk((stmt,)):
+            if x.op in (pir.Op.COPY_ASYNC, pir.Op.LOAD_ASYNC) and x.args:
+              base = getattr(x.args[0], 'hint', None)
+              if base:
+                confirmed.add(base)
+      return after
+
+    check = Generator(self.descr_list, self._context, attrs=self._attrs)
+    check._rotate = set(names)
+    _wrap.wrap_prefetch = confirming
+    try:
+      check.generate()
+    except Exception:
+      return set()
+    finally:
+      _wrap.wrap_prefetch = original2
+    return names & confirmed
 
   def _apply_rotation(self, loop) -> None:
     """Give the chosen transfers two stages, before anything is allocated."""
