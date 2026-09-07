@@ -13,7 +13,7 @@ binder reorder a recursion.
 import pytest
 
 from tensorforge.analysis.dependence import (Carried, binding_period, carried,
-                                             escapes)
+                                             escapes, shifts)
 from tensorforge.analysis.families import find_repeats
 from tensorforge.common.basic_types import Addressing, Datatype
 from tensorforge.common.matrix.boundingbox import BoundingBox
@@ -23,13 +23,13 @@ from tensorforge.generators.descriptions import GemmDescr
 DTYPE = Datatype.F32
 
 
-def make(alias, shape):
+def make(alias, shape, is_tmp=False):
     """One tensor per alias, so that two chunks naming it name one object."""
     key = (alias, tuple(shape))
     if key not in make.pool:
         make.pool[key] = Tensor(list(shape), Addressing.STRIDED,
                                 BoundingBox([0] * len(shape), list(shape)),
-                                alias=alias, datatype=DTYPE)
+                                alias=alias, is_tmp=is_tmp, datatype=DTYPE)
     return SubTensor(make.pool[key])
 
 
@@ -184,16 +184,48 @@ def test_intermediates_read_afterwards_escape():
         sorted(f'deriv{k}' for k in range(1, 7)))
 
 
-def test_nothing_escapes_a_run_whose_output_is_final():
+def test_a_destination_the_caller_owns_escapes_with_nothing_reading_it():
+    """Writing a tensor the caller passed in is the point of passing it."""
     descrs = independent()
-    assert escapes(descrs, 0, len(descrs)) == ()
+    assert escapes(descrs, 0, len(descrs)) == tuple(
+        sorted(f'face{i}' for i in range(4)))
 
 
-def test_only_what_is_read_again_escapes():
-    steps = recursion(3)
-    tail = [gemm(make('w', [56, 56]), make('deriv3', [56, 9]),
+def test_a_temporary_escapes_only_where_something_reads_it():
+    scratch = [gemm(make('A', [56, 56]), make('I', [56, 9]),
+                    make(f'tmp{i}', [56, 9], is_tmp=True)) for i in range(3)]
+    assert escapes(scratch, 0, len(scratch)) == ()
+
+    tail = [gemm(make('w', [56, 56]), make('tmp1', [56, 9], is_tmp=True),
                  make('total', [56, 9]))]
-    assert escapes(steps + tail, 0, len(steps)) == ('deriv3',)
+    assert escapes(scratch + tail, 0, len(scratch)) == ('tmp1',)
+
+
+# --- one hole's table as another's, moved along -----------------------------
+
+
+def test_a_recursion_shows_its_chain_as_a_shift():
+    run = find_repeats(recursion())[0]
+    found = shifts(run.general.bindings)
+    assert found == ((0, 1, 1),)
+
+
+def test_independent_contributions_have_no_shift():
+    run = find_repeats(independent())[0]
+    assert shifts(run.general.bindings) == ()
+
+
+def test_a_single_agreement_is_not_a_shift():
+    """Two short tables that touch once say nothing."""
+    descrs = [gemm(make('A', [56, 56]), make('x', [56, 9]),
+                   make('y', [56, 9])),
+              gemm(make('A', [56, 56]), make('y', [56, 9]),
+                   make('z', [56, 9])),
+              gemm(make('A', [56, 56]), make('z', [56, 9]),
+                   make('w', [56, 9]))]
+    run = find_repeats(descrs)[0]
+    assert shifts(run.general.bindings, least_overlap=3) == ()
+    assert shifts(run.general.bindings, least_overlap=2) == ((0, 1, 1),)
 
 
 # --- edges ------------------------------------------------------------------

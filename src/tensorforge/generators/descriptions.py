@@ -438,11 +438,21 @@ class ForDescr(OperationDescription):
   escape; either fact alone chooses wrong.
   """
 
-  def __init__(self, general, dependence, periods=(), escaping=()):
+  def __init__(self, general, dependence, periods=(), escaping=(), shifts=()):
     self.general = general
     self.dependence = dependence
     self.periods = tuple(periods)
     self.escaping = tuple(escaping)
+    # `(source, target, distance)`: what hole `source` names at iteration `k`
+    # is what hole `target` names at `k + distance`.  A column that is another
+    # column moved along does not have to be carried twice.
+    self.shifts = tuple(shifts)
+
+  @property
+  def independent_holes(self):
+    """The holes whose tables are not another hole's table at an offset."""
+    derived = {target for _, target, _ in self.shifts}
+    return tuple(h for h in range(self.arity) if h not in derived)
 
   @property
   def iterations(self) -> int:

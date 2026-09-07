@@ -201,13 +201,18 @@ def binding_period(bindings: Sequence[object]) -> Optional[int]:
 
 def escapes(descrs: Sequence[OperationDescription],
             start: int, stop: int) -> Tuple[str, ...]:
-    """Tensors written inside ``[start, stop)`` and read after it.
+    """Tensors written inside ``[start, stop)`` whose value is observable after.
 
-    A run may look like a rotation from the inside and still need every buffer
-    it wrote, because something after it reads them all.  That is not a
-    property of the run, so it cannot be answered from the run alone, and
-    answering it from the run alone is how a rotation gets chosen for a
-    sequence whose whole point is that the intermediates survive.
+    Two ways to be observable, and both have to be counted.  One is a read
+    later in the same list.  The other is being a tensor the caller passed in:
+    writing it is the point of passing it, so its value outlives the kernel
+    whether or not anything else in the list touches it, and only a temporary
+    the generator invented for itself is free of that.
+
+    Counting only the first is how a rotation gets chosen for a sequence whose
+    outputs are the reason the kernel exists.  A recursion whose steps each
+    write a buffer the caller owns has every step observable, even when the
+    list itself never reads one of them again.
     """
     written: Dict[int, object] = {}
     for descr in descrs[start:stop]:
@@ -220,4 +225,42 @@ def escapes(descrs: Sequence[OperationDescription],
         r, _ = accesses(descr)
         later |= {id(tensor) for tensor in r}
 
-    return tuple(sorted(_name(written[i]) for i in written if i in later))
+    return tuple(sorted(_name(tensor) for key, tensor in written.items()
+                        if key in later or not getattr(tensor, 'is_tmp', False)))
+
+
+def shifts(bindings: Sequence[Sequence[object]],
+           least_overlap: int = 2) -> Tuple[Tuple[int, int, int], ...]:
+    """Which hole's table is another hole's table, moved along.
+
+    ``(source, target, distance)`` says that what hole ``source`` names at
+    iteration ``k`` is what hole ``target`` names at iteration ``k + distance``
+    -- the shape of a recurrence, where each step reads what the one before it
+    wrote.
+
+    Worth finding for two reasons.  A table with a shifted column in it is a
+    table with a redundant column: only the independent ones have to be
+    carried, and the rest are the same values read at an offset.  And the
+    relation is the recurrence itself made visible, which no per-iteration
+    fact can be -- within one iteration the two are simply different tensors.
+
+    ``least_overlap`` is how many positions must agree before this counts.  A
+    single coincidence between two short tables says nothing.
+    """
+    if not bindings:
+        return ()
+    arity = len(bindings[0])
+    found: List[Tuple[int, int, int]] = []
+    for distance in range(1, len(bindings)):
+        overlap = len(bindings) - distance
+        if overlap < least_overlap:
+            break
+        for source in range(arity):
+            for target in range(arity):
+                if source == target:
+                    continue
+                if all(_tensor_of(bindings[k][source])
+                       is _tensor_of(bindings[k + distance][target])
+                       for k in range(overlap)):
+                    found.append((source, target, distance))
+    return tuple(found)

@@ -25,7 +25,8 @@ a question for whoever wrote it and not something to make tidier.
 
 from typing import List, Optional, Sequence
 
-from tensorforge.analysis.dependence import binding_period, carried, escapes
+from tensorforge.analysis.dependence import (binding_period, carried,
+                                             escapes, shifts)
 from tensorforge.analysis.families import find_repeats
 from tensorforge.generators.descriptions import ForDescr, OperationDescription
 
@@ -67,7 +68,8 @@ def roll(descrs: Sequence[OperationDescription],
             run.general,
             carried(chunks),
             periods=tuple(binding_period(h) for h in holes),
-            escaping=escapes(descrs, run.start, run.stop))
+            escaping=escapes(descrs, run.start, run.stop),
+            shifts=shifts(run.general.bindings))
         out.append(loop)
         cursor = run.stop
 

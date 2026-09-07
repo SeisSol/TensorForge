@@ -23,12 +23,12 @@ from tensorforge.generators.rolling import roll, unroll
 DTYPE = Datatype.F32
 
 
-def make(alias, shape):
+def make(alias, shape, is_tmp=False):
     key = (alias, tuple(shape))
     if key not in make.pool:
         make.pool[key] = Tensor(list(shape), Addressing.STRIDED,
                                 BoundingBox([0] * len(shape), list(shape)),
-                                alias=alias, datatype=DTYPE)
+                                alias=alias, is_tmp=is_tmp, datatype=DTYPE)
     return SubTensor(make.pool[key])
 
 
@@ -135,13 +135,47 @@ def test_the_loop_carries_what_decides_the_buffers():
     assert loop.escaping == tuple(sorted(f'deriv{k}' for k in range(1, 7)))
 
 
-def test_a_rotation_shows_a_period_and_nothing_escaping():
-    descrs = [gemm(make('A', [56, 56]), make(f'tmp{k % 2}', [56, 9]),
-                   make(f'tmp{(k + 1) % 2}', [56, 9])) for k in range(6)]
-    out = roll(descrs, max_period=1)
-    loop = out[0]
+def test_alternating_buffers_show_a_period_and_still_escape():
+    """Both halves of the rotation test, and why they disagree here.
+
+    Two named buffers taking turns give each hole a period of two.  They are
+    also tensors the caller passed in, so writing them is observable and a
+    rotation over them would not be a rotation but a change of what the kernel
+    leaves behind.  Period alone is not the licence; that is the point of
+    asking both.
+    """
+    descrs = [gemm(make('A', [56, 56]), make(f'buf{k % 2}', [56, 9]),
+                   make(f'buf{(k + 1) % 2}', [56, 9])) for k in range(6)]
+    loop = roll(descrs, max_period=1)[0]
     assert loop.periods == (2, 2)
-    assert loop.escaping == ()
+    assert loop.escaping == ('buf0', 'buf1')
+
+
+def test_scratch_that_does_not_leave_its_chunk_is_not_a_table():
+    """A temporary has no identity outside the body that makes it.
+
+    Which is right for scratch: the generator may rename its own, so two
+    chunks holding one each hold the same thing.  It also means a rotation
+    over scratch is invisible here, so the rotation test -- a period with
+    nothing escaping -- is currently only reachable for buffers the anti-
+    unifier can see, and those escape.  Stated rather than worked around,
+    since closing it means telling scratch that stays inside a chunk from
+    scratch that crosses into the next.
+    """
+    descrs = [d for k in range(4) for d in
+              [gemm(make('A', [56, 56]), make(f'in{k}', [56, 9]),
+                    make(f's{k}', [56, 9], True)),
+               gemm(make('B', [56, 56]), make(f's{k}', [56, 9], True),
+                    make(f'out{k}', [56, 9]))]]
+    loop = roll(descrs)[0]
+    assert (loop.iterations, loop.arity) == (4, 2)
+    assert loop.periods == (None, None)
+
+
+def test_a_chain_carries_its_shift_and_drops_the_derived_column():
+    loop = roll(recursion())[0]
+    assert loop.shifts == ((0, 1, 1),)
+    assert loop.independent_holes == (0,)
 
 
 def test_a_loop_reports_the_reads_of_every_iteration():
