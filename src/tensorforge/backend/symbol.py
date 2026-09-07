@@ -1598,7 +1598,7 @@ class Symbol:
       writer(f'tensorforge::VectorT<{self.get_fptype()}, {vec}> {variable} = *(tensorforge::VectorT<{self.get_fptype()}, {vec}>*)&{access};')
     return None
 
-  def _record_linear_layout(self, index, vec):
+  def _record_linear_layout(self, index, vec, threads=None):
     """Note the distribution a linearized fill leaves behind.
 
     `GlbToRegLoader` stages a flat run: it reads `glb[i + threadIdx.x * g]`
@@ -1621,13 +1621,27 @@ class Symbol:
     unknown.
     """
     from tensorforge.backend.pir.core import LaneAxis, RegisterLayout
-    if self.stype != SymbolType.Register or self.num_threads is None:
+    # `threads` from the fill when the symbol cannot say.  A register image
+    # knows its own lane count; a shared one does not -- `num_threads` is None
+    # there, because a shared buffer is not owned by one multiplication.  The
+    # loader that writes the run does know, and it is the only party that
+    # does, so it passes it.
+    #
+    # Without this the claim was simply absent for shared images, and `None`
+    # means unknown: every consumer had to fail closed.  Invisible under SPMD,
+    # where an unknown distribution costs only precision -- and fatal under an
+    # explicit vector, where a declaration cannot be written without one.  24
+    # values in `accumulate_chain` alone.
+    threads = threads if threads is not None else self.num_threads
+    if self.stype not in (SymbolType.Register, SymbolType.SharedMem):
       return
-    if not isinstance(index, int) or index % (self.num_threads * vec) != 0:
+    if threads is None:
+      return
+    if not isinstance(index, int) or index % (threads * vec) != 0:
       # A fill that does not start on a slot boundary distributes something
       # this function has not established.
       return
-    layout = RegisterLayout((LaneAxis(self.num_threads, 1),))
+    layout = RegisterLayout((LaneAxis(threads, 1),))
     if self.layout is not None and self.layout != layout:
       # Two fills disagreeing about the same register image is a defect, and
       # a silent overwrite would hand the second one's claim to consumers of
@@ -1637,14 +1651,14 @@ class Symbol:
     self.layout = layout
 
   def store_linear(self, writer, context: Context, variable, index, vec = 1,
-                   base: str = None):
+                   base: str = None, threads=None):
     # `base` overrides the pointer written through, without changing the
     # symbol.  A rotating shared-memory buffer declares its pointer at the
     # stage consumers read and fills a different one -- see
     # AbstractShrMemWrite.write_base().
     name = base or self.name
     addrs = []
-    self._record_linear_layout(index, vec)
+    self._record_linear_layout(index, vec, threads)
     if self.stype == SymbolType.Register:
       addr = index // self.num_threads
     else:

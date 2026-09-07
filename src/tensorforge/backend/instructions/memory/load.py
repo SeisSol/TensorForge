@@ -304,6 +304,19 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
         # ESIMD lowering needs this said -- an SPMD backend can leave the
         # distribution in the index expression, a vector one cannot.
         xfer_layout = RegisterLayout((LaneAxis(self._num_threads, 1),))
+        # Said on the *destination* as well, not only on the value in flight.
+        # A later read of this image is `load_linear`, whose address has no
+        # lane term at all -- it reports what the fill recorded and can derive
+        # nothing.  Stating the claim only on the loaded value left the symbol
+        # unknown, so every consumer of the staged image had to fail closed:
+        # invisible under SPMD, where unknown costs precision, and fatal under
+        # an explicit vector, where a declaration cannot be written without a
+        # distribution.
+        #
+        # Same call `store_linear` makes for the other fill path, so the two
+        # cannot record different claims about the same shape.
+        self._dest._record_linear_layout(dst_offset, increment,
+                                         self._num_threads)
         dst_buf = self._dest.pir_buffer(writer)
         src_buf = self._src.pir_buffer(writer)
         def write_load(lhs, rhs, _d=dst_buf, _s=src_buf, _n=increment,
@@ -547,7 +560,8 @@ class GlbToRegLoader(MemoryInstruction, LoadInstruction):
         # scheduler drop its state and nothing reorders across one.
         staged = self._src.load_linear(writer, self._context, None, i, g)
         self._dest.store_linear(writer, self._context, staged, i, g,
-                                base=self.write_base())
+                                base=self.write_base(),
+                                threads=self._num_threads)
 
       if tail:
         # Fewer than `num_threads` elements, so some lanes have nothing to
@@ -564,7 +578,8 @@ class GlbToRegLoader(MemoryInstruction, LoadInstruction):
             writer, self._context,
             self._src.load_linear(writer, self._context, None,
                                   total_size - tail, 1),
-            total_size - tail, 1, base=self.write_base())
+            total_size - tail, 1, base=self.write_base(),
+            threads=self._num_threads)
 
     elif self._context.get_vm().get_hw_descr().vendor in ['amd'] and False:
 

@@ -150,3 +150,55 @@ def test_axes_that_do_not_tile_the_wave_stay_unknown():
     values that differ."""
     idx = [LeadIndex(0, 4, 1), LeadIndex(0, 4, 1)]
     assert layout_of(idx, num_threads=16) is None
+
+
+# --------------------------------------------------------------------------
+# a staged image's distribution is recorded by whoever fills it
+# --------------------------------------------------------------------------
+
+def test_a_shared_image_can_carry_a_layout():
+    """It could not, and the omission was silent.
+
+    `_record_linear_layout` answered only for registers, because a register
+    image knows its own lane count and a shared one does not -- `num_threads`
+    is None there, a shared buffer not being owned by one multiplication.  The
+    loader that writes the run does know, and is the only party that does.
+
+    A later read is `load_linear`, whose address has no lane term at all: it
+    reports what the fill recorded and can derive nothing.  So an unrecorded
+    claim left every consumer of a staged image failing closed -- invisible
+    under SPMD, where unknown costs only precision, and fatal under an
+    explicit vector, where a declaration needs a distribution.
+    """
+    from tensorforge.backend.symbol import Symbol, SymbolType
+    sym = Symbol.__new__(Symbol)
+    sym.stype = SymbolType.SharedMem
+    sym.num_threads = None
+    sym.layout = None
+    sym._record_linear_layout(0, 1, threads=16)
+    assert sym.layout == RegisterLayout((LaneAxis(16, 1),))
+
+
+def test_without_a_lane_count_it_stays_unknown():
+    """`None` means unknown, and a fill that cannot say how wide the run is
+    must leave it that way rather than pick a default."""
+    from tensorforge.backend.symbol import Symbol, SymbolType
+    sym = Symbol.__new__(Symbol)
+    sym.stype = SymbolType.SharedMem
+    sym.num_threads = None
+    sym.layout = None
+    sym._record_linear_layout(0, 1)
+    assert sym.layout is None
+
+
+def test_two_fills_disagreeing_leave_it_unknown():
+    """A silent overwrite would hand the second fill's claim to consumers of
+    the first."""
+    from tensorforge.backend.symbol import Symbol, SymbolType
+    sym = Symbol.__new__(Symbol)
+    sym.stype = SymbolType.SharedMem
+    sym.num_threads = None
+    sym.layout = None
+    sym._record_linear_layout(0, 1, threads=16)
+    sym._record_linear_layout(0, 1, threads=32)
+    assert sym.layout is None
