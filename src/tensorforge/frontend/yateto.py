@@ -459,14 +459,32 @@ class GpuKernelGeneratorV1:
       self._cache[entry_name] = entry
 
   def tensor_ref(self, d):
-    name = d['name']
-    eqspp = d['spp']
+    """One occurrence of a tensor, as the operation names it.
 
-    name = f'{self._prefix}{name}'
+    Three things belong to the occurrence and not to the tensor, and all
+    three used to be dropped here: the box the equivalent sparsity pattern
+    marks out -- which is the range the operation runs over, and regularly
+    much smaller than the storage -- the shift that a slicing operand
+    imposes, and whether it is a slice at all.
+
+    Coordinates: the box is in the space the operand names, the shift maps
+    that space onto the storage, and the two stay apart. Boxes are
+    intersected across operands further down, which only means anything if
+    every operand contributes its box in the same space; the shift is a pure
+    addressing constant and is applied where an address is formed.
+    """
+    name = f'{self._prefix}{d["name"]}'
 
     assert(name in self._cache)
+    tensor = self._cache[name]
 
-    return SubTensor(self._cache[name], self._cache[name].bbox)
+    box = d.get('bbox')
+    # An all-zero pattern marks out no box at all, and a description from a
+    # yateto that predates the field states none either.
+    bbox = tensor.bbox if box is None else BBox(list(box[0]), list(box[1]))
+    offset = d.get('offset') or [0] * bbox.rank()
+
+    return SubTensor(tensor, bbox, offset, sliced=bool(d.get('sliced')))
 
   def tensor_ref_new(self, d):
     name = d['name']
@@ -527,7 +545,8 @@ class GpuKernelGeneratorV1:
     is_temporary = d['flags']['temporary']
     is_constant = d['flags']['constant']
 
-    self._cache[name] = Tensor(shape, addressing, bbox, name, is_temporary, spp, values, datatype)
+    self._cache[name] = Tensor(shape, addressing, bbox, name, is_temporary, spp,
+                               values, datatype, d.get('alignment', 0))
 
     self._tensor_list[name] = TensorData(datatype_new, shape, spp, values=values)
 
