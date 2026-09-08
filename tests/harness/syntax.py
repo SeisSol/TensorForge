@@ -145,3 +145,135 @@ def check_snapshot(path: Path, cxx: Optional[str] = None) -> Result:
 
 def snapshots(pattern: str = "*.cpp") -> List[Path]:
     return sorted(SNAPSHOT_DIR.glob(pattern))
+
+
+# ----------------------------------------------------------------------
+# The device front end
+# ----------------------------------------------------------------------
+#
+# `g++ -fsyntax-only` answers "is this well-formed C++", which is the class of
+# defect that escaped everything else and is worth the four seconds.  It does
+# not answer "will the *device* front end take it", and the two differ: a GNU
+# `vector_size` typedef is well-formed to g++ and rejected by nvcc in device
+# code with "is a vector, which is not supported in device code".
+#
+# That difference is not hypothetical.  `CudaLexic.get_fptype` renders a packed
+# value as `tensorforge::VectorT<float, 4>`, deliberately and with its reasons
+# written down; the NVIDIA matrix path is the only live emitter that makes a
+# *value* of that type, and it produces 101 nvcc errors on a kernel that g++
+# passes without a word.  The path is parked behind `nvidia.ENABLED`, so the
+# corpus never reaches it -- which is exactly the arrangement where a defect
+# waits.  `cuda.h` predicted this one in as many words: "If nvcc ever ...
+# declines `vector_size` in device code at all -- these turn a silent
+# quarter-width copy into a build error."
+#
+# Neither invocation below generates an object: `-ptx` stops nvcc after the
+# device compile, `--cuda-device-only -fsyntax-only` stops clang before code
+# generation.  Half a second per case, against four for the whole host corpus.
+
+@dataclass(frozen=True)
+class _DeviceFrontEnd:
+    #: Overriding variable, the same names `toolchain.py` honours.
+    env: str
+    default: str
+    #: The architecture to compile *for*.  A front end targets any
+    #: architecture it knows without the hardware present, so this is a
+    #: property of the check and not of the machine running it -- the same
+    #: pair `test_snapshots.py` freezes, so a failure names a target the
+    #: corpus already carries.
+    arch: str
+    flags: tuple
+
+
+_DEVICE_FRONT_ENDS = {
+    "cuda": _DeviceFrontEnd(
+        env="NVCC", default="nvcc", arch="sm_86",
+        flags=("-x", "cu", "--expt-relaxed-constexpr", "-ptx")),
+    "hip": _DeviceFrontEnd(
+        env="HIPCC", default="hipcc", arch="gfx90a",
+        flags=("-x", "hip", "--cuda-device-only", "-fsyntax-only")),
+}
+
+INCLUDE = TESTS.parent / "src" / "tensorforge" / "include"
+
+
+#: Generated source the device front end is known to refuse, by
+#: ``(case, backend)``, with the reason.
+#:
+#: The same arrangement as `NOT_YET_ESIMD` and for the same reason: a check
+#: that is permanently red is a check nobody reads.  An entry here is a claim
+#: that the refusal is understood, not that it is acceptable.
+#:
+#: `gemm_square_16_f128` is refused twice over, and only one of the two is
+#: ours.  Below Blackwell nvcc rejects `__float128` in device code outright
+#: -- an architecture fact, and `tests/README.md` already says the case needs
+#: a compiler that supports the type.  On `sm_120`, where the type is taken,
+#: one error is left and it is a generator defect: the load path emits
+#: `__ldcg`, which has no `__float128` overload at any architecture.  Removing
+#: this entry is what a fix for that has to do.
+DEVICE_KNOWN_BAD = {
+    ("gemm_square_16_f128", "cuda"):
+        "nvcc has no `__ldcg` overload for `__float128`, and below sm_120 it "
+        "declines the type in device code at all",
+}
+
+
+def device_known_bad(case_name: str, backend: str) -> str:
+    """The recorded reason this pair does not compile, or ``''``."""
+    return DEVICE_KNOWN_BAD.get((case_name, backend), "")
+
+
+def device_front_end(backend: str) -> Optional[_DeviceFrontEnd]:
+    """The front end for this backend, or None where there is not one.
+
+    SYCL is absent on purpose rather than by omission: `acpp` and `icpx` are
+    whole-program compilers with no device-only mode that stops this early,
+    and a check that quietly compiled the host half too would be a slower
+    version of the one above wearing this one's name.
+    """
+    return _DEVICE_FRONT_ENDS.get(backend)
+
+
+def device_compiler(backend: str) -> Optional[str]:
+    fe = device_front_end(backend)
+    if fe is None:
+        return None
+    return os.environ.get(fe.env) or shutil.which(fe.default)
+
+
+def check_device_source(kernel: str, headers, backend: str,
+                        arch: Optional[str] = None,
+                        path: Optional[Path] = None,
+                        cc: Optional[str] = None) -> Result:
+    """Hand one generated kernel to the device front end.
+
+    `headers` is the generator's own list --- `vm.get_headers()` plus
+    `gen.get_helper_headers()` --- and not a fixed preamble, because which
+    helper headers a kernel needs is a property of what it emitted.  A
+    barrier case pulls in cooperative groups and a plain GEMM does not.
+    """
+    fe = device_front_end(backend)
+    if fe is None:
+        return Result(path or Path("<generated>"), None,
+                      reason=f"no device front end for backend {backend!r}")
+    cc = cc or device_compiler(backend)
+    if cc is None:
+        return Result(path or Path("<generated>"), None,
+                      reason=f"{fe.default} not found; set ${fe.env}")
+
+    suffix = ".cu" if backend == "cuda" else ".hip.cpp"
+    preamble = "\n".join(f'#include "{h}"' for h in headers)
+    with tempfile.NamedTemporaryFile("w", suffix=suffix, delete=False) as f:
+        f.write(preamble + "\n" + kernel)
+        tmp = f.name
+    arch_flag = (f"-arch={arch or fe.arch}" if backend == "cuda"
+                 else f"--offload-arch={arch or fe.arch}")
+    try:
+        r = subprocess.run(
+            [cc, "-std=c++17", "-w", arch_flag, *fe.flags,
+             "-I", str(INCLUDE), tmp, "-o", os.devnull],
+            capture_output=True, text=True)
+    finally:
+        os.unlink(tmp)
+    stderr = r.stderr.replace(tmp, str(path) if path else "<generated>")
+    return Result(path or Path("<generated>"), r.returncode == 0, stderr)

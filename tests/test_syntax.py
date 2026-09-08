@@ -269,3 +269,74 @@ def test_the_check_rejects(name, mutation):
     mutated = mutation(_GOOD)
     assert mutated != _GOOD, "mutation did not apply"
     assert _rejects(mutated), f"{name}: not caught"
+
+
+# ----------------------------------------------------------------------
+# The device front end
+# ----------------------------------------------------------------------
+
+def _device_cases():
+    """Every case, generated fresh, for each backend with a device front end.
+
+    Fresh rather than from `snapshots/`, because the device compile needs the
+    include list the generator produced --- a barrier case pulls in
+    cooperative groups and a plain GEMM does not --- and a snapshot records the
+    kernel without it.  Generation is the cheap half here anyway; the front end
+    is about half a second per case.
+    """
+    from conftest import _discover_cases          # same directory as this file
+    out = []
+    for case in _discover_cases():
+        for backend in ("cuda", "hip"):
+            out.append(pytest.param(case, backend,
+                                    id=f"{case.NAME}-{backend}"))
+    return out
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("dev_case,backend", _device_cases())
+def test_generated_kernel_survives_the_device_front_end(dev_case, backend):
+    """`g++` and `nvcc` do not accept the same language.
+
+    The check above asks whether the emitted source is well-formed C++.  This
+    one asks whether the *device* compiler takes it, and the two answers differ
+    for a class the corpus cannot otherwise see: a GNU `vector_size` typedef
+    passes g++ and is rejected by nvcc in device code.  The NVIDIA matrix path
+    emits exactly that, produces 101 nvcc errors on a kernel g++ passes
+    silently, and sat behind `nvidia.ENABLED = False` where nothing looked.
+
+    Not a substitute for the host check and not a superset of it either: this
+    one compiles only the device half, so a defect in host code the front end
+    never sees is still that one's to catch.
+
+    Skipped rather than passed where the toolchain is absent, and where a case
+    does not generate --- the snapshots own that question.
+    """
+    from tensorforge.common.context import Context
+    from tensorforge.generators.generator import Generator
+
+    fe = syntax.device_front_end(backend)
+    if syntax.device_compiler(backend) is None:
+        pytest.skip(f"{fe.default} not found; set ${fe.env}")
+    known = syntax.device_known_bad(dev_case.NAME, backend)
+    if known:
+        pytest.xfail(known)
+
+    ctx = Context(arch=fe.arch, backend=backend,
+                  fp_type=getattr(dev_case, "DTYPE", None))
+    try:
+        gen = Generator(dev_case.descr_list(), ctx,
+                        attrs=getattr(dev_case, "ATTRS", None))
+        gen.generate()
+    except Exception as exc:                      # noqa: BLE001
+        pytest.skip(f"{dev_case.NAME} does not generate on {backend}: "
+                    f"{type(exc).__name__}")
+
+    headers = list(ctx.get_vm().get_headers()) + list(gen.get_helper_headers())
+    result = syntax.check_device_source(gen.get_kernel(), headers, backend,
+                                        path=Path(f"{dev_case.NAME}.{backend}"))
+    if result.ok is None:
+        pytest.skip(result.reason)
+    assert result.ok, (
+        f"{dev_case.NAME} on {backend}/{fe.arch} does not survive "
+        f"{fe.default}:\n  " + "\n  ".join(result.errors()))
