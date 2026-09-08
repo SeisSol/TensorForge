@@ -132,6 +132,11 @@ class Generator:
     self._tmp_list = None
     self._scopes: Scopes = Scopes()
     self._is_registerd: bool = False
+    #: Tables substituted into the kernel's signature in place of their
+    #: members.  Empty unless something registers one, so a generator that
+    #: never sees a repeated run emits exactly what it did before.
+    self._param_tables = []
+    self._table_member = {}
 
     self._num_threads: int = 0
     self._num_active_threads: int = 0
@@ -569,6 +574,9 @@ class Generator:
 
       lexic.get_stream_via_pointer(writer, 'stream', GeneralLexicon.STREAM_PTR_STR)
 
+      for table in self._param_tables:
+        writer(table.argument())
+
       args = self._generate_kernel_base_args()
       args = ', '.join(args)
       call_site = lexic.get_launch_code(func_name=kernel_name,
@@ -827,6 +835,10 @@ class Generator:
   def get_base_name(self):
     return self._base_kernel_name
 
+  def param_table_types(self) -> List[str]:
+    """The by-value types the signature names, for whoever writes the file."""
+    return [table.struct_definition() for table in self._param_tables]
+
   def _write_kernel_meta_data(self, writer):
     writer(f'// generated with TensorForge. Version: {interop.get_version()}')
     writer('// meta data:')
@@ -839,9 +851,30 @@ class Generator:
       writer(f'// {item}')
     writer.new_line()
 
-  def _generate_base_params_list(self, symbol_list, with_types=True, with_defaults=False):
+  def register_param_table(self, table) -> None:
+    """Take a table into the kernel's signature in place of its members.
+
+    Only the kernel's.  The launcher keeps taking the members one by one and
+    assembles the value itself, so the interface a caller sees does not move --
+    the substitution lives entirely between two pieces of generated code, which
+    is the only reason it can be made at all without touching SeisSol.
+    """
+    self._param_tables.append(table)
+    for member in table.get_operands():
+      self._table_member[member.name] = table
+
+  def _generate_base_params_list(self, symbol_list, with_types=True,
+                                 with_defaults=False, substitute_tables=False):
     params = []
+    emitted_tables = set()
     for symbol in symbol_list:
+      table = self._table_member.get(symbol.name) if substitute_tables else None
+      if table is not None:
+        # In place of the first member, once; the rest of them vanish.
+        if id(table) not in emitted_tables:
+          emitted_tables.add(id(table))
+          params.append(table.parameter() if with_types else table.name)
+        continue
       datatype = self._context.fp_type if symbol.obj.datatype is None else symbol.obj.datatype
       if symbol.obj.addressing == Addressing.SCALAR:
         if not symbol.stype == SymbolType.Data:
@@ -874,13 +907,16 @@ class Generator:
 
   def _generate_kernel_base_args(self):
     global_symbols = self._scopes.get_global_scope().values()
-    args = self._generate_base_params_list(global_symbols, with_types=False)
+    args = self._generate_base_params_list(global_symbols, with_types=False,
+                                           substitute_tables=True)
     return args
 
   def _generate_kernel_proto(self, writer):
     global_symbols = self._scopes.get_global_scope().values()
 
-    params = self._generate_base_params_list(symbol_list=global_symbols, with_types=True)
+    params = self._generate_base_params_list(symbol_list=global_symbols,
+                                             with_types=True,
+                                             substitute_tables=True)
     str_params = ', '.join(params)
 
     mults_per_block = min(section.shr_mem_obj.get_mults_per_block() for section in self._sections)

@@ -333,3 +333,96 @@ def test_a_parameter_table_is_not_emitted_inside_the_loop():
     text = written(VariantLoop(context(), 'face', 4, [Marker('body();')],
                                tables=[table]))
     assert 'tbl' not in text
+
+
+# --- the signature ----------------------------------------------------------
+
+
+def _generator_with_table():
+    from tensorforge.generators.descriptions import GemmDescr
+    from tensorforge.generators.generator import Generator
+
+    pool = {}
+
+    def view(alias, shape):
+        if alias not in pool:
+            pool[alias] = Tensor(
+                list(shape),
+                Addressing.NONE if alias.startswith('K') else Addressing.STRIDED,
+                BoundingBox([0] * len(shape), list(shape)), alias=alias,
+                datatype=Datatype.F32)
+        from tensorforge.common.matrix.tensor import SubTensor
+        return SubTensor(pool[alias])
+
+    descrs = [GemmDescr(trans_a=False, trans_b=False, a=view(f'K{k}', [9, 9]),
+                        b=view(f'i{k}', [9, 4]), c=view(f'o{k}', [9, 4]))
+              for k in range(4)]
+    ctx = context()
+    gen = Generator(descrs, ctx)
+    gen.register()
+    members = [s for s in gen._scopes.get_global_scope().values()
+               if s.obj.alias and s.obj.alias.startswith('K')]
+    table = DeclareOperandTable(ctx, 'faceTable', members, Addressing.NONE,
+                                Datatype.F32, form=TableForm.PARAM)
+    gen.register_param_table(table)
+    gen.generate()
+    return gen, table, members
+
+
+def test_the_kernel_takes_the_table_and_not_its_members():
+    gen, table, members = _generator_with_table()
+    signature = next(l for l in gen.get_kernel().splitlines()
+                     if 'kernel_kernel' in l)
+    assert '__grid_constant__ const faceTable_t faceTable' in signature
+    for member in members:
+        assert f' {member.name},' not in signature
+
+
+def test_the_launcher_still_takes_the_members_one_by_one():
+    """The substitution lives between two pieces of generated code.
+
+    Which is the only reason it can be made without touching the caller: the
+    launcher's signature is the interface, and it does not move.
+    """
+    gen, _, members = _generator_with_table()
+    proto = gen._generate_launcher_proto(with_defaults=False)
+    assert 'faceTable' not in proto
+    for member in members:
+        assert member.name in proto
+
+
+def test_the_launcher_assembles_the_value_before_the_launch():
+    gen, _, _ = _generator_with_table()
+    lines = gen.get_launcher().splitlines()
+    build = next(i for i, l in enumerate(lines) if 'faceTable =' in l)
+    # The name also appears in the occupancy query and the attribute call, so
+    # the launch is found by its argument list rather than by the name.
+    call = next(i for i, l in enumerate(lines) if '<<<' in l)
+    assert build < call
+    assert 'faceTable' in lines[call]
+
+
+def test_the_struct_type_is_reported_for_whoever_writes_the_file():
+    gen, _, _ = _generator_with_table()
+    assert gen.param_table_types() == [
+        'struct faceTable_t { const float *const p[4]; };']
+
+
+def test_a_generator_without_a_table_emits_what_it_did_before():
+    from tensorforge.generators.generator import Generator
+    gen = Generator(_contributions_for_signature(), context())
+    gen.generate()
+    assert gen.param_table_types() == []
+    assert 'faceTable' not in gen.get_kernel()
+
+
+def _contributions_for_signature():
+    from tensorforge.common.matrix.tensor import SubTensor
+    from tensorforge.generators.descriptions import GemmDescr
+
+    def view(alias, shape):
+        return SubTensor(Tensor(list(shape), Addressing.STRIDED,
+                                BoundingBox([0] * len(shape), list(shape)),
+                                alias=alias, datatype=Datatype.F32))
+    return [GemmDescr(trans_a=False, trans_b=False, a=view('A', [9, 9]),
+                      b=view('i', [9, 4]), c=view('o', [9, 4]))]
