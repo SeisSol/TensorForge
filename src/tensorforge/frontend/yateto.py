@@ -10,7 +10,7 @@ from tensorforge.common.matrix.tensor import Tensor, SubTensor
 from tensorforge.common.matrix.spp import FullSPP, BoundingBoxSPP, ListSPP
 from tensorforge.common.matrix.boundingbox import BoundingBox as BBox
 from tensorforge.generators.generator import Generator as TensorForgeGenerator
-from tensorforge.generators.descriptions import MultilinearDescr, ElementwiseDescr, ReductionDescr, GridBarrierDescr, GridFenceDescr, RegionDescription
+from tensorforge.generators.descriptions import MultilinearDescr, ElementwiseDescr, ReductionDescr, GridBarrierDescr, GridFenceDescr, RegionDescription, GuardLiteral
 from tensorforge.common.operation import Operation
 from tensorforge.common.operation import AddOperator, MulOperator, MinOperator, MaxOperator, AndOperator, OrOperator, XorOperator
 
@@ -126,11 +126,10 @@ class GpuKernelGeneratorV1:
     """
     if condition is None:
       return None
-    return [{
-      'tensor': self.tensor_ref(literal['tensor']),
-      'version': literal['version'],
-      'negated': literal['negated'],
-    } for literal in condition]
+    return [GuardLiteral(self.tensor_ref(literal['tensor']),
+                         literal['version'],
+                         literal['negated'])
+            for literal in condition]
 
   #: Operations that a multilinear describes exactly. A pointwise product is
   #: a multilinear over which no axis is contracted, and a sum over one axis
@@ -208,15 +207,11 @@ class GpuKernelGeneratorV1:
       # the guard never holds; yateto kept the statement only so that the
       # tensors it names stay in the kernel's signature
       return 0
-    if condition:
-      raise NotImplementedError(
-        f'{kind} operation under a guard of {len(condition)} literal(s): the '
-        f'guard reaches here as data but nothing lowers it into the kernel '
-        f'yet, and generating the operation unguarded would compute it '
-        f'unconditionally.')
-
     linear = d.get('linear') or {}
     add = linear.get('add', False)
+    # the guard covers every descriptor this operation turns into, the
+    # scaling that may follow included
+    first = len(self._descr_list)
 
     if kind == 'multilinear':
       # the scale is already one of `args` whenever it is not one -- yateto
@@ -272,6 +267,9 @@ class GpuKernelGeneratorV1:
       self._append_scaling(d['result'], linear.get('alpha'))
     else:
       raise NotImplementedError(f'yateto exported an operation of type {kind!r}')
+
+    for descr in self._descr_list[first:]:
+      descr.condition = condition
 
     return 0# self._descr_list[-1].get_flops()
 

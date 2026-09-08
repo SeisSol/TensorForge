@@ -95,7 +95,10 @@ class SectionPlan:
     # -- construction ---------------------------------------------------- #
 
     def _add_reads(self, descr, scopes) -> None:
-        for op in descr.reads():
+        # The guard's operands are read here too. They are not operands of the
+        # operation and no builder resolves them as such, but the section has
+        # to stage them all the same, and this is what decides that.
+        for op in itertools.chain(descr.reads(), descr.condition_reads()):
             tensor = getattr(op, 'tensor', None)
             if tensor is None:
                 continue

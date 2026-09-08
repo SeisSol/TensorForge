@@ -13,7 +13,60 @@ from tensorforge.common.basic_types import Addressing
 
 from typing import List
 
+class GuardLiteral:
+  """One term of a guard: a rank-0 condition tensor, taken or negated.
+
+  `version` distinguishes successive values of the same tensor. yateto writes
+  a condition tensor and may write it again later, and two literals over the
+  same tensor at different versions are different values -- without the
+  version they would compare equal and a guard could be simplified away
+  against a value it never had.
+  """
+
+  __slots__ = ('tensor', 'version', 'negated')
+
+  def __init__(self, tensor, version=0, negated=False):
+    self.tensor = tensor
+    self.version = version
+    self.negated = negated
+
+  def key(self):
+    return (id(getattr(self.tensor, 'tensor', self.tensor)),
+            self.version, self.negated)
+
+  def __str__(self):
+    name = getattr(getattr(self.tensor, 'tensor', None), 'alias', None) or str(self.tensor)
+    return f'{"!" if self.negated else ""}{name}@{self.version}'
+
+
 class OperationDescription:
+  #: The guard this operation runs under: a conjunction of `GuardLiteral`,
+  #: or None for one that always runs. An empty conjunction is also always.
+  #:
+  #: A field rather than a wrapping descriptor, because everything that walks
+  #: a section -- `SectionPlan`, residency, the temporaries -- asks each
+  #: descriptor for its geometry through `reads`, `writes` and
+  #: `effective_boxes` and deliberately does not know what kinds there are. A
+  #: wrapper would have to be unwrapped by every one of those walks, and a
+  #: walk that forgot would read a guarded write as an unconditional one,
+  #: which is the failure that leaves no trace. Grouping neighbours that share
+  #: a guard is then a pass over the list, which is where it belongs.
+  condition = None
+
+  def guarded(self):
+    """Whether this operation runs under a guard that is not always true."""
+    return bool(self.condition)
+
+  def condition_reads(self) -> List:
+    """The views the guard reads.
+
+    Kept apart from `reads()`: those are the operation's operands and a
+    builder resolves them as such, while these are read to decide whether the
+    operation runs at all. A section still has to stage them, so whatever
+    walks the section has to see both.
+    """
+    return [literal.tensor for literal in (self.condition or ())]
+
   def barrier(self):
     return False
 

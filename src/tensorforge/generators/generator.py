@@ -29,7 +29,7 @@ from tensorforge.backend.instructions.builders.allocator_builder import ShrMemAl
 from tensorforge.backend.instructions.sync_block import SyncThreads, SyncBlock, SyncGrid
 from tensorforge.backend.instructions.batch_loop import BatchLoop, LoopMode
 from tensorforge.backend.writer import Writer
-from tensorforge.common.exceptions import GenerationError
+from tensorforge.common.exceptions import GenerationError, InternalError
 
 import tensorforge.interop as interop
 
@@ -728,6 +728,15 @@ class Generator:
         (ReductionDescr, ReductionBuilder(*common)),
     ]
 
+
+    for descr in descr_list:
+      if getattr(descr, 'guarded', lambda: False)():
+        raise InternalError(
+            f'{descr} runs under a guard, and nothing lowers one yet. What is '
+            f'missing is the region: evaluate the conjunction, open a '
+            f'`writer.if_` around the operation\'s body, and stop the plan '
+            f'from counting a guarded write as covering its destination.')
+
     # Expanded, like the section's plan above: a descriptor that stands for
     # several operations is built as those operations.  While that is all a
     # loop lowers to, a rolled list and the same list written out generate the
@@ -788,6 +797,12 @@ class Generator:
           builder.build(descr)
           region.extend(builder.get_instructions())
           break
+      else:
+        # A descriptor nobody recognises used to fall out of the loop and be
+        # dropped, which turns a missing builder into a wrong kernel rather
+        # than an error.
+        raise InternalError(
+            f'no builder for {descr.__class__.__name__}: {descr}')
 
     self._section.ir.append(
         VariantLoop(self._context, counter, loop.iterations, region, tables))
