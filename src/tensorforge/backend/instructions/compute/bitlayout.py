@@ -255,3 +255,54 @@ def moves(have: BitLayout, want: BitLayout, indices,
         out.append(Move(source, target, toggles.pop(),
                         tuple(sorted({there for _, there in pairs}))))
     return tuple(out)
+
+
+def displacement(have: BitLayout, want: BitLayout
+                 ) -> Optional[Tuple[Tuple[Bit, Bit], ...]]:
+    """Bit by bit, where each one is and where it has to be.
+
+    Only the bits that differ, in axis order then bit order.  `None` where the
+    two do not describe the same index space -- a different number of axes, or
+    an axis stated to a different number of bits -- because a bit with no
+    counterpart is not a bit that has to move.
+    """
+    if len(have.axes) != len(want.axes):
+        return None
+    out = []
+    for here, there in zip(have.axes, want.axes):
+        if len(here) != len(there):
+            return None
+        out += [(a, b) for a, b in zip(here, there) if a != b]
+    return tuple(out)
+
+
+def is_exchange(pairs) -> Optional[Tuple[Tuple[int, int], ...]]:
+    """The `(slot weight, lane weight)` pairs a transpose would have to swap.
+
+    An exchange is the one shape a transpose has: every bit that moves goes
+    between a slot and a lane, and the moves pair up -- a slot weight that
+    becomes a lane weight has a bit coming back the other way at exactly those
+    two weights.  Anything else is a different instruction or none: a bit that
+    stays in the lanes and changes weight is a permutation within the lanes,
+    which nothing in `RELAYOUTS` does, and a bit that reaches a vector element
+    is not a cross-lane question at all.
+
+    `()` where nothing differs, which is the answer that says no relayout is
+    called for -- the one an emitter asking "is my operand already right"
+    wants most often and cannot get today.
+    """
+    if pairs is None:
+        return None
+    forward, backward = {}, {}
+    for source, target in pairs:
+        if Place.VECTOR in (source.place, target.place):
+            return None
+        if source.place is target.place:
+            return None
+        if source.place is Place.SLOT:
+            forward[(source.weight, target.weight)] = True
+        else:
+            backward[(target.weight, source.weight)] = True
+    if set(forward) != set(backward):
+        return None
+    return tuple(sorted(forward))

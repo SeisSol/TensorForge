@@ -109,6 +109,9 @@ KEPT_UNREACHABLE = {
         "the same row `position` reads, in the vocabulary a value can also "
         "be read in; nothing compares the two sides yet, which is what the "
         "relayout solver would do",
+    "transpose_exchange":
+        "what the transpose does, in the shared vocabulary; the solver that "
+        "would compare it against a gap is not wired into an emitter yet",
     "NOT_MODELLED":
         "documents the catalogue's boundary; read by the LLVM cross-check",
 }

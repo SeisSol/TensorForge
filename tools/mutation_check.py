@@ -401,6 +401,18 @@ GROUPS = {
     ]),
 
     'bitlayout': ('tests/test_bitlayout.py', [
+        ('an unpaired bit move accepted as an exchange',
+         sub(Path('src/tensorforge/backend/instructions/compute/bitlayout.py'),
+             '    if set(forward) != set(backward):\n        return None',
+             '    if False:\n        return None')),
+        ('a bit staying on its own side counted as moving',
+         sub(Path('src/tensorforge/backend/instructions/compute/bitlayout.py'),
+             '        if source.place is target.place:\n            return None',
+             '        if False:\n            return None')),
+        ('the transpose narrowed by one bit',
+         sub(Path('src/tensorforge/backend/instructions/compute/primitives/amd/relayout.py'),
+             "    return tuple((1 << bit, 1 << bit) for bit in range((ext - 1).bit_length()))",
+             "    return tuple((1 << bit, 1 << bit) for bit in range((ext - 1).bit_length() - 1))")),
         ('a region with two toggles accepted as one',
          sub(Path('src/tensorforge/backend/instructions/compute/bitlayout.py'),
              '        if len(toggles) != 1:\n            return None',

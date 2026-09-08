@@ -133,6 +133,30 @@ TRANSPOSE4X4 = Relayout(
 #: absent on purpose: it is defined in the runtime, but its body uses row and
 #: wave DPP controls that the simulator does not model, so no row for it could
 #: be checked.
+def transpose_exchange(ext: int):
+    """What `transpose{ext}x{ext}b32` does, as `(slot weight, lane weight)`
+    pairs.
+
+    The instruction exchanges the register index with the low lane index
+    inside each group of `ext` lanes, so slot weight `2**b` and lane weight
+    `2**b` trade places for every `b` below `log2(ext)`.  Stated in the shared
+    vocabulary because that is where it can be compared with a gap: what
+    `bitlayout.is_exchange` reports for two layouts is exactly this, or it is
+    not this instruction.
+
+    Not the same statement as `produces`.  That one names the distribution of
+    the *result*, one register at a time, which is what a value carries and
+    what a pass compares.  This names what the instruction did to the whole
+    value, which is what a solver needs -- the index space is the same on both
+    sides of it, and `produces` re-factors it.
+
+    The other two rows of `RELAYOUTS` have no entry here on purpose: both are
+    lossy, they select a sub-block and repeat it rather than moving bits, and
+    a replication is not a permutation.
+    """
+    return tuple((1 << bit, 1 << bit) for bit in range((ext - 1).bit_length()))
+
+
 RELAYOUTS = (BROADCAST, MOVDPP16, TRANSPOSE4X4)
 
 

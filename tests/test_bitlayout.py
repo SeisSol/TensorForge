@@ -310,3 +310,73 @@ def test_a_vector_element_is_out_of_this_family_s_reach():
     packed = BitLayout(((Bit(Place.VECTOR, 1),),))
     plain = BitLayout(((Bit(Place.LANE, 1),),))
     assert bitlayout.moves(packed, plain, [(0,), (1,)]) is None
+
+
+# -- the other half: bits that cross between lane and slot ----------------- #
+
+def _before_transpose(ext, threads):
+    """The shared matrix as the nest holds it: one register per column, the
+    contraction across the lanes."""
+    return BitLayout((
+        tuple(Bit(Place.SLOT, 1 << b) for b in range((ext - 1).bit_length())),
+        tuple(Bit(Place.LANE, 1 << b) for b in range((threads - 1).bit_length())),
+    ))
+
+
+def _after_transpose(ext, threads):
+    """The same elements afterwards: the column on the low lane bits, and the
+    contraction bits it displaced now in the registers."""
+    low = (ext - 1).bit_length()
+    return BitLayout((
+        tuple(Bit(Place.LANE, 1 << b) for b in range(low)),
+        tuple(Bit(Place.SLOT, 1 << b) if b < low else Bit(Place.LANE, 1 << b)
+              for b in range((threads - 1).bit_length())),
+    ))
+
+
+@pytest.mark.parametrize('threads', [32, 64])
+@pytest.mark.parametrize('ext', [4, 16])
+def test_the_gap_across_a_transpose_is_the_exchange_it_performs(ext, threads):
+    """The second half of a solver, and the half the swap family cannot
+    serve: `swap` moves where a copy is read from, a transpose moves a bit
+    between a register and a lane.  What the gap needs and what the
+    instruction does are the same statement here, which is what lets one be
+    answered by the other."""
+    from tensorforge.backend.instructions.compute.primitives.amd import relayout
+    gap = bitlayout.displacement(_before_transpose(ext, threads),
+                                 _after_transpose(ext, threads))
+    assert bitlayout.is_exchange(gap) == relayout.transpose_exchange(ext)
+
+
+def test_no_gap_is_the_answer_an_emitter_wants_most():
+    """`()` and not `None`: nothing to do is a result, and it is the one an
+    operand that already arrives right should get."""
+    layout = _after_transpose(4, 64)
+    assert bitlayout.is_exchange(
+        bitlayout.displacement(layout, layout)) == ()
+
+
+def test_a_permutation_inside_the_lanes_is_no_transpose():
+    """Nothing in `RELAYOUTS` moves a bit from one lane weight to another, so
+    the honest answer is that this family does not reach it."""
+    have = BitLayout(((Bit(Place.LANE, 1), Bit(Place.LANE, 2)),))
+    want = BitLayout(((Bit(Place.LANE, 2), Bit(Place.LANE, 1)),))
+    assert bitlayout.is_exchange(bitlayout.displacement(have, want)) is None
+
+
+def test_an_unpaired_move_is_no_exchange():
+    """A bit leaving the slots with nothing coming back is not what a
+    transpose does -- it would leave two elements in one place."""
+    have = BitLayout(((Bit(Place.SLOT, 1),), (Bit(Place.LANE, 2),)))
+    want = BitLayout(((Bit(Place.LANE, 1),), (Bit(Place.LANE, 2),)))
+    assert bitlayout.is_exchange(bitlayout.displacement(have, want)) is None
+
+
+def test_index_spaces_that_do_not_line_up_have_no_displacement():
+    """`produces` re-factors the index space -- it names one register's
+    distribution -- so it is not what a displacement compares."""
+    assert bitlayout.displacement(BitLayout(((Bit(Place.LANE, 1),),)),
+                                  BitLayout(())) is None
+    assert bitlayout.displacement(
+        BitLayout(((Bit(Place.LANE, 1), Bit(Place.LANE, 2)),)),
+        BitLayout(((Bit(Place.LANE, 1),),))) is None
