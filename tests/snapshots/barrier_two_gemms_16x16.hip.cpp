@@ -32,7 +32,10 @@ void launcher_kernel_9367114bd9(float* m0, unsigned m0_extraOffset, const float*
       }
       
   hipStream_t stream = (streamPtr != nullptr) ? static_cast<hipStream_t>(streamPtr) : 0;
-  hipLaunchKernelGGL(kernel_kernel_9367114bd9, grid, block, 0 * sizeof(float), stream,  m0,  m0_extraOffset,  m1,  m1_extraOffset,  m2,  m2_extraOffset,  m3,  m3_extraOffset,  m4,  m4_extraOffset,  numElements0,  numElements1,  flags0 ,  flags1 );
+  
+    auto args = tensorforge::argsPtrs( m0,  m0_extraOffset,  m1,  m1_extraOffset,  m2,  m2_extraOffset,  m3,  m3_extraOffset,  m4,  m4_extraOffset,  numElements0,  numElements1,  flags0 ,  flags1 );
+    hipLaunchCooperativeKernel(kernel_kernel_9367114bd9, grid, block, args.data(), 0 * sizeof(float), stream);
+  ;
   CHECK_ERR;
 }
 
