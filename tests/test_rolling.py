@@ -290,3 +290,59 @@ def test_a_loop_stands_for_every_operation_of_every_iteration():
     loop = roll(original)[0]
     assert len(loop.operations()) == len(original)
     assert same_shape(loop.operations()) == same_shape(original)
+
+
+# --- the loop through the generator -----------------------------------------
+
+
+def _generated(descrs):
+    from tensorforge.common.context import Context
+    from tensorforge.generators.generator import Generator
+    gen = Generator(descrs, Context(arch='sm_86', backend='cuda',
+                                    fp_type=DTYPE))
+    gen.generate()
+    return gen.get_kernel()
+
+
+def _code_only(text):
+    """The kernel without its descriptor comment block or its name."""
+    import re
+    text = re.sub(r'kernel_[0-9a-f]+', 'K', text)
+    return '\n'.join(line for line in text.splitlines()
+                     if not line.lstrip().startswith('//'))
+
+
+def _contributions(count=3):
+    return [gemm(make('A', [9, 9]), make(f'i{k}', [9, 4]),
+                 make(f'o{k}', [9, 4])) for k in range(count)]
+
+
+def test_a_rolled_list_generates_the_same_kernel_body():
+    """While a loop lowers to its iterations, rolling changes no code.
+
+    The state the loop's own lowering has to be measured against: every walk
+    over the descriptor list -- lane geometry, operand naming, the section's
+    plan, the builders -- goes over the expansion, so a repetition stated once
+    and the same repetition written out reach the same instructions.  A walk
+    that was missed shows up here as a difference rather than as a kernel that
+    silently drops a body.
+    """
+    plain = _contributions()
+    rolled = roll(_contributions())
+    assert any(isinstance(d, ForDescr) for d in rolled)
+    assert _code_only(_generated(plain)) == _code_only(_generated(rolled))
+
+
+def test_the_descriptor_comment_states_the_rolled_form():
+    """What does differ, and why it is left differing.
+
+    The comment block above a kernel is the list the generator was handed, and
+    a rolled list is not the same list.  It feeds the kernel's name, so a
+    rolled kernel is a distinct kernel from the start -- which is what keeps a
+    later change of lowering from colliding with a cached build of the same
+    name.
+    """
+    plain = _generated(_contributions())
+    rolled = _generated(roll(_contributions()))
+    assert plain != rolled
+    assert 'for 3' in rolled

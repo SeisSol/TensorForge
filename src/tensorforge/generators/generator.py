@@ -587,7 +587,10 @@ class Generator:
 
   def _deduce_num_threads(self):
     """Adopt the section's lane geometry: the caller's, or the deduced one."""
-    config = self._lanes or lane_config.deduce(self.descr_list, self._context)
+    # Over the expansion: lane geometry follows from the operations, and a
+    # descriptor that stands for several is not one of them.
+    flat = [op for descr in self.descr_list for op in descr.operations()]
+    config = self._lanes or lane_config.deduce(flat, self._context)
     self._num_threads = config.num_threads
     self._num_active_threads = config.num_active_threads
     self._lead_width = config.lead_width
@@ -697,12 +700,18 @@ class Generator:
         (ReductionDescr, ReductionBuilder(*common)),
     ]
 
-    for descr in descr_list:
-      for kind, builder in builders:
-        if isinstance(descr, kind):
-          builder.build(descr)
-          self._section.ir.extend(builder.get_instructions())
-          break
+    # Expanded, like the section's plan above: a descriptor that stands for
+    # several operations is built as those operations.  While that is all a
+    # loop lowers to, a rolled list and the same list written out generate the
+    # same body, which is the state the loop's own lowering has to be measured
+    # against before it replaces this.
+    for outer in descr_list:
+      for descr in outer.operations():
+        for kind, builder in builders:
+          if isinstance(descr, kind):
+            builder.build(descr)
+            self._section.ir.extend(builder.get_instructions())
+            break
 
     # Anything the section still holds only in registers has to reach memory
     # before the section ends.

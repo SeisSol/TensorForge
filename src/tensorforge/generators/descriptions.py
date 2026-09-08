@@ -491,6 +491,20 @@ class ForDescr(OperationDescription):
   def operations(self) -> List:
     return [descr for body in self.bodies() for descr in body]
 
+  def matrix_list(self) -> List:
+    """Every operand of every iteration, first use first.
+
+    In the order the operations state them, so that naming a rolled list and
+    naming the same list written out reach the same names.  A kernel whose
+    parameters change places because a repetition was stated once would be a
+    different kernel for no reason anyone asked for.
+    """
+    seen = {}
+    for descr in self.operations():
+      for matrix in descr.matrix_list():
+        seen.setdefault(matrix.tensor, matrix)
+    return list(seen.values())
+
   def destinations(self) -> List:
     seen = []
     for body in self.bodies():
