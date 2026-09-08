@@ -35,7 +35,7 @@ AMD = (Path(__file__).parent.parent / "src" / "tensorforge" / "backend" /
 #: to launder dead code past this check.
 MODULES = ["__init__", "arch", "caps", "features", "catalog", "layouts",
            "reorder", "relayout", "select", "emitters", "codegen",
-           "exchange_codegen", "unused"]
+           "exchange_codegen", "tiling", "unused"]
 
 #: What the dispatch calls into this package.  Two, and both are entry points
 #: in the same sense: one is asked before generation what has to be reserved,
@@ -71,70 +71,17 @@ KEPT_UNREACHABLE = {
     # what `test_allow_list_does_not_outlive_its_entries` enforces.
     "_place":
         "the table's decoder; reached only from `position`",
-    "Provenance":
-        "says whether a row is measured or derived; read by `established`",
-    "provenance":
-        "same, per operand; no emitter asks yet",
     "established":
         "the strict query an emitter uses to decline a derived layout",
-    "_index_bits":
-        "half the A/B derivation; reached only from `_derived`",
-    "_contraction_bits":
-        "the other half; reached only from `_derived`",
-    "_accumulator_precedent":
-        "looks for a unanimous D; reached only from `_derived`",
-    "_derived":
-        "rows for the generations the calculator does not reach",
     "_row":
         "measured row or derived one; reached only from `position`",
     "AXES":
         "names the operand index order for `index_terms`",
-    "Move":
-        "one register into one region of a fragment; the emitter that turns "
-        "these into `swap` and `dppUpdate` calls is not written",
-    "matmul_exchange":
-        "the k>1 matrix path, written and deliberately not routed: wiring it "
-        "up changes every F64 kernel on CDNA 2 and later and the only check "
-        "available here is that it follows its plans",
-    "exchange_op":
-        "which instruction that path would take; the gate `matmul` would ask",
-    "_b_fragment":
-        "one B fragment; reached only from `matmul_exchange`",
-    "_writeback":
-        "one output column; reached only from `matmul_exchange`",
-    "_swapped":
-        "a swap sequence; reached from both of those",
-    "_merge":
-        "a masked merge; reached from both of those",
-    "Exchange":
-        "the transpose and contraction order that feed an A fragment",
-    "a_exchange":
-        "names that transpose; the emitter that calls it is not written",
     "FED_BY":
         "which accessor feeds which fragment; the names collide and the "
         "mapping is not symmetric",
-    "broadcast_feeds_a":
-        "whether the instruction fetches its own A operand; read by the "
-        "emitter that is not written",
-    "Gather":
-        "one accumulator register into a region of an output column; the "
-        "emitter that turns these into calls is not written",
-    "accumulator_gathers":
-        "the writeback plan; no emitter consumes it yet",
     "accumulator_cost":
         "prices the epilogue against the contraction loop that filled it",
-    "Select":
-        "which lanes a merge writes, and what that costs; read by `Move`",
-    "BANK":
-        "lanes per DPP bank, which is what `bank_mask` selects",
-    "IDENTITY_DPP":
-        "the control that makes `dppUpdate` a merge and not a shuffle",
-    "ROW":
-        "lanes per DPP row, which is what `row_mask` selects",
-    "_swaps_for":
-        "bit mask to `swap` sequence; reached only from `fragment_moves`",
-    "fragment_moves":
-        "the reordering plan; no emitter consumes it yet",
     "fragment_cost":
         "prices a plan against staging or against not taking the path",
     "Term":
@@ -149,8 +96,6 @@ KEPT_UNREACHABLE = {
     "position":
         "fragment placement; the emitter that stages an operand into one is "
         "not written",
-    "covers":
-        "guards `position`; same call site, not written yet",
     "lane_batched_ops":
         "the same precondition asked of the whole catalogue; the F32 policy "
         "reaches it through MFMA_TILES instead",

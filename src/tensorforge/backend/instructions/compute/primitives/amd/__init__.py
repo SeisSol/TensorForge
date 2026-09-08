@@ -54,6 +54,9 @@ from .reorder import (BANK, FED_BY, IDENTITY_DPP, ROW, Gather, Move,
                       accumulator_gathers, broadcast_feeds_a,
                       fragment_cost, fragment_moves)
 from .codegen import hfma, matmul32, matmulemu, matmuldpp
+from .exchange_codegen import exchange_op, matmul_exchange
+from .tiling import (EMULATION, EXCHANGE, Fit, Scheme, boundary,
+                     choose, offers)
 from .emitters import fmadpp, fmadpp4, fmadpp8, fmadpp16, fmascalar
 from .relayout import (BROADCAST, MOVDPP16, RELAYOUTS, TRANSPOSE4X4, Relayout,
                        find_relayout)
@@ -67,6 +70,7 @@ __all__ = [
     'FEATURE_TARGETS', 'has_feature', 'wave_size',
     'Call', 'Fragment', 'MatrixOp', 'MATRIX_OPS', 'MANTISSA',
     'DEFINED_SPLITS', 'emu_tile_for', 'matmulemu', 'EMULATION',
+    'EXCHANGE', 'Scheme', 'Fit', 'exchange_op', 'matmul_exchange',
     'NOT_MODELLED', 'ops_for',
     'MfmaTile', 'DEFINED_TRANSPOSES', 'MFMA_TILES', 'usable_mfma_tiles',
     'lane_batched_ops', 'mfma_tile_for',
@@ -85,19 +89,6 @@ __all__ = [
 ]
 
 
-#: Whether the emulated tile is deployed, as opposed to whether one exists
-#: for a shape -- that second question is `emu_tile_for`.  Two facts, so two
-#: names, and only this one is a decision about the generator.
-#:
-#: Parked for the same reason `nvidia.ENABLED` is.  The operand stacking is
-#: derived from `layouts.position` and checked against it, and the split is
-#: the runtime's; what is left is whether three BF16 products through the
-#: matrix unit beat one F32 product through it, on a machine.  That is a run,
-#: not an argument -- and unlike the DPAS case the direct path here is not
-#: merely slower but already fast, so the answer could well be no.
-EMULATION = False
-
-
 def strategies(shape, ctx):
     """What this target can emit for this shape.
 
@@ -105,13 +96,14 @@ def strategies(shape, ctx):
     of the shape, and where the widest form does not link, `select.py` falls
     to a narrower one rather than to nothing.
 
-    A matrix core only where a tile fits, which is a structural question and
-    not a family or a type one.  `mfma_f64_16x16x4f64` spends two of its lane
-    bits on the contraction, so the data operand carries the leading dimension
-    there and the lane-batched loop cannot feed it; `MatrixOp.lane_batched`
-    states that as one equation and `mfma_tile_for` asks it.  F64 therefore
-    lands on DPP -- where `fmacdpp16(double&, ...)` serves it -- because no
-    tile fits, rather than because a condition names the type.
+    A matrix core where any of the schemes in `tiling` serves the shape,
+    which is a structural question and not a family or a type one.
+    `mfma_f64_16x16x4f64` spends two of its lane bits on the contraction, so
+    the data operand carries the leading dimension there and the lane-batched
+    loop cannot feed it; `MatrixOp.lane_batched` states that as one equation.
+    F64 therefore lands on DPP -- where `fmacdpp16(double&, ...)` serves it --
+    while the scheme that could feed it is not deployed, rather than because a
+    condition names the type.
 
     A sparse second operand is read by linear index, which no fragment layout
     accepts and which the broadcast chain has no lane to replicate; the DPP
@@ -123,7 +115,7 @@ def strategies(shape, ctx):
         # through `readlane`.  It cannot read a sparse operand, which is the
         # one thing the DPP branch does that this does not.
         offered.add(Strategy.BROADCAST)
-        if mfma_tile_for(shape.threads, shape.accumulator, ctx) is not None:
+        if offers(shape.threads, shape.accumulator, ctx):
             offered.add(Strategy.MATRIX)
     return frozenset(offered)
 
@@ -137,7 +129,8 @@ def plan(strategy, shape, n, ctx):
     """How the chosen arrangement is laid out over the output.
 
     The matrix core covers whole tiles; what is left over is a cost question
-    with a threshold behind it.  A tail of two or three columns is cheaper as
+    with a threshold behind it, and which threshold depends on which scheme
+    `tiling` picked.  A tail of two or three columns is cheaper as
     one MFMA block with its spare lanes zeroed than as two or three passes of
     a broadcast chain, and a tail of one is not -- padding a block of four to
     compute one column spends three quarters of it on zeroes.
@@ -151,24 +144,19 @@ def plan(strategy, shape, n, ctx):
     """
     if strategy is not Strategy.MATRIX:
         return whole(strategy, n)
-    tile = mfma_tile_for(shape.threads, shape.accumulator, ctx)
-    # What the last block would spend on zeroes if it ran padded.  Nothing
-    # left over means there is no tail to place; all but one position means
-    # the block would compute a single real column, which the chain does for
-    # the price of that column instead of the price of a block.  Anything
-    # between is cheaper padded, so the block takes it and no second span is
-    # named.
-    empty = packing.waste(n, tile.block)
-    boundary = ((n // tile.block) * tile.block) \
-        if empty in (0, tile.block - 1) else n
-    if boundary >= n:
+    fit = choose(shape.threads, shape.accumulator, ctx)
+    # Asked of the scheme that will run rather than of one of them.  Only the
+    # lane-batched one draws a boundary at all, and the threshold behind it is
+    # a measurement against its own block width.
+    edge = boundary(fit, n)
+    if edge >= n:
         return whole(Strategy.MATRIX, n)
-    if boundary <= 0:
+    if edge <= 0:
         # Fewer columns than one block, and too few to repay padding it: there
         # is no matrix span to name, not an empty one.
         return whole(Strategy.DPP, n)
-    return (Span(Strategy.MATRIX, 0, boundary),
-            Span(Strategy.DPP, boundary, n))
+    return (Span(Strategy.MATRIX, 0, edge),
+            Span(Strategy.DPP, edge, n))
 
 
 def matmul(writer, ops, ctx, span):
@@ -180,19 +168,22 @@ def matmul(writer, ops, ctx, span):
     if span.strategy is Strategy.BROADCAST:
         return broadcast.matmul(writer, ops, ctx, span)
     if span.strategy is Strategy.MATRIX:
-        emu = emu_tile_for(threads, dtype, ctx) if EMULATION else None
-        if emu is not None and (ops.a, ops.b) == (dtype, dtype):
-            tile, terms = emu
-            return matmulemu(writer, C, A, B, M, N, K, kx, threads, dtype,
-                             sparse, ctx, span.start, span.stop, tile, terms)
-        tile = mfma_tile_for(threads, dtype, ctx)
-        if (ops.a, ops.b) != (tile.op.a.dtype, tile.op.b.dtype):
-            # The tile was selected by what it accumulates in; what it
-            # multiplies is a separate property of the same entry.  Where the
-            # two operands do not already arrive as its fragments want them,
-            # reaching this instruction is a split, and that is not what this
-            # emitter does.
+        fit = choose(threads, dtype, ctx)
+        if fit is None or (ops.a, ops.b) != (fit.reads, fit.reads):
+            # The entry was selected by what it accumulates in; what it
+            # multiplies is a separate property of the same entry, and an
+            # emulated scheme reads a third thing again.  `Fit.reads` is the
+            # one the chosen scheme expects, and where the operands do not
+            # arrive as it, reaching the instruction is a further split that
+            # none of these emitters performs.
             return False
+        if fit.scheme is Scheme.EMULATED:
+            return matmulemu(writer, C, A, B, M, N, K, kx, threads, dtype,
+                             sparse, ctx, span.start, span.stop, fit.tile,
+                             fit.terms)
+        if fit.scheme is Scheme.EXCHANGE:
+            return matmul_exchange(writer, C, A, B, M, N, K, kx, threads,
+                                   dtype, sparse, ctx, span.start, span.stop)
         matmul32(writer, C, A, B, M, N, K, kx, threads, dtype, sparse, ctx,
                  span.start, span.stop)
     else:

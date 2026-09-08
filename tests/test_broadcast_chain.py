@@ -104,12 +104,27 @@ def test_a_span_bounds_what_it_writes(hip):
     assert {j for _, _, j in rec.stores} == {3, 4, 5}
 
 
-def test_it_declines_a_sparse_operand():
+def test_amd_never_offers_the_chain_a_sparse_operand():
     """B is reached through its linear index there, and the contraction here
-    walks B's lanes; there is no lane to replicate."""
-    ops = _ops(None, 4, sparse=lambda k, j: True)
-    assert broadcast.matmul(None, ops, None,
-                            Span(Strategy.BROADCAST, 0, 4)) is False
+    walks B's lanes; there is no lane to replicate.
+
+    The guarantee is the dispatch's rather than the emitter's, which is what
+    keeps one bounds test out of every product."""
+    shape = ComputeShape(threads=32, accumulator=Datatype.F32, sparse=True,
+                         explicit_simd=False)
+    assert Strategy.BROADCAST not in amd.strategies(shape, None)
+
+
+@pytest.mark.xfail(strict=True, reason=(
+    "intel.supports documents `not sparse` as one of its three conditions "
+    "and no longer applies it, and strategies() guards only MATRIX with it. "
+    "So an ESIMD kernel with a sparse second operand is offered the chain, "
+    "which then reads B through the coordinate accessor it is not stored "
+    "under -- a wrong answer rather than a failure."))
+def test_intel_never_offers_the_chain_a_sparse_operand():
+    shape = ComputeShape(threads=16, accumulator=Datatype.F32, sparse=True,
+                         explicit_simd=True)
+    assert Strategy.BROADCAST not in intel.strategies(shape, None)
 
 
 # -- where it sits in the order -------------------------------------------- #

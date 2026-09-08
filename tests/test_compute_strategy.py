@@ -222,3 +222,67 @@ def test_intel_declines_operands_its_split_cannot_take():
                          accumulator=Datatype.F32)
     assert intel.matmul(None, ops, None,
                         Span(Strategy.MATRIX, 0, 1)) is False
+
+
+# -- choosing among the matrix schemes ------------------------------------- #
+
+def _hip(arch='gfx90a', dtype=Datatype.F32):
+    from tensorforge.common.context import Context
+    return Context(arch=arch, backend='hip', fp_type=dtype)
+
+
+def test_the_three_matrix_schemes_overlap():
+    """Which is why the choice is ranked rather than conditioned.  At a full
+    wave on CDNA every one of them serves an F32 contraction."""
+    from tensorforge.backend.instructions.compute.primitives.amd import tiling
+    ctx = _hip()
+    assert tiling.mfma_tile_for(64, Datatype.F32, ctx) is not None
+    assert tiling.exchange_op(Datatype.F32, 64, ctx) is not None
+    assert tiling.emu_tile_for(64, Datatype.F32, ctx) is not None
+
+
+def test_only_the_exchange_scheme_serves_f64():
+    """The lane-batched loop cannot feed an instruction that spends lane bits
+    on the contraction, and there is nothing narrower to emulate F64 from."""
+    from tensorforge.backend.instructions.compute.primitives.amd import tiling
+    ctx = _hip(dtype=Datatype.F64)
+    assert tiling.mfma_tile_for(64, Datatype.F64, ctx) is None
+    assert tiling.emu_tile_for(64, Datatype.F64, ctx) is None
+    assert tiling.exchange_op(Datatype.F64, 64, ctx) is not None
+
+
+def test_both_gates_off_leaves_exactly_the_deployed_scheme():
+    """What makes the layer snapshot-neutral: with nothing switched on, the
+    only scheme offered is the one that was running."""
+    from tensorforge.backend.instructions.compute.primitives.amd import tiling
+    assert (tiling.EMULATION, tiling.EXCHANGE) == (False, False)
+    for dtype in (Datatype.F32, Datatype.F64):
+        for threads in (32, 64):
+            offered = tiling.offers(threads, dtype, _hip(dtype=dtype))
+            assert offered <= {tiling.Scheme.LANE_BATCHED}
+
+
+def test_a_gated_scheme_outranks_the_deployed_one():
+    """Otherwise the switch answers nothing: wherever the deployed scheme also
+    fits, it would keep running and the gate would only affect the shapes
+    nothing else served."""
+    from tensorforge.backend.instructions.compute.primitives.amd import tiling
+    order = tiling.ORDER
+    assert order[-1] is tiling.Scheme.LANE_BATCHED
+    assert set(order) == set(tiling.Scheme)
+
+
+def test_only_the_lane_batched_scheme_draws_a_boundary():
+    """The other two pad a partial block inside the emitter, so a plan has no
+    tail to place -- and the four-wide threshold would not carry to a block of
+    sixteen anyway."""
+    from tensorforge.backend.instructions.compute.primitives.amd import tiling
+    ctx = _hip()
+    lane = tiling.Fit(tiling.Scheme.LANE_BATCHED,
+                      tiling.mfma_tile_for(64, Datatype.F32, ctx).op)
+    swap = tiling.Fit(tiling.Scheme.EXCHANGE,
+                      tiling.exchange_op(Datatype.F32, 64, ctx))
+    for n in range(1, 40):
+        assert tiling.boundary(swap, n) == n
+    assert tiling.boundary(lane, 9) == 8
+    assert tiling.boundary(lane, 10) == 10

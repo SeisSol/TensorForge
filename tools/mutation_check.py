@@ -352,27 +352,22 @@ GROUPS = {
     # the boundary back where each half of that mistake had it.
     'tiling': ('tests/test_amd_tiling.py', [
         ('the boundary ignores the padding decision',
-         sub(PKG / '__init__.py',
-             '    boundary = ((n // tile.block) * tile.block) \\\n'
-             '        if empty in (0, tile.block - 1) else n',
-             '    boundary = (n // tile.block) * tile.block')),
+         sub(PKG / 'tiling.py', '    return ((n // fit.width) * fit.width) if empty in (0, fit.width - 1) else n',
+             '    return (n // fit.width) * fit.width')),
         ('over-corrected: the tail dropped entirely',
-         sub(PKG / '__init__.py',
-             '    boundary = ((n // tile.block) * tile.block) \\\n'
-             '        if empty in (0, tile.block - 1) else n',
-             '    boundary = n')),
+         sub(PKG / 'tiling.py', '    return ((n // fit.width) * fit.width) if empty in (0, fit.width - 1) else n', '    return n')),
         ('padding policy inverted',
-         sub(PKG / '__init__.py',
-             'if empty in (0, tile.block - 1) else n',
-             'if empty not in (0, tile.block - 1) else n')),
+         sub(PKG / 'tiling.py', 'if empty in (0, fit.width - 1) else n',
+             'if empty not in (0, fit.width - 1) else n')),
         ('a block of one real column padded anyway',
-         sub(PKG / '__init__.py',
-             'if empty in (0, tile.block - 1) else n',
+         sub(PKG / 'tiling.py', 'if empty in (0, fit.width - 1) else n',
              'if empty == 0 else n')),
+        ('a scheme that pads its own tail asked for a boundary anyway',
+         sub(PKG / 'tiling.py',
+             '    if fit.scheme is not Scheme.LANE_BATCHED:\n        return n',
+             '    if False:\n        return n')),
         ('the empty span is planned rather than dropped',
-         sub(PKG / '__init__.py',
-             '    if boundary <= 0:',
-             '    if False:')),
+         sub(PKG / '__init__.py', '    if edge <= 0:', '    if False:')),
     ]),
 
     'packing': ('tests/test_packing.py', [
