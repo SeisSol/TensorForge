@@ -611,6 +611,21 @@ class MultilinearInstruction(ComputeInstruction):
             n *= mx - mi
         return n
 
+    def _shape(self) -> ComputeShape:
+        """What the choice and the reservation are both made from.
+
+        One place, because they have to agree: a plan chosen from one reading
+        of the operation and a buffer sized from another is either memory
+        nobody writes or an overrun.
+        """
+        return ComputeShape(threads=self._num_threads,
+                            accumulator=self._idest.get_fptype(),
+                            sparse=self._second_operand_is_sparse(),
+                            explicit_simd=_explicit_simd(self._context),
+                            lead=self._ns[0][1] - self._ns[0][0],
+                            depth=math.prod(mx - mi for mi, mx in self._ks),
+                            lead_width=self._lead_width)
+
     def _plan(self) -> Tuple[Span, ...]:
         """Which arrangements compute this operation, over which columns.
 
@@ -627,12 +642,7 @@ class MultilinearInstruction(ComputeInstruction):
         if module is None or not is_contraction(len(self._ops),
                                                 self._lead_width):
             return whole(Strategy.GENERIC, n)
-        shape = ComputeShape(threads=self._num_threads,
-                             accumulator=self._idest.get_fptype(),
-                             sparse=self._second_operand_is_sparse(),
-                             explicit_simd=_explicit_simd(self._context),
-                             lead=self._ns[0][1] - self._ns[0][0],
-                             depth=math.prod(mx - mi for mi, mx in self._ks))
+        shape = self._shape()
         chosen = choose_strategy(
             legal_strategies(module.strategies(shape, self._context)),
             self._context.get_vm().get_hw_descr().vendor)
@@ -645,7 +655,6 @@ class MultilinearInstruction(ComputeInstruction):
                 f'{plan} for {n} columns, which does not compute each of them '
                 f'exactly once')
         return plan
-
 
     def _nonleading_dim_test(self, writer: Writer):
         # if len(self._ks) == 0 and len(self._ops) == 1:
@@ -955,6 +964,6 @@ class MultilinearInstruction(ComputeInstruction):
         module = _vendor_module(self._context)
         # The most any one span needs, not the sum: the spans run in sequence
         # and nothing an arrangement stages outlives the columns it computed.
-        return max(module.scratch(span.strategy, self._idest.get_fptype(),
+        return max(module.scratch(span.strategy, self._shape(),
                                   self._context)
                    for span in plan)

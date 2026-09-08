@@ -505,7 +505,7 @@ def strategies(shape, ctx):
     return frozenset(offered)
 
 
-def scratch(strategy, accumulator, ctx):
+def scratch(strategy, shape, ctx):
     """Nothing: both arrangements here hold their fragments in registers.
 
     `ctx` is unused and is part of the signature anyway: the NVIDIA answer

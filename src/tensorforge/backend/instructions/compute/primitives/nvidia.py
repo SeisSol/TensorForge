@@ -329,7 +329,7 @@ def strategies(shape, ctx):
     return frozenset()
 
 
-def scratch(strategy, accumulator, ctx):
+def scratch(strategy, shape, ctx):
     """One set of staging tiles, sized off the same atom the emitter picks.
 
     Asked before generation, so it cannot depend on anything the body decides
@@ -339,7 +339,7 @@ def scratch(strategy, accumulator, ctx):
     """
     if strategy is not Strategy.MATRIX:
         return 0
-    return shmsize(1, accumulator, sm_of(ctx))
+    return shmsize(1, shape.accumulator, sm_of(ctx))
 
 
 def plan(strategy, shape, n, ctx):

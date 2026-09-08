@@ -350,3 +350,55 @@ def test_an_unpacked_lead_operand_needs_nothing():
     assert _packed_lead(1, 64) == _flat_lead(64)
     assert relayout.reach(_packed_lead(1, 64), _flat_lead(64), 4,
                           _indices(64), wave=64) == 0
+
+
+# -- the reservation ------------------------------------------------------- #
+
+def _shape(width=1, threads=64):
+    from tensorforge.backend.instructions.compute.strategy import ComputeShape
+    from tensorforge.common.basic_types import Datatype
+    return ComputeShape(threads=threads, accumulator=Datatype.F32,
+                        sparse=False, explicit_simd=False, lead_width=width)
+
+
+def test_an_unpacked_operand_reserves_nothing():
+    """Every arrangement keeps its operands in registers while they arrive
+    unpacked, and the relayouts between register layouts are swaps and
+    merges."""
+    from tensorforge.backend.instructions.compute.primitives import amd
+    from tensorforge.backend.instructions.compute.strategy import Strategy
+    assert amd.scratch(Strategy.MATRIX, _shape(width=1), None) == 0
+    assert amd.scratch(Strategy.GENERIC, _shape(width=4), None) == 0
+
+
+@pytest.mark.parametrize('width', [2, 4])
+@pytest.mark.parametrize('threads', [32, 64])
+def test_a_packed_operand_reserves_one_wave(width, threads):
+    """The buffer carries one operand register at a time, so it does not grow
+    with the problem -- which is what lets a reservation be made before any
+    body exists."""
+    from tensorforge.backend.instructions.compute.primitives import amd
+    from tensorforge.backend.instructions.compute.strategy import Strategy
+    assert amd.scratch(Strategy.MATRIX, _shape(width, threads),
+                       None) == threads
+
+
+@pytest.mark.parametrize('width', [2, 4])
+def test_the_reservation_is_the_plan_s_own_size(width):
+    """Not a number computed beside it: smaller is an overrun and larger is
+    memory nobody writes."""
+    from tensorforge.backend.instructions.compute.primitives import amd
+    from tensorforge.backend.instructions.compute.strategy import Strategy
+    plan = staging.staged(amd._packed_lead(width, 64), amd._flat_lead(64),
+                          _indices(64))
+    assert amd.scratch(Strategy.MATRIX, _shape(width), None) == \
+        staging.buffer_elements(plan)
+
+
+def test_the_shape_is_built_in_one_place():
+    """The plan and the reservation read the same one, or a buffer sized for
+    one arrangement meets an emission of another."""
+    import inspect
+    from tensorforge.backend.instructions.compute import multilinear
+    source = inspect.getsource(multilinear.MultilinearInstruction)
+    assert source.count('ComputeShape(') == 1

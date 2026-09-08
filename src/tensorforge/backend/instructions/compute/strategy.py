@@ -94,6 +94,12 @@ class ComputeShape:
     lead: int = 0
     depth: int = 0
 
+    #: Elements of the leading dimension one register holds.  1 is unpacked.
+    #: Read by the reservation: a packed lead operand reaches its fragment
+    #: through the buffer, and how big that is has to be answerable before any
+    #: body exists.
+    lead_width: int = 1
+
 
 def is_contraction(operands: int, lead_width: int) -> bool:
     """Whether anything but the nest could compute this at all.

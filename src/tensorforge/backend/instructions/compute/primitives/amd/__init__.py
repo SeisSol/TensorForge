@@ -36,7 +36,7 @@ property.
 
 from tensorforge.common.basic_types import Datatype
 
-from ... import broadcast, packing
+from ... import bitlayout, broadcast, packing, staging
 from ...strategy import Span, Strategy, whole
 
 from .arch import amdarch, cdna2, gfx1250, gfx1251, rdna
@@ -129,13 +129,51 @@ def strategies(shape, ctx):
     return frozenset(offered)
 
 
-def scratch(strategy, accumulator, ctx):
-    """Nothing: both arrangements here keep their operands in registers.
+def scratch(strategy, shape, ctx):
+    """Elements the operands need staged before any body exists.
 
-    `ctx` is unused and is part of the signature anyway: the NVIDIA answer
-    depends on the target, so the interface has to be able to carry one.
+    Nothing while the operands arrive unpacked: every arrangement here keeps
+    them in registers, and the relayouts between register layouts are swaps
+    and merges.
+
+    A packed lead operand is the exception, and it is why this reads the shape
+    rather than the type alone.  `lead_width` puts its low bits inside a
+    register and the fragment wants the leading dimension across the lanes;
+    unpacking moves them the wrong way and what remains is a permutation
+    between lane weights, which no relayout performs.  The trip through memory
+    answers it, and one wave of elements is what that trip holds -- the buffer
+    carries one operand register at a time, so it does not grow with the
+    problem.
+
+    Sized from the same plan the emission will walk, so the two cannot differ:
+    a reservation smaller than the plan is an overrun and a larger one is
+    memory nobody writes.
     """
-    return 0
+    if strategy is Strategy.GENERIC or shape.lead_width <= 1:
+        return 0
+    return staging.buffer_elements(
+        staging.staged(_packed_lead(shape.lead_width, shape.threads),
+                       _flat_lead(shape.threads),
+                       [(index,) for index in range(shape.threads)]))
+
+
+def _packed_lead(width, threads):
+    """The lead operand as `lead_width` leaves it: the low bits of the index
+    inside the register, the rest across the lanes."""
+    low = (width - 1).bit_length()
+    lanes = (max(threads // width, 1) - 1).bit_length()
+    return bitlayout.BitLayout((
+        tuple(bitlayout.Bit(bitlayout.Place.VECTOR, 1 << bit)
+              for bit in range(low))
+        + tuple(bitlayout.Bit(bitlayout.Place.LANE, 1 << bit)
+                for bit in range(lanes)),))
+
+
+def _flat_lead(threads):
+    """What a fragment wants: the leading dimension one element per lane."""
+    return bitlayout.BitLayout((
+        tuple(bitlayout.Bit(bitlayout.Place.LANE, 1 << bit)
+              for bit in range((threads - 1).bit_length())),))
 
 
 def plan(strategy, shape, n, ctx):
