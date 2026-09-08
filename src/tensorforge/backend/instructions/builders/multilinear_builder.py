@@ -19,7 +19,8 @@ from tensorforge.backend.placement import (Placement, ResultPlacement,
                                            choose_result_placement,
                                            legal_operand_placements,
                                            legal_result_placements,
-                                           policy_for, result_is_atomic)
+                                           policy_for, result_is_atomic,
+                                           atomic_write_is_exact)
 from tensorforge.common.operation import AddOperator, MulOperator
 
 
@@ -703,6 +704,11 @@ class MultilinearBuilder(OperationBuilder):
             # `atomic_ref` has no scalar to bind.
             supported=self._context.get_vm().get_lexic().has_atomic_store(
                 self._context, None, dest_symbol.get_fptype()),
+            # The width the store nest will run at, which is the accumulator's
+            # and not the destination's: a global symbol carries `lead_width`
+            # 1 whatever the register image is blocked by, so asking `dest`
+            # would answer for a nest that is not the one about to be built.
+            exact=atomic_write_is_exact(lead_width=self._lead_width),
             policy=self._policy)
         result = choose_result_placement(
             legal_result_placements(written_in_slices=in_slices),

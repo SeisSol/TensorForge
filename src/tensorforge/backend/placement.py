@@ -178,7 +178,8 @@ def choose_operand_placement(legal: FrozenSet[Placement],
 
 
 def result_is_atomic(*, accumulating: bool, pending_is_atomic: bool,
-                     supported: bool, policy: VendorPolicy) -> bool:
+                     supported: bool, exact: bool,
+                     policy: VendorPolicy) -> bool:
     """Whether this result reaches memory as an atomic update.
 
     Only an accumulation can be one, and only while nothing non-atomic is
@@ -193,9 +194,52 @@ def result_is_atomic(*, accumulating: bool, pending_is_atomic: bool,
     there is no instruction the compiler emits a compare-and-swap loop, so
     saying yes here is slower than saying no -- and on the four targets whose
     builtin does not exist, it did not compile at all.
+
+    `exact` is the fourth, and it is the one that separates an assignment from
+    an accumulation.  A plain store needs the nest to *cover* the destination:
+    every element written at least once, and an element written twice with the
+    same value is free.  An atomic add needs the nest to be *exact*: written
+    once, no more.  Those are different requirements and the store nest only
+    ever had to meet the first, so the places where it writes an element from
+    several lanes are correct for `=` and multiply the contribution for `+=`.
+    Asked here rather than checked at emission time, because by then the
+    residency has already recorded a pending atomic and the decision cannot be
+    taken back.
     """
     return (policy.atomic_accumulation and accumulating and pending_is_atomic
-            and supported)
+            and supported and exact)
+
+
+def atomic_write_is_exact(*, lead_width: int) -> bool:
+    """Whether the store nest writes each destination element exactly once.
+
+    One condition, and it covers the two ways the widened lead path breaks an
+    atomic:
+
+    * the *peeled* tail.  A lead extent that the vector width does not divide
+      leaves `extent % width` elements that no whole vector covers, and
+      `LeadLoop._peel` hands each to the store as a plain integer.  For a
+      register destination `Symbol.store` guards that write to the lane that
+      owns the element; for a global one it does not, deliberately -- global
+      memory is addressed by every lane and no lane uniquely owns an element,
+      so *which* lane would be the wrong question.  The consequence is that
+      the whole wave stores it.  Under `=` that is the same value written
+      `threads` times and the result is right; under `+=` the contribution is
+      counted `threads` times.
+    * the *value*.  A wide store hands `VectorT<float, 2>` to the atomic, and
+      `__builtin_amdgcn_global_atomic_fadd_f32` takes a `float`.  There is no
+      packed FP32 atomic add to widen to on AMD -- no builtin and no subtarget
+      feature -- and on NVIDIA the `float2` and `float4` forms start at
+      sm_90.  So the width has nowhere to go here even where the tail divides.
+
+    Both follow from `lead_width > 1`, so one answer serves.  Widening this to
+    "the tail divides, and the target has a packed atomic of the right width"
+    is the shape of the eventual fix; it is a larger change than a condition,
+    since the store would have to carry the width down to `atomic_store` and
+    the capability model would have to grow the axis it deliberately does not
+    have yet.
+    """
+    return lead_width == 1
 
 
 def legal_result_placements(*, written_in_slices: bool
