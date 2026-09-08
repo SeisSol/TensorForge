@@ -107,6 +107,29 @@ GROUPS = {
     # A tile's permutation lives on the buffer so no access can forget it.
     # The bank model.  Every mistake it made over-reported, which is the
     # direction that gets a check ignored.
+    # The IR-level bank analysis.  Every mistake it made over-reported, which
+    # is the direction that gets a check ignored.
+    'irbanks': ('tests/test_pir_banks.py', [
+        ('guards ignored, so inactive lanes count',
+         sub(Path('src/tensorforge/backend/pir/banks.py'),
+             '        if parent.op is not Op.IF:\n            continue',
+             '        if True:\n            continue', 1)),
+        ('the width read from the target for a store too',
+         sub(Path('src/tensorforge/backend/pir/banks.py'),
+             "            carrier = (stmt.target[0] if stmt.op == Op.LOAD and stmt.target",
+             "            carrier = (stmt.target[0] if stmt.target", 1)),
+        ('a numpy integer is not an integer again',
+         sub(Path('src/tensorforge/backend/pir/banks.py'), '        return operator.index(operand)',
+             '        return operand if isinstance(operand, int) else 1 / 0', 1)),
+        ('a loop variable no longer resolves to its bound',
+         sub(Path('src/tensorforge/backend/pir/banks.py'),
+             '        if stmt.op is Op.FOR and stmt.regions and stmt.regions[0].args:',
+             '        if False:', 1)),
+        ('an unreadable address counted rather than refused',
+         sub(Path('src/tensorforge/backend/pir/banks.py'), '                unresolved += 1\n                continue',
+             '                continue', 1)),
+    ]),
+
     'dryrun': ('tests/test_tools.py::test_every_mutation_still_applies', [
         ('a stale anchor stops being reported',
          sub(Path('tools/mutation_check.py'),

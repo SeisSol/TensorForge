@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: MIT
 from tensorforge.common.basic_types import Datatype
 from ..strategy import Strategy, whole
-from tensorforge.backend.pir.core import (INDEX, Access, Effect, MemSpace,
+from tensorforge.backend.pir.core import (BOOL, INDEX, Access, Effect, MemSpace,
                                           XorSwizzle,
                                           Uniformity,
                                           ScalarType, Value)
@@ -265,16 +265,24 @@ def matmul(writer, ops, ctx, span):
     threads, dtype, sparse = ops.threads, ops.accumulator, ops.sparse
 
     def threadrange(start, size):
-        conditions = []
-        if start > 0:
-            conditions += [f'threadIdx.x >= {start}']
-        if start + size < threads:
-            conditions += [f'threadIdx.x < {start + size}']
+        """The lanes that take part in one staging step.
 
-        if len(conditions) > 0:
-            return writer.If(' && '.join(conditions))
-        else:
-            return writer.AnonymousScope()
+        A structured `if_` rather than `writer.If`, which takes a string and
+        emits a raw block.  The text spelled the same guard, and the emitted
+        C++ is identical -- what changes is that the condition is a value, so
+        a pass walking the body can tell which lanes reach an access inside.
+        Without that, `pir/banks.py` counted all 32 into every bank and read
+        72 conflict-free accesses in `rectangular` as 2-way.
+        """
+        cond = None
+        tid = writer.thread_id('x')
+        if start > 0:
+            cond = writer.op('ge', BOOL, tid, start, hint='g')
+        if start + size < threads:
+            upper = writer.op('lt', BOOL, tid, start + size, hint='g')
+            cond = upper if cond is None else writer.op('and', BOOL, cond,
+                                                        upper, hint='g')
+        return writer.if_(cond) if cond is not None else writer.AnonymousScope()
 
     if sparse:
         return False
