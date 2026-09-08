@@ -150,23 +150,56 @@ def test_a_transpose_is_swaps_and_merges():
         assembled = reorder.compose_exchange(
             relayout.nest_shared(ext, wave),
             relayout.transposed(ext, wave), indices, wave)
-        assert len(assembled) == ext * ext
+        assert len(assembled) == ext
+        assert all(len(group) == ext for group in assembled)
 
 
-def test_a_width_the_runtime_has_no_function_for_stays_in_registers():
-    """The rung this adds.  `DEFINED_TRANSPOSES` names four widths and the
-    catalogue has entries at others; those used to fall all the way to
-    memory."""
-    from tensorforge.backend.instructions.compute.primitives.amd import reorder
-    assert not relayout.has_transpose(8)
+def test_the_assembled_exchange_is_priced_and_not_emittable():
+    """Cheaper than the trip and still not offered.
+
+    A transpose's regions are one lane out of every `ext` -- one per bank,
+    which neither a `dppUpdate` row mask nor a bank mask expresses -- so the
+    merge would need a ternary on the lane id.  `Select` reports that and the
+    merge refuses it, which is the module's own policy: the path reads no lane
+    id anywhere else and one appearing is a thing to look at.
+
+    So the cost stands as a statement of what a merge primitive would buy, and
+    the route offered is the trip."""
+    from tensorforge.backend.instructions.compute.primitives.amd import (
+        exchange_codegen, reorder)
     indices = _indices(8, 64)
-    route = relayout.reach(relayout.nest_shared(8, 64),
-                           relayout.transposed(8, 64), 8, indices, wave=64)
-    assert not isinstance(route, int)
-    assert isinstance(route[0], reorder.Move)
-    assert reorder.compose_cost(route) < sum(
+    assembled = reorder.compose_exchange(relayout.nest_shared(8, 64),
+                                         relayout.transposed(8, 64),
+                                         indices, 64)
+    assert not reorder.emittable(assembled)
+    assert reorder.compose_cost(assembled) < sum(
         staging.accesses(staging.staged(relayout.nest_shared(8, 64),
                                         relayout.transposed(8, 64), indices)))
+
+    assert not relayout.has_transpose(8)
+    route = relayout.reach(relayout.nest_shared(8, 64),
+                           relayout.transposed(8, 64), 8, indices, wave=64)
+    assert isinstance(route[0], staging.Transfer)
+
+
+def test_the_emitter_refuses_a_mask_that_does_not_exist():
+    """Rather than returning a register with a hole in it."""
+    from tensorforge.backend.instructions.compute.primitives.amd import (
+        exchange_codegen, reorder)
+    from tensorforge.backend.pir.build import IRBuilder
+    from tensorforge.backend.pir.core import ScalarType
+    from tensorforge.common.basic_types import Datatype
+    from tensorforge.common.context import Context
+
+    ctx = Context(arch='gfx90a', backend='hip', fp_type=Datatype.F32)
+    assembled = reorder.compose_exchange(relayout.nest_shared(4, 64),
+                                         relayout.transposed(4, 64),
+                                         _indices(4, 64), 64)
+    writer = IRBuilder(Datatype.F32, context=ctx)
+    ftype = ScalarType(Datatype.F32)
+    regs = [writer.declare(ftype, hint='op') for _ in range(4)]
+    assert exchange_codegen.apply_exchange(writer, regs, assembled,
+                                           ftype) is None
 
 
 def test_the_builtin_still_wins_where_there_is_one():

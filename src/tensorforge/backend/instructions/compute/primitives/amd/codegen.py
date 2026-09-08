@@ -11,6 +11,7 @@ from .arch import cdna2, gfx1251, rdna
 from .catalog import mfma_tile_for
 from ... import split
 from .emitters import fmadpp4, fmadpp8, fmadpp16, fmascalar
+from .exchange_codegen import apply_exchange
 from .relayout import (MOVDPP16, TRANSPOSE4X4, find_relayout,
                        nest_shared, reach, transposed,
                        fmadpp_operand_layout)
@@ -235,16 +236,20 @@ def matmul32(writer: Writer, C, B, A, M, N, K, kx, threads, dtype, sparse,
                                for l in range(threads)], wave=threads)
                 if route == 0:
                     return list(regs)
-                if route != 1:
-                    # Assembled swaps and a staged trip both close the gap and
-                    # this emitter takes neither: the first needs a merge loop
-                    # it does not have, the second a buffer reserved before any
-                    # body exists, and `scratch` answers 0 here.  Declining
-                    # sends the operation to the generic nest, which is slower
-                    # and right, rather than to code that was not written or a
-                    # reservation that was never made.
-                    return None
-                return _transpose(writer, tile, ftype, threads, regs)
+                if route == 1:
+                    return _transpose(writer, tile, ftype, threads, regs)
+                if route and isinstance(route[0], tuple):
+                    # The same exchange assembled out of swaps and merges,
+                    # which is what a width the runtime has no `transpose*`
+                    # for gets.  More instructions than the builtin and far
+                    # fewer than a trip through memory.
+                    return apply_exchange(writer, regs, route, ftype)
+                # A staged trip is the only route left, and this emitter does
+                # not take it: the buffer has to be reserved before any body
+                # exists and `scratch` answers 0 here.  Declining sends the
+                # operation to the generic nest, which is slower and right,
+                # rather than to a reservation that was never made.
+                return None
 
             # The MFMA accumulator layout is deliberately left untracked.
             #

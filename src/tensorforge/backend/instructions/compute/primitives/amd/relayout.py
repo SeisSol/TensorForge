@@ -33,7 +33,7 @@ from typing import Callable, Optional, Tuple
 from tensorforge.backend.pir.core import LaneAxis, RegisterLayout
 
 from . import catalog
-from .reorder import compose_cost, compose_exchange
+from .reorder import compose_cost, compose_exchange, emittable
 from ... import bitlayout, staging
 
 
@@ -187,10 +187,12 @@ def reach(have, want, ext: int, indices, wave: Optional[int] = None):
     `Transfer` is the trip through memory.  Ordered by what they cost rather
     than by which is convenient, because the order *is* the preference.
 
-    The middle rung is the one worth having.  A gap that is the exchange at a
-    width the runtime has no function for would otherwise fall all the way to
-    memory; assembled from swaps it stays in registers.  Which of the last two
-    is taken is a comparison of their counts, not their order.
+    The middle rung is where a width the runtime has no `transpose*` for would
+    stay in registers, and today it is not reached: a transpose's regions are
+    one lane out of every `ext`, which no `dppUpdate` mask expresses.  It is
+    offered only when every region has a mask that exists, and otherwise the
+    trip is what is left.  Which of the last two is taken is a comparison of
+    their counts, not their order.
 
     Never `None`.  The staged path closes every gap, so a caller reaching here
     always has an answer -- what it does not always have is one it can
@@ -205,7 +207,11 @@ def reach(have, want, ext: int, indices, wave: Optional[int] = None):
     if wave is None:
         return trip
     composed = compose_exchange(have, want, indices, wave)
-    if composed is None:
+    if composed is None or not emittable(composed):
+        # Priced but not emittable: a transpose's regions are one lane out of
+        # every `ext`, which no `dppUpdate` mask expresses, so the merge would
+        # need a ternary on the lane id.  Offering a route nothing can emit
+        # would be worse than the trip it is cheaper than.
         return trip
     # The last two rungs are compared rather than ordered.  Registers beat
     # memory at every width in the catalogue -- 224 instructions against 1024

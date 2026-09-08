@@ -106,6 +106,31 @@ def _merge(writer, into, value, select, ftype):
     return writer.call(callee, ftype, value, into, hint='frag')
 
 
+def apply_exchange(writer, regs, groups, ftype):
+    """The registers at the other layout, or `None`.
+
+    One output at a time: every source that reaches it, swapped into place and
+    merged under the region's mask.  The masks of one group partition the
+    wave, so the first merge writes rather than combines and `_merge` takes
+    `None` for that.
+
+    `None` where a region needs a mask `dppUpdate` cannot express.  The plan
+    reports that through `Select`, and refusing here is the same refusal
+    `_merge` already makes for the fragments -- the caller falls back rather
+    than getting a register with a hole in it.
+    """
+    out = []
+    for group in groups:
+        value = None
+        for move in group:
+            moved = _swapped(writer, regs[move.contraction], move.swaps, ftype)
+            value = _merge(writer, value, moved, move.select, ftype)
+            if value is None:
+                return None
+        out.append(value)
+    return out
+
+
 def matmul_exchange(writer, C, shared, lead, M, N, K, kx, threads, dtype,
                     sparse, ctx, start, stop) -> bool:
     """``C[i,j] += lead[i,k] * shared[j,k]`` through a `k > 1` instruction.

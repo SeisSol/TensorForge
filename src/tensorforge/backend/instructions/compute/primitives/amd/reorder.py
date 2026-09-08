@@ -304,8 +304,8 @@ def broadcast_feeds_a(op) -> bool:
     return op.broadcast and op.blocks > 1
 
 
-def compose_exchange(have, want, indices, wave: int,
-                     base_have=None, base_want=None) -> Optional[Tuple[Move, ...]]:
+def compose_exchange(have, want, indices, wave: int, base_have=None,
+                     base_want=None) -> Optional[Tuple[Tuple[Move, ...], ...]]:
     """A bit exchange assembled out of swaps and merges, or `None`.
 
     A `swap` does not move anything between a register and a lane, so no
@@ -323,8 +323,10 @@ def compose_exchange(have, want, indices, wave: int,
     is what closes the gap in registers, at a cost between the builtin and a
     trip through memory.
 
-    `Move.contraction` is the source register here, which is what it is in a
-    fragment plan too: the register the region is read from.
+    Grouped by destination register, because that is what an emitter walks:
+    one output at a time, merging each source into it under the region's mask.
+    `Move.contraction` is the source register, which is what it is in a
+    fragment plan too -- the register the region is read from.
     """
     kwargs = {}
     if base_have is not None:
@@ -334,14 +336,32 @@ def compose_exchange(have, want, indices, wave: int,
     found = bitlayout.moves(have, want, indices, **kwargs)
     if found is None:
         return None
-    return tuple(Move(move.source, _swaps_for(move.xor),
-                      Select.of(move.lanes, wave))
-                 for move in found)
+    groups = [[] for _ in range(max(move.target for move in found) + 1)]
+    for move in found:
+        groups[move.target].append(
+            Move(move.source, _swaps_for(move.xor), Select.of(move.lanes, wave)))
+    return tuple(tuple(group) for group in groups)
 
 
-def compose_cost(moves: Iterable[Move]) -> int:
+def emittable(groups) -> bool:
+    """Whether every region of an assembled exchange has a mask that exists.
+
+    `dppUpdate` carries a region in a row mask and a bank mask, and a
+    transpose's regions are one lane out of every `ext` -- one per bank, which
+    neither expresses.  `Select` reports that as `cndmask`, a ternary on the
+    lane id, and the merge refuses it: the path reads no lane id anywhere else
+    and one appearing is a thing to look at rather than to paper over.
+
+    So the assembled form is priced and not emitted.  The cost is right -- the
+    ternary is in `Move.cost` -- and what is missing is a merge primitive, not
+    a plan.
+    """
+    return all(move.select.free for group in groups for move in group)
+
+
+def compose_cost(groups) -> int:
     """Instructions the assembled exchange issues."""
-    return sum(move.cost for move in moves)
+    return sum(move.cost for group in groups for move in group)
 
 
 def fragment_moves(op, which: str, slot: int,
