@@ -258,11 +258,13 @@ def build(unit: BuildUnit, cache: Path = CACHE,
     if compiler is None:
         return UnitBuild(unit, None, [], f'no recipe for backend '
                                         f'{unit.target.backend!r}')
-    cc = compiler_binary(compiler)
-    if cc is None:
-        return UnitBuild(unit, None, [],
-                         f'{compiler.default} not found; set ${compiler.env}')
 
+    # Generation first, and the compiler looked up only after. Which workloads
+    # generate is a fact about the generator, and a caller that has no
+    # toolchain -- a dry run printing profiler command lines, a check that a
+    # configuration still produces code -- has a use for it. Returning early on
+    # a missing compiler would have made that answer unavailable for the same
+    # reason the answer was wanted.
     sources: Dict[str, str] = {}
     records: List[WorkloadBuild] = []
     for workload in unit.workloads:
@@ -270,6 +272,11 @@ def build(unit: BuildUnit, cache: Path = CACHE,
         records.append(record)
         if src is not None:
             sources[workload.name] = src
+
+    cc = compiler_binary(compiler)
+    if cc is None:
+        return UnitBuild(unit, None, records,
+                         f'{compiler.default} not found; set ${compiler.env}')
 
     if not sources:
         return UnitBuild(unit, None, records, 'nothing generated')
