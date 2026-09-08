@@ -538,3 +538,43 @@ def test_the_stand_ins_are_not_among_the_members():
 def test_a_loop_reports_one_stand_in_per_hole():
     loop = roll(recursion())[0]
     assert len(loop.stand_ins()) == loop.arity
+
+
+def test_a_stand_in_does_not_move_the_parameters_along():
+    """Its own naming series, so a rolled kernel's parameters keep their places."""
+    from tensorforge.common.context import Context
+    from tensorforge.generators.generator import Generator
+
+    def named(descrs):
+        gen = Generator(descrs, Context(arch='sm_86', backend='cuda',
+                                        fp_type=DTYPE))
+        gen.register()
+        return {m.alias: m.name for m in gen._matrix_list
+                if not getattr(m, 'is_variant', False)}
+
+    assert named(roll(accumulation())) == named(accumulation())
+
+
+def test_a_stand_in_is_named_apart_and_kept_out_of_the_signature():
+    from tensorforge.common.context import Context
+    from tensorforge.generators.generator import Generator
+
+    gen = Generator(roll(accumulation()), Context(arch='sm_86', backend='cuda',
+                                                  fp_type=DTYPE))
+    gen.generate()
+    variants = [m for m in gen._matrix_list if getattr(m, 'is_variant', False)]
+    assert [m.name for m in variants] == ['v0']
+    signature = next(l for l in gen.get_kernel().splitlines()
+                     if 'kernel_kernel' in l)
+    assert ' v0' not in signature
+
+
+def test_a_stand_in_is_neither_a_parameter_nor_a_temporary():
+    loop = roll(accumulation())[0]
+    stand_in = loop.stand_ins()[0].tensor
+    assert stand_in.is_variant
+    assert not stand_in.is_tmp
+
+
+def test_an_ordinary_tensor_is_not_a_variant():
+    assert not accumulation()[0].writes().tensor.is_variant

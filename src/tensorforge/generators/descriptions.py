@@ -526,6 +526,8 @@ class ForDescr(OperationDescription):
     different kernel for no reason anyone asked for.
     """
     seen = {}
+    for stand_in in self.stand_ins():
+      seen.setdefault(stand_in.tensor, stand_in)
     for descr in self.operations():
       for matrix in descr.matrix_list():
         seen.setdefault(matrix.tensor, matrix)

@@ -25,6 +25,14 @@ class Tensor:
         self.alias = alias
         self.shape = tuple(shape)
         self.is_tmp = is_tmp
+        #: A name a loop body uses where an operand varies between iterations.
+        #:
+        #: A third kind beside a parameter and a temporary, and it has to be
+        #: one: it is not passed in, because it stands for several things that
+        #: are; and it is not the generator's own scratch, because it is never
+        #: written.  It resolves inside the loop to whichever member the
+        #: counter names, so the signature leaves it out and the body binds it.
+        self.is_variant = False
         self.direction: Union[DataFlowDirection, None] = None
         self.data = data
         self.spp = spp

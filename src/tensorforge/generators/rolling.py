@@ -176,6 +176,7 @@ def _stand_in(view, name: str):
                    datatype=source.datatype,
                    alignment=getattr(source, 'alignment', 0))
     clone.direction = source.direction
+    clone.is_variant = True
     return SubTensor(clone, view.bbox, list(view.offset),
                      getattr(view, 'sliced', False))
 

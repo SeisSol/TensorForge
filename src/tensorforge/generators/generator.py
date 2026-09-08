@@ -677,6 +677,10 @@ class Generator:
     builder = GetElementPtrBuilder(self._context, self._scopes)
     self._scopes.add_scope()
     for symbol in self._scopes.get_global_scope().values():
+      if getattr(symbol.obj, 'is_variant', False):
+        # Bound inside the loop, from the table, once per iteration.  A
+        # binding here would name one member for the whole run.
+        continue
       firstptr = symbol.obj.addressing == Addressing.SCALAR or symbol.obj.addressing == Addressing.NONE
       if not firstptr:
         builder.build(symbol)
@@ -766,8 +770,15 @@ class Generator:
 
     self._matrix_list = list(pre_matrix_list.keys())
 
+    variant_counter = 0
     for matrix in self._matrix_list:
-      if matrix.is_tmp:
+      if getattr(matrix, 'is_variant', False):
+        # Its own series: a stand-in is not a parameter, so letting it take an
+        # `m` number would move every later parameter along by one and change
+        # the signature of a kernel that has nothing to do with it.
+        matrix.name = f'v{variant_counter}'
+        variant_counter += 1
+      elif matrix.is_tmp:
         matrix.name = f't{tmp_counter}'
         tmp_counter += 1
       else:
@@ -875,6 +886,8 @@ class Generator:
     params = []
     emitted_tables = set()
     for symbol in symbol_list:
+      if getattr(symbol.obj, 'is_variant', False):
+        continue
       table = self._table_member.get(symbol.name) if substitute_tables else None
       if table is not None:
         # In place of the first member, once; the rest of them vanish.
