@@ -58,13 +58,26 @@ TARGETS = [("cuda", "sm_86"), ("hip", "gfx90a"),
 #: of a regression the pass causes; it is xfailed rather than fixed here
 #: because the fix is to give the clone a declarator, and that is a change to
 #: `decl_expr` rather than to this test.
-KNOWN_BAD = {
-    ("aligned_operands", "acpp"):
-        "the advanced clone renders VectorT where the SPMD lowering wants "
-        "sycl::vec -- dropping `decl` on a clone drops the backend's spelling",
-}
+#:
+#: Stated as the class it is, rather than as the one case that first reached
+#: it: the SPMD lowering and a rendered `VectorT` in the same kernel.  That is
+#: the defect itself, so nothing has to be kept in step with it -- listing
+#: cases instead grows by a line for every case added to the corpus and never
+#: says why, and `aligned_operands` stood here alone only because it was the
+#: only case whose operands promised an aligned stride.
+#:
+#: The promise is not the condition, though it sounds like it.  Stating it
+#: that way put `aligned_odd_lead` in the class, whose operands promise the
+#: same and which compiles anyway, because an odd lead leaves nothing to
+#: widen and no vector type is rendered.  The condition is what comes out,
+#: not what goes in.
+KNOWN_BAD_REASON = (
+    "the advanced clone renders VectorT where the SPMD lowering wants "
+    "sycl::vec -- dropping `decl` on a clone drops the backend's spelling")
 
 
+def _known_bad(kernel: str, backend: str) -> bool:
+    return backend == "acpp" and "VectorT" in kernel
 def _generate(mod, backend, arch, *, wrap):
     ctx = Context(arch=arch, backend=backend,
                   fp_type=getattr(mod, "DTYPE", None),
@@ -119,12 +132,19 @@ def test_wrapped_kernel_is_well_formed(name, backend, arch):
     if not kernel:
         pytest.skip("no kernel section")
 
-    if (name, backend) in KNOWN_BAD:
-        pytest.xfail(KNOWN_BAD[(name, backend)])
-
     result = syntax.check_source(kernel, shim=syntax.shim_for(backend))
     if result.ok is None:
         pytest.skip(result.reason)
+
+    if _known_bad(kernel, backend):
+        # Not `pytest.xfail`, which is unconditional: a repaired emitter would
+        # go on being skipped by it, and an entry that cannot tell you it is
+        # obsolete is how a fixed defect keeps a test switched off.  Asserting
+        # the failure means the fix turns this red and says so.
+        assert not result.ok, (
+            f"{name} [{backend}] now compiles -- `_known_bad` is obsolete "
+            f"and this case, and the predicate, should go")
+        pytest.skip(KNOWN_BAD_REASON)
     assert result.ok, (
         f"{name} [{backend}] does not compile with the wrap pass on:\n"
         f"{result.stderr}")
