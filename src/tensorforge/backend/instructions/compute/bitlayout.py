@@ -312,3 +312,36 @@ def is_exchange(pairs) -> Optional[Tuple[Tuple[int, int], ...]]:
     if set(forward) != set(backward):
         return None
     return tuple(sorted(forward))
+
+
+def unpacked(layout: BitLayout) -> Tuple[BitLayout, int]:
+    """The same elements with every vector bit moved into a register slot.
+
+    A vector bit is an element of a packed register -- a `float4` holds four
+    consecutive elements of the leading dimension in one -- and reaching one is
+    a subscript, not a shuffle.  So it is not a gap for the cross-lane
+    machinery to close; it is one that closes first, and what is left is a
+    distribution the lane and slot rungs already answer.
+
+    Returned with the count, because the extracts are what it costs and a
+    caller comparing routes needs the number.  Zero means the layout holds
+    nothing packed and this changed nothing.
+
+    The freed bits become the *low* slot bits, above nothing: an extract names
+    an element of a register and the register it lands in is the caller's to
+    choose, so the cheapest reading is that the packed elements become
+    consecutive registers.
+    """
+    freed = 0
+    axes = []
+    for bits in layout.axes:
+        out, slot = [], 0
+        for bit in bits:
+            if bit.place is Place.VECTOR:
+                out.append(Bit(Place.SLOT, 1 << slot))
+                slot += 1
+                freed += 1
+            else:
+                out.append(bit)
+        axes.append(tuple(out))
+    return BitLayout(tuple(axes)), freed

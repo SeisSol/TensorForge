@@ -401,6 +401,18 @@ GROUPS = {
     ]),
 
     'staging': ('tests/test_staging.py', [
+        ('a vector bit left where it is',
+         sub(Path('src/tensorforge/backend/instructions/compute/bitlayout.py'),
+             '            if bit.place is Place.VECTOR:',
+             '            if False:')),
+        ('the freed bits counted but not moved',
+         sub(Path('src/tensorforge/backend/instructions/compute/bitlayout.py'),
+             '                out.append(Bit(Place.SLOT, 1 << slot))',
+             '                out.append(bit)')),
+        ('the unpack skipped before the route is asked',
+         sub(Path('src/tensorforge/backend/instructions/compute/primitives/amd/relayout.py'),
+             '    have, _ = bitlayout.unpacked(have)',
+             '    have = have')),
         ('the assembled exchange preferred over the builtin',
          sub(Path('src/tensorforge/backend/instructions/compute/primitives/amd/relayout.py'),
              '    if direct == 1 and has_transpose(ext):\n        return 1',

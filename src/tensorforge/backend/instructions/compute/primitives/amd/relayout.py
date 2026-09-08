@@ -178,6 +178,17 @@ def has_transpose(ext: int) -> bool:
     return f'tensorforge::transpose{ext}x{ext}b32' in catalog.DEFINED_TRANSPOSES
 
 
+def extracts(have) -> int:
+    """Element reads it takes to unpack `have` before `reach` reads it.
+
+    Separate from the route because it happens before one: an extract names an
+    element of a register the caller already holds, and the register it lands
+    in is the caller's to choose.  A caller comparing routes adds this to
+    whichever it takes.
+    """
+    return bitlayout.unpacked(have)[1]
+
+
 def reach(have, want, ext: int, indices, wave: Optional[int] = None):
     """How the operand gets from one distribution to the other.
 
@@ -194,10 +205,21 @@ def reach(have, want, ext: int, indices, wave: Optional[int] = None):
     trip is what is left.  Which of the last two is taken is a comparison of
     their counts, not their order.
 
+    A packed operand is unpacked first and then answered like any other, so
+    `lead_width > 1` is a cost here rather than a case -- what keeps it out is
+    `strategy.is_contraction`, which refuses it before this is asked.
+
     Never `None`.  The staged path closes every gap, so a caller reaching here
     always has an answer -- what it does not always have is one it can
     afford.
     """
+    # A vector bit is an element of a packed register and reaching one is a
+    # subscript rather than a shuffle, so it is not a gap for the cross-lane
+    # machinery -- it closes first, and `extracts` is what it costs.  What is
+    # left is a distribution the rungs below already answer: unpacking a
+    # packed shared matrix yields exactly `nest_shared`.
+    have, _ = bitlayout.unpacked(have)
+
     direct = transposes_between(have, want, ext)
     if direct == 0:
         return 0

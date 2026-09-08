@@ -109,6 +109,9 @@ KEPT_UNREACHABLE = {
         "the same row `position` reads, in the vocabulary a value can also "
         "be read in; nothing compares the two sides yet, which is what the "
         "relayout solver would do",
+    "extracts":
+        "what unpacking a packed operand costs; nothing packed reaches a "
+        "relayout question while `is_contraction` refuses `lead_width > 1`",
     "NOT_MODELLED":
         "documents the catalogue's boundary; read by the LLVM cross-check",
 }

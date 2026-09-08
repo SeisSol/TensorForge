@@ -241,3 +241,50 @@ def test_without_a_wave_the_middle_rung_is_skipped():
     route = relayout.reach(relayout.nest_shared(8, 64),
                            relayout.transposed(8, 64), 8, indices)
     assert isinstance(route[0], staging.Transfer)
+
+
+# -- the packed case is not a case -------------------------------------- #
+
+def _packed(ext, threads):
+    """A `float4`-style operand: the low bits of the first index inside a
+    register rather than across the lanes."""
+    width = (ext - 1).bit_length()
+    return BitLayout((
+        tuple(Bit(Place.VECTOR, 1 << b) for b in range(width)),
+        tuple(Bit(Place.LANE, 1 << b) for b in range((threads - 1).bit_length())),
+    ))
+
+
+@pytest.mark.parametrize('ext,threads', [(4, 64), (4, 32), (16, 64)])
+def test_unpacking_a_packed_operand_yields_the_ordinary_one(ext, threads):
+    """Which is why it needs no rung of its own: a vector bit is an element of
+    a register and reaching one is a subscript, so it closes first and what is
+    left is exactly the distribution the nest hands over anyway."""
+    plain, freed = bitlayout.unpacked(_packed(ext, threads))
+    assert plain == relayout.nest_shared(ext, threads)
+    assert freed == (ext - 1).bit_length()
+
+
+@pytest.mark.parametrize('ext,threads', [(4, 64), (4, 32), (16, 64)])
+def test_the_remaining_gap_is_the_one_that_already_works(ext, threads):
+    """So a packed operand costs the extracts and then the transpose that
+    runs today -- a cost rather than a case."""
+    indices = _indices(ext, threads)
+    packed = _packed(ext, threads)
+    assert relayout.extracts(packed) == (ext - 1).bit_length()
+    assert relayout.reach(packed, relayout.transposed(ext, threads), ext,
+                          indices, wave=threads) == 1
+
+
+def test_an_unpacked_operand_costs_no_extracts():
+    assert relayout.extracts(relayout.nest_shared(4, 64)) == 0
+
+
+def test_what_still_refuses_a_packed_operand_is_the_strategy_layer():
+    """`is_contraction` declines `lead_width > 1` for every matrix
+    arrangement, so nothing packed reaches a relayout question at all.  That
+    is the one line between here and a packed kernel taking a matrix path,
+    and flipping it changes generated code."""
+    from tensorforge.backend.instructions.compute.strategy import is_contraction
+    assert is_contraction(operands=2, lead_width=1)
+    assert not is_contraction(operands=2, lead_width=4)
