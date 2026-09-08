@@ -79,35 +79,40 @@ __launch_bounds__(256)
           }
           __float128 r1[2]{};
           // r1 = load{g>r}(glb_m2);
-          __float128 v26_lin = glb_m2[0 + threadIdx.x * 1];
-          r1[0] = v26_lin;
-          __float128 v27_lin = glb_m2[2 + threadIdx.x * 1];
-          r1[1] = v27_lin;
+          #pragma unroll
+          for (int32_t v29_i0 = 0; v29_i0 < 1; ++v29_i0) {
+            int32_t v35_lead = v13_lead + (v29_i0 * 2);
+            #pragma unroll
+            for (int32_t v30_i1 = 0; v30_i1 < 2; ++v30_i1) {
+              __float128 v38_data = __builtin_nontemporal_load(&glb_m2[(v35_lead + (v30_i1 * 2))]);
+              r1[(v29_i0 + v30_i1)] = v38_data;
+            }
+          }
           // wait(r0 = load{g>r}(glb_m1););
           // wait(r1 = load{g>r}(glb_m2););
           __float128 r2[2]{};
           // r2 = +(r0 * r1) + None
           // [(0, 2), (0, 2)] [(0, 2)]
-          __float128 v29_data = r0[0];
-          __float128 v30_data = r0[1];
-          __float128 v31_acc{};
-          __float128 v32_acc{};
-          __float128 v33_lin = r1[0];
-          v31_acc += ((tensorforge::broadcast<2, 1, 0>(v33_lin)) * v29_data);
-          v31_acc += ((tensorforge::broadcast<2, 1, 1>(v33_lin)) * v30_data);
-          __float128 v38_lin = r1[1];
-          v32_acc += ((tensorforge::broadcast<2, 1, 0>(v38_lin)) * v29_data);
-          v32_acc += ((tensorforge::broadcast<2, 1, 1>(v38_lin)) * v30_data);
-          r2[0] = v31_acc;
-          r2[1] = v32_acc;
+          __float128 v41_data = r0[0];
+          __float128 v42_data = r0[1];
+          __float128 v43_acc{};
+          __float128 v44_acc{};
+          __float128 v45_data = r1[0];
+          __float128 v46_data = r1[1];
+          v43_acc += ((tensorforge::broadcast<2, 1, 0>(v45_data)) * v41_data);
+          v43_acc += ((tensorforge::broadcast<2, 1, 1>(v45_data)) * v42_data);
+          v44_acc += ((tensorforge::broadcast<2, 1, 0>(v46_data)) * v41_data);
+          v44_acc += ((tensorforge::broadcast<2, 1, 1>(v46_data)) * v42_data);
+          r2[0] = v43_acc;
+          r2[1] = v44_acc;
           // glb_m0 = store{r>g}(r2);
           #pragma unroll
-          for (int32_t v46_i0 = 0; v46_i0 < 1; ++v46_i0) {
-            int32_t v54_lead = v13_lead + (v46_i0 * 2);
+          for (int32_t v58_i0 = 0; v58_i0 < 1; ++v58_i0) {
+            int32_t v66_lead = v13_lead + (v58_i0 * 2);
             #pragma unroll
-            for (int32_t v47_i1 = 0; v47_i1 < 2; ++v47_i1) {
-              __float128 v49_data = r2[(v46_i0 + v47_i1)];
-              glb_m0[(v54_lead + (v47_i1 * 2))] = v49_data;
+            for (int32_t v59_i1 = 0; v59_i1 < 2; ++v59_i1) {
+              __float128 v61_data = r2[(v58_i0 + v59_i1)];
+              glb_m0[(v66_lead + (v59_i1 * 2))] = v61_data;
             }
           }
         }

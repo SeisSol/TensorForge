@@ -88,39 +88,43 @@ __launch_bounds__(256)
           float r2[8]{};
           // r2 = +(r0 * r1) + None
           // [(0, 8), (0, 8)] []
-          float v40_data = r0[0];
-          float v41_acc{};
-          float v42_acc{};
-          float v43_acc{};
-          float v44_acc{};
-          float v45_acc{};
-          float v46_acc{};
-          float v47_acc{};
-          float v48_acc{};
-          float v49_lin = r1[0];
-          float v50_bc = tensorforge::broadcast<32, 16, 0>(v49_lin);
-          tensorforge::fmacdpp16<0>(v41_acc, v50_bc, v40_data);
-          tensorforge::fmacdpp16<1>(v42_acc, v50_bc, v40_data);
-          tensorforge::fmacdpp16<2>(v43_acc, v50_bc, v40_data);
-          tensorforge::fmacdpp16<3>(v44_acc, v50_bc, v40_data);
-          tensorforge::fmacdpp16<4>(v45_acc, v50_bc, v40_data);
-          tensorforge::fmacdpp16<5>(v46_acc, v50_bc, v40_data);
-          tensorforge::fmacdpp16<6>(v47_acc, v50_bc, v40_data);
-          tensorforge::fmacdpp16<7>(v48_acc, v50_bc, v40_data);
-          r2[0] = v41_acc;
-          r2[1] = v42_acc;
-          r2[2] = v43_acc;
-          r2[3] = v44_acc;
-          r2[4] = v45_acc;
-          r2[5] = v46_acc;
-          r2[6] = v47_acc;
-          r2[7] = v48_acc;
+          float v40_data = r1[0];
+          float v41_data = r1[1];
+          float v42_data = r1[2];
+          float v43_data = r1[3];
+          float v44_tp{};
+          float v45_tp{};
+          float v46_tp{};
+          float v47_tp{};
+          tensorforge::transpose4x4b32(v44_tp, v45_tp, v46_tp, v47_tp, v40_data, v41_data, v42_data, v43_data);
+          tensorforge::VectorT<float, 4> v48_acc{};
+          float v49_data = r0[0];
+          tensorforge::VectorT<float, 4> v53_acc = __builtin_amdgcn_mfma_f32_4x4x1f32(v44_tp, v49_data, v48_acc, 3, 0, 0);
+          r2[0] = (v53_acc[0]);
+          r2[1] = (v53_acc[1]);
+          r2[2] = (v53_acc[2]);
+          r2[3] = (v53_acc[3]);
+          float v58_data = r1[4];
+          float v59_data = r1[5];
+          float v60_data = r1[6];
+          float v61_data = r1[7];
+          float v62_tp{};
+          float v63_tp{};
+          float v64_tp{};
+          float v65_tp{};
+          tensorforge::transpose4x4b32(v62_tp, v63_tp, v64_tp, v65_tp, v58_data, v59_data, v60_data, v61_data);
+          tensorforge::VectorT<float, 4> v66_acc{};
+          tensorforge::VectorT<float, 4> v71_acc = __builtin_amdgcn_mfma_f32_4x4x1f32(v62_tp, v49_data, v66_acc, 3, 0, 0);
+          r2[4] = (v71_acc[0]);
+          r2[5] = (v71_acc[1]);
+          r2[6] = (v71_acc[2]);
+          r2[7] = (v71_acc[3]);
           // glb_m1 = store{r>g}(r2);
           if (v10_lead < 8) {
             #pragma unroll
-            for (int32_t v55_i1 = 0; v55_i1 < 8; ++v55_i1) {
-              float v57_data = r2[v55_i1];
-              glb_m1[(v10_lead + (v55_i1 * 8))] = v57_data;
+            for (int32_t v80_i1 = 0; v80_i1 < 8; ++v80_i1) {
+              float v82_data = r2[v80_i1];
+              glb_m1[(v10_lead + (v80_i1 * 8))] = v82_data;
             }
           }
         }

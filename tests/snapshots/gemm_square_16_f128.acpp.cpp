@@ -56,45 +56,50 @@ inline void kernel_kernel_0b2fc070b9(sycl::queue *stream, sycl::range<3> group_c
               }
               __float128 r1[2]{};
               // r1 = load{g>r}(glb_m2);
-              __float128 v21_lin = glb_m2[0 + item.get_local_id(0) * 1];
-              r1[0] = v21_lin;
-              __float128 v22_lin = glb_m2[2 + item.get_local_id(0) * 1];
-              r1[1] = v22_lin;
+              #pragma unroll
+              for (int32_t v24_i0 = 0; v24_i0 < 1; ++v24_i0) {
+                int32_t v30_lead = v8_lead + (v24_i0 * 2);
+                #pragma unroll
+                for (int32_t v25_i1 = 0; v25_i1 < 2; ++v25_i1) {
+                  __float128 v33_data = glb_m2[(v30_lead + (v25_i1 * 2))];
+                  r1[(v24_i0 + v25_i1)] = v33_data;
+                }
+              }
               // wait(r0 = load{g>r}(glb_m1););
               // wait(r1 = load{g>r}(glb_m2););
               __float128 r2[2]{};
               // r2 = +(r0 * r1) + None
               // [(0, 2), (0, 2)] [(0, 2)]
               __float128 ir2[2]{};
-              __float128 v28_data = r0[0];
-              __float128 v29_data = r1[0];
-              __float128 v32_data = ir2[0];
-              ir2[0] = (v32_data + (v28_data * (sycl::group_broadcast(item.get_sub_group(), v29_data, 0))));
-              __float128 v35_data = r1[1];
-              __float128 v38_data = ir2[1];
-              ir2[1] = (v38_data + (v28_data * (sycl::group_broadcast(item.get_sub_group(), v35_data, 0))));
-              __float128 v43_data = r0[1];
-              __float128 v47_data = ir2[0];
-              ir2[0] = (v47_data + (v43_data * (sycl::group_broadcast(item.get_sub_group(), v29_data, 1))));
-              __float128 v53_data = ir2[1];
-              ir2[1] = (v53_data + (v43_data * (sycl::group_broadcast(item.get_sub_group(), v35_data, 1))));
+              __float128 v40_data = r0[0];
+              __float128 v41_data = r1[0];
+              __float128 v44_data = ir2[0];
+              ir2[0] = (v44_data + (v40_data * (sycl::group_broadcast(item.get_sub_group(), v41_data, 0))));
+              __float128 v47_data = r1[1];
+              __float128 v50_data = ir2[1];
+              ir2[1] = (v50_data + (v40_data * (sycl::group_broadcast(item.get_sub_group(), v47_data, 0))));
+              __float128 v55_data = r0[1];
+              __float128 v59_data = ir2[0];
+              ir2[0] = (v59_data + (v55_data * (sycl::group_broadcast(item.get_sub_group(), v41_data, 1))));
+              __float128 v65_data = ir2[1];
+              ir2[1] = (v65_data + (v55_data * (sycl::group_broadcast(item.get_sub_group(), v47_data, 1))));
               #pragma unroll
-              for (int32_t v58_n0 = 0; v58_n0 < 1; ++v58_n0) {
+              for (int32_t v70_n0 = 0; v70_n0 < 1; ++v70_n0) {
                 #pragma unroll
-                for (int32_t v59_n1 = 0; v59_n1 < 2; ++v59_n1) {
-                  int32_t v60_a = v58_n0 + v59_n1;
-                  __float128 v61_data = ir2[v60_a];
-                  r2[v60_a] = v61_data;
+                for (int32_t v71_n1 = 0; v71_n1 < 2; ++v71_n1) {
+                  int32_t v72_a = v70_n0 + v71_n1;
+                  __float128 v73_data = ir2[v72_a];
+                  r2[v72_a] = v73_data;
                 }
               }
               // glb_m0 = store{r>g}(r2);
               #pragma unroll
-              for (int32_t v66_i0 = 0; v66_i0 < 1; ++v66_i0) {
-                int32_t v74_lead = v8_lead + (v66_i0 * 2);
+              for (int32_t v78_i0 = 0; v78_i0 < 1; ++v78_i0) {
+                int32_t v86_lead = v8_lead + (v78_i0 * 2);
                 #pragma unroll
-                for (int32_t v67_i1 = 0; v67_i1 < 2; ++v67_i1) {
-                  __float128 v69_data = r2[(v66_i0 + v67_i1)];
-                  glb_m0[(v74_lead + (v67_i1 * 2))] = v69_data;
+                for (int32_t v79_i1 = 0; v79_i1 < 2; ++v79_i1) {
+                  __float128 v81_data = r2[(v78_i0 + v79_i1)];
+                  glb_m0[(v86_lead + (v79_i1 * 2))] = v81_data;
                 }
               }
             }
