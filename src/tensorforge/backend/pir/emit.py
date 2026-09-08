@@ -593,15 +593,22 @@ class Emitter:
                 nbytes = elems * self.elem_size(s.copy_dst)
                 w(self._async_lex.copy_async(f'&{dst_b}[{dst_a}]',
                                              f'&{src_b}[{src_a}]', nbytes))
-                commit = self._async_lex.commit_async()
-                if commit:
-                    w(commit)
             elif elems == 1:
                 w(f'{dst_b}[{dst_a}] = {src_b}[{src_a}];')
             else:
                 c = f'c{s.target[0].id}'
                 w(f'for (int {c} = 0; {c} < {elems}; ++{c}) '
                   f'{{ {dst_b}[({dst_a}) + {c}] = {src_b}[({src_a}) + {c}]; }}')
+            return
+
+        if op == Op.COMMIT_ASYNC:
+            # Nothing when the copies took the synchronous fallback: there is
+            # no group to close, and `_decide_async` has already made that
+            # decision once for the whole body.
+            if self._async_lex is not None:
+                txt = self._async_lex.commit_async()
+                if txt:
+                    w(txt)
             return
 
         if op == Op.WAIT:

@@ -663,6 +663,7 @@ class Op:
     STORE = 'store'
     COPY_ASYNC = 'copy.async'   # global -> shared, completes at its wait
     LOAD_ASYNC = 'load.async'   # global -> register, ditto
+    COMMIT_ASYNC = 'commit.async'   # closes issued copies into one counted group
     WAIT = 'wait'
     BARRIER = 'barrier'
     CALL = 'call'
@@ -793,6 +794,30 @@ class Stmt:
     def load_index(self) -> Tuple[Operand, ...]:
         assert self.op == Op.LOAD_ASYNC
         return self.args[1:]
+
+    @property
+    def committed(self) -> Tuple[int, ...]:
+        """The tokens this `commit.async` closes into one group.
+
+        Ids rather than values, and an attribute rather than operands: a
+        commit is bookkeeping over statements that already exist, so naming
+        them as arguments would make it a second consumer of every token and
+        put it at odds with `check_tokens`, which requires exactly one.
+        """
+        assert self.op == Op.COMMIT_ASYNC
+        return self.attr('tokens', ())
+
+    @property
+    def exact(self) -> bool:
+        """Does this group hold exactly ``len(committed)`` operations?
+
+        False when an issue of the group sits under a predicate or inside a
+        region, where the count is a bound rather than a figure.  Only a
+        per-operation counter cares --- a group counter counts the commit,
+        which runs either way.
+        """
+        assert self.op == Op.COMMIT_ASYNC
+        return bool(self.attr('exact', True))
 
     @property
     def counter(self) -> str:

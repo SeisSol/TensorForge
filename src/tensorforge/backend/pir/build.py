@@ -933,10 +933,15 @@ class IRBuilder:
         case --- it is every transfer whose length is not a multiple of the
         block.
 
-        Predication does not change the token.  The copy issues for the wave
-        whenever any lane is active, so it counts once against the hardware
-        counter either way, and the guard is a real branch rather than a
-        select because the token has no C++ value to select on.
+        Predication does not change the token, and the guard is a real branch
+        rather than a select because the token has no C++ value to select on.
+        What it does change is the *count*, on one of the two vendors: AMD's
+        `vmcnt` is per wave and the instruction issues whenever any lane is
+        active, but NVIDIA's group counter is per thread, so a lane inside the
+        guard and a lane outside it do not agree on how many groups are in
+        flight.  That is why the commit is not emitted here.  `place_commits`
+        puts it where the wait is, so the two agree by construction and the
+        copy may stay under its predicate.
 
         The token granularity is independent of all of this.  A wait retires
         every copy up to and including the one it names, so a wait on the last

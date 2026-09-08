@@ -51,6 +51,7 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import Dict, List, Optional, Sequence, Tuple
 
+from .asyncmem import strip_commits
 from .core import (Effect, Op, Region, Stmt, TokenType, Value,
                    accesses_conflict, walk)
 from .passes import substitute
@@ -192,6 +193,13 @@ def wrap_prefetch(body: Tuple[Stmt, ...], make_value,
     this produces go where the pass puts them, not where a builder's cursor
     happens to be.
     """
+    # A commit records where a group closed, and this pass is about to change
+    # that: the peel closes one group before the loop and the body closes
+    # another inside it.  So the commits from the earlier `schedule_async` go
+    # first, and the `schedule_async` that follows this pass puts them back --
+    # otherwise the group boundary an issue was moved out of would still be
+    # standing between that issue and its wait.
+    body = strip_commits(body)
     out: List[Stmt] = []
     for s in body:
         if s.op is not Op.FOR:
