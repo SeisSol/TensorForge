@@ -400,6 +400,22 @@ GROUPS = {
              'for step in range(steps)]')),
     ]),
 
+    'bitlayout': ('tests/test_bitlayout.py', [
+        ('a slot weight read as a lane weight',
+         sub(Path('src/tensorforge/backend/instructions/compute/bitlayout.py'),
+             'Bit(Place.LANE if weight > 0 else Place.SLOT, abs(weight))',
+             'Bit(Place.LANE, abs(weight))')),
+        ('the cut point put on the wrong side of the axis',
+         sub(Path('src/tensorforge/backend/instructions/compute/bitlayout.py'),
+             '        if position < low:',
+             '        if position >= low:')),
+        ('a stride that is not a power of two admitted anyway',
+         sub(Path('src/tensorforge/backend/instructions/compute/bitlayout.py'),
+             '    if low is None or base is None:\n        return None',
+             '    if low is None:\n        return None\n'
+             '    base = 0 if base is None else base')),
+    ]),
+
     'catalog': ('tests/test_amd_catalog.py', [
         ('tile claims a transpose that does not exist',
          sub(PKG / 'catalog.py', "'tensorforge::transpose32x32b32'",
