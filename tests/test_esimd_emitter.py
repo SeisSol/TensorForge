@@ -773,3 +773,37 @@ def test_spmd_sycl_still_declines_and_says_why():
     from tensorforge.common.operation import Operation
     with pytest.raises(NotImplementedError, match='sub-group size'):
         _lexic(simd=False).reduction('v', Operation.ADD, Datatype.F32, 16)
+
+
+# --------------------------------------------------------------------------
+# a change of lane count is not a movement
+# --------------------------------------------------------------------------
+
+def test_the_lane_count_does_not_change_where_an_element_lives():
+    """Under an explicit vector, an element's address is its index.
+
+    `lane_offset` contributes 0 -- the work-item owns the whole dimension --
+    and the slot multiplier *is* the lane count, so element `e` of a lead axis
+    sits at `slot * lanes + lane = e` whatever `lanes` is.  Two readers with
+    different lane counts therefore see the same storage chunked differently,
+    and going between them moves nothing.
+
+    Not so under SPMD, where `lane_offset` is the thread index: there
+    `LaneAxis(32)` and `LaneAxis(16)` put element `e` in different *threads*,
+    and crossing between them is a shuffle.  Which is why the census counts
+    2142 of these as relayouts -- the category is right for the model it was
+    written for.
+    """
+    def address(element, lanes):
+        return (element // lanes) * lanes + element % lanes
+
+    for a, b in ((32, 16), (24, 9), (16, 32), (4, 16)):
+        assert all(address(e, a) == address(e, b) for e in range(256)), (a, b)
+
+
+def test_spmd_puts_the_same_element_in_a_different_thread():
+    """The counterpart, so the asymmetry is stated rather than implied."""
+    def thread_of(element, lanes):
+        return element % lanes
+
+    assert thread_of(20, 32) != thread_of(20, 16)

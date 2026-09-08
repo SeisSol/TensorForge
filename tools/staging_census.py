@@ -14,9 +14,16 @@ comparison says what the buffer is for:
   same element, which another lane holds.  Under SPMD that is what shared
   memory is for; under an explicit vector it is `v[k]`, an element read out of
   this work-item's own registers, and the buffer moves nothing.
-* **relayout** -- filled over one lane count, read over another.  A real
-  redistribution: the element a lane wants is in a different lane, and no
-  register read reaches it.
+* **relayout** -- filled over one lane count, read over another.  Under SPMD a
+  real redistribution: the element a lane wants is in a different *thread*, and
+  no register read reaches it.  Under an explicit vector it is not a movement
+  at all -- `lane_offset` contributes 0 and the slot multiplier is the lane
+  count, so an element's address is its index whatever the count, and the two
+  readers see the same storage chunked differently.  All 2142 on the ESIMD path
+  are of that kind: four pairs, `32->16`, `24->9`, `16->32`, `4->16`, none of
+  them a transpose.  The category is kept because the classification is the
+  same question on both models and only the answer differs; see
+  `test_the_lane_count_does_not_change_where_an_element_lives`.
 * **round trip** -- filled and read the same way.  Written and read back with
   the same lane assignment, so it accomplishes nothing at all except spilling.
 * **unknown** -- one side has no claim.  Not a category, a gap: see
