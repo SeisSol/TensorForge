@@ -23,7 +23,16 @@ from tensorforge.ir.data.memory import Logical
 import numpy as np
 import re
 
-class GpuKernelGeneratorV1:
+class DescriptionReader:
+  """Turns a kernel description into TensorForge tensors and descriptors.
+
+  Split off from the emitting half because the two answer different
+  questions and share only their result: this one knows what yateto means
+  and nothing about how a kernel is built, `KernelEmitter` the other way
+  round. The old single class also carried a `V1` in its name that had
+  stopped being true.
+  """
+
   def __init__(self, arch, attrs=None):
     self._arch = arch
     #: The attributes yateto attached to this kernel, or None when yateto has
@@ -41,16 +50,6 @@ class GpuKernelGeneratorV1:
 
     # TODO: maybe remove again
     self._prefix = ""
-
-  def add_operation(self, dest, ops, target, permute, add):
-    self._cache_matrices(dest, ops, target, permute)
-    can_be_aligned = self._can_be_aligned(dest, ops, target, permute)
-    self._descr_list.append(MultilinearDescr(self.get_tensor(dest, can_be_aligned, [i for i in range(len(dest.indices))]),
-                              [self.get_tensor(op, can_be_aligned, optarget) for op, optarget in zip(ops, target)],
-                              target, permute, add=add,
-                                strict_match=False,
-                                prefer_align=can_be_aligned))
-    return 0# self._descr_list[-1].get_flops()
 
   #: yateto names its operations after the class that implements them; the
   #: enum here is spelled differently and is not a superset.  What is missing
@@ -309,155 +308,6 @@ class GpuKernelGeneratorV1:
     values = list(data.values()) if isinstance(data, dict) else list(np.ravel(data))
     return values != [1] and values != [1.0]
 
-  def is_scalar(self, op):
-    # a bit hacky...
-    return not hasattr(op, 'memoryLayout') and not isinstance(op, (float, int)) #TODO: isinstance(op, Scalar):
-
-  def get_tensor(self, op, can_be_aligned, dims):
-    if isinstance(op, (float, int)):
-      return SubTensor(tensor = Tensor([], Addressing.SCALAR, data = np.array(op)))
-    elif self.is_scalar(op):
-      return SubTensor(self._cache[f'{self._prefix}{op.name()}'])
-    else:
-      tensor = self._cache[f'{self._prefix}{op.name}']
-      currentPreShape = BBox([s for s, _ in op.eqspp.nnzbounds()], [e+1 for _, e in op.eqspp.nnzbounds()])
-
-      # Two shifts act on a yateto tensor, in opposite directions, and they must
-      # not be conflated:
-      #
-      #   * the memory bounding box (`tml.bbox()`) restricts what is *stored*.
-      #     It lives in storage coordinates and is subtracted when an address is
-      #     formed (see Symbol.access_address).
-      #   * a MemoryLayoutView adds a slicing offset: the view's own index space
-      #     is [0, end-start), mapped to the base by `relidx`.
-      #
-      # `currentPreShape` is derived from eqspp, which is defined over the
-      # *view* shape --- so it is already in logical coordinates and stays
-      # there.  Bounding boxes become loop ranges and are intersected across
-      # operands (MultilinearInstruction._analyze); that intersection is only
-      # meaningful if every operand contributes it in the same, shared logical
-      # index space.  The offset is a pure addressing constant and is applied at
-      # the access site only.
-      tml = op.memoryLayout
-      offset = [0] * currentPreShape.rank()
-      # a view means the operand names a slice, not the tensor; see
-      # SubTensor.sliced.  The offset alone does not carry it: `subslice` from
-      # index 0 produces a view with a zero shift.
-      sliced = type(tml).__name__ == 'MemoryLayoutView'
-      while type(tml).__name__ == 'MemoryLayoutView':
-        # relidx() adds this view's `start` in the one dimension it slices;
-        # nested views compose, so this accumulates the full logical->storage shift
-        offset = list(tml.relidx(offset))
-        tml = tml.base
-      tml = tml.storage()
-
-      if can_be_aligned and currentPreShape.rank() > 0 and tml.alignedStride():
-        # Alignment is a property of the *address*, so snap in storage
-        # coordinates and pull the result back into logical ones.  Widening is
-        # sound because the entries gained are zero by eqspp; it must not,
-        # however, reach past what is actually stored.
-        storeRange = tml.bbox()[0]
-        newLower = max(self._arch.alignedLower(currentPreShape._lower[0] + offset[0]),
-                       storeRange.start)
-        newUpper = min(self._arch.alignedUpper(currentPreShape._upper[0] + offset[0]),
-                       storeRange.stop)
-
-        currentPreShape._lower = tuple([newLower - offset[0]] + list(currentPreShape._lower[1:]))
-        currentPreShape._upper = tuple([newUpper - offset[0]] + list(currentPreShape._upper[1:]))
-
-      # invariant tying the two coordinate systems together: bbox + offset must
-      # land inside what the storage layout actually holds
-      storeBox = tml.bbox()
-      for j, (lo, hi) in enumerate(zip(currentPreShape.lower(), currentPreShape.upper())):
-        assert lo >= hi or (storeBox[j].start <= lo + offset[j] and hi + offset[j] <= storeBox[j].stop), \
-            f'{op.name}: logical bbox [{lo},{hi}) + offset {offset[j]} escapes ' \
-            f'storage [{storeBox[j].start},{storeBox[j].stop}) in dim {j}'
-
-      return SubTensor(tensor, currentPreShape, offset, sliced=sliced)
-
-  def add_scalar(self, ops, statements, indices):
-    indicesIndexed = {}
-    for i,op in enumerate(ops):
-      self.make_tensor(op, False, None)
-      indicesIndexed[op.name() if self.is_scalar(op) else op.name] = indices[i]
-
-    def assigner(pretensor):
-      if self.is_scalar(pretensor):
-        self.make_tensor(pretensor, False, None)
-        indicesIndexed[pretensor.name()] = []
-        subTensor = SubTensor(self._cache[f'{self._prefix}{pretensor.name()}'], BBox([], []))
-      else:
-        bbox = BBox([s for s, _ in pretensor.eqspp().nnzbounds()], [e+1 for _, e in pretensor.eqspp().nnzbounds()])
-        subTensor = SubTensor(self._cache[f'{self._prefix}{pretensor.name()}'], bbox)
-      return subTensor, indicesIndexed[pretensor.name()]
-
-    for statement in statements:
-      statement.assignTensor(assigner)
-
-    self._descr_list.append(ElementwiseDescr(statements,
-                                strict_match=False,
-                                prefer_align=False))
-    return 0
-
-  def _datatype(self, source):
-    if hasattr(source, 'datatype'):
-      stype = Datatype.ytt2enum(source.datatype)
-    else:
-      stype = None
-    if hasattr(self._arch, 'typename'):
-      fptype = Datatype.str2enum(self._arch.typename)
-    else:
-      fptype = None
-
-    assert not (stype is None and fptype is None)
-
-    return stype if stype is not None else fptype
-
-  def generate(self, cpp, routineCache):
-    if hasattr(self._arch, 'typename'):
-      fptype = Datatype.str2enum(self._arch.typename)
-    else:
-      fptype = None
-
-    context = Context(arch=self._arch.name,
-                      backend=self._arch.backend,
-                      fp_type=fptype)
-
-    # print(self._ir_list)
-
-    tensorforge_generator = TensorForgeGenerator(self._descr_list, context,
-                                                attrs=self._attrs)
-    tensorforge_generator.generate()
-
-    cpp(f'{self._gen_call_site(tensorforge_generator)}')
-    routine_name = tensorforge_generator.get_base_name()
-
-    routineCache.addRoutine(routine_name, TensorForgeWriter(tensorforge_generator, context.get_vm().get_headers()))
-
-  def _can_be_aligned(self, dest, ops, target, permute):
-    # TODO: useful?
-    aligned = dest.memoryLayout.alignedStride()
-    for i, op in enumerate(ops):
-      if 0 in target[i]:
-        aligned &= dest.memoryLayout.alignedStride() and permute[i][0] == 0
-
-    return aligned
-
-  def make_tensor(self, op, can_be_aligned, dims):
-    if isinstance(op, (float, int)):
-      return Tensor([], Addressing.SCALAR, data = np.array(op))
-    if self.is_scalar(op):
-      entry = self._add_scalar(op)
-      entry_name = op.name()
-    else:
-      entry = self._get_tensorforge_matrix(op)
-      entry_name = op.name
-
-    entry_name = f'{self._prefix}{entry_name}'
-
-    if not (entry_name in self._cache and entry.is_same(self._cache[entry_name])):
-      self._cache[entry_name] = entry
-
   def tensor_ref(self, d):
     """One occurrence of a tensor, as the operation names it.
 
@@ -485,16 +335,6 @@ class GpuKernelGeneratorV1:
     offset = d.get('offset') or [0] * bbox.rank()
 
     return SubTensor(tensor, bbox, offset, sliced=bool(d.get('sliced')))
-
-  def tensor_ref_new(self, d):
-    name = d['name']
-    eqspp = d['spp']
-
-    assert(name in self._cache)
-
-    # TODO: bbox
-
-    return TensorAlloc(name, self._tensor_list[name], Logical())
 
   def add_tensor(self, d):
     name = d['name']
@@ -541,7 +381,7 @@ class GpuKernelGeneratorV1:
       #       numbering is the address; yateto sends them in its storage order.
       spp = ListSPP([tuple(entry) for entry in d['storage']['entries']], shape)
 
-    values = d['values']
+    values = self._values(d['values'])
     is_temporary = d['flags']['temporary']
     is_constant = d['flags']['constant']
 
@@ -550,77 +390,83 @@ class GpuKernelGeneratorV1:
 
     self._tensor_list[name] = TensorData(datatype_new, shape, spp, values=values)
 
-  def _cache_matrices(self, dest, ops, target, permute):
-    can_be_aligned = self._can_be_aligned(dest, ops, target, permute)
-
-    # no add onto a matrix that doesn't exist (TODO: check if that's always the case)
-    assert not(dest.is_temporary and dest in ops)
-
-    for op, optarget in zip(ops, target):
-      self.make_tensor(op, can_be_aligned, optarget)
-
-    if dest.is_temporary: # (dest is never a scalar---for the time being)
-      self.make_tensor(dest, can_be_aligned, [i for i in range(len(dest.indices))])
-      self._tmp_matrices[f'{self._prefix}{dest.name}'] = self._cache[f'{self._prefix}{dest.name}']
+  # NOTE: regions and barriers have no place in the description yet -- yateto
+  #       has never called for one -- so these are unreachable. When they are
+  #       needed they belong in the operations list, as entries of their own.
+  def switch_region(self, barrier):
+    if barrier:
+      self._descr_list += [GridBarrierDescr()]
     else:
-      self.make_tensor(dest, can_be_aligned, [i for i in range(len(dest.indices))])
+      self._descr_list += [GridFenceDescr()]
+
+  def set_region_name(self, name):
+    self._prefix = f"{name}."
+    self._descr_list += [RegionDescription(name)]
+
+  @staticmethod
+  def _values(values):
+    """The constant data a tensor carries, if it carries any.
+
+    Two shapes reach here and `Tensor` wants a different thing for each: a
+    dense run of values as an array, and a handful of named entries as a
+    map from coordinate to value. Neither is a list, which `Tensor` refuses
+    on purpose.
+    """
+    if values is None:
+      return None
+    if values['kind'] == 'flat':
+      return np.asarray(values['data'])
+    if values['kind'] == 'entries':
+      return {tuple(index): value for index, value in values['data']}
+    raise NotImplementedError(f'unknown value kind {values["kind"]!r}')
+
+  def read(self, description):
+    """Read a whole kernel: every tensor first, then every operation.
+
+    Tensors first because an operation names them, and the description
+    lists them in the order they were met, so nothing forward-references.
+    """
+    version = description.get('version')
+    if version != YatetoFrontend.INTERFACE_VERSION:
+      raise NotImplementedError(
+        f'the description states interface version {version}, this side '
+        f'reads {YatetoFrontend.INTERFACE_VERSION}.')
+    for tensor in description['tensors']:
+      self.add_tensor(tensor)
+    for operation in description['operations']:
+      self.add_operation_new(operation)
+    return self._descr_list, self._cache
 
 
+class KernelEmitter:
+  """Runs TensorForge over what the reader built and writes the call site."""
 
-  def _add_scalar(self, scalar):
-    name = f'{self._prefix}{scalar.name()}'
-    tensor = Tensor([], Addressing.SCALAR, alias=name, datatype=self._datatype(scalar.datatype))
-    self._tmp_matrices[name] = tensor # SubTensor(tensor, tensor.bbox)
-    return self._tmp_matrices[name]
+  def __init__(self, arch, attrs, descr_list, cache):
+    self._arch = arch
+    self._attrs = attrs
+    self._descr_list = descr_list
+    self._cache = cache
 
-  def deduce_addresing(self, term):
-    if term.is_compute_constant:
-      return Addressing.NONE
-    if term.is_temporary:
-      return Addressing.STRIDED
+  def generate(self, cpp, routineCache):
+    if hasattr(self._arch, 'typename'):
+      fptype = Datatype.str2enum(self._arch.typename)
     else:
-      return Addressing.PTR_BASED
+      fptype = None
 
-  def _storage(self, tml):
-    if type(tml).__name__ == 'MemoryLayoutView':
-      return tml.storage()
-    return tml
+    context = Context(arch=self._arch.name,
+                      backend=self._arch.backend,
+                      fp_type=fptype)
 
-  def _get_tensorforge_matrix(self, tensor):
-    tml = self._storage(tensor.memoryLayout)
+    # print(self._ir_list)
 
-    shape=[rng.stop for rng in tml.bbox()]
-    bboxrange=tml.bbox()
+    tensorforge_generator = TensorForgeGenerator(self._descr_list, context,
+                                                attrs=self._attrs)
+    tensorforge_generator.generate()
 
-    addr_mode = self.deduce_addresing(tensor) if tensor.addressing is None else tensor.addressing
-    if tensor.is_temporary and tensor.name in self._tmp_matrices:
-      return self._tmp_matrices[tensor.name]
+    cpp(f'{self._gen_call_site(tensorforge_generator)}')
+    routine_name = tensorforge_generator.get_base_name()
 
-    if type(tml).__name__ == 'DenseMemoryLayout':
-      pattern = None
-    else:
-      #ranges = []
-      #for i in range(len(shape)):
-      #  ranges += [range(tml.bbox()[i].start, tml.bbox()[i].stop)]
-      ranges = []
-      for i in range(len(shape)):
-        ranges += [range(0, shape[i])]
-      pattern = tml.entries(*ranges)
-      # incorrect:
-      # pattern = tensor.eqspp.as_ndarray()
-
-    alignment = 16 if len(tensor.memoryLayout.shape()) > 0 and tensor.memoryLayout.alignedStride() else 0
-
-    return yi.gen_matrix(shape,
-                               bboxrange,
-                               addressing=addr_mode,
-                               name=f'{self._prefix}{tensor.name}',
-                               is_tmp=tensor.is_temporary,
-                               permute=None,
-                               pattern=pattern,
-                               values = tensor.values,
-                               datatype = self._datatype(tensor.datatype),
-                               alignment = alignment)
+    routineCache.addRoutine(routine_name, TensorForgeWriter(tensorforge_generator, context.get_vm().get_headers()))
 
   def _gen_call_site(self, generator):
     mat_name_map = {}
@@ -647,24 +493,6 @@ class GpuKernelGeneratorV1:
 
     return generator.generate_call_site(mat_name_map,
                                         offset_name_map)
-
-  def _append_operation(self, op):
-    if isinstance(op, (float, int)):
-      return Tensor([], Addressing.SCALAR, data = np.array(op))
-    elif self.is_scalar(op):
-      return self._cache[f'{self._prefix}{op.name()}']
-    else:
-      return self._cache[f'{self._prefix}{op.name}']
-
-  def switch_region(self, barrier):
-    if barrier:
-      self._descr_list += [GridBarrierDescr()]
-    else:
-      self._descr_list += [GridFenceDescr()]
-
-  def set_region_name(self, name):
-    self._prefix = f"{name}."
-    self._descr_list += [RegionDescription(name)]
 
 class TensorForgeWriter:
   def __init__(self, tensorforge_generator, headers):
@@ -698,7 +526,7 @@ class YatetoFrontend:
   #: The version of yateto's export interface this reads. yateto refuses an
   #: exporter that speaks an older one, because the fields added since would
   #: be dropped silently rather than missed loudly.
-  INTERFACE_VERSION = 2
+  INTERFACE_VERSION = 3
 
   def __init__(self, arch, attrs=None):
     """The routine exporter yateto instantiates, once per kernel.
@@ -708,24 +536,18 @@ class YatetoFrontend:
     the default then selects the kernel surface that predates the channel --
     a flag mask on every kernel, checked against ``nullptr``.
     """
-    self.generator = GpuKernelGeneratorV1(arch, attrs)
+    self._arch = arch
+    self._attrs = attrs
+    self._emitter = None
+
+  def add_kernel(self, description):
+    """The whole kernel, as data, in one call."""
+    reader = DescriptionReader(self._arch, self._attrs)
+    descr_list, cache = reader.read(description)
+    self._emitter = KernelEmitter(self._arch, self._attrs, descr_list, cache)
 
   def generate(self, cpp, cache):
-    self.generator.generate(cpp, cache)
-
-  def add_linear_operation(self, dest, ops, target, permute, add):
-    # legacy gateway
-    return self.generator.add_operation(dest, ops, target, permute, add)
-
-  def region_switch(self, barrier):
-    self.generator.switch_region(barrier)
-    return 0
-
-  def set_region_name(self, name):
-    self.generator.set_region_name(name)
-
-  def add_operation(self, description):
-    return self.generator.add_operation_new(description)
-
-  def add_tensor(self, tensor):
-    return self.generator.add_tensor(tensor)
+    if self._emitter is None:
+      raise NotImplementedError(
+        'generate() before add_kernel(): there is nothing to build.')
+    self._emitter.generate(cpp, cache)

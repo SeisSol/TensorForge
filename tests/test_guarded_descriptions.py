@@ -151,3 +151,88 @@ def test_a_descriptor_nobody_builds_stops_the_generator():
 
     with pytest.raises(InternalError, match="no builder"):
         _generate([Unknown()])
+
+
+# ----------------------------------------------------------------------
+# The kernel description is data
+# ----------------------------------------------------------------------
+
+def _tensor(name, shape):
+    return dict(name=name, addressing="n&+o&", datatype="f64",
+                storage=dict(shape=list(shape), type="bbox",
+                             start=[0] * len(shape), sizes=list(shape)),
+                values=None, alignment=64,
+                flags=dict(temporary=False, constant=False))
+
+
+def _ref(name, indices, shape):
+    return dict(name=name, indices=list(indices),
+                bbox=[[0] * len(shape), list(shape)],
+                offset=[0] * len(shape), sliced=False)
+
+
+def _matmul_description():
+    """``C_ij = A_ik B_kj``, spelled the way yateto sends it."""
+    return dict(
+        version=6,
+        tensors=[_tensor(n, [8, 8]) for n in ("A", "B", "C")] + [
+            dict(name="_scalar0", addressing="", datatype="f64",
+                 storage=dict(shape=[], type="full"), alignment=0,
+                 values=dict(kind="entries", data=[[[], 1.0]]),
+                 flags=dict(temporary=False, constant=True))],
+        operations=[dict(
+            type="multilinear",
+            result=_ref("C", "ij", [8, 8]),
+            args=[_ref("A", "ik", [8, 8]), _ref("B", "kj", [8, 8])],
+            condition=[],
+            permute=[[0, 1], [0, 1]],
+            target=[[0, -1], [-1, 1]],
+            linear=dict(alpha=dict(name="_scalar0", indices=[], bbox=None,
+                                   offset=None, sliced=False),
+                        add=False))])
+
+
+def test_a_kernel_description_survives_being_written_out_and_read_back():
+    """Nothing in it needs Python to be understood.
+
+    The host-side tooling records these and works off the recording rather
+    than running yateto again, so a field only Python can carry is a field
+    that tooling cannot.
+    """
+    import json
+
+    from tensorforge.frontend.yateto import DescriptionReader, YatetoFrontend
+
+    description = _matmul_description()
+    description["version"] = YatetoFrontend.INTERFACE_VERSION
+    replayed = json.loads(json.dumps(description))
+    assert replayed == description
+
+    descrs, cache = DescriptionReader(_ARCH, {}).read(replayed)
+    assert len(descrs) == 1
+    assert {name for name in cache} == {"A", "B", "C", "_scalar0"}
+
+
+def test_a_description_from_another_interface_version_is_refused():
+    from tensorforge.frontend.yateto import DescriptionReader, YatetoFrontend
+
+    description = _matmul_description()
+    description["version"] = YatetoFrontend.INTERFACE_VERSION - 1
+    with pytest.raises(NotImplementedError, match="interface version"):
+        DescriptionReader(_ARCH, {}).read(description)
+
+
+class _Arch:
+    name = "sm_86"
+    backend = "cuda"
+    typename = "double"
+    alignment = 64
+
+    def alignedLower(self, index):
+        return index
+
+    def alignedUpper(self, index):
+        return index
+
+
+_ARCH = _Arch()
