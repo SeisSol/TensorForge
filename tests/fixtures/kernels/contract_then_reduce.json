@@ -242,7 +242,7 @@
  },
  "descriptions": {
   "kernel_e62aee1d95": {
-   "version": 4,
+   "version": 5,
    "tensors": [
     {
      "name": "A",
@@ -415,6 +415,7 @@
        0,
        0
       ],
+      "offset_from": null,
       "sliced": false
      },
      "args": [
@@ -438,6 +439,7 @@
         0,
         0
        ],
+       "offset_from": null,
        "sliced": false
       },
       {
@@ -460,6 +462,7 @@
         0,
         0
        ],
+       "offset_from": null,
        "sliced": false
       }
      ],
@@ -490,6 +493,7 @@
        "indices": [],
        "bbox": null,
        "offset": null,
+       "offset_from": null,
        "sliced": false
       },
       "add": false
@@ -513,6 +517,7 @@
       "offset": [
        0
       ],
+      "offset_from": null,
       "sliced": false
      },
      "args": [
@@ -536,6 +541,7 @@
         0,
         0
        ],
+       "offset_from": null,
        "sliced": false
       }
      ],
@@ -546,6 +552,7 @@
        "indices": [],
        "bbox": null,
        "offset": null,
+       "offset_from": null,
        "sliced": false
       },
       "add": false

@@ -341,9 +341,34 @@ class DescriptionReader:
     # An all-zero pattern marks out no box at all, and a description from a
     # yateto that predates the field states none either.
     bbox = tensor.bbox if box is None else BBox(list(box[0]), list(box[1]))
-    offset = d.get('offset') or [0] * bbox.rank()
+    offset = list(d.get('offset') or [0] * bbox.rank())
+
+    selectors = d.get('offset_from')
+    if selectors and any(selectors):
+      offset = self._selected_offset(offset, selectors)
 
     return SubTensor(tensor, bbox, offset, sliced=bool(d.get('sliced')))
+
+  def _selected_offset(self, offset, selectors):
+    """An offset whose shift on some axis is only known once it runs.
+
+    That is how one of several matrices is selected: the family is a tensor
+    with one axis more, and the shift along that axis is a value rather than
+    a number. `VarOffset` is what carries the pair.
+
+    Two things this does not yet do, and they are the next step rather than
+    an oversight. The selected axis has to leave the box arithmetic --
+    `SubTensor.storage_box` folds the offset into the box and
+    `MultilinearDescr.effective_boxes` adds it to the loop ranges, neither of
+    which a value can join. And the alignment a layout promises about a
+    column only survives a shift along the leading axis if the stride
+    preserves it, which is decided where the layout is, not here.
+    """
+    raise NotImplementedError(
+      f'operand selected at run time along axis '
+      f'{[i for i, sel in enumerate(selectors) if sel]}: the shift arrives '
+      f'as data and `VarOffset` can carry it, but the box arithmetic still '
+      f'treats every offset as a number.')
 
   def add_tensor(self, d):
     name = d['name']
@@ -561,7 +586,7 @@ class YatetoFrontend:
   #: The version of yateto's export interface this reads. yateto refuses an
   #: exporter that speaks an older one, because the fields added since would
   #: be dropped silently rather than missed loudly.
-  INTERFACE_VERSION = 4
+  INTERFACE_VERSION = 5
 
   def __init__(self, arch, attrs=None):
     """The routine exporter yateto instantiates, once per kernel.
