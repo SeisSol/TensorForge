@@ -163,6 +163,51 @@ class Tensor:
                 f'the pattern and the index map disagree')
         return tuple(slots)
 
+    def storage_runs(self):
+        """The stored cells as `(slot, cell, length)` runs, or `None`.
+
+        A run is a stretch that is contiguous in both the compressed order
+        and the bounding box at once, so copying one is a block copy with two
+        constant bases and no per-element index.  That is what lets a sparse
+        tensor be expanded into a dense image without an index table: the run
+        list is the table, and it is spent at code-generation time.
+
+        Worth it only when there are few runs.  The corpus splits sharply --
+        `rDivM(2)` at order 8 is 2866 non-zeros in 62 runs, while `kDivM(0)`
+        is 1446 in 1446, one per element -- and the second kind is cheaper
+        staged dense in the first place.
+        """
+        pack = self.storage_map()
+        if pack is None:
+            return None
+        runs = []
+        start = 0
+        for slot in range(1, len(pack) + 1):
+            if (slot < len(pack)
+                    and pack[slot] == pack[slot - 1] + 1):
+                continue
+            runs.append((start, pack[start], slot - start))
+            start = slot
+        return tuple(runs)
+
+    def densified(self):
+        """The same tensor with nothing left out, or `None` if already dense.
+
+        Its bounding box, shape and type are this one's; only the pattern
+        differs.  Somewhere to expand into: a consumer reading the image asks
+        `is_dense()` and gets the answer that is true of the image rather than
+        the one that is true of where it came from.
+        """
+        if self.is_dense():
+            return None
+        twin = Tensor(shape=self.shape, addressing=self.addressing,
+                      bbox=self.bbox, alias=self.alias, is_tmp=self.is_tmp,
+                      spp=None, data=self.data, datatype=self.datatype,
+                      alignment=self.alignment)
+        twin.name = self.name
+        twin.direction = self.direction
+        return twin
+
     def get_actual_shape(self):
         return self.bbox.sizes()
 
