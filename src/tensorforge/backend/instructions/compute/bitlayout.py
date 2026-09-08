@@ -211,7 +211,8 @@ class Move:
 
 
 def moves(have: BitLayout, want: BitLayout, indices,
-          base: Position = Position()) -> Optional[Tuple[Move, ...]]:
+          base_have: Position = Position(),
+          base_want: Position = Position()) -> Optional[Tuple[Move, ...]]:
     """How to get from one distribution to the other, or `None`.
 
     The `swap` family does not permute bits: `swap<B>` reads the lane `B` away,
@@ -221,10 +222,14 @@ def moves(have: BitLayout, want: BitLayout, indices,
     lane and a slot, which is a transpose and `relayout.find_relayout`'s
     business.
 
-    `base` is a constant added to the source, which is what a caller holding
-    one of several groups of a wave contributes: the group index is an offset
-    on the lane and not a bit of any index the two layouts share, so it cannot
-    be an axis of either.
+    The two bases are constants added to each side, which is what a caller
+    holding one of several groups of a wave contributes: the group index is an
+    offset on the lane and not a bit of any index the two layouts share, so it
+    cannot be an axis of either.  Which side carries it depends on which of
+    them the wave is divided over, so both are stated rather than one assumed.
+
+    `Move.lanes` are the *destination* lanes -- the region of `want`'s register
+    this writes -- because that is what a caller has to mask when it merges.
 
     `None` where some pair of slots needs more than one toggle.  Not a
     limitation to route around: that is the case where no sequence of reads
@@ -239,7 +244,8 @@ def moves(have: BitLayout, want: BitLayout, indices,
         return None
     regions = {}
     for index in indices:
-        here, there = base + have.locate(*index), want.locate(*index)
+        here = base_have + have.locate(*index)
+        there = base_want + want.locate(*index)
         if here.element or there.element:
             # A vector element is neither a lane nor a slot, so no lane toggle
             # reaches it; a packed operand needs the element bits accounted

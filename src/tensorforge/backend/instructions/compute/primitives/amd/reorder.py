@@ -87,6 +87,8 @@ from typing import Optional, Tuple
 
 from . import layouts
 
+from ... import bitlayout
+
 #: `quad_perm:[0,1,2,3]`.  The DPP control that moves nothing, so that
 #: `dppUpdate` is a masked merge and not also a shuffle.
 IDENTITY_DPP = 0xE4
@@ -400,21 +402,32 @@ def accumulator_gathers(op, column: int) -> Optional[Tuple[Gather, ...]]:
     span = op.n * op.blocks
     if op.wave % span:
         return None
+    fragment = layouts.fragment_layout(op, 'D')
+    if fragment is None:
+        return None
 
-    regions = {}
-    for lane in range(op.wave):
-        group, local = divmod(lane, span)
-        block, index = divmod(local, op.n)
-        slot, source = layouts.position(op, 'D', column, index, block)
-        regions.setdefault((group, slot), []).append((lane, source))
+    # The nest's own register: lane `l` holds leading-dimension element `l`,
+    # and nothing varies with the column -- each one is a separate store.
+    nest = bitlayout.BitLayout((
+        tuple(bitlayout.Bit(bitlayout.Place.LANE, op.n << bit)
+              for bit in range((op.blocks - 1).bit_length())),
+        (),
+        tuple(bitlayout.Bit(bitlayout.Place.LANE, 1 << bit)
+              for bit in range((op.n - 1).bit_length())),
+    ))
+    indices = [(block, column, index)
+               for block in range(op.blocks) for index in range(op.n)]
 
     gathers = []
-    for (group, slot), pairs in sorted(regions.items()):
-        masks = {lane ^ source for lane, source in pairs}
-        if len(masks) != 1:
+    for group in range(op.wave // span):
+        found = bitlayout.moves(
+            fragment, nest, indices,
+            base_want=bitlayout.Position(lane=group * span))
+        if found is None:
             return None
-        gathers.append(Gather(group, slot, _swaps_for(masks.pop()),
-                              Select.of((lane for lane, _ in pairs), op.wave)))
+        gathers += [Gather(group, move.source, _swaps_for(move.xor),
+                           Select.of(move.lanes, op.wave))
+                    for move in found]
     return tuple(gathers)
 
 

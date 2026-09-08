@@ -278,7 +278,7 @@ def test_the_solver_finds_the_swaps_the_plan_states(name):
                    for b in range(op.blocks) for i in range(op.n)]
         for group in range(op.wave // span):
             found = bitlayout.moves(have, fragment, indices,
-                                    base=Position(lane=group * span))
+                                    base_have=Position(lane=group * span))
             assert found is not None, (name, column, group)
             for move in found:
                 assert stated[(group, move.target)] == reorder._swaps_for(
@@ -415,3 +415,31 @@ def test_a_packed_operand_is_not_reached_by_a_transpose():
     ))
     assert relayout.transposes_between(
         packed, relayout.transposed(4, 64), 4) is None
+
+
+def test_the_gathers_are_the_solver_s_answer():
+    """`accumulator_gathers` reads the solver now instead of walking lanes.
+
+    The plan it returns is the same for every entry and every column -- 756
+    answers, 692 of them plans -- which is what makes reading it from two
+    layouts a refactor rather than a second opinion.
+    """
+    from tensorforge.backend.instructions.compute.primitives.amd import reorder
+    planned = sum(1 for op in MATRIX_OPS for column in range(op.m)
+                  if reorder.accumulator_gathers(op, column) is not None)
+    assert planned == 692
+
+
+def test_a_base_on_each_side():
+    """Which side carries the group offset depends on which of the two the
+    wave is divided over: the epilogue gathers *into* the nest, so the offset
+    is on the destination, and the transpose check has it on the source."""
+    layout = BitLayout(((Bit(Place.LANE, 1),),))
+    indices = [(0,), (1,)]
+    forward = bitlayout.moves(layout, layout, indices,
+                              base_have=Position(lane=8))
+    backward = bitlayout.moves(layout, layout, indices,
+                               base_want=Position(lane=8))
+    assert forward is not None and backward is not None
+    assert {m.xor for m in forward} == {8}
+    assert {m.xor for m in backward} == {8}
