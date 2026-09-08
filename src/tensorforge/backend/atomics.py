@@ -24,11 +24,6 @@ handed, and a fifth compiled a different instruction than the one named.
 
 What is *not* modelled here, and why:
 
-* **Width.**  `red.global.add.v2.f32` and `.v4.f32` exist from sm_90 and cut
-  the number of atomic transactions by two or four.  They are the natural
-  extension of the packed-FMA work and want the same `ScalarType.length` the
-  store path already carries; the text store path this reaches does not carry
-  it yet, so a width parameter here would have no caller.
 * **Shared memory.**  Nothing reaches an atomic on a non-global symbol today,
   and `Symbol.store` now says so rather than silently writing a plain
   assignment.  When it does, the AMD gates are `lds-atomic-add-f64` for f64
@@ -38,6 +33,18 @@ What is *not* modelled here, and why:
   targets again (`atomic-fmin-fmax-global-f32` reaches RDNA1, which has no
   add at all), so the parameter is threaded through to keep the question
   askable, and answered only for addition.
+
+**Width** is modelled, and answering it honestly is what lets
+`placement.atomic_write_is_exact` stop standing in for it.  That condition
+refused every widened lead for two reasons at once -- a peeled tail element no
+lane owns, and a wide value handed to a scalar instruction -- and only the
+first is a fact about the nest.  The second is this table's question.
+
+The answer still refuses everything actually reached, and by its own content
+rather than by a switch: AMD is the one vendor whose policy asks for atomics,
+and AMD has a packed add for f16 and bf16 and none for f32 or f64.  There is
+no `global_atomic_pk_add_f32` -- no builtin, and no subtarget feature to gate
+one on.  So lifting this is hardware arriving, not an edit here.
 
 The fine-grained memory question is a separate one and is *not* answered by
 this module, because it is not a property of the architecture.  AMD's hardware
@@ -85,15 +92,31 @@ def _sm(ctx) -> int:
     return int(_model(ctx)[3:])
 
 
-def _nvidia_add(ctx, datatype) -> bool:
-    if datatype is Datatype.F32:
-        return True                 # sm_20 and up; every row of the table
-    if datatype is Datatype.F64:
-        return _sm(ctx) >= 60
-    # `atomicAdd(__half *)` does not exist -- the half-precision forms are
-    # `__half2` and `__nv_bfloat162`, which are the width axis above and not a
-    # scalar the store path can hand over.
-    return False
+#: `(datatype, length)` -> the compute capability that has it.
+#:
+#: The half formats are *only* packed: `atomicAdd(__half *)` does not exist,
+#: `atomicAdd(__half2 *)` does, and the same for bf16.  So the width axis is
+#: not a widening of the scalar table here -- it is where two of the types
+#: live at all, which is why the two are one table rather than a table and a
+#: multiplier.
+#:
+#: `float2` and `float4` arrived with sm_90 and are global-memory only, with
+#: atomicity guaranteed per component.  Per component is all an accumulation
+#: needs: it adds to each element independently and nothing reads the pair
+#: back as a unit.
+_NVIDIA_ADD = {
+    (Datatype.F32, 1): 20,
+    (Datatype.F64, 1): 60,
+    (Datatype.F16, 2): 60,
+    (Datatype.BF16, 2): 80,
+    (Datatype.F32, 2): 90,
+    (Datatype.F32, 4): 90,
+}
+
+
+def _nvidia_add(ctx, datatype, length) -> bool:
+    need = _NVIDIA_ADD.get((datatype, length))
+    return need is not None and _sm(ctx) >= need
 
 
 # --------------------------------------------------------------------------- #
@@ -103,9 +126,15 @@ def _nvidia_add(ctx, datatype) -> bool:
 #: What an *instruction* needs, which is not what the *builtin* needs.  The
 #: non-returning form is the one to ask for: an accumulation throws the old
 #: value away, and gfx908 has only that form.
+#: Keyed by `(datatype, length)` for the reason the NVIDIA table is: the
+#: packed 16-bit adds are the only form those types have, and there is no
+#: packed f32 or f64 entry to widen to -- `global_atomic_pk_add_f32` is not a
+#: builtin and no subtarget feature gates one.
 _AMD_ADD_FEATURE = {
-    Datatype.F32: 'atomic-fadd-no-rtn-insts',
-    Datatype.F64: 'flat-buffer-global-fadd-f64-inst',
+    (Datatype.F32, 1): 'atomic-fadd-no-rtn-insts',
+    (Datatype.F64, 1): 'flat-buffer-global-fadd-f64-inst',
+    (Datatype.F16, 2): 'atomic-buffer-global-pk-add-f16-insts',
+    (Datatype.BF16, 2): 'atomic-global-pk-add-bf16-inst',
 }
 
 #: The builtin that *is* the instruction, and the feature clang gates it on.
@@ -124,10 +153,10 @@ _AMD_ADD_BUILTIN = {
 }
 
 
-def _amd_add(ctx, datatype) -> bool:
+def _amd_add(ctx, datatype, length) -> bool:
     from tensorforge.backend.instructions.compute.primitives.amd import (
         has_feature)
-    feature = _AMD_ADD_FEATURE.get(datatype)
+    feature = _AMD_ADD_FEATURE.get((datatype, length))
     return feature is not None and has_feature(ctx, feature)
 
 
@@ -158,7 +187,7 @@ def unsafe_fp_atomics_required(ctx, datatype) -> bool:
     """
     from tensorforge.backend.instructions.compute.primitives.amd import (
         has_feature)
-    if _vendor(ctx) != 'amd' or not _amd_add(ctx, datatype):
+    if _vendor(ctx) != 'amd' or not _amd_add(ctx, datatype, 1):
         return False
     if amd_add_builtin(ctx, datatype) is not None:
         return False
@@ -174,7 +203,13 @@ def unsafe_fp_atomics_required(ctx, datatype) -> bool:
 _INTEL_NATIVE_F64 = ('pvc',)
 
 
-def _intel_add(ctx, datatype) -> bool:
+def _intel_add(ctx, datatype, length) -> bool:
+    # Scalar only, and that is the SPMD spelling rather than the hardware:
+    # `sycl::atomic_ref` binds one reference to one element and has no packed
+    # form.  A wide update under ESIMD is `atomic_update` over a `simd<T, N>`,
+    # which is a different emitter and answers for itself in `SyclLexic`.
+    if length != 1:
+        return False
     if datatype is Datatype.F32:
         return True
     if datatype is Datatype.F64:
@@ -187,11 +222,18 @@ def _intel_add(ctx, datatype) -> bool:
 _VENDORS = {'nvidia': _nvidia_add, 'amd': _amd_add, 'intel': _intel_add}
 
 
-def native_add(ctx, datatype) -> bool:
-    """Does this target add to global memory in one instruction?
+def native_add(ctx, datatype, length: int = 1) -> bool:
+    """Does this target add `length` adjacent elements in one instruction?
 
     A vendor with no entry answers False, which costs a preference and never
     correctness: the accumulation goes out as an ordinary read-modify-write,
     which is what every target did before atomics existed here.
+
+    `length` defaults to 1 so a caller that has no width to offer keeps
+    asking the question it was asking.  It is *not* a hint: a target with a
+    scalar add and no packed one answers False for 2, rather than yes with a
+    silent fallback to two scalar updates.  Splitting a wide value is the
+    store path's decision and it has the information to make it; making it
+    here would hide a doubled instruction count behind a capability query.
     """
-    return _VENDORS.get(_vendor(ctx), lambda *_: False)(ctx, datatype)
+    return _VENDORS.get(_vendor(ctx), lambda *_: False)(ctx, datatype, length)

@@ -90,12 +90,12 @@ def _generate(arch='gfx90a', backend='hip'):
 # --------------------------------------------------------------------------- #
 
 def test_a_scalar_lead_writes_exactly_once():
-    assert atomic_write_is_exact(lead_width=1)
+    assert atomic_write_is_exact(lead_width=1, lead_extent=32)
 
 
 @pytest.mark.parametrize('width', [2, 4])
 def test_a_widened_lead_does_not(width):
-    assert not atomic_write_is_exact(lead_width=width)
+    assert not atomic_write_is_exact(lead_width=width, lead_extent=35)
 
 
 def test_exactness_is_required_on_its_own():
@@ -155,3 +155,38 @@ def test_the_peeled_element_is_what_would_have_been_wrong(monkeypatch):
               and 'glb_' in line]
     assert peeled, 'no peeled global write found; the shape has changed'
     assert all('=' in line and 'atomic' not in line for line in peeled)
+
+
+def test_a_dividing_extent_is_refused_by_the_other_condition(monkeypatch):
+    """36 elements at width 2: no peel, and still no atomic.
+
+    The two conditions are separable now and this is what shows it.  At 35 the
+    tail leaves one element over and `atomic_write_is_exact` refuses; at 36 it
+    divides, the nest is exact, and what refuses instead is
+    `atomics.native_add` -- AMD has no packed FP32 add for the width to go to.
+
+    Worth pinning because the two used to be one condition.  If a later change
+    lifts the peel and this still refuses, that is correct and the reason is
+    the table; if it stops refusing without a packed add appearing, something
+    has widened that should not have.
+    """
+    monkeypatch.setattr(vectorize, 'LEAD_VECTORIZE', True)
+    descrs = [GemmDescr(trans_a=False, trans_b=False,
+                        a=_t([36, K], 'A'), b=_t([K, N], 'B'),
+                        c=_t([36, N], 'D'), alpha=1.0, beta=1.0)]
+    ctx = Context(arch='gfx90a', backend='hip', fp_type=Datatype.F32)
+    gen = Generator(descrs, ctx)
+    gen.register()
+    gen.generate()
+    src = gen.get_kernel()
+
+    assert 'VectorT<float, 2>' in src, 'the widened path did not engage'
+    assert 'broadcast<' not in src.split('store{r>g}')[-1], (
+        'a peel was emitted for an extent the width divides')
+    assert 'atomic' not in src
+
+    from tensorforge.backend import atomics
+    from tensorforge.backend.placement import atomic_write_is_exact
+    assert atomic_write_is_exact(lead_width=2, lead_extent=36), (
+        'the nest is exact here; the refusal has to come from the capability')
+    assert not atomics.native_add(ctx, Datatype.F32, 2)

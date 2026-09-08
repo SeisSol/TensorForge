@@ -252,3 +252,86 @@ def test_explicit_simd_declines_whatever_the_hardware_can_do():
     assert spmd.get_vm().get_lexic().has_atomic_store(spmd, None, Datatype.F32)
     assert not esimd.get_vm().get_lexic().has_atomic_store(esimd, None,
                                                            Datatype.F32)
+
+
+# --------------------------------------------------------------------------- #
+# Width
+# --------------------------------------------------------------------------- #
+
+def test_the_width_defaults_to_the_question_it_replaced():
+    """A caller with no width to offer asks what it always asked."""
+    ctx = _ctx('gfx90a')
+    assert (atomics.native_add(ctx, Datatype.F32)
+            is atomics.native_add(ctx, Datatype.F32, 1))
+
+
+@pytest.mark.parametrize('length', [2, 4])
+def test_amd_has_no_packed_float_add(length):
+    """Which is why nothing reaches a packed atomic today.
+
+    AMD is the one vendor whose policy asks for atomics, and there is no
+    `global_atomic_pk_add_f32` -- no builtin, and no subtarget feature to gate
+    one on.  So the width axis refuses everything actually emitted, by the
+    table's own content rather than by a switch.
+    """
+    for arch in ('gfx90a', 'gfx942', 'gfx950', 'gfx1250'):
+        assert not atomics.native_add(_ctx(arch), Datatype.F32, length)
+        assert not atomics.native_add(_ctx(arch, dtype=Datatype.F64),
+                                      Datatype.F64, length)
+
+
+@pytest.mark.parametrize('arch,length,expected',
+                         [('sm_86', 2, False), ('sm_86', 4, False),
+                          ('sm_90', 2, True), ('sm_90', 4, True),
+                          ('sm_100', 2, True)])
+def test_nvidia_packs_floats_from_sm_90(arch, length, expected):
+    assert atomics.native_add(_ctx(arch, 'cuda'), Datatype.F32,
+                              length) is expected
+
+
+def test_the_half_formats_exist_only_packed():
+    """`atomicAdd(__half *)` does not exist and `atomicAdd(__half2 *)` does.
+
+    So the width axis is where two of the types live at all, rather than a
+    widening of the scalar table -- which is the reason both vendor tables are
+    keyed by the pair instead of by the type with a multiplier beside it.
+    """
+    ctx = _ctx('sm_90', 'cuda')
+    assert not atomics.native_add(ctx, Datatype.F16, 1)
+    assert atomics.native_add(ctx, Datatype.F16, 2)
+    assert atomics.native_add(_ctx('gfx942'), Datatype.BF16, 2)
+    assert not atomics.native_add(_ctx('gfx90a'), Datatype.BF16, 2)
+
+
+def test_a_width_is_never_answered_by_splitting_it():
+    """gfx90a adds one float atomically and is not asked whether it could do
+    two by doing one twice.
+
+    Splitting a wide value is the store path's decision and it has what it
+    needs to make it; answering yes here would hide a doubled instruction
+    count behind a capability query.
+    """
+    ctx = _ctx('gfx90a')
+    assert atomics.native_add(ctx, Datatype.F32, 1)
+    assert not atomics.native_add(ctx, Datatype.F32, 2)
+
+
+def test_intel_declines_a_width_whatever_the_hardware_has():
+    """`sycl::atomic_ref` binds one reference to one element and has no packed
+    form; a wide update is `esimd::atomic_update`, a different emitter."""
+    assert not atomics.native_add(_ctx('pvc', 'oneapi'), Datatype.F32, 2)
+
+
+def test_the_cuda_spelling_casts_to_the_vector_overload():
+    """The value is a GNU vector and `atomicAdd` is declared over `floatN`.
+
+    Same size and alignment, no implicit conversion -- so the cast is what
+    makes the overload reachable, and its absence would be a compile error
+    rather than a wrong number.
+    """
+    ctx = _ctx('sm_90', 'cuda')
+    lexic = ctx.get_vm().get_lexic()
+    assert lexic.has_atomic_store(ctx, None, Datatype.F32, 2)
+    stmt = lexic.atomic_store(ctx, 'glb[i]', 'value', None, Datatype.F32, 2)
+    assert 'float2' in stmt and 'reinterpret_cast' in stmt
+    assert stmt.endswith(';')

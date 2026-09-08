@@ -702,13 +702,25 @@ class MultilinearBuilder(OperationBuilder):
             # instruction can still have a lowering that cannot reach it --
             # ESIMD is the case, where the value is a vector and the SPMD
             # `atomic_ref` has no scalar to bind.
+            # The width is the accumulator's and not the destination's: a
+            # global symbol carries `lead_width` 1 whatever the register image
+            # is blocked by, so asking `dest` would answer for a nest that is
+            # not the one about to be built.
+            #
+            # Asked of the lexic and not of `atomics` directly: the backend
+            # gets the last word, because a target whose hardware has the
+            # instruction can still have a lowering that cannot reach it --
+            # ESIMD is the case, where the value is a vector and the SPMD
+            # `atomic_ref` has no scalar to bind.
             supported=self._context.get_vm().get_lexic().has_atomic_store(
-                self._context, None, dest_symbol.get_fptype()),
-            # The width the store nest will run at, which is the accumulator's
-            # and not the destination's: a global symbol carries `lead_width`
-            # 1 whatever the register image is blocked by, so asking `dest`
-            # would answer for a nest that is not the one about to be built.
-            exact=atomic_write_is_exact(lead_width=self._lead_width),
+                self._context, None, dest_symbol.get_fptype(),
+                self._lead_width),
+            exact=atomic_write_is_exact(
+                lead_width=self._lead_width,
+                # The range the nest will actually run over, which `_analyze`
+                # may have narrowed below the declared box -- the peel is
+                # decided by where the loop stops, not by what was asked for.
+                lead_extent=self._temp_regs.data_view.get_bbox().upper()[0]),
             policy=self._policy)
         result = choose_result_placement(
             legal_result_placements(written_in_slices=in_slices),

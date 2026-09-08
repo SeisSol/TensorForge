@@ -2029,7 +2029,8 @@ class Symbol:
       if self.stype == SymbolType.Global:
         if atomic:
           assign = context.get_vm().get_lexic().atomic_store(
-              context, access, var, None, self.get_fptype())
+              context, access, var, None, self.get_fptype(),
+              lead_width_of(index))
         else:
           assign = context.get_vm().get_lexic().glb_store(access, var, nontemp)
       else:

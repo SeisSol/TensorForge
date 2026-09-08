@@ -210,36 +210,45 @@ def result_is_atomic(*, accumulating: bool, pending_is_atomic: bool,
             and supported and exact)
 
 
-def atomic_write_is_exact(*, lead_width: int) -> bool:
+def atomic_write_is_exact(*, lead_width: int, lead_extent: int) -> bool:
     """Whether the store nest writes each destination element exactly once.
 
-    One condition, and it covers the two ways the widened lead path breaks an
-    atomic:
+    One thing, now that the capability model answers the other.  This used to
+    refuse every widened lead for two reasons at once -- a peeled tail element
+    no lane owns, and a wide value handed to a scalar instruction -- and only
+    the first is a fact about the nest.  Whether the target has a packed add
+    of the value's width is `atomics.native_add`'s question, and it is asked
+    where the width is known.
 
-    * the *peeled* tail.  A lead extent that the vector width does not divide
-      leaves `extent % width` elements that no whole vector covers, and
-      `LeadLoop._peel` hands each to the store as a plain integer.  For a
-      register destination `Symbol.store` guards that write to the lane that
-      owns the element; for a global one it does not, deliberately -- global
-      memory is addressed by every lane and no lane uniquely owns an element,
-      so *which* lane would be the wrong question.  The consequence is that
-      the whole wave stores it.  Under `=` that is the same value written
-      `threads` times and the result is right; under `+=` the contribution is
-      counted `threads` times.
-    * the *value*.  A wide store hands `VectorT<float, 2>` to the atomic, and
-      `__builtin_amdgcn_global_atomic_fadd_f32` takes a `float`.  There is no
-      packed FP32 atomic add to widen to on AMD -- no builtin and no subtarget
-      feature -- and on NVIDIA the `float2` and `float4` forms start at
-      sm_90.  So the width has nowhere to go here even where the tail divides.
+    What is left is the peel.  A lead extent the vector width does not divide
+    leaves `extent % width` elements no whole vector covers, and
+    `LeadLoop._peel` hands each to the store as a plain integer.  `_peel`'s
+    own docstring says `Symbol.store` guards that write to the lane that owns
+    the element -- true for a register destination and not for a global one,
+    where the guard is deliberately absent because global memory is addressed
+    by every lane and *which* lane owns an element is not a question with an
+    answer.  So the whole wave stores it: under `=` the same value written
+    `threads` times, under `+=` the contribution counted `threads` times.
 
-    Both follow from `lead_width > 1`, so one answer serves.  Widening this to
-    "the tail divides, and the target has a packed atomic of the right width"
-    is the shape of the eventual fix; it is a larger change than a condition,
-    since the store would have to carry the width down to `atomic_store` and
-    the capability model would have to grow the axis it deliberately does not
-    have yet.
+    The extent alone decides it, not the lane count: a slot is
+    `threads * width` elements, which is a whole number of vectors, so the
+    leftover is `extent % width` whatever the wave is.
+
+    Reproduced before this was gated, on gfx90a with `TF_LEAD_VEC=1`, from a
+    35-element lead dimension over aligned operands with `beta=1.0`::
+
+        for (int32_t v561_i1 = 0; v561_i1 < 4; ++v561_i1) {
+          float v564_data = r2[(v561_i1 * 2)];
+          int32_t v567_a = 34 + (v561_i1 * 35);
+          __builtin_amdgcn_global_atomic_fadd_f32(
+              &glb_m0[v567_a], (tensorforge::broadcast<32, 1, 17>(v564_data)));
+        }
+
+    Narrowing this to nothing is a real fix and not a smaller condition: give
+    a global destination's fixed lead element an owning lane in
+    `Symbol.store`, and the peel stops being a wave-wide write.
     """
-    return lead_width == 1
+    return lead_extent % lead_width == 0
 
 
 def legal_result_placements(*, written_in_slices: bool

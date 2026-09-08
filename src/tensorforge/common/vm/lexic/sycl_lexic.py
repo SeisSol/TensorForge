@@ -141,7 +141,7 @@ class SyclLexic(Lexic):
   def get_headers(self):
     return ['sycl/sycl.hpp']
 
-  def has_atomic_store(self, ctx, op, datatype):
+  def has_atomic_store(self, ctx, op, datatype, length=1):
     """No under the explicit-SIMD lowering, whatever the hardware can do.
 
     `atomic_ref` binds one reference to one element, and under ESIMD the value
@@ -153,9 +153,10 @@ class SyclLexic(Lexic):
     it exists, refusing is what keeps an ESIMD kernel from being handed an
     `atomic_ref<simd<float, 16>>` that does not compile.
     """
-    return not self.simd_mode and super().has_atomic_store(ctx, op, datatype)
+    return (not self.simd_mode
+            and super().has_atomic_store(ctx, op, datatype, length))
 
-  def atomic_store(self, ctx, access, variable, op, datatype):
+  def atomic_store(self, ctx, access, variable, op, datatype, length=1):
     """A relaxed, device-scope `atomic_ref` over the destination element.
 
     Relaxed because an add carries no ordering the accumulation depends on,

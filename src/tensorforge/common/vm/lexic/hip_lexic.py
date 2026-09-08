@@ -155,7 +155,7 @@ class HipLexic(CudaLexic):
     else:
       return f'{rhs}'
 
-  def atomic_store(self, ctx, access, variable, op, datatype):
+  def atomic_store(self, ctx, access, variable, op, datatype, length=1):
     """The intrinsic where this target has one, `__hip_atomic_fetch_add` else.
 
     The intrinsic was emitted unconditionally, on every target and for both
@@ -179,7 +179,13 @@ class HipLexic(CudaLexic):
     same condition `glb_store` has always had and this never did.
     """
     if self._underlying_hardware != 'amd':
-      return super().atomic_store(ctx, access, variable, op, datatype)
+      return super().atomic_store(ctx, access, variable, op, datatype, length)
+    # No packed FP32 or FP64 add exists here, so `has_atomic_store` refuses
+    # every width but one and this never sees a vector.  Asserted rather than
+    # assumed: the builtin below takes a scalar and would take a GNU vector
+    # by silent truncation of nothing -- it simply would not compile, which
+    # is a worse way to learn it than this.
+    assert length == 1, f'no packed atomic add on AMD (length {length})'
     from tensorforge.backend import atomics
     builtin = atomics.amd_add_builtin(ctx, datatype)
     if builtin is not None:

@@ -125,8 +125,8 @@ class Lexic(ABC):
   # turns on the architecture.  That is the whole of the bug this replaces:
   # a per-vendor answer to a per-architecture question.
 
-  def has_atomic_store(self, ctx, op, datatype):
-    """Whether an atomic update of `datatype` is one instruction here.
+  def has_atomic_store(self, ctx, op, datatype, length=1):
+    """Whether an atomic update of `length` x `datatype` is one instruction.
 
     Not "can it be spelled": every target can spell it, and one that has no
     instruction gets a compare-and-swap loop -- slower than the
@@ -135,9 +135,9 @@ class Lexic(ABC):
     without one says False and is accumulated into normally.
     """
     from tensorforge.backend import atomics
-    return op is None and atomics.native_add(ctx, datatype)
+    return op is None and atomics.native_add(ctx, datatype, length)
 
-  def atomic_store(self, ctx, access, variable, op, datatype):
+  def atomic_store(self, ctx, access, variable, op, datatype, length=1):
     """One atomic update, as a statement.
 
     Only reached when `has_atomic_store` agreed, so a backend overriding this
