@@ -578,3 +578,29 @@ def test_a_stand_in_is_neither_a_parameter_nor_a_temporary():
 
 def test_an_ordinary_tensor_is_not_a_variant():
     assert not accumulation()[0].writes().tensor.is_variant
+
+
+def test_the_loop_path_is_off_and_says_what_it_is_waiting_for():
+    """Assembling it works; verifying it does not, and the reason is one thing.
+
+    A body built once reads its accumulator at the top of the first iteration,
+    and the definition that reaches it is the one the *previous* iteration
+    made.  Nothing carries a value across the back edge yet, so the verifier
+    reports a read with no preceding definition -- correctly.  Expansion is
+    meanwhile exact, so the default trades nothing.
+    """
+    from tensorforge.common.context import Context
+    from tensorforge.generators.generator import Generator
+    from tensorforge.common.exceptions import GenerationError
+
+    def build(loops):
+        gen = Generator(roll(accumulation()),
+                        Context(arch='sm_86', backend='cuda', fp_type=DTYPE))
+        gen._emit_loops = loops
+        gen.generate()
+        return gen
+
+    assert build(False).get_kernel()
+    with pytest.raises(GenerationError) as raised:
+        build(True)
+    assert 'no preceding definition' in str(raised.value)

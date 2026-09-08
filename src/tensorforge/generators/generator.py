@@ -4,7 +4,7 @@
 from typing import List, Optional, Union, Type
 from copy import deepcopy
 import hashlib
-from tensorforge.generators.descriptions import OperationDescription, MultilinearDescr, ElementwiseDescr, RegionDescription, ReductionDescr
+from tensorforge.generators.descriptions import ForDescr, OperationDescription, MultilinearDescr, ElementwiseDescr, RegionDescription, ReductionDescr
 from tensorforge.common.context import Context
 from tensorforge.common.basic_types import Addressing, FlagMode, GeneralLexicon, DataFlowDirection
 from tensorforge.common.helper import get_extra_offset_name
@@ -137,6 +137,15 @@ class Generator:
     #: never sees a repeated run emits exactly what it did before.
     self._param_tables = []
     self._table_member = {}
+    #: Whether a `ForDescr` becomes a loop or is expanded into its iterations.
+    #:
+    #: Off, because the loop does not verify yet: a body built once reads its
+    #: accumulator at the top of the first iteration, and the definition that
+    #: reaches it is the one the *previous* iteration made -- which is not a
+    #: definition the verifier can see, since nothing carries a value across
+    #: the back edge.  Expansion is meanwhile exact, so leaving it on would
+    #: trade working code for a diagnostic.
+    self._emit_loops = False
 
     self._num_threads: int = 0
     self._num_active_threads: int = 0
@@ -725,6 +734,9 @@ class Generator:
     # same body, which is the state the loop's own lowering has to be measured
     # against before it replaces this.
     for outer in descr_list:
+      if isinstance(outer, ForDescr) and self._emit_loops:
+        self._emit_variant_loop(outer, builders)
+        continue
       for descr in outer.operations():
         for kind, builder in builders:
           if isinstance(descr, kind):
@@ -735,6 +747,50 @@ class Generator:
     # Anything the section still holds only in registers has to reach memory
     # before the section ends.
     self._section.ir.extend(residency.flush_all())
+
+  def _emit_variant_loop(self, loop, builders) -> None:
+    """One body, one counter, and one binding per varying operand.
+
+    The body is built with the same builders as anything else -- it is an
+    ordinary descriptor list over the stand-ins -- and the only thing this adds
+    is where a stand-in resolves: a table over the members, and a binding
+    inside the loop that reads it at the counter.  Which is why the loop is
+    assembled here and not inside a builder: no operation in the body knows it
+    is in a loop, and none of them has to.
+    """
+    from tensorforge.backend.instructions.ptr_manip import (
+        DeclareOperandTable, TableForm, VariantLoop)
+    from tensorforge.backend.instructions.builders.ptr_manip_builder import \
+        GetElementPtrBuilder
+
+    body, variants = loop.decompose()
+    counter = f'{GeneralLexicon.BATCH_ID_NAME}v{len(self._section.ir)}'
+
+    tables, region = [], []
+    pointers = GetElementPtrBuilder(self._context, self._scopes)
+    for variant in variants:
+      members = [self._scopes.get_symbol(view.tensor) for view in variant.members]
+      stand_in = self._scopes.get_symbol(variant.stand_in.tensor)
+      table = DeclareOperandTable(
+          self._context, f'{stand_in.name}Table', members,
+          stand_in.obj.addressing, stand_in.obj.datatype,
+          form=(TableForm.SELECT
+                if len(members) <= DeclareOperandTable.SELECT_LIMIT
+                else TableForm.ARRAY),
+          variant=counter)
+      tables.append(table)
+      pointers.build(stand_in, table=table, variant=counter)
+      region.extend(pointers.get_instructions())
+
+    for descr in body:
+      for kind, builder in builders:
+        if isinstance(descr, kind):
+          builder.build(descr)
+          region.extend(builder.get_instructions())
+          break
+
+    self._section.ir.append(
+        VariantLoop(self._context, counter, loop.iterations, region, tables))
 
   def _deduce_mults_per_block(self):
     policy = self._thread_block_policy_type(self._context,

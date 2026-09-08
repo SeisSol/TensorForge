@@ -15,7 +15,8 @@ class GetElementPtrBuilder(AbstractBuilder):
   def __init__(self, context: Context, scopes: Scopes):
     super(GetElementPtrBuilder, self).__init__(context, scopes)
 
-  def build(self, src: Symbol, include_extra_offset: bool = True, batch_offset = 0):
+  def build(self, src: Symbol, include_extra_offset: bool = True, batch_offset = 0,
+            table=None, variant=None, name=None):
     self._reset()
 
     dstype = src.stype
@@ -23,7 +24,7 @@ class GetElementPtrBuilder(AbstractBuilder):
     if dstype not in (SymbolType.Scalar, SymbolType.Data):
       dstype = SymbolType.Global
 
-    dest = Symbol(name=f'{GeneralLexicon.GLOBAL_MEM_PREFIX}{src.name}',
+    dest = Symbol(name=f'{GeneralLexicon.GLOBAL_MEM_PREFIX}{name or src.name}',
                     stype=dstype,
                     obj=src.obj)
 
@@ -35,6 +36,8 @@ class GetElementPtrBuilder(AbstractBuilder):
     self._scopes.add_symbol(dest)
 
     if src.stype != SymbolType.Data:
-      self._instructions.append(GetElementPtr(self._context, src, dest, include_extra_offset, batch_offset))
+      self._instructions.append(GetElementPtr(self._context, src, dest,
+                                             include_extra_offset, batch_offset,
+                                             table=table, variant=variant))
 
     src.add_user(self)
