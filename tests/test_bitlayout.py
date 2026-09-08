@@ -380,3 +380,38 @@ def test_index_spaces_that_do_not_line_up_have_no_displacement():
     assert bitlayout.displacement(
         BitLayout(((Bit(Place.LANE, 1), Bit(Place.LANE, 2)),)),
         BitLayout(((Bit(Place.LANE, 1),),))) is None
+
+
+# -- what the emitter now asks --------------------------------------------- #
+
+@pytest.mark.parametrize('threads', [32, 64])
+@pytest.mark.parametrize('ext', [4, 16])
+def test_the_nest_needs_one_transpose_to_reach_the_fragment(ext, threads):
+    """What `matmul32` does, now as an answer rather than an assumption."""
+    from tensorforge.backend.instructions.compute.primitives.amd import relayout
+    assert relayout.transposes_between(
+        relayout.nest_shared(ext, threads),
+        relayout.transposed(ext, threads), ext) == 1
+
+
+def test_an_operand_that_already_arrives_right_needs_none():
+    """The answer worth having: transposing unconditionally is correct for
+    the arrangement the nest hands over and wrong for any other, and nothing
+    could tell the two apart."""
+    from tensorforge.backend.instructions.compute.primitives.amd import relayout
+    ready = relayout.transposed(4, 64)
+    assert relayout.transposes_between(ready, ready, 4) == 0
+
+
+def test_a_packed_operand_is_not_reached_by_a_transpose():
+    """Which is the branch that makes the question worth asking.  A `float4`
+    holds its low lead bits inside a register, and no exchange of lane and
+    slot bits reaches an element index -- so the emitter declines instead of
+    emitting a transpose that does not land."""
+    from tensorforge.backend.instructions.compute.primitives.amd import relayout
+    packed = BitLayout((
+        (Bit(Place.VECTOR, 1), Bit(Place.VECTOR, 2)),
+        tuple(Bit(Place.LANE, 1 << b) for b in range(6)),
+    ))
+    assert relayout.transposes_between(
+        packed, relayout.transposed(4, 64), 4) is None

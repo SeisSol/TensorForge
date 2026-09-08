@@ -32,6 +32,8 @@ from typing import Callable, Optional, Tuple
 
 from tensorforge.backend.pir.core import LaneAxis, RegisterLayout
 
+from ... import bitlayout
+
 
 @dataclass(frozen=True)
 class Relayout:
@@ -133,6 +135,58 @@ TRANSPOSE4X4 = Relayout(
 #: absent on purpose: it is defined in the runtime, but its body uses row and
 #: wave DPP controls that the simulator does not model, so no row for it could
 #: be checked.
+def nest_shared(ext: int, threads: int) -> bitlayout.BitLayout:
+    """The shared matrix as the loop nest hands it over.
+
+    One register per column of the tile and the contraction spread across the
+    lanes, which is what `A(writer, None, j + jj, ...)` returns: `jj` picks the
+    register and the lane picks the contraction value.
+    """
+    return bitlayout.BitLayout((
+        tuple(bitlayout.Bit(bitlayout.Place.SLOT, 1 << b)
+              for b in range((ext - 1).bit_length())),
+        tuple(bitlayout.Bit(bitlayout.Place.LANE, 1 << b)
+              for b in range((threads - 1).bit_length())),
+    ))
+
+
+def transposed(ext: int, threads: int) -> bitlayout.BitLayout:
+    """The same elements at the layout the A fragment wants.
+
+    The column on the low lane bits, and the contraction bits it displaced now
+    in the registers -- which is why `matmul32` reads its contraction in
+    stride-`ext` groups and not in steps of one.
+    """
+    low = (ext - 1).bit_length()
+    return bitlayout.BitLayout((
+        tuple(bitlayout.Bit(bitlayout.Place.LANE, 1 << b) for b in range(low)),
+        tuple(bitlayout.Bit(bitlayout.Place.SLOT, 1 << b) if b < low
+              else bitlayout.Bit(bitlayout.Place.LANE, 1 << b)
+              for b in range((threads - 1).bit_length())),
+    ))
+
+
+def transposes_between(have, want, ext: int) -> Optional[int]:
+    """How many `transpose{ext}x{ext}b32` calls close the gap: 0, 1 or `None`.
+
+    Nothing and one instruction are the two answers this family has, and the
+    first is the one worth having: an operand that already arrives at the
+    layout the instruction wants needs no relayout, and asking is what lets an
+    emitter find that out instead of transposing unconditionally.
+
+    `None` is the gap this instruction does not close -- a bit permuted inside
+    the lanes, an unpaired move, an element bit of a packed operand.  Not an
+    error: it says a different instruction is wanted, or none exists, and the
+    caller is what knows whether it has another.
+    """
+    gap = bitlayout.is_exchange(bitlayout.displacement(have, want))
+    if gap is None:
+        return None
+    if gap == ():
+        return 0
+    return 1 if gap == transpose_exchange(ext) else None
+
+
 def transpose_exchange(ext: int):
     """What `transpose{ext}x{ext}b32` does, as `(slot weight, lane weight)`
     pairs.

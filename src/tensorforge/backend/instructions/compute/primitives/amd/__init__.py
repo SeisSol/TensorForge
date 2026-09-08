@@ -189,8 +189,8 @@ def matmul(writer, ops, ctx, span):
         if fit.scheme is Scheme.EXCHANGE:
             return matmul_exchange(writer, C, A, B, M, N, K, kx, threads,
                                    dtype, sparse, ctx, span.start, span.stop)
-        matmul32(writer, C, A, B, M, N, K, kx, threads, dtype, sparse, ctx,
-                 span.start, span.stop)
+        return matmul32(writer, C, A, B, M, N, K, kx, threads, dtype, sparse,
+                        ctx, span.start, span.stop)
     else:
         matmuldpp(writer, span.start, C, A, B, M, N, K, kx, threads, dtype,
                   sparse, ctx, span.stop)

@@ -12,6 +12,7 @@ from .catalog import mfma_tile_for
 from ... import split
 from .emitters import fmadpp4, fmadpp8, fmadpp16, fmascalar
 from .relayout import (MOVDPP16, TRANSPOSE4X4, find_relayout,
+                       nest_shared, transposed, transposes_between,
                        fmadpp_operand_layout)
 from .select import select_fmadpp_step
 
@@ -197,6 +198,23 @@ def matmul32(writer: Writer, C, B, A, M, N, K, kx, threads, dtype, sparse,
             fn = tile.builtin
 
             def transpose(regs):
+                """The shared matrix at the layout the A fragment wants.
+
+                Asked rather than assumed.  `matmul32` transposed
+                unconditionally because that is what its own operands need,
+                which is true and is not the same statement as the
+                instruction needing it -- and an operand arriving already
+                right would have been transposed anyway.  `None` here is the
+                gap this instruction does not close; the caller declines
+                rather than emitting something that does not reach the
+                fragment.
+                """
+                needed = transposes_between(nest_shared(block, threads),
+                                            transposed(block, threads), block)
+                if needed == 0:
+                    return list(regs)
+                if needed is None:
+                    return None
                 return _transpose(writer, tile, ftype, threads, regs)
 
             # The MFMA accumulator layout is deliberately left untracked.
@@ -226,7 +244,10 @@ def matmul32(writer: Writer, C, B, A, M, N, K, kx, threads, dtype, sparse,
                             # zeroes, so that the MFMA over the full block
                             # contributes nothing for them.
                             regs += [writer.const(0.0, ftype)]
-                        tA[k // threads] = transpose(regs)
+                        reached = transpose(regs)
+                        if reached is None:
+                            return False
+                        tA[k // threads] = reached
                     for i in range(0, M):
                         with writer.AnonymousScope():
                             vtype = ScalarType(dtype, block)
@@ -289,6 +310,7 @@ def matmul32(writer: Writer, C, B, A, M, N, K, kx, threads, dtype, sparse,
 
                             for jj in range(min(block, N - j)):
                                 C(writer, writer.extract(acc, jj, ftype), i, j + jj)
+            return True
 
         # The tiling policy, now separate from what the tiles are.  Only the
         # 4-wide tile is reachable today: the 16-wide one needs a shared-memory
@@ -305,7 +327,7 @@ def matmul32(writer: Writer, C, B, A, M, N, K, kx, threads, dtype, sparse,
                 f'no MFMA tile for {dtype} at {threads} threads; '
                 f'matmul() should have taken the DPP path')
 
-        write_matmul(tile, start, stop)
+        return write_matmul(tile, start, stop)
 
 
     # TODO: gfx1200, f'__builtin_amdgcn_wmma_f32_16x16x16_bf16_w32_gfx12'
