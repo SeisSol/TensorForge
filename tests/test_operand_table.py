@@ -295,19 +295,35 @@ def test_cuda_annotates_the_parameter_and_hip_does_not():
     assert '__grid_constant__' not in param_table(backend='hip').parameter()
 
 
-def test_the_parameter_carries_the_length_and_the_indirection():
-    assert 'const tbl[4]' in param_table().parameter()
-    assert '**' in param_table(addressing=Addressing.PTR_BASED).parameter()
+def test_the_parameter_is_a_struct_and_not_an_array():
+    """An array parameter decays to a pointer, and there is then no by-value
+    parameter left for the annotation to keep out of per-thread memory."""
+    assert param_table().parameter().endswith('const tbl_t tbl')
+    assert '[' not in param_table().parameter()
 
 
-def test_a_parameter_table_is_read_by_index_like_an_array():
-    assert param_table().access('face') == 'tbl[face]'
+def test_the_struct_carries_the_length_and_the_indirection():
+    assert 'p[4]' in param_table().struct_definition()
+    assert '**' in param_table(addressing=Addressing.PTR_BASED).struct_definition()
+
+
+def test_the_caller_builds_it_by_value():
+    assert param_table().argument() == \
+        'const tbl_t tbl = {{m3, m5, m7, m9}};'
+
+
+def test_a_parameter_table_is_read_through_its_member():
+    assert param_table().access('face') == 'tbl.p[face]'
 
 
 def test_only_a_parameter_table_has_a_parameter():
     from tensorforge.common.exceptions import GenerationError
     with pytest.raises(GenerationError):
         select_table().parameter()
+    with pytest.raises(GenerationError):
+        select_table().struct_definition()
+    with pytest.raises(GenerationError):
+        select_table().argument()
 
 
 def test_a_parameter_table_is_not_emitted_inside_the_loop():

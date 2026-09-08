@@ -290,7 +290,9 @@ class DeclareOperandTable(AbstractInstruction):
 
   def access(self, variant: str) -> str:
     """The expression that yields the member `variant` names."""
-    if self._form in (TableForm.ARRAY, TableForm.PARAM):
+    if self._form is TableForm.PARAM:
+      return f'{self._name}.p[{variant}]'
+    if self._form is TableForm.ARRAY:
       return f'{self._name}[{variant}]'
     return self._name
 
@@ -301,6 +303,30 @@ class DeclareOperandTable(AbstractInstruction):
   def __len__(self) -> int:
     return len(self._members)
 
+  def _require_param(self) -> None:
+    if self._form is not TableForm.PARAM:
+      raise GenerationError(f'{self._form.value} is not a parameter')
+
+  def struct_name(self) -> str:
+    return f'{self._name}_t'
+
+  def struct_definition(self) -> str:
+    """The by-value type the table is passed as.
+
+    A struct and not an array, because an array parameter decays to a pointer:
+    `const float* const t[4]` in a signature *is* `const float* const* t`, so
+    the caller would have to put the four pointers somewhere the device can
+    read them and pass the address of that.  Which is a global load through an
+    extra indirection -- the opposite of the point, and the thing the
+    annotation cannot fix, since there is no by-value parameter left to
+    annotate.  Wrapping the array in a struct is what keeps it a value.
+    """
+    self._require_param()
+    datatype = self._datatype or self._vm._fp_type
+    stars = Addressing.addr2ptr_type(self._addressing)
+    return (f'struct {self.struct_name()} {{ const {datatype} {stars}const '
+            f'p[{len(self._members)}]; }};')
+
   def parameter(self) -> str:
     """How this table is declared in the kernel's signature, for `PARAM`.
 
@@ -308,14 +334,16 @@ class DeclareOperandTable(AbstractInstruction):
     parameter out of per-thread memory is a property of the backend, and on
     most of them the answer is that nothing is needed.
     """
-    if self._form is not TableForm.PARAM:
-      raise GenerationError(f'{self._form.value} is not a parameter')
-    datatype = self._datatype or self._vm._fp_type
-    stars = Addressing.addr2ptr_type(self._addressing)
+    self._require_param()
     annotation = self._vm.get_lexic().grid_constant_kw
     annotation = f'{annotation} ' if annotation else ''
-    return (f'{annotation}const {datatype} {stars}const '
-            f'{self._name}[{len(self._members)}]')
+    return f'{annotation}const {self.struct_name()} {self._name}'
+
+  def argument(self) -> str:
+    """How the caller builds it, one launch before the kernel reads it."""
+    self._require_param()
+    entries = ', '.join(m.name for m in self._members)
+    return f'const {self.struct_name()} {self._name} = {{{{{entries}}}}};'
 
   def gen_ir(self, writer):
     if self._form is TableForm.PARAM:
