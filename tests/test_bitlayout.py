@@ -443,3 +443,30 @@ def test_a_base_on_each_side():
     assert forward is not None and backward is not None
     assert {m.xor for m in forward} == {8}
     assert {m.xor for m in backward} == {8}
+
+def test_the_b_fragment_plan_is_the_solver_s_answer():
+    """`fragment_moves` reads the solver now.  351 plans across every entry,
+    slot and group, identical to what walking the lanes produced."""
+    from tensorforge.backend.instructions.compute.primitives.amd import reorder
+    planned = 0
+    for op in MATRIX_OPS:
+        span = op.n * op.blocks
+        if not span or op.wave % span:
+            continue
+        for slot in range(op.b.per_lane):
+            for group in range(op.wave // span):
+                if reorder.fragment_moves(op, 'B', slot, group) is not None:
+                    planned += 1
+    assert planned == 351
+
+
+def test_a_replicated_fragment_gets_no_plan():
+    """`position` names the lowest lane holding an element, so a plan read off
+    it would move one copy and leave the others reading whatever was there.
+    The RDNA 3 rows hold their operand twice per wave32 and four times per
+    wave64, and they are declined rather than served approximately."""
+    from tensorforge.backend.instructions.compute.primitives.amd import reorder
+    replicated = [op for op in MATRIX_OPS if op.replication('b') != 1]
+    assert replicated, 'the catalogue has replicated fragments'
+    for op in replicated:
+        assert reorder.fragment_moves(op, 'B', 0, 0) is None, op.builtin

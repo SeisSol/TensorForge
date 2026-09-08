@@ -339,23 +339,37 @@ def fragment_moves(op, which: str, slot: int,
     span = extent * op.blocks
     if op.wave % span or group >= op.wave // span:
         return None
+    fragment = layouts.fragment_layout(op, which)
+    if fragment is None or op.replication(which.lower()) != 1:
+        # A replicated fragment holds each element in several lanes, and
+        # `position` names only the lowest of them -- so a plan read off it
+        # would move one copy and leave the others reading whatever was there.
+        # The RDNA 3 rows are the ones where that is not 1.
+        return None
 
-    regions = {}
-    for lane in range(op.wave):
-        element = layouts.element_at(op, which, slot, lane)
-        block, contraction, index = element
-        source = group * span + block * extent + index
-        regions.setdefault(contraction, []).append((lane, source))
+    # The nest's own registers: one per contraction value, with the leading
+    # dimension across the lanes.  The contraction is what picks a register,
+    # which is why it is the slot here and the region key below.
+    nest = bitlayout.BitLayout((
+        tuple(bitlayout.Bit(bitlayout.Place.LANE, extent << bit)
+              for bit in range((op.blocks - 1).bit_length())),
+        tuple(bitlayout.Bit(bitlayout.Place.SLOT, 1 << bit)
+              for bit in range(max(op.k - 1, 0).bit_length())),
+        tuple(bitlayout.Bit(bitlayout.Place.LANE, 1 << bit)
+              for bit in range((extent - 1).bit_length())),
+    ))
+    indices = [(block, contraction, index)
+               for block in range(op.blocks)
+               for contraction in range(op.k)
+               for index in range(extent)]
 
-    moves = []
-    for contraction, pairs in sorted(regions.items()):
-        masks = {lane ^ source for lane, source in pairs}
-        if len(masks) != 1:
-            return None        # not a single XOR: no swap sequence does it
-        mask = masks.pop()
-        moves.append(Move(contraction, _swaps_for(mask),
-                          Select.of((lane for lane, _ in pairs), op.wave)))
-    return tuple(moves)
+    found = bitlayout.moves(nest, fragment, indices,
+                            base=bitlayout.Position(lane=group * span))
+    if found is None:
+        return None
+    return tuple(Move(move.source, _swaps_for(move.xor),
+                      Select.of(move.lanes, op.wave))
+                 for move in found if move.target == slot)
 
 
 @dataclass(frozen=True)

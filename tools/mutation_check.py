@@ -401,6 +401,14 @@ GROUPS = {
     ]),
 
     'bitlayout': ('tests/test_bitlayout.py', [
+        ('a replicated fragment planned from its lowest lane',
+         sub(Path('src/tensorforge/backend/instructions/compute/primitives/amd/reorder.py'),
+             "    if fragment is None or op.replication(which.lower()) != 1:",
+             "    if fragment is None:")),
+        ('the plan kept for every slot, not the one asked for',
+         sub(Path('src/tensorforge/backend/instructions/compute/primitives/amd/reorder.py'),
+             '                 for move in found if move.target == slot)',
+             '                 for move in found)')),
         ('an unpaired bit move accepted as an exchange',
          sub(Path('src/tensorforge/backend/instructions/compute/bitlayout.py'),
              '    if set(forward) != set(backward):\n        return None',
