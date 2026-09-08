@@ -232,15 +232,17 @@ def matmul32(writer: Writer, C, B, A, M, N, K, kx, threads, dtype, sparse,
                 route = reach(nest_shared(block, threads),
                               transposed(block, threads), block,
                               [(c, l) for c in range(block)
-                               for l in range(threads)])
+                               for l in range(threads)], wave=threads)
                 if route == 0:
                     return list(regs)
                 if route != 1:
-                    # A staged trip closes the gap and this emitter does not
-                    # take it: the buffer has to be reserved before any body
-                    # exists, and `scratch` answers 0 here.  Declining sends
-                    # the operation to the generic nest, which is slower and
-                    # right, rather than to a reservation that was never made.
+                    # Assembled swaps and a staged trip both close the gap and
+                    # this emitter takes neither: the first needs a merge loop
+                    # it does not have, the second a buffer reserved before any
+                    # body exists, and `scratch` answers 0 here.  Declining
+                    # sends the operation to the generic nest, which is slower
+                    # and right, rather than to code that was not written or a
+                    # reservation that was never made.
                     return None
                 return _transpose(writer, tile, ftype, threads, regs)
 

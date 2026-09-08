@@ -32,6 +32,8 @@ from typing import Callable, Optional, Tuple
 
 from tensorforge.backend.pir.core import LaneAxis, RegisterLayout
 
+from . import catalog
+from .reorder import compose_cost, compose_exchange
 from ... import bitlayout, staging
 
 
@@ -166,23 +168,51 @@ def transposed(ext: int, threads: int) -> bitlayout.BitLayout:
     ))
 
 
-def reach(have, want, ext: int, indices):
+def has_transpose(ext: int) -> bool:
+    """Whether the runtime defines `transpose{ext}x{ext}b32`.
+
+    A copy of a C++ fact, and the reason a gap that *is* the exchange still
+    may not be one instruction: `DEFINED_TRANSPOSES` names four widths and the
+    catalogue has entries at others.
+    """
+    return f'tensorforge::transpose{ext}x{ext}b32' in catalog.DEFINED_TRANSPOSES
+
+
+def reach(have, want, ext: int, indices, wave: Optional[int] = None):
     """How the operand gets from one distribution to the other.
 
-    Three answers, cheapest first, and each is a different kind of thing:
-    `0` is nothing to emit, an `int` is that many transposes, and a plan is
-    the trip through memory.  Ordered by what they cost rather than by which
-    is tried first, because the order *is* the preference -- a register path
-    beats a store, a barrier and a load per element, and the counts say so.
+    Four answers, cheapest first, and each is a different kind of thing: `0`
+    is nothing to emit, `1` is the runtime's transpose, a tuple of `Move` is
+    that same exchange assembled out of swaps and merges, and a tuple of
+    `Transfer` is the trip through memory.  Ordered by what they cost rather
+    than by which is convenient, because the order *is* the preference.
+
+    The middle rung is the one worth having.  A gap that is the exchange at a
+    width the runtime has no function for would otherwise fall all the way to
+    memory; assembled from swaps it stays in registers.  Which of the last two
+    is taken is a comparison of their counts, not their order.
 
     Never `None`.  The staged path closes every gap, so a caller reaching here
-    always has an answer; what it does not always have is one it can afford,
-    and that is what the plan's `accesses` are for.
+    always has an answer -- what it does not always have is one it can
+    afford.
     """
     direct = transposes_between(have, want, ext)
-    if direct is not None:
-        return direct
-    return staging.staged(have, want, indices)
+    if direct == 0:
+        return 0
+    if direct == 1 and has_transpose(ext):
+        return 1
+    trip = staging.staged(have, want, indices)
+    if wave is None:
+        return trip
+    composed = compose_exchange(have, want, indices, wave)
+    if composed is None:
+        return trip
+    # The last two rungs are compared rather than ordered.  Registers beat
+    # memory at every width in the catalogue -- 224 instructions against 1024
+    # accesses at width eight -- but that is a count and not a law, and a gap
+    # with one region per element would not.
+    stores, loads = staging.accesses(trip)
+    return composed if compose_cost(composed) <= stores + loads else trip
 
 
 def transposes_between(have, want, ext: int) -> Optional[int]:

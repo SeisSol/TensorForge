@@ -401,6 +401,18 @@ GROUPS = {
     ]),
 
     'staging': ('tests/test_staging.py', [
+        ('the assembled exchange preferred over the builtin',
+         sub(Path('src/tensorforge/backend/instructions/compute/primitives/amd/relayout.py'),
+             '    if direct == 1 and has_transpose(ext):\n        return 1',
+             '    if False:\n        return 1')),
+        ('the middle rung skipped, memory taken instead',
+         sub(Path('src/tensorforge/backend/instructions/compute/primitives/amd/relayout.py'),
+             '    composed = compose_exchange(have, want, indices, wave)',
+             '    composed = None')),
+        ('the two counts compared the wrong way round',
+         sub(Path('src/tensorforge/backend/instructions/compute/primitives/amd/relayout.py'),
+             'return composed if compose_cost(composed) <= stores + loads else trip',
+             'return trip if compose_cost(composed) <= stores + loads else composed')),
         ('two elements sharing an address',
          sub(Path('src/tensorforge/backend/instructions/compute/staging.py'),
              '    for address, index in enumerate(indices):',
@@ -410,12 +422,10 @@ GROUPS = {
              '    addresses = {transfer.address for transfer in plan}\n'
              '    return len(addresses)',
              '    return 0')),
-        ('the staged route preferred over the register one',
+        ('the nothing-to-do answer skipped',
          sub(Path('src/tensorforge/backend/instructions/compute/primitives/amd/relayout.py'),
-             '    direct = transposes_between(have, want, ext)\n'
-             '    if direct is not None:\n        return direct',
-             '    direct = transposes_between(have, want, ext)\n'
-             '    if False:\n        return direct')),
+             '    if direct == 0:\n        return 0',
+             '    if False:\n        return 0')),
     ]),
 
     'bitlayout': ('tests/test_bitlayout.py', [

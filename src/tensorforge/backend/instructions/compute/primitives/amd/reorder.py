@@ -83,7 +83,7 @@ it assumes.
 """
 
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Iterable, Optional, Tuple
 
 from . import layouts
 
@@ -302,6 +302,46 @@ def broadcast_feeds_a(op) -> bool:
     not cost an instruction its broadcast.
     """
     return op.broadcast and op.blocks > 1
+
+
+def compose_exchange(have, want, indices, wave: int,
+                     base_have=None, base_want=None) -> Optional[Tuple[Move, ...]]:
+    """A bit exchange assembled out of swaps and merges, or `None`.
+
+    A `swap` does not move anything between a register and a lane, so no
+    sequence of them transposes one register.  Several registers and a merge
+    do: the elements going from register `r` to register `s` all move by one
+    XOR, and masking the merge to the lanes they land on leaves the rest of
+    `s` alone.  `bitlayout.moves` is what finds those regions, so this is the
+    same question the operands already ask, put to a different pair of
+    layouts.
+
+    Which makes the transposes a convenience rather than a capability: the
+    4x4 gap comes out as sixteen regions whose XOR is `source ^ target`, and
+    the runtime's `transpose4x4b32` is that arrangement written once.  Where a
+    width has no such function -- and `DEFINED_TRANSPOSES` names four -- this
+    is what closes the gap in registers, at a cost between the builtin and a
+    trip through memory.
+
+    `Move.contraction` is the source register here, which is what it is in a
+    fragment plan too: the register the region is read from.
+    """
+    kwargs = {}
+    if base_have is not None:
+        kwargs['base_have'] = base_have
+    if base_want is not None:
+        kwargs['base_want'] = base_want
+    found = bitlayout.moves(have, want, indices, **kwargs)
+    if found is None:
+        return None
+    return tuple(Move(move.source, _swaps_for(move.xor),
+                      Select.of(move.lanes, wave))
+                 for move in found)
+
+
+def compose_cost(moves: Iterable[Move]) -> int:
+    """Instructions the assembled exchange issues."""
+    return sum(move.cost for move in moves)
 
 
 def fragment_moves(op, which: str, slot: int,

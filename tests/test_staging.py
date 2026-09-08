@@ -128,3 +128,61 @@ def test_a_base_on_each_side():
     plan = staging.staged(layout, layout, _indices(2),
                           base_want=Position(lane=8))
     assert [t.target.lane - t.source.lane for t in plan] == [8, 8]
+
+
+# -- the rung between registers and memory --------------------------------- #
+
+def test_a_transpose_is_swaps_and_merges():
+    """No `swap` moves anything between a register and a lane, so none
+    transposes one register.  Several registers and a merge do: the elements
+    going from register `r` to register `s` all move by the one XOR `r ^ s`,
+    and masking the merge to the lanes they land on leaves the rest alone.
+
+    Which makes the runtime's transposes a convenience rather than a
+    capability -- the arrangement written once."""
+    from tensorforge.backend.instructions.compute.primitives.amd import reorder
+    for ext, wave in ((4, 64), (4, 32), (8, 64), (16, 64)):
+        indices = _indices(ext, wave)
+        plan = bitlayout.moves(relayout.nest_shared(ext, wave),
+                               relayout.transposed(ext, wave), indices)
+        assert plan is not None and len(plan) == ext * ext, (ext, wave)
+        assert all(move.xor == move.source ^ move.target for move in plan)
+        assembled = reorder.compose_exchange(
+            relayout.nest_shared(ext, wave),
+            relayout.transposed(ext, wave), indices, wave)
+        assert len(assembled) == ext * ext
+
+
+def test_a_width_the_runtime_has_no_function_for_stays_in_registers():
+    """The rung this adds.  `DEFINED_TRANSPOSES` names four widths and the
+    catalogue has entries at others; those used to fall all the way to
+    memory."""
+    from tensorforge.backend.instructions.compute.primitives.amd import reorder
+    assert not relayout.has_transpose(8)
+    indices = _indices(8, 64)
+    route = relayout.reach(relayout.nest_shared(8, 64),
+                           relayout.transposed(8, 64), 8, indices, wave=64)
+    assert not isinstance(route, int)
+    assert isinstance(route[0], reorder.Move)
+    assert reorder.compose_cost(route) < sum(
+        staging.accesses(staging.staged(relayout.nest_shared(8, 64),
+                                        relayout.transposed(8, 64), indices)))
+
+
+def test_the_builtin_still_wins_where_there_is_one():
+    """One call against sixteen regions: assembling is the fallback for a
+    width without a function, not a replacement for one with."""
+    for ext in (4, 16):
+        assert relayout.has_transpose(ext)
+        assert relayout.reach(relayout.nest_shared(ext, 64),
+                              relayout.transposed(ext, 64), ext,
+                              _indices(ext, 64), wave=64) == 1
+
+
+def test_without_a_wave_the_middle_rung_is_skipped():
+    """A merge is masked by lane, so a caller that does not say how wide the
+    wave is cannot be given one."""
+    indices = _indices(8, 64)
+    route = relayout.reach(relayout.nest_shared(8, 64),
+                           relayout.transposed(8, 64), 8, indices)
+    assert isinstance(route[0], staging.Transfer)
