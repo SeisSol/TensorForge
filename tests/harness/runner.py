@@ -187,6 +187,19 @@ def run_case(case, target: Target, cache_root: Path,
             # aliasing here: the view stays dense for the reference, the flat
             # buffer carries only the stored cells.
             flat = layout.pack(view, np.asarray(op.pack_index), dt)
+        if op.storage_parts == 2:
+            # The same seam, one step further on: `pack` changed which cells
+            # the buffer holds, this changes how many scalars each of them
+            # takes.  Both are invisible to `reference()`, which read its copy
+            # of `view` above -- the tensor is the same matrix either way, and
+            # only the kernel's reading of it differs.
+            flat = layout.split_tf32(flat, dt)
+        elif op.storage_parts != 1:
+            raise NotImplementedError(
+                f"{op.kernel_name}: no host-side preparation for "
+                f"storage_parts={op.storage_parts}; the generator asked for a "
+                f"form the harness cannot write, which would ship a buffer of "
+                f"the right size and the wrong contents")
         flats[op.kernel_name] = flat
 
     expected = _reference_for_case(case, inputs_by_alias, dest_in_view)

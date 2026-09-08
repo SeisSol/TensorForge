@@ -33,6 +33,21 @@ class Tensor:
         #: written.  It resolves inside the loop to whichever member the
         #: counter names, so the signature leaves it out and the body binds it.
         self.is_variant = False
+        #: Scalars one *logical* element occupies in memory.
+        #:
+        #: One for every tensor the frontend describes, and that is the whole
+        #: of it as far as a frontend is concerned: this is a codegen
+        #: decision, not a description of the operation.  The generator raises
+        #: it when it decides to store an operand already prepared -- a value
+        #: split into the halves a matrix instruction multiplies, say -- so
+        #: that the kernel reads the parts instead of computing them.
+        #:
+        #: It is a count and not a flag because the schemes differ in it: two
+        #: parts for a TF32 split, three for a BF16 one.  What the parts *mean*
+        #: is the preparing function's business and not this attribute's; this
+        #: one only says how much room they take, which is what an address
+        #: needs to know.
+        self.storage_parts = 1
         self.direction: Union[DataFlowDirection, None] = None
         self.data = data
         self.spp = spp
@@ -128,7 +143,11 @@ class Tensor:
         nothing is reserved for the structural zeros.  A bounding box is the
         same under either reading, which is why it needs no case of its own.
         """
-        return self.get_actual_volume() if self.is_dense() else self.memory()
+        base = self.get_actual_volume() if self.is_dense() else self.memory()
+        # `storage_parts` multiplies whichever of the two readings applies:
+        # preparing an operand does not change which cells are stored, only
+        # how many scalars each of them takes.
+        return base * self.storage_parts
 
     def storage_map(self):
         """Which cell of the bounding box each storage slot holds.

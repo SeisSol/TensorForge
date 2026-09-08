@@ -57,8 +57,18 @@ def slots_for(lower: int, upper: int, num_threads: int,
 
 
 class DataView:
-  def __init__(self, shape: List[int], permute: Union[List[int], None], bbox: BoundingBox = None):
+  def __init__(self, shape: List[int], permute: Union[List[int], None],
+               bbox: BoundingBox = None, elem_parts: int = 1):
     self.shape = shape
+    #: Scalars one logical element of this buffer occupies --- `Tensor.
+    #: storage_parts` for a view onto a global tensor, and 1 for a staging
+    #: tile, whose elements are whatever was staged into it.
+    #:
+    #: It belongs on the view and not only on the tensor because a view is
+    #: what an address is computed from, and this is the innermost stride:
+    #: element `(i0, i1)` of a two-part tensor lives at
+    #: `parts * (i0 + e0 * i1)`, with the part index added on top.
+    self._elem_parts = elem_parts
     if permute is None:
       permute = [i for i in range(len(shape))]
     if bbox is None:
@@ -177,8 +187,13 @@ class DataView:
     (Tensor.get_actual_shape), not here.
     """
     # TODO: permute? Yes or no? Also, unify SPPs.
+    #
+    # `current` starts at the part count rather than at one: where a tensor is
+    # stored prepared, consecutive logical elements are that many scalars
+    # apart, and every stride above them scales with it.  One for everything
+    # else, which is every buffer that is not a prepared global operand.
     strides = []
-    current = 1
+    current = self._elem_parts
     for i, size in enumerate(self.shape):
       if i not in mask:
         strides += [current]

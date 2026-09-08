@@ -105,9 +105,13 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
       return f'{lexic.thread_idx_x}'
 
   def _get_bounding_box_dense(self):
+    # The parts belong to the *global* tensor: the staging tile below is
+    # built from what was copied into it, so its elements are single
+    # scalars whatever the source was stored as.
     self._src.data_view = DataView(shape=self._tensor.get_actual_shape(),
                                    permute=None,
-                                   bbox=self._tensor.get_bbox())
+                                   bbox=self._tensor.get_bbox(),
+                                   elem_parts=self._tensor.storage_parts)
 
     src_real_shape = self._tensor.bbox.sizes()
     dst_bbox = self._tensor.get_bbox() # BoundingBox([0] * len(self._tensor.shape), src_real_shape)

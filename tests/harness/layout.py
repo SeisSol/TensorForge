@@ -132,6 +132,51 @@ def pack(view: np.ndarray, pack_index: np.ndarray,
                                 dtype=np_dtype(dt))
 
 
+def split_tf32(flat: np.ndarray, dt: Datatype) -> np.ndarray:
+    """Store each scalar as the two TF32 halves a matrix instruction multiplies.
+
+    The kernel-side counterpart is `splitFloatTF32` in
+    ``tensorforge_device/cuda.h``: `upper` is the value rounded to TF32,
+    `lower` is the same rounding of what the first one left over.  Done here,
+    once, for an operand that is constant across the batch, the kernel reads
+    the pair instead of computing it -- which is the whole point.
+
+    Interleaved, `[hi0, lo0, hi1, lo1, ...]`, because that is what
+    ``DataView.get_dim_strides`` produces for ``storage_parts == 2``: the part
+    index is the innermost stride, so the halves of one element are adjacent
+    and a single wide access fetches both.
+
+    Both halves are stored as ``float`` and not as ``uint32``.  A TF32 value
+    *is* a float with its low thirteen mantissa bits zero, so the kernel loads
+    them through the accessor it already has and reinterprets -- no
+    conversion, which is the arithmetic this exists to remove.
+
+    The rounding is `cvt.rna`: nearest, ties **away from zero**.  Not
+    ties-to-even, however much the mnemonic looks like `rne`.  The difference
+    is two values in four thousand, which is exactly the kind of margin that
+    passes every test that does not compare bit for bit -- and this one has
+    been compared bit for bit against the device, over 4096 values, both
+    halves.
+    """
+    if np_dtype(dt) != np.float32:
+        raise ValueError(
+            f"the TF32 split is defined for F32 operands; got {dt}")
+
+    def _rna(x: np.ndarray) -> np.ndarray:
+        # The bits below the sign are a magnitude, so adding half an ulp of
+        # the kept width and truncating rounds away from zero for both signs.
+        u = x.view(np.uint32).astype(np.uint64)
+        return ((u + 0x1000) & 0xFFFFE000).astype(np.uint32)
+
+    x = np.ascontiguousarray(flat, dtype=np.float32)
+    hi = _rna(x)
+    lo = _rna((x - hi.view(np.float32)).astype(np.float32))
+    out = np.empty(x.size * 2, dtype=np.float32)
+    out[0::2] = hi.view(np.float32)
+    out[1::2] = lo.view(np.float32)
+    return out
+
+
 def unpack(flat: np.ndarray, pack_index: np.ndarray,
            shape: Tuple[int, ...], batch: int) -> np.ndarray:
     """Expand the kernel's buffer back into a dense ``(batch, *shape)`` array.

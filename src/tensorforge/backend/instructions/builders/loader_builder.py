@@ -28,7 +28,9 @@ class GlobalLoaderBuilder(AbstractBuilder):
                     obj=src.obj)
     # a global tensor's extent is its bounding box: memory spans
     # upper - lower, with address 0 at `lower`
-    predest.data_view = DataView(shape=src.obj.get_actual_shape(), permute=None, bbox=src.obj.get_bbox())
+    predest.data_view = DataView(shape=src.obj.get_actual_shape(), permute=None,
+                                 bbox=src.obj.get_bbox(),
+                                 elem_parts=src.obj.storage_parts)
 
     self._scopes.add_symbol(predest)
     self._instructions.append(GetElementPtr(self._context, src, predest, True))

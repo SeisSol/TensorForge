@@ -57,6 +57,11 @@ class DriverOperand:
     #: Scalars one batch element occupies, from ``Tensor.storage_volume``.
     #: Equal to ``volume`` for a dense tensor and smaller for a sparse one.
     storage_volume: int = 0
+    #: Scalars one *logical element* occupies, from ``Tensor.storage_parts``.
+    #: One unless the generator decided to store this operand prepared, in
+    #: which case the host has to write the prepared form -- the kernel is
+    #: already addressing it that way.
+    storage_parts: int = 1
     #: For a sparse tensor, the F-order cell of one element that each storage
     #: slot holds; ``None`` when the tensor is stored dense and the two orders
     #: are the same thing.
@@ -110,6 +115,7 @@ def collect_operands(generator) -> List[DriverOperand]:
             is_source=is_src,
             is_sink=is_snk,
             storage_volume=int(t.storage_volume()),
+            storage_parts=int(getattr(t, "storage_parts", 1)),
             pack_index=t.storage_map(),
             # the kernel addresses the *stored* region: memory spans
             # upper - lower and address 0 is `lower`, so the host buffer is
