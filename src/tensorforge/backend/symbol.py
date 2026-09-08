@@ -2079,14 +2079,31 @@ class Symbol:
       # One named element of a dimension that lives in the registers, so
       # exactly one lane holds it and the others must not write.
       #
+      # *Which* lane is the question this got wrong.  It compared the thread
+      # index against the element index, and those are the same number only
+      # at `lead_width == 1`.  At width 2 a peeled element 32 produced
+      # `threadIdx.x == 32` in a 32-lane wave -- a lane that does not exist,
+      # so the accumulator for that element was never written and the store's
+      # `readlane` of it read whatever the guarded main block had left there.
+      # One wrong element per column, always the last, on every odd extent.
+      #
+      # The owning lane is `(element // width) % threads`, which is exactly
+      # what `Symbol.load` computes for `bc_lane` when it broadcasts the same
+      # element.  Taken from the symbol rather than derived here so the two
+      # cannot drift: a store that guards a different lane than the load
+      # broadcasts from is the same defect in the other direction.
+      #
       # Deliberately *not* extended to Global alongside the branch above.
-      # Global memory is shared: every lane addresses it directly and there is
-      # no lane that uniquely owns an element, so the guard would be wrong --
-      # and it also formats the index with `{...}`, which for a `VarOffset`
-      # interpolates a Python object repr (address included) straight into the
-      # generated source.  Unreachable today for register-like symbols, which
-      # is why nothing has caught it; see `VarOffset.__str__`.
-      with writer.If(f'{context.get_vm().get_lexic().thread_idx_x} == {lead}'):
+      # Global memory is shared: every lane addresses it directly, so no lane
+      # owns an element and this guard would be answering a question global
+      # memory does not ask.  What global *does* need is that exactly one lane
+      # writes -- which is a different requirement, and one only an atomic
+      # accumulation is sensitive to; see `placement.atomic_write_is_exact`.
+      owner = (unwrap_lead(lead)[0]._value if unwrap_lead(lead) is not None
+               else lead)
+      if isinstance(owner, (int, np.integer)):
+        owner = (int(owner) // self.lead_width) % self.num_threads
+      with writer.If(f'{context.get_vm().get_lexic().thread_idx_x} == {owner}'):
         writer.access_stmt(assign, self, kind, args=_operands(variable, addrs), fmt=fmt)
     else:
       writer.access_stmt(assign, self, kind, args=_operands(variable, addrs), fmt=fmt)

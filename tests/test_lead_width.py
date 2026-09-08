@@ -456,8 +456,21 @@ def _run_case(monkeypatch, M, N, width, align=16, dtype=None):
 
 
 def _wrong_lead_indices(monkeypatch, M, N, width, **kw):
-    _, scalar = _run_case(monkeypatch, M, N, 1, **kw)
-    _, wide = _run_case(monkeypatch, M, N, width, **kw)
+    """Which lead elements the widened kernel gets wrong, or a skip.
+
+    The skip is the interpreter's limit and not the generator's: a narrow
+    extent puts the operand broadcast in its template form
+    (`tensorforge::broadcast<8, 1, 4>`), which `kernel_eval` does not parse.
+    Raised as a skip rather than filtered out of the parameter list, so the
+    day it is modelled these cases start running instead of staying quietly
+    absent.
+    """
+    from kernel_eval import Abort
+    try:
+        _, scalar = _run_case(monkeypatch, M, N, 1, **kw)
+        _, wide = _run_case(monkeypatch, M, N, width, **kw)
+    except Abort as exc:
+        pytest.skip(f'host interpreter cannot evaluate this shape: {exc}')
     return sorted({i % M for i, (a, b) in enumerate(zip(scalar, wide))
                    if abs(a - b) > 1e-4})
 
@@ -508,19 +521,43 @@ def test_width_four_is_right_where_the_stride_agrees(monkeypatch, extent):
     assert not _wrong_lead_indices(monkeypatch, extent, 4, 3)
 
 
-@pytest.mark.parametrize('extent', [33, 35])
-def test_the_peeled_element_gets_a_wrong_value_at_width_two(monkeypatch,
-                                                            extent):
-    """And this one is at the width the generator actually offers.
+@pytest.mark.parametrize('extent', [9, 15, 17, 21, 33, 35, 45, 63, 65])
+@pytest.mark.parametrize('dtype_align', [(None, 16), (None, 8)],
+                         ids=['align16', 'align8'])
+def test_an_odd_extent_computes_the_peeled_element(monkeypatch, extent,
+                                                   dtype_align):
+    """The element no whole vector covers, and the lane that owns it.
 
-    An odd extent at width 2 leaves one element no whole vector covers, and
-    `LeadLoop._peel` hands it to the store as a plain integer.  Its value
-    comes out wrong -- one element per column, always the last -- so the peel
-    is not merely the redundant wave-wide write that `test_store_exactness`
-    describes.  That one is a cost under `=` and a wrong sum under `+=`; this
-    is a wrong number under both.
+    `Symbol.store` guards a fixed lead element to the one lane that holds it,
+    and compared the *thread* index against the *element* index to do so --
+    the same number only at width 1.  At width 2 a peeled element 32 asked for
+    `threadIdx.x == 32` in a 32-lane wave, so the accumulator was never
+    written and the store's `readlane` of it read what the guarded main block
+    had left there.  One wrong element per column, always the last, on every
+    odd extent, in FP32 and FP64 alike.
 
-    `tests/cases/aligned_odd_lead` exists to exercise exactly this shape and
-    the numeric oracle skips it, which is why nothing has said so.
+    The owning lane is `(element // width) % threads`, which is what
+    `Symbol.load` already computed to broadcast the same element -- so the
+    defect was the two disagreeing, and taking the store's answer from the
+    symbol is what stops them.
     """
-    assert _wrong_lead_indices(monkeypatch, extent, 3, 2) == [extent - 1]
+    _, align = dtype_align
+    assert _wrong_lead_indices(monkeypatch, extent, 3, 2, align=align) == []
+
+
+def test_the_peeled_write_is_still_wave_wide():
+    """Right value, still written by every lane -- two separate properties.
+
+    The guard above is on the *register* accumulator, which is what made the
+    value wrong.  The global store of the peeled element has no guard at all
+    and cannot simply take this one: `readlane` is `__shfl_sync` over the full
+    warp mask, so moving it inside a single-lane branch is a shuffle the other
+    lanes never reach.
+
+    So exactness is unchanged and `atomic_write_is_exact` still refuses a
+    widened lead.  Repairing it means hoisting the broadcast out of the guard,
+    which is a change to how the store sequences its statements rather than to
+    which lane it names.
+    """
+    from tensorforge.backend.placement import atomic_write_is_exact
+    assert not atomic_write_is_exact(lead_width=2, lead_extent=33)
