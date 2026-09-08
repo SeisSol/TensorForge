@@ -816,3 +816,44 @@ def test_the_driver_counts_what_the_launcher_takes():
                 if getattr(m, 'is_variant', False)}
     assert variants
     assert counted.isdisjoint(variants)
+
+
+# --- one switch -------------------------------------------------------------
+
+
+def _with_option(descrs, **options):
+    from tensorforge.common.context import Context, Options
+    from tensorforge.generators.generator import Generator
+    gen = Generator(descrs, Context(arch='sm_86', backend='cuda',
+                                    fp_type=DTYPE, options=Options(**options)))
+    gen.generate()
+    return gen
+
+
+def test_the_option_rewrites_and_emits_in_one_step():
+    """Two separately reachable switches let a list be rolled and expanded."""
+    plain = _with_option(_flux())
+    merged = _with_option(_flux(), merge_variants=True)
+    assert not any(type(i).__name__ == 'VariantLoop'
+                   for i in plain._sections[0].ir)
+    assert any(type(i).__name__ == 'VariantLoop'
+               for i in merged._sections[0].ir)
+    assert len(merged.get_kernel()) < len(plain.get_kernel())
+
+
+def test_the_option_is_off_by_default():
+    assert not any(type(i).__name__ == 'VariantLoop'
+                   for i in _with_option(_flux())._sections[0].ir)
+
+
+def test_a_pair_is_not_a_run_by_default():
+    """Two contributions are cheaper written out than a counter and a select."""
+    merged = _with_option(_flux(3), merge_variants=True)
+    assert not any(type(i).__name__ == 'VariantLoop'
+                   for i in merged._sections[0].ir)
+
+
+def test_the_minimum_is_the_caller_s_to_lower():
+    merged = _with_option(_flux(3), merge_variants=True, merge_min_count=2)
+    assert any(type(i).__name__ == 'VariantLoop'
+               for i in merged._sections[0].ir)

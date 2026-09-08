@@ -17,7 +17,26 @@ class Options:
                enable_wrap_loads=False,
                wrap_distance=1,
                preload_globals=None,
-               wide_bodies=True):
+               wide_bodies=True,
+               wide_bodies=True,
+               merge_variants=False,
+               merge_min_count=3,
+               merge_max_arity=None):
+    # Macro-op merging: state a repeated run of the descriptor list once and
+    # bind its varying operands to a counter.  One switch and not two -- the
+    # rewrite and the emission were separately reachable, which meant a caller
+    # could roll a list and have it silently expanded again.
+    #
+    # `merge_min_count` is three rather than two because two contributions are
+    # cheaper written out than a counter and a select per operand, and because
+    # a pair of same-shaped operations is the commonest accidental run.
+    #
+    # Off pending numbers from hardware; the forms are exact against each other
+    # in the generated text and have not been compared as values.
+    self.merge_variants = merge_variants
+    self.merge_min_count = merge_min_count
+    self.merge_max_arity = merge_max_arity
+
     self.exact_contraction_length: bool = exact_contraction_length
     self.align_shr_mem: bool = align_shr_mem
     self.enable_sync_block_opt = enable_sync_block_opt

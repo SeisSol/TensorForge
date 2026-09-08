@@ -231,6 +231,17 @@ class Generator:
     self._section: Section = Section()
     self._sections: List[Section] = []
 
+    if context.get_user_options().merge_variants:
+      # Before the operands are named, which is the first thing that reads the
+      # list -- a stand-in arriving after it has no name and then no symbol,
+      # and the failure is a table built from `None` several phases later.
+      from tensorforge.generators.rolling import roll
+      options = context.get_user_options()
+      self.descr_list = roll(self.descr_list,
+                             min_count=options.merge_min_count,
+                             max_arity=options.merge_max_arity)
+      self._emit_loops = True
+
     self._name_operands(self.descr_list)
 
     # launch control is (still) broken
