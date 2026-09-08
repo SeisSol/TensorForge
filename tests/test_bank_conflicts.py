@@ -175,3 +175,20 @@ def test_a_loaded_value_is_not_an_address_expression():
     for _n, index, base, width, _k, defs, lanes in bc.accesses(source):
         assert 'x' not in defs and 'y' not in defs
         assert bc.ways(bc._resolve(index, defs), base, width, lanes) == 1
+
+
+def test_the_arena_a_window_is_cut_from_is_not_itself_a_window():
+    """`float* tempShrMem = &localShrMem0[352];` declares a window and reads
+    like an access to `localShrMem0`.
+
+    It is not one: subscripting the arena is how a window is *made*.  Counting
+    those put the arena pointers in the population beside the tiles, which is
+    a different denominator from the one the IR analysis uses -- 252 of the
+    336 accesses the two disagreed on.
+    """
+    source = ("float* localShrMem0 = &totalShrMem[0];\n"
+              "float* tempShrMem = &localShrMem0[352];\n"
+              "float* tile = &tempShrMem[0];\n"
+              "float x = tile[threadIdx.x];\n")
+    names = {name for name, _i, _b, _w, _k, _d, _l in bc.accesses(source)}
+    assert names == {'tile'}, names

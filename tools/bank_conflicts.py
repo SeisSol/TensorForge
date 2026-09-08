@@ -249,10 +249,18 @@ def accesses(source: str):
     """Every shared-memory subscript, with its element size and direction."""
     windows = {}
     defs = {}
+    arenas = set()
     for line in source.splitlines():
         m = _WINDOW.match(line)
         if m:
-            ctype, name, _arena = m.groups()
+            ctype, name, arena = m.groups()
+            # The arena a window is cut from is itself declared this way, and
+            # subscripting it is how a window is *made*, not a data access.
+            # Counting those put `localShrMem0` and `tempShrMem` in the
+            # population beside the tiles, which is a different denominator
+            # from the one the IR analysis uses and part of why the two
+            # disagreed on totals while agreeing on conflicts.
+            arenas.add(arena)
             windows[name] = _ELEM_BYTES.get(ctype, 4)
             continue
         m = _FOR_INIT.search(line)
@@ -267,6 +275,9 @@ def accesses(source: str):
 
     depth = 0
     guard: List[Tuple[int, str]] = []      # (brace depth, condition)
+    for name in arenas:
+        windows.pop(name, None)
+
     for line in source.splitlines():
         cond = _GUARD.search(line)
         for name, index in _subscripts(line, windows):

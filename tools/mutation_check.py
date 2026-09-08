@@ -138,6 +138,10 @@ GROUPS = {
     ]),
 
     'banks': ('tests/test_bank_conflicts.py', [
+        ('the arena counted as a window again',
+         sub(Path('tools/bank_conflicts.py'),
+             '    for name in arenas:\n        windows.pop(name, None)',
+             '    pass', 1)),
         ('loop variables go unresolved again',
          sub(Path('tools/bank_conflicts.py'),
              "        m = _FOR_INIT.search(line)", '        m = None', 1)),
