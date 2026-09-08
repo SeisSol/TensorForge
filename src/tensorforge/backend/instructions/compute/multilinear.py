@@ -610,7 +610,9 @@ class MultilinearInstruction(ComputeInstruction):
         shape = ComputeShape(threads=self._num_threads,
                              accumulator=self._idest.get_fptype(),
                              sparse=self._second_operand_is_sparse(),
-                             explicit_simd=_explicit_simd(self._context))
+                             explicit_simd=_explicit_simd(self._context),
+                             lead=self._ns[0][1] - self._ns[0][0],
+                             depth=math.prod(mx - mi for mi, mx in self._ks))
         chosen = choose_strategy(
             legal_strategies(module.strategies(shape, self._context)),
             self._context.get_vm().get_hw_descr().vendor)

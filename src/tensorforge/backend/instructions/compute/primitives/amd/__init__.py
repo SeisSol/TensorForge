@@ -42,7 +42,7 @@ from ...strategy import Span, Strategy, whole
 from .arch import amdarch, cdna2, gfx1250, gfx1251, rdna
 from .caps import has_fmacdpp4, has_fmacdpp8, has_fmacdpp16
 from .catalog import (DEFINED_SPLITS, DEFINED_TRANSPOSES, MANTISSA,
-                      MATRIX_OPS, MFMA_TILES, emu_tile_for,
+                      MATRIX_OPS, MFMA_TILES, emu_tile_for, emu_tiles,
                       NOT_MODELLED, Call, Fragment, MatrixOp,
                       MfmaTile, lane_batched_ops, mfma_tile_for, ops_for,
                       usable_mfma_tiles)
@@ -54,9 +54,10 @@ from .reorder import (BANK, FED_BY, IDENTITY_DPP, ROW, Gather, Move,
                       accumulator_gathers, broadcast_feeds_a,
                       fragment_cost, fragment_moves)
 from .codegen import hfma, matmul32, matmulemu, matmuldpp
-from .exchange_codegen import exchange_op, matmul_exchange
-from .tiling import (EMULATION, EXCHANGE, Fit, Scheme, boundary,
-                     choose, offers)
+from .exchange_codegen import exchange_op, exchange_ops, matmul_exchange
+from .tiling import (CYCLES, EMULATION, EXCHANGE, Fit, Scheme, boundary,
+                     candidates, choose, issues, offers, rank,
+                     spare_products)
 from .emitters import fmadpp, fmadpp4, fmadpp8, fmadpp16, fmascalar
 from .relayout import (BROADCAST, MOVDPP16, RELAYOUTS, TRANSPOSE4X4, Relayout,
                        find_relayout)
@@ -70,7 +71,9 @@ __all__ = [
     'FEATURE_TARGETS', 'has_feature', 'wave_size',
     'Call', 'Fragment', 'MatrixOp', 'MATRIX_OPS', 'MANTISSA',
     'DEFINED_SPLITS', 'emu_tile_for', 'matmulemu', 'EMULATION',
-    'EXCHANGE', 'Scheme', 'Fit', 'exchange_op', 'matmul_exchange',
+    'EXCHANGE', 'Scheme', 'Fit', 'exchange_op', 'exchange_ops',
+    'matmul_exchange', 'emu_tiles', 'CYCLES', 'candidates', 'issues',
+    'rank', 'spare_products',
     'NOT_MODELLED', 'ops_for',
     'MfmaTile', 'DEFINED_TRANSPOSES', 'MFMA_TILES', 'usable_mfma_tiles',
     'lane_batched_ops', 'mfma_tile_for',
@@ -144,7 +147,8 @@ def plan(strategy, shape, n, ctx):
     """
     if strategy is not Strategy.MATRIX:
         return whole(strategy, n)
-    fit = choose(shape.threads, shape.accumulator, ctx)
+    fit = choose(shape.threads, shape.accumulator, ctx,
+                 columns=n, lead=shape.lead, depth=shape.depth)
     # Asked of the scheme that will run rather than of one of them.  Only the
     # lane-batched one draws a boundary at all, and the threshold behind it is
     # a measurement against its own block width.
@@ -168,7 +172,8 @@ def matmul(writer, ops, ctx, span):
     if span.strategy is Strategy.BROADCAST:
         return broadcast.matmul(writer, ops, ctx, span)
     if span.strategy is Strategy.MATRIX:
-        fit = choose(threads, dtype, ctx)
+        fit = choose(threads, dtype, ctx, columns=N,
+                     lead=ops.lead_slots * threads, depth=K + kx)
         if fit is None or (ops.a, ops.b) != (fit.reads, fit.reads):
             # The entry was selected by what it accumulates in; what it
             # multiplies is a separate property of the same entry, and an

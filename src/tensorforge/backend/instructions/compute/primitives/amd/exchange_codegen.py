@@ -50,6 +50,18 @@ def exchange_op(dtype, threads, ctx) -> Optional[object]:
     a plan.  Asking all three here rather than discovering the third halfway
     through an emission is what lets `matmul` gate on one call.
     """
+    found = exchange_ops(dtype, threads, ctx)
+    return found[0] if found else None
+
+
+def exchange_ops(dtype, threads, ctx) -> tuple:
+    """Every instruction this path could emit here, largest first.
+
+    The same conditions, kept in one place: a selection that reads them and a
+    ranking that reads them again are two chances to disagree about what the
+    path can serve.
+    """
+    out = []
     for op in sorted(MATRIX_OPS, key=lambda o: (-o.m * o.n, o.builtin)):
         if op.call is not Call.MFMA or not op.available_for(dtype, ctx):
             continue
@@ -63,8 +75,8 @@ def exchange_op(dtype, threads, ctx) -> Optional[object]:
             continue
         if accumulator_gathers(op, 0) is None:
             continue
-        return op
-    return None
+        out.append(op)
+    return tuple(out)
 
 
 def _swapped(writer, value, blocks, ftype):

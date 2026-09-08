@@ -286,3 +286,56 @@ def test_only_the_lane_batched_scheme_draws_a_boundary():
         assert tiling.boundary(swap, n) == n
     assert tiling.boundary(lane, 9) == 8
     assert tiling.boundary(lane, 10) == 10
+
+
+# -- choosing the entry within a scheme ------------------------------------ #
+
+def test_the_entry_is_ranked_by_issues_not_by_fit():
+    """Thirteen columns take four 4x4 issues or one 16x16 that wastes three
+    of its sixteen.  Which is faster is a property of the two instructions
+    rather than of the waste, so the count is what is stated and `CYCLES` is
+    where the rest would go."""
+    from tensorforge.backend.instructions.compute.primitives.amd import (
+        MATRIX_OPS, tiling)
+    ops = {o.builtin: o for o in MATRIX_OPS}
+    narrow, wide = ops['mfma_f32_4x4x1f32'], ops['mfma_f32_16x16x1f32']
+    assert tiling.issues(narrow, 13, 56, 56) == 4 * tiling.issues(
+        wide, 13, 56, 56)
+    assert tiling.CYCLES == {}, 'a guessed cycle count reads as a measurement'
+
+
+def test_a_term_product_takes_the_whole_output_axis():
+    """Which is why partial spare is no use: a product is a complete tile,
+    not a column of one."""
+    from tensorforge.backend.instructions.compute.primitives.amd import (
+        MATRIX_OPS, tiling)
+    ops = {o.builtin: o for o in MATRIX_OPS}
+    for name, expected in (('mfma_f32_4x4x4bf16_1k', 1),
+                           ('mfma_f32_16x16x4bf16_1k', 1),
+                           ('mfma_f32_32x32x4bf16_1k', 3)):
+        assert tiling.spare_products(ops[name], 9) == expected, name
+
+
+def test_an_unknown_extent_counts_as_one_tile():
+    """A shape that does not carry its leading dimension or its depth still
+    ranks by what it does carry, rather than ranking everything equal."""
+    from tensorforge.backend.instructions.compute.primitives.amd import (
+        MATRIX_OPS, tiling)
+    ops = {o.builtin: o for o in MATRIX_OPS}
+    op = ops['mfma_f32_4x4x1f32']
+    assert tiling.issues(op, 9) == tiling.issues(op, 9, lead=1, depth=1)
+
+
+def test_the_emulated_limit_has_a_number_on_it():
+    """The emitter takes only entries whose k-vector is the block width, and
+    that is what keeps the 32-wide one out -- where three term products would
+    share an issue instead of one."""
+    from tensorforge.backend.instructions.compute.primitives.amd import (
+        MATRIX_OPS, emu_tiles, tiling)
+    ctx = _hip()
+    offered = {tile.op.builtin for tile, _ in emu_tiles(64, Datatype.F32, ctx)}
+    ops = {o.builtin: o for o in MATRIX_OPS}
+    assert offered == {'mfma_f32_4x4x4bf16_1k'}
+    wide = ops['mfma_f32_32x32x4bf16_1k']
+    assert wide.k != wide.m
+    assert tiling.spare_products(wide, 9) == 3

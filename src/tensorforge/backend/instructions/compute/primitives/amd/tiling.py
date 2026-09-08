@@ -27,11 +27,11 @@ an order here rather than a condition somewhere.
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import FrozenSet, Optional, Tuple
+from typing import Dict, FrozenSet, Iterable, List, Optional, Tuple
 
 from ... import packing
-from .catalog import emu_tile_for, mfma_tile_for
-from .exchange_codegen import exchange_op
+from .catalog import emu_tile_for, emu_tiles, mfma_tile_for
+from .exchange_codegen import exchange_op, exchange_ops
 
 
 class Scheme(Enum):
@@ -119,23 +119,45 @@ ORDER: Tuple[Scheme, ...] = (Scheme.EMULATED, Scheme.EXCHANGE,
                              Scheme.LANE_BATCHED)
 
 
-def choose(threads, accumulator, ctx) -> Optional[Fit]:
-    """The scheme this target prefers among the ones that fit, ready to emit."""
+def candidates(scheme: Scheme, threads, accumulator, ctx) -> Tuple[Fit, ...]:
+    """Every entry this scheme could run here, unranked.
+
+    Each scheme answers in its own shape -- a tile, a bare entry, a tile and a
+    term count -- and this is where that stops mattering to anyone else.
+    """
+    if scheme is Scheme.LANE_BATCHED:
+        tile = mfma_tile_for(threads, accumulator, ctx)
+        # One, and the policy in `mfma_tile_for` is what keeps it one: the
+        # wider tiles need a staging step that is not written.
+        return () if tile is None else (
+            Fit(scheme, tile.op, tile=tile, reads=tile.op.a.dtype),)
+    if scheme is Scheme.EXCHANGE:
+        return tuple(Fit(scheme, op, reads=op.a.dtype)
+                     for op in exchange_ops(accumulator, threads, ctx))
+    return tuple(
+        # What the split reads is the accumulator: the narrow type is what
+        # comes out of it, not what goes in.
+        Fit(scheme, tile.op, tile=tile, terms=terms, reads=accumulator)
+        for tile, terms in emu_tiles(threads, accumulator, ctx))
+
+
+def choose(threads, accumulator, ctx, columns: int = 0, lead: int = 0,
+           depth: int = 0) -> Optional[Fit]:
+    """The scheme this target prefers, and the cheapest entry it can run it on.
+
+    Two rankings, and they are not the same question.  Which scheme is a
+    preference between mappings and reads `ORDER`; which entry within it is a
+    count over the shape, because an entry wider than the output wastes the
+    difference in every issue and one narrower than it needs several.
+    """
     legal = offers(threads, accumulator, ctx)
     for scheme in ORDER:
         if scheme not in legal:
             continue
-        if scheme is Scheme.LANE_BATCHED:
-            tile = mfma_tile_for(threads, accumulator, ctx)
-            return Fit(scheme, tile.op, tile=tile, reads=tile.op.a.dtype)
-        if scheme is Scheme.EXCHANGE:
-            op = exchange_op(accumulator, threads, ctx)
-            return Fit(scheme, op, reads=op.a.dtype)
-        tile, terms = emu_tile_for(threads, accumulator, ctx)
-        # What the split reads, which is the accumulator: the narrow type is
-        # what comes out of it, not what goes in.
-        return Fit(scheme, tile.op, tile=tile, terms=terms,
-                   reads=accumulator)
+        fits = rank(candidates(scheme, threads, accumulator, ctx),
+                    columns, lead, depth)
+        if fits:
+            return fits[0]
     return None
 
 
@@ -155,3 +177,79 @@ def boundary(fit: Fit, n: int) -> int:
         return n
     empty = packing.waste(n, fit.width)
     return ((n // fit.width) * fit.width) if empty in (0, fit.width - 1) else n
+
+
+# -- how much of an entry a shape actually uses ---------------------------- #
+
+def spare_products(op, columns: int) -> int:
+    """Term products one issue holds on the output axis, the real one included.
+
+    A term product is a whole ``C += A_i x B_j`` over the tile, so it occupies
+    every output column the shape has -- which is why partial spare is no use
+    here and the count is a division rather than a remainder.  An entry
+    narrower than the shape holds one and no more.
+
+    This is the axis worth spending, and the only one of the three.  The
+    contraction axis has the small quantum -- one slot per step -- and no
+    spare, since the contraction fills it; the lane axis has spare but a
+    product needs the whole leading dimension there, and reclaiming it is a
+    cross-lane reduction rather than an add chain inside a lane.
+    """
+    if columns <= 0:
+        return 1
+    return max(1, op.m // columns)
+
+
+def issues(op, columns: int, lead: int = 0, depth: int = 0,
+           products: int = 1) -> int:
+    """Instruction issues this entry takes for the whole contraction.
+
+    The four axes multiplied: output columns against `m`, the leading
+    dimension against the lanes one issue spans, the contraction against `k`,
+    and the term products against what one issue can hold beside the real one.
+    An extent given as 0 is one the caller does not know, and counts as a
+    single tile rather than as nothing.
+
+    It counts issues, not time.  Two entries that differ in passes do not cost
+    the same per issue, which is what `CYCLES` is for and why this is not
+    called a cost.
+    """
+    def tiles(demand, capacity):
+        return packing.tiles(demand, capacity) if demand > 0 else 1
+
+    return (tiles(columns, op.m)
+            * tiles(lead, op.n * op.blocks)
+            * tiles(depth, op.k)
+            * packing.tiles(products, spare_products(op, columns)))
+
+
+#: Issue cost per instruction, in cycles.  Empty.
+#:
+#: The numbers are a hardware fact like every other row in the catalogue, and
+#: they have to be read off the ISA guide and checked the same way -- AMD
+#: documents them per instruction; for other vendors this table would need its
+#: own source.  Guessing them is worse than not having them: the ranking below
+#: then reads as a cost model and is a count.
+#:
+#: Until it is filled, `rank` orders by issues alone, which is exactly wrong
+#: where two entries differ in passes.  A 32x32 issue is not one 4x4 issue,
+#: and fewer issues of a longer instruction can be slower.
+CYCLES: Dict[str, int] = {}
+
+
+def rank(fits, columns: int, lead: int = 0, depth: int = 0):
+    """The candidates, cheapest first.
+
+    Fewest issues wins, and where `CYCLES` knows an entry its issues are
+    weighted by it.  Deliberately not "the narrowest that fits": four 4x4
+    issues and one 16x16 issue both serve thirteen columns, the second wastes
+    three of its sixteen, and which is faster is a property of the two
+    instructions rather than of the waste.  Stating the order here is what
+    lets that be answered by filling a table instead of by rewriting a
+    selection.
+    """
+    def key(fit):
+        count = issues(fit.op, columns, lead, depth, fit.terms)
+        return (count * CYCLES.get(fit.op.builtin, 1), count, fit.op.builtin)
+
+    return tuple(sorted(fits, key=key))

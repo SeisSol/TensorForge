@@ -594,7 +594,27 @@ def emu_tile_for(threads, dtype, ctx):
     already holds, and `layouts.position` puts them at the fragment's slots
     only when the two widths agree.
     """
+    found = emu_tiles(threads, dtype, ctx)
+    return found[0] if found else None
+
+
+def emu_tiles(threads, dtype, ctx):
+    """Every tile an emulated path could run here, largest first.
+
+    Restricted to entries whose k-vector is exactly the block width.  That is
+    the *emitter's* limit and not the catalogue's: `matmulemu` hands the
+    instruction the registers one `kk` step already holds, which are the
+    fragment's slots only when the two widths agree.  The stacking itself
+    holds wider -- `layouts.position` says so for the 16- and 32-wide entries
+    too -- and lifting the condition is what would reach them.
+
+    It is not free to leave.  A term product occupies every output column, so
+    an entry wider than the shape holds several: at nine columns the 32-wide
+    entry takes three products per issue where these take one, which is six
+    issues against two for a three-term split.
+    """
     from ...split import MANTISSA, terms as _terms
+    out = []
     for op in ops_for(dtype, ctx, threads):
         if op.arithmetic is not None or op.a.dtype is dtype:
             continue
@@ -606,12 +626,12 @@ def emu_tile_for(threads, dtype, ctx):
             continue
         if op.a.per_lane != op.k or op.b.per_lane != op.k:
             continue
-        tile = MfmaTile(op=op, transpose='tensorforge::transpose4x4b32',
+        tile = MfmaTile(op=op, transpose=_TILE_TRANSPOSES.get(op.m, (None, False))[0],
                         transpose_has_separate_outputs=True)
         if not tile.fits(threads) or tile.transpose not in DEFINED_TRANSPOSES:
             continue
-        return tile, _terms(MANTISSA[op.a.dtype], dtype)
-    return None
+        out.append((tile, _terms(MANTISSA[op.a.dtype], dtype)))
+    return tuple(out)
 
 
 def mfma_tile_for(threads, dtype, ctx):

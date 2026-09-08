@@ -87,6 +87,13 @@ class ComputeShape:
     #: broadcast costs differs between them by more than its spelling.
     explicit_simd: bool
 
+    #: Elements the leading dimension spans, and steps the contraction takes.
+    #: 0 where the caller does not know them -- a count that reads an extent
+    #: of 0 treats it as one tile rather than as nothing, so an unfilled pair
+    #: narrows what a ranking can tell apart without making it wrong.
+    lead: int = 0
+    depth: int = 0
+
 
 def is_contraction(operands: int, lead_width: int) -> bool:
     """Whether anything but the nest could compute this at all.
