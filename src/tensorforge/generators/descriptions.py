@@ -450,6 +450,13 @@ class ForDescr(OperationDescription):
   """
 
   def __init__(self, general, dependence, periods=(), escaping=(), shifts=()):
+    #: The one body this emits and what each hole stands for, decided once.
+    #:
+    #: Cached rather than derived on demand, because the stand-ins are
+    #: *identities*: the generator names operands in one phase and resolves
+    #: them in another, and a decomposition rebuilt between the two would hand
+    #: the second phase tensors the first has never seen.  One call, one set.
+    self._decomposition = None
     self.general = general
     self.dependence = dependence
     self.periods = tuple(periods)
@@ -490,6 +497,25 @@ class ForDescr(OperationDescription):
 
   def operations(self) -> List:
     return [descr for body in self.bodies() for descr in body]
+
+  def decompose(self, prefix: str = 'variant'):
+    """`(body, variants)`, the same pair every time it is asked for."""
+    if self._decomposition is None:
+      from tensorforge.generators.rolling import variant_body
+      self._decomposition = variant_body(self, prefix)
+    return self._decomposition
+
+  def variants(self) -> List:
+    return list(self.decompose()[1])
+
+  def stand_ins(self) -> List:
+    """The names the emitted body uses where an operand varies.
+
+    Not parameters and not temporaries: each one resolves, inside the loop, to
+    whichever member the counter names.  Whoever builds the signature has to
+    leave them out, and whoever builds the body has to bind them.
+    """
+    return [variant.stand_in for variant in self.decompose()[1]]
 
   def matrix_list(self) -> List:
     """Every operand of every iteration, first use first.

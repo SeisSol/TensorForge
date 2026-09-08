@@ -514,3 +514,27 @@ def test_the_prefix_names_the_stand_ins():
 
     _, variants = variant_body(roll(accumulation())[0], prefix='face')
     assert [v.stand_in.tensor.alias for v in variants] == ['face0']
+
+
+def test_the_decomposition_is_the_same_one_every_time():
+    """The generator names operands in one phase and resolves them in another.
+
+    A decomposition rebuilt between the two would hand the second phase
+    tensors the first has never seen, so the stand-ins are identities and not
+    values.
+    """
+    loop = roll(accumulation())[0]
+    first, second = loop.decompose(), loop.decompose()
+    assert first[0] is second[0] and first[1] is second[1]
+    assert loop.stand_ins()[0].tensor is loop.stand_ins()[0].tensor
+
+
+def test_the_stand_ins_are_not_among_the_members():
+    loop = roll(accumulation())[0]
+    members = {m.tensor.alias for v in loop.variants() for m in v.members}
+    assert {s.tensor.alias for s in loop.stand_ins()}.isdisjoint(members)
+
+
+def test_a_loop_reports_one_stand_in_per_hole():
+    loop = roll(recursion())[0]
+    assert len(loop.stand_ins()) == loop.arity
