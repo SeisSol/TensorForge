@@ -170,3 +170,30 @@ def test_a_loop_variable_resolves_to_its_bound():
         b.load(tile, b.thread_id('x'), hint='v')
     accesses, unresolved = banks.analyse(b.finish())
     assert unresolved == 0 and accesses[0].ways == 1
+
+
+def test_the_analysis_belongs_after_the_passes():
+    """A freshly finished body still holds what `dce` and `cse` will remove.
+
+    `chain_three` has 1172 shared loads at `finish()` and 587 after
+    optimisation, and the emitted source shows 590 -- so measuring the
+    unoptimised body counted twice as many accesses as the hardware will make.
+    That is also where a pass acting on this would sit: after the passes that
+    change what is there, before the emitter that fixes it.
+    """
+    from tensorforge.backend.pir import passes
+
+    b = builder()
+    tile = b.alloc(Datatype.F32, (128,), MemSpace.SHARED, hint='s')
+    idx = b.op('mul', INDEX, b.thread_id('x'), 4, hint='a')
+    kept = b.load(tile, idx, hint='keep')
+    b.load(tile, idx, hint='dead')          # nothing uses it
+    b('use(%s);' % kept, kept, accesses=())
+    body = b.finish()
+
+    before, _ = banks.analyse(body)
+    after, _ = banks.analyse(passes.optimize(body))
+    assert len(before) == 2
+    assert len(after) == 1, (
+        'the dead load is still counted; the analysis has to run on the body '
+        'the emitter will see')

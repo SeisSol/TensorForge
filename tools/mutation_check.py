@@ -110,6 +110,11 @@ GROUPS = {
     # The IR-level bank analysis.  Every mistake it made over-reported, which
     # is the direction that gets a check ignored.
     'irbanks': ('tests/test_pir_banks.py', [
+        ('a dead access counted as one the hardware makes',
+         sub(Path('src/tensorforge/backend/pir/passes.py'),
+             'def optimize(body: Tuple[Stmt, ...], dump_hook=None,',
+             'def optimize(body, *_a, **_k):\n    return body\n\n\n'
+             'def _optimize(body: Tuple[Stmt, ...], dump_hook=None,', 1)),
         ('guards ignored, so inactive lanes count',
          sub(Path('src/tensorforge/backend/pir/banks.py'),
              '        if parent.op is not Op.IF:\n            continue',

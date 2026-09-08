@@ -14,6 +14,19 @@ sit beside it.  It is checked against it first: `tests/test_pir_banks.py`
 compares the two over the corpus, and until they agree everywhere the text
 version is the one that decides.
 
+Run it on the *optimised* body.  A freshly finished one still holds the loads
+that `dce` and `cse` are about to remove -- twice as many in `chain_three` --
+and the addresses the hardware sees are the ones that survive.  That is also
+where a pass acting on this would sit: after the passes that change what is
+there, before the emitter that fixes it.
+
+What the two count differs by about 200 accesses over the corpus, in one
+direction: the text sees every subscript the emitter writes, including those
+inside raw statements, and this sees structured loads and stores.  The gap is
+therefore a measure of what is still raw -- `addressing_none` writes its
+window as text and shows up here as 0 against 65 -- and it closes as that
+does, rather than needing to be explained.
+
 What this buys beyond tidiness is the thing the text version cannot do.  It
 runs before emission, on a body, which is where a decision could still be
 made -- the swizzle width is chosen from the buffer's volume today, three
