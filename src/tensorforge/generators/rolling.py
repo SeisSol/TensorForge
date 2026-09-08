@@ -25,6 +25,7 @@ a question for whoever wrote it and not something to make tidier.
 
 from typing import List, Optional, Sequence
 
+from tensorforge.analysis.cost import estimated_lines
 from tensorforge.analysis.dependence import (binding_period, carried,
                                              escapes, shifts)
 from tensorforge.analysis.families import find_repeats
@@ -41,14 +42,21 @@ def roll(descrs: Sequence[OperationDescription],
          min_count: int = 2,
          max_period: Optional[int] = None,
          max_arity: Optional[int] = None,
-         allow_barriers: bool = False) -> List[OperationDescription]:
+         allow_barriers: bool = False,
+         keep_unrolled_under: Optional[int] = None,
+         num_threads: int = 32) -> List[OperationDescription]:
     """Replace each repeated run of a descriptor list with a `ForDescr`.
 
     Runs that are not rolled are left where they are, so the result is the same
-    list with some slices replaced and nothing reordered.  Whether rolling is
-    worth it -- fewer instruction bytes against a counter and an indexed load --
-    is a cost question and is not decided here; this states the run as a loop
-    so that something else can weigh the two forms against each other.
+    list with some slices replaced and nothing reordered.
+
+    `keep_unrolled_under` is the size a run may reach written out before it is
+    worth rolling, in estimated lines of kernel.  A small body is better left
+    alone: written out it costs a few hundred lines and keeps every operand at
+    a compile-time address, while rolled it costs a counter, an indexed load
+    per varying operand, and a residency that has to survive the back edge.
+    Left unset nothing is weighed and every run is rolled, which is what the
+    tests want and not what a generator should do.
     """
     runs = find_repeats(descrs, min_count=min_count, max_period=max_period,
                         max_arity=max_arity)
@@ -60,6 +68,10 @@ def roll(descrs: Sequence[OperationDescription],
         if not allow_barriers and any(d.barrier() for d in chunks[0]):
             continue
         if run.arity == 0:
+            continue
+        if keep_unrolled_under is not None and estimated_lines(
+                [d for chunk in chunks for d in chunk],
+                num_threads) < keep_unrolled_under:
             continue
 
         out.extend(descrs[cursor:run.start])

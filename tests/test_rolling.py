@@ -373,3 +373,39 @@ def test_a_rolled_chain_generates_the_same_body():
     plain, rolled = _chain(4), roll(_chain(4))
     assert any(isinstance(d, ForDescr) for d in rolled)
     assert _code_only(_generated(plain)) == _code_only(_generated(rolled))
+
+
+# --- whether a run is worth rolling -----------------------------------------
+
+
+def test_a_small_run_is_left_alone_under_a_budget():
+    """A body worth a few hundred lines is cheaper written out.
+
+    Rolled it costs a counter, an indexed load per varying operand and a
+    residency that has to survive the back edge; written out it costs lines
+    and keeps every operand at a compile-time address.  Which way that goes is
+    a size question, so the budget is where the caller states it.
+    """
+    from tensorforge.analysis.cost import estimated_lines
+
+    descrs = _contributions(3)
+    size = estimated_lines(descrs, 32)
+    assert not any(isinstance(d, ForDescr) for d in
+                   roll(_contributions(3), keep_unrolled_under=size * 2))
+    assert any(isinstance(d, ForDescr) for d in
+               roll(_contributions(3), keep_unrolled_under=size // 2))
+
+
+def test_without_a_budget_every_run_rolls():
+    assert any(isinstance(d, ForDescr) for d in roll(_contributions(3)))
+
+
+def test_the_estimate_follows_the_arithmetic_and_the_lanes():
+    from tensorforge.analysis.cost import estimated_lines
+
+    small = estimated_lines(_contributions(2), 32)
+    large = estimated_lines(_contributions(6), 32)
+    assert large > small
+    assert estimated_lines(_contributions(6), 64) < large
+    with pytest.raises(ValueError):
+        estimated_lines(_contributions(2), 0)

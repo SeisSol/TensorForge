@@ -377,3 +377,39 @@ def list_cost(descr_list: List, batch: int = 1,
     for descr in descr_list:
         total = total.merged(descr_cost(descr, batch=batch, datatype=datatype))
     return total
+
+
+# -- how much code a list becomes ------------------------------------------- #
+
+#: Emitted lines per lane-flop, and the fixed part of a kernel.
+#:
+#: Fitted against the order-6 viscoelastic set as SeisSol ships it: 57 kernels
+#: spanning three orders of magnitude, R^2 = 0.998 on the totals.  Per kernel it
+#: is coarser -- the median relative error over the 48 kernels above 500 lines
+#: is 0.44 -- because the count ignores everything but arithmetic: staging,
+#: index arithmetic and guards all ride on the same constant.
+#:
+#: Good enough for the question it exists to answer, which is whether a body is
+#: large against an instruction cache, and not good enough for anything that
+#: needs the number itself.  Recalibrate by fitting emitted lines against
+#: `list_cost(...).flops / num_threads` over a generated file.
+LINES_PER_LANE_FLOP = 4.1
+LINES_FIXED = 25
+
+
+def estimated_lines(descr_list: List, num_threads: int,
+                    datatype: Optional[Datatype] = None) -> int:
+    """Roughly how many lines of kernel this list becomes.
+
+    The arithmetic is spread over the lanes, so what one lane writes out is the
+    iteration space divided by the lane count -- which is why the estimate is
+    in lane-flops and not in flops, even though a corpus at one lane count
+    cannot tell the two apart.
+
+    An estimate and named as one.  It answers whether a body is large against
+    an instruction cache; it does not answer how large.
+    """
+    if num_threads <= 0:
+        raise ValueError('a kernel has at least one lane')
+    flops = list_cost(descr_list, batch=1, datatype=datatype).flops
+    return int(LINES_PER_LANE_FLOP * flops / num_threads) + LINES_FIXED
