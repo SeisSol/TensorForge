@@ -88,7 +88,6 @@ __launch_bounds__(256)
           }
           // s0 = load{g>s}(glb_m1[0, 1])
           __pipeline_memcpy_async(&s0[0 + 0 + 1 * threadIdx.x + 0], &glb_m1[0 + 0 + 1 * threadIdx.x + 0], 4);
-          __pipeline_commit();
           __pipeline_memcpy_async(&s0[0 + 0 + 1 * threadIdx.x + 32], &glb_m1[0 + 0 + 1 * threadIdx.x + 32], 4);
           __pipeline_commit();
           // wait(r0 = load{g>r}(glb_m0););
@@ -326,7 +325,6 @@ __launch_bounds__(256)
           __syncwarp();
           // s2 = load{g>s}(glb_m3[0, 1])
           __pipeline_memcpy_async(&s2[0 + 0 + 1 * threadIdx.x + 0], &glb_m3[0 + 0 + 1 * threadIdx.x + 0], 4);
-          __pipeline_commit();
           __pipeline_memcpy_async(&s2[0 + 0 + 1 * threadIdx.x + 32], &glb_m3[0 + 0 + 1 * threadIdx.x + 32], 4);
           __pipeline_commit();
           // wait(r2 = load{g>r}(glb_m2););

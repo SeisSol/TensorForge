@@ -96,8 +96,8 @@ __launch_bounds__(256)
           #pragma unroll
           for (int32_t i = 0; i < 6; i += 1) {
             __pipeline_memcpy_async(&s0[0 + 0 + 1 * threadIdx.x + i * 32], &glb_m2[0 + 0 + 1 * threadIdx.x + i * 32], 4);
-            __pipeline_commit();
           }
+          __pipeline_commit();
           // wait(r0 = load{g>r}(glb_m1););
           float r2[12]{};
           // r2 = load{g>r}(glb_m3);
@@ -727,9 +727,7 @@ __launch_bounds__(256)
           __syncwarp();
           // s1 = load{g>s}(glb_m4[0, 1])
           __pipeline_memcpy_async(&s1[0 + 0 + 1 * threadIdx.x + 0], &glb_m4[0 + 0 + 1 * threadIdx.x + 0], 4);
-          __pipeline_commit();
           __pipeline_memcpy_async(&s1[0 + 0 + 1 * threadIdx.x + 32], &glb_m4[0 + 0 + 1 * threadIdx.x + 32], 4);
-          __pipeline_commit();
           __pipeline_memcpy_async(&s1[0 + 0 + 1 * threadIdx.x + 64], &glb_m4[0 + 0 + 1 * threadIdx.x + 64], 4);
           __pipeline_commit();
           // wait(r2 = load{g>r}(glb_m3););
@@ -1086,9 +1084,7 @@ __launch_bounds__(256)
           __syncwarp();
           // s2 = load{g>s}(glb_m6[0, 1])
           __pipeline_memcpy_async(&s2[0 + 0 + 1 * threadIdx.x + 0], &glb_m6[0 + 0 + 1 * threadIdx.x + 0], 4);
-          __pipeline_commit();
           __pipeline_memcpy_async(&s2[0 + 0 + 1 * threadIdx.x + 32], &glb_m6[0 + 0 + 1 * threadIdx.x + 32], 4);
-          __pipeline_commit();
           __pipeline_memcpy_async(&s2[0 + 0 + 1 * threadIdx.x + 64], &glb_m6[0 + 0 + 1 * threadIdx.x + 64], 4);
           __pipeline_commit();
           // wait(r5 = load{g>r}(glb_m5););

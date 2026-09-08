@@ -144,17 +144,13 @@ __launch_bounds__(256)
           r1[12] = (v85_data + v84_data);
           // s1 = load{g>s}(glb_m2[0, 1])
           __pipeline_memcpy_async(&s1[0 + 0 + 1 * threadIdx.x + 0], &glb_m2[0 + 0 + 1 * threadIdx.x + 0], 4);
-          __pipeline_commit();
           __pipeline_memcpy_async(&s1[0 + 0 + 1 * threadIdx.x + 32], &glb_m2[0 + 0 + 1 * threadIdx.x + 32], 4);
-          __pipeline_commit();
           __pipeline_memcpy_async(&s1[0 + 0 + 1 * threadIdx.x + 64], &glb_m2[0 + 0 + 1 * threadIdx.x + 64], 4);
-          __pipeline_commit();
           __pipeline_memcpy_async(&s1[0 + 0 + 1 * threadIdx.x + 96], &glb_m2[0 + 0 + 1 * threadIdx.x + 96], 4);
-          __pipeline_commit();
           if (threadIdx.x < 28) {
             __pipeline_memcpy_async(&s1[0 + 0 + 1 * threadIdx.x + 128], &glb_m2[0 + 0 + 1 * threadIdx.x + 128], 4);
-            __pipeline_commit();
           }
+          __pipeline_commit();
           // wait(r2 = load{g>r}(glb_m1););
           // wait(s1 = load{g>s}(glb_m2[0, 1]));
           __pipeline_wait_prior(0);
@@ -695,12 +691,11 @@ __launch_bounds__(256)
           #pragma unroll
           for (int32_t i = 0; i < 5; i += 1) {
             __pipeline_memcpy_async(&s2[0 + 0 + 1 * threadIdx.x + i * 32], &glb_m4[0 + 0 + 1 * threadIdx.x + i * 32], 4);
-            __pipeline_commit();
           }
           if (threadIdx.x < 9) {
             __pipeline_memcpy_async(&s2[0 + 0 + 1 * threadIdx.x + 160], &glb_m4[0 + 0 + 1 * threadIdx.x + 160], 4);
-            __pipeline_commit();
           }
+          __pipeline_commit();
           // wait(r5 = load{g>r}(glb_m0););
           // wait(s2 = load{g>s}(glb_m4[0, 1]));
           __pipeline_wait_prior(0);

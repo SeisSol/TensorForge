@@ -89,8 +89,8 @@ __launch_bounds__(256)
           #pragma unroll
           for (int32_t i = 0; i < 9; i += 1) {
             __pipeline_memcpy_async(&s0[0 + 0 + 1 * threadIdx.x + i * 16], &glb_m1[0 + 0 + 1 * threadIdx.x + i * 16], 4);
-            __pipeline_commit();
           }
+          __pipeline_commit();
           // wait(r0 = load{g>r}(glb_m0););
           float r2[12]{};
           // r2 = load{g>r}(glb_m2);

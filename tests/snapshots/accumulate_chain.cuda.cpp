@@ -100,8 +100,8 @@ __launch_bounds__(256)
           #pragma unroll
           for (int32_t i = 0; i < 6; i += 1) {
             __pipeline_memcpy_async(&s0[0 + 0 + 1 * threadIdx.x + i * 16], &glb_m2[0 + 0 + 1 * threadIdx.x + i * 16], 4);
-            __pipeline_commit();
           }
+          __pipeline_commit();
           // wait(r0 = load{g>r}(glb_m1););
           float r2[12]{};
           // r2 = load{g>r}(glb_m3);
@@ -455,8 +455,8 @@ __launch_bounds__(256)
           #pragma unroll
           for (int32_t i = 0; i < 6; i += 1) {
             __pipeline_memcpy_async(&s1[0 + 0 + 1 * threadIdx.x + i * 16], &glb_m4[0 + 0 + 1 * threadIdx.x + i * 16], 4);
-            __pipeline_commit();
           }
+          __pipeline_commit();
           // wait(r2 = load{g>r}(glb_m3););
           float r4[12]{};
           // r4 = load{g>r}(glb_m5);
@@ -811,8 +811,8 @@ __launch_bounds__(256)
           #pragma unroll
           for (int32_t i = 0; i < 6; i += 1) {
             __pipeline_memcpy_async(&s2[0 + 0 + 1 * threadIdx.x + i * 16], &glb_m6[0 + 0 + 1 * threadIdx.x + i * 16], 4);
-            __pipeline_commit();
           }
+          __pipeline_commit();
           // wait(r4 = load{g>r}(glb_m5););
           float r6[12]{};
           // r6 = load{g>r}(glb_m7);
@@ -1167,8 +1167,8 @@ __launch_bounds__(256)
           #pragma unroll
           for (int32_t i = 0; i < 6; i += 1) {
             __pipeline_memcpy_async(&s3[0 + 0 + 1 * threadIdx.x + i * 16], &glb_m8[0 + 0 + 1 * threadIdx.x + i * 16], 4);
-            __pipeline_commit();
           }
+          __pipeline_commit();
           // wait(r6 = load{g>r}(glb_m7););
           // wait(s3 = load{g>s}(glb_m8[0, 1]));
           __pipeline_wait_prior(0);
