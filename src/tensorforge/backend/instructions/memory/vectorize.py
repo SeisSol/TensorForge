@@ -201,18 +201,20 @@ def _round_up_pow2(n: int, cap: int) -> int:
 #: The widest lead vector that has been shown to compute the right numbers.
 #:
 #: `lead_width_cap` answers what the address permits, which is 4 for an FP32
-#: base of 16-byte alignment.  Taking it produces a kernel that generates,
-#: passes the coverage and exactness checks over its store nest, and is wrong:
-#: `tests/cases/aligned_operands` (16x8x16, alignment 16) disagrees with the
-#: scalar kernel in 120 of the destination's 128 cells.  Every cell, in other
-#: words, rather than an edge -- which places it in the register image and not
-#: in the loop nest, the loader writing a blocking the compute does not read
-#: back.  Width 2 on the same case agrees to the last slot.
+#: base of 16-byte alignment.  Taking it is wrong on some extents, and the
+#: reason is one number: the register image holds `ceil(extent / threads)`
+#: slots per lane, while a `w`-wide read of it needs
+#: `w * ceil(extent / (threads * w))`.  Those agree for 8, 16, 32 and 64 and
+#: differ for 12, 20, 24, 40 and 48, where consecutive non-lead indices then
+#: read overlapping windows -- at M=12 the stride is 3 and the read is 4 wide,
+#: so every column after the first is built from one register of the one
+#: before it.  Width 2 escapes it because the lane count is chosen as
+#: `roundpow2(ceil(extent / 2))`, which makes the two expressions equal.
 #:
-#: So the two are separated rather than the cap being lowered: what the
-#: address allows is a fact about the address, and what has been validated is
-#: a fact about us.  `test_lead_width` holds the failure in place, so fixing
-#: the image makes that test fail and say to raise this.
+#: Two facts, kept apart rather than the cap being lowered: what the address
+#: allows is about the address, and this is about us.  `test_lead_width` holds
+#: the split in place at its exact extents, so sizing the image from the width
+#: makes those tests fail and say to raise this.
 VALIDATED_LEAD_WIDTH = 2
 
 
@@ -330,6 +332,34 @@ def lead_threads_and_width(extent: int, elem_bytes: int, align_bytes: int,
             continue
         return threads, w
     return scalar_threads, 1
+
+
+def lead_pair(extent: int, elem_bytes: int, align_bytes: int):
+    """The `(threads, width)` a lead dimension runs at.  One decision.
+
+    `lead_threads_and_width` returns a pair because the two are one choice --
+    at width `w` the lane count needed is `ceil(extent / w)`, so picking
+    either without the other is picking neither.  Two callers then took one
+    component each, from their own call: `get_num_threads` read the lane count
+    and `lead_width` the width, and nothing made the two calls pass the same
+    arguments.
+
+    They did not.  One passed the cap and one took the default, and for a
+    16-element FP32 extent at 16-byte alignment that is `(8, 2)` against
+    `(4, 4)` -- so the nest ran at 8 lanes and width 4, which is 32 slots for
+    16 elements and a register image blocked for a pair nobody had computed.
+    120 of `aligned_operands`' 128 destination cells came out wrong, and the
+    loop nest was not at fault: it covered its range exactly once, as
+    `test_lead_coverage` says it does at every width.
+
+    So the cap is applied here rather than passed in, and the pair is taken
+    whole.  `lead_threads_and_width` keeps its `cap` argument, which is what
+    the unit tests vary; nothing in the generator reaches it directly.
+    """
+    return lead_threads_and_width(
+        extent, elem_bytes, align_bytes,
+        cap=min(lead_width_cap(elem_bytes, align_bytes), VALIDATED_LEAD_WIDTH),
+        blocking=LEAD_BLOCKING)
 
 
 def lead_vectorize_supported(context) -> bool:

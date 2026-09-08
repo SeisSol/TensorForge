@@ -419,53 +419,108 @@ def test_width_four_is_permitted_by_the_address_and_not_by_us():
     assert VALIDATED_LEAD_WIDTH == 2
 
 
-def test_the_widened_register_image_is_wrong_at_four(monkeypatch):
-    """Asserted as the broken behaviour it is, so fixing it says so.
-
-    `aligned_operands` is 16x8x16 with 16-byte alignment.  At width 4 the
-    kernel generates, its store nest passes coverage and exactness, and it
-    disagrees with the scalar kernel in 120 of the destination's 128 cells --
-    every cell rather than an edge, which places the defect in the register
-    image (a loader blocking the compute does not read back) and not in the
-    loop nest.  Width 2 on the same case agrees to the last slot.
-
-    When the image is fixed this test fails, and that failure is the signal to
-    raise `VALIDATED_LEAD_WIDTH`.
-    """
-    import importlib.util
+def _run_case(monkeypatch, M, N, width, align=16, dtype=None):
+    """`D = A B` at `width`, run over one block on the host interpreter."""
     import re
-    from pathlib import Path
 
     from tensorforge.backend.instructions.memory import vectorize
+    from tensorforge.common.basic_types import Addressing, Datatype
     from tensorforge.common.context import Context
+    from tensorforge.common.matrix.boundingbox import BoundingBox
+    from tensorforge.common.matrix.tensor import SubTensor, Tensor
+    from tensorforge.generators.descriptions import GemmDescr
     from tensorforge.generators.generator import Generator
     from kernel_eval import evaluate_wave
 
+    dtype = dtype or Datatype.F32
     monkeypatch.setattr(vectorize, 'LEAD_VECTORIZE', True)
-    case_path = Path(__file__).parent / 'cases' / 'aligned_operands.py'
-    spec = importlib.util.spec_from_file_location('c_aligned', case_path)
-    case = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(case)
+    monkeypatch.setattr(vectorize, 'VALIDATED_LEAD_WIDTH', width)
 
-    def render(width):
-        monkeypatch.setattr(vectorize, 'VALIDATED_LEAD_WIDTH', width)
-        ctx = Context(arch='sm_86', backend='cuda', fp_type=case.DTYPE)
-        gen = Generator(case.descr_list(), ctx)
-        gen.register()
-        gen.generate()
-        return gen.get_kernel()
+    def t(shape, alias):
+        return SubTensor(Tensor(shape, Addressing.STRIDED,
+                                BoundingBox([0] * len(shape), list(shape)),
+                                alias=alias, datatype=dtype, alignment=align))
 
-    def run(src):
-        lanes = max([int(x) for x
-                     in re.findall(r'threadIdx\.x % (\d+)', src)] or [32])
-        return evaluate_wave(src, lanes, seed=7, globals_only=True,
-                             preset={'m0': 0.0})
+    gen = Generator([GemmDescr(False, False, a=t([M, 8], 'A'),
+                               b=t([8, N], 'B'), c=t([M, N], 'D'),
+                               alpha=1.0, beta=0.0)],
+                    Context(arch='sm_86', backend='cuda', fp_type=dtype))
+    gen.register()
+    gen.generate()
+    src = gen.get_kernel()
+    lanes = max([int(x) for x
+                 in re.findall(r'threadIdx\.x % (\d+)', src)] or [32])
+    mem = evaluate_wave(src, lanes, seed=7, globals_only=True,
+                        preset={'m0': 0.0})
+    return src, [mem.get(('m0', i)) or 0.0 for i in range(M * N)]
 
-    scalar, wide = run(render(1)), run(render(4))
-    cells = 16 * 8
-    wrong = [i for i in range(cells)
-             if abs((scalar.get(('m0', i)) or 0.0)
-                    - (wide.get(('m0', i)) or 0.0)) > 1e-4]
-    assert len(wrong) == 120, (
-        f'{len(wrong)} of {cells} cells differ, not 120 -- the width-4 image '
-        f'has changed; if it is fixed, raise VALIDATED_LEAD_WIDTH')
+
+def _wrong_lead_indices(monkeypatch, M, N, width, **kw):
+    _, scalar = _run_case(monkeypatch, M, N, 1, **kw)
+    _, wide = _run_case(monkeypatch, M, N, width, **kw)
+    return sorted({i % M for i, (a, b) in enumerate(zip(scalar, wide))
+                   if abs(a - b) > 1e-4})
+
+
+def _slot_stride(extent, threads, width):
+    """What the register image uses, against what a wide read needs."""
+    return -(-extent // threads), width * -(-extent // (threads * width))
+
+
+#: Extents where the two agree, and where they do not.  Not a list of numbers
+#: that happen to fail: `_slot_stride` predicts the split exactly, and these
+#: are it for FP32 at 16-byte alignment.
+WIDTH4_OK = [8, 16, 32, 64]
+WIDTH4_BROKEN = [12, 20, 24, 40, 48]
+
+
+@pytest.mark.parametrize('extent', WIDTH4_OK + WIDTH4_BROKEN)
+def test_the_register_slot_stride_predicts_which_extents_break(extent):
+    """The image holds `ceil(extent / threads)` slots per lane.
+
+    A `w`-wide read of it needs `w * ceil(extent / (threads * w))`, and the
+    two are not the same number.  Where they differ, consecutive non-lead
+    indices read overlapping windows: at M=12 the stride is 3 and the read is
+    4 wide, so column 0 takes `r1[0..3]`, column 1 `r1[3..6]`, and each column
+    after the first is built from one register of its predecessor.
+    """
+    threads, width = lead_threads_and_width(extent, 4, 16, cap=4)
+    used, needed = _slot_stride(extent, threads, width)
+    assert (used == needed) is (extent in WIDTH4_OK)
+
+
+@pytest.mark.parametrize('extent', WIDTH4_BROKEN)
+def test_width_four_is_wrong_exactly_where_the_stride_says(monkeypatch,
+                                                           extent):
+    """Asserted as the broken behaviour it is, so repairing it says so.
+
+    When the image is sized from the width this fails, and that failure is the
+    signal to raise `VALIDATED_LEAD_WIDTH`.
+    """
+    assert _wrong_lead_indices(monkeypatch, extent, 3, 4), (
+        f'M={extent} now agrees at width 4 -- if the slot stride is fixed, '
+        f'raise VALIDATED_LEAD_WIDTH and delete this')
+
+
+@pytest.mark.parametrize('extent', WIDTH4_OK)
+def test_width_four_is_right_where_the_stride_agrees(monkeypatch, extent):
+    """Which is what says the defect is the stride and not the width."""
+    assert not _wrong_lead_indices(monkeypatch, extent, 4, 3)
+
+
+@pytest.mark.parametrize('extent', [33, 35])
+def test_the_peeled_element_gets_a_wrong_value_at_width_two(monkeypatch,
+                                                            extent):
+    """And this one is at the width the generator actually offers.
+
+    An odd extent at width 2 leaves one element no whole vector covers, and
+    `LeadLoop._peel` hands it to the store as a plain integer.  Its value
+    comes out wrong -- one element per column, always the last -- so the peel
+    is not merely the redundant wave-wide write that `test_store_exactness`
+    describes.  That one is a cost under `=` and a wrong sum under `+=`; this
+    is a wrong number under both.
+
+    `tests/cases/aligned_odd_lead` exists to exercise exactly this shape and
+    the numeric oracle skips it, which is why nothing has said so.
+    """
+    assert _wrong_lead_indices(monkeypatch, extent, 3, 2) == [extent - 1]
