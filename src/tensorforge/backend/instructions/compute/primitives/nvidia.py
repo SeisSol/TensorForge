@@ -4,6 +4,7 @@
 from tensorforge.common.basic_types import Datatype
 from tensorforge.common.exceptions import GenerationError
 from .. import ranking
+from ..bitlayout import packed
 from ..strategy import Strategy, whole
 from tensorforge.backend.pir.core import (BOOL, INDEX, Access, Effect, MemSpace,
                                           XorSwizzle,
@@ -510,7 +511,7 @@ def strategies(shape, ctx):
     there is nothing to ask `reach` about, so the refusal is a literal rather
     than a route, and it stays one until the table is written.
     """
-    if shape.lead_width > 1:
+    if packed(shape.lead_layout):
         return frozenset()
     if (ENABLED
             and supports(shape.threads, shape.accumulator, shape.sparse,

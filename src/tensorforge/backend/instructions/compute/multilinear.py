@@ -23,7 +23,7 @@ from .primitives import amd as amd
 from .primitives import intel as intel
 from .matmul import MatmulOperands
 from .strategy import (ComputeShape, Span, Strategy, choose_strategy, covers,
-                       is_contraction, legal_strategies, whole)
+                       is_contraction, lead_layout, legal_strategies, whole)
 
 #: Which module owns the matrix paths for a vendor.  One row per target, and
 #: every question the dispatch asks goes to the same row -- so what gets
@@ -686,7 +686,9 @@ class MultilinearInstruction(ComputeInstruction):
                             lead_width=self._lead_width,
                             a_parts=getattr(self._ops[0].symbol.obj,
                                             'storage_parts', 1)
-                            if self._ops and self._ops[0].symbol.obj else 1)
+                            if self._ops and self._ops[0].symbol.obj else 1,
+                            lead_layout=lead_layout(self._num_threads,
+                                                    self._lead_width))
 
     def _plan(self) -> Tuple[Span, ...]:
         """Which arrangements compute this operation, over which columns.

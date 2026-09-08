@@ -370,10 +370,12 @@ def test_an_unpacked_lead_operand_needs_nothing():
 # -- the reservation ------------------------------------------------------- #
 
 def _shape(width=1, threads=64):
-    from tensorforge.backend.instructions.compute.strategy import ComputeShape
+    from tensorforge.backend.instructions.compute.strategy import (
+        ComputeShape, lead_layout)
     from tensorforge.common.basic_types import Datatype
     return ComputeShape(threads=threads, accumulator=Datatype.F32,
-                        sparse=False, explicit_simd=False, lead_width=width)
+                        sparse=False, explicit_simd=False,
+                        lead_layout=lead_layout(threads, width))
 
 
 def test_an_unpacked_operand_reserves_nothing():
@@ -401,10 +403,15 @@ def test_a_packed_operand_reserves_one_wave(width, threads):
 @pytest.mark.parametrize('width', [2, 4])
 def test_the_reservation_is_the_plan_s_own_size(width):
     """Not a number computed beside it: smaller is an overrun and larger is
-    memory nobody writes."""
+    memory nobody writes.
+
+    The plan is built from this file's own statement of the two layouts, not
+    from the module's, so the check is on the derivation and not a comparison
+    of the implementation with itself.
+    """
     from tensorforge.backend.instructions.compute.primitives import amd
     from tensorforge.backend.instructions.compute.strategy import Strategy
-    plan = staging.staged(amd._packed_lead(width, 64), amd._flat_lead(64),
+    plan = staging.staged(_packed_lead(width, 64), _flat_lead(64),
                           _indices(64))
     assert amd.scratch(Strategy.MATRIX, _shape(width), None) == \
         staging.buffer_elements(plan)

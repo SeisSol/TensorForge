@@ -230,11 +230,11 @@ def test_the_reservation_reads_the_derived_layout():
     """What the AMD scratch answer is sized from.  Spelled out beside the
     derivation, the two could disagree and the buffer would then be reserved
     for a trip other than the one emitted."""
-    from tensorforge.backend.instructions.compute.primitives import amd
-    bits = amd._packed_lead(4, 64).axes[0]
+    from tensorforge.backend.instructions.compute.strategy import lead_layout
+    bits = lead_layout(threads=64, width=4).axes[0]
     assert [b.place for b in bits] == ([Place.VECTOR] * 2
                                        + [Place.LANE] * 4)
-    assert amd._flat_lead(64) == bitlayout.from_register_layout(
+    assert lead_layout(threads=64, width=1) == bitlayout.from_register_layout(
         RegisterLayout((LaneAxis(64, 1),)), (64,))
 
 

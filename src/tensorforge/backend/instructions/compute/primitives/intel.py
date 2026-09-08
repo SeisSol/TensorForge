@@ -48,6 +48,7 @@ gain.
 from tensorforge.backend.pir.core import SCALAR_LAYOUT, ScalarType
 from tensorforge.common.basic_types import Datatype
 from .. import broadcast, ranking, split
+from ..bitlayout import packed
 from ..strategy import Strategy, whole
 
 #: Fixed by the hardware; the header asserts it.
@@ -503,7 +504,7 @@ def strategies(shape, ctx):
     `k` is an element index for the same reason as on AMD.  Neither has been
     given a conversion, so neither is offered one.
     """
-    if shape.lead_width > 1:
+    if packed(shape.lead_layout):
         return frozenset()
     if not supports(shape.threads, shape.accumulator, shape.sparse):
         return frozenset()

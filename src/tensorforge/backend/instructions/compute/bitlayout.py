@@ -221,6 +221,20 @@ def from_register_layout(layout, extents: Sequence[int],
     return BitLayout(tuple(axes))
 
 
+def packed(layout) -> bool:
+    """Whether any of this layout's index bits land inside a register.
+
+    The question a consumer asks when it has no way to name where an element
+    is beyond "which lane" -- a fragment table, a DPP pattern and a lane
+    broadcast all address lanes, and a bit in `Place.VECTOR` is an element
+    they have no coordinate for.  `False` for a layout that is `None`: an
+    unstated distribution is unknown, not packed, and refusing on it would
+    turn a missing annotation into an exclusion.
+    """
+    return layout is not None and any(bit.place is Place.VECTOR
+                                      for axis in layout.axes for bit in axis)
+
+
 def from_value(layout, type_, extents: Sequence[int], axis: int = 0
                ) -> Optional[BitLayout]:
     """What a value holds, read from its layout and its type together.

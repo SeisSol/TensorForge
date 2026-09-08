@@ -20,7 +20,11 @@ import pytest
 
 from tensorforge.backend.instructions.compute.strategy import (
     DEFAULT_PREFERENCE, PREFERENCES, ComputeShape, Span, Strategy,
-    choose_strategy, is_contraction, legal_strategies)
+    choose_strategy, is_contraction, lead_layout, legal_strategies)
+from tensorforge.backend.instructions.compute import bitlayout
+from tensorforge.backend.instructions.compute.bitlayout import Position
+from tensorforge.backend.symbol import LeadIndex
+from tensorforge.common.context import Context
 from tensorforge.backend.instructions.compute.primitives import amd, intel
 from tensorforge.backend.instructions.compute.primitives import nvidia
 from tensorforge.common.basic_types import Datatype
@@ -53,6 +57,47 @@ def _shape(threads=32, dtype=Datatype.F32, sparse=False, explicit_simd=False):
                         explicit_simd=explicit_simd)
 
 
+# -- the layout the plan derives ------------------------------------------- #
+
+def test_the_plan_derives_the_layout_the_emitter_addresses():
+    """The point of deriving it here at all.  A distribution has always been
+    readable off the access -- `layout_of` does it and `LeadIndex.layout()` is
+    what it reads -- but every caller of that sits inside the emission, so by
+    the time a layout exists the arrangement is chosen and an operand in the
+    wrong one can only be refused.
+
+    So this checks the plan's reading against the address the generator
+    writes: for each of the `threads` elements a fragment covers, the layout
+    has to name the lane and the component `LeadIndex` puts it at.
+    """
+    ctx = Context(arch='gfx90a', backend='hip', fp_type=Datatype.F32)
+    for threads in (16, 32, 64):
+        for width in (1, 2, 4):
+            layout = lead_layout(threads, width)
+            index = LeadIndex(0, block=threads, stride=1, width=width)
+            emitted = index.write(ctx)
+            for tid in range(threads):
+                base = eval(emitted.replace('threadIdx.x', str(tid))
+                            .replace('/', '//'))
+                for component in range(width):
+                    if base + component >= threads:
+                        continue
+                    assert layout.locate(base + component) == Position(
+                        lane=tid, element=component), (threads, width, tid)
+
+
+def test_the_fragment_s_index_space_is_the_one_the_operand_is_read_over():
+    """Worth pinning because the two candidates differ by `width`, and the
+    wrong one is not obviously wrong.  A lead dimension spans `threads *
+    width` elements per slot; a fragment covers `threads` of them, one per
+    lane.  Describing the slot instead would compare a fragment against
+    `width` times as many elements as it has lanes for."""
+    packed = lead_layout(threads=32, width=4)
+    assert packed.locate(31) == Position(lane=7, element=3)
+    assert bitlayout.packed(packed)
+    assert not bitlayout.packed(lead_layout(threads=32, width=1))
+
+
 # -- shape-independent legality -------------------------------------------- #
 
 def test_three_operands_have_no_a_and_b():
@@ -72,6 +117,10 @@ def test_the_lead_width_is_not_asked_here():
     from tensorforge.backend.instructions.compute import strategy
     assert 'lead_width' not in inspect.signature(is_contraction).parameters
     assert 'lead_width' not in inspect.getsource(is_contraction)
+    # Nor on the shape the arrangements read: what they ask about a packed
+    # operand is "can I take this distribution", and a width is only a
+    # number that stands in for one.
+    assert 'lead_width' not in ComputeShape.__dataclass_fields__
 
 
 @pytest.mark.parametrize('vendor', ['amd', 'nvidia', 'intel'])
@@ -99,7 +148,8 @@ def test_every_target_declines_a_packed_lead_operand(vendor, width, monkeypatch)
     def shape(width):
         return ComputeShape(threads=threads, accumulator=Datatype.F32,
                             sparse=False, explicit_simd=(vendor == 'intel'),
-                            lead=threads, depth=32, lead_width=width)
+                            lead=threads, depth=32,
+                            lead_layout=lead_layout(threads, width))
 
     assert shape(1) and module.strategies(shape(1), ctx) != frozenset(), (
         'the unpacked shape has to be served, or the refusal below says '

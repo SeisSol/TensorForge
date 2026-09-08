@@ -400,21 +400,34 @@ GROUPS = {
              'for step in range(steps)]')),
     ]),
 
-    'leadwidth': ('tests/test_compute_strategy.py tests/test_staging.py', [
+    'leadwidth': ('tests/test_compute_strategy.py tests/test_staging.py '
+                  'tests/test_bitlayout.py', [
+        ('the packing dropped from the layout the plan derives',
+         sub(Path('src/tensorforge/backend/instructions/compute/strategy.py'),
+             'index.layout(), (threads,), (width,))',
+             'index.layout(), (threads,))')),
+        ("the operand's slot read where a fragment's lanes were meant",
+         sub(Path('src/tensorforge/backend/instructions/compute/strategy.py'),
+             'index.layout(), (threads,), (width,))',
+             'index.layout(), (threads * width,), (width,))')),
+        ('an unstated distribution treated as a packed one',
+         sub(Path('src/tensorforge/backend/instructions/compute/bitlayout.py'),
+             '    return layout is not None and any(bit.place is Place.VECTOR',
+             '    return layout is None or any(bit.place is Place.VECTOR')),
         ('a packed lead operand offered the AMD arrangements anyway',
          sub(Path('src/tensorforge/backend/instructions/compute/primitives/amd/__init__.py'),
-             '    if shape.lead_width > 1:\n'
+             '    if bitlayout.packed(shape.lead_layout):\n'
              '        return (frozenset({Strategy.MATRIX})',
              '    if False:\n'
              '        return (frozenset({Strategy.MATRIX})')),
         ('a packed lead operand offered the NVIDIA fragments',
          sub(Path('src/tensorforge/backend/instructions/compute/primitives/nvidia.py'),
-             '    if shape.lead_width > 1:\n        return frozenset()\n'
+             '    if packed(shape.lead_layout):\n        return frozenset()\n'
              '    if (ENABLED',
              '    if (ENABLED')),
         ('a packed lead operand offered DPAS and the Intel chain',
          sub(Path('src/tensorforge/backend/instructions/compute/primitives/intel.py'),
-             '    if shape.lead_width > 1:\n        return frozenset()\n'
+             '    if packed(shape.lead_layout):\n        return frozenset()\n'
              '    if not supports(',
              '    if not supports(')),
         ('the staged trip counted as a route an emitter writes',

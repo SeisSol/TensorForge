@@ -41,9 +41,12 @@ reads the answer without knowing which of them asked.
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import FrozenSet, Iterable, Tuple
+from typing import FrozenSet, Iterable, Optional, Tuple
 
+from tensorforge.backend.symbol import LeadIndex
 from tensorforge.common.basic_types import Datatype
+
+from .bitlayout import BitLayout, from_register_layout
 
 
 class Strategy(Enum):
@@ -113,6 +116,35 @@ class ComputeShape:
     #: different body, which `_suballocate` reports as an overflow at
     #: generation and not before.
     a_parts: int = 1
+    #: How the lead operand holds the elements a fragment covers, or `None`
+    #: where the caller has not derived it.  A *layout*, not the width it is
+    #: derived from: every arrangement's question about a packed operand is
+    #: "can I take this distribution", which a number can only stand in for.
+    #: See :func:`lead_layout`.
+    lead_layout: Optional[BitLayout] = None
+
+
+def lead_layout(threads: int, width: int) -> Optional[BitLayout]:
+    """How the lead operand holds the `threads` elements a fragment covers.
+
+    Derived where the plan is made, from the index the emitter will build.
+    That is the whole of it: the distribution has always been derivable from
+    the access -- `layout_of` does exactly this and `LeadIndex.layout()` is
+    what it reads -- but every caller of it sits inside the emission, so by
+    the time a layout exists the arrangement has been chosen and an operand
+    in the wrong one can only be refused.  Asking `LeadIndex` here rather than
+    writing a `LaneAxis` out by hand is what keeps the plan's reading and the
+    emitter's the same reading.
+
+    The index space is the *fragment's*, and it is worth saying because the
+    two candidates differ by `width`: the lead dimension spans `threads *
+    width` elements per slot, and a fragment covers `threads` of them, one
+    per lane.  Those are the ones this describes -- at width `w` they sit in
+    `threads / w` lanes, `w` to a register -- so the comparison against a
+    fragment layout is between two statements about the same elements.
+    """
+    index = LeadIndex(0, block=threads, stride=1, width=width)
+    return from_register_layout(index.layout(), (threads,), (width,))
 
 
 def is_contraction(operands: int) -> bool:

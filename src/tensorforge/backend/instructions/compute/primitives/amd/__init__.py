@@ -34,11 +34,10 @@ definition since it was written.  `tests/test_amd_reachability.py` keeps the
 property.
 """
 
-from tensorforge.backend.pir.core import LaneAxis, RegisterLayout
 from tensorforge.common.basic_types import Datatype
 
 from ... import bitlayout, broadcast, packing, staging
-from ...strategy import Span, Strategy, whole
+from ...strategy import Span, Strategy, lead_layout, whole
 
 from .arch import amdarch, cdna2, gfx1250, gfx1251, rdna
 from .caps import has_fmacdpp4, has_fmacdpp8, has_fmacdpp16
@@ -132,7 +131,7 @@ def strategies(shape, ctx):
     emitted.  So the refusal is where the route is, and when the emission
     lands the offer follows it without a condition being edited.
     """
-    if shape.lead_width > 1:
+    if bitlayout.packed(shape.lead_layout):
         return (frozenset({Strategy.MATRIX})
                 if takes(lead_route(shape))
                 and offers(shape.threads, shape.accumulator, ctx)
@@ -192,33 +191,30 @@ def lead_route(shape):
     needs, and the tests to check that the refusal is the route and not a
     literal.  The extent is the thread count -- the index space this operand
     spans in one issue, which is also what the trip has to carry.
+
+    The start is read off the shape rather than rebuilt here.  It used to be
+    rebuilt, from `threads` and a width, which made this the second place
+    stating how a packed operand is distributed; the plan derives it now from
+    the index the emitter will build, and one derivation is what keeps the
+    reservation and the emission talking about the same operand.
     """
-    if shape.lead_width <= 1:
+    have = shape.lead_layout
+    if have is None or not bitlayout.packed(have):
         return 0
     threads = shape.threads
-    return reach(_packed_lead(shape.lead_width, threads), _flat_lead(threads),
-                 threads, [(index,) for index in range(threads)])
-
-
-def _packed_lead(width, threads):
-    """The lead operand as `lead_width` leaves it: the low bits of the index
-    inside the register, the rest across the lanes.
-
-    Derived from the distribution and the width rather than spelled out, so
-    that what the reservation measures is what a value of that width actually
-    holds.  Spelled out, it was a second statement of the same map, and the
-    two could disagree without anything noticing -- the reservation would then
-    be for a trip other than the one emitted.
-    """
-    return bitlayout.from_register_layout(
-        RegisterLayout((LaneAxis(max(threads // width, 1), 1),)),
-        (threads,), (width,))
+    return reach(have, _flat_lead(threads), threads,
+                 [(index,) for index in range(threads)])
 
 
 def _flat_lead(threads):
-    """What a fragment wants: the leading dimension one element per lane."""
-    return bitlayout.from_register_layout(
-        RegisterLayout((LaneAxis(threads, 1),)), (threads,))
+    """What a fragment wants: the leading dimension one element per lane.
+
+    Which is the lead operand at width one, so it is that and not a third
+    statement of a distribution -- a fragment wants the operand as an
+    unpacked one already arrives, and saying it that way is what makes the
+    two sides of `reach` comparable by construction.
+    """
+    return lead_layout(threads, 1)
 
 
 def plan(strategy, shape, n, ctx):
