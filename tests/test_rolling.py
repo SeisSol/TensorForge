@@ -247,3 +247,46 @@ def test_a_list_with_nothing_repeated_comes_back_unchanged():
 def test_an_empty_list_rolls_to_an_empty_list():
     assert roll([]) == []
     assert unroll([]) == []
+
+
+# --- the loop where it first meets the backend ------------------------------
+
+
+def test_the_section_geometry_is_the_same_rolled_or_not():
+    """A loop is transparent to whoever asks what a section reads and writes.
+
+    The first thing the generator computes from a descriptor list is its
+    geometry, and it decides staging widths and whether a destination may stay
+    in registers.  Stating a repetition once rather than writing it out is not
+    supposed to change any of that, so the two lists are compared rather than
+    the rolled one merely being accepted.
+    """
+    from tensorforge.backend.scopes import Scopes
+    from tensorforge.backend.section_plan import SectionPlan
+
+    for build in (recursion, accumulation, separate):
+        original = build()
+        rolled = roll(original)
+        assert any(isinstance(d, ForDescr) for d in rolled)
+
+        plain = SectionPlan(original, Scopes())
+        looped = SectionPlan(rolled, Scopes())
+
+        tensors = {v.tensor for d in original
+                   for v in d.reads() + [d.writes()] if v is not None}
+        for tensor in tensors:
+            assert looped.dest_union(tensor) == plain.dest_union(tensor)
+            assert looped.written_in_slices(tensor) == \
+                plain.written_in_slices(tensor)
+
+
+def test_a_plain_descriptor_stands_for_itself():
+    descrs = separate(2)
+    assert [d.operations() for d in descrs] == [[d] for d in descrs]
+
+
+def test_a_loop_stands_for_every_operation_of_every_iteration():
+    original = accumulation()
+    loop = roll(original)[0]
+    assert len(loop.operations()) == len(original)
+    assert same_shape(loop.operations()) == same_shape(original)

@@ -78,12 +78,17 @@ class SectionPlan:
         self._eff_reads = {}
         self._eff_writes = {}
 
-        for descr in descr_list:
-            if not isinstance(descr, OperationDescription):
+        # Expanded rather than walked: a descriptor that stands for several
+        # operations is asked for them, so a section's geometry is the same
+        # whether the list states a repetition once or writes it out.  The
+        # kinds that contain others stay their own business.
+        for outer in descr_list:
+            if not isinstance(outer, OperationDescription):
                 continue
-            self._add_reads(descr, scopes)
-            tensor = self._add_writes(descr)
-            self._add_effective(descr, tensor)
+            for descr in outer.operations():
+                self._add_reads(descr, scopes)
+                tensor = self._add_writes(descr)
+                self._add_effective(descr, tensor)
 
         self._check_initialised()
 

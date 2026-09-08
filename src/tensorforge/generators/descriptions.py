@@ -17,6 +17,17 @@ class OperationDescription:
   def barrier(self):
     return False
 
+  def operations(self) -> List:
+    """The operations this descriptor stands for, itself by default.
+
+    A descriptor that holds others -- a loop over a body -- is not the unit
+    whose geometry can be asked for: it reads and writes whatever its
+    iterations do, and `writes()` has one destination to give.  So whoever
+    needs the operations asks for them and gets them expanded, rather than
+    learning which kinds contain which.
+    """
+    return [self]
+
   def reads(self) -> List:
     """The views this operation reads, tensor-carrying ones only.
 
@@ -476,6 +487,9 @@ class ForDescr(OperationDescription):
 
   def barrier(self):
     return any(d.barrier() for d in self.general.template)
+
+  def operations(self) -> List:
+    return [descr for body in self.bodies() for descr in body]
 
   def destinations(self) -> List:
     seen = []
