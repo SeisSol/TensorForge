@@ -123,6 +123,7 @@ def test_no_site_label_is_ambiguous():
     ("operand_layouts.py", r"\bmfma\b|\buntracked\b"),
     ("slot_census.py", r"batch loops over \d+ cases"),
     ("buffer_spans.py", r"\bby kind\b|\bspan\b"),
+    ("overlap_census.py", r"\d+ B of \d+ B to separate them"),
 ])
 def test_the_censuses_still_see_something(tool, marker):
     """Each wraps a builder method and would report an empty corpus if the
