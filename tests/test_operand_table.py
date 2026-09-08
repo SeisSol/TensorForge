@@ -426,3 +426,20 @@ def _contributions_for_signature():
                                 alias=alias, datatype=Datatype.F32))
     return [GemmDescr(trans_a=False, trans_b=False, a=view('A', [9, 9]),
                       b=view('i', [9, 4]), c=view('o', [9, 4]))]
+
+
+def test_the_struct_is_defined_ahead_of_the_signature_that_names_it():
+    """Both the kernel and the launcher are in this translation unit."""
+    gen, _, _ = _generator_with_table()
+    lines = gen.get_kernel().splitlines()
+    definition = next(i for i, l in enumerate(lines) if l.startswith('struct '))
+    signature = next(i for i, l in enumerate(lines) if 'faceTable_t faceTable' in l)
+    assert definition < signature
+
+
+def test_no_struct_is_defined_where_no_table_is_registered():
+    from tensorforge.generators.generator import Generator
+    gen = Generator(_contributions_for_signature(), context())
+    gen.generate()
+    assert not any(l.startswith('struct ')
+                   for l in gen.get_kernel().splitlines())

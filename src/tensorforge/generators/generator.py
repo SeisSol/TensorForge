@@ -460,6 +460,13 @@ class Generator:
     vm = self._context.get_vm()
 
     writer = Writer()
+    # Ahead of the signature that names them, and ahead of the launcher that
+    # builds one: both sit in this translation unit, and the kernel comes
+    # first in it.
+    for definition in self.param_table_types():
+      writer(definition)
+    if self._param_tables:
+      writer.new_line()
     with self._generate_kernel_proto(writer):
       self._write_kernel_meta_data(writer)
 
