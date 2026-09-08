@@ -541,8 +541,10 @@ def matmul(writer, ops, ctx, span):
     AfragParts = [[None] * len(Afrag) for _ in range(aparts)]
 
     with writer.scratch_scope():
-        Ashm = writer.alloc(atom.d, (aregs * threads,), MemSpace.SHARED,
-                            hint='atile')
+        # `aparts` scalars per slot, adjacent, so a fragment's parts are one
+        # access rather than one each -- see the note below the B tile.
+        Ashm = writer.alloc(atom.d, (aparts * aregs * threads,),
+                            MemSpace.SHARED, hint='atile')
         # The B tile is written a row at a time and read a column at a time,
         # which no linear stride can serve without bank conflicts: 32 lanes
         # read 32 distinct elements spread over 60, and 240 bytes do not fit
@@ -551,13 +553,22 @@ def matmul(writer, ops, ctx, span):
         # both.  Measured over the emitted addresses: 2-way -> 1-way.
         Bshm = writer.alloc(atom.d, (bregs * threads,), MemSpace.SHARED,
                             hint='btile', swizzle=XorSwizzle(atom.k))
-        # The first is `Ashm`; the rest get their own, because the fragment
-        # read indexes by slot times the wave and one tile holding several
-        # parts per slot would change that arithmetic for all of them.
-        AshmParts = [Ashm] + [
-            writer.alloc(atom.d, (aregs * threads,), MemSpace.SHARED,
-                         hint=f'atile{p}')
-            for p in range(1, aparts)]
+        # One tile with the parts *adjacent*, not one tile per part.
+        #
+        # The first arrangement gave each part its own tile, on the grounds
+        # that the fragment read indexes by slot times the wave and a shared
+        # tile holding several parts per slot would change that arithmetic.
+        # True, and the wrong thing to optimise: it saved one allocation and
+        # paid one access per fragment per part.  Measured, two parts cost
+        # +896 LDS and +904 global loads against the single-part kernel, and
+        # the kernel is bound by exactly that traffic.
+        #
+        # Adjacent, the two halves of one fragment are one 8-byte access, and
+        # the same holds in global memory, where `DataView._elem_parts` already
+        # interleaves them.  The address gains a factor and an addend; ptxas
+        # merges the neighbouring scalar accesses, as it already does for the
+        # four consecutive stores below.
+
     with writer.scratch_scope():
         # Written lane-strided across the whole warp and read row-strided by
         # `atom.n`, so it collides both ways: 4-way on the read, 2-way on the
@@ -651,24 +662,30 @@ def matmul(writer, ops, ctx, span):
                                                                  kkk * ktile, hint='a')
                                             Bfrag[kkk + jj * kregs] = writer.load(Bshm, addr, hint='b')
 
+                                    # Parts innermost, so one element's parts
+                                    # are read next to each other.  They are
+                                    # adjacent in memory -- the part index is
+                                    # the innermost stride -- but a compiler
+                                    # merges neighbouring accesses only where
+                                    # they are also neighbours in the
+                                    # instruction stream, and reading all of
+                                    # part 0 and then all of part 1 leaves them
+                                    # far apart.  Measured: separated, the two
+                                    # parts cost 1809 global loads; adjacent,
+                                    # ptxas folds them back into the 905 the
+                                    # single-part kernel issues.
                                     for kkk in range(0, min(atom.k, K - k - kk)):
-                                        Areg[kkk] = A(writer, None, i // threads, k + kk + kkk)
-                                    for kkk in range(min(atom.k, K - k - kk), atom.k):
-                                        Areg[kkk] = writer.declare(ScalarType(atom.d),
-                                                                   hint='as')
-                                    for pt in range(1, aparts):
-                                        for kkk in range(0, min(atom.k, K - k - kk)):
+                                        for pt in range(aparts):
                                             AregParts[pt][kkk] = A(writer, None,
                                                                    i // threads,
-                                                                   k + kk + kkk,
-                                                                   pt)
-                                        for kkk in range(min(atom.k, K - k - kk), atom.k):
-                                            # A padding slot reads zero in
-                                            # every part, and for a split that
-                                            # is the right answer: it says the
-                                            # part before it was exact, which
-                                            # for a slot nothing multiplies is
-                                            # true.
+                                                                   k + kk + kkk, pt)
+                                    for kkk in range(min(atom.k, K - k - kk), atom.k):
+                                        for pt in range(aparts):
+                                            # A padding slot reads zero in every
+                                            # part, and for a split that is the
+                                            # right answer: it says the part
+                                            # before it was exact, which for a
+                                            # slot nothing multiplies is true.
                                             AregParts[pt][kkk] = writer.declare(
                                                 ScalarType(atom.d), hint='as')
 
@@ -726,21 +743,31 @@ def matmul(writer, ops, ctx, span):
                                                     for n in range(ktile):
                                                         addr = base if n == 0 else writer.op(
                                                             'add', INDEX, base, n, hint='a')
-                                                        writer.store(Ashm, Areg[kkk + n], addr)
-                                                        for pt in range(1, aparts):
-                                                            writer.store(AshmParts[pt],
+                                                        wide = (addr if aparts == 1
+                                                                else writer.op('mul', INDEX, addr,
+                                                                               aparts, hint='a'))
+                                                        for pt in range(aparts):
+                                                            at = (wide if pt == 0
+                                                                  else writer.op('add', INDEX,
+                                                                                 wide, pt,
+                                                                                 hint='a'))
+                                                            writer.store(Ashm,
                                                                          AregParts[pt][kkk + n],
-                                                                         addr)
+                                                                         at)
                                             writer.barrier(Uniformity.MULT)
 
                                             for kk in range(0, kregs):
                                                 for iii in range(0, mregs):
                                                     #writer(f'{atom.d.ctype()} {Areg2}_{iii + kk * mregs} = {shmptr}[{aoffs} + (threadIdx.x / {ktile}) + (threadIdx.x % {ktile} + {kk * ktile}) * {atom.m} + {iii * mtile}];')
                                                     faddr = _index(writer, add=(iii + kk * mregs) * 32)
+                                                    if aparts > 1:
+                                                        faddr = writer.op('mul', INDEX, faddr,
+                                                                          aparts, hint='a')
                                                     Afrag[iii + kk * mregs] = writer.load(Ashm, faddr, hint='a')
                                                     for pt in range(1, aparts):
                                                         AfragParts[pt][iii + kk * mregs] = writer.load(
-                                                            AshmParts[pt], faddr, hint='a')
+                                                            Ashm, writer.op('add', INDEX, faddr, pt,
+                                                                            hint='a'), hint='a')
 
                                             # Where A was stored prepared the
                                             # parts are handed over as they
