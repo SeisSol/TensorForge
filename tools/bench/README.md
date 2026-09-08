@@ -24,6 +24,7 @@ the thing timed.
 | `suites/` | suite definitions |
 | `build.py` | one binary per configuration, with measurement flags |
 | `run.py` | the vendor-neutral timing run |
+| `profile.py` | the vendor profilers, over the same binary |
 
 The driver itself is emitted by `tests/harness/driver_bench.py`, next to the
 correctness driver and sharing its operand collection and its launcher call —
@@ -100,6 +101,57 @@ small kernels per timestep. Device event time around one launch excludes the
 queueing and is what an achieved FLOP-per-second should be divided by. SYCL has
 only the first: the launcher submits internally and does not return its event,
 so the device clock is reported absent rather than as a zero.
+
+## Profiling
+
+`profile.py` runs the same binary in its `profile` mode — a fixed number of
+dispatches after the warm-up, no clock of its own — under `ncu`, `rocprofv3`,
+`unitrace` or `vtune`. One workload per process, which keeps a counter
+collection small and keeps `rocprof-compute`, which re-runs the application
+once per counter pass, to a runtime measured in seconds.
+
+```bash
+# what is installed, and which metrics it knows
+python3 tools/bench/profile.py --probe
+
+python3 tools/bench/profile.py suites/corpus.py --dry-run
+python3 tools/bench/profile.py suites/seissol.py --tool rocprofv3 --out prof/
+```
+
+Only a short set is normalised: duration, DRAM bytes each way, L2 bytes,
+achieved occupancy, launch geometry. Everything else stays in the vendor's own
+file, kept beside the normalised rows rather than parsed. Normalising more
+would mean claiming `dram__bytes_read.sum` and `FETCH_SIZE` are the same
+quantity in more places than they are, and that claim fails as a table that
+looks comparable and is not. Cross-vendor comparison belongs to `run.py`: a
+launch counted with a steady clock is the same measurement everywhere and a
+hardware counter is not.
+
+The column worth the trouble is `x`, the traffic amplification: measured DRAM
+bytes over the compulsory bytes the cost model says the operation could not
+avoid. For a batched small-operator kernel that ratio is the whole question —
+an `Addressing.NONE` operator matrix is read by every block and should be an L2
+hit, so near one means the cache did its job and near the block count means it
+did not. No timing run can tell those apart; they differ in where the bytes
+came from, not in how many arrived.
+
+Intel has two entries. `unitrace` is the default because it needs no licence
+and gives kernel timings; the memory counters are behind `--tool vtune`, which
+collects and then reports, hence two commands. A roofline on that stack is
+Advisor's own (`advisor --collect=roofline --profile-gpu`) and is named rather
+than wrapped — it runs its own calibration, and a wrapper that got the
+calibration wrong would produce a plot that looks like Advisor's and is not.
+
+Vendor command lines move between releases, so every flag lives in one adapter,
+`--dry-run` prints the exact command without running it, and `--probe` asks the
+installed tool which of the default metrics it knows (`ncu --query-metrics`,
+`rocprofv3-avail pmc-check`). A metric the tool rejects is dropped with a note
+rather than failing the run.
+
+Counter access is a privilege. Without `CAP_PERFMON`, or with the NVIDIA
+driver's `NVreg_RestrictProfilingToAdminUsers` at its default, `ncu` collects
+nothing — which is a machine configuration and not something a flag here can
+work around. `run.py` never needs it.
 
 ## Build flags
 
