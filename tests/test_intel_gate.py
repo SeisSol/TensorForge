@@ -127,7 +127,7 @@ def test_a_sparse_operand_is_still_servable():
 
 
 def test_fp32_is_emulated_through_tf32():
-    assert intel.atom_for(Datatype.F32) is intel.ATOMS['tf32']
+    assert intel.atom_for(Datatype.F32).name == 'tf32'
     assert intel.TF32_TERMS == 3
     # And it is that because of the split, not because a constant says so.
     assert intel.TF32_SPLIT_TERMS == 2
@@ -335,3 +335,44 @@ def test_both_matrix_paths_name_the_same_type():
     *generator* now knows what those four bytes are."""
     from tensorforge.backend.instructions.compute.primitives import nvidia
     assert nvidia.TF32_HALF.base is Datatype.TF32
+
+
+# -- the repeat count ------------------------------------------------------ #
+
+def test_the_default_repeat_is_what_the_table_held():
+    """The ranking has to be inert where nothing bounds it, or the change is
+    not a refactor."""
+    assert intel.atom_for(Datatype.F32).repeat == 8
+    assert intel.atom_for(Datatype.F32, columns=9, lead=56, depth=56).repeat == 8
+
+
+def test_issues_alone_always_return_the_widest_repeat():
+    """Which is the point of saying so: nothing else in the count changes
+    with `repeat`, so without a register bound the ranking is a constant."""
+    for columns in (1, 5, 9, 16, 33):
+        assert intel.atom_for(Datatype.F32, columns=columns).repeat == 8
+
+
+def test_a_register_bound_is_what_makes_it_a_choice():
+    """Eight columns of output per issue against one, and eight times the
+    accumulator and Src2 to hold them."""
+    sizes = {a.repeat: intel.fragment_bytes(a)
+             for a in intel.atoms_for(Datatype.F32)}
+    assert sizes[8] > sizes[4] > sizes[2] > sizes[1]
+    assert intel.atom_for(Datatype.F32, columns=9,
+                          budget=sizes[8]).repeat == 8
+    assert intel.atom_for(Datatype.F32, columns=9,
+                          budget=sizes[8] - 1).repeat == 4
+    assert intel.atom_for(Datatype.F32, columns=9,
+                          budget=sizes[1] - 1) is None
+
+
+def test_only_the_repeats_the_header_admits():
+    """`verify_repeat_count` takes 1, 2, 4 and 8."""
+    assert set(intel.REPEATS) == {1, 2, 4, 8}
+    assert {a.repeat for a in intel.atoms_for(Datatype.F32)} == set(intel.REPEATS)
+
+
+def test_a_type_with_no_atom_has_no_candidates():
+    assert intel.atoms_for(Datatype.F64) == ()
+    assert intel.atom_for(Datatype.F64) is None

@@ -47,7 +47,7 @@ gain.
 
 from tensorforge.backend.pir.core import SCALAR_LAYOUT, ScalarType
 from tensorforge.common.basic_types import Datatype
-from .. import broadcast, split
+from .. import broadcast, ranking, split
 from ..strategy import Strategy, whole
 
 #: Fixed by the hardware; the header asserts it.
@@ -268,9 +268,73 @@ def supports(threads, dtype, sparse) -> bool:
     return threads == EXECUTION_SIZE and dtype == Datatype.F32
 
 
-def atom_for(dtype):
-    """The atom an operator of this type is emulated with, or None."""
-    return ATOMS['tf32'] if dtype == Datatype.F32 else None
+#: Repeat counts the header's `verify_repeat_count` admits, widest first.
+#:
+#: Widest first because a tie in the ranking below means the count could not
+#: tell two of them apart, and the order a module states is then the answer.
+#: With no shape and no budget every candidate ties, so this is what decides.
+REPEATS = (8, 4, 2, 1)
+
+
+def fragment_bytes(atom, terms=TF32_SPLIT_TERMS) -> int:
+    """Register file one issue group's fragments hold, in bytes.
+
+    The accumulator once and each operand once per split term, which is what
+    `dpas_matmul` declares inside a `j0` tile.  `repeat` scales the
+    accumulator and Src2 and leaves Src1 alone, so this is the register half
+    of the trade the repeat count makes -- the issue half is `ranking.issues`.
+
+    A lower bound on what the body holds, not the body's own figure: the
+    surrounding loop nest has registers of its own, and
+    `_check_register_budget` is what weighs the whole of it.
+    """
+    elems = atom.c_elems + terms * (atom.a_elems + atom.b_elems)
+    return elems * Datatype.F32.size()
+
+
+def atoms_for(dtype, budget=None):
+    """Every repeat count this type could be emitted at, widest first.
+
+    `repeat` is the only free parameter here, and it trades register pressure
+    for issue count: eight columns of output per issue against one, and eight
+    times the accumulator and Src2 to hold them.  A budget in bytes drops the
+    candidates whose fragments alone would not fit.
+    """
+    if dtype != Datatype.F32:
+        return ()
+    base = ATOMS['tf32']
+    out = [base.with_repeat(repeat) for repeat in REPEATS]
+    if budget is not None:
+        out = [atom for atom in out if fragment_bytes(atom) <= budget]
+    return tuple(out)
+
+
+def atom_for(dtype, columns=0, lead=0, depth=0, budget=None):
+    """The repeat count that serves this shape with the fewest issues.
+
+    Ranking by issues alone always returns the widest, because nothing else
+    in the count changes with `repeat` -- so without a budget this is the
+    constant `REPEATS[0]` with a ranking around it, and saying that is the
+    point: the selection only becomes one once the register side bounds it.
+    That is what `budget` is for and why it is a parameter rather than a
+    constant here.
+    """
+    def key(atom):
+        # `m` takes the output columns, `n` the lanes and so the leading
+        # dimension, `k` the contraction -- a third mapping to the same three
+        # numbers, and the reason the conversion sits in each vendor module.
+        return (ranking.Extent(columns=atom.m, lanes=atom.n, depth=atom.k,
+                               name=f'{atom.name}x{atom.repeat}'), 1)
+
+    found = ranking.rank(atoms_for(dtype, budget), key, columns, lead, depth)
+    return found[0] if found else None
+
+
+def register_budget(ctx):
+    """Bytes of register file one work-item gets, or `None` where unstated."""
+    if ctx is None:
+        return None
+    return getattr(ctx.get_vm().get_hw_descr(), 'max_reg_per_thread', None)
 
 
 def simd(lexic, elem, count) -> str:
@@ -355,7 +419,8 @@ def dpas_matmul(writer, C, A, B, M, N, K, kx, threads, dtype, ctx):
     The same arrangement as `nvidia.py`'s `mma.sync ... .tf32`, and it has to
     be -- the error analysis belongs to the split, not to either instruction.
     """
-    atom = atom_for(dtype)
+    atom = atom_for(dtype, columns=N, lead=M * threads, depth=K + kx,
+                    budget=register_budget(ctx))
     if atom is None or threads != atom.n:
         return False
     acc_ct = dtype.ctype()

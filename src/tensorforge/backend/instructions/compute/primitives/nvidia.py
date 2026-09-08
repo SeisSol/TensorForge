@@ -173,11 +173,17 @@ EMITTED_MODES = (MMAMode.TF32, MMAMode.DIRECT)
 
 
 def instrs_for(dtype, sm=None):
-    """Every entry the emitter could issue for this accumulator, unranked."""
+    """Every entry the emitter could issue for this accumulator, widest first.
+
+    Widest because a tie in the ranking keeps this order, and a tie is what a
+    caller that does not state its shape gets.  Listing them in the order the
+    table happens to hold would make such a caller take the narrowest.
+    """
     sm = BASELINE_SM if sm is None else sm
-    return tuple(op for op in INSTRS
-                 if op.d is dtype and op.mode in EMITTED_MODES
-                 and op.sm <= sm)
+    return tuple(sorted((op for op in INSTRS
+                         if op.d is dtype and op.mode in EMITTED_MODES
+                         and op.sm <= sm),
+                        key=lambda op: (-op.m * op.n * op.k, op.name)))
 
 
 def instr_for(dtype, columns=0, lead=0, depth=0, sm=None):

@@ -106,12 +106,18 @@ def rank(candidates: Iterable, key: Callable[[object], Tuple[Extent, int]],
 
     `key` returns the extent of one candidate and how many term products it
     has to carry, which is the only thing a caller has to say about its own
-    types.  Ties break on the extent's name so that a ranking is stable
-    between runs, which a snapshot depends on.
+    types.
+
+    A tie keeps the order the caller listed its candidates in, and the sort is
+    stable so that it does.  Which is not a detail: where the count cannot
+    tell two instructions apart -- because the shape it would read was not
+    given, or because they differ only in something it does not count -- the
+    order a module states is the answer, and a tie-break of this function's
+    own would silently overrule it.
     """
     def order(candidate):
         extent, products = key(candidate)
         count = issues(extent, columns, lead, depth, products)
-        return (count * CYCLES.get(extent.name, 1), count, extent.name)
+        return (count * CYCLES.get(extent.name, 1), count)
 
     return tuple(sorted(candidates, key=order))
