@@ -34,6 +34,7 @@ definition since it was written.  `tests/test_amd_reachability.py` keeps the
 property.
 """
 
+from tensorforge.backend.pir.core import LaneAxis, RegisterLayout
 from tensorforge.common.basic_types import Datatype
 
 from ... import bitlayout, broadcast, packing, staging
@@ -159,21 +160,23 @@ def scratch(strategy, shape, ctx):
 
 def _packed_lead(width, threads):
     """The lead operand as `lead_width` leaves it: the low bits of the index
-    inside the register, the rest across the lanes."""
-    low = (width - 1).bit_length()
-    lanes = (max(threads // width, 1) - 1).bit_length()
-    return bitlayout.BitLayout((
-        tuple(bitlayout.Bit(bitlayout.Place.VECTOR, 1 << bit)
-              for bit in range(low))
-        + tuple(bitlayout.Bit(bitlayout.Place.LANE, 1 << bit)
-                for bit in range(lanes)),))
+    inside the register, the rest across the lanes.
+
+    Derived from the distribution and the width rather than spelled out, so
+    that what the reservation measures is what a value of that width actually
+    holds.  Spelled out, it was a second statement of the same map, and the
+    two could disagree without anything noticing -- the reservation would then
+    be for a trip other than the one emitted.
+    """
+    return bitlayout.from_register_layout(
+        RegisterLayout((LaneAxis(max(threads // width, 1), 1),)),
+        (threads,), (width,))
 
 
 def _flat_lead(threads):
     """What a fragment wants: the leading dimension one element per lane."""
-    return bitlayout.BitLayout((
-        tuple(bitlayout.Bit(bitlayout.Place.LANE, 1 << bit)
-              for bit in range((threads - 1).bit_length())),))
+    return bitlayout.from_register_layout(
+        RegisterLayout((LaneAxis(threads, 1),)), (threads,))
 
 
 def plan(strategy, shape, n, ctx):

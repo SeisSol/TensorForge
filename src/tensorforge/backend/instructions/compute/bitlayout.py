@@ -139,9 +139,9 @@ def _bits_of(value: int) -> Optional[int]:
     return value.bit_length() - 1
 
 
-def from_lane_axis(block: int, stride: int, extent: int
+def from_lane_axis(block: int, stride: int, extent: int, width: int = 1
                    ) -> Optional[Tuple[Bit, ...]]:
-    """`LaneAxis(block, stride)` as bits, or `None` where it is not expressible.
+    """`LaneAxis(block, stride)` at this packing as bits, or `None`.
 
     The axis says element `s` lives in slot ``s // block``, held by the threads
     with ``(t // stride) % block == s % block``.  In bits: the low
@@ -150,29 +150,47 @@ def from_lane_axis(block: int, stride: int, extent: int
     of what this language says and a special case of what the fragment tables
     say.
 
-    `None` where `block` or `stride` is not a power of two.  That is not a gap
-    to fill in later: an axis that wraps at nine elements does not decompose
-    into bits at all, and moving between two such distributions is a shuffle by
-    lane index rather than a permutation of bits.  Saying so is the point --
-    the fragment side is powers of two throughout because the hardware is, and
-    the value side is only sometimes.
+    `width` is the second half of the same reading, and it belongs here rather
+    than beside it.  `LeadIndex` maps the packed dimension by
+
+        idx = width * (((tid / stride) % block) + nonlead * block) + c
+
+    with `c` naming a component *inside* the value, so the low ``log2(width)``
+    bits of `s` reach neither a lane nor a slot and the cut point moves up by
+    exactly that many.  `LaneAxis` is right to leave the width out -- which
+    lane holds which share does not change with it, which is why two indices
+    differing only in width are the same distribution -- but a consumer that
+    indexes *elements* needs both readings at once, and one bit string is what
+    holds them.
+
+    `None` where `block`, `stride` or `width` is not a power of two.  That is
+    not a gap to fill in later: an axis that wraps at nine elements does not
+    decompose into bits at all, and moving between two such distributions is a
+    shuffle by lane index rather than a permutation of bits.  Saying so is the
+    point -- the fragment side is powers of two throughout because the
+    hardware is, and the value side is only sometimes.
     """
     low = _bits_of(block)
     base = _bits_of(stride)
-    if low is None or base is None:
+    packed = _bits_of(width)
+    if low is None or base is None or packed is None:
         return None
     total = max(1, extent - 1).bit_length()
     out = []
     for position in range(total):
-        if position < low:
-            out.append(Bit(Place.LANE, 1 << (base + position)))
+        if position < packed:
+            out.append(Bit(Place.VECTOR, 1 << position))
+        elif position < packed + low:
+            out.append(Bit(Place.LANE, 1 << (base + position - packed)))
         else:
-            out.append(Bit(Place.SLOT, 1 << (position - low)))
+            out.append(Bit(Place.SLOT, 1 << (position - packed - low)))
     return tuple(out)
 
 
-def from_register_layout(layout, extents: Sequence[int]) -> Optional[BitLayout]:
-    """A PIR `RegisterLayout` in this vocabulary, or `None`.
+def from_register_layout(layout, extents: Sequence[int],
+                         widths: Optional[Sequence[int]] = None
+                         ) -> Optional[BitLayout]:
+    """A PIR `RegisterLayout` at this packing in this vocabulary, or `None`.
 
     One axis per tensor dimension, in the layout's own order, each through
     :func:`from_lane_axis`.  `None` as soon as one of them does not decompose,
@@ -180,17 +198,62 @@ def from_register_layout(layout, extents: Sequence[int]) -> Optional[BitLayout]:
 
     The extents come from outside: a `LaneAxis` says how a dimension is spread
     and not how far it reaches, and the number of bits an index needs is the
-    second of those.
+    second of those.  The widths come from outside for the same reason and a
+    sharper one -- the packing is on the value's type, not on its layout, and
+    reading the two apart is what left a packed operand describable only as a
+    number nobody downstream could act on.
+
+    Omitted means unpacked throughout, which is what every layout said before
+    a width could be stated and what the corpus still says everywhere.
     """
     if layout is None or len(layout.axes) != len(extents):
         return None
+    if widths is None:
+        widths = (1,) * len(layout.axes)
+    if len(widths) != len(layout.axes):
+        return None
     axes = []
-    for axis, extent in zip(layout.axes, extents):
-        bits = from_lane_axis(axis.block, axis.stride, extent)
+    for axis, extent, width in zip(layout.axes, extents, widths):
+        bits = from_lane_axis(axis.block, axis.stride, extent, width)
         if bits is None:
             return None
         axes.append(bits)
     return BitLayout(tuple(axes))
+
+
+def from_value(layout, type_, extents: Sequence[int], axis: int = 0
+               ) -> Optional[BitLayout]:
+    """What a value holds, read from its layout and its type together.
+
+    The one place the two are joined.  A value states its distribution on
+    `layout` and its packing on `type_.length`, and every consumer that indexes
+    elements needs both -- a `float4` load and the scalar load it replaces
+    carry the same `RegisterLayout`, deliberately, because a pass asking "is
+    moving between these a shuffle?" must keep getting "no".  For a matrix
+    fragment, which wants the leading dimension across the lanes, the same two
+    values are not interchangeable at all, and until they were readable
+    together the difference could only be spelled as `lead_width` -- a number
+    whose only available use was to switch the arrangement off.
+
+    `axis` names the dimension the packing is on, and defaults to the first
+    because that is the emitter's own reading: `lead_width_of` returns the
+    width of the *first* lead index of an access, and `layout_of_index` puts
+    the lead axes in that same order.  It is stated rather than assumed so
+    that a caller whose value is arranged otherwise can say so instead of
+    getting a layout that is quietly wrong.
+
+    `None` on everything :func:`from_register_layout` declines, and on an
+    `axis` the layout does not have.
+    """
+    if layout is None:
+        return None
+    length = getattr(type_, 'length', None)
+    width = 1 if length is None else length
+    widths = [1] * len(layout.axes)
+    if not -len(widths) <= axis < len(widths):
+        return None
+    widths[axis] = width
+    return from_register_layout(layout, extents, widths)
 
 
 @dataclass(frozen=True)

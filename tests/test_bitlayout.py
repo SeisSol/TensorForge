@@ -23,7 +23,13 @@ from tensorforge.backend.instructions.compute.bitlayout import (
     Bit, BitLayout, Place, Position)
 from tensorforge.backend.instructions.compute.primitives.amd import (
     MATRIX_OPS, layouts)
-from tensorforge.backend.pir.core import LaneAxis, RegisterLayout
+from tensorforge.backend.pir.core import (LaneAxis, RegisterLayout,
+                                          ScalarType)
+from tensorforge.backend.symbol import LeadIndex
+from tensorforge.common.basic_types import Datatype
+from tensorforge.common.context import Context
+
+CTX = Context(arch='gfx90a', backend='hip', fp_type=Datatype.F32)
 
 FRAGMENTS = ('A', 'B', 'D')
 
@@ -133,6 +139,103 @@ def test_the_undistributed_axis_is_all_slot_bits():
     bits = bitlayout.from_lane_axis(1, 1, 8)
     assert bits is not None
     assert all(b.place is Place.SLOT for b in bits)
+
+
+# -- the packing, against the map the emitter writes ----------------------- #
+
+def _emitted(index, ctx, tid):
+    """The element index `LeadIndex` addresses, evaluated rather than restated.
+
+    The check has to be against what is generated and not against a second
+    copy of the formula here, because a copy shares whatever mistake the
+    original has -- which is the failure the `LaneAxis` docstring already
+    caused once, when the annotations were derived from prose instead of from
+    the hardware.
+    """
+    expression = index.write(ctx)
+    return eval(expression.replace('threadIdx.x', str(tid)).replace('/', '//'))
+
+
+@pytest.mark.parametrize('width', [1, 2, 4])
+@pytest.mark.parametrize('block,stride', [(16, 1), (8, 2), (4, 1), (1, 1)])
+def test_the_packed_reading_is_the_map_the_emitter_writes(width, block, stride):
+    """Both halves of what a value holds, checked against the address the
+    generator emits for it: which lane, which slot, and -- the part no layout
+    could state before -- which element inside the register."""
+    threads, slots = 64, 2
+    extent = width * block * slots
+    bits = bitlayout.from_lane_axis(block, stride, extent, width)
+    assert bits is not None
+    layout = BitLayout((bits,))
+    for slot in range(slots):
+        index = LeadIndex(slot, block=block, stride=stride, width=width)
+        for tid in range(threads):
+            base = _emitted(index, CTX, tid)
+            for component in range(width):
+                assert layout.locate(base + component) == Position(
+                    slot=slot, lane=((tid // stride) % block) * stride,
+                    element=component), (width, block, stride, tid, slot)
+
+
+def test_at_width_one_it_is_the_reading_it_replaces():
+    """The default is the old answer and not a new one that agrees on the
+    corpus: `lead_width` is 1 everywhere today, so anything else would be an
+    unreviewed change to every layout in play."""
+    for block, stride, extent in ((16, 1, 64), (8, 2, 32), (1, 1, 8)):
+        assert (bitlayout.from_lane_axis(block, stride, extent, 1)
+                == bitlayout.from_lane_axis(block, stride, extent))
+        assert all(b.place is not Place.VECTOR
+                   for b in bitlayout.from_lane_axis(block, stride, extent))
+
+
+def test_a_width_that_is_not_a_power_of_two_has_no_bits():
+    """Same refusal as an axis that wraps at nine, for the same reason: three
+    adjacent elements per lane do not decompose into bits at all."""
+    assert bitlayout.from_lane_axis(16, 1, 48, 3) is None
+    assert bitlayout.from_lane_axis(16, 1, 96, 6) is None
+
+
+# -- layout and type, read together ---------------------------------------- #
+
+def test_the_type_carries_the_width_and_the_layout_does_not():
+    """The reason this reading has to exist.  A packed load and the scalar
+    load it replaces carry the *same* `RegisterLayout` -- deliberately, so a
+    pass asking whether moving between them is a shuffle keeps getting no --
+    and a consumer that indexes elements is told nothing by that."""
+    layout = RegisterLayout((LaneAxis(16, 1),))
+    packed = bitlayout.from_value(layout, ScalarType(Datatype.F32, 4), (64,))
+    scalar = bitlayout.from_value(layout, ScalarType(Datatype.F32), (64,))
+    assert packed != scalar
+    assert scalar == bitlayout.from_register_layout(layout, (64,))
+    assert packed == bitlayout.from_register_layout(layout, (64,), (4,))
+
+
+def test_the_width_lands_on_the_axis_it_is_named_on():
+    """Stated rather than assumed: a caller whose value is arranged otherwise
+    says so instead of getting a layout that is quietly wrong."""
+    layout = RegisterLayout((LaneAxis(4, 1), LaneAxis(8, 4)))
+    on_second = bitlayout.from_value(layout, ScalarType(Datatype.F32, 2),
+                                     (8, 32), axis=1)
+    assert all(b.place is not Place.VECTOR for b in on_second.axes[0])
+    assert on_second.axes[1][0] == Bit(Place.VECTOR, 1)
+
+
+def test_an_axis_the_layout_does_not_have_is_refused():
+    layout = RegisterLayout((LaneAxis(16, 1),))
+    assert bitlayout.from_value(layout, ScalarType(Datatype.F32, 2), (64,),
+                                axis=3) is None
+
+
+def test_the_reservation_reads_the_derived_layout():
+    """What the AMD scratch answer is sized from.  Spelled out beside the
+    derivation, the two could disagree and the buffer would then be reserved
+    for a trip other than the one emitted."""
+    from tensorforge.backend.instructions.compute.primitives import amd
+    bits = amd._packed_lead(4, 64).axes[0]
+    assert [b.place for b in bits] == ([Place.VECTOR] * 2
+                                       + [Place.LANE] * 4)
+    assert amd._flat_lead(64) == bitlayout.from_register_layout(
+        RegisterLayout((LaneAxis(64, 1),)), (64,))
 
 
 # -- the vocabulary itself ------------------------------------------------- #

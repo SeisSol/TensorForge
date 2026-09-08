@@ -447,6 +447,19 @@ GROUPS = {
     ]),
 
     'bitlayout': ('tests/test_bitlayout.py', [
+        ('a packed element read as a register of its own',
+         sub(Path('src/tensorforge/backend/instructions/compute/bitlayout.py'),
+             '            out.append(Bit(Place.VECTOR, 1 << position))',
+             '            out.append(Bit(Place.SLOT, 1 << position))')),
+        ('a width that is not a power of two taken as unpacked',
+         sub(Path('src/tensorforge/backend/instructions/compute/bitlayout.py'),
+             '    if low is None or base is None or packed is None:',
+             '    packed = packed or 0\n'
+             '    if low is None or base is None:')),
+        ("the value's type read for everything but its length",
+         sub(Path('src/tensorforge/backend/instructions/compute/bitlayout.py'),
+             '    width = 1 if length is None else length',
+             '    width = 1')),
         ('a replicated fragment planned from its lowest lane',
          sub(Path('src/tensorforge/backend/instructions/compute/primitives/amd/reorder.py'),
              "    if fragment is None or op.replication(which.lower()) != 1:",
@@ -489,12 +502,13 @@ GROUPS = {
              'Bit(Place.LANE, abs(weight))')),
         ('the cut point put on the wrong side of the axis',
          sub(Path('src/tensorforge/backend/instructions/compute/bitlayout.py'),
-             '        if position < low:',
-             '        if position >= low:')),
+             '        elif position < packed + low:',
+             '        elif position >= packed + low:')),
         ('a stride that is not a power of two admitted anyway',
          sub(Path('src/tensorforge/backend/instructions/compute/bitlayout.py'),
-             '    if low is None or base is None:\n        return None',
-             '    if low is None:\n        return None\n'
+             '    if low is None or base is None or packed is None:\n'
+             '        return None',
+             '    if low is None or packed is None:\n        return None\n'
              '    base = 0 if base is None else base')),
     ]),
 
