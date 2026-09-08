@@ -764,7 +764,7 @@ class MultilinearInstruction(ComputeInstruction):
                         spec.discard()
                 return res
 
-            def A(writer, var, i, k, part=0):
+            def A(writer, var, i, k, part=0, parts=1):
                 """One part of `A` at element `(i, k)`.
 
                 `part` is zero for an operand stored as one scalar per
@@ -779,7 +779,7 @@ class MultilinearInstruction(ComputeInstruction):
                 with writer.speculative() as spec:
                     res = self._ops[0].symbol.load(writer, self._context, var,
                                                    unwindOp(i, 0, k, 0, True),
-                                                   False, part=part)
+                                                   False, part=part, parts=parts)
                     if not res:
                         spec.discard()
                 return res

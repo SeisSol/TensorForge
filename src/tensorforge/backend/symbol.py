@@ -1873,7 +1873,7 @@ class Symbol:
       return None
     return (int(idx) // self.lead_width) % self.num_threads
 
-  def load(self, writer, context: Context, variable, index: List[Union[str, int, Immediate, Variable, LeadIndex]], nontemp, broadcast: bool = True, part: int = 0):
+  def load(self, writer, context: Context, variable, index: List[Union[str, int, Immediate, Variable, LeadIndex]], nontemp, broadcast: bool = True, part: int = 0, parts: int = 1):
     addrs = []
     if self.stype == SymbolType.Data or (not self.obj.is_dense() and not isinstance(self.obj.spp, BoundingBoxSPP)):
       if variable is None:
@@ -2000,6 +2000,50 @@ class Symbol:
         addr = self.address_value(writer, context, read_index)
         if part:
             addr = writer.op('add', INDEX, addr, part, hint='a')
+        if parts > 1:
+            # Every part of one element in a single access.  They are
+            # adjacent -- the part index is the innermost stride -- so this is
+            # one 8- or 16-byte read where the caller would otherwise issue
+            # `parts` of them, and the alignment follows from the layout:
+            # element `e` begins at `parts * e`, which for two 4-byte parts is
+            # always 8-byte aligned.
+            #
+            # Adjacency alone was not enough.  Emitted as separate scalar
+            # reads, ptxas merged the *shared* pair (2269 -> 477 LDS plus 896
+            # LDS.64) and left the *global* one alone at 1809 LDG.E against
+            # 905 for the single-part kernel, whether or not the two reads
+            # were neighbours in the instruction stream.  So the width is
+            # stated rather than hoped for.
+            #
+            # And the alignment with it, which is the difference between a
+            # wide access and a wide *name* for two narrow ones: asked with
+            # `RELAXED` this is still 1809 `LDG.E`, because a compiler may not
+            # widen a load it has been told is only element-aligned.
+            #
+            # Two of the three terms of that claim are structural.  Every
+            # stride is a multiple of `parts` -- `get_dim_strides` starts at
+            # `_elem_parts` and only multiplies -- so every address this
+            # builds is too; and `part` must be zero here, since a caller
+            # asking for all the parts cannot also be selecting one, which the
+            # assertion states rather than assumes.  The third term is the
+            # base, and it is *not* structural: a global comes from the
+            # allocator and is aligned past any width this asks for, while a
+            # register or scratch array is an array of `T` with nothing but
+            # element alignment, and a shared window is offset by a running
+            # allocator.  So the claim is made exactly where it holds and the
+            # weaker one everywhere else -- a wide access that is merely
+            # correct, rather than a fast one that is undefined.
+            assert part == 0, \
+                'a wide read of every part cannot also select one'
+            from tensorforge.backend.pir.core import ScalarType
+            based = self.stype in (SymbolType.Global, SymbolType.Batch)
+            wide = writer.load(self, addr,
+                               type_=ScalarType(self.get_fptype(), parts),
+                               hint='data', align=None if based else RELAXED,
+                               layout=layout_of(read_index, self.num_threads),
+                               nontemporal=nontemp)
+            return tuple(writer.extract(wide, i, hint='p')
+                         for i in range(parts))
         value = writer.load(self, addr,
                             type_=ltype, hint='data',
                             align=None if w == 1 else RELAXED,

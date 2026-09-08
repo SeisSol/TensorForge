@@ -29,10 +29,59 @@ inline constexpr unsigned FullWarpMask = 0xffffffffu;
 // been getting away with it.  This is the same pair `hip.h` declares -- the
 // natural width for a base that proves it, and an element-aligned twin for a
 // base that does not.
+/// A vector as a *struct*, not as a GNU `vector_size` typedef.
+///
+/// nvcc declines `vector_size` in device code outright --- as the type of a
+/// value, and as the target of a cast, with "is a vector, which is not
+/// supported in device code".  So on this target there is no spelling of the
+/// typedef that reaches a kernel, which is why nothing here has ever emitted
+/// one and why the matrix path could not be turned on without 101 errors.
+///
+/// The subscript is what makes this a drop-in: everything the generator emits
+/// for a vector value --- `v[i]` to take a component, an assignment through a
+/// cast to move one --- is spelled the same way for both, so only this
+/// definition changes and no call site does.  `__align__` is what makes it a
+/// *wide* access rather than N narrow ones: the natural pair is eight bytes
+/// and the relaxed twin is element-aligned, exactly as the typedefs were.
+///
+/// Alignment is a *parameter*, not a second struct.  That is forced: under
+/// `vector_size` the natural and the relaxed spelling are the same type
+/// carrying different alignment attributes, so `*(VectorRelaxedT*)&buf[i] = v`
+/// assigns a `VectorT` straight through; written as two unrelated structs the
+/// same line stops compiling, which is precisely the trap `cuda_lexic` warns
+/// about for `float2`.  One template with the alignment in the type keeps them
+/// related, and the conversion below restores the assignment in both
+/// directions.  It is a member-wise copy of a trivially copyable POD of
+/// identical layout, so it costs nothing the attribute version did not.
+///
+/// What is lost, and it is a real loss: elementwise arithmetic.  A GNU vector
+/// multiplies with `*`; this does not, and a path that wants that has to say
+/// so per component.  Nothing emits it today.  Lengths CUDA's own structs do
+/// not have are not a special case here --- any N works --- but a length the
+/// hardware has no wide access for simply compiles to N narrow ones.
+template <typename T, std::size_t N, std::size_t Align>
+struct alignas(Align) VectorStruct {
+  T data[N];
+  __device__ __forceinline__ T &operator[](std::size_t i) { return data[i]; }
+  __device__ __forceinline__ const T &operator[](std::size_t i) const {
+    return data[i];
+  }
+  /// The same width at another alignment.  Never selected for `A == Align`:
+  /// a conversion function to its own class type is never used.
+  template <std::size_t A>
+  __device__ __forceinline__ operator VectorStruct<T, N, A>() const {
+    VectorStruct<T, N, A> out{};
+#pragma unroll
+    for (std::size_t i = 0; i < N; ++i) {
+      out.data[i] = data[i];
+    }
+    return out;
+  }
+};
+
 template <typename T, std::size_t N> struct VectorOf {
-  typedef T type __attribute__((__vector_size__(N * sizeof(T))));
-  typedef T relaxed
-      __attribute__((__vector_size__(N * sizeof(T)), __aligned__(sizeof(T))));
+  typedef VectorStruct<T, N, N * sizeof(T)> type;
+  typedef VectorStruct<T, N, sizeof(T)> relaxed;
 };
 
 template <typename T, std::size_t N>
@@ -43,13 +92,18 @@ using VectorRelaxedT = typename VectorOf<T, N>::relaxed;
 
 } // namespace tensorforge
 
-// The property this pattern has already got wrong once, in `hip.h`: written
-// as an alias template with a dependent element type, GCC drops the attribute
-// with a warning and `VectorT<float, 4>` becomes plain `float`.  If nvcc ever
-// does the same -- or declines `vector_size` in device code at all -- these
-// turn a silent quarter-width copy into a build error.
+// The two properties the struct exists for, asserted rather than assumed.
+// Width first: a member array is only as wide as its element count if nothing
+// pads it, and a padded `VectorT` would make every wide transfer copy a
+// fraction of what it names -- silently, since the subscripts still compile.
+// Alignment second: `VectorT` is wide *because* it is over-aligned, and its
+// relaxed twin is castable *because* it is not; swap either and the code is
+// still valid C++ that does the wrong thing.  A GNU `vector_size` typedef used
+// to carry both, and got it wrong once already in `hip.h`, where an alias
+// template with a dependent element type made GCC drop the attribute with a
+// warning and turn `VectorT<float, 4>` into plain `float`.
 static_assert(sizeof(tensorforge::VectorT<float, 4>) == 4 * sizeof(float),
-              "VectorT lost its vector_size attribute");
+              "VectorT is padded: it is not as wide as it claims");
 static_assert(alignof(tensorforge::VectorT<float, 4>) == 4 * sizeof(float),
               "VectorT is not naturally aligned");
 static_assert(alignof(tensorforge::VectorRelaxedT<float, 4>) == alignof(float),

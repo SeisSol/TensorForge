@@ -675,10 +675,11 @@ def matmul(writer, ops, ctx, span):
                                     # ptxas folds them back into the 905 the
                                     # single-part kernel issues.
                                     for kkk in range(0, min(atom.k, K - k - kk)):
+                                        got = A(writer, None, i // threads,
+                                                k + kk + kkk, parts=aparts)
+                                        got = got if aparts > 1 else (got,)
                                         for pt in range(aparts):
-                                            AregParts[pt][kkk] = A(writer, None,
-                                                                   i // threads,
-                                                                   k + kk + kkk, pt)
+                                            AregParts[pt][kkk] = got[pt]
                                     for kkk in range(min(atom.k, K - k - kk), atom.k):
                                         for pt in range(aparts):
                                             # A padding slot reads zero in every
