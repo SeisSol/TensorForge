@@ -393,8 +393,18 @@ def emit(generator, backend: str, default_batch: int) -> str:
                 f"    DEV_MALLOC(d_p_{op.kernel_name}, {ptr_size});"
             )
             # TODO: move to maybe a section of its own?
+            #
+            # `i * per_element` and not `i`: `d_X` is a `{ctype}*`, so `+ i`
+            # advances by one *element* where the kernel indexes by one *batch
+            # element*.  Every batch then aliased the same storage shifted by
+            # one scalar, which is why a PTR_BASED case could read plausible
+            # numbers and still be wrong everywhere but batch 0.  The stride
+            # has to be the one the allocation above used, so it is written
+            # from the same expression rather than restated.
             h2d.append(
-                f"    for (size_t i = 0; i < batch; ++i) h_p_{op.kernel_name}[i] = d_{op.kernel_name} + i;"
+                f"    for (size_t i = 0; i < batch; ++i)"
+                f" h_p_{op.kernel_name}[i] = d_{op.kernel_name}"
+                f" + i * (size_t){per_element}u;"
             )
             h2d.append(
                 f"    DEV_MEMCPY_H2D(d_p_{op.kernel_name}, h_p_{op.kernel_name}, {ptr_size});"
