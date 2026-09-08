@@ -485,6 +485,17 @@ GROUPS = {
              '    base = 0 if base is None else base')),
     ]),
 
+    'lanemerge': ('tests/test_lane_merge.py', [
+        ('a region finer than a bank refused again',
+         sub(Path('src/tensorforge/backend/instructions/compute/primitives/amd/exchange_codegen.py'),
+             "        callee = f'tensorforge::laneMerge<{select.mask}ULL>'",
+             '        return None')),
+        ('the mask built from the wrong side of the region',
+         sub(Path('src/tensorforge/backend/instructions/compute/primitives/amd/reorder.py'),
+             '        return sum(1 << lane for lane in self.lanes)',
+             '        return sum(1 << lane for lane in self.lanes) >> 1')),
+    ]),
+
     'catalog': ('tests/test_amd_catalog.py', [
         ('tile claims a transpose that does not exist',
          sub(PKG / 'catalog.py', "'tensorforge::transpose32x32b32'",

@@ -98,7 +98,14 @@ def _merge(writer, into, value, select, ftype):
     look at rather than to paper over.
     """
     if not select.free:
-        return None
+        # A region finer than a bank -- one lane out of every four, which is
+        # what transposing a 4x4 needs -- is outside `dppUpdate`'s masks, and
+        # a ternary on the lane id is what serves it.  `transpose4x4b32`
+        # writes that by hand four times, so it is not a read this path
+        # avoids; it is one it already makes inside a runtime function.
+        callee = f'tensorforge::laneMerge<{select.mask}ULL>'
+        return writer.call(callee, ftype, value,
+                           value if into is None else into, hint='frag')
     callee = (f'tensorforge::dppUpdate<{IDENTITY_DPP}, {select.row_mask}, '
               f'{select.bank_mask}, false>')
     if into is None:

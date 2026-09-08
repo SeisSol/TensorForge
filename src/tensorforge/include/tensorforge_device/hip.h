@@ -969,6 +969,24 @@ __device__ __forceinline__ void transpose16x4(T &w1, T &w2, T &w3, T &w4, T v1,
   "v_cndmask_b32_dpp " c ", " a ", " b CMVCC                                   \
   " row_ror:" STR(cnt) " row_mask:0xf bank_mask:0xf bound_ctrl:1" CMFI
 
+/// One region of a register, selected by lane rather than by mask.
+///
+/// `dppUpdate` carries a region in a row mask and a bank mask, which express a
+/// product and stop at four lanes.  A region finer than a bank -- one lane out
+/// of every four, say, which is what transposing a 4x4 needs -- is outside
+/// them, and this is what serves it: a ternary on the lane id, which lowers to
+/// `v_cndmask_b32` with the mask in VCC.
+///
+/// `transpose4x4b32` below writes exactly this by hand, four times, and the
+/// assembly it keeps in a comment fuses it with the shuffle as
+/// `v_cndmask_b32_dpp`.  So the lane id is not a read this path avoids; it is
+/// one it already makes, inside a runtime function rather than in generated
+/// code.
+template <std::uint64_t Mask, typename T>
+__device__ __forceinline__ T laneMerge(T value, T into) {
+  return ((Mask >> __lane_id()) & 1ULL) ? value : into;
+}
+
 template <typename T>
 __device__ __forceinline__ void transpose4x4b32(T &w1, T &w2, T &w3, T &w4,
                                                 T v1, T v2, T v3, T v4) {

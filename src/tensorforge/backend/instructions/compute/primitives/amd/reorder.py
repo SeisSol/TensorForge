@@ -130,6 +130,23 @@ class Select:
     #: the masks are checked to reproduce.
     lanes: frozenset
 
+    @property
+    def mask(self) -> int:
+        """The region as a lane bitmap, which is what `laneMerge` takes."""
+        return sum(1 << lane for lane in self.lanes)
+
+    @property
+    def mergeable(self) -> bool:
+        """Whether a merge can write this region at all.
+
+        Every region: the mask pair where it is a product of rows and banks,
+        a lane bitmap otherwise.  Not the same question as `free`, which asks
+        whether the select costs an instruction of its own -- a `cndmask` does
+        and is still emittable, and conflating the two is what kept the
+        assembled exchange out of reach.
+        """
+        return True
+
     @classmethod
     def of(cls, lanes, wave: int) -> 'Select':
         """The cheapest select for a set of lanes."""
