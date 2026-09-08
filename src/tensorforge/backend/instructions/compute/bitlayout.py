@@ -169,3 +169,25 @@ def from_lane_axis(block: int, stride: int, extent: int
         else:
             out.append(Bit(Place.SLOT, 1 << (position - low)))
     return tuple(out)
+
+
+def from_register_layout(layout, extents: Sequence[int]) -> Optional[BitLayout]:
+    """A PIR `RegisterLayout` in this vocabulary, or `None`.
+
+    One axis per tensor dimension, in the layout's own order, each through
+    :func:`from_lane_axis`.  `None` as soon as one of them does not decompose,
+    because a layout is only comparable to a fragment if all of it is.
+
+    The extents come from outside: a `LaneAxis` says how a dimension is spread
+    and not how far it reaches, and the number of bits an index needs is the
+    second of those.
+    """
+    if layout is None or len(layout.axes) != len(extents):
+        return None
+    axes = []
+    for axis, extent in zip(layout.axes, extents):
+        bits = from_lane_axis(axis.block, axis.stride, extent)
+        if bits is None:
+            return None
+        axes.append(bits)
+    return BitLayout(tuple(axes))

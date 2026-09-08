@@ -105,6 +105,10 @@ KEPT_UNREACHABLE = {
     "spare_products":
         "the output-axis predicate the emulated emitter needs once it can "
         "take an entry wider than its k-vector; nothing reads it before then",
+    "fragment_layout":
+        "the same row `position` reads, in the vocabulary a value can also "
+        "be read in; nothing compares the two sides yet, which is what the "
+        "relayout solver would do",
     "NOT_MODELLED":
         "documents the catalogue's boundary; read by the LLVM cross-check",
 }

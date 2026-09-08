@@ -161,3 +161,68 @@ def test_an_index_with_no_bits_contributes_nothing():
 def test_the_index_count_has_to_match():
     with pytest.raises(ValueError):
         bitlayout.from_weights((1,), (2,)).locate(1)
+
+
+# -- the first `have == want` ---------------------------------------------- #
+
+def _lane_batched():
+    return [op for op in MATRIX_OPS if op.lane_batched()]
+
+
+@pytest.mark.parametrize('name', sorted(op.builtin for op in _lane_batched()))
+def test_the_transpose_output_is_the_a_fragment(name):
+    """What `matmul32` rests on, and what nothing could state before.
+
+    `_check_mfma_operand` compares the operand it was handed against what the
+    transpose produces -- it never asks whether that is what the instruction
+    wants, because the two were written in languages that do not compare.  In
+    one vocabulary they do, and they agree: the transpose puts one dimension
+    on the low lane bits and the other above it, which is where the fragment
+    puts `m` and the block.
+
+    The correspondence is stated here rather than assumed, because there is
+    none that is right for both operands: A's first index is the output
+    dimension and B's is the contraction.
+    """
+    from tensorforge.backend.instructions.compute.primitives.amd.relayout \
+        import TRANSPOSE4X4
+    op = next(o for o in MATRIX_OPS if o.builtin == name)
+    threads = op.wave
+    fragment = layouts.fragment_layout(op, 'A')
+    produced = bitlayout.from_register_layout(
+        TRANSPOSE4X4.produces(threads=threads), (4, max(threads // 4, 1)))
+    if fragment is None or produced is None or op.m != 4:
+        pytest.skip('the 4-wide transpose does not feed this entry')
+    for block in range(op.blocks):
+        for m in range(op.m):
+            assert fragment.locate(block, m, 0) == produced.locate(m, block)
+
+
+@pytest.mark.parametrize('name', sorted(op.builtin for op in _lane_batched()))
+def test_the_leading_operand_is_the_b_fragment(name):
+    """The nest hands the leading operand over spread flat across the wave,
+    one element per lane.  The fragment states the same lanes as an `n` inside
+    a block, which looks like a different distribution and is the same bit
+    map -- which is the work the vocabulary is for."""
+    op = next(o for o in MATRIX_OPS if o.builtin == name)
+    fragment = layouts.fragment_layout(op, 'B')
+    flat = bitlayout.from_register_layout(
+        RegisterLayout((LaneAxis(op.wave, 1),)), (op.wave,))
+    assert fragment is not None and flat is not None
+    for block in range(op.blocks):
+        for n in range(op.n):
+            assert fragment.locate(block, 0, n) == flat.locate(
+                block * op.n + n)
+
+
+def test_a_disagreement_would_be_seen():
+    """The checks above are only worth something if the comparison can fail.
+    A block bit moved one place over is a wrong kernel and no snapshot would
+    notice, since both treat the intrinsic as opaque."""
+    op = next(o for o in MATRIX_OPS if o.builtin == 'mfma_f32_4x4x1f32')
+    rows = _rows(op, 'A')
+    shifted = bitlayout.from_weights(
+        tuple(w * 2 for w in rows[0]), rows[1], rows[2])
+    good = layouts.fragment_layout(op, 'A')
+    assert any(shifted.locate(b, m, 0) != good.locate(b, m, 0)
+               for b in range(op.blocks) for m in range(op.m))

@@ -66,6 +66,8 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Dict, Optional, Tuple
 
+from ... import bitlayout
+
 #: builtin -> (A block, A first, A second, B ..., D ...), each a tuple with one
 #: entry per index bit: positive is a lane weight, negative a slot weight.
 #: Index order is `A[m][k]`, `B[k][n]`, `D[m][n]`.
@@ -391,6 +393,30 @@ def position(op, which: str, first: int, second: int,
         slot += s
         lane += l
     return slot, lane
+
+
+def fragment_layout(op, which: str = 'A'):
+    """This fragment's distribution in the shared vocabulary, or `None`.
+
+    The same row `position` reads, in the language a *value* can also be read
+    in.  That is the whole of what it adds: `position` answers where one
+    element sits and cannot be compared with anything, while two `BitLayout`s
+    can be asked whether they are the same distribution -- which is the
+    question an emitter needs before it decides whether a relayout is called
+    for, and the one nothing here could ask.
+
+    The axes are `(block, first, second)`, in that order.  Which of the two
+    indices is the contraction differs between A and B, so a caller comparing
+    against a value's layout states the correspondence rather than assuming
+    one; there is no order that is right for both.
+    """
+    row = _row(op)
+    if row is None:
+        return None
+    block, one, two = row[{'A': 0, 'B': 3, 'D': 6}[which.upper()]:][:3]
+    if block is None:
+        return None
+    return bitlayout.from_weights(block, one, two)
 
 
 def provenance(op, which: str = 'A') -> Optional[Provenance]:
