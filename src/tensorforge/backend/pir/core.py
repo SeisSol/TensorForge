@@ -160,6 +160,16 @@ class BufferType:
     #: would disagree about where an element is, and the kernel would be
     #: quietly wrong rather than merely slow.
     swizzle: Optional['XorSwizzle'] = None
+    #: Whether what this buffer points at may not be written through it.
+    #:
+    #: On the type and not on the declaration that first spelled it.  A pointer
+    #: binding renders its own declarator as text, which is right for the site
+    #: that writes it and useless to a pass that moves the value somewhere
+    #: else: the copy is declared from its type, and a type that does not know
+    #: the pointee is read-only renders `float*` where the source was
+    #: `const float*`.  That is not a wrong address, it is code that does not
+    #: compile, and it only appears once a pass touches the binding.
+    readonly: bool = False
 
     @property
     def volume(self) -> int:
@@ -171,7 +181,8 @@ class BufferType:
     def __repr__(self):
         dims = 'x'.join(str(s) for s in self.shape)
         swz = f', {self.swizzle!r}' if self.swizzle else ''
-        return f'buffer<{dims}x{self.elem}, {self.space.name.lower()}{swz}>'
+        ro = ', readonly' if self.readonly else ''
+        return f'buffer<{dims}x{self.elem}, {self.space.name.lower()}{swz}{ro}>'
 
 
 @dataclass(frozen=True)

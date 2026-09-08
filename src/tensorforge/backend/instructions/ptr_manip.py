@@ -185,7 +185,9 @@ class GetElementPtr(AbstractInstruction):
         args = (ind,)
       value = writer.decl_expr(
           lhs, text,
-          BufferType(self._dest.get_fptype(), (1,), MemSpace.GLOBAL),
+          BufferType(self._dest.get_fptype(), (1,), MemSpace.GLOBAL,
+                     readonly=self._src.obj.direction
+                     == DataFlowDirection.SOURCE),
           self._src, args=args, kind=Effect.READ, hint=self._dest.name,
           extern=self._dest.name, alias_root=self._src)
       self._dest.set_pir_buffer(writer, value)

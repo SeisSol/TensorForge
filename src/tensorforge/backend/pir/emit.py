@@ -179,7 +179,8 @@ class Emitter:
             # carried pointer, which is a narrowing conversion the compiler
             # rejects rather than a wrong answer -- but only because the
             # element type happened to be arithmetic.
-            return f'{t.elem.ctype()}*'
+            const = 'const ' if getattr(t, 'readonly', False) else ''
+            return f'{const}{t.elem.ctype()}*'
         raise IRError(f'cannot render type {t!r}')
 
     # -- lexic ------------------------------------------------------------- #
