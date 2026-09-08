@@ -314,19 +314,21 @@ __launch_bounds__(256)
             #pragma unroll
             for (int32_t v386_i1 = 0; v386_i1 < 8; ++v386_i1) {
               float v388_data = r1[v386_i1];
-              s1[(v15_lead + (v386_i1 * 8))] = v388_data;
+              int32_t v395_a = v15_lead + (v386_i1 * 8);
+              s1[(v395_a ^ ((v395_a >> 5) & 31))] = v388_data;
             }
           }
           __syncwarp();
           // glb_m2 = +(s1, dims=[1])
           if (v15_lead < 8) {
-            float v401_acc0 = 0.0f;
+            float v404_acc0 = 0.0f;
             #pragma unroll
-            for (int32_t v400_r1 = 0; v400_r1 < 8; ++v400_r1) {
-              float v409_data = s1[(v15_lead + (v400_r1 * 8))];
-              v401_acc0 = (v401_acc0 + v409_data);
+            for (int32_t v403_r1 = 0; v403_r1 < 8; ++v403_r1) {
+              int32_t v411_a = v15_lead + (v403_r1 * 8);
+              float v415_data = s1[(v411_a ^ ((v411_a >> 5) & 31))];
+              v404_acc0 = (v404_acc0 + v415_data);
             }
-            glb_m2[v15_lead] = v401_acc0;
+            glb_m2[v15_lead] = v404_acc0;
           }
           __syncwarp();
         }

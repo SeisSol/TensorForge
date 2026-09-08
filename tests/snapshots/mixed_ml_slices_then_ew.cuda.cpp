@@ -220,7 +220,8 @@ __launch_bounds__(256)
             #pragma unroll
             for (int32_t v227_i1 = 0; v227_i1 < 4; ++v227_i1) {
               float v229_data = r1[v227_i1];
-              s1[(v17_lead + (v227_i1 * 8))] = v229_data;
+              int32_t v236_a = v17_lead + (v227_i1 * 8);
+              s1[(v236_a ^ ((v236_a >> 5) & 31))] = v229_data;
             }
           }
           // s2 = load{g>s}(glb_m2[0, 1])
@@ -234,149 +235,151 @@ __launch_bounds__(256)
           // [(0, 8), (0, 4)] [(0, 8)]
           float ir2[4]{};
           if (v17_lead < 8) {
-            float v244_data = r0[0];
-            float v245_data = s2[0];
-            float v247_data = ir2[0];
-            ir2[0] = (v247_data + (v244_data * v245_data));
-            float v250_data = s2[8];
-            float v252_data = ir2[1];
-            ir2[1] = (v252_data + (v244_data * v250_data));
-            float v255_data = s2[16];
-            float v257_data = ir2[2];
-            ir2[2] = (v257_data + (v244_data * v255_data));
-            float v260_data = s2[24];
-            float v262_data = ir2[3];
-            ir2[3] = (v262_data + (v244_data * v260_data));
+            float v247_data = r0[0];
+            float v248_data = s2[0];
+            float v250_data = ir2[0];
+            ir2[0] = (v250_data + (v247_data * v248_data));
+            float v253_data = s2[8];
+            float v255_data = ir2[1];
+            ir2[1] = (v255_data + (v247_data * v253_data));
+            float v258_data = s2[16];
+            float v260_data = ir2[2];
+            ir2[2] = (v260_data + (v247_data * v258_data));
+            float v263_data = s2[24];
+            float v265_data = ir2[3];
+            ir2[3] = (v265_data + (v247_data * v263_data));
           }
           if (v17_lead < 8) {
-            float v268_data = r0[1];
-            float v269_data = s2[1];
-            float v271_data = ir2[0];
-            ir2[0] = (v271_data + (v268_data * v269_data));
-            float v274_data = s2[9];
-            float v276_data = ir2[1];
-            ir2[1] = (v276_data + (v268_data * v274_data));
-            float v279_data = s2[17];
-            float v281_data = ir2[2];
-            ir2[2] = (v281_data + (v268_data * v279_data));
-            float v284_data = s2[25];
-            float v286_data = ir2[3];
-            ir2[3] = (v286_data + (v268_data * v284_data));
+            float v271_data = r0[1];
+            float v272_data = s2[1];
+            float v274_data = ir2[0];
+            ir2[0] = (v274_data + (v271_data * v272_data));
+            float v277_data = s2[9];
+            float v279_data = ir2[1];
+            ir2[1] = (v279_data + (v271_data * v277_data));
+            float v282_data = s2[17];
+            float v284_data = ir2[2];
+            ir2[2] = (v284_data + (v271_data * v282_data));
+            float v287_data = s2[25];
+            float v289_data = ir2[3];
+            ir2[3] = (v289_data + (v271_data * v287_data));
           }
           if (v17_lead < 8) {
-            float v292_data = r0[2];
-            float v293_data = s2[2];
-            float v295_data = ir2[0];
-            ir2[0] = (v295_data + (v292_data * v293_data));
-            float v298_data = s2[10];
-            float v300_data = ir2[1];
-            ir2[1] = (v300_data + (v292_data * v298_data));
-            float v303_data = s2[18];
-            float v305_data = ir2[2];
-            ir2[2] = (v305_data + (v292_data * v303_data));
-            float v308_data = s2[26];
-            float v310_data = ir2[3];
-            ir2[3] = (v310_data + (v292_data * v308_data));
+            float v295_data = r0[2];
+            float v296_data = s2[2];
+            float v298_data = ir2[0];
+            ir2[0] = (v298_data + (v295_data * v296_data));
+            float v301_data = s2[10];
+            float v303_data = ir2[1];
+            ir2[1] = (v303_data + (v295_data * v301_data));
+            float v306_data = s2[18];
+            float v308_data = ir2[2];
+            ir2[2] = (v308_data + (v295_data * v306_data));
+            float v311_data = s2[26];
+            float v313_data = ir2[3];
+            ir2[3] = (v313_data + (v295_data * v311_data));
           }
           if (v17_lead < 8) {
-            float v316_data = r0[3];
-            float v317_data = s2[3];
-            float v319_data = ir2[0];
-            ir2[0] = (v319_data + (v316_data * v317_data));
-            float v322_data = s2[11];
-            float v324_data = ir2[1];
-            ir2[1] = (v324_data + (v316_data * v322_data));
-            float v327_data = s2[19];
-            float v329_data = ir2[2];
-            ir2[2] = (v329_data + (v316_data * v327_data));
-            float v332_data = s2[27];
-            float v334_data = ir2[3];
-            ir2[3] = (v334_data + (v316_data * v332_data));
+            float v319_data = r0[3];
+            float v320_data = s2[3];
+            float v322_data = ir2[0];
+            ir2[0] = (v322_data + (v319_data * v320_data));
+            float v325_data = s2[11];
+            float v327_data = ir2[1];
+            ir2[1] = (v327_data + (v319_data * v325_data));
+            float v330_data = s2[19];
+            float v332_data = ir2[2];
+            ir2[2] = (v332_data + (v319_data * v330_data));
+            float v335_data = s2[27];
+            float v337_data = ir2[3];
+            ir2[3] = (v337_data + (v319_data * v335_data));
           }
           if (v17_lead < 8) {
-            float v340_data = r0[4];
-            float v341_data = s2[4];
-            float v343_data = ir2[0];
-            ir2[0] = (v343_data + (v340_data * v341_data));
-            float v346_data = s2[12];
-            float v348_data = ir2[1];
-            ir2[1] = (v348_data + (v340_data * v346_data));
-            float v351_data = s2[20];
-            float v353_data = ir2[2];
-            ir2[2] = (v353_data + (v340_data * v351_data));
-            float v356_data = s2[28];
-            float v358_data = ir2[3];
-            ir2[3] = (v358_data + (v340_data * v356_data));
+            float v343_data = r0[4];
+            float v344_data = s2[4];
+            float v346_data = ir2[0];
+            ir2[0] = (v346_data + (v343_data * v344_data));
+            float v349_data = s2[12];
+            float v351_data = ir2[1];
+            ir2[1] = (v351_data + (v343_data * v349_data));
+            float v354_data = s2[20];
+            float v356_data = ir2[2];
+            ir2[2] = (v356_data + (v343_data * v354_data));
+            float v359_data = s2[28];
+            float v361_data = ir2[3];
+            ir2[3] = (v361_data + (v343_data * v359_data));
           }
           if (v17_lead < 8) {
-            float v364_data = r0[5];
-            float v365_data = s2[5];
-            float v367_data = ir2[0];
-            ir2[0] = (v367_data + (v364_data * v365_data));
-            float v370_data = s2[13];
-            float v372_data = ir2[1];
-            ir2[1] = (v372_data + (v364_data * v370_data));
-            float v375_data = s2[21];
-            float v377_data = ir2[2];
-            ir2[2] = (v377_data + (v364_data * v375_data));
-            float v380_data = s2[29];
-            float v382_data = ir2[3];
-            ir2[3] = (v382_data + (v364_data * v380_data));
+            float v367_data = r0[5];
+            float v368_data = s2[5];
+            float v370_data = ir2[0];
+            ir2[0] = (v370_data + (v367_data * v368_data));
+            float v373_data = s2[13];
+            float v375_data = ir2[1];
+            ir2[1] = (v375_data + (v367_data * v373_data));
+            float v378_data = s2[21];
+            float v380_data = ir2[2];
+            ir2[2] = (v380_data + (v367_data * v378_data));
+            float v383_data = s2[29];
+            float v385_data = ir2[3];
+            ir2[3] = (v385_data + (v367_data * v383_data));
           }
           if (v17_lead < 8) {
-            float v388_data = r0[6];
-            float v389_data = s2[6];
-            float v391_data = ir2[0];
-            ir2[0] = (v391_data + (v388_data * v389_data));
-            float v394_data = s2[14];
-            float v396_data = ir2[1];
-            ir2[1] = (v396_data + (v388_data * v394_data));
-            float v399_data = s2[22];
-            float v401_data = ir2[2];
-            ir2[2] = (v401_data + (v388_data * v399_data));
-            float v404_data = s2[30];
-            float v406_data = ir2[3];
-            ir2[3] = (v406_data + (v388_data * v404_data));
+            float v391_data = r0[6];
+            float v392_data = s2[6];
+            float v394_data = ir2[0];
+            ir2[0] = (v394_data + (v391_data * v392_data));
+            float v397_data = s2[14];
+            float v399_data = ir2[1];
+            ir2[1] = (v399_data + (v391_data * v397_data));
+            float v402_data = s2[22];
+            float v404_data = ir2[2];
+            ir2[2] = (v404_data + (v391_data * v402_data));
+            float v407_data = s2[30];
+            float v409_data = ir2[3];
+            ir2[3] = (v409_data + (v391_data * v407_data));
           }
           if (v17_lead < 8) {
-            float v412_data = r0[7];
-            float v413_data = s2[7];
-            float v415_data = ir2[0];
-            ir2[0] = (v415_data + (v412_data * v413_data));
-            float v418_data = s2[15];
-            float v420_data = ir2[1];
-            ir2[1] = (v420_data + (v412_data * v418_data));
-            float v423_data = s2[23];
-            float v425_data = ir2[2];
-            ir2[2] = (v425_data + (v412_data * v423_data));
-            float v428_data = s2[31];
-            float v430_data = ir2[3];
-            ir2[3] = (v430_data + (v412_data * v428_data));
+            float v415_data = r0[7];
+            float v416_data = s2[7];
+            float v418_data = ir2[0];
+            ir2[0] = (v418_data + (v415_data * v416_data));
+            float v421_data = s2[15];
+            float v423_data = ir2[1];
+            ir2[1] = (v423_data + (v415_data * v421_data));
+            float v426_data = s2[23];
+            float v428_data = ir2[2];
+            ir2[2] = (v428_data + (v415_data * v426_data));
+            float v431_data = s2[31];
+            float v433_data = ir2[3];
+            ir2[3] = (v433_data + (v415_data * v431_data));
           }
           if (v17_lead < 8) {
             #pragma unroll
-            for (int32_t v436_n1 = 0; v436_n1 < 4; ++v436_n1) {
-              float v438_data = ir2[v436_n1];
-              r2[v436_n1] = v438_data;
+            for (int32_t v439_n1 = 0; v439_n1 < 4; ++v439_n1) {
+              float v441_data = ir2[v439_n1];
+              r2[v439_n1] = v441_data;
             }
           }
           __syncwarp();
           // s1 = store{r>s}(localShrMem0, r2);
           if (v17_lead < 8) {
             #pragma unroll
-            for (int32_t v444_i1 = 0; v444_i1 < 4; ++v444_i1) {
-              float v446_data = r2[v444_i1];
-              s1[(v17_lead + ((v444_i1 + 4) * 8))] = v446_data;
+            for (int32_t v447_i1 = 0; v447_i1 < 4; ++v447_i1) {
+              float v449_data = r2[v447_i1];
+              int32_t v457_a = v17_lead + ((v447_i1 + 4) * 8);
+              s1[(v457_a ^ ((v457_a >> 5) & 31))] = v449_data;
             }
           }
           __syncwarp();
           // glb_m3 = abs(s1)
           if (v17_lead < 8) {
             #pragma unroll
-            for (int32_t v459_k1 = 0; v459_k1 < 8; ++v459_k1) {
-              int32_t v465_a = v459_k1 * 8;
-              float v467_data = s1[(v17_lead + v465_a)];
-              glb_m3[(v17_lead + v465_a)] = (fabsf(v467_data));
+            for (int32_t v465_k1 = 0; v465_k1 < 8; ++v465_k1) {
+              int32_t v471_a = v465_k1 * 8;
+              int32_t v472_a = v17_lead + v471_a;
+              float v476_data = s1[(v472_a ^ ((v472_a >> 5) & 31))];
+              glb_m3[(v17_lead + v471_a)] = (fabsf(v476_data));
             }
           }
           __syncwarp();

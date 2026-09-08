@@ -309,16 +309,18 @@ __launch_bounds__(256)
             #pragma unroll
             for (int32_t v107_i1 = 0; v107_i1 < 8; ++v107_i1) {
               float v109_data = r5[v107_i1];
-              s0[(v16_lead + (v107_i1 * 8))] = v109_data;
+              int32_t v116_a = v16_lead + (v107_i1 * 8);
+              s0[(v116_a ^ ((v116_a >> 5) & 31))] = v109_data;
             }
           }
           // glb_m4 = abs(s0)
           if (v16_lead < 8) {
             #pragma unroll
-            for (int32_t v121_k1 = 0; v121_k1 < 8; ++v121_k1) {
-              int32_t v127_a = v121_k1 * 8;
-              float v129_data = s0[(v16_lead + v127_a)];
-              glb_m4[(v16_lead + v127_a)] = (fabsf(v129_data));
+            for (int32_t v124_k1 = 0; v124_k1 < 8; ++v124_k1) {
+              int32_t v130_a = v124_k1 * 8;
+              int32_t v131_a = v16_lead + v130_a;
+              float v135_data = s0[(v131_a ^ ((v131_a >> 5) & 31))];
+              glb_m4[(v16_lead + v130_a)] = (fabsf(v135_data));
             }
           }
         }

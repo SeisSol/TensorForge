@@ -82,17 +82,19 @@ __launch_bounds__(256)
             #pragma unroll
             for (int32_t v30_i1 = 0; v30_i1 < 8; ++v30_i1) {
               float v32_data = r0[v30_i1];
-              s0[(v13_lead + (v30_i1 * 8))] = v32_data;
+              int32_t v39_a = v13_lead + (v30_i1 * 8);
+              s0[(v39_a ^ ((v39_a >> 5) & 31))] = v32_data;
             }
           }
           __syncwarp();
           // glb_m1 = neg(s0)
           if (v13_lead < 8) {
             #pragma unroll
-            for (int32_t v44_k1 = 0; v44_k1 < 8; ++v44_k1) {
-              int32_t v50_a = v44_k1 * 8;
-              float v52_data = s0[(v13_lead + v50_a)];
-              glb_m1[(v13_lead + v50_a)] = ((-v52_data));
+            for (int32_t v47_k1 = 0; v47_k1 < 8; ++v47_k1) {
+              int32_t v53_a = v47_k1 * 8;
+              int32_t v54_a = v13_lead + v53_a;
+              float v58_data = s0[(v54_a ^ ((v54_a >> 5) & 31))];
+              glb_m1[(v13_lead + v53_a)] = ((-v58_data));
             }
           }
           __syncwarp();
