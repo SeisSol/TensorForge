@@ -804,6 +804,15 @@ class Generator:
         raise InternalError(
             f'no builder for {descr.__class__.__name__}: {descr}')
 
+    # An allocation is not a per-iteration act.  Left in the region it would
+    # give the enclosing stream no definition for a register the body fills
+    # and something after the loop reads -- the accumulator's writeback is
+    # exactly that -- and in the emitted text it would put the declaration
+    # inside the braces its users sit outside of.
+    from tensorforge.backend.instructions.allocate import RegisterAlloc
+    allocations = [i for i in region if isinstance(i, RegisterAlloc)]
+    region = [i for i in region if not isinstance(i, RegisterAlloc)]
+    self._section.ir.extend(allocations)
     self._section.ir.append(
         VariantLoop(self._context, counter, loop.iterations, region, tables))
 

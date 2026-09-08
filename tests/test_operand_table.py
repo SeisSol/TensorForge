@@ -98,16 +98,21 @@ def _binding(src, table=None, variant=None):
                                  table=table, variant=variant))
 
 
-def test_a_table_fed_operand_offsets_the_same_way_as_an_argument_fed_one():
-    """Only the base changes; the arithmetic around it is one expression."""
+def test_a_table_fed_operand_is_not_offset_a_second_time():
+    """A table holds bindings, not arguments.
+
+    Its members are the per-element pointers the prologue already made, so
+    they carry the element offset.  Applying it again would double it; what
+    varies between iterations is only which of them to take.
+    """
     src = symbol('m3', Addressing.NONE)
     table = DeclareOperandTable(context(), 'tbl',
                                 [symbol(f'm{i}', Addressing.NONE)
                                  for i in (3, 5, 7, 9)],
                                 Addressing.NONE, form=TableForm.ARRAY)
-    plain = _binding(src)
     fed = _binding(src, table=table, variant='v')
-    assert plain.replace('m3[', 'tbl[v][') == fed
+    assert fed.rstrip().endswith('= tbl[v];')
+    assert '[0' not in fed
 
 
 def test_the_variant_index_appears_where_the_argument_name_was():
@@ -117,8 +122,8 @@ def test_the_variant_index_appears_where_the_argument_name_was():
                                  for i in (1, 4, 6, 8)],
                                 Addressing.PTR_BASED, form=TableForm.ARRAY)
     text = _binding(src, table=table, variant='face')
-    assert 'tbl[face][' in text
-    assert 'm1[' not in text
+    assert 'tbl[face]' in text
+    assert 'm1' not in text
 
 
 def test_without_a_table_nothing_changes():

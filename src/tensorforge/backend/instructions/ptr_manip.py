@@ -74,6 +74,17 @@ class GetElementPtr(AbstractInstruction):
 
   def gen_ir(self, writer):
 
+    if self._table is not None:
+      # The table's members are the bindings the prologue already made, so
+      # they carry the element offset.  Offsetting again would apply it twice;
+      # what varies between iterations is which of them to take, and that is
+      # the whole of it.
+      datatype = self._vm._fp_type if self._src.obj.datatype is None else self._src.obj.datatype
+      lhs = 'const ' if self._src.obj.direction == DataFlowDirection.SOURCE else ''
+      lhs += f'{datatype} *const {self._vm.get_lexic().restrict_kw} {self._dest.name}'
+      self._emit_binding(writer, lhs, self._table.access(self._variant))
+      return
+
     batch_obj = self._src.obj
     batch_addressing = batch_obj.addressing
 

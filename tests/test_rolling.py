@@ -580,27 +580,37 @@ def test_an_ordinary_tensor_is_not_a_variant():
     assert not accumulation()[0].writes().tensor.is_variant
 
 
-def test_the_loop_path_is_off_and_says_what_it_is_waiting_for():
-    """Assembling it works; verifying it does not, and the reason is one thing.
-
-    A body built once reads its accumulator at the top of the first iteration,
-    and the definition that reaches it is the one the *previous* iteration
-    made.  Nothing carries a value across the back edge yet, so the verifier
-    reports a read with no preceding definition -- correctly.  Expansion is
-    meanwhile exact, so the default trades nothing.
-    """
+def _built(loops):
     from tensorforge.common.context import Context
     from tensorforge.generators.generator import Generator
-    from tensorforge.common.exceptions import GenerationError
+    gen = Generator(roll(accumulation()),
+                    Context(arch='sm_86', backend='cuda', fp_type=DTYPE))
+    gen._emit_loops = loops
+    gen.generate()
+    return gen.get_kernel()
 
-    def build(loops):
-        gen = Generator(roll(accumulation()),
-                        Context(arch='sm_86', backend='cuda', fp_type=DTYPE))
-        gen._emit_loops = loops
-        gen.generate()
-        return gen
 
-    assert build(False).get_kernel()
-    with pytest.raises(GenerationError) as raised:
-        build(True)
-    assert 'no preceding definition' in str(raised.value)
+def test_the_loop_generates_and_verifies():
+    """Both forms come out; the default is still expansion.
+
+    Off not because it cannot be built -- it can, and the verifier accepts it --
+    but because nothing has yet compared the two numerically, and expansion is
+    exact.
+    """
+    assert _built(True)
+    assert _built(False)
+
+
+def test_the_loop_form_is_one_body_and_a_counter():
+    kernel = _built(True)
+    assert kernel.count('for (int batchIdv') == 1
+    assert 'Table = (batchIdv' in kernel
+
+
+def test_the_registers_are_declared_outside_the_loop():
+    """An allocation is not a per-iteration act, and its users sit outside."""
+    lines = _built(True).splitlines()
+    header = next(i for i, l in enumerate(lines) if 'for (int batchIdv' in l)
+    allocs = [i for i, l in enumerate(lines)
+              if l.strip().startswith('float r') and '[' in l]
+    assert allocs and all(i < header for i in allocs)
