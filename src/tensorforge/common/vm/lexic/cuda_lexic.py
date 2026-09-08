@@ -295,5 +295,17 @@ class CudaLexic(Lexic):
     else:
       return f'{rhs}'
 
-  def atomic_store(self, access, variable, datatype):
+  def atomic_store(self, ctx, access, variable, op, datatype):
+    """`atomicAdd` with the result dropped, which is what makes it a `RED`.
+
+    ptxas emits the reduction form -- fire-and-forget, no return path to
+    scoreboard -- only when nothing reads the old value.  Binding the result
+    to a name gets `ATOM` instead, at the same address and for nothing, so the
+    call is a statement here rather than an expression a caller might keep.
+
+    Device scope, not block: the reason an accumulation is atomic at all is
+    that another block may be writing the same element.  `atomicAdd_block` is
+    the cheaper spelling for a destination one block owns, and a destination
+    one block owns does not need an atomic.
+    """
     return f'atomicAdd(&{access}, {variable});'

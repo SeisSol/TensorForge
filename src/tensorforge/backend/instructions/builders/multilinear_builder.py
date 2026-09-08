@@ -683,6 +683,13 @@ class MultilinearBuilder(OperationBuilder):
         atomic = result_is_atomic(
             accumulating=self._add,
             pending_is_atomic=pending is None or pending.atomic is not None,
+            # Asked of the lexic and not of `atomics` directly: the backend
+            # gets the last word, because a target whose hardware has the
+            # instruction can still have a lowering that cannot reach it --
+            # ESIMD is the case, where the value is a vector and the SPMD
+            # `atomic_ref` has no scalar to bind.
+            supported=self._context.get_vm().get_lexic().has_atomic_store(
+                self._context, None, dest_symbol.get_fptype()),
             policy=self._policy)
         result = choose_result_placement(
             legal_result_placements(written_in_slices=in_slices),

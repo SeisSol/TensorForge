@@ -178,14 +178,24 @@ def choose_operand_placement(legal: FrozenSet[Placement],
 
 
 def result_is_atomic(*, accumulating: bool, pending_is_atomic: bool,
-                     policy: VendorPolicy) -> bool:
+                     supported: bool, policy: VendorPolicy) -> bool:
     """Whether this result reaches memory as an atomic update.
 
     Only an accumulation can be one, and only while nothing non-atomic is
     already pending for the same tensor: mixing the two lets a plain store
     overwrite an update instead of adding to it.
+
+    `supported` is the third condition and it is not a preference, which is
+    why it is an argument rather than a row of the table.  The policy says
+    this hardware is *worth* accumulating atomically on; whether the
+    architecture has the instruction for this datatype is a separate fact, and
+    keeping it in the table made every AMD target answer for gfx90a.  Where
+    there is no instruction the compiler emits a compare-and-swap loop, so
+    saying yes here is slower than saying no -- and on the four targets whose
+    builtin does not exist, it did not compile at all.
     """
-    return policy.atomic_accumulation and accumulating and pending_is_atomic
+    return (policy.atomic_accumulation and accumulating and pending_is_atomic
+            and supported)
 
 
 def legal_result_placements(*, written_in_slices: bool

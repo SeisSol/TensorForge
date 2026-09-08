@@ -2,7 +2,6 @@
 #
 # SPDX-License-Identifier: MIT
 from . import CudaLexic
-from tensorforge.common.basic_types import Datatype
 
 
 class HipLexic(CudaLexic):
@@ -151,13 +150,34 @@ class HipLexic(CudaLexic):
     else:
       return f'{rhs}'
 
-  def atomic_store(self, access, variable, op, datatype):
-    # those sometimes are faster
-    if datatype == Datatype.F32:
-      return f'__builtin_amdgcn_global_atomic_fadd_f32(&{access}, {variable});'
-    if datatype == Datatype.F64:
-      return f'__builtin_amdgcn_global_atomic_fadd_f64(&{access}, {variable});'
-    return f'atomicAdd(&{access}, {variable});'
+  def atomic_store(self, ctx, access, variable, op, datatype):
+    """The intrinsic where this target has one, `__hip_atomic_fetch_add` else.
 
-  def has_atomic_store(self, op, datatype):
-    return True
+    The intrinsic was emitted unconditionally, on every target and for both
+    types.  `__builtin_amdgcn_global_atomic_fadd_f32` is gated on
+    `atomic-fadd-rtn-insts` and `..._f64` on `gfx90a-insts`, so that was a
+    compile error on gfx900, gfx906, gfx908, gfx1010 and gfx1030 -- and on
+    gfx1250 and gfx1251 for f64, which have the instruction under a different
+    feature and not the builtin.  `atomics.amd_add_builtin` asks LLVM's own
+    table instead of the vendor string.
+
+    Where there is no builtin the fallback is not a retreat to a
+    compare-and-swap loop: agent scope and relaxed ordering are what let the
+    backend select `global_atomic_add_*`, and it does so given an assurance
+    that the pointer is not fine-grained (`unsafe_fp_atomics_required` names
+    the targets where that assurance has to come from the build).  Relaxed
+    because an add carries no ordering an accumulation depends on, and agent
+    rather than system because system scope is what forces the loop.
+
+    And it is reached at all only when `_underlying_hardware` is AMD.  HIP
+    compiles for NVIDIA as well, where every name here is undeclared -- the
+    same condition `glb_store` has always had and this never did.
+    """
+    if self._underlying_hardware != 'amd':
+      return super().atomic_store(ctx, access, variable, op, datatype)
+    from tensorforge.backend import atomics
+    builtin = atomics.amd_add_builtin(ctx, datatype)
+    if builtin is not None:
+      return f'{builtin}(&{access}, {variable});'
+    return (f'__hip_atomic_fetch_add(&{access}, {variable}, '
+            f'__ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT);')

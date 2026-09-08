@@ -1987,10 +1987,21 @@ class Symbol:
       var = '{0}' if fmt else variable
       if self.stype == SymbolType.Global:
         if atomic:
-          assign = context.get_vm().get_lexic().atomic_store(access, var, None, self.get_fptype())
+          assign = context.get_vm().get_lexic().atomic_store(
+              context, access, var, None, self.get_fptype())
         else:
           assign = context.get_vm().get_lexic().glb_store(access, var, nontemp)
       else:
+        # `atomic` used to reach here and be dropped: the update came out as
+        # `access = var;`, an assignment where an accumulation was asked for,
+        # with nothing said.  Nothing builds one today -- the builder only
+        # marks a `SymbolType.Global` destination atomic -- so this states the
+        # precondition rather than implementing a second path.  The shared
+        # one, when it is wanted, is `ds_add_*` and gated separately;
+        # `backend/atomics.py` names the features.
+        assert not atomic, (
+            f'atomic store to a {self.stype.name} symbol {self.name!r}: '
+            f'only global memory has an atomic path')
         assign = f'{access} = {var};'
 
     if structured:

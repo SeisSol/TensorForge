@@ -141,6 +141,38 @@ class SyclLexic(Lexic):
   def get_headers(self):
     return ['sycl/sycl.hpp']
 
+  def has_atomic_store(self, ctx, op, datatype):
+    """No under the explicit-SIMD lowering, whatever the hardware can do.
+
+    `atomic_ref` binds one reference to one element, and under ESIMD the value
+    a store carries is a `simd<T, N>` with a mask beside it -- there is no
+    scalar to bind.  The instruction is `esimd::atomic_update<atomic_op::fadd>`,
+    which takes the vector and the `simd_mask` together and updates the whole
+    of it with atomicity per element.  That is a better fit for what the store
+    path wants than the SPMD spelling is, and it is a different emitter; until
+    it exists, refusing is what keeps an ESIMD kernel from being handed an
+    `atomic_ref<simd<float, 16>>` that does not compile.
+    """
+    return not self.simd_mode and super().has_atomic_store(ctx, op, datatype)
+
+  def atomic_store(self, ctx, access, variable, op, datatype):
+    """A relaxed, device-scope `atomic_ref` over the destination element.
+
+    Relaxed because an add carries no ordering the accumulation depends on,
+    and device rather than system scope for the same reason it is agent scope
+    on AMD: system scope is what makes the backend give up on the instruction.
+
+    Worth checking against the generated SPIR-V rather than against results
+    alone the first time this runs: `fetch_add` on a floating-point type is
+    expanded into a compare-and-swap loop where the backend is not told the
+    native instruction may be used, and a CAS loop is correct -- it just
+    undoes the entire reason for choosing an atomic.
+    """
+    return (f'sycl::atomic_ref<{datatype}, sycl::memory_order::relaxed, '
+            f'sycl::memory_scope::device, '
+            f'sycl::access::address_space::global_space>'
+            f'({access}).fetch_add({variable});')
+
   def get_fptype(self, fptype, length=1, relaxed=False):
     # `sycl::vec` carries its own alignment and there is no relaxed spelling
     # for it, so the flag is accepted and ignored rather than silently

@@ -105,6 +105,41 @@ class Lexic(ABC):
   def glb_load(self, rhs, nontemporal=False):
     return f'{rhs}'
 
+  # --- atomic accumulation --------------------------------------------------
+  # Declared here because the three implementations had drifted into three
+  # different interfaces: `CudaLexic.atomic_store` took three arguments where
+  # the one call site passes four, `SyclLexic` had neither method, and
+  # `has_atomic_store` existed on `HipLexic` alone and returned True without
+  # looking at anything.  Two of the three targets could not have reached this
+  # path without a TypeError or an AttributeError, which is a fair description
+  # of the state they were in.
+  #
+  # `ctx` is a parameter and not a field because the lexic is constructed with
+  # the vendor alone (`vm.py` passes `descr.vendor`), while the answer here
+  # turns on the architecture.  That is the whole of the bug this replaces:
+  # a per-vendor answer to a per-architecture question.
+
+  def has_atomic_store(self, ctx, op, datatype):
+    """Whether an atomic update of `datatype` is one instruction here.
+
+    Not "can it be spelled": every target can spell it, and one that has no
+    instruction gets a compare-and-swap loop -- slower than the
+    read-modify-write the atomic was chosen to replace.  So the honest answer
+    to give the placement policy is about the instruction, and a backend
+    without one says False and is accumulated into normally.
+    """
+    from tensorforge.backend import atomics
+    return op is None and atomics.native_add(ctx, datatype)
+
+  def atomic_store(self, ctx, access, variable, op, datatype):
+    """One atomic update, as a statement.
+
+    Only reached when `has_atomic_store` agreed, so a backend overriding this
+    does not have to answer for the cases that one turns away.
+    """
+    raise NotImplementedError(
+        f'{type(self).__name__} has no atomic store; see Lexic.atomic_store')
+
   # --- asynchronous global -> shared copies --------------------------------
   # A backend without a hardware path returns None; the caller then emits a
   # synchronous fallback, so correctness never depends on these being present.
