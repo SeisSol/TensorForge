@@ -205,9 +205,13 @@ def reach(have, want, ext: int, indices, wave: Optional[int] = None):
     trip is what is left.  Which of the last two is taken is a comparison of
     their counts, not their order.
 
-    A packed operand is unpacked first and then answered like any other, so
-    `lead_width > 1` is a cost here rather than a case -- what keeps it out is
-    `strategy.is_contraction`, which refuses it before this is asked.
+    A packed operand is unpacked first and then answered like any other, and
+    whether that closes the gap depends on which operand it is.  The shared
+    matrix reduces to `nest_shared` and costs the extracts.  The lead operand
+    does not: `lead_width` puts its low bits inside the register and the
+    fragment wants the leading dimension across the lanes, so unpacking moves
+    them the wrong way and what remains is a permutation between lane weights
+    -- which no row of `RELAYOUTS` performs, and the trip is what answers it.
 
     Never `None`.  The staged path closes every gap, so a caller reaching here
     always has an answer -- what it does not always have is one it can

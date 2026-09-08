@@ -319,9 +319,13 @@ def unpacked(layout: BitLayout) -> Tuple[BitLayout, int]:
 
     A vector bit is an element of a packed register -- a `float4` holds four
     consecutive elements of the leading dimension in one -- and reaching one is
-    a subscript, not a shuffle.  So it is not a gap for the cross-lane
-    machinery to close; it is one that closes first, and what is left is a
-    distribution the lane and slot rungs already answer.
+    a subscript, not a shuffle.
+
+    Which makes this the right first step only where the fragment wants those
+    elements in *registers*.  Where it wants them across the lanes, moving them
+    into slots is the wrong direction and closes nothing: the lead operand of a
+    matrix instruction is the case, and `test_staging` measures it.  The count
+    is what a caller weighs; it is not a promise that the rest then follows.
 
     Returned with the count, because the extracts are what it costs and a
     caller comparing routes needs the number.  Zero means the layout holds

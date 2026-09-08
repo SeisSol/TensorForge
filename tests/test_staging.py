@@ -246,8 +246,13 @@ def test_without_a_wave_the_middle_rung_is_skipped():
 # -- the packed case is not a case -------------------------------------- #
 
 def _packed(ext, threads):
-    """A `float4`-style operand: the low bits of the first index inside a
-    register rather than across the lanes."""
+    """A packed *shared matrix*: the column index inside a register.
+
+    Not what `lead_width` produces -- it packs the leading dimension, which
+    the shared matrix does not carry.  Kept because the reduction it shows is
+    real and is what a fragment wanting those elements in registers gets;
+    `_packed_lead` below is the operand packing actually reaches.
+    """
     width = (ext - 1).bit_length()
     return BitLayout((
         tuple(Bit(Place.VECTOR, 1 << b) for b in range(width)),
@@ -288,3 +293,60 @@ def test_what_still_refuses_a_packed_operand_is_the_strategy_layer():
     from tensorforge.backend.instructions.compute.strategy import is_contraction
     assert is_contraction(operands=2, lead_width=1)
     assert not is_contraction(operands=2, lead_width=4)
+
+
+def _packed_lead(width, wave):
+    """The lead operand as `lead_width` leaves it.
+
+    A 32-element dimension at width 2 becomes 16 lanes each holding a
+    `float2`: the low bit of the index is the element inside the register and
+    the rest are lanes.
+    """
+    low = (width - 1).bit_length()
+    lanes = (wave // width - 1).bit_length()
+    return BitLayout((
+        tuple(Bit(Place.VECTOR, 1 << b) for b in range(low))
+        + tuple(Bit(Place.LANE, 1 << b) for b in range(lanes)),))
+
+
+def _flat_lead(wave):
+    """What a B fragment wants: the leading dimension one element per lane."""
+    return BitLayout((
+        tuple(Bit(Place.LANE, 1 << b) for b in range((wave - 1).bit_length())),))
+
+
+@pytest.mark.parametrize('width', [2, 4])
+def test_unpacking_does_not_close_the_lead_operand_s_gap(width):
+    """The correction that matters, and it is the operand `lead_width` packs.
+
+    Its low bits sit inside the register and the fragment wants the leading
+    dimension across the lanes, so moving them into slots is the wrong
+    direction.  What remains after either reading is a permutation between
+    lane weights, which no row of `RELAYOUTS` performs.
+    """
+    packed = _packed_lead(width, 64)
+    flat = _flat_lead(64)
+    assert bitlayout.is_exchange(bitlayout.displacement(packed, flat)) is None
+
+    plain, extracts = bitlayout.unpacked(packed)
+    assert extracts == (width - 1).bit_length()
+    assert bitlayout.is_exchange(bitlayout.displacement(plain, flat)) is None
+
+
+@pytest.mark.parametrize('width', [2, 4])
+def test_so_the_trip_is_what_answers_it(width):
+    """Which gives the staged rung the case it was built for, and corrects
+    the reading that it had none."""
+    indices = _indices(64)
+    route = relayout.reach(_packed_lead(width, 64), _flat_lead(64), 4,
+                           indices, wave=64)
+    assert not isinstance(route, int)
+    assert isinstance(route[0], staging.Transfer)
+
+
+def test_an_unpacked_lead_operand_needs_nothing():
+    """Width one is the flat distribution already, which is why this is a
+    packing question and not a matrix-path one."""
+    assert _packed_lead(1, 64) == _flat_lead(64)
+    assert relayout.reach(_packed_lead(1, 64), _flat_lead(64), 4,
+                          _indices(64), wave=64) == 0
