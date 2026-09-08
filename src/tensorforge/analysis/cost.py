@@ -383,16 +383,25 @@ def list_cost(descr_list: List, batch: int = 1,
 
 #: Emitted lines per lane-flop, and the fixed part of a kernel.
 #:
-#: Fitted against the order-6 viscoelastic set as SeisSol ships it: 57 kernels
-#: spanning three orders of magnitude, R^2 = 0.998 on the totals.  Per kernel it
-#: is coarser -- the median relative error over the 48 kernels above 500 lines
-#: is 0.44 -- because the count ignores everything but arithmetic: staging,
-#: index arithmetic and guards all ride on the same constant.
+#: Fitted against the order-6 viscoelastic set as SeisSol ships it: 57 kernels,
+#: R^2 = 0.998 on the totals and 1.8 percent out on the largest, which is the
+#: one this exists for.
 #:
-#: Good enough for the question it exists to answer, which is whether a body is
-#: large against an instruction cache, and not good enough for anything that
-#: needs the number itself.  Recalibrate by fitting emitted lines against
-#: `list_cost(...).flops / num_threads` over a generated file.
+#: It does not hold across scales, and that is worth stating rather than
+#: discovering.  Refitting against the case set -- 54 small kernels generated
+#: on the spot -- gives roughly half this slope, so on a body of a few hundred
+#: lines the figure comes out about twice too large.  The count ignores
+#: everything but arithmetic, and what staging, index arithmetic and guards
+#: cost relative to the arithmetic is simply not the same at the two ends.
+#:
+#: Which direction that errs in matters.  Overstating a small body makes a
+#: budget more likely to roll it, and a small body is the one case where
+#: rolling is clearly not worth it -- so the size a run must reach before it is
+#: rolled at all is asked separately, and is not this number's job.  Here the
+#: figure is used for the opposite question, whether a large body is too large,
+#: and there it is worth what the fit above says it is.
+#:
+#: `tools/calibrate_code_size.py` redoes both fits.
 LINES_PER_LANE_FLOP = 4.1
 LINES_FIXED = 25
 
