@@ -25,6 +25,7 @@ the thing timed.
 | `build.py` | one binary per configuration, with measurement flags |
 | `run.py` | the vendor-neutral timing run |
 | `profile.py` | the vendor profilers, over the same binary |
+| `roofline.py` | measured machine ceilings, and the kernels under them |
 
 The driver itself is emitted by `tests/harness/driver_bench.py`, next to the
 correctness driver and sharing its operand collection and its launcher call —
@@ -152,6 +153,47 @@ Counter access is a privilege. Without `CAP_PERFMON`, or with the NVIDIA
 driver's `NVreg_RestrictProfilingToAdminUsers` at its default, `ncu` collects
 nothing — which is a machine configuration and not something a flag here can
 work around. `run.py` never needs it.
+
+## Rooflines
+
+The ceilings are measured, not looked up. `hw_descr_db.yml` carries what the
+code generator may emit and deliberately not what the hardware sustains — a
+clock rate is not a code-generation constraint, and a database with one in it
+is wrong every time a machine is power-capped. A datasheet peak is worse: it is
+a number at a boost clock the machine may never hold, for an instruction mix
+the vendor picked, and "we are at 12% of peak" is then mostly a statement about
+the divisor.
+
+```bash
+python3 tools/bench/roofline.py --ceiling-only            # just the roof
+python3 tools/bench/roofline.py out/bench.json --out roof/
+```
+
+Two microbenchmarks, built with the same recipe as everything else here: an FMA
+chain with enough independent accumulators to cover the pipeline, and a STREAM
+triad over a buffer far past the last level of cache, counted at three arrays
+the way STREAM counts it. The first repetition of each is discarded — it
+carries the module load and, on a JIT stack, the compile — and the rest are
+reduced with a maximum, because a ceiling is the best the machine did and a
+mean over a run that was descheduled once reports the scheduler.
+
+Where the vendor has its own roofline it is better than this one, because it
+knows its own machine: `rocprof-compute --roof-only` on MI200 and newer, Intel
+Advisor on the oneAPI stack. Neither is wrapped. `--peak-flops` and
+`--peak-bytes` take a figure from either, and it is recorded as supplied so a
+later reader can tell it from a measurement.
+
+Points get three labels, not two. On the memory slope the lever is reuse; on
+the flat it is arithmetic; and a point below half the roof its intensity allows
+is bound by something the roofline does not draw — occupancy, launch overhead,
+latency — which for batched small operators is the common case. Calling that
+one *memory bound* would send a reader to optimise reuse that was never the
+constraint.
+
+The plot is a hand-written SVG with no plotting dependency: this directory
+exists to run on a login node somebody else administers, where `pip install
+matplotlib` is not always a thing that happens, and an SVG opens in a browser
+and diffs as text.
 
 ## Build flags
 
