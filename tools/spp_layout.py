@@ -35,6 +35,24 @@ from typing import Optional, Sequence, Tuple
 
 import numpy as np
 
+#: The widest single load either ISA issues, in bytes.  What a padded block
+#: has to reach for the padding to buy anything, and what it should not
+#: exceed, since nothing addresses more than this in one go.
+LOAD_BYTES = 16
+
+
+def natural_align(fp_bytes: int) -> int:
+    """Elements one load covers: the width worth padding to.
+
+    Not the width the layout uses today.  `deriveArchitecture` gives a device
+    build 64 bytes on NVIDIA and 128 on AMD, and `PatternMemoryLayout` pads
+    to that -- eight FP64 elements, or sixteen.  That figure is a cacheline,
+    which is the right question for a dense stride and the wrong one for a
+    sparse pattern: a block wider than one load cannot be read in one go, so
+    everything past this is stored and never addressed as a unit.
+    """
+    return max(1, LOAD_BYTES // fp_bytes)
+
 
 @dataclass
 class Layout:
@@ -129,9 +147,15 @@ def layout_for(mask: np.ndarray, align: int = 1) -> Layout:
     return Layout(stored=stored, slots=slots, align=align, values_mask=mask)
 
 
-def compare(mask: np.ndarray, widths: Sequence[int] = (1, 2, 4)) -> str:
-    """What each alignment costs in storage and saves in runs."""
-    head = (f'{"align":>6} {"stored":>8} {"×nnz":>6} {"runs":>6} '
+def compare(mask: np.ndarray, widths: Sequence[int] = (1, 2, 4, 8, 16),
+            fp_bytes: int = 8) -> str:
+    """What each alignment costs in storage and saves in runs.
+
+    The width one load covers is marked; wider ones are padding that nothing
+    reads as a unit.
+    """
+    natural = natural_align(fp_bytes)
+    head = (f'{"":1} {"align":>6} {"stored":>8} {"×nnz":>6} {"runs":>6} '
             f'{"mean len":>9}')
     lines = [head, '-' * len(head)]
     nnz = int(mask.sum())
@@ -139,6 +163,38 @@ def compare(mask: np.ndarray, widths: Sequence[int] = (1, 2, 4)) -> str:
         lay = layout_for(mask, width)
         runs = lay.runs()
         mean = (sum(r[2] for r in runs) / len(runs)) if runs else 0.0
-        lines.append(f'{width:>6} {lay.volume:>8} {lay.volume / nnz:>6.2f} '
-                     f'{len(runs):>6} {mean:>9.1f}')
+        mark = '<' if width == natural else ' '
+        lines.append(f'{mark:1} {width:>6} {lay.volume:>8} '
+                     f'{lay.volume / nnz:>6.2f} {len(runs):>6} {mean:>9.1f}')
+    return '\n'.join(lines)
+
+
+def sweep(masks, widths: Sequence[int] = (1, 2, 4, 8, 16),
+          fp_bytes: int = 8) -> str:
+    """The same over a set of tensors, with the totals that decide.
+
+    `masks` is a mapping of name to occupancy mask.
+    """
+    natural = natural_align(fp_bytes)
+    head = (f'{"name":<12} {"nnz":>7} ' +
+            ' '.join(f'{"w=" + str(w):>9}' for w in widths) + f' {"dense":>9}')
+    lines = [head, '-' * len(head)]
+    totals = {w: 0 for w in widths}
+    dense = 0
+    for name, mask in masks.items():
+        row = []
+        for width in widths:
+            volume = layout_for(mask, width).volume
+            totals[width] += volume
+            row.append(f'{volume:>9}')
+        dense += mask.size
+        lines.append(f'{name:<12} {int(mask.sum()):>7} ' + ' '.join(row) +
+                     f' {mask.size:>9}')
+    lines.append('-' * len(head))
+    lines.append(f'{"total":<12} {"":>7} ' +
+                 ' '.join(f'{totals[w]:>9}' for w in widths) +
+                 f' {dense:>9}')
+    lines.append('of dense:    ' +
+                 '  '.join(f'w={w}{"*" if w == natural else ""}: '
+                           f'{totals[w] / dense:.2f}' for w in widths))
     return '\n'.join(lines)
