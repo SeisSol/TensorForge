@@ -877,6 +877,27 @@ class Generator:
       self._residency.record_writeback(key, init, entry.home)
     carried = tuple((init, init) for init, _ in carried)
 
+    # A destination that *varies* has to be stored inside the loop, and one
+    # that does not must not be.
+    #
+    # The residency flushes once, at the end of the section, against whatever
+    # address the entry holds by then.  For a destination that is the same
+    # tensor every iteration -- an accumulator -- that is right and is the
+    # whole point: the sum is written once.  For one that is a different
+    # tensor every iteration the address is the last iteration's, so every
+    # iteration computes and only the last is kept.
+    #
+    # Which it is, is whether the destination is a stand-in.  Not whether it
+    # escapes: an accumulator escapes too, and asking that stores the sum on
+    # every pass.
+    for descr in body:
+      dest = descr.writes()
+      if dest is None or not getattr(dest.tensor, 'is_variant', False):
+        continue
+      key = f'{GeneralLexicon.GLOBAL_MEM_PREFIX}{dest.tensor.name}'
+      if self._residency.get(key) is not None:
+        region.extend(self._residency.flush(key))
+
     self._section.ir.extend(allocations)
     self._section.ir.append(
         VariantLoop(self._context, counter, loop.iterations, region, tables,

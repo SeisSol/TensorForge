@@ -722,3 +722,40 @@ def test_substitution_reports_whether_it_reached_anything():
                    if type(i).__name__ == 'MultilinearInstruction')
     absent = object()
     assert compute.substitute(absent, absent) is False
+
+
+def _stores(descrs):
+    from tensorforge.common.context import Context
+    from tensorforge.generators.generator import Generator
+    gen = Generator(descrs, Context(arch='sm_86', backend='cuda',
+                                    fp_type=DTYPE))
+    gen._emit_loops = True
+    gen.generate()
+    ir = gen._sections[0].ir
+    loop = next(i for i in ir if type(i).__name__ == 'VariantLoop')
+    inside = sum('Store' in type(i).__name__ for i in loop.region)
+    after = sum('Store' in type(i).__name__ for i in ir[ir.index(loop) + 1:])
+    return inside, after
+
+
+def test_an_accumulator_is_written_once_after_the_loop():
+    """Which is the whole reason for rolling this one: the sum goes out once."""
+    assert _stores(roll(accumulation())) == (0, 1)
+
+
+def test_a_destination_that_varies_is_written_every_iteration():
+    """Its address is a different tensor each time.
+
+    The residency flushes once, against whatever the entry holds by then --
+    the last iteration's address -- so without a store inside, every iteration
+    computes and only the last is kept.
+    """
+    inside, _ = _stores(roll(recursion()))
+    assert inside == 1
+
+
+def test_the_rule_is_whether_the_destination_varies_not_whether_it_escapes():
+    """An accumulator escapes too, and asking that stores the sum every pass."""
+    loop = [d for d in roll(accumulation()) if isinstance(d, ForDescr)][0]
+    assert 'Q' in loop.escaping
+    assert _stores(roll(accumulation()))[0] == 0
