@@ -346,3 +346,30 @@ def test_the_descriptor_comment_states_the_rolled_form():
     rolled = _generated(roll(_contributions()))
     assert plain != rolled
     assert 'for 3' in rolled
+
+
+def _chain(count=3):
+    return [gemm(make('A', [9, 9]), make(f'd{k}', [9, 4]),
+                 make(f'd{k + 1}', [9, 4])) for k in range(count)]
+
+
+def test_a_chain_through_a_published_buffer_generates():
+    """The shape of a recursion: each step reads what the last one wrote.
+
+    The intermediate is a tensor the caller passed in, not a temporary, so the
+    register image holding it has a global home.  Staging it for the next step
+    has to move its lane axis, and a store into shared memory has no way to
+    name a global destination -- so the write goes home first and is read back
+    from there.
+
+    Pinned because it is the body the first loop will be built from, and
+    because it is the one chain shape the temporary-based cases do not cover.
+    """
+    for count in (2, 3, 5):
+        assert _generated(_chain(count))
+
+
+def test_a_rolled_chain_generates_the_same_body():
+    plain, rolled = _chain(4), roll(_chain(4))
+    assert any(isinstance(d, ForDescr) for d in rolled)
+    assert _code_only(_generated(plain)) == _code_only(_generated(rolled))

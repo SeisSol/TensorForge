@@ -162,7 +162,7 @@ class MultilinearBuilder(OperationBuilder):
 
     if name in self._residency and self._resolve_reuse(i, name):
       entry = self._residency.get(name)
-      if placement is Placement.SHARED:
+      if placement is Placement.SHARED and entry.home.stype == SymbolType.SharedMem:
         self._instructions.append(StoreRegToShr(context=self._context,
                                                 src=entry.image,
                                                 dest=entry.home,
@@ -170,6 +170,19 @@ class MultilinearBuilder(OperationBuilder):
                                                 num_threads=self._num_threads))
         self._residency.drop(name)
         self._ops[i].symbol = entry.home
+      elif placement is Placement.SHARED:
+        # The image is the only copy of a pending write, so it cannot be
+        # dropped the way a preload can.  Its home is where its symbol says,
+        # and for anything but a temporary that is global memory, which a
+        # store into shared memory has no way to name.  So the write goes to
+        # its home and the operand keeps its global symbol; the staging below
+        # then reads it back in the orientation this operand wants.
+        #
+        # A round trip, and the price of moving the lane axis of a value the
+        # kernel has to publish anyway.  Only a shared staging buffer of its
+        # own would avoid it, and that is a placement decision rather than
+        # something to settle here.
+        self._instructions.extend(self._residency.flush(name))
       else:
         self._ops[i].symbol = entry.image
 
