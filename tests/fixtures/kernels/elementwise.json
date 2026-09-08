@@ -1,11 +1,12 @@
 {
  "all": {
-  "kernel_e62aee1d95": [
+  "kernel_8488f5512d": [
    {
-    "kind": "multilinear",
+    "kind": "elementwise",
+    "op": "SQRT",
     "dest": {
-     "name": "m0",
-     "alias": "C",
+     "name": "m1",
+     "alias": "A",
      "shape": [
       8,
       8
@@ -45,47 +46,7 @@
     },
     "ops": [
      {
-      "name": "m1",
-      "alias": "A",
-      "shape": [
-       8,
-       8
-      ],
-      "ashape": [
-       8,
-       8
-      ],
-      "tbbox": [
-       [
-        0,
-        0
-       ],
-       [
-        8,
-        8
-       ]
-      ],
-      "bbox": [
-       [
-        0,
-        0
-       ],
-       [
-        8,
-        8
-       ]
-      ],
-      "offset": [
-       0,
-       0
-      ],
-      "addressing": "pointer_based",
-      "is_tmp": false,
-      "sliced": false,
-      "data": null
-     },
-     {
-      "name": "m2",
+      "name": "m0",
       "alias": "B",
       "shape": [
        8,
@@ -128,10 +89,6 @@
     "target": [
      [
       0,
-      -1
-     ],
-     [
-      -1,
       1
      ]
     ],
@@ -139,109 +96,16 @@
      [
       0,
       1
-     ],
-     [
-      0,
-      1
      ]
     ],
-    "add": false
-   },
-   {
-    "kind": "multilinear",
-    "dest": {
-     "name": "m3",
-     "alias": "v",
-     "shape": [
-      8
-     ],
-     "ashape": [
-      8
-     ],
-     "tbbox": [
-      [
-       0
-      ],
-      [
-       8
-      ]
-     ],
-     "bbox": [
-      [
-       0
-      ],
-      [
-       8
-      ]
-     ],
-     "offset": [
-      0
-     ],
-     "addressing": "pointer_based",
-     "is_tmp": false,
-     "sliced": false,
-     "data": null
-    },
-    "ops": [
-     {
-      "name": "m0",
-      "alias": "C",
-      "shape": [
-       8,
-       8
-      ],
-      "ashape": [
-       8,
-       8
-      ],
-      "tbbox": [
-       [
-        0,
-        0
-       ],
-       [
-        8,
-        8
-       ]
-      ],
-      "bbox": [
-       [
-        0,
-        0
-       ],
-       [
-        8,
-        8
-       ]
-      ],
-      "offset": [
-       0,
-       0
-      ],
-      "addressing": "pointer_based",
-      "is_tmp": false,
-      "sliced": false,
-      "data": null
-     }
-    ],
-    "target": [
-     [
-      0,
-      -1
-     ]
-    ],
-    "permute": [
-     [
-      0,
-      1
-     ]
-    ],
+    "scalars": [],
     "add": false
    }
-  ]
+  ],
+  "elementwise_1": []
  },
  "descriptions": {
-  "kernel_e62aee1d95": {
+  "kernel_8488f5512d": {
    "version": 4,
    "tensors": [
     {
@@ -297,7 +161,124 @@
      }
     },
     {
-     "name": "C",
+     "name": "_scalar0",
+     "addressing": "",
+     "datatype": "f64",
+     "storage": {
+      "shape": [],
+      "type": "full"
+     },
+     "alignment": 0,
+     "values": {
+      "kind": "entries",
+      "data": [
+       [
+        [],
+        1.0
+       ]
+      ]
+     },
+     "flags": {
+      "temporary": false,
+      "constant": true
+     }
+    }
+   ],
+   "operations": [
+    {
+     "type": "elementwise",
+     "result": {
+      "name": "A",
+      "indices": [
+       "i",
+       "j"
+      ],
+      "bbox": [
+       [
+        0,
+        0
+       ],
+       [
+        8,
+        8
+       ]
+      ],
+      "offset": [
+       0,
+       0
+      ],
+      "sliced": false
+     },
+     "args": [
+      {
+       "name": "B",
+       "indices": [
+        "i",
+        "j"
+       ],
+       "bbox": [
+        [
+         0,
+         0
+        ],
+        [
+         8,
+         8
+        ]
+       ],
+       "offset": [
+        0,
+        0
+       ],
+       "sliced": false
+      }
+     ],
+     "condition": [],
+     "linear": {
+      "alpha": {
+       "name": "_scalar0",
+       "indices": [],
+       "bbox": null,
+       "offset": null,
+       "sliced": false
+      },
+      "add": false
+     },
+     "optype": "Sqrt"
+    }
+   ]
+  },
+  "elementwise_1": {
+   "version": 4,
+   "tensors": [
+    {
+     "name": "A",
+     "addressing": "n&+o&",
+     "datatype": "f64",
+     "storage": {
+      "shape": [
+       8,
+       8
+      ],
+      "type": "bbox",
+      "start": [
+       0,
+       0
+      ],
+      "sizes": [
+       8,
+       8
+      ]
+     },
+     "values": null,
+     "alignment": 64,
+     "flags": {
+      "temporary": false,
+      "constant": false
+     }
+    },
+    {
+     "name": "B",
      "addressing": "n&+o&",
      "datatype": "f64",
      "storage": {
@@ -346,18 +327,21 @@
      }
     },
     {
-     "name": "v",
+     "name": "C",
      "addressing": "n&+o&",
      "datatype": "f64",
      "storage": {
       "shape": [
+       8,
        8
       ],
       "type": "bbox",
       "start": [
+       0,
        0
       ],
       "sizes": [
+       8,
        8
       ]
      },
@@ -394,9 +378,9 @@
    ],
    "operations": [
     {
-     "type": "multilinear",
+     "type": "elementwise",
      "result": {
-      "name": "C",
+      "name": "A",
       "indices": [
        "i",
        "j"
@@ -419,31 +403,9 @@
      },
      "args": [
       {
-       "name": "A",
-       "indices": [
-        "i",
-        "k"
-       ],
-       "bbox": [
-        [
-         0,
-         0
-        ],
-        [
-         8,
-         8
-        ]
-       ],
-       "offset": [
-        0,
-        0
-       ],
-       "sliced": false
-      },
-      {
        "name": "B",
        "indices": [
-        "k",
+        "i",
         "j"
        ],
        "bbox": [
@@ -464,26 +426,6 @@
       }
      ],
      "condition": [],
-     "permute": [
-      [
-       0,
-       1
-      ],
-      [
-       0,
-       1
-      ]
-     ],
-     "target": [
-      [
-       0,
-       -1
-      ],
-      [
-       -1,
-       1
-      ]
-     ],
      "linear": {
       "alpha": {
        "name": "_scalar0",
@@ -493,24 +435,29 @@
        "sliced": false
       },
       "add": false
-     }
+     },
+     "optype": "Sqrt"
     },
     {
-     "type": "reduction",
+     "type": "elementwise",
      "result": {
-      "name": "v",
+      "name": "A",
       "indices": [
-       "i"
+       "i",
+       "j"
       ],
       "bbox": [
        [
+        0,
         0
        ],
        [
+        8,
         8
        ]
       ],
       "offset": [
+       0,
        0
       ],
       "sliced": false
@@ -548,9 +495,12 @@
        "offset": null,
        "sliced": false
       },
-      "add": false
+      "add": [
+       0,
+       1
+      ]
      },
-     "optype": "Add"
+     "optype": "Sin"
     }
    ]
   }

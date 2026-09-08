@@ -23,8 +23,11 @@ import pathlib
 
 import pytest
 
+from tensorforge.common.basic_types import Datatype
+from tensorforge.common.context import Context
 from tensorforge.frontend.yateto import DescriptionReader, YatetoFrontend
 from tensorforge.generators.descriptions import MultilinearDescr
+from tensorforge.generators.generator import Generator
 
 KERNELS = pathlib.Path(__file__).parent / "fixtures" / "kernels"
 
@@ -134,3 +137,52 @@ def test_replaying_it_twice_gives_the_same_thing(description):
     second, _ = DescriptionReader(_Arch(), {}).read(description)
     assert [d.target for d in first] == [d.target for d in second]
     assert [d.permute for d in first] == [d.permute for d in second]
+
+
+# ----------------------------------------------------------------------
+# Where each recording stops
+# ----------------------------------------------------------------------
+
+#: The captures that do not build yet, and what stops each one. Kept here
+#: rather than left implicit so that fixing one of these fails this test: the
+#: entry then has to go, which is the point at which the gap is closed. Each
+#: capture stops at the first kernel that cannot be built, so the kernels
+#: before it in the same file are ones that can.
+STOPS_AT = {
+    "sparse_layouts": "LeadIndex",
+    "index_permutations": "not in shared mem",
+    "rings": "shape-changing operation is not elementwise",
+    "elementwise": "accumulates onto its destination",
+    "guards": "runs under a guard",
+    "plasticity": "runs under a guard",
+}
+
+
+def _build(recording):
+    """Read a description and build what it describes, as a codegen run does."""
+    descrs, _ = DescriptionReader(_Arch(), {}).read(recording)
+    Generator(descrs, Context(arch="sm_86", backend="cuda",
+                              fp_type=Datatype.F64), attrs={}).generate()
+
+
+@pytest.mark.parametrize("path", sorted(KERNELS.glob("*.json")),
+                         ids=lambda p: p.stem)
+def test_a_capture_builds_or_stops_where_it_is_recorded_as_stopping(path):
+    blob = json.loads(path.read_text())
+    recordings = list(blob["descriptions"].values())
+
+    if path.stem not in STOPS_AT:
+        for recording in recordings:
+            _build(recording)
+        return
+
+    reasons = []
+    for recording in recordings:
+        try:
+            _build(recording)
+        except Exception as caught:      # noqa: BLE001 -- the reason is the point
+            reasons.append(str(caught))
+    assert reasons, (
+        f"{path.stem} is recorded as stopping at {STOPS_AT[path.stem]!r}, "
+        f"but every kernel in it builds -- remove the entry")
+    assert any(STOPS_AT[path.stem] in reason for reason in reasons), reasons

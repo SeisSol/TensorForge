@@ -209,7 +209,14 @@ class DescriptionReader:
       # tensors it names stay in the kernel's signature
       return 0
     linear = d.get('linear') or {}
+    # `add` is a mask over the destination's axes, or False. Not a bool: the
+    # empty mask means a destination without axes is accumulated onto, and
+    # `bool([])` says the opposite.
     add = linear.get('add', False)
+    if isinstance(add, list) and self._is_phantom(d['result']):
+      # the axis a rank-0 destination is carried as is accumulated onto too
+      add = [0]
+    accumulates = add is not False and add is not None
     # the guard covers every descriptor this operation turns into, the
     # scaling that may follow included
     first = len(self._descr_list)
@@ -244,7 +251,7 @@ class DescriptionReader:
                                                strict_match=False,
                                                prefer_align=False))
     elif kind == 'elementwise':
-      if add:
+      if accumulates:
         raise NotImplementedError(
           'an elementwise operation that accumulates onto its destination; '
           'ElementwiseDescr overwrites.')
@@ -255,7 +262,7 @@ class DescriptionReader:
                                                prefer_align=False))
       self._append_scaling(d['result'], linear.get('alpha'))
     elif kind == 'reduction':
-      if add:
+      if accumulates:
         raise NotImplementedError(
           'a reduction that accumulates onto its destination; '
           'ReductionDescr overwrites.')
@@ -528,11 +535,33 @@ class TensorForgeWriter:
 
     return self._generator.get_header()
 
+class Recorded:
+  """One kernel, as `capture` hands it over.
+
+  `name` is a property rather than a value because it is not known when the
+  kernel arrives: it is derived from what gets generated, so it stays `None`
+  for a kernel that never does.
+  """
+
+  __slots__ = ('description', 'descrs', 'emitter')
+
+  def __init__(self, description):
+    self.description = description
+    #: What was built from it, once it has been read. `None` for a
+    #: description that could not be read at all.
+    self.descrs = None
+    self.emitter = None
+
+  @property
+  def name(self):
+    return None if self.emitter is None else self.emitter.base_name
+
+
 class YatetoFrontend:
   #: The version of yateto's export interface this reads. yateto refuses an
   #: exporter that speaks an older one, because the fields added since would
   #: be dropped silently rather than missed loudly.
-  INTERFACE_VERSION = 3
+  INTERFACE_VERSION = 4
 
   def __init__(self, arch, attrs=None):
     """The routine exporter yateto instantiates, once per kernel.
@@ -554,14 +583,19 @@ class YatetoFrontend:
   @classmethod
   @contextmanager
   def capture(cls, sink):
-    """Record every kernel generated inside this block.
+    """Record every kernel handed over inside this block.
 
-    `sink(name, description, descrs)` gets what the routine is called, the
-    description yateto handed over, and the descriptors built from it. A
-    supported way in, so that tooling wanting to see a codegen run does not
-    have to patch a method belonging to another class -- which is what it
-    used to do, and why it only ever saw the one kind of descriptor the
+    `sink(recorded)` gets a `Recorded`: the description yateto sent, the
+    descriptors built from it, and what the routine ends up being called.
+    A supported way in, so that tooling wanting to see a codegen run does
+    not have to patch a method belonging to another class -- which is what
+    it used to do, and why it only ever saw the one kind of descriptor the
     patch happened to know about.
+
+    It fires as the kernel arrives, not once it is built, so a kernel that
+    fails to build is recorded too. Those are the ones worth having: a
+    failure needs the input that produced it. The name is only known once
+    there is a generated routine to name, so it reads as `None` until then.
     """
     previous = cls._sink
     cls._sink = sink
@@ -572,17 +606,25 @@ class YatetoFrontend:
 
   def add_kernel(self, description):
     """The whole kernel, as data, in one call."""
+    # Recorded before it is read, so that a description this cannot read is
+    # recorded too -- that is precisely the one worth having.
+    recorded = None
+    sink = type(self)._sink
+    if sink is not None:
+      recorded = Recorded(description)
+      sink(recorded)
+
     reader = DescriptionReader(self._arch, self._attrs)
     descr_list, cache = reader.read(description)
     self._description = description
     self._emitter = KernelEmitter(self._arch, self._attrs, descr_list, cache)
+
+    if recorded is not None:
+      recorded.descrs = descr_list
+      recorded.emitter = self._emitter
 
   def generate(self, cpp, cache):
     if self._emitter is None:
       raise NotImplementedError(
         'generate() before add_kernel(): there is nothing to build.')
     self._emitter.generate(cpp, cache)
-    sink = type(self)._sink
-    if sink is not None:
-      sink(self._emitter.base_name, self._description,
-           self._emitter._descr_list)

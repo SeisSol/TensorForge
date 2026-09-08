@@ -124,9 +124,10 @@ def main():
     captured = {}
     descriptions = {}
 
-    def record(name, description, descrs):
-        captured[name] = [_row(d) for d in descrs]
-        descriptions[name] = description
+    recorded = []
+
+    def record(item):
+        recorded.append(item)
 
     sys.argv = ["generate.py"] + theirs
     with YatetoFrontend.capture(record):
@@ -134,6 +135,12 @@ def main():
             runpy.run_path("generate.py", run_name="__main__")
         except SystemExit:
             pass
+
+    for i, item in enumerate(recorded):
+        # a kernel that failed to build never got a routine to be named after
+        name = item.name or f"unbuilt_{i}"
+        captured[name] = [_row(d) for d in (item.descrs or [])]
+        descriptions[name] = item.description
 
     def conv(o):
         if isinstance(o, np.integer):
