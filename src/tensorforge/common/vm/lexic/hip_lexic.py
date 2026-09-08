@@ -53,6 +53,11 @@ class HipLexic(CudaLexic):
     """
 
   def get_launch_code(self, func_name, grid, block, stream, func_params, shmem, coop):
+    if coop:
+      return f"""
+  auto args = tensorforge::argsPtrs({func_params});
+  hipLaunchCooperativeKernel({func_name}, {grid}, {block}, args.data(), {shmem}, {stream});
+"""
     return f"hipLaunchKernelGGL({func_name}, {grid}, {block}, {shmem}, {stream}, {func_params})"
 
   def sync_simd(self):
@@ -73,7 +78,7 @@ class HipLexic(CudaLexic):
       return f'tensorforge::broadcast<{block}, {subblock}, {lane}>({variable})'
 
   def get_headers(self):
-    return ["hip/hip_runtime.h", "tensorforge_device/hip.h"]
+    return ["hip/hip_runtime.h", "hip/hip_cooperative_groups.h", "tensorforge_device/hip.h"]
 
   # CDNA has no __pipeline_*; the equivalent is a direct global->LDS load
   # plus an explicit vmcnt wait.  gfx90a/gfx94x accept 1, 2 and 4 bytes per
