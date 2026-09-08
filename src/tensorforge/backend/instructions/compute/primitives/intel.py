@@ -494,7 +494,17 @@ def strategies(shape, ctx):
     whether a mis-oriented operand may be read where it lies and is dropped
     under the same lowering this one requires.  One is about reaching an
     operand, the other about what to build the products out of.
+
+    A packed lead operand is declined by both.  DPAS reads its fragments at
+    offsets derived from the vISA pseudocode and checked by laying a matrix
+    through them; those offsets name elements, and a width that puts elements
+    inside a register is a distribution they were not derived for.  The
+    broadcast chain reads `v[k]` out of the work-item's own registers, where
+    `k` is an element index for the same reason as on AMD.  Neither has been
+    given a conversion, so neither is offered one.
     """
+    if shape.lead_width > 1:
+        return frozenset()
     if not supports(shape.threads, shape.accumulator, shape.sparse):
         return frozenset()
     offered = set()

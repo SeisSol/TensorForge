@@ -58,16 +58,53 @@ def _shape(threads=32, dtype=Datatype.F32, sparse=False, explicit_simd=False):
 def test_three_operands_have_no_a_and_b():
     """Every arrangement but the nest names two operands; a longer product
     has no such split to name."""
-    assert not is_contraction(operands=3, lead_width=1)
+    assert not is_contraction(operands=3)
+    assert is_contraction(operands=2)
 
 
-def test_a_widened_lead_dimension_excludes_every_arrangement():
-    """The matrix cores own the lane-to-register mapping their fragments use
-    and the broadcast chains index the lanes directly; a blocked lead
-    distribution is a change to exactly that.  Composing the two is silent --
-    right registers, wrong places -- so it is excluded rather than ranked."""
-    assert not is_contraction(operands=2, lead_width=2)
-    assert is_contraction(operands=2, lead_width=1)
+def test_the_lead_width_is_not_asked_here():
+    """It used to be, and refused every arrangement on every target at once.
+    The reasons are not one reason, and a shared refusal cannot lift for one
+    target -- so each `strategies` owns its own now, and this asks only what
+    is true of the operation."""
+    import inspect
+
+    from tensorforge.backend.instructions.compute import strategy
+    assert 'lead_width' not in inspect.signature(is_contraction).parameters
+    assert 'lead_width' not in inspect.getsource(is_contraction)
+
+
+@pytest.mark.parametrize('vendor', ['amd', 'nvidia', 'intel'])
+@pytest.mark.parametrize('width', [2, 4])
+def test_every_target_declines_a_packed_lead_operand(vendor, width, monkeypatch):
+    """Separately and for its own reason, but all of them today: no emitter
+    writes a route from a packed operand to a fragment yet.
+
+    The deployment switches are turned on for this, or two of the three would
+    answer nothing whatever the width and the check would read as coverage.
+    """
+    from tensorforge.backend.instructions.compute.primitives import (
+        amd, intel, nvidia)
+    from tensorforge.common.context import Context
+
+    module, arch, backend, threads = {
+        'amd': (amd, 'gfx90a', 'hip', 64),
+        'nvidia': (nvidia, 'sm_80', 'cuda', 32),
+        'intel': (intel, 'pvc', 'esimd', 16)}[vendor]
+    for switch in ('ENABLED', 'BROADCAST_ENABLED'):
+        if hasattr(module, switch):
+            monkeypatch.setattr(module, switch, True)
+    ctx = Context(arch=arch, backend=backend, fp_type=Datatype.F32)
+
+    def shape(width):
+        return ComputeShape(threads=threads, accumulator=Datatype.F32,
+                            sparse=False, explicit_simd=(vendor == 'intel'),
+                            lead=threads, depth=32, lead_width=width)
+
+    assert shape(1) and module.strategies(shape(1), ctx) != frozenset(), (
+        'the unpacked shape has to be served, or the refusal below says '
+        'nothing about the width')
+    assert module.strategies(shape(width), ctx) == frozenset()
 
 
 def test_the_nest_is_always_legal():

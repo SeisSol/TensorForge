@@ -400,6 +400,29 @@ GROUPS = {
              'for step in range(steps)]')),
     ]),
 
+    'leadwidth': ('tests/test_compute_strategy.py tests/test_staging.py', [
+        ('a packed lead operand offered the AMD arrangements anyway',
+         sub(Path('src/tensorforge/backend/instructions/compute/primitives/amd/__init__.py'),
+             '    if shape.lead_width > 1:\n'
+             '        return (frozenset({Strategy.MATRIX})',
+             '    if False:\n'
+             '        return (frozenset({Strategy.MATRIX})')),
+        ('a packed lead operand offered the NVIDIA fragments',
+         sub(Path('src/tensorforge/backend/instructions/compute/primitives/nvidia.py'),
+             '    if shape.lead_width > 1:\n        return frozenset()\n'
+             '    if (ENABLED',
+             '    if (ENABLED')),
+        ('a packed lead operand offered DPAS and the Intel chain',
+         sub(Path('src/tensorforge/backend/instructions/compute/primitives/intel.py'),
+             '    if shape.lead_width > 1:\n        return frozenset()\n'
+             '    if not supports(',
+             '    if not supports(')),
+        ('the staged trip counted as a route an emitter writes',
+         sub(Path('src/tensorforge/backend/instructions/compute/primitives/amd/relayout.py'),
+             '    if route == 0 or route == 1:\n        return True',
+             '    if True:\n        return True')),
+    ]),
+
     'staging': ('tests/test_staging.py', [
         ('a vector bit left where it is',
          sub(Path('src/tensorforge/backend/instructions/compute/bitlayout.py'),
@@ -860,17 +883,20 @@ GROUPS = {
              "                                        writer(f'float {Areg[kkk]}{{}};', accesses=())", 1)),
         ('the wave width no longer checked',
          sub(Path('src/tensorforge/backend/instructions/compute/primitives/nvidia.py'),
-             'return threads == 32 and dtype in (Datatype.F32, Datatype.F64) and not sparse',
-             'return dtype in (Datatype.F32, Datatype.F64) and not sparse', 1)),
+             '    return (threads == 32 and dtype in (Datatype.F32, '
+             'Datatype.F64)',
+             '    return (dtype in (Datatype.F32, Datatype.F64)', 1)),
         ('the operand type no longer checked',
          sub(Path('src/tensorforge/backend/instructions/compute/primitives/nvidia.py'),
-             'return threads == 32 and dtype in (Datatype.F32, Datatype.F64) and not sparse',
-             'return threads == 32 and not sparse', 1)),
+             '    return (threads == 32 and dtype in (Datatype.F32, '
+             'Datatype.F64)\n            and not sparse',
+             '    return (threads == 32\n            and not sparse', 1)),
         ('the gate bypassed entirely',
          sub(Path('src/tensorforge/backend/instructions/compute/primitives/nvidia.py'),
              '    if (ENABLED\n'
              '            and supports(shape.threads, shape.accumulator, '
-             'shape.sparse)\n'
+             'shape.sparse,\n'
+             '                         shape.depth)\n'
              '            and instrs_for(shape.accumulator, sm_of(ctx))):',
              '    if ENABLED:', 1)),
         ('the arch dropped from the offer, so a target with no entry is offered one',

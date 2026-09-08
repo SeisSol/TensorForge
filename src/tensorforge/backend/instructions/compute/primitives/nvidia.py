@@ -372,7 +372,16 @@ def strategies(shape, ctx):
     `supports` the shape gate.  Asking both here rather than at the call site
     is what keeps a shape this cannot serve falling through to the nest
     instead of reaching an assertion inside the emitter.
+
+    A packed lead operand is declined, and here the reason is that the
+    question cannot be asked yet: the fragments are staged through shared
+    memory at offsets this module writes out by hand, and there is no layout
+    table for them -- no counterpart to AMD's `FRAGMENT_BITS`.  Without one
+    there is nothing to ask `reach` about, so the refusal is a literal rather
+    than a route, and it stays one until the table is written.
     """
+    if shape.lead_width > 1:
+        return frozenset()
     if (ENABLED
             and supports(shape.threads, shape.accumulator, shape.sparse,
                          shape.depth)

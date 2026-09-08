@@ -13,7 +13,7 @@ from ... import split
 from .emitters import fmadpp4, fmadpp8, fmadpp16, fmascalar
 from .exchange_codegen import apply_exchange
 from .relayout import (MOVDPP16, TRANSPOSE4X4, find_relayout,
-                       nest_shared, reach, transposed,
+                       nest_shared, reach, takes, transposed,
                        fmadpp_operand_layout)
 from .select import BroadcastForm, select_broadcast_form, select_fmadpp_step
 
@@ -234,22 +234,25 @@ def matmul32(writer: Writer, C, B, A, M, N, K, kx, threads, dtype, sparse,
                               transposed(block, threads), block,
                               [(c, l) for c in range(block)
                                for l in range(threads)], wave=threads)
+                if not takes(route):
+                    # A staged trip, which this emitter does not write: the
+                    # buffer has to be reserved before any body exists.
+                    # Declining sends the operation to the generic nest,
+                    # which is slower and right, rather than to a reservation
+                    # that was never made.  Asked through `takes` rather than
+                    # by testing the shape here, because `strategies` decides
+                    # whether to offer this arrangement from the same
+                    # sentence and the two must not drift.
+                    return None
                 if route == 0:
                     return list(regs)
                 if route == 1:
                     return _transpose(writer, tile, ftype, threads, regs)
-                if route and isinstance(route[0], tuple):
-                    # The same exchange assembled out of swaps and merges,
-                    # which is what a width the runtime has no `transpose*`
-                    # for gets.  More instructions than the builtin and far
-                    # fewer than a trip through memory.
-                    return apply_exchange(writer, regs, route, ftype)
-                # A staged trip is the only route left, and this emitter does
-                # not take it: the buffer has to be reserved before any body
-                # exists and `scratch` answers 0 here.  Declining sends the
-                # operation to the generic nest, which is slower and right,
-                # rather than to a reservation that was never made.
-                return None
+                # The same exchange assembled out of swaps and merges, which
+                # is what a width the runtime has no `transpose*` for gets.
+                # More instructions than the builtin and far fewer than a trip
+                # through memory.
+                return apply_exchange(writer, regs, route, ftype)
 
             # The MFMA accumulator layout is deliberately left untracked.
             #

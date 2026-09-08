@@ -285,14 +285,29 @@ def test_an_unpacked_operand_costs_no_extracts():
     assert relayout.extracts(relayout.nest_shared(4, 64)) == 0
 
 
-def test_what_still_refuses_a_packed_operand_is_the_strategy_layer():
-    """`is_contraction` declines `lead_width > 1` for every matrix
-    arrangement, so nothing packed reaches a relayout question at all.  That
-    is the one line between here and a packed kernel taking a matrix path,
-    and flipping it changes generated code."""
-    from tensorforge.backend.instructions.compute.strategy import is_contraction
-    assert is_contraction(operands=2, lead_width=1)
-    assert not is_contraction(operands=2, lead_width=4)
+def test_what_refuses_a_packed_operand_is_the_route_and_not_a_literal():
+    """The refusal is derived now: the lead operand's route to the fragment is
+    the trip through memory, and `takes` says no emitter writes it.  When one
+    does, the offer follows without a condition being edited -- which is the
+    difference between this and a width the strategy layer names."""
+    from tensorforge.backend.instructions.compute.primitives import amd
+    from tensorforge.backend.instructions.compute.strategy import Strategy
+
+    assert amd.lead_route(_shape(width=1)) == 0
+    route = amd.lead_route(_shape(width=4))
+    assert isinstance(route, tuple) and isinstance(route[0], staging.Transfer)
+    assert not amd.takes(route)
+    assert amd.takes(amd.lead_route(_shape(width=1)))
+
+    ctx = _amd_context()
+    assert Strategy.MATRIX in amd.strategies(_shape(width=1), ctx)
+    assert amd.strategies(_shape(width=4), ctx) == frozenset()
+
+
+def _amd_context():
+    from tensorforge.common.basic_types import Datatype
+    from tensorforge.common.context import Context
+    return Context(arch='gfx90a', backend='hip', fp_type=Datatype.F32)
 
 
 def _packed_lead(width, wave):

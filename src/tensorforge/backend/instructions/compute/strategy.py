@@ -29,11 +29,14 @@ one of them answers differently, and the only one that separates them:
 
 Vector width is deliberately not one of them.  Packing the lead dimension into
 `float2`/`float4` is a change to how wide each of these steps is, not a
-different arrangement, so it lives on the instruction as `lead_width` and
-appears here only as the exclusion in :func:`is_contraction`.  Staging into a
-scratch shared buffer is likewise not one: where an operand is copied to is
-:mod:`placement`'s question, and the nest reads the answer without knowing
-which of them asked.
+different arrangement, so it lives on the instruction as `lead_width` and each
+arrangement says for itself whether it can be handed an operand at that width.
+It is not asked here, because the answers differ and one of them is derived:
+a matrix core reads the route from its operand's layout to its fragment's,
+while a broadcast chain indexes the lanes and has been given no conversion at
+all.  Staging into a scratch shared buffer is likewise not an arrangement:
+where an operand is copied to is :mod:`placement`'s question, and the nest
+reads the answer without knowing which of them asked.
 """
 
 from dataclasses import dataclass
@@ -112,23 +115,25 @@ class ComputeShape:
     a_parts: int = 1
 
 
-def is_contraction(operands: int, lead_width: int) -> bool:
+def is_contraction(operands: int) -> bool:
     """Whether anything but the nest could compute this at all.
 
-    Two conditions, and neither is a preference.
+    One condition, and it is not a preference: every arrangement below names
+    an `A` and a `B`, and a product of three or more operands has no such
+    split, so only the nest walks it.
 
-    Every arrangement below names an `A` and a `B`; a product of three or more
-    operands has no such split and only the nest walks it.
-
-    A lead width above one distributes the lead dimension across the lanes in
-    blocks rather than cyclically.  The matrix arrangements own that mapping
-    -- handing MFMA operands addressed at stride `width` gives it the right
-    registers in the wrong places -- and the broadcast arrangements index the
-    lanes directly.  Width and arrangement are alternatives rather than
-    composable, and saying so here is what stops one from quietly corrupting
-    the other.
+    The lead width used to be a second condition here, refusing every
+    arrangement on every target at once.  That was true of all of them and
+    owned by none, and the reasons were not the same reason -- a matrix core
+    cannot take a packed operand because the fragment wants those elements
+    across the lanes, a broadcast chain because it indexes an element per lane
+    and has been given no conversion.  A shared refusal also cannot lift for
+    one target: the moment a route is emitted somewhere, the condition here
+    would have to grow a vendor it does not know.  So each `strategies`
+    answers for its own arrangements now, and this asks only what is true of
+    the operation itself.
     """
-    return operands == 2 and lead_width == 1
+    return operands == 2
 
 
 def legal_strategies(offered: Iterable[Strategy]) -> FrozenSet[Strategy]:

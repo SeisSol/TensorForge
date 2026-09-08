@@ -642,8 +642,7 @@ class MultilinearInstruction(ComputeInstruction):
         """
         n = self._output_extent()
         module = _vendor_module(self._context)
-        if module is None or not is_contraction(len(self._ops),
-                                                self._lead_width):
+        if module is None or not is_contraction(len(self._ops)):
             return whole(Strategy.GENERIC, n)
         shape = self._shape()
         chosen = choose_strategy(

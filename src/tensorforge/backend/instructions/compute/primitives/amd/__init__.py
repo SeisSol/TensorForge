@@ -61,7 +61,7 @@ from .tiling import (EMULATION, EXCHANGE, Fit, Scheme, boundary,
                      spare_products)
 from .emitters import fmadpp, fmadpp4, fmadpp8, fmadpp16, fmascalar
 from .relayout import (BROADCAST, MOVDPP16, RELAYOUTS, TRANSPOSE4X4, Relayout,
-                       find_relayout)
+                       find_relayout, reach, takes)
 from .select import (BroadcastForm, MATERIALISE_FROM, broadcast_form,
                      dual_issue_fma_lanes, packed_fma_lanes,
                      select_broadcast_form, select_fmadpp_step,
@@ -118,7 +118,25 @@ def strategies(shape, ctx):
     A sparse second operand is read by linear index, which no fragment layout
     accepts and which the broadcast chain has no lane to replicate; the DPP
     chain has a branch for it and takes it alone.
+
+    A packed lead operand is declined here rather than by the caller, and the
+    two chains and the matrix core decline it for different reasons.  Both
+    chains index the lanes directly -- a lane holds one element of the lead
+    dimension at the index they compute, and at width `w` it holds `w` of
+    them, so the address is right and the element it names is not.  Nothing
+    converts that, because nothing here was asked to.
+
+    The matrix core was asked, and answers through `takes`: an operand at
+    width one already arrives spread one element per lane, and above one it
+    reaches the fragment only through the trip that is priced and not yet
+    emitted.  So the refusal is where the route is, and when the emission
+    lands the offer follows it without a condition being edited.
     """
+    if shape.lead_width > 1:
+        return (frozenset({Strategy.MATRIX})
+                if takes(lead_route(shape))
+                and offers(shape.threads, shape.accumulator, ctx)
+                else frozenset())
     offered = {Strategy.DPP}
     if not shape.sparse:
         # The same chain the DPP one fuses its broadcast into, available here
@@ -150,12 +168,36 @@ def scratch(strategy, shape, ctx):
     a reservation smaller than the plan is an overrun and a larger one is
     memory nobody writes.
     """
-    if strategy is Strategy.GENERIC or shape.lead_width <= 1:
+    route = lead_route(shape)
+    if strategy is Strategy.GENERIC or not isinstance(route, tuple):
         return 0
-    return staging.buffer_elements(
-        staging.staged(_packed_lead(shape.lead_width, shape.threads),
-                       _flat_lead(shape.threads),
-                       [(index,) for index in range(shape.threads)]))
+    return staging.buffer_elements(route)
+
+
+def lead_route(shape):
+    """How a lead operand of this width reaches the distribution a fragment
+    wants, in the three kinds `reach` answers in.
+
+    `0` at width one, and that is not a shortcut: an unpacked lead operand
+    already arrives spread one element per lane, which is the fragment's own
+    reading, so there is no gap.  Above one the low bits of the index sit
+    inside the register, and unpacking them moves them into slots -- the wrong
+    direction, since the fragment wants them across the lanes.  What is left
+    is a permutation between lane weights, which no row of `RELAYOUTS`
+    performs, and the trip through memory is the answer.
+
+    One function because three callers ask the same question of the same
+    operand and would otherwise each derive it: `strategies` to decide whether
+    to offer a matrix core at all, `scratch` to size the buffer the answer
+    needs, and the tests to check that the refusal is the route and not a
+    literal.  The extent is the thread count -- the index space this operand
+    spans in one issue, which is also what the trip has to carry.
+    """
+    if shape.lead_width <= 1:
+        return 0
+    threads = shape.threads
+    return reach(_packed_lead(shape.lead_width, threads), _flat_lead(threads),
+                 threads, [(index,) for index in range(threads)])
 
 
 def _packed_lead(width, threads):

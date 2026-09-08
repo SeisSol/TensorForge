@@ -247,6 +247,28 @@ def reach(have, want, ext: int, indices, wave: Optional[int] = None):
     return composed if compose_cost(composed) <= stores + loads else trip
 
 
+def takes(route) -> bool:
+    """Whether an emitter has a form for this route.
+
+    `reach` never says `None`, so having an answer and being able to write it
+    are two questions now, and this is the second.  Three of the four rungs
+    are written: nothing to do, the runtime's transpose, and the exchange
+    assembled out of swaps and merges.  The trip through memory is priced and
+    not emitted -- the buffer has to be reserved before any body exists, and
+    that is the wiring `staging` still waits on.
+
+    Said once because two callers need the same answer and drifting apart
+    would be silent in the worse direction: `strategies` reads it to decide
+    whether to *offer* an arrangement, and the emitter to decide whether to
+    write one it was given.  An offer the emitter then declines costs a
+    reservation for a path nobody takes; a refusal to offer a route that is
+    in fact written costs a matrix core.
+    """
+    if route == 0 or route == 1:
+        return True
+    return bool(route) and isinstance(route[0], tuple)
+
+
 def transposes_between(have, want, ext: int) -> Optional[int]:
     """How many `transpose{ext}x{ext}b32` calls close the gap: 0, 1 or `None`.
 
