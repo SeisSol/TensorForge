@@ -14,7 +14,7 @@ from .emitters import fmadpp4, fmadpp8, fmadpp16, fmascalar
 from .relayout import (MOVDPP16, TRANSPOSE4X4, find_relayout,
                        nest_shared, transposed, transposes_between,
                        fmadpp_operand_layout)
-from .select import select_fmadpp_step
+from .select import BroadcastForm, select_broadcast_form, select_fmadpp_step
 
 #: The runtime's BF16 split, in its out-parameter form: each term is a value
 #: the generator declared rather than a name bound by a structured binding,
@@ -38,15 +38,22 @@ def _check_mfma_operand(operand, threads, callee):
 
 
 def hfma(writer: Writer, Cs, As, Bs, repeat, datatype, threads, ctx):
-    """
-    Strategy:
+    """The broadcast chain: one lane of `A` against a row of `B`, per product.
 
-    * gfx906: shuffle over 4 threads; but use DPP over 16 to broadcast blocks of 4 (already encoded)
-    * gfx908+ / CDNA+ and RDNA+: use DPP 16 with broadcasting. Fuse for F32 and little users (to harness pkd math on RDNA 3+).
-    * gfx90a+ / CDNA2+: use DPP64 for F64 and broadcasting if 2 or more rows and lots of users.
+    Two decisions, both asked of `select`.  How wide the broadcast reaches is
+    `select_fmadpp_step`.  Whether it is a modifier on each multiply or an
+    instruction of its own is `select_broadcast_form`, and `repeat` is what
+    that turns on: it is how many products read the same replicated value, so
+    it is what a materialised move would be divided by.
+
+    `can_pack=False` states what this emitter holds.  The products of one
+    broadcast are separate accumulators here, not a register pair, so packed
+    math is out of reach and the move is worth taking only where the target
+    pairs scalar FMAs by itself.
     """
 
     step = select_fmadpp_step(datatype, threads, ctx)
+    form = select_broadcast_form(datatype, step, repeat, ctx, can_pack=False)
 
     fma = fmascalar
     func = {
@@ -116,7 +123,20 @@ def hfma(writer: Writer, Cs, As, Bs, repeat, datatype, threads, ctx):
 
                 ax = []
 
-                if bcst and all((B[bx][idx + jj] if idx + jj < len(B[bx]) else None) is not None for bx in range(localstep) for jj in range(repeat)):
+                if form is BroadcastForm.MOVED:
+                    # The row that `fmacdpp16<j>` would apply per product,
+                    # applied once and read `repeat` times.  Same table and
+                    # same layout as the fused form asks for, so the two
+                    # arrangements compute the same products -- what differs
+                    # is that these multiplies carry no modifier and may
+                    # therefore be issued in pairs.
+                    mv = dict(threads=threads, row=j)
+                    ax = [writer.call(MOVDPP16.callee.format(**mv), ftype, aa,
+                                      hint='bc', movable=False,
+                                      layout=MOVDPP16.produces(**mv))
+                          for aa in a]
+                    usebcst = True
+                elif bcst and all((B[bx][idx + jj] if idx + jj < len(B[bx]) else None) is not None for bx in range(localstep) for jj in range(repeat)):
                     aa = writer.pack(vtype, *a, hint='pk')
                     # Same table, same reason.  This path is switched off
                     # below (`bcst`), so no snapshot exercises it -- which is

@@ -10,6 +10,11 @@ subtarget features are LLVM's and can only be read.  A matrix builtin is gated
 on one of these, so calling it without the feature is a compile error rather
 than the link error `caps` exists to prevent.
 
+Some rows gate nothing and describe throughput instead -- how many FMAs an
+issue retires, how wide one DPP move is.  Getting one of those wrong costs a
+slower kernel rather than a broken build, which is a reason to check them
+against the same source, not a reason to keep them somewhere looser.
+
 Reading them off the architecture number, as `arch` does for families, is what
 this module avoids.  The families and the features do not nest the same way:
 `gfx1250` and `gfx1251` share `gfx1250-insts` but only `gfx1251` has
@@ -125,6 +130,40 @@ FEATURE_TARGETS = {
     'agent-scope-fine-grained-remote-memory-atomics': (0x942, 0x950,
                                                        0x1200, 0x1201,
                                                        0x1250, 0x1251, 0x1310),
+
+    # How many FMAs an issue retires, read by `select.broadcast_form`.  A DPP
+    # modifier excludes every one of these -- an instruction carries a
+    # modifier or packed operands, and a VOPD pair carries neither -- so they
+    # are what a fused broadcast is paid for.
+    #
+    #: `v_pk_fma_f32`, on CDNA and on gfx125x, and the two are named
+    #: differently in AMDGPU.td: CDNA carries `FeaturePackedFP32Ops` and
+    #: gfx125x gates the same arithmetic on the target, so the `single-sgpr`
+    #: refinement is the only record that names it.  Read as an existence
+    #: marker, which is what makes it worth two rows rather than one -- a
+    #: single hand-merged row would state a fact LLVM does not.
+    'packed-fp32-ops': (0x90a, *_REMOVED_FROM_LLVM, 0x942, 0x950),
+    'packed-fp32-single-sgpr-ops': (0x1250, 0x1251),
+    #: `v_pk_fma_f64`, on gfx1251 alone.
+    'packed-fp64-single-sgpr-ops': (0x1251,),
+    #: Wave32 dual issue: two *independent scalar* FMAs paired by the
+    #: compiler, which is a differently shaped kernel from packed math and not
+    #: a second spelling of it.  RDNA 3 onwards, gfx125x included, and not
+    #: RDNA 1 or 2 -- so a range over `>= gfx1000` claims it four generations
+    #: too early.
+    'vopd': (0x1100, 0x1101, 0x1102, 0x1103,
+             0x1150, 0x1151, 0x1152, 0x1153, 0x1154,
+             0x1170, 0x1171, 0x1172,
+             0x1200, 0x1201, 0x1250, 0x1251, 0x1310),
+    #: DPP over the 64-bit DP ALU: `v_mov_b64_dpp` and `v_fmac_f64_dpp` move
+    #: or multiply a whole 64-bit unit -- a `double`, or a pair of floats --
+    #: where two 32-bit instructions are needed otherwise.  gfx1251 carries it
+    #: and gfx1250 does not, so a family predicate over gfx125x gets one of
+    #: the two wrong whichever way it answers.  What will read it is the
+    #: packed arrangement, which pays one move where the unit goes in one
+    #: piece and two where it does not; it is listed so that answer is looked
+    #: up rather than assumed.
+    'dpp-64bit': (0x90a, *_REMOVED_FROM_LLVM, 0x942, 0x950, 0x1251),
 }
 
 

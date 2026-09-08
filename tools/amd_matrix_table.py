@@ -100,10 +100,14 @@ def feature_map(features_td, processors_td):
     return {k: sorted(set(v)) for k, v in out.items()}
 
 
-#: tablegen record name -> the string the builtin definitions use.  Only the
-#: ones a matrix or atomic builtin is gated on, plus the two that decide
-#: whether an atomic needs an assurance from the caller; anything else is
-#: dropped.
+#: tablegen record name -> the string the builtin definitions use.  Three
+#: kinds of entry, and anything else is dropped: the ones a matrix or atomic
+#: builtin is gated on, the two that decide whether an atomic needs an
+#: assurance from the caller, and the five that say how many FMAs an issue
+#: retires and how wide one DPP move is.  The last group gates no builtin at
+#: all -- it decides whether a broadcast is cheaper as a modifier or as a
+#: move -- but it is the same kind of fact from the same file, so it is read
+#: the same way rather than written out by hand.
 FEATURE_NAMES = {
     'FeatureAtomicFaddRtnInsts': 'atomic-fadd-rtn-insts',
     'FeatureAtomicFaddNoRtnInsts': 'atomic-fadd-no-rtn-insts',
@@ -127,6 +131,17 @@ FEATURE_NAMES = {
     'FeatureGFX1251GEMMInsts': 'gfx1251-gemm-insts',
     'FeatureSWMMACGfx1250Insts': 'swmmac-gfx1250-insts',
     'FeatureGFX125xLowestRateWMMA': 'gfx125x-lowest-rate-wmma',
+
+    # Throughput, and the width of a DPP move.  `packed-fp32-ops` and `vopd`
+    # are the two mechanisms that retire two FP32 FMAs at once and they do
+    # not cover the same parts; the two `single-sgpr` records are the only
+    # place AMDGPU.td names gfx125x's packed math, since its instructions are
+    # gated on the target rather than on a feature of their own.
+    'FeatureDPALU_DPP': 'dpp-64bit',
+    'FeaturePackedFP32Ops': 'packed-fp32-ops',
+    'FeaturePackedFP32SingleSGPROps': 'packed-fp32-single-sgpr-ops',
+    'FeaturePackedFP64SingleSGPROps': 'packed-fp64-single-sgpr-ops',
+    'FeatureVOPDInsts': 'vopd',
 }
 
 

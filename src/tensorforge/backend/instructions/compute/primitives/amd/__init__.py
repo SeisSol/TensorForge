@@ -61,7 +61,10 @@ from .tiling import (EMULATION, EXCHANGE, Fit, Scheme, boundary,
 from .emitters import fmadpp, fmadpp4, fmadpp8, fmadpp16, fmascalar
 from .relayout import (BROADCAST, MOVDPP16, RELAYOUTS, TRANSPOSE4X4, Relayout,
                        find_relayout)
-from .select import select_fmadpp_step, wanted_fmadpp_step
+from .select import (BroadcastForm, MATERIALISE_FROM, broadcast_form,
+                     dual_issue_fma_lanes, packed_fma_lanes,
+                     select_broadcast_form, select_fmadpp_step,
+                     wanted_fmadpp_step)
 from .unused import (mfma_emu_bf16_f32, mfma_emu_f16_f32, mfma_emu_int8,
                      wmma3atom)
 
@@ -84,6 +87,9 @@ __all__ = [
     'accumulator_cost', 'accumulator_gathers',
     'fragment_cost', 'fragment_moves',
     'wanted_fmadpp_step', 'select_fmadpp_step',
+    'BroadcastForm', 'MATERIALISE_FROM', 'broadcast_form',
+    'dual_issue_fma_lanes', 'packed_fma_lanes',
+    'select_broadcast_form',
     'Relayout', 'RELAYOUTS', 'BROADCAST', 'MOVDPP16', 'TRANSPOSE4X4',
     'find_relayout',
     'fmadpp', 'fmadpp4', 'fmadpp8', 'fmadpp16', 'fmascalar',

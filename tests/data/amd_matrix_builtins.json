@@ -64,6 +64,12 @@
       "gfx942",
       "gfx950"
     ],
+    "dpp-64bit": [
+      "gfx1251",
+      "gfx90a",
+      "gfx942",
+      "gfx950"
+    ],
     "flat-buffer-global-fadd-f64-inst": [
       "gfx1250",
       "gfx1251",
@@ -127,9 +133,40 @@
       "gfx942",
       "gfx950"
     ],
+    "packed-fp32-ops": [
+      "gfx90a",
+      "gfx942",
+      "gfx950"
+    ],
+    "packed-fp32-single-sgpr-ops": [
+      "gfx1250",
+      "gfx1251"
+    ],
+    "packed-fp64-single-sgpr-ops": [
+      "gfx1251"
+    ],
     "swmmac-gfx1250-insts": [
       "gfx1250",
       "gfx1251"
+    ],
+    "vopd": [
+      "gfx1100",
+      "gfx1101",
+      "gfx1102",
+      "gfx1103",
+      "gfx1150",
+      "gfx1151",
+      "gfx1152",
+      "gfx1153",
+      "gfx1154",
+      "gfx1170",
+      "gfx1171",
+      "gfx1172",
+      "gfx1200",
+      "gfx1201",
+      "gfx1250",
+      "gfx1251",
+      "gfx1310"
     ],
     "wmma-128b-insts": [
       "gfx1170",
