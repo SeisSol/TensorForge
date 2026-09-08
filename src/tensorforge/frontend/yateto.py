@@ -214,6 +214,73 @@ class DescriptionReader:
         f'ReductionDescr.')
     return dims
 
+  def _conform(self, result, argrefs, args):
+    """Bring every operand of a pointwise operation onto the destination's axes.
+
+    An elementwise operation applies one scalar operation cell by cell, so
+    each operand has to be indexed by exactly the destination's axes, in the
+    destination's order. yateto does not require that: it names the axes, and
+    an operand may carry fewer of them, or the same ones in another order --
+    `t[i,j,k] = A[i,k] + B[k,j]` is an elementwise sum over a semiring.
+
+    An operand that does not already match is copied into a scratch tensor
+    that does, by a multilinear over one operand with no axis contracted.
+    That is the same operation a broadcast already is on this path, so it is
+    spelled the same way rather than given a kind of its own.
+
+    Judged on the axes and not on the extents. Two operands of a square
+    destination can have matching extents and still name their axes the other
+    way round, and comparing shapes calls that a match -- which computes the
+    transpose of what was asked for and says nothing.
+    """
+    axes = list(result['indices'])
+    conformed = []
+    for ref, arg in zip(argrefs, args):
+      indices = list(ref['indices'])
+      if indices == axes:
+        conformed.append(arg)
+        continue
+      missing = [index for index in indices if index not in axes]
+      if missing:
+        raise NotImplementedError(
+          f'an elementwise operand is indexed by {missing}, which its '
+          f'destination {axes} does not carry; an axis that survives in no '
+          f'operand of a pointwise operation has nothing to iterate.')
+      conformed.append(self._conform_one(result, arg, axes, indices))
+    return conformed
+
+  def _conform_one(self, result, arg, axes, indices):
+    """One operand, copied onto the destination's axes.
+
+    The scratch takes the destination occurrence's box rather than a box of
+    its own, so that the copy writes and the operation reads the same cells
+    in the same coordinates. Its datatype is the operand's: a copy does not
+    convert, and a sum over booleans stays boolean.
+    """
+    box = self.tensor_ref(result).bbox
+    name = f'{self._prefix}_conform{self._scratch}'
+    self._scratch += 1
+
+    tensor = Tensor(shape=[int(extent) for extent in box.upper()],
+                    addressing=Addressing.PTR_BASED,
+                    bbox=box,
+                    alias=name,
+                    is_tmp=True,
+                    datatype=getattr(arg.tensor, 'datatype', None))
+    self._cache[name] = tensor
+    dest = SubTensor(tensor, box)
+
+    target = [[axes.index(index) for index in indices]]
+    permute = [list(range(len(indices)))]
+    self._descr_list.append(MultilinearDescr(dest,
+                                             [arg],
+                                             target,
+                                             permute,
+                                             add=False,
+                                             strict_match=False,
+                                             prefer_align=False))
+    return dest
+
   def _accumulator(self, result, dest, add):
     """Where a non-accumulating descriptor writes when yateto wanted a sum.
 
@@ -311,6 +378,7 @@ class DescriptionReader:
                                                prefer_align=False))
     elif kind == 'elementwise':
       dest, accumulate = self._accumulator(d['result'], result, add)
+      args = self._conform(d['result'], d['args'], args)
       self._descr_list.append(ElementwiseDescr(self.convert_op(d['optype'], d['result']),
                                                dest,
                                                args,
