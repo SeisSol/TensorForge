@@ -752,6 +752,8 @@ class Generator:
             builder.build(descr)
             self._section.ir.extend(builder.get_instructions())
             break
+        else:
+          raise InternalError(f'{type(descr)} has no registered builder.')
 
     # Anything the section still holds only in registers has to reach memory
     # before the section ends.
