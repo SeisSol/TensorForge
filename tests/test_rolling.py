@@ -614,3 +614,53 @@ def test_the_registers_are_declared_outside_the_loop():
     allocs = [i for i, l in enumerate(lines)
               if l.strip().startswith('float r') and '[' in l]
     assert allocs and all(i < header for i in allocs)
+
+
+def _loop_region():
+    from tensorforge.common.context import Context
+    from tensorforge.generators.generator import Generator
+    gen = Generator(roll(accumulation()),
+                    Context(arch='sm_86', backend='cuda', fp_type=DTYPE))
+    gen._emit_loops = True
+    gen.generate()
+    loop = next(i for i in gen._sections[0].ir
+                if type(i).__name__ == 'VariantLoop')
+    return loop
+
+
+def test_the_peeled_iteration_leaves_the_invariants_outside():
+    """What every iteration shares is done once, without a pass for it.
+
+    The shared staging of the operand all iterations read and the load of the
+    destination both happen in the peeled copy, and the residency keeps the
+    body from repeating them.
+    """
+    loop = _loop_region()
+    kinds = [type(i).__name__ for i in loop.region]
+    assert kinds.count('GlbToShrLoader') == 0
+    assert kinds.count('GlbToRegLoader') == 1
+    assert len(loop.region) < 6
+
+
+def test_the_loop_runs_the_iterations_the_peel_did_not():
+    loop = _loop_region()
+    assert (loop.start, loop.count) == (1, 4)
+    assert 'for (int' in loop.header().join(('for (int ', ''))
+
+
+def test_the_destination_is_still_not_carried_across_the_back_edge():
+    """The one thing left, and the peel is what narrowed it to one thing.
+
+    The body reads the accumulator the peel established and writes a *different*
+    register: each build of a destination takes a fresh one, so repeating the
+    body recomputes from the peeled value instead of adding to what the last
+    iteration produced.  Nothing carries it, which is what `for_`'s `iter_args`
+    is for.  Pinned rather than described, since what makes it pass is the next
+    piece of work.
+    """
+    loop = _loop_region()
+    compute = next(i for i in loop.region
+                   if type(i).__name__ == 'MultilinearInstruction')
+    written = {s.name for s in compute.defs()}
+    read = {s.name for s in compute.uses()}
+    assert not (written & read)

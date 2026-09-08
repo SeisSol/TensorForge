@@ -402,11 +402,15 @@ class VariantLoop(AbstractInstruction):
   """
 
   def __init__(self, context: Context, counter: str, count: int,
-               region, tables=(), unroll: bool = False):
+               region, tables=(), unroll: bool = False, start: int = 0):
     super(VariantLoop, self).__init__(context)
     if count < 1:
       raise GenerationError(f'a loop runs at least once, given {count}')
+    if not 0 <= start < count:
+      raise GenerationError(f'a loop starting at {start} of {count} runs '
+                            f'no iterations')
     self._counter = counter
+    self._start = start
     self._count = count
     self._region = list(region)
     self._tables = list(tables)
@@ -447,9 +451,13 @@ class VariantLoop(AbstractInstruction):
 
   # -- emission ------------------------------------------------------------ #
 
+  @property
+  def start(self) -> int:
+    return self._start
+
   def header(self) -> str:
-    return (f'int {self._counter} = 0; {self._counter} < {self._count}; '
-            f'++{self._counter}')
+    return (f'int {self._counter} = {self._start}; '
+            f'{self._counter} < {self._count}; ++{self._counter}')
 
   def gen_code(self, writer) -> None:
     invariant = [t for t in self._tables if t.loop_invariant()]
@@ -463,5 +471,5 @@ class VariantLoop(AbstractInstruction):
         instruction.gen_code(writer)
 
   def __str__(self):
-    return (f'for {self._counter} in [0,{self._count}): '
+    return (f'for {self._counter} in [{self._start},{self._count}): '
             f'{len(self._region)} instruction(s)')

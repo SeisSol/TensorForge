@@ -774,6 +774,28 @@ class Generator:
     from tensorforge.backend.instructions.builders.ptr_manip_builder import \
         GetElementPtrBuilder
 
+    # The first iteration is peeled, and it is not an optimisation.
+    #
+    # A body built cold does what the *first* of the expanded descriptors did:
+    # it loads the destination and computes a result from it.  Repeating that
+    # recomputes `Q + contribution` from the stored `Q` every time and keeps
+    # only the last one.  What the loop wants is what descriptors two onwards
+    # did -- accumulate into a destination that is already resident -- and the
+    # way to build that body is to let one iteration establish the residency
+    # first.
+    #
+    # It also settles the invariants without a pass: the shared staging of an
+    # operand every iteration shares, and the destination's load, both happen
+    # in the peeled copy and the residency stops the body from repeating them.
+    # The cost is one body written out beside the loop, so four iterations
+    # cost two copies rather than four.
+    for descr in loop.body(0):
+      for kind, builder in builders:
+        if isinstance(descr, kind):
+          builder.build(descr)
+          self._section.ir.extend(builder.get_instructions())
+          break
+
     body, variants = loop.decompose()
     counter = f'{GeneralLexicon.BATCH_ID_NAME}v{len(self._section.ir)}'
 
@@ -816,7 +838,8 @@ class Generator:
     region = [i for i in region if not isinstance(i, RegisterAlloc)]
     self._section.ir.extend(allocations)
     self._section.ir.append(
-        VariantLoop(self._context, counter, loop.iterations, region, tables))
+        VariantLoop(self._context, counter, loop.iterations, region, tables,
+                    start=1))
 
   def _deduce_mults_per_block(self):
     policy = self._thread_block_policy_type(self._context,
