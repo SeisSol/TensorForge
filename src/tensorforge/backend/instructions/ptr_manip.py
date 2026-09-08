@@ -17,9 +17,19 @@ class GetElementPtr(AbstractInstruction):
                include_extra_offset=True,
                batch_offset=0,
                update_dest=None,
-               pipeline = False):
+               pipeline = False,
+               table=None,
+               variant=None):
     super(GetElementPtr, self).__init__(context)
     self._src = src
+    # Where the base pointer is read from, when it is not the argument itself.
+    # A run whose operand changes between iterations reaches it through a table
+    # the kernel builds from arguments it already has, so only the *name* on
+    # the right-hand side changes; the offsetting below is the same arithmetic
+    # either way, and keeping it one expression is what makes a table-fed
+    # operand indistinguishable downstream from an argument-fed one.
+    self._table = table
+    self._variant = variant
     self._dest = dest
     self._include_extra_offset = include_extra_offset
     self._is_ready = True
@@ -54,6 +64,12 @@ class GetElementPtr(AbstractInstruction):
     """
     return getattr(self._src.obj, 'addressing', None) == Addressing.PTR_BASED
 
+  def source_name(self) -> str:
+    """What the right-hand side reads the base pointer out of."""
+    if self._table is None:
+      return self._src.name
+    return f'{self._table.name}[{self._variant}]'
+
   def gen_ir(self, writer):
 
     batch_obj = self._src.obj
@@ -73,7 +89,7 @@ class GetElementPtr(AbstractInstruction):
       main_offset = f'{self.batch_index()} * {batch_addressing.stride}'
       sub_offset = f'{batch_obj.get_offset_to_first_element()}'
       address = f'{main_offset} + {batch_addressing.offset} + {sub_offset}{extra_offset}'
-      rhs = f'&{self._src.name}[{address}]'
+      rhs = f'&{self.source_name()}[{address}]'
       lhs = 'const ' if self._src.obj.direction == DataFlowDirection.SOURCE else ''
       lhs += f'{datatype} *{const_mod} {self._vm.get_lexic().restrict_kw} {self._dest.name}'
     if batch_addressing == Addressing.STRIDED:
@@ -82,7 +98,7 @@ class GetElementPtr(AbstractInstruction):
       main_offset = f'{self.batch_index()} * {batch_obj.storage_volume()}'
       sub_offset = f'{batch_obj.get_offset_to_first_element()}'
       address = f'{main_offset} + {sub_offset}{extra_offset}'
-      rhs = f'&{self._src.name}[{address}]'
+      rhs = f'&{self.source_name()}[{address}]'
       lhs = 'const ' if self._src.obj.direction == DataFlowDirection.SOURCE else ''
       lhs += f'{datatype} *{const_mod} {self._vm.get_lexic().restrict_kw} {self._dest.name}'
     elif batch_addressing == Addressing.PTR_BASED:
@@ -90,7 +106,7 @@ class GetElementPtr(AbstractInstruction):
       sub_offset = f'{batch_obj.get_offset_to_first_element()}'
       address = f'{main_offset}][{sub_offset}{extra_offset}'
       src_suffix = '_ptr' if self._vm.get_lexic()._backend == 'targetdart' else ''
-      rhs = f'&{self._src.name}{src_suffix}[{address}]'
+      rhs = f'&{self.source_name()}{src_suffix}[{address}]'
       lhs = 'const ' if self._src.obj.direction == DataFlowDirection.SOURCE else ''
       if self._context.get_vm().get_hw_descr().vendor == 'amd':
         lhs += f'{datatype}'
@@ -100,11 +116,11 @@ class GetElementPtr(AbstractInstruction):
         lhs += f'{datatype} *{const_mod} {self._vm.get_lexic().restrict_kw} {self._dest.name}'
     elif batch_addressing == Addressing.NONE:
       address = f'{batch_obj.get_offset_to_first_element()}'
-      rhs = f'&{self._src.name}[{address}]'
+      rhs = f'&{self.source_name()}[{address}]'
       lhs = 'const ' if self._src.obj.direction == DataFlowDirection.SOURCE else ''
       lhs += f'{datatype} *{const_mod} {self._vm.get_lexic().restrict_kw} {self._dest.name}'
     elif batch_addressing == Addressing.SCALAR:
-      rhs = f'{self._src.name}'
+      rhs = f'{self.source_name()}'
       lhs = f'{datatype} {self._dest.name}'
     else:
       GenerationError(f'unknown addressing of {self._src.name}, given {batch_addressing}')
@@ -183,3 +199,52 @@ class GetElementPtr(AbstractInstruction):
   def __str__(self) -> str:
     return (f'{self._dest.name} = getelementptr_b2g {self._src.name} '
             f'[{self.batch_index()}];')
+
+
+class DeclareOperandTable(AbstractInstruction):
+  """An array of the kernel's own arguments, indexed by a loop counter.
+
+  A run whose operand changes between iterations needs that operand reachable
+  by index.  Where its members are already parameters -- which is the case a
+  frontend that wrote the repetition out always produces, since it named every
+  one of them -- nothing has to reach the interface: the table is built inside
+  the kernel from what is already there, costs one initialised array, and the
+  index into it is uniform, so the load stays on the scalar path.
+
+  The element type follows the members' addressing rather than being chosen
+  here.  A pointer-based argument is already an array per element, so a table
+  over such members is one indirection deeper than a table over batch-invariant
+  ones, and getting that wrong is a type error at compile time rather than a
+  wrong address at run time.
+  """
+
+  def __init__(self, context: Context, name: str, members, addressing,
+               datatype=None):
+    super(DeclareOperandTable, self).__init__(context)
+    if not members:
+      raise GenerationError('an operand table has at least one member')
+    self._name = name
+    self._members = list(members)
+    self._addressing = addressing
+    self._datatype = datatype
+    self._is_ready = True
+
+  @property
+  def name(self) -> str:
+    return self._name
+
+  def __len__(self) -> int:
+    return len(self._members)
+
+  def gen_ir(self, writer):
+    datatype = self._datatype or self._vm._fp_type
+    stars = Addressing.addr2ptr_type(self._addressing)
+    entries = ', '.join(m.name for m in self._members)
+    writer(f'const {datatype} {stars}const {self._name}[{len(self._members)}]'
+           f' = {{{entries}}};')
+
+  def get_operands(self):
+    return list(self._members)
+
+  def __str__(self):
+    return f'{self._name} = table[{len(self._members)}]'
