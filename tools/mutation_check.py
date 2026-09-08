@@ -409,11 +409,12 @@ GROUPS = {
          sub(Path('src/tensorforge/backend/instructions/compute/primitives/amd/relayout.py'),
              '    if composed is None or not emittable(composed):',
              '    if composed is None:')),
-        ('every region reported as maskable',
+        ('emittable answering the free question again',
          sub(Path('src/tensorforge/backend/instructions/compute/primitives/amd/reorder.py'),
-             '    return all(move.select.free for group in groups '
+             '    return all(move.select.mergeable for group in groups '
              'for move in group)',
-             '    return True')),
+             '    return all(move.select.free for group in groups '
+             'for move in group)')),
         ('the two counts compared the wrong way round',
          sub(Path('src/tensorforge/backend/instructions/compute/primitives/amd/relayout.py'),
              'return composed if compose_cost(composed) <= stores + loads else trip',

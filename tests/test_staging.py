@@ -154,36 +154,13 @@ def test_a_transpose_is_swaps_and_merges():
         assert all(len(group) == ext for group in assembled)
 
 
-def test_the_assembled_exchange_is_priced_and_not_emittable():
-    """Cheaper than the trip and still not offered.
+def test_the_assembled_exchange_is_emitted_now(monkeypatch):
+    """`laneMerge` is what unblocked it: the regions are one lane out of every
+    `ext`, no `dppUpdate` mask expresses that, and a ternary on the lane id
+    does -- one the runtime's own transpose already writes eight times.
 
-    A transpose's regions are one lane out of every `ext` -- one per bank,
-    which neither a `dppUpdate` row mask nor a bank mask expresses -- so the
-    merge would need a ternary on the lane id.  `Select` reports that and the
-    merge refuses it, which is the module's own policy: the path reads no lane
-    id anywhere else and one appearing is a thing to look at.
-
-    So the cost stands as a statement of what a merge primitive would buy, and
-    the route offered is the trip."""
-    from tensorforge.backend.instructions.compute.primitives.amd import (
-        exchange_codegen, reorder)
-    indices = _indices(8, 64)
-    assembled = reorder.compose_exchange(relayout.nest_shared(8, 64),
-                                         relayout.transposed(8, 64),
-                                         indices, 64)
-    assert not reorder.emittable(assembled)
-    assert reorder.compose_cost(assembled) < sum(
-        staging.accesses(staging.staged(relayout.nest_shared(8, 64),
-                                        relayout.transposed(8, 64), indices)))
-
-    assert not relayout.has_transpose(8)
-    route = relayout.reach(relayout.nest_shared(8, 64),
-                           relayout.transposed(8, 64), 8, indices, wave=64)
-    assert isinstance(route[0], staging.Transfer)
-
-
-def test_the_emitter_refuses_a_mask_that_does_not_exist():
-    """Rather than returning a register with a hole in it."""
+    So a width the runtime has no `transpose*` for stays in registers instead
+    of falling to the trip."""
     from tensorforge.backend.instructions.compute.primitives.amd import (
         exchange_codegen, reorder)
     from tensorforge.backend.pir.build import IRBuilder
@@ -191,15 +168,60 @@ def test_the_emitter_refuses_a_mask_that_does_not_exist():
     from tensorforge.common.basic_types import Datatype
     from tensorforge.common.context import Context
 
+    indices = _indices(8, 64)
+    assembled = reorder.compose_exchange(relayout.nest_shared(8, 64),
+                                         relayout.transposed(8, 64),
+                                         indices, 64)
+    assert reorder.emittable(assembled)
+    assert not relayout.has_transpose(8)
+    route = relayout.reach(relayout.nest_shared(8, 64),
+                           relayout.transposed(8, 64), 8, indices, wave=64)
+    assert isinstance(route[0], tuple)
+    assert reorder.compose_cost(route) < sum(
+        staging.accesses(staging.staged(relayout.nest_shared(8, 64),
+                                        relayout.transposed(8, 64), indices)))
+
     ctx = Context(arch='gfx90a', backend='hip', fp_type=Datatype.F32)
-    assembled = reorder.compose_exchange(relayout.nest_shared(4, 64),
-                                         relayout.transposed(4, 64),
-                                         _indices(4, 64), 64)
     writer = IRBuilder(Datatype.F32, context=ctx)
     ftype = ScalarType(Datatype.F32)
-    regs = [writer.declare(ftype, hint='op') for _ in range(4)]
-    assert exchange_codegen.apply_exchange(writer, regs, assembled,
-                                           ftype) is None
+    regs = [writer.declare(ftype, hint='op') for _ in range(8)]
+    out = exchange_codegen.apply_exchange(writer, regs, assembled, ftype)
+    assert out is not None and len(out) == 8
+
+
+@pytest.mark.parametrize('ext', [4, 8, 16])
+def test_what_is_emitted_stays_under_what_was_planned(ext):
+    """And by exactly the ternaries.
+
+    `Move.cost` counts a `cndmask` region as swaps, a merge and a select,
+    because setting the mask is a scalar move beside the merge.  `laneMerge`
+    takes it as a template constant, so the IR issues one call and the move is
+    the compiler's to hoist out of the loop -- both true, at different levels,
+    and the plan being the conservative one is the right direction.
+    """
+    from tensorforge.backend.instructions.compute.primitives.amd import (
+        exchange_codegen, reorder)
+    from tensorforge.backend.pir.build import IRBuilder
+    from tensorforge.backend.pir.core import ScalarType
+    from tensorforge.common.basic_types import Datatype
+    from tensorforge.common.context import Context
+
+    indices = _indices(ext, 64)
+    assembled = reorder.compose_exchange(relayout.nest_shared(ext, 64),
+                                         relayout.transposed(ext, 64),
+                                         indices, 64)
+    ctx = Context(arch='gfx90a', backend='hip', fp_type=Datatype.F32)
+    writer = IRBuilder(Datatype.F32, context=ctx)
+    ftype = ScalarType(Datatype.F32)
+    regs = [writer.declare(ftype, hint='op') for _ in range(ext)]
+    before = len(writer._stack[-1].body)
+    exchange_codegen.apply_exchange(writer, regs, assembled, ftype)
+    emitted = len(writer._stack[-1].body) - before
+
+    ternaries = sum(1 for group in assembled for move in group
+                    if not move.select.free)
+    assert emitted == reorder.compose_cost(assembled) - ternaries
+    assert ternaries == ext * ext
 
 
 def test_the_builtin_still_wins_where_there_is_one():

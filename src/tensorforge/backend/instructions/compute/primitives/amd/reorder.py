@@ -361,19 +361,15 @@ def compose_exchange(have, want, indices, wave: int, base_have=None,
 
 
 def emittable(groups) -> bool:
-    """Whether every region of an assembled exchange has a mask that exists.
+    """Whether every region of an assembled exchange can be written at all.
 
-    `dppUpdate` carries a region in a row mask and a bank mask, and a
-    transpose's regions are one lane out of every `ext` -- one per bank, which
-    neither expresses.  `Select` reports that as `cndmask`, a ternary on the
-    lane id, and the merge refuses it: the path reads no lane id anywhere else
-    and one appearing is a thing to look at rather than to paper over.
-
-    So the assembled form is priced and not emitted.  The cost is right -- the
-    ternary is in `Move.cost` -- and what is missing is a merge primitive, not
-    a plan.
+    `mergeable`, not `free`.  The two are different questions and conflating
+    them is what kept this form out of reach: a region finer than a bank costs
+    a `laneMerge` of its own and is emitted all the same, so it is dearer
+    rather than impossible.  `Move.cost` already carries the difference, which
+    is why the ranking needs no second opinion here.
     """
-    return all(move.select.free for group in groups for move in group)
+    return all(move.select.mergeable for group in groups for move in group)
 
 
 def compose_cost(groups) -> int:
