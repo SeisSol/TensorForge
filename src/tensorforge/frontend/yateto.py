@@ -114,6 +114,34 @@ class GpuKernelGeneratorV1:
       'negated': literal['negated'],
     } for literal in condition]
 
+  #: Operations that a multilinear describes exactly. A pointwise product is
+  #: a multilinear over which no axis is contracted, and a sum over one axis
+  #: is a multilinear with a single operand over which that axis is. Both go
+  #: that way rather than to their own descriptor: the multilinear path
+  #: carries the optimisations, and it broadcasts an operand of lower rank,
+  #: which the elementwise one does not.
+  AS_MULTILINEAR = {('elementwise', 'Mul'), ('reduction', 'Add')}
+
+  def _linear_layout(self, result, args):
+    """Where each operand's axes land, in the numbering a multilinear uses.
+
+    Non-negative numbers are axes of the result, in its own order; negative
+    ones are axes contracted away, numbered as they are met. This is the
+    numbering yateto builds for the operations it already sends as
+    multilinear, so an operation converted here is indistinguishable from one
+    that arrived that way.
+    """
+    axis = {index: position for position, index in enumerate(result['indices'])}
+    contracted = -1
+    for arg in args:
+      for index in arg['indices']:
+        if index not in axis:
+          axis[index] = contracted
+          contracted -= 1
+    target = [[axis[index] for index in arg['indices']] for arg in args]
+    permute = [list(range(len(arg['indices']))) for arg in args]
+    return target, permute
+
   def _reduction_dims(self, result, arg):
     """The axes of `arg` that the reduction removes.
 
@@ -170,6 +198,21 @@ class GpuKernelGeneratorV1:
                                                args,
                                                d['target'],
                                                d['permute'],
+                                               add=add,
+                                               strict_match=False,
+                                               prefer_align=False))
+    elif (kind, d.get('optype')) in self.AS_MULTILINEAR:
+      argrefs = list(d['args'])
+      if self._is_named_scalar(linear.get('alpha')):
+        # a multilinear takes its factor as one more operand over no axis,
+        # which is how yateto sends a scaled contraction as well
+        argrefs = argrefs + [linear['alpha']]
+        args = args + [self.tensor_ref(linear['alpha'])]
+      target, permute = self._linear_layout(d['result'], argrefs)
+      self._descr_list.append(MultilinearDescr(result,
+                                               args,
+                                               target,
+                                               permute,
                                                add=add,
                                                strict_match=False,
                                                prefer_align=False))
