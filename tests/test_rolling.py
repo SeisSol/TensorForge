@@ -759,3 +759,60 @@ def test_the_rule_is_whether_the_destination_varies_not_whether_it_escapes():
     loop = [d for d in roll(accumulation()) if isinstance(d, ForDescr)][0]
     assert 'Q' in loop.escaping
     assert _stores(roll(accumulation()))[0] == 0
+
+
+def _flux(count=4):
+    """First contribution assigns, the rest add -- what a frontend emits."""
+    return [gemm(make(f'fPrT{i}', [9, 9]), make('I', [9, 4]),
+                 make('Q', [9, 4]), add=(i > 0)) for i in range(count)]
+
+
+def test_a_run_after_an_assigning_contribution_is_not_peeled_again():
+    """The residency it would establish is already established.
+
+    A frontend writes the first contribution as an assignment and the rest as
+    additions, so the first falls out of the run -- and it is exactly the
+    iteration a peel would add.  Peeling on top of it writes a second copy of
+    the body for nothing.
+    """
+    from tensorforge.common.context import Context
+    from tensorforge.generators.generator import Generator
+
+    gen = Generator(roll(_flux()), Context(arch='sm_86', backend='cuda',
+                                           fp_type=DTYPE))
+    gen._emit_loops = True
+    gen.generate()
+    ir = gen._sections[0].ir
+    loop = next(i for i in ir if type(i).__name__ == 'VariantLoop')
+    assert loop.start == 0
+    outside = [i for i in ir if type(i).__name__ == 'MultilinearInstruction']
+    assert len(outside) == 1
+
+
+def test_a_run_with_nothing_before_it_still_peels():
+    loop = _loop_of(roll(accumulation()))
+    assert loop.start == 1
+
+
+def test_the_driver_counts_what_the_launcher_takes():
+    """A stand-in is in the scope and out of the signature.
+
+    Counting it hands the launcher two arguments more than it has parameters,
+    which fails at the call site and says nothing about where it came from.
+    """
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from harness.driver_emit import collect_operands
+    from tensorforge.common.context import Context
+    from tensorforge.generators.generator import Generator
+
+    gen = Generator(roll(_flux()), Context(arch='sm_86', backend='cuda',
+                                           fp_type=DTYPE))
+    gen._emit_loops = True
+    gen.generate()
+    counted = {op.kernel_name for op in collect_operands(gen)}
+    variants = {m.name for m in gen._matrix_list
+                if getattr(m, 'is_variant', False)}
+    assert variants
+    assert counted.isdisjoint(variants)

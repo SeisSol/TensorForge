@@ -66,12 +66,19 @@ class DriverOperand:
 def collect_operands(generator) -> List[DriverOperand]:
     """Walk the generator's global scope and materialize operand metadata.
 
-    The global scope's insertion order is the same order the launcher
-    takes its parameters in, so host-side args line up by index.
+    The global scope's insertion order is the same order the launcher takes
+    its parameters in, so host-side args line up by index -- for everything
+    the launcher takes.  A stand-in is in the scope because the body resolves
+    it there and out of the signature because it is not passed: it names,
+    inside a loop, whichever member the counter selects.  Counting it here
+    hands the launcher two arguments more than it has parameters, which is a
+    compile error at the call and says nothing about where it came from.
     """
     ops: List[DriverOperand] = []
     for sym in generator._scopes.get_global_scope().values():
         t = sym.obj
+        if getattr(t, 'is_variant', False):
+            continue
         if sym.stype == SymbolType.Scalar:
             # Scalar literal (e.g. alpha). Must have a baked-in value;
             # symbolic-runtime scalars (alpha='alpha') are out of MVP scope.

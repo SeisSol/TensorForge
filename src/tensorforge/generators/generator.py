@@ -858,12 +858,25 @@ class Generator:
     # in the peeled copy and the residency stops the body from repeating them.
     # The cost is one body written out beside the loop, so four iterations
     # cost two copies rather than four.
-    for descr in loop.body(0):
-      for kind, builder in builders:
-        if isinstance(descr, kind):
-          builder.build(descr)
-          self._section.ir.extend(builder.get_instructions())
-          break
+    # ...unless something before the loop already did.  A run that follows a
+    # descriptor writing the same destination -- which is what a frontend
+    # produces when the first contribution assigns and the rest add -- has its
+    # residency established already, and peeling again writes a second copy of
+    # the body for nothing.
+    accumulated_keys = [
+        f'{GeneralLexicon.GLOBAL_MEM_PREFIX}{d.writes().tensor.name}'
+        for d in loop.body(0)
+        if getattr(d, 'add', False) and d.writes() is not None]
+    resident = bool(accumulated_keys) and all(
+        self._residency.get(key) is not None for key in accumulated_keys)
+
+    if not resident:
+      for descr in loop.body(0):
+        for kind, builder in builders:
+          if isinstance(descr, kind):
+            builder.build(descr)
+            self._section.ir.extend(builder.get_instructions())
+            break
 
     body, variants = loop.decompose()
     counter = f'{GeneralLexicon.BATCH_ID_NAME}v{len(self._section.ir)}'
@@ -970,7 +983,7 @@ class Generator:
     self._section.ir.extend(allocations)
     self._section.ir.append(
         VariantLoop(self._context, counter, loop.iterations, region, tables,
-                    start=1, carried=tuple(carried)))
+                    start=0 if resident else 1, carried=tuple(carried)))
 
   def _deduce_mults_per_block(self):
     policy = self._thread_block_policy_type(self._context,
