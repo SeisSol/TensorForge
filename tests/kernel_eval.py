@@ -67,6 +67,31 @@ _VEC_STORE = re.compile(
 #: `*(SomeVecType*)&name[expr] = value`
 _VEC_ASSIGN = re.compile(r'^\*\s*\([^)]*\)\s*&\s*\w+\s*\[.*\]\s*=')
 
+#: `__pipeline_memcpy_async(&dst[i], &src[j], N)`.  The transfer half of
+#: CUDA's pipeline primitives; the commit and the wait are the other half and
+#: move nothing.
+_ASYNC_COPY = re.compile(
+    r'^__pipeline_memcpy_async\s*\(\s*&\s*(?P<dst>\w+)\s*\[(?P<di>[^\]]*)\]\s*,'
+    r'\s*&\s*(?P<src>\w+)\s*\[(?P<si>[^\]]*)\]\s*,\s*(?P<bytes>\d+)\s*\)$')
+
+#: Scalar type -> bytes, for turning a copy's byte count into element slots.
+#: The interpreter's memory is untyped, so the width has to come from the
+#: declaration of the pointer being written.
+_SCALAR_BYTES = {
+    'float': 4, 'double': 8, 'half': 2, 'bfloat16': 2, '__float128': 16,
+    'int8_t': 1, 'uint8_t': 1, 'int16_t': 2, 'uint16_t': 2,
+    'int32_t': 4, 'uint32_t': 4, 'int64_t': 8, 'uint64_t': 8,
+    'int': 4, 'char': 1, 'bool': 1,
+}
+
+
+def _scalar_bytes(stmt: str) -> Optional[int]:
+    """The element size of a pointer declaration, from its type."""
+    for word in re.findall(r'\w+', stmt):
+        if word in _SCALAR_BYTES:
+            return _SCALAR_BYTES[word]
+    return None
+
 # How many slots `evaluate(preset=...)` fills per array.  Larger than any
 # operand a test case declares; the interpreter reads only what the kernel
 # addresses, so the surplus is inert.
@@ -252,6 +277,10 @@ class Interp:
         self.mem = mem
         self.env = dict(env)
         self.budget = limit
+        #: Element size per pointer name, from the type in its declaration.
+        #: An async copy is measured in bytes and the memory here is untyped,
+        #: so this is the only place the two can be reconciled.
+        self.widths: Dict[str, int] = {}
         self.env['DEREF'] = lambda p, i=0: p[i] if isinstance(p, Ptr) else p
         self.env['ADDR'] = lambda p, i: (p + i) if isinstance(p, Ptr) else p
         #: The other lanes of the wave, set by `Lockstep`.  Empty for a
@@ -362,6 +391,22 @@ class Interp:
             elif kind == 'block':
                 self.run(node[1])
 
+    def _async_copy(self, cp, stmt: str) -> None:
+        """Move `bytes` worth of elements from one buffer to another."""
+        dst = self.env.get(cp.group('dst'))
+        src = self.env.get(cp.group('src'))
+        if not isinstance(dst, Ptr) or not isinstance(src, Ptr):
+            raise Abort(f'async copy between unknown buffers: {stmt!r}')
+        width = self.widths.get(cp.group('dst'))
+        nbytes = int(cp.group('bytes'))
+        if width is None or nbytes % width:
+            raise Abort(f'async copy of {nbytes} B into {cp.group("dst")!r}, '
+                        f'whose element size is {width!r}: {stmt!r}')
+        di = int(self.ev(cp.group('di')))
+        si = int(self.ev(cp.group('si')))
+        for k in range(nbytes // width):
+            dst[di + k] = src[si + k]
+
     def assign(self, stmt: str) -> None:
         m = _DECL.match(stmt)
         am = re.match(r'^(?:const\s+)?auto\s*&\s*(\w+)\s*=\s*(.+)$', stmt)
@@ -400,6 +445,28 @@ class Interp:
             # abort is the honest answer and a silent skip is the dangerous
             # one.
             raise Abort(f'vector assignment not modelled: {stmt!r}')
+        cp = _ASYNC_COPY.match(stmt)
+        if cp:
+            # The transfer half of the pipeline primitives.  It moves data, so
+            # it cannot sit in the catch-all below with the commit and the
+            # wait, which do not -- and it did.  What that cost was not a
+            # visible failure: `Slot` fills an unwritten address from its seed,
+            # so a kernel whose operand arrives this way still produced a full
+            # destination of plausible numbers, none of which had been through
+            # the transfer.  Two such kernels then agreed with each other for
+            # the same reason, which is what an oracle exists to rule out.
+            #
+            # Completion is not modelled and does not need to be.  The wait is
+            # the only point at which the copy is guaranteed done, this
+            # interpreter is sequential, and finishing early is the one
+            # rounding of `cp.async` that no reader here can observe.
+            self._async_copy(cp, stmt)
+            return
+        if 'memcpy_async' in stmt:
+            # Another spelling -- the four-argument zero-fill form, say.
+            # Refused rather than swallowed: a transfer that quietly does
+            # nothing is the defect this branch exists to keep from recurring.
+            raise Abort(f'async copy not modelled: {stmt!r}')
         if (('pipeline' in stmt or '::' in stmt)
                 and not _VEC_DECL.match(stmt) and 'tensorforge::' not in stmt):
             # The catch-all was written for `cuda::pipeline` and friends, which
@@ -411,6 +478,8 @@ class Interp:
             return
         if m and m.group('name') not in ('return',):
             name = m.group('name')
+            if m.group('ptr') or m.group('arr'):
+                self.widths[name] = _scalar_bytes(stmt)
             if m.group('arr'):
                 self.env[name] = Ptr(self.mem, f'{name}#{id(self.env)}')
                 for i in range(int(m.group('dim'))):
@@ -528,12 +597,19 @@ def parse(src: str) -> List:
     return block()
 
 
-def _base_env(src: str, mem: Slot, tid: int) -> Dict[str, object]:
-    """The names a kernel body starts with, for one lane."""
+def _base_env(src: str, mem: Slot, tid: int, lanes: int = 256,
+              mults: int = 1) -> Dict[str, object]:
+    """The names a kernel body starts with, for one lane.
+
+    `blockDim` follows the launcher.  `blockDim.x` appears in no generated
+    kernel today, but `blockDim.y` is the stride of the batch loop in most of
+    them, and a fixed 1 there is a guess that happens to agree only while
+    `numElements` is 1.
+    """
     env = {
         'threadIdx': type('T', (), {'x': tid, 'y': 0, 'z': 0})(),
         'blockIdx': type('B', (), {'x': 0, 'y': 0, 'z': 0})(),
-        'blockDim': type('D', (), {'x': 256, 'y': 1, 'z': 1})(),
+        'blockDim': type('D', (), {'x': lanes, 'y': mults, 'z': 1})(),
         'gridDim': type('G', (), {'x': 1, 'y': 1, 'z': 1})(),
     }
     for name in re.findall(r'\b(m\d+)\b', src):
@@ -603,9 +679,32 @@ class Lockstep:
                 self.run(node[1], lanes)
 
 
+#: `dim3 block(threads, mults, 1)` in the generated launcher.  The lane count
+#: belongs to the kernel, not to the test that runs it, and this is where the
+#: kernel states it.
+_BLOCK_DIM = re.compile(r'\bblock\s*\(\s*(\d+)\s*,\s*(\d+)\s*,\s*\d+\s*\)')
+
+
+def launch_geometry(launcher: str) -> Tuple[int, int]:
+    """``(lanes per multiplication, multiplications per block)``.
+
+    Running more lanes than the launcher asks for is not a harmless surplus.
+    A hop loop is only guarded where the extent does not divide evenly, so the
+    invented lanes execute unguarded copies at their own offsets and read past
+    the end of the operand -- which reads as a generator overrun and is not
+    one.  It stayed invisible for as long as the async copy was swallowed,
+    because a lane that copies nothing reads nothing either.
+    """
+    m = _BLOCK_DIM.search(launcher)
+    if not m:
+        raise Abort('launcher states no block dimensions')
+    return int(m.group(1)), int(m.group(2))
+
+
 def evaluate_wave(src: str, lanes: int, seed: int = 0,
                   globals_only: bool = False,
-                  preset: Optional[Dict[str, float]] = None) -> Dict:
+                  preset: Optional[Dict[str, float]] = None,
+                  mults: int = 1) -> Dict:
     """Run one kernel body for `lanes` lanes together; return the memory.
 
     The difference from calling `evaluate` per lane is that the lanes share
@@ -614,6 +713,9 @@ def evaluate_wave(src: str, lanes: int, seed: int = 0,
     too; what it adds is the cross-lane traffic -- the broadcast of an operand
     and the peeled tail of a widened lead dimension, neither of which had any
     numerical coverage before.
+
+    `lanes` is the kernel's own, from `launch_geometry`, not a round number:
+    see there for what a surplus lane does once the copies are modelled.
     """
     body = src[src.index('{'):]
     mem = Slot(seed)
@@ -623,7 +725,7 @@ def evaluate_wave(src: str, lanes: int, seed: int = 0,
                 mem.write(name, idx, value)
     interps = []
     for tid in range(lanes):
-        env = _base_env(src, mem, tid)
+        env = _base_env(src, mem, tid, lanes=lanes, mults=mults)
         interps.append(Interp(mem, env))
     Lockstep(interps).run(parse(body))
     if globals_only:

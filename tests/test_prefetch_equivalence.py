@@ -29,8 +29,6 @@ import kernel_eval
 from tensorforge.common.context import Context, Options
 from tensorforge.generators.generator import Generator
 
-TIDS = (0, 1, 7, 15, 16, 31)
-
 
 def _load(path):
     spec = importlib.util.spec_from_file_location(path.stem, path)
@@ -46,15 +44,22 @@ def _generate(mod, wrap):
     gen = Generator(mod.descr_list(), ctx)
     with contextlib.redirect_stdout(io.StringIO()):
         gen.generate()
-    return gen.get_kernel()
+    return gen.get_kernel(), kernel_eval.launch_geometry(gen.get_launcher())
 
 
-def _run(src):
-    out = {}
-    for tid in TIDS:
-        out.update(kernel_eval.evaluate(src, tid=tid, seed=17,
-                                        globals_only=True))
-    return out
+def _run(src, geometry):
+    """One block over one memory, at the width the launcher starts.
+
+    Not lane by lane over a fixed set of tids, which is what this was.  A
+    staged operand arrives cooperatively, so a lane running on its own memory
+    fills one stripe of the window and reads seed fill for the rest --- and
+    two builds then agree about a window neither of them wrote.  Half of the
+    fixed tid set was also past the end of the block, where the unguarded hops
+    copy from beyond the operand.
+    """
+    lanes, mults = geometry
+    return kernel_eval.evaluate_wave(src, lanes, seed=17, globals_only=True,
+                                     mults=mults)
 
 
 def _compare(name):
@@ -63,10 +68,10 @@ def _compare(name):
                 (pathlib.Path(__file__).parent / 'cases').rglob('*.py')
                 if p.stem == name)
     mod = _load(path)
-    plain, wrapped = _generate(mod, False), _generate(mod, True)
+    (plain, pg), (wrapped, wg) = _generate(mod, False), _generate(mod, True)
     if plain == wrapped:
         return None
-    return _run(plain), _run(wrapped)
+    return _run(plain, pg), _run(wrapped, wg)
 
 
 def test_the_oracle_can_read_a_prefetched_kernel():
@@ -80,10 +85,10 @@ def test_the_oracle_can_read_a_prefetched_kernel():
     answer below.
     """
     assert kernel_eval._DECL.match('uint32_t pipeStage0 = 0;')
-    src = _generate(_load(next(
+    src, geometry = _generate(_load(next(
         p for p in (pathlib.Path(__file__).parent / 'cases').rglob('*.py')
         if p.stem == 'square_notrans')), True)
-    assert kernel_eval.evaluate(src, tid=0, seed=17, globals_only=True)
+    assert _run(src, geometry)
 
 
 @pytest.mark.parametrize('name', ['square_notrans', 'rectangular',
@@ -140,4 +145,4 @@ def test_no_case_in_the_corpus_currently_earns_a_rotation():
         path = next(p for p in
                     (pathlib.Path(__file__).parent / 'cases').rglob('*.py')
                     if p.stem == name)
-        assert 'pipeStage' not in _generate(_load(path), True)
+        assert 'pipeStage' not in _generate(_load(path), True)[0]

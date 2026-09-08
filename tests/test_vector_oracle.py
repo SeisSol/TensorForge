@@ -33,7 +33,8 @@ from tensorforge.generators.generator import Generator
 VEC_CASES = ['aligned_operands']
 
 
-def _destination(name, widen, blocking=1, threads=64):
+def _build(name, widen, blocking=1):
+    """The kernel and the geometry its launcher starts it with."""
     old = (vectorize.LEAD_VECTORIZE, vectorize.LEAD_BLOCKING)
     vectorize.LEAD_VECTORIZE, vectorize.LEAD_BLOCKING = widen, blocking
     try:
@@ -45,14 +46,29 @@ def _destination(name, widen, blocking=1, threads=64):
                         Context(arch='sm_86', backend='cuda',
                                 fp_type=mod.DTYPE))
         gen.generate()
-        src = gen.get_kernel()
+        return gen.get_kernel(), kernel_eval.launch_geometry(gen.get_launcher())
     finally:
         vectorize.LEAD_VECTORIZE, vectorize.LEAD_BLOCKING = old
-    out = {}
-    for tid in range(threads):
-        mem = kernel_eval.evaluate(src, tid=tid, seed=11, globals_only=True)
-        out.update({k: v for k, v in mem.items() if k[0] == 'm0'})
-    return src, out
+
+
+def _destination(name, widen, blocking=1):
+    """The destination, run as one block over one memory.
+
+    This used to run each lane on its own and merge the results, over a fixed
+    64 tids.  Both halves of that stopped being true once `kernel_eval` began
+    modelling the async copy.  A staged operand arrives cooperatively --- lane
+    `t` copies its own stripe and no other --- so a lane on its own memory
+    computes from a window that is one stripe of operand and seed fill
+    everywhere else, and two configurations then agree because they were both
+    reading the same fill.  And 64 is not this kernel's width: the widened
+    build here is launched with four lanes, so sixty of those tids were a
+    second block's threads addressing one block's memory, copying past the end
+    of the operand as they went.
+    """
+    src, (lanes, mults) = _build(name, widen, blocking)
+    mem = kernel_eval.evaluate_wave(src, lanes, seed=11, globals_only=True,
+                                    mults=mults)
+    return src, {k: v for k, v in mem.items() if k[0] == 'm0'}
 
 
 @pytest.mark.parametrize('blocking', [1, 2, 4])
@@ -108,23 +124,10 @@ def test_the_widened_kernel_is_not_trivially_empty(vcase):
 # Cross-lane traffic, which needs the lanes run together
 # --------------------------------------------------------------------------- #
 
-def _wave(name, widen, blocking=1, lanes=32):
-    old = (vectorize.LEAD_VECTORIZE, vectorize.LEAD_BLOCKING)
-    vectorize.LEAD_VECTORIZE, vectorize.LEAD_BLOCKING = widen, blocking
-    try:
-        path = pathlib.Path(__file__).parent / 'cases' / f'{name}.py'
-        spec = importlib.util.spec_from_file_location(name, path)
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
-        gen = Generator(mod.descr_list(),
-                        Context(arch='sm_86', backend='cuda',
-                                fp_type=mod.DTYPE))
-        gen.generate()
-        src = gen.get_kernel()
-    finally:
-        vectorize.LEAD_VECTORIZE, vectorize.LEAD_BLOCKING = old
+def _wave(name, widen, blocking=1):
+    src, (lanes, mults) = _build(name, widen, blocking)
     return src, kernel_eval.evaluate_wave(src, lanes, seed=11,
-                                          globals_only=True)
+                                          globals_only=True, mults=mults)
 
 
 @pytest.mark.parametrize('vcase', VEC_CASES)
