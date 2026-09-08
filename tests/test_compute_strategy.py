@@ -301,7 +301,8 @@ def test_the_entry_is_ranked_by_issues_not_by_fit():
     narrow, wide = ops['mfma_f32_4x4x1f32'], ops['mfma_f32_16x16x1f32']
     assert tiling.issues(narrow, 13, 56, 56) == 4 * tiling.issues(
         wide, 13, 56, 56)
-    assert tiling.CYCLES == {}, 'a guessed cycle count reads as a measurement'
+    from tensorforge.backend.instructions.compute import ranking
+    assert ranking.CYCLES == {}, 'a guessed cycle count reads as a measurement'
 
 
 def test_a_term_product_takes_the_whole_output_axis():

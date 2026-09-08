@@ -29,7 +29,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Dict, FrozenSet, Iterable, List, Optional, Tuple
 
-from ... import packing
+from ... import packing, ranking
 from .catalog import emu_tile_for, emu_tiles, mfma_tile_for
 from .exchange_codegen import exchange_op, exchange_ops
 
@@ -181,75 +181,38 @@ def boundary(fit: Fit, n: int) -> int:
 
 # -- how much of an entry a shape actually uses ---------------------------- #
 
-def spare_products(op, columns: int) -> int:
-    """Term products one issue holds on the output axis, the real one included.
+def extent_of(op) -> ranking.Extent:
+    """One issue of this entry, in the generator's dimensions.
 
-    A term product is a whole ``C += A_i x B_j`` over the tile, so it occupies
-    every output column the shape has -- which is why partial spare is no use
-    here and the count is a division rather than a remainder.  An entry
-    narrower than the shape holds one and no more.
-
-    This is the axis worth spending, and the only one of the three.  The
-    contraction axis has the small quantum -- one slot per step -- and no
-    spare, since the contraction fills it; the lane axis has spare but a
-    product needs the whole leading dimension there, and reclaiming it is a
-    cross-lane reduction rather than an add chain inside a lane.
+    The mapping is `MatrixOp.lane_batched`'s: `m` takes the output columns,
+    `n * blocks` the lanes and so the leading dimension, `k` the contraction.
+    Reading it here is what lets the count itself be shared with targets whose
+    mapping is a different one.
     """
-    if columns <= 0:
-        return 1
-    return max(1, op.m // columns)
+    return ranking.Extent(columns=op.m, lanes=op.n * op.blocks, depth=op.k,
+                          name=op.builtin)
+
+
+def spare_products(op, columns: int) -> int:
+    """Term products one issue holds on the output axis, the real one
+    included."""
+    return ranking.spare_products(extent_of(op), columns)
 
 
 def issues(op, columns: int, lead: int = 0, depth: int = 0,
            products: int = 1) -> int:
-    """Instruction issues this entry takes for the whole contraction.
-
-    The four axes multiplied: output columns against `m`, the leading
-    dimension against the lanes one issue spans, the contraction against `k`,
-    and the term products against what one issue can hold beside the real one.
-    An extent given as 0 is one the caller does not know, and counts as a
-    single tile rather than as nothing.
-
-    It counts issues, not time.  Two entries that differ in passes do not cost
-    the same per issue, which is what `CYCLES` is for and why this is not
-    called a cost.
-    """
-    def tiles(demand, capacity):
-        return packing.tiles(demand, capacity) if demand > 0 else 1
-
-    return (tiles(columns, op.m)
-            * tiles(lead, op.n * op.blocks)
-            * tiles(depth, op.k)
-            * packing.tiles(products, spare_products(op, columns)))
-
-
-#: Issue cost per instruction, in cycles.  Empty.
-#:
-#: The numbers are a hardware fact like every other row in the catalogue, and
-#: they have to be read off the ISA guide and checked the same way -- AMD
-#: documents them per instruction; for other vendors this table would need its
-#: own source.  Guessing them is worse than not having them: the ranking below
-#: then reads as a cost model and is a count.
-#:
-#: Until it is filled, `rank` orders by issues alone, which is exactly wrong
-#: where two entries differ in passes.  A 32x32 issue is not one 4x4 issue,
-#: and fewer issues of a longer instruction can be slower.
-CYCLES: Dict[str, int] = {}
+    """Instruction issues this entry takes for the whole contraction."""
+    return ranking.issues(extent_of(op), columns, lead, depth, products)
 
 
 def rank(fits, columns: int, lead: int = 0, depth: int = 0):
     """The candidates, cheapest first.
 
-    Fewest issues wins, and where `CYCLES` knows an entry its issues are
-    weighted by it.  Deliberately not "the narrowest that fits": four 4x4
-    issues and one 16x16 issue both serve thirteen columns, the second wastes
-    three of its sixteen, and which is faster is a property of the two
-    instructions rather than of the waste.  Stating the order here is what
-    lets that be answered by filling a table instead of by rewriting a
-    selection.
+    Deliberately not "the narrowest that fits": four 4x4 issues and one 16x16
+    issue both serve thirteen columns, the second wastes three of its sixteen,
+    and which is faster is a property of the two instructions rather than of
+    the waste.  Stating the order here is what lets that be answered by
+    filling a table instead of by rewriting a selection.
     """
-    def key(fit):
-        count = issues(fit.op, columns, lead, depth, fit.terms)
-        return (count * CYCLES.get(fit.op.builtin, 1), count, fit.op.builtin)
-
-    return tuple(sorted(fits, key=key))
+    return ranking.rank(fits, lambda fit: (extent_of(fit.op), fit.terms),
+                        columns, lead, depth)

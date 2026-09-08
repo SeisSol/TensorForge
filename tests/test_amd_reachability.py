@@ -99,6 +99,12 @@ KEPT_UNREACHABLE = {
     "lane_batched_ops":
         "the same precondition asked of the whole catalogue; the F32 policy "
         "reaches it through MFMA_TILES instead",
+    "issues":
+        "the axis count, read by the ranking through `ranking.issues` and by "
+        "the tests; this wrapper is what a caller holding a `MatrixOp` uses",
+    "spare_products":
+        "the output-axis predicate the emulated emitter needs once it can "
+        "take an entry wider than its k-vector; nothing reads it before then",
     "NOT_MODELLED":
         "documents the catalogue's boundary; read by the LLVM cross-check",
 }

@@ -55,7 +55,7 @@ from .reorder import (BANK, FED_BY, IDENTITY_DPP, ROW, Gather, Move,
                       fragment_cost, fragment_moves)
 from .codegen import hfma, matmul32, matmulemu, matmuldpp
 from .exchange_codegen import exchange_op, exchange_ops, matmul_exchange
-from .tiling import (CYCLES, EMULATION, EXCHANGE, Fit, Scheme, boundary,
+from .tiling import (EMULATION, EXCHANGE, Fit, Scheme, boundary,
                      candidates, choose, issues, offers, rank,
                      spare_products)
 from .emitters import fmadpp, fmadpp4, fmadpp8, fmadpp16, fmascalar
@@ -72,7 +72,7 @@ __all__ = [
     'Call', 'Fragment', 'MatrixOp', 'MATRIX_OPS', 'MANTISSA',
     'DEFINED_SPLITS', 'emu_tile_for', 'matmulemu', 'EMULATION',
     'EXCHANGE', 'Scheme', 'Fit', 'exchange_op', 'exchange_ops',
-    'matmul_exchange', 'emu_tiles', 'CYCLES', 'candidates', 'issues',
+    'matmul_exchange', 'emu_tiles', 'candidates', 'issues',
     'rank', 'spare_products',
     'NOT_MODELLED', 'ops_for',
     'MfmaTile', 'DEFINED_TRANSPOSES', 'MFMA_TILES', 'usable_mfma_tiles',

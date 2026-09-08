@@ -686,13 +686,21 @@ GROUPS = {
              'def shuffle_swap(writer, v):\n'
              '    return f"__shfl_xor_sync(0xffffffff, {v}, 1)"\n\n'
              'def tfconvert(writer: Writer, variables):', 1)),
-        ('the shared reservation and the emitter pick different atoms',
-         sub(Path('src/tensorforge/backend/instructions/compute/primitives/nvidia.py'),
-             'def shmsize(stages, dtype):\n    atom = {',
-             'def shmsize(stages, dtype):\n    dtype = Datatype.F32\n    atom = {', 1)),
     ]),
 
     'gate': ('tests/test_nvidia_gate.py', [
+        ('the reservation sized for one candidate instead of all of them',
+         sub(Path('src/tensorforge/backend/instructions/compute/primitives/nvidia.py'),
+             '    return max((size(atom) for atom in instrs_for(dtype)), '
+             'default=0)',
+             '    return size(instrs_for(dtype)[0])', 1)),
+        ('the i8 entries let into the candidates',
+         sub(Path('src/tensorforge/backend/instructions/compute/primitives/nvidia.py'),
+             'EMITTED_MODES = (MMAMode.TF32, MMAMode.DIRECT)',
+             'EMITTED_MODES = (MMAMode.TF32, MMAMode.DIRECT, MMAMode.I8)', 1)),
+        ('the capability floor lifted without an arch reaching here',
+         sub(Path('src/tensorforge/backend/instructions/compute/primitives/nvidia.py'),
+             'BASELINE_SM = 80', 'BASELINE_SM = 90', 1)),
         ('an address goes back to raw text',
          sub(Path('src/tensorforge/backend/instructions/compute/primitives/nvidia.py'),
              "    v = writer.thread_id('x')",

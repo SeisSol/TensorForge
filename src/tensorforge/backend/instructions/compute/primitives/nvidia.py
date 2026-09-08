@@ -2,6 +2,7 @@
 #
 # SPDX-License-Identifier: MIT
 from tensorforge.common.basic_types import Datatype
+from .. import ranking
 from ..strategy import Strategy, whole
 from tensorforge.backend.pir.core import (BOOL, INDEX, Access, Effect, MemSpace,
                                           XorSwizzle,
@@ -63,7 +64,7 @@ class MMAInstr:
     def headers(self):
         return []
 
-    def __init__(self, m, n, k, b, d, name, mode):
+    def __init__(self, m, n, k, b, d, name, mode, sm):
         self.n = n
         self.m = m
         self.k = k
@@ -71,6 +72,12 @@ class MMAInstr:
         self.d = d
         self.name = name
         self.mode = mode
+        #: Compute capability the instruction first appears at, times ten.
+        #: Promoted from the comment each row already carried, and unchecked
+        #: in the way a comment was: nothing here reads the PTX ISA.  It is a
+        #: field so that a selection can refuse an entry the target does not
+        #: have, which a comment cannot do.
+        self.sm = sm
 
     def headers(self):
         return []
@@ -139,16 +146,58 @@ class MMAInstr:
                 self.asmcall(writer, C, A, B, C, uses)
 
 INSTRS = [
-    MMAInstr(16,8,4,1,Datatype.F32,'mma.sync.aligned.m16n8k4.row.col.f32.tf32.tf32.f32', MMAMode.TF32), # SM_80
-    MMAInstr(16,8,8,1,Datatype.F32,'mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32', MMAMode.TF32), # SM_80
-    MMAInstr(8,8,4,1,Datatype.F64,'mma.sync.aligned.m8n8k4.row.col.f64.f64.f64.f64', MMAMode.DIRECT), # SM_80
-    MMAInstr(16,8,4,1,Datatype.F64,'mma.sync.aligned.m16n8k4.row.col.f64.f64.f64.f64', MMAMode.DIRECT), # SM_90
-    MMAInstr(16,8,8,1,Datatype.F64,'mma.sync.aligned.m16n8k8.row.col.f64.f64.f64.f64', MMAMode.DIRECT), # SM_90
-    MMAInstr(16,8,16,1,Datatype.F64,'mma.sync.aligned.m16n8k16.row.col.f64.f64.f64.f64', MMAMode.DIRECT), # SM_90
-    MMAInstr(8,8,16,1,Datatype.F64,'mma.sync.aligned.m8n8k16.row.col.s32.s8.s8.s32', MMAMode.I8), # SM_75
-    MMAInstr(16,8,16,1,Datatype.F64,'mma.sync.aligned.m16n8k16.row.col.s32.s8.s8.s32', MMAMode.I8), # SM_80
-    MMAInstr(16,8,32,1,Datatype.F64,'mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32', MMAMode.I8), # SM_80
+    MMAInstr(16,8,4,1,Datatype.F32,'mma.sync.aligned.m16n8k4.row.col.f32.tf32.tf32.f32', MMAMode.TF32, 80), # SM_80
+    MMAInstr(16,8,8,1,Datatype.F32,'mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32', MMAMode.TF32, 80), # SM_80
+    MMAInstr(8,8,4,1,Datatype.F64,'mma.sync.aligned.m8n8k4.row.col.f64.f64.f64.f64', MMAMode.DIRECT, 80), # SM_80
+    MMAInstr(16,8,4,1,Datatype.F64,'mma.sync.aligned.m16n8k4.row.col.f64.f64.f64.f64', MMAMode.DIRECT, 90), # SM_90
+    MMAInstr(16,8,8,1,Datatype.F64,'mma.sync.aligned.m16n8k8.row.col.f64.f64.f64.f64', MMAMode.DIRECT, 90), # SM_90
+    MMAInstr(16,8,16,1,Datatype.F64,'mma.sync.aligned.m16n8k16.row.col.f64.f64.f64.f64', MMAMode.DIRECT, 90), # SM_90
+    MMAInstr(8,8,16,1,Datatype.F64,'mma.sync.aligned.m8n8k16.row.col.s32.s8.s8.s32', MMAMode.I8, 75), # SM_75
+    MMAInstr(16,8,16,1,Datatype.F64,'mma.sync.aligned.m16n8k16.row.col.s32.s8.s8.s32', MMAMode.I8, 80), # SM_80
+    MMAInstr(16,8,32,1,Datatype.F64,'mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32', MMAMode.I8, 80), # SM_80
 ]
+
+#: The compute capability entries are selected against.
+#:
+#: 80 rather than the target's, because nothing plumbs the target's here:
+#: `shmsize` is asked for a size before a context exists and `matmul` gets one
+#: it does not pass on.  So the baseline is the floor, and the SM_90 F64
+#: entries -- which a count would otherwise prefer, being wider in both m and
+#: k -- stay out of reach until an arch reaches this.
+BASELINE_SM = 80
+
+#: Modes the emitter actually emits.  `generate` converts and issues three
+#: products for TF32 and issues once for DIRECT; its I8 branch is a `pass`, so
+#: those entries would be selected and then emit nothing.
+EMITTED_MODES = (MMAMode.TF32, MMAMode.DIRECT)
+
+
+def instrs_for(dtype, sm=None):
+    """Every entry the emitter could issue for this accumulator, unranked."""
+    sm = BASELINE_SM if sm is None else sm
+    return tuple(op for op in INSTRS
+                 if op.d is dtype and op.mode in EMITTED_MODES
+                 and op.sm <= sm)
+
+
+def instr_for(dtype, columns=0, lead=0, depth=0, sm=None):
+    """The entry that serves this shape with the fewest issues, or `None`.
+
+    One function, asked twice: once by `shmsize` sizing the staging and once
+    by `matmul` issuing.  A size computed for one entry and an issue of
+    another is a buffer nobody fills or an overrun, and two dicts indexing the
+    same list by hand is how the two come to differ.
+    """
+    def extent(op):
+        # The warp holds `m` of the leading dimension and the accumulator `n`
+        # of the output; the contraction is `k`.  A different mapping to the
+        # same three numbers than AMD's, which is why the conversion is here.
+        return (ranking.Extent(columns=op.n, lanes=op.m, depth=op.k,
+                               name=op.name), 1)
+
+    found = ranking.rank(instrs_for(dtype, sm), extent, columns, lead, depth)
+    return found[0] if found else None
+
 
 #: Whether the path is deployed, as opposed to whether it *can* emit for a
 #: given shape -- that second question is `supports()`.  Two different facts,
@@ -183,17 +232,24 @@ def supports(threads, dtype, sparse) -> bool:
 
 
 def shmsize(stages, dtype):
-    atom = {
-        Datatype.F32: INSTRS[1],
-        Datatype.F64: INSTRS[2]
-    }[dtype]
+    """Staging elements to reserve, sized before the entry is chosen.
 
+    Over every candidate rather than over the one `instr_for` would return,
+    because this is asked without the shape that ranking reads: a reservation
+    made for a narrower entry than the one issued is an overrun, and the two
+    cannot be made to agree by ranking twice on different information.  The
+    largest is an upper bound, and the difference between the candidates is
+    one staging tile.
+    """
     threads = 32
-    aregs = (atom.m * atom.k) // threads
-    bregs = (atom.n * atom.k) // threads
-    cregs = (atom.m * atom.n) // threads
 
-    return 32 * max(aregs + bregs, cregs)
+    def size(atom):
+        aregs = (atom.m * atom.k) // threads
+        bregs = (atom.n * atom.k) // threads
+        cregs = (atom.m * atom.n) // threads
+        return 32 * max(aregs + bregs, cregs)
+
+    return max((size(atom) for atom in instrs_for(dtype)), default=0)
 
 def strategies(shape, ctx):
     """What this target can emit for this shape.
@@ -290,12 +346,8 @@ def matmul(writer, ops, ctx, span):
     # for now.
     # TODO for later: split matrix into tiles
     # if too small for matrix tile (or with zero padded), use FMA instead
-    # use different tile sizes if available
-
-    atom = {
-        Datatype.F32: INSTRS[1],
-        Datatype.F64: INSTRS[2]
-    }[dtype]
+    atom = instr_for(dtype, columns=ops.n, lead=ops.lead_elements,
+                     depth=ops.k + ops.kx)
 
     mma = writer.varalloc()
     mmaT = writer.varalloc()

@@ -247,3 +247,54 @@ def test_the_repeated_thread_reads_collapse(enabled):
     assert source.count('threadIdx.x') < 300, (
         f"{source.count('threadIdx.x')} thread-index reads; they are supposed "
         f"to be hash-consed")
+
+
+# -- which instruction, and why that one ----------------------------------- #
+
+def test_the_ranking_reproduces_the_indices_it_replaced():
+    """Two hardcoded dicts indexed the same list by hand, in `shmsize` and in
+    `matmul`.  A size computed for one entry and an issue of another is a
+    buffer nobody fills; the point of one function is that they cannot
+    differ.  That it lands on the same entries is what makes the change
+    inert."""
+    assert nvidia.instr_for(Datatype.F32, 9, 56, 56) is nvidia.INSTRS[1]
+    assert nvidia.instr_for(Datatype.F64, 9, 56, 56) is nvidia.INSTRS[2]
+
+
+def test_the_i8_entries_are_not_candidates():
+    """`generate`'s I8 branch is a `pass`, so an I8 entry would be selected
+    and then emit nothing."""
+    for dtype in (Datatype.F32, Datatype.F64):
+        for op in nvidia.instrs_for(dtype):
+            assert op.mode in nvidia.EMITTED_MODES
+
+
+def test_the_reservation_covers_whichever_entry_is_issued():
+    """`shmsize` is asked without the shape the ranking reads, so it cannot
+    reproduce the choice -- it bounds it instead."""
+    from tensorforge.backend.instructions.compute.primitives import nvidia as n
+    for dtype in (Datatype.F32, Datatype.F64):
+        budget = n.shmsize(1, dtype)
+        for op in n.instrs_for(dtype):
+            aregs = (op.m * op.k) // 32
+            bregs = (op.n * op.k) // 32
+            cregs = (op.m * op.n) // 32
+            assert budget >= 32 * max(aregs + bregs, cregs), op.name
+
+
+def test_the_baseline_keeps_the_sm90_entries_out_of_reach():
+    """A count prefers them -- wider in both m and k -- and nothing plumbs the
+    target's compute capability this far, so the floor is what is selected
+    against until something does."""
+    assert nvidia.BASELINE_SM == 80
+    wide = [op for op in nvidia.INSTRS if op.d is Datatype.F64 and op.sm > 80]
+    assert wide, 'the table carries SM_90 F64 entries'
+    assert not set(wide) & set(nvidia.instrs_for(Datatype.F64))
+    # And they come into reach the moment one is passed.
+    assert nvidia.instr_for(Datatype.F64, 9, 56, 56, sm=90) in wide
+
+
+def test_every_entry_states_the_capability_it_needs():
+    """It was a comment on each row, which a selection cannot read."""
+    for op in nvidia.INSTRS:
+        assert op.sm in (75, 80, 90), op.name
