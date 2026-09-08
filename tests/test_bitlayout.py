@@ -226,3 +226,87 @@ def test_a_disagreement_would_be_seen():
     good = layouts.fragment_layout(op, 'A')
     assert any(shifted.locate(b, m, 0) != good.locate(b, m, 0)
                for b in range(op.blocks) for m in range(op.m))
+
+
+# -- the first piece of a solver ------------------------------------------- #
+
+def _nest_register(op):
+    """The nest's own register for one output column: lane `l` holds lead
+    element `l`, and nothing varies with the column."""
+    return BitLayout((
+        tuple(Bit(Place.LANE, op.n << b)
+              for b in range((op.blocks - 1).bit_length())),
+        (),
+        tuple(Bit(Place.LANE, 1 << b)
+              for b in range((op.n - 1).bit_length())),
+    ))
+
+
+def _accumulator_cases():
+    from tensorforge.backend.instructions.compute.primitives.amd import reorder
+    for op in MATRIX_OPS:
+        span = op.n * op.blocks
+        if op.wave % span or layouts.fragment_layout(op, 'D') is None:
+            continue
+        if any(reorder.accumulator_gathers(op, c) is None
+               for c in range(op.m)):
+            continue
+        yield op.builtin
+
+
+@pytest.mark.parametrize('name', sorted(set(_accumulator_cases())))
+def test_the_solver_finds_the_swaps_the_plan_states(name):
+    """`accumulator_gathers` computes the epilogue by hand: for each region it
+    checks that one XOR carries every lane and turns it into a `swap`
+    sequence.  Written against two layouts that is one question -- where does
+    each element sit, where does it have to sit -- and the answer has to be
+    the same, or the vocabulary describes something other than what is
+    emitted.
+
+    Every region of every column of every entry whose accumulator has a plan.
+    """
+    from tensorforge.backend.instructions.compute.primitives.amd import reorder
+    op = next(o for o in MATRIX_OPS if o.builtin == name)
+    span = op.n * op.blocks
+    fragment = layouts.fragment_layout(op, 'D')
+    have = _nest_register(op)
+    checked = 0
+    for column in range(op.m):
+        stated = {(g.group, g.slot): g.swaps
+                  for g in reorder.accumulator_gathers(op, column)}
+        indices = [(b, column, i)
+                   for b in range(op.blocks) for i in range(op.n)]
+        for group in range(op.wave // span):
+            found = bitlayout.moves(have, fragment, indices,
+                                    base=Position(lane=group * span))
+            assert found is not None, (name, column, group)
+            for move in found:
+                assert stated[(group, move.target)] == reorder._swaps_for(
+                    move.xor), (name, column, group, move)
+                checked += 1
+    assert checked
+
+
+def test_a_region_needing_two_toggles_is_refused():
+    """Not a limitation to route around: where two elements sharing a pair of
+    slots need different toggles, no sequence of reads serves the region, and
+    a plan that pretended otherwise would write some of them from the wrong
+    lane."""
+    have = BitLayout(((Bit(Place.LANE, 1), Bit(Place.LANE, 2)),))
+    want = BitLayout(((Bit(Place.LANE, 2), Bit(Place.LANE, 1)),))
+    assert bitlayout.moves(have, want, [(i,) for i in range(4)]) is None
+
+
+def test_an_identical_distribution_moves_by_nothing():
+    layout = BitLayout(((Bit(Place.LANE, 1), Bit(Place.SLOT, 1)),))
+    found = bitlayout.moves(layout, layout, [(i,) for i in range(4)])
+    assert found is not None
+    assert all(move.xor == 0 for move in found)
+
+
+def test_a_vector_element_is_out_of_this_family_s_reach():
+    """A lane toggle does not reach inside a register, so a packed operand
+    needs its element bits accounted for before this is the right question."""
+    packed = BitLayout(((Bit(Place.VECTOR, 1),),))
+    plain = BitLayout(((Bit(Place.LANE, 1),),))
+    assert bitlayout.moves(packed, plain, [(0,), (1,)]) is None

@@ -401,6 +401,18 @@ GROUPS = {
     ]),
 
     'bitlayout': ('tests/test_bitlayout.py', [
+        ('a region with two toggles accepted as one',
+         sub(Path('src/tensorforge/backend/instructions/compute/bitlayout.py'),
+             '        if len(toggles) != 1:\n            return None',
+             '        if False:\n            return None')),
+        ('the regions keyed by the target slot alone',
+         sub(Path('src/tensorforge/backend/instructions/compute/bitlayout.py'),
+             '        regions.setdefault((here.slot, there.slot), []).append(',
+             '        regions.setdefault((0, there.slot), []).append(')),
+        ('the group offset dropped from the source',
+         sub(Path('src/tensorforge/backend/instructions/compute/bitlayout.py'),
+             '        here, there = base + have.locate(*index), want.locate(*index)',
+             '        here, there = have.locate(*index), want.locate(*index)')),
         ('a slot weight read as a lane weight',
          sub(Path('src/tensorforge/backend/instructions/compute/bitlayout.py'),
              'Bit(Place.LANE if weight > 0 else Place.SLOT, abs(weight))',

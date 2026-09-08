@@ -191,3 +191,67 @@ def from_register_layout(layout, extents: Sequence[int]) -> Optional[BitLayout]:
             return None
         axes.append(bits)
     return BitLayout(tuple(axes))
+
+
+@dataclass(frozen=True)
+class Move:
+    """One region of a value that reaches its destination by a single XOR.
+
+    `source` and `target` are register slots and `xor` is what the lane id has
+    to be toggled by for every element of the region at once.  A region is
+    exactly as large as one constant reaches: where two elements sharing a
+    pair of slots need different toggles they are not one move, and a plan
+    that pretended otherwise would write some of them from the wrong lane.
+    """
+
+    source: int
+    target: int
+    xor: int
+    lanes: Tuple[int, ...]
+
+
+def moves(have: BitLayout, want: BitLayout, indices,
+          base: Position = Position()) -> Optional[Tuple[Move, ...]]:
+    """How to get from one distribution to the other, or `None`.
+
+    The `swap` family does not permute bits: `swap<B>` reads the lane `B` away,
+    so it moves where a copy is read from and leaves the bit structure alone.
+    What it can serve is therefore exactly this -- a constant XOR over a
+    region -- and what it cannot is a layout that needs a bit moved between a
+    lane and a slot, which is a transpose and `relayout.find_relayout`'s
+    business.
+
+    `base` is a constant added to the source, which is what a caller holding
+    one of several groups of a wave contributes: the group index is an offset
+    on the lane and not a bit of any index the two layouts share, so it cannot
+    be an axis of either.
+
+    `None` where some pair of slots needs more than one toggle.  Not a
+    limitation to route around: that is the case where no sequence of reads
+    serves the whole region, and the honest answer is that this family does
+    not reach it.
+
+    The caller enumerates `indices` because only it knows the extents and,
+    for a fragment, which of its indices corresponds to which axis of the
+    value -- there is no correspondence that is right for both operands.
+    """
+    if len(have.axes) != len(want.axes):
+        return None
+    regions = {}
+    for index in indices:
+        here, there = base + have.locate(*index), want.locate(*index)
+        if here.element or there.element:
+            # A vector element is neither a lane nor a slot, so no lane toggle
+            # reaches it; a packed operand needs the element bits accounted
+            # for before this question is even the right one.
+            return None
+        regions.setdefault((here.slot, there.slot), []).append(
+            (here.lane, there.lane))
+    out = []
+    for (source, target), pairs in sorted(regions.items()):
+        toggles = {here ^ there for here, there in pairs}
+        if len(toggles) != 1:
+            return None
+        out.append(Move(source, target, toggles.pop(),
+                        tuple(sorted({there for _, there in pairs}))))
+    return tuple(out)
