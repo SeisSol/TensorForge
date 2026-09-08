@@ -18,7 +18,6 @@ class Options:
                wrap_distance=1,
                preload_globals=None,
                wide_bodies=True,
-               wide_bodies=True,
                merge_variants=False,
                merge_min_count=3,
                merge_max_arity=None):
