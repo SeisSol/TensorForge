@@ -157,19 +157,70 @@ INSTRS = [
     MMAInstr(16,8,32,1,Datatype.F64,'mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32', MMAMode.I8, 80), # SM_80
 ]
 
-#: The compute capability entries are selected against.
+#: The compute capability to select against when the caller has no target.
 #:
-#: 80 rather than the target's, because nothing plumbs the target's here:
-#: `shmsize` is asked for a size before a context exists and `matmul` gets one
-#: it does not pass on.  So the baseline is the floor, and the SM_90 F64
-#: entries -- which a count would otherwise prefer, being wider in both m and
-#: k -- stay out of reach until an arch reaches this.
-BASELINE_SM = 80
+#: It used to be 80 because nothing plumbed the target's: `shmsize` was asked
+#: for a size before a context existed and `matmul` was handed one it did not
+#: pass on, so every arch from sm_60 to sm_120 got the same sm_80 table.  Both
+#: now take an `sm`, derived from the context by `sm_of`, and this is what is
+#: left: the floor for a caller that genuinely has no target to name.
+#:
+#: 75 rather than 80 because that is where `mma.sync` first exists at all, and
+#: because being the *floor* it should exclude rather than include.  Every F32
+#: entry here is sm_80, so a caller with no context now selects nothing for
+#: F32 and falls through to the generic nest -- which is the safe direction.
+#: At 80 it would instead have emitted sm_80 PTX for a target that may not run
+#: it.
+BASELINE_SM = 75
+
+
+def sm_of(ctx) -> int:
+    """The target's compute capability times ten, or the floor.
+
+    `hw_descr().model` is the arch string the context was built with
+    (`'sm_120'`).  Anything that does not parse as one -- a non-NVIDIA model
+    reaching here, or a name shape this does not know -- yields the floor
+    rather than a guess, so an unrecognised target declines instructions
+    instead of being credited with them.
+    """
+    try:
+        model = str(ctx.get_vm().get_hw_descr().model)
+    except AttributeError:
+        return BASELINE_SM
+    if not model.startswith('sm_'):
+        return BASELINE_SM
+    digits = ''.join(c for c in model[3:] if c.isdigit())
+    return int(digits) if digits else BASELINE_SM
 
 #: Modes the emitter actually emits.  `generate` converts and issues three
 #: products for TF32 and issues once for DIRECT; its I8 branch is a `pass`, so
 #: those entries would be selected and then emit nothing.
 EMITTED_MODES = (MMAMode.TF32, MMAMode.DIRECT)
+
+
+def accumulator_slots(atom):
+    """`(slot, offset)` for every accumulator register one lane holds.
+
+    The D fragment's shape, and the only place it is written down.  Every row
+    in `INSTRS` has `n == 8` and holds D as `m / 8` row groups of two adjacent
+    columns: lane `t` owns rows `t / 4 + 8 * g` and columns `2 * (t % 4) + e`.
+    Since `(t / 4) * n + 2 * (t % 4)` is `2 * t` for `n == 8`, the lane's whole
+    contribution to the address is `2 * t`, which the caller adds; what is left
+    is the constant offset per slot, and `slot` is `2 * g + e` because that is
+    the order the PTX operand list is in.
+
+    Extracted from the epilogue rather than left inline because inline it was
+    three constants -- `nregs * 2`, `mregs` and a literal 64 -- that happen to
+    describe `m16n8k8` and nothing else in the table.  `m8n8k4.f64` has
+    `mregs == 1`, so the loop dropped `e == 1` and wrote the other slot 64
+    elements past the end of a 64-element tile.  That returned NaN, silently,
+    and nothing could see it: the emitter was the only statement of the layout,
+    so there was nothing to check it against.  `tests/test_nvidia_gate.py` now
+    checks it against the read-back that follows it.
+    """
+    return tuple((2 * g + e, e + g * 8 * atom.n)
+                 for g in range(atom.m // 8)
+                 for e in range(2))
 
 
 def instrs_for(dtype, sm=None):
@@ -237,7 +288,7 @@ def supports(threads, dtype, sparse) -> bool:
     return threads == 32 and dtype in (Datatype.F32, Datatype.F64) and not sparse
 
 
-def shmsize(stages, dtype):
+def shmsize(stages, dtype, sm=None):
     """Staging elements to reserve, sized before the entry is chosen.
 
     Over every candidate rather than over the one `instr_for` would return,
@@ -246,6 +297,12 @@ def shmsize(stages, dtype):
     cannot be made to agree by ranking twice on different information.  The
     largest is an upper bound, and the difference between the candidates is
     one staging tile.
+
+    `sm` has to be the same one `matmul` will select with.  It is the reason
+    `scratch` takes a context: sizing over the sm_75 table and then issuing
+    from the sm_120 one reserves a buffer for the narrowest entry and writes
+    the widest into it, which is the overrun this docstring already warned
+    about -- reached through the arch rather than through the shape.
     """
     threads = 32
 
@@ -255,7 +312,7 @@ def shmsize(stages, dtype):
         cregs = (atom.m * atom.n) // threads
         return 32 * max(aregs + bregs, cregs)
 
-    return max((size(atom) for atom in instrs_for(dtype)), default=0)
+    return max((size(atom) for atom in instrs_for(dtype, sm)), default=0)
 
 def strategies(shape, ctx):
     """What this target can emit for this shape.
@@ -265,19 +322,24 @@ def strategies(shape, ctx):
     is what keeps a shape this cannot serve falling through to the nest
     instead of reaching an assertion inside the emitter.
     """
-    if ENABLED and supports(shape.threads, shape.accumulator, shape.sparse):
+    if (ENABLED
+            and supports(shape.threads, shape.accumulator, shape.sparse)
+            and instrs_for(shape.accumulator, sm_of(ctx))):
         return frozenset({Strategy.MATRIX})
     return frozenset()
 
 
-def scratch(strategy, accumulator):
+def scratch(strategy, accumulator, ctx):
     """One set of staging tiles, sized off the same atom the emitter picks.
 
-    Asked before generation, so it cannot depend on anything the body decides.
+    Asked before generation, so it cannot depend on anything the body decides
+    -- but it may depend on the target, and it has to: the entry `matmul`
+    issues is selected against the context's compute capability, so a size
+    computed without it is a size for a different instruction.
     """
     if strategy is not Strategy.MATRIX:
         return 0
-    return shmsize(1, accumulator)
+    return shmsize(1, accumulator, sm_of(ctx))
 
 
 def plan(strategy, shape, n, ctx):
@@ -353,7 +415,7 @@ def matmul(writer, ops, ctx, span):
     # TODO for later: split matrix into tiles
     # if too small for matrix tile (or with zero padded), use FMA instead
     atom = instr_for(dtype, columns=ops.n, lead=ops.lead_elements,
-                     depth=ops.k + ops.kx)
+                     depth=ops.k + ops.kx, sm=sm_of(ctx))
 
     mma = writer.varalloc()
     mmaT = writer.varalloc()
@@ -556,10 +618,12 @@ def matmul(writer, ops, ctx, span):
 
                     for ii in range(0, threads, atom.m):
                         with writer.AnonymousScope():
-                            for jj in range(0, nregs * 2):
-                                for iii in range(0, mregs):
-                                    writer.store(Cshm, Cvals[iii + mregs * jj][ii // atom.m],
-                                        _index(writer, scale=2, add=iii + jj * 64))
+                            # The lane's own term is `2 * t`; the rest is the
+                            # instruction's fragment shape, which
+                            # `accumulator_slots` states and a test checks.
+                            for slot, off in accumulator_slots(atom):
+                                writer.store(Cshm, Cvals[slot][ii // atom.m],
+                                             _index(writer, scale=2, add=off))
 
                             writer.barrier(Uniformity.MULT)
                             with threadrange(ii, atom.m):

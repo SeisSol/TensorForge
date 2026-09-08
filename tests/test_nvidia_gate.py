@@ -35,6 +35,7 @@ import pytest
 
 from tensorforge.backend.instructions.compute.primitives import nvidia
 from tensorforge.common.basic_types import Datatype
+from tensorforge.common.context import Context
 
 ATOM_TYPE = Datatype.F32
 
@@ -257,41 +258,145 @@ def test_the_ranking_reproduces_the_indices_it_replaced():
     buffer nobody fills; the point of one function is that they cannot
     differ.  That it lands on the same entries is what makes the change
     inert."""
-    assert nvidia.instr_for(Datatype.F32, 9, 56, 56) is nvidia.INSTRS[1]
-    assert nvidia.instr_for(Datatype.F64, 9, 56, 56) is nvidia.INSTRS[2]
+    assert nvidia.instr_for(Datatype.F32, 9, 56, 56, sm=80) is nvidia.INSTRS[1]
+    assert nvidia.instr_for(Datatype.F64, 9, 56, 56, sm=80) is nvidia.INSTRS[2]
 
 
 def test_the_i8_entries_are_not_candidates():
     """`generate`'s I8 branch is a `pass`, so an I8 entry would be selected
-    and then emit nothing."""
+    and then emit nothing.
+
+    Asked at the widest capability in the table rather than at the baseline:
+    the baseline is a floor that excludes, so `instrs_for` returns nothing
+    there and the loop below would pass by never running -- which is the
+    trivially-true property `tools/mutation_check.py` exists to catch.
+    """
     for dtype in (Datatype.F32, Datatype.F64):
-        for op in nvidia.instrs_for(dtype):
+        candidates = nvidia.instrs_for(dtype, sm=90)
+        assert candidates, dtype
+        for op in candidates:
             assert op.mode in nvidia.EMITTED_MODES
 
 
-def test_the_reservation_covers_whichever_entry_is_issued():
+@pytest.mark.parametrize("sm", [80, 90, 120])
+def test_the_reservation_covers_whichever_entry_is_issued(sm):
     """`shmsize` is asked without the shape the ranking reads, so it cannot
-    reproduce the choice -- it bounds it instead."""
+    reproduce the choice -- it bounds it instead.
+
+    Now asked per capability, because the capability is what makes the bound
+    load-bearing: the sm_90 F64 entries are wider than the sm_80 one, so a
+    reservation sized against one table and an issue out of another is the
+    overrun this bounds -- reached through the arch rather than through the
+    shape.  `scratch` passes the context's, which is why it takes one.
+    """
     from tensorforge.backend.instructions.compute.primitives import nvidia as n
     for dtype in (Datatype.F32, Datatype.F64):
-        budget = n.shmsize(1, dtype)
-        for op in n.instrs_for(dtype):
+        budget = n.shmsize(1, dtype, sm=sm)
+        for op in n.instrs_for(dtype, sm=sm):
             aregs = (op.m * op.k) // 32
             bregs = (op.n * op.k) // 32
             cregs = (op.m * op.n) // 32
             assert budget >= 32 * max(aregs + bregs, cregs), op.name
 
 
-def test_the_baseline_keeps_the_sm90_entries_out_of_reach():
-    """A count prefers them -- wider in both m and k -- and nothing plumbs the
-    target's compute capability this far, so the floor is what is selected
-    against until something does."""
-    assert nvidia.BASELINE_SM == 80
+def test_the_baseline_excludes_rather_than_guesses():
+    """The floor for a caller with no target, and it is set to exclude.
+
+    This test used to assert the opposite fact: that the baseline was 80 and
+    that the SM_90 F64 entries stayed out of reach "until something plumbs the
+    target's compute capability".  Something does now -- `sm_of` reads it off
+    the context and `matmul`, `strategies` and `scratch` all pass it -- so what
+    is left for the baseline is the case where there is no context at all.
+
+    75 rather than 80 for that case, because a floor should refuse.  Every F32
+    entry in the table is sm_80, so a caller with no target now selects nothing
+    and falls through to the generic nest, instead of being handed sm_80 PTX
+    for a target that may not run it.
+    """
+    assert nvidia.BASELINE_SM == 75
+    assert nvidia.instrs_for(Datatype.F32) == ()
+    assert nvidia.instrs_for(Datatype.F64) == ()
+
+
+def test_the_context_is_what_brings_an_entry_into_reach():
+    """`sm_of` is the plumbing, and this is what it buys.
+
+    The SM_90 F64 entries are wider in both m and k, so a ranking prefers them
+    -- and before the context reached this far they were unreachable on every
+    target, sm_120 included.
+    """
     wide = [op for op in nvidia.INSTRS if op.d is Datatype.F64 and op.sm > 80]
     assert wide, 'the table carries SM_90 F64 entries'
-    assert not set(wide) & set(nvidia.instrs_for(Datatype.F64))
-    # And they come into reach the moment one is passed.
+
+    assert not set(wide) & set(nvidia.instrs_for(Datatype.F64, sm=80))
+    assert set(wide) & set(nvidia.instrs_for(Datatype.F64, sm=90))
     assert nvidia.instr_for(Datatype.F64, 9, 56, 56, sm=90) in wide
+
+    ctx = Context(arch='sm_120', backend='cuda', fp_type=Datatype.F32)
+    assert nvidia.sm_of(ctx) == 120
+    assert nvidia.instr_for(Datatype.F64, 9, 56, 56,
+                            sm=nvidia.sm_of(ctx)) in wide
+
+
+def test_an_unreadable_target_falls_to_the_floor():
+    """A model this cannot parse yields the floor, not a guess.
+
+    The failure mode it forecloses: crediting an unrecognised target with
+    instructions it may not have.  `None` reaches here from the tests that
+    call `strategies` without a context.
+    """
+    assert nvidia.sm_of(None) == nvidia.BASELINE_SM
+
+    class _NoModel:
+        def get_vm(self):
+            raise AttributeError
+    assert nvidia.sm_of(_NoModel()) == nvidia.BASELINE_SM
+
+
+@pytest.mark.parametrize(
+    "atom", [op for op in nvidia.INSTRS if op.mode in nvidia.EMITTED_MODES],
+    ids=lambda op: op.name.split('.aligned.')[1])
+def test_the_accumulator_epilogue_lands_every_slot_exactly_once(atom):
+    """The epilogue's store and its read-back have to be inverses.
+
+    They are written apart -- 32 lanes each store `cregs` registers into a
+    shared tile, a barrier, then each lane reads a row of it back -- so nothing
+    in the source makes them agree.  What has to hold is that the stores land
+    on the `m x n` tile exactly once and that the read-back names the same
+    cells; a store that misses one leaves the caller's previous value there,
+    and a store that leaves the tile corrupts whatever follows it.
+
+    This is the check the F64 path did not have.  `m8n8k4.f64` stored one of
+    its two slots at `2 * t + 64` in a tile of 64 elements and never stored the
+    other: out of bounds and short by half, and the only symptom anywhere was
+    NaN out of a device run with the deployment switch flipped.
+    """
+    threads = 32
+    cregs = (atom.m * atom.n) // threads
+    slots = nvidia.accumulator_slots(atom)
+
+    assert len(slots) == cregs, (
+        f"{len(slots)} slots for {cregs} accumulator registers")
+    assert sorted(s for s, _ in slots) == list(range(cregs)), (
+        "the slots have to be the operand list's own indices")
+
+    written = {}
+    for lane in range(threads):
+        for slot, off in slots:
+            idx = 2 * lane + off
+            assert 0 <= idx < cregs * threads, (
+                f"lane {lane} slot {slot} writes {idx} into a tile of "
+                f"{cregs * threads}")
+            assert idx not in written, (
+                f"lane {lane} slot {slot} overwrites {written[idx]} at {idx}")
+            written[idx] = (lane, slot)
+
+    # The read-back: `(t % m) * n + jj`, guarded to the lanes of one m-tile.
+    read = {(lane % atom.m) * atom.n + jj
+            for lane in range(threads) for jj in range(atom.n)}
+    assert read == set(written), (
+        "the epilogue reads cells the stores never wrote, or the other way "
+        f"round: {sorted(read ^ set(written))[:8]}")
 
 
 def test_every_entry_states_the_capability_it_needs():

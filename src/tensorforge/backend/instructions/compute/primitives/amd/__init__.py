@@ -129,8 +129,12 @@ def strategies(shape, ctx):
     return frozenset(offered)
 
 
-def scratch(strategy, accumulator):
-    """Nothing: both arrangements here keep their operands in registers."""
+def scratch(strategy, accumulator, ctx):
+    """Nothing: both arrangements here keep their operands in registers.
+
+    `ctx` is unused and is part of the signature anyway: the NVIDIA answer
+    depends on the target, so the interface has to be able to carry one.
+    """
     return 0
 
 

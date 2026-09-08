@@ -937,5 +937,6 @@ class MultilinearInstruction(ComputeInstruction):
         module = _vendor_module(self._context)
         # The most any one span needs, not the sum: the spans run in sequence
         # and nothing an arrangement stages outlives the columns it computed.
-        return max(module.scratch(span.strategy, self._idest.get_fptype())
+        return max(module.scratch(span.strategy, self._idest.get_fptype(),
+                                  self._context)
                    for span in plan)
