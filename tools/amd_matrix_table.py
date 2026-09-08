@@ -101,8 +101,20 @@ def feature_map(features_td, processors_td):
 
 
 #: tablegen record name -> the string the builtin definitions use.  Only the
-#: ones a matrix builtin is gated on; anything else is dropped.
+#: ones a matrix or atomic builtin is gated on, plus the two that decide
+#: whether an atomic needs an assurance from the caller; anything else is
+#: dropped.
 FEATURE_NAMES = {
+    'FeatureAtomicFaddRtnInsts': 'atomic-fadd-rtn-insts',
+    'FeatureAtomicFaddNoRtnInsts': 'atomic-fadd-no-rtn-insts',
+    'FeatureFlatBufferGlobalAtomicFaddF64Inst':
+        'flat-buffer-global-fadd-f64-inst',
+    'FeatureLdsAtomicAddF64': 'lds-atomic-add-f64',
+    'FeatureAtomicGlobalPkAddBF16Inst': 'atomic-global-pk-add-bf16-inst',
+    'FeatureMemoryAtomicFAddF32DenormalSupport':
+        'memory-atomic-fadd-f32-denormal-support',
+    'FeatureAgentScopeFineGrainedRemoteMemoryAtomics':
+        'agent-scope-fine-grained-remote-memory-atomics',
     'FeatureMAIInsts': 'mai-insts',
     'FeatureGFX90AInsts': 'gfx90a-insts',
     'FeatureGFX940Insts': 'gfx940-insts',
@@ -205,7 +217,7 @@ def main():
     }
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(table, indent=1) + '\n')
+    out.write_text(json.dumps(table, indent=2) + '\n')
     print(f'{out}: {len(table["builtins"])} builtins, '
           f'{len(table["features"])} features')
 
