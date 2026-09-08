@@ -577,10 +577,28 @@ class MultilinearInstruction(ComputeInstruction):
         The same expression decides three things -- which accessor `B` gets,
         whether `matmul` declines, and whether shared memory is reserved --
         so it is written once.
+
+        It used to carry a second clause, `data_view.shape[0] < 16`, and that
+        clause was the reason a register-resident operand could be *written*
+        under one element-to-lane map and *read* under another.  The flat fill
+        `GlbToRegLoader` emits puts storage element `f` on lane `f % T`, slot
+        `f // T`; ordinary addressing puts element `(i0, i1)` on lane `i0 % T`,
+        slot `i0 // T + i1 * ceil(e0 / T)`.  Those are the same map only when
+        `e0 % T == 0`.  The writer chose between them on where the operand's
+        lane axis sits (`multilinear_builder.py:_make_load_op`), this chose on
+        a size against a constant, and nothing made the two agree -- so a plain
+        `C = A @ B` with `K = 20` over 16 lanes read six output columns out of
+        register slots nobody had written, and got exact zeros.
+
+        Now both sides ask this one question, and `is_dense` is the whole of
+        it: the flat fill is for the operands stored compressed, which are
+        exactly the ones whose cells have no dimension-wise addresses to begin
+        with.  Keeping the two in step is what the predicate is for; which
+        vector width either map is walked at is a separate question and stays
+        open to both.
         """
         obj = self._ops[1].symbol.obj
-        return bool(obj) and (not obj.is_dense()
-                              or self._ops[1].symbol.data_view.shape[0] < 16)
+        return bool(obj) and not obj.is_dense()
 
     def _output_extent(self) -> int:
         """Columns the second index spans, flattened.

@@ -348,12 +348,23 @@ def emit(generator, backend: str, default_batch: int) -> str:
         # Batch-constant (Addressing.NONE) operands share one storage
         # block across all batch elements — see ptr_manip.py:67-71 where
         # the kernel-side pointer skips the ``batchId * volume`` term.
-        # The driver therefore allocates a single ``volume`` worth of
-        # bytes, independent of the batch size.
+        # The driver therefore allocates a single element's worth of bytes,
+        # independent of the batch size.
+        #
+        # `storage_volume` and not `volume`, which is the same distinction
+        # `driver_bench.py` already draws and for the same reason: the batch
+        # stride the kernel indexes with is `Tensor.storage_volume()`, the
+        # *compressed* count for a masked tensor, while `volume` is the dense
+        # one.  `runner.py` writes the input file compressed too (it packs
+        # through `pack_index`), so sizing the read at the dense volume asks
+        # `read_bin` for more bytes than the file holds and the driver dies
+        # with exit(2) before the kernel is ever launched.  That is why every
+        # sparse case failed here while its generated code was correct.
+        per_element = op.storage_volume or op.volume
         if op.addressing == "none":
-            total_expr = f"(size_t){op.volume}u * {elem_bytes}"
+            total_expr = f"(size_t){per_element}u * {elem_bytes}"
         else:
-            total_expr = f"(size_t){op.volume}u * batch * {elem_bytes}"
+            total_expr = f"(size_t){per_element}u * batch * {elem_bytes}"
 
         allocs_host.append(
             f"    void* h_{op.kernel_name} = std::malloc({total_expr});\n"

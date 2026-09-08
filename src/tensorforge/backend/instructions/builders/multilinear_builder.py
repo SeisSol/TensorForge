@@ -154,11 +154,26 @@ class MultilinearBuilder(OperationBuilder):
         placement = Placement.SHARED
 
     # The linearized load packs the operand flat --- storage element `f` goes
-    # to lane `f % T`, slot `f // T` --- which can only ever make the *first*
-    # dimension the lane axis.  With the lane axis elsewhere the flat packing
-    # and the per-dimension addressing describe different images, so take the
-    # dimension-wise loader instead; it is correct for any lane axis.
-    linearize = lane_axis_needs_moving and lead_pos == 0
+    # to lane `f % T`, slot `f // T`.  With the lane axis elsewhere the flat
+    # packing and the per-dimension addressing describe different images, so
+    # take the dimension-wise loader instead; it is correct for any lane axis.
+    #
+    # `is_dense` is the other half, and it is the half that was missing.  The
+    # comment here used to claim flat packing "can only ever make the first
+    # dimension the lane axis"; that holds only when the first extent is a
+    # multiple of the lane count.  At 16 elements over 32 lanes it is false,
+    # and the reader --- `MultilinearInstruction._second_operand_is_sparse`,
+    # which picks the accessor --- was deciding the same question separately
+    # and on other grounds.  Two answers to one question is what produced
+    # register slots nobody wrote.
+    #
+    # So the flat fill is now for compressed operands and no others: their
+    # cells have no dimension-wise address in the first place, which is why
+    # the flat map is the right one there and the only one there.  Both sides
+    # read the same predicate.  Note this says *which map*, not how wide it is
+    # walked -- a vectorised fill stays available under either.
+    dense = symbol.obj is None or symbol.obj.is_dense()
+    linearize = lane_axis_needs_moving and lead_pos == 0 and not dense
 
     if name in self._residency and self._resolve_reuse(i, name):
       entry = self._residency.get(name)

@@ -45,7 +45,3 @@ def descr_list():
                       a=_t([M, K], "A"), b=_t([K, N], "B"),
                       c=_t([M, N], "D"),
                       alpha=1.0, beta=0.0)]
-
-
-def reference(a, b):
-    return a @ b
