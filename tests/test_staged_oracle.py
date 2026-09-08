@@ -47,7 +47,7 @@ CASES = pathlib.Path(__file__).parent / 'cases'
 #: `widths_for` needs before it will pick anything but scalar.  Every other
 #: case in the corpus leaves `Tensor.alignment` at 0 -- unknown -- so the
 #: staged path they exercise is the narrow one.
-STAGED = ['aligned_operands']
+STAGED = ['aligned_operands', 'wide_cascade', 'wide_cascade_tail']
 
 
 def _build(name):
@@ -182,3 +182,34 @@ def test_no_lane_reads_past_its_operand(name):
         assert touched, f'{base} was never touched'
         assert max(touched) < size, (
             f'{base}: read index {max(touched)} of an operand holding {size}')
+
+# --------------------------------------------------------------------------- #
+# The corpus reaches the widths at all
+# --------------------------------------------------------------------------- #
+
+def test_the_corpus_exercises_every_copy_width():
+    """Stated as a property, because it silently stopped being true once.
+
+    `alignment` defaults to 0 and 0 is *unknown*, which `widths_for` turns
+    into scalar.  With `aligned_operands` alone the corpus reached one width
+    and one hop count: 128 elements over 16 lanes is two hops of four and
+    nothing else, so the cascade below four was unreachable and the code for
+    it was as good as absent from every snapshot diff.
+    """
+    seen = set()
+    for name in STAGED:
+        _, src, _ = _build(name)
+        seen |= {int(w) for w in
+                 re.findall(r'__pipeline_memcpy_async\([^;]*?,\s*(\d+)\)', src)}
+    assert {4, 8, 16} <= seen, f'widths reached: {sorted(seen)}'
+
+
+def test_a_cascade_case_drops_lanes_in_its_tail():
+    """The width decision and the lane predicate, on one transfer.
+
+    Separately each is simple.  Together they are where an offset counted in
+    elements per lane meets a bound counted in elements, and no kernel in the
+    corpus had both happen to the same transfer.
+    """
+    _, src, _ = _build('wide_cascade_tail')
+    assert re.search(r'if \(threadIdx\.x < \d+\)', src)
