@@ -807,3 +807,39 @@ def test_spmd_puts_the_same_element_in_a_different_thread():
         return element % lanes
 
     assert thread_of(20, 32) != thread_of(20, 16)
+
+
+# --------------------------------------------------------------------------
+# what a vector width costs to issue
+# --------------------------------------------------------------------------
+
+def test_only_powers_of_two_are_one_issue():
+    """`Exec_size` is a three-bit field: 1, 2, 4, 8, 16, 32 and nothing else.
+
+    So an operation on a 24-wide vector is issued as 16 + 8 -- two
+    instructions -- while the same 24 channels of a 32-wide one are a single
+    issue with eight masked off, the mask being bits [7..4] of the same field
+    and therefore free.  See `documentation/visa/instructions/MOV.md`.
+    """
+    from tensorforge.backend.symbol import LeadLoop
+    for width in LeadLoop.EXEC_SIZES:
+        assert LeadLoop.issues(width) == 1
+    for width in (3, 6, 9, 12, 20, 24):
+        assert LeadLoop.issues(width) == 2
+
+
+def test_the_narrowed_widths_are_the_expensive_ones():
+    """Which is the tension `_narrow` sits in.
+
+    Replacing a guard with a shorter vector is right for *correctness* -- a
+    `simd_mask` is not a branch condition, and the store would have been
+    predicated on one.  It is not automatically right for cost: 360 of the
+    706 narrowings on the corpus land on a length the hardware cannot issue
+    in one go, and the largest bucket is 24, which is two issues where a
+    masked 32 would be one.
+    """
+    from tensorforge.backend.symbol import LeadLoop
+    # the widths `_narrow` actually chooses, and what they cost
+    assert LeadLoop.issues(24) == 2 and LeadLoop.issues(32) == 1
+    assert LeadLoop.issues(12) == 2 and LeadLoop.issues(16) == 1
+    assert LeadLoop.issues(9) == 2 and LeadLoop.issues(16) == 1

@@ -703,6 +703,26 @@ class LeadLoop:
     """
     return writer.lane_index(self.threads, self.stride, hint='lead')
 
+  #: Execution sizes the hardware encodes, largest first.
+  #:
+  #: `Exec_size` is a three-bit field: 1, 2, 4, 8, 16, 32 and nothing else
+  #: (`documentation/visa/instructions/MOV.md`).  An operation on a vector of
+  #: any other length is issued as several -- a 24-wide one as 16 + 8 -- while
+  #: the same 24 channels of a 32-wide instruction are one issue with the
+  #: other eight masked off, the mask being bits [7..4] of the same field and
+  #: therefore free.
+  EXEC_SIZES = (32, 16, 8, 4, 2, 1)
+
+  @classmethod
+  def issues(cls, width: int) -> int:
+    """How many instructions an operation on `width` elements is issued as."""
+    count, left = 0, width
+    for size in cls.EXEC_SIZES:
+      while left >= size:
+        count += 1
+        left -= size
+    return count
+
   def _narrow_possible(self, writer) -> bool:
     """Whether this lowering can replace a guard with a narrower vector."""
     return bool(getattr(writer, '_explicit_simd', lambda: False)())
