@@ -26,6 +26,7 @@ from tensorforge.backend.instructions.builders.pointwise_builders import (
     ElementwiseBuilder, ReductionBuilder)
 from tensorforge.backend.instructions.builders.ptr_manip_builder import GetElementPtrBuilder
 from tensorforge.backend.instructions.builders.allocator_builder import ShrMemAllocBuilder
+from tensorforge.backend.instructions.control.conditional import GuardedRegion
 from tensorforge.backend.instructions.sync_block import SyncThreads, SyncBlock, SyncGrid
 from tensorforge.backend.instructions.batch_loop import BatchLoop, LoopMode
 from tensorforge.backend.writer import Writer
@@ -99,6 +100,68 @@ class Section:
     self.shr_mem_obj: Union[ShrMemObject, None] = None
     self.scopes: Scopes = Scopes()
     self.barrier = False
+
+class _GuardGrouping:
+  """Collects the instructions of neighbouring operations under one guard.
+
+  An operation's guard is a conjunction of literals, and two operations that
+  state the same conjunction run under the same condition -- so their
+  instructions go into one region and the condition is evaluated once. The
+  run ends where the conjunction changes, which keeps the emitted order the
+  order the descriptor list states.
+  """
+
+  def __init__(self, context, scopes, residency, out):
+    self._context = context
+    self._scopes = scopes
+    self._residency = residency
+    self._out = out
+    self._key = None
+    self._literals = []
+    self._pending = []
+
+  @staticmethod
+  def _key_of(descr):
+    """What makes two guards the same one.
+
+    `None` for an operation that always runs, so an unguarded stretch never
+    joins a guarded one. The literals are sorted: a conjunction is a set, and
+    two operations may state the same one in different orders.
+    """
+    condition = getattr(descr, 'condition', None)
+    if not condition:
+      return None
+    return tuple(sorted(literal.key() for literal in condition))
+
+  def _resolve(self, descr):
+    return [(self._scopes.get_symbol(literal.tensor.tensor), literal.negated)
+            for literal in descr.condition]
+
+  def add(self, descr, instrs) -> None:
+    key = self._key_of(descr)
+    if key != self._key:
+      self.flush()
+      self._key = key
+      self._literals = self._resolve(descr) if key is not None else []
+      # The condition is read where the region opens, which is before its
+      # body runs. A value another operation left in registers has to reach
+      # its buffer *here* -- `prepare_operands` flushes an operation's own
+      # operands, and a guard's operands are not among them.
+      for symbol, _ in self._literals:
+        self._out.extend(self._residency.flush(symbol.name))
+    self._pending.extend(instrs)
+
+  def flush(self) -> None:
+    if self._pending:
+      if self._key is None:
+        self._out.extend(self._pending)
+      else:
+        self._out.append(GuardedRegion(self._context, self._literals,
+                                       self._pending))
+    self._key = None
+    self._literals = []
+    self._pending = []
+
 
 class Generator:
   NAME_ENCODING_LENGTH = 10
@@ -729,31 +792,32 @@ class Generator:
     ]
 
 
-    for descr in descr_list:
-      if getattr(descr, 'guarded', lambda: False)():
-        raise InternalError(
-            f'{descr} runs under a guard, and nothing lowers one yet. What is '
-            f'missing is the region: evaluate the conjunction, open a '
-            f'`writer.if_` around the operation\'s body, and stop the plan '
-            f'from counting a guarded write as covering its destination.')
-
     # Expanded, like the section's plan above: a descriptor that stands for
     # several operations is built as those operations.  While that is all a
     # loop lowers to, a rolled list and the same list written out generate the
     # same body, which is the state the loop's own lowering has to be measured
     # against before it replaces this.
+    #
+    # Neighbours under one guard become one region rather than one region
+    # each: the condition is then read once, and a body that is skipped is
+    # skipped as a whole.
+    guard = _GuardGrouping(self._context, self._scopes, residency,
+                           self._section.ir)
     for outer in descr_list:
       if isinstance(outer, ForDescr) and self._emit_loops:
+        guard.flush()
         self._emit_variant_loop(outer, builders)
         continue
       for descr in outer.operations():
         for kind, builder in builders:
           if isinstance(descr, kind):
             builder.build(descr)
-            self._section.ir.extend(builder.get_instructions())
+            guard.add(descr, builder.get_instructions())
             break
         else:
           raise InternalError(f'{type(descr)} has no registered builder.')
+
+    guard.flush()
 
     # Anything the section still holds only in registers has to reach memory
     # before the section ends.
@@ -934,6 +998,13 @@ class Generator:
       for matrix in local_list:
         # dict preserves ordering starting with 3.7
         pre_matrix_list[matrix.tensor] = None
+
+      # A guard's operands are not operands of the operation -- no builder
+      # resolves them, and `matrix_list` deliberately does not name them --
+      # but the kernel still reads them, so they are parameters like any
+      # other and need a name and a symbol.
+      for view in gemm.condition_reads():
+        pre_matrix_list[view.tensor] = None
 
     self._matrix_list = list(pre_matrix_list.keys())
 

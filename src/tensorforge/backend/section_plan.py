@@ -77,6 +77,11 @@ class SectionPlan:
         #: boxes.  These are what coverage is judged on.
         self._eff_reads = {}
         self._eff_writes = {}
+        #: id(tensor) for anything a guard reads, and for anything written
+        #: under one.  Both make a register image unusable, for opposite
+        #: reasons -- see `written_in_slices`.
+        self._guard_reads = set()
+        self._guarded_writes = set()
 
         # Expanded rather than walked: a descriptor that stands for several
         # operations is asked for them, so a section's geometry is the same
@@ -95,6 +100,10 @@ class SectionPlan:
     # -- construction ---------------------------------------------------- #
 
     def _add_reads(self, descr, scopes) -> None:
+        for op in descr.condition_reads():
+            tensor = getattr(op, 'tensor', None)
+            if tensor is not None:
+                self._guard_reads.add(id(tensor))
         # The guard's operands are read here too. They are not operands of the
         # operation and no builder resolves them as such, but the section has
         # to stage them all the same, and this is what decides that.
@@ -122,6 +131,8 @@ class SectionPlan:
         tensor = getattr(dest, 'tensor', None) if dest is not None else None
         if tensor is None:
             return None
+        if descr.guarded():
+            self._guarded_writes.add(id(tensor))
         box = dest.storage_box()
         self._dest_union[id(tensor)] = _hull(self._dest_union.get(id(tensor)),
                                              box)
@@ -245,6 +256,19 @@ class SectionPlan:
         holds only the last one's rows; the read that follows then wants the
         union and finds half of it.
         """
+        # A guard breaks the deferral in both directions, so neither case gets
+        # as far as looking at boxes.
+        #
+        # Read by a guard: the condition is not an operand, so no builder
+        # resolves it through the residency -- the region loads the symbol.
+        # A value still sitting in a register has no symbol to load.
+        #
+        # Written under a guard: whether the register image holds the new
+        # value or the old one is decided at run time, and a deferred entry
+        # records only that something wrote it.
+        key = id(tensor)
+        if key in self._guard_reads or key in self._guarded_writes:
+            return True
         boxes = (self._eff_writes.get(id(tensor))
                  or self._dest_boxes.get(id(tensor), []))
         union = None

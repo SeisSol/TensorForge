@@ -12,10 +12,12 @@ and deliberately does not know what kinds of descriptor there are.  A wrapper
 would have to be unwrapped by each of those walks, and a walk that forgot
 would read a guarded write as an unconditional one.
 
-Nothing lowers a guard yet.  What is asserted here is the part that has to
-hold before it can be lowered: the guard reaches the descriptor, the section
-sees the tensors it reads, and a descriptor that cannot be honoured stops the
-generator instead of being dropped.
+A guard lowers to a `GuardedRegion`: the operations under one conjunction
+become one region, the condition is read once where it opens, and `verify`
+recurses through the region as it does through a loop's body.  Asserted here
+is that the guard reaches the descriptor, that the section sees the tensors
+it reads, that neighbours under one guard share a region, and that a region
+is only mult-uniform -- a block-wide barrier inside one deadlocks.
 """
 
 from __future__ import annotations
@@ -107,11 +109,76 @@ def test_two_versions_of_one_tensor_are_two_values():
 # What the generator does with one
 # ----------------------------------------------------------------------
 
-def test_a_guarded_operation_stops_the_generator():
+def _regions(gen):
+    from tensorforge.backend.instructions.control.conditional import \
+        GuardedRegion
+    return [instr
+            for section in gen._sections
+            for instr in section.ir
+            if isinstance(instr, GuardedRegion)]
+
+
+def test_a_guarded_operation_becomes_a_region():
     descr = _sqrt()
     descr.condition = [GuardLiteral(_flag("c"))]
-    with pytest.raises(InternalError, match="guard"):
-        _generate([descr])
+    regions, = _regions(_generate([descr]))
+    assert len(regions.region()) > 0
+
+
+def test_neighbours_under_one_guard_share_a_region():
+    """The condition is read once, not once per operation."""
+    flag = _flag("c")
+    first, second = _sqrt(dest="A"), _sqrt(dest="C")
+    first.condition = [GuardLiteral(flag)]
+    second.condition = [GuardLiteral(flag)]
+    assert len(_regions(_generate([first, second]))) == 1
+
+
+def test_a_different_guard_is_a_different_region():
+    first, second = _sqrt(dest="A"), _sqrt(dest="C")
+    first.condition = [GuardLiteral(_flag("c"))]
+    second.condition = [GuardLiteral(_flag("d"))]
+    assert len(_regions(_generate([first, second]))) == 2
+
+
+def test_an_unguarded_neighbour_stays_out_of_the_region():
+    guarded, plain = _sqrt(dest="A"), _sqrt(dest="C")
+    guarded.condition = [GuardLiteral(_flag("c"))]
+    regions = _regions(_generate([guarded, plain]))
+    assert len(regions) == 1
+    assert len(regions[0].region()) > 0
+
+
+def test_a_region_is_only_mult_uniform():
+    """The condition is addressed per batch element, so two elements in one
+    block may decide differently.  A block-wide barrier inside the region is
+    then reached by some threads and not others, which deadlocks -- `verify`
+    tightens its limit through `uniform_scope` on the way in."""
+    from tensorforge.backend.instructions.abstract_instruction import \
+        BarrierScope
+
+    descr = _sqrt()
+    descr.condition = [GuardLiteral(_flag("c"))]
+    region, = _regions(_generate([descr]))
+    assert region.uniform_scope() is BarrierScope.SIMD
+
+
+def test_a_guard_stops_the_plan_deferring_its_operand():
+    """The condition is not an operand, so no builder resolves it through the
+    residency -- the region loads the symbol.  A value still in a register has
+    no symbol to load, so the tensor a guard reads has to reach memory."""
+    from tensorforge.backend.section_plan import SectionPlan
+
+    flag = _flag("c")
+    descr = _sqrt()
+    descr.condition = [GuardLiteral(flag)]
+
+    class _NoSymbols:
+        def get_symbol(self, tensor):
+            return None
+
+    plan = SectionPlan([descr], _NoSymbols())
+    assert plan.written_in_slices(flag.tensor)
 
 
 def test_the_section_sees_the_tensors_a_guard_reads():
