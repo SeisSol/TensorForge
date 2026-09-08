@@ -189,9 +189,15 @@ class StoreRegToGlb(AbstractInstruction):
     src.add_user(self)
     dest.add_user(self)
 
+    # The fourth view onto a global tensor, and the only one on the writing
+    # side.  A prepared operand is an input today, so this is inert -- but a
+    # store addressing the destination at one stride while a load addresses it
+    # at another is the kind of disagreement that shows up as wrong values in
+    # a later kernel rather than as a failure here.
     dest.data_view = DataView(shape=dest.obj.get_actual_shape(),
                               permute=None,
-                              bbox=dest.obj.get_bbox())
+                              bbox=dest.obj.get_bbox(),
+                              elem_parts=dest.obj.storage_parts)
 
     #if dest.data_view.get_dim_size(0) < src.data_view.get_dim_size(0):
     #  raise InternalError('store: `src` and `dest` do not match in size aling dim `0`')

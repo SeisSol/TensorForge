@@ -76,6 +76,16 @@ class DataView:
     self._permute = permute
     self._bbox = bbox
 
+  @property
+  def elem_parts(self):
+    """Scalars per element --- the stride a contiguous axis carries.
+
+    Read it wherever an absolute stride is compared against something rather
+    than merely used, since the number that means `adjacent` is this one and
+    only sometimes 1.
+    """
+    return self._elem_parts
+
   def get_bbox(self):
     # `BoundingBox` has no mutating API -- `_lower`/`_upper` are tuples and
     # every operation returns a new box -- so the defensive deepcopy that used
@@ -98,8 +108,10 @@ class DataView:
 
   def get_volume(self):
     # physical extent, i.e. including any staging padding --- see
-    # get_dim_strides for why this is `shape` and not the bounding box
-    volume = 1
+    # get_dim_strides for why this is `shape` and not the bounding box.
+    # In scalars, because that is the unit an allocation is made in: the one
+    # caller sizes a shared-memory buffer with it.
+    volume = self._elem_parts
     for s in self.shape:
       volume *= s
     return volume
@@ -223,7 +235,8 @@ class DataView:
     return addr
 
   def __str__(self):
-    return f'shape: {self.shape}, permute: {self._permute}'
+    parts = f', parts: {self._elem_parts}' if self._elem_parts != 1 else ''
+    return f'shape: {self.shape}, permute: {self._permute}{parts}'
 
 class Immediate:
   def __init__(self, value, fptype: Datatype):

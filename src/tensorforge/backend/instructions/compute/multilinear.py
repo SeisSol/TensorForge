@@ -49,9 +49,15 @@ def _contiguous_first_axis(sym) -> bool:
     The condition a wide load along that axis rests on, and it is a property
     of the *view* rather than of the tensor: a transposed operand has the same
     tensor and a stride that makes the values `ld` apart.
+
+    Adjacency is asked in elements.  The stride a contiguous axis carries is
+    the size of one element, which is `elem_parts` scalars and only sometimes
+    one of them; comparing against the literal would call a decomposed
+    operand strided and cost it the wide load it is in fact entitled to.
     """
     try:
-        return sym.data_view.get_dim_strides()[0] == 1
+        view = sym.data_view
+        return view.get_dim_strides()[0] == view.elem_parts
     except Exception:
         return False
 

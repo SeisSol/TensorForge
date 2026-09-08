@@ -108,6 +108,22 @@ class Tensor:
         else:
             self.direction = DataFlowDirection.SOURCESINK
 
+    @property
+    def storage_parts(self):
+        return self._storage_parts
+
+    @storage_parts.setter
+    def storage_parts(self, value):
+        # Checked at the assignment rather than at the address, because the
+        # generator sets this and a nonsensical count does not fail there: it
+        # sizes a buffer, and the kernel then reads the operand at a stride
+        # nothing else disagrees with.
+        if int(value) < 1:
+            raise GenerationError(
+                f'Tensor {self.alias}: storage_parts is the number of scalars '
+                f'per element and must be at least 1, got {value}')
+        self._storage_parts = int(value)
+
     def has_values(self):
         return self.data is not None
 
@@ -128,6 +144,21 @@ class Tensor:
     def memory(self):
         return self.spp.count_nz()
 
+    def storage_elements(self):
+        """Elements one batch element of this tensor stores.
+
+        A dense tensor is stored over its bounding box -- address zero is the
+        box's lower corner and the buffer spans upper minus lower.  A sparse
+        one is stored compressed, in the order ``linear_index`` assigns, and
+        nothing is reserved for the structural zeros.  A bounding box is the
+        same under either reading, which is why it needs no case of its own.
+
+        This is the count in *elements*, which is the unit ``linear_index``
+        and ``storage_map`` speak: they say which value sits in which slot, a
+        question preparing an operand does not change the answer to.
+        """
+        return self.get_actual_volume() if self.is_dense() else self.memory()
+
     def storage_volume(self):
         """Scalars one batch element of this tensor occupies in memory.
 
@@ -137,24 +168,23 @@ class Tensor:
         a masked tensor was written densely by the host and read compressed by
         the kernel.
 
-        A dense tensor is stored over its bounding box -- address zero is the
-        box's lower corner and the buffer spans upper minus lower.  A sparse
-        one is stored compressed, in the order ``linear_index`` assigns, and
-        nothing is reserved for the structural zeros.  A bounding box is the
-        same under either reading, which is why it needs no case of its own.
+        Two factors answering two questions: which elements are stored, and
+        how much room one takes.  Everything sizing or striding a buffer wants
+        the product -- the batch stride in ``ptr_manip``, the allocation the
+        harness makes, the bound an address is checked against -- and
+        everything naming an element wants ``storage_elements``.
         """
-        base = self.get_actual_volume() if self.is_dense() else self.memory()
         # `storage_parts` multiplies whichever of the two readings applies:
         # preparing an operand does not change which cells are stored, only
         # how many scalars each of them takes.
-        return base * self.storage_parts
+        return self.storage_elements() * self.storage_parts
 
     def storage_map(self):
         """Which cell of the bounding box each storage slot holds.
 
         ``None`` when the tensor is stored dense, because then the two orders
         are the same thing and a map would only be a way to disagree with
-        itself.  Otherwise a tuple of length ``storage_volume``, indexed by
+        itself.  Otherwise a tuple of length ``storage_elements``, indexed by
         slot and giving the F-order position within the bounding box.
 
         Read off ``linear_index``, so everything that has to agree about the
@@ -173,7 +203,7 @@ class Tensor:
         for extent in box:
             strides.append(acc)
             acc *= extent
-        slots = [-1] * int(self.storage_volume())
+        slots = [-1] * int(self.storage_elements())
         for idx in _f_order(tuple(self.get_real_shape())):
             if not self.spp.is_nz(idx):
                 continue
@@ -233,6 +263,9 @@ class Tensor:
                       alignment=self.alignment)
         twin.name = self.name
         twin.direction = self.direction
+        # the image is expanded from this tensor's memory, so it is read under
+        # this tensor's convention
+        twin.storage_parts = self.storage_parts
         return twin
 
     def get_actual_shape(self):
@@ -257,9 +290,14 @@ class Tensor:
         self.name = name
 
     def is_similar(self, other):
+        # `storage_parts` belongs in here and not merely alongside: two
+        # tensors agreeing on shape, addressing and box still address memory
+        # differently when one is stored prepared, and whatever treats them as
+        # one operand would read the second at the first's stride.
         is_similar = self.shape == other.shape
         is_similar &= self.addressing == other.addressing
         is_similar &= self.bbox == other.bbox
+        is_similar &= self.storage_parts == other.storage_parts
         return is_similar
 
     def is_same(self, other):
@@ -269,7 +307,12 @@ class Tensor:
         return self.name
 
     def gen_descr(self):
-        return f'{self.name} {"×".join(str(d) for d in self.shape)}({"×".join(str(d) for d in self.bbox.sizes())}) {self.bbox} {self.addressing}'
+        # The suffix appears only where there is something to say.  This
+        # string is read by the metainfo header and the reproduction tools,
+        # and a field every operand carries identically is one they all have
+        # to parse to learn nothing.
+        parts = f' /{self.storage_parts}' if self.storage_parts != 1 else ''
+        return f'{self.name} {"×".join(str(d) for d in self.shape)}({"×".join(str(d) for d in self.bbox.sizes())}) {self.bbox} {self.addressing}{parts}'
 
     def density(self):
         return self.spp.count_nz() / self.get_real_volume()
