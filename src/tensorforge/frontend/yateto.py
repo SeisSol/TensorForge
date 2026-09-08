@@ -695,6 +695,11 @@ class TensorForgeWriter:
     return self._generator.get_header()
 
 class YatetoFrontend:
+  #: The version of yateto's export interface this reads. yateto refuses an
+  #: exporter that speaks an older one, because the fields added since would
+  #: be dropped silently rather than missed loudly.
+  INTERFACE_VERSION = 2
+
   def __init__(self, arch, attrs=None):
     """The routine exporter yateto instantiates, once per kernel.
 
