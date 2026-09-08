@@ -605,21 +605,54 @@ def matmul(writer, ops, ctx, span):
                                                 # for kkk in range(0, atom.k):
                                                 #     writer(f'{shmptr}[{aoffs} + (threadIdx.x - {ii}) % {atom.m} + {kkk * atom.m}] = {Areg}_{kkk};')
                                                 for kkk in range(0, atom.k, ktile):
-                                                    # `store` already emits the
-                                                    # reinterpret-cast form for
-                                                    # a vector-typed value.
-                                                    # Writing it by hand meant
-                                                    # the shared write was
-                                                    # opaque for the sake of a
-                                                    # cast the verb performs.
-                                                    quad = writer.pack(
-                                                        ScalarType(atom.d, 4),
-                                                        *(Areg[kkk + n] for n in range(4)),
-                                                        hint='q')
-                                                    writer.store(
-                                                        Ashm, quad,
-                                                        _index(writer, sub=ii, mod=atom.m, scale=ktile,
-                                                                              add=kkk * atom.m))
+                                                    # `ktile` consecutive
+                                                    # elements, written one at a
+                                                    # time rather than packed.
+                                                    #
+                                                    # This was a `pack` into
+                                                    # `ScalarType(atom.d, 4)`
+                                                    # and one wide store, which
+                                                    # is what the addresses
+                                                    # deserve -- and which nvcc
+                                                    # refuses.  `CudaLexic`
+                                                    # renders a packed value as
+                                                    # `tensorforge::VectorT<T,
+                                                    # 4>`, a GNU `vector_size`
+                                                    # typedef, and the device
+                                                    # front end declines a
+                                                    # *value* of that type: "is
+                                                    # a vector, which is not
+                                                    # supported in device code",
+                                                    # 101 times over a corpus
+                                                    # case.  `cuda.h` predicted
+                                                    # exactly this.
+                                                    #
+                                                    # The spelling is not fixed
+                                                    # in the lexic because the
+                                                    # lexic is right for its own
+                                                    # reasons: `float4` has no
+                                                    # arithmetic operators and
+                                                    # cannot be assigned through
+                                                    # a `VectorRelaxedT`
+                                                    # pointer, which the staging
+                                                    # transfers need.  Neither
+                                                    # applies here -- this value
+                                                    # is only ever stored -- so
+                                                    # the narrower spelling is
+                                                    # local to the one site that
+                                                    # cannot have the wider one.
+                                                    #
+                                                    # It costs a wide store.
+                                                    # Reinstating one needs a
+                                                    # device-legal vector value,
+                                                    # not a different lexic.
+                                                    base = _index(
+                                                        writer, sub=ii, mod=atom.m,
+                                                        scale=ktile, add=kkk * atom.m)
+                                                    for n in range(ktile):
+                                                        addr = base if n == 0 else writer.op(
+                                                            'add', INDEX, base, n, hint='a')
+                                                        writer.store(Ashm, Areg[kkk + n], addr)
                                             writer.barrier(Uniformity.MULT)
 
                                             for kk in range(0, kregs):
