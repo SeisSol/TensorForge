@@ -122,14 +122,27 @@ def pack(view: np.ndarray, pack_index: np.ndarray,
     batch element belongs there.  Cells no slot points at are the structural
     zeros: they are not stored, and whatever the dense view holds for them is
     dropped here rather than silently reaching the kernel.
+
+    A slot naming ``-1`` is the other direction, and it is the one thing a
+    gather cannot express on its own: a slot with no cell.  A tiled storage
+    order has them wherever the tiling runs past the end of the matrix, and
+    they read zero -- which is what the kernel's own padding registers held
+    before the order moved into memory, so the product is unchanged and not
+    merely harmless.  Written as a gather from cell 0 followed by a mask,
+    because ``dense[:, -1]`` is a legal read of the last cell and would put
+    the wrong value there rather than fail.
     """
     batch = view.shape[0]
     # Each element is F-contiguous, so the flat cell order within one element
     # is F-order over ``shape`` -- which is the order ``pack_index`` speaks.
     dense = np.stack([np.asarray(view[b]).ravel(order='F')
                       for b in range(batch)])
-    return np.ascontiguousarray(dense[:, pack_index].ravel(),
-                                dtype=np_dtype(dt))
+    pack_index = np.asarray(pack_index)
+    empty = pack_index < 0
+    out = dense[:, np.where(empty, 0, pack_index)]
+    if empty.any():
+        out = np.where(empty[None, :], np.zeros((), dtype=out.dtype), out)
+    return np.ascontiguousarray(out.ravel(), dtype=np_dtype(dt))
 
 
 def split_tf32(flat: np.ndarray, dt: Datatype) -> np.ndarray:

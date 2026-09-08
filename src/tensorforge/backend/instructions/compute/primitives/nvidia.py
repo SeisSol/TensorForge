@@ -2,6 +2,7 @@
 #
 # SPDX-License-Identifier: MIT
 from tensorforge.common.basic_types import Datatype
+from tensorforge.common.exceptions import GenerationError
 from .. import ranking
 from ..strategy import Strategy, whole
 from tensorforge.backend.pir.core import (BOOL, INDEX, Access, Effect, MemSpace,
@@ -247,6 +248,105 @@ def accumulator_slots(atom):
     return tuple((2 * g + e, e + g * 8 * atom.n)
                  for g in range(atom.m // 8)
                  for e in range(2))
+
+
+def tile_starts(extent, threads, atom):
+    """Where the emitter's nest puts tile origins along one axis.
+
+    Two nested loops and not one, and the difference is not cosmetic: the
+    outer walks waves and the inner walks the atom inside a wave, but the
+    inner is bounded by what is left of the *wave*, not of the extent.  So
+    `range(0, extent, atom)` is a different list whenever the wave remainder
+    is not a multiple of the atom, and anything deriving the tiling from a
+    ceiling disagrees with the code it is describing.
+
+    Stated here because two readers need the same answer -- the emitter, which
+    walks the tiles, and `fragment_order`, which says what is in them -- and a
+    layout the two derive separately is a layout they can come to disagree
+    about without either being wrong on its own.
+    """
+    return tuple(outer + inner
+                 for outer in range(0, extent, threads)
+                 for inner in range(0, min(threads, extent - outer), atom))
+
+
+def fragment_order(shape, atom, threads=32):
+    """Which bounding-box cell each slot of a pre-ordered A holds.
+
+    The operand's storage in the order a lane reads it: tile by tile, and
+    within a tile slot by slot with the 32 lanes contiguous.  The emitter's
+    staged read is `Ashm[lane + threads * f]`, so an operand already in this
+    order is read at that address *in memory* -- a coalesced 128-byte load per
+    fragment, and no shared round trip at all.
+
+    The tile's own map is the PTX A layout, and it is the one thing here that
+    is the hardware's rather than this module's: lane `t` holds rows
+    `t / ktile + iii * mtile` and columns `t % ktile + kf * ktile`, with
+    `f == iii + kf * mregs` the operand-list order.  Verified against the
+    instruction on hardware three ways -- the `wmma` loader, a raw `mma.sync`
+    against a host reference, and an impulse response -- and against this
+    module's own store/load pair, which computes the same function.
+
+    A slot naming `-1` is padding: the tiling covers `len(tile_starts) * atom`
+    along each axis, which is at least the extent and usually more, and a slot
+    past the end belongs to no cell.  It reads zero, which is what the
+    emitter's own padding registers said before the order moved into memory.
+
+    Returned as `Tensor.storage_order` wants it -- F-order cell per slot -- so
+    the host packer and the kernel take the layout from one statement.
+    """
+    rows, cols = int(shape[0]), int(shape[1])
+    mtile, ktile = 8, 4
+    mregs, kregs = atom.m // mtile, atom.k // ktile
+    aregs = mregs * kregs
+    mstarts = tile_starts(rows, threads, atom.m)
+    kstarts = tile_starts(cols, threads, atom.k)
+    # The emitter names a tile by `start // atom` (`mt`, `kt` at the fragment
+    # read), so the two agree only while that is the position in the list.
+    # It is, for every entry in `INSTRS` -- each `m` and `k` divides the wave,
+    # so a start is a multiple of the atom and the starts run from zero
+    # without gaps -- and an entry that broke it would silently shift every
+    # tile, so it is checked rather than assumed.
+    for starts, step in ((mstarts, atom.m), (kstarts, atom.k)):
+        if tuple(st // step for st in starts) != tuple(range(len(starts))):
+            raise GenerationError(
+                f'the nest tiles {starts} do not enumerate by start // '
+                f'{step}, so `fragment_order` and the emitter would name '
+                f'tiles differently')
+    ktiles = len(kstarts)
+    order = []
+    for mt, m0 in enumerate(mstarts):
+        for kt, k0 in enumerate(kstarts):
+            assert len(order) == (mt * ktiles + kt) * aregs * threads
+            for f in range(aregs):
+                iii, kf = f % mregs, f // mregs
+                for lane in range(threads):
+                    row = m0 + lane // ktile + iii * mtile
+                    col = k0 + lane % ktile + kf * ktile
+                    order.append(row + rows * col
+                                 if row < rows and col < cols else -1)
+    return tuple(order)
+
+
+def prepared_order(shape, dtype, ctx, columns=0, lead=0, depth=0,
+                   threads=32):
+    """The order this target would read a two-dimensional A operand in.
+
+    `None` where there is none to state: no entry serves the accumulator, the
+    operand is not a matrix, or the wave is not the one the layout is written
+    for.  A caller asks before it decides to prepare an operand, so a refusal
+    has to be an answer rather than an exception.
+    """
+    if threads != 32 or len(shape) != 2:
+        return None
+    # The same `sm` the emission will select with, for the reason `scratch`
+    # takes a context: an order laid out against one table and read by an
+    # entry from another is a permutation nothing shares.
+    atom = instr_for(dtype, columns=columns, lead=lead, depth=depth,
+                     sm=sm_of(ctx))
+    if atom is None:
+        return None
+    return fragment_order(shape, atom, threads)
 
 
 def instrs_for(dtype, sm=None):
@@ -506,6 +606,11 @@ def matmul(writer, ops, ctx, span):
     kregs = atom.k // ktile
 
     aregs = (atom.m * atom.k) // threads
+    # How many k tiles a pre-ordered operand was laid out in.  Read from
+    # `tile_starts` and not from a ceiling, so the emitter names a tile the
+    # same way `fragment_order` did -- the two are one layout, and the only
+    # way for them to disagree is to derive it twice.
+    ktiles = len(tile_starts(K, threads, atom.k))
     bregs = (atom.n * atom.k) // threads
     cregs = (atom.m * atom.n) // threads
 
@@ -537,6 +642,11 @@ def matmul(writer, ops, ctx, span):
     # per slot would change that arithmetic for all of them to save one
     # allocation.
     aparts = ops.a_parts
+    # Whether `A` is stored in the order this reads it.  Where it is, the
+    # staging tile below is not an optimisation that was skipped -- it is a
+    # transform that already happened, once, on the host, for a batch that
+    # shares the operand.
+    aordered = ops.A_slot is not None
     AregParts = [Areg] + [{} for _ in range(1, aparts)]
     AfragParts = [[None] * len(Afrag) for _ in range(aparts)]
 
@@ -674,101 +784,129 @@ def matmul(writer, ops, ctx, span):
                                     # parts cost 1809 global loads; adjacent,
                                     # ptxas folds them back into the 905 the
                                     # single-part kernel issues.
-                                    for kkk in range(0, min(atom.k, K - k - kk)):
-                                        got = A(writer, None, i // threads,
-                                                k + kk + kkk, parts=aparts)
-                                        got = got if aparts > 1 else (got,)
-                                        for pt in range(aparts):
-                                            AregParts[pt][kkk] = got[pt]
-                                    for kkk in range(min(atom.k, K - k - kk), atom.k):
-                                        for pt in range(aparts):
-                                            # A padding slot reads zero in every
-                                            # part, and for a split that is the
-                                            # right answer: it says the part
-                                            # before it was exact, which for a
-                                            # slot nothing multiplies is true.
-                                            AregParts[pt][kkk] = writer.declare(
-                                                ScalarType(atom.d), hint='as')
+                                    if not aordered:
+                                        # Read once per lane and redistributed
+                                        # through the tile below.  A
+                                        # pre-ordered operand skips both: it
+                                        # was redistributed before the kernel
+                                        # ran, so a lane reads its own
+                                        # fragments and nothing else's.
+                                        for kkk in range(0, min(atom.k, K - k - kk)):
+                                            got = A(writer, None, i // threads,
+                                                    k + kk + kkk, parts=aparts)
+                                            got = got if aparts > 1 else (got,)
+                                            for pt in range(aparts):
+                                                AregParts[pt][kkk] = got[pt]
+                                        for kkk in range(min(atom.k, K - k - kk), atom.k):
+                                            for pt in range(aparts):
+                                                # A padding slot reads zero in
+                                                # every part, and for a split
+                                                # that is the right answer: it
+                                                # says the part before it was
+                                                # exact, which for a slot
+                                                # nothing multiplies is true.
+                                                AregParts[pt][kkk] = writer.declare(
+                                                    ScalarType(atom.d), hint='as')
 
                                     for ii in range(0, min(threads, M - i), atom.m):
                                         with writer.AnonymousScope():
-                                            writer.barrier(Uniformity.MULT)
-                                            with threadrange(ii, atom.m):
-                                                # for kkk in range(0, atom.k):
-                                                #     writer(f'{shmptr}[{aoffs} + (threadIdx.x - {ii}) % {atom.m} + {kkk * atom.m}] = {Areg}_{kkk};')
-                                                for kkk in range(0, atom.k, ktile):
-                                                    # `ktile` consecutive
-                                                    # elements, written one at a
-                                                    # time rather than packed.
-                                                    #
-                                                    # This was a `pack` into
-                                                    # `ScalarType(atom.d, 4)`
-                                                    # and one wide store, which
-                                                    # is what the addresses
-                                                    # deserve -- and which nvcc
-                                                    # refuses.  `CudaLexic`
-                                                    # renders a packed value as
-                                                    # `tensorforge::VectorT<T,
-                                                    # 4>`, a GNU `vector_size`
-                                                    # typedef, and the device
-                                                    # front end declines a
-                                                    # *value* of that type: "is
-                                                    # a vector, which is not
-                                                    # supported in device code",
-                                                    # 101 times over a corpus
-                                                    # case.  `cuda.h` predicted
-                                                    # exactly this.
-                                                    #
-                                                    # The spelling is not fixed
-                                                    # in the lexic because the
-                                                    # lexic is right for its own
-                                                    # reasons: `float4` has no
-                                                    # arithmetic operators and
-                                                    # cannot be assigned through
-                                                    # a `VectorRelaxedT`
-                                                    # pointer, which the staging
-                                                    # transfers need.  Neither
-                                                    # applies here -- this value
-                                                    # is only ever stored -- so
-                                                    # the narrower spelling is
-                                                    # local to the one site that
-                                                    # cannot have the wider one.
-                                                    #
-                                                    # It costs a wide store.
-                                                    # Reinstating one needs a
-                                                    # device-legal vector value,
-                                                    # not a different lexic.
-                                                    base = _index(
-                                                        writer, sub=ii, mod=atom.m,
-                                                        scale=ktile, add=kkk * atom.m)
-                                                    for n in range(ktile):
-                                                        addr = base if n == 0 else writer.op(
-                                                            'add', INDEX, base, n, hint='a')
-                                                        wide = (addr if aparts == 1
-                                                                else writer.op('mul', INDEX, addr,
-                                                                               aparts, hint='a'))
-                                                        for pt in range(aparts):
-                                                            at = (wide if pt == 0
-                                                                  else writer.op('add', INDEX,
-                                                                                 wide, pt,
-                                                                                 hint='a'))
-                                                            writer.store(Ashm,
-                                                                         AregParts[pt][kkk + n],
-                                                                         at)
-                                            writer.barrier(Uniformity.MULT)
+                                            if aordered:
+                                                # The address the staging tile was *read* at, in memory: the
+                                                # tile base, plus the slot times the wave, plus the lane the
+                                                # accessor supplies.  So a fragment is 32 consecutive elements
+                                                # -- one 128-byte transaction, or 256 with the parts adjacent --
+                                                # and the store, the two barriers and the read back are all
+                                                # gone, not merely cheaper.
+                                                mt = (i + ii) // atom.m
+                                                kt = (k + kk) // atom.k
+                                                tbase = (mt * ktiles + kt) * (aregs * threads)
+                                                for kf in range(0, kregs):
+                                                    for iii in range(0, mregs):
+                                                        fr = iii + kf * mregs
+                                                        got = ops.A_slot(writer, tbase + fr * threads,
+                                                                         parts=aparts)
+                                                        got = got if aparts > 1 else (got,)
+                                                        Afrag[fr] = got[0]
+                                                        for pt in range(1, aparts):
+                                                            AfragParts[pt][fr] = got[pt]
+                                            else:
+                                                writer.barrier(Uniformity.MULT)
+                                                with threadrange(ii, atom.m):
+                                                    # for kkk in range(0, atom.k):
+                                                    #     writer(f'{shmptr}[{aoffs} + (threadIdx.x - {ii}) % {atom.m} + {kkk * atom.m}] = {Areg}_{kkk};')
+                                                    for kkk in range(0, atom.k, ktile):
+                                                        # `ktile` consecutive
+                                                        # elements, written one at a
+                                                        # time rather than packed.
+                                                        #
+                                                        # This was a `pack` into
+                                                        # `ScalarType(atom.d, 4)`
+                                                        # and one wide store, which
+                                                        # is what the addresses
+                                                        # deserve -- and which nvcc
+                                                        # refuses.  `CudaLexic`
+                                                        # renders a packed value as
+                                                        # `tensorforge::VectorT<T,
+                                                        # 4>`, a GNU `vector_size`
+                                                        # typedef, and the device
+                                                        # front end declines a
+                                                        # *value* of that type: "is
+                                                        # a vector, which is not
+                                                        # supported in device code",
+                                                        # 101 times over a corpus
+                                                        # case.  `cuda.h` predicted
+                                                        # exactly this.
+                                                        #
+                                                        # The spelling is not fixed
+                                                        # in the lexic because the
+                                                        # lexic is right for its own
+                                                        # reasons: `float4` has no
+                                                        # arithmetic operators and
+                                                        # cannot be assigned through
+                                                        # a `VectorRelaxedT`
+                                                        # pointer, which the staging
+                                                        # transfers need.  Neither
+                                                        # applies here -- this value
+                                                        # is only ever stored -- so
+                                                        # the narrower spelling is
+                                                        # local to the one site that
+                                                        # cannot have the wider one.
+                                                        #
+                                                        # It costs a wide store.
+                                                        # Reinstating one needs a
+                                                        # device-legal vector value,
+                                                        # not a different lexic.
+                                                        base = _index(
+                                                            writer, sub=ii, mod=atom.m,
+                                                            scale=ktile, add=kkk * atom.m)
+                                                        for n in range(ktile):
+                                                            addr = base if n == 0 else writer.op(
+                                                                'add', INDEX, base, n, hint='a')
+                                                            wide = (addr if aparts == 1
+                                                                    else writer.op('mul', INDEX, addr,
+                                                                                   aparts, hint='a'))
+                                                            for pt in range(aparts):
+                                                                at = (wide if pt == 0
+                                                                      else writer.op('add', INDEX,
+                                                                                     wide, pt,
+                                                                                     hint='a'))
+                                                                writer.store(Ashm,
+                                                                             AregParts[pt][kkk + n],
+                                                                             at)
+                                                writer.barrier(Uniformity.MULT)
 
-                                            for kk in range(0, kregs):
-                                                for iii in range(0, mregs):
-                                                    #writer(f'{atom.d.ctype()} {Areg2}_{iii + kk * mregs} = {shmptr}[{aoffs} + (threadIdx.x / {ktile}) + (threadIdx.x % {ktile} + {kk * ktile}) * {atom.m} + {iii * mtile}];')
-                                                    faddr = _index(writer, add=(iii + kk * mregs) * 32)
-                                                    if aparts > 1:
-                                                        faddr = writer.op('mul', INDEX, faddr,
-                                                                          aparts, hint='a')
-                                                    Afrag[iii + kk * mregs] = writer.load(Ashm, faddr, hint='a')
-                                                    for pt in range(1, aparts):
-                                                        AfragParts[pt][iii + kk * mregs] = writer.load(
-                                                            Ashm, writer.op('add', INDEX, faddr, pt,
-                                                                            hint='a'), hint='a')
+                                                for kk in range(0, kregs):
+                                                    for iii in range(0, mregs):
+                                                        #writer(f'{atom.d.ctype()} {Areg2}_{iii + kk * mregs} = {shmptr}[{aoffs} + (threadIdx.x / {ktile}) + (threadIdx.x % {ktile} + {kk * ktile}) * {atom.m} + {iii * mtile}];')
+                                                        faddr = _index(writer, add=(iii + kk * mregs) * 32)
+                                                        if aparts > 1:
+                                                            faddr = writer.op('mul', INDEX, faddr,
+                                                                              aparts, hint='a')
+                                                        Afrag[iii + kk * mregs] = writer.load(Ashm, faddr, hint='a')
+                                                        for pt in range(1, aparts):
+                                                            AfragParts[pt][iii + kk * mregs] = writer.load(
+                                                                Ashm, writer.op('add', INDEX, faddr, pt,
+                                                                                hint='a'), hint='a')
 
                                             # Where A was stored prepared the
                                             # parts are handed over as they

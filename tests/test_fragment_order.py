@@ -1,0 +1,175 @@
+# SPDX-FileCopyrightText: 2026 SeisSol Group
+#
+# SPDX-License-Identifier: MIT
+"""The pre-ordered storage layout, against the staging it replaces.
+
+`nvidia.fragment_order` says where each element of a prepared `A` operand
+lives.  The claim it makes is not "some permutation" but a specific one: the
+order the emitter's *own* shared tile put the elements in, so that a read that
+used to hit `Ashm[lane + threads * f]` hits memory at the same offset instead.
+
+That claim is exactly checkable and nothing else checks it.  The emitter and
+the layout function are two derivations of one layout, and two derivations are
+how a layout comes to disagree with itself -- silently, since a wrong
+permutation still runs, still fills every slot, and returns numbers.  So the
+staging is replayed here as plain integer arithmetic, transcribed from the
+store and the load, and the two are compared slot for slot.
+
+The hardware's half of the layout -- which `(m, k)` of a tile a lane holds in
+fragment `f` -- was verified on the device three independent ways (the `wmma`
+loader, a raw `mma.sync` against a host reference, and an impulse response).
+That is not repeated here, because it needs a GPU and this does not; what is
+repeated is everything that could drift when this repository changes.
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from tensorforge.backend.instructions.compute.primitives import nvidia
+from tensorforge.common.basic_types import Addressing, Datatype
+from tensorforge.common.exceptions import GenerationError
+from tensorforge.common.matrix.tensor import Tensor
+
+THREADS = 32
+#: The emitter's own fragment tiling, from `matmul`.
+MTILE, KTILE = 8, 4
+
+
+def _staged_tile(atom):
+    """`Ashm` after the store, as `slot -> (m_local, k_local)`.
+
+    Transcribed from the store site: a lane in `threadrange(ii, atom.m)` holds
+    row `t - ii` of the tile and writes its `atom.k` depth values at
+    `(t - ii) * ktile + kkk * atom.m + n`, with `kkk` stepping by `ktile`.
+    """
+    tile = {}
+    for row in range(atom.m):
+        for kkk in range(0, atom.k, KTILE):
+            for n in range(KTILE):
+                tile[row * KTILE + kkk * atom.m + n] = (row, kkk + n)
+    assert len(tile) == atom.m * atom.k
+    return tile
+
+
+def _staged_fragments(atom):
+    """What the fragment read takes out of it: `(lane, f) -> (m, k)`.
+
+    The load is `Afrag[iii + kf * mregs] = Ashm[lane + 32 * f]`, so this is
+    the tile indexed at that offset and nothing else.
+    """
+    tile = _staged_tile(atom)
+    aregs = (atom.m * atom.k) // THREADS
+    return {(lane, f): tile[lane + THREADS * f]
+            for f in range(aregs) for lane in range(THREADS)}
+
+
+def _atoms():
+    """Every entry the emitter can issue, over the architectures it gates on."""
+    seen, out = set(), []
+    for dtype in (Datatype.F32, Datatype.F64):
+        for sm in (75, 80, 86, 90, 120):
+            for atom in nvidia.instrs_for(dtype, sm):
+                key = (atom.m, atom.n, atom.k, atom.d)
+                if key not in seen:
+                    seen.add(key)
+                    out.append(atom)
+    return out
+
+
+@pytest.mark.parametrize('atom', _atoms(),
+                         ids=lambda a: f'm{a.m}n{a.n}k{a.k}_{a.d.name}')
+def test_the_order_is_the_one_the_staging_produced(atom):
+    """One tile, read back where the staged read would have looked."""
+    rows, cols = atom.m, atom.k
+    order = nvidia.fragment_order((rows, cols), atom, THREADS)
+    assert len(order) == (atom.m * atom.k), 'one tile, no padding'
+
+    want = _staged_fragments(atom)
+    aregs = (atom.m * atom.k) // THREADS
+    for f in range(aregs):
+        for lane in range(THREADS):
+            m_local, k_local = want[(lane, f)]
+            # F-order over the bounding box: the first axis is the fast one.
+            assert order[THREADS * f + lane] == m_local + rows * k_local, (
+                f'fragment {f} of lane {lane}')
+
+
+def test_a_tiled_operand_pads_rather_than_wrapping():
+    """A matrix the tiling does not divide gets slots with no cell.
+
+    56 rows against a 16-row tile is the shape the corpus actually has, and
+    the answer that would be wrong quietly is a wrap: every slot filled, every
+    cell stored, and eight rows of the operand multiplied twice.
+    """
+    atom = nvidia.instr_for(Datatype.F32, columns=9, lead=56, depth=56, sm=120)
+    order = nvidia.fragment_order((56, 56), atom, THREADS)
+
+    starts = nvidia.tile_starts(56, THREADS, atom.m)
+    assert starts == (0, 16, 32, 48), 'the nest tiles rows in four'
+    assert len(order) == 64 * 56, 'the image spans the tiling, not the matrix'
+
+    stored = [c for c in order if c != -1]
+    assert len(stored) == 56 * 56, 'every cell exactly once'
+    assert len(set(stored)) == len(stored), 'and no cell twice'
+    assert order.count(-1) == (64 - 56) * 56
+
+
+def test_the_order_and_the_count_reach_the_tensor():
+    t = Tensor([56, 56], Addressing.NONE, datatype=Datatype.F32)
+    assert t.storage_map() is None and t.storage_elements() == 56 * 56
+
+    atom = nvidia.instr_for(Datatype.F32, columns=9, lead=56, depth=56, sm=120)
+    t.storage_order = nvidia.fragment_order((56, 56), atom, THREADS)
+    assert t.storage_elements() == 64 * 56
+    assert t.storage_volume() == 64 * 56, 'one scalar per element, so far'
+    assert t.storage_map() == t.storage_order
+
+    # The two conventions compose: the order says which element, the parts say
+    # how much room it takes.
+    t.storage_parts = 2
+    assert t.storage_elements() == 64 * 56
+    assert t.storage_volume() == 2 * 64 * 56
+
+
+@pytest.mark.parametrize('order,why', [
+    ((0, 1, 2), 'drops'),
+    ((0, 1, 2, 3, 3), 'holds a cell twice'),
+    ((0, 1, 2, 99), 'outside'),
+])
+def test_an_order_that_is_not_one_is_refused(order, why):
+    """Every way of being wrong that a later reader could not detect.
+
+    A short order under-sizes the buffer, a repeated cell drops an element,
+    and a cell outside the box reads past it.  None of the three fails where
+    it is spent -- they size an allocation -- so they are refused where they
+    are stated.
+    """
+    t = Tensor([2, 2], Addressing.NONE, datatype=Datatype.F32)
+    with pytest.raises(GenerationError, match=why):
+        t.storage_order = order
+
+
+# -- the host half ---------------------------------------------------------- #
+
+def test_the_packer_zeroes_a_slot_with_no_cell():
+    """`layout.pack` is a gather, and a padding slot gathers from nowhere.
+
+    The bug this forecloses is quiet and specific: `dense[:, -1]` is a legal
+    read of the *last* cell, so an unhandled `-1` does not raise -- it stores
+    the wrong element, in the slots a tile hangs off the end of the matrix
+    into, where a wrong value is multiplied by whatever the other operand has
+    there.  The kernel's own padding registers read zero, so these must too.
+    """
+    import numpy as np
+
+    from harness import layout
+
+    # A 2x2 matrix in an order with one padding slot, cells in F-order.
+    view = np.arange(2 * 2 * 2, dtype=np.float32).reshape(2, 2, 2)
+    order = np.array([2, 0, -1, 3, 1], dtype=np.int64)
+    out = layout.pack(view, order, Datatype.F32).reshape(2, 5)
+
+    for b in range(2):
+        cells = np.asarray(view[b]).ravel(order='F')
+        assert list(out[b]) == [cells[2], cells[0], 0.0, cells[3], cells[1]]

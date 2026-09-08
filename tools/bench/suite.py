@@ -159,6 +159,14 @@ CONFIGS: Dict[str, Config] = {
     # `no-preload` reads it from global inside the batch loop.
     'preload': Config('preload', Options(preload_globals=True)),
     'no-preload': Config('no-preload', Options(preload_globals=False)),
+    # Whether the backend may re-encode a batch-constant operand for the
+    # instruction that reads it.  Paired with `no-preload` because the two
+    # answer the same question in opposite directions -- preloading stages the
+    # operand into shared memory once per block, preparing removes the reason
+    # to stage it at all -- and a run that does not say which it measured has
+    # measured neither.
+    'prepare': Config('prepare', Options(preload_globals=False,
+                                         prepare_operands=True)),
 }
 
 

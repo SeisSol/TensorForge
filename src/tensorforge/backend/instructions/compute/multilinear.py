@@ -11,7 +11,7 @@ from tensorforge.backend.writer import Writer
 from tensorforge.common.context import Context
 from tensorforge.common.operation import ReductionOperator
 from typing import Union, List, Tuple
-from tensorforge.common.basic_types import Datatype
+from tensorforge.common.basic_types import Addressing, Datatype
 from tensorforge.backend.pir.core import MemSpace
 from tensorforge.backend.instructions.abstract_instruction import _explicit_simd
 from tensorforge.backend.writer import Writer
@@ -617,6 +617,59 @@ class MultilinearInstruction(ComputeInstruction):
             n *= mx - mi
         return n
 
+    def _offer_order(self, module, a_obj, lead, depth):
+        """Let the target store `A` in the order it will read it.
+
+        Asked here rather than at construction because here is where it is
+        settled: the plan is chosen, the module that will emit is known, and
+        every instruction exists, so the question "does anything else read
+        this operand" has an answer.  Earlier it does not, and marking an
+        operand a second reader then addresses by row and column is not a
+        missed optimisation but a wrong kernel.
+
+        Four conditions, and each one is a way the marking could be wrong
+        rather than merely unhelpful:
+
+        * The caller asked.  Preparing an operand moves work onto whoever
+          fills the buffer, so it is `Options.prepare_operands` and not a
+          vendor rule --- a host that cannot run the packer cannot use the
+          kernel, and only the caller knows.
+        * `Addressing.NONE`.  The permutation is applied once to a buffer the
+          whole batch shares; per-element data would have to be permuted per
+          element, which is the transform being avoided.
+        * Nothing else reads it.  The order is this operation's shape and this
+          target's fragment layout, so two readers are two orders.
+        * The target has one to state.  `prepared_order` answers `None` where
+          it does not --- a wave it is not written for, an accumulator with no
+          entry --- and a refusal has to be an answer here, not an exception.
+
+        Idempotent: an operand already carrying an order keeps it, so
+        regenerating does not re-decide.
+        """
+        if not self._context.get_user_options().prepare_operands:
+            return
+        if not isinstance(a_obj, Tensor) or a_obj.storage_order is not None:
+            # Only a tensor has a storage convention.  A register-resident
+            # operand is already in whatever order the pass that produced it
+            # left it in, and there is no buffer for a host to write.
+            return
+        if a_obj.addressing is not Addressing.NONE or not a_obj.is_dense():
+            return
+        if len(a_obj.get_actual_shape()) != 2:
+            return
+        users = self._ops[0].symbol.get_user_list()
+        if any(user is not self for user in users):
+            return
+        offer = getattr(module, 'prepared_order', None)
+        if offer is None:
+            return
+        order = offer(tuple(a_obj.get_actual_shape()),
+                      self._idest.get_fptype(), self._context,
+                      columns=self._output_extent(), lead=lead, depth=depth,
+                      threads=self._num_threads)
+        if order is not None:
+            a_obj.storage_order = order
+
     def _shape(self) -> ComputeShape:
         """What the choice and the reservation are both made from.
 
@@ -790,11 +843,42 @@ class MultilinearInstruction(ComputeInstruction):
                         spec.discard()
                 return res
 
+            def A_slot(writer, slot, parts=1):
+                """One fragment of a pre-ordered `A`, named by storage slot.
+
+                A prepared operand has no coordinate addressing left, and that
+                is the point rather than a limitation: its slots *are* the
+                order a lane reads them in, so the address is what the staged
+                read computed --- one memory away, with nothing between.
+
+                A single lead index, whose `nonlead` names the slot within the
+                lane and whose lane term the class supplies.  The remaining
+                axes are indexed at zero and fold away: the view still
+                describes the operand's shape, because everything else that
+                asks it --- the bound, the batch stride, the element type ---
+                still wants that answer, and only this one read does not.
+                """
+                threads = self._num_threads
+                rank = self._ops[0].symbol.data_view.rank()
+                index = ([LeadIndex(slot // threads, threads, 1)]
+                         + [0] * (rank - 1))
+                with writer.speculative() as spec:
+                    res = self._ops[0].symbol.load(writer, self._context, None,
+                                                   index, False, parts=parts)
+                    if not res:
+                        spec.discard()
+                return res
+
 
             a_obj = self._ops[0].symbol.obj
+            self._offer_order(_vendor_module(self._context),
+                              a_obj, Mx, K)
             ops = MatmulOperands(
                 A=A, B=B, C=C, sparse=sparse,
                 a_parts=getattr(a_obj, 'storage_parts', 1) if a_obj else 1,
+                A_slot=(A_slot if a_obj is not None
+                        and getattr(a_obj, 'storage_order', None) is not None
+                        else None),
                 lead_slots=M, lead_elements=Mx, n=N, k=K, kx=kx,
                 threads=self._num_threads,
                 a=self._ops[0].symbol.get_fptype(),

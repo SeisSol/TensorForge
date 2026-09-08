@@ -56,9 +56,12 @@ MODULES = ["nvidia"]
 #: third: what the path needs staged has to be answerable before any body
 #: exists, so it cannot sit behind the emitter.  `shmsize` is reached through
 #: it and is listed as well, since a direct reader is free to size a buffer
-#: without going through the routing table.
+#: without going through the routing table.  `prepared_order` is the fifth,
+#: and it is asked at a different time from all of them: before the operand's
+#: buffer is sized, because the answer decides how big it is.
+#: `fragment_order` hangs off it and is reached rather than listed.
 ENTRIES = ["matmul", "supports", "shmsize", "scratch", "strategies",
-           "plan", "ENABLED"]
+           "plan", "ENABLED", "prepared_order"]
 
 # Unreachable on purpose.  Each entry would need a reason that says why
 # deleting it would be worse than keeping it.  There are none.

@@ -872,18 +872,18 @@ GROUPS = {
              '    if scale != 1:', '    if False:', 1)),
         ('a staged fragment goes back to a varalloc name',
          sub(Path('src/tensorforge/backend/instructions/compute/primitives/nvidia.py'),
-             '                                        got = A(writer, None, i // threads,\n'
-             '                                                k + kk + kkk, parts=aparts)',
-             "                                        got = writer.varalloc()\n"
-             "                                        A(writer, f'{got}', i // threads,\n"
-             "                                          k + kk + kkk, parts=aparts)", 1)),
+             '                                            got = A(writer, None, i // threads,\n'
+             '                                                    k + kk + kkk, parts=aparts)',
+             "                                            got = writer.varalloc()\n"
+             "                                            A(writer, f'{got}', i // threads,\n"
+             "                                              k + kk + kkk, parts=aparts)", 1)),
         ('a padding fragment declared as text again',
          sub(Path('src/tensorforge/backend/instructions/compute/primitives/nvidia.py'),
-             "                                            AregParts[pt][kkk] = writer.declare(\n"
-             "                                                ScalarType(atom.d), hint='as')",
-             "                                            AregParts[pt][kkk] = writer.varalloc()\n"
-             "                                            writer(f'float {AregParts[pt][kkk]}{{}};',\n"
-             "                                                   accesses=())", 1)),
+             "                                                AregParts[pt][kkk] = writer.declare(\n"
+             "                                                    ScalarType(atom.d), hint='as')",
+             "                                                AregParts[pt][kkk] = writer.varalloc()\n"
+             "                                                writer(f'float {AregParts[pt][kkk]}{{}};',\n"
+             "                                                       accesses=())", 1)),
         ('the wave width no longer checked',
          sub(Path('src/tensorforge/backend/instructions/compute/primitives/nvidia.py'),
              '    return (threads == 32 and dtype in (Datatype.F32, '

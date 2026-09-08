@@ -48,6 +48,23 @@ class Tensor:
         #: one only says how much room they take, which is what an address
         #: needs to know.
         self.storage_parts = 1
+        #: Which bounding-box cell each storage slot holds, or `None` for the
+        #: identity.
+        #:
+        #: The sibling of `storage_parts`, and the other half of the same
+        #: question: that one says how much room an element takes, this one
+        #: says which element a slot is.  Both are the generator's to set --
+        #: the frontend describes a matrix, not a buffer -- and both are read
+        #: by the host packer, so what the kernel assumes and what the host
+        #: writes come from one statement rather than two.
+        #:
+        #: A slot naming `-1` has no source cell.  That is the one thing a
+        #: pure permutation cannot express and the reason this is not just a
+        #: reordering: a fragment image is tiled, and a tile that runs off the
+        #: end of the matrix has slots no element belongs in.  They read zero,
+        #: which is what the emitter's own padding registers did before the
+        #: order moved into memory.
+        self.storage_order = None
         self.direction: Union[DataFlowDirection, None] = None
         self.data = data
         self.spp = spp
@@ -124,6 +141,44 @@ class Tensor:
                 f'per element and must be at least 1, got {value}')
         self._storage_parts = int(value)
 
+    @property
+    def storage_order(self):
+        return self._storage_order
+
+    @storage_order.setter
+    def storage_order(self, value):
+        if value is None:
+            self._storage_order = None
+            return
+        if not self.is_dense():
+            # Two orders, and composing them is a decision rather than a
+            # detail: the compressed order already says which cell a slot
+            # holds, so a second map would either replace it or be applied to
+            # it, and nothing here can tell which was meant.  Refused until a
+            # caller needs it and says so.
+            raise GenerationError(
+                f'Tensor {self.alias}: a storage order and a sparsity pattern '
+                f'both claim to say which cell a slot holds; only a dense '
+                f'tensor may be given an order')
+        cells = int(self.get_actual_volume())
+        order = tuple(int(c) for c in value)
+        bad = [c for c in order if c != -1 and not 0 <= c < cells]
+        if bad:
+            raise GenerationError(
+                f'Tensor {self.alias}: storage order names cell(s) {bad[:4]} '
+                f'outside the bounding box, which holds {cells}')
+        seen = [c for c in order if c != -1]
+        if len(set(seen)) != len(seen):
+            raise GenerationError(
+                f'Tensor {self.alias}: storage order holds a cell twice; a '
+                f'slot may share an element with no other slot')
+        if len(seen) != cells:
+            missing = cells - len(seen)
+            raise GenerationError(
+                f'Tensor {self.alias}: storage order drops {missing} of '
+                f'{cells} cells; an order reorders, it does not discard')
+        self._storage_order = order
+
     def has_values(self):
         return self.data is not None
 
@@ -157,6 +212,11 @@ class Tensor:
         and ``storage_map`` speak: they say which value sits in which slot, a
         question preparing an operand does not change the answer to.
         """
+        if self._storage_order is not None:
+            # An order may be longer than the matrix: a fragment image is
+            # tiled, and the slots a tile runs past the end into are stored
+            # like any other.  So the order is the count, not the box.
+            return len(self._storage_order)
         return self.get_actual_volume() if self.is_dense() else self.memory()
 
     def storage_volume(self):
@@ -191,6 +251,12 @@ class Tensor:
         order -- the kernel, the test harness, the host oracle -- agrees by
         construction rather than by three parallel derivations.
         """
+        if self._storage_order is not None:
+            # Already in the unit this returns -- slot to F-order cell -- and
+            # the setter has checked it is one.  The `-1` for a slot with no
+            # source cell is this method's contract too: `storage_runs` and
+            # the host packer both read it here.
+            return self._storage_order
         if self.is_dense():
             return None
         # `linear_index` speaks full-tensor coordinates; the dense view a
@@ -266,6 +332,7 @@ class Tensor:
         # the image is expanded from this tensor's memory, so it is read under
         # this tensor's convention
         twin.storage_parts = self.storage_parts
+        twin.storage_order = self.storage_order
         return twin
 
     def get_actual_shape(self):
@@ -298,6 +365,7 @@ class Tensor:
         is_similar &= self.addressing == other.addressing
         is_similar &= self.bbox == other.bbox
         is_similar &= self.storage_parts == other.storage_parts
+        is_similar &= self.storage_order == other.storage_order
         return is_similar
 
     def is_same(self, other):
@@ -312,6 +380,7 @@ class Tensor:
         # and a field every operand carries identically is one they all have
         # to parse to learn nothing.
         parts = f' /{self.storage_parts}' if self.storage_parts != 1 else ''
+        parts += ' ordered' if self.storage_order is not None else ''
         return f'{self.name} {"×".join(str(d) for d in self.shape)}({"×".join(str(d) for d in self.bbox.sizes())}) {self.bbox} {self.addressing}{parts}'
 
     def density(self):

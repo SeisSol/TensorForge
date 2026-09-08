@@ -17,6 +17,7 @@ class Options:
                enable_wrap_loads=False,
                wrap_distance=1,
                preload_globals=None,
+               prepare_operands=False,
                wide_bodies=True,
                merge_variants=False,
                merge_min_count=3,
@@ -68,6 +69,20 @@ class Options:
     # -- has never been compared against its own alternative.  A benchmark
     # cannot ask a question the generator cannot be asked.
     self.preload_globals = preload_globals
+    #: Let the backend re-encode a batch-constant operand for the instruction
+    #: that reads it -- store it in fragment order, split into parts, or both.
+    #:
+    #: A question and not a vendor rule, because the answer is the caller's
+    #: and it is not free: a prepared operand is written by whoever fills the
+    #: buffer, so a host that cannot run the packer cannot use the kernel.
+    #: What preparing *means* is the primitive's business; this only says
+    #: whether it may.
+    #:
+    #: Off by default. On `local_flux` at batch 8192 it is worth 16% for the
+    #: fragment order alone and 27% with the TF32 split on top, but only
+    #: `Addressing.NONE` operands are eligible at all, and a case with none of
+    #: them pays the question with nothing.
+    self.prepare_operands = prepare_operands
     # One PIR body per loop body, rather than one per macro instruction.
     #
     # A pass sees a body.  Per macro instruction that means `RegisterAlloc`,

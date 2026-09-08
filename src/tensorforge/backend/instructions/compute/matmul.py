@@ -116,6 +116,22 @@ class MatmulOperands:
     #: *numbered* is this.
     a_parts: int = 1
 
+    #: ``A_slot(writer, slot, parts) -> value | tuple``, or ``None`` where `A`
+    #: is stored in the order the frontend described it.
+    #:
+    #: The other half of what "prepared" can mean.  `a_parts` says an element
+    #: takes more room than it did; this says the elements are not where they
+    #: were --- the operand sits in the order the instruction reads it, so a
+    #: fragment is a contiguous run of lanes in memory and there is no shared
+    #: staging tile between the two.
+    #:
+    #: A second accessor rather than a flag on `A`, because it indexes a
+    #: different thing: `A` takes a row and a column, and a pre-ordered
+    #: operand has neither left --- its slots are the reading order, and a
+    #: coordinate would have to be mapped back through the very permutation
+    #: that was applied to avoid computing it.
+    A_slot: Optional[Callable] = None
+
 
 def scratch(dtype: Datatype) -> int:
     """Shared-memory elements a path needs, asked before anything is emitted.
