@@ -132,6 +132,24 @@ class MatmulOperands:
     #: that was applied to avoid computing it.
     A_slot: Optional[Callable] = None
 
+    #: ``B_frag(writer, j, k, kblock, nblock) -> value``: the `B` fragment
+    #: whose base is `(k, j)` and whose lane distribution is `kblock` columns
+    #: of the contraction by `nblock` of the output.
+    #:
+    #: The same freedom `A_slot` has, arrived at from the other side. `A` could
+    #: skip its staging tile because a batch-constant operand may be permuted
+    #: once on the host; `B` is per-element and may not, and does not need to
+    #: be --- its fragment coordinate is two lane distributions, so the address
+    #: is computable per lane and the tile was only ever compensating for an
+    #: accessor that could express one distribution and not two.
+    B_frag: Optional[Callable] = None
+
+    #: ``B_direct(kblock, nblock) -> bool``: whether :attr:`B_frag` can address
+    #: every fragment of this operation.  Asked before anything is emitted,
+    #: because a path that staged some fragments and read the rest would need
+    #: the tile it was removing.
+    B_direct: Optional[Callable] = None
+
 
 def scratch(dtype: Datatype) -> int:
     """Shared-memory elements a path needs, asked before anything is emitted.

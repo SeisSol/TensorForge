@@ -870,12 +870,84 @@ class MultilinearInstruction(ComputeInstruction):
                 return res
 
 
+            def B_direct(kblock, nblock):
+                """Whether `B_frag` can address every fragment of this shape.
+
+                Asked once, before anything is emitted, because the answer has
+                to hold for the whole span: a path that reads some fragments
+                from memory and stages the rest would need both, and the tile
+                it was trying to remove back.
+
+                Everything it checks is a way the fragment's coordinate would
+                stop being `base + lane`, which is the only form a `LeadIndex`
+                has.  A second contraction or output axis puts a term between
+                the two; a transposed operand swaps which lane bits mean what;
+                a slice offset shifts the base off its block, and then no
+                `nonlead` names it.  Each of those is refused rather than
+                approximated -- the staging path below is correct for all of
+                them, and being slower is not the same as being wrong.
+                """
+                if len(self._ks) != 1 or len(self._ns) != 2:
+                    return False
+                if self._opdim_to_nks[1] != ['k0', 'n1']:
+                    return False
+                if any(self._eff_offset(1, d) != 0 for d in range(2)):
+                    return False
+                if (self._ks[0][0] % kblock or self._ns[1][0] % nblock):
+                    return False
+                # And the banks.  The fragment reads `(t % kblock) + stride *
+                # (t / kblock)`, so the `nblock` lane groups land `stride`
+                # apart and collide whenever `stride` shares too much with the
+                # bank count: `gcd(stride, 32)` values of `stride * g` repeat,
+                # giving `gcd / kblock`-way conflicts.  A window whose row is a
+                # multiple of 32 puts every group in the same banks -- 8-way,
+                # against the 2-way the staged path reaches with its swizzle.
+                #
+                # Refused rather than swizzled because the buffer is not this
+                # instruction's to permute: it is the staging window some
+                # loader filled, and a permutation applied on only one of its
+                # two sides is not a permutation.  What lifts this is the
+                # window carrying a layout the reader can ask about -- the same
+                # thing `strategies` says is missing for fragments.
+                strides = self._ops[1].symbol.data_view.get_dim_strides()
+                banks = 32
+                if math.gcd(int(strides[1]), banks) > kblock * 2:
+                    return False
+                return True
+
+            def B_frag(writer, j, k, kblock, nblock):
+                """One `B` fragment, at the distribution the instruction reads.
+
+                The staging tile it replaces exists for an addressing reason
+                and not a hardware one: the coordinate accessor hands lane `t`
+                the element at lead index `k + t`, while the fragment wants
+                `B[k + t % kblock][n + t / kblock]`.  Both of those are plain
+                lane distributions, which is exactly what `LeadIndex` says --
+                `block` and `stride` describe which lane holds what -- so the
+                address is expressible and every lane reads its own elements
+                out of memory.  Nothing crosses lanes, so nothing has to be
+                redistributed through shared memory.
+
+                `B_direct` is the guard, and it is the caller's to ask first.
+                """
+                assert B_direct(kblock, nblock)
+                index = [LeadIndex((k + self._ks[0][0]) // kblock, kblock, 1),
+                         LeadIndex((j + self._ns[1][0]) // nblock, nblock,
+                                   kblock)]
+                with writer.speculative() as spec:
+                    res = self._ops[1].symbol.load(writer, self._context, None,
+                                                   index, False)
+                    if not res:
+                        spec.discard()
+                return res
+
             a_obj = self._ops[0].symbol.obj
             self._offer_order(_vendor_module(self._context),
                               a_obj, Mx, K)
             ops = MatmulOperands(
                 A=A, B=B, C=C, sparse=sparse,
                 a_parts=getattr(a_obj, 'storage_parts', 1) if a_obj else 1,
+                B_frag=B_frag, B_direct=B_direct,
                 A_slot=(A_slot if a_obj is not None
                         and getattr(a_obj, 'storage_order', None) is not None
                         else None),

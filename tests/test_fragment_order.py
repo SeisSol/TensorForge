@@ -173,3 +173,79 @@ def test_the_packer_zeroes_a_slot_with_no_cell():
     for b in range(2):
         cells = np.asarray(view[b]).ravel(order='F')
         assert list(out[b]) == [cells[2], cells[0], 0.0, cells[3], cells[1]]
+
+
+# -- B, read where it lies -------------------------------------------------- #
+
+def _multilinear(a_shape, b_shape, *, kslice=None, nslice=None, target=None):
+    """One `X = A @ B` instruction, built the way a frontend would."""
+    from tensorforge.common.matrix.boundingbox import BoundingBox
+    from tensorforge.common.matrix.tensor import SubTensor
+    from tensorforge.common.context import Context
+    from tensorforge.generators.descriptions import MultilinearDescr
+
+    def t(shape, alias, addressing, bbox=None, is_tmp=False):
+        return Tensor(list(shape), addressing,
+                      BoundingBox([0] * len(shape), list(bbox or shape)),
+                      alias=alias, datatype=Datatype.F32, is_tmp=is_tmp)
+
+    m, k = a_shape
+    _, n = b_shape
+    a = t(a_shape, 'A', Addressing.NONE)
+    b = SubTensor(t(b_shape, 'B', Addressing.STRIDED),
+                  bbox=BoundingBox([kslice or 0, nslice or 0], [k, n])
+                  if (kslice or nslice) else None)
+    x = t([m, n], 'X', Addressing.STRIDED, is_tmp=True)
+    descr = MultilinearDescr(dest=SubTensor(x), ops=[SubTensor(a), b],
+                             target=target or [[0, -1], [-1, 1]],
+                             permute=[[0, 1], [0, 1]])
+    return descr, Context(arch='sm_120', backend='cuda',
+                          fp_type=Datatype.F32)
+
+
+def _b_direct(**kw):
+    """`B_direct` as the emitter would ask it, for one built instruction."""
+    from tensorforge.generators.generator import Generator
+
+    descr, ctx = _multilinear((56, 56), kw.pop('b_shape', (56, 9)), **kw)
+    seen = []
+    from tensorforge.backend.instructions.compute.primitives import nvidia as nv
+    orig = nv.matmul
+
+    def spy(writer, ops, context, span):
+        seen.append(ops.B_direct(4, 8) if ops.B_direct else None)
+        return orig(writer, ops, context, span)
+
+    nv.matmul, was = spy, nv.ENABLED
+    nv.ENABLED = True
+    try:
+        Generator([descr], ctx).generate()
+    finally:
+        nv.matmul, nv.ENABLED = orig, was
+    return seen
+
+
+def test_b_is_read_where_it_lies_when_the_address_says_so():
+    """The plain case: a whole operand, no slice, no permutation."""
+    assert _b_direct() == [True]
+
+
+@pytest.mark.parametrize('kw,why', [
+    # `target` is what names the axes, not `permute`: B's axis 0 becomes the
+    # output index and axis 1 the contraction, so the lane bits that meant `k`
+    # now mean `n` and the two `LeadIndex` would address the transpose.
+    ({'target': [[0, -1], [1, -1]], 'b_shape': (9, 56)},
+     'a transposed operand'),
+    ({'nslice': 1}, 'an output slice off its block'),
+])
+def test_what_the_predicate_refuses(kw, why):
+    """Every refusal is a coordinate that stops being `base + lane`.
+
+    Not a performance question: the staging path is correct for all of these,
+    and reading them directly would address the wrong element rather than the
+    same one more slowly.  A refusal that turns into a `True` is the failure
+    this guards, so it is checked from the outside -- by building the
+    instruction and asking what the emitter would have been told.
+    """
+    answers = _b_direct(**kw)
+    assert answers and not any(answers), why

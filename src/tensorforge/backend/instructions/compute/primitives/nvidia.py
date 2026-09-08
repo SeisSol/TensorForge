@@ -349,6 +349,36 @@ def prepared_order(shape, dtype, ctx, columns=0, lead=0, depth=0,
     return fragment_order(shape, atom, threads)
 
 
+def _bfrag(writer, ops, threadrange, nbase, kbase, ktile, ntile, N,
+           atom, threads):
+    """One `B` fragment read where it lies, with the column range guarded.
+
+    The guard is the whole difference between this and the staged read, and it
+    is easy to leave out: staged, the columns past the end of the operand are
+    a *compile-time* range --- `for jj in range(min(atom.n, N - j))` reads and
+    the rest declare a zero --- because the column a lane holds is a Python
+    loop variable.  Read directly, the column is `n + t / ktile`, so which
+    lanes have a column at all is a question about the hardware, and asking it
+    at emission time gives every lane the answer for lane zero.
+
+    What that costs if it is skipped is not a wrong column but an out-of-range
+    read: the lanes above the end address past the operand, and on the corpus
+    case that returned NaN rather than anything harmless.  The columns
+    themselves are independent --- column `c` of the product comes from column
+    `c` of `B` --- so the values the guarded-off lanes would hold are never
+    read; it is the access that has to not happen.
+    """
+    live = min(ntile, N - nbase) * ktile
+    if live >= threads:
+        return ops.B_frag(writer, nbase, kbase, ktile, ntile)
+    # Declared outside the guard: a value defined inside one is not visible to
+    # the instruction that follows, and a slot nothing writes reads zero.
+    value = writer.declare(ScalarType(atom.d), hint='bs')
+    with threadrange(0, live):
+        writer.assign(value, ops.B_frag(writer, nbase, kbase, ktile, ntile))
+    return value
+
+
 def instrs_for(dtype, sm=None):
     """Every entry the emitter could issue for this accumulator, widest first.
 
@@ -647,6 +677,11 @@ def matmul(writer, ops, ctx, span):
     # transform that already happened, once, on the host, for a batch that
     # shares the operand.
     aordered = ops.A_slot is not None
+    # Whether `B` can be read where it lies instead of redistributed.  Asked
+    # once and for the whole span: the tile is either needed or it is not, and
+    # a path that staged half the fragments would still pay for it.
+    bdirect = (ops.B_frag is not None and ops.B_direct is not None
+               and ops.B_direct(ktile, ntile) and atom.n == ntile)
     AregParts = [Areg] + [{} for _ in range(1, aparts)]
     AfragParts = [[None] * len(Afrag) for _ in range(aparts)]
 
@@ -730,19 +765,25 @@ def matmul(writer, ops, ctx, span):
                         with writer.AnonymousScope():
                             for kk in range(0, min(threads, K - k), atom.k):
                                 with writer.AnonymousScope():
-                                    writer.barrier(Uniformity.MULT)
                                     trueK = kk + kx
-                                    trueSK = min(atom.k, threads - trueK)
-                                    with threadrange(trueK, trueSK):
-                                        for jj in range(0, atom.n):
-                                            writer.store(Bshm, Breg[k // threads, jj],
-                                                         _index(writer, sub=trueK, mod=atom.k, add=jj * atom.k))
-                                    if trueSK != atom.k:
-                                        with threadrange(0, atom.k - trueSK):
+                                    if not bdirect:
+                                        # Read once per lane at one
+                                        # distribution and handed to the lanes
+                                        # that want it at another.  Where the
+                                        # fragment's own address is
+                                        # expressible, none of this happens.
+                                        writer.barrier(Uniformity.MULT)
+                                        trueSK = min(atom.k, threads - trueK)
+                                        with threadrange(trueK, trueSK):
                                             for jj in range(0, atom.n):
-                                                writer.store(Bshm, Breg[k // threads + 1, jj],
-                                                                     _index(writer, sub=-trueSK, mod=atom.k, add=jj * atom.k))
-                                    writer.barrier(Uniformity.MULT)
+                                                writer.store(Bshm, Breg[k // threads, jj],
+                                                             _index(writer, sub=trueK, mod=atom.k, add=jj * atom.k))
+                                        if trueSK != atom.k:
+                                            with threadrange(0, atom.k - trueSK):
+                                                for jj in range(0, atom.n):
+                                                    writer.store(Bshm, Breg[k // threads + 1, jj],
+                                                                         _index(writer, sub=-trueSK, mod=atom.k, add=jj * atom.k))
+                                        writer.barrier(Uniformity.MULT)
 
                                     for jj in range(0, nregs):
                                         for kkk in range(0, kregs):
@@ -762,6 +803,14 @@ def matmul(writer, ops, ctx, span):
                                             # out -- still operations, and the
                                             # two `thread_id` reads are one
                                             # value after `cse`.
+                                            if bdirect:
+                                                Bfrag[kkk + jj * kregs] = _bfrag(
+                                                    writer, ops, threadrange,
+                                                    j + jj * ntile,
+                                                    k + trueK + kkk * ktile,
+                                                    ktile, ntile, N, atom,
+                                                    threads)
+                                                continue
                                             col = _index(writer, mod=ktile)
                                             row = _index(writer, div=ktile,
                                                          add=jj * ntile,
