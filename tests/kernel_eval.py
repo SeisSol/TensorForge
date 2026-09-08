@@ -192,23 +192,51 @@ def _py(expr: str) -> str:
     e = ''.join(out)
     e = e.replace('true', 'True').replace('false', 'False')
     e = e.replace('nullptr', 'None')
-    # ternary: rightmost ? : first
+    # ternary: rightmost ? : first, and only the group it sits in
+    #
+    # Taking everything before the `?` as the condition works for an
+    # expression that *is* a ternary and for nothing else.  A select emitted
+    # inside an fma reads `x + ((c) ? a : b) * y`, where the prefix is
+    # `x + ((c` -- unbalanced, and the whole configuration aborts on an
+    # expression that is perfectly well formed.  So the group is found from
+    # the `?` outwards: back to the paren that opens it, forward to the one
+    # that closes it.
     while '?' in e:
         q = e.rindex('?')
+
         depth = 0
+        start = None
+        for i in range(q - 1, -1, -1):
+            if e[i] == ')':
+                depth += 1
+            elif e[i] == '(':
+                if depth == 0:
+                    start = i
+                    break
+                depth -= 1
+        if start is None:
+            start = -1
+
+        depth = 0
+        colon = None
+        stop = None
         for i in range(q + 1, len(e)):
             if e[i] == '(':
                 depth += 1
             elif e[i] == ')':
                 if depth == 0:
+                    stop = i
                     break
                 depth -= 1
-            elif e[i] == ':' and depth == 0:
-                cond, a, b = e[:q], e[q + 1:i], e[i + 1:]
-                e = f'(({a}) if ({cond}) else ({b}))'
-                break
-        else:
+            elif e[i] == ':' and depth == 0 and colon is None:
+                colon = i
+        if colon is None:
             raise Abort(f'unbalanced ternary in {expr!r}')
+        if stop is None:
+            stop = len(e)
+
+        cond, a, b = e[start + 1:q], e[q + 1:colon], e[colon + 1:stop]
+        e = e[:start + 1] + f'(({a}) if ({cond}) else ({b}))' + e[stop:]
     return e
 
 

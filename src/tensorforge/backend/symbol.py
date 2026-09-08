@@ -1519,20 +1519,41 @@ class Symbol:
                 cond2 = writer.op('lt', BOOL, idxvar, rngE)
                 cond = writer.op('and', BOOL, cond1, cond2, hint='cond')
 
-                sel = writer.if_else(cond, (ScalarType(self.get_fptype()),))
-
-                with sel.then():
+                # A run that only clips the lane block is a choice per lane,
+                # and how it is spelled decides what it costs.  An if/else
+                # branches, and on a band operand that came to 144 more
+                # branches than the dense build of the same shape, all inside
+                # the inner loop.  A select is a ternary, which predicates.
+                #
+                # The price is that the load is issued on every lane, so it
+                # has to be in bounds even where its value is discarded.
+                # `validx` runs over `value - rngS + idx` for `idx` across the
+                # whole block, and the ends of that are known here: when they
+                # stay inside the stored region nothing more is needed, and
+                # when they do not the branch is what keeps the read legal.
+                lo = (value - rngS) + bndS
+                hi = (value - rngS) + bndE - 1
+                if 0 <= lo and hi < self.obj.storage_volume():
                   local_load = writer.load(self, validx, type_=ScalarType(self.get_fptype()), hint='data',
                                           layout=layout_of(index, self.num_threads))
-                  sel.yield_(local_load)
-                  # writer.access_stmt(f'{variable} = {self.name}[{validx}];', self, Effect.READ)
-                with sel.otherwise():
-                  if wrote is None:
-                    sel.yield_(writer.const(0.0, ScalarType(self.get_fptype())))
-                  else:
-                    sel.yield_(wrote)
+                  other = (wrote if wrote is not None
+                           else writer.const(0.0, ScalarType(self.get_fptype())))
+                  wrote = writer.op('select', ScalarType(self.get_fptype()),
+                                    cond, local_load, other, hint='masked')
+                else:
+                  sel = writer.if_else(cond, (ScalarType(self.get_fptype()),))
 
-                wrote = sel.result
+                  with sel.then():
+                    local_load = writer.load(self, validx, type_=ScalarType(self.get_fptype()), hint='data',
+                                            layout=layout_of(index, self.num_threads))
+                    sel.yield_(local_load)
+                  with sel.otherwise():
+                    if wrote is None:
+                      sel.yield_(writer.const(0.0, ScalarType(self.get_fptype())))
+                    else:
+                      sel.yield_(wrote)
+
+                  wrote = sel.result
     else:
       if isinstance(index[pos], (int, np.int32, np.int64)):
         runIdx[pos] = index[pos]
