@@ -22,6 +22,13 @@ the thing timed.
 |---|---|
 | `suite.py` | what to measure: workloads, batches, configurations |
 | `suites/` | suite definitions |
+| `build.py` | one binary per configuration, with measurement flags |
+| `run.py` | the vendor-neutral timing run |
+
+The driver itself is emitted by `tests/harness/driver_bench.py`, next to the
+correctness driver and sharing its operand collection and its launcher call —
+two drivers deriving the launcher's parameter order independently is how they
+come to disagree about a signature that changed under one of them.
 
 ## Suites
 
@@ -77,6 +84,22 @@ static figures the compiler reported, and every report is joined against it.
 The hash earns something in return: it is a content key over the descriptors,
 so the same symbol in two runs is the same operation, and two operations cannot
 collide onto one name. Comparing runs is a join, not a guess.
+
+## Reading the output
+
+The launcher sizes its grid `min(occupancy_gridsize, numElements0)`, so below
+saturation a kernel is launch-bound and its throughput describes the runtime
+rather than the code. That is why the runner sweeps the batch and prints
+nanoseconds per element beside the totals: where that column has stopped
+falling, the grid is full. A single batch would produce one number and no way
+to tell which regime it came from.
+
+Two clocks per row. Wall time over back-to-back launches on one stream includes
+the launch overhead, which SeisSol pays for real — it dispatches thousands of
+small kernels per timestep. Device event time around one launch excludes the
+queueing and is what an achieved FLOP-per-second should be divided by. SYCL has
+only the first: the launcher submits internally and does not return its event,
+so the device clock is reported absent rather than as a zero.
 
 ## Build flags
 
