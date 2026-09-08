@@ -23,6 +23,8 @@ from tensorforge.ir.data.memory import Logical
 import numpy as np
 import re
 
+from contextlib import contextmanager
+
 class DescriptionReader:
   """Turns a kernel description into TensorForge tensors and descriptors.
 
@@ -442,6 +444,9 @@ class KernelEmitter:
   """Runs TensorForge over what the reader built and writes the call site."""
 
   def __init__(self, arch, attrs, descr_list, cache):
+    #: What the generated routine ends up being called. Only known once it
+    #: has been generated, since it is derived from what was generated.
+    self.base_name = None
     self._arch = arch
     self._attrs = attrs
     self._descr_list = descr_list
@@ -465,6 +470,7 @@ class KernelEmitter:
 
     cpp(f'{self._gen_call_site(tensorforge_generator)}')
     routine_name = tensorforge_generator.get_base_name()
+    self.base_name = routine_name
 
     routineCache.addRoutine(routine_name, TensorForgeWriter(tensorforge_generator, context.get_vm().get_headers()))
 
@@ -538,12 +544,37 @@ class YatetoFrontend:
     """
     self._arch = arch
     self._attrs = attrs
+    self._description = None
     self._emitter = None
+
+  #: Set by `capture()`. Every kernel that goes through here is offered to
+  #: it, once it has been built and therefore has a name.
+  _sink = None
+
+  @classmethod
+  @contextmanager
+  def capture(cls, sink):
+    """Record every kernel generated inside this block.
+
+    `sink(name, description, descrs)` gets what the routine is called, the
+    description yateto handed over, and the descriptors built from it. A
+    supported way in, so that tooling wanting to see a codegen run does not
+    have to patch a method belonging to another class -- which is what it
+    used to do, and why it only ever saw the one kind of descriptor the
+    patch happened to know about.
+    """
+    previous = cls._sink
+    cls._sink = sink
+    try:
+      yield
+    finally:
+      cls._sink = previous
 
   def add_kernel(self, description):
     """The whole kernel, as data, in one call."""
     reader = DescriptionReader(self._arch, self._attrs)
     descr_list, cache = reader.read(description)
+    self._description = description
     self._emitter = KernelEmitter(self._arch, self._attrs, descr_list, cache)
 
   def generate(self, cpp, cache):
@@ -551,3 +582,7 @@ class YatetoFrontend:
       raise NotImplementedError(
         'generate() before add_kernel(): there is nothing to build.')
     self._emitter.generate(cpp, cache)
+    sink = type(self)._sink
+    if sink is not None:
+      sink(self._emitter.base_name, self._description,
+           self._emitter._descr_list)

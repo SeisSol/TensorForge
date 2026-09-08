@@ -30,11 +30,23 @@ def kernels(path):
     return sorted(blob["all"]) if "all" in blob else []
 
 
+def evaluable(d):
+    """Whether this row is one this can evaluate.
+
+    A product with a contraction is an einsum and is what everything here
+    computes. An elementwise operation or a reduction is recorded too --- it
+    used to be dropped at capture time, as a bare `None` --- but neither is a
+    product, so evaluating one as if it were would be worse than skipping it.
+    A capture that predates the field holds nothing but products.
+    """
+    return d is not None and d.get("kind", "multilinear") == "multilinear"
+
+
 def tensors_of(descrs):
     """name -> logical shape, plus the set of tensors the kernel writes."""
     shapes, written = {}, set()
     for d in descrs:
-        if d is None:
+        if not evaluable(d):
             continue
         for x in [d["dest"]] + [o for o in d["ops"] if o]:
             shapes[x["name"]] = tuple(x["shape"])
@@ -56,7 +68,7 @@ def storage_of(descrs):
     """
     out = {}
     for d in descrs:
-        if d is None:
+        if not evaluable(d):
             continue
         for x in [d["dest"]] + [o for o in d["ops"] if o]:
             pack = x.get("pack")
@@ -198,7 +210,7 @@ def run(path, seed=0, kernel=None):
     arrays = make(shapes, written, seed, constants_of(descrs))
     inputs = {k: v.copy() for k, v in arrays.items() if k not in written}
     for d in descrs:
-        if d is not None:
+        if evaluable(d):
             apply(d, arrays)
     return arrays, inputs, shapes, written
 

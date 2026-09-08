@@ -29,9 +29,9 @@ import reference                                               # noqa: E402
 
 def check(dump, descriptors, kernel, seed=1, nonzero_dest=True):
     descrs = reference.load(descriptors, kernel)
-    if not descrs or all(d is None for d in descrs):
+    if not descrs or not any(reference.evaluable(d) for d in descrs):
         return None
-    prefix = [d for d in descrs if d is not None]
+    prefix = [d for d in descrs if reference.evaluable(d)]
     shapes, written = reference.tensors_of(prefix)
     storage = reference.storage_of(prefix)
     arrays = reference.make(shapes, written, seed,
