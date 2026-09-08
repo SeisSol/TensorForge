@@ -140,7 +140,10 @@ def main():
         # a kernel that failed to build never got a routine to be named after
         name = item.name or f"unbuilt_{i}"
         captured[name] = [_row(d) for d in (item.descrs or [])]
-        descriptions[name] = item.description
+        if item.description is not None:
+            # a kernel that arrived as terms has none, and a null read back is
+            # not a description of anything
+            descriptions[name] = item.description
 
     def conv(o):
         if isinstance(o, np.integer):

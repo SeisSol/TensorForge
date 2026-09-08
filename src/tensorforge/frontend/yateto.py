@@ -25,27 +25,63 @@ import re
 
 from contextlib import contextmanager
 
-class DescriptionReader:
+class Reader:
+  """What every reading of yateto's output has in common.
+
+  yateto reaches this side in two ways -- a whole kernel as data, or one
+  operation at a time as the objects its own codegen works with -- and what
+  separates them is only how an operand is understood. Both meet a tensor
+  once and name it from then on, both produce descriptors in the order the
+  operations arrived, and both prefix everything with the region they are in.
+  """
+
+  def __init__(self):
+    self._cache = {}
+
+    # to be replaced by the IR list
+    self._descr_list = []
+
+    # TODO: maybe remove again
+    self._prefix = ""
+
+  def result(self):
+    """The descriptors read so far, and the tensors they name.
+
+    The list itself rather than a copy: a reader handed one operation at a
+    time is not finished when it is first asked for its result.
+    """
+    return self._descr_list, self._cache
+
+  # NOTE: regions and barriers have no place in the description yet -- yateto
+  #       has never called for one -- so these are unreachable. When they are
+  #       needed they belong in the operations list, as entries of their own.
+  def switch_region(self, barrier):
+    if barrier:
+      self._descr_list += [GridBarrierDescr()]
+    else:
+      self._descr_list += [GridFenceDescr()]
+
+  def set_region_name(self, name):
+    self._prefix = f"{name}."
+    self._descr_list += [RegionDescription(name)]
+
+
+class DescriptionReader(Reader):
   """Turns a kernel description into TensorForge tensors and descriptors.
 
   Split off from the emitting half because the two answer different
   questions and share only their result: this one knows what yateto means
   and nothing about how a kernel is built, `KernelEmitter` the other way
-  round. The old single class also carried a `V1` in its name that had
-  stopped being true.
+  round.
   """
 
   def __init__(self, arch, attrs=None):
+    super().__init__()
     self._arch = arch
     #: The attributes yateto attached to this kernel, or None when yateto has
     #: no attribute channel to attach them with.  Passed on untouched; the
     #: Generator is what reads them.
     self._attrs = attrs
-    self._cache = {}
-    self._tmp_matrices = {}
-
-    # to be replaced by the IR list
-    self._descr_list = []
 
     self._ir_list = []
     self._tensor_list = {}
@@ -552,19 +588,6 @@ class DescriptionReader:
 
     self._tensor_list[name] = TensorData(datatype_new, shape, spp, values=values)
 
-  # NOTE: regions and barriers have no place in the description yet -- yateto
-  #       has never called for one -- so these are unreachable. When they are
-  #       needed they belong in the operations list, as entries of their own.
-  def switch_region(self, barrier):
-    if barrier:
-      self._descr_list += [GridBarrierDescr()]
-    else:
-      self._descr_list += [GridFenceDescr()]
-
-  def set_region_name(self, name):
-    self._prefix = f"{name}."
-    self._descr_list += [RegionDescription(name)]
-
   @staticmethod
   def _values(values):
     """The constant data a tensor carries, if it carries any.
@@ -597,7 +620,224 @@ class DescriptionReader:
       self.add_tensor(tensor)
     for operation in description['operations']:
       self.add_operation_new(operation)
-    return self._descr_list, self._cache
+    return self.result()
+
+
+class TermReader(Reader):
+  """Turns yateto's own term objects into TensorForge tensors and descriptors.
+
+  This is the route a yateto takes that sends one operation at a time as the
+  objects its codegen works with, rather than a kernel as data. A term states
+  its indices, its memory layout and its equivalent sparsity pattern, and
+  everything a description states outright is derived from those here: the
+  box an occurrence runs over, the shift a slicing operand imposes, whether
+  it is a slice at all, and what alignment may be claimed for it.
+
+  yateto is never imported. A term is whatever was handed over, and the few
+  places that have to tell one kind of layout from another ask for the type's
+  name.
+  """
+
+  def __init__(self, arch):
+    super().__init__()
+    self._arch = arch
+    self._tmp_matrices = {}
+
+  def add_operation(self, dest, ops, target, permute, add):
+    """One contraction, product, permutation or copy, as a multilinear.
+
+    Every operation that arrives this way is linear in its operands, so
+    there is one descriptor kind to build and the return value is the flop
+    count yateto adds up -- nothing counts them here yet.
+    """
+    self._cache_matrices(dest, ops, target, permute)
+    can_be_aligned = self._can_be_aligned(dest, ops, target, permute)
+    destdims = [i for i in range(len(dest.indices))]
+    self._descr_list.append(
+      MultilinearDescr(self.get_tensor(dest, can_be_aligned, destdims),
+                       [self.get_tensor(op, can_be_aligned, optarget)
+                        for op, optarget in zip(ops, target)],
+                       target, permute, add=add,
+                       strict_match=False,
+                       prefer_align=can_be_aligned))
+    return 0
+
+  @staticmethod
+  def is_scalar(op):
+    """Whether this operand is a named scalar rather than a tensor.
+
+    Asked of the object, since recognising yateto's `Scalar` by type would
+    mean importing yateto. It carries no memory layout, and a factor that is
+    a literal arrives as a number instead.
+    """
+    return not hasattr(op, 'memoryLayout') and not isinstance(op, (float, int))
+
+  def _datatype(self, source):
+    if hasattr(source, 'datatype'):
+      stype = Datatype.ytt2enum(source.datatype)
+    else:
+      stype = None
+    if hasattr(self._arch, 'typename'):
+      fptype = Datatype.str2enum(self._arch.typename)
+    else:
+      fptype = None
+
+    assert not (stype is None and fptype is None)
+
+    return stype if stype is not None else fptype
+
+  def _can_be_aligned(self, dest, ops, target, permute):
+    # TODO: useful?
+    aligned = dest.memoryLayout.alignedStride()
+    for i, op in enumerate(ops):
+      if 0 in target[i]:
+        aligned &= dest.memoryLayout.alignedStride() and permute[i][0] == 0
+
+    return aligned
+
+  def get_tensor(self, op, can_be_aligned, dims):
+    if isinstance(op, (float, int)):
+      return SubTensor(tensor = Tensor([], Addressing.SCALAR, data = np.array(op)))
+    elif self.is_scalar(op):
+      return SubTensor(self._cache[f'{self._prefix}{op.name()}'])
+    else:
+      tensor = self._cache[f'{self._prefix}{op.name}']
+      currentPreShape = BBox([s for s, _ in op.eqspp.nnzbounds()], [e+1 for _, e in op.eqspp.nnzbounds()])
+
+      # Two shifts act on a yateto tensor, in opposite directions, and they must
+      # not be conflated:
+      #
+      #   * the memory bounding box (`tml.bbox()`) restricts what is *stored*.
+      #     It lives in storage coordinates and is subtracted when an address is
+      #     formed (see Symbol.access_address).
+      #   * a MemoryLayoutView adds a slicing offset: the view's own index space
+      #     is [0, end-start), mapped to the base by `relidx`.
+      #
+      # `currentPreShape` is derived from eqspp, which is defined over the
+      # *view* shape --- so it is already in logical coordinates and stays
+      # there.  Bounding boxes become loop ranges and are intersected across
+      # operands (MultilinearInstruction._analyze); that intersection is only
+      # meaningful if every operand contributes it in the same, shared logical
+      # index space.  The offset is a pure addressing constant and is applied at
+      # the access site only.
+      tml = op.memoryLayout
+      offset = [0] * currentPreShape.rank()
+      # a view means the operand names a slice, not the tensor; see
+      # SubTensor.sliced.  The offset alone does not carry it: `subslice` from
+      # index 0 produces a view with a zero shift.
+      sliced = type(tml).__name__ == 'MemoryLayoutView'
+      while type(tml).__name__ == 'MemoryLayoutView':
+        # relidx() adds this view's `start` in the one dimension it slices;
+        # nested views compose, so this accumulates the full logical->storage shift
+        offset = list(tml.relidx(offset))
+        tml = tml.base
+      tml = tml.storage()
+
+      if can_be_aligned and currentPreShape.rank() > 0 and tml.alignedStride():
+        # Alignment is a property of the *address*, so snap in storage
+        # coordinates and pull the result back into logical ones.  Widening is
+        # sound because the entries gained are zero by eqspp; it must not,
+        # however, reach past what is actually stored.
+        storeRange = tml.bbox()[0]
+        newLower = max(self._arch.alignedLower(currentPreShape._lower[0] + offset[0]),
+                       storeRange.start)
+        newUpper = min(self._arch.alignedUpper(currentPreShape._upper[0] + offset[0]),
+                       storeRange.stop)
+
+        currentPreShape._lower = tuple([newLower - offset[0]] + list(currentPreShape._lower[1:]))
+        currentPreShape._upper = tuple([newUpper - offset[0]] + list(currentPreShape._upper[1:]))
+
+      # invariant tying the two coordinate systems together: bbox + offset must
+      # land inside what the storage layout actually holds
+      storeBox = tml.bbox()
+      for j, (lo, hi) in enumerate(zip(currentPreShape.lower(), currentPreShape.upper())):
+        assert lo >= hi or (storeBox[j].start <= lo + offset[j] and hi + offset[j] <= storeBox[j].stop), \
+            f'{op.name}: logical bbox [{lo},{hi}) + offset {offset[j]} escapes ' \
+            f'storage [{storeBox[j].start},{storeBox[j].stop}) in dim {j}'
+
+      return SubTensor(tensor, currentPreShape, offset, sliced=sliced)
+
+  def make_tensor(self, op, can_be_aligned, dims):
+    if isinstance(op, (float, int)):
+      return Tensor([], Addressing.SCALAR, data = np.array(op))
+    if self.is_scalar(op):
+      entry = self._add_scalar(op)
+      entry_name = op.name()
+    else:
+      entry = self._get_tensorforge_matrix(op)
+      entry_name = op.name
+
+    entry_name = f'{self._prefix}{entry_name}'
+
+    if not (entry_name in self._cache and entry.is_same(self._cache[entry_name])):
+      self._cache[entry_name] = entry
+
+  def _cache_matrices(self, dest, ops, target, permute):
+    can_be_aligned = self._can_be_aligned(dest, ops, target, permute)
+
+    # no add onto a matrix that doesn't exist (TODO: check if that's always the case)
+    assert not(dest.is_temporary and dest in ops)
+
+    for op, optarget in zip(ops, target):
+      self.make_tensor(op, can_be_aligned, optarget)
+
+    self.make_tensor(dest, can_be_aligned, [i for i in range(len(dest.indices))])
+
+    if dest.is_temporary: # (dest is never a scalar---for the time being)
+      self._tmp_matrices[f'{self._prefix}{dest.name}'] = self._cache[f'{self._prefix}{dest.name}']
+
+  def _add_scalar(self, scalar):
+    name = f'{self._prefix}{scalar.name()}'
+    tensor = Tensor([], Addressing.SCALAR, alias=name, datatype=self._datatype(scalar.datatype))
+    self._tmp_matrices[name] = tensor
+    return self._tmp_matrices[name]
+
+  @staticmethod
+  def _deduce_addressing(term):
+    if term.is_compute_constant:
+      return Addressing.NONE
+    if term.is_temporary:
+      return Addressing.STRIDED
+    else:
+      return Addressing.PTR_BASED
+
+  @staticmethod
+  def _storage(tml):
+    if type(tml).__name__ == 'MemoryLayoutView':
+      return tml.storage()
+    return tml
+
+  def _get_tensorforge_matrix(self, tensor):
+    tml = self._storage(tensor.memoryLayout)
+
+    shape=[rng.stop for rng in tml.bbox()]
+    bboxrange=tml.bbox()
+
+    addr_mode = self._deduce_addressing(tensor) if tensor.addressing is None else tensor.addressing
+    if tensor.is_temporary and tensor.name in self._tmp_matrices:
+      return self._tmp_matrices[tensor.name]
+
+    if type(tml).__name__ == 'DenseMemoryLayout':
+      pattern = None
+    else:
+      # from zero rather than from the box's lower corner: `entries` numbers
+      # what it returns relative to the ranges it is given, and the pattern
+      # has to be stated over the shape, which is what `ListSPP` indexes
+      ranges = [range(0, shape[i]) for i in range(len(shape))]
+      pattern = tml.entries(*ranges)
+
+    alignment = 16 if len(tensor.memoryLayout.shape()) > 0 and tensor.memoryLayout.alignedStride() else 0
+
+    return yi.gen_matrix(shape,
+                         bboxrange,
+                         addressing=addr_mode,
+                         name=f'{self._prefix}{tensor.name}',
+                         is_tmp=tensor.is_temporary,
+                         permute=None,
+                         pattern=pattern,
+                         values = tensor.values,
+                         datatype = self._datatype(tensor.datatype),
+                         alignment = alignment)
 
 
 class KernelEmitter:
@@ -699,6 +939,9 @@ class Recorded:
   __slots__ = ('description', 'descrs', 'emitter')
 
   def __init__(self, description):
+    #: What yateto sent, when it sent a description at all. `None` for a
+    #: kernel that arrived as terms, one operation at a time -- there is no
+    #: description of it to keep, only what was built.
     self.description = description
     #: What was built from it, once it has been read. `None` for a
     #: description that could not be read at all.
@@ -728,6 +971,9 @@ class YatetoFrontend:
     self._attrs = attrs
     self._description = None
     self._emitter = None
+    #: Set once a kernel arrives as terms; see `add_linear_operation`.
+    self._terms = None
+    self._recorded = None
 
   #: Set by `capture()`. Every kernel that goes through here is offered to
   #: it, once it has been built and therefore has a name.
@@ -757,15 +1003,20 @@ class YatetoFrontend:
     finally:
       cls._sink = previous
 
+  def _record(self, description):
+    """Offer this kernel to whoever is capturing, if anyone is."""
+    sink = type(self)._sink
+    if sink is None:
+      return None
+    recorded = Recorded(description)
+    sink(recorded)
+    return recorded
+
   def add_kernel(self, description):
     """The whole kernel, as data, in one call."""
     # Recorded before it is read, so that a description this cannot read is
     # recorded too -- that is precisely the one worth having.
-    recorded = None
-    sink = type(self)._sink
-    if sink is not None:
-      recorded = Recorded(description)
-      sink(recorded)
+    recorded = self._record(description)
 
     reader = DescriptionReader(self._arch, self._attrs)
     descr_list, cache = reader.read(description)
@@ -776,8 +1027,30 @@ class YatetoFrontend:
       recorded.descrs = descr_list
       recorded.emitter = self._emitter
 
+  def add_linear_operation(self, dest, ops, target, permute, add):
+    """One operation of a kernel that arrives as terms rather than as data.
+
+    Nothing announces such a kernel -- the first operation is what starts
+    it, and it is complete only once `generate` asks for it -- so the reader
+    is made here and kept.
+
+    What is recorded is the descriptor list itself, which the reader goes on
+    appending to, so a capture fills in as the rest of the kernel arrives.
+    """
+    if self._terms is None:
+      self._terms = TermReader(self._arch)
+      self._recorded = self._record(None)
+      if self._recorded is not None:
+        self._recorded.descrs, _ = self._terms.result()
+    return self._terms.add_operation(dest, ops, target, permute, add)
+
   def generate(self, cpp, cache):
+    if self._emitter is None and self._terms is not None:
+      descr_list, tensors = self._terms.result()
+      self._emitter = KernelEmitter(self._arch, self._attrs, descr_list, tensors)
+      if self._recorded is not None:
+        self._recorded.emitter = self._emitter
     if self._emitter is None:
       raise NotImplementedError(
-        'generate() before add_kernel(): there is nothing to build.')
+        'generate() before a kernel arrived: there is nothing to build.')
     self._emitter.generate(cpp, cache)
