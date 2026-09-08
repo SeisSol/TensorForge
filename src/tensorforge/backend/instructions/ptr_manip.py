@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: 2026 SeisSol Group
 #
 # SPDX-License-Identifier: MIT
+import enum
+
 from .abstract_instruction import AbstractInstruction
 from tensorforge.common.context import Context
 from tensorforge.common.helper import get_extra_offset_name, Addressing
@@ -68,7 +70,7 @@ class GetElementPtr(AbstractInstruction):
     """What the right-hand side reads the base pointer out of."""
     if self._table is None:
       return self._src.name
-    return f'{self._table.name}[{self._variant}]'
+    return self._table.access(self._variant)
 
   def gen_ir(self, writer):
 
@@ -201,15 +203,42 @@ class GetElementPtr(AbstractInstruction):
             f'[{self.batch_index()}];')
 
 
+class TableForm(enum.Enum):
+  """How a run reaches the member its counter names.
+
+  `SELECT` is a chain of conditionals collapsing to one pointer.  The counter
+  is uniform, so each step is a scalar select on both vendors and nothing is
+  stored anywhere; the chain is `n - 1` selects long, which is why it is the
+  choice for a handful of members and not for many.
+
+  `ARRAY` is an initialised array indexed by the counter.  Constant in the
+  length of the run, and it pays for that by being *memory*: an array with a
+  dynamic index cannot be promoted out of its allocation, so it lands in the
+  per-thread space -- `.local` on NVIDIA, scratch on AMD -- where every thread
+  in the block builds and holds its own copy of one set of pointers, and where
+  on AMD the allocation alone can cost occupancy.
+
+  So `SELECT` is the default and `ARRAY` earns its place only once the chain
+  is longer than the memory is worth.  A third form is better than both where
+  it applies and is not available here: members that are one contiguous blob
+  need neither, since the address is the base plus the counter times a stride.
+  """
+
+  SELECT = 'select'
+  ARRAY = 'array'
+
+
 class DeclareOperandTable(AbstractInstruction):
-  """An array of the kernel's own arguments, indexed by a loop counter.
+  """How the kernel's own arguments are reached by a counter.
 
   A run whose operand changes between iterations needs that operand reachable
   by index.  Where its members are already parameters -- which is the case a
   frontend that wrote the repetition out always produces, since it named every
-  one of them -- nothing has to reach the interface: the table is built inside
-  the kernel from what is already there, costs one initialised array, and the
-  index into it is uniform, so the load stays on the scalar path.
+  one of them -- nothing has to reach the interface; it is assembled inside the
+  kernel from what is already there.
+
+  Assembled in one of two shapes, and `TableForm` says why the default is the
+  one that touches no memory.
 
   The element type follows the members' addressing rather than being chosen
   here.  A pointer-based argument is already an array per element, so a table
@@ -218,8 +247,12 @@ class DeclareOperandTable(AbstractInstruction):
   wrong address at run time.
   """
 
+  #: Beyond this many members the chain is longer than the memory is worth.
+  #: A guide for whoever constructs one; nothing here enforces it.
+  SELECT_LIMIT = 8
+
   def __init__(self, context: Context, name: str, members, addressing,
-               datatype=None):
+               datatype=None, form: 'TableForm' = None, variant: str = None):
     super(DeclareOperandTable, self).__init__(context)
     if not members:
       raise GenerationError('an operand table has at least one member')
@@ -227,7 +260,29 @@ class DeclareOperandTable(AbstractInstruction):
     self._members = list(members)
     self._addressing = addressing
     self._datatype = datatype
+    self._form = form or TableForm.SELECT
+    self._variant = variant
+    if self._form is TableForm.SELECT and variant is None:
+      raise GenerationError('a select chain has to name the counter it reads')
     self._is_ready = True
+
+  @property
+  def form(self) -> 'TableForm':
+    return self._form
+
+  def loop_invariant(self) -> bool:
+    """Whether this may be emitted once, ahead of the loop.
+
+    An array does not depend on the counter and is built before the header; a
+    select chain is the counter's value and belongs at the top of the body.
+    """
+    return self._form is TableForm.ARRAY
+
+  def access(self, variant: str) -> str:
+    """The expression that yields the member `variant` names."""
+    if self._form is TableForm.ARRAY:
+      return f'{self._name}[{variant}]'
+    return self._name
 
   @property
   def name(self) -> str:
@@ -239,9 +294,16 @@ class DeclareOperandTable(AbstractInstruction):
   def gen_ir(self, writer):
     datatype = self._datatype or self._vm._fp_type
     stars = Addressing.addr2ptr_type(self._addressing)
-    entries = ', '.join(m.name for m in self._members)
-    writer(f'const {datatype} {stars}const {self._name}[{len(self._members)}]'
-           f' = {{{entries}}};')
+    if self._form is TableForm.ARRAY:
+      entries = ', '.join(m.name for m in self._members)
+      writer(f'const {datatype} {stars}const {self._name}'
+             f'[{len(self._members)}] = {{{entries}}};')
+      return
+    chain = self._members[-1].name
+    for index in range(len(self._members) - 2, -1, -1):
+      chain = (f'({self._variant} == {index}) ? {self._members[index].name} '
+               f': {chain}')
+    writer(f'const {datatype} {stars}const {self._name} = {chain};')
 
   def get_operands(self):
     return list(self._members)
@@ -320,9 +382,13 @@ class VariantLoop(AbstractInstruction):
             f'++{self._counter}')
 
   def gen_code(self, writer) -> None:
-    for table in self._tables:
+    invariant = [t for t in self._tables if t.loop_invariant()]
+    per_iteration = [t for t in self._tables if not t.loop_invariant()]
+    for table in invariant:
       table.gen_code(writer)
     with writer.For(self.header(), unroll=self._unroll):
+      for table in per_iteration:
+        table.gen_code(writer)
       for instruction in self._region:
         instruction.gen_code(writer)
 

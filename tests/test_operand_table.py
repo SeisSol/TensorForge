@@ -19,7 +19,8 @@ downstream.
 import pytest
 
 from tensorforge.backend.instructions.ptr_manip import (DeclareOperandTable,
-                                                        GetElementPtr)
+                                                        GetElementPtr,
+                                                        TableForm, VariantLoop)
 from tensorforge.backend.symbol import Symbol, SymbolType
 from tensorforge.common.basic_types import Addressing, DataFlowDirection, Datatype
 from tensorforge.common.context import Context
@@ -57,7 +58,8 @@ def emitted(instruction):
 def test_a_table_over_batch_invariant_members_is_one_star():
     members = [symbol(f'm{i}', Addressing.NONE) for i in (3, 5, 7, 9)]
     text = emitted(DeclareOperandTable(context(), 'tbl', members,
-                                       Addressing.NONE, Datatype.F32))
+                                       Addressing.NONE, Datatype.F32,
+                                       form=TableForm.ARRAY))
     assert 'const float *const tbl[4] = {m3, m5, m7, m9};' in text
 
 
@@ -66,13 +68,15 @@ def test_a_table_over_pointer_based_members_is_one_deeper():
     members = [symbol(f'm{i}', Addressing.PTR_BASED, (9, 15))
                for i in (1, 4, 6, 8)]
     text = emitted(DeclareOperandTable(context(), 'tbl', members,
-                                       Addressing.PTR_BASED, Datatype.F32))
+                                       Addressing.PTR_BASED, Datatype.F32,
+                                       form=TableForm.ARRAY))
     assert 'const float **const tbl[4] = {m1, m4, m6, m8};' in text
 
 
 def test_the_table_reports_its_members_as_operands():
     members = [symbol(f'm{i}', Addressing.NONE) for i in (3, 5)]
-    table = DeclareOperandTable(context(), 'tbl', members, Addressing.NONE)
+    table = DeclareOperandTable(context(), 'tbl', members, Addressing.NONE,
+                                form=TableForm.ARRAY)
     assert table.get_operands() == members
     assert len(table) == 2
 
@@ -80,7 +84,8 @@ def test_the_table_reports_its_members_as_operands():
 def test_an_empty_table_is_refused():
     from tensorforge.common.exceptions import GenerationError
     with pytest.raises(GenerationError):
-        DeclareOperandTable(context(), 'tbl', [], Addressing.NONE)
+        DeclareOperandTable(context(), 'tbl', [], Addressing.NONE,
+                            form=TableForm.ARRAY)
 
 
 # --- reading through it -----------------------------------------------------
@@ -99,7 +104,7 @@ def test_a_table_fed_operand_offsets_the_same_way_as_an_argument_fed_one():
     table = DeclareOperandTable(context(), 'tbl',
                                 [symbol(f'm{i}', Addressing.NONE)
                                  for i in (3, 5, 7, 9)],
-                                Addressing.NONE)
+                                Addressing.NONE, form=TableForm.ARRAY)
     plain = _binding(src)
     fed = _binding(src, table=table, variant='v')
     assert plain.replace('m3[', 'tbl[v][') == fed
@@ -110,7 +115,7 @@ def test_the_variant_index_appears_where_the_argument_name_was():
     table = DeclareOperandTable(context(), 'tbl',
                                 [symbol(f'm{i}', Addressing.PTR_BASED, (9, 15))
                                  for i in (1, 4, 6, 8)],
-                                Addressing.PTR_BASED)
+                                Addressing.PTR_BASED, form=TableForm.ARRAY)
     text = _binding(src, table=table, variant='face')
     assert 'tbl[face][' in text
     assert 'm1[' not in text
@@ -123,6 +128,68 @@ def test_without_a_table_nothing_changes():
 
 
 # --- the loop the tables are for --------------------------------------------
+
+
+def select_table(names=(3, 5, 7, 9), addressing=Addressing.NONE,
+                 variant='face', shape=(56, 56)):
+    return DeclareOperandTable(
+        context(), 'tbl', [symbol(f'm{i}', addressing, shape) for i in names],
+        addressing, Datatype.F32, form=TableForm.SELECT, variant=variant)
+
+
+# --- the form that touches no memory ----------------------------------------
+
+
+def test_the_default_form_is_a_chain_and_not_an_array():
+    """An array with a dynamic index cannot leave its allocation.
+
+    It lands in the per-thread space -- `.local` on NVIDIA, scratch on AMD --
+    where every thread in the block builds and holds its own copy of one set of
+    pointers, and where on AMD the allocation alone can cost occupancy.  The
+    counter is uniform, so a chain of selects is scalar on both vendors and
+    stores nothing.
+    """
+    text = emitted(select_table())
+    assert '[4]' not in text
+    assert text.count('?') == 3
+    assert 'const float *const tbl = (face == 0) ? m3 : ' in text
+
+
+def test_the_chain_ends_on_the_last_member_without_a_test():
+    text = emitted(select_table(names=(3, 5)))
+    assert text.count('?') == 1
+    assert text.rstrip().endswith(': m5;')
+
+
+def test_a_chain_of_one_is_just_the_member():
+    text = emitted(select_table(names=(3,)))
+    assert '?' not in text
+    assert 'tbl = m3;' in text
+
+
+def test_a_chain_is_read_by_name_and_an_array_by_index():
+    chain, array = select_table(), DeclareOperandTable(
+        context(), 'tbl', [symbol(f'm{i}', Addressing.NONE) for i in (3, 5)],
+        Addressing.NONE, form=TableForm.ARRAY)
+    assert chain.access('face') == 'tbl'
+    assert array.access('face') == 'tbl[face]'
+
+
+def test_a_chain_without_a_counter_is_refused():
+    from tensorforge.common.exceptions import GenerationError
+    with pytest.raises(GenerationError):
+        DeclareOperandTable(context(), 'tbl',
+                            [symbol('m3', Addressing.NONE)], Addressing.NONE,
+                            form=TableForm.SELECT)
+
+
+def test_a_chain_is_emitted_inside_the_loop_and_an_array_before_it():
+    """A chain is the counter's value; an array does not depend on it."""
+    lines = written(VariantLoop(context(), 'face', 4, [Marker('body();')],
+                                tables=[select_table()])).splitlines()
+    head = next(i for i, l in enumerate(lines) if 'for (int face' in l)
+    decl = next(i for i, l in enumerate(lines) if 'tbl =' in l)
+    assert decl > head
 
 
 def loop_writer():
@@ -170,7 +237,7 @@ def test_the_tables_are_declared_before_the_header_not_inside_it():
     table = DeclareOperandTable(context(), 'tbl',
                                 [symbol(f'm{i}', Addressing.NONE)
                                  for i in (3, 5)], Addressing.NONE,
-                                Datatype.F32)
+                                Datatype.F32, form=TableForm.ARRAY)
     lines = written(VariantLoop(context(), 'face', 2, [Marker('body();')],
                                 tables=[table])).splitlines()
     decl = next(i for i, l in enumerate(lines) if 'tbl[2]' in l)
@@ -181,7 +248,8 @@ def test_the_tables_are_declared_before_the_header_not_inside_it():
 def test_a_loop_reports_the_arguments_its_tables_hold():
     from tensorforge.backend.instructions.ptr_manip import VariantLoop
     members = [symbol(f'm{i}', Addressing.NONE) for i in (3, 5, 7, 9)]
-    table = DeclareOperandTable(context(), 'tbl', members, Addressing.NONE)
+    table = DeclareOperandTable(context(), 'tbl', members, Addressing.NONE,
+                                form=TableForm.ARRAY)
     loop = VariantLoop(context(), 'face', 4, [], tables=[table])
     assert loop.get_operands() == members
 
