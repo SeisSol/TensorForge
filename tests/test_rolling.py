@@ -648,24 +648,6 @@ def test_the_loop_runs_the_iterations_the_peel_did_not():
     assert 'for (int' in loop.header().join(('for (int ', ''))
 
 
-def test_the_destination_is_still_not_carried_across_the_back_edge():
-    """The one thing left, and the peel is what narrowed it to one thing.
-
-    The body reads the accumulator the peel established and writes a *different*
-    register: each build of a destination takes a fresh one, so repeating the
-    body recomputes from the peeled value instead of adding to what the last
-    iteration produced.  Nothing carries it, which is what `for_`'s `iter_args`
-    is for.  Pinned rather than described, since what makes it pass is the next
-    piece of work.
-    """
-    loop = _loop_region()
-    compute = next(i for i in loop.region
-                   if type(i).__name__ == 'MultilinearInstruction')
-    written = {s.name for s in compute.defs()}
-    read = {s.name for s in compute.uses()}
-    assert not (written & read)
-
-
 def _loop_of(descrs):
     from tensorforge.common.context import Context
     from tensorforge.generators.generator import Generator
@@ -688,14 +670,55 @@ def test_the_loop_names_the_value_its_body_threads_through_itself():
     loop = _loop_of(roll(accumulation()))
     assert len(loop.carried) == 1
     init, result = loop.carried[0]
-    assert init is not result
+    # Reported after the substitution closed it, so the two links are one.
+    assert init is result
 
     compute = next(i for i in loop.region
                    if type(i).__name__ == 'MultilinearInstruction')
     assert init in compute.uses()
-    assert result in compute.defs()
+    assert init in compute.defs()
 
 
 def test_a_body_that_accumulates_nothing_carries_nothing():
     """Empty means nothing to carry, not a carried value gone unnoticed."""
     assert _loop_of(roll(separate())).carried == ()
+
+
+def test_the_body_reads_and_writes_the_same_register():
+    """The chain closed: a repeated body has to land where it started.
+
+    Substituted on the built region rather than arranged during the build,
+    because what the residency hands out is its business and the fact that a
+    body will be repeated is not something it can know.
+    """
+    loop = _loop_of(roll(accumulation()))
+    compute = next(i for i in loop.region
+                   if type(i).__name__ == 'MultilinearInstruction')
+    written = {s.name for s in compute.defs()}
+    assert written & {s.name for s in compute.uses()} == written
+
+
+def test_the_writeback_stores_the_register_the_loop_kept():
+    """Emitted after the loop is assembled, so the residency has to be told."""
+    from tensorforge.common.context import Context
+    from tensorforge.generators.generator import Generator
+    gen = Generator(roll(accumulation()),
+                    Context(arch='sm_86', backend='cuda', fp_type=DTYPE))
+    gen._emit_loops = True
+    gen.generate()
+    loop = next(i for i in gen._sections[0].ir
+                if type(i).__name__ == 'VariantLoop')
+    stores = [i for i in gen._sections[0].ir
+              if type(i).__name__ == 'StoreRegToGlb']
+    kept = {s.name for i in loop.region for s in i.defs()}
+    assert len(stores) == 1
+    assert {s.name for s in stores[0].uses()} <= kept
+
+
+def test_substitution_reports_whether_it_reached_anything():
+    """So a substitution that did nothing is not mistaken for one applied."""
+    loop = _loop_of(roll(accumulation()))
+    compute = next(i for i in loop.region
+                   if type(i).__name__ == 'MultilinearInstruction')
+    absent = object()
+    assert compute.substitute(absent, absent) is False

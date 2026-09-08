@@ -861,6 +861,22 @@ class Generator:
       if was is not None and entry is not None and entry.image is not was:
         carried.append((was, entry.image))
 
+    # Close the chain: the body reads one register and writes another, and a
+    # loop needs the two to be one.  Substituted on the built region rather
+    # than arranged during the build, because what the residency hands out is
+    # its business and the fact that a repeated body must land where it
+    # started is not something it can know.
+    for key, (init, result) in zip(
+            [k for k in keys if k in before], carried):
+      for instr in region:
+        instr.substitute(result, init)
+      # And tell the residency where the value now lives, because the
+      # writeback is emitted after this returns and would otherwise store a
+      # register the substitution has just made unreachable.
+      entry = self._residency.get(key)
+      self._residency.record_writeback(key, init, entry.home)
+    carried = tuple((init, init) for init, _ in carried)
+
     self._section.ir.extend(allocations)
     self._section.ir.append(
         VariantLoop(self._context, counter, loop.iterations, region, tables,
