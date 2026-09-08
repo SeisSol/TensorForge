@@ -267,7 +267,23 @@ def instr_for(dtype, columns=0, lead=0, depth=0, sm=None):
 ENABLED = False
 
 
-def supports(threads, dtype, sparse) -> bool:
+#: Contraction steps below which the matrix path is declined.
+#:
+#: A stand-in for a cost model, and it says so.  The widest F32 entry here
+#: contracts 8 steps at a time, so a contraction of 9 issues two tiles to do
+#: the work of one and a bit: 44% of what it issues is padding.  Sixteen is
+#: twice that tile depth, which bounds the waste at one padded tail tile and
+#: at most half the issued work -- a rule of thumb, not a measurement, and the
+#: measurement is what should replace it.
+#:
+#: It exists because SeisSol's local flux contains both kinds in one kernel:
+#: `56x56 . 56x9` contracts 56 steps and is what the path was built for, while
+#: `56x9 . 9x9` contracts 9 and reaches it only incidentally.  Until the second
+#: has been priced, it stays on the generic nest.
+MIN_DEPTH = 16
+
+
+def supports(threads, dtype, sparse, depth=0) -> bool:
     """Whether `matmul` can emit for this shape, asked *before* it is called.
 
     This was an `assert` inside the emitter, which was safe only for as long
@@ -284,8 +300,13 @@ def supports(threads, dtype, sparse) -> bool:
     * ``not sparse``.  `matmul` already declines these by returning `False`,
       but `temp_shmem` reserves shared memory off the same predicate; if the
       two disagree the reservation is made for a kernel that never uses it.
+    * ``depth >= MIN_DEPTH``.  A shallow contraction reaches this path and then
+      spends most of its issues on padding; see `MIN_DEPTH`.  `depth == 0` is
+      "the caller does not know", which is not the same as "shallow" and is
+      admitted -- `shmsize` asks without a shape and must keep its upper bound.
     """
-    return threads == 32 and dtype in (Datatype.F32, Datatype.F64) and not sparse
+    return (threads == 32 and dtype in (Datatype.F32, Datatype.F64)
+            and not sparse and (depth == 0 or depth >= MIN_DEPTH))
 
 
 def shmsize(stages, dtype, sm=None):
@@ -323,7 +344,8 @@ def strategies(shape, ctx):
     instead of reaching an assertion inside the emitter.
     """
     if (ENABLED
-            and supports(shape.threads, shape.accumulator, shape.sparse)
+            and supports(shape.threads, shape.accumulator, shape.sparse,
+                         shape.depth)
             and instrs_for(shape.accumulator, sm_of(ctx))):
         return frozenset({Strategy.MATRIX})
     return frozenset()
