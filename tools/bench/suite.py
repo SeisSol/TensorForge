@@ -153,6 +153,12 @@ CONFIGS: Dict[str, Config] = {
     'wrap1': Config('wrap1', Options(enable_wrap_loads=True, wrap_distance=1)),
     'wrap2': Config('wrap2', Options(enable_wrap_loads=True, wrap_distance=2)),
     'narrow-bodies': Config('narrow-bodies', Options(wide_bodies=False)),
+    # The two sides of the prologue question.  Named rather than left to the
+    # vendor default so a run states which one it measured: `preload` stages
+    # every batch-constant operand into shared memory once per block,
+    # `no-preload` reads it from global inside the batch loop.
+    'preload': Config('preload', Options(preload_globals=True)),
+    'no-preload': Config('no-preload', Options(preload_globals=False)),
 }
 
 

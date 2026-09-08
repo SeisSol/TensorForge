@@ -16,6 +16,7 @@ class Options:
                pipeline_depth=2,
                enable_wrap_loads=False,
                wrap_distance=1,
+               preload_globals=None,
                wide_bodies=True):
     self.exact_contraction_length: bool = exact_contraction_length
     self.align_shr_mem: bool = align_shr_mem
@@ -36,6 +37,19 @@ class Options:
     # n - 1; see backend/opt/wrap.py.
     self.enable_wrap_loads = enable_wrap_loads
     self.wrap_distance = wrap_distance
+    # Stage every `Addressing.NONE` operand into shared memory once per block,
+    # in the section prologue, instead of reading it from global inside the
+    # batch loop.  `None` keeps whatever the vendor rule says, which is what
+    # every caller got before this was expressible; True and False ask for the
+    # other answer.
+    #
+    # It is a question and not a constant because the answer is a measurement
+    # nobody has taken on NVIDIA: the rule has been "AMD only" since it was
+    # written, so the whole NVIDIA path -- including the tensor-core one, where
+    # a batch-constant operand would also carry a batch-constant *conversion*
+    # -- has never been compared against its own alternative.  A benchmark
+    # cannot ask a question the generator cannot be asked.
+    self.preload_globals = preload_globals
     # One PIR body per loop body, rather than one per macro instruction.
     #
     # A pass sees a body.  Per macro instruction that means `RegisterAlloc`,
