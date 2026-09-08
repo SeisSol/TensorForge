@@ -5,7 +5,7 @@ from typing import Union
 import math
 from . import ComputeInstruction
 from tensorforge.common.matrix.boundingbox import BoundingBox
-from tensorforge.backend.symbol import VecIndex, SymbolType, add_offset, Symbol, SymbolView, DataView, Loop, LeadLoop, write_loops, LeadIndex, LinearizedLoop, Immediate
+from tensorforge.backend.symbol import slots_for, VecIndex, SymbolType, add_offset, Symbol, SymbolView, DataView, Loop, LeadLoop, write_loops, LeadIndex, LinearizedLoop, Immediate
 from tensorforge.common.exceptions import InternalError, GenerationError
 from tensorforge.backend.writer import Writer
 from tensorforge.common.context import Context
@@ -264,12 +264,14 @@ class MultilinearInstruction(ComputeInstruction):
                                                   [u for _,u in self._ns])
         self._iregs = 1
         if len(self._ns) > 0:
-            self._iregs = -(-self._ns[0][1] // self._num_threads) - self._ns[0][0] // self._num_threads
-            # The third copy of the slot-count formula, and the third place
-            # that has to agree with the addressing side about how many
-            # entries one slot takes.  `DataView.lead_lanes` is that number:
-            # one per slot when the lane is the thread, `num_threads` when the
-            # work-item holds the whole wave.
+            # No longer a third copy of the slot-count formula: it is called,
+            # like the addressing side and the other allocation site, because
+            # three statements of one rule is how the width came to be in one
+            # of them and not the others.  `DataView.lead_lanes` stays a
+            # separate factor -- how many entries one slot takes is a question
+            # about the lowering, not about the distribution.
+            self._iregs = slots_for(self._ns[0][0], self._ns[0][1],
+                                    self._num_threads, self._lead_width)
             self._iregs *= DataView.lead_lanes(
                 None, _explicit_simd(self._context), self._num_threads)
         for l,u in self._ns[1:]:

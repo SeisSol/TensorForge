@@ -153,6 +153,13 @@ def _py(expr: str) -> str:
     # asking for.
     e = re.sub(r'\btensorforge::readlane\s*\(\s*(\w+)\s*,\s*([^),]+)\)',
                r'READLANE("\1", \2)', e)
+    # `broadcast<Block, Subblock, Lane>(v)`, the template form the operand
+    # broadcast takes on a narrow extent.  Captured as a name for the same
+    # reason `readlane` is, and left to `_broadcast` to resolve, since which
+    # lane it reads depends on the reading lane's own index.
+    e = re.sub(r'\btensorforge::broadcast\s*<\s*(\d+)\s*,\s*(\d+)\s*,'
+               r'\s*(\d+)\s*>\s*\(\s*(\w+)\s*\)',
+               r'BROADCAST("\4", \1, \2, \3)', e)
     e = e.replace('&&', ' and ').replace('||', ' or ')
     e = re.sub(r'(?<![=!<>&|])!(?!=)', ' not ', e)
     # `*(SomeVecType*)&p[i]` -> `VLOAD(ADDR(p, i), N)`.  Done before the
@@ -252,6 +259,7 @@ class Interp:
         #: says so instead of quietly returning this lane's copy.
         self.peers: List['Interp'] = []
         self.env['READLANE'] = self._readlane
+        self.env['BROADCAST'] = self._broadcast
         self.env['VEC'] = lambda *xs: Vec(xs)
         self.env['VLOAD'] = lambda n, p, i: Vec(p[i + k] for k in range(n))
         for fn in ('min', 'max', 'abs'):
@@ -289,6 +297,33 @@ class Interp:
             raise Abort(f'readlane({name!r}, {lane}): lane {lane} never '
                         f'defined it -- it was masked off there')
         return peer.env[name]
+
+    def _broadcast(self, name: str, block: int, subblock: int, lane: int):
+        """`tensorforge::broadcast<Block, Subblock, Lane>(name)` for this lane.
+
+        Modelled from the definition in `include/tensorforge_device/cuda.h`
+        rather than from what it is used for.  The degenerate case returns the
+        lane's own copy; otherwise it is a `__shfl_sync` with a *width*, which
+        splits the warp into segments of `Block` lanes and resolves the source
+        within the caller's own segment:
+
+            src = (L // Block) * Block
+                  + ((Subblock * Lane + L % Subblock) % Block)
+
+        Without this the narrow extents -- the ones whose operand broadcast
+        takes the template form -- had no numerical coverage at all: every
+        such case aborted, and an abort that a caller turns into a skip looks
+        exactly like a pass.
+        """
+        block, subblock, lane = int(block), int(subblock), int(lane)
+        if block == 1 or block == subblock:
+            if name not in self.env:
+                raise Abort(f'broadcast({name!r}): not defined in this lane')
+            return self.env[name]
+        me = self.env['threadIdx'].x
+        src = (me // block) * block + ((subblock * lane + me % subblock)
+                                       % block)
+        return self._readlane(name, src)
 
     def ev(self, expr: str):
         self.budget -= 1

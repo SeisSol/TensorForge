@@ -200,22 +200,21 @@ def _round_up_pow2(n: int, cap: int) -> int:
 
 #: The widest lead vector that has been shown to compute the right numbers.
 #:
-#: `lead_width_cap` answers what the address permits, which is 4 for an FP32
-#: base of 16-byte alignment.  Taking it is wrong on some extents, and the
-#: reason is one number: the register image holds `ceil(extent / threads)`
-#: slots per lane, while a `w`-wide read of it needs
-#: `w * ceil(extent / (threads * w))`.  Those agree for 8, 16, 32 and 64 and
-#: differ for 12, 20, 24, 40 and 48, where consecutive non-lead indices then
-#: read overlapping windows -- at M=12 the stride is 3 and the read is 4 wide,
-#: so every column after the first is built from one register of the one
-#: before it.  Width 2 escapes it because the lane count is chosen as
-#: `roundpow2(ceil(extent / 2))`, which makes the two expressions equal.
+#: 4, which is also what `lead_width_cap` permits for an FP32 base of 16-byte
+#: alignment, so the two agree today and the pair is kept because they are
+#: still different questions: one is about the address and one is about us.
 #:
-#: Two facts, kept apart rather than the cap being lowered: what the address
-#: allows is about the address, and this is about us.  `test_lead_width` holds
-#: the split in place at its exact extents, so sizing the image from the width
-#: makes those tests fail and say to raise this.
-VALIDATED_LEAD_WIDTH = 2
+#: It was 2, and what held it there was the slot-count formula.  The register
+#: image sized a lane's share of a distributed dimension as `ceil(u/T)`, its
+#: *slot* count, where a `w`-wide read needs its *float* count -- and the rule
+#: was stated three times, in the addressing and in both allocation sites, so
+#: the width reached none of them.  At u=12, T=4, w=4 that is 3 against 4, and
+#: consecutive non-lead indices addressed overlapping windows.  One statement
+#: of the rule now, in `symbol.slots_for`.
+#:
+#: 114 shapes per width across FP32 and FP64, both alignments, odd and even
+#: extents: widths 2 and 4 agree with the scalar kernel everywhere.
+VALIDATED_LEAD_WIDTH = 4
 
 
 def lead_width_cap(elem_bytes: int, align_bytes: int) -> int:

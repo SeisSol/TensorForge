@@ -27,7 +27,7 @@ from typing import List, Optional, Tuple
 from tensorforge.backend.data_types import RegMemObject
 from tensorforge.backend.instructions.abstract_instruction import _explicit_simd
 from tensorforge.backend.instructions.allocate import RegisterAlloc
-from tensorforge.backend.symbol import DataView, Symbol, SymbolType
+from tensorforge.backend.symbol import slots_for, DataView, Symbol, SymbolType
 from tensorforge.common.exceptions import InternalError
 from tensorforge.common.matrix.boundingbox import BoundingBox
 
@@ -97,9 +97,14 @@ class Temporaries:
             if d != lead_pos or threads == 0:
                 regsize *= dim
             else:
-                r_start = (bbox.lower()[d] + shift) // threads
-                r_end = (bbox.upper()[d] + shift + threads - 1) // threads
-                regsize *= (r_end - r_start) * DataView.lead_lanes(
+                # The same rule addressing uses, called rather than restated.
+                # It was restated, without the width, and a four-wide read of
+                # a three-slot image is how consecutive non-lead indices came
+                # to address overlapping windows.
+                regsize *= slots_for(
+                    bbox.lower()[d] + shift, bbox.upper()[d] + shift,
+                    threads, getattr(self, '_lead_width', 1)
+                ) * DataView.lead_lanes(
                     None, _explicit_simd(self._context), threads)
                 threads //= dim  # TODO?
 

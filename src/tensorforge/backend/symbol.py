@@ -43,6 +43,19 @@ class SparseDataView:
   def __init__(self, shape: List[int], permute: Union[List[int], None], ssp):
     pass
 
+def slots_for(lower: int, upper: int, num_threads: int,
+              lead_width: int = 1) -> int:
+    """Per-lane floats a distributed range `[lower, upper)` occupies.
+
+    The one statement of the rule.  `DataView.get_dim_slots` reads it for
+    addressing and the two allocation sites for sizing, which is the property
+    that has to hold: a stride and an allocation derived from different
+    formulas alias the next dimension onto this one.
+    """
+    span = num_threads * lead_width
+    return lead_width * (-(-upper // span) - lower // span)
+
+
 class DataView:
   def __init__(self, shape: List[int], permute: Union[List[int], None], bbox: BoundingBox = None):
     self.shape = shape
@@ -119,21 +132,35 @@ class DataView:
     """
     return num_threads if explicit_simd else 1
 
-  def get_dim_slots(self, index, num_threads):
-    """Per-thread slots a thread-distributed dimension occupies.
+  def get_dim_slots(self, index, num_threads, lead_width=1):
+    """Per-thread floats a thread-distributed dimension occupies.
 
-    `ceil(u/T) - floor(l/T)`, i.e. whole thread-blocks are rebased away and the
-    ragged ends survive as predicates (see LeadLoop.write).  This is *not*
-    `ceil((u-l)/T)` as soon as [l,u) straddles a block boundary --- for
-    l=31, u=33, T=32 the two give 2 and 1 --- and the allocation side
-    (MultilinearInstruction._iregs, MultilinearBuilder._alloc_register_array)
-    has always used the former.  Addressing has to agree with allocation, or
-    the next dimension aliases onto this one.
+    `w * (ceil(u/(T*w)) - floor(l/(T*w)))`: whole *slots* are rebased away and
+    the ragged ends survive as predicates (see LeadLoop.write).  A slot is
+    `T*w` elements, of which this lane holds `w`, so the span to divide by and
+    the count to multiply back are both the width -- and at `w == 1` this is
+    character for character the expression that was here.
+
+    Not `ceil((u-l)/(T*w)) * w` either, as soon as [l,u) straddles a slot
+    boundary: for l=31, u=33, T=32, w=1 the two give 2 and 1.
+
+    The width is what this was missing.  It returned `ceil(u/T)`, which is the
+    lane's slot count and not its float count, and the two differ whenever
+    `T*w` does not divide the extent the way `T` does: at u=12, T=4, w=4 it
+    said 3 where a four-wide read needs 4.  Consecutive non-lead indices then
+    addressed overlapping windows -- column 1 starting one register inside
+    column 0 -- which is every destination cell wrong on 12, 20, 24, 40 and 48
+    and none on 8, 16, 32 and 64, where the two expressions happen to agree.
+
+    Addressing has to agree with allocation, or the next dimension aliases
+    onto this one.  Both allocation sites (`MultilinearInstruction._iregs`,
+    `MultilinearBuilder._alloc_register_array`) call here now rather than
+    restating it; they were the two copies that had to be found and changed
+    together, and finding one of them is how this stayed wrong.
     """
     assert index >= 0 and index < len(self.shape)
-    lower = self._bbox.lower()[index]
-    upper = self._bbox.upper()[index]
-    return -(-upper // num_threads) - lower // num_threads
+    return slots_for(self._bbox.lower()[index], self._bbox.upper()[index],
+                     num_threads, lead_width)
 
   def get_dim_strides(self, mask=[]):
     """Strides of the buffer this view describes.
@@ -1289,7 +1316,8 @@ class Symbol:
                             stride * lanes, lead=True))
           if lane_shift:
             parts.append(lane_shift * stride)
-          stride *= self.data_view.get_dim_slots(i, self.num_threads) * lanes
+          stride *= self.data_view.get_dim_slots(
+              i, self.num_threads, self.lead_width) * lanes
         elif (i in self.lead_dims
               and isinstance(index[i], (int, np.integer))):
           # A *fixed element* of the distributed dimension, which
@@ -1313,7 +1341,8 @@ class Symbol:
           slot = (int(index[i]) // w) // self.num_threads
           parts.append(term(w * slot + int(index[i]) % w,
                             offsets[i] // self.num_threads, stride, lead=True))
-          stride *= self.data_view.get_dim_slots(i, self.num_threads)
+          stride *= self.data_view.get_dim_slots(i, self.num_threads,
+                                                 self.lead_width)
         else:
           parts.append(term(index[i], offsets[i], stride, lead=True))
           stride *= self.data_view.get_dim_size(i)
@@ -1381,7 +1410,8 @@ class Symbol:
           terms.append(writeOffset(lead_index,
                                    offsets[i] // self.num_threads
                                    - shift // self.num_threads, stride))
-          stride *= self.data_view.get_dim_slots(i, self.num_threads)
+          stride *= self.data_view.get_dim_slots(i, self.num_threads,
+                                                 self.lead_width)
         elif (i in self.lead_dims
               and isinstance(index[i], (int, np.integer))):
           # A *fixed element* of the distributed dimension.  It used to fall
@@ -1405,7 +1435,8 @@ class Symbol:
           comp = int(index[i]) % w
           terms.append(writeOffset(w * slot + comp,
                                    offsets[i] // self.num_threads, stride))
-          stride *= self.data_view.get_dim_slots(i, self.num_threads)
+          stride *= self.data_view.get_dim_slots(i, self.num_threads,
+                                                 self.lead_width)
         else:
           terms.append(writeOffset(index[i], offsets[i], stride))
           stride *= self.data_view.get_dim_size(i)

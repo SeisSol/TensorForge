@@ -406,17 +406,39 @@ def test_the_fma_width_is_not_the_cap(vendor, arch):
     assert per_element(4) < per_element(2) < per_element(1)
 
 
-def test_width_four_is_permitted_by_the_address_and_not_by_us():
-    """The two facts the cap used to be one of.
+def test_the_address_and_the_validation_agree_and_stay_two_questions():
+    """Both 4 now.  Kept apart because they are still different facts.
 
-    `lead_width_cap` answers what a 16-byte-aligned FP32 base permits, which
-    is 4.  `VALIDATED_LEAD_WIDTH` answers what has been shown to compute the
-    right numbers, which is 2.
+    `lead_width_cap` is what a 16-byte-aligned FP32 base permits;
+    `VALIDATED_LEAD_WIDTH` is what has been shown to compute the right
+    numbers.  Collapsing them once they coincide is how the next ceiling --
+    32-byte alignment, or a width the register budget cannot carry -- would
+    arrive already claimed.
     """
     from tensorforge.backend.instructions.memory.vectorize import (
         VALIDATED_LEAD_WIDTH)
     assert lead_width_cap(4, 16) == 4
-    assert VALIDATED_LEAD_WIDTH == 2
+    assert lead_width_cap(8, 16) == 2
+    assert VALIDATED_LEAD_WIDTH == 4
+
+
+@pytest.mark.parametrize('extent,threads,width,expected', [
+    # what the image used to size, against what a wide read needs
+    (12, 4, 4, 4), (16, 4, 4, 4), (20, 8, 4, 4), (32, 8, 4, 4),
+    (33, 32, 1, 2), (33, 32, 2, 2), (31, 32, 1, 1),
+])
+def test_the_slot_count_is_floats_and_not_slots(extent, threads, width,
+                                                expected):
+    """`w * (ceil(u/(T*w)) - floor(l/(T*w)))`, stated once.
+
+    The old expression was `ceil(u/T)`, which is a lane's slot count and not
+    its float count; the two differ at 12/4/4, where it gave 3 and a four-wide
+    read needs 4.  It was written out three times -- addressing and both
+    allocation sites -- so the width reached none of them, and the failure was
+    every destination cell wrong on the extents where the two disagree.
+    """
+    from tensorforge.backend.symbol import slots_for
+    assert slots_for(0, extent, threads, width) == expected
 
 
 def _run_case(monkeypatch, M, N, width, align=16, dtype=None):
@@ -480,45 +502,33 @@ def _slot_stride(extent, threads, width):
     return -(-extent // threads), width * -(-extent // (threads * width))
 
 
-#: Extents where the two agree, and where they do not.  Not a list of numbers
-#: that happen to fail: `_slot_stride` predicts the split exactly, and these
-#: are it for FP32 at 16-byte alignment.
-WIDTH4_OK = [8, 16, 32, 64]
-WIDTH4_BROKEN = [12, 20, 24, 40, 48]
+#: The extents the old slot count got wrong, kept as the parametrisation
+#: rather than replaced by a round set: they are where `ceil(u/T)` and
+#: `w * ceil(u/(T*w))` disagree, and a regression in `slots_for` shows up here
+#: first.
+WIDTH4_WAS_BROKEN = [12, 17, 20, 24, 33, 35, 40, 48]
+WIDTH4_WAS_FINE = [8, 16, 31, 32, 56, 64]
 
 
-@pytest.mark.parametrize('extent', WIDTH4_OK + WIDTH4_BROKEN)
-def test_the_register_slot_stride_predicts_which_extents_break(extent):
-    """The image holds `ceil(extent / threads)` slots per lane.
+@pytest.mark.parametrize('extent', WIDTH4_WAS_BROKEN + WIDTH4_WAS_FINE)
+@pytest.mark.parametrize('columns', [3, 8])
+def test_width_four_computes_the_same_numbers(monkeypatch, extent, columns):
+    """Both halves of the old split, now one answer.
 
-    A `w`-wide read of it needs `w * ceil(extent / (threads * w))`, and the
-    two are not the same number.  Where they differ, consecutive non-lead
-    indices read overlapping windows: at M=12 the stride is 3 and the read is
-    4 wide, so column 0 takes `r1[0..3]`, column 1 `r1[3..6]`, and each column
-    after the first is built from one register of its predecessor.
+    The image sized a lane's share as its slot count where a four-wide read
+    needs its float count, so consecutive non-lead indices addressed
+    overlapping windows -- column 1 starting one register inside column 0 --
+    and every destination cell came out wrong on the extents where the two
+    expressions disagree.  Where they happened to agree, width 4 was already
+    right, which is what said the defect was the stride and not the width.
     """
-    threads, width = lead_threads_and_width(extent, 4, 16, cap=4)
-    used, needed = _slot_stride(extent, threads, width)
-    assert (used == needed) is (extent in WIDTH4_OK)
+    assert _wrong_lead_indices(monkeypatch, extent, columns, 4) == []
 
 
-@pytest.mark.parametrize('extent', WIDTH4_BROKEN)
-def test_width_four_is_wrong_exactly_where_the_stride_says(monkeypatch,
-                                                           extent):
-    """Asserted as the broken behaviour it is, so repairing it says so.
-
-    When the image is sized from the width this fails, and that failure is the
-    signal to raise `VALIDATED_LEAD_WIDTH`.
-    """
-    assert _wrong_lead_indices(monkeypatch, extent, 3, 4), (
-        f'M={extent} now agrees at width 4 -- if the slot stride is fixed, '
-        f'raise VALIDATED_LEAD_WIDTH and delete this')
-
-
-@pytest.mark.parametrize('extent', WIDTH4_OK)
-def test_width_four_is_right_where_the_stride_agrees(monkeypatch, extent):
-    """Which is what says the defect is the stride and not the width."""
-    assert not _wrong_lead_indices(monkeypatch, extent, 4, 3)
+@pytest.mark.parametrize('extent', WIDTH4_WAS_BROKEN + WIDTH4_WAS_FINE)
+def test_width_two_computes_the_same_numbers(monkeypatch, extent):
+    """The width that was already offered, held in place while 4 arrives."""
+    assert _wrong_lead_indices(monkeypatch, extent, 3, 2) == []
 
 
 @pytest.mark.parametrize('extent', [9, 15, 17, 21, 33, 35, 45, 63, 65])
