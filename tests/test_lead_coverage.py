@@ -130,14 +130,19 @@ class Recorder:
 
         A lane outside a guard writes nothing; a lane inside one writes
         `width` adjacent elements at its slot.  A peeled leftover is a fixed
-        element, and *every* lane of the wave reaches it -- there is no guard
-        on it for a global destination, which is the whole of what this
-        records.
+        element and one lane holds it, so it is written once -- `StoreRegToGlb`
+        guards the whole body to that lane, which is also what removes the
+        cross-lane read of a value the writing lane already has.
+
+        This counted `threads` before, and that was not a modelling choice: it
+        was the behaviour.  The peeled write had no guard at all, so the wave
+        stored the element -- right under `=`, and `threads` times the
+        contribution under `+=`.
         """
         seen = Counter()
         for block in self.blocks:
             if block[0] == 'peel':
-                seen[block[1]] += self.threads
+                seen[block[1]] += 1
                 continue
             slot, lo, hi, width, offset = block
             slots = (range(slot.lo, slot.hi)
@@ -240,67 +245,19 @@ def test_a_scalar_nest_stays_inside_its_range(end, threads):
     assert not outside, f'outside [0, {end}): {sorted(outside)[:8]}'
 
 
-@pytest.mark.parametrize('threads', [16, 32])
-@pytest.mark.parametrize('end', [33, 35, 49, 65])
-def test_a_widened_nest_writes_the_peeled_element_from_every_lane(end,
-                                                                  threads):
-    """The defect `atomic_write_is_exact` gates on, stated as a property.
+@pytest.mark.parametrize('width', [1, 2, 4])
+@pytest.mark.parametrize('threads', THREADS)
+@pytest.mark.parametrize('end', EXTENTS)
+def test_every_width_writes_each_element_exactly_once(end, threads, width):
+    """Exactness at every width, which is new.
 
-    Coverage holds -- the element is written, with the right value in every
-    lane, because the store broadcasts it from the lane that owns it.  What
-    fails is exactness, and by the width of the wave rather than by one.
-
-    This asserts the *broken* behaviour on purpose.  When `Symbol.store`
-    learns to give a global destination's fixed lead element an owning lane,
-    this test is what has to be rewritten, and rewriting it is the signal that
-    `atomic_write_is_exact` can narrow.
+    It held at width 1 and failed at 2 and 4 for one reason: the peeled tail
+    was written by the whole wave.  With that write guarded to the lane that
+    owns the element, the nest partitions its range at every width -- so the
+    condition `placement.atomic_write_is_exact` was carrying is no longer
+    about the nest.
     """
-    seen, _ = cover(0, end, threads, 2)
-    peeled = [e for e, n in seen.items() if n == threads]
-    assert peeled == [end - 1], (
-        f'expected the last element peeled and written {threads} times, '
-        f'got {sorted(seen.items())[-4:]}')
-
-
-# --------------------------------------------------------------------------- #
-# The alternating full/half pattern, which is what a reader sees first
-# --------------------------------------------------------------------------- #
-
-def test_a_half_wave_tail_is_a_different_half_wave():
-    """48 elements over 32 lanes: a full slot, then sixteen *other* lanes.
-
-    This is the shape that shows up in generated source as a 32-wide write, a
-    16-wide write, a 32-wide write at the address after it, and so on down the
-    columns -- and it reads like a wave writing 32 elements and then 16 of
-    them again.  It is not: the two blocks are disjoint lane ranges over
-    consecutive slots, so the 48 elements are covered once each.
-
-    Worth a test of its own rather than leaving it to the matrix above,
-    because the matrix says "no element twice" and this says which two blocks
-    that conclusion rests on.
-    """
-    seen, rec = cover(0, 48, 32, 1)
-    ranges = [(b[1], b[2]) for b in rec.blocks if b[0] != 'peel']
-    assert ranges == [(0, 32), (0, 16)]
-    assert set(seen) == set(range(48))
-    assert set(seen.values()) == {1}
-
-
-@pytest.mark.parametrize('end,threads', [(12, 32), (20, 32), (12, 16)])
-def test_a_narrow_operator_is_masked_and_not_redistributed(end, threads):
-    """An operator narrower than the section's lane count keeps that count.
-
-    The alternative would be a second modulus -- `threadIdx.x % 12` beside
-    `threadIdx.x % 32` -- and that is the arrangement in which masking really
-    would double a write: lanes 12..23 would alias 0..11 and every element
-    would be accumulated twice.  The generator does not do it; a section has
-    one lane index and a narrow operator is guarded down to a prefix of it.
-
-    Stated here because it is the property an atomic accumulation depends on
-    and nothing else in the suite says it.
-    """
-    seen, rec = cover(0, end, threads, 1)
-    assert set(seen.values()) == {1}
-    assert all(lo == 0 and hi <= threads
-               for _, lo, hi, _, _ in
-               (b for b in rec.blocks if b[0] != 'peel'))
+    seen, _ = cover(0, end, threads, width)
+    twice = {e: n for e, n in seen.items() if n > 1}
+    assert not twice, f'written more than once: {sorted(twice.items())[:8]}'
+    assert not [e for e in seen if e >= end], 'wrote past the end'

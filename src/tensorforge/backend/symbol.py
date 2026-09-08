@@ -1799,7 +1799,35 @@ class Symbol:
     else:
       writer.access_stmt(f'{access} = {variable};', self, Effect.WRITE, args=_operands(variable, addrs))
 
-  def load(self, writer, context: Context, variable, index: List[Union[str, int, Immediate, Variable, LeadIndex]], nontemp):
+  def owning_lane(self, index):
+    """Which lane holds a fixed element of the distributed dimension.
+
+    `None` when the question does not arise: a symbol that is not
+    register-resident, a lead index that is still distributed, or an index
+    this cannot resolve to a number.
+
+    One function because three callers need the same answer and have already
+    disagreed twice.  `load` computes it to broadcast the element; `store`
+    computes it to guard the write to the lane that holds it; and
+    `StoreRegToGlb` needs it to decide whether either is required at all.  The
+    store used to derive it separately and got `threadIdx.x == 32` in a
+    32-lane wave, which is the bug this shape removes rather than fixes again.
+    """
+    if self.stype not in (SymbolType.Register, SymbolType.Scratch):
+      return None
+    if len(self.lead_dims) != 1:
+      return None
+    idx = index[self.lead_dims[0]]
+    lead = unwrap_lead(idx)
+    if lead is not None:
+      return None                 # still distributed; every lane has a share
+    if isinstance(idx, Immediate):
+      idx = idx._value
+    if not isinstance(idx, (int, np.integer)):
+      return None
+    return (int(idx) // self.lead_width) % self.num_threads
+
+  def load(self, writer, context: Context, variable, index: List[Union[str, int, Immediate, Variable, LeadIndex]], nontemp, broadcast: bool = True):
     addrs = []
     if self.stype == SymbolType.Data or (not self.obj.is_dense() and not isinstance(self.obj.spp, BoundingBoxSPP)):
       if variable is None:
@@ -1917,7 +1945,14 @@ class Symbol:
                             align=None if w == 1 else RELAXED,
                             layout=layout_of(read_index, self.num_threads),
                             nontemporal=nontemp)
-        if bc_lane is None:
+        if bc_lane is None or not broadcast:
+          # `broadcast=False` keeps the register index and drops the
+          # cross-lane read of it.  The caller is then saying it will use the
+          # value only in the lane that owns it -- which is what a store
+          # guarded to that lane does, and for which the shuffle is pure
+          # waste.  The index is unchanged either way: `bc_index` is where the
+          # element sits in the owning lane's registers, and that lane reading
+          # its own is the same number the broadcast would have handed out.
           return value
         # A broadcast is a load *wrapped* in a vendor intrinsic, and it used
         # to be spelled whole: the buffer named inside a string, which is what
@@ -2099,10 +2134,7 @@ class Symbol:
       # memory does not ask.  What global *does* need is that exactly one lane
       # writes -- which is a different requirement, and one only an atomic
       # accumulation is sensitive to; see `placement.atomic_write_is_exact`.
-      owner = (unwrap_lead(lead)[0]._value if unwrap_lead(lead) is not None
-               else lead)
-      if isinstance(owner, (int, np.integer)):
-        owner = (int(owner) // self.lead_width) % self.num_threads
+      owner = self.owning_lane(index)
       with writer.If(f'{context.get_vm().get_lexic().thread_idx_x} == {owner}'):
         writer.access_stmt(assign, self, kind, args=_operands(variable, addrs), fmt=fmt)
     else:

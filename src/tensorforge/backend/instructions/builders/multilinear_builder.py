@@ -19,8 +19,7 @@ from tensorforge.backend.placement import (Placement, ResultPlacement,
                                            choose_result_placement,
                                            legal_operand_placements,
                                            legal_result_placements,
-                                           policy_for, result_is_atomic,
-                                           atomic_write_is_exact)
+                                           policy_for, result_is_atomic)
 from tensorforge.common.operation import AddOperator, MulOperator
 
 
@@ -715,12 +714,6 @@ class MultilinearBuilder(OperationBuilder):
             supported=self._context.get_vm().get_lexic().has_atomic_store(
                 self._context, None, dest_symbol.get_fptype(),
                 self._lead_width),
-            exact=atomic_write_is_exact(
-                lead_width=self._lead_width,
-                # The range the nest will actually run over, which `_analyze`
-                # may have narrowed below the declared box -- the peel is
-                # decided by where the loop stops, not by what was asked for.
-                lead_extent=self._temp_regs.data_view.get_bbox().upper()[0]),
             policy=self._policy)
         result = choose_result_placement(
             legal_result_placements(written_in_slices=in_slices),

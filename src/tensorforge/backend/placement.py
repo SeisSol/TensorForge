@@ -178,8 +178,7 @@ def choose_operand_placement(legal: FrozenSet[Placement],
 
 
 def result_is_atomic(*, accumulating: bool, pending_is_atomic: bool,
-                     supported: bool, exact: bool,
-                     policy: VendorPolicy) -> bool:
+                     supported: bool, policy: VendorPolicy) -> bool:
     """Whether this result reaches memory as an atomic update.
 
     Only an accumulation can be one, and only while nothing non-atomic is
@@ -189,66 +188,24 @@ def result_is_atomic(*, accumulating: bool, pending_is_atomic: bool,
     `supported` is the third condition and it is not a preference, which is
     why it is an argument rather than a row of the table.  The policy says
     this hardware is *worth* accumulating atomically on; whether the
-    architecture has the instruction for this datatype is a separate fact, and
-    keeping it in the table made every AMD target answer for gfx90a.  Where
-    there is no instruction the compiler emits a compare-and-swap loop, so
-    saying yes here is slower than saying no -- and on the four targets whose
-    builtin does not exist, it did not compile at all.
+    architecture has the instruction for this datatype and width is a separate
+    fact, and keeping it in the table made every AMD target answer for gfx90a.
+    Where there is no instruction the compiler emits a compare-and-swap loop,
+    so saying yes here is slower than saying no -- and on the four targets
+    whose builtin does not exist, it did not compile at all.
 
-    `exact` is the fourth, and it is the one that separates an assignment from
-    an accumulation.  A plain store needs the nest to *cover* the destination:
-    every element written at least once, and an element written twice with the
-    same value is free.  An atomic add needs the nest to be *exact*: written
-    once, no more.  Those are different requirements and the store nest only
-    ever had to meet the first, so the places where it writes an element from
-    several lanes are correct for `=` and multiply the contribution for `+=`.
-    Asked here rather than checked at emission time, because by then the
-    residency has already recorded a pending atomic and the decision cannot be
-    taken back.
+    There was a fourth, `atomic_write_is_exact`, and it is gone rather than
+    always true.  An atomic add needs each destination element written exactly
+    once where a plain store needs only coverage, and the nest failed that at
+    every width above one: the peeled tail was stored by the whole wave, which
+    is the same value `threads` times under `=` and the contribution `threads`
+    times under `+=`.  That write is guarded to the lane that owns the element
+    now, so the nest partitions its range at every width and there is no
+    condition left to ask -- `tests/test_lead_coverage` checks the property the
+    argument used to stand for.
     """
     return (policy.atomic_accumulation and accumulating and pending_is_atomic
-            and supported and exact)
-
-
-def atomic_write_is_exact(*, lead_width: int, lead_extent: int) -> bool:
-    """Whether the store nest writes each destination element exactly once.
-
-    One thing, now that the capability model answers the other.  This used to
-    refuse every widened lead for two reasons at once -- a peeled tail element
-    no lane owns, and a wide value handed to a scalar instruction -- and only
-    the first is a fact about the nest.  Whether the target has a packed add
-    of the value's width is `atomics.native_add`'s question, and it is asked
-    where the width is known.
-
-    What is left is the peel.  A lead extent the vector width does not divide
-    leaves `extent % width` elements no whole vector covers, and
-    `LeadLoop._peel` hands each to the store as a plain integer.  `_peel`'s
-    own docstring says `Symbol.store` guards that write to the lane that owns
-    the element -- true for a register destination and not for a global one,
-    where the guard is deliberately absent because global memory is addressed
-    by every lane and *which* lane owns an element is not a question with an
-    answer.  So the whole wave stores it: under `=` the same value written
-    `threads` times, under `+=` the contribution counted `threads` times.
-
-    The extent alone decides it, not the lane count: a slot is
-    `threads * width` elements, which is a whole number of vectors, so the
-    leftover is `extent % width` whatever the wave is.
-
-    Reproduced before this was gated, on gfx90a with `TF_LEAD_VEC=1`, from a
-    35-element lead dimension over aligned operands with `beta=1.0`::
-
-        for (int32_t v561_i1 = 0; v561_i1 < 4; ++v561_i1) {
-          float v564_data = r2[(v561_i1 * 2)];
-          int32_t v567_a = 34 + (v561_i1 * 35);
-          __builtin_amdgcn_global_atomic_fadd_f32(
-              &glb_m0[v567_a], (tensorforge::broadcast<32, 1, 17>(v564_data)));
-        }
-
-    Narrowing this to nothing is a real fix and not a smaller condition: give
-    a global destination's fixed lead element an owning lane in
-    `Symbol.store`, and the peel stops being a wave-wide write.
-    """
-    return lead_extent % lead_width == 0
+            and supported)
 
 
 def legal_result_placements(*, written_in_slices: bool

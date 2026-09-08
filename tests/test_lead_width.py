@@ -545,19 +545,20 @@ def test_an_odd_extent_computes_the_peeled_element(monkeypatch, extent,
     assert _wrong_lead_indices(monkeypatch, extent, 3, 2, align=align) == []
 
 
-def test_the_peeled_write_is_still_wave_wide():
-    """Right value, still written by every lane -- two separate properties.
+def test_the_peeled_write_is_now_exact_too():
+    """Right value and written once -- two properties, fixed in that order.
 
-    The guard above is on the *register* accumulator, which is what made the
-    value wrong.  The global store of the peeled element has no guard at all
-    and cannot simply take this one: `readlane` is `__shfl_sync` over the full
-    warp mask, so moving it inside a single-lane branch is a shuffle the other
-    lanes never reach.
+    The guard on the *register* accumulator is what made the value right; it
+    could not be reused for the global store, because `readlane` is
+    `__shfl_sync` over the full warp mask and a single-lane branch is a
+    shuffle the other lanes never reach.  Guarding the load along with the
+    store removes the shuffle instead, and with the peeled element written by
+    one lane the nest partitions its range at every width.
 
-    So exactness is unchanged and `atomic_write_is_exact` still refuses a
-    widened lead.  Repairing it means hoisting the broadcast out of the guard,
-    which is a change to how the store sequences its statements rather than to
-    which lane it names.
+    So `placement` no longer asks whether the write is exact; what remains
+    deciding an atomic is whether the target has the instruction at that
+    width.  `test_lead_coverage` holds the property, and
+    `test_store_exactness` holds the two ends of the capability question.
     """
-    from tensorforge.backend.placement import atomic_write_is_exact
-    assert not atomic_write_is_exact(lead_width=2, lead_extent=33)
+    from tensorforge.backend import placement
+    assert not hasattr(placement, 'atomic_write_is_exact')
