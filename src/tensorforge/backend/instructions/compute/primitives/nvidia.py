@@ -25,6 +25,24 @@ from tensorforge.backend.writer import Writer
 TF32_HALF = ScalarType(Datatype.TF32)
 
 
+def _as_tf32(writer: Writer, value):
+    """A stored half as the instruction's operand type, without arithmetic.
+
+    A TF32 value *is* a float whose low thirteen mantissa bits are zero, so a
+    half that was prepared on the host is already the right number; what the
+    `asm` needs is the `r` operand class, which is a reinterpretation and not
+    a conversion.  `__float_as_uint` is how CUDA spells that, and it costs no
+    instruction.
+
+    This is the whole difference between reading a prepared operand and
+    computing one: `tfconvert` below emits two `cvt.rna.tf32.f32` per value,
+    and on a part without a native converter each of those is a software
+    sequence.
+    """
+    return writer.rawexpr('__float_as_uint({0})', value, type_=TF32_HALF,
+                          hint='u', pure=True, movable=True)
+
+
 def tfconvert(writer: Writer, variables):
     """Split each operand into the two TF32 halves the MMA multiplies.
 
@@ -130,13 +148,21 @@ class MMAInstr:
     def epilogue(self):
         pass
 
-    def generate(self, writer, context, A, B, C, uses=()):
+    def generate(self, writer, context, A, B, C, uses=(), a_split=None):
+        """`a_split` is the A halves where they were read rather than computed.
+
+        Same shape `tfconvert` returns -- a `(upper, lower)` per fragment -- so
+        the three issues below are unchanged and only their source differs.
+        Given, the conversion of A does not happen at all; that is the point of
+        storing the operand prepared, and it is the whole of what this
+        parameter does.
+        """
         with writer.Scope():
             if self.mode == MMAMode.I8:
 
                 pass
             if self.mode == MMAMode.TF32:
-                Atf32 = tfconvert(writer, A)
+                Atf32 = a_split if a_split is not None else tfconvert(writer, A)
                 Btf32 = tfconvert(writer, B)
 
                 self.asmcall(writer, C, [a[0] for a in Atf32], [b[0] for b in Btf32], C, uses)
@@ -309,7 +335,7 @@ def supports(threads, dtype, sparse, depth=0) -> bool:
             and not sparse and (depth == 0 or depth >= MIN_DEPTH))
 
 
-def shmsize(stages, dtype, sm=None):
+def shmsize(stages, dtype, sm=None, a_parts=1):
     """Staging elements to reserve, sized before the entry is chosen.
 
     Over every candidate rather than over the one `instr_for` would return,
@@ -328,7 +354,11 @@ def shmsize(stages, dtype, sm=None):
     threads = 32
 
     def size(atom):
-        aregs = (atom.m * atom.k) // threads
+        # `a_parts` tiles for A and not one: an operand stored prepared is
+        # staged a part at a time, each through its own tile, because the
+        # fragment read indexes by slot times the wave and a tile holding two
+        # parts per slot would change that arithmetic for both.
+        aregs = a_parts * ((atom.m * atom.k) // threads)
         bregs = (atom.n * atom.k) // threads
         cregs = (atom.m * atom.n) // threads
         return 32 * max(aregs + bregs, cregs)
@@ -361,7 +391,7 @@ def scratch(strategy, shape, ctx):
     """
     if strategy is not Strategy.MATRIX:
         return 0
-    return shmsize(1, shape.accumulator, sm_of(ctx))
+    return shmsize(1, shape.accumulator, sm_of(ctx), shape.a_parts)
 
 
 def plan(strategy, shape, n, ctx):
@@ -451,6 +481,7 @@ def matmul(writer, ops, ctx, span):
     # extents are loop-derived; what matters is that these hold values now, not
     # C++ identifiers built out of a `varalloc` name.
     Areg = {}
+    AregParts = None            # per part, allocated once the atom is known
     Breg = {}
     Creg = writer.varalloc()
 
@@ -487,6 +518,18 @@ def matmul(writer, ops, ctx, span):
     # bound is a product of loop extents rather than the register count.
     Afrag = [None] * (aregs * mregs * kregs * 8)
     Bfrag = [None] * (bregs * nregs * kregs * 8)
+    # One staging chain per part.  `a_parts == 1` is the ordinary operand and
+    # every list below is one long, which is the shape this code had before
+    # there was a second part -- so the prepared case is the general one and
+    # the ordinary case is its `n = 1`, rather than the two being branches.
+    #
+    # A part gets its own tile rather than a wider shared one: the fragment
+    # read indexes by slot times the wave, and a tile holding several parts
+    # per slot would change that arithmetic for all of them to save one
+    # allocation.
+    aparts = ops.a_parts
+    AregParts = [Areg] + [{} for _ in range(1, aparts)]
+    AfragParts = [[None] * len(Afrag) for _ in range(aparts)]
 
     with writer.scratch_scope():
         Ashm = writer.alloc(atom.d, (aregs * threads,), MemSpace.SHARED,
@@ -499,6 +542,13 @@ def matmul(writer, ops, ctx, span):
         # both.  Measured over the emitted addresses: 2-way -> 1-way.
         Bshm = writer.alloc(atom.d, (bregs * threads,), MemSpace.SHARED,
                             hint='btile', swizzle=XorSwizzle(atom.k))
+        # The first is `Ashm`; the rest get their own, because the fragment
+        # read indexes by slot times the wave and one tile holding several
+        # parts per slot would change that arithmetic for all of them.
+        AshmParts = [Ashm] + [
+            writer.alloc(atom.d, (aregs * threads,), MemSpace.SHARED,
+                         hint=f'atile{p}')
+            for p in range(1, aparts)]
     with writer.scratch_scope():
         # Written lane-strided across the whole warp and read row-strided by
         # `atom.n`, so it collides both ways: 4-way on the read, 2-way on the
@@ -597,6 +647,21 @@ def matmul(writer, ops, ctx, span):
                                     for kkk in range(min(atom.k, K - k - kk), atom.k):
                                         Areg[kkk] = writer.declare(ScalarType(atom.d),
                                                                    hint='as')
+                                    for pt in range(1, aparts):
+                                        for kkk in range(0, min(atom.k, K - k - kk)):
+                                            AregParts[pt][kkk] = A(writer, None,
+                                                                   i // threads,
+                                                                   k + kk + kkk,
+                                                                   pt)
+                                        for kkk in range(min(atom.k, K - k - kk), atom.k):
+                                            # A padding slot reads zero in
+                                            # every part, and for a split that
+                                            # is the right answer: it says the
+                                            # part before it was exact, which
+                                            # for a slot nothing multiplies is
+                                            # true.
+                                            AregParts[pt][kkk] = writer.declare(
+                                                ScalarType(atom.d), hint='as')
 
                                     for ii in range(0, min(threads, M - i), atom.m):
                                         with writer.AnonymousScope():
@@ -653,15 +718,39 @@ def matmul(writer, ops, ctx, span):
                                                         addr = base if n == 0 else writer.op(
                                                             'add', INDEX, base, n, hint='a')
                                                         writer.store(Ashm, Areg[kkk + n], addr)
+                                                        for pt in range(1, aparts):
+                                                            writer.store(AshmParts[pt],
+                                                                         AregParts[pt][kkk + n],
+                                                                         addr)
                                             writer.barrier(Uniformity.MULT)
 
                                             for kk in range(0, kregs):
                                                 for iii in range(0, mregs):
                                                     #writer(f'{atom.d.ctype()} {Areg2}_{iii + kk * mregs} = {shmptr}[{aoffs} + (threadIdx.x / {ktile}) + (threadIdx.x % {ktile} + {kk * ktile}) * {atom.m} + {iii * mtile}];')
-                                                    Afrag[iii + kk * mregs] = writer.load(Ashm, _index(writer, add=(iii + kk * mregs) * 32), hint='a')
+                                                    faddr = _index(writer, add=(iii + kk * mregs) * 32)
+                                                    Afrag[iii + kk * mregs] = writer.load(Ashm, faddr, hint='a')
+                                                    for pt in range(1, aparts):
+                                                        AfragParts[pt][iii + kk * mregs] = writer.load(
+                                                            AshmParts[pt], faddr, hint='a')
 
+                                            # Where A was stored prepared the
+                                            # parts are handed over as they
+                                            # were read, one tuple per
+                                            # fragment.  What a mode does with
+                                            # them is its own: the TF32 branch
+                                            # takes two and issues three
+                                            # products, a BF16 one would take
+                                            # three.  The reinterpretation to
+                                            # the operand type is
+                                            # arithmetic-free.
+                                            AfragParts[0] = Afrag
+                                            a_split = ([tuple(_as_tf32(writer, AfragParts[pt][f])
+                                                              for pt in range(aparts))
+                                                        for f in range(aregs)]
+                                                       if aparts > 1 else None)
                                             atom.generate(writer, ctx, Afrag[:aregs], Bfrag[:bregs],
-                                                          [Cvals[i][ii // atom.m] for i in range (cregs)])
+                                                          [Cvals[i][ii // atom.m] for i in range (cregs)],
+                                                          a_split=a_split)
 
                     # The epilogue's staging registers.  Assigned inside a
                     # thread guard and read outside it, so they are declared

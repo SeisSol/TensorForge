@@ -624,7 +624,10 @@ class MultilinearInstruction(ComputeInstruction):
                             explicit_simd=_explicit_simd(self._context),
                             lead=self._ns[0][1] - self._ns[0][0],
                             depth=math.prod(mx - mi for mi, mx in self._ks),
-                            lead_width=self._lead_width)
+                            lead_width=self._lead_width,
+                            a_parts=getattr(self._ops[0].symbol.obj,
+                                            'storage_parts', 1)
+                            if self._ops and self._ops[0].symbol.obj else 1)
 
     def _plan(self) -> Tuple[Span, ...]:
         """Which arrangements compute this operation, over which columns.
@@ -762,15 +765,31 @@ class MultilinearInstruction(ComputeInstruction):
                         spec.discard()
                 return res
 
-            def A(writer, var, i, k):
+            def A(writer, var, i, k, part=0):
+                """One part of `A` at element `(i, k)`.
+
+                `part` is zero for an operand stored as one scalar per
+                element, which is every operand a frontend describes.  Where
+                the operand is stored prepared the parts sit adjacent --- the
+                part index is the innermost stride --- so the element is the
+                same place and only the addend differs.  Which part this is,
+                is the caller's to say; what the addend means for the width,
+                the layout claim and the broadcast is `load`'s, and stays
+                there.
+                """
                 with writer.speculative() as spec:
-                    res = self._ops[0].symbol.load(writer, self._context, var, unwindOp(i, 0, k, 0, True), False)
+                    res = self._ops[0].symbol.load(writer, self._context, var,
+                                                   unwindOp(i, 0, k, 0, True),
+                                                   False, part=part)
                     if not res:
                         spec.discard()
                 return res
 
+
+            a_obj = self._ops[0].symbol.obj
             ops = MatmulOperands(
                 A=A, B=B, C=C, sparse=sparse,
+                a_parts=getattr(a_obj, 'storage_parts', 1) if a_obj else 1,
                 lead_slots=M, lead_elements=Mx, n=N, k=K, kx=kx,
                 threads=self._num_threads,
                 a=self._ops[0].symbol.get_fptype(),

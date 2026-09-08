@@ -99,6 +99,23 @@ class MatmulOperands:
     #: the two are different questions.
     accumulator: Datatype
 
+    #: Scalars `A` occupies per logical element, and therefore how many parts
+    #: its accessor has: `A(writer, var, i, k, part)` for `part` in
+    #: `range(a_parts)`.
+    #:
+    #: One for every operand a frontend describes.  More where the generator
+    #: decided to keep `A` *prepared* in memory --- two for a TF32 split, three
+    #: for a BF16 one --- so that the parts a matrix instruction would compute
+    #: are read instead.
+    #:
+    #: A count and not a field per part, which is the version this replaced:
+    #: `A_lo` names "the second of two" and a three-part scheme would have
+    #: needed an `A_lo2` beside it, and a four-part one another.  What the
+    #: parts *mean* is the instruction mode's business --- the TF32 branch
+    #: takes two and multiplies three products of them --- and what they are
+    #: *numbered* is this.
+    a_parts: int = 1
+
 
 def scratch(dtype: Datatype) -> int:
     """Shared-memory elements a path needs, asked before anything is emitted.

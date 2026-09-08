@@ -99,6 +99,17 @@ class ComputeShape:
     #: through the buffer, and how big that is has to be answerable before any
     #: body exists.
     lead_width: int = 1
+    #: Scalars the first operand occupies per logical element, from
+    #: `Tensor.storage_parts`.  One for every operand a frontend describes;
+    #: more where the generator decided to keep it *prepared* in memory, and
+    #: then the staging is per part.
+    #:
+    #: On the shape rather than passed beside it because the reservation and
+    #: the emission have to agree about it, and the shape is already what they
+    #: both answer from -- a size computed without it is a size for a
+    #: different body, which `_suballocate` reports as an overflow at
+    #: generation and not before.
+    a_parts: int = 1
 
 
 def is_contraction(operands: int, lead_width: int) -> bool:

@@ -1873,7 +1873,7 @@ class Symbol:
       return None
     return (int(idx) // self.lead_width) % self.num_threads
 
-  def load(self, writer, context: Context, variable, index: List[Union[str, int, Immediate, Variable, LeadIndex]], nontemp, broadcast: bool = True):
+  def load(self, writer, context: Context, variable, index: List[Union[str, int, Immediate, Variable, LeadIndex]], nontemp, broadcast: bool = True, part: int = 0):
     addrs = []
     if self.stype == SymbolType.Data or (not self.obj.is_dense() and not isinstance(self.obj.spp, BoundingBoxSPP)):
       if variable is None:
@@ -1985,8 +1985,22 @@ class Symbol:
         w = max(lead_width_of(read_index), vec_width_of(read_index))
         ltype = (ScalarType(self.get_fptype()) if w == 1
                  else ScalarType(self.get_fptype(), w))
-        value = writer.load(self,
-                            self.address_value(writer, context, read_index),
+        # `part` selects among the scalars one logical element occupies where
+        # the operand is stored prepared -- the hi and lo halves of a split,
+        # say.  It is an addend on the address and nothing else: the strides
+        # already scale with `DataView._elem_parts`, so element `(i0, i1)`
+        # begins at `parts * (i0 + e0 * i1)` and the parts follow it.
+        #
+        # Here rather than in the caller because the caller would otherwise
+        # have to rebuild the width, the layout claim and the broadcast
+        # decision below to reach the same load -- twenty-five lines of a
+        # second opinion about questions this function already answers.  What
+        # the caller decides is *which* part; what that means for the access
+        # is one addend.
+        addr = self.address_value(writer, context, read_index)
+        if part:
+            addr = writer.op('add', INDEX, addr, part, hint='a')
+        value = writer.load(self, addr,
                             type_=ltype, hint='data',
                             align=None if w == 1 else RELAXED,
                             layout=layout_of(read_index, self.num_threads),
