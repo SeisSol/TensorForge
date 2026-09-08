@@ -198,6 +198,61 @@ def _round_up_pow2(n: int, cap: int) -> int:
     return t
 
 
+#: The widest lead vector that has been shown to compute the right numbers.
+#:
+#: `lead_width_cap` answers what the address permits, which is 4 for an FP32
+#: base of 16-byte alignment.  Taking it produces a kernel that generates,
+#: passes the coverage and exactness checks over its store nest, and is wrong:
+#: `tests/cases/aligned_operands` (16x8x16, alignment 16) disagrees with the
+#: scalar kernel in 120 of the destination's 128 cells.  Every cell, in other
+#: words, rather than an edge -- which places it in the register image and not
+#: in the loop nest, the loader writing a blocking the compute does not read
+#: back.  Width 2 on the same case agrees to the last slot.
+#:
+#: So the two are separated rather than the cap being lowered: what the
+#: address allows is a fact about the address, and what has been validated is
+#: a fact about us.  `test_lead_width` holds the failure in place, so fixing
+#: the image makes that test fail and say to raise this.
+VALIDATED_LEAD_WIDTH = 2
+
+
+def lead_width_cap(elem_bytes: int, align_bytes: int) -> int:
+    """The widest lead vector worth taking, from what the address proves.
+
+    Was the constant 2, and the constant hid a question rather than answering
+    it: `widths_for` offers 4 for an FP32 base of 16-byte alignment and 2 for
+    an FP64 one, so `float4` was unreachable and `double2` reachable only
+    because 2 happened to be both the cap and the ceiling.
+
+    The *FMA* width is deliberately not part of this, and that is the part
+    worth stating because the intuition runs the other way.  A vector wider
+    than the target's packed FMA is not an instruction that does not exist --
+    it is several of them, and every element past the first amortises the one
+    load and the one splat further.  Per m-element at one vector per lane,
+    with `p` the packed FMA width:
+
+        w=1            3.00 instructions
+        w=2, p=1       2.00
+        w=2, p=2       1.50
+        w=4, p=1       1.50
+        w=4, p=2       1.00
+
+    So the count falls with `w` whether or not the arithmetic packs, and a
+    scalar-FMA target gains *more* from the step to 4 than a packed one does.
+    `compute/packed.py` says which of those columns a target is in, which is a
+    cost-model input and not a ceiling; the ceiling is the address.
+
+    What is left out and would lower this is register pressure.  A width of
+    `w` puts `w` times as many floats in a lane and `w` times fewer lanes on
+    the operator, which is neutral in total and not per thread -- and per
+    thread is the constraint that already binds at order 6 in FP64.  That is a
+    measurement this cannot make, which is the argument for keeping the
+    address ceiling here and a budget elsewhere rather than folding a guess at
+    the budget into the ceiling.
+    """
+    return max(widths_for(elem_bytes, align_bytes))
+
+
 def lead_threads_and_width(extent: int, elem_bytes: int, align_bytes: int,
                            max_threads: int = 32, cap: int = 2,
                            blocking: int = 1):

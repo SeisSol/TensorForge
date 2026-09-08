@@ -341,3 +341,131 @@ def test_blocking_does_nothing_without_a_width():
 def test_a_zero_blocking_is_refused():
     with pytest.raises(ValueError):
         lead_threads_and_width(32, 4, 16, blocking=0)
+
+
+# --------------------------------------------------------------------------- #
+# The cap
+# --------------------------------------------------------------------------- #
+# It was the constant 2, and the constant hid a question rather than answering
+# it: `widths_for` offers 4 for an FP32 base of 16-byte alignment, so `float4`
+# was unreachable, and `double2` was reachable only because 2 happened to be
+# both the cap and the ceiling for FP64.
+
+from tensorforge.backend.instructions.compute.packed import packed_fma_width
+from tensorforge.backend.instructions.memory.vectorize import (  # noqa: E402
+    lead_width_cap, lead_threads_and_width)
+
+
+@pytest.mark.parametrize('elem,align,expected', [
+    (4, 0, 1), (4, 8, 2), (4, 16, 4), (4, 32, 4),
+    (8, 0, 1), (8, 8, 1), (8, 16, 2), (8, 32, 2),
+])
+def test_the_cap_is_what_the_address_proves(elem, align, expected):
+    assert lead_width_cap(elem, align) == expected
+
+
+def test_an_unproven_alignment_caps_at_one():
+    """Same permission as `widths_for`'s: not known to be aligned and known to
+    be element-aligned are one answer, and a cast that needs 16 must not
+    acquire the permission by default."""
+    assert lead_width_cap(4, 0) == 1
+    assert lead_threads_and_width(32, 4, 0, cap=lead_width_cap(4, 0))[1] == 1
+
+
+def test_float4_is_reachable_and_double4_is_not():
+    """The two the cap used to decide together, now decided apart.
+
+    16 bytes is the access ceiling, so FP32 reaches 4 and FP64 stops at 2 --
+    not because doubles are special but because two of them are already the
+    widest access there is.
+    """
+    assert lead_threads_and_width(64, 4, 16, cap=lead_width_cap(4, 16))[1] == 4
+    assert lead_threads_and_width(64, 8, 16, cap=lead_width_cap(8, 16))[1] == 2
+
+
+@pytest.mark.parametrize('vendor,arch', [('nvidia', 'sm_86'),
+                                         ('nvidia', 'sm_100'),
+                                         ('amd', 'gfx90a'), ('amd', 'gfx908')])
+def test_the_fma_width_is_not_the_cap(vendor, arch):
+    """A vector wider than the packed FMA is several of them, not none.
+
+    The intuition runs the other way, so this states it: every element past
+    the first amortises the one load and the one splat further, and the
+    per-element instruction count falls with the width whether or not the
+    arithmetic packs.  A scalar-FMA target gains *more* from the step to 4
+    than a packed one does, which is the opposite of a ceiling.
+    """
+    packed = packed_fma_width(vendor, arch, 4)
+    cap = lead_width_cap(4, 16)
+    assert cap >= packed, 'the address ceiling, not the instruction width'
+
+    def per_element(w):
+        # one load of b, one splat of it, and w/p fused multiply-adds
+        return (1 + 1 + -(-w // packed)) / w
+
+    assert per_element(4) < per_element(2) < per_element(1)
+
+
+def test_width_four_is_permitted_by_the_address_and_not_by_us():
+    """The two facts the cap used to be one of.
+
+    `lead_width_cap` answers what a 16-byte-aligned FP32 base permits, which
+    is 4.  `VALIDATED_LEAD_WIDTH` answers what has been shown to compute the
+    right numbers, which is 2.
+    """
+    from tensorforge.backend.instructions.memory.vectorize import (
+        VALIDATED_LEAD_WIDTH)
+    assert lead_width_cap(4, 16) == 4
+    assert VALIDATED_LEAD_WIDTH == 2
+
+
+def test_the_widened_register_image_is_wrong_at_four(monkeypatch):
+    """Asserted as the broken behaviour it is, so fixing it says so.
+
+    `aligned_operands` is 16x8x16 with 16-byte alignment.  At width 4 the
+    kernel generates, its store nest passes coverage and exactness, and it
+    disagrees with the scalar kernel in 120 of the destination's 128 cells --
+    every cell rather than an edge, which places the defect in the register
+    image (a loader blocking the compute does not read back) and not in the
+    loop nest.  Width 2 on the same case agrees to the last slot.
+
+    When the image is fixed this test fails, and that failure is the signal to
+    raise `VALIDATED_LEAD_WIDTH`.
+    """
+    import importlib.util
+    import re
+    from pathlib import Path
+
+    from tensorforge.backend.instructions.memory import vectorize
+    from tensorforge.common.context import Context
+    from tensorforge.generators.generator import Generator
+    from kernel_eval import evaluate_wave
+
+    monkeypatch.setattr(vectorize, 'LEAD_VECTORIZE', True)
+    case_path = Path(__file__).parent / 'cases' / 'aligned_operands.py'
+    spec = importlib.util.spec_from_file_location('c_aligned', case_path)
+    case = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(case)
+
+    def render(width):
+        monkeypatch.setattr(vectorize, 'VALIDATED_LEAD_WIDTH', width)
+        ctx = Context(arch='sm_86', backend='cuda', fp_type=case.DTYPE)
+        gen = Generator(case.descr_list(), ctx)
+        gen.register()
+        gen.generate()
+        return gen.get_kernel()
+
+    def run(src):
+        lanes = max([int(x) for x
+                     in re.findall(r'threadIdx\.x % (\d+)', src)] or [32])
+        return evaluate_wave(src, lanes, seed=7, globals_only=True,
+                             preset={'m0': 0.0})
+
+    scalar, wide = run(render(1)), run(render(4))
+    cells = 16 * 8
+    wrong = [i for i in range(cells)
+             if abs((scalar.get(('m0', i)) or 0.0)
+                    - (wide.get(('m0', i)) or 0.0)) > 1e-4]
+    assert len(wrong) == 120, (
+        f'{len(wrong)} of {cells} cells differ, not 120 -- the width-4 image '
+        f'has changed; if it is fixed, raise VALIDATED_LEAD_WIDTH')

@@ -135,7 +135,7 @@ def test_no_atomic_survives_the_widened_lead(monkeypatch):
     """
     monkeypatch.setattr(vectorize, 'LEAD_VECTORIZE', True)
     src = _generate()
-    assert 'VectorT<float, 2>' in src, (
+    assert 'VectorT<float, ' in src, (
         'the widened path did not engage, so this test proves nothing')
     assert 'atomic' not in src
 
@@ -180,13 +180,13 @@ def test_a_dividing_extent_is_refused_by_the_other_condition(monkeypatch):
     gen.generate()
     src = gen.get_kernel()
 
-    assert 'VectorT<float, 2>' in src, 'the widened path did not engage'
+    assert 'VectorT<float, ' in src, 'the widened path did not engage'
     assert 'broadcast<' not in src.split('store{r>g}')[-1], (
         'a peel was emitted for an extent the width divides')
     assert 'atomic' not in src
 
     from tensorforge.backend import atomics
     from tensorforge.backend.placement import atomic_write_is_exact
-    assert atomic_write_is_exact(lead_width=2, lead_extent=36), (
+    assert atomic_write_is_exact(lead_width=4, lead_extent=36), (
         'the nest is exact here; the refusal has to come from the capability')
-    assert not atomics.native_add(ctx, Datatype.F32, 2)
+    assert not atomics.native_add(ctx, Datatype.F32, 4)
