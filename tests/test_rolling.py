@@ -452,3 +452,65 @@ def test_the_two_questions_are_asked_separately():
     assert not any(isinstance(d, ForDescr) for d in
                    roll(_contributions(3), keep_unrolled_under=floor,
                         fit_within=1))
+
+
+# --- what a builder gets ----------------------------------------------------
+
+
+def test_the_body_names_a_stand_in_and_not_a_member():
+    """A member's name is right for one iteration in four and wrong for three."""
+    from tensorforge.generators.rolling import variant_body
+
+    loop = roll(accumulation())[0]
+    body, variants = variant_body(loop)
+    named = {v.tensor.alias for d in body for v in d.reads() + [d.writes()]
+             if v is not None}
+    assert 'variant0' in named
+    assert not any(n.startswith('fPrT') for n in named)
+
+
+def test_a_stand_in_is_interchangeable_with_what_it_stands_for():
+    from tensorforge.analysis.antiunify import operand_key
+    from tensorforge.generators.rolling import variant_body
+
+    _, variants = variant_body(roll(accumulation())[0])
+    for variant in variants:
+        keys = {operand_key(m) for m in variant.members}
+        assert keys == {operand_key(variant.stand_in)}
+
+
+def test_one_variant_per_hole_holding_one_member_per_iteration():
+    from tensorforge.generators.rolling import variant_body
+
+    loop = roll(recursion())[0]
+    body, variants = variant_body(loop)
+    assert len(variants) == loop.arity
+    assert all(v.count == loop.iterations for v in variants)
+    assert [m.tensor.alias for m in variants[0].members] == \
+        [f'deriv{k + 1}' for k in range(6)]
+
+
+def test_the_body_is_one_iteration_long():
+    from tensorforge.generators.rolling import variant_body
+
+    loop = roll(accumulation())[0]
+    body, _ = variant_body(loop)
+    assert len(body) == len(loop.general.template)
+    assert same_shape(body) != same_shape(accumulation())
+
+
+def test_binding_the_members_back_gives_the_iterations_again():
+    """The stand-in is a name, not a change of meaning."""
+    from tensorforge.analysis.antiunify import instantiate
+
+    loop = roll(accumulation())[0]
+    for member in range(loop.iterations):
+        assert same_shape(instantiate(loop.general, member)) == \
+            same_shape(loop.body(member))
+
+
+def test_the_prefix_names_the_stand_ins():
+    from tensorforge.generators.rolling import variant_body
+
+    _, variants = variant_body(roll(accumulation())[0], prefix='face')
+    assert [v.stand_in.tensor.alias for v in variants] == ['face0']

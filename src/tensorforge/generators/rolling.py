@@ -23,8 +23,10 @@ is not rolled either -- it is the same computation done several times, which is
 a question for whoever wrote it and not something to make tidier.
 """
 
-from typing import List, Optional, Sequence
+from dataclasses import dataclass
+from typing import List, Optional, Sequence, Tuple
 
+from tensorforge.analysis.antiunify import substitute
 from tensorforge.analysis.cost import estimated_lines
 from tensorforge.analysis.dependence import (binding_period, carried,
                                              escapes, shifts)
@@ -135,3 +137,61 @@ def unroll(descrs: Sequence[OperationDescription]
         else:
             out.append(descr)
     return out
+
+
+# ---------------------------------------------------------------------------
+# What a builder needs from a loop
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Variant:
+    """One hole, as the thing a body names and the things it stands for.
+
+    ``stand_in`` is a tensor with the members' shape, sparsity, addressing and
+    type and a name of its own; ``members`` are the views the iterations
+    actually bind, in order.
+
+    The body is built against the stand-in and not against the first member.
+    Building against a member would leave that member's name in the generated
+    body, which is right for one iteration in four and wrong for the rest -- so
+    it is given a name that belongs to no iteration, and what the name resolves
+    to is the table's business.
+    """
+
+    stand_in: object
+    members: Tuple[object, ...]
+
+    @property
+    def count(self) -> int:
+        return len(self.members)
+
+
+def _stand_in(view, name: str):
+    """A tensor interchangeable with `view`'s, under a name of its own."""
+    from tensorforge.common.matrix.tensor import SubTensor, Tensor
+    source = view.tensor
+    clone = Tensor(list(source.shape), source.addressing, source.bbox,
+                   alias=name, is_tmp=source.is_tmp, spp=source.spp,
+                   datatype=source.datatype,
+                   alignment=getattr(source, 'alignment', 0))
+    clone.direction = source.direction
+    return SubTensor(clone, view.bbox, list(view.offset),
+                     getattr(view, 'sliced', False))
+
+
+def variant_body(loop, prefix: str = 'variant'
+                 ) -> Tuple[List[OperationDescription], List[Variant]]:
+    """The one body a loop emits, and what each of its holes stands for.
+
+    The step between a rewritten descriptor list and a builder: the loop knows
+    which operands vary and what they are per iteration, the builder needs one
+    body to build and one name per hole to resolve through a table.  Splitting
+    it here keeps the substitution -- which is `antiunify`'s -- out of the
+    backend, and keeps the backend's question to where a name resolves.
+    """
+    variants = [
+        Variant(_stand_in(column[0], f'{prefix}{index}'), tuple(column))
+        for index, column in enumerate(zip(*loop.general.bindings))]
+    body = substitute(loop.general, [v.stand_in for v in variants])
+    return body, variants
