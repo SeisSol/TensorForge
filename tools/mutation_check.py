@@ -400,6 +400,24 @@ GROUPS = {
              'for step in range(steps)]')),
     ]),
 
+    'staging': ('tests/test_staging.py', [
+        ('two elements sharing an address',
+         sub(Path('src/tensorforge/backend/instructions/compute/staging.py'),
+             '    for address, index in enumerate(indices):',
+             '    for address, index in [(0, i) for i in indices]:')),
+        ('the buffer sized by something other than the plan',
+         sub(Path('src/tensorforge/backend/instructions/compute/staging.py'),
+             '    addresses = {transfer.address for transfer in plan}\n'
+             '    return len(addresses)',
+             '    return 0')),
+        ('the staged route preferred over the register one',
+         sub(Path('src/tensorforge/backend/instructions/compute/primitives/amd/relayout.py'),
+             '    direct = transposes_between(have, want, ext)\n'
+             '    if direct is not None:\n        return direct',
+             '    direct = transposes_between(have, want, ext)\n'
+             '    if False:\n        return direct')),
+    ]),
+
     'bitlayout': ('tests/test_bitlayout.py', [
         ('a replicated fragment planned from its lowest lane',
          sub(Path('src/tensorforge/backend/instructions/compute/primitives/amd/reorder.py'),

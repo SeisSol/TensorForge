@@ -364,7 +364,7 @@ def fragment_moves(op, which: str, slot: int,
                for index in range(extent)]
 
     found = bitlayout.moves(nest, fragment, indices,
-                            base=bitlayout.Position(lane=group * span))
+                            base_have=bitlayout.Position(lane=group * span))
     if found is None:
         return None
     return tuple(Move(move.source, _swaps_for(move.xor),

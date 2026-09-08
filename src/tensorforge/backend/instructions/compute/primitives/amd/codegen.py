@@ -12,7 +12,7 @@ from .catalog import mfma_tile_for
 from ... import split
 from .emitters import fmadpp4, fmadpp8, fmadpp16, fmascalar
 from .relayout import (MOVDPP16, TRANSPOSE4X4, find_relayout,
-                       nest_shared, transposed, transposes_between,
+                       nest_shared, reach, transposed,
                        fmadpp_operand_layout)
 from .select import BroadcastForm, select_broadcast_form, select_fmadpp_step
 
@@ -229,11 +229,18 @@ def matmul32(writer: Writer, C, B, A, M, N, K, kx, threads, dtype, sparse,
                 rather than emitting something that does not reach the
                 fragment.
                 """
-                needed = transposes_between(nest_shared(block, threads),
-                                            transposed(block, threads), block)
-                if needed == 0:
+                route = reach(nest_shared(block, threads),
+                              transposed(block, threads), block,
+                              [(c, l) for c in range(block)
+                               for l in range(threads)])
+                if route == 0:
                     return list(regs)
-                if needed is None:
+                if route != 1:
+                    # A staged trip closes the gap and this emitter does not
+                    # take it: the buffer has to be reserved before any body
+                    # exists, and `scratch` answers 0 here.  Declining sends
+                    # the operation to the generic nest, which is slower and
+                    # right, rather than to a reservation that was never made.
                     return None
                 return _transpose(writer, tile, ftype, threads, regs)
 

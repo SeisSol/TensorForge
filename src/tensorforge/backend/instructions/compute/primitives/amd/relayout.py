@@ -32,7 +32,7 @@ from typing import Callable, Optional, Tuple
 
 from tensorforge.backend.pir.core import LaneAxis, RegisterLayout
 
-from ... import bitlayout
+from ... import bitlayout, staging
 
 
 @dataclass(frozen=True)
@@ -164,6 +164,25 @@ def transposed(ext: int, threads: int) -> bitlayout.BitLayout:
               else bitlayout.Bit(bitlayout.Place.LANE, 1 << b)
               for b in range((threads - 1).bit_length())),
     ))
+
+
+def reach(have, want, ext: int, indices):
+    """How the operand gets from one distribution to the other.
+
+    Three answers, cheapest first, and each is a different kind of thing:
+    `0` is nothing to emit, an `int` is that many transposes, and a plan is
+    the trip through memory.  Ordered by what they cost rather than by which
+    is tried first, because the order *is* the preference -- a register path
+    beats a store, a barrier and a load per element, and the counts say so.
+
+    Never `None`.  The staged path closes every gap, so a caller reaching here
+    always has an answer; what it does not always have is one it can afford,
+    and that is what the plan's `accesses` are for.
+    """
+    direct = transposes_between(have, want, ext)
+    if direct is not None:
+        return direct
+    return staging.staged(have, want, indices)
 
 
 def transposes_between(have, want, ext: int) -> Optional[int]:
