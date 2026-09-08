@@ -10,7 +10,9 @@ from tensorforge.common.matrix.tensor import Tensor, SubTensor
 from tensorforge.common.matrix.spp import FullSPP, BoundingBoxSPP, ListSPP
 from tensorforge.common.matrix.boundingbox import BoundingBox as BBox
 from tensorforge.generators.generator import Generator as TensorForgeGenerator
-from tensorforge.generators.descriptions import MultilinearDescr, ElementwiseDescr, GridBarrierDescr, GridFenceDescr, RegionDescription
+from tensorforge.generators.descriptions import MultilinearDescr, ElementwiseDescr, ReductionDescr, GridBarrierDescr, GridFenceDescr, RegionDescription
+from tensorforge.common.operation import Operation
+from tensorforge.common.operation import AddOperator, MulOperator, MinOperator, MaxOperator, AndOperator, OrOperator, XorOperator
 
 from tensorforge.ir.data.variable import TensorView, TensorAlloc
 from tensorforge.ir.data.variable import TensorData
@@ -49,56 +51,173 @@ class GpuKernelGeneratorV1:
                                 prefer_align=can_be_aligned))
     return 0# self._descr_list[-1].get_flops()
 
+  #: yateto names its operations after the class that implements them; the
+  #: enum here is spelled differently and is not a superset.  What is missing
+  #: is named in `add_operation_new` rather than mapped to something close.
+  ELEMENTWISE_OPS = {
+    'Sin': Operation.SIN, 'Cos': Operation.COS, 'Tan': Operation.TAN,
+    'Asin': Operation.ASIN, 'Acos': Operation.ACOS, 'Atan': Operation.ATAN,
+    'Sinh': Operation.SINH, 'Cosh': Operation.COSH, 'Tanh': Operation.TANH,
+    'Asinh': Operation.ASINH, 'Acosh': Operation.ACOSH,
+    'Atanh': Operation.ATANH,
+    'Log': Operation.LOG, 'Exp': Operation.EXP,
+    'Log1p': Operation.LOGP1, 'Expm1': Operation.EXPM1,
+    'Sqrt': Operation.SQRT, 'Cbrt': Operation.CBRT, 'Abs': Operation.ABS,
+    'Min': Operation.MIN, 'Max': Operation.MAX, 'Pow': Operation.POW,
+    'Div': Operation.DIV, 'Add': Operation.ADD, 'Mul': Operation.MUL,
+    'And': Operation.AND, 'Or': Operation.OR, 'Xor': Operation.XOR,
+    'Not': Operation.NOT,
+    'CmpEq': Operation.EQ, 'CmpNe': Operation.NEQ,
+    'CmpLt': Operation.LT, 'CmpLe': Operation.LE,
+    'CmpGt': Operation.GT, 'CmpGe': Operation.GE,
+  }
+
+  #: A reduction carries an operator object, not an enum member: the neutral
+  #: element it starts from is type-dependent and only the operator knows it.
+  REDUCTION_OPS = {
+    'Add': AddOperator, 'Mul': MulOperator,
+    'Min': MinOperator, 'Max': MaxOperator,
+    'And': AndOperator, 'Or': OrOperator, 'Xor': XorOperator,
+  }
+
+  def convert_op(self, name):
+    """The elementwise operation yateto spelled as `name`."""
+    if name not in self.ELEMENTWISE_OPS:
+      raise NotImplementedError(
+        f'yateto operation {name!r} has no counterpart here. Casts '
+        f'(Cast<...>), the ternary select and the logical (as opposed to '
+        f'bitwise) negation are the ones yateto can currently emit and this '
+        f'side cannot express.')
+    return self.ELEMENTWISE_OPS[name]
+
+  def convert_reduction_op(self, name):
+    """The reduction operator yateto spelled as `name`."""
+    if name not in self.REDUCTION_OPS:
+      raise NotImplementedError(
+        f'yateto reduces over {name!r}, which is not one of the operators a '
+        f'reduction can start from here ({", ".join(sorted(self.REDUCTION_OPS))}).')
+    return self.REDUCTION_OPS[name]()
+
+  def convert_condition(self, condition):
+    """A guard, as yateto exports it: a conjunction of literals, or nothing.
+
+    `None` is the guard that never holds -- yateto has already decided the
+    statement is dead. An empty list is the guard that always holds. Every
+    other list is a conjunction, each literal naming a rank-0 condition
+    tensor, the version of it that is meant, and whether it is negated.
+    """
+    if condition is None:
+      return None
+    return [{
+      'tensor': self.tensor_ref(literal['tensor']),
+      'version': literal['version'],
+      'negated': literal['negated'],
+    } for literal in condition]
+
+  def _reduction_dims(self, result, arg):
+    """The axes of `arg` that the reduction removes.
+
+    yateto keeps the surviving axes in the operand's own order, so the axes
+    it dropped are enough to describe the reduction -- no permutation comes
+    with it. Checking that here means a change on the far side surfaces as a
+    message rather than as transposed results.
+    """
+    src = list(arg['indices'])
+    dst = list(result['indices'])
+    dims = [i for i, index in enumerate(src) if index not in dst]
+    kept = [index for index in src if index in dst]
+    if kept != dst:
+      raise NotImplementedError(
+        f'the reduction keeps axes {kept} but its result is indexed {dst}; '
+        f'a reduction that also permutes is not expressible as a '
+        f'ReductionDescr.')
+    return dims
+
   def add_operation_new(self, d):
+    kind = d['type']
     result = self.tensor_ref(d['result'])
     args = [self.tensor_ref(arg) for arg in d['args']]
+    condition = self.convert_condition(d['condition'])
 
-    condition_raw = d['condition']
-    condition = [self.tensor_ref(var) for clause in condition_raw for var in clause]
-    # condition = self.tensor_ref(d['condition'])
+    if condition is None:
+      # the guard never holds; yateto kept the statement only so that the
+      # tensors it names stay in the kernel's signature
+      return 0
+    if condition:
+      raise NotImplementedError(
+        f'{kind} operation under a guard of {len(condition)} literal(s): the '
+        f'guard reaches here as data but nothing lowers it into the kernel '
+        f'yet, and generating the operation unguarded would compute it '
+        f'unconditionally.')
 
-    if d['type'] == 'reduction':
-      assert len(args) == 1
-      op = self.convert_op(d['optype'])
+    if len(d['result']['indices']) == 0:
+      # Every backend path indexes the destination by at least one axis --
+      # MultilinearDescr._lead_dim and the symbol layer both read axis 0 --
+      # so a scalar result crashes several layers down rather than here.
+      # yateto reaches this with a full contraction or a full reduction.
+      raise NotImplementedError(
+        f'{kind} operation writing a rank-0 result: a destination without '
+        f'axes is not supported by the backend.')
 
-    if d['type'] == 'elementwise':
-      op = self.convert_op(d['optype'])
+    linear = d.get('linear') or {}
+    add = linear.get('add', False)
 
-    if d['type'] == 'matmul':
-      pass
-
-    if 'linear' in d['type']:
-      alpha = self.tensor_ref(d['linear']['alpha'])
-      add = d['linear']['add']
-
-    if d['type'] == 'multilinear':
-      target = d['target']
-      permute = d['permute']
-
-      # TODO
-
-      alpha = self.tensor_ref(d['linear']['alpha'])
-      add = d['linear']['add']
-
-      # ElementwiseDescr()
+    if kind == 'multilinear':
+      # the scale is already one of `args` whenever it is not one -- yateto
+      # appends it as a rank-0 operand with an empty target -- so `alpha`
+      # here is the same value a second time and is deliberately unused.
       self._descr_list.append(MultilinearDescr(result,
-                              args,
-                              target, permute, add=add,
-                                strict_match=False,
-                                prefer_align=False))
-
-      result = self.tensor_ref_new(d['result'])
-      args = [self.tensor_ref_new(arg) for arg in d['args']]
-
-      condition_raw = d['condition']
-      condition = [self.tensor_ref_new(var) for clause in condition_raw for var in clause]
-
-      self._ir_list.append(Multilinear(result, None, None, args, target, add))
+                                               args,
+                                               d['target'],
+                                               d['permute'],
+                                               add=add,
+                                               strict_match=False,
+                                               prefer_align=False))
+    elif kind == 'elementwise':
+      if add:
+        raise NotImplementedError(
+          'an elementwise operation that accumulates onto its destination; '
+          'ElementwiseDescr overwrites.')
+      self._descr_list.append(ElementwiseDescr(self.convert_op(d['optype']),
+                                               result,
+                                               args,
+                                               strict_match=False,
+                                               prefer_align=False))
+    elif kind == 'reduction':
+      if add:
+        raise NotImplementedError(
+          'a reduction that accumulates onto its destination; '
+          'ReductionDescr overwrites.')
+      if self._is_named_scalar(linear.get('alpha')):
+        raise NotImplementedError(
+          'a scaled reduction; ReductionDescr carries no factor, and folding '
+          'one in would change what the reduction starts from.')
+      assert len(args) == 1
+      self._descr_list.append(ReductionDescr(result,
+                                             args[0],
+                                             self._reduction_dims(d['result'], d['args'][0]),
+                                             self.convert_reduction_op(d['optype']),
+                                             prefer_align=False))
+    else:
+      raise NotImplementedError(f'yateto exported an operation of type {kind!r}')
 
     return 0# self._descr_list[-1].get_flops()
 
-  def convert_op(self):
-    pass
+  def _is_named_scalar(self, alpha):
+    """Whether `alpha` is a runtime argument rather than the constant one.
+
+    yateto always sends a scale, and a reference to it carries only a name --
+    the values came with `add_tensor`, so the answer is in the cache. A scale
+    that is literally one is the same as no scale at all.
+    """
+    if alpha is None:
+      return False
+    tensor = self._cache.get(f'{self._prefix}{alpha["name"]}')
+    data = None if tensor is None else getattr(tensor, 'data', None)
+    if data is None:
+      return True
+    values = list(data.values()) if isinstance(data, dict) else list(np.ravel(data))
+    return values != [1] and values != [1.0]
 
   def is_scalar(self, op):
     # a bit hacky...
