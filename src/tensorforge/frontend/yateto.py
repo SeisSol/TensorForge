@@ -53,6 +53,10 @@ class DescriptionReader:
     # TODO: maybe remove again
     self._prefix = ""
 
+    #: Numbers the scratch tensors this reader introduces, so that two of them
+    #: in one kernel do not land on the same name.
+    self._scratch = 0
+
   #: yateto names its operations after the class that implements them; the
   #: enum here is spelled differently and is not a superset.  What is missing
   #: is named in `add_operation_new` rather than mapped to something close.
@@ -179,6 +183,18 @@ class DescriptionReader:
     permute = [list(range(len(arg['indices']))) for arg in args]
     return self._fixup_phantom(args, target, permute)
 
+  @staticmethod
+  def _accumulates(add):
+    """Whether an operation adds onto its destination rather than overwriting.
+
+    yateto states the accumulation as a mask over the destination's axes, so
+    the value is either `False` -- overwrite -- or the axes the accumulated
+    value spans. A rank-0 destination has no axes, so the mask that
+    accumulates onto a scalar is the empty one, and `bool` answers the
+    opposite of the question there. `False` is the only value that overwrites.
+    """
+    return add is not False
+
   def _reduction_dims(self, result, arg):
     """The axes of `arg` that the reduction removes.
 
@@ -197,6 +213,49 @@ class DescriptionReader:
         f'a reduction that also permutes is not expressible as a '
         f'ReductionDescr.')
     return dims
+
+  def _accumulator(self, result, dest, add):
+    """Where a non-accumulating descriptor writes when yateto wanted a sum.
+
+    Neither `ElementwiseDescr` nor `ReductionDescr` accumulates; both
+    overwrite their destination. An operation that yateto marked as
+    accumulating therefore writes a scratch tensor, and a multilinear adds
+    that onto the destination afterwards -- the same two-step shape a scaled
+    result already takes.
+
+    Returns the destination to write and a callable that appends the
+    accumulation, which is nothing when there is none.
+    """
+    if not self._accumulates(add):
+      return dest, lambda: None
+
+    box = dest.bbox
+    name = f'{self._prefix}_accum{self._scratch}'
+    self._scratch += 1
+    tensor = Tensor(shape=[int(extent) for extent in box.upper()],
+                    addressing=Addressing.PTR_BASED,
+                    bbox=box,
+                    alias=name,
+                    is_tmp=True,
+                    datatype=getattr(dest.tensor, 'datatype', None))
+    self._cache[name] = tensor
+    scratch = SubTensor(tensor, box)
+
+    # The scratch has the destination *view's* shape, so its axes are the
+    # ones to state -- not `result['indices']`, which counts a rank-0 result
+    # as having none while the view carries it as an axis of extent one.
+    axes = list(range(box.rank()))
+
+    def accumulate():
+      self._descr_list.append(MultilinearDescr(self.tensor_ref(result),
+                                               [scratch],
+                                               [axes],
+                                               [axes],
+                                               add=axes,
+                                               strict_match=False,
+                                               prefer_align=False))
+
+    return scratch, accumulate
 
   def add_operation_new(self, d):
     kind = d['type']
@@ -251,28 +310,24 @@ class DescriptionReader:
                                                strict_match=False,
                                                prefer_align=False))
     elif kind == 'elementwise':
-      if accumulates:
-        raise NotImplementedError(
-          'an elementwise operation that accumulates onto its destination; '
-          'ElementwiseDescr overwrites.')
+      dest, accumulate = self._accumulator(d['result'], result, add)
       self._descr_list.append(ElementwiseDescr(self.convert_op(d['optype'], d['result']),
-                                               result,
+                                               dest,
                                                args,
                                                strict_match=False,
                                                prefer_align=False))
-      self._append_scaling(d['result'], linear.get('alpha'))
+      self._append_scaling(d['result'], linear.get('alpha'), dest)
+      accumulate()
     elif kind == 'reduction':
-      if accumulates:
-        raise NotImplementedError(
-          'a reduction that accumulates onto its destination; '
-          'ReductionDescr overwrites.')
+      dest, accumulate = self._accumulator(d['result'], result, add)
       assert len(args) == 1
-      self._descr_list.append(ReductionDescr(result,
+      self._descr_list.append(ReductionDescr(dest,
                                              args[0],
                                              self._reduction_dims(d['result'], d['args'][0]),
                                              self.convert_reduction_op(d['optype']),
                                              prefer_align=False))
-      self._append_scaling(d['result'], linear.get('alpha'))
+      self._append_scaling(d['result'], linear.get('alpha'), dest)
+      accumulate()
     else:
       raise NotImplementedError(f'yateto exported an operation of type {kind!r}')
 
@@ -281,7 +336,7 @@ class DescriptionReader:
 
     return 0# self._descr_list[-1].get_flops()
 
-  def _append_scaling(self, result, alpha):
+  def _append_scaling(self, result, alpha, view=None):
     """Scale a result in place, as an operation of its own.
 
     Neither an elementwise operation nor a reduction carries a factor, and
@@ -291,9 +346,14 @@ class DescriptionReader:
     """
     if not self._is_named_scalar(alpha):
       return
-    axes = [0] if self._is_phantom(result) else list(range(len(result['indices'])))
-    self._descr_list.append(MultilinearDescr(self.tensor_ref(result),
-                                             [self.tensor_ref(result),
+    # `view` is what the operation actually wrote. It is the destination
+    # itself for an operation that overwrites, and the scratch for one whose
+    # result is still to be added on -- the factor multiplies what was
+    # computed, not what it will be added to.
+    scaled = self.tensor_ref(result) if view is None else view
+    axes = list(range(scaled.bbox.rank()))
+    self._descr_list.append(MultilinearDescr(scaled,
+                                             [scaled,
                                               self.tensor_ref(alpha)],
                                              [axes, []],
                                              [axes, []],
