@@ -20,9 +20,11 @@ sets ``section.barrier`` and triggers ``persistent_threading``:
   ``cooperative_groups/memcpy_async.h``) come in via
   ``gen.get_helper_headers()`` — already wired in ``runner.py:99``.
 
-The compute layer is identical to the fence case, so once the fence
-case passes the only failure mode here is the cooperative-launch
-plumbing.
+The fence case is no longer the same arithmetic: it was rewritten to
+two *independent* GEMMs, because a fence does not order its sections
+(see ``fence_two_gemms.py``).  Ordering across a section boundary is
+this case's subject alone, which is why its batch has to exceed the
+grid.
 
 Cooperative launch has a device-side prerequisite: the GPU must
 support ``cudaDevAttrCooperativeLaunch``. Almost everything ≥ sm_60
@@ -44,7 +46,21 @@ NAME = "barrier_two_gemms_16x16"
 # so the case has to name the one `reference()` returns.
 OUTPUT = "E"
 DTYPE = Datatype.F32
-BATCH = 4
+# Past the grid size an occupancy query yields on the machines this runs
+# on, so the batch loop takes more than one trip and blocks take *unequal*
+# numbers of trips.  What that buys is a guard on where the grid sync sits:
+# outside the batch loop it is reached once by every block, which is what
+# the generator emits; moved inside it, the blocks with fewer trips stop
+# arriving and the kernel hangs.  A batch below the grid size gives every
+# block exactly one trip and cannot tell the two placements apart.
+#
+# It does *not* make the case test grid-wide ordering, and no batch size
+# would: a barrier resets the section-1 traversal to `blockId`
+# (`generator.py:511-513`), so both sections walk the same elements in the
+# same blocks and every block only ever reads back what it wrote itself.
+# Ordering across blocks is not expressible as a case while a section's
+# element mapping is fixed by the block id.
+BATCH = 96
 TOL = (1e-4, 1e-4)
 
 

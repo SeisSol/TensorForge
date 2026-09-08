@@ -190,16 +190,29 @@ def test_temporary_assembled_from_slices_is_read_after_both_writes(backend,
                          ids=[b for b, _ in ALL_TARGETS])
 def test_a_sections_residency_empties_at_the_section_boundary(case_stem, backend,
                                                               arch):
-    """The second section reads what the first one produced.
+    """The first section's writeback lands before the second section runs.
 
-    The first contraction leaves its result in registers and the second
-    section, past the barrier, reads it back from global memory.  Nothing in
-    the second section knows about the first section's registers, so the
-    writeback has to have happened by then -- and "by the end of the kernel"
-    is not by then.
+    The first contraction leaves its result in registers.  Nothing in the
+    second section knows about the first section's registers, so the writeback
+    has to have happened by the time the second section starts -- and "by the
+    end of the kernel" is not by then.
 
     Stated as an access order rather than against the barrier instruction,
     which each backend spells differently.
+
+    The two cases carry different amounts of evidence for that, and the
+    difference is deliberate rather than incidental:
+
+    * ``barrier`` keeps a cross-section dependency -- section 1 reads back the
+      tensor section 0 wrote -- so the order can be asserted on that one array,
+      which is the sharpest form the invariant has.
+    * ``fence`` has none, and must not: a fence does not order its sections,
+      so a case that read section 0's output in section 1 would be racing by
+      construction (see ``cases/barrier/fence_two_gemms.py``).  What is left to
+      assert there is the boundary itself -- section 0's destination is written
+      before section 1's destination is first touched, rather than both being
+      flushed together at the end of the kernel.  That is the part of the
+      invariant that does not need a dependency to be true.
     """
     try:
         gen, descrs = _generate(case_stem, backend, arch)
@@ -211,18 +224,40 @@ def test_a_sections_residency_empties_at_the_section_boundary(case_stem, backend
         # generate there is the snapshots' business.
         pytest.skip(f"{case_stem} does not generate on {backend}: "
                     f"{type(exc).__name__}: {exc}")
-    array = f"glb_{descrs[0].dest.tensor.name}"
-    accesses = _accesses(gen.get_kernel(), array)
+    produced = f"glb_{descrs[0].dest.tensor.name}"
+    src = gen.get_kernel()
+    accesses = _accesses(src, produced)
 
     write = _first(accesses, "w")
+    assert write is not None, (
+        f"expected {produced} to be written by the first section, got "
+        f"{[(k, ln) for k, ln, _ in accesses]}")
+
     read = _first(accesses, "r")
-    assert write is not None and read is not None, (
-        f"expected {array} to be both written by the first section and read "
-        f"by the second, got {[(k, ln) for k, ln, _ in accesses]}")
-    assert write[1] < read[1], (
-        f"{array} is read at line {read[1]} by the section after the barrier, "
-        f"before the section before it wrote at line {write[1]}:\n"
-        f"  {read[1]}: {read[2]}\n"
+    if read is not None:
+        # The cross-section dependency the barrier case carries: the readback
+        # in section 1 must not overtake the writeback in section 0.
+        assert write[1] < read[1], (
+            f"{produced} is read at line {read[1]} by the section after the "
+            f"barrier, before the section before it wrote at line "
+            f"{write[1]}:\n"
+            f"  {read[1]}: {read[2]}\n"
+            f"  {write[1]}: {write[2]}")
+
+    # Holds with or without that dependency: the boundary is where the first
+    # section's residency empties, so its writeback precedes anything the
+    # second section does with its own destination.
+    consumed = f"glb_{descrs[-1].dest.tensor.name}"
+    assert consumed != produced, (
+        f"the two sections of this case share destination {consumed}; the "
+        "boundary assertion below cannot tell them apart")
+    later = _accesses(src, consumed)
+    assert later, f"expected the second section to touch {consumed}"
+    assert write[1] < later[0][1], (
+        f"{produced} is written at line {write[1]}, after the second section "
+        f"first touches {consumed} at line {later[0][1]}, so the first "
+        f"section's residency outlived the section boundary:\n"
+        f"  {later[0][1]}: {later[0][2]}\n"
         f"  {write[1]}: {write[2]}")
 
 
