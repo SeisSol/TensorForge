@@ -31,6 +31,7 @@ carried.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from typing import Optional, Sequence, Tuple
 
 import numpy as np
@@ -129,7 +130,36 @@ def align_pattern(mask: np.ndarray, width: int) -> np.ndarray:
     return out
 
 
-def layout_for(mask: np.ndarray, align: int = 1) -> Layout:
+def merge_gaps(mask: np.ndarray, max_gap: int) -> np.ndarray:
+    """Close every gap shorter than `max_gap`, along the flattened box.
+
+    Optimal for a cost of the form `alpha * stored + beta * runs`, and the
+    argument is short: closing a gap of `g` stores `g` more cells and removes
+    one run, so it pays exactly when `alpha * g < beta`.  The gaps do not
+    interact -- closing one changes nothing about what any other is worth --
+    so the whole decision is that comparison applied to each, and `max_gap`
+    is `beta / alpha` spelled as a length.
+
+    A fill ratio would not do: it closes larger gaps in a dense stretch than
+    in a sparse one, though a gap costs the same either way.
+    """
+    if max_gap <= 0:
+        return mask.copy()
+    flat = mask.ravel(order='F').copy()
+    run_start = None
+    last_end = None
+    for cell, occupied in enumerate(flat):
+        if not occupied:
+            continue
+        if last_end is not None and cell - last_end < max_gap:
+            flat[last_end:cell] = True
+        last_end = cell + 1
+        run_start = run_start if run_start is not None else cell
+    return flat.reshape(mask.shape, order='F')
+
+
+def layout_for(mask: np.ndarray, align: int = 1,
+               max_gap: int = 0) -> Layout:
     """The padded pattern and its slot assignment, F-order.
 
     Slots run in the order the flattened bounding box does, which is the
@@ -137,7 +167,10 @@ def layout_for(mask: np.ndarray, align: int = 1) -> Layout:
     back explicitly is what makes a different order possible later without
     changing anything else.
     """
-    stored = align_pattern(mask, align)
+    # Gaps first, boundaries second: closing a gap is about how many runs
+    # there are, rounding one is about where a run may start, and doing it
+    # the other way round would round boundaries that then disappear.
+    stored = align_pattern(merge_gaps(mask, max_gap), align)
     slots = np.zeros(stored.shape, dtype=np.int64, order='F')
     flat_stored = stored.ravel(order='F')
     flat_slots = slots.ravel(order='F')
@@ -166,6 +199,52 @@ def compare(mask: np.ndarray, widths: Sequence[int] = (1, 2, 4, 8, 16),
         mark = '<' if width == natural else ' '
         lines.append(f'{mark:1} {width:>6} {lay.volume:>8} '
                      f'{lay.volume / nnz:>6.2f} {len(runs):>6} {mean:>9.1f}')
+    return '\n'.join(lines)
+
+
+def gap_sweep(masks, gaps: Sequence[int] = (0, 2, 3, 4, 6, 8, 12, 16),
+              align: int = 1, group: int = 32,
+              w_run: float = 3.0, w_bit: float = 6.0,
+              fp_bytes: int = 8, bytes_per_cycle: float = 64.0) -> str:
+    """Cost against `max_gap`, with the bitset as the alternative per column.
+
+    A column is costed either as its runs -- one iteration each, most lanes
+    idle on a short one -- or as a bitset over `group`-cell words, where every
+    lane works but the index has to be computed.  `w_run` and `w_bit` are
+    instructions per iteration and are estimates until the loader exists to
+    count them from.
+
+    Issue and traffic are put in one currency the way `spp_plan` does it, so
+    the total has a minimum rather than falling forever: closing gaps buys
+    iterations and costs bytes, and the gap that minimises the sum is
+    `beta / alpha` for the corpus rather than for one matrix, which is the
+    number the generator would carry.
+    """
+    head = (f'{"gap":>5} {"stored":>9} {"runs":>8} {"issue":>10} '
+            f'{"traffic":>9} {"total":>10} {"bitset cols":>12}')
+    lines = [head, '-' * len(head)]
+    for gap in gaps:
+        stored = runs = cost = bitcols = 0
+        for mask in masks.values():
+            merged = align_pattern(merge_gaps(mask, gap), align)
+            stored += int(merged.sum())
+            rows = merged.shape[0]
+            words = math.ceil(rows / group)
+            for column in np.ndindex(*merged.shape[1:]):
+                col = merged[(slice(None),) + column]
+                nz = np.flatnonzero(col)
+                if nz.size == 0:
+                    continue
+                breaks = int(np.count_nonzero(np.diff(nz) > 1)) + 1
+                runs += breaks
+                run_cost = breaks * w_run
+                bit_cost = words * w_bit
+                cost += min(run_cost, bit_cost)
+                bitcols += bit_cost < run_cost
+        traffic = stored * fp_bytes / bytes_per_cycle
+        lines.append(f'{gap:>5} {stored:>9} {runs:>8} {cost:>10.0f} '
+                     f'{traffic:>9.0f} {cost + traffic:>10.0f} '
+                     f'{bitcols:>12}')
     return '\n'.join(lines)
 
 
