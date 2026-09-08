@@ -1466,6 +1466,20 @@ class Symbol:
             idxvar = writer.op('sub', INDEX, strindex, offset, hint='idx')
 
             lead = index[leadidx]
+            if not isinstance(lead._nonlead, (int, np.integer)):
+              # The slot has to be a number here: what follows sorts the runs
+              # into those that cover the lane block, those that clip it and
+              # those that miss it, and that is a comparison against the
+              # block's bounds.  A slot that is a loop induction variable has
+              # no bounds until the loop runs, and multiplying its name by the
+              # block width is Python string repetition -- it does not raise
+              # where it goes wrong, it raises two lines further on comparing
+              # a number to a sixty-character string.
+              raise GenerationError(
+                  f'{self.name}: a sparse lead dimension needs its slot known '
+                  f'when the code is written, and this one is the induction '
+                  f'variable {lead._nonlead!r} of a loop that was not '
+                  f'unrolled')
             bndS = lead._nonlead * lead._block
             bndE = (lead._nonlead + 1) * lead._block
 
