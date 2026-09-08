@@ -21,6 +21,7 @@ from tensorforge.ir.type import BaseDatatype
 from tensorforge.ir.data.memory import Logical
 
 import numpy as np
+import re
 
 class GpuKernelGeneratorV1:
   def __init__(self, arch, attrs=None):
@@ -80,14 +81,31 @@ class GpuKernelGeneratorV1:
     'And': AndOperator, 'Or': OrOperator, 'Xor': XorOperator,
   }
 
-  def convert_op(self, name):
-    """The elementwise operation yateto spelled as `name`."""
+  def convert_op(self, name, dest=None):
+    """The elementwise operation yateto spelled as `name`.
+
+    A cast is a copy. There is no enum member carrying a target type, and
+    there does not need to be: yateto types the destination of a cast with
+    exactly the type cast to, so writing the value into it converts it. The
+    destination is checked rather than trusted, because a copy into the wrong
+    type would silently be a different cast.
+    """
+    cast = re.fullmatch(r'Cast<(.+)>', name)
+    if cast is not None:
+      target = Datatype.ytt2enum(cast.group(1))
+      actual = None if dest is None else getattr(self._cache.get(f'{self._prefix}{dest["name"]}'), 'datatype', None)
+      if actual != target:
+        raise NotImplementedError(
+          f'a cast to {cast.group(1)} writing into a destination of type '
+          f'{actual}: the conversion here is the one the store performs, so '
+          f'the two have to agree.')
+      return Operation.COPY
     if name not in self.ELEMENTWISE_OPS:
       raise NotImplementedError(
-        f'yateto operation {name!r} has no counterpart here. Casts '
-        f'(Cast<...>), the ternary select and the logical (as opposed to '
-        f'bitwise) negation are the ones yateto can currently emit and this '
-        f'side cannot express.')
+        f'yateto operation {name!r} has no counterpart here. The ternary '
+        f'select (it would need a third operand through `Lexic.get_operation`) '
+        f'and the logical, as opposed to bitwise, negation are the ones yateto '
+        f'can currently emit and this side cannot express.')
     return self.ELEMENTWISE_OPS[name]
 
   def convert_reduction_op(self, name):
@@ -221,30 +239,49 @@ class GpuKernelGeneratorV1:
         raise NotImplementedError(
           'an elementwise operation that accumulates onto its destination; '
           'ElementwiseDescr overwrites.')
-      self._descr_list.append(ElementwiseDescr(self.convert_op(d['optype']),
+      self._descr_list.append(ElementwiseDescr(self.convert_op(d['optype'], d['result']),
                                                result,
                                                args,
                                                strict_match=False,
                                                prefer_align=False))
+      self._append_scaling(d['result'], linear.get('alpha'))
     elif kind == 'reduction':
       if add:
         raise NotImplementedError(
           'a reduction that accumulates onto its destination; '
           'ReductionDescr overwrites.')
-      if self._is_named_scalar(linear.get('alpha')):
-        raise NotImplementedError(
-          'a scaled reduction; ReductionDescr carries no factor, and folding '
-          'one in would change what the reduction starts from.')
       assert len(args) == 1
       self._descr_list.append(ReductionDescr(result,
                                              args[0],
                                              self._reduction_dims(d['result'], d['args'][0]),
                                              self.convert_reduction_op(d['optype']),
                                              prefer_align=False))
+      self._append_scaling(d['result'], linear.get('alpha'))
     else:
       raise NotImplementedError(f'yateto exported an operation of type {kind!r}')
 
     return 0# self._descr_list[-1].get_flops()
+
+  def _append_scaling(self, result, alpha):
+    """Scale a result in place, as an operation of its own.
+
+    Neither an elementwise operation nor a reduction carries a factor, and
+    folding one into a reduction would change what it starts from. Applying
+    it afterwards is a multilinear over the result and the factor, which is
+    the same shape of operation yateto sends for a scaled contraction.
+    """
+    if not self._is_named_scalar(alpha):
+      return
+    rank = len(result['indices'])
+    axes = list(range(rank))
+    self._descr_list.append(MultilinearDescr(self.tensor_ref(result),
+                                             [self.tensor_ref(result),
+                                              self.tensor_ref(alpha)],
+                                             [axes, []],
+                                             [axes, []],
+                                             add=False,
+                                             strict_match=False,
+                                             prefer_align=False))
 
   def _is_named_scalar(self, alpha):
     """Whether `alpha` is a runtime argument rather than the constant one.
@@ -464,7 +501,9 @@ class GpuKernelGeneratorV1:
       spp = FullSPP(shape)#BoundingBoxSPP(bbox)
     if storagetype == 'spp':
       bbox = None
-      spp = ListSPP(d['storage']['entries'])
+      # NOTE: ListSPP numbers the entries in the order they arrive, and that
+      #       numbering is the address; yateto sends them in its storage order.
+      spp = ListSPP([tuple(entry) for entry in d['storage']['entries']], shape)
 
     values = d['values']
     is_temporary = d['flags']['temporary']
