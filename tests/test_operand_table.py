@@ -448,3 +448,35 @@ def test_no_struct_is_defined_where_no_table_is_registered():
     gen.generate()
     assert not any(l.startswith('struct ')
                    for l in gen.get_kernel().splitlines())
+
+
+def test_the_loop_takes_the_structured_path_where_one_is_open():
+    """And registers its counter as a value, not only as a name.
+
+    Anything in the body that mentions the counter has to say so as an
+    operand.  A select chain over four pointers reads nothing else, so to the
+    IR it is a computation with no inputs -- free to be hoisted out of the very
+    loop that defines what it reads, silently and only in the text.
+    """
+    from tensorforge.backend.instructions.abstract_instruction import \
+        AbstractInstruction
+    from tensorforge.backend.instructions.ptr_manip import VariantLoop
+    from tensorforge.backend.writer import Writer
+
+    depth = []
+
+    class Probe:
+        def gen_code(self, writer):
+            depth.append(len(AbstractInstruction._induction_value))
+
+    loop = VariantLoop(context(), 'face', 4, [Probe()])
+    with AbstractInstruction.shared_body(context(), Writer()) as builder:
+        loop.gen_code(builder)
+    assert depth == [1]
+
+
+def test_the_text_path_still_writes_a_counted_loop():
+    from tensorforge.backend.instructions.ptr_manip import VariantLoop
+    text = written(VariantLoop(context(), 'face', 4, [Marker('body();')],
+                               start=1))
+    assert 'for (int face = 1; face < 4; ++face)' in text

@@ -471,16 +471,38 @@ class VariantLoop(AbstractInstruction):
     return (f'int {self._counter} = {self._start}; '
             f'{self._counter} < {self._count}; ++{self._counter}')
 
+  def _emit_region(self, writer, per_iteration) -> None:
+    for table in per_iteration:
+      table.gen_code(writer)
+    for instruction in self._region:
+      instruction.gen_code(writer)
+
   def gen_code(self, writer) -> None:
     invariant = [t for t in self._tables if t.loop_invariant()]
     per_iteration = [t for t in self._tables if not t.loop_invariant()]
     for table in invariant:
       table.gen_code(writer)
+
+    if hasattr(writer, 'for_'):
+      # `extern` and `ctype` because the counter's name and type are the macro
+      # layer's: the select chains and every table access spell it out as text.
+      #
+      # And the induction *value* is pushed, not merely its name.  Anything
+      # inside that mentions the counter has to say so as an operand, or the
+      # IR sees a computation with no inputs -- a select chain over four
+      # pointers is exactly that -- and is free to hoist it out of the loop
+      # that defines the thing it reads.  Silently, and only in the text.
+      with writer.for_(self._start, self._count, 1, extern=self._counter,
+                       ctype='int', unroll=self._unroll) as loop:
+        AbstractInstruction._induction_value.append(loop.induction)
+        try:
+          self._emit_region(writer, per_iteration)
+        finally:
+          AbstractInstruction._induction_value.pop()
+      return
+
     with writer.For(self.header(), unroll=self._unroll):
-      for table in per_iteration:
-        table.gen_code(writer)
-      for instruction in self._region:
-        instruction.gen_code(writer)
+      self._emit_region(writer, per_iteration)
 
   def __str__(self):
     return (f'for {self._counter} in [{self._start},{self._count}): '
