@@ -52,6 +52,15 @@ _FOR = re.compile(r'^for\s*\((?:const\s+)?\w+\s+(?P<v>\w+)\s*=\s*(?P<a>.+?);'
 _IF = re.compile(r'^if\s*\((?P<c>.*)\)$')
 #: A declaration whose type is a namespaced vector type.
 _VEC_DECL = re.compile(r'^tensorforge::Vector(?:Relaxed)?T\s*<[^>]*>\s+\w+')
+
+#: The three spellings an atomic accumulation reaches memory through.  All of
+#: them are `dest[i] += value` here; what differs between them is which
+#: instruction the vendor's compiler picks, which is not a question the host
+#: can answer or needs to.
+_ATOMIC_ADD = re.compile(
+    r'^(?:atomicAdd|atomicAdd_block|__builtin_amdgcn_global_atomic_fadd_f(?:32|64)'
+    r'|__hip_atomic_fetch_add)\s*\(\s*&(?P<base>\w+)\s*\[(?P<idx>.*)\]\s*,'
+    r'\s*(?P<val>.*?)\s*(?:,\s*__ATOMIC_\w+\s*,\s*__HIP_MEMORY_SCOPE_\w+\s*)?\)$')
 #: `*(SomeVecType*)&name[expr] = value`, captured for the interpreter
 _VEC_STORE = re.compile(
     r'^\*\s*\(([^()]*?)\s*\*\)\s*&\s*(\w+)\s*\[(.+?)\]\s*=\s*(.+?);?$')
@@ -360,6 +369,25 @@ class Interp:
                 raise Abort(f'unsupported lhs {lhs!r}')
             return
         if re.match(r'^(__syncthreads|__syncwarp|__threadfence)\s*\(', stmt):
+            return
+        am = _ATOMIC_ADD.match(stmt)
+        if am:
+            # `dest[i] += value`, and every lane that reaches this statement
+            # performs one.  That is the whole content of an atomic here: the
+            # interpreter runs the lanes in lockstep over one shared `Slot`,
+            # so summing the arrivals *is* the hardware's guarantee, and the
+            # ordering an atomic also promises does not change a sum.
+            #
+            # Modelled rather than skipped, and rather than treated as a
+            # store.  Skipping leaves the accumulation out of the comparison
+            # entirely, which is how the atomic path came to have no numerical
+            # coverage on the host at all; treating it as `=` would agree with
+            # the correct answer whenever exactly one lane arrives, which is
+            # precisely the case that is never in doubt.
+            base, index, value = am.group('base'), am.group('idx'), am.group('val')
+            ptr = self.env[base]
+            slot = self.ev(index)
+            ptr[slot] = (ptr[slot] or 0.0) + self.ev(value)
             return
         if stmt.startswith('extern ') or stmt.startswith('__shared__'):
             return                      # the shared arena, modelled as a base
