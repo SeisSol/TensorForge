@@ -7,6 +7,11 @@ from . import CudaLexic
 class HipLexic(CudaLexic):
   def __init__(self, backend, underlying_hardware):
     super().__init__(backend, underlying_hardware)
+    # HIP has no `__grid_constant__` and needs none: kernel arguments already
+    # live in the constant address space and a uniform index into one is a
+    # scalar load.  Stated rather than inherited, since this shares its base
+    # with the backend that does need the annotation.
+    self.grid_constant_kw = ''
     self._backend = backend
     self.thread_idx_y = "threadIdx.y"
     self.thread_idx_x = "threadIdx.x"

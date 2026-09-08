@@ -218,6 +218,14 @@ class TableForm(enum.Enum):
   in the block builds and holds its own copy of one set of pointers, and where
   on AMD the allocation alone can cost occupancy.
 
+  `PARAM` is neither: the table is a kernel parameter the caller fills, so the
+  members never appear as separate arguments and the read comes from the space
+  kernel arguments already live in -- broadcast, uniform and cached.  The best
+  of the three wherever it applies, and the one that costs an interface, since
+  the launcher has to assemble the array.  It is also the only one whose cost
+  does not grow with the length of the run, so it is what a run of sixteen
+  wants where a run of four is better off with a chain.
+
   So `SELECT` is the default and `ARRAY` earns its place only once the chain
   is longer than the memory is worth.  A third form is better than both where
   it applies and is not available here: members that are one contiguous blob
@@ -226,6 +234,7 @@ class TableForm(enum.Enum):
 
   SELECT = 'select'
   ARRAY = 'array'
+  PARAM = 'param'
 
 
 class DeclareOperandTable(AbstractInstruction):
@@ -274,13 +283,14 @@ class DeclareOperandTable(AbstractInstruction):
     """Whether this may be emitted once, ahead of the loop.
 
     An array does not depend on the counter and is built before the header; a
-    select chain is the counter's value and belongs at the top of the body.
+    select chain is the counter's value and belongs at the top of the body.  A
+    parameter is built by the caller and is emitted nowhere at all.
     """
-    return self._form is TableForm.ARRAY
+    return self._form is not TableForm.SELECT
 
   def access(self, variant: str) -> str:
     """The expression that yields the member `variant` names."""
-    if self._form is TableForm.ARRAY:
+    if self._form in (TableForm.ARRAY, TableForm.PARAM):
       return f'{self._name}[{variant}]'
     return self._name
 
@@ -291,7 +301,26 @@ class DeclareOperandTable(AbstractInstruction):
   def __len__(self) -> int:
     return len(self._members)
 
+  def parameter(self) -> str:
+    """How this table is declared in the kernel's signature, for `PARAM`.
+
+    The annotation is the lexic's, not this site's: what keeps a by-value
+    parameter out of per-thread memory is a property of the backend, and on
+    most of them the answer is that nothing is needed.
+    """
+    if self._form is not TableForm.PARAM:
+      raise GenerationError(f'{self._form.value} is not a parameter')
+    datatype = self._datatype or self._vm._fp_type
+    stars = Addressing.addr2ptr_type(self._addressing)
+    annotation = self._vm.get_lexic().grid_constant_kw
+    annotation = f'{annotation} ' if annotation else ''
+    return (f'{annotation}const {datatype} {stars}const '
+            f'{self._name}[{len(self._members)}]')
+
   def gen_ir(self, writer):
+    if self._form is TableForm.PARAM:
+      # Nothing to emit: the caller filled it and the signature names it.
+      return
     datatype = self._datatype or self._vm._fp_type
     stars = Addressing.addr2ptr_type(self._addressing)
     if self._form is TableForm.ARRAY:

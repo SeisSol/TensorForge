@@ -270,3 +270,50 @@ def test_a_loop_that_never_runs_is_refused():
     from tensorforge.common.exceptions import GenerationError
     with pytest.raises(GenerationError):
         VariantLoop(context(), 'face', 0, [])
+
+
+# --- the form the caller fills ----------------------------------------------
+
+
+def param_table(names=(3, 5, 7, 9), addressing=Addressing.NONE, backend='cuda'):
+    ctx = Context(arch='sm_86' if backend == 'cuda' else 'gfx90a',
+                  backend=backend, fp_type=Datatype.F32)
+    return DeclareOperandTable(
+        ctx, 'tbl', [symbol(f'm{i}', addressing) for i in names],
+        addressing, Datatype.F32, form=TableForm.PARAM)
+
+
+def test_a_parameter_table_emits_nothing_in_the_body():
+    """The caller filled it; there is nothing for the kernel to build."""
+    assert emitted(param_table()) == ''
+
+
+def test_cuda_annotates_the_parameter_and_hip_does_not():
+    """What keeps a by-value parameter out of per-thread memory is the
+    backend's business, and on most of them nothing is needed."""
+    assert '__grid_constant__' in param_table(backend='cuda').parameter()
+    assert '__grid_constant__' not in param_table(backend='hip').parameter()
+
+
+def test_the_parameter_carries_the_length_and_the_indirection():
+    assert 'const tbl[4]' in param_table().parameter()
+    assert '**' in param_table(addressing=Addressing.PTR_BASED).parameter()
+
+
+def test_a_parameter_table_is_read_by_index_like_an_array():
+    assert param_table().access('face') == 'tbl[face]'
+
+
+def test_only_a_parameter_table_has_a_parameter():
+    from tensorforge.common.exceptions import GenerationError
+    with pytest.raises(GenerationError):
+        select_table().parameter()
+
+
+def test_a_parameter_table_is_not_emitted_inside_the_loop():
+    from tensorforge.backend.instructions.ptr_manip import VariantLoop
+    table = param_table()
+    assert table.loop_invariant()
+    text = written(VariantLoop(context(), 'face', 4, [Marker('body();')],
+                               tables=[table]))
+    assert 'tbl' not in text

@@ -21,6 +21,12 @@ class Lexic(ABC):
     self.block_idx_x = None
     self.stream_type = None
     self.restrict_kw = None
+    #: How a by-value kernel parameter is kept out of per-thread memory when
+    #: its address is taken or it is indexed by a runtime value.  Empty where
+    #: the backend needs no annotation because its kernel arguments already
+    #: live in a broadcast space -- which is most of them; CUDA is the one that
+    #: otherwise copies such a parameter to `.local` per thread.
+    self.grid_constant_kw = ''
     self.simd_mode = False
 
   @abstractmethod

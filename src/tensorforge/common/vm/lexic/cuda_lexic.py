@@ -21,6 +21,9 @@ class CudaLexic(Lexic):
     self.grid_dim_x = "gridDim.x"
     self.stream_type = "cudaStream_t"
     self.restrict_kw = "__restrict__"
+    # sm_70 and up; below it the annotation does not exist and the parameter
+    # is copied per thread, which is the behaviour without it anyway.
+    self.grid_constant_kw = '__grid_constant__'
 
   def multifile(self):
     return False
