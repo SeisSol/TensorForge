@@ -30,6 +30,15 @@ from .arch import amdarch
 #: feature and the vendored table cannot confirm it.  The check is therefore
 #: containment, not equality: everything LLVM names must appear here, and the
 #: surplus is these two.
+#:
+#: Where the vendored table cannot confirm, what to assume depends on which
+#: way being wrong hurts.  For a feature that says *an instruction exists*,
+#: guessing wrong costs a compile error, so these two are listed with the rest
+#: of CDNA3.  For one that says *no assurance is needed from the caller* ---
+#: `agent-scope-fine-grained-remote-memory-atomics` and
+#: `memory-atomic-fadd-f32-denormal-support` --- guessing wrong costs a silent
+#: no-op on fine-grained memory, so they are left out and the assurance is
+#: asked for.
 _REMOVED_FROM_LLVM = (0x940, 0x941)
 
 #: Feature string -> the targets that carry it.  Same spelling as the
@@ -66,6 +75,56 @@ FEATURE_TARGETS = {
     #: split-precision paths are worth less there than on gfx1250, and the
     #: native FP64 WMMA is worth more.
     'gfx125x-lowest-rate-wmma': (0x1251,),
+
+    # Floating-point atomics, read by `backend/atomics.py`.  They are here and
+    # not in a table of their own for the reason the module exists: they are
+    # LLVM's facts, checked against LLVM's sources by the same test as the
+    # matrix ones.
+    #
+    # The returning and non-returning forms are separate features and the
+    # difference is not cosmetic.  gfx908 carries only the non-returning one,
+    # which is the form an accumulation wants -- and
+    # `__builtin_amdgcn_global_atomic_fadd_f32` returns, so the builtin is
+    # unavailable exactly where the instruction is not.
+    'atomic-fadd-rtn-insts': (0x90a, 0x942, 0x950,
+                              0x1100, 0x1101, 0x1102, 0x1103,
+                              0x1150, 0x1151, 0x1152, 0x1153, 0x1154,
+                              0x1170, 0x1171, 0x1172,
+                              0x1200, 0x1201, 0x1250, 0x1251, 0x1310,
+                              *_REMOVED_FROM_LLVM),
+    'atomic-fadd-no-rtn-insts': (0x908, 0x90a, 0x942, 0x950,
+                                 0x1100, 0x1101, 0x1102, 0x1103,
+                                 0x1150, 0x1151, 0x1152, 0x1153, 0x1154,
+                                 0x1170, 0x1171, 0x1172,
+                                 0x1200, 0x1201, 0x1250, 0x1251, 0x1310,
+                                 *_REMOVED_FROM_LLVM),
+    #: FP64 global add.  CDNA2 and up, and gfx125x -- and *not* RDNA, at any
+    #: generation, which is the gate a `>= gfx1000` range gets backwards.
+    'flat-buffer-global-fadd-f64-inst': (0x90a, 0x942, 0x950, 0x1250, 0x1251,
+                                         *_REMOVED_FROM_LLVM),
+    #: The LDS counterpart, carried by the same targets.  No caller yet; it is
+    #: listed so the answer is looked up rather than assumed when a
+    #: shared-memory accumulation first asks.
+    'lds-atomic-add-f64': (0x90a, 0x942, 0x950, 0x1250, 0x1251,
+                           *_REMOVED_FROM_LLVM),
+    'atomic-global-pk-add-bf16-inst': (0x942, 0x950, 0x1200, 0x1201,
+                                       0x1250, 0x1251, 0x1310),
+    #: Whether the hardware add honours the denormal mode.  Where it does not,
+    #: the compiler wants `-fatomic-ignore-denormal-mode` before it will emit
+    #: the instruction -- which is why gfx90a needs the flag and gfx942 does
+    #: not, on hardware that has the same instruction.
+    'memory-atomic-fadd-f32-denormal-support': (0x942, 0x950,
+                                                0x1100, 0x1101, 0x1102, 0x1103,
+                                                0x1150, 0x1151, 0x1152, 0x1153,
+                                                0x1154, 0x1170, 0x1171, 0x1172,
+                                                0x1200, 0x1201, 0x1250, 0x1251),
+    #: Agent-scope atomics reach fine-grained memory without an assurance from
+    #: the caller.  The one entry here that is about the *allocator* rather
+    #: than the instruction, and the reason `unsafe_fp_atomics_required`
+    #: answers False for gfx942 and True for gfx90a.
+    'agent-scope-fine-grained-remote-memory-atomics': (0x942, 0x950,
+                                                       0x1200, 0x1201,
+                                                       0x1250, 0x1251, 0x1310),
 }
 
 

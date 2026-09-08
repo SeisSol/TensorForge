@@ -112,3 +112,32 @@ def zeros_batch(shape: Tuple[int, ...], batch: int,
 def view_of(flat: np.ndarray, shape: Tuple[int, ...], batch: int) -> np.ndarray:
     """Attach a ``(batch, *shape)`` per-element F-order view to ``flat``."""
     return _strided_view(flat, shape, batch)
+
+
+def pack(view: np.ndarray, pack_index: np.ndarray,
+         dt: Datatype) -> np.ndarray:
+    """Compress a ``(batch, *shape)`` dense view into the kernel's buffer.
+
+    ``pack_index`` says, for each storage slot, which F-order cell of one
+    batch element belongs there.  Cells no slot points at are the structural
+    zeros: they are not stored, and whatever the dense view holds for them is
+    dropped here rather than silently reaching the kernel.
+    """
+    batch = view.shape[0]
+    # Each element is F-contiguous, so the flat cell order within one element
+    # is F-order over ``shape`` -- which is the order ``pack_index`` speaks.
+    dense = np.stack([np.asarray(view[b]).ravel(order='F')
+                      for b in range(batch)])
+    return np.ascontiguousarray(dense[:, pack_index].ravel(),
+                                dtype=np_dtype(dt))
+
+
+def unpack(flat: np.ndarray, pack_index: np.ndarray,
+           shape: Tuple[int, ...], batch: int) -> np.ndarray:
+    """Expand the kernel's buffer back into a dense ``(batch, *shape)`` array.
+
+    Structural zeros come back as zeros, which is what they are.
+    """
+    out = np.zeros((batch, volume(shape)), dtype=flat.dtype)
+    out[:, pack_index] = flat.reshape(batch, -1)
+    return np.stack([out[b].reshape(shape, order='F') for b in range(batch)])

@@ -23,7 +23,7 @@ from .core import (Access, BufferType, Effect, IRError, MemSpace, Op, Operand,
                    Region, ScalarType, Stmt, TokenType, Value,
                    accesses_conflict, collect_accesses, collect_effect,
                    def_use, defined_within, walk, Uniformity)
-from .asyncmem import check_tokens, schedule_async
+from .asyncmem import check_commits, check_tokens, schedule_async
 
 
 # --------------------------------------------------------------------------- #
@@ -47,6 +47,7 @@ def verify(body: Tuple[Stmt, ...], strict: bool = True) -> List[str]:
     try:
         defs, uses = def_use(body)  # single-assignment / single-binding
         diag.extend(check_tokens(body, defs, uses))
+        diag.extend(check_commits(body))
     except IRError as e:
         diag.append(str(e))
 
@@ -410,6 +411,14 @@ def _check_scope(body: Tuple[Stmt, ...], live: set, diag: List[str],
                 diag.append('copy.async: must declare the read and the write')
             if not (s.effect & Effect.ASYNC):
                 diag.append('copy.async: must carry Effect.ASYNC')
+
+        elif s.op == Op.COMMIT_ASYNC:
+            if s.target:
+                diag.append('commit.async: closes a group and produces nothing')
+            if not s.attr('tokens'):
+                diag.append('commit.async: must name the tokens it closes')
+            if not (s.effect & Effect.ASYNC):
+                diag.append('commit.async: must carry Effect.ASYNC')
 
         elif s.op == Op.WAIT:
             # Several tokens are allowed, and for a macro copy they are

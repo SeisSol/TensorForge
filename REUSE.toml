@@ -11,3 +11,10 @@ version = 1
 path = ["AUTHORS", "requirements.txt"]
 SPDX-FileCopyrightText = "2023 SeisSol Group"
 SPDX-License-Identifier = "MIT"
+
+# A recorded kernel description is data written by `dump_descriptors.py`, so
+# it carries no header of its own; there is nowhere in JSON to put one.
+[[annotations]]
+path = ["tests/fixtures/kernels/**"]
+SPDX-FileCopyrightText = "2026 SeisSol Group"
+SPDX-License-Identifier = "MIT"

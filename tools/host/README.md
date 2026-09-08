@@ -69,7 +69,7 @@ at --- small enough to read the generated code for, and to turn into a test.
 
 | | |
 |---|---|
-| `dump_descriptors.py` | Capture every kernel's descriptor list from a codegen run. Everything else works off this file. |
+| `dump_descriptors.py` | Capture, per kernel, the description yateto handed over and the descriptors built from it. Everything else works off this file. |
 | `validate_dump.py` | Run each kernel on the host, all lanes, and compare with NumPy. |
 | `prefix_bisect.py` | Rebuild a descriptor list as live objects and bisect to the shortest prefix that is wrong. |
 | `check_structure.py` | Structural checks over a dump, no reference needed: results computed and discarded, a register serving as bias twice, a load overtaken by a store to what it reads, a register array indexed outside its declared range. Each of these was a real defect. |

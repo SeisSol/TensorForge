@@ -25,6 +25,14 @@ class Tensor:
         self.alias = alias
         self.shape = tuple(shape)
         self.is_tmp = is_tmp
+        #: A name a loop body uses where an operand varies between iterations.
+        #:
+        #: A third kind beside a parameter and a temporary, and it has to be
+        #: one: it is not passed in, because it stands for several things that
+        #: are; and it is not the generator's own scratch, because it is never
+        #: written.  It resolves inside the loop to whichever member the
+        #: counter names, so the signature leaves it out and the body binds it.
+        self.is_variant = False
         self.direction: Union[DataFlowDirection, None] = None
         self.data = data
         self.spp = spp
@@ -105,6 +113,109 @@ class Tensor:
     def memory(self):
         return self.spp.count_nz()
 
+    def storage_volume(self):
+        """Scalars one batch element of this tensor occupies in memory.
+
+        The one place the storage convention is decided, because it was
+        previously decided twice and differently: the batch stride came from
+        the bounding box while the staging loop copied ``count_nz`` cells, so
+        a masked tensor was written densely by the host and read compressed by
+        the kernel.
+
+        A dense tensor is stored over its bounding box -- address zero is the
+        box's lower corner and the buffer spans upper minus lower.  A sparse
+        one is stored compressed, in the order ``linear_index`` assigns, and
+        nothing is reserved for the structural zeros.  A bounding box is the
+        same under either reading, which is why it needs no case of its own.
+        """
+        return self.get_actual_volume() if self.is_dense() else self.memory()
+
+    def storage_map(self):
+        """Which cell of the bounding box each storage slot holds.
+
+        ``None`` when the tensor is stored dense, because then the two orders
+        are the same thing and a map would only be a way to disagree with
+        itself.  Otherwise a tuple of length ``storage_volume``, indexed by
+        slot and giving the F-order position within the bounding box.
+
+        Read off ``linear_index``, so everything that has to agree about the
+        order -- the kernel, the test harness, the host oracle -- agrees by
+        construction rather than by three parallel derivations.
+        """
+        if self.is_dense():
+            return None
+        # `linear_index` speaks full-tensor coordinates; the dense view a
+        # caller compares against spans the bounding box.  So the slot is
+        # asked of the one and the cell reported in the other, and the box's
+        # lower corner is what separates them.
+        box = tuple(self.get_actual_shape())
+        lower = tuple(self.bbox.lower())
+        strides, acc = [], 1
+        for extent in box:
+            strides.append(acc)
+            acc *= extent
+        slots = [-1] * int(self.storage_volume())
+        for idx in _f_order(tuple(self.get_real_shape())):
+            if not self.spp.is_nz(idx):
+                continue
+            cell = tuple(i - lo for i, lo in zip(idx, lower))
+            if any(c < 0 or c >= extent for c, extent in zip(cell, box)):
+                raise ValueError(
+                    f'{self.alias!r}: a non-zero at {idx} lies outside the '
+                    f'bounding box that is supposed to contain them')
+            slots[self.linear_index(idx)] = sum(c * s for c, s
+                                                in zip(cell, strides))
+        if any(slot < 0 for slot in slots):
+            raise ValueError(
+                f'{self.alias!r}: linear_index left storage slots unassigned; '
+                f'the pattern and the index map disagree')
+        return tuple(slots)
+
+    def storage_runs(self):
+        """The stored cells as `(slot, cell, length)` runs, or `None`.
+
+        A run is a stretch that is contiguous in both the compressed order
+        and the bounding box at once, so copying one is a block copy with two
+        constant bases and no per-element index.  That is what lets a sparse
+        tensor be expanded into a dense image without an index table: the run
+        list is the table, and it is spent at code-generation time.
+
+        Worth it only when there are few runs.  The corpus splits sharply --
+        `rDivM(2)` at order 8 is 2866 non-zeros in 62 runs, while `kDivM(0)`
+        is 1446 in 1446, one per element -- and the second kind is cheaper
+        staged dense in the first place.
+        """
+        pack = self.storage_map()
+        if pack is None:
+            return None
+        runs = []
+        start = 0
+        for slot in range(1, len(pack) + 1):
+            if (slot < len(pack)
+                    and pack[slot] == pack[slot - 1] + 1):
+                continue
+            runs.append((start, pack[start], slot - start))
+            start = slot
+        return tuple(runs)
+
+    def densified(self):
+        """The same tensor with nothing left out, or `None` if already dense.
+
+        Its bounding box, shape and type are this one's; only the pattern
+        differs.  Somewhere to expand into: a consumer reading the image asks
+        `is_dense()` and gets the answer that is true of the image rather than
+        the one that is true of where it came from.
+        """
+        if self.is_dense():
+            return None
+        twin = Tensor(shape=self.shape, addressing=self.addressing,
+                      bbox=self.bbox, alias=self.alias, is_tmp=self.is_tmp,
+                      spp=None, data=self.data, datatype=self.datatype,
+                      alignment=self.alignment)
+        twin.name = self.name
+        twin.direction = self.direction
+        return twin
+
     def get_actual_shape(self):
         return self.bbox.sizes()
 
@@ -155,6 +266,16 @@ class Tensor:
 
     def __repr__(self):
         return self.gen_descr()
+
+def _f_order(shape):
+    """Every index of ``shape``, first axis fastest."""
+    if not shape:
+        yield ()
+        return
+    for rest in _f_order(shape[1:]):
+        for i in range(shape[0]):
+            yield (i,) + rest
+
 
 class TensorWrapper:
     pass

@@ -150,3 +150,152 @@ def test_axes_that_do_not_tile_the_wave_stay_unknown():
     values that differ."""
     idx = [LeadIndex(0, 4, 1), LeadIndex(0, 4, 1)]
     assert layout_of(idx, num_threads=16) is None
+
+
+# --------------------------------------------------------------------------
+# a staged image's distribution is recorded by whoever fills it
+# --------------------------------------------------------------------------
+
+def test_a_shared_image_can_carry_a_layout():
+    """It could not, and the omission was silent.
+
+    `_record_linear_layout` answered only for registers, because a register
+    image knows its own lane count and a shared one does not -- `num_threads`
+    is None there, a shared buffer not being owned by one multiplication.  The
+    loader that writes the run does know, and is the only party that does.
+
+    A later read is `load_linear`, whose address has no lane term at all: it
+    reports what the fill recorded and can derive nothing.  So an unrecorded
+    claim left every consumer of a staged image failing closed -- invisible
+    under SPMD, where unknown costs only precision, and fatal under an
+    explicit vector, where a declaration needs a distribution.
+    """
+    from tensorforge.backend.symbol import Symbol, SymbolType
+    sym = Symbol.__new__(Symbol)
+    sym.stype = SymbolType.SharedMem
+    sym.num_threads = None
+    sym.layout = None
+    sym._record_linear_layout(0, 1, threads=16)
+    assert sym.layout == RegisterLayout((LaneAxis(16, 1),))
+
+
+def test_without_a_lane_count_it_stays_unknown():
+    """`None` means unknown, and a fill that cannot say how wide the run is
+    must leave it that way rather than pick a default."""
+    from tensorforge.backend.symbol import Symbol, SymbolType
+    sym = Symbol.__new__(Symbol)
+    sym.stype = SymbolType.SharedMem
+    sym.num_threads = None
+    sym.layout = None
+    sym._record_linear_layout(0, 1)
+    assert sym.layout is None
+
+
+def test_two_fills_disagreeing_leave_it_unknown():
+    """A silent overwrite would hand the second fill's claim to consumers of
+    the first."""
+    from tensorforge.backend.symbol import Symbol, SymbolType
+    sym = Symbol.__new__(Symbol)
+    sym.stype = SymbolType.SharedMem
+    sym.num_threads = None
+    sym.layout = None
+    sym._record_linear_layout(0, 1, threads=16)
+    sym._record_linear_layout(0, 1, threads=32)
+    assert sym.layout is None
+
+
+# --------------------------------------------------------------------------
+# a discarded speculation leaves nothing behind
+# --------------------------------------------------------------------------
+
+def test_a_discarded_attempt_takes_its_layout_claim_back():
+    """The claim belongs to the fill that makes it true.
+
+    A speculative attempt that gets discarded emitted no fill, so the image is
+    not distributed that way and the claim is not true.  Left behind, the
+    second attempt sees a symbol the first did not -- and the same case
+    generates two different kernels.
+
+    `_rollback` restores the body, the value counter, the name counter and the
+    scope stack, all of which the builder owns.  This is state it does not,
+    which is why the mechanism is a registered undo rather than a snapshot:
+    the list of everything mutable would otherwise live in the one place that
+    can see none of it.
+    """
+    from tensorforge.backend.symbol import Symbol, SymbolType
+    from tensorforge.backend.pir.build import IRBuilder
+    from tensorforge.common.context import Context as _Ctx
+
+    b = IRBuilder(fptype=Datatype.F32,
+                  context=_Ctx(arch='pvc', backend='esimd',
+                               fp_type=Datatype.F32))
+    sym = Symbol.__new__(Symbol)
+    sym.stype = SymbolType.SharedMem
+    sym.num_threads = None
+    sym.layout = None
+
+    with b.speculative() as spec:
+        sym._record_linear_layout(0, 1, threads=16, writer=b)
+        assert sym.layout is not None, 'the attempt did record it'
+        spec.discard()
+    assert sym.layout is None, 'and the discard took it back'
+
+
+def test_a_kept_attempt_keeps_it():
+    from tensorforge.backend.symbol import Symbol, SymbolType
+    from tensorforge.backend.pir.build import IRBuilder
+    from tensorforge.common.context import Context as _Ctx
+
+    b = IRBuilder(fptype=Datatype.F32,
+                  context=_Ctx(arch='pvc', backend='esimd',
+                               fp_type=Datatype.F32))
+    sym = Symbol.__new__(Symbol)
+    sym.stype = SymbolType.SharedMem
+    sym.num_threads = None
+    sym.layout = None
+
+    with b.speculative():
+        sym._record_linear_layout(0, 1, threads=16, writer=b)
+    assert sym.layout == RegisterLayout((LaneAxis(16, 1),))
+
+
+def test_a_structured_store_records_what_it_distributes():
+    """The third fill path, and the third place the statement was missing.
+
+    A staged image is filled linearly by the loader, in bulk by the transfer,
+    or one element at a time by a compute instruction writing out of its
+    registers.  The first two recorded how the image ends up distributed; the
+    third did not, so an image written that way read back as unknown.
+
+    Derivable here, unlike the linear paths: the index carries a `LeadIndex`,
+    which *is* the distribution, so this reports what `layout_of` already
+    computes rather than restating it.
+    """
+    from tensorforge.backend.symbol import Symbol, SymbolType
+    sym = Symbol.__new__(Symbol)
+    sym.stype = SymbolType.SharedMem
+    sym.layout = None
+    sym._note_layout(RegisterLayout((LaneAxis(16, 1),)))
+    assert sym.layout == RegisterLayout((LaneAxis(16, 1),))
+
+
+def test_an_underivable_store_leaves_it_alone():
+    """`layout_of` answers `None` when it cannot establish the distribution,
+    and `None` is not a claim -- recording it would erase a claim an earlier
+    fill did establish."""
+    from tensorforge.backend.symbol import Symbol, SymbolType
+    sym = Symbol.__new__(Symbol)
+    sym.stype = SymbolType.SharedMem
+    sym.layout = RegisterLayout((LaneAxis(16, 1),))
+    sym._note_layout(None)
+    assert sym.layout == RegisterLayout((LaneAxis(16, 1),))
+
+
+def test_two_fill_paths_disagreeing_leave_it_unknown():
+    from tensorforge.backend.symbol import Symbol, SymbolType
+    sym = Symbol.__new__(Symbol)
+    sym.stype = SymbolType.SharedMem
+    sym.layout = None
+    sym._note_layout(RegisterLayout((LaneAxis(16, 1),)))
+    sym._note_layout(RegisterLayout((LaneAxis(8, 1),)))
+    assert sym.layout is None

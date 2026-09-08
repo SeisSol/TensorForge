@@ -30,11 +30,23 @@ def kernels(path):
     return sorted(blob["all"]) if "all" in blob else []
 
 
+def evaluable(d):
+    """Whether this row is one this can evaluate.
+
+    A product with a contraction is an einsum and is what everything here
+    computes. An elementwise operation or a reduction is recorded too --- it
+    used to be dropped at capture time, as a bare `None` --- but neither is a
+    product, so evaluating one as if it were would be worse than skipping it.
+    A capture that predates the field holds nothing but products.
+    """
+    return d is not None and d.get("kind", "multilinear") == "multilinear"
+
+
 def tensors_of(descrs):
     """name -> logical shape, plus the set of tensors the kernel writes."""
     shapes, written = {}, set()
     for d in descrs:
-        if d is None:
+        if not evaluable(d):
             continue
         for x in [d["dest"]] + [o for o in d["ops"] if o]:
             shapes[x["name"]] = tuple(x["shape"])
@@ -43,15 +55,26 @@ def tensors_of(descrs):
 
 
 def storage_of(descrs):
-    """name -> (actual shape, bbox lower).  Storage is compacted to the
-    bounding box: address 0 is `lower`, which is how the kernel addresses it."""
+    """name -> (actual shape, bbox lower, pack map).
+
+    A dense tensor is compacted to its bounding box: address 0 is `lower`,
+    which is how the kernel addresses it, and the pack map is `None` because
+    the storage order and the box order are the same thing.
+
+    A sparse one is stored compressed and the map says which cell of the box
+    each slot holds.  Reading it as if it were dense is the mistake worth
+    naming: the buffer is shorter than the box, so the values land at the
+    wrong cells and the comparison measures that instead of the kernel.
+    """
     out = {}
     for d in descrs:
-        if d is None:
+        if not evaluable(d):
             continue
         for x in [d["dest"]] + [o for o in d["ops"] if o]:
+            pack = x.get("pack")
             out[x["name"]] = (tuple(x.get("ashape") or x["shape"]),
-                              tuple(x["tbbox"][0]))
+                              tuple(x["tbbox"][0]),
+                              tuple(pack) if pack is not None else None)
     return out
 
 
@@ -71,7 +94,15 @@ def constants_of(descrs):
     return out
 
 
-def make(shapes, written, seed=0, constants=None):
+def make(shapes, written, seed=0, constants=None, storage=None):
+    """Inputs for one run.
+
+    ``storage`` matters for a sparse tensor: its structural zeros are zeros,
+    and the kernel never sees a value there because no slot holds one.  Left
+    random, the reference would multiply them in and disagree with a kernel
+    that is right -- which is a wrong answer about the kernel, not about the
+    pattern.
+    """
     rng = np.random.default_rng(seed)
     constants = constants or {}
     out = {}
@@ -82,6 +113,15 @@ def make(shapes, written, seed=0, constants=None):
             out[name] = np.zeros(shape or (1,), dtype=np.float64)
         else:
             out[name] = rng.standard_normal(shape or (1,))
+    for name, entry in (storage or {}).items():
+        pack = entry[2] if len(entry) > 2 else None
+        if pack is None or name not in out or name in written:
+            continue
+        kept = np.zeros(out[name].size)
+        flat = out[name].reshape(-1, order='F')
+        idx = np.asarray(pack)
+        kept[idx] = flat[idx]
+        out[name] = kept.reshape(out[name].shape, order='F')
     return out
 
 
@@ -170,7 +210,7 @@ def run(path, seed=0, kernel=None):
     arrays = make(shapes, written, seed, constants_of(descrs))
     inputs = {k: v.copy() for k, v in arrays.items() if k not in written}
     for d in descrs:
-        if d is not None:
+        if evaluable(d):
             apply(d, arrays)
     return arrays, inputs, shapes, written
 

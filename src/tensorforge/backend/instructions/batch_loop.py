@@ -267,9 +267,23 @@ class BatchLoop(AbstractInstruction):
         Same rule as the addresses, and it holds more easily here: nothing
         about this declaration depends on the element, so hoisting it cannot
         observe anything a masked element would not have.
+
+        Unconditional, where this used to run only with `enable_wrap_loads`.
+        That gate made the switch decide something it has no business
+        deciding: whether the window a *consumer* reads is in scope where it
+        reads it.  The declaration is emitted by whichever instruction fills
+        the window first, so when that instruction sits inside the flag guard
+        the name is scoped to the guard -- and every later reader of the same
+        window is then referring to something that was never declared where it
+        stands.  With prefetch on it was hoisted and the kernel compiled; with
+        prefetch off, which is the default, it did not compile at all.
+
+        The corpus never showed it because no case here has a first writer
+        inside the guard and a reader outside it.  Nothing about the hoist
+        depends on prefetching: the offset comes from `ShrMemOpt` and is the
+        same for every element, so there was never a reason for the two to be
+        tied together.
         """
-        if not self._context.get_user_options().enable_wrap_loads:
-            return
         for instr in guarded:
             declare = getattr(instr, 'gen_code_declare', None)
             if declare is None or not getattr(instr, '_declare', False):

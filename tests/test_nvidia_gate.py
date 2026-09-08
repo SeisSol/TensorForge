@@ -197,3 +197,104 @@ def test_the_matmul_emits_no_raw_statements(enabled):
         pir_build.IRBuilder.__call__ = original
 
     assert not seen, "raw statements left in the MMA path:\n" + "\n".join(seen)
+
+
+def test_the_matmul_emits_no_raw_index_expressions(enabled):
+    """The addresses are operations, not text.
+
+    Raw statements went first; the addresses stayed as `rawexpr` for a while
+    after, in six shapes over 5908 instances, all of them `threadIdx.x` and
+    constants.  Text is where an address stops being analysable: `cse` cannot
+    merge two identical `rawexpr` nodes because they are not pure, the bank
+    census has to parse the generated source to answer a question the IR could
+    answer directly, and a pass wanting to reason about the access pattern had
+    nothing to reason over.
+
+    A count, not a list, for the same reason as the statement test beside it.
+    """
+    import traceback
+
+    from tensorforge.backend.pir import build as pir_build
+
+    seen = []
+    original = pir_build.IRBuilder.rawexpr
+
+    def rawexpr(self, text, *args, **kwargs):
+        frame = next((f for f in reversed(traceback.extract_stack())
+                      if f.filename.endswith('primitives/nvidia.py')), None)
+        if frame is not None:
+            seen.append(f'nvidia.py:{frame.lineno}: {text.strip()[:60]}')
+        return original(self, text, *args, **kwargs)
+
+    pir_build.IRBuilder.rawexpr = rawexpr
+    try:
+        _generate(CASE_THAT_TAKES_THE_PATH)
+    finally:
+        pir_build.IRBuilder.rawexpr = original
+
+    assert not seen, "raw index expressions left:\n" + "\n".join(seen)
+
+
+def test_the_repeated_thread_reads_collapse(enabled):
+    """What the conversion bought beyond the opacity count.
+
+    Every one of those addresses started with `threadIdx.x`, and a `rawexpr`
+    naming it is opaque and impure, so each was its own read.  As operations
+    they are one value: 660 reads in this kernel became 192, and the kernel
+    lost 234 lines.
+    """
+    source = _generate(CASE_THAT_TAKES_THE_PATH)
+    assert source.count('threadIdx.x') < 300, (
+        f"{source.count('threadIdx.x')} thread-index reads; they are supposed "
+        f"to be hash-consed")
+
+
+# -- which instruction, and why that one ----------------------------------- #
+
+def test_the_ranking_reproduces_the_indices_it_replaced():
+    """Two hardcoded dicts indexed the same list by hand, in `shmsize` and in
+    `matmul`.  A size computed for one entry and an issue of another is a
+    buffer nobody fills; the point of one function is that they cannot
+    differ.  That it lands on the same entries is what makes the change
+    inert."""
+    assert nvidia.instr_for(Datatype.F32, 9, 56, 56) is nvidia.INSTRS[1]
+    assert nvidia.instr_for(Datatype.F64, 9, 56, 56) is nvidia.INSTRS[2]
+
+
+def test_the_i8_entries_are_not_candidates():
+    """`generate`'s I8 branch is a `pass`, so an I8 entry would be selected
+    and then emit nothing."""
+    for dtype in (Datatype.F32, Datatype.F64):
+        for op in nvidia.instrs_for(dtype):
+            assert op.mode in nvidia.EMITTED_MODES
+
+
+def test_the_reservation_covers_whichever_entry_is_issued():
+    """`shmsize` is asked without the shape the ranking reads, so it cannot
+    reproduce the choice -- it bounds it instead."""
+    from tensorforge.backend.instructions.compute.primitives import nvidia as n
+    for dtype in (Datatype.F32, Datatype.F64):
+        budget = n.shmsize(1, dtype)
+        for op in n.instrs_for(dtype):
+            aregs = (op.m * op.k) // 32
+            bregs = (op.n * op.k) // 32
+            cregs = (op.m * op.n) // 32
+            assert budget >= 32 * max(aregs + bregs, cregs), op.name
+
+
+def test_the_baseline_keeps_the_sm90_entries_out_of_reach():
+    """A count prefers them -- wider in both m and k -- and nothing plumbs the
+    target's compute capability this far, so the floor is what is selected
+    against until something does."""
+    assert nvidia.BASELINE_SM == 80
+    wide = [op for op in nvidia.INSTRS if op.d is Datatype.F64 and op.sm > 80]
+    assert wide, 'the table carries SM_90 F64 entries'
+    assert not set(wide) & set(nvidia.instrs_for(Datatype.F64))
+    # And they come into reach the moment one is passed.
+    assert nvidia.instr_for(Datatype.F64, 9, 56, 56, sm=90) in wide
+
+
+def test_every_entry_states_the_capability_it_needs():
+    """It was a comment on each row, which a selection cannot read."""
+    for op in nvidia.INSTRS:
+        assert op.sm in (75, 80, 90), op.name

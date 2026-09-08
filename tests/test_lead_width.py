@@ -341,3 +341,234 @@ def test_blocking_does_nothing_without_a_width():
 def test_a_zero_blocking_is_refused():
     with pytest.raises(ValueError):
         lead_threads_and_width(32, 4, 16, blocking=0)
+
+
+# --------------------------------------------------------------------------- #
+# The cap
+# --------------------------------------------------------------------------- #
+# It was the constant 2, and the constant hid a question rather than answering
+# it: `widths_for` offers 4 for an FP32 base of 16-byte alignment, so `float4`
+# was unreachable, and `double2` was reachable only because 2 happened to be
+# both the cap and the ceiling for FP64.
+
+from tensorforge.backend.instructions.compute.packed import packed_fma_width
+from tensorforge.backend.instructions.memory.vectorize import (  # noqa: E402
+    lead_width_cap, lead_threads_and_width)
+
+
+@pytest.mark.parametrize('elem,align,expected', [
+    (4, 0, 1), (4, 8, 2), (4, 16, 4), (4, 32, 4),
+    (8, 0, 1), (8, 8, 1), (8, 16, 2), (8, 32, 2),
+])
+def test_the_cap_is_what_the_address_proves(elem, align, expected):
+    assert lead_width_cap(elem, align) == expected
+
+
+def test_an_unproven_alignment_caps_at_one():
+    """Same permission as `widths_for`'s: not known to be aligned and known to
+    be element-aligned are one answer, and a cast that needs 16 must not
+    acquire the permission by default."""
+    assert lead_width_cap(4, 0) == 1
+    assert lead_threads_and_width(32, 4, 0, cap=lead_width_cap(4, 0))[1] == 1
+
+
+def test_float4_is_reachable_and_double4_is_not():
+    """The two the cap used to decide together, now decided apart.
+
+    16 bytes is the access ceiling, so FP32 reaches 4 and FP64 stops at 2 --
+    not because doubles are special but because two of them are already the
+    widest access there is.
+    """
+    assert lead_threads_and_width(64, 4, 16, cap=lead_width_cap(4, 16))[1] == 4
+    assert lead_threads_and_width(64, 8, 16, cap=lead_width_cap(8, 16))[1] == 2
+
+
+@pytest.mark.parametrize('vendor,arch', [('nvidia', 'sm_86'),
+                                         ('nvidia', 'sm_100'),
+                                         ('amd', 'gfx90a'), ('amd', 'gfx908')])
+def test_the_fma_width_is_not_the_cap(vendor, arch):
+    """A vector wider than the packed FMA is several of them, not none.
+
+    The intuition runs the other way, so this states it: every element past
+    the first amortises the one load and the one splat further, and the
+    per-element instruction count falls with the width whether or not the
+    arithmetic packs.  A scalar-FMA target gains *more* from the step to 4
+    than a packed one does, which is the opposite of a ceiling.
+    """
+    packed = packed_fma_width(vendor, arch, 4)
+    cap = lead_width_cap(4, 16)
+    assert cap >= packed, 'the address ceiling, not the instruction width'
+
+    def per_element(w):
+        # one load of b, one splat of it, and w/p fused multiply-adds
+        return (1 + 1 + -(-w // packed)) / w
+
+    assert per_element(4) < per_element(2) < per_element(1)
+
+
+def test_the_address_and_the_validation_agree_and_stay_two_questions():
+    """Both 4 now.  Kept apart because they are still different facts.
+
+    `lead_width_cap` is what a 16-byte-aligned FP32 base permits;
+    `VALIDATED_LEAD_WIDTH` is what has been shown to compute the right
+    numbers.  Collapsing them once they coincide is how the next ceiling --
+    32-byte alignment, or a width the register budget cannot carry -- would
+    arrive already claimed.
+    """
+    from tensorforge.backend.instructions.memory.vectorize import (
+        VALIDATED_LEAD_WIDTH)
+    assert lead_width_cap(4, 16) == 4
+    assert lead_width_cap(8, 16) == 2
+    assert VALIDATED_LEAD_WIDTH == 4
+
+
+@pytest.mark.parametrize('extent,threads,width,expected', [
+    # what the image used to size, against what a wide read needs
+    (12, 4, 4, 4), (16, 4, 4, 4), (20, 8, 4, 4), (32, 8, 4, 4),
+    (33, 32, 1, 2), (33, 32, 2, 2), (31, 32, 1, 1),
+])
+def test_the_slot_count_is_floats_and_not_slots(extent, threads, width,
+                                                expected):
+    """`w * (ceil(u/(T*w)) - floor(l/(T*w)))`, stated once.
+
+    The old expression was `ceil(u/T)`, which is a lane's slot count and not
+    its float count; the two differ at 12/4/4, where it gave 3 and a four-wide
+    read needs 4.  It was written out three times -- addressing and both
+    allocation sites -- so the width reached none of them, and the failure was
+    every destination cell wrong on the extents where the two disagree.
+    """
+    from tensorforge.backend.symbol import slots_for
+    assert slots_for(0, extent, threads, width) == expected
+
+
+def _run_case(monkeypatch, M, N, width, align=16, dtype=None):
+    """`D = A B` at `width`, run over one block on the host interpreter."""
+    import re
+
+    from tensorforge.backend.instructions.memory import vectorize
+    from tensorforge.common.basic_types import Addressing, Datatype
+    from tensorforge.common.context import Context
+    from tensorforge.common.matrix.boundingbox import BoundingBox
+    from tensorforge.common.matrix.tensor import SubTensor, Tensor
+    from tensorforge.generators.descriptions import GemmDescr
+    from tensorforge.generators.generator import Generator
+    from kernel_eval import evaluate_wave
+
+    dtype = dtype or Datatype.F32
+    monkeypatch.setattr(vectorize, 'LEAD_VECTORIZE', True)
+    monkeypatch.setattr(vectorize, 'VALIDATED_LEAD_WIDTH', width)
+
+    def t(shape, alias):
+        return SubTensor(Tensor(shape, Addressing.STRIDED,
+                                BoundingBox([0] * len(shape), list(shape)),
+                                alias=alias, datatype=dtype, alignment=align))
+
+    gen = Generator([GemmDescr(False, False, a=t([M, 8], 'A'),
+                               b=t([8, N], 'B'), c=t([M, N], 'D'),
+                               alpha=1.0, beta=0.0)],
+                    Context(arch='sm_86', backend='cuda', fp_type=dtype))
+    gen.register()
+    gen.generate()
+    src = gen.get_kernel()
+    lanes = max([int(x) for x
+                 in re.findall(r'threadIdx\.x % (\d+)', src)] or [32])
+    mem = evaluate_wave(src, lanes, seed=7, globals_only=True,
+                        preset={'m0': 0.0})
+    return src, [mem.get(('m0', i)) or 0.0 for i in range(M * N)]
+
+
+def _wrong_lead_indices(monkeypatch, M, N, width, **kw):
+    """Which lead elements the widened kernel gets wrong, or a skip.
+
+    The skip is the interpreter's limit and not the generator's: a narrow
+    extent puts the operand broadcast in its template form
+    (`tensorforge::broadcast<8, 1, 4>`), which `kernel_eval` does not parse.
+    Raised as a skip rather than filtered out of the parameter list, so the
+    day it is modelled these cases start running instead of staying quietly
+    absent.
+    """
+    from kernel_eval import Abort
+    try:
+        _, scalar = _run_case(monkeypatch, M, N, 1, **kw)
+        _, wide = _run_case(monkeypatch, M, N, width, **kw)
+    except Abort as exc:
+        pytest.skip(f'host interpreter cannot evaluate this shape: {exc}')
+    return sorted({i % M for i, (a, b) in enumerate(zip(scalar, wide))
+                   if abs(a - b) > 1e-4})
+
+
+def _slot_stride(extent, threads, width):
+    """What the register image uses, against what a wide read needs."""
+    return -(-extent // threads), width * -(-extent // (threads * width))
+
+
+#: The extents the old slot count got wrong, kept as the parametrisation
+#: rather than replaced by a round set: they are where `ceil(u/T)` and
+#: `w * ceil(u/(T*w))` disagree, and a regression in `slots_for` shows up here
+#: first.
+WIDTH4_WAS_BROKEN = [12, 17, 20, 24, 33, 35, 40, 48]
+WIDTH4_WAS_FINE = [8, 16, 31, 32, 56, 64]
+
+
+@pytest.mark.parametrize('extent', WIDTH4_WAS_BROKEN + WIDTH4_WAS_FINE)
+@pytest.mark.parametrize('columns', [3, 8])
+def test_width_four_computes_the_same_numbers(monkeypatch, extent, columns):
+    """Both halves of the old split, now one answer.
+
+    The image sized a lane's share as its slot count where a four-wide read
+    needs its float count, so consecutive non-lead indices addressed
+    overlapping windows -- column 1 starting one register inside column 0 --
+    and every destination cell came out wrong on the extents where the two
+    expressions disagree.  Where they happened to agree, width 4 was already
+    right, which is what said the defect was the stride and not the width.
+    """
+    assert _wrong_lead_indices(monkeypatch, extent, columns, 4) == []
+
+
+@pytest.mark.parametrize('extent', WIDTH4_WAS_BROKEN + WIDTH4_WAS_FINE)
+def test_width_two_computes_the_same_numbers(monkeypatch, extent):
+    """The width that was already offered, held in place while 4 arrives."""
+    assert _wrong_lead_indices(monkeypatch, extent, 3, 2) == []
+
+
+@pytest.mark.parametrize('extent', [9, 15, 17, 21, 33, 35, 45, 63, 65])
+@pytest.mark.parametrize('dtype_align', [(None, 16), (None, 8)],
+                         ids=['align16', 'align8'])
+def test_an_odd_extent_computes_the_peeled_element(monkeypatch, extent,
+                                                   dtype_align):
+    """The element no whole vector covers, and the lane that owns it.
+
+    `Symbol.store` guards a fixed lead element to the one lane that holds it,
+    and compared the *thread* index against the *element* index to do so --
+    the same number only at width 1.  At width 2 a peeled element 32 asked for
+    `threadIdx.x == 32` in a 32-lane wave, so the accumulator was never
+    written and the store's `readlane` of it read what the guarded main block
+    had left there.  One wrong element per column, always the last, on every
+    odd extent, in FP32 and FP64 alike.
+
+    The owning lane is `(element // width) % threads`, which is what
+    `Symbol.load` already computed to broadcast the same element -- so the
+    defect was the two disagreeing, and taking the store's answer from the
+    symbol is what stops them.
+    """
+    _, align = dtype_align
+    assert _wrong_lead_indices(monkeypatch, extent, 3, 2, align=align) == []
+
+
+def test_the_peeled_write_is_now_exact_too():
+    """Right value and written once -- two properties, fixed in that order.
+
+    The guard on the *register* accumulator is what made the value right; it
+    could not be reused for the global store, because `readlane` is
+    `__shfl_sync` over the full warp mask and a single-lane branch is a
+    shuffle the other lanes never reach.  Guarding the load along with the
+    store removes the shuffle instead, and with the peeled element written by
+    one lane the nest partitions its range at every width.
+
+    So `placement` no longer asks whether the write is exact; what remains
+    deciding an atomic is whether the target has the instruction at that
+    width.  `test_lead_coverage` holds the property, and
+    `test_store_exactness` holds the two ends of the capability question.
+    """
+    from tensorforge.backend import placement
+    assert not hasattr(placement, 'atomic_write_is_exact')

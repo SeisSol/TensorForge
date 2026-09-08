@@ -54,6 +54,13 @@ class DriverOperand:
     addressing: str
     is_scalar: bool = False
     scalar_value: float | None = None
+    #: Scalars one batch element occupies, from ``Tensor.storage_volume``.
+    #: Equal to ``volume`` for a dense tensor and smaller for a sparse one.
+    storage_volume: int = 0
+    #: For a sparse tensor, the F-order cell of one element that each storage
+    #: slot holds; ``None`` when the tensor is stored dense and the two orders
+    #: are the same thing.
+    pack_index: tuple | None = None
 
 
 def collect_operands(generator) -> List[DriverOperand]:
@@ -95,6 +102,8 @@ def collect_operands(generator) -> List[DriverOperand]:
             alias=t.alias,
             is_source=is_src,
             is_sink=is_snk,
+            storage_volume=int(t.storage_volume()),
+            pack_index=t.storage_map(),
             # the kernel addresses the *stored* region: memory spans
             # upper - lower and address 0 is `lower`, so the host buffer is
             # bbox-shaped, not shape-shaped (see DataView.get_dim_strides)
@@ -104,6 +113,64 @@ def collect_operands(generator) -> List[DriverOperand]:
             addressing=str(t.addressing),
         ))
     return ops
+
+
+def launcher_call_expr(generator, ops: List[DriverOperand], *,
+                       batch: str = "batch",
+                       stream: str = "DEV_STREAM_PTR(stream)",
+                       flags: str = "d_flags") -> str:
+    """The launcher call, as one C++ expression.
+
+    Separated from ``emit`` because it is the second half of what
+    ``collect_operands`` knows: that one says which buffers exist and in which
+    order, this one says how the launcher wants them spelled. Every driver has
+    to agree with the generator about both, and two drivers deriving the
+    parameter order independently is how they come to disagree about a
+    signature that has changed under one of them.
+
+    ``flags`` is only read when the kernel's flag mode is ``REQUIRED``; the
+    caller owns the buffer of that name, since whether it needs allocating is
+    the caller's business and not this expression's.
+    """
+    call_args = []
+    for op in ops:
+        if op.is_scalar:
+            # Bake the constant in. The literal needs the type suffix so
+            # we don't accidentally widen/narrow at the call site.
+            suffix = {
+                "float": "f",
+                "double": "",
+                "__float128": "q",
+            }.get(op.ctype) or ""
+
+            call_args.append(f"static_cast<{op.ctype}>({op.scalar_value!r}{suffix})")
+        else:
+            if op.addressing == "pointer_based":
+                call_args.append(f"d_p_{op.kernel_name}")
+            else:
+                call_args.append(f"d_{op.kernel_name}")
+            # The launcher only takes an ``extraOffset`` for STRIDED
+            # operands; NONE-addressed bindings drop it (see the
+            # launcher signature in generator output).
+            if op.addressing != "none":
+                call_args.append("0u")
+    # The launcher signature has one ``numElements{i}`` parameter per
+    # section. With a single descr or only fence-less chains the section
+    # count is 1 — the default. ``GridFenceDescr`` / ``GridBarrierDescr``
+    # between descrs split sections, raising the count.
+    num_sections = len(getattr(generator, "_sections", [None]))
+    for _ in range(num_sections):
+        call_args.append(batch)
+    # Whether a ``flags{i}`` parameter sits beside each of them is the
+    # kernel's flag mode; see ``FlagMode``.
+    flag_mode = generator.flag_mode()
+    for _ in range(num_sections):
+        if flag_mode is FlagMode.REQUIRED:
+            call_args.append(flags)
+        elif flag_mode is FlagMode.OPTIONAL:
+            call_args.append("nullptr")    # flags{i}: no skip-flags here
+    call_args.append(stream)
+    return f"launcher_{generator.get_base_name()}({', '.join(call_args)})"
 
 
 # ----------------------------------------------------------------------
@@ -340,38 +407,6 @@ def emit(generator, backend: str, default_batch: int) -> str:
         )
 
     # --- launcher call ---------------------------------------------------
-    launcher_fn = f"launcher_{generator.get_base_name()}"
-    call_args = []
-    for op in ops:
-        if op.is_scalar:
-            # Bake the constant in. The literal needs the type suffix so
-            # we don't accidentally widen/narrow at the call site.
-            suffix = {
-                "float": "f",
-                "double": "",
-                "__float128": "q",
-            }.get(op.ctype) or ""
-
-            call_args.append(f"static_cast<{op.ctype}>({op.scalar_value!r}{suffix})")
-        else:
-            if op.addressing == "pointer_based":
-                call_args.append(f"d_p_{op.kernel_name}")
-            else:
-                call_args.append(f"d_{op.kernel_name}")
-            # The launcher only takes an ``extraOffset`` for STRIDED
-            # operands; NONE-addressed bindings drop it (see the
-            # launcher signature in generator output).
-            if op.addressing != "none":
-                call_args.append("0u")
-    # The launcher signature has one ``numElements{i}`` parameter per
-    # section. With a single descr or only fence-less chains the section
-    # count is 1 — the default. ``GridFenceDescr`` / ``GridBarrierDescr``
-    # between descrs split sections, raising the count.
-    num_sections = len(getattr(generator, "_sections", [None]))
-    for _ in range(num_sections):
-        call_args.append("batch")
-    # Whether a ``flags{i}`` parameter sits beside each of them is the
-    # kernel's flag mode; see ``FlagMode``.
     flag_mode = generator.flag_mode()
     if flag_mode is FlagMode.REQUIRED:
         # An all-ones mask enables every element, so the kernel computes
@@ -391,13 +426,8 @@ def emit(generator, backend: str, default_batch: int) -> str:
             "    DEV_MEMCPY_H2D(d_flags, h_flags, batch * sizeof(unsigned));"
         )
         frees.append("    DEV_FREE(d_flags);\n    std::free(h_flags);")
-    for _ in range(num_sections):
-        if flag_mode is FlagMode.REQUIRED:
-            call_args.append("d_flags")
-        elif flag_mode is FlagMode.OPTIONAL:
-            call_args.append("nullptr")    # flags{i}: no skip-flags in tests
-    call_args.append("DEV_STREAM_PTR(stream)")
-    launcher_call = f"{launcher_fn}({', '.join(call_args)})"
+
+    launcher_call = launcher_call_expr(generator, ops)
 
     body = _MAIN_TEMPLATE.format(
         default_batch=default_batch,

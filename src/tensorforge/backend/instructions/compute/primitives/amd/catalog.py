@@ -53,6 +53,8 @@ from math import ceil
 from typing import Optional, Tuple
 
 from tensorforge.common.basic_types import Datatype
+
+from ...split import MANTISSA
 from .features import has_feature, wave_size
 
 
@@ -84,13 +86,9 @@ class Call(Enum):
 #: terms a split-precision emulation needs, so it is stated per *format*, not
 #: per storage type: `xf32` arrives in `float` registers and is rounded to a
 #: narrower significand inside the matrix unit, which no C++ type records.
-MANTISSA = {
-    Datatype.F64: 53,
-    Datatype.F32: 24,
-    Datatype.TF32: 11,
-    Datatype.F16: 11,
-    Datatype.BF16: 8,
-}
+#: Re-exported: the significand widths are a property of the formats, and
+#: `MatrixOp.significand` is the catalogue's reading of them.
+MANTISSA = MANTISSA
 
 
 @dataclass(frozen=True)
@@ -439,44 +437,6 @@ def lane_batched_ops(dtype, ctx):
                  if op.broadcast and op.lane_batched())
 
 
-def split_terms(op, dtype) -> int:
-    """Operand terms whose sum reproduces a `dtype` significand.
-
-    Three BF16 terms cover F32's 24 bits exactly; two cover 16, which is more
-    than TF32 and less than F32.  The formula is here so that the reduced
-    variants are a choice with a number attached rather than a habit ---
-    `mfma_emu_f16_f32` used two F16 terms, which is 22 bits, and nothing said
-    so.
-
-    It says nothing about *range*.  F16 carries five exponent bits, so an F16
-    split of an F32 operand also needs scaling to stay inside them; BF16 and
-    XF32 carry F32's exponent and need none.
-    """
-    return max(1, ceil(MANTISSA[dtype] / op.significand))
-
-
-def split_products(terms: int, keep: Optional[int] = None
-                   ) -> Tuple[Tuple[int, int], ...]:
-    """Which `(i, j)` term products to accumulate, smallest contribution first.
-
-    Term `i` is worth about ``2**(-significand*i)`` of the operand, so the
-    product `(i, j)` is worth ``2**(-significand*(i+j))``: everything with
-    ``i + j >= keep`` sits at or below the target's own rounding error and is
-    dropped.  At ``keep == terms`` that leaves ``terms*(terms+1)/2``
-    products --- six for BF16 into F32, which is what `mfma_emu_bf16_f32`
-    emits.
-
-    Smallest first, so the small contributions accumulate before the large one
-    rounds them off.  The order is free and never worse; how much it buys
-    depends on how much the accumulator already carries from earlier k, which
-    is a measurement rather than a derivation.
-    """
-    keep = terms if keep is None else keep
-    pairs = [(i, j) for i in range(terms) for j in range(terms)
-             if i + j < keep]
-    return tuple(sorted(pairs, key=lambda p: (-(p[0] + p[1]), p)))
-
-
 # --------------------------------------------------------------------------- #
 # The F32 K=1 tiling policy
 # --------------------------------------------------------------------------- #
@@ -497,6 +457,15 @@ def split_products(terms: int, keep: Optional[int] = None
 #: 16-lane row rather than transposing a 16x16 tile, so they do not fit the
 #: `MfmaTile` shape.  Listing them anyway keeps this set meaning what its name
 #: says, which is what makes the check against the header a real check.
+#: Operand arithmetic -> the runtime's out-parameter split into terms of it.
+#: A copy of a C++ fact, checked against the header the same way
+#: `DEFINED_TRANSPOSES` is: an emulated tile the runtime cannot feed is a call
+#: to an undeclared function, which is the same failure as a missing
+#: transpose and deserves the same guard.
+DEFINED_SPLITS = {
+    Datatype.BF16: 'tensorforge::splitFloatx4BF16',
+}
+
 DEFINED_TRANSPOSES = frozenset({
     'tensorforge::transpose4x4b32',
     'tensorforge::transpose16x16b32',
@@ -609,6 +578,60 @@ def usable_mfma_tiles(threads, dtype, ctx):
     return tuple(sorted((t for t in MFMA_TILES
                          if t.available_for(threads, dtype, ctx)),
                         key=lambda t: -t.block))
+
+
+def emu_tile_for(threads, dtype, ctx):
+    """The tile an emulated path would run here, and how many terms, or `None`.
+
+    The narrow counterpart of `mfma_tile_for`, and it has to be a separate
+    question: every entry that tile selection can reach multiplies in the type
+    it accumulates, so nothing there is ever a split.  What is offered here
+    multiplies in something narrower, which is why it needs a term count
+    beside it.
+
+    Restricted to entries whose k-vector is exactly the block width.  That is
+    not a preference: the loop hands the instruction the registers a `kk` step
+    already holds, and `layouts.position` puts them at the fragment's slots
+    only when the two widths agree.
+    """
+    found = emu_tiles(threads, dtype, ctx)
+    return found[0] if found else None
+
+
+def emu_tiles(threads, dtype, ctx):
+    """Every tile an emulated path could run here, largest first.
+
+    Restricted to entries whose k-vector is exactly the block width.  That is
+    the *emitter's* limit and not the catalogue's: `matmulemu` hands the
+    instruction the registers one `kk` step already holds, which are the
+    fragment's slots only when the two widths agree.  The stacking itself
+    holds wider -- `layouts.position` says so for the 16- and 32-wide entries
+    too -- and lifting the condition is what would reach them.
+
+    It is not free to leave.  A term product occupies every output column, so
+    an entry wider than the shape holds several: at nine columns the 32-wide
+    entry takes three products per issue where these take one, which is six
+    issues against two for a three-term split.
+    """
+    from ...split import MANTISSA, terms as _terms
+    out = []
+    for op in ops_for(dtype, ctx, threads):
+        if op.arithmetic is not None or op.a.dtype is dtype:
+            continue
+        if op.a.dtype not in DEFINED_SPLITS or op.a.dtype not in MANTISSA:
+            continue
+        if op.n != op.m or op.k != op.m:
+            continue
+        if op.n * op.blocks != wave_size(ctx):
+            continue
+        if op.a.per_lane != op.k or op.b.per_lane != op.k:
+            continue
+        tile = MfmaTile(op=op, transpose=_TILE_TRANSPOSES.get(op.m, (None, False))[0],
+                        transpose_has_separate_outputs=True)
+        if not tile.fits(threads) or tile.transpose not in DEFINED_TRANSPOSES:
+            continue
+        out.append((tile, _terms(MANTISSA[op.a.dtype], dtype)))
+    return tuple(out)
 
 
 def mfma_tile_for(threads, dtype, ctx):

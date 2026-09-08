@@ -60,6 +60,7 @@ __launch_bounds__(256)
       auto* totalShrMem = reinterpret_cast<float*>(totalShrMemPtr);
       float* localShrMem0 = &totalShrMem[64 * threadIdx.y + 0];
       float* tempShrMem = &localShrMem0[64];
+      float* __restrict__ s1 = &localShrMem0[0];
       for (size_t batchId0 = threadIdx.y + blockDim.y * (blockIdx.x); batchId0 < numElements0; batchId0 += (gridDim.x * blockDim.y)) {
         const auto batchId1 = batchId0 + (gridDim.x * blockDim.y) < numElements0 ? batchId0 + (gridDim.x * blockDim.y) : batchId0;
         const auto batchId2 = batchId1 + (gridDim.x * blockDim.y) < numElements0 ? batchId1 + (gridDim.x * blockDim.y) : batchId1;
@@ -68,10 +69,8 @@ __launch_bounds__(256)
           const float *const __restrict__ glb_m0 = &m0[batchId0 * 64 + 0 + m0_extraOffset];
           float *const __restrict__ glb_m1 = &m1[batchId0 * 64 + 0 + m1_extraOffset];
           const float *const __restrict__ glb_m2 = &m2[batchId0 * 64 + 0 + m2_extraOffset];
-          float* __restrict__ s1 = &localShrMem0[0];
           // s1 = load{g>s}(glb_m2[0, 1])
           __pipeline_memcpy_async(&s1[0 + 0 + 1 * threadIdx.x + 0], &glb_m2[0 + 0 + 1 * threadIdx.x + 0], 4);
-          __pipeline_commit();
           __pipeline_memcpy_async(&s1[0 + 0 + 1 * threadIdx.x + 32], &glb_m2[0 + 0 + 1 * threadIdx.x + 32], 4);
           __pipeline_commit();
           float r0[8]{};
@@ -105,16 +104,16 @@ __launch_bounds__(256)
             float v51_data = s1[24];
             float v53_data = ir1[3];
             ir1[3] = (v53_data + (v35_data * v51_data));
-            float v56_data = s1[33];
+            float v56_data = s1[32];
             float v58_data = ir1[4];
             ir1[4] = (v58_data + (v35_data * v56_data));
-            float v61_data = s1[41];
+            float v61_data = s1[40];
             float v63_data = ir1[5];
             ir1[5] = (v63_data + (v35_data * v61_data));
-            float v66_data = s1[49];
+            float v66_data = s1[48];
             float v68_data = ir1[6];
             ir1[6] = (v68_data + (v35_data * v66_data));
-            float v71_data = s1[57];
+            float v71_data = s1[56];
             float v73_data = ir1[7];
             ir1[7] = (v73_data + (v35_data * v71_data));
           }
@@ -132,16 +131,16 @@ __launch_bounds__(256)
             float v95_data = s1[25];
             float v97_data = ir1[3];
             ir1[3] = (v97_data + (v79_data * v95_data));
-            float v100_data = s1[32];
+            float v100_data = s1[33];
             float v102_data = ir1[4];
             ir1[4] = (v102_data + (v79_data * v100_data));
-            float v105_data = s1[40];
+            float v105_data = s1[41];
             float v107_data = ir1[5];
             ir1[5] = (v107_data + (v79_data * v105_data));
-            float v110_data = s1[48];
+            float v110_data = s1[49];
             float v112_data = ir1[6];
             ir1[6] = (v112_data + (v79_data * v110_data));
-            float v115_data = s1[56];
+            float v115_data = s1[57];
             float v117_data = ir1[7];
             ir1[7] = (v117_data + (v79_data * v115_data));
           }
@@ -159,16 +158,16 @@ __launch_bounds__(256)
             float v139_data = s1[26];
             float v141_data = ir1[3];
             ir1[3] = (v141_data + (v123_data * v139_data));
-            float v144_data = s1[35];
+            float v144_data = s1[34];
             float v146_data = ir1[4];
             ir1[4] = (v146_data + (v123_data * v144_data));
-            float v149_data = s1[43];
+            float v149_data = s1[42];
             float v151_data = ir1[5];
             ir1[5] = (v151_data + (v123_data * v149_data));
-            float v154_data = s1[51];
+            float v154_data = s1[50];
             float v156_data = ir1[6];
             ir1[6] = (v156_data + (v123_data * v154_data));
-            float v159_data = s1[59];
+            float v159_data = s1[58];
             float v161_data = ir1[7];
             ir1[7] = (v161_data + (v123_data * v159_data));
           }
@@ -186,16 +185,16 @@ __launch_bounds__(256)
             float v183_data = s1[27];
             float v185_data = ir1[3];
             ir1[3] = (v185_data + (v167_data * v183_data));
-            float v188_data = s1[34];
+            float v188_data = s1[35];
             float v190_data = ir1[4];
             ir1[4] = (v190_data + (v167_data * v188_data));
-            float v193_data = s1[42];
+            float v193_data = s1[43];
             float v195_data = ir1[5];
             ir1[5] = (v195_data + (v167_data * v193_data));
-            float v198_data = s1[50];
+            float v198_data = s1[51];
             float v200_data = ir1[6];
             ir1[6] = (v200_data + (v167_data * v198_data));
-            float v203_data = s1[58];
+            float v203_data = s1[59];
             float v205_data = ir1[7];
             ir1[7] = (v205_data + (v167_data * v203_data));
           }
@@ -213,16 +212,16 @@ __launch_bounds__(256)
             float v227_data = s1[28];
             float v229_data = ir1[3];
             ir1[3] = (v229_data + (v211_data * v227_data));
-            float v232_data = s1[37];
+            float v232_data = s1[36];
             float v234_data = ir1[4];
             ir1[4] = (v234_data + (v211_data * v232_data));
-            float v237_data = s1[45];
+            float v237_data = s1[44];
             float v239_data = ir1[5];
             ir1[5] = (v239_data + (v211_data * v237_data));
-            float v242_data = s1[53];
+            float v242_data = s1[52];
             float v244_data = ir1[6];
             ir1[6] = (v244_data + (v211_data * v242_data));
-            float v247_data = s1[61];
+            float v247_data = s1[60];
             float v249_data = ir1[7];
             ir1[7] = (v249_data + (v211_data * v247_data));
           }
@@ -240,16 +239,16 @@ __launch_bounds__(256)
             float v271_data = s1[29];
             float v273_data = ir1[3];
             ir1[3] = (v273_data + (v255_data * v271_data));
-            float v276_data = s1[36];
+            float v276_data = s1[37];
             float v278_data = ir1[4];
             ir1[4] = (v278_data + (v255_data * v276_data));
-            float v281_data = s1[44];
+            float v281_data = s1[45];
             float v283_data = ir1[5];
             ir1[5] = (v283_data + (v255_data * v281_data));
-            float v286_data = s1[52];
+            float v286_data = s1[53];
             float v288_data = ir1[6];
             ir1[6] = (v288_data + (v255_data * v286_data));
-            float v291_data = s1[60];
+            float v291_data = s1[61];
             float v293_data = ir1[7];
             ir1[7] = (v293_data + (v255_data * v291_data));
           }
@@ -267,16 +266,16 @@ __launch_bounds__(256)
             float v315_data = s1[30];
             float v317_data = ir1[3];
             ir1[3] = (v317_data + (v299_data * v315_data));
-            float v320_data = s1[39];
+            float v320_data = s1[38];
             float v322_data = ir1[4];
             ir1[4] = (v322_data + (v299_data * v320_data));
-            float v325_data = s1[47];
+            float v325_data = s1[46];
             float v327_data = ir1[5];
             ir1[5] = (v327_data + (v299_data * v325_data));
-            float v330_data = s1[55];
+            float v330_data = s1[54];
             float v332_data = ir1[6];
             ir1[6] = (v332_data + (v299_data * v330_data));
-            float v335_data = s1[63];
+            float v335_data = s1[62];
             float v337_data = ir1[7];
             ir1[7] = (v337_data + (v299_data * v335_data));
           }
@@ -294,16 +293,16 @@ __launch_bounds__(256)
             float v359_data = s1[31];
             float v361_data = ir1[3];
             ir1[3] = (v361_data + (v343_data * v359_data));
-            float v364_data = s1[38];
+            float v364_data = s1[39];
             float v366_data = ir1[4];
             ir1[4] = (v366_data + (v343_data * v364_data));
-            float v369_data = s1[46];
+            float v369_data = s1[47];
             float v371_data = ir1[5];
             ir1[5] = (v371_data + (v343_data * v369_data));
-            float v374_data = s1[54];
+            float v374_data = s1[55];
             float v376_data = ir1[6];
             ir1[6] = (v376_data + (v343_data * v374_data));
-            float v379_data = s1[62];
+            float v379_data = s1[63];
             float v381_data = ir1[7];
             ir1[7] = (v381_data + (v343_data * v379_data));
           }

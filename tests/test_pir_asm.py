@@ -201,3 +201,106 @@ def test_assign_is_pinned():
     t = b.declare(hint='c')
     stmt = b.assign(t, b.rawexpr('1.0f', hint='d'))
     assert not stmt.movable and not stmt.pure
+
+
+# --------------------------------------------------------------------------- #
+# A pure operation with more than one result
+# --------------------------------------------------------------------------- #
+
+def test_a_two_result_op_is_hash_consed():
+    """`splitFloatTF32` is a function: one input, two halves, deterministic.
+
+    Modelling it as a call that writes through references made it
+    side-effecting, and CSE skips those -- so the corpus split the same value
+    twice in 15% of cases, with no store and no reload in between, just a
+    second `kk` block asking for the same fragment.  The reference-out
+    spelling is the vendor's signature, not a property of the operation, and
+    it belongs in the emitter.
+    """
+    from tensorforge.backend.pir import passes
+
+    b = builder()
+    x = b.rawexpr('operand', hint='b')
+    t = ScalarType(Datatype.U32)
+    first = b.split_op('tensorforge::splitFloatTF32', (t, t), x,
+                       hints=('u', 'l'))
+    second = b.split_op('tensorforge::splitFloatTF32', (t, t), x,
+                        hints=('u', 'l'))
+    b(f'use({first[0]}, {second[0]});', *first, *second, accesses=())
+    text = emitted(passes.cse(b.finish()))
+    assert text.count('splitFloatTF32') == 1, text
+
+
+def test_both_results_follow_the_survivor():
+    """`cse` zips `s.target` against what it recorded, so both halves have to
+    be redirected, not just the first.
+
+    The consumer here is an ordinary op rather than an `asm_stmt`, and the
+    difference is the point of the next test: `asm_stmt` pins its write
+    operands, and a pinned producer escapes, which takes it out of CSE
+    altogether.
+    """
+    from tensorforge.backend.pir import passes
+
+    b = builder()
+    x = b.rawexpr('operand', hint='b')
+    t = ScalarType(Datatype.U32)
+    u1, l1 = b.split_op('tensorforge::splitFloatTF32', (t, t), x,
+                        hints=('u', 'l'))
+    u2, l2 = b.split_op('tensorforge::splitFloatTF32', (t, t), x,
+                        hints=('u', 'l'))
+    consumer = b.op('add', t, u2, l2, hint='sum')
+    body = passes.cse(b.finish())
+    add = [s for s, _ in walk(body) if str(s.op) == 'add'][0]
+    assert list(add.args) == [u1, l1], (
+        f'only some results followed the survivor: {add.args}')
+    assert sum(1 for s, _ in walk(body)
+               if 'splitFloatTF32' in str(s.op)) == 1
+
+
+def test_a_pinned_result_keeps_its_own_split():
+    """Which is why the saving is smaller than the duplicate count suggests.
+
+    `asm_stmt` pins its write operands -- the accumulator has to keep the name
+    the template spells -- and a pinned producer is marked as escaping, which
+    CSE skips.  So a split feeding an `mma.sync` is never merged, and the 13%
+    the corpus does save comes from the splits that feed something else.
+    """
+    from tensorforge.backend.pir import passes
+
+    b = builder()
+    x = b.rawexpr('operand', hint='b')
+    t = ScalarType(Datatype.U32)
+    b.split_op('tensorforge::splitFloatTF32', (t, t), x, hints=('u', 'l'))
+    u2, l2 = b.split_op('tensorforge::splitFloatTF32', (t, t), x,
+                        hints=('u', 'l'))
+    b.asm_stmt('"use "\n"{%0}, {%1};"', [('+r', u2), ('r', l2)])
+    body = passes.cse(b.finish())
+    assert sum(1 for s, _ in walk(body)
+               if 'splitFloatTF32' in str(s.op)) == 2
+
+
+def test_a_different_operand_is_not_merged():
+    from tensorforge.backend.pir import passes
+
+    b = builder()
+    t = ScalarType(Datatype.U32)
+    for name in ('a', 'b'):
+        x = b.rawexpr(name, hint=name)
+        r = b.split_op('tensorforge::splitFloatTF32', (t, t), x,
+                       hints=('u', 'l'))
+        b(f'use({r[0]});', *r, accesses=())
+    assert emitted(passes.cse(b.finish())).count('splitFloatTF32') == 2
+
+
+def test_the_emitter_declares_every_result():
+    """A reference parameter needs something with an address, so each half is
+    a declaration of its own before the call."""
+    b = builder()
+    x = b.rawexpr('operand', hint='b')
+    t = ScalarType(Datatype.U32)
+    u, l = b.split_op('tensorforge::splitFloatTF32', (t, t), x,
+                      hints=('u', 'l'))
+    text = emitted(b.finish())
+    assert f'uint32_t {u}{{}};' in text and f'uint32_t {l}{{}};' in text
+    assert f'splitFloatTF32({u}, {l}, ' in text

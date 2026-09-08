@@ -36,20 +36,28 @@ property.
 
 from tensorforge.common.basic_types import Datatype
 
-from ...strategy import Strategy
+from ... import broadcast, packing
+from ...strategy import Span, Strategy, whole
 
 from .arch import amdarch, cdna2, gfx1250, gfx1251, rdna
 from .caps import has_fmacdpp4, has_fmacdpp8, has_fmacdpp16
-from .catalog import (DEFINED_TRANSPOSES, MANTISSA, MATRIX_OPS, MFMA_TILES,
+from .catalog import (DEFINED_SPLITS, DEFINED_TRANSPOSES, MANTISSA,
+                      MATRIX_OPS, MFMA_TILES, emu_tile_for, emu_tiles,
                       NOT_MODELLED, Call, Fragment, MatrixOp,
                       MfmaTile, lane_batched_ops, mfma_tile_for, ops_for,
-                      split_products, split_terms, usable_mfma_tiles)
+                      usable_mfma_tiles)
 from .features import FEATURE_TARGETS, has_feature, wave_size
 from .layouts import (FRAGMENT_BITS, Provenance, covers, established,
                       position, provenance)
-from .reorder import (IDENTITY_DPP, ROW, Move, fragment_cost,
-                      fragment_moves)
-from .codegen import hfma, matmul32, matmuldpp
+from .reorder import (BANK, FED_BY, IDENTITY_DPP, ROW, Gather, Move,
+                      Select, Exchange, a_exchange, accumulator_cost,
+                      accumulator_gathers, broadcast_feeds_a,
+                      fragment_cost, fragment_moves)
+from .codegen import hfma, matmul32, matmulemu, matmuldpp
+from .exchange_codegen import exchange_op, exchange_ops, matmul_exchange
+from .tiling import (EMULATION, EXCHANGE, Fit, Scheme, boundary,
+                     candidates, choose, issues, offers, rank,
+                     spare_products)
 from .emitters import fmadpp, fmadpp4, fmadpp8, fmadpp16, fmascalar
 from .relayout import (BROADCAST, MOVDPP16, RELAYOUTS, TRANSPOSE4X4, Relayout,
                        find_relayout)
@@ -62,13 +70,19 @@ __all__ = [
     'has_fmacdpp4', 'has_fmacdpp8', 'has_fmacdpp16',
     'FEATURE_TARGETS', 'has_feature', 'wave_size',
     'Call', 'Fragment', 'MatrixOp', 'MATRIX_OPS', 'MANTISSA',
-    'NOT_MODELLED', 'ops_for', 'split_terms',
-    'split_products',
+    'DEFINED_SPLITS', 'emu_tile_for', 'matmulemu', 'EMULATION',
+    'EXCHANGE', 'Scheme', 'Fit', 'exchange_op', 'exchange_ops',
+    'matmul_exchange', 'emu_tiles', 'candidates', 'issues',
+    'rank', 'spare_products',
+    'NOT_MODELLED', 'ops_for',
     'MfmaTile', 'DEFINED_TRANSPOSES', 'MFMA_TILES', 'usable_mfma_tiles',
     'lane_batched_ops', 'mfma_tile_for',
     'FRAGMENT_BITS', 'Provenance', 'covers', 'established',
     'position', 'provenance',
-    'IDENTITY_DPP', 'ROW', 'Move', 'fragment_cost', 'fragment_moves',
+    'BANK', 'FED_BY', 'IDENTITY_DPP', 'ROW', 'Gather', 'Move', 'Select',
+    'broadcast_feeds_a', 'Exchange', 'a_exchange',
+    'accumulator_cost', 'accumulator_gathers',
+    'fragment_cost', 'fragment_moves',
     'wanted_fmadpp_step', 'select_fmadpp_step',
     'Relayout', 'RELAYOUTS', 'BROADCAST', 'MOVDPP16', 'TRANSPOSE4X4',
     'find_relayout',
@@ -85,37 +99,99 @@ def strategies(shape, ctx):
     of the shape, and where the widest form does not link, `select.py` falls
     to a narrower one rather than to nothing.
 
-    A matrix core only where a tile fits, which is a structural question and
-    not a family or a type one.  `mfma_f64_16x16x4f64` spends two of its lane
-    bits on the contraction, so the data operand carries the leading dimension
-    there and the lane-batched loop cannot feed it; `MatrixOp.lane_batched`
-    states that as one equation and `mfma_tile_for` asks it.  F64 therefore
-    lands on DPP -- where `fmacdpp16(double&, ...)` serves it -- because no
-    tile fits, rather than because a condition names the type.
+    A matrix core where any of the schemes in `tiling` serves the shape,
+    which is a structural question and not a family or a type one.
+    `mfma_f64_16x16x4f64` spends two of its lane bits on the contraction, so
+    the data operand carries the leading dimension there and the lane-batched
+    loop cannot feed it; `MatrixOp.lane_batched` states that as one equation.
+    F64 therefore lands on DPP -- where `fmacdpp16(double&, ...)` serves it --
+    while the scheme that could feed it is not deployed, rather than because a
+    condition names the type.
 
     A sparse second operand is read by linear index, which no fragment layout
-    accepts; the DPP chain has a branch for it and takes it.
+    accepts and which the broadcast chain has no lane to replicate; the DPP
+    chain has a branch for it and takes it alone.
     """
     offered = {Strategy.DPP}
-    if not shape.sparse \
-            and mfma_tile_for(shape.threads, shape.dtype, ctx) is not None:
-        offered.add(Strategy.MATRIX)
+    if not shape.sparse:
+        # The same chain the DPP one fuses its broadcast into, available here
+        # through `readlane`.  It cannot read a sparse operand, which is the
+        # one thing the DPP branch does that this does not.
+        offered.add(Strategy.BROADCAST)
+        if offers(shape.threads, shape.accumulator, ctx):
+            offered.add(Strategy.MATRIX)
     return frozenset(offered)
 
 
-def scratch(strategy, dtype):
+def scratch(strategy, accumulator):
     """Nothing: both arrangements here keep their operands in registers."""
     return 0
 
 
-def matmul(writer, ops, ctx, strategy):
-    """Emit the arrangement the caller chose."""
+def plan(strategy, shape, n, ctx):
+    """How the chosen arrangement is laid out over the output.
+
+    The matrix core covers whole tiles; what is left over is a cost question
+    with a threshold behind it, and which threshold depends on which scheme
+    `tiling` picked.  A tail of two or three columns is cheaper as
+    one MFMA block with its spare lanes zeroed than as two or three passes of
+    a broadcast chain, and a tail of one is not -- padding a block of four to
+    compute one column spends three quarters of it on zeroes.
+
+    So the tail is a second span rather than a handoff inside the emitter,
+    and the boundary is stated once instead of computed twice.  Computing it
+    twice is what makes the two arrangements overlap: `(n // block) * block`
+    is the tail only when the block loop stopped there, and when it padded
+    through to the end it points into a block already emitted -- both spans
+    then write the same columns, the later store hiding it.
+    """
+    if strategy is not Strategy.MATRIX:
+        return whole(strategy, n)
+    fit = choose(shape.threads, shape.accumulator, ctx,
+                 columns=n, lead=shape.lead, depth=shape.depth)
+    # Asked of the scheme that will run rather than of one of them.  Only the
+    # lane-batched one draws a boundary at all, and the threshold behind it is
+    # a measurement against its own block width.
+    edge = boundary(fit, n)
+    if edge >= n:
+        return whole(Strategy.MATRIX, n)
+    if edge <= 0:
+        # Fewer columns than one block, and too few to repay padding it: there
+        # is no matrix span to name, not an empty one.
+        return whole(Strategy.DPP, n)
+    return (Span(Strategy.MATRIX, 0, edge),
+            Span(Strategy.DPP, edge, n))
+
+
+def matmul(writer, ops, ctx, span):
+    """Emit one span of the plan."""
     C, A, B = ops.C, ops.A, ops.B
     M, N, K, kx = ops.lead_slots, ops.n, ops.k, ops.kx
-    threads, dtype, sparse = ops.threads, ops.dtype, ops.sparse
+    threads, dtype, sparse = ops.threads, ops.accumulator, ops.sparse
 
-    if strategy is Strategy.MATRIX:
-        matmul32(writer, C, A, B, M, N, K, kx, threads, dtype, sparse, ctx)
+    if span.strategy is Strategy.BROADCAST:
+        return broadcast.matmul(writer, ops, ctx, span)
+    if span.strategy is Strategy.MATRIX:
+        fit = choose(threads, dtype, ctx, columns=N,
+                     lead=ops.lead_slots * threads, depth=K + kx)
+        if fit is None or (ops.a, ops.b) != (fit.reads, fit.reads):
+            # The entry was selected by what it accumulates in; what it
+            # multiplies is a separate property of the same entry, and an
+            # emulated scheme reads a third thing again.  `Fit.reads` is the
+            # one the chosen scheme expects, and where the operands do not
+            # arrive as it, reaching the instruction is a further split that
+            # none of these emitters performs.
+            return False
+        if fit.scheme is Scheme.EMULATED:
+            return matmulemu(writer, C, A, B, M, N, K, kx, threads, dtype,
+                             sparse, ctx, span.start, span.stop, fit.tile,
+                             fit.terms)
+        if fit.scheme is Scheme.EXCHANGE:
+            return matmul_exchange(writer, C, A, B, M, N, K, kx, threads,
+                                   dtype, sparse, ctx, span.start, span.stop)
+        return matmul32(writer, C, A, B, M, N, K, kx, threads, dtype, sparse,
+                        ctx, span.start, span.stop)
     else:
-        matmuldpp(writer, 0, C, A, B, M, N, K, kx, threads, dtype, sparse, ctx)
+        matmuldpp(writer, span.start, C, A, B, M, N, K, kx, threads, dtype,
+                  sparse, ctx, span.stop)
     return True

@@ -107,7 +107,54 @@ GROUPS = {
     # A tile's permutation lives on the buffer so no access can forget it.
     # The bank model.  Every mistake it made over-reported, which is the
     # direction that gets a check ignored.
+    # The IR-level bank analysis.  Every mistake it made over-reported, which
+    # is the direction that gets a check ignored.
+    'irbanks': ('tests/test_pir_banks.py', [
+        ('the volume rule picks a width the pattern does not want',
+         sub(Path('src/tensorforge/backend/instructions/memory/__init__.py'),
+             '    while width * 2 <= self._BANKS and volume % (width * 2) == 0:',
+             '    while width * 2 <= 8 and volume % (width * 2) == 0:', 1)),
+        ('the recommender scores every candidate the same',
+         sub(Path('src/tensorforge/backend/pir/banks.py'),
+             '                if candidate > 1:',
+             '                if False:', 1)),
+        ('a dead access counted as one the hardware makes',
+         sub(Path('src/tensorforge/backend/pir/passes.py'),
+             'def optimize(body: Tuple[Stmt, ...], dump_hook=None,',
+             'def optimize(body, *_a, **_k):\n    return body\n\n\n'
+             'def _optimize(body: Tuple[Stmt, ...], dump_hook=None,', 1)),
+        ('guards ignored, so inactive lanes count',
+         sub(Path('src/tensorforge/backend/pir/banks.py'),
+             '        if parent.op is not Op.IF:\n            continue',
+             '        if True:\n            continue', 1)),
+        ('the width read from the target for a store too',
+         sub(Path('src/tensorforge/backend/pir/banks.py'),
+             "            carrier = (stmt.target[0] if stmt.op == Op.LOAD and stmt.target",
+             "            carrier = (stmt.target[0] if stmt.target", 1)),
+        ('a numpy integer is not an integer again',
+         sub(Path('src/tensorforge/backend/pir/banks.py'), '        return operator.index(operand)',
+             '        return operand if isinstance(operand, int) else 1 / 0', 1)),
+        ('a loop variable no longer resolves to its bound',
+         sub(Path('src/tensorforge/backend/pir/banks.py'),
+             '        if stmt.op is Op.FOR and stmt.regions and stmt.regions[0].args:',
+             '        if False:', 1)),
+        ('an unreadable address counted rather than refused',
+         sub(Path('src/tensorforge/backend/pir/banks.py'), '                unresolved += 1\n                continue',
+             '                continue', 1)),
+    ]),
+
+    'dryrun': ('tests/test_tools.py::test_every_mutation_still_applies', [
+        ('a stale anchor stops being reported',
+         sub(Path('tools/mutation_check.py'),
+             "                print(f'  {group}: {name}: {exc}')\n                stale += 1",
+             "                pass", 1)),
+    ]),
+
     'banks': ('tests/test_bank_conflicts.py', [
+        ('the arena counted as a window again',
+         sub(Path('tools/bank_conflicts.py'),
+             '    for name in arenas:\n        windows.pop(name, None)',
+             '    pass', 1)),
         ('loop variables go unresolved again',
          sub(Path('tools/bank_conflicts.py'),
              "        m = _FOR_INIT.search(line)", '        m = None', 1)),
@@ -140,14 +187,27 @@ GROUPS = {
              '    per_phase = len(lanes)', 1)),
     ]),
 
+    'ceiling': ('tests/test_tools.py::test_no_shared_access_costs_more_than_four_bank_cycles', [
+        ('the window stops being permuted',
+         sub(Path('src/tensorforge/backend/instructions/memory/__init__.py'),
+             '      if not self._structured_copy(writer):\n        return None',
+             '      if True:\n        return None', 1)),
+        ('the loader question replaced by the proxy that broke',
+         sub(Path('src/tensorforge/backend/instructions/memory/__init__.py'),
+             "    if writer is not None and hasattr(self, '_structured_copy'):\n"
+             "      if not self._structured_copy(writer):",
+             "    if writer is not None and hasattr(self, '_src'):\n"
+             "      if self._src.pir_buffer(writer) is None:", 1)),
+    ]),
+
     'swizzle': ('tests/test_pir_swizzle.py', [
         ('esimd allowed to swizzle, so a vector read reorders itself',
          sub(Path('src/tensorforge/backend/instructions/memory/__init__.py'),
              '    if _explicit_simd(self._context):\n      return None',
              '    if False:\n      return None', 1)),
-        ('a window whose source has no buffer swizzled anyway',
+        ('a window written outside `store` swizzled anyway',
          sub(Path('src/tensorforge/backend/instructions/memory/__init__.py'),
-             '      if self._src.pir_buffer(writer) is None:\n        return None',
+             '      if not self._structured_copy(writer):\n        return None',
              '      if False:\n        return None', 1)),
         ('the vector cast survives the pointer rewrite',
          sub(Path('src/tensorforge/backend/pir/emit_esimd.py'),
@@ -212,6 +272,14 @@ GROUPS = {
     ]),
 
     'asm': ('tests/test_pir_asm.py', [
+        ('the split goes back to a side-effecting call',
+         sub(Path('src/tensorforge/backend/pir/build.py'),
+             "        self._emit_op(name, vs, tuple(args), pure=True, attrs=attrs)",
+             "        self._emit_op(name, vs, tuple(args), pure=False, attrs=attrs)", 1)),
+        ('only the first result is declared',
+         sub(Path('src/tensorforge/backend/pir/emit.py'),
+             "            for t in s.target:\n                w(f'{self.ctype(t.type, t)} {self.name(t)}{{}};')",
+             "            t = s.target[0]\n            w(f'{self.ctype(t.type, t)} {self.name(t)}{{}};')", 1)),
         ('assign does not declare an access on its target',
          sub(Path('src/tensorforge/backend/pir/build.py'),
              '            accesses=(Access(Effect.WRITE, MemSpace.REGISTER, base=target),),',
@@ -296,18 +364,80 @@ GROUPS = {
              '#if defined(__gfx940__)', 1)),
     ]),
 
+    # The boundary between the two spans, which `plan` states once.  Stating
+    # it twice is what let the spans overlap, so the first two mutations put
+    # the boundary back where each half of that mistake had it.
     'tiling': ('tests/test_amd_tiling.py', [
-        ('the original tail overlap',
-         sub(PKG / 'codegen.py',
-             '        tail = ((N // tile.block) * tile.block) if cap else N',
-             '        tail = (N // tile.block) * tile.block')),
+        ('the boundary ignores the padding decision',
+         sub(PKG / 'tiling.py', '    return ((n // fit.width) * fit.width) if empty in (0, fit.width - 1) else n',
+             '    return (n // fit.width) * fit.width')),
         ('over-corrected: the tail dropped entirely',
-         sub(PKG / 'codegen.py',
-             '        tail = ((N // tile.block) * tile.block) if cap else N',
-             '        tail = N')),
-        ('cap policy inverted',
-         sub(PKG / 'codegen.py', '        cap = N % tile.block < 2',
-             '        cap = N % tile.block >= 2')),
+         sub(PKG / 'tiling.py', '    return ((n // fit.width) * fit.width) if empty in (0, fit.width - 1) else n', '    return n')),
+        ('padding policy inverted',
+         sub(PKG / 'tiling.py', 'if empty in (0, fit.width - 1) else n',
+             'if empty not in (0, fit.width - 1) else n')),
+        ('a block of one real column padded anyway',
+         sub(PKG / 'tiling.py', 'if empty in (0, fit.width - 1) else n',
+             'if empty == 0 else n')),
+        ('a scheme that pads its own tail asked for a boundary anyway',
+         sub(PKG / 'tiling.py',
+             '    if fit.scheme is not Scheme.LANE_BATCHED:\n        return n',
+             '    if False:\n        return n')),
+        ('the empty span is planned rather than dropped',
+         sub(PKG / '__init__.py', '    if edge <= 0:', '    if False:')),
+    ]),
+
+    'packing': ('tests/test_packing.py', [
+        ('waste counted from the wrong end',
+         sub(Path('src/tensorforge/backend/instructions/compute/packing.py'),
+             '    return (-max(demand, 0)) % capacity',
+             '    return max(demand, 0) % capacity')),
+        ('packing restarts per product like the unpacked layout',
+         sub(Path('src/tensorforge/backend/instructions/compute/packing.py'),
+             '    pairs = [(product, step) for product in products '
+             'for step in range(steps)]',
+             '    pairs = [(product, 0) for product in products '
+             'for step in range(steps)]')),
+    ]),
+
+    'bitlayout': ('tests/test_bitlayout.py', [
+        ('an unpaired bit move accepted as an exchange',
+         sub(Path('src/tensorforge/backend/instructions/compute/bitlayout.py'),
+             '    if set(forward) != set(backward):\n        return None',
+             '    if False:\n        return None')),
+        ('a bit staying on its own side counted as moving',
+         sub(Path('src/tensorforge/backend/instructions/compute/bitlayout.py'),
+             '        if source.place is target.place:\n            return None',
+             '        if False:\n            return None')),
+        ('the transpose narrowed by one bit',
+         sub(Path('src/tensorforge/backend/instructions/compute/primitives/amd/relayout.py'),
+             "    return tuple((1 << bit, 1 << bit) for bit in range((ext - 1).bit_length()))",
+             "    return tuple((1 << bit, 1 << bit) for bit in range((ext - 1).bit_length() - 1))")),
+        ('a region with two toggles accepted as one',
+         sub(Path('src/tensorforge/backend/instructions/compute/bitlayout.py'),
+             '        if len(toggles) != 1:\n            return None',
+             '        if False:\n            return None')),
+        ('the regions keyed by the target slot alone',
+         sub(Path('src/tensorforge/backend/instructions/compute/bitlayout.py'),
+             '        regions.setdefault((here.slot, there.slot), []).append(',
+             '        regions.setdefault((0, there.slot), []).append(')),
+        ('the group offset dropped from the source',
+         sub(Path('src/tensorforge/backend/instructions/compute/bitlayout.py'),
+             '        here, there = base + have.locate(*index), want.locate(*index)',
+             '        here, there = have.locate(*index), want.locate(*index)')),
+        ('a slot weight read as a lane weight',
+         sub(Path('src/tensorforge/backend/instructions/compute/bitlayout.py'),
+             'Bit(Place.LANE if weight > 0 else Place.SLOT, abs(weight))',
+             'Bit(Place.LANE, abs(weight))')),
+        ('the cut point put on the wrong side of the axis',
+         sub(Path('src/tensorforge/backend/instructions/compute/bitlayout.py'),
+             '        if position < low:',
+             '        if position >= low:')),
+        ('a stride that is not a power of two admitted anyway',
+         sub(Path('src/tensorforge/backend/instructions/compute/bitlayout.py'),
+             '    if low is None or base is None:\n        return None',
+             '    if low is None:\n        return None\n'
+             '    base = 0 if base is None else base')),
     ]),
 
     'catalog': ('tests/test_amd_catalog.py', [
@@ -320,12 +450,12 @@ GROUPS = {
              '        return True')),
         ('scale formula off by one',
          sub(PKG / 'catalog.py',
-             'return (threads // self.block).bit_length() - 1',
-             'return (threads // self.block).bit_length()')),
+             'return min(self.blocks, threads // self.n).bit_length() - 1',
+             'return min(self.blocks, threads // self.n).bit_length()')),
         ('the fits() check dropped',
          sub(PKG / 'catalog.py',
-             '        if not self.fits(threads):\n            return False\n        return self.transpose is None',
-             '        return self.transpose is None')),
+             '        if not self.fits(threads):\n            return False\n',
+             '')),
     ]),
 
     'layout': ('tests/test_layout.py', [
@@ -448,10 +578,10 @@ GROUPS = {
          sub(SYM, '    if len(loops) == 0:\n      inner(varlist)',
              '    if len(loops) == 0:\n      with writer.Scope():\n        inner(varlist)')),
         ('a scalar routed through Op.LOAD, inventing a subscript',
-         sub(SYM, '''        if access is pre_access and self.stype in (
-                SymbolType.Register, SymbolType.Scratch,
-                SymbolType.SharedMem, SymbolType.Batch, SymbolType.Global):''',
-             '        if access is pre_access:')),
+         sub(SYM, '''      if (bc_lane is None and self.stype in (
+              SymbolType.Register, SymbolType.Scratch, SymbolType.SharedMem,
+              SymbolType.Batch, SymbolType.Global)):''',
+             '      if bc_lane is None:')),
     ]),
 
     'reachability': ('tests/test_amd_reachability.py', [
@@ -530,9 +660,17 @@ GROUPS = {
     # The sparse loader's layout is a claim about a *write*, recorded where the
     # write happens and read back somewhere else.  Both ends have to fail.
     'sparse': ('tests/test_sparse_layout.py', [
+        ('the shared image stops being described',
+         sub(Path('src/tensorforge/backend/symbol.py'),
+             '    if self.stype not in (SymbolType.Register, SymbolType.SharedMem):',
+             '    if self.stype is not SymbolType.Register:', 1)),
+        ('a global image described as though it were staged',
+         sub(Path('src/tensorforge/backend/symbol.py'),
+             '    if self.stype not in (SymbolType.Register, SymbolType.SharedMem):',
+             '    if False:', 1)),
         ('the fill records nothing',
          sub(Path('src/tensorforge/backend/symbol.py'),
-             '    self._record_linear_layout(index, vec)\n', '', 1)),
+             '    self._record_linear_layout(index, vec, threads, writer)\n', '', 1)),
         ('the read drops what the fill recorded',
          sub(Path('src/tensorforge/backend/symbol.py'),
              "        return writer.load(buf, addr, type_=ltype, hint='lin',\n"
@@ -541,11 +679,11 @@ GROUPS = {
              "                           layout=None,", 1)),
         ('the wave width taken as the block instead of the thread count',
          sub(Path('src/tensorforge/backend/symbol.py'),
-             'layout = RegisterLayout((LaneAxis(self.num_threads, 1),))',
-             'layout = RegisterLayout((LaneAxis(self.num_threads, 2),))', 1)),
+             'layout = RegisterLayout((LaneAxis(threads, 1),))',
+             'layout = RegisterLayout((LaneAxis(threads, 2),))', 1)),
         ('a mid-slot fill claimed anyway',
          sub(Path('src/tensorforge/backend/symbol.py'),
-             'if not isinstance(index, int) or index % (self.num_threads * vec) != 0:',
+             'if not isinstance(index, int) or index % (threads * vec) != 0:',
              'if not isinstance(index, int):', 1)),
         ('two disagreeing fills, last one wins',
          sub(Path('src/tensorforge/backend/symbol.py'),
@@ -579,23 +717,41 @@ GROUPS = {
     'nvidia': ('tests/test_nvidia_reachability.py', [
         ('a second definition of matmul',
          sub(Path('src/tensorforge/backend/instructions/compute/primitives/nvidia.py'),
-             'def matmul(writer, C, A, B, M, N, K, kx, threads, dtype, sparse, ctx, shmptr, shmsize):',
+             'def matmul(writer, ops, ctx, span):',
              'def matmul(*args, **kwargs):\n    pass\n\n'
-             'def matmul(writer, C, A, B, M, N, K, kx, threads, dtype, sparse, ctx, shmptr, shmsize):',
-             1)),
+             'def matmul(writer, ops, ctx, span):', 1)),
         ('an unreachable helper reintroduced',
          sub(Path('src/tensorforge/backend/instructions/compute/primitives/nvidia.py'),
              'def tfconvert(writer: Writer, variables):',
              'def shuffle_swap(writer, v):\n'
              '    return f"__shfl_xor_sync(0xffffffff, {v}, 1)"\n\n'
              'def tfconvert(writer: Writer, variables):', 1)),
-        ('the shared reservation and the emitter pick different atoms',
-         sub(Path('src/tensorforge/backend/instructions/compute/primitives/nvidia.py'),
-             'def shmsize(stages, dtype):\n    atom = {',
-             'def shmsize(stages, dtype):\n    dtype = Datatype.F32\n    atom = {', 1)),
     ]),
 
     'gate': ('tests/test_nvidia_gate.py', [
+        ('the reservation sized for one candidate instead of all of them',
+         sub(Path('src/tensorforge/backend/instructions/compute/primitives/nvidia.py'),
+             '    return max((size(atom) for atom in instrs_for(dtype)), '
+             'default=0)',
+             '    return size(instrs_for(dtype)[0])', 1)),
+        ('the i8 entries let into the candidates',
+         sub(Path('src/tensorforge/backend/instructions/compute/primitives/nvidia.py'),
+             'EMITTED_MODES = (MMAMode.TF32, MMAMode.DIRECT)',
+             'EMITTED_MODES = (MMAMode.TF32, MMAMode.DIRECT, MMAMode.I8)', 1)),
+        ('the capability floor lifted without an arch reaching here',
+         sub(Path('src/tensorforge/backend/instructions/compute/primitives/nvidia.py'),
+             'BASELINE_SM = 80', 'BASELINE_SM = 90', 1)),
+        ('an address goes back to raw text',
+         sub(Path('src/tensorforge/backend/instructions/compute/primitives/nvidia.py'),
+             "    v = writer.thread_id('x')",
+             "    return writer.rawexpr('threadIdx.x', type_=INDEX, hint='a')\n"
+             "    v = writer.thread_id('x')", 1)),
+        ('the wrap is dropped from the index',
+         sub(Path('src/tensorforge/backend/instructions/compute/primitives/nvidia.py'),
+             '    if mod is not None:', '    if False:', 1)),
+        ('the stride is dropped from the index',
+         sub(Path('src/tensorforge/backend/instructions/compute/primitives/nvidia.py'),
+             '    if scale != 1:', '    if False:', 1)),
         ('a staged fragment goes back to a varalloc name',
          sub(Path('src/tensorforge/backend/instructions/compute/primitives/nvidia.py'),
              '                                        Areg[kkk] = A(writer, None, i // threads, k + kk + kkk)',
@@ -616,10 +772,10 @@ GROUPS = {
              'return threads == 32 and dtype in (Datatype.F32, Datatype.F64) and not sparse',
              'return threads == 32 and not sparse', 1)),
         ('the gate bypassed entirely',
-         sub(Path('src/tensorforge/backend/instructions/compute/multilinear.py'),
-             '            return nvidia.supports(self._num_threads, self._idest.datatype,\n'
-             '                                   self._second_operand_is_sparse())',
-             '            return True', 1)),
+         sub(Path('src/tensorforge/backend/instructions/compute/primitives/nvidia.py'),
+             '    if ENABLED and supports(shape.threads, shape.accumulator, '
+             'shape.sparse):',
+             '    if ENABLED:', 1)),
         ('the deployment switch flipped without re-recording',
          sub(Path('src/tensorforge/backend/instructions/compute/primitives/nvidia.py'),
              'ENABLED = False', 'ENABLED = True', 1)),
@@ -698,8 +854,16 @@ GROUPS = {
              '    return RegisterLayout((LaneAxis(max(step // 2, 1), 1),))\n', 1)),
         ('the transpose skipped, MFMA fed a raw load',
          sub(PKG / 'codegen.py',
-             '                        tA[k // threads] = transpose(regs)',
-             '                        tA[k // threads] = list(regs)')),
+             '                        reached = transpose(regs)',
+             '                        reached = list(regs)')),
+        ('the gap answered as already closed',
+         sub(PKG / 'relayout.py',
+             '    if gap == ():\n        return 0',
+             '    return 0\n    if gap == ():\n        return 0')),
+        ('a gap this instruction does not close emitted anyway',
+         sub(PKG / 'relayout.py',
+             '    return 1 if gap == transpose_exchange(ext) else None',
+             '    return 1')),
         ('the broadcast lane taken from the table, not the algorithm',
          sub(PKG / 'codegen.py',
              '                    params = dict(params, lane=i // step)',
@@ -761,14 +925,44 @@ def run(group, target, mutations):
     return caught, len(mutations)
 
 
+def _dry_run(wanted):
+    """Report anchors that no longer match, without running a test.
+
+    Applying a mutation costs a full test run; checking that its anchor is
+    still findable costs a string search.  The second is the part that rots --
+    five anchors had gone stale before anyone counted -- and separating them
+    is what lets a test assert freshness without taking minutes.
+    """
+    stale = 0
+    for group in wanted:
+        target, mutations = GROUPS[group]
+        for name, mutation in mutations:
+            try:
+                # `make()` computes the mutated text and writes nothing, so
+                # asking it is enough and there is nothing to undo.
+                mutation()
+            except AssertionError as exc:
+                print(f'  {group}: {name}: {exc}')
+                stale += 1
+    print(f'\n{stale} anchor(s) no longer match')
+    return 1 if stale else 0
+
+
 def main():
     _recover()
-    wanted = sys.argv[1:] or list(GROUPS)
-    total = hit = 0
+    argv = sys.argv[1:]
+    dry = '--dry-run' in argv
+    if dry:
+        argv = [a for a in argv if a != '--dry-run']
+    wanted = argv or list(GROUPS)
     for group in wanted:
         if group not in GROUPS:
             print(f'unknown group {group!r}; have: {", ".join(GROUPS)}')
             return 2
+    if dry:
+        return _dry_run(wanted)
+    total = hit = 0
+    for group in wanted:
         target, mutations = GROUPS[group]
         c, n = run(group, target, mutations)
         hit += c

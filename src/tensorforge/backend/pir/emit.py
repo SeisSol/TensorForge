@@ -179,7 +179,8 @@ class Emitter:
             # carried pointer, which is a narrowing conversion the compiler
             # rejects rather than a wrong answer -- but only because the
             # element type happened to be arithmetic.
-            return f'{t.elem.ctype()}*'
+            const = 'const ' if getattr(t, 'readonly', False) else ''
+            return f'{const}{t.elem.ctype()}*'
         raise IRError(f'cannot render type {t!r}')
 
     # -- lexic ------------------------------------------------------------- #
@@ -592,15 +593,22 @@ class Emitter:
                 nbytes = elems * self.elem_size(s.copy_dst)
                 w(self._async_lex.copy_async(f'&{dst_b}[{dst_a}]',
                                              f'&{src_b}[{src_a}]', nbytes))
-                commit = self._async_lex.commit_async()
-                if commit:
-                    w(commit)
             elif elems == 1:
                 w(f'{dst_b}[{dst_a}] = {src_b}[{src_a}];')
             else:
                 c = f'c{s.target[0].id}'
                 w(f'for (int {c} = 0; {c} < {elems}; ++{c}) '
                   f'{{ {dst_b}[({dst_a}) + {c}] = {src_b}[({src_a}) + {c}]; }}')
+            return
+
+        if op == Op.COMMIT_ASYNC:
+            # Nothing when the copies took the synchronous fallback: there is
+            # no group to close, and `_decide_async` has already made that
+            # decision once for the whole body.
+            if self._async_lex is not None:
+                txt = self._async_lex.commit_async()
+                if txt:
+                    w(txt)
             return
 
         if op == Op.WAIT:
@@ -711,6 +719,18 @@ class Emitter:
 
         if op == Op.IF:
             self._emit_if(s)
+            return
+
+        # A pure operation with several results.  The vendor spells it as a
+        # call writing through references, which is a property of the
+        # signature and not of the operation -- keeping that spelling out of
+        # the IR is what lets CSE hash-cons it.
+        if len(s.target) > 1:
+            for t in s.target:
+                w(f'{self.ctype(t.type, t)} {self.name(t)}{{}};')
+            outs = ', '.join(self.name(t) for t in s.target)
+            args = ', '.join(self.operand(a) for a in s.args)
+            w(f'{op}({outs}, {args});')
             return
 
         # generic pure op

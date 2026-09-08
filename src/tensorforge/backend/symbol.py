@@ -43,6 +43,19 @@ class SparseDataView:
   def __init__(self, shape: List[int], permute: Union[List[int], None], ssp):
     pass
 
+def slots_for(lower: int, upper: int, num_threads: int,
+              lead_width: int = 1) -> int:
+    """Per-lane floats a distributed range `[lower, upper)` occupies.
+
+    The one statement of the rule.  `DataView.get_dim_slots` reads it for
+    addressing and the two allocation sites for sizing, which is the property
+    that has to hold: a stride and an allocation derived from different
+    formulas alias the next dimension onto this one.
+    """
+    span = num_threads * lead_width
+    return lead_width * (-(-upper // span) - lower // span)
+
+
 class DataView:
   def __init__(self, shape: List[int], permute: Union[List[int], None], bbox: BoundingBox = None):
     self.shape = shape
@@ -119,21 +132,35 @@ class DataView:
     """
     return num_threads if explicit_simd else 1
 
-  def get_dim_slots(self, index, num_threads):
-    """Per-thread slots a thread-distributed dimension occupies.
+  def get_dim_slots(self, index, num_threads, lead_width=1):
+    """Per-thread floats a thread-distributed dimension occupies.
 
-    `ceil(u/T) - floor(l/T)`, i.e. whole thread-blocks are rebased away and the
-    ragged ends survive as predicates (see LeadLoop.write).  This is *not*
-    `ceil((u-l)/T)` as soon as [l,u) straddles a block boundary --- for
-    l=31, u=33, T=32 the two give 2 and 1 --- and the allocation side
-    (MultilinearInstruction._iregs, MultilinearBuilder._alloc_register_array)
-    has always used the former.  Addressing has to agree with allocation, or
-    the next dimension aliases onto this one.
+    `w * (ceil(u/(T*w)) - floor(l/(T*w)))`: whole *slots* are rebased away and
+    the ragged ends survive as predicates (see LeadLoop.write).  A slot is
+    `T*w` elements, of which this lane holds `w`, so the span to divide by and
+    the count to multiply back are both the width -- and at `w == 1` this is
+    character for character the expression that was here.
+
+    Not `ceil((u-l)/(T*w)) * w` either, as soon as [l,u) straddles a slot
+    boundary: for l=31, u=33, T=32, w=1 the two give 2 and 1.
+
+    The width is what this was missing.  It returned `ceil(u/T)`, which is the
+    lane's slot count and not its float count, and the two differ whenever
+    `T*w` does not divide the extent the way `T` does: at u=12, T=4, w=4 it
+    said 3 where a four-wide read needs 4.  Consecutive non-lead indices then
+    addressed overlapping windows -- column 1 starting one register inside
+    column 0 -- which is every destination cell wrong on 12, 20, 24, 40 and 48
+    and none on 8, 16, 32 and 64, where the two expressions happen to agree.
+
+    Addressing has to agree with allocation, or the next dimension aliases
+    onto this one.  Both allocation sites (`MultilinearInstruction._iregs`,
+    `MultilinearBuilder._alloc_register_array`) call here now rather than
+    restating it; they were the two copies that had to be found and changed
+    together, and finding one of them is how this stayed wrong.
     """
     assert index >= 0 and index < len(self.shape)
-    lower = self._bbox.lower()[index]
-    upper = self._bbox.upper()[index]
-    return -(-upper // num_threads) - lower // num_threads
+    return slots_for(self._bbox.lower()[index], self._bbox.upper()[index],
+                     num_threads, lead_width)
 
   def get_dim_strides(self, mask=[]):
     """Strides of the buffer this view describes.
@@ -703,6 +730,26 @@ class LeadLoop:
     """
     return writer.lane_index(self.threads, self.stride, hint='lead')
 
+  #: Execution sizes the hardware encodes, largest first.
+  #:
+  #: `Exec_size` is a three-bit field: 1, 2, 4, 8, 16, 32 and nothing else
+  #: (`documentation/visa/instructions/MOV.md`).  An operation on a vector of
+  #: any other length is issued as several -- a 24-wide one as 16 + 8 -- while
+  #: the same 24 channels of a 32-wide instruction are one issue with the
+  #: other eight masked off, the mask being bits [7..4] of the same field and
+  #: therefore free.
+  EXEC_SIZES = (32, 16, 8, 4, 2, 1)
+
+  @classmethod
+  def issues(cls, width: int) -> int:
+    """How many instructions an operation on `width` elements is issued as."""
+    count, left = 0, width
+    for size in cls.EXEC_SIZES:
+      while left >= size:
+        count += 1
+        left -= size
+    return count
+
   def _narrow_possible(self, writer) -> bool:
     """Whether this lowering can replace a guard with a narrower vector."""
     return bool(getattr(writer, '_explicit_simd', lambda: False)())
@@ -1038,6 +1085,14 @@ class Symbol:
     #: and the destination accumulator.  The compute instructions read it from
     #: here rather than keeping their own copy.
     self.lead_dims = [0]
+    #: How many adjacent lead-dimension elements one lane of this symbol's
+    #: image holds.  A property of the *image*, not of whoever is walking it:
+    #: every loop over it and every fixed-element access has to resolve
+    #: positions the same way, and three separate bugs came from one of them
+    #: using the cyclic rule while the rest used the blocked one -- the store
+    #: reading back what the compute wrote, `build` double-scaling a slot, and
+    #: a peeled tail element asking the wrong lane for its value.
+    self.lead_width = 1
     #: How this symbol's register image is distributed across the wave, when
     #: that is known.  Set by whoever fills it -- `store_linear` is the only
     #: filler that does so today -- and reported by `load_linear`, so that a
@@ -1261,7 +1316,33 @@ class Symbol:
                             stride * lanes, lead=True))
           if lane_shift:
             parts.append(lane_shift * stride)
-          stride *= self.data_view.get_dim_slots(i, self.num_threads) * lanes
+          stride *= self.data_view.get_dim_slots(
+              i, self.num_threads, self.lead_width) * lanes
+        elif (i in self.lead_dims
+              and isinstance(index[i], (int, np.integer))):
+          # A *fixed element* of the distributed dimension, which
+          # `unwrap_lead` does not recognise -- it looks for a `LeadIndex`,
+          # and this is a bare integer.  It used to fall through to the branch
+          # below, which treats the index as an ordinary coordinate and takes
+          # it as the register address unchanged: a store to element 34 of a
+          # 35-row operand wrote `r[34]` into an array with eight floats per
+          # lane.
+          #
+          # Nothing reached it before.  A fixed lead element only arises from
+          # a peeled tail, and the tail is what the vectorisation introduced;
+          # the same resolution in `load` was added for the same reason and
+          # this is its other half, so a peeled element is now written and
+          # read at the same place.
+          #
+          # No guard: each lane has its own array, so the lanes that do not
+          # own the element write their own copy and nothing reads it back --
+          # the owner is picked by the `readlane` on the way out.
+          w = self.lead_width
+          slot = (int(index[i]) // w) // self.num_threads
+          parts.append(term(w * slot + int(index[i]) % w,
+                            offsets[i] // self.num_threads, stride, lead=True))
+          stride *= self.data_view.get_dim_slots(i, self.num_threads,
+                                                 self.lead_width)
         else:
           parts.append(term(index[i], offsets[i], stride, lead=True))
           stride *= self.data_view.get_dim_size(i)
@@ -1329,7 +1410,33 @@ class Symbol:
           terms.append(writeOffset(lead_index,
                                    offsets[i] // self.num_threads
                                    - shift // self.num_threads, stride))
-          stride *= self.data_view.get_dim_slots(i, self.num_threads)
+          stride *= self.data_view.get_dim_slots(i, self.num_threads,
+                                                 self.lead_width)
+        elif (i in self.lead_dims
+              and isinstance(index[i], (int, np.integer))):
+          # A *fixed element* of the distributed dimension.  It used to fall
+          # through to the branch below, which treats the index as an ordinary
+          # coordinate and takes it as the register address unchanged -- so a
+          # store to element 34 of a 35-row operand wrote `r[34]` into an array
+          # with eight floats per lane.
+          #
+          # Nothing reached it before: a fixed lead element only arises from a
+          # peeled tail, and the tail is what the vectorisation introduced.
+          # The resolution is the one `load` already uses for the same case,
+          # and it lives here so both go through it: the element first divides
+          # by the blocking, then distributes, and the remainder picks the
+          # component inside the lane's vector.
+          #
+          # No guard.  Each lane has its own array, so the lanes that do not
+          # own the element write their own copy and nothing reads it back --
+          # the owner is selected by the `readlane` on the way out.
+          w = self.lead_width
+          slot = (int(index[i]) // w) // self.num_threads
+          comp = int(index[i]) % w
+          terms.append(writeOffset(w * slot + comp,
+                                   offsets[i] // self.num_threads, stride))
+          stride *= self.data_view.get_dim_slots(i, self.num_threads,
+                                                 self.lead_width)
         else:
           terms.append(writeOffset(index[i], offsets[i], stride))
           stride *= self.data_view.get_dim_size(i)
@@ -1375,7 +1482,13 @@ class Symbol:
           # SIMD block-aligned sparsity
 
           offset = self.data_view.get_dim_offsets()[leadidx]
-          strindex = self.build_address(writer, context, index[leadidx])
+          # The lead dimension's own index, not an address: what follows
+          # compares it against plain dimension bounds -- the run's `rngS`
+          # and `rngE`, and the lane block's `bndS` and `bndE` -- so it has
+          # to be counted in elements of that dimension.  `build_address`
+          # answers a different question, over the whole index tuple and
+          # with each term already scaled by its stride.
+          strindex = index[leadidx].build(writer, context)
           rngs = []
           rng = None
           startValue = None
@@ -1398,9 +1511,26 @@ class Symbol:
             rngs += [(rng, self.data_view.get_dim_size(leadidx))]
 
           if len(rngs) > 0:
+            # The layout of what these loads produce is the layout of the
+            # lead index, so it is asked of the index tuple.  The address is
+            # derived from it and carries no layout of its own.
             idxvar = writer.op('sub', INDEX, strindex, offset, hint='idx')
 
             lead = index[leadidx]
+            if not isinstance(lead._nonlead, (int, np.integer)):
+              # The slot has to be a number here: what follows sorts the runs
+              # into those that cover the lane block, those that clip it and
+              # those that miss it, and that is a comparison against the
+              # block's bounds.  A slot that is a loop induction variable has
+              # no bounds until the loop runs, and multiplying its name by the
+              # block width is Python string repetition -- it does not raise
+              # where it goes wrong, it raises two lines further on comparing
+              # a number to a sixty-character string.
+              raise GenerationError(
+                  f'{self.name}: a sparse lead dimension needs its slot known '
+                  f'when the code is written, and this one is the induction '
+                  f'variable {lead._nonlead!r} of a loop that was not '
+                  f'unrolled')
             bndS = lead._nonlead * lead._block
             bndE = (lead._nonlead + 1) * lead._block
 
@@ -1413,27 +1543,48 @@ class Symbol:
               if rngS <= bndS and rngE >= bndE:
                 assert wrote is None
                 wrote = writer.load(self, validx, type_=ScalarType(self.get_fptype()), hint='data',
-                                          layout=layout_of(validx, self.num_threads))
+                                          layout=layout_of(index, self.num_threads))
                 # writer.access_stmt(f'{variable} = {self.name}[{validx}];', self, Effect.READ)
               elif rngE > bndS and rngS < bndE:
                 cond1 = writer.op('ge', BOOL, idxvar, rngS)
                 cond2 = writer.op('lt', BOOL, idxvar, rngE)
                 cond = writer.op('and', BOOL, cond1, cond2, hint='cond')
 
-                sel = writer.if_else(cond, (ScalarType(self.get_fptype()),))
-
-                with sel.then():
+                # A run that only clips the lane block is a choice per lane,
+                # and how it is spelled decides what it costs.  An if/else
+                # branches, and on a band operand that came to 144 more
+                # branches than the dense build of the same shape, all inside
+                # the inner loop.  A select is a ternary, which predicates.
+                #
+                # The price is that the load is issued on every lane, so it
+                # has to be in bounds even where its value is discarded.
+                # `validx` runs over `value - rngS + idx` for `idx` across the
+                # whole block, and the ends of that are known here: when they
+                # stay inside the stored region nothing more is needed, and
+                # when they do not the branch is what keeps the read legal.
+                lo = (value - rngS) + bndS
+                hi = (value - rngS) + bndE - 1
+                if 0 <= lo and hi < self.obj.storage_volume():
                   local_load = writer.load(self, validx, type_=ScalarType(self.get_fptype()), hint='data',
-                                          layout=layout_of(validx, self.num_threads))
-                  sel.yield_(local_load)
-                  # writer.access_stmt(f'{variable} = {self.name}[{validx}];', self, Effect.READ)
-                with sel.otherwise():
-                  if wrote is None:
-                    sel.yield_(writer.const(0.0, ScalarType(self.get_fptype())))
-                  else:
-                    sel.yield_(wrote)
+                                          layout=layout_of(index, self.num_threads))
+                  other = (wrote if wrote is not None
+                           else writer.const(0.0, ScalarType(self.get_fptype())))
+                  wrote = writer.op('select', ScalarType(self.get_fptype()),
+                                    cond, local_load, other, hint='masked')
+                else:
+                  sel = writer.if_else(cond, (ScalarType(self.get_fptype()),))
 
-                wrote = sel.result
+                  with sel.then():
+                    local_load = writer.load(self, validx, type_=ScalarType(self.get_fptype()), hint='data',
+                                            layout=layout_of(index, self.num_threads))
+                    sel.yield_(local_load)
+                  with sel.otherwise():
+                    if wrote is None:
+                      sel.yield_(writer.const(0.0, ScalarType(self.get_fptype())))
+                    else:
+                      sel.yield_(wrote)
+
+                  wrote = sel.result
     else:
       if isinstance(index[pos], (int, np.int32, np.int64)):
         runIdx[pos] = index[pos]
@@ -1542,7 +1693,29 @@ class Symbol:
       writer(f'tensorforge::VectorT<{self.get_fptype()}, {vec}> {variable} = *(tensorforge::VectorT<{self.get_fptype()}, {vec}>*)&{access};')
     return None
 
-  def _record_linear_layout(self, index, vec):
+  def _note_layout(self, layout, writer=None):
+    """Record how this symbol's image is distributed, or give up knowing.
+
+    Shared by the fill paths, so two of them cannot record different claims
+    about the same shape in different words.  Two fills that disagree leave it
+    unknown: a silent overwrite would hand the second one's claim to consumers
+    of the first, and unknown is the safe answer.
+
+    The claim is registered for undo, because it belongs to the fill that
+    makes it true -- a speculative attempt that gets discarded emitted no
+    fill.
+    """
+    if layout is None:
+      return
+    if writer is not None and hasattr(writer, 'on_rollback'):
+      previous = self.layout
+      writer.on_rollback(lambda: setattr(self, 'layout', previous))
+    if self.layout is not None and self.layout != layout:
+      self.layout = None
+      return
+    self.layout = layout
+
+  def _record_linear_layout(self, index, vec, threads=None, writer=None):
     """Note the distribution a linearized fill leaves behind.
 
     `GlbToRegLoader` stages a flat run: it reads `glb[i + threadIdx.x * g]`
@@ -1565,13 +1738,34 @@ class Symbol:
     unknown.
     """
     from tensorforge.backend.pir.core import LaneAxis, RegisterLayout
-    if self.stype != SymbolType.Register or self.num_threads is None:
+    # `threads` from the fill when the symbol cannot say.  A register image
+    # knows its own lane count; a shared one does not -- `num_threads` is None
+    # there, because a shared buffer is not owned by one multiplication.  The
+    # loader that writes the run does know, and it is the only party that
+    # does, so it passes it.
+    #
+    # Without this the claim was simply absent for shared images, and `None`
+    # means unknown: every consumer had to fail closed.  Invisible under SPMD,
+    # where an unknown distribution costs only precision -- and fatal under an
+    # explicit vector, where a declaration cannot be written without one.  24
+    # values in `accumulate_chain` alone.
+    threads = threads if threads is not None else self.num_threads
+    if self.stype not in (SymbolType.Register, SymbolType.SharedMem):
       return
-    if not isinstance(index, int) or index % (self.num_threads * vec) != 0:
+    if threads is None:
+      return
+    if not isinstance(index, int) or index % (threads * vec) != 0:
       # A fill that does not start on a slot boundary distributes something
       # this function has not established.
       return
-    layout = RegisterLayout((LaneAxis(self.num_threads, 1),))
+    layout = RegisterLayout((LaneAxis(threads, 1),))
+    # The claim belongs to the fill that makes it true, so a speculative fill
+    # that gets discarded has to take it back.  Without this the second
+    # attempt sees a symbol the first did not, and the same case generates two
+    # different kernels.
+    if writer is not None and hasattr(writer, 'on_rollback'):
+      previous = self.layout
+      writer.on_rollback(lambda: setattr(self, 'layout', previous))
     if self.layout is not None and self.layout != layout:
       # Two fills disagreeing about the same register image is a defect, and
       # a silent overwrite would hand the second one's claim to consumers of
@@ -1581,14 +1775,14 @@ class Symbol:
     self.layout = layout
 
   def store_linear(self, writer, context: Context, variable, index, vec = 1,
-                   base: str = None):
+                   base: str = None, threads=None):
     # `base` overrides the pointer written through, without changing the
     # symbol.  A rotating shared-memory buffer declares its pointer at the
     # stage consumers read and fills a different one -- see
     # AbstractShrMemWrite.write_base().
     name = base or self.name
     addrs = []
-    self._record_linear_layout(index, vec)
+    self._record_linear_layout(index, vec, threads, writer)
     if self.stype == SymbolType.Register:
       addr = index // self.num_threads
     else:
@@ -1636,7 +1830,35 @@ class Symbol:
     else:
       writer.access_stmt(f'{access} = {variable};', self, Effect.WRITE, args=_operands(variable, addrs))
 
-  def load(self, writer, context: Context, variable, index: List[Union[str, int, Immediate, Variable, LeadIndex]], nontemp):
+  def owning_lane(self, index):
+    """Which lane holds a fixed element of the distributed dimension.
+
+    `None` when the question does not arise: a symbol that is not
+    register-resident, a lead index that is still distributed, or an index
+    this cannot resolve to a number.
+
+    One function because three callers need the same answer and have already
+    disagreed twice.  `load` computes it to broadcast the element; `store`
+    computes it to guard the write to the lane that holds it; and
+    `StoreRegToGlb` needs it to decide whether either is required at all.  The
+    store used to derive it separately and got `threadIdx.x == 32` in a
+    32-lane wave, which is the bug this shape removes rather than fixes again.
+    """
+    if self.stype not in (SymbolType.Register, SymbolType.Scratch):
+      return None
+    if len(self.lead_dims) != 1:
+      return None
+    idx = index[self.lead_dims[0]]
+    lead = unwrap_lead(idx)
+    if lead is not None:
+      return None                 # still distributed; every lane has a share
+    if isinstance(idx, Immediate):
+      idx = idx._value
+    if not isinstance(idx, (int, np.integer)):
+      return None
+    return (int(idx) // self.lead_width) % self.num_threads
+
+  def load(self, writer, context: Context, variable, index: List[Union[str, int, Immediate, Variable, LeadIndex]], nontemp, broadcast: bool = True):
     addrs = []
     if self.stype == SymbolType.Data or (not self.obj.is_dense() and not isinstance(self.obj.spp, BoundingBoxSPP)):
       if variable is None:
@@ -1691,10 +1913,31 @@ class Symbol:
           if isinstance(idx, Variable):
             bc_lane, bc_index = idx.write_nonlead(), list(index)
           else:
+            # Which lane owns a fixed element, and where in its registers it
+            # sits.  At `lead_width == 1` this is the cyclic rule that was
+            # here before; wider, a lane holds `w` adjacent elements, so the
+            # element first divides by the width and only then distributes.
+            #
+            # This is the resolution a peeled tail element goes through -- the
+            # loop hands it over as a plain integer -- so getting it from the
+            # symbol rather than from the caller is what makes the two agree
+            # without the peel having to know anything.
+            w = self.lead_width
+            bc_lane = (idx._value // w) % self.num_threads
+            # The register float, resolved here rather than carried as a
+            # width: this access reads *one* element, so it has to stay
+            # scalar.  Handing over a width-`w` index would make the load
+            # vector-typed and the value would be the lane's whole pair --
+            # which the generated code then assigned to a scalar slot, a
+            # type error the C++ compiler would have caught and the snapshot
+            # tests would not.
+            #
+            # `w * slot + component`, pre-scaled, so `build_nonlead` returns
+            # it unchanged.
             bc_index = list(index)
             bc_index[self.lead_dims[0]] = LeadIndex(
-                idx._value // self.num_threads, self.num_threads, 1)
-            bc_lane = idx._value % self.num_threads
+                w * ((idx._value // w) // self.num_threads) + idx._value % w,
+                self.num_threads, 1)
       read_index = bc_index if bc_index is not None else index
 
       if variable is None and self.stype in (
@@ -1733,7 +1976,14 @@ class Symbol:
                             align=None if w == 1 else RELAXED,
                             layout=layout_of(read_index, self.num_threads),
                             nontemporal=nontemp)
-        if bc_lane is None:
+        if bc_lane is None or not broadcast:
+          # `broadcast=False` keeps the register index and drops the
+          # cross-lane read of it.  The caller is then saying it will use the
+          # value only in the lane that owns it -- which is what a store
+          # guarded to that lane does, and for which the shuffle is pure
+          # waste.  The index is unchanged either way: `bc_index` is where the
+          # element sits in the owning lane's registers, and that lane reading
+          # its own is the same number the broadcast would have handed out.
           return value
         # A broadcast is a load *wrapped* in a vendor intrinsic, and it used
         # to be spelled whole: the buffer named inside a string, which is what
@@ -1817,6 +2067,20 @@ class Symbol:
                   and self.stype in (SymbolType.Register, SymbolType.Scratch,
                                      SymbolType.Global, SymbolType.SharedMem))
 
+    if structured and self.stype in (SymbolType.SharedMem,
+                                    SymbolType.Register):
+      # The third fill path, and the third place the same statement was
+      # missing.  A shared image is filled linearly by the loader
+      # (`store_linear`), in bulk by the transfer, or -- here -- one element at
+      # a time by a compute instruction writing an intermediate out of its
+      # registers.  The first two record how the image ends up distributed;
+      # this one did not, so an image written this way read back as unknown.
+      #
+      # Derivable, unlike the linear paths: the index carries a `LeadIndex`,
+      # which is exactly the distribution, so this reports what `layout_of`
+      # already computes rather than restating it.
+      self._note_layout(layout_of(index, self.num_threads), writer)
+
     # Decided *before* the text address is built, not after.  `self.access()`
     # emits the address as IR ops and the last of them carries `escapes`, so
     # it survives DCE whether or not anything reads it -- building one for a
@@ -1830,10 +2094,22 @@ class Symbol:
       var = '{0}' if fmt else variable
       if self.stype == SymbolType.Global:
         if atomic:
-          assign = context.get_vm().get_lexic().atomic_store(access, var, None, self.get_fptype())
+          assign = context.get_vm().get_lexic().atomic_store(
+              context, access, var, None, self.get_fptype(),
+              lead_width_of(index))
         else:
           assign = context.get_vm().get_lexic().glb_store(access, var, nontemp)
       else:
+        # `atomic` used to reach here and be dropped: the update came out as
+        # `access = var;`, an assignment where an accumulation was asked for,
+        # with nothing said.  Nothing builds one today -- the builder only
+        # marks a `SymbolType.Global` destination atomic -- so this states the
+        # precondition rather than implementing a second path.  The shared
+        # one, when it is wanted, is `ds_add_*` and gated separately;
+        # `backend/atomics.py` names the features.
+        assert not atomic, (
+            f'atomic store to a {self.stype.name} symbol {self.name!r}: '
+            f'only global memory has an atomic path')
         assign = f'{access} = {var};'
 
     if structured:
@@ -1869,14 +2145,28 @@ class Symbol:
       # One named element of a dimension that lives in the registers, so
       # exactly one lane holds it and the others must not write.
       #
+      # *Which* lane is the question this got wrong.  It compared the thread
+      # index against the element index, and those are the same number only
+      # at `lead_width == 1`.  At width 2 a peeled element 32 produced
+      # `threadIdx.x == 32` in a 32-lane wave -- a lane that does not exist,
+      # so the accumulator for that element was never written and the store's
+      # `readlane` of it read whatever the guarded main block had left there.
+      # One wrong element per column, always the last, on every odd extent.
+      #
+      # The owning lane is `(element // width) % threads`, which is exactly
+      # what `Symbol.load` computes for `bc_lane` when it broadcasts the same
+      # element.  Taken from the symbol rather than derived here so the two
+      # cannot drift: a store that guards a different lane than the load
+      # broadcasts from is the same defect in the other direction.
+      #
       # Deliberately *not* extended to Global alongside the branch above.
-      # Global memory is shared: every lane addresses it directly and there is
-      # no lane that uniquely owns an element, so the guard would be wrong --
-      # and it also formats the index with `{...}`, which for a `VarOffset`
-      # interpolates a Python object repr (address included) straight into the
-      # generated source.  Unreachable today for register-like symbols, which
-      # is why nothing has caught it; see `VarOffset.__str__`.
-      with writer.If(f'{context.get_vm().get_lexic().thread_idx_x} == {lead}'):
+      # Global memory is shared: every lane addresses it directly, so no lane
+      # owns an element and this guard would be answering a question global
+      # memory does not ask.  What global *does* need is that exactly one lane
+      # writes -- which is a different requirement, and one only an atomic
+      # accumulation is sensitive to; see `placement.atomic_write_is_exact`.
+      owner = self.owning_lane(index)
+      with writer.If(f'{context.get_vm().get_lexic().thread_idx_x} == {owner}'):
         writer.access_stmt(assign, self, kind, args=_operands(variable, addrs), fmt=fmt)
     else:
       writer.access_stmt(assign, self, kind, args=_operands(variable, addrs), fmt=fmt)

@@ -30,13 +30,20 @@ def extract(path, kernel):
 
 
 def desugar_async(src):
-    """`cuda::memcpy_async` is the shared-memory staging; model it as a copy.
+    """The shared-memory staging, modelled as the copy it is.
 
-    `kernel_eval` skips anything with `::` --- for a pipeline object that is
-    right, but the transfer itself carries the values every consumer reads.
+    Two spellings reach here.  `cuda::memcpy_async` is the pipeline object
+    form, and `kernel_eval` skips anything with `::` --- right for the object,
+    wrong for the transfer, which carries the values every consumer reads.
+    `__pipeline_memcpy_async` is the intrinsic form and has no `::` to be
+    skipped by; it is simply a call the interpreter has no body for, and a
+    staging that silently does nothing leaves every consumer reading zeros.
     """
-    return re.sub(
+    src = re.sub(
         r"cuda::memcpy_async\(\s*&([^,]+?),\s*&([^,]+?),[^;]*\);",
+        r"\1 = \2;", src)
+    return re.sub(
+        r"__pipeline_memcpy_async\(\s*&([^,]+?),\s*&([^,]+?),[^;]*\);",
         r"\1 = \2;", src)
 
 
@@ -123,10 +130,11 @@ def run(src, inputs, shapes, storage=None):
     for name, shape in shapes.items():
         if not name.startswith("m"):
             continue
-        ashape, lower = (storage or {}).get(name, (shape, (0,) * len(shape)))
-        n = 1
-        for s_ in ashape:
-            n *= s_
+        ashape, lower, pack = _storage(storage, name, shape)
+        n = len(pack) if pack is not None else 1
+        if pack is None:
+            for s_ in ashape:
+                n *= s_
         arr = inputs.get(name)
         if arr is None:
             for idx in range(max(n, 1)):
@@ -135,6 +143,11 @@ def run(src, inputs, shapes, storage=None):
         sub = arr[tuple(slice(lo, lo + sz) for lo, sz in zip(lower, ashape))] \
             if arr.ndim else arr
         flat = _np.asarray(sub).reshape(-1, order="F")
+        if pack is not None:
+            # Stored compressed: only the cells the map names are there, in
+            # the order it names them.  Writing the box densely would put
+            # every value at the wrong slot and shorten nothing.
+            flat = flat[_np.asarray(pack)]
         for idx in range(max(n, 1)):
             mem.write(name, idx, float(flat[idx]) if idx < len(flat) else 0.0)
     m = re.search(r"&totalShrMem\[(\d+) \* threadIdx\.y", src)
@@ -178,14 +191,34 @@ def run(src, inputs, shapes, storage=None):
     return mem
 
 
+def _storage(storage, name, shape):
+    """(actual shape, bbox lower, pack map) for one tensor.
+
+    Tolerates the two-element form an older capture carries, which says the
+    tensor is stored dense over its box.
+    """
+    entry = (storage or {}).get(name)
+    if entry is None:
+        return shape, (0,) * len(shape), None
+    if len(entry) == 2:
+        return entry[0], entry[1], None
+    return entry
+
+
 def read(mem, name, shape, storage=None):
     import numpy as np
-    ashape, lower = (storage or {}).get(name, (shape, (0,) * len(shape)))
+    ashape, lower, pack = _storage(storage, name, shape)
     n = 1
     for s in ashape:
         n *= s
-    flat = np.array([mem.read(name, i) for i in range(n)])
     out = np.zeros(shape)
+    if pack is not None:
+        stored = np.array([mem.read(name, i) for i in range(len(pack))])
+        box = np.zeros(n)
+        box[np.asarray(pack)] = stored
+        flat = box
+    else:
+        flat = np.array([mem.read(name, i) for i in range(n)])
     out[tuple(slice(lo, lo + sz) for lo, sz in zip(lower, ashape))] = \
         flat.reshape(ashape, order="F")
     return out

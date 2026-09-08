@@ -34,13 +34,14 @@ AMD = (Path(__file__).parent.parent / "src" / "tensorforge" / "backend" /
 #: another file is still unreachable, and splitting a module must not be a way
 #: to launder dead code past this check.
 MODULES = ["__init__", "arch", "caps", "features", "catalog", "layouts",
-           "reorder", "relayout", "select", "emitters", "codegen", "unused"]
+           "reorder", "relayout", "select", "emitters", "codegen",
+           "exchange_codegen", "tiling", "unused"]
 
 #: What the dispatch calls into this package.  Two, and both are entry points
 #: in the same sense: one is asked before generation what has to be reserved,
 #: the other emits.  Computing reachability from the emitter alone would count
 #: the first as dead.
-ENTRIES = ["matmul", "scratch", "strategies"]
+ENTRIES = ["matmul", "scratch", "strategies", "plan"]
 
 # Unreachable on purpose.  Each entry needs a reason that says why deleting it
 # would be worse than keeping it.
@@ -68,39 +69,19 @@ KEPT_UNREACHABLE = {
     # general query and the split arithmetic have no call site yet. They lose
     # their entry here when the emitter that consumes them lands -- which is
     # what `test_allow_list_does_not_outlive_its_entries` enforces.
-    "ops_for":
-        "catalogue query; the emitter that selects from it is not written",
     "_place":
         "the table's decoder; reached only from `position`",
-    "Provenance":
-        "says whether a row is measured or derived; read by `established`",
-    "provenance":
-        "same, per operand; no emitter asks yet",
     "established":
         "the strict query an emitter uses to decline a derived layout",
-    "_index_bits":
-        "half the A/B derivation; reached only from `_derived`",
-    "_contraction_bits":
-        "the other half; reached only from `_derived`",
-    "_accumulator_precedent":
-        "looks for a unanimous D; reached only from `_derived`",
-    "_derived":
-        "rows for the generations the calculator does not reach",
     "_row":
         "measured row or derived one; reached only from `position`",
     "AXES":
         "names the operand index order for `index_terms`",
-    "Move":
-        "one register into one region of a fragment; the emitter that turns "
-        "these into `swap` and `dppUpdate` calls is not written",
-    "IDENTITY_DPP":
-        "the control that makes `dppUpdate` a merge and not a shuffle",
-    "ROW":
-        "lanes per DPP row, which is what `row_mask` selects",
-    "_swaps_for":
-        "bit mask to `swap` sequence; reached only from `fragment_moves`",
-    "fragment_moves":
-        "the reordering plan; no emitter consumes it yet",
+    "FED_BY":
+        "which accessor feeds which fragment; the names collide and the "
+        "mapping is not symmetric",
+    "accumulator_cost":
+        "prices the epilogue against the contraction loop that filled it",
     "fragment_cost":
         "prices a plan against staging or against not taking the path",
     "Term":
@@ -115,15 +96,19 @@ KEPT_UNREACHABLE = {
     "position":
         "fragment placement; the emitter that stages an operand into one is "
         "not written",
-    "covers":
-        "guards `position`; same call site, not written yet",
     "lane_batched_ops":
         "the same precondition asked of the whole catalogue; the F32 policy "
         "reaches it through MFMA_TILES instead",
-    "split_terms":
-        "split-precision arithmetic; no emitter consumes it yet",
-    "split_products":
-        "split-precision arithmetic; no emitter consumes it yet",
+    "issues":
+        "the axis count, read by the ranking through `ranking.issues` and by "
+        "the tests; this wrapper is what a caller holding a `MatrixOp` uses",
+    "spare_products":
+        "the output-axis predicate the emulated emitter needs once it can "
+        "take an entry wider than its k-vector; nothing reads it before then",
+    "fragment_layout":
+        "the same row `position` reads, in the vocabulary a value can also "
+        "be read in; nothing compares the two sides yet, which is what the "
+        "relayout solver would do",
     "NOT_MODELLED":
         "documents the catalogue's boundary; read by the LLVM cross-check",
 }

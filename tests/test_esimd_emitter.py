@@ -735,15 +735,29 @@ def test_nothing_to_combine_is_the_value_itself():
     assert _lexic().reduction('v', Operation.ADD, Datatype.F32, 16, 16) == 'v'
 
 
-def test_a_segmented_reduction_is_declined():
-    """The SPMD butterfly stops at `subblock`, leaving each group its own
-    answer.  Expressible here as a two-dimensional region, but nothing asks
-    for it -- every reduction in the corpus is block=16, subblock=1 -- and an
-    untested butterfly for a case with no caller is how the old `simd_mode`
-    branches came about."""
+@pytest.mark.parametrize('sub', [2, 4, 8])
+def test_a_segmented_reduction_keeps_its_group(sub):
+    """`subblock > 1` is a different shape, not a narrower one.
+
+    A group survives, so the answer is a *vector* -- unlike the collapse,
+    which is a scalar -- and the intrinsics do not answer it: `reduce` and
+    `hmax` return one value for the whole thing.  `segmentedReduction` in
+    `isycl.h` is the butterfly, and `tests/cpp/esimd_reduction.cpp` checks it
+    computes what the CUDA shuffle version computes.
+    """
     from tensorforge.common.operation import Operation
-    with pytest.raises(NotImplementedError, match='segmented'):
-        _lexic().reduction('v', Operation.ADD, Datatype.F32, 16, 4)
+    out = _lexic().reduction('v', Operation.ADD, Datatype.F32, 16, sub)
+    assert f'segmentedReduction<' in out and f', 16, {sub}, float>' in out
+
+
+def test_the_segmented_form_covers_the_bitwise_operations():
+    """It goes through `ReductionOperation`, which `base.h` defines for every
+    backend -- so unlike the collapse, this shape is not limited to the four
+    the ESIMD intrinsics happen to have."""
+    from tensorforge.common.operation import Operation
+    for op in (Operation.XOR, Operation.AND, Operation.OR):
+        out = _lexic().reduction('v', op, Datatype.I32, 16, 4)
+        assert 'segmentedReduction<' in out
 
 
 def test_bitwise_reductions_have_no_entry_point():
@@ -759,3 +773,73 @@ def test_spmd_sycl_still_declines_and_says_why():
     from tensorforge.common.operation import Operation
     with pytest.raises(NotImplementedError, match='sub-group size'):
         _lexic(simd=False).reduction('v', Operation.ADD, Datatype.F32, 16)
+
+
+# --------------------------------------------------------------------------
+# a change of lane count is not a movement
+# --------------------------------------------------------------------------
+
+def test_the_lane_count_does_not_change_where_an_element_lives():
+    """Under an explicit vector, an element's address is its index.
+
+    `lane_offset` contributes 0 -- the work-item owns the whole dimension --
+    and the slot multiplier *is* the lane count, so element `e` of a lead axis
+    sits at `slot * lanes + lane = e` whatever `lanes` is.  Two readers with
+    different lane counts therefore see the same storage chunked differently,
+    and going between them moves nothing.
+
+    Not so under SPMD, where `lane_offset` is the thread index: there
+    `LaneAxis(32)` and `LaneAxis(16)` put element `e` in different *threads*,
+    and crossing between them is a shuffle.  Which is why the census counts
+    2142 of these as relayouts -- the category is right for the model it was
+    written for.
+    """
+    def address(element, lanes):
+        return (element // lanes) * lanes + element % lanes
+
+    for a, b in ((32, 16), (24, 9), (16, 32), (4, 16)):
+        assert all(address(e, a) == address(e, b) for e in range(256)), (a, b)
+
+
+def test_spmd_puts_the_same_element_in_a_different_thread():
+    """The counterpart, so the asymmetry is stated rather than implied."""
+    def thread_of(element, lanes):
+        return element % lanes
+
+    assert thread_of(20, 32) != thread_of(20, 16)
+
+
+# --------------------------------------------------------------------------
+# what a vector width costs to issue
+# --------------------------------------------------------------------------
+
+def test_only_powers_of_two_are_one_issue():
+    """`Exec_size` is a three-bit field: 1, 2, 4, 8, 16, 32 and nothing else.
+
+    So an operation on a 24-wide vector is issued as 16 + 8 -- two
+    instructions -- while the same 24 channels of a 32-wide one are a single
+    issue with eight masked off, the mask being bits [7..4] of the same field
+    and therefore free.  See `documentation/visa/instructions/MOV.md`.
+    """
+    from tensorforge.backend.symbol import LeadLoop
+    for width in LeadLoop.EXEC_SIZES:
+        assert LeadLoop.issues(width) == 1
+    for width in (3, 6, 9, 12, 20, 24):
+        assert LeadLoop.issues(width) == 2
+
+
+def test_the_narrowed_widths_are_the_expensive_ones():
+    """Which is the tension `_narrow` sits in.
+
+    Replacing a guard with a shorter vector is right for *correctness* -- a
+    `simd_mask` is not a branch condition, and the store would have been
+    predicated on one.  It is not automatically right for cost: 360 of the
+    706 narrowings on the corpus land on a length the hardware cannot issue
+    in one go, and the largest bucket is 24, which is two issues where a
+    masked 32 would be one.
+    """
+    from tensorforge.backend.symbol import LeadLoop
+    # the widths `_narrow` actually chooses, and what they cost
+    assert LeadLoop.issues(24) == 2 and LeadLoop.issues(32) == 1
+    assert LeadLoop.issues(12) == 2 and LeadLoop.issues(16) == 1
+    assert LeadLoop.issues(9) == 2 and LeadLoop.issues(16) == 1

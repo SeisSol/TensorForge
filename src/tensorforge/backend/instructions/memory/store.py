@@ -264,12 +264,42 @@ class StoreRegToGlb(AbstractInstruction):
         needsLoad = all(not isinstance(index, Immediate) or (src_bbox.lower()[i] <= index._value and src_bbox.upper()[i] > index._value) for i,index in enumerate(indices))
         dest_indices = [add_offset(x, self._dest_offset[i])
                         for i, x in enumerate(indices)]
-        if needsLoad:
-          value = self._src.load(writer, self._context, None, indices, False)
-        else:
-          value = writer.const(0) # TODO: dtype
 
-        self._dest.store(writer, self._context, value, dest_indices, allow_nontemporal, self._atomic)
+        def emit():
+          if needsLoad:
+            value = self._src.load(writer, self._context, None, indices, False,
+                                   broadcast=owner is None)
+          else:
+            value = writer.const(0) # TODO: dtype
+          self._dest.store(writer, self._context, value, dest_indices,
+                           allow_nontemporal, self._atomic)
+
+        # A lead index the loop handed over as a plain integer -- the peeled
+        # tail of a widened lead dimension -- names one element, and one lane
+        # holds it.  Global memory has no owner of its own, so `Symbol.store`
+        # cannot work this out for itself the way it does for a register
+        # destination; the source symbol knows and this is where both are in
+        # scope.
+        #
+        # The whole body goes inside the branch rather than the store alone,
+        # which is what makes the shuffle disappear instead of moving.  The
+        # broadcast exists so every lane has an element only one of them
+        # holds; with the write guarded to that lane it is reading its own
+        # register, and `readlane` is `__shfl_sync` over the full warp mask,
+        # so leaving it outside would have been a shuffle whose partners are
+        # in a branch they do not take.
+        #
+        # Without the guard every lane stored the element.  Under `=` that is
+        # the same value written `threads` times and the result is right;
+        # under `+=` it is the contribution counted `threads` times, which is
+        # why `atomic_write_is_exact` refused a widened lead at all.
+        owner = self._src.owning_lane(indices) if needsLoad else None
+        if owner is None:
+          emit()
+        else:
+          with writer.If(f'{self._context.get_vm().get_lexic().thread_idx_x}'
+                         f' == {owner}'):
+            emit()
 
       if not any(manual) and self._context.get_vm().get_hw_descr().vendor in ['amd'] and False:
         pass

@@ -21,6 +21,7 @@ import pytest
 from tensorforge.backend.instructions.compute.primitives import intel
 from tensorforge.common.basic_types import Datatype
 from tensorforge.backend.instructions.compute.matmul import MatmulOperands
+from tensorforge.backend.instructions.compute import split
 from tensorforge.backend.instructions.compute.strategy import (
     ComputeShape, Strategy)
 
@@ -116,32 +117,31 @@ def test_fp64_has_no_dpas():
     assert intel.atom_for(Datatype.F64) is None
 
 
-def test_a_sparse_operand_is_not_a_fragment():
-    assert not intel.supports(16, Datatype.F32, True)
+def test_a_sparse_operand_is_still_servable():
+    """It disqualifies DPAS -- a packed operand has no fragment to read -- and
+    not the broadcast chain, which reads `B` by linear index and replicates
+    one lane at a time.  Refusing both over a property only one of them cares
+    about sent every sparse operator to the generic loop; `strategies` drops
+    MATRIX instead."""
+    assert intel.supports(16, Datatype.F32, True)
 
 
 def test_fp32_is_emulated_through_tf32():
-    assert intel.atom_for(Datatype.F32) is intel.ATOMS['tf32']
+    assert intel.atom_for(Datatype.F32).name == 'tf32'
     assert intel.TF32_TERMS == 3
+    # And it is that because of the split, not because a constant says so.
+    assert intel.TF32_SPLIT_TERMS == 2
+    assert intel.TF32_TERMS == len(split.products(intel.TF32_SPLIT_TERMS))
 
 
-def test_a_sparse_operand_falls_through():
-    """The register path contracts over B's lanes, and a sparse operand is
-    loaded by linear index rather than as a lane-distributed vector.  Declining
-    sends the caller to the generic path, which handles it.
-
-    Twice over, and both matter: the offer is empty so the dispatch never
-    picks a path here, and the emitter still declines when called directly,
-    since nothing stops a caller from naming an arrangement itself."""
-    shape = ComputeShape(threads=16, dtype=Datatype.F32, sparse=True,
+def test_dpas_is_not_offered_for_a_packed_operand():
+    """The strategy drops out, not the target."""
+    from tensorforge.backend.instructions.compute.strategy import ComputeShape
+    from tensorforge.backend.instructions.compute.strategy import Strategy
+    shape = ComputeShape(threads=16, accumulator=Datatype.F32, sparse=True,
                          explicit_simd=True)
-    assert intel.strategies(shape, None) == frozenset()
-
-    ops = MatmulOperands(A=None, B=None, C=None,
-                         sparse=lambda k, j: True,
-                         lead_slots=1, lead_elements=16, n=1, k=1, kx=0,
-                         threads=16, dtype=Datatype.F32)
-    assert intel.matmul(None, ops, None, Strategy.BROADCAST) is False
+    assert Strategy.MATRIX not in intel.strategies(shape, None)
+    assert Strategy.BROADCAST in intel.strategies(shape, None)
 
 
 # --------------------------------------------------------------------------
@@ -335,3 +335,44 @@ def test_both_matrix_paths_name_the_same_type():
     *generator* now knows what those four bytes are."""
     from tensorforge.backend.instructions.compute.primitives import nvidia
     assert nvidia.TF32_HALF.base is Datatype.TF32
+
+
+# -- the repeat count ------------------------------------------------------ #
+
+def test_the_default_repeat_is_what_the_table_held():
+    """The ranking has to be inert where nothing bounds it, or the change is
+    not a refactor."""
+    assert intel.atom_for(Datatype.F32).repeat == 8
+    assert intel.atom_for(Datatype.F32, columns=9, lead=56, depth=56).repeat == 8
+
+
+def test_issues_alone_always_return_the_widest_repeat():
+    """Which is the point of saying so: nothing else in the count changes
+    with `repeat`, so without a register bound the ranking is a constant."""
+    for columns in (1, 5, 9, 16, 33):
+        assert intel.atom_for(Datatype.F32, columns=columns).repeat == 8
+
+
+def test_a_register_bound_is_what_makes_it_a_choice():
+    """Eight columns of output per issue against one, and eight times the
+    accumulator and Src2 to hold them."""
+    sizes = {a.repeat: intel.fragment_bytes(a)
+             for a in intel.atoms_for(Datatype.F32)}
+    assert sizes[8] > sizes[4] > sizes[2] > sizes[1]
+    assert intel.atom_for(Datatype.F32, columns=9,
+                          budget=sizes[8]).repeat == 8
+    assert intel.atom_for(Datatype.F32, columns=9,
+                          budget=sizes[8] - 1).repeat == 4
+    assert intel.atom_for(Datatype.F32, columns=9,
+                          budget=sizes[1] - 1) is None
+
+
+def test_only_the_repeats_the_header_admits():
+    """`verify_repeat_count` takes 1, 2, 4 and 8."""
+    assert set(intel.REPEATS) == {1, 2, 4, 8}
+    assert {a.repeat for a in intel.atoms_for(Datatype.F32)} == set(intel.REPEATS)
+
+
+def test_a_type_with_no_atom_has_no_candidates():
+    assert intel.atoms_for(Datatype.F64) == ()
+    assert intel.atom_for(Datatype.F64) is None

@@ -181,6 +181,12 @@ def run_case(case, target: Target, cache_root: Path,
             inputs_by_alias[key] = np.array(view, copy=True)
             if op is sink_op:
                 dest_in_view = np.array(view, copy=True)
+        if op.pack_index is not None:
+            # The kernel addresses this operand compressed, so the buffer it
+            # reads is not the dense view the reference works on.  They stop
+            # aliasing here: the view stays dense for the reference, the flat
+            # buffer carries only the stored cells.
+            flat = layout.pack(view, np.asarray(op.pack_index), dt)
         flats[op.kernel_name] = flat
 
     expected = _reference_for_case(case, inputs_by_alias, dest_in_view)
@@ -228,7 +234,11 @@ def run_case(case, target: Target, cache_root: Path,
         # Read back the chosen output buffer.
         got_bytes = (out_dir / f"out_{sink_op.kernel_name}.bin").read_bytes()
         got_flat = np.frombuffer(got_bytes, dtype=layout.np_export_dtype(dt)).astype(layout.np_dtype(dt))
-        got_view = layout.view_of(got_flat, sink_op.shape, batch)
+        if sink_op.pack_index is not None:
+            got_view = layout.unpack(got_flat, np.asarray(sink_op.pack_index),
+                                     sink_op.shape, batch)
+        else:
+            got_view = layout.view_of(got_flat, sink_op.shape, batch)
 
         abs_err = np.abs(np.asarray(got_view) - np.asarray(expected))
         max_abs = float(abs_err.max())

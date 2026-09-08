@@ -4,11 +4,12 @@
 from typing import List, Optional, Union, Type
 from copy import deepcopy
 import hashlib
-from tensorforge.generators.descriptions import OperationDescription, MultilinearDescr, ElementwiseDescr, RegionDescription, ReductionDescr
+from tensorforge.generators.descriptions import ForDescr, OperationDescription, MultilinearDescr, ElementwiseDescr, RegionDescription, ReductionDescr
 from tensorforge.common.context import Context
 from tensorforge.common.basic_types import Addressing, FlagMode, GeneralLexicon, DataFlowDirection
 from tensorforge.common.helper import get_extra_offset_name
 from tensorforge.backend.data_types import ShrMemObject, RegMemObject
+from tensorforge.backend import pir
 from tensorforge.backend.opt import OptimizationStage
 from tensorforge.backend.opt.inspect import async_depth, format_diagnostics, verify
 from tensorforge.backend.scopes import Scopes
@@ -25,10 +26,11 @@ from tensorforge.backend.instructions.builders.pointwise_builders import (
     ElementwiseBuilder, ReductionBuilder)
 from tensorforge.backend.instructions.builders.ptr_manip_builder import GetElementPtrBuilder
 from tensorforge.backend.instructions.builders.allocator_builder import ShrMemAllocBuilder
+from tensorforge.backend.instructions.control.conditional import GuardedRegion
 from tensorforge.backend.instructions.sync_block import SyncThreads, SyncBlock, SyncGrid
 from tensorforge.backend.instructions.batch_loop import BatchLoop, LoopMode
 from tensorforge.backend.writer import Writer
-from tensorforge.common.exceptions import GenerationError
+from tensorforge.common.exceptions import GenerationError, InternalError
 
 import tensorforge.interop as interop
 
@@ -99,6 +101,68 @@ class Section:
     self.scopes: Scopes = Scopes()
     self.barrier = False
 
+class _GuardGrouping:
+  """Collects the instructions of neighbouring operations under one guard.
+
+  An operation's guard is a conjunction of literals, and two operations that
+  state the same conjunction run under the same condition -- so their
+  instructions go into one region and the condition is evaluated once. The
+  run ends where the conjunction changes, which keeps the emitted order the
+  order the descriptor list states.
+  """
+
+  def __init__(self, context, scopes, residency, out):
+    self._context = context
+    self._scopes = scopes
+    self._residency = residency
+    self._out = out
+    self._key = None
+    self._literals = []
+    self._pending = []
+
+  @staticmethod
+  def _key_of(descr):
+    """What makes two guards the same one.
+
+    `None` for an operation that always runs, so an unguarded stretch never
+    joins a guarded one. The literals are sorted: a conjunction is a set, and
+    two operations may state the same one in different orders.
+    """
+    condition = getattr(descr, 'condition', None)
+    if not condition:
+      return None
+    return tuple(sorted(literal.key() for literal in condition))
+
+  def _resolve(self, descr):
+    return [(self._scopes.get_symbol(literal.tensor.tensor), literal.negated)
+            for literal in descr.condition]
+
+  def add(self, descr, instrs) -> None:
+    key = self._key_of(descr)
+    if key != self._key:
+      self.flush()
+      self._key = key
+      self._literals = self._resolve(descr) if key is not None else []
+      # The condition is read where the region opens, which is before its
+      # body runs. A value another operation left in registers has to reach
+      # its buffer *here* -- `prepare_operands` flushes an operation's own
+      # operands, and a guard's operands are not among them.
+      for symbol, _ in self._literals:
+        self._out.extend(self._residency.flush(symbol.name))
+    self._pending.extend(instrs)
+
+  def flush(self) -> None:
+    if self._pending:
+      if self._key is None:
+        self._out.extend(self._pending)
+      else:
+        self._out.append(GuardedRegion(self._context, self._literals,
+                                       self._pending))
+    self._key = None
+    self._literals = []
+    self._pending = []
+
+
 class Generator:
   NAME_ENCODING_LENGTH = 10
 
@@ -110,6 +174,10 @@ class Generator:
                attrs: Optional[dict] = None):
     self.descr_list: List[OperationDescription] = gemm_list
     self._context: Context = context
+    #: Destination names whose transfer should get two stages, or None to
+    #: work that out.  Set to a concrete set on the throwaway generator that
+    #: works it out, which is what stops it recursing.
+    self._rotate: Optional[set] = None
     #: Switches the frontend's caller set on this kernel, or None from a
     #: frontend that has no attribute channel.  Only the flag mask reads
     #: these; the distinction between None and {} is what keeps a frontend
@@ -127,6 +195,20 @@ class Generator:
     self._tmp_list = None
     self._scopes: Scopes = Scopes()
     self._is_registerd: bool = False
+    #: Tables substituted into the kernel's signature in place of their
+    #: members.  Empty unless something registers one, so a generator that
+    #: never sees a repeated run emits exactly what it did before.
+    self._param_tables = []
+    self._table_member = {}
+    #: Whether a `ForDescr` becomes a loop or is expanded into its iterations.
+    #:
+    #: Off, because the loop does not verify yet: a body built once reads its
+    #: accumulator at the top of the first iteration, and the definition that
+    #: reaches it is the one the *previous* iteration made -- which is not a
+    #: definition the verifier can see, since nothing carries a value across
+    #: the back edge.  Expansion is meanwhile exact, so leaving it on would
+    #: trade working code for a diagnostic.
+    self._emit_loops = False
 
     self._num_threads: int = 0
     self._num_active_threads: int = 0
@@ -141,6 +223,10 @@ class Generator:
     #: because the budget is per kernel and the widest body is what has to
     #: fit.
     self.peak_pressure: Optional[int] = None
+    #: Blocks resident per SM under the resources that are known exactly --
+    #: shared memory and threads.  Not the register limit; see
+    #: `_resident_blocks`.
+    self.resident_blocks: Optional[int] = None
 
     self._section: Section = Section()
     self._sections: List[Section] = []
@@ -180,7 +266,123 @@ class Generator:
     for instr in self._section.stream:
       instr.set_threadconfig_pre(self._num_threads, mults)
 
+  def _rotation_targets(self) -> set:
+    """Which transfers should get a second buffer, asked of the pass itself.
+
+    `ShrMemOpt` sizes the arena before a body exists, so the decision has to
+    be made in advance -- and the only exact answer comes from
+    `wrap_prefetch`, which needs the body.  So the section is built once to
+    ask and once to use the answer.
+
+    `tools/rotation_cost.py` is why it is this way round rather than giving
+    every async transfer two stages: that costs 9% of arena on average and
+    25-29% on the kernels with several transfers, which are the ones a
+    pipeline is for, and shared memory is paid per launch where a second
+    build is paid once.
+
+    The cheap part is knowing when not to ask.  A description list with no
+    shared async transfer cannot benefit, and being wrong about *that* costs
+    a needless query rather than a buffer nobody uses.
+    """
+    from tensorforge.backend.pir import wrap as _wrap
+    from tensorforge.backend.instructions.memory.load import GlbToShrLoader
+
+    names: set = set()
+    original = _wrap.wrap_prefetch
+
+    def asking(body, make_value, next_index=None, report=None,
+               assume_rotated=False):
+      before = original(body, make_value, next_index, [], assume_rotated=True)
+      for stmt, _ in pir.walk(before):
+        if stmt.op is pir.Op.FOR and stmt.target:
+          for x, _ in pir.walk((stmt,)):
+            if x.op in (pir.Op.COPY_ASYNC, pir.Op.LOAD_ASYNC) and x.args:
+              base = getattr(x.args[0], 'hint', None)
+              if base:
+                names.add(base)
+      return original(body, make_value, next_index, report, assume_rotated)
+
+    probe = Generator(self.descr_list, self._context, attrs=self._attrs)
+    probe._rotate = set()
+    _wrap.wrap_prefetch = asking
+    try:
+      probe.generate()
+    except Exception:
+      return set()
+    finally:
+      _wrap.wrap_prefetch = original
+    if not names:
+      return names
+
+    # Ask again, this time of the body the answer *produces*.  The first probe
+    # runs unrotated, so the windows are static and declared ahead of the loop;
+    # granting the rotation then declares the write window *inside* it, because
+    # its offset moves with the stage counter -- and that is one of the pass's
+    # refusal conditions.  So a transfer could be accepted while unrotated,
+    # rotated on the strength of that, and then declined for a reason the
+    # rotation itself created.
+    #
+    # Rotated-and-not-wrapped is not a missed optimisation, it is wrong code:
+    # the compute reads stage `pipeStage % 2` and the transfer fills the other
+    # one, so no iteration ever fills the stage it reads and the first element
+    # computes from whatever the arena held.  `trans_a` did exactly that.
+    #
+    # Hence the invariant this restores: rotated if and only if wrapped.
+    confirmed: set = set()
+    original2 = _wrap.wrap_prefetch
+
+    def confirming(body, make_value, next_index=None, report=None,
+                   assume_rotated=False):
+      # `assume_rotated=True`: the buffers really are rotated in this build, so
+      # the refusal that exists only for a single copy does not apply.
+      after = original2(body, make_value, next_index, report, True)
+      for stmt, _ in pir.walk(after):
+        if stmt.op is pir.Op.FOR and stmt.target:
+          for x, _ in pir.walk((stmt,)):
+            if x.op in (pir.Op.COPY_ASYNC, pir.Op.LOAD_ASYNC) and x.args:
+              base = getattr(x.args[0], 'hint', None)
+              if base:
+                confirmed.add(base)
+      return after
+
+    check = Generator(self.descr_list, self._context, attrs=self._attrs)
+    check._rotate = set(names)
+    _wrap.wrap_prefetch = confirming
+    try:
+      check.generate()
+    except Exception:
+      return set()
+    finally:
+      _wrap.wrap_prefetch = original2
+    return names & confirmed
+
+  def _apply_rotation(self, loop) -> None:
+    """Give the chosen transfers two stages, before anything is allocated."""
+    if self._rotate is None:
+      return
+    if not self._rotate:
+      return
+    from tensorforge.backend.instructions.memory.load import GlbToShrLoader
+    if not hasattr(loop, 'request_stage_counter'):
+      return
+    # Request it, not merely name it.  `stage_counter_name()` answers what the
+    # counter is called; `_declare_stage_counter` only emits one when a depth
+    # has been requested.  Naming it without requesting it produced kernels
+    # that read `pipeStage0` and never declared it -- which renders, and which
+    # nothing in the suite compiles, because the syntax check runs on
+    # snapshots taken with this flag off.
+    stage = loop.request_stage_counter(2)
+    for instr in getattr(loop, 'region', []) or []:
+      if not isinstance(instr, GlbToShrLoader):
+        continue
+      if instr._dest.name not in self._rotate:
+        continue
+      instr.set_stages(2, f'{stage} % 2', f'({stage} + 1) % 2')
+
   def generate(self):
+    if (self._rotate is None
+        and self._context.get_user_options().enable_wrap_loads):
+      self._rotate = self._rotation_targets()
     # Reset rather than only read at the end: a context outlives one generator
     # -- a search builds several against the same one -- so a figure left over
     # from a previous build would be attributed to this one, and a maximum
@@ -242,6 +444,7 @@ class Generator:
       #
       # A peeled prologue from a pipelining pass belongs *here*, ahead of the
       # loop in `instructions`, not in the section prologue.
+      self._apply_rotation(loop)
       opt = OptimizationStage(context=self._context,
                               shr_mem=self._section.shr_mem_obj,
                               instructions=[loop],
@@ -329,6 +532,13 @@ class Generator:
     vm = self._context.get_vm()
 
     writer = Writer()
+    # Ahead of the signature that names them, and ahead of the launcher that
+    # builds one: both sit in this translation unit, and the kernel comes
+    # first in it.
+    for definition in self.param_table_types():
+      writer(definition)
+    if self._param_tables:
+      writer.new_line()
     with self._generate_kernel_proto(writer):
       self._write_kernel_meta_data(writer)
 
@@ -379,6 +589,40 @@ class Generator:
 
     self._kernel = writer.get_src()
     self.peak_pressure = self._context.peak_pressure
+    self.resident_blocks = self._resident_blocks()
+
+  def _resident_blocks(self) -> Optional[int]:
+    """How many of these blocks fit on one SM, counting what is known exactly.
+
+    Shared memory per block and threads per block are not estimates: the first
+    is what `ShrMemOpt` allocated and the second is the launch geometry, and
+    both budgets are in the hardware description.  So this half of occupancy
+    can be computed rather than modelled -- unlike the register half, where
+    the figure is bytes of live values and the hardware counts registers after
+    allocation, a mapping that spreads over a factor of seventy across the
+    corpus.
+
+    Which makes the two worth keeping apart rather than adding up.  A caller
+    comparing configurations can let this decide where it speaks and fall back
+    on the model where it does not, instead of folding a fact and a guess into
+    one number that is neither.
+
+    The register limit is *not* applied here even though `max_reg_per_block`
+    exists: applying it would need the register count, which is the thing that
+    is not known.
+    """
+    if self._section is None or self._section.shr_mem_obj is None:
+      return None
+    hw = self._context.get_vm().get_hw_descr()
+    shr = self._section.shr_mem_obj
+    per_block = shr.get_total_size() * self._context.fp_type.size()
+    threads = self._num_threads * shr.get_mults_per_block()
+    limits = [hw.max_block_per_sm]
+    if per_block:
+      limits.append(hw.max_local_mem_size_per_block // per_block)
+    if threads:
+      limits.append(hw.max_threads_per_sm // threads)
+    return max(0, min(limits))
 
   def _generate_launcher(self):
     writer = Writer()
@@ -409,6 +653,9 @@ class Generator:
 
       lexic.get_stream_via_pointer(writer, 'stream', GeneralLexicon.STREAM_PTR_STR)
 
+      for table in self._param_tables:
+        writer(table.argument())
+
       args = self._generate_kernel_base_args()
       args = ', '.join(args)
       call_site = lexic.get_launch_code(func_name=kernel_name,
@@ -427,7 +674,10 @@ class Generator:
 
   def _deduce_num_threads(self):
     """Adopt the section's lane geometry: the caller's, or the deduced one."""
-    config = self._lanes or lane_config.deduce(self.descr_list, self._context)
+    # Over the expansion: lane geometry follows from the operations, and a
+    # descriptor that stands for several is not one of them.
+    flat = [op for descr in self.descr_list for op in descr.operations()]
+    config = self._lanes or lane_config.deduce(flat, self._context)
     self._num_threads = config.num_threads
     self._num_active_threads = config.num_active_threads
     self._lead_width = config.lead_width
@@ -499,6 +749,10 @@ class Generator:
     builder = GetElementPtrBuilder(self._context, self._scopes)
     self._scopes.add_scope()
     for symbol in self._scopes.get_global_scope().values():
+      if getattr(symbol.obj, 'is_variant', False):
+        # Bound inside the loop, from the table, once per iteration.  A
+        # binding here would name one member for the whole run.
+        continue
       firstptr = symbol.obj.addressing == Addressing.SCALAR or symbol.obj.addressing == Addressing.NONE
       if not firstptr:
         builder.build(symbol)
@@ -515,11 +769,14 @@ class Generator:
     # across a barrier would push its writebacks past the barrier that was
     # supposed to publish them.
     plan = SectionPlan(descr_list, self._scopes)
-    residency = Residency(self._context,
+    residency = self._residency = Residency(self._context,
                           self._scopes.get_symbol(self._section.shr_mem_obj),
                           self._num_threads,
                           self._lead_width)
     temporaries = Temporaries(self._context, self._scopes, self._num_threads)
+    # Every register image this section allocates is blocked the same way, so
+    # the factory carries it rather than each caller passing it along.
+    temporaries._lead_width = self._lead_width
 
     # One builder per kind of operation, all sharing the section's plan,
     # residency and temporaries.  The list is ordered: `GemmDescr` is a
@@ -534,16 +791,181 @@ class Generator:
         (ReductionDescr, ReductionBuilder(*common)),
     ]
 
-    for descr in descr_list:
+
+    # Expanded, like the section's plan above: a descriptor that stands for
+    # several operations is built as those operations.  While that is all a
+    # loop lowers to, a rolled list and the same list written out generate the
+    # same body, which is the state the loop's own lowering has to be measured
+    # against before it replaces this.
+    #
+    # Neighbours under one guard become one region rather than one region
+    # each: the condition is then read once, and a body that is skipped is
+    # skipped as a whole.
+    guard = _GuardGrouping(self._context, self._scopes, residency,
+                           self._section.ir)
+    for outer in descr_list:
+      if isinstance(outer, ForDescr) and self._emit_loops:
+        guard.flush()
+        self._emit_variant_loop(outer, builders)
+        continue
+      for descr in outer.operations():
+        for kind, builder in builders:
+          if isinstance(descr, kind):
+            builder.build(descr)
+            guard.add(descr, builder.get_instructions())
+            break
+        else:
+          raise InternalError(f'{type(descr)} has no registered builder.')
+
+    guard.flush()
+
+    # Anything the section still holds only in registers has to reach memory
+    # before the section ends.
+    self._section.ir.extend(residency.flush_all())
+
+  def _emit_variant_loop(self, loop, builders) -> None:
+    """One body, one counter, and one binding per varying operand.
+
+    The body is built with the same builders as anything else -- it is an
+    ordinary descriptor list over the stand-ins -- and the only thing this adds
+    is where a stand-in resolves: a table over the members, and a binding
+    inside the loop that reads it at the counter.  Which is why the loop is
+    assembled here and not inside a builder: no operation in the body knows it
+    is in a loop, and none of them has to.
+    """
+    from tensorforge.backend.instructions.ptr_manip import (
+        DeclareOperandTable, TableForm, VariantLoop)
+    from tensorforge.backend.instructions.builders.ptr_manip_builder import \
+        GetElementPtrBuilder
+
+    # The first iteration is peeled, and it is not an optimisation.
+    #
+    # A body built cold does what the *first* of the expanded descriptors did:
+    # it loads the destination and computes a result from it.  Repeating that
+    # recomputes `Q + contribution` from the stored `Q` every time and keeps
+    # only the last one.  What the loop wants is what descriptors two onwards
+    # did -- accumulate into a destination that is already resident -- and the
+    # way to build that body is to let one iteration establish the residency
+    # first.
+    #
+    # It also settles the invariants without a pass: the shared staging of an
+    # operand every iteration shares, and the destination's load, both happen
+    # in the peeled copy and the residency stops the body from repeating them.
+    # The cost is one body written out beside the loop, so four iterations
+    # cost two copies rather than four.
+    for descr in loop.body(0):
       for kind, builder in builders:
         if isinstance(descr, kind):
           builder.build(descr)
           self._section.ir.extend(builder.get_instructions())
           break
 
-    # Anything the section still holds only in registers has to reach memory
-    # before the section ends.
-    self._section.ir.extend(residency.flush_all())
+    body, variants = loop.decompose()
+    counter = f'{GeneralLexicon.BATCH_ID_NAME}v{len(self._section.ir)}'
+
+    tables, region = [], []
+    pointers = GetElementPtrBuilder(self._context, self._scopes)
+    for variant in variants:
+      members = [self._scopes.get_symbol(view.tensor) for view in variant.members]
+      stand_in = self._scopes.get_symbol(variant.stand_in.tensor)
+      table = DeclareOperandTable(
+          self._context, f'{stand_in.name}Table', members,
+          stand_in.obj.addressing, stand_in.obj.datatype,
+          form=(TableForm.SELECT
+                if len(members) <= DeclareOperandTable.SELECT_LIMIT
+                else TableForm.ARRAY),
+          variant=counter)
+      tables.append(table)
+      pointers.build(stand_in, table=table, variant=counter)
+      region.extend(pointers.get_instructions())
+
+    # What the body threads through itself.  A destination is not accumulated
+    # in place: each build takes a fresh register and reads the last one, so
+    # the expanded form is a chain and one turn of it is what the body holds.
+    #
+    # Read off either side of the build, because that is the only moment both
+    # links exist.  Keyed by the *binding*, which is what the residency is
+    # keyed by -- the tensor is `m0`, its entry is `glb_m0`, and asking for the
+    # tensor finds nothing and looks exactly like nothing to carry.
+    accumulated = [descr.writes() for descr in body
+                   if getattr(descr, 'add', False) and descr.writes() is not None]
+    keys = [f'{GeneralLexicon.GLOBAL_MEM_PREFIX}{v.tensor.name}'
+            for v in accumulated]
+    before = {}
+    for key in keys:
+      entry = self._residency.get(key)
+      if entry is not None:
+        before[key] = entry.image
+
+    for descr in body:
+      for kind, builder in builders:
+        if isinstance(descr, kind):
+          builder.build(descr)
+          region.extend(builder.get_instructions())
+          break
+      else:
+        # A descriptor nobody recognises used to fall out of the loop and be
+        # dropped, which turns a missing builder into a wrong kernel rather
+        # than an error.
+        raise InternalError(
+            f'no builder for {descr.__class__.__name__}: {descr}')
+
+    # An allocation is not a per-iteration act.  Left in the region it would
+    # give the enclosing stream no definition for a register the body fills
+    # and something after the loop reads -- the accumulator's writeback is
+    # exactly that -- and in the emitted text it would put the declaration
+    # inside the braces its users sit outside of.
+    from tensorforge.backend.instructions.allocate import RegisterAlloc
+    allocations = [i for i in region if isinstance(i, RegisterAlloc)]
+    region = [i for i in region if not isinstance(i, RegisterAlloc)]
+    carried = []
+    for key in keys:
+      entry = self._residency.get(key)
+      was = before.get(key)
+      if was is not None and entry is not None and entry.image is not was:
+        carried.append((was, entry.image))
+
+    # Close the chain: the body reads one register and writes another, and a
+    # loop needs the two to be one.  Substituted on the built region rather
+    # than arranged during the build, because what the residency hands out is
+    # its business and the fact that a repeated body must land where it
+    # started is not something it can know.
+    for key, (init, result) in zip(
+            [k for k in keys if k in before], carried):
+      for instr in region:
+        instr.substitute(result, init)
+      # And tell the residency where the value now lives, because the
+      # writeback is emitted after this returns and would otherwise store a
+      # register the substitution has just made unreachable.
+      entry = self._residency.get(key)
+      self._residency.record_writeback(key, init, entry.home)
+    carried = tuple((init, init) for init, _ in carried)
+
+    # A destination that *varies* has to be stored inside the loop, and one
+    # that does not must not be.
+    #
+    # The residency flushes once, at the end of the section, against whatever
+    # address the entry holds by then.  For a destination that is the same
+    # tensor every iteration -- an accumulator -- that is right and is the
+    # whole point: the sum is written once.  For one that is a different
+    # tensor every iteration the address is the last iteration's, so every
+    # iteration computes and only the last is kept.
+    #
+    # Which it is, is whether the destination is a stand-in.  Not whether it
+    # escapes: an accumulator escapes too, and asking that stores the sum on
+    # every pass.
+    for descr in body:
+      dest = descr.writes()
+      if dest is None or not getattr(dest.tensor, 'is_variant', False):
+        continue
+      key = f'{GeneralLexicon.GLOBAL_MEM_PREFIX}{dest.tensor.name}'
+      if self._residency.get(key) is not None:
+        region.extend(self._residency.flush(key))
+
+    self._section.ir.extend(allocations)
+    self._section.ir.append(
+        VariantLoop(self._context, counter, loop.iterations, region, tables,
+                    start=1, carried=tuple(carried)))
 
   def _deduce_mults_per_block(self):
     policy = self._thread_block_policy_type(self._context,
@@ -577,10 +999,24 @@ class Generator:
         # dict preserves ordering starting with 3.7
         pre_matrix_list[matrix.tensor] = None
 
+      # A guard's operands are not operands of the operation -- no builder
+      # resolves them, and `matrix_list` deliberately does not name them --
+      # but the kernel still reads them, so they are parameters like any
+      # other and need a name and a symbol.
+      for view in gemm.condition_reads():
+        pre_matrix_list[view.tensor] = None
+
     self._matrix_list = list(pre_matrix_list.keys())
 
+    variant_counter = 0
     for matrix in self._matrix_list:
-      if matrix.is_tmp:
+      if getattr(matrix, 'is_variant', False):
+        # Its own series: a stand-in is not a parameter, so letting it take an
+        # `m` number would move every later parameter along by one and change
+        # the signature of a kernel that has nothing to do with it.
+        matrix.name = f'v{variant_counter}'
+        variant_counter += 1
+      elif matrix.is_tmp:
         matrix.name = f't{tmp_counter}'
         tmp_counter += 1
       else:
@@ -655,6 +1091,10 @@ class Generator:
   def get_base_name(self):
     return self._base_kernel_name
 
+  def param_table_types(self) -> List[str]:
+    """The by-value types the signature names, for whoever writes the file."""
+    return [table.struct_definition() for table in self._param_tables]
+
   def _write_kernel_meta_data(self, writer):
     writer(f'// generated with TensorForge. Version: {interop.get_version()}')
     writer('// meta data:')
@@ -667,9 +1107,32 @@ class Generator:
       writer(f'// {item}')
     writer.new_line()
 
-  def _generate_base_params_list(self, symbol_list, with_types=True, with_defaults=False):
+  def register_param_table(self, table) -> None:
+    """Take a table into the kernel's signature in place of its members.
+
+    Only the kernel's.  The launcher keeps taking the members one by one and
+    assembles the value itself, so the interface a caller sees does not move --
+    the substitution lives entirely between two pieces of generated code, which
+    is the only reason it can be made at all without touching SeisSol.
+    """
+    self._param_tables.append(table)
+    for member in table.get_operands():
+      self._table_member[member.name] = table
+
+  def _generate_base_params_list(self, symbol_list, with_types=True,
+                                 with_defaults=False, substitute_tables=False):
     params = []
+    emitted_tables = set()
     for symbol in symbol_list:
+      if getattr(symbol.obj, 'is_variant', False):
+        continue
+      table = self._table_member.get(symbol.name) if substitute_tables else None
+      if table is not None:
+        # In place of the first member, once; the rest of them vanish.
+        if id(table) not in emitted_tables:
+          emitted_tables.add(id(table))
+          params.append(table.parameter() if with_types else table.name)
+        continue
       datatype = self._context.fp_type if symbol.obj.datatype is None else symbol.obj.datatype
       if symbol.obj.addressing == Addressing.SCALAR:
         if not symbol.stype == SymbolType.Data:
@@ -702,13 +1165,16 @@ class Generator:
 
   def _generate_kernel_base_args(self):
     global_symbols = self._scopes.get_global_scope().values()
-    args = self._generate_base_params_list(global_symbols, with_types=False)
+    args = self._generate_base_params_list(global_symbols, with_types=False,
+                                           substitute_tables=True)
     return args
 
   def _generate_kernel_proto(self, writer):
     global_symbols = self._scopes.get_global_scope().values()
 
-    params = self._generate_base_params_list(symbol_list=global_symbols, with_types=True)
+    params = self._generate_base_params_list(symbol_list=global_symbols,
+                                             with_types=True,
+                                             substitute_tables=True)
     str_params = ', '.join(params)
 
     mults_per_block = min(section.shr_mem_obj.get_mults_per_block() for section in self._sections)

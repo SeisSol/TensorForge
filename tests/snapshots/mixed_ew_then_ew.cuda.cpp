@@ -59,6 +59,7 @@ __launch_bounds__(256)
       auto* totalShrMem = reinterpret_cast<float*>(totalShrMemPtr);
       float* localShrMem0 = &totalShrMem[64 * threadIdx.y + 0];
       float* tempShrMem = &localShrMem0[64];
+      float* __restrict__ s0 = &localShrMem0[0];
       for (size_t batchId0 = threadIdx.y + blockDim.y * (blockIdx.x); batchId0 < numElements0; batchId0 += (gridDim.x * blockDim.y)) {
         const auto batchId1 = batchId0 + (gridDim.x * blockDim.y) < numElements0 ? batchId0 + (gridDim.x * blockDim.y) : batchId0;
         const auto batchId2 = batchId1 + (gridDim.x * blockDim.y) < numElements0 ? batchId1 + (gridDim.x * blockDim.y) : batchId1;
@@ -68,33 +69,32 @@ __launch_bounds__(256)
           float *const __restrict__ glb_m1 = &m1[batchId0 * 64 + 0 + m1_extraOffset];
           float r0[8]{};
           // r0 = abs(glb_m0)
-          int32_t v12_lead = threadIdx.x % 32;
-          if (v12_lead < 8) {
+          int32_t v13_lead = threadIdx.x % 32;
+          if (v13_lead < 8) {
             #pragma unroll
-            for (int32_t v14_k1 = 0; v14_k1 < 8; ++v14_k1) {
-              float v22_data = glb_m0[(v12_lead + (v14_k1 * 8))];
-              r0[v14_k1] = (fabsf(v22_data));
+            for (int32_t v15_k1 = 0; v15_k1 < 8; ++v15_k1) {
+              float v23_data = glb_m0[(v13_lead + (v15_k1 * 8))];
+              r0[v15_k1] = (fabsf(v23_data));
             }
           }
-          float* __restrict__ s0 = &localShrMem0[0];
           // s0 = store{r>s}(localShrMem0, r0);
-          if (v12_lead < 8) {
+          if (v13_lead < 8) {
             #pragma unroll
             for (int32_t v30_i1 = 0; v30_i1 < 8; ++v30_i1) {
               float v32_data = r0[v30_i1];
-              int32_t v39_a = v12_lead + (v30_i1 * 8);
+              int32_t v39_a = v13_lead + (v30_i1 * 8);
               s0[(v39_a ^ ((v39_a >> 5) & 31))] = v32_data;
             }
           }
           __syncwarp();
           // glb_m1 = neg(s0)
-          if (v12_lead < 8) {
+          if (v13_lead < 8) {
             #pragma unroll
             for (int32_t v47_k1 = 0; v47_k1 < 8; ++v47_k1) {
               int32_t v53_a = v47_k1 * 8;
-              int32_t v54_a = v12_lead + v53_a;
+              int32_t v54_a = v13_lead + v53_a;
               float v58_data = s0[(v54_a ^ ((v54_a >> 5) & 31))];
-              glb_m1[(v12_lead + v53_a)] = ((-v58_data));
+              glb_m1[(v13_lead + v53_a)] = ((-v58_data));
             }
           }
           __syncwarp();

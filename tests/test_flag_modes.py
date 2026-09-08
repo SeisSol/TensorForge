@@ -79,7 +79,7 @@ def test_the_yateto_frontend_without_attributes_asks_for_nothing():
     from tensorforge.frontend.yateto import YatetoFrontend
 
     frontend = YatetoFrontend(object())          # positional, as yateto calls it
-    assert FlagMode.from_attrs(frontend.generator._attrs) is FlagMode.OPTIONAL
+    assert FlagMode.from_attrs(frontend._attrs) is FlagMode.OPTIONAL
 
 
 def test_absent_is_not_the_same_as_no_attributes():

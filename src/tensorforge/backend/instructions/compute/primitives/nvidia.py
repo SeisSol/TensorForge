@@ -2,8 +2,9 @@
 #
 # SPDX-License-Identifier: MIT
 from tensorforge.common.basic_types import Datatype
-from ..strategy import Strategy
-from tensorforge.backend.pir.core import (INDEX, Access, Effect, MemSpace,
+from .. import ranking
+from ..strategy import Strategy, whole
+from tensorforge.backend.pir.core import (BOOL, INDEX, Access, Effect, MemSpace,
                                           XorSwizzle,
                                           Uniformity,
                                           ScalarType, Value)
@@ -40,13 +41,17 @@ def tfconvert(writer: Writer, variables):
     writing it as one is better than writing it as an intrinsic that happens
     to take a string.
     """
+    # A pure operation with two results, not a call writing through
+    # references.  The reference-out spelling is the vendor's signature and
+    # belongs in the emitter; here the split is what it is, and CSE can
+    # hash-cons it.  The corpus split the same value twice in 15% of cases --
+    # no store and no reload in between, just a second `kk` block asking for
+    # the same fragment.
     out = []
     for variable in variables:
-        upper = writer.declare(TF32_HALF, hint='u')
-        lower = writer.declare(TF32_HALF, hint='l')
-        writer.call_stmt('tensorforge::splitFloatTF32', upper, lower, variable,
-                         writes=(upper, lower))
-        out.append((upper, lower))
+        out.append(writer.split_op('tensorforge::splitFloatTF32',
+                                   (TF32_HALF, TF32_HALF), variable,
+                                   hints=('u', 'l')))
     return out
 
 class MMAMode:
@@ -59,7 +64,7 @@ class MMAInstr:
     def headers(self):
         return []
 
-    def __init__(self, m, n, k, b, d, name, mode):
+    def __init__(self, m, n, k, b, d, name, mode, sm):
         self.n = n
         self.m = m
         self.k = k
@@ -67,6 +72,12 @@ class MMAInstr:
         self.d = d
         self.name = name
         self.mode = mode
+        #: Compute capability the instruction first appears at, times ten.
+        #: Promoted from the comment each row already carried, and unchecked
+        #: in the way a comment was: nothing here reads the PTX ISA.  It is a
+        #: field so that a selection can refuse an entry the target does not
+        #: have, which a comment cannot do.
+        self.sm = sm
 
     def headers(self):
         return []
@@ -135,16 +146,64 @@ class MMAInstr:
                 self.asmcall(writer, C, A, B, C, uses)
 
 INSTRS = [
-    MMAInstr(16,8,4,1,Datatype.F32,'mma.sync.aligned.m16n8k4.row.col.f32.tf32.tf32.f32', MMAMode.TF32), # SM_80
-    MMAInstr(16,8,8,1,Datatype.F32,'mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32', MMAMode.TF32), # SM_80
-    MMAInstr(8,8,4,1,Datatype.F64,'mma.sync.aligned.m8n8k4.row.col.f64.f64.f64.f64', MMAMode.DIRECT), # SM_80
-    MMAInstr(16,8,4,1,Datatype.F64,'mma.sync.aligned.m16n8k4.row.col.f64.f64.f64.f64', MMAMode.DIRECT), # SM_90
-    MMAInstr(16,8,8,1,Datatype.F64,'mma.sync.aligned.m16n8k8.row.col.f64.f64.f64.f64', MMAMode.DIRECT), # SM_90
-    MMAInstr(16,8,16,1,Datatype.F64,'mma.sync.aligned.m16n8k16.row.col.f64.f64.f64.f64', MMAMode.DIRECT), # SM_90
-    MMAInstr(8,8,16,1,Datatype.F64,'mma.sync.aligned.m8n8k16.row.col.s32.s8.s8.s32', MMAMode.I8), # SM_75
-    MMAInstr(16,8,16,1,Datatype.F64,'mma.sync.aligned.m16n8k16.row.col.s32.s8.s8.s32', MMAMode.I8), # SM_80
-    MMAInstr(16,8,32,1,Datatype.F64,'mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32', MMAMode.I8), # SM_80
+    MMAInstr(16,8,4,1,Datatype.F32,'mma.sync.aligned.m16n8k4.row.col.f32.tf32.tf32.f32', MMAMode.TF32, 80), # SM_80
+    MMAInstr(16,8,8,1,Datatype.F32,'mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32', MMAMode.TF32, 80), # SM_80
+    MMAInstr(8,8,4,1,Datatype.F64,'mma.sync.aligned.m8n8k4.row.col.f64.f64.f64.f64', MMAMode.DIRECT, 80), # SM_80
+    MMAInstr(16,8,4,1,Datatype.F64,'mma.sync.aligned.m16n8k4.row.col.f64.f64.f64.f64', MMAMode.DIRECT, 90), # SM_90
+    MMAInstr(16,8,8,1,Datatype.F64,'mma.sync.aligned.m16n8k8.row.col.f64.f64.f64.f64', MMAMode.DIRECT, 90), # SM_90
+    MMAInstr(16,8,16,1,Datatype.F64,'mma.sync.aligned.m16n8k16.row.col.f64.f64.f64.f64', MMAMode.DIRECT, 90), # SM_90
+    MMAInstr(8,8,16,1,Datatype.F64,'mma.sync.aligned.m8n8k16.row.col.s32.s8.s8.s32', MMAMode.I8, 75), # SM_75
+    MMAInstr(16,8,16,1,Datatype.F64,'mma.sync.aligned.m16n8k16.row.col.s32.s8.s8.s32', MMAMode.I8, 80), # SM_80
+    MMAInstr(16,8,32,1,Datatype.F64,'mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32', MMAMode.I8, 80), # SM_80
 ]
+
+#: The compute capability entries are selected against.
+#:
+#: 80 rather than the target's, because nothing plumbs the target's here:
+#: `shmsize` is asked for a size before a context exists and `matmul` gets one
+#: it does not pass on.  So the baseline is the floor, and the SM_90 F64
+#: entries -- which a count would otherwise prefer, being wider in both m and
+#: k -- stay out of reach until an arch reaches this.
+BASELINE_SM = 80
+
+#: Modes the emitter actually emits.  `generate` converts and issues three
+#: products for TF32 and issues once for DIRECT; its I8 branch is a `pass`, so
+#: those entries would be selected and then emit nothing.
+EMITTED_MODES = (MMAMode.TF32, MMAMode.DIRECT)
+
+
+def instrs_for(dtype, sm=None):
+    """Every entry the emitter could issue for this accumulator, widest first.
+
+    Widest because a tie in the ranking keeps this order, and a tie is what a
+    caller that does not state its shape gets.  Listing them in the order the
+    table happens to hold would make such a caller take the narrowest.
+    """
+    sm = BASELINE_SM if sm is None else sm
+    return tuple(sorted((op for op in INSTRS
+                         if op.d is dtype and op.mode in EMITTED_MODES
+                         and op.sm <= sm),
+                        key=lambda op: (-op.m * op.n * op.k, op.name)))
+
+
+def instr_for(dtype, columns=0, lead=0, depth=0, sm=None):
+    """The entry that serves this shape with the fewest issues, or `None`.
+
+    One function, asked twice: once by `shmsize` sizing the staging and once
+    by `matmul` issuing.  A size computed for one entry and an issue of
+    another is a buffer nobody fills or an overrun, and two dicts indexing the
+    same list by hand is how the two come to differ.
+    """
+    def extent(op):
+        # The warp holds `m` of the leading dimension and the accumulator `n`
+        # of the output; the contraction is `k`.  A different mapping to the
+        # same three numbers than AMD's, which is why the conversion is here.
+        return (ranking.Extent(columns=op.n, lanes=op.m, depth=op.k,
+                               name=op.name), 1)
+
+    found = ranking.rank(instrs_for(dtype, sm), extent, columns, lead, depth)
+    return found[0] if found else None
+
 
 #: Whether the path is deployed, as opposed to whether it *can* emit for a
 #: given shape -- that second question is `supports()`.  Two different facts,
@@ -179,17 +238,24 @@ def supports(threads, dtype, sparse) -> bool:
 
 
 def shmsize(stages, dtype):
-    atom = {
-        Datatype.F32: INSTRS[1],
-        Datatype.F64: INSTRS[2]
-    }[dtype]
+    """Staging elements to reserve, sized before the entry is chosen.
 
+    Over every candidate rather than over the one `instr_for` would return,
+    because this is asked without the shape that ranking reads: a reservation
+    made for a narrower entry than the one issued is an overrun, and the two
+    cannot be made to agree by ranking twice on different information.  The
+    largest is an upper bound, and the difference between the candidates is
+    one staging tile.
+    """
     threads = 32
-    aregs = (atom.m * atom.k) // threads
-    bregs = (atom.n * atom.k) // threads
-    cregs = (atom.m * atom.n) // threads
 
-    return 32 * max(aregs + bregs, cregs)
+    def size(atom):
+        aregs = (atom.m * atom.k) // threads
+        bregs = (atom.n * atom.k) // threads
+        cregs = (atom.m * atom.n) // threads
+        return 32 * max(aregs + bregs, cregs)
+
+    return max((size(atom) for atom in instrs_for(dtype)), default=0)
 
 def strategies(shape, ctx):
     """What this target can emit for this shape.
@@ -199,40 +265,86 @@ def strategies(shape, ctx):
     is what keeps a shape this cannot serve falling through to the nest
     instead of reaching an assertion inside the emitter.
     """
-    if ENABLED and supports(shape.threads, shape.dtype, shape.sparse):
+    if ENABLED and supports(shape.threads, shape.accumulator, shape.sparse):
         return frozenset({Strategy.MATRIX})
     return frozenset()
 
 
-def scratch(strategy, dtype):
+def scratch(strategy, accumulator):
     """One set of staging tiles, sized off the same atom the emitter picks.
 
     Asked before generation, so it cannot depend on anything the body decides.
     """
     if strategy is not Strategy.MATRIX:
         return 0
-    return shmsize(1, dtype)
+    return shmsize(1, accumulator)
 
 
-def matmul(writer, ops, ctx, strategy):
+def plan(strategy, shape, n, ctx):
+    """One arrangement over the whole output: nothing here splits a tail.
+
+    A partial tile is padded by `threadrange` instead, which the staged
+    fragments make cheap -- the spare lanes read zeroes out of the same tile
+    the real ones do.
+    """
+    return whole(strategy, n)
+
+
+def _index(writer, *, sub=0, mod=None, div=None, scale=1, add=0):
+    """A lane-derived index, built as operations rather than spelled out.
+
+    Every address this file computes has the same shape --- the thread index,
+    an optional shift, an optional wrap, a stride and an offset --- and it was
+    written as text six times.  Text is where the address stops being
+    analysable: `cse` cannot merge two identical `rawexpr` nodes (they are not
+    pure), the bank census has to parse the generated source to answer a
+    question the IR could answer directly, and a pass that wanted to reason
+    about the access pattern had nothing to reason over.
+
+    Order is `((tid - sub) % mod / div) * scale + add`, which is the order the
+    six call sites already used.
+    """
+    v = writer.thread_id('x')
+    if sub:
+        v = writer.op('sub', INDEX, v, sub, hint='a')
+    if mod is not None:
+        v = writer.op('rem', INDEX, v, mod, hint='a')
+    if div is not None:
+        v = writer.op('div', INDEX, v, div, hint='a')
+    if scale != 1:
+        v = writer.op('mul', INDEX, v, scale, hint='a')
+    if add:
+        v = writer.op('add', INDEX, v, add, hint='a')
+    return v
+
+
+def matmul(writer, ops, ctx, span):
     C, A, B = ops.C, ops.A, ops.B
     # Elements, and the loop below walks them in strides of `threads`.  The
     # accessors take slots, so `i // threads` is what reaches them.
     M = ops.lead_elements
-    N, K, kx = ops.n, ops.k, ops.kx
-    threads, dtype, sparse = ops.threads, ops.dtype, ops.sparse
+    N, K, kx = span.stop, ops.k, ops.kx
+    threads, dtype, sparse = ops.threads, ops.accumulator, ops.sparse
 
     def threadrange(start, size):
-        conditions = []
-        if start > 0:
-            conditions += [f'threadIdx.x >= {start}']
-        if start + size < threads:
-            conditions += [f'threadIdx.x < {start + size}']
+        """The lanes that take part in one staging step.
 
-        if len(conditions) > 0:
-            return writer.If(' && '.join(conditions))
-        else:
-            return writer.AnonymousScope()
+        A structured `if_` rather than `writer.If`, which takes a string and
+        emits a raw block.  The text spelled the same guard, and the emitted
+        C++ is identical -- what changes is that the condition is a value, so
+        a pass walking the body can tell which lanes reach an access inside.
+        Without that, `pir/banks.py` counted all 32 into every bank and read
+        72 conflict-free accesses in `rectangular` as 2-way.
+        """
+        cond = None
+        tid = writer.thread_id('x')
+        if start > 0:
+            cond = writer.op('ge', BOOL, tid, start, hint='g')
+        if start + size < threads:
+            upper = writer.op('lt', BOOL, tid, start + size, hint='g')
+            cond = upper if cond is None else writer.op('and', BOOL, cond,
+                                                        upper, hint='g')
+        return writer.if_(cond) if cond is not None else writer.AnonymousScope()
 
     if sparse:
         return False
@@ -240,12 +352,8 @@ def matmul(writer, ops, ctx, strategy):
     # for now.
     # TODO for later: split matrix into tiles
     # if too small for matrix tile (or with zero padded), use FMA instead
-    # use different tile sizes if available
-
-    atom = {
-        Datatype.F32: INSTRS[1],
-        Datatype.F64: INSTRS[2]
-    }[dtype]
+    atom = instr_for(dtype, columns=ops.n, lead=ops.lead_elements,
+                     depth=ops.k + ops.kx)
 
     mma = writer.varalloc()
     mmaT = writer.varalloc()
@@ -328,7 +436,7 @@ def matmul(writer, ops, ctx, strategy):
         Datatype.F64: 'double4'
     }[dtype]
 
-    for j in range(0, N, atom.n):
+    for j in range(span.start, N, atom.n):
         with writer.AnonymousScope():
             for k in range(0, K + kx, threads):
                 # `var is None` asks the accessor for the value rather than a
@@ -364,12 +472,12 @@ def matmul(writer, ops, ctx, strategy):
                                     with threadrange(trueK, trueSK):
                                         for jj in range(0, atom.n):
                                             writer.store(Bshm, Breg[k // threads, jj],
-                                                         writer.rawexpr(f'(threadIdx.x - {trueK}) % {atom.k} + {jj * atom.k}', type_=INDEX, hint='a'))
+                                                         _index(writer, sub=trueK, mod=atom.k, add=jj * atom.k))
                                     if trueSK != atom.k:
                                         with threadrange(0, atom.k - trueSK):
                                             for jj in range(0, atom.n):
                                                 writer.store(Bshm, Breg[k // threads + 1, jj],
-                                                                     writer.rawexpr(f'(threadIdx.x + {trueSK}) % {atom.k} + {jj * atom.k}', type_=INDEX, hint='a'))
+                                                                     _index(writer, sub=-trueSK, mod=atom.k, add=jj * atom.k))
                                     writer.barrier(Uniformity.MULT)
 
                                     for jj in range(0, nregs):
@@ -382,7 +490,23 @@ def matmul(writer, ops, ctx, strategy):
                                             # assignment per fragment, and a
                                             # C++ identifier where the IR had a
                                             # value all along.
-                                            Bfrag[kkk + jj * kregs] = writer.load(Bshm, writer.rawexpr(f'(threadIdx.x % {ktile}) + (threadIdx.x / {ktile} + {jj * ntile}) * {atom.k} + {kkk * ktile}', type_=INDEX, hint='a'), hint='b')
+                                            # The fragment layout: the lane's
+                                            # column within the tile, plus its
+                                            # row scaled by the tile width.
+                                            # Two lane terms, so `_index` does
+                                            # not fit and the sum is written
+                                            # out -- still operations, and the
+                                            # two `thread_id` reads are one
+                                            # value after `cse`.
+                                            col = _index(writer, mod=ktile)
+                                            row = _index(writer, div=ktile,
+                                                         add=jj * ntile,
+                                                         scale=atom.k)
+                                            addr = writer.op('add', INDEX, col, row, hint='a')
+                                            if kkk * ktile:
+                                                addr = writer.op('add', INDEX, addr,
+                                                                 kkk * ktile, hint='a')
+                                            Bfrag[kkk + jj * kregs] = writer.load(Bshm, addr, hint='b')
 
                                     for kkk in range(0, min(atom.k, K - k - kk)):
                                         Areg[kkk] = A(writer, None, i // threads, k + kk + kkk)
@@ -410,14 +534,14 @@ def matmul(writer, ops, ctx, strategy):
                                                         hint='q')
                                                     writer.store(
                                                         Ashm, quad,
-                                                        writer.rawexpr(f'((threadIdx.x - {ii}) % {atom.m}) * {ktile} + {kkk * atom.m}',
-                                                                       type_=INDEX, hint='a'))
+                                                        _index(writer, sub=ii, mod=atom.m, scale=ktile,
+                                                                              add=kkk * atom.m))
                                             writer.barrier(Uniformity.MULT)
 
                                             for kk in range(0, kregs):
                                                 for iii in range(0, mregs):
                                                     #writer(f'{atom.d.ctype()} {Areg2}_{iii + kk * mregs} = {shmptr}[{aoffs} + (threadIdx.x / {ktile}) + (threadIdx.x % {ktile} + {kk * ktile}) * {atom.m} + {iii * mtile}];')
-                                                    Afrag[iii + kk * mregs] = writer.load(Ashm, writer.rawexpr(f'threadIdx.x + {(iii + kk * mregs) * 32}', type_=INDEX, hint='a'), hint='a')
+                                                    Afrag[iii + kk * mregs] = writer.load(Ashm, _index(writer, add=(iii + kk * mregs) * 32), hint='a')
 
                                             atom.generate(writer, ctx, Afrag[:aregs], Bfrag[:bregs],
                                                           [Cvals[i][ii // atom.m] for i in range (cregs)])
@@ -435,12 +559,12 @@ def matmul(writer, ops, ctx, strategy):
                             for jj in range(0, nregs * 2):
                                 for iii in range(0, mregs):
                                     writer.store(Cshm, Cvals[iii + mregs * jj][ii // atom.m],
-                                        writer.rawexpr(f'threadIdx.x * 2 + {iii} + {jj * 64}', type_=INDEX, hint='a'))
+                                        _index(writer, scale=2, add=iii + jj * 64))
 
                             writer.barrier(Uniformity.MULT)
                             with threadrange(ii, atom.m):
                                 for jj in range(0, atom.n):
-                                    _c = writer.load(Cshm, writer.rawexpr(f'(threadIdx.x % {atom.m}) * {atom.n} + {jj}', type_=INDEX, hint='a'), hint='data')
+                                    _c = writer.load(Cshm, _index(writer, mod=atom.m, scale=atom.n, add=jj), hint='data')
                                     writer.assign(Cout[jj], _c)
                             writer.barrier(Uniformity.MULT)
 

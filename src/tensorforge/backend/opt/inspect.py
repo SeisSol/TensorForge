@@ -107,6 +107,44 @@ _PREDEFINED = (SymbolType.Batch, SymbolType.Global, SymbolType.Scalar,
                SymbolType.Data)
 
 
+def entering(region: Sequence[AbstractInstruction],
+             predefined: Iterable[Any] = ()) -> tuple:
+    """`(carried, missing)` — what a region needs that it does not start with.
+
+    A region a loop repeats reads some things before it writes them.  Two
+    kinds, and they want opposite treatments, which is why one answer would
+    not do:
+
+    *carried*  is also written later in the region.  The value the first
+               iteration reads is the one the *previous* iteration wrote, so it
+               is a loop-carried argument: initialised before the header,
+               updated across the back edge.  An accumulator is this.
+
+    *missing*  is never written in the region at all.  Nothing carries it and
+               nothing produces it, so the read is simply unbound and whoever
+               assembled the region owes it a definition ahead of the loop.
+
+    Same notion of a read and a write as `verify` uses, on purpose: a region
+    that reports nothing here is a region `verify` will not complain about,
+    and the two drifting apart would make one of them a lie.
+    """
+    defined = OrderedSet(predefined)
+    written = OrderedSet()
+    for instr in region:
+        for sym in instr.defs():
+            written.add(sym)
+    carried, missing = [], []
+    for instr in region:
+        for sym in instr.uses():
+            if sym in defined or getattr(sym, 'stype', None) in _PREDEFINED:
+                continue
+            (carried if sym in written else missing).append(sym)
+            defined.add(sym)
+        for sym in instr.defs():
+            defined.add(sym)
+    return tuple(carried), tuple(missing)
+
+
 def verify(instrs: Sequence[AbstractInstruction],
            *,
            max_barrier_scope: BarrierScope = BarrierScope.GRID,

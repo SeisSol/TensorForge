@@ -211,11 +211,39 @@ def test_a_symbol_without_a_thread_count_says_nothing():
     assert sym.layout is None
 
 
-def test_a_non_register_symbol_is_left_alone():
-    """Shared and global images are addressed as `name[i + threadIdx.x * vec]`,
-    which is a different map; `_record_linear_layout` describes the register
-    one and declines to speak about the others."""
+def test_a_shared_image_records_the_same_distribution():
+    """A shared staging image is filled by the same linearized run.
+
+    This test asserted the opposite -- that only register images were
+    described -- and it was right when the register case was the only one the
+    recorder had been shown to hold for.  It stopped being right when the
+    explicit-vector lowering arrived: an unknown distribution costs only
+    precision under SPMD, and a declaration cannot be written without one
+    under ESIMD, so the shared case had to be answered too.
+
+    The thread count is the difference.  A register image knows its own; a
+    shared one does not, because a shared buffer is not owned by one
+    multiplication, so the loader that writes the run passes it.
+    """
     sym = Symbol("s0", SymbolType.SharedMem, obj=None)
+    sym.num_threads = 16
+    sym._record_linear_layout(0, 1)
+    assert sym.layout == RegisterLayout((LaneAxis(16, 1),))
+
+
+def test_a_shared_image_with_no_thread_count_still_declines():
+    """`None` means unknown, and a shared symbol carries no thread count of
+    its own -- so without one from the fill there is nothing to claim."""
+    sym = Symbol("s0", SymbolType.SharedMem, obj=None)
+    assert sym.num_threads is None
+    sym._record_linear_layout(0, 1)
+    assert sym.layout is None
+
+
+def test_a_global_symbol_is_still_left_alone():
+    """The two staging kinds are described; a global image is addressed
+    differently and is not one of them."""
+    sym = Symbol("g0", SymbolType.Global, obj=None)
     sym.num_threads = 16
     sym._record_linear_layout(0, 1)
     assert sym.layout is None

@@ -21,6 +21,9 @@ class CudaLexic(Lexic):
     self.grid_dim_x = "gridDim.x"
     self.stream_type = "cudaStream_t"
     self.restrict_kw = "__restrict__"
+    # sm_70 and up; below it the annotation does not exist and the parameter
+    # is copied per thread, which is the behaviour without it anyway.
+    self.grid_constant_kw = '__grid_constant__'
 
   def multifile(self):
     return False
@@ -295,5 +298,29 @@ class CudaLexic(Lexic):
     else:
       return f'{rhs}'
 
-  def atomic_store(self, access, variable, datatype):
-    return f'atomicAdd(&{access}, {variable});'
+  def atomic_store(self, ctx, access, variable, op, datatype, length=1):
+    """`atomicAdd` with the result dropped, which is what makes it a `RED`.
+
+    ptxas emits the reduction form -- fire-and-forget, no return path to
+    scoreboard -- only when nothing reads the old value.  Binding the result
+    to a name gets `ATOM` instead, at the same address and for nothing, so the
+    call is a statement here rather than an expression a caller might keep.
+
+    Device scope, not block: the reason an accumulation is atomic at all is
+    that another block may be writing the same element.  `atomicAdd_block` is
+    the cheaper spelling for a destination one block owns, and a destination
+    one block owns does not need an atomic.
+
+    A wide update goes through the vector overloads, which exist from sm_90
+    for `float2` and `float4` and are global-memory only.  The cast is what
+    the spelling costs: the value arrives as `tensorforge::VectorT<float, N>`,
+    a GNU vector, and `atomicAdd` is declared over CUDA's `floatN` -- same
+    size, same alignment, no implicit conversion between them.  Only reached
+    when `has_atomic_store` agreed for this width, so the overload it names
+    exists.
+    """
+    if length == 1:
+      return f'atomicAdd(&{access}, {variable});'
+    vec = f'float{length}' if datatype == Datatype.F32 else f'{datatype}{length}'
+    return (f'atomicAdd(reinterpret_cast<{vec}*>(&{access}), '
+            f'*reinterpret_cast<const {vec}*>(&{variable}));')

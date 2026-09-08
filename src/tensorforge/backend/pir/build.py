@@ -143,6 +143,9 @@ class IRBuilder:
         # copy, one entry per loaded value for `load.async`)
         self._token_results: Dict[int, Tuple[Any, ...]] = {}
         self._token_uniform: Dict[int, bool] = {}
+        #: Undo callbacks for state written outside the body; see
+        #: `on_rollback`.
+        self._undo: List[Any] = []
 
     # -- values ------------------------------------------------------------ #
 
@@ -367,6 +370,27 @@ class IRBuilder:
         return self._emit_op(Op.CALL, (), tuple(args), pure=False,
                              movable=movable, effect=effect,
                              accesses=accesses, attrs=(('callee', callee),))
+
+    def split_op(self, name: str, types: Sequence, *args: Operand,
+                 hints: Sequence[str] = (), attrs: Tuple = ()) -> Tuple[Value, ...]:
+        """A pure operation with more than one result.
+
+        `splitFloatTF32(uint32_t &upper, uint32_t &lower, float value)` is a
+        function in every sense that matters -- the same input gives the same
+        two halves -- but modelling it as a call that writes through references
+        makes it side-effecting, and CSE skips it.  The corpus splits the same
+        value twice in 15% of cases, with no store and no reload in between.
+
+        The reference-out spelling is the vendor's, not the operation's, so it
+        belongs in the emitter.  Here it is what it is: `n` values from one
+        argument, pure, and hash-consed like any other expression.  `cse`
+        already handles several results -- it zips `s.target` against what it
+        recorded -- so nothing there had to change.
+        """
+        vs = tuple(self.value(t, hint=h)
+                   for t, h in zip(types, list(hints) + [''] * len(types)))
+        self._emit_op(name, vs, tuple(args), pure=True, attrs=attrs)
+        return vs
 
     def asm_stmt(self, template: str, operands: Sequence[Tuple[str, Operand]],
                  *, movable: bool = False) -> Stmt:
@@ -909,10 +933,15 @@ class IRBuilder:
         case --- it is every transfer whose length is not a multiple of the
         block.
 
-        Predication does not change the token.  The copy issues for the wave
-        whenever any lane is active, so it counts once against the hardware
-        counter either way, and the guard is a real branch rather than a
-        select because the token has no C++ value to select on.
+        Predication does not change the token, and the guard is a real branch
+        rather than a select because the token has no C++ value to select on.
+        What it does change is the *count*, on one of the two vendors: AMD's
+        `vmcnt` is per wave and the instruction issues whenever any lane is
+        active, but NVIDIA's group counter is per thread, so a lane inside the
+        guard and a lane outside it do not agree on how many groups are in
+        flight.  That is why the commit is not emitted here.  `place_commits`
+        puts it where the wait is, so the two agree by construction and the
+        copy may stay under its predicate.
 
         The token granularity is independent of all of this.  A wait retires
         every copy up to and including the one it names, so a wait on the last
@@ -1105,24 +1134,47 @@ class IRBuilder:
         counter = self._counter
         names = getattr(self._alloc, 'counter', None)
         depth = len(self._stack)
+        undo_mark = len(self._undo)
         spec = _Speculation()
         try:
             yield spec
         except Exception:
-            self._rollback(scope, mark, counter, names, depth)
+            self._rollback(scope, mark, counter, names, depth, undo_mark)
             raise
         if spec.discarded:
-            self._rollback(scope, mark, counter, names, depth)
+            self._rollback(scope, mark, counter, names, depth, undo_mark)
         elif len(self._stack) != depth:
             raise IRError('speculative block left the scope stack unbalanced')
 
-    def _rollback(self, scope, mark, counter, names, depth):
+    def _rollback(self, scope, mark, counter, names, depth, undo_mark=0):
         del scope.body[mark:]
         self._counter = counter
         if names is not None:
             # a discarded probe must not burn names either
             self._alloc.counter = names
         del self._stack[depth:]
+        # State the attempt wrote *outside* the body, newest first.
+        #
+        # Everything above is bookkeeping this builder owns; this is not.  A
+        # fill records on its symbol how the image it writes is distributed
+        # (`Symbol._record_linear_layout`), and that claim is a fact about the
+        # emitted body -- a discarded attempt emitted no fill, so the claim is
+        # not true and must go with it.  Left behind, the second attempt sees
+        # a symbol the first did not, and the same case generates two
+        # different kernels: `test_generation_is_deterministic` caught exactly
+        # that, at 1828 lines against 796.
+        while len(self._undo) > undo_mark:
+            self._undo.pop()()
+
+    def on_rollback(self, undo) -> None:
+        """Register how to undo something this emission did outside the body.
+
+        Callers that mutate state a `_rollback` cannot reach say so here.  The
+        alternative was for `speculative` to know which state exists and
+        snapshot it, which puts the list of everything mutable in the one
+        place that cannot see any of it.
+        """
+        self._undo.append(undo)
 
     # -- legacy Writer facade ---------------------------------------------- #
 

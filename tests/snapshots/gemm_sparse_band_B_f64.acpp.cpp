@@ -41,7 +41,7 @@ inline void kernel_kernel_417e1ddcc4(sycl::queue *stream, sycl::range<3> group_c
             if (allowed) {
               double *const __restrict__ glb_m0 = &m0[batchId0 * 256 + 0 + m0_extraOffset];
               const double *const __restrict__ glb_m1 = &m1[batchId0 * 256 + 0 + m1_extraOffset];
-              const double *const __restrict__ glb_m2 = &m2[batchId0 * 256 + 0 + m2_extraOffset];
+              const double *const __restrict__ glb_m2 = &m2[batchId0 * 46 + 0 + m2_extraOffset];
               double r0[16]{};
               // r0 = load{g>r}(glb_m1);
               int32_t v8_lead = item.get_local_id(0) % 16;

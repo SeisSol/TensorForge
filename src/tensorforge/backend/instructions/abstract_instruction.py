@@ -119,6 +119,29 @@ class AbstractInstruction(ABC):
   # conservative rather than silently gaining permission.
   # ----------------------------------------------------------------- #
 
+  def substitute(self, old, new) -> bool:
+    """Make this instruction name `new` wherever it named `old`.
+
+    Reflective over the same attributes `defs` and `uses` read, and for the
+    same reason: what an instruction calls its destination and its operands is
+    a convention, not an interface, and a substitution that knew each kind
+    would have to be extended for every kind that is ever added.
+
+    Returns whether anything changed, so a caller can tell a substitution that
+    did nothing from one it never reached.
+    """
+    changed = False
+    for attr in ('_dest', '_src'):
+      if getattr(self, attr, None) is old:
+        setattr(self, attr, new)
+        changed = True
+    for attr in ('_ops', '_srcs', '_operands'):
+      held = getattr(self, attr, None)
+      if isinstance(held, list) and any(x is old for x in held):
+        setattr(self, attr, [new if x is old else x for x in held])
+        changed = True
+    return changed
+
   def defs(self) -> Tuple:
     """Symbols written by this instruction."""
     get_dest = getattr(self, 'get_dest', None)

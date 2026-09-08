@@ -27,7 +27,8 @@ from .core import (ANY_EFFECT, BOOL, INDEX, TOKEN, Access, BufferType, Effect,
                    TokenType, Value, accesses_conflict, collect_accesses,
                    collect_effect, def_use, defined_within, dump, free_values,
                    may_alias, walk)
-from .asyncmem import check_tokens, schedule_async
+from .asyncmem import (check_tokens, place_commits, schedule_async,
+                       strip_commits)
 from .build import IRBuilder, access_of
 from .passes import cluster_loads, flatten_scopes, if_convert, pressure, cse, dce, fold, licm, load_cse, optimize, substitute, verify
 from .emit import Emitter, emit
@@ -38,7 +39,8 @@ __all__ = [
     'ScalarType', 'Stmt', 'TokenType', 'Value', 'access_of',
     'accesses_conflict', 'check_tokens', 'collect_accesses', 'collect_effect',
     'cse', 'dce', 'cluster_loads', 'flatten_scopes', 'if_convert', 'pressure', 'def_use', 'defined_within', 'dump', 'emit', 'fold',
-    'free_values', 'licm', 'load_cse', 'may_alias', 'optimize', 'schedule_async',
+    'free_values', 'licm', 'load_cse', 'may_alias', 'optimize', 'place_commits',
+    'schedule_async', 'strip_commits',
     'substitute', 'verify',
     'walk',
 ]

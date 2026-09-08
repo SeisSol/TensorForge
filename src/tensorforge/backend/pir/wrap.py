@@ -51,6 +51,7 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import Dict, List, Optional, Sequence, Tuple
 
+from .asyncmem import strip_commits
 from .core import (Effect, Op, Region, Stmt, TokenType, Value,
                    accesses_conflict, walk)
 from .passes import substitute
@@ -192,6 +193,13 @@ def wrap_prefetch(body: Tuple[Stmt, ...], make_value,
     this produces go where the pass puts them, not where a builder's cursor
     happens to be.
     """
+    # A commit records where a group closed, and this pass is about to change
+    # that: the peel closes one group before the loop and the body closes
+    # another inside it.  So the commits from the earlier `schedule_async` go
+    # first, and the `schedule_async` that follows this pass puts them back --
+    # otherwise the group boundary an issue was moved out of would still be
+    # standing between that issue and its wait.
+    body = strip_commits(body)
     out: List[Stmt] = []
     for s in body:
         if s.op is not Op.FOR:
@@ -299,8 +307,14 @@ def _wrap_one(loop: Stmt, make_value,
     if guard_at is not None:
         defined_in_loop |= {t.id for st in region.body[guard_at].regions[0].body
                             for t in st.target}
-    if any(isinstance(a, Value) and a.id in defined_in_loop
-           for g in group for a in g.args[:1]):
+    # From the subtree: a section member is a hop loop with no args of its
+    # own, so reading `g.args[:1]` stopped finding the destination the moment
+    # the group became a section -- and a rotating write window *is* declared
+    # inside the loop, because its offset moves with the stage counter.  The
+    # peel then names it before it exists, which renders and does not compile.
+    dests = [x.args[0] for g in group for x, _ in walk((g,))
+             if x.op in (Op.COPY_ASYNC, Op.LOAD_ASYNC) and x.args]
+    if any(isinstance(a, Value) and a.id in defined_in_loop for a in dests):
         raise Refusal('the destination is declared inside the loop, so a '
                       'peeled transfer would name it before it exists')
 
@@ -328,7 +342,13 @@ def _wrap_one(loop: Stmt, make_value,
     rewritten = [substitute((g,), {**next_index, **advance_map})[0]
                  for g in group]
 
-    tokens = [g.target[0] for g in group]
+    # From the subtree: a section member may be a hop loop, which has no
+    # target of its own -- the tokens belong to the `copy.async` statements
+    # inside it.  Reading `g.target[0]` worked only while the group was a set
+    # of copies, and raised an IndexError the first time a real section
+    # reached here.
+    tokens = [t for g in group for x, _ in walk((g,))
+              if x.op in (Op.COPY_ASYNC, Op.LOAD_ASYNC) for t in x.target]
     carried = [make_value(t.type, 'cp') for t in tokens]
     swap = dict(zip((t.id for t in tokens), carried))
     new_wait = replace(wait, args=tuple(
@@ -363,21 +383,51 @@ def _wrap_one(loop: Stmt, make_value,
     lo = loop.loop_bounds[0]
     peel_slice, peel_map = _advance(slice_, {loop.induction.id: lo},
                                     make_value)
-    peel = peel_slice + [
-        replace(substitute((g,), {loop.induction.id: lo, **peel_map})[0],
-                target=(make_value(g.target[0].type, 'cp'),))
-        for g in group]
+    # The prologue is the section again, for the first element, with fresh
+    # tokens.  A section member keeps its shape -- a loop stays a loop -- so
+    # only the tokens inside it are renamed.
+    peel = list(peel_slice)
+    peel_tokens = []
+    for g in group:
+        clone = substitute((g,), {loop.induction.id: lo, **peel_map})[0]
+        clone, fresh = _fresh_tokens(clone, make_value)
+        peel.append(clone)
+        peel_tokens.extend(fresh)
 
     results = [make_value(t.type, 'cp') for t in tokens]
     new_loop = replace(
         loop,
         target=loop.target + tuple(results),
-        args=loop.args + tuple(p.target[0] for p in peel[-len(group):]),
+        args=loop.args + tuple(peel_tokens),
         regions=(replace(region, args=region.args + tuple(carried),
                          body=tuple(body)),))
     drain = Stmt(op=Op.WAIT, args=tuple(results), pure=False, movable=True,
                  effect=wait.effect, accesses=wait.accesses)
     return list(peel) + [new_loop, drain]
+
+
+def _fresh_tokens(stmt: Stmt, make_value):
+    """Rename the completion tokens inside a statement, keeping its shape.
+
+    A peeled section is the same code for a different element, so its loops
+    stay loops and its predicates stay predicates; what must not be shared
+    with the in-loop copy is the tokens, since both are in flight at once.
+    """
+    fresh: List[Value] = []
+
+    def rewrite(st: Stmt) -> Stmt:
+        nonlocal fresh
+        if st.op in (Op.COPY_ASYNC, Op.LOAD_ASYNC):
+            new = tuple(make_value(t.type, 'cp') for t in st.target)
+            fresh.extend(new)
+            st = replace(st, target=new)
+        if st.regions:
+            st = replace(st, regions=tuple(
+                replace(r, body=tuple(rewrite(x) for x in r.body))
+                for r in st.regions))
+        return st
+
+    return rewrite(stmt), fresh
 
 
 def _index_slice(region: Region, group: Sequence[Stmt],

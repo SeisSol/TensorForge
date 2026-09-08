@@ -397,12 +397,14 @@ def test_yateto_frontend_imports_and_constructs():
     scope for the in-repo suite; SeisSol's CI is the right place for
     those.
     """
-    from tensorforge.frontend.yateto import YatetoFrontend, GpuKernelGeneratorV1
+    from tensorforge.frontend.yateto import (DescriptionReader, KernelEmitter,
+                                             YatetoFrontend)
 
     fe = YatetoFrontend(arch="sm_86")
-    assert isinstance(fe.generator, GpuKernelGeneratorV1)
-    assert fe.generator._descr_list == [], (
-        "fresh YatetoFrontend should have empty descr list")
+    assert fe._emitter is None, (
+        "a fresh YatetoFrontend has been handed no kernel yet")
+    assert DescriptionReader("sm_86", {})._descr_list == []
+    assert KernelEmitter is not None
 
 
 # ---------------------------------------------------------------------- #

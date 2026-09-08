@@ -287,7 +287,15 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
         # width stops being a cast on both sides of an assignment and becomes
         # `elems`, which is what the emitter needs anyway to check the
         # transfer size against `copy_async_sizes()`.
-        dst_buf = self._dest.pir_buffer(writer)
+        # The same claim the synchronous branch below records.  A `copy.async`
+        # distributes its destination exactly as a load-and-store pair does --
+        # the engine moves the bytes, not the mapping -- so leaving it unsaid
+        # here made the answer depend on which transfer the target happens to
+        # use.  66% of the staged reads on CUDA had no claim behind them for
+        # that reason; see `tools/staging_census.py`.
+        self._dest._record_linear_layout(dst_offset, increment,
+                                         self._num_threads, writer)
+        dst_buf = self._destination_buffer(writer)
         src_buf = self._src.pir_buffer(writer)
         def write_load(lhs, rhs, _d=dst_buf, _s=src_buf, _n=increment):
           self._tokens.append(writer.copy_async(
@@ -304,6 +312,19 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
         # ESIMD lowering needs this said -- an SPMD backend can leave the
         # distribution in the index expression, a vector one cannot.
         xfer_layout = RegisterLayout((LaneAxis(self._num_threads, 1),))
+        # Said on the *destination* as well, not only on the value in flight.
+        # A later read of this image is `load_linear`, whose address has no
+        # lane term at all -- it reports what the fill recorded and can derive
+        # nothing.  Stating the claim only on the loaded value left the symbol
+        # unknown, so every consumer of the staged image had to fail closed:
+        # invisible under SPMD, where unknown costs precision, and fatal under
+        # an explicit vector, where a declaration cannot be written without a
+        # distribution.
+        #
+        # Same call `store_linear` makes for the other fill path, so the two
+        # cannot record different claims about the same shape.
+        self._dest._record_linear_layout(dst_offset, increment,
+                                         self._num_threads, writer)
         dst_buf = self._dest.pir_buffer(writer)
         src_buf = self._src.pir_buffer(writer)
         def write_load(lhs, rhs, _d=dst_buf, _s=src_buf, _n=increment,
@@ -374,10 +395,23 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
     """
     if not hasattr(writer, 'copy_async'):
       return False
-    if self.write_base() != self._dest.name:
+    if self._src.pir_buffer(writer) is None:
       return False
-    return (self._dest.pir_buffer(writer) is not None
-            and self._src.pir_buffer(writer) is not None)
+    return self._destination_buffer(writer) is not None
+
+  def _destination_buffer(self, writer):
+    """The value this transfer fills.
+
+    Not the symbol's for a rotating buffer: that one addresses the stage the
+    consumers read, and writing through it would overwrite the data they are
+    about to use.  The write window is a value of its own now, which is what
+    lets a rotating transfer stay on the structured path -- rotation and
+    `copy.async` used to exclude each other, and rotation is what the wrap
+    pass needs.
+    """
+    if self.rotates():
+      return self.write_buffer(writer)
+    return self._dest.pir_buffer(writer)
 
   def get_src(self) -> Symbol:
     return self._src
@@ -534,7 +568,8 @@ class GlbToRegLoader(MemoryInstruction, LoadInstruction):
         # scheduler drop its state and nothing reorders across one.
         staged = self._src.load_linear(writer, self._context, None, i, g)
         self._dest.store_linear(writer, self._context, staged, i, g,
-                                base=self.write_base())
+                                base=self.write_base(),
+                                threads=self._num_threads)
 
       if tail:
         # Fewer than `num_threads` elements, so some lanes have nothing to
@@ -551,7 +586,8 @@ class GlbToRegLoader(MemoryInstruction, LoadInstruction):
             writer, self._context,
             self._src.load_linear(writer, self._context, None,
                                   total_size - tail, 1),
-            total_size - tail, 1, base=self.write_base())
+            total_size - tail, 1, base=self.write_base(),
+            threads=self._num_threads)
 
     elif self._context.get_vm().get_hw_descr().vendor in ['amd'] and False:
 

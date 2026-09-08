@@ -13,9 +13,73 @@ from tensorforge.common.basic_types import Addressing
 
 from typing import List
 
+class GuardLiteral:
+  """One term of a guard: a rank-0 condition tensor, taken or negated.
+
+  `version` distinguishes successive values of the same tensor. yateto writes
+  a condition tensor and may write it again later, and two literals over the
+  same tensor at different versions are different values -- without the
+  version they would compare equal and a guard could be simplified away
+  against a value it never had.
+  """
+
+  __slots__ = ('tensor', 'version', 'negated')
+
+  def __init__(self, tensor, version=0, negated=False):
+    self.tensor = tensor
+    self.version = version
+    self.negated = negated
+
+  def key(self):
+    return (id(getattr(self.tensor, 'tensor', self.tensor)),
+            self.version, self.negated)
+
+  def __str__(self):
+    name = getattr(getattr(self.tensor, 'tensor', None), 'alias', None) or str(self.tensor)
+    return f'{"!" if self.negated else ""}{name}@{self.version}'
+
+
 class OperationDescription:
+  #: The guard this operation runs under: a conjunction of `GuardLiteral`,
+  #: or None for one that always runs. An empty conjunction is also always.
+  #:
+  #: A field rather than a wrapping descriptor, because everything that walks
+  #: a section -- `SectionPlan`, residency, the temporaries -- asks each
+  #: descriptor for its geometry through `reads`, `writes` and
+  #: `effective_boxes` and deliberately does not know what kinds there are. A
+  #: wrapper would have to be unwrapped by every one of those walks, and a
+  #: walk that forgot would read a guarded write as an unconditional one,
+  #: which is the failure that leaves no trace. Grouping neighbours that share
+  #: a guard is then a pass over the list, which is where it belongs.
+  condition = None
+
+  def guarded(self):
+    """Whether this operation runs under a guard that is not always true."""
+    return bool(self.condition)
+
+  def condition_reads(self) -> List:
+    """The views the guard reads.
+
+    Kept apart from `reads()`: those are the operation's operands and a
+    builder resolves them as such, while these are read to decide whether the
+    operation runs at all. A section still has to stage them, so whatever
+    walks the section has to see both.
+    """
+    return [literal.tensor for literal in (self.condition or ())]
+
   def barrier(self):
     return False
+
+  def operations(self) -> List:
+    """The operations this descriptor stands for, itself by default.
+
+    A descriptor that holds others -- a loop over a body -- is not the unit
+    whose geometry can be asked for: it reads and writes whatever its
+    iterations do, and `writes()` has one destination to give.  So whoever
+    needs the operations asks for them and gets them expanded, rather than
+    learning which kinds contain which.
+    """
+    return [self]
 
   def reads(self) -> List:
     """The views this operation reads, tensor-carrying ones only.
@@ -98,8 +162,9 @@ class MultilinearDescr(OperationDescription):
     align = min([getattr(m.tensor, 'alignment', 0) or 0
                  for m in self.matrix_list()] or [0])
     fp = context.fp_type.size()
-    return vectorize.lead_threads_and_width(
-        self._lead_dim(), fp, align, blocking=vectorize.LEAD_BLOCKING)[1]
+    # The same call `get_num_threads` makes, so the lane count and the width
+    # cannot come from two different answers.
+    return vectorize.lead_pair(self._lead_dim(), fp, align)[1]
 
   def scalar_num_threads(self, context: Context) -> int:
     """The lane count this operator would have had without vectorisation.
@@ -132,9 +197,7 @@ class MultilinearDescr(OperationDescription):
       fp = context.fp_type.size()
       align = min([getattr(m.tensor, 'alignment', 0) or 0
                    for m in self.matrix_list()] or [0])
-      threads, width = vectorize.lead_threads_and_width(
-          self._lead_dim(), fp, align,
-          blocking=vectorize.LEAD_BLOCKING)
+      threads, width = vectorize.lead_pair(self._lead_dim(), fp, align)
       if width > 1:
         # The extent still has to be covered: the loop bound is in elements
         # and the lane count is what it is divided by, so this returns the
@@ -422,8 +485,138 @@ class GemmDescr(MultilinearDescr):
       ))
       super(GemmDescr, self).__init__(c, [a, b, alpha_tensor], [target_a, target_b, []], [permute_a, permute_b, []], add, strict_match, prefer_align)
 
-class ForDescr:
-  pass
+class ForDescr(OperationDescription):
+  """A run of chunks stated once, with a table of what varies.
+
+  Holds the generalisation of the run rather than a body with placeholders in
+  it: iteration `i` *is* the common body with `bindings[i]` in its holes, so
+  there is one definition of what the loop means and `unroll` is its inverse
+  rather than a second implementation of it.
+
+  The facts that decide the lowering are carried alongside and not recomputed:
+  `dependence` says whether the iterations may be reordered or overlapped,
+  `periods` says whether a hole names its tensors again on a stride, and
+  `escaping` says which of the outputs are read after the loop.  A rotation is
+  legal only where a hole has a period *and* the buffers it skips do not
+  escape; either fact alone chooses wrong.
+  """
+
+  def __init__(self, general, dependence, periods=(), escaping=(), shifts=()):
+    #: The one body this emits and what each hole stands for, decided once.
+    #:
+    #: Cached rather than derived on demand, because the stand-ins are
+    #: *identities*: the generator names operands in one phase and resolves
+    #: them in another, and a decomposition rebuilt between the two would hand
+    #: the second phase tensors the first has never seen.  One call, one set.
+    self._decomposition = None
+    self.general = general
+    self.dependence = dependence
+    self.periods = tuple(periods)
+    self.escaping = tuple(escaping)
+    # `(source, target, distance)`: what hole `source` names at iteration `k`
+    # is what hole `target` names at `k + distance`.  A column that is another
+    # column moved along does not have to be carried twice.
+    self.shifts = tuple(shifts)
+
+  @property
+  def independent_holes(self):
+    """The holes whose tables are not another hole's table at an offset."""
+    derived = {target for _, target, _ in self.shifts}
+    return tuple(h for h in range(self.arity) if h not in derived)
+
+  @property
+  def iterations(self) -> int:
+    return len(self.general.bindings)
+
+  @property
+  def arity(self) -> int:
+    return self.general.arity
+
+  @property
+  def sequential(self) -> bool:
+    """Whether the order the iterations were written in is part of the meaning."""
+    return self.dependence.ordered
+
+  def body(self, iteration: int) -> List:
+    from tensorforge.analysis.antiunify import instantiate
+    return instantiate(self.general, iteration)
+
+  def bodies(self) -> List[List]:
+    return [self.body(i) for i in range(self.iterations)]
+
+  def barrier(self):
+    return any(d.barrier() for d in self.general.template)
+
+  def operations(self) -> List:
+    return [descr for body in self.bodies() for descr in body]
+
+  def decompose(self, prefix: str = 'variant'):
+    """`(body, variants)`, the same pair every time it is asked for."""
+    if self._decomposition is None:
+      from tensorforge.generators.rolling import variant_body
+      self._decomposition = variant_body(self, prefix)
+    return self._decomposition
+
+  def variants(self) -> List:
+    return list(self.decompose()[1])
+
+  def stand_ins(self) -> List:
+    """The names the emitted body uses where an operand varies.
+
+    Not parameters and not temporaries: each one resolves, inside the loop, to
+    whichever member the counter names.  Whoever builds the signature has to
+    leave them out, and whoever builds the body has to bind them.
+    """
+    return [variant.stand_in for variant in self.decompose()[1]]
+
+  def matrix_list(self) -> List:
+    """Every operand of every iteration, first use first.
+
+    In the order the operations state them, so that naming a rolled list and
+    naming the same list written out reach the same names.  A kernel whose
+    parameters change places because a repetition was stated once would be a
+    different kernel for no reason anyone asked for.
+    """
+    seen = {}
+    for stand_in in self.stand_ins():
+      seen.setdefault(stand_in.tensor, stand_in)
+    for descr in self.operations():
+      for matrix in descr.matrix_list():
+        seen.setdefault(matrix.tensor, matrix)
+    return list(seen.values())
+
+  def destinations(self) -> List:
+    seen = []
+    for body in self.bodies():
+      for descr in body:
+        dest = descr.writes()
+        if dest is not None and not any(dest.tensor is s.tensor for s in seen):
+          seen.append(dest)
+    return seen
+
+  def reads(self) -> List:
+    seen = []
+    for body in self.bodies():
+      for descr in body:
+        for op in descr.reads():
+          if not any(op.tensor is s.tensor for s in seen):
+            seen.append(op)
+    return seen
+
+  def writes(self):
+    """The destination, when every iteration has the same one.
+
+    A loop that writes several tensors has no single answer, and `None` is the
+    reading the base class already gives to a descriptor that cannot say.  Ask
+    `destinations()` for the set.
+    """
+    dests = self.destinations()
+    return dests[0] if len(dests) == 1 else None
+
+  def __str__(self):
+    order = 'in order' if self.sequential else 'any order'
+    return (f'for {self.iterations} ({self.arity} varying, {order}): '
+            f'{len(self.general.template)} op(s)')
 
 class IfDescr:
   def __init__(self, condition, subdescr):

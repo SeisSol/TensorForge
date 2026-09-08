@@ -125,9 +125,28 @@ def search(descr_factory, context: Context,
     that this builds repeatedly, which a caller passing a list it still holds
     a reference to should know.
 
-    The objective is peak register footprint per lane, summed over nothing:
-    the *maximum* over the kernel's bodies, because a budget is per kernel and
-    the widest body is what has to fit.
+    Three keys, in order, and the order is the point: what is known exactly
+    decides before what is modelled, and neither decides where both are
+    silent.
+
+    First, blocks resident per SM under shared memory and threads per block.
+    Those are not estimates -- one is what was allocated, the other is the
+    launch geometry -- so where they differ they are a fact and outrank the
+    model.  Over the corpus they differ once, on the kernel that runs out of
+    registers, and they agree with the model there.  They also explain why the
+    two are worth separating: the lane count moves `mults_per_block` as well,
+    so every contested case changes its shared memory per block at the same
+    time as its registers, and a single number would have hidden which of the
+    two moved.
+
+    Second, peak register footprint per lane: the *maximum* over the kernel's
+    bodies, since a budget is per kernel and the widest body has to fit.
+
+    Third, the geometry the descriptors asked for.  A tie means the model sees
+    no difference, and changing the configuration for no modelled reason is
+    exactly where "the wider one measured slower" would bite -- so a tie keeps
+    what the generator would have done anyway.  Six of the corpus's fourteen
+    contested cases on gfx90a are ties.
 
     Ranking only, and deliberately.  Measured against `hipcc` over the corpus
     on gfx90a and gfx942, the model picks the same configuration the compiler
@@ -154,6 +173,7 @@ def search(descr_factory, context: Context,
     caller can see how close the decision was and what it passed over.
     """
     options = options or candidates(descr_factory(), context)
+    default = deduce(descr_factory(), context)
     if len(options) == 1:
         return options[0], {options[0].num_threads: None}
 
@@ -162,6 +182,7 @@ def search(descr_factory, context: Context,
     was = context.measure_pressure
     context.measure_pressure = True
     scores = {}
+    blocks = {}
     failed = []
     try:
         for config in options:
@@ -173,6 +194,7 @@ def search(descr_factory, context: Context,
                 failed.append(exc)
                 continue
             scores[config.num_threads] = gen.peak_pressure
+            blocks[config.num_threads] = gen.resident_blocks
     finally:
         context.measure_pressure = was
 
@@ -187,5 +209,9 @@ def search(descr_factory, context: Context,
         built = [c for c in options
                  if not isinstance(scores.get(c.num_threads), Exception)]
         return built[0], scores
-    best = min(scored, key=lambda k: scored[k])
+    def rank(width):
+        return (-(blocks.get(width) or 0), scored[width],
+                width != default.num_threads)
+
+    best = min(scored, key=rank)
     return next(c for c in options if c.num_threads == best), scores

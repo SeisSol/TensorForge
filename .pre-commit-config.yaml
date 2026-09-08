@@ -79,7 +79,9 @@ repos:
     hooks:
     -   id: clang-format
         name: '[C++] clang-format'
-        files: ^(?!tests\/snapshots)
+        # tests/fixtures holds recorded JSON; reformatting a recording makes
+        # every fresh capture look like a change
+        files: ^(?!tests\/(snapshots|fixtures))
 
 -   repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v6.0.0

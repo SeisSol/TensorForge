@@ -64,7 +64,7 @@ __launch_bounds__(256)
         if (allowed) {
           float *const __restrict__ glb_m0 = &m0[batchId0 * 256 + 0 + m0_extraOffset];
           const float *const __restrict__ glb_m1 = &m1[batchId0 * 256 + 0 + m1_extraOffset];
-          const float *const __restrict__ glb_m2 = &m2[batchId0 * 256 + 0 + m2_extraOffset];
+          const float *const __restrict__ glb_m2 = &m2[batchId0 * 46 + 0 + m2_extraOffset];
           float r0[16]{};
           // r0 = load{g>r}(glb_m1);
           int32_t v13_lead = threadIdx.x % 16;

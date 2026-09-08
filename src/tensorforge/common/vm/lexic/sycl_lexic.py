@@ -141,6 +141,39 @@ class SyclLexic(Lexic):
   def get_headers(self):
     return ['sycl/sycl.hpp']
 
+  def has_atomic_store(self, ctx, op, datatype, length=1):
+    """No under the explicit-SIMD lowering, whatever the hardware can do.
+
+    `atomic_ref` binds one reference to one element, and under ESIMD the value
+    a store carries is a `simd<T, N>` with a mask beside it -- there is no
+    scalar to bind.  The instruction is `esimd::atomic_update<atomic_op::fadd>`,
+    which takes the vector and the `simd_mask` together and updates the whole
+    of it with atomicity per element.  That is a better fit for what the store
+    path wants than the SPMD spelling is, and it is a different emitter; until
+    it exists, refusing is what keeps an ESIMD kernel from being handed an
+    `atomic_ref<simd<float, 16>>` that does not compile.
+    """
+    return (not self.simd_mode
+            and super().has_atomic_store(ctx, op, datatype, length))
+
+  def atomic_store(self, ctx, access, variable, op, datatype, length=1):
+    """A relaxed, device-scope `atomic_ref` over the destination element.
+
+    Relaxed because an add carries no ordering the accumulation depends on,
+    and device rather than system scope for the same reason it is agent scope
+    on AMD: system scope is what makes the backend give up on the instruction.
+
+    Worth checking against the generated SPIR-V rather than against results
+    alone the first time this runs: `fetch_add` on a floating-point type is
+    expanded into a compare-and-swap loop where the backend is not told the
+    native instruction may be used, and a CAS loop is correct -- it just
+    undoes the entire reason for choosing an atomic.
+    """
+    return (f'sycl::atomic_ref<{datatype}, sycl::memory_order::relaxed, '
+            f'sycl::memory_scope::device, '
+            f'sycl::access::address_space::global_space>'
+            f'({access}).fetch_add({variable});')
+
   def get_fptype(self, fptype, length=1, relaxed=False):
     # `sycl::vec` carries its own alignment and there is no relaxed spelling
     # for it, so the flag is accepted and ignored rather than silently
@@ -203,6 +236,20 @@ class SyclLexic(Lexic):
       f'Composing it from the intrinsics that do exist is a numerics '
       f'decision, not a spelling one.')
 
+  #: C++ `tensorforge::Operation` members, by the `Operation` they lower from.
+  #: The same table `CudaLexic` has, because it names the same device-side
+  #: `ReductionOperation` specialisations -- `base.h` defines them once for
+  #: every backend.
+  REDUCTION_OPS = {
+      Operation.ADD: 'Add',
+      Operation.MUL: 'Mul',
+      Operation.MIN: 'Min',
+      Operation.MAX: 'Max',
+      Operation.AND: 'And',
+      Operation.OR: 'Or',
+      Operation.XOR: 'Xor',
+  }
+
   #: The ESIMD spelling of each all-reduce, by the `Operation` it lowers from.
   #:
   #: `reduce` covers only `std::plus` and `std::multiplies` -- its other
@@ -223,14 +270,18 @@ class SyclLexic(Lexic):
     lanes are elements of one work-item's register, so the reduction is an
     operation on a `simd<T, N>` and the "all" part is a broadcast back.
 
-    Only the whole-vector case, and the omission is deliberate.  The SPMD
-    butterfly is `for (i = Block/2; i >= Subblock; i >>= 1) result =
-    Op(result, shfl_xor(result, i))`, which for `Subblock > 1` leaves each
-    group of `Subblock` lanes with its own answer.  That is expressible here
-    -- a two-dimensional region, `select<N/(2i), 2i, i, 1>`, is exactly the
-    pairing -- but nothing asks for it: every reduction in the corpus is
-    `block=16, subblock=1`.  Writing an untested butterfly for a case with no
-    caller is how the `simd_mode` branches got there in the first place.
+    Two shapes, and they differ in more than width.  `subblock == 1`
+    collapses the lane axis and the intrinsics answer it in one call, giving a
+    *scalar*.  `subblock > 1` keeps a group, so the answer is a vector and the
+    butterfly has to be spelled out -- `segmentedReduction` in `isycl.h` does
+    that with the two-dimensional region `select<Block/(2i), 2i, i, 1>`, which
+    is exactly the pairing `shfl_xor(x, i)` performs.
+
+    Nothing in the generator asks for the second shape today: `reduction.py`
+    passes `subblock=1` at its only call site, and no descriptor produces a
+    lead axis that carries two tensor dimensions.  It is implemented anyway
+    because the primitive is what the *lexic* promises, and a promise with a
+    hole in it is found by whoever first needs it.
     """
     if block == subblock:
       # Nothing to combine: each group is one lane wide already.
@@ -243,9 +294,17 @@ class SyclLexic(Lexic):
           f'cannot see the sub-group size to check the second condition, and '
           f'a reduction over the wrong width is wrong quietly.')
     if subblock != 1:
-      raise NotImplementedError(
-          f'segmented reduction (block={block}, subblock={subblock}) is not '
-          f'emitted; see SyclLexic.reduction')
+      # A group survives, so this is not a collapse and the intrinsics do not
+      # answer it: `reduce` and `hmax` return one value for the whole vector.
+      # `segmentedReduction` in `isycl.h` is the butterfly, and its result is
+      # a vector -- unlike the collapse below, which yields a scalar.
+      if optype not in self.REDUCTION_OPS:
+        raise NotImplementedError(f'reduction over {optype}')
+      ctype = fptype.ctype()
+      op = (f'tensorforge::ReductionOperation<{ctype}, '
+            f'tensorforge::Operation::{self.REDUCTION_OPS[optype]}>')
+      return (f'tensorforge::segmentedReduction<{op}, {block}, {subblock}, '
+              f'{ctype}>({variable})')
     if optype not in self._ESIMD_REDUCE:
       raise NotImplementedError(
           f'reduction over {optype} has no ESIMD entry point')

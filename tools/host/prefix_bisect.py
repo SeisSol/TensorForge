@@ -49,7 +49,7 @@ def build(descrs, upto=None):
 
     out = []
     for d in descrs[:upto]:
-        if d is None:
+        if not ref.evaluable(d):
             continue
         out.append(MultilinearDescr(
             dest=sub(d["dest"]),
@@ -61,7 +61,7 @@ def build(descrs, upto=None):
 
 
 def prefix_descrs(descrs, upto):
-    return [d for d in descrs[:upto] if d is not None]
+    return [d for d in descrs[:upto] if ref.evaluable(d)]
 
 
 def evaluate(descrs, upto, backend="cuda", arch="sm_86", seed=1):
@@ -76,7 +76,7 @@ def evaluate(descrs, upto, backend="cuda", arch="sm_86", seed=1):
     shapes, written = ref.tensors_of(prefix)
     storage = ref.storage_of(prefix)
     arrays = ref.make(shapes, written, seed,
-                      ref.constants_of(prefix_descrs(descrs, upto)))
+                      ref.constants_of(prefix_descrs(descrs, upto)), storage)
     # A destination that is *only* accumulated onto must carry a value on
     # entry, or a dropped bias cannot show.  One with an assignment among its
     # writers must not -- see the note in validate_dump.py.
@@ -127,7 +127,7 @@ if __name__ == "__main__":
             "kernel, rather than a guess at what it looked like.")
     descriptors, kernel = sys.argv[1], sys.argv[2]
     descrs = json.load(open(descriptors))["all"][kernel]
-    n = len([d for d in descrs if d is not None])
+    n = len([d for d in descrs if ref.evaluable(d)])
     print(f"{kernel}: {n} descriptors")
     lo, hi = 1, n
     while lo < hi:

@@ -58,7 +58,7 @@ MODULES = ["nvidia"]
 #: it and is listed as well, since a direct reader is free to size a buffer
 #: without going through the routing table.
 ENTRIES = ["matmul", "supports", "shmsize", "scratch", "strategies",
-           "ENABLED"]
+           "plan", "ENABLED"]
 
 # Unreachable on purpose.  Each entry would need a reason that says why
 # deleting it would be worse than keeping it.  There are none.

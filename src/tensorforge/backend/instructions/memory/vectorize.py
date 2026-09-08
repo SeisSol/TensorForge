@@ -198,6 +198,62 @@ def _round_up_pow2(n: int, cap: int) -> int:
     return t
 
 
+#: The widest lead vector that has been shown to compute the right numbers.
+#:
+#: 4, which is also what `lead_width_cap` permits for an FP32 base of 16-byte
+#: alignment, so the two agree today and the pair is kept because they are
+#: still different questions: one is about the address and one is about us.
+#:
+#: It was 2, and what held it there was the slot-count formula.  The register
+#: image sized a lane's share of a distributed dimension as `ceil(u/T)`, its
+#: *slot* count, where a `w`-wide read needs its *float* count -- and the rule
+#: was stated three times, in the addressing and in both allocation sites, so
+#: the width reached none of them.  At u=12, T=4, w=4 that is 3 against 4, and
+#: consecutive non-lead indices addressed overlapping windows.  One statement
+#: of the rule now, in `symbol.slots_for`.
+#:
+#: 114 shapes per width across FP32 and FP64, both alignments, odd and even
+#: extents: widths 2 and 4 agree with the scalar kernel everywhere.
+VALIDATED_LEAD_WIDTH = 4
+
+
+def lead_width_cap(elem_bytes: int, align_bytes: int) -> int:
+    """The widest lead vector worth taking, from what the address proves.
+
+    Was the constant 2, and the constant hid a question rather than answering
+    it: `widths_for` offers 4 for an FP32 base of 16-byte alignment and 2 for
+    an FP64 one, so `float4` was unreachable and `double2` reachable only
+    because 2 happened to be both the cap and the ceiling.
+
+    The *FMA* width is deliberately not part of this, and that is the part
+    worth stating because the intuition runs the other way.  A vector wider
+    than the target's packed FMA is not an instruction that does not exist --
+    it is several of them, and every element past the first amortises the one
+    load and the one splat further.  Per m-element at one vector per lane,
+    with `p` the packed FMA width:
+
+        w=1            3.00 instructions
+        w=2, p=1       2.00
+        w=2, p=2       1.50
+        w=4, p=1       1.50
+        w=4, p=2       1.00
+
+    So the count falls with `w` whether or not the arithmetic packs, and a
+    scalar-FMA target gains *more* from the step to 4 than a packed one does.
+    `compute/packed.py` says which of those columns a target is in, which is a
+    cost-model input and not a ceiling; the ceiling is the address.
+
+    What is left out and would lower this is register pressure.  A width of
+    `w` puts `w` times as many floats in a lane and `w` times fewer lanes on
+    the operator, which is neutral in total and not per thread -- and per
+    thread is the constraint that already binds at order 6 in FP64.  That is a
+    measurement this cannot make, which is the argument for keeping the
+    address ceiling here and a budget elsewhere rather than folding a guess at
+    the budget into the ceiling.
+    """
+    return max(widths_for(elem_bytes, align_bytes))
+
+
 def lead_threads_and_width(extent: int, elem_bytes: int, align_bytes: int,
                            max_threads: int = 32, cap: int = 2,
                            blocking: int = 1):
@@ -275,6 +331,34 @@ def lead_threads_and_width(extent: int, elem_bytes: int, align_bytes: int,
             continue
         return threads, w
     return scalar_threads, 1
+
+
+def lead_pair(extent: int, elem_bytes: int, align_bytes: int):
+    """The `(threads, width)` a lead dimension runs at.  One decision.
+
+    `lead_threads_and_width` returns a pair because the two are one choice --
+    at width `w` the lane count needed is `ceil(extent / w)`, so picking
+    either without the other is picking neither.  Two callers then took one
+    component each, from their own call: `get_num_threads` read the lane count
+    and `lead_width` the width, and nothing made the two calls pass the same
+    arguments.
+
+    They did not.  One passed the cap and one took the default, and for a
+    16-element FP32 extent at 16-byte alignment that is `(8, 2)` against
+    `(4, 4)` -- so the nest ran at 8 lanes and width 4, which is 32 slots for
+    16 elements and a register image blocked for a pair nobody had computed.
+    120 of `aligned_operands`' 128 destination cells came out wrong, and the
+    loop nest was not at fault: it covered its range exactly once, as
+    `test_lead_coverage` says it does at every width.
+
+    So the cap is applied here rather than passed in, and the pair is taken
+    whole.  `lead_threads_and_width` keeps its `cap` argument, which is what
+    the unit tests vary; nothing in the generator reaches it directly.
+    """
+    return lead_threads_and_width(
+        extent, elem_bytes, align_bytes,
+        cap=min(lead_width_cap(elem_bytes, align_bytes), VALIDATED_LEAD_WIDTH),
+        blocking=LEAD_BLOCKING)
 
 
 def lead_vectorize_supported(context) -> bool:

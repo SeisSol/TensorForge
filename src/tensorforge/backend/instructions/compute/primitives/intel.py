@@ -47,7 +47,8 @@ gain.
 
 from tensorforge.backend.pir.core import SCALAR_LAYOUT, ScalarType
 from tensorforge.common.basic_types import Datatype
-from ..strategy import Strategy
+from .. import broadcast, ranking, split
+from ..strategy import Strategy, whole
 
 #: Fixed by the hardware; the header asserts it.
 SYSTOLIC_DEPTH = 8
@@ -122,14 +123,23 @@ ATOMS = {
     'fp16': DpasAtom('fp16', 16, Datatype.F32),
 }
 
+#: Terms the FP32 path splits an operand into.
+#:
+#: Two, and `split.terms(MANTISSA[TF32], F32)` is three: 11 bits at a time
+#: against FP32's 24 needs three terms to cover it exactly, and two carry 22.
+#: The reduction is deliberate and it is what `splitFloatTF32` is built for --
+#: it returns a `(hi, lo)` pair, so the count and the routine's arity are one
+#: fact -- but it is a reduction, and `split.covered` is what it costs.
+TF32_SPLIT_TERMS = 2
+
 #: The number of TF32 products it takes to recover an FP32 multiply.
 #:
-#: TF32 keeps 11 mantissa bits against FP32's 24, so one split leaves the pair
-#: `(hi, lo)` covering about 22 -- and the cross terms `hi*lo` and `lo*hi` make
-#: up the difference.  `lo*lo` falls below the accumulator's rounding and is
-#: dropped, which is the same three-term arrangement `nvidia.py` uses for
-#: `mma.sync ... .tf32`.
-TF32_TERMS = 3
+#: Derived rather than stated: the pair covers about 22 bits and the cross
+#: terms `hi*lo` and `lo*hi` make up the difference, while `lo*lo` sits below
+#: the accumulator's rounding and is dropped.  That is the same three-product
+#: arrangement `nvidia.py` uses for `mma.sync ... .tf32`, and it comes out of
+#: the same formula rather than being asserted twice.
+TF32_TERMS = len(split.products(TF32_SPLIT_TERMS))
 
 #: Whether the path is deployed, as opposed to whether it *can* emit for a
 #: given shape -- that second question is `supports()`.  Two different facts,
@@ -255,12 +265,76 @@ def supports(threads, dtype, sparse) -> bool:
     * ``not sparse``.  The sparse operand path loads by linear index, which is
       not a fragment.
     """
-    return threads == EXECUTION_SIZE and dtype == Datatype.F32 and not sparse
+    return threads == EXECUTION_SIZE and dtype == Datatype.F32
 
 
-def atom_for(dtype):
-    """The atom an operator of this type is emulated with, or None."""
-    return ATOMS['tf32'] if dtype == Datatype.F32 else None
+#: Repeat counts the header's `verify_repeat_count` admits, widest first.
+#:
+#: Widest first because a tie in the ranking below means the count could not
+#: tell two of them apart, and the order a module states is then the answer.
+#: With no shape and no budget every candidate ties, so this is what decides.
+REPEATS = (8, 4, 2, 1)
+
+
+def fragment_bytes(atom, terms=TF32_SPLIT_TERMS) -> int:
+    """Register file one issue group's fragments hold, in bytes.
+
+    The accumulator once and each operand once per split term, which is what
+    `dpas_matmul` declares inside a `j0` tile.  `repeat` scales the
+    accumulator and Src2 and leaves Src1 alone, so this is the register half
+    of the trade the repeat count makes -- the issue half is `ranking.issues`.
+
+    A lower bound on what the body holds, not the body's own figure: the
+    surrounding loop nest has registers of its own, and
+    `_check_register_budget` is what weighs the whole of it.
+    """
+    elems = atom.c_elems + terms * (atom.a_elems + atom.b_elems)
+    return elems * Datatype.F32.size()
+
+
+def atoms_for(dtype, budget=None):
+    """Every repeat count this type could be emitted at, widest first.
+
+    `repeat` is the only free parameter here, and it trades register pressure
+    for issue count: eight columns of output per issue against one, and eight
+    times the accumulator and Src2 to hold them.  A budget in bytes drops the
+    candidates whose fragments alone would not fit.
+    """
+    if dtype != Datatype.F32:
+        return ()
+    base = ATOMS['tf32']
+    out = [base.with_repeat(repeat) for repeat in REPEATS]
+    if budget is not None:
+        out = [atom for atom in out if fragment_bytes(atom) <= budget]
+    return tuple(out)
+
+
+def atom_for(dtype, columns=0, lead=0, depth=0, budget=None):
+    """The repeat count that serves this shape with the fewest issues.
+
+    Ranking by issues alone always returns the widest, because nothing else
+    in the count changes with `repeat` -- so without a budget this is the
+    constant `REPEATS[0]` with a ranking around it, and saying that is the
+    point: the selection only becomes one once the register side bounds it.
+    That is what `budget` is for and why it is a parameter rather than a
+    constant here.
+    """
+    def key(atom):
+        # `m` takes the output columns, `n` the lanes and so the leading
+        # dimension, `k` the contraction -- a third mapping to the same three
+        # numbers, and the reason the conversion sits in each vendor module.
+        return (ranking.Extent(columns=atom.m, lanes=atom.n, depth=atom.k,
+                               name=f'{atom.name}x{atom.repeat}'), 1)
+
+    found = ranking.rank(atoms_for(dtype, budget), key, columns, lead, depth)
+    return found[0] if found else None
+
+
+def register_budget(ctx):
+    """Bytes of register file one work-item gets, or `None` where unstated."""
+    if ctx is None:
+        return None
+    return getattr(ctx.get_vm().get_hw_descr(), 'max_reg_per_thread', None)
 
 
 def simd(lexic, elem, count) -> str:
@@ -290,66 +364,6 @@ def simd(lexic, elem, count) -> str:
 #: accumulators sweeps the full contraction over one distinct B vector.  That
 #: is structure, not numerics -- the numbers still want a run.
 BROADCAST_ENABLED = True
-
-
-def broadcast_matmul(writer, C, A, B, M, N, K, kx, threads, dtype, ctx):
-    """`C[i][j] += B[k][j] * A[i][k]`, entirely in registers.
-
-    The same shape as the AMD DPP path in `amd/codegen.py`, and preferable
-    here for a reason that is specific to this model: the contraction index of
-    B lives in the *lanes*, so every product needs one of B's lanes broadcast
-    to all of them.  On AMD that is a real cross-lane instruction and the
-    reason `relayout.py` has a table of them; under an explicit vector it is
-    `v[k]`, an element read out of this work-item's own registers.
-
-    A free broadcast is what makes the register-only arrangement beat staging
-    operands through shared memory, which is what the NVIDIA path has to do --
-    there is no barrier, no arena, and no round trip.
-
-    A is per-lane in the output index `i`; B is per-lane in the contraction
-    index `k`.  Two different meanings of "lane" for the two operands, which
-    is exactly what the broadcast reconciles.
-    """
-    # `None` asks the loader for the value rather than for a name to fill in:
-    # these are operands, and an operand whose definition the IR cannot see is
-    # invisible to every pass that reasons about ordering or reuse.
-    a = {}
-    out_layout = None
-    for i in range(M):
-        for k in range(K + kx):
-            v = A(writer, None, i, k)
-            if v is not None and v is not False:
-                a[(i, k)] = v
-                # Taken from the operand rather than constructed: A is indexed
-                # by the same output index the accumulator is, so whatever
-                # distribution its loads came out with is the one to hold.
-                if out_layout is None:
-                    out_layout = v.layout
-
-    for j in range(N):
-        # The accumulator is spread over the lanes exactly like the output it
-        # holds -- one element of the lead dimension per lane.  Declared with
-        # that layout rather than left untracked, because untracked is not a
-        # conservative default here: an explicitly vectorised declaration
-        # cannot be written without it.
-        acc = [writer.declare(hint='acc', layout=out_layout) for _ in range(M)]
-        for k0 in range(0, K + kx, threads):
-            vb = B(writer, None, j, k0 // threads)
-            if vb is None or vb is False:
-                continue
-            for lane in range(min(threads, K + kx - k0)):
-                # One of B's lanes, replicated -- free here, a shuffle on AMD.
-                bk = writer.lane_broadcast(vb, lane, threads)
-                for i in range(M):
-                    operand = a.get((i, k0 + lane))
-                    if operand is None:
-                        continue
-                    writer.accumulate(
-                        acc[i], writer.op('mul', operand.type, bk, operand,
-                                          hint='p'))
-        for i in range(M):
-            C(writer, acc[i], i, j)
-    return True
 
 
 def _fragment(writer, dtype, count, hint):
@@ -405,7 +419,8 @@ def dpas_matmul(writer, C, A, B, M, N, K, kx, threads, dtype, ctx):
     The same arrangement as `nvidia.py`'s `mma.sync ... .tf32`, and it has to
     be -- the error analysis belongs to the split, not to either instruction.
     """
-    atom = atom_for(dtype)
+    atom = atom_for(dtype, columns=N, lead=M * threads, depth=K + kx,
+                    budget=register_budget(ctx))
     if atom is None or threads != atom.n:
         return False
     acc_ct = dtype.ctype()
@@ -443,7 +458,9 @@ def dpas_matmul(writer, C, A, B, M, N, K, kx, threads, dtype, ctx):
                                  _run(writer, v, 0, atom.k, 'bk'),
                                  writes=(ahi, alo))
 
-            for bf, af in ((bhi, ahi), (bhi, alo), (blo, ahi)):
+            bterms, aterms = (bhi, blo), (ahi, alo)
+            for i, j in split.products(TF32_SPLIT_TERMS):
+                bf, af = bterms[i], aterms[j]
                 writer.assign(acc, writer.rawexpr(
                     f'tensorforge::intel_xmx::dpas<{atom.depth}, '
                     f'{atom.repeat}, {acc_ct}>({{0}}, {{1}}, {{2}})',
@@ -478,23 +495,38 @@ def strategies(shape, ctx):
     under the same lowering this one requires.  One is about reaching an
     operand, the other about what to build the products out of.
     """
-    if not supports(shape.threads, shape.dtype, shape.sparse):
+    if not supports(shape.threads, shape.accumulator, shape.sparse):
         return frozenset()
     offered = set()
-    if ENABLED:
+    if ENABLED and not shape.sparse:
         offered.add(Strategy.MATRIX)
     if BROADCAST_ENABLED and shape.explicit_simd:
         offered.add(Strategy.BROADCAST)
     return frozenset(offered)
 
 
-def scratch(strategy, dtype):
+def scratch(strategy, accumulator):
     """Nothing: both arrangements here hold their fragments in registers."""
     return 0
 
 
-def matmul(writer, ops, ctx, strategy):
+def plan(strategy, shape, n, ctx):
+    """One arrangement over the whole output.
+
+    Both paths here pad a partial tile rather than leave it: DPAS reads a
+    fragment whose spare rows are zero, and the broadcast chain simply has
+    fewer accumulators.  Neither gets cheaper by handing the remainder to the
+    other.
+    """
+    return whole(strategy, n)
+
+
+def matmul(writer, ops, ctx, span):
     """Emit the arrangement the caller chose, or decline.
+
+    DPAS is what is specific to this target; the broadcast chain is the shared
+    one in `compute/broadcast.py`, offered here because an explicit vector is
+    where its replication is free rather than because it is an Intel idea.
 
     Either may decline after it has emitted, when an operand it needs turns
     out to have no value: whether the shape is servable is not fully knowable
@@ -504,13 +536,20 @@ def matmul(writer, ops, ctx, strategy):
     """
     C, A, B = ops.C, ops.A, ops.B
     M, N, K, kx = ops.lead_slots, ops.n, ops.k, ops.kx
-    threads, dtype, sparse = ops.threads, ops.dtype, ops.sparse
+    threads, dtype, sparse = ops.threads, ops.accumulator, ops.sparse
 
-    if sparse:
+    if span.strategy is Strategy.BROADCAST:
+        return broadcast.matmul(writer, ops, ctx, span)
+    if span.start != 0 or span.stop != N:
+        # DPAS does not take a range; `plan` never asks for one, and a direct
+        # caller that does should hear so rather than get the whole output.
         return False
-    if strategy is Strategy.MATRIX:
+    if span.strategy is Strategy.MATRIX:
+        if Datatype.F32 not in (ops.a, ops.b) or ops.a != ops.b:
+            # `splitFloatTF32` takes an F32 apart; handed anything else it
+            # would produce two halves of a number it never had.  The atom is
+            # chosen by the accumulator, so nothing upstream has checked what
+            # the operands arrive as.
+            return False
         return dpas_matmul(writer, C, A, B, M, N, K, kx, threads, dtype, ctx)
-    if strategy is Strategy.BROADCAST:
-        return broadcast_matmul(writer, C, A, B, M, N, K, kx, threads, dtype,
-                                ctx)
     return False

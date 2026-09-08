@@ -27,7 +27,7 @@ from typing import List, Optional, Tuple
 from tensorforge.backend.data_types import RegMemObject
 from tensorforge.backend.instructions.abstract_instruction import _explicit_simd
 from tensorforge.backend.instructions.allocate import RegisterAlloc
-from tensorforge.backend.symbol import DataView, Symbol, SymbolType
+from tensorforge.backend.symbol import slots_for, DataView, Symbol, SymbolType
 from tensorforge.common.exceptions import InternalError
 from tensorforge.common.matrix.boundingbox import BoundingBox
 
@@ -48,6 +48,11 @@ class Temporaries:
         name = f's{self._shared_counter}'
         self._shared_counter += 1
         return name
+
+    #: How many adjacent lead-dimension elements one lane of a register image
+    #: holds.  Set by whoever knows the compute arrangement; see
+    #: `Symbol.lead_width`.
+    _lead_width: int = 1
 
     def next_register_name(self) -> str:
         name = f'r{self._register_counter}'
@@ -92,9 +97,14 @@ class Temporaries:
             if d != lead_pos or threads == 0:
                 regsize *= dim
             else:
-                r_start = (bbox.lower()[d] + shift) // threads
-                r_end = (bbox.upper()[d] + shift + threads - 1) // threads
-                regsize *= (r_end - r_start) * DataView.lead_lanes(
+                # The same rule addressing uses, called rather than restated.
+                # It was restated, without the width, and a four-wide read of
+                # a three-slot image is how consecutive non-lead indices came
+                # to address overlapping windows.
+                regsize *= slots_for(
+                    bbox.lower()[d] + shift, bbox.upper()[d] + shift,
+                    threads, getattr(self, '_lead_width', 1)
+                ) * DataView.lead_lanes(
                     None, _explicit_simd(self._context), threads)
                 threads //= dim  # TODO?
 
@@ -103,6 +113,10 @@ class Temporaries:
                            obj=RegMemObject(name, regsize, spp=spp))
         registers.lead_dims = [lead_pos]
         registers.num_threads = self._num_threads
+        # The blocking of this image, set once here so every access resolves
+        # positions the same way -- the loops that walk it, and the
+        # fixed-element reads that go through the broadcast path.
+        registers.lead_width = getattr(self, '_lead_width', 1)
         registers.datatype = self._context.fp_type
         self._scopes.add_symbol(registers)
         return registers, RegisterAlloc(self._context, registers, regsize, 0.0)

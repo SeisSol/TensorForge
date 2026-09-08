@@ -36,8 +36,14 @@ _DECL = re.compile(
     # onto it, and the oracle has to read past it to find the array.
     r'^(?:alignas\s*\(\s*\d+\s*\)\s+)?'
     r'(?:const\s+)?(?:__restrict__\s+)?'
+    # `uint32_t` was missing, and with it every kernel built with prefetch:
+    # `wrap.py` emits `uint32_t pipeStage0` as its bookkeeping, the
+    # declaration did not match, and the whole configuration aborted at the
+    # first line of the loop.  So the one path that most needed an oracle had
+    # none.
     r'(?:tensorforge::Vector(?:Relaxed)?T\s*<[^>]*>|float[234]|double[234]|'
-    r'float|double|int32_t|int|unsigned|size_t|bool|auto|__float128|char)'
+    r'u?int(?:8|16|32|64)_t|float|double|int|unsigned|size_t|bool|auto|'
+    r'__float128|char)'
     r'(?P<ptr>\s*\*(?:\s*const)?(?:\s*__restrict__)?)?\s+'
     r'(?P<name>\w+)\s*(?P<arr>\[\s*(?P<dim>\d+)\s*\])?\s*'
     r'(?:\{\s*\}|=\s*(?P<init>.+))?$')
@@ -46,6 +52,15 @@ _FOR = re.compile(r'^for\s*\((?:const\s+)?\w+\s+(?P<v>\w+)\s*=\s*(?P<a>.+?);'
 _IF = re.compile(r'^if\s*\((?P<c>.*)\)$')
 #: A declaration whose type is a namespaced vector type.
 _VEC_DECL = re.compile(r'^tensorforge::Vector(?:Relaxed)?T\s*<[^>]*>\s+\w+')
+
+#: The three spellings an atomic accumulation reaches memory through.  All of
+#: them are `dest[i] += value` here; what differs between them is which
+#: instruction the vendor's compiler picks, which is not a question the host
+#: can answer or needs to.
+_ATOMIC_ADD = re.compile(
+    r'^(?:atomicAdd|atomicAdd_block|__builtin_amdgcn_global_atomic_fadd_f(?:32|64)'
+    r'|__hip_atomic_fetch_add)\s*\(\s*&(?P<base>\w+)\s*\[(?P<idx>.*)\]\s*,'
+    r'\s*(?P<val>.*?)\s*(?:,\s*__ATOMIC_\w+\s*,\s*__HIP_MEMORY_SCOPE_\w+\s*)?\)$')
 #: `*(SomeVecType*)&name[expr] = value`, captured for the interpreter
 _VEC_STORE = re.compile(
     r'^\*\s*\(([^()]*?)\s*\*\)\s*&\s*(\w+)\s*\[(.+?)\]\s*=\s*(.+?);?$')
@@ -138,6 +153,13 @@ def _py(expr: str) -> str:
     # asking for.
     e = re.sub(r'\btensorforge::readlane\s*\(\s*(\w+)\s*,\s*([^),]+)\)',
                r'READLANE("\1", \2)', e)
+    # `broadcast<Block, Subblock, Lane>(v)`, the template form the operand
+    # broadcast takes on a narrow extent.  Captured as a name for the same
+    # reason `readlane` is, and left to `_broadcast` to resolve, since which
+    # lane it reads depends on the reading lane's own index.
+    e = re.sub(r'\btensorforge::broadcast\s*<\s*(\d+)\s*,\s*(\d+)\s*,'
+               r'\s*(\d+)\s*>\s*\(\s*(\w+)\s*\)',
+               r'BROADCAST("\4", \1, \2, \3)', e)
     e = e.replace('&&', ' and ').replace('||', ' or ')
     e = re.sub(r'(?<![=!<>&|])!(?!=)', ' not ', e)
     # `*(SomeVecType*)&p[i]` -> `VLOAD(ADDR(p, i), N)`.  Done before the
@@ -177,23 +199,51 @@ def _py(expr: str) -> str:
     e = ''.join(out)
     e = e.replace('true', 'True').replace('false', 'False')
     e = e.replace('nullptr', 'None')
-    # ternary: rightmost ? : first
+    # ternary: rightmost ? : first, and only the group it sits in
+    #
+    # Taking everything before the `?` as the condition works for an
+    # expression that *is* a ternary and for nothing else.  A select emitted
+    # inside an fma reads `x + ((c) ? a : b) * y`, where the prefix is
+    # `x + ((c` -- unbalanced, and the whole configuration aborts on an
+    # expression that is perfectly well formed.  So the group is found from
+    # the `?` outwards: back to the paren that opens it, forward to the one
+    # that closes it.
     while '?' in e:
         q = e.rindex('?')
+
         depth = 0
+        start = None
+        for i in range(q - 1, -1, -1):
+            if e[i] == ')':
+                depth += 1
+            elif e[i] == '(':
+                if depth == 0:
+                    start = i
+                    break
+                depth -= 1
+        if start is None:
+            start = -1
+
+        depth = 0
+        colon = None
+        stop = None
         for i in range(q + 1, len(e)):
             if e[i] == '(':
                 depth += 1
             elif e[i] == ')':
                 if depth == 0:
+                    stop = i
                     break
                 depth -= 1
-            elif e[i] == ':' and depth == 0:
-                cond, a, b = e[:q], e[q + 1:i], e[i + 1:]
-                e = f'(({a}) if ({cond}) else ({b}))'
-                break
-        else:
+            elif e[i] == ':' and depth == 0 and colon is None:
+                colon = i
+        if colon is None:
             raise Abort(f'unbalanced ternary in {expr!r}')
+        if stop is None:
+            stop = len(e)
+
+        cond, a, b = e[start + 1:q], e[q + 1:colon], e[colon + 1:stop]
+        e = e[:start + 1] + f'(({a}) if ({cond}) else ({b}))' + e[stop:]
     return e
 
 
@@ -209,6 +259,7 @@ class Interp:
         #: says so instead of quietly returning this lane's copy.
         self.peers: List['Interp'] = []
         self.env['READLANE'] = self._readlane
+        self.env['BROADCAST'] = self._broadcast
         self.env['VEC'] = lambda *xs: Vec(xs)
         self.env['VLOAD'] = lambda n, p, i: Vec(p[i + k] for k in range(n))
         for fn in ('min', 'max', 'abs'):
@@ -246,6 +297,33 @@ class Interp:
             raise Abort(f'readlane({name!r}, {lane}): lane {lane} never '
                         f'defined it -- it was masked off there')
         return peer.env[name]
+
+    def _broadcast(self, name: str, block: int, subblock: int, lane: int):
+        """`tensorforge::broadcast<Block, Subblock, Lane>(name)` for this lane.
+
+        Modelled from the definition in `include/tensorforge_device/cuda.h`
+        rather than from what it is used for.  The degenerate case returns the
+        lane's own copy; otherwise it is a `__shfl_sync` with a *width*, which
+        splits the warp into segments of `Block` lanes and resolves the source
+        within the caller's own segment:
+
+            src = (L // Block) * Block
+                  + ((Subblock * Lane + L % Subblock) % Block)
+
+        Without this the narrow extents -- the ones whose operand broadcast
+        takes the template form -- had no numerical coverage at all: every
+        such case aborted, and an abort that a caller turns into a skip looks
+        exactly like a pass.
+        """
+        block, subblock, lane = int(block), int(subblock), int(lane)
+        if block == 1 or block == subblock:
+            if name not in self.env:
+                raise Abort(f'broadcast({name!r}): not defined in this lane')
+            return self.env[name]
+        me = self.env['threadIdx'].x
+        src = (me // block) * block + ((subblock * lane + me % subblock)
+                                       % block)
+        return self._readlane(name, src)
 
     def ev(self, expr: str):
         self.budget -= 1
@@ -322,7 +400,8 @@ class Interp:
             # abort is the honest answer and a silent skip is the dangerous
             # one.
             raise Abort(f'vector assignment not modelled: {stmt!r}')
-        if ('pipeline' in stmt or '::' in stmt) and not _VEC_DECL.match(stmt):
+        if (('pipeline' in stmt or '::' in stmt)
+                and not _VEC_DECL.match(stmt) and 'tensorforge::' not in stmt):
             # The catch-all was written for `cuda::pipeline` and friends, which
             # have no effect on the values compared here.  A declaration whose
             # *type* is namespaced is not one of those: swallowing
@@ -354,11 +433,31 @@ class Interp:
             return
         if re.match(r'^(__syncthreads|__syncwarp|__threadfence)\s*\(', stmt):
             return
+        am = _ATOMIC_ADD.match(stmt)
+        if am:
+            # `dest[i] += value`, and every lane that reaches this statement
+            # performs one.  That is the whole content of an atomic here: the
+            # interpreter runs the lanes in lockstep over one shared `Slot`,
+            # so summing the arrivals *is* the hardware's guarantee, and the
+            # ordering an atomic also promises does not change a sum.
+            #
+            # Modelled rather than skipped, and rather than treated as a
+            # store.  Skipping leaves the accumulation out of the comparison
+            # entirely, which is how the atomic path came to have no numerical
+            # coverage on the host at all; treating it as `=` would agree with
+            # the correct answer whenever exactly one lane arrives, which is
+            # precisely the case that is never in doubt.
+            base, index, value = am.group('base'), am.group('idx'), am.group('val')
+            ptr = self.env[base]
+            slot = self.ev(index)
+            ptr[slot] = (ptr[slot] or 0.0) + self.ev(value)
+            return
         if stmt.startswith('extern ') or stmt.startswith('__shared__'):
             return                      # the shared arena, modelled as a base
         if re.match(r'^(?:const\s+)?auto\s*\*?\s*\w+', stmt) and '=' not in stmt:
             return
-        if ('pipeline' in stmt or '::' in stmt) and not _VEC_DECL.match(stmt):
+        if (('pipeline' in stmt or '::' in stmt)
+                and not _VEC_DECL.match(stmt) and 'tensorforge::' not in stmt):
             # The catch-all was written for `cuda::pipeline` and friends, which
             # have no effect on the values compared here.  A declaration whose
             # *type* is namespaced is not one of those: swallowing

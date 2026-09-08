@@ -160,6 +160,16 @@ class BufferType:
     #: would disagree about where an element is, and the kernel would be
     #: quietly wrong rather than merely slow.
     swizzle: Optional['XorSwizzle'] = None
+    #: Whether what this buffer points at may not be written through it.
+    #:
+    #: On the type and not on the declaration that first spelled it.  A pointer
+    #: binding renders its own declarator as text, which is right for the site
+    #: that writes it and useless to a pass that moves the value somewhere
+    #: else: the copy is declared from its type, and a type that does not know
+    #: the pointee is read-only renders `float*` where the source was
+    #: `const float*`.  That is not a wrong address, it is code that does not
+    #: compile, and it only appears once a pass touches the binding.
+    readonly: bool = False
 
     @property
     def volume(self) -> int:
@@ -171,7 +181,8 @@ class BufferType:
     def __repr__(self):
         dims = 'x'.join(str(s) for s in self.shape)
         swz = f', {self.swizzle!r}' if self.swizzle else ''
-        return f'buffer<{dims}x{self.elem}, {self.space.name.lower()}{swz}>'
+        ro = ', readonly' if self.readonly else ''
+        return f'buffer<{dims}x{self.elem}, {self.space.name.lower()}{swz}{ro}>'
 
 
 @dataclass(frozen=True)
@@ -652,6 +663,7 @@ class Op:
     STORE = 'store'
     COPY_ASYNC = 'copy.async'   # global -> shared, completes at its wait
     LOAD_ASYNC = 'load.async'   # global -> register, ditto
+    COMMIT_ASYNC = 'commit.async'   # closes issued copies into one counted group
     WAIT = 'wait'
     BARRIER = 'barrier'
     CALL = 'call'
@@ -782,6 +794,30 @@ class Stmt:
     def load_index(self) -> Tuple[Operand, ...]:
         assert self.op == Op.LOAD_ASYNC
         return self.args[1:]
+
+    @property
+    def committed(self) -> Tuple[int, ...]:
+        """The tokens this `commit.async` closes into one group.
+
+        Ids rather than values, and an attribute rather than operands: a
+        commit is bookkeeping over statements that already exist, so naming
+        them as arguments would make it a second consumer of every token and
+        put it at odds with `check_tokens`, which requires exactly one.
+        """
+        assert self.op == Op.COMMIT_ASYNC
+        return self.attr('tokens', ())
+
+    @property
+    def exact(self) -> bool:
+        """Does this group hold exactly ``len(committed)`` operations?
+
+        False when an issue of the group sits under a predicate or inside a
+        region, where the count is a bound rather than a figure.  Only a
+        per-operation counter cares --- a group counter counts the commit,
+        which runs either way.
+        """
+        assert self.op == Op.COMMIT_ASYNC
+        return bool(self.attr('exact', True))
 
     @property
     def counter(self) -> str:

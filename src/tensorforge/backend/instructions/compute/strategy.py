@@ -75,9 +75,10 @@ class ComputeShape:
 
     #: Lanes the lead dimension is spread over.
     threads: int
-    #: Accumulator type.  The operand type may be narrower -- an emulated path
-    #: splits its inputs and keeps the sum in this.
-    dtype: Datatype
+    #: Type the sum is kept in.  The role legality is asked about: a matrix
+    #: instruction is selected by the accumulator it produces, and the operand
+    #: types are what an emulated path then has to reach it from.
+    accumulator: Datatype
     #: Whether the second operand is stored sparsely, which decides both how
     #: it is read and which arrangements can read it that way.
     sparse: bool
@@ -85,6 +86,13 @@ class ComputeShape:
     #: of the hardware: the same target admits both, and what a cross-lane
     #: broadcast costs differs between them by more than its spelling.
     explicit_simd: bool
+
+    #: Elements the leading dimension spans, and steps the contraction takes.
+    #: 0 where the caller does not know them -- a count that reads an extent
+    #: of 0 treats it as one tile rather than as nothing, so an unfilled pair
+    #: narrows what a ranking can tell apart without making it wrong.
+    lead: int = 0
+    depth: int = 0
 
 
 def is_contraction(operands: int, lead_width: int) -> bool:
@@ -125,8 +133,12 @@ def legal_strategies(offered: Iterable[Strategy]) -> FrozenSet[Strategy]:
 #: wholesale rather than unpicked from the dispatch.
 PREFERENCES = {
     # Matrix cores where a tile fits; the DPP chain otherwise, which is why
-    # F64 lands there without the order naming a type.
-    'amd': (Strategy.MATRIX, Strategy.DPP, Strategy.GENERIC),
+    # F64 lands there without the order naming a type.  The plain broadcast
+    # chain sits behind it and is reached only for a shape DPP declines,
+    # because the two differ by whether the replication costs an instruction
+    # -- which is a reason to rank them, not to offer only one.
+    'amd': (Strategy.MATRIX, Strategy.DPP, Strategy.BROADCAST,
+            Strategy.GENERIC),
     'nvidia': (Strategy.MATRIX, Strategy.GENERIC),
     # The register-only chain beats staging operands through shared memory
     # here, and whether DPAS beats it in turn is a measurement rather than a
@@ -143,3 +155,61 @@ def choose_strategy(legal: FrozenSet[Strategy], vendor: str) -> Strategy:
         if strategy in legal:
             return strategy
     return Strategy.GENERIC
+
+
+# -- laying the arrangements out over the output --------------------------- #
+
+@dataclass(frozen=True)
+class Span:
+    """One arrangement over a half-open range of the output's second index.
+
+    A contraction does not have to be computed by a single arrangement, and on
+    one target it already is not: a matrix core covers whole tiles and the
+    columns left over go through a chain, because two or three of them are
+    cheaper padded into a block and one is cheaper not.  That is a genuine
+    choice with a cost behind it, and stating it as a span makes it one the
+    caller can see -- rather than a handoff between two emitters, where the
+    only way to find out what was decided is to read the generated code.
+
+    The lead index is not divided.  Every arrangement here spreads it over the
+    lanes, so a split along it would cut a wave in half; the second index is
+    walked by the loop and cuts freely.
+    """
+
+    strategy: Strategy
+    #: First column this arrangement computes.
+    start: int
+    #: One past the last.
+    stop: int
+
+    def __len__(self) -> int:
+        return max(0, self.stop - self.start)
+
+
+def whole(strategy: Strategy, n: int) -> Tuple[Span, ...]:
+    """One arrangement over the whole output."""
+    return (Span(strategy, 0, n),)
+
+
+def covers(plan: Iterable[Span], n: int) -> bool:
+    """Whether this plan computes every column exactly once.
+
+    A gap is a column nobody writes and an overlap is one two arrangements
+    both accumulate into; the second is the quieter of the two, since the
+    stores still land and only the value is wrong.
+
+    The nest is special-cased rather than ranged: `_nonleading_dim` walks the
+    whole output and takes no bounds, so a plan may name it only as the whole
+    plan.  Giving it a range is the change that would lift that.
+    """
+    spans = [span for span in plan]
+    if not spans:
+        return n == 0
+    if any(span.strategy is Strategy.GENERIC for span in spans):
+        if len(spans) != 1:
+            return False
+    if any(len(span) <= 0 for span in spans):
+        return False
+    if spans[0].start != 0 or spans[-1].stop != n:
+        return False
+    return all(a.stop == b.start for a, b in zip(spans, spans[1:]))

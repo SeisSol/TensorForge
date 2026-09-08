@@ -192,7 +192,7 @@ def test_a_deferred_result_can_still_be_atomic():
     the accumulation an assignment.
     """
     atomic = result_is_atomic(accumulating=True, pending_is_atomic=True,
-                              policy=AMD)
+                              supported=True, policy=AMD)
     assert atomic
     assert choose_result_placement(legal_result_placements(
         written_in_slices=False), atomic=atomic, policy=AMD) \
@@ -202,7 +202,7 @@ def test_a_deferred_result_can_still_be_atomic():
 def test_an_atomic_result_written_in_slices_goes_out_now():
     """Deferring an atomic is what makes it collide with the next slice."""
     atomic = result_is_atomic(accumulating=True, pending_is_atomic=True,
-                              policy=AMD)
+                              supported=True, policy=AMD)
     assert choose_result_placement(legal_result_placements(
         written_in_slices=True), atomic=atomic, policy=AMD) \
         is ResultPlacement.MEMORY
@@ -211,16 +211,28 @@ def test_an_atomic_result_written_in_slices_goes_out_now():
 def test_an_atomic_needs_nothing_non_atomic_already_pending():
     """Mixing the two lets a plain store overwrite an update."""
     assert not result_is_atomic(accumulating=True, pending_is_atomic=False,
-                                policy=AMD)
+                                supported=True, policy=AMD)
 
 
 def test_only_an_accumulation_is_atomic():
     assert not result_is_atomic(accumulating=False, pending_is_atomic=True,
-                                policy=AMD)
+                                supported=True, policy=AMD)
 
 
 @pytest.mark.parametrize("policy", [NVIDIA, INTEL, DEFAULT_POLICY],
                          ids=["nvidia", "intel", "unnamed"])
 def test_a_vendor_without_atomics_never_gets_one(policy):
     assert not result_is_atomic(accumulating=True, pending_is_atomic=True,
-                                policy=policy)
+                                supported=True, policy=policy)
+
+
+def test_a_target_without_the_instruction_never_gets_one():
+    """The condition the vendor table cannot express.
+
+    gfx900 takes the same AMD row gfx90a does and has no floating-point
+    atomic add at all -- the emitted builtin is not merely slow there, it does
+    not compile. `supported` is where that is answered, and answering it False
+    has to be enough on its own.
+    """
+    assert not result_is_atomic(accumulating=True, pending_is_atomic=True,
+                                supported=False, policy=AMD)
