@@ -41,7 +41,7 @@ from dataclasses import dataclass
 from typing import Dict, List, Sequence, Tuple
 
 from .core import (BufferType, Effect, MemSpace, Op, ScalarType, Stmt, Value,
-                   walk)
+                   XorSwizzle, walk)
 
 #: Bytes one bank serves per cycle.  The count of banks is a property of the
 #: target and comes from `hw_descr.shmem_banks`; the width does not vary
@@ -219,3 +219,69 @@ def analyse(body: Sequence[Stmt], banks: int = 32) -> Tuple[List[Access], int]:
                 buf, 'load' if stmt.op == Op.LOAD else 'store',
                 ways(addrs, t.elem.size(), width, banks), len(lanes)))
     return found, unresolved
+
+
+#: Widths a permutation may take: powers of two up to the bank count.
+CANDIDATE_WIDTHS = (1, 2, 4, 8, 16, 32)
+
+
+def recommend(body: Sequence[Stmt], banks: int = 32):
+    """What each shared buffer's permutation costs, and what it could cost.
+
+    The width is chosen at `alloc` today, from the buffer's volume, because
+    the access pattern is not known at that point -- which is the ordering
+    problem behind three widths picked by hand, each with a measurement beside
+    it in a comment.
+
+    This does not fix the ordering.  It answers the question the ordering gets
+    in the way of: given the accesses a body actually makes, which width would
+    have been right.  The permutation is an involution, so applying the
+    buffer's current one to an emitted address recovers the plain index, and
+    every candidate can then be tried against the real pattern.
+
+    Returns ``{buffer: (current_width, {width: worst_ways})}``.  A
+    recommendation that disagrees with what was chosen is a finding either
+    way: the volume rule is wrong there, or the pattern is one this scoring
+    does not capture.
+    """
+    defs = _definitions(body)
+    per_buffer = {}
+    for stmt, parents in walk(body):
+        if stmt.op not in (Op.LOAD, Op.STORE):
+            continue
+        for access in stmt.accesses:
+            if access.space != MemSpace.SHARED:
+                continue
+            buf = access.base
+            t = getattr(buf, 'type', None)
+            if not isinstance(t, BufferType):
+                continue
+            index = stmt.args[-1] if stmt.args else None
+            lanes = _active(parents, defs)
+            try:
+                addrs = [evaluate(index, i, defs) for i in lanes]
+            except NotStatic:
+                continue
+            carrier = (stmt.target[0] if stmt.op == Op.LOAD and stmt.target
+                       else stmt.args[1] if len(stmt.args) > 1 else None)
+            width = getattr(getattr(carrier, 'type', None), 'length', None) or 1
+            per_buffer.setdefault(buf, []).append((addrs, t.elem.size(), width))
+
+    out = {}
+    for buf, accesses in per_buffer.items():
+        current = getattr(buf.type, 'swizzle', None)
+        cw = current.width if current is not None else 1
+        scores = {}
+        for candidate in CANDIDATE_WIDTHS:
+            worst = 0
+            for addrs, elem, width in accesses:
+                plain = [current.apply(a) for a in addrs] if current else addrs
+                if candidate > 1:
+                    swz = XorSwizzle(candidate)
+                    permuted = [swz.apply(a) for a in plain]
+                else:
+                    permuted = plain
+                worst = max(worst, ways(permuted, elem, width, banks))
+            scores[candidate] = worst
+        out[buf] = (cw, scores)
+    return out

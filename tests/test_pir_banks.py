@@ -24,6 +24,8 @@ from __future__ import annotations
 
 import pytest
 
+ROOT = __import__("pathlib").Path(__file__).resolve().parent.parent
+
 from tensorforge.backend.pir import banks
 from tensorforge.backend.pir.build import IRBuilder
 from tensorforge.backend.pir.core import BOOL, INDEX, MemSpace, XorSwizzle
@@ -197,3 +199,123 @@ def test_the_analysis_belongs_after_the_passes():
     assert len(after) == 1, (
         'the dead load is still counted; the analysis has to run on the body '
         'the emitter will see')
+
+
+# --------------------------------------------------------------------------- #
+# Whether the width should be chosen from the pattern rather than the volume
+# --------------------------------------------------------------------------- #
+
+def test_the_recommender_recovers_the_plain_index():
+    """The permutation is an involution, so applying a buffer's current one to
+    an emitted address gives back the index before it -- which is what lets a
+    candidate width be scored against the pattern that is actually there."""
+    for width in (2, 4, 8, 16, 32):
+        swz = XorSwizzle(width)
+        assert all(swz.apply(swz.apply(i)) == i for i in range(4 * width * width))
+
+
+def test_a_column_read_wants_the_wave_and_says_so():
+    b = builder(8192)
+    tile = b.alloc(Datatype.F32, (1024,), MemSpace.SHARED, hint='s',
+                   swizzle=XorSwizzle(8))
+    idx = b.op('mul', INDEX, b.thread_id('x'), 32, hint='a')
+    v = b.load(tile, idx, hint='v')
+    b(f'use({v});', v, accesses=())
+
+    from tensorforge.backend.pir import passes
+    (current, scores), = banks.recommend(passes.optimize(b.finish())).values()
+    assert current == 8
+    assert scores[8] > scores[32] == 1, scores
+
+
+def test_a_width_that_is_already_right_is_not_second_guessed():
+    b = builder(8192)
+    tile = b.alloc(Datatype.F32, (1024,), MemSpace.SHARED, hint='s',
+                   swizzle=XorSwizzle(32))
+    idx = b.op('mul', INDEX, b.thread_id('x'), 32, hint='a')
+    v = b.load(tile, idx, hint='v')
+    b(f'use({v});', v, accesses=())
+
+    from tensorforge.backend.pir import passes
+    (current, scores), = banks.recommend(passes.optimize(b.finish())).values()
+    assert current == 32 and scores[32] == min(scores.values()) == 1
+
+
+def test_the_volume_rule_picks_the_width_the_pattern_wants():
+    """Whether the width should come from the access pattern instead.
+
+    It is chosen at `alloc` from the buffer's volume, because the pattern is
+    not known at that point -- the ordering problem behind three widths picked
+    by hand.  Scored against the accesses the corpus actually makes, the
+    volume rule is already optimal for 164 of 166 buffers.
+
+    The two it is not optimal for are `chain_five`'s stride-56 windows, where
+    `xor16` would give 2-way against the 4-way `xor8` gives.  They cannot take
+    it: the permutation maps each block of `width` onto itself, so the width
+    has to divide the volume, and 728 is not a multiple of 16.  Padding to 736
+    would make it legal -- eight elements -- and that is a separate decision.
+
+    So automating the choice would buy two buffers out of 166, both blocked by
+    a correctness constraint rather than by missing information.  What is
+    worth having is this check, which would catch the case where the volume
+    rule picks wrong for a reason nobody predicted.
+    """
+    import importlib.util
+
+    from tensorforge.backend.pir import banks, passes
+    from tensorforge.backend.pir import passes as pir
+    import tensorforge.backend.instructions.abstract_instruction as absinstr
+    from tensorforge.common.basic_types import Datatype
+    from tensorforge.common.context import Context
+    from tensorforge.generators.generator import Generator
+
+    #: Windows whose volume forbids the width their pattern wants.
+    KNOWN = {('chain_five', 's0'), ('chain_five', 's1')}
+
+    original = pir.optimize
+    worse = []
+    for path in sorted((ROOT / 'tests' / 'cases').rglob('*.py')):
+        if path.name.startswith('_'):
+            continue
+        spec = importlib.util.spec_from_file_location('c_' + path.stem, path)
+        module = importlib.util.module_from_spec(spec)
+        try:
+            spec.loader.exec_module(module)
+        except Exception:
+            continue
+        if not hasattr(module, 'descr_list'):
+            continue
+        for backend, arch in (('cuda', 'sm_86'), ('hip', 'gfx90a')):
+            bodies = []
+
+            def optimize(body, *args, **kwargs):
+                out = original(body, *args, **kwargs)
+                bodies.append(out)
+                return out
+
+            pir.optimize = optimize
+            absinstr.pir.optimize = optimize
+            try:
+                gen = Generator(module.descr_list(), Context(
+                    arch=arch, backend=backend,
+                    fp_type=getattr(module, 'DTYPE', None) or Datatype.F32))
+                gen.generate()
+            except Exception:
+                continue
+            finally:
+                pir.optimize = original
+                absinstr.pir.optimize = original
+
+            for body in bodies:
+                for buf, (current, scores) in banks.recommend(body).items():
+                    if current not in scores:
+                        continue
+                    if scores[current] == min(scores.values()):
+                        continue
+                    name = str(buf).split('_', 1)[-1]
+                    if (path.stem, name) in KNOWN:
+                        continue
+                    worse.append(
+                        f'{path.stem}/{backend} {buf}: xor{current} gives '
+                        f'{scores[current]}-way, best is {min(scores.values())}')
+    assert not worse, "\n".join(worse)

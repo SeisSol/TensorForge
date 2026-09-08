@@ -110,6 +110,14 @@ GROUPS = {
     # The IR-level bank analysis.  Every mistake it made over-reported, which
     # is the direction that gets a check ignored.
     'irbanks': ('tests/test_pir_banks.py', [
+        ('the volume rule picks a width the pattern does not want',
+         sub(Path('src/tensorforge/backend/instructions/memory/__init__.py'),
+             '    while width * 2 <= self._BANKS and volume % (width * 2) == 0:',
+             '    while width * 2 <= 8 and volume % (width * 2) == 0:', 1)),
+        ('the recommender scores every candidate the same',
+         sub(Path('src/tensorforge/backend/pir/banks.py'),
+             '                if candidate > 1:',
+             '                if False:', 1)),
         ('a dead access counted as one the hardware makes',
          sub(Path('src/tensorforge/backend/pir/passes.py'),
              'def optimize(body: Tuple[Stmt, ...], dump_hook=None,',
