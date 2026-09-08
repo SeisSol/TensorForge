@@ -120,3 +120,85 @@ def test_without_a_table_nothing_changes():
     src = symbol('m3', Addressing.NONE)
     assert 'm3[' in _binding(src)
     assert 'tbl' not in _binding(src)
+
+
+# --- the loop the tables are for --------------------------------------------
+
+
+def loop_writer():
+    from tensorforge.backend.writer import Writer
+    return Writer()
+
+
+def written(instruction):
+    writer = loop_writer()
+    instruction.gen_code(writer)
+    return writer.get_src()
+
+
+class Marker:
+    """A child that writes one line, so nesting is visible in the text."""
+
+    def __init__(self, text):
+        self.text = text
+
+    def gen_code(self, writer):
+        writer(self.text)
+
+
+def test_the_header_is_a_counted_loop_over_the_members():
+    from tensorforge.backend.instructions.ptr_manip import VariantLoop
+    loop = VariantLoop(context(), 'face', 4, [Marker('body();')])
+    text = written(loop)
+    assert 'for (int face = 0; face < 4; ++face)' in text
+    assert 'body();' in text
+
+
+def test_the_body_sits_inside_the_header():
+    from tensorforge.backend.instructions.ptr_manip import VariantLoop
+    lines = written(VariantLoop(context(), 'face', 2,
+                                [Marker('a();'), Marker('b();')])).splitlines()
+    head = next(i for i, l in enumerate(lines) if 'for (int face' in l)
+    body = [i for i, l in enumerate(lines) if 'a();' in l or 'b();' in l]
+    assert all(i > head for i in body)
+    assert len(body) == 2
+
+
+def test_the_tables_are_declared_before_the_header_not_inside_it():
+    """They do not change between iterations, so they are not rebuilt in one."""
+    from tensorforge.backend.instructions.ptr_manip import VariantLoop
+    table = DeclareOperandTable(context(), 'tbl',
+                                [symbol(f'm{i}', Addressing.NONE)
+                                 for i in (3, 5)], Addressing.NONE,
+                                Datatype.F32)
+    lines = written(VariantLoop(context(), 'face', 2, [Marker('body();')],
+                                tables=[table])).splitlines()
+    decl = next(i for i, l in enumerate(lines) if 'tbl[2]' in l)
+    head = next(i for i, l in enumerate(lines) if 'for (int face' in l)
+    assert decl < head
+
+
+def test_a_loop_reports_the_arguments_its_tables_hold():
+    from tensorforge.backend.instructions.ptr_manip import VariantLoop
+    members = [symbol(f'm{i}', Addressing.NONE) for i in (3, 5, 7, 9)]
+    table = DeclareOperandTable(context(), 'tbl', members, Addressing.NONE)
+    loop = VariantLoop(context(), 'face', 4, [], tables=[table])
+    assert loop.get_operands() == members
+
+
+def test_the_region_is_replaceable_like_any_other():
+    """So that a pass walking regions reaches this one without knowing it."""
+    from tensorforge.backend.instructions.ptr_manip import VariantLoop
+    loop = VariantLoop(context(), 'face', 2, [Marker('old();')])
+    assert len(loop.regions()) == 1
+    loop.replace_region(0, [Marker('new();')])
+    assert 'new();' in written(loop) and 'old();' not in written(loop)
+    with pytest.raises(Exception):
+        loop.replace_region(1, [])
+
+
+def test_a_loop_that_never_runs_is_refused():
+    from tensorforge.backend.instructions.ptr_manip import VariantLoop
+    from tensorforge.common.exceptions import GenerationError
+    with pytest.raises(GenerationError):
+        VariantLoop(context(), 'face', 0, [])

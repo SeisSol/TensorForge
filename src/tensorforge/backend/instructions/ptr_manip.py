@@ -248,3 +248,84 @@ class DeclareOperandTable(AbstractInstruction):
 
   def __str__(self):
     return f'{self._name} = table[{len(self._members)}]'
+
+
+class VariantLoop(AbstractInstruction):
+  """A run stated once, with a counter its varying operands are read by.
+
+  The body is a region like `BatchLoop`'s, so the passes that walk regions
+  reach it without knowing what kind of loop this is.  What differs is the
+  trip count: it is a constant known at generation, not a bound the caller
+  supplies, so the header is a plain counted loop and the counter is uniform
+  across the block by construction.
+
+  The tables are declared ahead of the header rather than inside it.  They are
+  arrays of the kernel's own arguments and do not change between iterations,
+  and a declaration inside the body would rebuild them on every one -- which a
+  compiler would very likely hoist, and which there is no reason to write down
+  and hope for.
+
+  Like `BatchLoop`, this drives child instructions that route themselves
+  through the pseudo-IR, so it overrides `gen_code` rather than `gen_ir`.
+  """
+
+  def __init__(self, context: Context, counter: str, count: int,
+               region, tables=(), unroll: bool = False):
+    super(VariantLoop, self).__init__(context)
+    if count < 1:
+      raise GenerationError(f'a loop runs at least once, given {count}')
+    self._counter = counter
+    self._count = count
+    self._region = list(region)
+    self._tables = list(tables)
+    self._unroll = unroll
+    self._is_ready = True
+
+  # -- structure ----------------------------------------------------------- #
+
+  @property
+  def counter(self) -> str:
+    return self._counter
+
+  @property
+  def count(self) -> int:
+    return self._count
+
+  @property
+  def region(self):
+    return self._region
+
+  @property
+  def tables(self):
+    return self._tables
+
+  def regions(self):
+    return (tuple(self._region),)
+
+  def replace_region(self, index: int, instrs) -> None:
+    if index != 0:
+      raise GenerationError(f'a VariantLoop has one region, not {index + 1}')
+    self._region = list(instrs)
+
+  def get_operands(self):
+    out = []
+    for table in self._tables:
+      out.extend(table.get_operands())
+    return out
+
+  # -- emission ------------------------------------------------------------ #
+
+  def header(self) -> str:
+    return (f'int {self._counter} = 0; {self._counter} < {self._count}; '
+            f'++{self._counter}')
+
+  def gen_code(self, writer) -> None:
+    for table in self._tables:
+      table.gen_code(writer)
+    with writer.For(self.header(), unroll=self._unroll):
+      for instruction in self._region:
+        instruction.gen_code(writer)
+
+  def __str__(self):
+    return (f'for {self._counter} in [0,{self._count}): '
+            f'{len(self._region)} instruction(s)')
