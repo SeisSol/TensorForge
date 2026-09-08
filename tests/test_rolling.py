@@ -409,3 +409,46 @@ def test_the_estimate_follows_the_arithmetic_and_the_lanes():
     assert estimated_lines(_contributions(6), 64) < large
     with pytest.raises(ValueError):
         estimated_lines(_contributions(2), 0)
+
+
+def test_a_list_that_already_fits_keeps_every_operand_where_it_was():
+    """The question an instruction cache asks is about the list, not a run."""
+    from tensorforge.analysis.cost import estimated_lines
+
+    descrs = _contributions(4)
+    total = estimated_lines(descrs, 32)
+    assert not any(isinstance(d, ForDescr) for d in
+                   roll(_contributions(4), fit_within=total + 1))
+    assert any(isinstance(d, ForDescr) for d in
+               roll(_contributions(4), fit_within=total // 2))
+
+
+def test_only_as_many_runs_are_rolled_as_the_total_needs():
+    from tensorforge.analysis.cost import estimated_lines
+
+    both = _contributions(4) + _chain(4)
+    budget = estimated_lines(both, 32) - estimated_lines(_chain(4), 32) // 2
+    rolled = roll(_contributions(4) + _chain(4), fit_within=budget)
+    assert sum(isinstance(d, ForDescr) for d in rolled) == 1
+
+
+def test_the_budget_does_not_change_what_the_list_means():
+    from tensorforge.analysis.cost import estimated_lines
+
+    original = _contributions(4) + _chain(4)
+    total = estimated_lines(original, 32)
+    for budget in (total * 2, total, total // 2, 1):
+        rolled = roll(_contributions(4) + _chain(4), fit_within=budget)
+        assert same_shape(unroll(rolled)) == \
+            same_shape(_contributions(4) + _chain(4))
+
+
+def test_the_two_questions_are_asked_separately():
+    """A run below the floor is left alone however tight the budget is."""
+    from tensorforge.analysis.cost import estimated_lines
+
+    descrs = _contributions(3)
+    floor = estimated_lines(descrs, 32) * 2
+    assert not any(isinstance(d, ForDescr) for d in
+                   roll(_contributions(3), keep_unrolled_under=floor,
+                        fit_within=1))
