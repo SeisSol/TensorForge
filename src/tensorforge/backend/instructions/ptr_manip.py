@@ -402,7 +402,8 @@ class VariantLoop(AbstractInstruction):
   """
 
   def __init__(self, context: Context, counter: str, count: int,
-               region, tables=(), unroll: bool = False, start: int = 0):
+               region, tables=(), unroll: bool = False, start: int = 0,
+               carried=()):
     super(VariantLoop, self).__init__(context)
     if count < 1:
       raise GenerationError(f'a loop runs at least once, given {count}')
@@ -415,7 +416,18 @@ class VariantLoop(AbstractInstruction):
     self._region = list(region)
     self._tables = list(tables)
     self._unroll = unroll
+    #: `(init, result)` per value the body threads through itself.
+    #:
+    #: `init` is the link the body reads, `result` the link it writes.  The
+    #: two being different registers is the whole of what a back edge has to
+    #: fix, and an empty tuple here means a body that carries nothing -- not a
+    #: body whose carried value went unnoticed.
+    self._carried = tuple(carried)
     self._is_ready = True
+
+  @property
+  def carried(self):
+    return self._carried
 
   # -- structure ----------------------------------------------------------- #
 

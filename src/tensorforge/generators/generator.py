@@ -706,7 +706,7 @@ class Generator:
     # across a barrier would push its writebacks past the barrier that was
     # supposed to publish them.
     plan = SectionPlan(descr_list, self._scopes)
-    residency = Residency(self._context,
+    residency = self._residency = Residency(self._context,
                           self._scopes.get_symbol(self._section.shr_mem_obj),
                           self._num_threads,
                           self._lead_width)
@@ -815,6 +815,24 @@ class Generator:
       pointers.build(stand_in, table=table, variant=counter)
       region.extend(pointers.get_instructions())
 
+    # What the body threads through itself.  A destination is not accumulated
+    # in place: each build takes a fresh register and reads the last one, so
+    # the expanded form is a chain and one turn of it is what the body holds.
+    #
+    # Read off either side of the build, because that is the only moment both
+    # links exist.  Keyed by the *binding*, which is what the residency is
+    # keyed by -- the tensor is `m0`, its entry is `glb_m0`, and asking for the
+    # tensor finds nothing and looks exactly like nothing to carry.
+    accumulated = [descr.writes() for descr in body
+                   if getattr(descr, 'add', False) and descr.writes() is not None]
+    keys = [f'{GeneralLexicon.GLOBAL_MEM_PREFIX}{v.tensor.name}'
+            for v in accumulated]
+    before = {}
+    for key in keys:
+      entry = self._residency.get(key)
+      if entry is not None:
+        before[key] = entry.image
+
     for descr in body:
       for kind, builder in builders:
         if isinstance(descr, kind):
@@ -836,10 +854,17 @@ class Generator:
     from tensorforge.backend.instructions.allocate import RegisterAlloc
     allocations = [i for i in region if isinstance(i, RegisterAlloc)]
     region = [i for i in region if not isinstance(i, RegisterAlloc)]
+    carried = []
+    for key in keys:
+      entry = self._residency.get(key)
+      was = before.get(key)
+      if was is not None and entry is not None and entry.image is not was:
+        carried.append((was, entry.image))
+
     self._section.ir.extend(allocations)
     self._section.ir.append(
         VariantLoop(self._context, counter, loop.iterations, region, tables,
-                    start=1))
+                    start=1, carried=tuple(carried)))
 
   def _deduce_mults_per_block(self):
     policy = self._thread_block_policy_type(self._context,

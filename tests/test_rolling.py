@@ -664,3 +664,38 @@ def test_the_destination_is_still_not_carried_across_the_back_edge():
     written = {s.name for s in compute.defs()}
     read = {s.name for s in compute.uses()}
     assert not (written & read)
+
+
+def _loop_of(descrs):
+    from tensorforge.common.context import Context
+    from tensorforge.generators.generator import Generator
+    gen = Generator(descrs, Context(arch='sm_86', backend='cuda',
+                                    fp_type=DTYPE))
+    gen._emit_loops = True
+    gen.generate()
+    return next(i for i in gen._sections[0].ir
+                if type(i).__name__ == 'VariantLoop')
+
+
+def test_the_loop_names_the_value_its_body_threads_through_itself():
+    """The pair a back edge has to close, read off either side of the build.
+
+    A destination is not accumulated in place -- each build takes a fresh
+    register and reads the last -- so what the body holds is one turn of the
+    expanded form's chain, and the two links being different registers is the
+    whole of what is missing.
+    """
+    loop = _loop_of(roll(accumulation()))
+    assert len(loop.carried) == 1
+    init, result = loop.carried[0]
+    assert init is not result
+
+    compute = next(i for i in loop.region
+                   if type(i).__name__ == 'MultilinearInstruction')
+    assert init in compute.uses()
+    assert result in compute.defs()
+
+
+def test_a_body_that_accumulates_nothing_carries_nothing():
+    """Empty means nothing to carry, not a carried value gone unnoticed."""
+    assert _loop_of(roll(separate())).carried == ()
