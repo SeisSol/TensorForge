@@ -203,6 +203,47 @@ def place_commits(body: Tuple[Stmt, ...]) -> Tuple[Stmt, ...]:
     return out
 
 
+def _issues(s: Stmt, toks) -> bool:
+    """Does this statement, or anything inside it, issue one of `toks`?"""
+    if s.op == Op.COPY_ASYNC and any(t.id in toks for t in s.target):
+        return True
+    return any(_issues(inner, toks)
+               for r in s.regions for inner in r.body)
+
+
+def _insert(body: Tuple[Stmt, ...], toks, exact: bool) -> Tuple[Stmt, ...]:
+    """Close a group whose issues rose out of the regions that made them.
+
+    `_place` returns the tokens it could not close in its own scope, because
+    the wait that retires them is in an enclosing one.  They arrive here, at
+    the scope that has the wait, and the commit goes *behind the last
+    statement that issued any of them* -- which in this scope is the region
+    they rose out of.
+
+    Reconstructed rather than recovered: `43230d48` added the call and never
+    the function, so every path reaching it raised `NameError`.  Nothing did
+    until `WrapLoads` learned to move a shared transfer, which peels a copy
+    into the prologue and leaves its group to be closed a scope up.  Three
+    statements in this module pin what it has to do, and they agree:
+
+    * `place_commits`: "behind its last issuing statement, in the scope that
+      statement belongs to";
+    * `_place`: "Both closures happen *before* the statement is appended, so
+      that `_insert` still finds the previous run's last issue behind it";
+    * `_place` again: "Whatever is left has no wait in this scope, so it rises
+      to the one that does."
+
+    Behind the *last* such statement and not the first, because groups close
+    in issue order and a commit placed early would close a group the later
+    issues were meant to join.
+    """
+    at = -1
+    for i, s in enumerate(body):
+        if _issues(s, toks):
+            at = i
+    return body[:at + 1] + (_commit(tuple(toks), exact),) + body[at + 1:]
+
+
 def _wait_index(body: Tuple[Stmt, ...]) -> Dict[int, int]:
     """Token id -> position of the wait that retires it, in walk order."""
     out: Dict[int, int] = {}
