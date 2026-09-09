@@ -172,6 +172,30 @@ class CudaLexic(Lexic):
   def wait_async(self, prior):
     return f'__pipeline_wait_prior({prior});'
 
+  def has_prefetch(self, hw):
+    """`prefetch.global.L1` and `.L2`: PTX ISA 2.0, sm_50 and up.
+
+    Everything this generator has a row for is above that, so the check is a
+    statement of what the helpers in `cuda.h` are allowed to assume rather
+    than a gate anything is expected to fail.  It is still asked, because the
+    inline PTX there carries no architecture guard of its own -- a target
+    below the line would reach `ptxas` and fail there, which is a worse place
+    to learn it.
+    """
+    level = hw.sm_level() if hw is not None else None
+    return level is not None and level >= 50
+
+  def prefetch(self, address, *, datatype, elems=1, level='l2'):
+    """The one target where the cache level is part of the instruction.
+
+    `elems` is not: `prefetch.global` names an address and brings in the line
+    around it, with no count to widen that. A run longer than a line is
+    therefore several statements, which is the caller's business since only
+    it knows the line width.
+    """
+    fn = 'prefetchL1' if str(level).lower() == 'l1' else 'prefetchL2'
+    return f'tensorforge::{fn}({address});'
+
   def get_fptype(self, fptype, length=1, relaxed=False):
     if length == 1:
       return f'{fptype}'

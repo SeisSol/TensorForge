@@ -128,6 +128,30 @@ __device__ __forceinline__ int lane_id() {
   return lane;
 }
 
+/// Ask a cache for the line at `ptr` and carry on without it.
+///
+/// `prefetch.global.L1` and `.L2` are PTX ISA 2.0 and sm_50, and there is no
+/// `__CUDA_ARCH__` guard here on purpose: which architectures may reach these
+/// is decided in `CudaLexic.has_prefetch`, and a guard would turn a target
+/// below the line into a call that compiles and does nothing rather than into
+/// the question it is.
+///
+/// No `"memory"` clobber. The hint reads nothing the surrounding code can
+/// observe, and declaring otherwise would pin every access around it in
+/// place -- which is the scheduling freedom the prefetch was issued to use.
+/// `volatile` is what keeps the statement at all, since it has no result that
+/// anything could be waiting on.
+template <typename T> __device__ __forceinline__ void prefetchL1(const T *ptr) {
+  asm volatile("prefetch.global.L1 [%0];" ::"l"(ptr));
+}
+
+/// The same one level out, which is where a hint issued far ahead of its use
+/// belongs: L1 is small enough that the line is likely evicted before the
+/// load arrives.
+template <typename T> __device__ __forceinline__ void prefetchL2(const T *ptr) {
+  asm volatile("prefetch.global.L2 [%0];" ::"l"(ptr));
+}
+
 // Bits at 0, Subblock, 2*Subblock, ... below Block: the lanes that share a
 // reduction with lane 0 of a block.
 template <std::size_t Block, std::size_t Subblock>

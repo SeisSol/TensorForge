@@ -50,6 +50,24 @@ class OpenCLLexic(Lexic):
   def kernel_range_object(self, name, values):
     return f"cl::sycl::range<3> {name} ({values})"
 
+  def has_prefetch(self, hw):
+    """`prefetch` is an OpenCL C 1.0 builtin, so every conforming device has it.
+
+    Whether it reaches an instruction is the implementation's business: the
+    specification says only that it does not change what the kernel computes,
+    which is exactly the guarantee a hint needs and the reason `hw` does not
+    enter into it.
+    """
+    return True
+
+  def prefetch(self, address, *, datatype, elems=1, level='l2'):
+    """`prefetch(p, n)` -- a count of elements, and no cache level.
+
+    The one target so far whose instruction takes the extent, so `elems` is
+    passed through rather than dropped.
+    """
+    return f'prefetch({address}, {elems});'
+
   def get_fptype(self, fptype, length=1, relaxed=False):
     # `sycl::vec` carries its own alignment and there is no relaxed spelling
     # for it, so the flag is accepted and ignored rather than silently

@@ -4,6 +4,24 @@
 from . import CudaLexic
 
 
+def _gfx_level(model):
+  """`gfx1030` -> 0x1030, and None for anything that is not a gfx model.
+
+  Hexadecimal, the way `amd/arch.py` reads the same string: the letters in
+  gfx90a are digits of the number, and a decimal read would both fail on them
+  and sort gfx940 above gfx1030. None rather than 0 keeps "this is not an AMD
+  part" apart from "it is an early one", so a `sm_90` model does not answer an
+  AMD question by comparing low.
+  """
+  text = str(model)
+  if not text.startswith('gfx'):
+    return None
+  try:
+    return int(text[3:], base=16)
+  except ValueError:
+    return None
+
+
 class HipLexic(CudaLexic):
   def __init__(self, backend, underlying_hardware):
     super().__init__(backend, underlying_hardware)
@@ -143,6 +161,49 @@ class HipLexic(CudaLexic):
     if self._underlying_hardware != 'amd':
       return super().wait_async_regs(prior)
     return self.wait_async(prior)
+
+  def has_prefetch(self, hw):
+    """gfx12 and up, where `hasPrefetch` in LLVM's subtarget is `GFX12Insts`.
+
+    Not a question about whether the call compiles: `__builtin_prefetch` is
+    accepted at every AMD target and simply selects no instruction below
+    gfx12. So a False here does not avert an error, it avoids carrying a
+    statement that reaches nothing -- and it is what makes the emitter say
+    once, per body, that this part has no prefetch to give.
+
+    HIP compiles for NVIDIA as well, where the builtin would be an NVPTX
+    question and not this one; the same condition `glb_store` and
+    `atomic_store` carry.
+    """
+    if self._underlying_hardware != 'amd':
+      return False
+    arch = _gfx_level(getattr(hw, 'model', None))
+    return arch is not None and arch >= 0x1200
+
+  def prefetch(self, address, *, datatype, elems=1, level='l2'):
+    """`__builtin_prefetch`, which has no cache level to be given.
+
+    The builtin takes (address, rw, locality) and always asks for the data
+    cache. On AMDGPU the locality is what becomes a memory *scope* -- 0 is
+    SCOPE_SYS, 1 SCOPE_DEV, 2 and 3 SCOPE_SE -- so there is no L1/L2 choice
+    to make here and the requested level is honoured by being ignored.
+    SCOPE_CU, which is what a locality argument would have to reach for the
+    nearest cache, is not generated at all: it is unsafe on an address that
+    does not resolve, and a prefetch that faults is worse than one that
+    misses.
+
+    The builtin rather than the intrinsic, because which instruction it means
+    follows the target: `s_prefetch_data` from gfx12, and the VMEM
+    `global_prefetch` into GL2 on gfx1250, where that exists. Naming one of
+    them here would fix the other in place.
+    """
+    if self._underlying_hardware != 'amd':
+      # Unreachable through `has_prefetch`, and spelled out rather than
+      # inherited: this class extends the CUDA one, so a `super()` call here
+      # would hand a HIP-on-NVIDIA build the PTX helper from `cuda.h`, which
+      # that translation unit does not include.
+      return None
+    return f'__builtin_prefetch({address}, 0, 3);'
 
   def get_fptype(self, fptype, length=1, relaxed=False):
     kind = 'VectorRelaxedT' if relaxed else 'VectorT'

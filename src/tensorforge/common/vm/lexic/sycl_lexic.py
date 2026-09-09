@@ -174,6 +174,46 @@ class SyclLexic(Lexic):
             f'sycl::access::address_space::global_space>'
             f'({access}).fetch_add({variable});')
 
+  def has_prefetch(self, hw):
+    """Core SYCL 2020, so the part underneath does not decide it.
+
+    `multi_ptr::prefetch` is declared for every global-space pointer and an
+    implementation with no instruction behind it still has to accept the
+    call. That is the right shape for a hint, and it is why this does not
+    consult `hw` the way the CUDA and HIP answers do.
+
+    False under the explicit-SIMD lowering, for the reason `has_atomic_store`
+    is: ESIMD spells a prefetch over a vector of byte offsets with a mask
+    beside it -- `esimd::prefetch`, or `lsc_prefetch` with the cache hints as
+    template arguments -- and neither takes the single address this hook
+    hands out. Which of the two, and what the offsets are, is a question
+    about the ESIMD path's addressing rather than about prefetching; settling
+    it here would fix the wrong shape in place, and a kernel is correct
+    without the hint.
+    """
+    return not self.simd_mode
+
+  def prefetch(self, address, *, datatype, elems=1, level='l2'):
+    """The SYCL 2020 spelling, which has no cache level to be given.
+
+    `sycl_ext_oneapi_prefetch` does have one -- `cache_level::L1` and up, and
+    a cooperative form besides -- but it is an experimental extension behind
+    `SYCL_EXT_ONEAPI_PREFETCH`, and a preprocessor test is not something an
+    expression can carry. It belongs in a helper beside the other backend
+    headers on the day the extension is depended on; until then the requested
+    level is a request this target does not honour.
+
+    `address_space_cast` rather than a `multi_ptr` constructed from the
+    pointer: the raw-pointer constructor exists only for the deprecated
+    `decorated::legacy` spelling, so building one that way ties the generated
+    kernel to an interface both implementations are moving off.
+    """
+    if self.simd_mode:
+      return None
+    return (f'sycl::address_space_cast<sycl::access::address_space::'
+            f'global_space, sycl::access::decorated::no>({address})'
+            f'.prefetch({elems});')
+
   def get_fptype(self, fptype, length=1, relaxed=False):
     # `sycl::vec` carries its own alignment and there is no relaxed spelling
     # for it, so the flag is accepted and ignored rather than silently
