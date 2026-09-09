@@ -146,13 +146,11 @@ def emit_workload_tu(generator, backend: str, name: str,
     for op in ops:
         if op.is_scalar:
             continue
-        if op.addressing not in ("strided", "none"):
+        if op.addressing not in ("strided", "none", "pointer_based"):
             raise NotImplementedError(
                 f"operand {op.kernel_name} uses {op.addressing!r} addressing; "
-                f"the measurement driver handles 'strided', 'none' and "
-                f"'scalar'. Pointer-based batches need a per-element pointer "
-                f"table, which is a host-side arrangement a timing run would "
-                f"be measuring as much as the kernel")
+                f"the measurement driver handles 'strided', 'none', "
+                f"'pointer_based' and 'scalar'")
 
     tag = slug(name)
     lang = "sycl" if backend in ("oneapi", "acpp", "esimd", "sycl") else backend
@@ -172,6 +170,42 @@ def emit_workload_tu(generator, backend: str, name: str,
                 else f"(size_t){per}u * batch * {elem}")
         decls.append(f"static {op.ctype}* d_{op.kernel_name} = nullptr;")
         allocs.append(f"    DEV_MALLOC(d_{op.kernel_name}, {span});")
+        if op.addressing == "pointer_based":
+            # The pointers are *contiguous and in order*: element i lives at
+            # `slab + i * per`, exactly where a STRIDED operand would put it.
+            #
+            # This is a choice and not the only one, which is why it is said
+            # here rather than left to be inferred.  A pointer table is a
+            # permutation of the batch, and the permutation is a first-order
+            # term in what the kernel costs: identity keeps the coalescing a
+            # STRIDED operand gets, and a scattered table would measure the
+            # scatter as much as the code.  Identity is therefore the *upper
+            # bound* on what pointer indirection can achieve, and a number
+            # from it must not be read as what a mesh-ordered SeisSol batch
+            # will see.  Measuring that needs a second layout and a statement
+            # of which one the row came from.
+            #
+            # `i * per` and not `i`: `d_X` is a `ctype*`, so `+ i` advances by
+            # one scalar where the kernel indexes by one batch element.
+            ptr_bytes = "batch * sizeof(void*)"
+            # `const` unless the kernel writes through it.  `float**` does not
+            # convert to `const float**` -- the language forbids it, because
+            # through the second one could store a `const float*` into the
+            # first's pointee -- so the table has to be declared with the
+            # constness the launcher's parameter already has.
+            ptr_elem = op.ctype if op.is_sink else f"const {op.ctype}"
+            decls.append(f"static {ptr_elem}** d_p_{op.kernel_name} = nullptr;")
+            allocs.append(f"    DEV_MALLOC(d_p_{op.kernel_name}, {ptr_bytes});")
+            fills.append(
+                f"    {{ void** h = (void**)std::malloc({ptr_bytes});\n"
+                f"      if (!h) {{ std::fprintf(stderr, \"host alloc\\n\"); "
+                f"std::exit(2); }}\n"
+                f"      for (size_t i = 0; i < batch; ++i)\n"
+                f"        h[i] = d_{op.kernel_name} + i * (size_t){per}u;\n"
+                f"      DEV_MEMCPY_H2D(d_p_{op.kernel_name}, h, {ptr_bytes});\n"
+                f"      std::free(h); }}")
+            frees.append(f"    DEV_FREE(d_p_{op.kernel_name});"
+                         f" d_p_{op.kernel_name} = nullptr;")
         fills.append(
             f"    {{ void* h = std::malloc({span});\n"
             f"      if (!h) {{ std::fprintf(stderr, \"host alloc\\n\"); "

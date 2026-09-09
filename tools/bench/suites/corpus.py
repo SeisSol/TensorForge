@@ -22,8 +22,8 @@ NAME = 'corpus'
 DESCRIPTION = 'the tests/cases corpus at saturating batches'
 
 BATCHES = (1024, 8192, 65536)
-CONFIGS = ['baseline', 'wave', 'pipeline', 'wrap1', 'wrap2', 'multibuffer',
-           'prefetch', 'prefetch-l1', 'preload']
+CONFIGS = ['baseline', 'prefetch', 'prefetch-l1', 'wrap1', 'wrap2',
+           'no-move-loads', 'pipeline']
 
 
 def workloads():

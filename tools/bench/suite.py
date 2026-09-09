@@ -172,6 +172,9 @@ CONFIGS: Dict[str, Config] = {
     # which the *next* element's index is known at the top of the iteration,
     # and both are listed because the interesting comparison is between them
     # rather than against the baseline alone.
+    # `MoveLoads` is on by default and has no other way to be turned off, so
+    # this config is how its contribution gets a number rather than a belief.
+    'no-move-loads': Config('no-move-loads', Options(enable_move_loads=False)),
     # The prefetch hint, at both levels it can ask for.  Two entries because
     # the level is the open question: L1 is closer and smaller, so a hint
     # issued a whole loop body ahead may be evicted before its use, and which

@@ -148,14 +148,38 @@ def test_every_workload_exposes_the_three_entry_points():
             assert f"tfb_{entry}_{tag}" in tu, f"{mod.NAME}: no {entry}"
 
 
-def test_pointer_based_addressing_is_refused_and_says_why():
-    """Not silently mis-sized. A `T**` batch needs a host-side pointer table,
-    and a timing run that built one would be measuring the table as much as the
-    kernel."""
+def test_pointer_based_addressing_builds_an_identity_pointer_table():
+    """It used to be refused, on the grounds that a timing run would be
+    measuring the table as much as the kernel.
+
+    Half of that is true and the half that is true is why the layout is
+    pinned rather than left open.  The table is built once in `setup` and
+    never touched by the timing loop, so its *construction* is not measured.
+    What is measured is the permutation it encodes, and that is a first-order
+    term: identity keeps the coalescing a STRIDED operand would get, so a
+    number from it is the upper bound on what pointer indirection can reach,
+    not what a mesh-ordered batch will see.
+
+    Refusing left the one case the prefetch hint was written for --
+    `local_flux`, whose operands are `PTR_BASED` -- outside every measurement
+    the corpus can make.  An upper bound that says which bound it is beats no
+    number at all.
+    """
     mod = _load(CASES / "addressing_ptr_based.py")
     _, gen = _generate(mod, "cuda", "sm_80")
-    with pytest.raises(NotImplementedError, match="pointer_based"):
-        driver_bench.emit_workload_tu(gen, "cuda", mod.NAME, "")
+    tu = driver_bench.emit_workload_tu(gen, "cuda", mod.NAME, "")
+    ops = [o for o in collect_operands(gen) if o.addressing == "pointer_based"]
+    assert ops, "the case no longer has a pointer-based operand"
+    for op in ops:
+        assert f"d_p_{op.kernel_name}" in tu, f"no table for {op.kernel_name}"
+        # identity, and by the element stride rather than the scalar one
+        assert (f"h[i] = d_{op.kernel_name} + i * (size_t)" in tu), (
+            f"{op.kernel_name}: the table is not the identity layout, or it "
+            f"advances by one scalar where the kernel indexes by one element")
+        # a source-only batch is read through `const T**`; `T**` does not
+        # convert to it, so the declaration has to carry the constness
+        elem = op.ctype if op.is_sink else f"const {op.ctype}"
+        assert f"static {elem}** d_p_{op.kernel_name}" in tu
 
 
 def test_a_sparse_operand_is_allocated_at_its_storage_volume():

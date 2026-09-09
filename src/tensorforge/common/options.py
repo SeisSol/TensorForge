@@ -333,6 +333,19 @@ declare('pipeline_depth',
         default=2,
         doc='Stages a rotating buffer holds.')
 
+declare('enable_move_loads',
+        default=True,
+        parse=parse_bool,
+        doc='Issue a load early and wait where the value is needed.\n'
+            '`MoveLoads` splits a transfer from its `LoadWait` and walks the '
+            'transfer up the stream to hide its latency, stopping where '
+            'something between the two would write what the load reads.\n'
+            'On by default and always has been -- this switch exists so the '
+            'default can be *priced*, not because it is in doubt. A pass with '
+            'no way to be turned off is a pass whose contribution nobody has '
+            'measured, and the same argument that put `preload_globals` behind '
+            'a question applies to it.')
+
 declare('enable_wrap_loads',
         default=False,
         doc='Slot-granular prefetch: move a register transfer `wrap_distance` '

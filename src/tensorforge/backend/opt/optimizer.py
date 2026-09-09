@@ -61,7 +61,8 @@ class OptimizationStage:
     pm.add(LegacyTransform(
         'MoveLoads',
         lambda pc, instrs: MoveLoads(pc.context, instrs),
-        scope=PassScope.PER_REGION))
+        scope=PassScope.PER_REGION,
+        enabled=lambda pc: getattr(opts, 'enable_move_loads', True)))
 
     # Slot-granular prefetch.  Whole nest, like Pipeline: the peeled transfer
     # lands outside the loop.  Runs after MoveLoads, which splits the transfer
