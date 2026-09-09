@@ -357,6 +357,22 @@ declare('preload_globals',
             'been compared against its own alternative.  A benchmark cannot ask '
             'a question the generator cannot be asked.')
 
+declare('prepare_operands',
+        default=False,
+        parse=parse_bool,
+        doc='Let the backend re-encode a batch-constant operand for the '
+            'instruction that reads it -- store it in fragment order, split it '
+            'into parts, or both.\n'
+            'A question and not a vendor rule because preparing an operand '
+            'moves work onto whoever fills the buffer: a host that cannot run '
+            'the packer cannot use the kernel, and only the caller knows '
+            'whether it can.  What preparing *means* is the primitive\'s '
+            'business; this only says whether it may.\n'
+            'Off by default.  On `local_flux` at batch 8192 the fragment order '
+            'alone was worth 16%, and 27% with the TF32 split on top -- but '
+            'only `Addressing.NONE` operands are eligible at all, so a case '
+            'with none of them pays the question with nothing.')
+
 declare('wide_bodies',
         default=True,
         env='TF_IR_WIDE',
