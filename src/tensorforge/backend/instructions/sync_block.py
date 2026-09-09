@@ -38,7 +38,30 @@ class SyncThreads(AbstractInstruction):
     return ()
 
   def gen_ir(self, writer):
-    writer.barrier(Uniformity.MULT)
+    """Emit the scope `barrier_scope` decided, not a second opinion.
+
+    These two used to disagree.  `barrier_scope` weighs the thread count
+    against the wave -- which is the whole reason it takes one -- and answers
+    `GROUP` for a multiplication that does not fit in a wave; `gen_ir` asked
+    for `MULT` regardless, and the emitter turned that into `__syncwarp()`.
+    So `verify` would refuse the construct while the emitter, had it run,
+    would have synchronised a warp where a block was needed: a barrier that
+    reaches part of the threads it was asked to reach.
+
+    Nothing in the corpus is wide enough to have shown it -- `lanes.py` clamps
+    to `vec_unit_length` for every descriptor but `ElementwiseDescr`, and no
+    elementwise case reaches the cap.  One answer, taken from the resolver
+    that has the numbers, is what keeps it from mattering later.
+    """
+    if self.barrier_scope() is BarrierScope.SIMD:
+      # A wave, and it is a wave whatever the multiplication is: these threads
+      # are in lockstep, so the barrier is about ordering memory, not about
+      # arrival.
+      writer.barrier(Uniformity.MULT)
+      return
+    # Wider than a wave.  `BLOCK` is what may legally be claimed -- the width
+    # rides along so a vendor with a sub-block rendezvous can narrow it.
+    writer.barrier(Uniformity.BLOCK, threads=self._num_threads)
 
   def __str__(self) -> str:
     return self.barrier_scope()

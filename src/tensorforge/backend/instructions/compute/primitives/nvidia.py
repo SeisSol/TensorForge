@@ -9,7 +9,6 @@ from ..routes import lead_route as routes_lead_route
 from ..strategy import Strategy, whole
 from tensorforge.backend.pir.core import (BOOL, INDEX, Access, Effect, MemSpace,
                                           XorSwizzle,
-                                          Uniformity,
                                           ScalarType, Value)
 from tensorforge.backend.writer import Writer
 
@@ -865,7 +864,7 @@ def matmul(writer, ops, ctx, span):
                                         # that want it at another.  Where the
                                         # fragment's own address is
                                         # expressible, none of this happens.
-                                        writer.barrier(Uniformity.MULT)
+                                        writer.barrier('wave')
                                         trueSK = min(atom.k, threads - trueK)
                                         with threadrange(trueK, trueSK):
                                             for jj in range(0, atom.n):
@@ -876,7 +875,7 @@ def matmul(writer, ops, ctx, span):
                                                 for jj in range(0, atom.n):
                                                     writer.store(Bshm, Breg[k // threads + 1, jj],
                                                                          _index(writer, sub=-trueSK, mod=atom.k, add=jj * atom.k))
-                                        writer.barrier(Uniformity.MULT)
+                                        writer.barrier('wave')
 
                                     for jj in range(0, nregs):
                                         for kkk in range(0, kregs):
@@ -972,7 +971,7 @@ def matmul(writer, ops, ctx, span):
                                                         for pt in range(1, aparts):
                                                             AfragParts[pt][fr] = got[pt]
                                             else:
-                                                writer.barrier(Uniformity.MULT)
+                                                writer.barrier('wave')
                                                 with threadrange(ii, atom.m):
                                                     # for kkk in range(0, atom.k):
                                                     #     writer(f'{shmptr}[{aoffs} + (threadIdx.x - {ii}) % {atom.m} + {kkk * atom.m}] = {Areg}_{kkk};')
@@ -1035,7 +1034,7 @@ def matmul(writer, ops, ctx, span):
                                                                 writer.store(Ashm,
                                                                              AregParts[pt][kkk + n],
                                                                              at)
-                                                writer.barrier(Uniformity.MULT)
+                                                writer.barrier('wave')
 
                                                 for kk in range(0, kregs):
                                                     for iii in range(0, mregs):
@@ -1086,12 +1085,12 @@ def matmul(writer, ops, ctx, span):
                                 writer.store(Cshm, Cvals[slot][ii // atom.m],
                                              _index(writer, scale=2, add=off))
 
-                            writer.barrier(Uniformity.MULT)
+                            writer.barrier('wave')
                             with threadrange(ii, atom.m):
                                 for jj in range(0, atom.n):
                                     _c = writer.load(Cshm, _index(writer, mod=atom.m, scale=atom.n, add=jj), hint='data')
                                     writer.assign(Cout[jj], _c)
-                            writer.barrier(Uniformity.MULT)
+                            writer.barrier('wave')
 
                     for jj in range(0, min(atom.n, N - j)):
                         C(writer, Cout[jj], i // threads, j + jj)

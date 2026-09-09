@@ -1073,7 +1073,8 @@ class IRBuilder:
             return base.type.space
         return MemSpace.from_symbol_type(getattr(base, 'stype', None))
 
-    def barrier(self, scope: Union[str, Uniformity] = Uniformity.BLOCK) -> Stmt:
+    def barrier(self, scope: Union[str, Uniformity] = Uniformity.BLOCK,
+                threads: Optional[int] = None) -> Stmt:
         """A rendezvous of every thread that agrees at level ``scope``.
 
         The scope is on the same lattice as value uniformity, and that is the
@@ -1082,11 +1083,28 @@ class IRBuilder:
         other branch, or ran fewer iterations, never arrive.  Previously the
         scope was an unchecked string that never reached the emitter -- every
         barrier came out as sync_block() regardless of what was asked for.
+
+        ``threads`` says how many threads the caller actually needs to meet,
+        where that is narrower than the scope it had to ask for.  A
+        multiplication is not a hardware level: it is a warp while it fits in
+        one and a fraction of a block once it does not, so a caller that means
+        "this multiplication" has to name ``BLOCK`` for legality and can then
+        say how wide it really is.  A vendor with a sub-block rendezvous --
+        NVIDIA's named barriers are the case -- may use it; the default
+        ignores it and synchronises the block.
+
+        Deliberately not a new level on ``Uniformity``.  That enum is ordered
+        by "same across more threads" and ``min`` over it propagates value
+        uniformity; a wave sits *above* a 16-thread multiplication and *below*
+        a 64-thread one, so a rung for it would order the lattice differently
+        depending on the lane configuration, and silently.
         """
         level = _as_barrier_scope(scope)
+        attrs = (('scope', level),)
+        if threads is not None:
+            attrs += (('threads', int(threads)),)
         return self._emit_op(Op.BARRIER, (), (), pure=False, movable=False,
-                             effect=Effect.BARRIER,
-                             attrs=(('scope', level),))
+                             effect=Effect.BARRIER, attrs=attrs)
 
     def yield_(self, *values: Operand) -> Stmt:
         return self._emit_op(Op.YIELD, (), values, pure=False, movable=False)

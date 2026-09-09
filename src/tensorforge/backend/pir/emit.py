@@ -216,10 +216,17 @@ class Emitter:
         base = getattr(v.type, 'base', None)
         return lex.get_operation(_LEXIC_BINOP[op], base, args[0], args[1])
 
-    def _sync(self, scope=None) -> str:
+    def _sync(self, scope=None, threads=None) -> str:
         # The scope used to be an unchecked string that never reached here, so
         # every barrier came out as sync_block() regardless of what was asked
         # for.
+        #
+        # `MULT` here means the *wave*: every caller spelling it means the
+        # threads that are in lockstep anyway, and `nvidia.py` says `'wave'`
+        # for exactly that.  A multiplication that is wider than a wave cannot
+        # be spelled this way -- it arrives as `BLOCK` carrying its width, and
+        # the vendor decides whether it has anything narrower than a whole
+        # block to offer.
         lex = self._lexic()
         if lex is None:
             return '__syncthreads();'
@@ -228,6 +235,8 @@ class Emitter:
             return lex.sync_simd()
         if name == 'GRID':
             return lex.sync_grid()
+        if threads is not None:
+            return lex.sync_mult(threads)
         return lex.sync_block()
 
     def _thread_idx(self, axis: str) -> str:
@@ -516,7 +525,7 @@ class Emitter:
             return
 
         if op == Op.BARRIER:
-            sync_instr = self._sync(s.attr('scope'))
+            sync_instr = self._sync(s.attr('scope'), s.attr('threads'))
             if sync_instr is not None:
                 w(sync_instr)
             return

@@ -8,28 +8,39 @@ takes a level from it. The docstring there is explicit about why: a barrier at
 level S inside a construct whose entry is only U-uniform deadlocks unless
 `U >= S`. So the level is a claim about how many threads arrive.
 
-`emit._sync` lowers MULT to `sync_simd()` — `__syncwarp()` on CUDA — and that
-is correct, because a multiplication currently cannot outgrow a wave. It is a
-lowering tied to an invariant, not a defect, and these tests exist to say
-which invariant, so that the day it is lifted the lowering is not left behind.
+MULT lowers to `sync_simd()` — `__syncwarp()` on CUDA — and that is not a
+lowering tied to an invariant but a definition: a barrier spelled MULT *means*
+the wave, and `nvidia.py` says `'wave'` at the six places where it stages an
+mma fragment, because a fragment's distribution is a property of the warp and
+not of whatever the multiplication happens to be.
 
-The invariant is not stated anywhere; it holds by construction.
-`_deduce_num_threads` clamps to 32 unless an elementwise descriptor is
-present, and the one configuration that gets past the clamp — a multilinear
-whose lead dimension aligns above 32, alongside an elementwise — does not
-produce a wrong kernel either. It produces no kernel at all: the PIR verifier
-rejects it with "group barrier inside a construct whose trip count is only
-simd-uniform". Checked, not assumed; see the last test below.
+A multiplication wider than a wave is therefore not spelled MULT at all. It
+cannot be: a wave sits above a 16-thread multiplication and below a 64-thread
+one, so a rung for it on this lattice would order `min`-propagation of value
+uniformity differently depending on the lane configuration. What happens
+instead is that `SyncThreads` resolves the width where the numbers are —
+`barrier_scope` already weighs the thread count against `vec_unit_length` —
+and asks for a BLOCK barrier carrying that width, so a vendor with a sub-block
+rendezvous can narrow it in `Lexic.sync_mult`.
 
-So the super-wave reduction is blocked, but not by a hazard. When the cap
-lifts, MULT has to lower to `sync_block()` wherever a multiplication spans
-several waves — correct on its own terms, a block barrier being a superset —
-and safe only with one multiple per block, since the batch loop is otherwise
-just MULT-uniform and a block barrier inside it deadlocks on a ragged tail.
-That is a thread-block policy decision
-(`RegmaxBlockPolicy.get_num_mults_per_block`), not one the emitter can take.
+That resolution is the fix these tests now pin. The two used to disagree:
+`barrier_scope` answered GROUP for a wide multiplication while `gen_ir` asked
+for MULT regardless, so `verify` would refuse the construct while the emitter,
+had it run, would have synchronised a warp where a block was needed.
+
+Nothing in the corpus is wide enough to have shown it. `_deduce_num_threads`
+clamps to 32 unless an elementwise descriptor is present, and the one
+configuration that gets past the clamp — a multilinear whose lead dimension
+aligns above 32, alongside an elementwise — produces no kernel at all: the PIR
+verifier rejects it with "group barrier inside a construct whose trip count is
+only simd-uniform". Checked, not assumed; see the last test below.
+
+When the cap does lift, the remaining decision is not the emitter's. A block
+barrier inside the batch loop is safe only with one multiple per block, since
+the loop is otherwise just MULT-uniform and a block barrier in it deadlocks on
+a ragged tail — that is
+`RegmaxBlockPolicy.get_num_mults_per_block`.
 """
-
 from __future__ import annotations
 
 import pytest
@@ -40,7 +51,7 @@ from tensorforge.common.basic_types import Datatype
 from tensorforge.common.context import Context
 
 
-def _sync_text(context, scope):
+def _sync_text(context, scope, threads=None):
     from tensorforge.backend.pir.emit import Emitter
 
     lines = []
@@ -52,7 +63,26 @@ def _sync_text(context, scope):
         def __getattr__(self, _):
             return lambda *a, **k: None
 
-    return Emitter(_Sink(), context)._sync(scope)
+    return Emitter(_Sink(), context)._sync(scope, threads)
+
+
+def _emitted_scope(context, num_threads):
+    """What `SyncThreads` actually asks the IR for, at this width.
+
+    Through the instruction rather than through `_sync`, because the width is
+    resolved there: that is the whole point of the change these tests pin.
+    """
+    from tensorforge.backend.instructions.sync_block import SyncThreads
+
+    seen = []
+
+    class _Recorder:
+        def barrier(self, scope, threads=None):
+            seen.append((scope, threads))
+
+    SyncThreads(context, num_threads).gen_ir(_Recorder())
+    assert len(seen) == 1, f'expected one barrier, got {seen}'
+    return seen[0]
 
 
 @pytest.fixture
@@ -73,25 +103,70 @@ def test_a_mult_barrier_is_a_warp_barrier(context):
     assert "syncwarp" in _sync_text(context, Uniformity.MULT)
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "the thread count cannot exceed a wave today, so _sync has no reason to "
-    "know the configuration; lifting the cap is what makes this assertion due"))
-def test_a_mult_barrier_spanning_waves_is_not_a_warp_barrier(context):
-    """What has to become true at the same commit that lifts the cap.
+def test_a_multiplication_wider_than_a_wave_does_not_ask_for_a_warp_barrier(context):
+    """This used to be an xfail waiting on `_sync` learning the width.
 
-    Written against the lowering rather than a generated kernel, because
-    nothing emits a MULT barrier at that width: the assertion has to be able
-    to fail before the configuration that would need it exists. `_sync` takes
-    only the scope, so there is no way to hand it a thread count -- which is
-    the work, not an obstacle to describing it.
+    It no longer waits, and the reason is that the width is not resolved in
+    the emitter at all.  `SyncThreads.barrier_scope` already weighed the
+    thread count against the wave -- that is why it takes one -- and `gen_ir`
+    now asks for what it decided instead of a second opinion.  A multiplication
+    that outgrows its wave therefore reaches the IR as a block barrier that
+    carries its own width, and never as `MULT`.
+
+    Checkable without lifting the lane cap, because the instruction can be
+    built at any width; what the cap governs is whether a *kernel* reaches
+    this, not whether the lowering is right.
     """
-    from tensorforge.common.threadconfig import ThreadConfig
+    scope, threads = _emitted_scope(context, num_threads=64)
+    assert scope.name == 'BLOCK', (
+        f'a 64-thread multiplication on a 32-wide wave asked for {scope.name}; '
+        f'a warp barrier reaches half the threads it was told to reach')
+    assert threads == 64, 'the width has to ride along or no vendor can narrow it'
+    assert 'syncwarp' not in _sync_text(context, scope, threads)
 
-    config = ThreadConfig(context, threadcount=64)
-    assert config.superwarp(), "the fixture no longer sets up the case"
-    assert config.warps_per_multiple() == 2
 
-    assert "syncwarp" not in _sync_text(context, Uniformity.MULT)
+def test_a_multiplication_inside_its_wave_still_asks_for_the_warp(context):
+    """The other half: the common case must not have moved."""
+    scope, threads = _emitted_scope(context, num_threads=32)
+    assert scope.name == 'MULT'
+    assert threads is None, (
+        'a wave barrier carries no width -- the threads are in lockstep, so '
+        'there is nothing for a vendor to narrow')
+    assert 'syncwarp' in _sync_text(context, scope, threads)
+
+
+def test_the_width_reaches_the_vendor_hook(context):
+    """`sync_mult` is where a sub-block rendezvous would go, so it must be asked."""
+    asked = []
+
+    class _Lexic:
+        def sync_mult(self, n):
+            asked.append(n)
+            return f'named_barrier({n});'
+
+        def sync_block(self):
+            return '__syncthreads();'
+
+        def sync_simd(self):
+            return '__syncwarp();'
+
+        def sync_grid(self):
+            return 'grid.sync();'
+
+    from tensorforge.backend.pir.emit import Emitter
+
+    emitter = Emitter(lambda *a, **k: None, context)
+    emitter._lexic = lambda: _Lexic()
+    assert emitter._sync(Uniformity.BLOCK, 64) == 'named_barrier(64);'
+    assert asked == [64]
+    # ...and a block barrier with no width stays a block barrier
+    assert emitter._sync(Uniformity.BLOCK, None) == '__syncthreads();'
+
+
+def test_the_default_hook_over_synchronises_rather_than_deadlocking(context):
+    """No vendor implements the narrow form; the fallback has to be a superset."""
+    lex = context.get_vm().get_lexic()
+    assert lex.sync_mult(64) == lex.sync_block()
 
 
 def test_a_thread_count_above_a_wave_is_refused_rather_than_miscompiled():
@@ -102,8 +177,10 @@ def test_a_thread_count_above_a_wave_is_refused_rather_than_miscompiled():
     the one combination that gets past the clamp -- a multilinear aligning
     above 32 next to an elementwise -- is rejected outright.
 
-    If this ever starts generating, the barrier lowering above is no longer
-    covered by an invariant and the xfail turns due.
+    If this ever starts generating, the width-carrying path above stops being
+    reachable only from a hand-built instruction and starts being reachable
+    from a kernel -- which is when `Lexic.sync_mult` is worth implementing for
+    a vendor rather than defaulting to a whole block.
     """
     from tensorforge.common.basic_types import Addressing
     from tensorforge.common.exceptions import GenerationError

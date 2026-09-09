@@ -58,6 +58,39 @@ class Lexic(ABC):
   def sync_simd(self):
     pass
 
+  def sync_mult(self, num_threads: int):
+    """Rendezvous exactly the ``num_threads`` threads of one multiplication.
+
+    Only reached where the multiplication is *wider* than a wave -- narrower
+    than that and `SyncThreads` asks for `sync_simd` directly, because the
+    threads are in lockstep anyway.  So the default is the honest one: a whole
+    block, which over-synchronises but never deadlocks.
+
+    The opportunity a vendor can take here is a sub-block rendezvous, and both
+    of the ones that matter have one:
+
+    * NVIDIA, `bar.sync id, count` -- meets exactly `count` threads at named
+      barrier `id`.
+    * AMD from gfx12 (checked: gfx1250 assembles `s_barrier_signal 1` /
+      `s_barrier_wait 1`, gfx1150 has only the monolithic `s_barrier`).
+
+    The catch is the same on both: every multiplication in the block needs an
+    `id` of its own -- `threadIdx.y + 1`, since 0 is the one a full block
+    barrier uses -- so it holds only while `mults_per_block` stays under the
+    number of barrier resources, 15 usable of 16 on NVIDIA.  Two
+    multiplications sharing an `id` rendezvous with each other, which is a
+    deadlock the moment they run the body a different number of times.
+
+    Not implemented for any target, and that is deliberate rather than
+    pending: no lane configuration the generator produces today is wider than
+    its wave.  `lanes.py` clamps `num_threads` to `vec_unit_length` for
+    everything except an `ElementwiseDescr`, and no elementwise case in the
+    corpus reaches the cap either.  An implementation would be untestable
+    code; the hook exists so that widening a multiplication is a change in one
+    place rather than a search.
+    """
+    return self.sync_block()
+
   @abstractmethod
   def get_sub_group_id(self, sub_group_size):
     return None
