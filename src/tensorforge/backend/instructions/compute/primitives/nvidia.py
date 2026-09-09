@@ -4,7 +4,7 @@
 from tensorforge.common.basic_types import Datatype
 from tensorforge.common.exceptions import GenerationError
 from .. import ranking
-from ..bitlayout import packed
+from ..bitlayout import Bit, BitLayout, Place, packed
 from ..strategy import Strategy, whole
 from tensorforge.backend.pir.core import (BOOL, INDEX, Access, Effect, MemSpace,
                                           XorSwizzle,
@@ -81,9 +81,6 @@ class MMAMode:
     I8 = 3
 
 class MMAInstr:
-    def headers(self):
-        return []
-
     def __init__(self, m, n, k, b, d, name, mode, sm):
         self.n = n
         self.m = m
@@ -271,6 +268,70 @@ def tile_starts(extent, threads, atom):
                  for inner in range(0, min(threads, extent - outer), atom))
 
 
+def a_fragment_bits(atom, threads: int = 32) -> BitLayout:
+    """The PTX A layout of one tile, in the vocabulary a value is read in.
+
+    The counterpart to AMD's `FRAGMENT_BITS`, and it exists for the same
+    reason: a distribution stated as arithmetic can be executed and compared
+    to nothing, while one stated as bits can be held against what an operand
+    actually holds.  Until this was written the packed-operand refusal here
+    had to be a literal -- there was no second side to ask about.
+
+    Both axes factor exactly, which is not an accident of these entries but
+    of the map: lane `t` holds row ``t / ktile + iii * mtile`` and column
+    ``t % ktile + kf * ktile``, and every one of those terms is a shift.  The
+    row's low three bits are the lane's bits 2..4, its higher bits are `iii`,
+    which is the operand list's low digit; the column's low two bits are the
+    lane's 0..1 and its higher bits are `kf`, the high digit, whose place
+    value in `f` is `mregs`.  A tile therefore spreads `atom.m * atom.k`
+    elements over exactly `aregs * threads` slots, one each.
+
+    The hardware fact itself is `fragment_order`'s to document, and it is
+    verified there three ways on real silicon.  This states it once, and
+    `fragment_order` reads it back rather than spelling the same arithmetic a
+    second time -- two statements of one map can disagree, and the one that
+    decides where the host packer writes and the one that decides where the
+    kernel reads are exactly the pair that must not.
+    """
+    mtile, ktile = 8, 4
+    mregs, kregs = atom.m // mtile, atom.k // ktile
+    rows = tuple([Bit(Place.LANE, 1 << (2 + b)) for b in range(3)]
+                 + [Bit(Place.SLOT, 1 << b)
+                    for b in range((mregs - 1).bit_length())])
+    cols = tuple([Bit(Place.LANE, 1 << b) for b in range(2)]
+                 + [Bit(Place.SLOT, mregs << b)
+                    for b in range((kregs - 1).bit_length())])
+    return BitLayout((rows, cols))
+
+
+def _fragment_cells(atom, threads: int = 32, bits=None):
+    """`a_fragment_bits` inverted: which cell of a tile each slot and lane
+    holds.
+
+    A bijection, and checked to be one.  A tile has `atom.m * atom.k` cells
+    and `aregs * threads` places for them, and those are equal by
+    construction -- so a table that sends two cells to one place has lost a
+    third, and an operand packed from it would be missing an element that the
+    kernel then reads as whatever was there before.
+
+    `bits` is a parameter so the refusal can be exercised: with the real
+    table it never fires, and a guard that cannot be made to fire is a guard
+    nobody has read.
+    """
+    bits = a_fragment_bits(atom, threads) if bits is None else bits
+    cells = {}
+    for row in range(atom.m):
+        for col in range(atom.k):
+            at = bits.locate(row, col)
+            if (at.slot, at.lane) in cells:
+                raise GenerationError(
+                    f'the A layout of {atom.name} sends two cells to slot '
+                    f'{at.slot} lane {at.lane}, so a tile does not fit its '
+                    f'own fragments')
+            cells[(at.slot, at.lane)] = (row, col)
+    return cells
+
+
 def fragment_order(shape, atom, threads=32):
     """Which bounding-box cell each slot of a pre-ordered A holds.
 
@@ -300,6 +361,7 @@ def fragment_order(shape, atom, threads=32):
     mtile, ktile = 8, 4
     mregs, kregs = atom.m // mtile, atom.k // ktile
     aregs = mregs * kregs
+    cell = _fragment_cells(atom, threads)
     mstarts = tile_starts(rows, threads, atom.m)
     kstarts = tile_starts(cols, threads, atom.k)
     # The emitter names a tile by `start // atom` (`mt`, `kt` at the fragment
@@ -320,10 +382,9 @@ def fragment_order(shape, atom, threads=32):
         for kt, k0 in enumerate(kstarts):
             assert len(order) == (mt * ktiles + kt) * aregs * threads
             for f in range(aregs):
-                iii, kf = f % mregs, f // mregs
                 for lane in range(threads):
-                    row = m0 + lane // ktile + iii * mtile
-                    col = k0 + lane % ktile + kf * ktile
+                    dm, dk = cell[(f, lane)]
+                    row, col = m0 + dm, k0 + dk
                     order.append(row + rows * col
                                  if row < rows and col < cols else -1)
     return tuple(order)
@@ -504,12 +565,16 @@ def strategies(shape, ctx):
     is what keeps a shape this cannot serve falling through to the nest
     instead of reaching an assertion inside the emitter.
 
-    A packed lead operand is declined, and here the reason is that the
-    question cannot be asked yet: the fragments are staged through shared
-    memory at offsets this module writes out by hand, and there is no layout
-    table for them -- no counterpart to AMD's `FRAGMENT_BITS`.  Without one
-    there is nothing to ask `reach` about, so the refusal is a literal rather
-    than a route, and it stays one until the table is written.
+    A packed lead operand is declined, and it is still a literal -- but no
+    longer for the reason it was.  The table now exists: `a_fragment_bits`
+    states what a fragment holds in the vocabulary a value is read in, so
+    there are two comparable sides here for the first time.  What is missing
+    is the third thing: `reach` and its rungs live in `primitives/amd`, and
+    they are where a difference between two layouts becomes a route or a
+    refusal.  Until that question can be asked from here, this answers the
+    part it can answer on its own -- an operand with an index bit inside a
+    register is not what any fragment holds -- and does not pretend to have
+    priced the alternative.
     """
     if packed(shape.lead_layout):
         return frozenset()

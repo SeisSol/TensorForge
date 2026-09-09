@@ -847,6 +847,21 @@ GROUPS = {
              'def tfconvert(writer: Writer, variables):', 1)),
     ]),
 
+    'fragmentbits': ('tests/test_fragment_order.py', [
+        ("the row's lane bits read one place too low",
+         sub(Path('src/tensorforge/backend/instructions/compute/primitives/nvidia.py'),
+             'rows = tuple([Bit(Place.LANE, 1 << (2 + b)) for b in range(3)]',
+             'rows = tuple([Bit(Place.LANE, 1 << (1 + b)) for b in range(3)]')),
+        ("the column's slot digit given the row's place value",
+         sub(Path('src/tensorforge/backend/instructions/compute/primitives/nvidia.py'),
+             '+ [Bit(Place.SLOT, mregs << b)',
+             '+ [Bit(Place.SLOT, 1 << b)')),
+        ('two cells allowed onto one slot and lane',
+         sub(Path('src/tensorforge/backend/instructions/compute/primitives/nvidia.py'),
+             '            if (at.slot, at.lane) in cells:',
+             '            if False:')),
+    ]),
+
     'gate': ('tests/test_nvidia_gate.py', [
         ('the reservation sized for one candidate instead of all of them',
          sub(Path('src/tensorforge/backend/instructions/compute/primitives/nvidia.py'),

@@ -79,6 +79,62 @@ def _atoms():
 
 @pytest.mark.parametrize('atom', _atoms(),
                          ids=lambda a: f'm{a.m}n{a.n}k{a.k}_{a.d.name}')
+def test_the_a_layout_factors_into_bits(atom):
+    """The PTX map, against the arithmetic it is stated as.
+
+    Written out here rather than imported, because a table checked against
+    its own generator checks nothing.  Every term of the map is a shift --
+    `t / ktile`, `t % ktile`, `iii * mtile`, `kf * ktile` -- which is why it
+    factors at all, and the point of saying so in bits is that a distribution
+    stated as bits can be held against what an operand actually holds.
+    """
+    bits = nvidia.a_fragment_bits(atom, THREADS)
+    mregs = atom.m // MTILE
+    for f in range(atom.m * atom.k // THREADS):
+        iii, kf = f % mregs, f // mregs
+        for lane in range(THREADS):
+            row = lane // KTILE + iii * MTILE
+            col = lane % KTILE + kf * KTILE
+            at = bits.locate(row, col)
+            assert (at.slot, at.lane) == (f, lane), (f, lane, at)
+            assert at.element == 0, (
+                'a fragment holds one element per slot per lane; an index bit '
+                'inside the register is what `strategies` refuses an operand '
+                'for')
+
+
+@pytest.mark.parametrize('atom', _atoms(),
+                         ids=lambda a: f'm{a.m}n{a.n}k{a.k}_{a.d.name}')
+def test_a_tile_fits_its_own_fragments_exactly(atom):
+    """Cells and places are equal in number by construction, so a table that
+    sends two cells to one place has silently dropped a third -- and the
+    operand packed from it would be missing an element the kernel then reads
+    as whatever was there before."""
+    cells = nvidia._fragment_cells(atom, THREADS)
+    assert len(cells) == atom.m * atom.k
+    assert set(cells.values()) == {(row, col) for row in range(atom.m)
+                                   for col in range(atom.k)}
+
+
+def test_a_table_that_is_not_a_bijection_is_refused():
+    """Exercised with a broken table, because the real one never trips it and
+    a guard nobody can make fire is a guard nobody has read.  Giving the
+    column axis the row axis's slot weights folds two cells onto one place."""
+    from tensorforge.backend.instructions.compute.bitlayout import (
+        Bit, BitLayout, Place)
+    atom = next(a for a in _atoms() if a.m // MTILE > 1 and a.k // KTILE > 1)
+    broken = BitLayout((
+        tuple([Bit(Place.LANE, 1 << (2 + b)) for b in range(3)]
+              + [Bit(Place.SLOT, 1)]),
+        tuple([Bit(Place.LANE, 1 << b) for b in range(2)]
+              + [Bit(Place.SLOT, 1 << b)
+                 for b in range((atom.k // KTILE - 1).bit_length())])))
+    with pytest.raises(GenerationError, match='two cells'):
+        nvidia._fragment_cells(atom, THREADS, broken)
+
+
+@pytest.mark.parametrize('atom', _atoms(),
+                         ids=lambda a: f'm{a.m}n{a.n}k{a.k}_{a.d.name}')
 def test_the_order_is_the_one_the_staging_produced(atom):
     """One tile, read back where the staged read would have looked."""
     rows, cols = atom.m, atom.k

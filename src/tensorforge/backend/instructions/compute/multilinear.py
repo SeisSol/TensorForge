@@ -14,7 +14,6 @@ from typing import Union, List, Tuple
 from tensorforge.common.basic_types import Addressing, Datatype
 from tensorforge.backend.pir.core import MemSpace
 from tensorforge.backend.instructions.abstract_instruction import _explicit_simd
-from tensorforge.backend.writer import Writer
 
 from tensorforge.common.matrix.tensor import Tensor
 
@@ -683,7 +682,6 @@ class MultilinearInstruction(ComputeInstruction):
                             explicit_simd=_explicit_simd(self._context),
                             lead=self._ns[0][1] - self._ns[0][0],
                             depth=math.prod(mx - mi for mi, mx in self._ks),
-                            lead_width=self._lead_width,
                             a_parts=getattr(self._ops[0].symbol.obj,
                                             'storage_parts', 1)
                             if self._ops and self._ops[0].symbol.obj else 1,

@@ -100,11 +100,6 @@ class ComputeShape:
     lead: int = 0
     depth: int = 0
 
-    #: Elements of the leading dimension one register holds.  1 is unpacked.
-    #: Read by the reservation: a packed lead operand reaches its fragment
-    #: through the buffer, and how big that is has to be answerable before any
-    #: body exists.
-    lead_width: int = 1
     #: Scalars the first operand occupies per logical element, from
     #: `Tensor.storage_parts`.  One for every operand a frontend describes;
     #: more where the generator decided to keep it *prepared* in memory, and
