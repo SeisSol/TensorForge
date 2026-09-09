@@ -204,17 +204,22 @@ INCLUDE = TESTS.parent / "src" / "tensorforge" / "include"
 #: that is permanently red is a check nobody reads.  An entry here is a claim
 #: that the refusal is understood, not that it is acceptable.
 #:
-#: `gemm_square_16_f128` is refused twice over, and only one of the two is
-#: ours.  Below Blackwell nvcc rejects `__float128` in device code outright
-#: -- an architecture fact, and `tests/README.md` already says the case needs
-#: a compiler that supports the type.  On `sm_120`, where the type is taken,
-#: one error is left and it is a generator defect: the load path emits
-#: `__ldcg`, which has no `__float128` overload at any architecture.  Removing
-#: this entry is what a fix for that has to do.
+#: `gemm_square_16_f128` was refused twice over and is refused once now.  What
+#: is left is an architecture fact: below Blackwell nvcc declines `__float128`
+#: in device code at all, and `_DEVICE_FRONT_ENDS['cuda']` compiles for
+#: `sm_86`.  `tests/README.md` says the same thing about the case from the
+#: host side.  So the entry outlives the defect it was written for, and what
+#: removes it is raising that architecture -- not another generator fix.
+#:
+#: The other half was ours and is gone: the load path emitted `__ldcg` for a
+#: type the overload set does not cover.  `CudaLexic.has_nontemporal` decides
+#: that now and `tests/test_nontemporal.py` holds it, which is where the claim
+#: belongs -- an entry here would have gone on saying it without a front end
+#: present to check.
 DEVICE_KNOWN_BAD = {
     ("gemm_square_16_f128", "cuda"):
-        "nvcc has no `__ldcg` overload for `__float128`, and below sm_120 it "
-        "declines the type in device code at all",
+        "nvcc declines `__float128` in device code below sm_120, and the "
+        "CUDA front end here compiles for sm_86",
 }
 
 
