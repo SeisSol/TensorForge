@@ -566,13 +566,33 @@ def _cse_key(s: Stmt):
 
 
 def cse(body: Tuple[Stmt, ...]) -> Tuple[Stmt, ...]:
-    """Hash-cons pure, region-free statements.
+    """Hash-cons pure, region-free statements, to a fixed point.
 
     Only expressions from *enclosing* scopes are reused, so dominance holds by
     construction --- no dominator tree needed with structured control flow.
+
+    One sweep merges one level of a dependence chain, because `_cse_key` names
+    a statement's operands by value id: two statements computing the same
+    thing have the same key only once the operands they read have themselves
+    been merged.  ``threadIdx.x % 32`` spelled out n times is n distinct keys
+    until the n reads of ``threadIdx.x`` under them collapse into one, and n
+    distinct keys again one level up.  Sweeping until nothing merges is what
+    turns a repeated expression into the one statement it is.
+
+    What that is worth is mostly in the pass after this one: `load_cse` keys a
+    load on its index *value*, so a load whose address is still a distinct
+    statement is still a distinct load, however many times the same address is
+    computed.  On the corpus's 56x56 operators this is the difference between
+    one read of a batch-constant operand per element and one per use.
+
+    The loop terminates because a sweep that maps anything deletes at least
+    one statement, and a body is finite.
     """
-    body, mapping = _cse_body(body, {})
-    return substitute(body, mapping) if mapping else body
+    while True:
+        body, mapping = _cse_body(body, {})
+        if not mapping:
+            return body
+        body = substitute(body, mapping)
 
 
 def _cse_body(body: Tuple[Stmt, ...], available: Dict[Any, Tuple[Value, ...]]):
@@ -1521,8 +1541,11 @@ def optimize(body: Tuple[Stmt, ...], dump_hook=None,
 
     ``load_cse`` runs after ``cse`` and before ``licm``: it removes the loads
     that would otherwise be hoisting candidates, so ``licm`` sees fewer
-    statements.  A second run after ``cse2`` was measured and removes nothing
-    on the current corpus, so it is not in the pipeline.
+    statements.  It wants ``cse`` at its fixed point in front of it, since a
+    load is keyed on the *value* its address is, not on the expression that
+    spells it.  A second run after ``cse2`` finds 32 more loads out of ~2900
+    on ``local_flux`` at order 6, which does not pay for another sweep of the
+    whole body, so it is not in the pipeline.
 
     `schedule.hoist_issues` and `schedule.sink_waits` are deliberately *not*
     here.  Both are correct and both were measured on the corpus: between them
