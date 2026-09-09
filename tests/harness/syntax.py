@@ -197,35 +197,71 @@ _DEVICE_FRONT_ENDS = {
 INCLUDE = TESTS.parent / "src" / "tensorforge" / "include"
 
 
+#: The architecture one case is compiled for, where the front end's default
+#: cannot answer the question the case asks.
+#:
+#: `gemm_square_16_f128` carries `__float128`, which nvcc declines in device
+#: code below Blackwell.  Compiled for `sm_86` the case reports an
+#: architecture, not a kernel, and no generator change can make it green.
+#:
+#: What makes this an entry rather than a second corpus: the case generates
+#: the same source at both targets, byte for byte, which
+#: `test_the_f128_source_does_not_depend_on_the_target` states.  So raising
+#: the architecture here changes which compiler answers and not what it is
+#: asked, and `snapshots/gemm_square_16_f128.cuda.cpp` still carries exactly
+#: what a failure would name.  An entry that did not have that property would
+#: need the snapshot corpus to gain the target too.
+DEVICE_ARCH = {
+    ("gemm_square_16_f128", "cuda"): "sm_120",
+}
+
+#: Front-end refusals to read as "not an answer" rather than "no".
+#:
+#: A toolchain that cannot target an architecture cannot say whether the
+#: source is good for it, and reporting that as a rejected kernel would put
+#: the reader in front of a diff that has nothing wrong with it.  Older nvcc
+#: against a `DEVICE_ARCH` entry is the case that reaches this.
+_NO_SUCH_TARGET = (
+    "unsupported gpu architecture",          # nvcc
+    "unknown cuda gpu architecture",         # clang in CUDA mode
+    "invalid target id",                     # clang/hipcc
+)
+
+
 #: Generated source the device front end is known to refuse, by
 #: ``(case, backend)``, with the reason.
 #:
 #: The same arrangement as `NOT_YET_ESIMD` and for the same reason: a check
 #: that is permanently red is a check nobody reads.  An entry here is a claim
-#: that the refusal is understood, not that it is acceptable.
+#: that the refusal is understood, not that it is acceptable, so it is a debt
+#: and the empty state is the one to hold it in.
 #:
-#: `gemm_square_16_f128` was refused twice over and is refused once now.  What
-#: is left is an architecture fact: below Blackwell nvcc declines `__float128`
-#: in device code at all, and `_DEVICE_FRONT_ENDS['cuda']` compiles for
-#: `sm_86`.  `tests/README.md` says the same thing about the case from the
-#: host side.  So the entry outlives the defect it was written for, and what
-#: removes it is raising that architecture -- not another generator fix.
-#:
-#: The other half was ours and is gone: the load path emitted `__ldcg` for a
-#: type the overload set does not cover.  `CudaLexic.has_nontemporal` decides
-#: that now and `tests/test_nontemporal.py` holds it, which is where the claim
-#: belongs -- an entry here would have gone on saying it without a front end
-#: present to check.
-DEVICE_KNOWN_BAD = {
-    ("gemm_square_16_f128", "cuda"):
-        "nvcc declines `__float128` in device code below sm_120, and the "
-        "CUDA front end here compiles for sm_86",
-}
+#: Note what does *not* belong here.  A refusal that another target would not
+#: make is a `DEVICE_ARCH` entry, since the front end can compile for any
+#: architecture it knows without the hardware present.  And a defect of ours
+#: belongs in a test that states it without a front end present --- an entry
+#: here would go on asserting it on every machine that has no nvcc, which is
+#: most of them.
+DEVICE_KNOWN_BAD = {}
 
 
 def device_known_bad(case_name: str, backend: str) -> str:
     """The recorded reason this pair does not compile, or ``''``."""
     return DEVICE_KNOWN_BAD.get((case_name, backend), "")
+
+
+def device_arch(case_name: str, backend: str) -> Optional[str]:
+    """The architecture to compile this pair for, or None where there is none.
+
+    The front end's default unless the case has an entry, so a caller can hand
+    the same answer to `Context` and to `check_device_source`: generating for
+    one target and compiling for another would check a kernel nobody asked
+    for.
+    """
+    fe = device_front_end(backend)
+    if fe is None:
+        return None
+    return DEVICE_ARCH.get((case_name, backend), fe.arch)
 
 
 def device_front_end(backend: str) -> Optional[_DeviceFrontEnd]:
@@ -281,4 +317,8 @@ def check_device_source(kernel: str, headers, backend: str,
     finally:
         os.unlink(tmp)
     stderr = r.stderr.replace(tmp, str(path) if path else "<generated>")
+    lowered = stderr.lower()
+    if any(msg in lowered for msg in _NO_SUCH_TARGET):
+        return Result(path or Path("<generated>"), None,
+                      reason=f"{fe.default} cannot target {arch or fe.arch}")
     return Result(path or Path("<generated>"), r.returncode == 0, stderr)

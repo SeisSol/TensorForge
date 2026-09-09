@@ -322,7 +322,8 @@ def test_generated_kernel_survives_the_device_front_end(dev_case, backend):
     if known:
         pytest.xfail(known)
 
-    ctx = Context(arch=fe.arch, backend=backend,
+    arch = syntax.device_arch(dev_case.NAME, backend)
+    ctx = Context(arch=arch, backend=backend,
                   fp_type=getattr(dev_case, "DTYPE", None))
     try:
         gen = Generator(dev_case.descr_list(), ctx,
@@ -334,9 +335,77 @@ def test_generated_kernel_survives_the_device_front_end(dev_case, backend):
 
     headers = list(ctx.get_vm().get_headers()) + list(gen.get_helper_headers())
     result = syntax.check_device_source(gen.get_kernel(), headers, backend,
+                                        arch=arch,
                                         path=Path(f"{dev_case.NAME}.{backend}"))
     if result.ok is None:
         pytest.skip(result.reason)
     assert result.ok, (
-        f"{dev_case.NAME} on {backend}/{fe.arch} does not survive "
+        f"{dev_case.NAME} on {backend}/{arch} does not survive "
         f"{fe.default}:\n  " + "\n  ".join(result.errors()))
+
+
+def test_the_f128_case_is_compiled_for_a_target_that_takes_the_type():
+    """`__float128` in device code is a Blackwell question, not a kernel one.
+
+    Compiled for the front end's default the case reports an architecture and
+    nothing about the source, which is an answer no generator change can
+    move.  So it gets its own target, and the assertion is that it gets one --
+    not that some particular architecture is the right one to ask.
+    """
+    fe = syntax.device_front_end("cuda")
+    arch = syntax.device_arch("gemm_square_16_f128", "cuda")
+    assert arch != fe.arch
+    assert syntax.device_arch("gemm_square_16", "cuda") == fe.arch
+
+
+def test_the_f128_source_does_not_depend_on_the_target():
+    """What lets one case be compiled for another architecture cheaply.
+
+    The device check generates fresh, so a case with its own target could in
+    principle be checking source that no snapshot carries -- and then a
+    failure would name a file that does not show what failed.  It does not
+    here, because this case emits the same kernel either way.  If that ever
+    stops being true, this fails rather than the corpus quietly ceasing to
+    cover what the front end reads.
+    """
+    from tensorforge.common.context import Context
+    from tensorforge.generators.generator import Generator
+    from conftest import _discover_cases
+
+    case = next(c for c in _discover_cases()
+                if c.NAME == "gemm_square_16_f128")
+    fe = syntax.device_front_end("cuda")
+
+    def render(arch):
+        ctx = Context(arch=arch, backend="cuda",
+                      fp_type=getattr(case, "DTYPE", None))
+        gen = Generator(case.descr_list(), ctx,
+                        attrs=getattr(case, "ATTRS", None))
+        gen.generate()
+        return gen.get_kernel()
+
+    assert render(fe.arch) == render(
+        syntax.device_arch(case.NAME, "cuda"))
+
+
+def test_a_target_the_front_end_does_not_know_is_not_an_answer(tmp_path):
+    """An entry in `DEVICE_ARCH` can outrun the toolchain that reads it.
+
+    `sm_120` needs a CUDA new enough to know it, and an installation that does
+    not cannot say whether the source is good for that target.  Reported as a
+    rejection it would put the reader in front of a kernel with nothing wrong
+    with it, so it is reported as no answer and the case skips --- the same
+    way an absent compiler does.
+    """
+    fake = tmp_path / "nvcc"
+    fake.write_text(
+        "#!/bin/sh\n"
+        "echo \"nvcc fatal   : Unsupported gpu architecture 'compute_120'\""
+        " 1>&2\n"
+        "exit 1\n")
+    fake.chmod(0o755)
+
+    result = syntax.check_device_source("__global__ void k() {}", [], "cuda",
+                                        arch="sm_120", cc=str(fake))
+    assert result.ok is None
+    assert "sm_120" in result.reason
