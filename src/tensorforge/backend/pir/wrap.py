@@ -378,9 +378,21 @@ def _wrap_one(loop: Stmt, make_value,
     body.append(Stmt(op=Op.YIELD, args=tuple(yielded)))
 
     # The prologue: the same transfers, for the element the loop starts on.
-    # Not `induction - 1` and not `0` -- the loop's own `lo`, which is where
-    # the first iteration would have issued from.
-    lo = loop.loop_bounds[0]
+    # Not `induction - 1` and not `0` -- where the first iteration would have
+    # issued from.
+    #
+    # `lo` is that only when every thread has a first iteration.  The batch
+    # loop's is `threadIdx.y + blockDim.y * blockIdx.x`, bounded by the launch
+    # geometry rather than by the element count, and the rows whose start is
+    # past the end are the common case, not the edge: 100 elements over a grid
+    # of 100 blocks with 16 rows puts the last start at 1599.  Those rows skip
+    # the loop, which is why the body never had to care -- the peel runs ahead
+    # of the guard and reads that element unconditionally.
+    #
+    # So the loop says which index the peel should use, the same way it says
+    # which one comes next.  Falling back to `lo` keeps a loop that clamps
+    # nothing working: for an ordinary counted loop the two are the same.
+    lo = loop.attr('first', loop.loop_bounds[0])
     peel_slice, peel_map = _advance(slice_, {loop.induction.id: lo},
                                     make_value)
     # The prologue is the section again, for the first element, with fresh

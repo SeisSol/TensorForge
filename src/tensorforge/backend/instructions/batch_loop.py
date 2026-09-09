@@ -767,6 +767,7 @@ class BatchLoop(AbstractInstruction):
                 with writer.for_(self._start, self._num_elements(),
                                  self._stride, hint=self._batch(0),
                                  index_type=SIZE,
+                                 peel_index=self.prologue_index(),
                                  uniform=Uniformity.MULT) as loop:
                     self._loop_handle = loop
                     # The induction *value*, not just its name.  Anything

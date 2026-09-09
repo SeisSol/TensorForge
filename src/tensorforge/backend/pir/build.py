@@ -1211,7 +1211,7 @@ class IRBuilder:
     def for_(self, lo: Operand, hi: Operand, step: Operand = 1,
              inits: Sequence[Operand] = (), types: Sequence[Any] = (),
              unroll: bool = False, hint: str = 'i', extern: str = None,
-             ctype: str = None, next_index=None,
+             ctype: str = None, next_index=None, peel_index=None,
              uniform=Uniformity.GRID, index_type=None) -> '_ForHandle':
         """A loop.  ``extern`` and ``ctype`` are for loops the macro layer owns.
 
@@ -1241,8 +1241,8 @@ class IRBuilder:
         inside.
         """
         return _ForHandle(self, lo, hi, step, tuple(inits), tuple(types),
-                          unroll, hint, extern, ctype, next_index, uniform,
-                          index_type)
+                          unroll, hint, extern, ctype, next_index, peel_index,
+                          uniform, index_type)
 
     def while_(self, init: Operand, hint: str = 'i', extern: str = None,
                ctype: str = None, uniform=Uniformity.GRID,
@@ -1859,7 +1859,7 @@ class _RawBlock:
 
 class _ForHandle:
     def __init__(self, builder, lo, hi, step, inits, types, unroll, hint,
-                 extern=None, ctype=None, next_index=None,
+                 extern=None, ctype=None, next_index=None, peel_index=None,
                  uniform=Uniformity.GRID, index_type=None):
         if len(inits) != len(types):
             raise IRError('for_: one result type per init value required')
@@ -1869,6 +1869,12 @@ class _ForHandle:
         # is a property of the traversal, which the loop knows and the IR does
         # not, so `wrap_prefetch` reads it here rather than deriving it.
         self._next_index = next_index
+        # ... and what it calls the *first* element, for the same reason.  `lo`
+        # is where the traversal starts, which is not the same as an element
+        # that exists: a row whose start is past the end never enters the loop,
+        # so nothing in the body ever noticed.  A peel runs before the guard
+        # and does notice.
+        self._peel_index = peel_index
         self.builder = builder
         self._args = (lo, hi, step) + inits
         self._types = types
@@ -1927,6 +1933,8 @@ class _ForHandle:
             attrs = attrs + (('ctype', self._ctype),)
         if self._next_index is not None:
             attrs = attrs + (('next', self._next_index),)
+        if self._peel_index is not None:
+            attrs = attrs + (('first', self._peel_index),)
         self.builder.emit(Stmt(op=Op.FOR, target=self.results, args=self._args,
                                regions=(region,), pure=False, movable=False,
                                attrs=attrs))
