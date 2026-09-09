@@ -843,3 +843,74 @@ def test_the_narrowed_widths_are_the_expensive_ones():
     assert LeadLoop.issues(24) == 2 and LeadLoop.issues(32) == 1
     assert LeadLoop.issues(12) == 2 and LeadLoop.issues(16) == 1
     assert LeadLoop.issues(9) == 2 and LeadLoop.issues(16) == 1
+
+
+# --------------------------------------------------------------------------
+# an explicit `select` is a merge too
+# --------------------------------------------------------------------------
+
+def _select_src(result_type=F32, cond_layout=SPREAD16, other=0.0):
+    """Emit `store(image, cond ? load : other)` through the ESIMD lowering."""
+    from tensorforge.backend.pir import BOOL, IRBuilder, MemSpace
+    from tensorforge.backend.writer import Writer
+
+    builder = IRBuilder(fptype=Datatype.F32)
+    image = builder.alloc(Datatype.F32, (16,), MemSpace.REGISTER, hint='image')
+    x = builder.load(image, 0, hint='x', layout=cond_layout)
+    cond = builder.op('lt', BOOL, x, 9.0, hint='occupied')
+    loaded = builder.load(image, 1, hint='stored', layout=SPREAD16)
+    picked = builder.op('select', result_type, cond, loaded,
+                        builder.const(other), hint='masked')
+    builder.store(image, picked, 0)
+
+    ctx = Context(arch='pvc', backend='oneapi', fp_type=Datatype.F32)
+    ctx.get_vm().get_lexic().simd_mode = True
+    writer = Writer()
+    EsimdEmitter(writer=writer, context=ctx, strict=False).run(builder.finish())
+    return writer.get_src()
+
+
+def test_a_masked_select_is_a_merge_and_not_a_ternary():
+    """`m ? a : b` on a `simd_mask` has no single bit to test.
+
+    The same answer `declare` already gave a folded predicate, for the select
+    the sparse path builds directly.  Reached through a different route --
+    `if_convert` attaches a predicate, `Symbol.encode_values` emits the op --
+    and lowered by the base emitter as a ternary until this was here.
+    """
+    src = _select_src()
+    assert '.merge(' in src, src
+    assert '?' not in src, src
+
+
+def test_the_merge_is_not_inlined_into_its_consumer():
+    """Which is why the interception cannot live in `declare`.
+
+    A single-use select is inlined, so the ternary landed inside a `copy_to`
+    argument and no declaration was ever written to override.
+    """
+    src = _select_src()
+    assert 'copy_to' in src
+    assert not any('copy_to' in line and 'merge' in line
+                   for line in src.splitlines()), src
+
+
+def test_a_replicated_condition_stays_a_ternary():
+    """A uniform bool is a branch condition and a `?:` operand like any other.
+
+    Only a *lane-varying* condition is a mask; spelling both as a merge would
+    make a vector out of a value that is one scalar per work-item.
+    """
+    src = _select_src(cond_layout=SCALAR_LAYOUT)
+    assert '?' in src, src
+    assert '.merge(' not in src, src
+
+
+def test_a_boolean_select_over_a_replicated_arm_is_refused():
+    """`simd_mask` has no conversion from `bool`, so the arm cannot broadcast.
+
+    Refused with what it would take, rather than emitting mask algebra with a
+    `false` in it that does not compile.
+    """
+    with pytest.raises(IRError, match='both arms to be masks'):
+        _select_src(result_type=ScalarType(Datatype.BOOL), other=False)

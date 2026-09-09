@@ -198,24 +198,53 @@ class EsimdEmitter(Emitter):
         `if_convert` attached the predicate and cannot know about it.
         """
         pred = getattr(s, 'predicate', None)
-        if (pred is not None and _folds_predicate(s)
-                and isinstance(pred, Value) and pred.layout is not None
-                and pred.distributed and isinstance(v.type, ScalarType)):
-            width = pred.lane_span() * (v.type.length or 1)
-            ty = self.simd_type(v.type.base.ctype(), width)
+        if self._masked(pred, v):
             other = s.attr('other')
             other = (self.operand(other) if other is not None
                      else self.zero(v.type))
-            nm = name or self.name(v)
-            self.writer(f'{ty} {nm}({other});')
-            # Both arms go through the vector type explicitly.  `merge` takes a
-            # `simd`, and the then-value is often a *replicated* load -- the
-            # mask is what makes the result distributed, not the operand -- so
-            # it has to be broadcast rather than left to an implicit
-            # conversion the API does not offer.
-            self.writer(f'{nm}.merge({ty}({expr}), {self.operand(pred)});')
+            self._merge(v, pred, expr, other, name)
             return
         return self._declare_unpredicated(v, expr, s, name)
+
+    @staticmethod
+    def _masked(cond, v: Value) -> bool:
+        """Is `cond` a lane mask, and `v` something a merge can hold?"""
+        return (isinstance(cond, Value) and cond.layout is not None
+                and cond.distributed and isinstance(v.type, ScalarType))
+
+    def _merge(self, v: Value, cond: Value, then_expr: str, other_expr: str,
+               name: str = None, arms: tuple = ()) -> None:
+        """`v = cond ? then : other`, as the two statements a vector needs.
+
+        A boolean result is a mask and not a vector, so it takes the mask
+        algebra instead: `simd_mask` is its own family, with `&`, `|` and `!`
+        and no `merge`.  Only over arms that are themselves masks -- there is
+        no conversion from a `bool` to a `simd_mask`, so a replicated arm
+        would have to be broadcast, and nothing builds one to say how.
+        """
+        nm = name or self.name(v)
+        if v.type.base is Datatype.BOOL:
+            if not all(isinstance(a, Value) and a.layout is not None
+                       and a.distributed for a in arms) or len(arms) != 2:
+                raise IRError(
+                    f'{v!r}: a masked select over a boolean needs both arms to '
+                    f'be masks. A replicated arm would have to be broadcast '
+                    f'into a `simd_mask`, which the API offers no conversion '
+                    f'for; build the arm as a mask, or select on the value '
+                    f'the boolean guards instead.')
+            ty = self.mask_type(cond.lane_span())
+            self.writer(f'{ty} {nm} = ({self.operand(cond)} & {then_expr}) | '
+                        f'(!{self.operand(cond)} & {other_expr});')
+            return
+        width = cond.lane_span() * (v.type.length or 1)
+        ty = self.simd_type(v.type.base.ctype(), width)
+        self.writer(f'{ty} {nm}({other_expr});')
+        # Both arms go through the vector type explicitly.  `merge` takes a
+        # `simd`, and the then-value is often a *replicated* load -- the
+        # mask is what makes the result distributed, not the operand -- so
+        # it has to be broadcast rather than left to an implicit
+        # conversion the API does not offer.
+        self.writer(f'{nm}.merge({ty}({then_expr}), {self.operand(cond)});')
 
     def _declare_unpredicated(self, v: Value, expr: str, s, name: str = None) -> None:
         """A distributed value is filled by a transfer, not by an initialiser.
@@ -270,7 +299,24 @@ class EsimdEmitter(Emitter):
         The symmetric case to the load: `p[i] = v` where `v` is a `simd` is
         either ill-formed or a narrowing to one element, and neither is the
         store that was meant.
+
+        An explicit `select` is the same question as a folded predicate and
+        needs the same answer.  It arrives by a different route -- the sparse
+        path builds one directly rather than letting `if_convert` attach a
+        predicate -- and the base emitter spells it `a ? b : c`, which on a
+        `simd_mask` does not compile.  Left to `declare` this would not even
+        be reached: a single-use select is inlined into its consumer, so the
+        ternary lands inside a `copy_to` argument with no declaration to
+        override.
         """
+        if (getattr(s, 'op', None) == 'select' and len(s.args) == 3
+                and s.target and self._masked(s.args[0], s.target[0])):
+            v = s.target[0]
+            self._merge(v, s.args[0],
+                        self.operand(s.args[1], v.type),
+                        self.operand(s.args[2], v.type),
+                        arms=(s.args[1], s.args[2]))
+            return
         if getattr(s, 'op', None) == Op.STORE:
             val = s.args[1]
             if isinstance(val, Value) and val.layout is not None and val.distributed:
