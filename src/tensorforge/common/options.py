@@ -373,6 +373,43 @@ declare('prepare_operands',
             'only `Addressing.NONE` operands are eligible at all, so a case '
             'with none of them pays the question with nothing.')
 
+declare('launch_control',
+        default=False,
+        parse=parse_bool,
+        doc='Traverse the batch through Blackwell\'s cluster launch control '
+            'instead of a grid-stride loop.\n'
+            '`clusterlaunchcontrol.try_cancel` asks the launcher not to launch '
+            'a CTA that has not started, and hands the caller its id, so a '
+            'resident block drains the grid without an occupancy query and the '
+            'tail is the hardware\'s problem.  Needs `sm_100` or above; the '
+            'CCCL wrappers gate on `__CUDA_ARCH__ >= 1000` and a lower target '
+            'fails at link time with a named symbol.\n'
+            'Off by default, and the reason is measured rather than cautious. '
+            'On an sm_120 part the queue costs 11-28% against the grid-stride '
+            'loop at every batch size from 600 to 262144, and the split says '
+            'why.  Timing the same traversal with one block barrier per '
+            'element added accounts for 7-15% of that on its own; the queue '
+            'adds about two points on top.  The grid-stride loop needs no '
+            'block barrier because the rows of a block hold independent '
+            'elements, and the hand-off needs one because every thread has to '
+            'read the response before the slot is reused.  So the switch '
+            'becomes interesting for a configuration that already '
+            'synchronises block-wide, and for work whose cost varies per '
+            'element -- not for the row-independent, uniform-cost kernels '
+            'this generator emits today.')
+
+declare('launch_control_depth',
+        default=1,
+        parse=parse_int,
+        doc='Cancel requests kept in flight per block.\n'
+            'One hides the queue\'s own latency behind the body.  Two is the '
+            'first depth at which the *next* element\'s index is known at the '
+            'top of the iteration, which is what a data prefetch needs -- at '
+            'depth one it arrives at the bottom, with no body left to overlap '
+            'a transfer with.  Beyond two a block reserves elements it has not '
+            'started, which costs at the tail: depth 4 measured worse than '
+            'depth 2 in every configuration.')
+
 declare('wide_bodies',
         default=True,
         env='TF_IR_WIDE',

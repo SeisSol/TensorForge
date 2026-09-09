@@ -167,6 +167,14 @@ CONFIGS: Dict[str, Config] = {
     # measured neither.
     'prepare': Config('prepare', Options(preload_globals=False,
                                          prepare_operands=True)),
+    # Blackwell's hardware work queue against the grid-stride loop.  Depth 1
+    # hides the queue's own latency behind the body; depth 2 is the first at
+    # which the *next* element's index is known at the top of the iteration,
+    # and both are listed because the interesting comparison is between them
+    # rather than against the baseline alone.
+    'launchctrl': Config('launchctrl', Options(launch_control=True)),
+    'launchctrl2': Config('launchctrl2', Options(launch_control=True,
+                                                 launch_control_depth=2)),
 }
 
 

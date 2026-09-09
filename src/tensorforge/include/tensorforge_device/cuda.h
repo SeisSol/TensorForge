@@ -4,7 +4,6 @@
 #ifndef SEISSOL_TENSORFORGE_INCLUDE_TENSORFORGE_DEVICE_CUDA_H_
 #define SEISSOL_TENSORFORGE_INCLUDE_TENSORFORGE_DEVICE_CUDA_H_
 
-#include <optional>
 #include <type_traits>
 
 #include "base.h"
@@ -208,72 +207,144 @@ __device__ __forceinline__ T broadcast(T value) {
   }
 }
 
-// #if __CUDA_ARCH__ >= 1000
-// cf. the new CUDA programming guide 4.12
-// declare this one as __shared__
-struct ClusterLaunchCtrl {
-private:
-  uint4 result_;
-  uint64_t barrier_;
+/// Blackwell's hardware work queue, as a ring of `Depth` outstanding requests.
+///
+/// `clusterlaunchcontrol.try_cancel` asks the grid launcher to *not* launch a
+/// CTA that has not started yet, and hands the caller its id.  A block that
+/// keeps cancelling therefore drains the grid without the launcher ever
+/// putting those blocks on an SM, which is a persistent kernel whose work
+/// queue is the grid itself -- and, unlike a grid-stride loop, one that needs
+/// no occupancy query to size the launch.
+///
+/// The request is asynchronous: it writes 16 bytes into shared memory and
+/// signals an mbarrier.  So the response for element k + 1 is asked for
+/// before element k is computed and collected after, and the queue latency
+/// disappears behind the body.  `Depth` > 1 keeps that many requests in
+/// flight, which is what a *data* prefetch needs: at depth 1 the next index
+/// is known only at the bottom of the iteration, with no body left to overlap
+/// the transfer with.
+///
+/// Split in two on purpose.  `ClusterLaunchQueue` is the shared state -- the
+/// response slots and their barriers -- and `ClusterLaunchCursor` is the
+/// bookkeeping, which is per *thread*.  Putting the cursor in shared memory
+/// alongside the queue reads naturally and is a data race: every thread of
+/// the block advances it, so `parity ^= 1` from 128 threads leaves a parity
+/// nobody agrees on and the next wait blocks forever.  Each thread holding
+/// its own copy costs a few registers and is correct, because every value it
+/// derives comes from a response all of them read.
+template <int Depth = 1> struct alignas(16) ClusterLaunchQueue {
+  // `try_cancel` writes a 16-byte response, so the slot has to be 16-byte
+  // aligned; `alignas` on the struct states it rather than inheriting it from
+  // `uint4` by luck.
+  uint4 response[Depth];
+  uint64_t barrier[Depth];
 
-public:
-  __device__ __forceinline__ void init() {
+  __device__ __forceinline__ void arm() {
     namespace cg = cooperative_groups;
     namespace ptx = cuda::ptx;
-
     if (cg::thread_block::thread_rank() == 0) {
-      result_ = {};
-      barrier_ = {};
-      ptx::mbarrier_init(&barrier_, 1);
+      for (int i = 0; i < Depth; ++i) {
+        ptx::mbarrier_init(&barrier[i], 1);
+      }
+      // `try_cancel` completes the barrier through the *async* proxy, and an
+      // initialisation written through the generic one is not ordered against
+      // it without this.  It works without the fence on the part this was
+      // measured on, which is not the same as being allowed to omit it.
+      ptx::fence_proxy_async(ptx::space_shared);
     }
-  }
-
-  __device__ __forceinline__ void setupNext() {
-    namespace cg = cooperative_groups;
-    namespace ptx = cuda::ptx;
-
     __syncthreads();
-
-    if (cg::thread_block::thread_rank() == 0) {
-      ptx::fence_proxy_async_generic_sync_restrict(
-          ptx::sem_acquire, ptx::space_cluster, ptx::scope_cluster);
-
-      cg::invoke_one(cg::coalesced_threads(), [&]() {
-        ptx::clusterlaunchcontrol_try_cancel(&result_, &barrier_);
-      });
-
-      ptx::mbarrier_arrive_expect_tx(ptx::sem_relaxed, ptx::scope_cta,
-                                     ptx::space_shared, &barrier_,
-                                     sizeof(uint4));
-    }
   }
 
-  __device__ __forceinline__ std::optional<int> queryNext(int phase) {
+  __device__ __forceinline__ void post(int slot) {
     namespace cg = cooperative_groups;
     namespace ptx = cuda::ptx;
-
-    while (!ptx::mbarrier_try_wait_parity(ptx::sem_acquire, ptx::scope_cta,
-                                          &barrier_, phase)) {
+    if (cg::thread_block::thread_rank() == 0) {
+      // expect-tx *before* the operation that completes it.  The other order
+      // races: the response can land before the transaction count is
+      // registered, and the barrier then never completes the phase.
+      ptx::mbarrier_arrive_expect_tx(ptx::sem_relaxed, ptx::scope_cta,
+                                     ptx::space_shared, &barrier[slot],
+                                     sizeof(uint4));
+      ptx::clusterlaunchcontrol_try_cancel(&response[slot], &barrier[slot]);
     }
-    phase ^= 1;
-
-    const bool success =
-        ptx::clusterlaunchcontrol_query_cancel_is_canceled(result_);
-    if (!success) {
-      return {};
-    }
-
-    // we only use blockIdx.x
-    const auto nextBlock =
-        ptx::clusterlaunchcontrol_query_cancel_get_first_ctaid_x<int>(result_);
-
-    ptx::fence_proxy_async_generic_sync_restrict(
-        ptx::sem_release, ptx::space_shared, ptx::scope_cluster);
-
-    return nextBlock;
   }
 };
-// #endif
+
+/// The per-thread half.  Every thread of the block runs it and they stay in
+/// lockstep, because each decision is read from a response in shared memory
+/// behind a barrier.
+template <int Depth = 1> struct ClusterLaunchCursor {
+  // The mbarrier phase, which alternates.  This is what a caller cannot be
+  // trusted with: passed as a plain `int` argument it is a copy, the caller's
+  // parity never flips, and from the second iteration on the wait returns
+  // immediately on a phase that already completed -- so the block reads a
+  // stale response, believes it holds work that another block also holds, and
+  // the loop never terminates.  Keeping it here is the reason the type exists.
+  uint32_t phase[Depth];
+  int head;
+  int outstanding;
+  bool refill;
+
+  __device__ __forceinline__ void start(ClusterLaunchQueue<Depth> &queue) {
+    for (int i = 0; i < Depth; ++i) {
+      phase[i] = 0;
+    }
+    head = 0;
+    outstanding = Depth;
+    refill = true;
+    queue.arm();
+    for (int i = 0; i < Depth; ++i) {
+      queue.post(i);
+    }
+  }
+
+  /// The next CTA id, or -1 when the grid is exhausted.
+  ///
+  /// Block-uniform, which is the property the enclosing loop rests on: every
+  /// thread reads the same response, so all of them leave the loop on the
+  /// same iteration and a block-wide barrier in the body is reached by all or
+  /// by none.  A grid-stride loop is only warp-uniform in the same place.
+  __device__ __forceinline__ int next(ClusterLaunchQueue<Depth> &queue) {
+    namespace ptx = cuda::ptx;
+    while (outstanding > 0) {
+      const int slot = head;
+      while (!ptx::mbarrier_try_wait_parity(ptx::sem_acquire, ptx::scope_cta,
+                                            &queue.barrier[slot],
+                                            phase[slot])) {
+      }
+      const bool granted = ptx::clusterlaunchcontrol_query_cancel_is_canceled(
+          queue.response[slot]);
+      int cta = -1;
+      if (granted) {
+        // Only ctaid.x: the launcher is one-dimensional here, and the y/z
+        // queries would answer for a geometry nothing emits.
+        cta = ptx::clusterlaunchcontrol_query_cancel_get_first_ctaid_x<int>(
+            queue.response[slot]);
+      }
+      // Everyone has read the response; only now may the slot be reposted.
+      // Reposting earlier flips the barrier a second time under a thread that
+      // is still waiting on the first, and that thread then waits for a phase
+      // that has already gone past.
+      __syncthreads();
+      phase[slot] ^= 1u;
+      head = (head + 1) % Depth;
+      --outstanding;
+      if (granted) {
+        // While `refill` holds, `outstanding` is still Depth, so the slot
+        // just freed is exactly the tail of the ring and reposting it keeps
+        // the order.  Once a request comes back empty the grid is drained and
+        // reposting would only ask again for nothing.
+        if (refill) {
+          queue.post(slot);
+          ++outstanding;
+        }
+        return cta;
+      }
+      refill = false;
+    }
+    return -1;
+  }
+};
 
 /// The 19-bit E8M10 the tensor cores multiply, as its bit pattern.
 ///

@@ -50,7 +50,8 @@ class BatchLoop(AbstractInstruction):
                  stride: str,
                  region: List[AbstractInstruction],
                  lookahead: int = 2,
-                 flags: FlagMode = FlagMode.OPTIONAL):
+                 flags: FlagMode = FlagMode.OPTIONAL,
+                 queue_depth: int = 1):
         super().__init__(context)
         self._section_index = section_index
         self._mode = mode
@@ -71,6 +72,18 @@ class BatchLoop(AbstractInstruction):
         self._stage_depth: Optional[int] = None
         # ids of leading region instructions emitted outside the flag guard
         self._unguarded: set = set()
+        # `LAUNCHCTRL` only: how many cancel requests are kept in flight.  One
+        # is enough to hide the queue's own latency behind the body, because
+        # the request for the next element is posted before the current one is
+        # computed.  It is *not* enough to prefetch the next element's data:
+        # at depth one the next index arrives at the bottom of the iteration,
+        # with no body left to overlap a transfer with.  Two is the first
+        # depth at which the index is known at the top.
+        if mode is LoopMode.LAUNCHCTRL and queue_depth < 1:
+            raise InternalError(
+                f'the work queue needs at least one request in flight, '
+                f'got {queue_depth}')
+        self._queue_depth = queue_depth
         self._is_ready = True
 
     # -- structure ------------------------------------------------------- #
@@ -116,8 +129,16 @@ class BatchLoop(AbstractInstruction):
         guard.  The tail block skips the body entirely, so a grid barrier there
         deadlocks.
 
-        ``LAUNCHCTRL``: the queue hands out work per block, and the size guard
-        is the same.
+        ``LAUNCHCTRL``: the *loop* is the exception -- its trip count is
+        block-uniform.  Every thread reads the same cancel response out of
+        shared memory behind a barrier, so all of them leave on the same
+        iteration, and the hand-off itself contains a ``__syncthreads``.  What
+        is still only ``SIMD``-uniform is the size guard *inside* it, which is
+        per element exactly as in the other two modes.  Answering ``GROUP``
+        here would license a block barrier that ``_emit_body`` may then place
+        under that guard, so the loop keeps the conservative answer until the
+        guard is a construct ``verify`` can see; the barrier the queue needs
+        for itself sits outside the guard where the emission puts it.
         """
         return BarrierScope.SIMD
 
@@ -504,10 +525,30 @@ class BatchLoop(AbstractInstruction):
     def _structured_loop(self, writer) -> bool:
         """Should this loop be an `Op.FOR` rather than Writer text?
 
-        `PERSISTENT` only, for now.  `LAUNCHCTRL` is a `while` with a break and
-        a queried successor, which is not a counted loop and wants its own
-        design; the remaining mode has no loop at all, so there is nothing to
-        put in the IR.
+        `PERSISTENT` only, for now.  The remaining mode has no loop at all, so
+        there is nothing to put in the IR.
+
+        `LAUNCHCTRL` is the open one, and it is worth stating what it needs
+        rather than that it needs something.  Everything the IR would buy here
+        hangs off one missing form: a loop whose successor is *queried*, not
+        incremented.  `for_` hands the body `loop.induction` because it
+        computed it; the queue's next index is the result of a statement
+        inside the body -- `cursor.next(queue)` -- and the loop ends when that
+        statement answers -1.  Give the builder that form and the rest follows
+        at once: `batchId0` becomes a value, so the size guard becomes an
+        `Op.IF` on it instead of `writer.If` over text and the body's reads of
+        it are operands; the hand-off becomes an `Op.CALL` carrying
+        `Effect.BARRIER` and its shared accesses, so the barrier it contains
+        stops being invisible to every pass; and the region the passes walk
+        becomes the whole loop rather than the part between the braces.
+
+        Without that form each of those is cosmetic, which is why this returns
+        False rather than half of it.  The cost is a name in `Op` -- a
+        vocabulary deliberately closed -- plus the handle in `build.py`, the
+        spelling and the `break` in `emit.py`, and the uniformity rule in
+        `inspect.py`.  Note also that the loop is *block*-uniform, which the
+        counted loop is not, so the form can carry a stronger answer than
+        `uniform_scope` gives today.
 
         Not when a body is already open: `shared_body` nests, and a second
         one would put the loop inside the body it is meant to contain.
@@ -574,20 +615,41 @@ class BatchLoop(AbstractInstruction):
                 self._advance_stage_counter(writer)
         elif self._mode is LoopMode.LAUNCHCTRL:
             self._declare_stage_counter(writer)
-            writer(f'__shared__ tensorforge::ClusterLaunchCtrl launchctrl;')
-            writer(f'int phase = 0;')
-            writer(f'launchctrl.init();')
+            self._declare_windows_early(writer, list(self._region))
+            depth = self._queue_depth
+            writer(f'__shared__ tensorforge::ClusterLaunchQueue<{depth}> '
+                   f'launchQueue{self._section_index};')
+            # The cursor is a *local*: it is per-thread state, and every thread
+            # of the block advances it identically.  In shared memory the
+            # parity would be one word 128 threads flip, which is a race whose
+            # symptom is a wait for a phase that has already gone past.
+            writer(f'tensorforge::ClusterLaunchCursor<{depth}> '
+                   f'launchCursor{self._section_index};')
+            writer(f'launchCursor{self._section_index}'
+                   f'.start(launchQueue{self._section_index});')
             writer(f'size_t {self._batch(0)} = {self._block_id()};')
-            with writer.While(f'true'):
-                writer('launchctrl.setupNext();')
+            with writer.While('true'):
                 with writer.If(self._size_guard()):
                     self._emit_body(writer)
                 self._advance_stage_counter(writer)
-                writer('const auto nextBlock = launchctrl.queryNext(phase);')
-                with writer.If('!nextBlock.has_value()'):
+                # Outside the size guard, deliberately.  `next` contains the
+                # block barrier that separates one element's shared memory
+                # from the next one's, and the guard is per element: the rows
+                # of a block hold different elements, so a barrier inside it
+                # is reached by some rows and not others.  That does not
+                # reliably deadlock -- `bar.sync` pairs arrivals by barrier
+                # *number*, so the rows that skipped rendezvous at the next
+                # one instead and the loop limps on one barrier out of step,
+                # reusing the tile an iteration early.  Measured both ways: a
+                # block barrier under the guard hangs outright once a flag
+                # mask makes the rows disagree persistently.
+                writer(f'const int nextBlock{self._section_index} = '
+                       f'launchCursor{self._section_index}'
+                       f'.next(launchQueue{self._section_index});')
+                with writer.If(f'nextBlock{self._section_index} < 0'):
                     writer('break;')
                 writer(f'{self._batch(0)} = '
-                       f'{self._block_id("nextBlock.value()")};')
+                       f'{self._block_id(f"nextBlock{self._section_index}")};')
         else:
             writer(f'const size_t {self._batch(0)} = {self._block_id()};')
             with writer.If(self._size_guard()):

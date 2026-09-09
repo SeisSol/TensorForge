@@ -158,6 +158,30 @@ class _GuardGrouping:
     self._pending = []
 
 
+def _supports_launch_control(context) -> bool:
+  """Does this target have `clusterlaunchcontrol.try_cancel`?
+
+  PTX ISA 8.6, and the CCCL wrappers gate the instruction on
+  `__CUDA_ARCH__ >= 1000`, so a lower target does not fail to compile -- it
+  fails to *link*, against a stub named
+  `__cuda_ptx_clusterlaunchcontrol_try_cancel_is_not_supported_before_SM_100__`.
+  Which is a decent error to read and a bad one to reach from a switch, so the
+  question is answered here.
+
+  The arch names are `sm_NN` throughout `hw_descr_db.yml`, two or three digits
+  and no `a`/`f` suffix, so the numeric part orders them; `sm_120` answers yes
+  and `sm_90` no, which is the split the instruction actually has.  Verified on
+  an sm_120 part: the plain target assembles it, no `sm_120a` needed.
+  """
+  hw = context.get_vm().get_hw_descr()
+  if hw.vendor != 'nvidia':
+    return False
+  model = hw.model
+  if not model.startswith('sm_') or not model[3:].isdigit():
+    return False
+  return int(model[3:]) >= 100
+
+
 class Generator:
   NAME_ENCODING_LENGTH = 10
 
@@ -239,8 +263,15 @@ class Generator:
 
     self._name_operands(self.descr_list)
 
-    # launch control is (still) broken
-    prefer_launchcontrol = False # context.get_vm().get_hw_descr().vendor == 'nvidia' and int(context.get_vm().get_hw_descr().model[3:]) >= 100
+    # Asked for and unavailable is an error, not a fallback.  A caller who
+    # switched the traversal and silently got the other one would attribute
+    # the grid-stride loop's numbers to the queue.
+    if context.get_user_options().launch_control and not _supports_launch_control(context):
+      hw = context.get_vm().get_hw_descr()
+      raise GenerationError(
+          f'launch_control needs `clusterlaunchcontrol`, which is sm_100 and '
+          f'above; this target is {hw.vendor} {hw.model}')
+    prefer_launchcontrol = context.get_user_options().launch_control
     prefer_persistent = context.get_vm().get_hw_descr().vendor in ['amd', 'nvidia'] and not prefer_launchcontrol
     # The vendor rule is the default and not the decision; it is carried by the
     # option's declaration, and a caller asking either way overrides it there,
@@ -252,6 +283,24 @@ class Generator:
     self._preload_globals = prefer_preload
 
     self._clusterlaunchcontrol = prefer_launchcontrol
+    self._launch_control_depth = context.get_user_options().launch_control_depth
+
+    if prefer_launchcontrol:
+      # The queue answers with a CTA id nothing can predict, so `batchId1`,
+      # which every prefetch pass reads, is `batchId_start + stride` and names
+      # an element this block will never be handed.  Nothing crashes: the
+      # transfer lands in the buffer the next iteration reads, and every
+      # element after the first is computed from another element's operands.
+      # Refused rather than silently wrong, until the lookahead index comes
+      # out of the queue instead of out of the stride.
+      options = context.get_user_options()
+      for name in ('enable_wrap_loads', 'enable_pipeline', 'enable_multibuffer'):
+        if getattr(options, name):
+          raise GenerationError(
+              f'{name} prefetches element `batchId1 = batchId_start + stride`, '
+              f'which under launch_control is not the element the queue hands '
+              f'out next; the two cannot be combined until the lookahead index '
+              f'is read from the queue (needs launch_control_depth >= 2)')
 
   def set_kernel_name(self, name):
     self._base_kernel_name = name
@@ -442,7 +491,8 @@ class Generator:
                        start=start,
                        stride=stride,
                        region=self._section.ir,
-                       flags=self._flags)
+                       flags=self._flags,
+                       queue_depth=self._launch_control_depth)
 
       # The prologue stays *out* of the rewritable stream.  Its shared-memory
       # symbols are allocated by ShrMemObject.alloc_global, a separate bump
@@ -469,7 +519,13 @@ class Generator:
       # one guards the next iteration's writes against the previous
       # iteration's reads -- a dependency across the back edge that the pass
       # does not model.  Adding it before optimisation removes it again.
-      if self._persistent_threading or self._clusterlaunchcontrol:
+      #
+      # `LAUNCHCTRL` is excluded, and not because it needs the separation less.
+      # It gets it from the hand-off, which carries a block barrier outside the
+      # size guard between one element's body and the next.  Appending a second
+      # one puts it *inside* that guard, where the rows of a block decide the
+      # predicate differently and a barrier is reached by some of them only.
+      if self._persistent_threading:
         loop.append(SyncThreads(self._context, self._num_threads))
 
       self._deduce_mults_per_block()
@@ -649,7 +705,28 @@ class Generator:
 
       writer(f'{lexic.kernel_range_object("block", f"{self._num_threads}, {mults_per_block}, 1")};')
       if not self._persistent_threading:
-        assert not coop
+        if coop:
+          # Both remaining traversals launch one block per element rather than
+          # one per worker, which is what a grid barrier cannot have: a
+          # cooperative launch requires every block of the grid to be resident
+          # at once, and this grid is sized by the batch.
+          #
+          # Under `launch_control` it is not a sizing question but a
+          # structural one.  The queue *works* by the launcher never starting
+          # most of the grid -- a resident block cancels the CTAs it then
+          # processes itself -- so the blocks a grid barrier would wait for
+          # are precisely the ones that will not exist.  Nor do the surviving
+          # blocks agree on a count: each runs until its own cancel request
+          # comes back empty.
+          how = ('launch_control cancels most of the grid before it is '
+                 'launched, so the blocks a grid barrier waits for never '
+                 'run' if self._clusterlaunchcontrol else
+                 'one block per element does not fit on the device at once')
+          raise GenerationError(
+              f'this kernel has a grid-wide barrier, which needs a '
+              f'cooperative launch over resident workers; {how}. Use the '
+              f'grid-stride traversal for a section that synchronises '
+              f'across the grid.')
         num_blocks = f'({GeneralLexicon.NUM_ELEMENTS}0 + {mults_per_block} - 1) / {mults_per_block}'
       else:
         writer(f'{lexic.get_launch_size(kernel_name, "block", shmemsize)}')

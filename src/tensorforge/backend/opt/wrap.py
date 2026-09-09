@@ -100,6 +100,17 @@ class WrapLoads(AbstractTransformer):
             # one iteration, so there is no next element to prefetch and no
             # back edge to wrap across
             return [], body
+        if loop._mode is LoopMode.LAUNCHCTRL:
+            # There *is* a next element, and this pass cannot name it.  It
+            # prefetches through `index_name(1)`, which the strided loop binds
+            # as `batchId0 + stride`; the queue hands out whatever CTA the
+            # launcher cancels, so that name is some other block's element.
+            # The transfer would land in the buffer the next iteration reads
+            # and every element after the first would be computed from the
+            # wrong operands -- no crash, wrong numbers.  `Generator` refuses
+            # the combination outright, and the reason lives here because this
+            # is what depends on it.
+            return [], body
 
         model = SlotModel(body).run()
         n = model.n
