@@ -30,6 +30,8 @@ from tensorforge.common.basic_types import FlagMode, GeneralLexicon
 from tensorforge.common.context import Context
 from tensorforge.common.exceptions import InternalError
 
+from tensorforge.backend import elementmask
+from tensorforge.common.threads import mults_per_group
 from .abstract_instruction import AbstractInstruction, BarrierScope
 
 
@@ -51,7 +53,8 @@ class BatchLoop(AbstractInstruction):
                  region: List[AbstractInstruction],
                  lookahead: int = 2,
                  flags: FlagMode = FlagMode.OPTIONAL,
-                 queue_depth: int = 1):
+                 queue_depth: int = 1,
+                 group_size: int = 1):
         super().__init__(context)
         self._section_index = section_index
         self._mode = mode
@@ -84,6 +87,16 @@ class BatchLoop(AbstractInstruction):
                 f'the work queue needs at least one request in flight, '
                 f'got {queue_depth}')
         self._queue_depth = queue_depth
+        # How many multiplications share this loop's block.  Set once the
+        # thread-block policy has decided; None until then, and `uniform_scope`
+        # answers conservatively while it is.
+        self._mults_per_block: Optional[int] = None
+        # How many multiplications share a whole number of waves, and so the
+        # smallest set a hardware barrier can separate.  `1` disables the group
+        # traversal entirely and leaves the emission per row, which is what a
+        # rotated section asks for: its start is taken modulo the stride, and a
+        # leader's start plus a lane offset is then not the row's own element.
+        self._group_size: int = max(1, int(group_size))
         self._is_ready = True
 
     # -- structure ------------------------------------------------------- #
@@ -103,43 +116,114 @@ class BatchLoop(AbstractInstruction):
     def append(self, instr: AbstractInstruction) -> None:
         self._region.append(instr)
 
+    def set_mults_per_block(self, mults: int) -> None:
+        self._mults_per_block = int(mults)
+
+    def _grouped(self) -> bool:
+        """Whether the traversal is driven by a group of rows rather than one.
+
+        Only where the group is the whole block.  A group narrower than the
+        block leaves the rows outside it free to run the body a different
+        number of times, and the barrier this buys reaches the block -- so it
+        would be licensing exactly what it is meant to make safe.  Sizing the
+        block to the group is `AbstractThreadBlockPolicy._barrier_cap`.
+
+        `LAUNCHCTRL` is excluded: its hand-off carries a block barrier of its
+        own outside the size guard, and a second traversal on top of that is a
+        second answer to a question already answered.
+        """
+        return (self._group_size > 1
+                and self._mults_per_block == self._group_size
+                and self._mode is not LoopMode.LAUNCHCTRL)
+
+    def _group_batch(self) -> str:
+        return f'{GeneralLexicon.BATCH_ID_NAME}Group{self._section_index}'
+
+    def _lane(self) -> str:
+        return f'{GeneralLexicon.BATCH_ID_NAME}Lane{self._section_index}'
+
+    def _active(self) -> str:
+        return f'{GeneralLexicon.BATCH_ID_NAME}Active{self._section_index}'
+
+    def _group_start(self) -> str:
+        """The leader's element index: the row rounded down to its group."""
+        lexic = self._vm.get_lexic()
+        row = f'({lexic.thread_idx_y} - {self._lane()})'
+        return f'{row} + {lexic.block_dim_y} * ({lexic.block_idx_x})'
+
+    def _declare_lane(self, writer) -> None:
+        lexic = self._vm.get_lexic()
+        writer(f'const auto {self._lane()} = '
+               f'{lexic.thread_idx_y} % {self._group_size};')
+
+    def _declare_row_element(self, writer) -> str:
+        """Bind this row's element and whether it has one, and return the mask.
+
+        The index is clamped to the leader's, which the loop condition has just
+        established is in range, so a row with no element of its own reads a
+        duplicate rather than past the end.  What keeps the duplicate out of
+        the result is the mask, which every global write runs under.
+        """
+        raw = f'{self._group_batch()} + {self._lane()}'
+        cond = f'{raw} < {self._num_elements()}'
+        if self._flags is not FlagMode.ABSENT:
+            flags = f'{GeneralLexicon.FLAGS_NAME}{self._section_index}'
+            read = f'static_cast<bool>({flags}[{raw}])'
+            if self._flags is FlagMode.OPTIONAL:
+                read = f'({flags} == nullptr || {read})'
+            # Folded into the mask instead of wrapping the body in a block.
+            # A flags array is read per element, so the block would be entered
+            # by some rows of the group and not others -- and the barrier the
+            # group exists for sits inside it.
+            cond = f'{cond} && {read}'
+        writer(f'const bool {self._active()} = {cond};')
+        writer(f'const size_t {self._batch(0)} = '
+               f'{self._active()} ? {raw} : {self._group_batch()};')
+        return self._active()
+
     def uniform_scope(self) -> BarrierScope:
         """How far the body's execution count is uniform, i.e. the strongest
         barrier that may legally appear inside.
 
-        The answer is ``SIMD`` for every mode, because the element index is
+        Two things narrow it, and the answer is the weaker of them: how often
+        the loop runs, and what the body sits under.  Both turn on the element
+        index
 
             batchId0 = threadIdx.y + blockDim.y * blockIdx.x
 
-        so it varies *within* a block, not just between blocks.
+        which is the same for every thread of one multiplication and different
+        between the multiplications packed into a block.
 
-        ``PERSISTENT``: the trip count is
-        ``ceil((numElements - batchId0) / stride)``.  Two thread groups in one
-        block start at indices differing by their ``threadIdx.y``, so their trip
-        counts differ by one whenever ``numElements`` is not a multiple of
+        *The trip count.*  ``PERSISTENT`` runs
+        ``ceil((numElements - batchId0) / stride)`` times.  Two rows of one
+        block start at indices differing by their ``threadIdx.y``, so their
+        trip counts differ by one whenever ``numElements`` is not a multiple of
         ``gridDim.x * blockDim.y`` -- and ``gridDim.x`` is occupancy-derived
         (``min(gridsize, numElements0)``), not ``ceil(numElements/blockDim.y)``,
-        so alignment is a coincidence rather than a guarantee.  A block-wide
-        barrier in the body is then reached a different number of times by
-        different thread groups.
+        so alignment is a coincidence rather than a guarantee.  ``SINGLE`` runs
+        once or not at all.  ``LAUNCHCTRL`` is the exception: every thread
+        reads the same cancel response out of shared memory behind a barrier,
+        so all of them leave on the same iteration.
 
-        ``SINGLE``: the body sits under ``if (batchId0 < numElements)``, the
-        same non-uniform predicate.  This previously claimed ``GRID`` on the
-        grounds that "exactly one iteration everywhere" -- which ignored the
-        guard.  The tail block skips the body entirely, so a grid barrier there
-        deadlocks.
+        *The guards.*  The body sits under the size guard ``batchId0 <
+        numElements``, and under ``flags[batchId0]`` where the section has a
+        flags array.  Both are per element, so both are decided per row.
 
-        ``LAUNCHCTRL``: the *loop* is the exception -- its trip count is
-        block-uniform.  Every thread reads the same cancel response out of
-        shared memory behind a barrier, so all of them leave on the same
-        iteration, and the hand-off itself contains a ``__syncthreads``.  What
-        is still only ``SIMD``-uniform is the size guard *inside* it, which is
-        per element exactly as in the other two modes.  Answering ``GROUP``
-        here would license a block barrier that ``_emit_body`` may then place
-        under that guard, so the loop keeps the conservative answer until the
-        guard is a construct ``verify`` can see; the barrier the queue needs
-        for itself sits outside the guard where the emission puts it.
+        At one multiplication per block the two coincide: ``blockDim.y == 1``
+        makes ``batchId0`` equal to ``blockIdx.x``, so the trip count, the size
+        guard and the flag guard are alike for every thread of the block, and a
+        block barrier in the body meets all of them.  That is the whole reason
+        `Lexic.has_sync_mult` reaches the thread-block policy: a target with no
+        sub-block rendezvous can still run a multiplication wider than a wave,
+        by being given a block that holds nothing else.
+
+        Above one, a row that is masked off does not arrive, so the answer is
+        the multiplication.  Widening it to a group of rows that share a wave
+        needs the mask off the body and onto the accesses it guards, which is
+        what an unguarded body would have to mean.
         """
+        if self._mults_per_block == 1 or self._grouped():
+            return BarrierScope.GROUP
         return BarrierScope.SIMD
 
     # -- data flow ------------------------------------------------------- #
@@ -556,6 +640,9 @@ class BatchLoop(AbstractInstruction):
         return not hasattr(writer, 'for_')
 
     def gen_code_inner(self, writer) -> None:
+        if self._grouped():
+            self._gen_grouped(writer)
+            return
         if self._mode is LoopMode.PERSISTENT:
             # TODO: OMP target
             # TODO: maybe iterate over adjacent elements? (for indirect pointers)
@@ -721,6 +808,36 @@ class BatchLoop(AbstractInstruction):
             finally:
                 AbstractInstruction._induction_value.pop()
                 self._induction = None
+
+    def _gen_grouped(self, writer) -> None:
+        """One traversal for a whole group of rows.
+
+        The loop is driven by the group leader, whose index is the lowest in
+        the group, so it runs as often as the row that has the most to do and
+        no row is cut short.  Every row of the group therefore reaches the same
+        barriers the same number of times, which is the whole point: the rows
+        share a wave, so a barrier cannot separate them and each one has to
+        arrive.
+        """
+        self._declare_lane(writer)
+        self._declare_stage_counter(writer)
+        self._declare_windows_early(writer, list(self._region))
+        if self._mode is LoopMode.PERSISTENT:
+            with writer.For(f'size_t {self._group_batch()} = '
+                            f'{self._group_start()}; '
+                            f'{self._group_batch()} < {self._num_elements()}; '
+                            f'{self._group_batch()} += {self._stride}'):
+                mask = self._declare_row_element(writer)
+                self._lookahead_bindings(writer)
+                with elementmask.element_mask(None, mask):
+                    self._emit_guarded(writer, list(self._region))
+                self._advance_stage_counter(writer)
+            return
+        writer(f'const size_t {self._group_batch()} = {self._group_start()};')
+        with writer.If(f'{self._group_batch()} < {self._num_elements()}'):
+            mask = self._declare_row_element(writer)
+            with elementmask.element_mask(None, mask):
+                self._emit_guarded(writer, list(self._region))
 
     def __str__(self) -> str:
         return (f'batchloop.{self._mode.value} '

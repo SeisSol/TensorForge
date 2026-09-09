@@ -4,12 +4,14 @@
 import enum
 from typing import Union, List
 from copy import deepcopy
+import contextlib
 from tensorforge.common.matrix.boundingbox import BoundingBox
 from functools import reduce
 from tensorforge.common.context import Context
 from tensorforge.common.basic_types import Datatype, Addressing
 from tensorforge.common.exceptions import GenerationError, InternalError
 from .writer import Writer
+from . import elementmask
 from tensorforge.backend.pir.core import (BOOL, INDEX, SCALAR_LAYOUT, Effect,
                                           LaneAxis, RegisterLayout, ScalarType)
 
@@ -2246,6 +2248,9 @@ class Symbol:
     # address chain in the output next to the one `address_value` produces.
     # That waste already existed for registers; extending the structured path
     # to global memory would have doubled it rather than exposed it.
+    mask_name = (elementmask.active()[1]
+                 if self.stype == SymbolType.Global else None)
+
     if not structured:
       access = self.access(context, index, writer, addrs, base=base)
       fmt = not isinstance(variable, (str, int, float))
@@ -2272,6 +2277,9 @@ class Symbol:
             f'only global memory has an atomic path')
         assign = f'{access} = {var};'
 
+    guard = (writer.If(mask_name) if mask_name is not None
+             else contextlib.nullcontext())
+
     if structured:
       # The symmetric case to the structured load: the destination address and
       # the stored value are operands, not names inside a string.  A pass can
@@ -2296,10 +2304,11 @@ class Symbol:
       # the buffer is typed by its element and would narrow every wide write
       # to its first component.  `RELAXED` for the same reason as in `load`.
       wide = getattr(getattr(variable, 'type', None), 'length', None)
-      writer.store(self, variable,
-                   self.address_value(writer, context, index),
-                   align=None if wide is None else RELAXED,
-                   nontemporal=bool(nontemp), pointer=base)
+      with guard:
+        writer.store(self, variable,
+                     self.address_value(writer, context, index),
+                     align=None if wide is None else RELAXED,
+                     nontemporal=bool(nontemp), pointer=base)
     elif (self.stype in (SymbolType.Register, SymbolType.Scratch)
           and not isinstance(lead, LeadIndex)):
       # One named element of a dimension that lives in the registers, so
@@ -2326,10 +2335,19 @@ class Symbol:
       # writes -- which is a different requirement, and one only an atomic
       # accumulation is sensitive to; see `placement.atomic_write_is_exact`.
       owner = self.owning_lane(index)
-      with writer.If(f'{context.get_vm().get_lexic().thread_idx_x} == {owner}'):
+      cond = f'{context.get_vm().get_lexic().thread_idx_x} == {owner}'
+      if mask_name is not None:
+        cond = f'{cond} && {mask_name}'
+      with writer.If(cond):
         writer.access_stmt(assign, self, kind, args=_operands(variable, addrs), fmt=fmt)
     else:
-      writer.access_stmt(assign, self, kind, args=_operands(variable, addrs), fmt=fmt)
+      # The atomic lands here: `atomic_store` returns an expression the lexic
+      # finished, so there is nothing structured to attach a predicate to and
+      # the mask has to be the block it runs in.  Which is the case that most
+      # needs one -- an accumulation from a row whose element is out of range
+      # is not a value overwritten later but a contribution counted twice.
+      with guard:
+        writer.access_stmt(assign, self, kind, args=_operands(variable, addrs), fmt=fmt)
 
   def add_user(self, user):
     self._users.append(user)

@@ -275,7 +275,6 @@ class AbstractInstruction(ABC):
   #: is how the value reaches the instruction that needs to name it.
   _induction_value: list = []
 
-
   @classmethod
   @contextmanager
   def shared_body(cls, context, writer: Writer, scratch: int = 0):

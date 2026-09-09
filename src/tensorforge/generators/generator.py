@@ -31,6 +31,7 @@ from tensorforge.backend.instructions.sync_block import SyncThreads, SyncBlock, 
 from tensorforge.backend.instructions.batch_loop import BatchLoop, LoopMode
 from tensorforge.backend.writer import Writer
 from tensorforge.common.exceptions import GenerationError, InternalError
+from tensorforge.common.threads import mults_per_group
 
 import tensorforge.interop as interop
 
@@ -48,6 +49,25 @@ class AbstractThreadBlockPolicy:
 
   def get_num_mults_per_block(self):
     pass
+
+  def _barrier_cap(self):
+    """How many multiplications a block may hold and still separate them.
+
+    A multiplication that fits in a wave needs no block-level rendezvous at
+    all, so nothing is capped.  One that is wider needs a barrier over its own
+    threads: either the target has a sub-block rendezvous, and several fit,
+    or it has none, and the block barrier is the multiplication's barrier
+    only when the block holds one multiplication.
+
+    `None` is no cap, which is different from a cap of one.
+    """
+    vm = self._context.get_vm()
+    wave = vm.get_hw_descr().vec_unit_length
+    if self._num_threads <= wave:
+      return None
+    if vm.get_lexic().has_sync_mult(self._num_threads):
+      return None
+    return mults_per_group(self._num_threads, wave)
 
 
 class RegmaxBlockPolicy(AbstractThreadBlockPolicy):
@@ -78,10 +98,12 @@ class RegmaxBlockPolicy(AbstractThreadBlockPolicy):
     # self._max_threads // self._num_threads // 2
     max_thread_mults = 256 // (self._num_threads * self._lane_factor)
     if self._mem_per_mult == 0:
-      return max_thread_mults
+      mults = max_thread_mults
     else:
       max_mem_mults = (self._max_allowed_mem - self._global_mem * self._context.fp_type.size()) // (self._mem_per_mult * self._context.fp_type.size())
-      return min(max_mem_mults, max_thread_mults)
+      mults = min(max_mem_mults, max_thread_mults)
+    cap = self._barrier_cap()
+    return mults if cap is None else min(mults, cap)
 
 class Section:
   def __init__(self):
@@ -492,7 +514,8 @@ class Generator:
                        stride=stride,
                        region=self._section.ir,
                        flags=self._flags,
-                       queue_depth=self._launch_control_depth)
+                       queue_depth=self._launch_control_depth,
+                       group_size=self._group_size(index, start))
 
       # The prologue stays *out* of the rewritable stream.  Its shared-memory
       # symbols are allocated by ShrMemObject.alloc_global, a separate bump
@@ -586,6 +609,25 @@ class Generator:
     else:
       start = f'({self._get_2d_block_id()} + {" + ".join(offset)}) % {stride}'
     return start, stride
+
+  def _group_size(self, index: int, start: str) -> int:
+    """How many rows this section's traversal drives together.
+
+    `1` where the multiplication divides the wave evenly -- each one is then
+    its own group and the traversal stays per row -- and `1` for a rotated
+    start, which is the restriction worth stating.  A rotated start is taken
+    modulo the stride, and the modulo does not distribute over the lane offset:
+    the leader's rotated start plus a lane is not the row's own rotated start
+    once the wrap falls between them, so rows would collide on one element and
+    miss another.  Lifting it needs the rotation to move whole groups, which is
+    a change to what the offset means rather than to how it is spelled.
+    """
+    wave = self._context.get_vm().get_hw_descr().vec_unit_length
+    if self._num_threads <= wave:
+      return 1
+    if start != self._get_2d_block_id():
+      return 1
+    return mults_per_group(self._num_threads, wave)
 
   def _batch_loop_mode(self) -> LoopMode:
     if self._persistent_threading:
@@ -1094,6 +1136,13 @@ class Generator:
                                             * self._context.get_user_options().lead_blocking)
     num_mults_per_block = policy.get_num_mults_per_block()
     self._section.shr_mem_obj.set_mults_per_block(num_mults_per_block)
+    # The loop reads it to answer how far its body is uniform, and the answer
+    # is what `verify` weighs a barrier against.  Over the optimised stream
+    # rather than the loop this method's caller built: a pass may have
+    # replaced it.
+    for instr in self._section.stream:
+      if isinstance(instr, BatchLoop):
+        instr.set_mults_per_block(num_mults_per_block)
 
   def get_kernel(self):
     return self._kernel

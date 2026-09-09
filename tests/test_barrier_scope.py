@@ -28,18 +28,14 @@ That resolution is the fix these tests now pin. The two used to disagree:
 for MULT regardless, so `verify` would refuse the construct while the emitter,
 had it run, would have synchronised a warp where a block was needed.
 
-Nothing in the corpus is wide enough to have shown it. `_deduce_num_threads`
-clamps to 32 unless an elementwise descriptor is present, and the one
-configuration that gets past the clamp — a multilinear whose lead dimension
-aligns above 32, alongside an elementwise — produces no kernel at all: the PIR
-verifier rejects it with "group barrier inside a construct whose trip count is
-only simd-uniform". Checked, not assumed; see the last test below.
-
-When the cap does lift, the remaining decision is not the emitter's. A block
-barrier inside the batch loop is safe only with one multiple per block, since
-the loop is otherwise just MULT-uniform and a block barrier in it deadlocks on
-a ragged tail — that is
-`RegmaxBlockPolicy.get_num_mults_per_block`.
+Which leaves the question of when a block barrier inside the batch loop is
+legal at all. It is legal exactly at one multiplication per block: the loop is
+otherwise only MULT-uniform and the barrier deadlocks on a ragged tail. So a
+width above a wave and a block holding several multiplications are mutually
+exclusive unless the target can rendezvous a sub-block, and
+`AbstractThreadBlockPolicy._barrier_cap` is where the two meet — it asks
+`Lexic.has_sync_mult` and caps the block at one where the answer is no. The
+last test below reads that from the outside.
 """
 from __future__ import annotations
 
@@ -169,21 +165,20 @@ def test_the_default_hook_over_synchronises_rather_than_deadlocking(context):
     assert lex.sync_mult(64) == lex.sync_block()
 
 
-def test_a_thread_count_above_a_wave_is_refused_rather_than_miscompiled():
+def test_a_thread_count_above_a_wave_gets_a_block_of_its_own():
     """The invariant, checked from the outside.
 
     `_deduce_num_threads` clamps to 32 only when no elementwise descriptor is
-    present, so the clamp alone does not carry it. What does is the verifier:
-    the one combination that gets past the clamp -- a multilinear aligning
-    above 32 next to an elementwise -- is rejected outright.
+    present, so a multilinear aligning above 32 next to an elementwise gets a
+    64-thread multiplication. None of the three backends implements
+    `sync_mult`, so all three have to answer it the same way: one
+    multiplication per block, which is what makes the block barrier the
+    multiplication's own and the loop around it block-uniform.
 
-    If this ever starts generating, the width-carrying path above stops being
-    reachable only from a hand-built instruction and starts being reachable
-    from a kernel -- which is when `Lexic.sync_mult` is worth implementing for
-    a vendor rather than defaulting to a whole block.
+    Checked through the launch geometry rather than the policy, because the
+    number that matters is the one the kernel is launched with.
     """
     from tensorforge.common.basic_types import Addressing
-    from tensorforge.common.exceptions import GenerationError
     from tensorforge.common.matrix.boundingbox import BoundingBox
     from tensorforge.common.matrix.tensor import SubTensor, Tensor
     from tensorforge.common.operation import Operation
@@ -196,17 +191,65 @@ def test_a_thread_count_above_a_wave_is_refused_rather_than_miscompiled():
                                 BoundingBox([0] * len(shape), list(shape)),
                                 alias=alias, datatype=Datatype.F32))
 
+    for arch, backend in (("sm_86", "cuda"), ("gfx1100", "hip"),
+                          ("pvc", "oneapi")):
+        ctx = Context(arch=arch, backend=backend, fp_type=Datatype.F32)
+        wave = ctx.get_vm().get_hw_descr().vec_unit_length
+        assert ctx.align(num=56) > wave, f"56 no longer aligns above {arch}"
+
+        gemm = MultilinearDescr(tensor([56, 18], "C"),
+                                [tensor([56, 18], "A"), tensor([18, 18], "B")],
+                                [[0, -1], [-1, 1]], [[0, 1], [0, 1]])
+        ew = ElementwiseDescr(Operation.ABS, tensor([56, 18], "F"),
+                              [tensor([56, 18], "E")])
+
+        gen = Generator([gemm, ew], ctx)
+        gen.generate()
+        threads = gen._num_threads
+        mults = min(s.shr_mem_obj.get_mults_per_block() for s in gen._sections)
+        assert threads > wave, f"{arch}: {threads} no longer exceeds the wave"
+        assert mults == 1, (
+            f"{arch}: {threads} threads per multiplication and {mults} "
+            f"multiplications per block, with no sub-block rendezvous to "
+            f"separate them")
+
+
+def test_a_width_within_a_wave_still_packs_a_block():
+    """The cap is about the barrier, so it must not reach a narrow width.
+
+    A multiplication inside a wave needs no block-level rendezvous at all, and
+    capping it at one per block would spend occupancy on a barrier nobody asks
+    for.
+    """
+    from tensorforge.generators.generator import RegmaxBlockPolicy
+
     ctx = Context(arch="sm_86", backend="cuda", fp_type=Datatype.F32)
-    assert ctx.align(num=56) > 32, "56 no longer aligns above a wave"
+    wave = ctx.get_vm().get_hw_descr().vec_unit_length
+    narrow = RegmaxBlockPolicy(ctx, global_mem=0, mem_size_per_mult=0,
+                               num_threads=wave)
+    wide = RegmaxBlockPolicy(ctx, global_mem=0, mem_size_per_mult=0,
+                             num_threads=2 * wave)
+    assert narrow._barrier_cap() is None
+    assert narrow.get_num_mults_per_block() > 1
+    assert wide._barrier_cap() == 1
+    assert wide.get_num_mults_per_block() == 1
 
-    gemm = MultilinearDescr(tensor([56, 18], "C"),
-                            [tensor([56, 18], "A"), tensor([18, 18], "B")],
-                            [[0, -1], [-1, 1]], [[0, 1], [0, 1]])
-    ew = ElementwiseDescr(Operation.ABS, tensor([56, 18], "F"),
-                          [tensor([56, 18], "E")])
 
-    with pytest.raises(GenerationError, match="barrier"):
-        Generator([gemm, ew], ctx).generate()
+def test_the_loop_reports_block_uniformity_only_at_one_mult_per_block():
+    """`uniform_scope` is what `verify` weighs a barrier against."""
+    from tensorforge.backend.instructions.abstract_instruction import \
+        BarrierScope
+    from tensorforge.backend.instructions.batch_loop import BatchLoop, LoopMode
+
+    ctx = Context(arch="sm_86", backend="cuda", fp_type=Datatype.F32)
+    loop = BatchLoop(ctx, section_index=0, mode=LoopMode.PERSISTENT,
+                     start="0", stride="1", region=[])
+    assert loop.uniform_scope() is BarrierScope.SIMD, (
+        "an undecided block count has to answer conservatively")
+    loop.set_mults_per_block(2)
+    assert loop.uniform_scope() is BarrierScope.SIMD
+    loop.set_mults_per_block(1)
+    assert loop.uniform_scope() is BarrierScope.GROUP
 
 
 def test_the_reduction_refuses_a_cross_lane_fold_it_cannot_synchronise():
