@@ -1270,7 +1270,17 @@ class Generator:
         ptr_type = symbol.obj.addressing.to_pointer()
         const_modifier = 'const ' if symbol.obj.direction == DataFlowDirection.SOURCE else ''
         batch_type = f'{const_modifier}{datatype}{ptr_type}' if with_types else ''
-        offset_type = 'unsigned' if with_types else ''
+        # `size_t`, and the same `size_t` the element count uses.  This is an
+        # *element* offset added to `batchId0 * stride`, so 32 bits caps what a
+        # caller can express at 2^32-1 elements -- 17.2 GB into an f32 buffer,
+        # 34.4 GB into an f64 one.  Both are reachable on a current card, and a
+        # caller past them loses the high bits silently at the call site, which
+        # is a wrong answer rather than a diagnostic.
+        #
+        # The arithmetic was never the problem: `batchId0 * stride` is already
+        # 64-bit and the unsigned offset promoted into it.  What was capped is
+        # what the *signature* can carry.
+        offset_type = 'size_t' if with_types else ''
         params.extend([f'{batch_type} {symbol.name}'])
         if symbol.obj.addressing != Addressing.NONE:
           params.extend([f'{offset_type} {get_extra_offset_name(symbol)}'])
