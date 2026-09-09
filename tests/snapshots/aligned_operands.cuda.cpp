@@ -1,12 +1,12 @@
 // === base name ===
-kernel_21138a3fa2
+kernel_704af43e49e7e2ed
 
 // === header ===
-void launcher_kernel_21138a3fa2(float* m0, unsigned m0_extraOffset, const float* m1, unsigned m1_extraOffset, const float* m2, unsigned m2_extraOffset, size_t numElements0, unsigned* flags0 = nullptr, void* streamPtr = nullptr);
+void launcher_kernel_704af43e49e7e2ed(float* m0, size_t m0_extraOffset, const float* m1, size_t m1_extraOffset, const float* m2, size_t m2_extraOffset, size_t numElements0, unsigned* flags0 = nullptr, void* streamPtr = nullptr);
 
 
 // === launcher ===
-void launcher_kernel_21138a3fa2(float* m0, unsigned m0_extraOffset, const float* m1, unsigned m1_extraOffset, const float* m2, unsigned m2_extraOffset, size_t numElements0, unsigned* flags0 , void* streamPtr) {
+void launcher_kernel_704af43e49e7e2ed(float* m0, size_t m0_extraOffset, const float* m1, size_t m1_extraOffset, const float* m2, size_t m2_extraOffset, size_t numElements0, unsigned* flags0 , void* streamPtr) {
   dim3 block (16, 16, 1);
   static std::size_t gridsize = 0;
       if (gridsize == 0) {
@@ -15,7 +15,7 @@ void launcher_kernel_21138a3fa2(float* m0, unsigned m0_extraOffset, const float*
         CHECK_ERR;
         cudaDeviceGetAttribute(&smCount, cudaDevAttrMultiProcessorCount, device);
         CHECK_ERR;
-        cudaOccupancyMaxActiveBlocksPerMultiprocessor(&blocksPerSM, kernel_kernel_21138a3fa2, block.x * block.y * block.z, 2304 * sizeof(float));
+        cudaOccupancyMaxActiveBlocksPerMultiprocessor(&blocksPerSM, kernel_kernel_704af43e49e7e2ed, block.x * block.y * block.z, 2304 * sizeof(float));
         CHECK_ERR;
         if (blocksPerSM > 0) {
           gridsize = smCount * blocksPerSM;
@@ -28,13 +28,13 @@ void launcher_kernel_21138a3fa2(float* m0, unsigned m0_extraOffset, const float*
   dim3 grid (std::min(gridsize, numElements0), 1, 1);
   static bool shmemsizeset = false;
       if (!shmemsizeset) {
-        cudaFuncSetAttribute(kernel_kernel_21138a3fa2, cudaFuncAttributeMaxDynamicSharedMemorySize, 2304 * sizeof(float));
+        cudaFuncSetAttribute(kernel_kernel_704af43e49e7e2ed, cudaFuncAttributeMaxDynamicSharedMemorySize, 2304 * sizeof(float));
         CHECK_ERR;
         shmemsizeset = true;
       }
       
   cudaStream_t stream = (streamPtr != nullptr) ? static_cast<cudaStream_t>(streamPtr) : 0;
-  kernel_kernel_21138a3fa2<<<grid,block,2304 * sizeof(float),stream>>>( m0,  m0_extraOffset,  m1,  m1_extraOffset,  m2,  m2_extraOffset,  numElements0,  flags0 );
+  kernel_kernel_704af43e49e7e2ed<<<grid,block,2304 * sizeof(float),stream>>>( m0,  m0_extraOffset,  m1,  m1_extraOffset,  m2,  m2_extraOffset,  numElements0,  flags0 );
   CHECK_ERR;
 }
 
@@ -42,7 +42,7 @@ void launcher_kernel_21138a3fa2(float* m0, unsigned m0_extraOffset, const float*
 // === kernel ===
 __global__ void 
 __launch_bounds__(256)
- kernel_kernel_21138a3fa2(float* m0, unsigned m0_extraOffset, const float* m1, unsigned m1_extraOffset, const float* m2, unsigned m2_extraOffset, size_t numElements0, unsigned* flags0 ) {
+ kernel_kernel_704af43e49e7e2ed(float* m0, size_t m0_extraOffset, const float* m1, size_t m1_extraOffset, const float* m2, size_t m2_extraOffset, size_t numElements0, unsigned* flags0 ) {
   extern __shared__ char totalShrMemPtr[];
    {
     // generated with TensorForge. Version: 0.0.1
@@ -89,7 +89,7 @@ __launch_bounds__(256)
           // wait(s0 = load{g>s}(glb_m2[0, 1]));
           __pipeline_wait_prior(0);
           float r1[8]{};
-          __syncwarp();
+          __syncwarp(0x0000ffffu << (threadIdx.y % 2 * 16));
           // r1 = +(r0 * s0) + None
           // [(0, 16), (0, 8)] [(0, 16)]
           float ir1[8]{};
@@ -512,7 +512,7 @@ __launch_bounds__(256)
               glb_m0[(v737_lead + (v730_i1 * 16))] = v732_data;
             }
           }
-          __syncwarp();
+          __syncwarp(0x0000ffffu << (threadIdx.y % 2 * 16));
         }
       }
     }

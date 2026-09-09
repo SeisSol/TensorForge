@@ -1,12 +1,12 @@
 // === base name ===
-kernel_a7d5d30824
+kernel_1195747290a4297d
 
 // === header ===
-void launcher_kernel_a7d5d30824(float* m0, unsigned m0_extraOffset, const float* m1, unsigned m1_extraOffset, size_t numElements0, unsigned* flags0 = nullptr, void* streamPtr = nullptr);
+void launcher_kernel_1195747290a4297d(float* m0, size_t m0_extraOffset, const float* m1, size_t m1_extraOffset, size_t numElements0, unsigned* flags0 = nullptr, void* streamPtr = nullptr);
 
 
 // === launcher ===
-void launcher_kernel_a7d5d30824(float* m0, unsigned m0_extraOffset, const float* m1, unsigned m1_extraOffset, size_t numElements0, unsigned* flags0 , void* streamPtr) {
+void launcher_kernel_1195747290a4297d(float* m0, size_t m0_extraOffset, const float* m1, size_t m1_extraOffset, size_t numElements0, unsigned* flags0 , void* streamPtr) {
   dim3 block (16, 16, 1);
   static std::size_t gridsize = 0;
       if (gridsize == 0) {
@@ -15,7 +15,7 @@ void launcher_kernel_a7d5d30824(float* m0, unsigned m0_extraOffset, const float*
         CHECK_ERR;
         cudaDeviceGetAttribute(&smCount, cudaDevAttrMultiProcessorCount, device);
         CHECK_ERR;
-        cudaOccupancyMaxActiveBlocksPerMultiprocessor(&blocksPerSM, kernel_kernel_a7d5d30824, block.x * block.y * block.z, 256 * sizeof(float));
+        cudaOccupancyMaxActiveBlocksPerMultiprocessor(&blocksPerSM, kernel_kernel_1195747290a4297d, block.x * block.y * block.z, 256 * sizeof(float));
         CHECK_ERR;
         if (blocksPerSM > 0) {
           gridsize = smCount * blocksPerSM;
@@ -28,13 +28,13 @@ void launcher_kernel_a7d5d30824(float* m0, unsigned m0_extraOffset, const float*
   dim3 grid (std::min(gridsize, numElements0), 1, 1);
   static bool shmemsizeset = false;
       if (!shmemsizeset) {
-        cudaFuncSetAttribute(kernel_kernel_a7d5d30824, cudaFuncAttributeMaxDynamicSharedMemorySize, 256 * sizeof(float));
+        cudaFuncSetAttribute(kernel_kernel_1195747290a4297d, cudaFuncAttributeMaxDynamicSharedMemorySize, 256 * sizeof(float));
         CHECK_ERR;
         shmemsizeset = true;
       }
       
   cudaStream_t stream = (streamPtr != nullptr) ? static_cast<cudaStream_t>(streamPtr) : 0;
-  kernel_kernel_a7d5d30824<<<grid,block,256 * sizeof(float),stream>>>( m0,  m0_extraOffset,  m1,  m1_extraOffset,  numElements0,  flags0 );
+  kernel_kernel_1195747290a4297d<<<grid,block,256 * sizeof(float),stream>>>( m0,  m0_extraOffset,  m1,  m1_extraOffset,  numElements0,  flags0 );
   CHECK_ERR;
 }
 
@@ -42,7 +42,7 @@ void launcher_kernel_a7d5d30824(float* m0, unsigned m0_extraOffset, const float*
 // === kernel ===
 __global__ void 
 __launch_bounds__(256)
- kernel_kernel_a7d5d30824(float* m0, unsigned m0_extraOffset, const float* m1, unsigned m1_extraOffset, size_t numElements0, unsigned* flags0 ) {
+ kernel_kernel_1195747290a4297d(float* m0, size_t m0_extraOffset, const float* m1, size_t m1_extraOffset, size_t numElements0, unsigned* flags0 ) {
   extern __shared__ char totalShrMemPtr[];
    {
     // generated with TensorForge. Version: 0.0.1
@@ -142,7 +142,7 @@ __launch_bounds__(256)
             float v131_data = r1[v130_i0];
             glb_m0[(v12_lead + (v130_i0 * 16))] = v131_data;
           }
-          __syncwarp();
+          __syncwarp(0x0000ffffu << (threadIdx.y % 2 * 16));
         }
       }
     }

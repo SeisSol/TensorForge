@@ -1,12 +1,12 @@
 // === base name ===
-kernel_a5ad08b73b
+kernel_2c5a5059bc58582f
 
 // === header ===
-void launcher_kernel_a5ad08b73b(float* m0, unsigned m0_extraOffset, const float* m1, unsigned m1_extraOffset, const float* m2, unsigned m2_extraOffset, float* m3, unsigned m3_extraOffset, const float* m4, unsigned m4_extraOffset, const float* m5, unsigned m5_extraOffset, size_t numElements0, size_t numElements1, unsigned* flags0 = nullptr, unsigned* flags1 = nullptr, void* streamPtr = nullptr);
+void launcher_kernel_2c5a5059bc58582f(float* m0, size_t m0_extraOffset, const float* m1, size_t m1_extraOffset, const float* m2, size_t m2_extraOffset, float* m3, size_t m3_extraOffset, const float* m4, size_t m4_extraOffset, const float* m5, size_t m5_extraOffset, size_t numElements0, size_t numElements1, unsigned* flags0 = nullptr, unsigned* flags1 = nullptr, void* streamPtr = nullptr);
 
 
 // === launcher ===
-void launcher_kernel_a5ad08b73b(float* m0, unsigned m0_extraOffset, const float* m1, unsigned m1_extraOffset, const float* m2, unsigned m2_extraOffset, float* m3, unsigned m3_extraOffset, const float* m4, unsigned m4_extraOffset, const float* m5, unsigned m5_extraOffset, size_t numElements0, size_t numElements1, unsigned* flags0 , unsigned* flags1 , void* streamPtr) {
+void launcher_kernel_2c5a5059bc58582f(float* m0, size_t m0_extraOffset, const float* m1, size_t m1_extraOffset, const float* m2, size_t m2_extraOffset, float* m3, size_t m3_extraOffset, const float* m4, size_t m4_extraOffset, const float* m5, size_t m5_extraOffset, size_t numElements0, size_t numElements1, unsigned* flags0 , unsigned* flags1 , void* streamPtr) {
   dim3 block (32, 8, 1);
   static std::size_t gridsize = 0;
       if (gridsize == 0) {
@@ -15,7 +15,7 @@ void launcher_kernel_a5ad08b73b(float* m0, unsigned m0_extraOffset, const float*
         CHECK_ERR;
         cudaDeviceGetAttribute(&smCount, cudaDevAttrMultiProcessorCount, device);
         CHECK_ERR;
-        cudaOccupancyMaxActiveBlocksPerMultiprocessor(&blocksPerSM, kernel_kernel_a5ad08b73b, block.x * block.y * block.z, 2048 * sizeof(float));
+        cudaOccupancyMaxActiveBlocksPerMultiprocessor(&blocksPerSM, kernel_kernel_2c5a5059bc58582f, block.x * block.y * block.z, 2048 * sizeof(float));
         CHECK_ERR;
         if (blocksPerSM > 0) {
           gridsize = smCount * blocksPerSM;
@@ -28,13 +28,13 @@ void launcher_kernel_a5ad08b73b(float* m0, unsigned m0_extraOffset, const float*
   dim3 grid (std::min(gridsize, numElements0), 1, 1);
   static bool shmemsizeset = false;
       if (!shmemsizeset) {
-        cudaFuncSetAttribute(kernel_kernel_a5ad08b73b, cudaFuncAttributeMaxDynamicSharedMemorySize, 2048 * sizeof(float));
+        cudaFuncSetAttribute(kernel_kernel_2c5a5059bc58582f, cudaFuncAttributeMaxDynamicSharedMemorySize, 2048 * sizeof(float));
         CHECK_ERR;
         shmemsizeset = true;
       }
       
   cudaStream_t stream = (streamPtr != nullptr) ? static_cast<cudaStream_t>(streamPtr) : 0;
-  kernel_kernel_a5ad08b73b<<<grid,block,2048 * sizeof(float),stream>>>( m0,  m0_extraOffset,  m1,  m1_extraOffset,  m2,  m2_extraOffset,  m3,  m3_extraOffset,  m4,  m4_extraOffset,  m5,  m5_extraOffset,  numElements0,  numElements1,  flags0 ,  flags1 );
+  kernel_kernel_2c5a5059bc58582f<<<grid,block,2048 * sizeof(float),stream>>>( m0,  m0_extraOffset,  m1,  m1_extraOffset,  m2,  m2_extraOffset,  m3,  m3_extraOffset,  m4,  m4_extraOffset,  m5,  m5_extraOffset,  numElements0,  numElements1,  flags0 ,  flags1 );
   CHECK_ERR;
 }
 
@@ -42,7 +42,7 @@ void launcher_kernel_a5ad08b73b(float* m0, unsigned m0_extraOffset, const float*
 // === kernel ===
 __global__ void 
 __launch_bounds__(256)
- kernel_kernel_a5ad08b73b(float* m0, unsigned m0_extraOffset, const float* m1, unsigned m1_extraOffset, const float* m2, unsigned m2_extraOffset, float* m3, unsigned m3_extraOffset, const float* m4, unsigned m4_extraOffset, const float* m5, unsigned m5_extraOffset, size_t numElements0, size_t numElements1, unsigned* flags0 , unsigned* flags1 ) {
+ kernel_kernel_2c5a5059bc58582f(float* m0, size_t m0_extraOffset, const float* m1, size_t m1_extraOffset, const float* m2, size_t m2_extraOffset, float* m3, size_t m3_extraOffset, const float* m4, size_t m4_extraOffset, const float* m5, size_t m5_extraOffset, size_t numElements0, size_t numElements1, unsigned* flags0 , unsigned* flags1 ) {
   extern __shared__ char totalShrMemPtr[];
    {
     // generated with TensorForge. Version: 0.0.1

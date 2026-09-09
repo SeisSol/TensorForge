@@ -1,12 +1,12 @@
 // === base name ===
-kernel_8a03a3cd0d
+kernel_d66d53f19bb7a7ec
 
 // === header ===
-void launcher_kernel_8a03a3cd0d(float* m0, unsigned m0_extraOffset, const float* m1, unsigned m1_extraOffset, const float* m2, unsigned m2_extraOffset, const float* m3, unsigned m3_extraOffset, const float* m4, unsigned m4_extraOffset, const float* m5, unsigned m5_extraOffset, const float* m6, unsigned m6_extraOffset, const float* m7, unsigned m7_extraOffset, const float* m8, unsigned m8_extraOffset, size_t numElements0, unsigned* flags0 = nullptr, void* streamPtr = nullptr);
+void launcher_kernel_d66d53f19bb7a7ec(float* m0, size_t m0_extraOffset, const float* m1, size_t m1_extraOffset, const float* m2, size_t m2_extraOffset, const float* m3, size_t m3_extraOffset, const float* m4, size_t m4_extraOffset, const float* m5, size_t m5_extraOffset, const float* m6, size_t m6_extraOffset, const float* m7, size_t m7_extraOffset, const float* m8, size_t m8_extraOffset, size_t numElements0, unsigned* flags0 = nullptr, void* streamPtr = nullptr);
 
 
 // === launcher ===
-void launcher_kernel_8a03a3cd0d(float* m0, unsigned m0_extraOffset, const float* m1, unsigned m1_extraOffset, const float* m2, unsigned m2_extraOffset, const float* m3, unsigned m3_extraOffset, const float* m4, unsigned m4_extraOffset, const float* m5, unsigned m5_extraOffset, const float* m6, unsigned m6_extraOffset, const float* m7, unsigned m7_extraOffset, const float* m8, unsigned m8_extraOffset, size_t numElements0, unsigned* flags0 , void* streamPtr) {
+void launcher_kernel_d66d53f19bb7a7ec(float* m0, size_t m0_extraOffset, const float* m1, size_t m1_extraOffset, const float* m2, size_t m2_extraOffset, const float* m3, size_t m3_extraOffset, const float* m4, size_t m4_extraOffset, const float* m5, size_t m5_extraOffset, const float* m6, size_t m6_extraOffset, const float* m7, size_t m7_extraOffset, const float* m8, size_t m8_extraOffset, size_t numElements0, unsigned* flags0 , void* streamPtr) {
   dim3 block (16, 16, 1);
   static std::size_t gridsize = 0;
       if (gridsize == 0) {
@@ -15,7 +15,7 @@ void launcher_kernel_8a03a3cd0d(float* m0, unsigned m0_extraOffset, const float*
         CHECK_ERR;
         cudaDeviceGetAttribute(&smCount, cudaDevAttrMultiProcessorCount, device);
         CHECK_ERR;
-        cudaOccupancyMaxActiveBlocksPerMultiprocessor(&blocksPerSM, kernel_kernel_8a03a3cd0d, block.x * block.y * block.z, 1792 * sizeof(float));
+        cudaOccupancyMaxActiveBlocksPerMultiprocessor(&blocksPerSM, kernel_kernel_d66d53f19bb7a7ec, block.x * block.y * block.z, 1792 * sizeof(float));
         CHECK_ERR;
         if (blocksPerSM > 0) {
           gridsize = smCount * blocksPerSM;
@@ -28,13 +28,13 @@ void launcher_kernel_8a03a3cd0d(float* m0, unsigned m0_extraOffset, const float*
   dim3 grid (std::min(gridsize, numElements0), 1, 1);
   static bool shmemsizeset = false;
       if (!shmemsizeset) {
-        cudaFuncSetAttribute(kernel_kernel_8a03a3cd0d, cudaFuncAttributeMaxDynamicSharedMemorySize, 1792 * sizeof(float));
+        cudaFuncSetAttribute(kernel_kernel_d66d53f19bb7a7ec, cudaFuncAttributeMaxDynamicSharedMemorySize, 1792 * sizeof(float));
         CHECK_ERR;
         shmemsizeset = true;
       }
       
   cudaStream_t stream = (streamPtr != nullptr) ? static_cast<cudaStream_t>(streamPtr) : 0;
-  kernel_kernel_8a03a3cd0d<<<grid,block,1792 * sizeof(float),stream>>>( m0,  m0_extraOffset,  m1,  m1_extraOffset,  m2,  m2_extraOffset,  m3,  m3_extraOffset,  m4,  m4_extraOffset,  m5,  m5_extraOffset,  m6,  m6_extraOffset,  m7,  m7_extraOffset,  m8,  m8_extraOffset,  numElements0,  flags0 );
+  kernel_kernel_d66d53f19bb7a7ec<<<grid,block,1792 * sizeof(float),stream>>>( m0,  m0_extraOffset,  m1,  m1_extraOffset,  m2,  m2_extraOffset,  m3,  m3_extraOffset,  m4,  m4_extraOffset,  m5,  m5_extraOffset,  m6,  m6_extraOffset,  m7,  m7_extraOffset,  m8,  m8_extraOffset,  numElements0,  flags0 );
   CHECK_ERR;
 }
 
@@ -42,7 +42,7 @@ void launcher_kernel_8a03a3cd0d(float* m0, unsigned m0_extraOffset, const float*
 // === kernel ===
 __global__ void 
 __launch_bounds__(256)
- kernel_kernel_8a03a3cd0d(float* m0, unsigned m0_extraOffset, const float* m1, unsigned m1_extraOffset, const float* m2, unsigned m2_extraOffset, const float* m3, unsigned m3_extraOffset, const float* m4, unsigned m4_extraOffset, const float* m5, unsigned m5_extraOffset, const float* m6, unsigned m6_extraOffset, const float* m7, unsigned m7_extraOffset, const float* m8, unsigned m8_extraOffset, size_t numElements0, unsigned* flags0 ) {
+ kernel_kernel_d66d53f19bb7a7ec(float* m0, size_t m0_extraOffset, const float* m1, size_t m1_extraOffset, const float* m2, size_t m2_extraOffset, const float* m3, size_t m3_extraOffset, const float* m4, size_t m4_extraOffset, const float* m5, size_t m5_extraOffset, const float* m6, size_t m6_extraOffset, const float* m7, size_t m7_extraOffset, const float* m8, size_t m8_extraOffset, size_t numElements0, unsigned* flags0 ) {
   extern __shared__ char totalShrMemPtr[];
    {
     // generated with TensorForge. Version: 0.0.1
@@ -116,7 +116,7 @@ __launch_bounds__(256)
           // wait(s0 = load{g>s}(glb_m2[0, 1]));
           __pipeline_wait_prior(0);
           float r1[8]{};
-          __syncwarp();
+          __syncwarp(0x0000ffffu << (threadIdx.y % 2 * 16));
           // r1 = +(r0 * s0) + None
           // [(0, 12), (0, 8)] [(0, 12)]
           float ir1[8]{};
@@ -451,7 +451,7 @@ __launch_bounds__(256)
               r1[v585_n1] = v587_data;
             }
           }
-          __syncwarp();
+          __syncwarp(0x0000ffffu << (threadIdx.y % 2 * 16));
           // s1 = load{g>s}(glb_m4[0, 1])
           #pragma unroll
           for (int32_t i = 0; i < 6; i += 1) {
@@ -471,7 +471,7 @@ __launch_bounds__(256)
           // wait(s1 = load{g>s}(glb_m4[0, 1]));
           __pipeline_wait_prior(0);
           float r3[8]{};
-          __syncwarp();
+          __syncwarp(0x0000ffffu << (threadIdx.y % 2 * 16));
           // r3 = +(r2 * s1) + name: r1, type: SymbolType.Register, lead: [0]
           // [(0, 12), (0, 8)] [(0, 12)]
           float ir3[8]{};
@@ -807,7 +807,7 @@ __launch_bounds__(256)
               r3[v1139_n1] = (v1143_data + v1141_data);
             }
           }
-          __syncwarp();
+          __syncwarp(0x0000ffffu << (threadIdx.y % 2 * 16));
           // s2 = load{g>s}(glb_m6[0, 1])
           #pragma unroll
           for (int32_t i = 0; i < 6; i += 1) {
@@ -827,7 +827,7 @@ __launch_bounds__(256)
           // wait(s2 = load{g>s}(glb_m6[0, 1]));
           __pipeline_wait_prior(0);
           float r5[8]{};
-          __syncwarp();
+          __syncwarp(0x0000ffffu << (threadIdx.y % 2 * 16));
           // r5 = +(r4 * s2) + name: r3, type: SymbolType.Register, lead: [0]
           // [(0, 12), (0, 8)] [(0, 12)]
           float ir5[8]{};
@@ -1163,7 +1163,7 @@ __launch_bounds__(256)
               r5[v1696_n1] = (v1700_data + v1698_data);
             }
           }
-          __syncwarp();
+          __syncwarp(0x0000ffffu << (threadIdx.y % 2 * 16));
           // s3 = load{g>s}(glb_m8[0, 1])
           #pragma unroll
           for (int32_t i = 0; i < 6; i += 1) {
@@ -1174,7 +1174,7 @@ __launch_bounds__(256)
           // wait(s3 = load{g>s}(glb_m8[0, 1]));
           __pipeline_wait_prior(0);
           float r7[8]{};
-          __syncwarp();
+          __syncwarp(0x0000ffffu << (threadIdx.y % 2 * 16));
           // r7 = +(r6 * s3) + name: r5, type: SymbolType.Register, lead: [0]
           // [(0, 12), (0, 8)] [(0, 12)]
           float ir7[8]{};
@@ -1518,7 +1518,7 @@ __launch_bounds__(256)
               glb_m0[(v23_lead + (v2249_i1 * 12))] = v2251_data;
             }
           }
-          __syncwarp();
+          __syncwarp(0x0000ffffu << (threadIdx.y % 2 * 16));
         }
       }
     }

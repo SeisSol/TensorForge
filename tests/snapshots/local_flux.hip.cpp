@@ -1,19 +1,19 @@
 // === base name ===
-kernel_f62b1bcc54
+kernel_3711234c2d69a9a8
 
 // === header ===
-void launcher_kernel_f62b1bcc54(const float* m0, const float** m1, unsigned m1_extraOffset, float** m2, unsigned m2_extraOffset, const float** m3, unsigned m3_extraOffset, const float* m4, const float** m5, unsigned m5_extraOffset, const float* m6, const float** m7, unsigned m7_extraOffset, const float* m8, const float** m9, unsigned m9_extraOffset, size_t numElements0, unsigned* flags0 = nullptr, void* streamPtr = nullptr);
+void launcher_kernel_3711234c2d69a9a8(const float* m0, const float** m1, size_t m1_extraOffset, float** m2, size_t m2_extraOffset, const float** m3, size_t m3_extraOffset, const float* m4, const float** m5, size_t m5_extraOffset, const float* m6, const float** m7, size_t m7_extraOffset, const float* m8, const float** m9, size_t m9_extraOffset, size_t numElements0, unsigned* flags0 = nullptr, void* streamPtr = nullptr);
 
 
 // === launcher ===
-void launcher_kernel_f62b1bcc54(const float* m0, const float** m1, unsigned m1_extraOffset, float** m2, unsigned m2_extraOffset, const float** m3, unsigned m3_extraOffset, const float* m4, const float** m5, unsigned m5_extraOffset, const float* m6, const float** m7, unsigned m7_extraOffset, const float* m8, const float** m9, unsigned m9_extraOffset, size_t numElements0, unsigned* flags0 , void* streamPtr) {
+void launcher_kernel_3711234c2d69a9a8(const float* m0, const float** m1, size_t m1_extraOffset, float** m2, size_t m2_extraOffset, const float** m3, size_t m3_extraOffset, const float* m4, const float** m5, size_t m5_extraOffset, const float* m6, const float** m7, size_t m7_extraOffset, const float* m8, const float** m9, size_t m9_extraOffset, size_t numElements0, unsigned* flags0 , void* streamPtr) {
   dim3 block (32, 8, 1);
   static std::size_t gridsize = 0;
       if (gridsize == 0) {
         int device, smCount, blocksPerSM;
         CHECK_RES(hipGetDevice(&device));
         CHECK_RES(hipDeviceGetAttribute(&smCount, hipDeviceAttributeMultiprocessorCount, device));
-        CHECK_RES(hipOccupancyMaxActiveBlocksPerMultiprocessor(&blocksPerSM, kernel_kernel_f62b1bcc54, block.x * block.y * block.z, 12544 * sizeof(float)));
+        CHECK_RES(hipOccupancyMaxActiveBlocksPerMultiprocessor(&blocksPerSM, kernel_kernel_3711234c2d69a9a8, block.x * block.y * block.z, 12544 * sizeof(float)));
         CHECK_ERR;
         if (blocksPerSM > 0) {
           gridsize = smCount * blocksPerSM;
@@ -26,13 +26,13 @@ void launcher_kernel_f62b1bcc54(const float* m0, const float** m1, unsigned m1_e
   dim3 grid (std::min(gridsize, numElements0), 1, 1);
   static bool shmemsizeset = false;
       if (!shmemsizeset) {
-        CHECK_RES(hipFuncSetAttribute(reinterpret_cast<const void*>(&kernel_kernel_f62b1bcc54), hipFuncAttributeMaxDynamicSharedMemorySize, 12544 * sizeof(float)));
+        CHECK_RES(hipFuncSetAttribute(reinterpret_cast<const void*>(&kernel_kernel_3711234c2d69a9a8), hipFuncAttributeMaxDynamicSharedMemorySize, 12544 * sizeof(float)));
         CHECK_ERR;
         shmemsizeset = true;
       }
       
   hipStream_t stream = (streamPtr != nullptr) ? static_cast<hipStream_t>(streamPtr) : 0;
-  hipLaunchKernelGGL(kernel_kernel_f62b1bcc54, grid, block, 12544 * sizeof(float), stream,  m0,  m1,  m1_extraOffset,  m2,  m2_extraOffset,  m3,  m3_extraOffset,  m4,  m5,  m5_extraOffset,  m6,  m7,  m7_extraOffset,  m8,  m9,  m9_extraOffset,  numElements0,  flags0 );
+  hipLaunchKernelGGL(kernel_kernel_3711234c2d69a9a8, grid, block, 12544 * sizeof(float), stream,  m0,  m1,  m1_extraOffset,  m2,  m2_extraOffset,  m3,  m3_extraOffset,  m4,  m5,  m5_extraOffset,  m6,  m7,  m7_extraOffset,  m8,  m9,  m9_extraOffset,  numElements0,  flags0 );
   CHECK_ERR;
 }
 
@@ -40,7 +40,7 @@ void launcher_kernel_f62b1bcc54(const float* m0, const float** m1, unsigned m1_e
 // === kernel ===
 __global__ void 
 __launch_bounds__(256)
- kernel_kernel_f62b1bcc54(const float* m0, const float** m1, unsigned m1_extraOffset, float** m2, unsigned m2_extraOffset, const float** m3, unsigned m3_extraOffset, const float* m4, const float** m5, unsigned m5_extraOffset, const float* m6, const float** m7, unsigned m7_extraOffset, const float* m8, const float** m9, unsigned m9_extraOffset, size_t numElements0, unsigned* flags0 ) {
+ kernel_kernel_3711234c2d69a9a8(const float* m0, const float** m1, size_t m1_extraOffset, float** m2, size_t m2_extraOffset, const float** m3, size_t m3_extraOffset, const float* m4, const float** m5, size_t m5_extraOffset, const float* m6, const float** m7, size_t m7_extraOffset, const float* m8, const float** m9, size_t m9_extraOffset, size_t numElements0, unsigned* flags0 ) {
   extern __shared__ char totalShrMemPtr[];
    {
     // generated with TensorForge. Version: 0.0.1
