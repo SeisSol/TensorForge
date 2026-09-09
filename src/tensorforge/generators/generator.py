@@ -307,7 +307,7 @@ class Generator:
           f'launch_control needs `clusterlaunchcontrol`, which is sm_100 and '
           f'above; this target is {hw.vendor} {hw.model}')
     prefer_launchcontrol = context.get_user_options().launch_control
-    prefer_persistent = context.get_vm().get_hw_descr().vendor in ['amd', 'nvidia'] and not prefer_launchcontrol
+    prefer_persistent = not prefer_launchcontrol
     # The vendor rule is the default and not the decision; it is carried by the
     # option's declaration, and a caller asking either way overrides it there,
     # so that a sweep can price both.
