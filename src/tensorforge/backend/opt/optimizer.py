@@ -23,6 +23,7 @@ from .manager import (LegacyAnalysis, LegacyTransform, PassContext, PassManager,
 from .mem_region_allocation import MemoryRegionAllocation
 from .memmove import MoveLoads
 from .pipeline import Pipeline
+from .prefetch import PrefetchBatch
 from .shr_mem_analyzer import ShrMemOpt
 from .wrap import WrapLoads
 from .sync_block import SyncThreadsOpt
@@ -90,6 +91,19 @@ class OptimizationStage:
             depth=getattr(opts, 'pipeline_depth', 2),
             rotate_buffers=getattr(opts, 'enable_multibuffer', False)),
         enabled=lambda pc: getattr(opts, 'enable_pipeline', False)))
+
+    # The cache hint for the next element's pointer.  After the two passes
+    # above and not before: both rewrite the head of the region, and the head
+    # is where this inserts.  It moves nothing itself, so nothing downstream
+    # has to be told it ran.
+    #
+    # Off by default.
+    pm.add(LegacyTransform(
+        'PrefetchBatch',
+        lambda pc, instrs: PrefetchBatch(
+            pc.context, instrs,
+            level=getattr(opts, 'prefetch_level', 'l2')),
+        enabled=lambda pc: getattr(opts, 'enable_prefetch', False)))
 
     # Whole nest: a value carried across the loop's back edge is only visible
     # to a fixed point over the region structure.

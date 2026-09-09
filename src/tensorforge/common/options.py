@@ -344,6 +344,35 @@ declare('wrap_distance',
         default=1,
         doc='Compute slots a wrapped transfer is moved ahead by.')
 
+declare('enable_prefetch',
+        default=False,
+        parse=parse_bool,
+        doc='Issue a cache hint for the next batch element at the top of the '
+            'loop body, where the target has a data prefetch.\n'
+            'Distinct from `enable_wrap_loads`, which moves the transfer '
+            'itself: nothing is loaded here and nothing waits, so it costs no '
+            'register and no buffer, and it is dropped outright on a target '
+            'that cannot spell it. What it buys is the head of element k+1 '
+            'being on its way while k is computed -- and under '
+            '`Addressing.PTR_BASED` the pointer, which is the load every '
+            'other address of that element depends on.\n'
+            'Off pending numbers from hardware. A hint that arrives too early '
+            'is evicted before its use and one that arrives too late is a '
+            'wasted request, and which of the two a body does is a '
+            'measurement.')
+
+declare('prefetch_level',
+        default='l2',
+        parse=parse_str,
+        doc='Which cache `enable_prefetch` asks for: `l1` or `l2`.\n'
+            'A request rather than an instruction. NVIDIA spells both and is '
+            'so far the only target that spells either; AMD takes a scope '
+            'where this would be a level, and SYCL 2020 has no level at all, '
+            'so the answer there is the same instruction both ways.\n'
+            'L2 by default, because the distance this issues at is a whole '
+            'loop body: L1 is small enough that the line is likely gone again '
+            'before the iteration that wants it.')
+
 declare('preload_globals',
         rule=lambda hw: hw.vendor in ('amd',),
         parse=parse_bool,

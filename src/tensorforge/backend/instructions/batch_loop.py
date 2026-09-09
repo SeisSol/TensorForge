@@ -285,6 +285,21 @@ class BatchLoop(AbstractInstruction):
                 f'{lookahead} requested')
         return self._batch(lookahead)
 
+    def lookahead_value(self):
+        """``batchId1`` as an operand, once the loop has bound it.
+
+        The name is available from construction; the value is not, and the
+        difference matters to anything inside the region that means the *next*
+        element. An index spelled into text is a computation the IR reads as
+        having no inputs, so it is loop-invariant as far as any pass can tell
+        -- which is how it ends up hoisted out of the loop that defines what
+        it reads.
+
+        ``None`` before the bindings are emitted, and on the legacy writer,
+        which has no operands to hand out.
+        """
+        return self._first_lookahead
+
     def stage_counter_name(self) -> str:
         return f'pipeStage{self._section_index}'
 

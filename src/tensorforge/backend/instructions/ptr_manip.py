@@ -66,6 +66,20 @@ class GetElementPtr(AbstractInstruction):
     """
     return getattr(self._src.obj, 'addressing', None) == Addressing.PTR_BASED
 
+  def reads_the_pointer_array(self) -> bool:
+    """Does this binding load `m[batchId0]` out of an array of pointers?
+
+    Narrower than `dereferences_the_batch`, which asks about the addressing
+    mode alone. Two bindings carry that mode and still read no pointer array
+    by the loop's own index: a table-fed one takes its base from a table the
+    prologue already built, so the element index does not enter the address at
+    all, and a lookahead one names an element the loop has not reached, whose
+    pointer is therefore already being asked for.
+    """
+    return (self.dereferences_the_batch()
+            and self._table is None
+            and self._batch_offset == 0)
+
   def source_name(self) -> str:
     """What the right-hand side reads the base pointer out of."""
     if self._table is None:
