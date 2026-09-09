@@ -419,7 +419,9 @@ class StoreShrMemToGlb(AbstractInstruction):
 
           lhs = "{}[{}]".format(dest_name, glb_mem_addr)
           rhs = "{}[{}]".format(src_name,  shr_mem_addr)
-          writer(self._vm.get_lexic().glb_store(lhs, rhs, self._src.get_last_user() is self))
+          writer(self._vm.get_lexic().glb_store(
+              lhs, rhs, datatype=self._src.get_fptype(),
+              nontemporal=self._src.get_last_user() is self))
 
       # the last hop to fill shared mem with data
       if (dest_data_view.lead_dim % self._num_threads) != 0:
@@ -431,7 +433,9 @@ class StoreShrMemToGlb(AbstractInstruction):
 
           lhs = "{}[{}]".format(dest_name, glb_mem_addr)
           rhs = "{}[{}]".format(src_name,  shr_mem_addr)
-          writer(self._vm.get_lexic().glb_store(lhs, rhs, self._src.get_last_user() is self))
+          writer(self._vm.get_lexic().glb_store(
+              lhs, rhs, datatype=self._src.get_fptype(),
+              nontemporal=self._src.get_last_user() is self))
 
   def __str__(self) -> str:
     return f'{self._dest.name} = store{{s>g}}({self._src.name});'

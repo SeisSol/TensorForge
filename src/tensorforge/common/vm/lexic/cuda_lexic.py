@@ -6,6 +6,36 @@ from tensorforge.common.basic_types import Datatype
 from tensorforge.common.basic_types import GeneralLexicon
 from tensorforge.backend.writer import MultiBlock
 
+#: The types `__ldcg` and `__stcg` are declared over, as this backend spells
+#: them.
+#:
+#: A list and not a rule, because the underlying set is a list too -- CUDA
+#: declares the pair one overload at a time -- and because the answer depends
+#: on the *spelling* a datatype gets here, not on the datatype.  `tf32` is
+#: `uint32_t` on this target, so it takes the `unsigned int` overload and
+#: belongs here; on Intel the same member is a class type and would not.
+#:
+#: Absent, each for its own reason.  `F128` has no overload at any
+#: architecture, which is the defect this set exists to stop.  `BOOL` has
+#: none either, and `const bool*` converts to no other pointer type, so it
+#: would fail the same way the day something loads one.  `F16` and `BF16` are
+#: spelled `half` and `bfloat16`, which nothing in `include/` declares for
+#: CUDA -- so a kernel carrying them fails earlier than this, and claiming an
+#: overload for a type that has no declaration would be a guess.  When that
+#: spelling arrives and resolves to `__half`/`__nv_bfloat16`, `cuda_fp16.hpp`
+#: and `cuda_bf16.hpp` do declare the pair, and this is the line that changes.
+_CACHE_HINT_TYPES = frozenset({
+    Datatype.F32,
+    Datatype.F64,
+    Datatype.I8,
+    Datatype.I16,
+    Datatype.I32,
+    Datatype.I64,
+    Datatype.U32,
+    Datatype.TF32,
+})
+
+
 class CudaLexic(Lexic):
 
   def __init__(self, backend, underlying_hardware):
@@ -285,15 +315,35 @@ class CudaLexic(Lexic):
     return (f'tensorforge::reduction<{op}, {block}, {subblock}, {ctype}>'
             f'({variable})')
 
-  def glb_store(self, lhs, rhs, nontemporal=False):
-    if nontemporal:
+  def has_nontemporal(self, datatype, length=1):
+    """Whether `__ldcg`/`__stcg` are declared for this type.
+
+    They are an overload set and not a generic: `sm_32_intrinsics.h` declares
+    them over the built-in integer types, `float`, `double`, and CUDA's own
+    vector structs.  A type outside it does not get a slower load, it gets
+    `no instance of overloaded function "__ldcg" matches the argument list`
+    -- at every architecture, since the overload set is a property of the
+    header and not of the target.
+
+    `length > 1` is refused twice over.  A wide value is spelled
+    `tensorforge::VectorT<T, N>` here, a GNU vector, and the overloads are
+    declared over `floatN` -- same size, same alignment, no conversion
+    between them, which is the cast `atomic_store` has to write out.  And a
+    value of vector type does not survive nvcc in device code at all, so
+    there is nothing for the hint to be attached to.  Both are spellings the
+    lexic would have to change; neither is answered by naming an intrinsic
+    here.
+    """
+    return length == 1 and datatype in _CACHE_HINT_TYPES
+
+  def glb_store(self, lhs, rhs, *, datatype, length=1, nontemporal=False):
+    if nontemporal and self.has_nontemporal(datatype, length):
       return f'__stcg(&{lhs}, {rhs});'
     else:
       return f'{lhs} = {rhs};'
 
-  def glb_load(self, rhs, nontemporal=False):
-    if nontemporal:
-      # return f'__ldg(&{rhs})'
+  def glb_load(self, rhs, *, datatype, length=1, nontemporal=False):
+    if nontemporal and self.has_nontemporal(datatype, length):
       return f'__ldcg(&{rhs})'
     else:
       return f'{rhs}'

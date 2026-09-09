@@ -2127,7 +2127,20 @@ class Symbol:
                     nontemporal=nontemp, extern=str(variable))
         return True
       if self.stype == SymbolType.Global:
-        writer(f'{self.get_fptype()} {variable} = {context.get_vm().get_lexic().glb_load(variable, access, nontemp)};', self, Effect.READ, args=_operands(variable, addrs))
+        # The hint goes on the read and the broadcast goes around it.  Only a
+        # broadcast reaches here -- the structured path above takes every
+        # other global load -- so `access` is already `__shfl_sync(mask, ...,
+        # lane)`, and a cache hint on *that* would be asking for the address
+        # of an intrinsic's return value.  `pre_access` is the read the hint
+        # is about, and re-wrapping it after keeps the exchange where it was.
+        lex = context.get_vm().get_lexic()
+        loaded = lex.glb_load(pre_access, datatype=self.get_fptype(),
+                              length=max(lead_width_of(index),
+                                         vec_width_of(index)),
+                              nontemporal=nontemp)
+        if bc_lane is not None:
+          loaded = lex.broadcast(loaded, bc_lane, self.num_threads)
+        writer(f'{self.get_fptype()} {variable} = {loaded};', self, Effect.READ, args=_operands(variable, addrs))
       else:
         writer.access_stmt(f'{self.get_fptype()} {variable} = {access};', self, Effect.READ, args=_operands(variable, addrs))
       return True
@@ -2184,7 +2197,9 @@ class Symbol:
               context, access, var, None, self.get_fptype(),
               lead_width_of(index))
         else:
-          assign = context.get_vm().get_lexic().glb_store(access, var, nontemp)
+          assign = context.get_vm().get_lexic().glb_store(
+              access, var, datatype=self.get_fptype(),
+              length=lead_width_of(index), nontemporal=nontemp)
       else:
         # `atomic` used to reach here and be dropped: the update came out as
         # `access = var;`, an assignment where an accumulation was asked for,

@@ -342,8 +342,12 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
         def write_load(lhs, rhs):
           writer(f'cuda::memcpy_async(&{lhs}, &{rhs}, cuda::aligned_size_t<{elsize}>({elsize}), {self._pipeline});')
       else:
-        def write_load(lhs, rhs):
-          writer(f'{lhs} = {self._context.get_vm().get_lexic().glb_load(rhs, nontemporal=nontemporal)};')
+        # `increment`, not 1: above a width of one both sides of this
+        # assignment are `*(VectorT<T, N>*)&...`, so the value the hint would
+        # attach to is a vector and the lexic has to be told which.
+        def write_load(lhs, rhs, _t=self._dest.get_fptype(), _n=increment,
+                       _nt=nontemporal):
+          writer(f'{lhs} = {self._context.get_vm().get_lexic().glb_load(rhs, datatype=_t, length=_n, nontemporal=_nt)};')
 
       if linscale is None:
         indexwrapper = lambda x: x

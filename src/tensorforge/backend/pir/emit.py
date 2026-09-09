@@ -265,6 +265,30 @@ class Emitter:
         dt = getattr(base, 'datatype', None)
         return dt.size() if dt is not None else 4
 
+    def elem_type(self, base: Operand):
+        """The `Datatype` a buffer holds, or None where the base does not say.
+
+        The same two places `elem_size` reads, returning the type rather than
+        its width, because the lexic asks which overload exists for it and a
+        size does not answer that.
+        """
+        if isinstance(base, Value) and isinstance(base.type, BufferType):
+            return base.type.elem
+        return getattr(base, 'datatype', None)
+
+    def access_type(self, t, base: Operand):
+        """The (datatype, width) an access to `base` carries a value of.
+
+        The value's own type where it has one -- a vector-typed value reads
+        several elements through one cast, and the width is what decides
+        whether a target can hint at that access.  Where it has none (a stored
+        literal is not a `Value`), the buffer's element type stands in, which
+        is what the access is spelled through anyway.
+        """
+        if isinstance(t, ScalarType):
+            return t.base, (t.length or 1)
+        return self.elem_type(base), 1
+
     def _decide_async(self, body: Tuple[Stmt, ...]) -> None:
         """One decision per kernel body, not per copy.
 
@@ -541,7 +565,9 @@ class Emitter:
             # swizzle all see the access.
             named = s.attr('extern')
             if nontemporal:
-                self.declare(v, f'{lex.glb_load(access, True)}', s, name=named)
+                dt, width = self.access_type(v.type, s.args[0])
+                self.declare(v, f'{lex.glb_load(access, datatype=dt, length=width, nontemporal=True)}',
+                             s, name=named)
             else:
                 self.declare(v, access, s, name=named)
             if named:
@@ -577,8 +603,10 @@ class Emitter:
             space = s.accesses[0].space if s.accesses else None
             lex = self._lexic()
             if space is MemSpace.GLOBAL and lex is not None:
+                dt, width = self.access_type(vt, s.args[0])
                 w(lex.glb_store(access, self.operand(val),
-                                bool(s.attr('nontemporal'))))
+                                datatype=dt, length=width,
+                                nontemporal=bool(s.attr('nontemporal'))))
                 return
             w(f'{access} = {self.operand(val)};')
             return

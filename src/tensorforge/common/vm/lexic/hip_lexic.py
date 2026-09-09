@@ -148,14 +148,28 @@ class HipLexic(CudaLexic):
     kind = 'VectorRelaxedT' if relaxed else 'VectorT'
     return f'tensorforge::{kind}<{fptype}, {length}>'
 
-  def glb_store(self, lhs, rhs, nontemporal=False):
-    if nontemporal and self._underlying_hardware == 'amd':
+  def has_nontemporal(self, datatype, length=1):
+    """The hardware, not the type: the builtins are generic.
+
+    `__builtin_nontemporal_load` and `_store` take any scalar or vector
+    operand, so unlike the CUDA pair there is no overload set to fall outside
+    of and no type this has to turn away -- `__float128` and a `VectorT` are
+    both accepted.
+
+    HIP compiles for NVIDIA as well, where neither builtin is declared; that
+    is the condition `glb_store` and `glb_load` have always carried, stated
+    here once so `atomic_store` and these two answer it the same way.
+    """
+    return self._underlying_hardware == 'amd'
+
+  def glb_store(self, lhs, rhs, *, datatype, length=1, nontemporal=False):
+    if nontemporal and self.has_nontemporal(datatype, length):
       return f'__builtin_nontemporal_store({rhs}, &{lhs});'
     else:
       return f'{lhs} = {rhs};'
 
-  def glb_load(self, rhs, nontemporal=False):
-    if nontemporal and self._underlying_hardware == 'amd':
+  def glb_load(self, rhs, *, datatype, length=1, nontemporal=False):
+    if nontemporal and self.has_nontemporal(datatype, length):
       return f'__builtin_nontemporal_load(&{rhs})'
     else:
       return f'{rhs}'

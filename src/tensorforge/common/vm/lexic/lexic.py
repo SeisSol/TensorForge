@@ -105,10 +105,31 @@ class Lexic(ABC):
         f'{type(self).__name__} has no cross-lane reduction; see '
         f'Lexic.reduction')
 
-  def glb_store(self, lhs, rhs, nontemporal=False):
+  # --- global accesses ------------------------------------------------------
+  # `datatype` is keyword-only and has no default, so a call site cannot omit
+  # it and a positional `nontemporal` cannot land in it.  The hint is spelled
+  # by an overload set on at least one target, which makes the type part of
+  # the question rather than decoration on it: what an unanswered type buys is
+  # not a plainer access but a kernel that does not compile.
+
+  def has_nontemporal(self, datatype, length=1):
+    """Whether this target spells a nontemporal access of `length` x `datatype`.
+
+    The counterpart to `has_atomic_store`, asked for the same reason and
+    answered on the same terms: what the caller needs to know is whether the
+    hint *exists* for this type, not whether something could be written.  A
+    target without one says False and the access is emitted plainly, which
+    costs a cache policy and nothing else -- the hint is an optimisation over
+    exactly that access.
+
+    False here, because the base spelling below has no hint to give.
+    """
+    return False
+
+  def glb_store(self, lhs, rhs, *, datatype, length=1, nontemporal=False):
     return f'{lhs} = {rhs};'
 
-  def glb_load(self, rhs, nontemporal=False):
+  def glb_load(self, rhs, *, datatype, length=1, nontemporal=False):
     return f'{rhs}'
 
   # --- atomic accumulation --------------------------------------------------
