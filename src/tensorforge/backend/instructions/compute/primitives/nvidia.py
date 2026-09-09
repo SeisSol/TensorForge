@@ -4,7 +4,8 @@
 from tensorforge.common.basic_types import Datatype
 from tensorforge.common.exceptions import GenerationError
 from .. import ranking
-from ..bitlayout import Bit, BitLayout, Place, packed
+from ..bitlayout import Bit, BitLayout, Place
+from ..routes import lead_route as routes_lead_route
 from ..strategy import Strategy, whole
 from tensorforge.backend.pir.core import (BOOL, INDEX, Access, Effect, MemSpace,
                                           XorSwizzle,
@@ -557,6 +558,30 @@ def shmsize(stages, dtype, sm=None, a_parts=1):
 
     return max((size(atom) for atom in instrs_for(dtype, sm)), default=0)
 
+def lead_route(shape):
+    """`routes.lead_route` with this target's rungs, and it has none.
+
+    Not a placeholder.  A rung is an instruction that moves bits between the
+    lane index and the register index, and the ones this module issues do not
+    do that: `mma.sync` reads a fragment it was given, and the staging around
+    it moves elements through shared memory rather than between lanes.  So
+    the honest answer is the two rungs that are true everywhere -- no gap, or
+    the trip -- and handing in nothing is how that is said.
+    """
+    return routes_lead_route(shape)
+
+
+def takes(route) -> bool:
+    """Whether this emitter writes this route.
+
+    Only the empty one.  The fragments here are staged, but by `matmul`
+    itself and from the operand's own storage; nothing in this module takes a
+    `Transfer` plan and emits it, which is the same gap AMD has and a
+    different emitter away from closing.
+    """
+    return route == 0
+
+
 def strategies(shape, ctx):
     """What this target can emit for this shape.
 
@@ -565,18 +590,20 @@ def strategies(shape, ctx):
     is what keeps a shape this cannot serve falling through to the nest
     instead of reaching an assertion inside the emitter.
 
-    A packed lead operand is declined, and it is still a literal -- but no
-    longer for the reason it was.  The table now exists: `a_fragment_bits`
-    states what a fragment holds in the vocabulary a value is read in, so
-    there are two comparable sides here for the first time.  What is missing
-    is the third thing: `reach` and its rungs live in `primitives/amd`, and
-    they are where a difference between two layouts becomes a route or a
-    refusal.  Until that question can be asked from here, this answers the
-    part it can answer on its own -- an operand with an index bit inside a
-    register is not what any fragment holds -- and does not pretend to have
-    priced the alternative.
+    A packed lead operand is declined by the route it would need, the same
+    way AMD declines it and through the same function.  What differs is the
+    rungs, and this target hands in none: there is no instruction here that
+    permutes a register index against a lane index, so an operand that does
+    not already arrive at the fragment's distribution reaches it through
+    memory or not at all.  `takes` then says no, because the emitter writes
+    the staged fragments it stages itself and not a relayout it was handed.
+
+    That is a refusal with a price attached rather than a literal, which is
+    what it was until `reach` stopped living in `primitives/amd`.  It also
+    means this lifts the way AMD's will: by an emitter learning a route, not
+    by a condition being edited.
     """
-    if packed(shape.lead_layout):
+    if not takes(lead_route(shape)):
         return frozenset()
     if (ENABLED
             and supports(shape.threads, shape.accumulator, shape.sparse,

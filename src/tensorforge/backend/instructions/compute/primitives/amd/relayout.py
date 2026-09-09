@@ -35,6 +35,8 @@ from tensorforge.backend.pir.core import LaneAxis, RegisterLayout
 from . import catalog
 from .reorder import compose_cost, compose_exchange, emittable
 from ... import bitlayout, staging
+from ...routes import Rungs
+from ...routes import reach as routes_reach
 
 
 @dataclass(frozen=True)
@@ -189,62 +191,45 @@ def extracts(have) -> int:
     return bitlayout.unpacked(have)[1]
 
 
-def reach(have, want, ext: int, indices, wave: Optional[int] = None):
-    """How the operand gets from one distribution to the other.
+def _single(have, want, ext: int) -> bool:
+    """Whether one `transpose{ext}x{ext}b32` closes this gap.
 
-    Four answers, cheapest first, and each is a different kind of thing: `0`
-    is nothing to emit, `1` is the runtime's transpose, a tuple of `Move` is
-    that same exchange assembled out of swaps and merges, and a tuple of
-    `Transfer` is the trip through memory.  Ordered by what they cost rather
-    than by which is convenient, because the order *is* the preference.
-
-    The middle rung is where a width the runtime has no `transpose*` for would
-    stay in registers, and today it is not reached: a transpose's regions are
-    one lane out of every `ext`, which no `dppUpdate` mask expresses.  It is
-    offered only when every region has a mask that exists, and otherwise the
-    trip is what is left.  Which of the last two is taken is a comparison of
-    their counts, not their order.
-
-    A packed operand is unpacked first and then answered like any other, and
-    whether that closes the gap depends on which operand it is.  The shared
-    matrix reduces to `nest_shared` and costs the extracts.  The lead operand
-    does not: `lead_width` puts its low bits inside the register and the
-    fragment wants the leading dimension across the lanes, so unpacking moves
-    them the wrong way and what remains is a permutation between lane weights
-    -- which no row of `RELAYOUTS` performs, and the trip is what answers it.
-
-    Never `None`.  The staged path closes every gap, so a caller reaching here
-    always has an answer -- what it does not always have is one it can
-    afford.
+    Two facts, and both have to hold: the gap has to *be* what the
+    instruction does, which is `transposes_between`'s question, and the
+    runtime has to define it at this width -- `DEFINED_TRANSPOSES` names four
+    and the catalogue has entries at others.
     """
-    # A vector bit is an element of a packed register and reaching one is a
-    # subscript rather than a shuffle, so it is not a gap for the cross-lane
-    # machinery -- it closes first, and `extracts` is what it costs.  What is
-    # left is a distribution the rungs below already answer: unpacking a
-    # packed shared matrix yields exactly `nest_shared`.
-    have, _ = bitlayout.unpacked(have)
+    return transposes_between(have, want, ext) == 1 and has_transpose(ext)
 
-    direct = transposes_between(have, want, ext)
-    if direct == 0:
-        return 0
-    if direct == 1 and has_transpose(ext):
-        return 1
-    trip = staging.staged(have, want, indices)
-    if wave is None:
-        return trip
+
+def _assembled(have, want, indices, wave: int):
+    """The same exchange out of swaps and merges, or `None`.
+
+    `None` covers both "cannot" and "priced but not writable", and the second
+    is the one that happens: a transpose's regions are one lane out of every
+    `ext`, which no `dppUpdate` mask expresses, so the merge would need a
+    ternary on the lane id.  Offering a route nothing can emit would be worse
+    than the trip it is cheaper than, and saying so here keeps the reason
+    next to the masks it is a reason about.
+    """
     composed = compose_exchange(have, want, indices, wave)
-    if composed is None or not emittable(composed):
-        # Priced but not emittable: a transpose's regions are one lane out of
-        # every `ext`, which no `dppUpdate` mask expresses, so the merge would
-        # need a ternary on the lane id.  Offering a route nothing can emit
-        # would be worse than the trip it is cheaper than.
-        return trip
-    # The last two rungs are compared rather than ordered.  Registers beat
-    # memory at every width in the catalogue -- 224 instructions against 1024
-    # accesses at width eight -- but that is a count and not a law, and a gap
-    # with one region per element would not.
-    stores, loads = staging.accesses(trip)
-    return composed if compose_cost(composed) <= stores + loads else trip
+    return composed if composed is not None and emittable(composed) else None
+
+
+#: What this target can put between two register layouts.  The rest of the
+#: question -- that an empty gap needs nothing and that a trip closes any gap
+#: -- is true everywhere and lives in `routes`.
+RUNGS = Rungs(single=_single, assembled=_assembled, cost=compose_cost)
+
+
+def reach(have, want, ext: int, indices, wave: Optional[int] = None):
+    """`routes.reach` with this target's rungs.
+
+    Kept as a name here because the callers are this target's emitters and
+    the rungs are not theirs to pass -- an emitter that had to name them
+    could name another target's.
+    """
+    return routes_reach(have, want, ext, indices, wave, RUNGS)
 
 
 def takes(route) -> bool:

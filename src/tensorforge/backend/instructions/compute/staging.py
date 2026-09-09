@@ -4,7 +4,10 @@
 """The relayout that always works, and what it costs to take it.
 
 `bitlayout.moves` serves a gap the swap family reaches and
-`relayout.transposes_between` one a transpose reaches.  Both answer `None`
+`amd.relayout.transposes_between` one a transpose reaches.  This is the rung
+below both, and the only one `routes.reach` can offer without asking a
+target: it needs no instruction that moves bits between a lane index and a
+register index, which is what a target that has none hands in nothing about.  Both answer `None`
 where their instruction does not close the gap, and both are right to: a
 constant XOR per region does not permute bits, and an exchange of lane and
 slot bits does not reach an element inside a register.

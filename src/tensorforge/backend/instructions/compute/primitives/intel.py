@@ -48,7 +48,7 @@ gain.
 from tensorforge.backend.pir.core import SCALAR_LAYOUT, ScalarType
 from tensorforge.common.basic_types import Datatype
 from .. import broadcast, ranking, split
-from ..bitlayout import packed
+from ..routes import lead_route
 from ..strategy import Strategy, whole
 
 #: Fixed by the hardware; the header asserts it.
@@ -496,15 +496,14 @@ def strategies(shape, ctx):
     under the same lowering this one requires.  One is about reaching an
     operand, the other about what to build the products out of.
 
-    A packed lead operand is declined by both.  DPAS reads its fragments at
-    offsets derived from the vISA pseudocode and checked by laying a matrix
-    through them; those offsets name elements, and a width that puts elements
-    inside a register is a distribution they were not derived for.  The
-    broadcast chain reads `v[k]` out of the work-item's own registers, where
-    `k` is an element index for the same reason as on AMD.  Neither has been
-    given a conversion, so neither is offered one.
+    A packed lead operand is declined by the route it would need.  This
+    target hands in no rungs either: DPAS reads its fragments at offsets
+    derived from the vISA pseudocode, and the broadcast chain reads `v[k]`
+    out of the work-item's own registers -- neither moves bits between a lane
+    index and a register index, which is what a rung is.  So the answer is
+    the trip, and `takes` is `route == 0` because nothing here writes one.
     """
-    if packed(shape.lead_layout):
+    if lead_route(shape) != 0:
         return frozenset()
     if not supports(shape.threads, shape.accumulator, shape.sparse):
         return frozenset()

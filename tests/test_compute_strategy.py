@@ -21,7 +21,9 @@ import pytest
 from tensorforge.backend.instructions.compute.strategy import (
     DEFAULT_PREFERENCE, PREFERENCES, ComputeShape, Span, Strategy,
     choose_strategy, is_contraction, lead_layout, legal_strategies)
-from tensorforge.backend.instructions.compute import bitlayout
+from tensorforge.backend.instructions.compute import (bitlayout,
+                                                      routes,
+                                                      staging)
 from tensorforge.backend.instructions.compute.bitlayout import Position
 from tensorforge.backend.symbol import LeadIndex
 from tensorforge.common.context import Context
@@ -55,6 +57,52 @@ class _FakeCtx:
 def _shape(threads=32, dtype=Datatype.F32, sparse=False, explicit_simd=False):
     return ComputeShape(threads=threads, accumulator=dtype, sparse=sparse,
                         explicit_simd=explicit_simd)
+
+
+# -- one question, three sets of rungs ------------------------------------- #
+
+def test_a_target_with_no_rungs_gets_the_two_that_are_always_true():
+    """What handing in nothing means.  No gap needs no instruction, and the
+    trip needs none either -- those are facts about bits.  Everything between
+    them is an instruction, and a target that has none is not a target the
+    question cannot be asked of."""
+    threads = 64
+    have, want = lead_layout(threads, 4), lead_layout(threads, 1)
+    indices = [(i,) for i in range(threads)]
+    assert routes.reach(want, want, threads, indices) == 0
+    bare = routes.reach(have, want, threads, indices)
+    assert isinstance(bare, tuple) and isinstance(bare[0], staging.Transfer)
+
+
+def test_the_rungs_are_what_differs_and_not_the_question():
+    """AMD reaches this gap in one instruction and the others do not, and
+    that is the whole of the difference: same layouts, same call, same index
+    space."""
+    from tensorforge.backend.instructions.compute.primitives.amd import relayout
+
+    ext, threads = 4, 64
+    have = relayout.nest_shared(ext, threads)
+    want = relayout.transposed(ext, threads)
+    indices = [(c, l) for c in range(ext) for l in range(threads)]
+    assert routes.reach(have, want, ext, indices,
+                        rungs=relayout.RUNGS) == 1
+    bare = routes.reach(have, want, ext, indices)
+    assert isinstance(bare, tuple) and isinstance(bare[0], staging.Transfer)
+
+
+@pytest.mark.parametrize('vendor', ['amd', 'nvidia', 'intel'])
+def test_every_target_answers_the_packed_operand_by_its_route(vendor):
+    """No target names a width any more.  Each asks what the operand would
+    need and whether it writes that, so each lifts by an emitter learning a
+    route rather than by a condition being edited."""
+    import inspect
+
+    from tensorforge.backend.instructions.compute.primitives import (
+        amd, intel, nvidia)
+    module = {'amd': amd, 'nvidia': nvidia, 'intel': intel}[vendor]
+    source = inspect.getsource(module.strategies)
+    assert 'lead_width' not in source
+    assert 'lead_route' in source
 
 
 # -- the layout the plan derives ------------------------------------------- #

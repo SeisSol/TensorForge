@@ -37,7 +37,8 @@ property.
 from tensorforge.common.basic_types import Datatype
 
 from ... import bitlayout, broadcast, packing, staging
-from ...strategy import Span, Strategy, lead_layout, whole
+from ...routes import lead_route as routes_lead_route
+from ...strategy import Span, Strategy, whole
 
 from .arch import amdarch, cdna2, gfx1250, gfx1251, rdna
 from .caps import has_fmacdpp4, has_fmacdpp8, has_fmacdpp16
@@ -59,8 +60,9 @@ from .tiling import (EMULATION, EXCHANGE, Fit, Scheme, boundary,
                      candidates, choose, issues, offers, rank,
                      spare_products)
 from .emitters import fmadpp, fmadpp4, fmadpp8, fmadpp16, fmascalar
-from .relayout import (BROADCAST, MOVDPP16, RELAYOUTS, TRANSPOSE4X4, Relayout,
-                       find_relayout, reach, takes)
+from .relayout import (BROADCAST, MOVDPP16, RELAYOUTS, RUNGS,
+                       TRANSPOSE4X4, Relayout, find_relayout, reach,
+                       takes)
 from .select import (BroadcastForm, MATERIALISE_FROM, broadcast_form,
                      dual_issue_fma_lanes, packed_fma_lanes,
                      select_broadcast_form, select_fmadpp_step,
@@ -174,47 +176,12 @@ def scratch(strategy, shape, ctx):
 
 
 def lead_route(shape):
-    """How a lead operand of this width reaches the distribution a fragment
-    wants, in the three kinds `reach` answers in.
+    """`routes.lead_route` with this target's rungs.
 
-    `0` at width one, and that is not a shortcut: an unpacked lead operand
-    already arrives spread one element per lane, which is the fragment's own
-    reading, so there is no gap.  Above one the low bits of the index sit
-    inside the register, and unpacking them moves them into slots -- the wrong
-    direction, since the fragment wants them across the lanes.  What is left
-    is a permutation between lane weights, which no row of `RELAYOUTS`
-    performs, and the trip through memory is the answer.
-
-    One function because three callers ask the same question of the same
-    operand and would otherwise each derive it: `strategies` to decide whether
-    to offer a matrix core at all, `scratch` to size the buffer the answer
-    needs, and the tests to check that the refusal is the route and not a
-    literal.  The extent is the thread count -- the index space this operand
-    spans in one issue, which is also what the trip has to carry.
-
-    The start is read off the shape rather than rebuilt here.  It used to be
-    rebuilt, from `threads` and a width, which made this the second place
-    stating how a packed operand is distributed; the plan derives it now from
-    the index the emitter will build, and one derivation is what keeps the
-    reservation and the emission talking about the same operand.
+    Kept as a name here for the same reason `reach` is: `strategies` and
+    `scratch` are this target's, and the rungs are not theirs to pass.
     """
-    have = shape.lead_layout
-    if have is None or not bitlayout.packed(have):
-        return 0
-    threads = shape.threads
-    return reach(have, _flat_lead(threads), threads,
-                 [(index,) for index in range(threads)])
-
-
-def _flat_lead(threads):
-    """What a fragment wants: the leading dimension one element per lane.
-
-    Which is the lead operand at width one, so it is that and not a third
-    statement of a distribution -- a fragment wants the operand as an
-    unpacked one already arrives, and saying it that way is what makes the
-    two sides of `reach` comparable by construction.
-    """
-    return lead_layout(threads, 1)
+    return routes_lead_route(shape, RUNGS)
 
 
 def plan(strategy, shape, n, ctx):
