@@ -610,7 +610,7 @@ class Generator:
 
       for i,section in enumerate(self._sections):
         with writer.AnonymousScope():
-          if self._context.get_vm().get_hw_descr().vendor == 'nvidia':
+          if self._context.get_vm().get_hw_descr().has_cuda_pipeline():
             # Size the pipeline to the transfers that may be outstanding at
             # once.  cuda::make_pipeline() yields a single stage, so a second
             # producer_acquire() before the matching consumer_wait() blocks on a
@@ -626,6 +626,9 @@ class Generator:
             # twice.  An unused local is the price, and it is the safe
             # direction: under-declaring is a compile error, over-declaring is
             # a line nvcc drops.
+            # The condition is the target's, not the vendor's, because that
+            # last sentence has a floor: below sm_70 the type does not exist
+            # and an unused declaration is a compile error too.
             depth = async_depth(section.stream)
             if depth > 1 and False: # disabled for now (not needed for thread_scope_thread)
               # NOT __shared__: the scope is thread, so the state is private and

@@ -10,7 +10,18 @@
 
 #include <cooperative_groups.h>
 
+// `<cuda/pipeline>` reaches `<cuda/barrier>`, which is a hard `#error` below
+// sm_70 -- so this include decides whether a translation unit builds at all,
+// not merely what is available in it.  The generator names `cuda::pipeline`
+// under the same condition (`HwDecription.has_cuda_pipeline`), so nothing that
+// compiles here is missing its declaration.
+//
+// The host pass takes it unconditionally: `__CUDA_ARCH__` is undefined there
+// and the kernel bodies are parsed all the same.
+#if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 700
 #include <cuda/pipeline>
+#endif
+
 #include <cuda/ptx>
 
 namespace tensorforge {

@@ -71,6 +71,15 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
     self._is_ready: bool = False
 
     self._use_cuda_memcpy = self._context.get_vm().get_hw_descr().vendor == 'nvidia' and not self._no_memcpy
+    #: The route through the `cuda::pipeline` object, as opposed to the
+    #: structured `copy.async` the emitter lowers itself.  Narrower than
+    #: `_use_cuda_memcpy`: the object comes from `<cuda/pipeline>`, which no
+    #: target below sm_70 can include, so a transfer that finds no structured
+    #: path there has to move its bytes with ordinary loads instead of
+    #: acquiring a pipeline that cannot be declared.
+    self._use_pipeline_object = (
+        self._use_cuda_memcpy
+        and self._context.get_vm().get_hw_descr().has_cuda_pipeline())
     self._use_tma_memcpy = False
     #: tokens issued by this transfer, for the `LoadWait` that retires them
     self._tokens = []
@@ -197,13 +206,15 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
       self._issued_async = False
       write_loops(self._context, writer, loops, inner)
     else:
-      self._issued_async = self._use_cuda_memcpy
       structured_issue = self._use_cuda_memcpy and self._structured_copy(writer)
+      # Nothing is in flight unless one of the two routes carried it, and a
+      # wait for a transfer that never issued is a wait that never retires.
+      self._issued_async = structured_issue or self._use_pipeline_object
       if structured_issue:
         self._tokens = []
         self._token_owner = getattr(writer, 'uid', None)
         self._issued_structured = True
-      elif self._use_cuda_memcpy:
+      elif self._use_pipeline_object:
         writer(f'{self._pipeline}.producer_acquire();')
 
       loops = [writer.For(f'int32_t i{i} = 0; i{i} < {self._dest.data_view.shape[i]}; ++i{i}', True) for i in self._loop_indices]
@@ -230,7 +241,7 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
         # object those belonged to is gone, and with it the compile-time N
         # that made prefetch distance a number of iterations.
         pass
-      elif self._use_cuda_memcpy:
+      elif self._use_pipeline_object:
         writer(f'__syncwarp();')
         writer(f'{self._pipeline}.producer_commit();')
       if self._use_tma_memcpy:
@@ -337,7 +348,7 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
           value = writer.load(_s, rhs, type_=ltype, hint='ld',
                               nontemporal=_nt, layout=_l)
           writer.store(_d, value, lhs)
-      elif self._use_cuda_memcpy:
+      elif self._use_pipeline_object:
         elsize = self._dest.get_fptype().size() * increment
         def write_load(lhs, rhs):
           writer(f'cuda::memcpy_async(&{lhs}, &{rhs}, cuda::aligned_size_t<{elsize}>({elsize}), {self._pipeline});')
@@ -441,7 +452,7 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
       raise InternalError(f'shr-load: `dest` operand is not a tensor, instead: {self._dest.obj}')
 
   def get_headers(self) -> List[str]:
-    if self._use_cuda_memcpy:
+    if self._use_pipeline_object:
       # Both, because the headers are collected before it is known which path
       # a transfer takes: `cuda::memcpy_async` and the pipeline object come
       # from cooperative_groups, the `__pipeline_*` primitives the structured
@@ -449,6 +460,10 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
       # what made the migrated corpus render and stop compiling.
       return ['cooperative_groups.h', 'cooperative_groups/memcpy_async.h',
               'cuda_pipeline.h']
+    if self._use_cuda_memcpy:
+      # The structured route still lowers to `__pipeline_*` where the target
+      # has the instruction, and that primitive header carries no floor.
+      return ['cuda_pipeline.h']
     else:
       return []
 
@@ -733,7 +748,7 @@ class LoadWait(MemoryInstruction, LoadInstruction):
       # of their own -- which is the thing the acquire/release pair was
       # standing in for, expressed as a def-use edge instead.
       writer.wait(tokens[-1], *tokens[:-1])
-    elif self._instr._use_cuda_memcpy:
+    elif self._instr._use_pipeline_object:
       writer(f'{self._instr._pipeline}.consumer_wait();')
       writer(f'{self._instr._pipeline}.consumer_release();')
 

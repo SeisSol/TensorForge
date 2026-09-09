@@ -51,6 +51,38 @@ class HwDecription:
     self.model = arch
     self.backend = backend
 
+  def sm_level(self):
+    """`sm_80` -> 80, and None for anything that is not an `sm_` model.
+
+    Every digit after the prefix, not a fixed slice: the numbering is three
+    digits from sm_100 on, so a two-character read would rank Blackwell below
+    Pascal.  None rather than 0 keeps "this target has no compute capability"
+    distinct from "it has a low one" -- a comparison against 0 would answer
+    every NVIDIA question for a gfx target as well.
+    """
+    text = str(self.model)
+    if not text.startswith('sm_'):
+      return None
+    digits = ''.join(c for c in text[3:] if c.isdigit())
+    return int(digits) if digits else None
+
+  def has_cuda_pipeline(self) -> bool:
+    """Whether `cuda::pipeline` and `cuda::memcpy_async` exist for this target.
+
+    `<cuda/pipeline>` reaches `<cuda/barrier>`, which is a hard `#error` below
+    sm_70.  So on Pascal the declaration is not a line the compiler drops for
+    want of a use -- it is a translation unit that does not build, and every
+    kernel carries one.
+
+    Not the same question as `cp.async`, which arrives with sm_80: between the
+    two the type exists and its transfers lower to synchronous copies.  A
+    target that has this but not the instruction gets a pipeline object that
+    costs nothing; a target that has neither must not be handed one.
+    """
+    level = self.sm_level()
+    return (self.vendor == 'nvidia' and self.backend == 'cuda'
+            and level is not None and level >= 70)
+
 
 def report_error(usr_vendor, user_sub_arch):
   print(f'{user_sub_arch} is not listed in allowed set for {usr_vendor}')
