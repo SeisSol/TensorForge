@@ -272,15 +272,38 @@ def _wrap_one(loop: Stmt, make_value,
     # Rotating the buffer is a separate transformation with its own cost, and
     # a pass that quietly assumed someone else had done it would be wrong in
     # exactly the cases where nobody had.
-    dst_writes = [a for g in group for a in g.accesses if a.writes]
+    # From the subtree on *both* sides, and the writer side is the one that was
+    # missing.  The reader side below already says why; the same is true of the
+    # write, and more quietly: a group member is a `rawblock` or a hop loop,
+    # neither of which carries an access of its own, so `g.accesses` was empty
+    # and `any(... for w in dst_writes)` was `any([])` for every reader in the
+    # body.  The refusal could not fire at all -- the pass accepted every
+    # single-buffered destination it was ever given, which is the third time in
+    # this function that reading the top level of a group has meant reading
+    # nothing (`g.args[:1]` and `g.target[0]` were the first two).
+    dst_writes = [a for g in group for x, _ in walk((g,)) for a in x.accesses
+                  if a.writes]
     # The whole subtree, not the top level.  The compute reads its operand
     # inside nested loops, so a one-level scan found no read of the
     # destination and accepted a transfer that fills the buffer the current
     # element is still reading -- the exact race this check exists to refuse,
     # slipping through because the read was two regions down.
+    #
+    # A group's own statements are not readers of it, and now that the scan
+    # descends they are in `scan` as well: the `copy.async` inside a member
+    # reads the source and writes the destination, so excluding only the
+    # member itself left its subtree to be compared against its own write.
+    #
+    # By identity, where `s in group` was structural.  `Stmt` is a frozen
+    # dataclass, so `==` walks the whole subtree: over a set this size that is
+    # quadratic in the body and deep in each comparison.  Identity is also what
+    # was meant -- these are the statements `_sole_async` picked out of this
+    # very body, not statements that merely look like them, and two that happen
+    # to render alike are two transfers, only one of which is the group's.
+    in_group = {id(x) for g in group for x, _ in walk((g,))}
     scan = [] if assume_rotated else [st for st, _ in walk(region.body)]
     for s in scan:
-        if s in group or s.op is Op.WAIT or s.op is Op.IF:
+        if id(s) in in_group or s.op is Op.WAIT or s.op is Op.IF:
             continue
         for a in s.accesses:
             if a.writes:
