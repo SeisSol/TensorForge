@@ -177,19 +177,17 @@ def test_sycl_spells_the_core_2020_form():
     assert 'address_space_cast' in src and '.prefetch(1);' in src, src
 
 
-def test_esimd_says_it_dropped_them():
-    """The lowering declines, so the hints are built and then not spelled.
+def test_esimd_spells_it_through_the_helper():
+    """The cache hints are mandatory on this path, so a helper carries them.
 
-    `SyclLexic.has_prefetch` refuses under `simd_mode` -- a prefetch there is
-    a vector of byte offsets with a mask, not the one address the hook hands
-    out -- and the emitter says so once per body rather than leaving the
-    absence to be inferred.
+    `check_cache_hints` refuses a prefetch whose property list is empty, and
+    refuses several of the combinations that are not, so the legal pairs live
+    in `isycl.h` and the generated line names one of two helpers.
     """
     gen, src = _generate(Addressing.PTR_BASED, arch='pvc', backend='esimd',
                          enable_prefetch=True)
     _needs_a_batch_loop(gen)
-    assert '.prefetch(' not in src
-    assert 'prefetch hints dropped' in src, src
+    assert 'tensorforge::prefetchL2(&' in src, src
 
 
 def test_the_hint_sits_at_the_head_of_the_body():

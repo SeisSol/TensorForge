@@ -164,11 +164,29 @@ def test_sycl_answers_from_the_library_and_not_the_part():
     assert SyclLexic('acpp', 'nvidia').has_prefetch(_Hw('sm_80'))
 
 
-def test_esimd_declines_until_its_addressing_is_settled():
-    """A vector of offsets with a mask is not the single address this passes."""
+def test_esimd_has_one_where_the_lsc_does():
+    """`prefetch(const T*, props)` is the block form: one address, no mask.
+
+    The gather forms take a vector of byte offsets and are what a scattered
+    access wants; this hook hands out a single address, and the API has an
+    overload for exactly that.
+    """
     lex = SyclLexic('oneapi', 'intel', explicit_simd=True)
-    assert not lex.has_prefetch(_Hw('pvc'))
-    assert lex.prefetch('&g[0]', datatype=Datatype.F32) is None
+    assert lex.has_prefetch(_Hw('pvc'))
+    assert lex.prefetch('&g[0]', datatype=Datatype.F32) == (
+        'tensorforge::prefetchL2(&g[0]);')
+
+
+def test_esimd_declines_where_the_lsc_does_not():
+    """DG2 and PVC, per the API's own documentation; dg1 is Xe-LP."""
+    lex = SyclLexic('oneapi', 'intel', explicit_simd=True)
+    assert not lex.has_prefetch(_Hw('dg1'))
+
+
+def test_the_spmd_answer_does_not_depend_on_the_part():
+    """A core SYCL call an implementation has to accept, instruction or not."""
+    lex = SyclLexic('oneapi', 'intel')
+    assert lex.has_prefetch(_Hw('dg1')) and lex.has_prefetch(_Hw('pvc'))
 
 
 # --------------------------------------------------------------------------- #

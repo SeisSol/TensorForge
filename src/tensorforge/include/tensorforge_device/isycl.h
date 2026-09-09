@@ -22,6 +22,43 @@ using tf32 = sycl::ext::intel::experimental::esimd::tfloat32;
 /// Kept for the existing spelling in `isycl.h`'s own helpers.
 using TF32 = tf32;
 
+/// Ask a cache for the word at `ptr`, under the hints this API requires.
+///
+/// The hints are not optional here, which is the whole reason a helper exists.
+/// `check_cache_hints` static-asserts that a prefetch names an L1 hint from
+/// {cached, uncached, streaming} and an L2 hint from {cached, uncached}, and
+/// refuses both uncached -- so the empty property list every other backend
+/// gets away with is a compile error on this path, and which combinations are
+/// legal is a rule worth stating once instead of at every call site.
+///
+/// One element, and one address. `prefetch(const T*, props)` is the block form
+/// of the API; the gather forms take a vector of byte offsets with a mask
+/// beside it, and neither is what a pointer chase wants -- the address is a
+/// slot in an array of pointers and the next slot belongs to another element.
+///
+/// DG2 and PVC only, which the generator gates on rather than this: an earlier
+/// Xe part has no LSC prefetch for the API to lower to.
+template <intel_esimd::cache_hint L1H, intel_esimd::cache_hint L2H, typename T>
+ESIMD_INLINE void prefetchHinted(const T *ptr) {
+  intel_esimd::prefetch<T>(
+      ptr, intel_esimd::properties{intel_esimd::cache_hint_L1<L1H>,
+                                   intel_esimd::cache_hint_L2<L2H>});
+}
+
+/// Keep it near: cached at both levels.
+template <typename T> ESIMD_INLINE void prefetchL1(const T *ptr) {
+  prefetchHinted<intel_esimd::cache_hint::cached,
+                 intel_esimd::cache_hint::cached>(ptr);
+}
+
+/// Keep it out of L1. A hint issued a whole loop body ahead of its use lands
+/// in L1 long before anything wants it, and displaces what the current
+/// iteration is reading to no purpose.
+template <typename T> ESIMD_INLINE void prefetchL2(const T *ptr) {
+  prefetchHinted<intel_esimd::cache_hint::uncached,
+                 intel_esimd::cache_hint::cached>(ptr);
+}
+
 /// Split a vector of floats into the two TF32 halves a DPAS multiplies.
 ///
 /// The same arrangement as `splitFloatTF32` in `cuda.h`, and it has to be:
