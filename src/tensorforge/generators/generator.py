@@ -41,6 +41,8 @@ class AbstractThreadBlockPolicy:
     self._mem_per_mult: int = mem_per_mult
     self._global_mem: int = global_mem
     self._num_threads: int = num_threads
+    #: Whether the section this sizes a block for contains a barrier at all.
+    self._has_barrier: bool = False
 
     vm = self._context.get_vm()
     self._max_blocks = vm.get_hw_descr().max_block_per_sm
@@ -53,21 +55,32 @@ class AbstractThreadBlockPolicy:
   def _barrier_cap(self):
     """How many multiplications a block may hold and still separate them.
 
-    A multiplication that fits in a wave needs no block-level rendezvous at
-    all, so nothing is capped.  One that is wider needs a barrier over its own
-    threads: either the target has a sub-block rendezvous, and several fit,
-    or it has none, and the block barrier is the multiplication's barrier
-    only when the block holds one multiplication.
+    The cap is about a barrier, so it is asked only of a section that has one
+    -- `set_has_barrier`.  A section whose multiplications never rendezvous is
+    packed by memory and threads alone, which is most of the register-resident
+    paths.
+
+    Where there is a barrier, the block is sized so that the strongest barrier
+    the target can spell is exactly the set that has to meet.  A target with a
+    sub-block rendezvous can separate one multiplication from the next, so
+    nothing is capped; without one, the smallest separable set is the group of
+    multiplications that fills a whole number of waves, and the block is sized
+    to hold one of those.
 
     `None` is no cap, which is different from a cap of one.
     """
+    if not self._has_barrier:
+      return None
     vm = self._context.get_vm()
     wave = vm.get_hw_descr().vec_unit_length
-    if self._num_threads <= wave:
+    if self._num_threads == wave:
       return None
-    if vm.get_lexic().has_sync_mult(self._num_threads):
+    if vm.get_lexic().has_sync_mult(self._num_threads, vm.get_hw_descr()):
       return None
     return mults_per_group(self._num_threads, wave)
+
+  def set_has_barrier(self, has_barrier: bool) -> None:
+    self._has_barrier = bool(has_barrier)
 
 
 class RegmaxBlockPolicy(AbstractThreadBlockPolicy):
@@ -1134,7 +1147,17 @@ class Generator:
                                             self._num_threads,
                                             self._lead_width
                                             * self._context.get_user_options().lead_blocking)
+    policy.set_has_barrier(
+        any(instr.barrier_scope() is not None for instr in self._section.stream))
     num_mults_per_block = policy.get_num_mults_per_block()
+    # A block holds whole groups or the group is not a unit.  Rounding down
+    # rather than up, because up would exceed whatever bound produced the
+    # number -- shared memory, threads, or the barrier cap itself.
+    group = self._group_size(len(self._sections), self._section_traversal(
+        len(self._sections))[0])
+    if group > 1:
+      num_mults_per_block = max(group, num_mults_per_block
+                                - num_mults_per_block % group)
     self._section.shr_mem_obj.set_mults_per_block(num_mults_per_block)
     # The loop reads it to answer how far its body is uniform, and the answer
     # is what `verify` weighs a barrier against.  Over the optimised stream

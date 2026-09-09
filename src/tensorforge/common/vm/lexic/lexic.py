@@ -58,7 +58,7 @@ class Lexic(ABC):
   def sync_simd(self):
     pass
 
-  def has_sync_mult(self, num_threads: int) -> bool:
+  def has_sync_mult(self, num_threads: int, hw) -> bool:
     """Whether `sync_mult` rendezvouses fewer threads than the whole block.
 
     Asked before the thread-block policy sizes a block, because the answer
@@ -72,11 +72,13 @@ class Lexic(ABC):
     `num_threads` is part of the question rather than decoration on it. Every
     sub-block rendezvous counts participants, and every one of them counts in
     a unit -- threads, waves, sub-groups -- that a width not divisible by the
-    wave cannot express.
+    wave cannot express.  `hw` is passed rather than read off the lexic: the
+    lexic is built from the vendor alone, while the answer turns on the
+    architecture -- named barriers arrive at gfx12.5 and not at gfx12.
     """
     return False
 
-  def sync_mult(self, num_threads: int):
+  def sync_mult(self, num_threads: int, hw):
     """Rendezvous exactly the ``num_threads`` threads of one multiplication.
 
     Only reached where the multiplication is *wider* than a wave -- narrower

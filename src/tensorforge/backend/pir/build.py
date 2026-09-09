@@ -27,6 +27,7 @@ from tensorforge.common.basic_types import Datatype
 from tensorforge.common.exceptions import GenerationError
 
 from .core import (BOOL, INDEX, SCALAR_LAYOUT, TOKEN, Access, BufferType,
+                   Participants,
                    Effect, IRError,
                    LaneAxis, MemSpace, Op, Operand, Region, RegisterLayout,
                    ScalarType, Stmt, TokenType, Value, XorSwizzle, dump, walk,
@@ -50,20 +51,28 @@ class _Scope:
         self.kind = kind
 
 
-_BARRIER_ALIASES = {'lane': Uniformity.LANE, 'simd': Uniformity.MULT,
-                    'wave': Uniformity.MULT, 'warp': Uniformity.MULT,
-                    'mult': Uniformity.MULT, 'block': Uniformity.BLOCK,
-                    'group': Uniformity.BLOCK, 'grid': Uniformity.GRID}
+_BARRIER_ALIASES = {'wave': Participants.WAVE, 'warp': Participants.WAVE,
+                    'simd': Participants.WAVE, 'mult': Participants.MULT,
+                    'multgroup': Participants.MULTGROUP,
+                    'group': Participants.MULTGROUP,
+                    'block': Participants.BLOCK, 'grid': Participants.GRID}
 
 
-def _as_barrier_scope(x) -> Uniformity:
-    """Accepts the old strings so existing callers keep working."""
-    if isinstance(x, Uniformity):
+def _as_participants(x) -> Participants:
+    """A participant set, from the enum or from one of its spellings.
+
+    ``'wave'``, ``'warp'`` and ``'simd'`` all name the hardware wave, which is
+    what a caller staging an mma fragment means: the fragment's distribution is
+    a property of the warp and not of whatever the multiplication happens to
+    be.  ``'group'`` names the multiplications that share one, which is a
+    different thing and the reason the two cannot be spelled alike.
+    """
+    if isinstance(x, Participants):
         return x
     try:
         return _BARRIER_ALIASES[str(x).lower()]
     except KeyError:
-        raise IRError(f'unknown barrier scope {x!r}; '
+        raise IRError(f'unknown barrier participant set {x!r}; '
                       f'expected one of {sorted(_BARRIER_ALIASES)}')
 
 
@@ -1146,34 +1155,36 @@ class IRBuilder:
             return base.type.space
         return MemSpace.from_symbol_type(getattr(base, 'stype', None))
 
-    def barrier(self, scope: Union[str, Uniformity] = Uniformity.BLOCK,
+    def barrier(self, participants: Union[str, Participants] = Participants.BLOCK,
                 threads: Optional[int] = None) -> Stmt:
-        """A rendezvous of every thread that agrees at level ``scope``.
+        """A rendezvous of the threads ``participants`` names.
 
-        The scope is on the same lattice as value uniformity, and that is the
-        point: a barrier at level S inside a construct whose entry is only
-        U-uniform deadlocks unless ``U >= S``, because the threads that took the
-        other branch, or ran fewer iterations, never arrive.  Previously the
-        scope was an unchecked string that never reached the emitter -- every
-        barrier came out as sync_block() regardless of what was asked for.
+        Two things travel with the statement, and they answer different
+        questions.  ``participants`` says what the barrier covers in hardware,
+        which is what the emitter turns into an instruction.  ``scope`` -- the
+        attribute this derives -- says who therefore has to arrive, which is
+        what ``verify`` weighs against the region: a barrier at level S inside
+        a construct whose entry is only U-uniform deadlocks unless ``U >= S``,
+        because the threads that took the other branch, or ran fewer
+        iterations, never arrive.
 
-        ``threads`` says how many threads the caller actually needs to meet,
-        where that is narrower than the scope it had to ask for.  A
-        multiplication is not a hardware level: it is a warp while it fits in
-        one and a fraction of a block once it does not, so a caller that means
-        "this multiplication" has to name ``BLOCK`` for legality and can then
-        say how wide it really is.  A vendor with a sub-block rendezvous --
-        NVIDIA's named barriers are the case -- may use it; the default
-        ignores it and synchronises the block.
-
-        Deliberately not a new level on ``Uniformity``.  That enum is ordered
-        by "same across more threads" and ``min`` over it propagates value
-        uniformity; a wave sits *above* a 16-thread multiplication and *below*
-        a 64-thread one, so a rung for it would order the lattice differently
-        depending on the lane configuration, and silently.
+        Derived rather than passed, so that the claim and the instruction
+        cannot drift apart.  The wave is where they would: it holds several
+        multiplications at one lane configuration and part of one at another,
+        so what a wave barrier demands of its region is a fact about the
+        geometry rather than about the request.  ``threads`` supplies the
+        geometry, and is also the participant count a sub-block rendezvous
+        needs -- every one of them counts, in threads, waves or sub-groups
+        depending on the target, which is why the count and not a pre-divided
+        number is what travels.
         """
-        level = _as_barrier_scope(scope)
-        attrs = (('scope', level),)
+        who = _as_participants(participants)
+        wave = 1
+        vm = getattr(self.context, 'get_vm', None)
+        if vm is not None:
+            wave = vm().get_hw_descr().vec_unit_length
+        level = who.arrival(threads if threads is not None else wave, wave)
+        attrs = (('scope', level), ('participants', who), ('wave', wave))
         if threads is not None:
             attrs += (('threads', int(threads)),)
         return self._emit_op(Op.BARRIER, (), (), pure=False, movable=False,

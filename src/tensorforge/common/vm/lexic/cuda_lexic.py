@@ -120,6 +120,43 @@ class CudaLexic(Lexic):
   def sync_grid(self):
     return "cooperative_groups::this_grid().sync();"
 
+  #: Sixteen barrier resources per CTA, 0 through 15.  `__syncthreads()` is
+  #: barrier 0, so a multiplication may take one of the remaining fifteen.
+  NAMED_BARRIERS = 16
+
+  def has_sync_mult(self, num_threads: int, hw) -> bool:
+    """Two spellings, and which one applies turns on the width.
+
+    Below a wave the multiplication is a run of lanes inside one, and
+    `__syncwarp` takes the mask of exactly those lanes.  Above it the
+    multiplication is a whole number of waves and `barrier.sync id, count`
+    meets exactly `count` threads -- but the count must be a multiple of the
+    warp size, so a width that leaves a partial wave has no spelling here and
+    falls back to the group.
+    """
+    wave = hw.vec_unit_length
+    if num_threads < wave:
+      return wave % num_threads == 0
+    return num_threads % wave == 0
+
+  def sync_mult(self, num_threads: int, hw):
+    wave = hw.vec_unit_length
+    if num_threads < wave:
+      # The lanes of this multiplication and no others.  A full mask here
+      # would wait for the neighbouring multiplications in the same warp,
+      # which are free to run the body a different number of times.
+      mults = wave // num_threads
+      mask = ((1 << num_threads) - 1)
+      return (f'__syncwarp(0x{mask:08x}u << '
+              f'({self.thread_idx_y} % {mults} * {num_threads}));')
+    # `threadIdx.y + 1`, because barrier 0 is the one `__syncthreads()` takes.
+    # Two multiplications sharing an id rendezvous with each other, which is a
+    # deadlock the moment they run the body a different number of times -- so
+    # the id has to be per multiplication, and `mults_per_block` is capped to
+    # the resources by the thread-block policy.
+    return (f'asm volatile("barrier.sync %0, %1;" :: '
+            f'"r"({self.thread_idx_y} + 1), "r"({num_threads}) : "memory");')
+
   def get_sub_group_id(self, sub_group_size):
     return f'{self.thread_idx_x} % {sub_group_size}'
 

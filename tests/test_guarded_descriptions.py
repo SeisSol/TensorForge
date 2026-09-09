@@ -154,13 +154,12 @@ def test_a_region_is_only_mult_uniform():
     block may decide differently.  A block-wide barrier inside the region is
     then reached by some threads and not others, which deadlocks -- `verify`
     tightens its limit through `uniform_scope` on the way in."""
-    from tensorforge.backend.instructions.abstract_instruction import \
-        BarrierScope
+    from tensorforge.backend.pir.core import Uniformity
 
     descr = _sqrt()
     descr.condition = [GuardLiteral(_flag("c"))]
     region, = _regions(_generate([descr]))
-    assert region.uniform_scope() is BarrierScope.SIMD
+    assert region.uniform_scope() is Uniformity.MULT
 
 
 def test_a_guard_stops_the_plan_deferring_its_operand():

@@ -2,86 +2,87 @@
 #
 # SPDX-License-Identifier: MIT
 from tensorforge.common.context import Context
-from .abstract_instruction import AbstractInstruction, BarrierScope
-from tensorforge.backend.pir.core import Uniformity
+from .abstract_instruction import AbstractInstruction
+from tensorforge.backend.pir.core import Participants, Uniformity
 
 class SyncThreads(AbstractInstruction):
+  """A rendezvous of the threads of one multiplication."""
+
   def __init__(self, context: Context, num_threads_per_mult):
     super().__init__(context)
     self._num_threads = num_threads_per_mult
     self._is_ready = True
 
-  def barrier_scope(self) -> BarrierScope:
-    # same predicate __str__ uses to pick sync_block vs sync_simd -- resolved
-    # once, here, so that passes and verify() can see the scope
-    #
-    # Under an explicit vector there is nothing to synchronise.  The wave is
-    # not a hardware sub-group whose width the multiplication has to fit
-    # inside; it *is* the work-item, and `num_threads` is the length of its
-    # registers.  A 32-thread multiplication is a 32-wide vector held by one
-    # work-item, executed in order, with no second party to wait for.
-    #
-    # This is the structural difference the whole path was chosen for.  On
-    # PVC's 16-wide sub-group the SPMD lowering turns any wider multiplication
-    # into a GROUP barrier, and a `BatchLoop` is only MULT-uniform, so
-    # `verify()` rejects it -- correctly, it would deadlock.  16 of the 54
-    # cases in the corpus fail there and none of them for a reason that has
-    # anything to do with the operator.
+  def _wave(self) -> int:
+    return self._vm.get_hw_descr().vec_unit_length
+
+  def participants(self) -> Participants:
+    """The narrowest set of threads this barrier can be spelled over.
+
+    Narrowest, because a barrier that reaches further than it has to is a
+    barrier the block cannot pack multiplications around: whatever it covers
+    has to arrive, and rows that have to arrive together cannot run the body a
+    different number of times.  So the width chosen here is what
+    `AbstractThreadBlockPolicy` sizes a block from, and asking for less is
+    occupancy.
+
+    Under an explicit vector there is nothing to synchronise.  The wave is not
+    a hardware sub-group whose width the multiplication has to fit inside; it
+    *is* the work-item, and `num_threads` is the length of its registers.  A
+    32-thread multiplication is a 32-wide vector held by one work-item,
+    executed in order, with no second party to wait for.
+    """
     lex = self._vm.get_lexic()
     if getattr(lex, 'simd_mode', False):
-      return BarrierScope.SIMD
-    if self._num_threads > self._vm.get_hw_descr().vec_unit_length:
-      return BarrierScope.GROUP
-    return BarrierScope.SIMD
+      return Participants.MULT
+    n, wave = self._num_threads, self._wave()
+    if n == wave:
+      # The multiplication *is* the wave, so the wave barrier meets exactly
+      # the threads that have to meet and nothing narrower exists.
+      return Participants.WAVE
+    if lex.has_sync_mult(n, self._vm.get_hw_descr()):
+      return Participants.MULT
+    # No sub-block rendezvous.  What is left is the smallest set of whole
+    # waves that holds this multiplication, which is its group -- and the
+    # block is sized to one group, so the block barrier is the group's.
+    return Participants.MULTGROUP
+
+  def barrier_scope(self) -> Uniformity:
+    """Who has to arrive, derived from what the barrier covers.
+
+    One answer, taken from the participant set, so that the claim `verify`
+    checks and the instruction the emitter picks cannot disagree.  A barrier
+    that claims more than it covers is refused where it would have been legal;
+    one that claims less reaches part of the threads it was asked to reach.
+    """
+    return self.participants().arrival(self._num_threads, self._wave())
 
   def accesses(self):
     return ()
 
   def gen_ir(self, writer):
-    """Emit the scope `barrier_scope` decided, not a second opinion.
-
-    These two used to disagree.  `barrier_scope` weighs the thread count
-    against the wave -- which is the whole reason it takes one -- and answers
-    `GROUP` for a multiplication that does not fit in a wave; `gen_ir` asked
-    for `MULT` regardless, and the emitter turned that into `__syncwarp()`.
-    So `verify` would refuse the construct while the emitter, had it run,
-    would have synchronised a warp where a block was needed: a barrier that
-    reaches part of the threads it was asked to reach.
-
-    Nothing in the corpus is wide enough to have shown it -- `lanes.py` clamps
-    to `vec_unit_length` for every descriptor but `ElementwiseDescr`, and no
-    elementwise case reaches the cap.  One answer, taken from the resolver
-    that has the numbers, is what keeps it from mattering later.
-    """
-    if self.barrier_scope() is BarrierScope.SIMD:
-      # A wave, and it is a wave whatever the multiplication is: these threads
-      # are in lockstep, so the barrier is about ordering memory, not about
-      # arrival.
-      writer.barrier(Uniformity.MULT)
-      return
-    # Wider than a wave.  `BLOCK` is what may legally be claimed -- the width
-    # rides along so a vendor with a sub-block rendezvous can narrow it.
-    writer.barrier(Uniformity.BLOCK, threads=self._num_threads)
+    writer.barrier(self.participants(), threads=self._num_threads)
 
   def __str__(self) -> str:
-    return self.barrier_scope()
+    return f'{self.participants().value}({self._num_threads})'
 
   def gen_mask_threads(self, num_threads) -> str:
     return ''
+
 
 class SyncBlock(AbstractInstruction):
   def __init__(self, context: Context):
     super().__init__(context)
     self._is_ready = True
 
-  def barrier_scope(self) -> BarrierScope:
-    return BarrierScope.GROUP
+  def barrier_scope(self) -> Uniformity:
+    return Uniformity.BLOCK
 
   def accesses(self):
     return ()
 
   def gen_ir(self, writer):
-    writer.barrier(Uniformity.BLOCK)
+    writer.barrier(Participants.BLOCK)
 
   def __str__(self) -> str:
     return self.barrier_scope()
@@ -94,14 +95,14 @@ class SyncGrid(AbstractInstruction):
     super().__init__(context)
     self._is_ready = True
 
-  def barrier_scope(self) -> BarrierScope:
-    return BarrierScope.GRID
+  def barrier_scope(self) -> Uniformity:
+    return Uniformity.GRID
 
   def accesses(self):
     return ()
 
   def gen_ir(self, writer):
-    writer.barrier(Uniformity.GRID)
+    writer.barrier(Participants.GRID)
 
   def __str__(self) -> str:
     return self.barrier_scope()

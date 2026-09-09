@@ -594,13 +594,17 @@ def _sync(threads, backend):
 
 
 def test_a_wide_multiplication_needs_a_group_barrier_in_spmd():
-    """PVC's sub-group is 16 wide, so 32 threads span two of them and the
-    barrier has to be group-wide -- which a `BatchLoop` cannot host, and
-    `verify()` rejects.  16 of 54 corpus cases fail there, none of them for a
-    reason that has anything to do with the operator."""
-    from tensorforge.backend.instructions.abstract_instruction import BarrierScope
-    assert _sync(16, 'acpp') is BarrierScope.SIMD
-    assert _sync(32, 'acpp') is BarrierScope.GROUP
+    """PVC's sub-group is 16 wide, so 32 threads span two of them.
+
+    SPMD has no spelling for a rendezvous narrower than the sub-group, so the
+    barrier is met at the group -- and the thread-block policy sizes the block
+    to hold one group, which is what makes it legal inside a `BatchLoop`.
+    """
+    from tensorforge.backend.pir.core import Uniformity
+    assert _sync(16, 'acpp') is Uniformity.MULT, (
+        "a 16-thread multiplication is the sub-group, so the sub-group "
+        "barrier meets exactly it")
+    assert _sync(32, 'acpp') is Uniformity.MULTGROUP
 
 
 def test_an_explicit_vector_has_nobody_to_wait_for():
@@ -612,10 +616,10 @@ def test_an_explicit_vector_has_nobody_to_wait_for():
     This is the structural difference the path was chosen for, and it is what
     the sub-group-16 finding from the very first review turns into.
     """
-    from tensorforge.backend.instructions.abstract_instruction import BarrierScope
-    assert _sync(16, 'esimd') is BarrierScope.SIMD
-    assert _sync(32, 'esimd') is BarrierScope.SIMD
-    assert _sync(64, 'esimd') is BarrierScope.SIMD
+    from tensorforge.backend.pir.core import Uniformity
+    assert _sync(16, 'esimd') is Uniformity.MULT
+    assert _sync(32, 'esimd') is Uniformity.MULT
+    assert _sync(64, 'esimd') is Uniformity.MULT
 
 
 # --------------------------------------------------------------------------

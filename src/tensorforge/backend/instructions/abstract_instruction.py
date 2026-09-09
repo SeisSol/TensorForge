@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: MIT
 from abc import ABC, abstractmethod
 from enum import IntEnum
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 from tensorforge.common.context import Context, VM
 from tensorforge.backend.writer import Writer
 from tensorforge.common.exceptions import InternalError
@@ -11,7 +11,8 @@ import warnings
 from contextlib import contextmanager
 
 from tensorforge.backend import pir
-from tensorforge.backend.pir.core import Access, Effect, MemSpace
+from tensorforge.backend.pir.core import (Access, Effect, MemSpace,
+                                          Participants, Uniformity)
 
 
 def _explicit_simd(context) -> bool:
@@ -66,22 +67,6 @@ def _check_register_budget(body, simd: bool, context, where: str) -> None:
 
 class RegisterBudgetWarning(UserWarning):
   """A body needs more register file per thread than the target provides."""
-
-
-class BarrierScope(IntEnum):
-  """How far a synchronisation reaches.
-
-  The scope used to be *derived* inside ``SyncThreads.__str__`` from a thread
-  count, which made it invisible to any pass.  It is a property of the
-  instruction, so it lives here: barrier legality inside a loop depends on
-  the trip count being uniform *across the scope*, and only ``GRID`` can
-  deadlock a kernel outright.
-  """
-
-  NONE = 0
-  SIMD = 1     # wave / warp
-  GROUP = 2    # thread block
-  GRID = 3     # whole grid (cooperative launch)
 
 
 def _as_tuple(x) -> Tuple:
@@ -171,8 +156,15 @@ class AbstractInstruction(ABC):
     """Whether ``defs()``/``uses()`` are trustworthy for this instruction."""
     return bool(self.defs() or self.uses())
 
-  def barrier_scope(self) -> 'BarrierScope':
-    return BarrierScope.NONE
+  def barrier_scope(self) -> Optional[Uniformity]:
+    """Who has to arrive here, or `None` where this is not a barrier.
+
+    `None` rather than a rung of its own: the ladder is ordered by "the same
+    across more threads", and "not a barrier" is not a point on it.  A rung
+    would compare against the others and every comparison would then have to
+    exclude it by hand.
+    """
+    return None
 
   def regions(self) -> Tuple[Tuple['AbstractInstruction', ...], ...]:
     """Nested instruction streams, e.g. a loop body.
@@ -194,15 +186,15 @@ class AbstractInstruction(ABC):
     raise InternalError(
         f'{type(self).__name__} reports a region but cannot replace it')
 
-  def uniform_scope(self) -> 'BarrierScope':
+  def uniform_scope(self) -> Uniformity:
     """The strongest barrier that may legally appear inside this instruction's
     regions.
 
     ``GRID`` means no restriction.  A loop whose trip count differs between
-    blocks returns ``GROUP``: a grid barrier in its body would deadlock, since
+    blocks returns ``BLOCK``: a grid barrier in its body would deadlock, since
     blocks with fewer iterations exit without arriving.
     """
-    return BarrierScope.GRID
+    return Uniformity.GRID
 
   def accesses(self) -> Tuple[Access, ...]:
     """Localised memory effects, in ``pir``'s vocabulary."""
@@ -226,7 +218,7 @@ class AbstractInstruction(ABC):
       eff |= acc.kind
       if acc.space is MemSpace.UNKNOWN:
         eff |= Effect.UNKNOWN
-    if self.barrier_scope() is not BarrierScope.NONE:
+    if self.barrier_scope() is not None:
       eff |= Effect.BARRIER
     return eff
 

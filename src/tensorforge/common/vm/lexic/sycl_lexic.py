@@ -106,6 +106,30 @@ class SyclLexic(Lexic):
     # ordinary operator shapes to reach it.
     return "sycl::group_barrier(item.get_sub_group());"
 
+  def has_sync_mult(self, num_threads: int, hw) -> bool:
+    """True under an explicit vector, False under SPMD, and the asymmetry is
+    the point.
+
+    Under ESIMD one work-item *is* the vector: a multiplication of any width is
+    held by a single work-item, executed in order, with no second party to wait
+    for.  So the rendezvous costs nothing and is exact.
+
+    Under SPMD there is no spelling.  `sycl::group_barrier` takes a group
+    object and the narrowest one available is the sub-group, which is all of
+    it -- there is no mask, so a multiplication occupying part of a sub-group
+    cannot be met on its own.  The named barriers Xe has are reachable from
+    ESIMD (`named_barrier_signal` / `named_barrier_wait`) and exactly there
+    they are not needed; from SPMD, where they would be, they are not exposed.
+    So a narrow multiplication is met at its group instead, and the block is
+    sized to hold one.
+    """
+    return bool(self.simd_mode)
+
+  def sync_mult(self, num_threads: int, hw):
+    if self.simd_mode:
+      return None
+    return self.sync_block()
+
   def sync_grid(self):
     raise NotImplementedError() # TODO
     #return "item.barrier();"

@@ -29,7 +29,7 @@ Design decisions (see the region-vs-CFG discussion):
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
-from enum import IntEnum, IntFlag, auto
+from enum import IntEnum, IntFlag, auto, Enum
 from typing import Any, Dict, Iterator, List, Optional, Tuple, Union
 
 from tensorforge.common.basic_types import Datatype
@@ -302,12 +302,65 @@ class Uniformity(IntEnum):
 
     Propagation takes the ``min``: a value is only as uniform as its least
     uniform operand.
+
+    ``MULTGROUP`` is the rung between one multiplication and a block: the
+    multiplications that together fill a whole number of waves.  It is a rung
+    and not a detail of the lowering because it is a genuine answer to "the
+    same across how many threads" -- a batch traversal driven by a group of
+    rows is group-uniform and neither mult- nor block-uniform, and a barrier
+    inside it is legal at exactly that level.
+
+    The wave is deliberately *not* a rung.  It sits above a 16-thread
+    multiplication and below a 64-thread one, so a rung for it would order the
+    lattice differently depending on the lane configuration, and silently.
+    What a barrier covers in hardware is `Participants`, which is a tag rather
+    than a level for that reason.
     """
 
-    LANE = 0     # differs per thread -- derived from the lane id
-    MULT = 1     # same within one multiplication, differs between them
-    BLOCK = 2    # same within a thread block
-    GRID = 3     # same everywhere
+    LANE = 0        # differs per thread -- derived from the lane id
+    MULT = 1        # same within one multiplication, differs between them
+    MULTGROUP = 2   # same within the multiplications that share a wave
+    BLOCK = 3       # same within a thread block
+    GRID = 4        # same everywhere
+
+
+class Participants(Enum):
+    """What a barrier covers in hardware, as opposed to who must arrive.
+
+    Not an `IntEnum` and not ordered, because `WAVE` is not comparable with the
+    rest: a wave holds several multiplications at one lane configuration and
+    part of one at another.  So this says which instruction the lowering should
+    reach for, and `Uniformity` says what the region has to guarantee for that
+    instruction to be legal.  Conflating the two is how a barrier ends up
+    reaching some of the threads it was asked to reach.
+
+    `SyncThreads.participants` derives it from the lane geometry and what the
+    target can spell; `Lexic.sync_mult` is asked only for `MULT`.
+    """
+
+    WAVE = 'wave'            # the hardware wave, whatever the multiplication is
+    MULT = 'mult'            # exactly the threads of one multiplication
+    MULTGROUP = 'multgroup'  # the multiplications that share a wave
+    BLOCK = 'block'
+    GRID = 'grid'
+
+    def arrival(self, num_threads: int, wave: int) -> Uniformity:
+        """The uniformity a region needs for this barrier to be legal.
+
+        Derived rather than stated, so that the two cannot disagree.  A wave
+        barrier is the interesting one: it needs mult-uniformity where a
+        multiplication is at least a wave wide, because the wave then holds
+        parts of one multiplication only, and group-uniformity where it is
+        narrower, because the wave then holds several and all of them have to
+        arrive.
+        """
+        if self is Participants.WAVE:
+            return (Uniformity.MULT if num_threads >= wave
+                    else Uniformity.MULTGROUP)
+        return {Participants.MULT: Uniformity.MULT,
+                Participants.MULTGROUP: Uniformity.MULTGROUP,
+                Participants.BLOCK: Uniformity.BLOCK,
+                Participants.GRID: Uniformity.GRID}[self]
 
 
 @dataclass(frozen=True)

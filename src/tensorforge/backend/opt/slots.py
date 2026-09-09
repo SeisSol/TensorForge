@@ -34,7 +34,7 @@ This module answers only that.  It transforms nothing.
 from typing import Dict, List, NamedTuple, Optional, Sequence, Tuple
 
 from tensorforge.backend.instructions.abstract_instruction import (
-    AbstractInstruction, BarrierScope)
+    AbstractInstruction, Uniformity)
 from tensorforge.backend.instructions.allocate import RegisterAlloc, ShrMemAlloc
 from tensorforge.backend.instructions.batch_loop import BatchLoop
 from tensorforge.backend.instructions.compute import ComputeInstruction
@@ -127,7 +127,7 @@ class SlotModel:
             if isinstance(instr, ComputeInstruction):
                 self.compute_at.append(index)
                 slot += 1
-            if instr.barrier_scope() is not BarrierScope.NONE:
+            if instr.barrier_scope() is not None:
                 self.barriers += 1
 
         for index, instr in enumerate(self._body):

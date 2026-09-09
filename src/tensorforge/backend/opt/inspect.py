@@ -19,7 +19,7 @@ from __future__ import annotations
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from tensorforge.backend.instructions.abstract_instruction import (
-    AbstractInstruction, BarrierScope)
+    AbstractInstruction, Uniformity)
 from tensorforge.backend.pir.core import Effect, MemSpace, accesses_conflict
 from tensorforge.backend.symbol import SymbolType
 from tensorforge.common.ordered import OrderedSet
@@ -39,7 +39,7 @@ def _effect_str(instr: AbstractInstruction) -> str:
         return 'pure'
     flags = [f.name.lower() for f in Effect if f and (eff & f)]
     scope = instr.barrier_scope()
-    if scope is not BarrierScope.NONE:
+    if scope is not None:
         flags = [f for f in flags if f != 'barrier'] + [f'barrier:{scope.name.lower()}']
     return '+'.join(flags)
 
@@ -69,7 +69,7 @@ def _dump_into(lines: List[str], instrs: Sequence[AbstractInstruction],
             if uses:
                 note += f' use={{{uses}}}'
             if (not instr.describes_dataflow()
-                    and instr.barrier_scope() is BarrierScope.NONE
+                    and instr.barrier_scope() is None
                     and not instr.regions()):
                 note += '  OPAQUE'
             if not instr.is_ready():
@@ -147,7 +147,7 @@ def entering(region: Sequence[AbstractInstruction],
 
 def verify(instrs: Sequence[AbstractInstruction],
            *,
-           max_barrier_scope: BarrierScope = BarrierScope.GRID,
+           max_barrier_scope: Uniformity = Uniformity.GRID,
            predefined: Iterable[Any] = (),
            backend: Optional[str] = None,
            check_offsets: bool = True,
@@ -198,7 +198,7 @@ def verify(instrs: Sequence[AbstractInstruction],
 
         # -- 3. a barrier may not exceed the enclosing constructs' uniformity
         scope = instr.barrier_scope()
-        if scope is not BarrierScope.NONE and scope > max_barrier_scope:
+        if scope is not None and scope > max_barrier_scope:
             diags.append(Diagnostic(
                 'error', index,
                 f'{scope.name.lower()} barrier inside a construct whose trip '
@@ -208,7 +208,7 @@ def verify(instrs: Sequence[AbstractInstruction],
                 f'producing a wrong answer.'))
 
         # -- 4. backend actually supports the requested scope
-        if scope is BarrierScope.GRID and backend == 'sycl':
+        if scope is Uniformity.GRID and backend == 'sycl':
             diags.append(Diagnostic(
                 'error', index,
                 'grid barrier requested but the SYCL lexic raises '
@@ -216,7 +216,7 @@ def verify(instrs: Sequence[AbstractInstruction],
 
         # -- 5. opaque instructions: the migration worklist
         if (not instr.describes_dataflow()
-                and scope is BarrierScope.NONE
+                and scope is None
                 and Effect.UNKNOWN & instr.effect()):
             diags.append(Diagnostic(
                 'info', index,

@@ -31,8 +31,9 @@ from tensorforge.common.context import Context
 from tensorforge.common.exceptions import InternalError
 
 from tensorforge.backend import elementmask
+from tensorforge.backend.pir.core import Participants, Uniformity
 from tensorforge.common.threads import mults_per_group
-from .abstract_instruction import AbstractInstruction, BarrierScope
+from .abstract_instruction import AbstractInstruction
 
 
 class LoopMode(Enum):
@@ -181,7 +182,7 @@ class BatchLoop(AbstractInstruction):
                f'{self._active()} ? {raw} : {self._group_batch()};')
         return self._active()
 
-    def uniform_scope(self) -> BarrierScope:
+    def uniform_scope(self) -> Uniformity:
         """How far the body's execution count is uniform, i.e. the strongest
         barrier that may legally appear inside.
 
@@ -223,8 +224,8 @@ class BatchLoop(AbstractInstruction):
         what an unguarded body would have to mean.
         """
         if self._mults_per_block == 1 or self._grouped():
-            return BarrierScope.GROUP
-        return BarrierScope.SIMD
+            return Uniformity.BLOCK
+        return Uniformity.MULT
 
     # -- data flow ------------------------------------------------------- #
     #
@@ -260,10 +261,10 @@ class BatchLoop(AbstractInstruction):
             out.extend(instr.accesses())
         return tuple(out)
 
-    def barrier_scope(self) -> BarrierScope:
+    def barrier_scope(self) -> Uniformity:
         """A loop containing a barrier synchronises, seen from outside."""
         inner = [i.barrier_scope() for i in self._region]
-        return max(inner) if inner else BarrierScope.NONE
+        return max((s for s in inner if s is not None), default=None)
 
     def temp_shmem(self) -> int:
         return max((i.temp_shmem() for i in self._region), default=0)

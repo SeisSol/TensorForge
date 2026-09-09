@@ -81,6 +81,49 @@ class HipLexic(CudaLexic):
   def sync_simd(self):
     return None
 
+  def has_sync_mult(self, num_threads: int, hw) -> bool:
+    """Within a wave, free; across waves, gfx12.5 and not before.
+
+    A multiplication inside a wave needs no instruction at all -- the lanes of
+    a wave are in lockstep, so the rendezvous has already happened -- which is
+    the same reason `sync_simd` is None.  Saying True for it is not a shortcut:
+    the barrier is genuinely narrower than a block and genuinely costs nothing.
+
+    Above a wave it needs a barrier object of its own.  GFX12 splits `s_barrier`
+    into signal and wait but leaves only the workgroup barrier visible to the
+    shader; the objects a shader may assign, 1 through 16, arrive at GFX12.5.
+    So the width has to be whole waves and the target has to be gfx1250 or
+    later.
+    """
+    wave = hw.vec_unit_length
+    if num_threads <= wave:
+      return wave % num_threads == 0
+    # Above a wave the answer is False until the prologue exists: the objects
+    # need `s_barrier_init` with the expected count, a workgroup barrier so
+    # that nobody joins before the init lands, and one `s_barrier_join` per
+    # wave, all before the first use.  `_named_barriers` says which targets
+    # could carry it.
+    return False
+
+  @staticmethod
+  def _named_barriers(hw) -> bool:
+    model = str(hw.model)
+    if not model.startswith('gfx'):
+      return False
+    try:
+      return int(model[3:], base=16) >= 0x1250
+    except ValueError:
+      return False
+
+  def sync_mult(self, num_threads: int, hw):
+    if num_threads <= hw.vec_unit_length:
+      return None
+    # Reached only once `has_sync_mult` agrees above a wave, which needs the
+    # prologue.  The expected count would be in *waves* and not threads:
+    # `s_barrier` synchronises at wavefront granularity, so what the object
+    # counts is how many waves have to arrive.
+    return self.sync_block()
+
   def get_sub_group_id(self, sub_group_size):
     return f'{self.thread_idx_x} % {sub_group_size}'
 

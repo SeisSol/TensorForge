@@ -7,7 +7,8 @@ from typing import List, Tuple
 
 from tensorforge.common.context import Context
 from tensorforge.backend.pir.core import BOOL, Access, Effect, MemSpace
-from ..abstract_instruction import AbstractInstruction, BarrierScope
+from ..abstract_instruction import AbstractInstruction
+from tensorforge.backend.pir.core import Uniformity
 
 
 class GuardedRegion(AbstractInstruction):
@@ -44,7 +45,7 @@ class GuardedRegion(AbstractInstruction):
     assert index == 0, f'GuardedRegion has one region, not {index + 1}'
     self._region = list(instrs)
 
-  def uniform_scope(self) -> BarrierScope:
+  def uniform_scope(self) -> Uniformity:
     """How far the guard's decision is uniform.
 
     The condition is a tensor addressed per batch element, so two elements
@@ -56,7 +57,7 @@ class GuardedRegion(AbstractInstruction):
     `verify` tightens its limit through this on the way into the region, so
     a body that needs a wider barrier is reported there rather than here.
     """
-    return BarrierScope.SIMD
+    return Uniformity.MULT
 
   # -- data flow --------------------------------------------------------- #
 
@@ -101,10 +102,10 @@ class GuardedRegion(AbstractInstruction):
       out.extend(instr.accesses())
     return tuple(out)
 
-  def barrier_scope(self) -> BarrierScope:
+  def barrier_scope(self) -> Uniformity:
     """A region containing a barrier synchronises, seen from outside."""
     inner = [instr.barrier_scope() for instr in self._region]
-    return max(inner) if inner else BarrierScope.NONE
+    return max((s for s in inner if s is not None), default=None)
 
   def temp_shmem(self) -> int:
     return max((instr.temp_shmem() for instr in self._region), default=0)

@@ -129,7 +129,7 @@ def test_the_body_of_a_grouped_loop_is_group_uniform():
              if isinstance(i, BatchLoop)]
     assert loops, "no batch loop in the stream"
     for loop in loops:
-        assert loop.uniform_scope().name == "GROUP"
+        assert loop.uniform_scope().name == "BLOCK"
 
 
 def test_a_rotated_start_stays_per_row():

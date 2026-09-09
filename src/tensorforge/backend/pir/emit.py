@@ -218,27 +218,32 @@ class Emitter:
         base = getattr(v.type, 'base', None)
         return lex.get_operation(_LEXIC_BINOP[op], base, args[0], args[1])
 
-    def _sync(self, scope=None, threads=None) -> str:
-        # The scope used to be an unchecked string that never reached here, so
-        # every barrier came out as sync_block() regardless of what was asked
-        # for.
-        #
-        # `MULT` here means the *wave*: every caller spelling it means the
-        # threads that are in lockstep anyway, and `nvidia.py` says `'wave'`
-        # for exactly that.  A multiplication that is wider than a wave cannot
-        # be spelled this way -- it arrives as `BLOCK` carrying its width, and
-        # the vendor decides whether it has anything narrower than a whole
-        # block to offer.
+    def _sync(self, participants=None, threads=None, wave=None) -> str:
+        """The instruction for what the barrier says it covers.
+
+        Read off `participants` alone, never off the arrival level: the two
+        are different questions and a wave barrier answers them differently.
+        `Lexic.sync_mult` is asked only for `MULT`, and only after
+        `has_sync_mult` agreed at the same width -- so a target with no
+        sub-block rendezvous is never handed a request it has to approximate.
+
+        Falls back to the bare call when there is no lexic: the IR-level tests
+        build bodies without a context, and an emitter that raised there would
+        make them require one for an op that is not what they test.
+        """
         lex = self._lexic()
         if lex is None:
             return '__syncthreads();'
-        name = getattr(scope, 'name', 'BLOCK')
-        if name == 'MULT':
+        who = getattr(participants, 'value', 'block')
+        if who == 'wave':
             return lex.sync_simd()
-        if name == 'GRID':
+        if who == 'grid':
             return lex.sync_grid()
-        if threads is not None:
-            return lex.sync_mult(threads)
+        if who == 'mult' and threads is not None and self._hw() is not None:
+            return lex.sync_mult(threads, self._hw())
+        # `multgroup` and `block` alike: the block is sized to hold one group
+        # wherever a group is what has to meet, so the block barrier is the
+        # group's own and there is nothing narrower to reach for.
         return lex.sync_block()
 
     def _thread_idx(self, axis: str) -> str:
@@ -559,7 +564,8 @@ class Emitter:
             return
 
         if op == Op.BARRIER:
-            sync_instr = self._sync(s.attr('scope'), s.attr('threads'))
+            sync_instr = self._sync(s.attr('participants'), s.attr('threads'),
+                                    s.attr('wave'))
             if sync_instr is not None:
                 w(sync_instr)
             return

@@ -8,7 +8,7 @@ from tensorforge.backend.instructions.memory import AbstractShrMemWrite, MemoryI
 from tensorforge.backend.instructions.memory.load import LoadInstruction, LoadWait
 from tensorforge.backend.instructions.ptr_manip import GetElementPtr
 from tensorforge.backend.instructions.allocate import RegisterAlloc
-from tensorforge.backend.instructions.abstract_instruction import BarrierScope
+from tensorforge.backend.pir.core import Uniformity
 from tensorforge.backend.symbol import SymbolType
 
 class MoveLoads(AbstractTransformer):
@@ -56,7 +56,7 @@ class MoveLoads(AbstractTransformer):
     barriers.  This is a latency optimisation --- giving up on one load costs
     a few cycles, getting it wrong costs the answer.
     """
-    if instr.barrier_scope() is not BarrierScope.NONE:
+    if instr.barrier_scope() is not None:
       # A barrier is not a memory operation --- `accesses()` is empty --- it
       # orders what *other* threads did.  Only a load that reads or writes
       # shared memory can see that, so a global-to-register transfer crosses
