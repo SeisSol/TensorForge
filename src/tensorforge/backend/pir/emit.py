@@ -753,12 +753,15 @@ class Emitter:
         # call writing through references, which is a property of the
         # signature and not of the operation -- keeping that spelling out of
         # the IR is what lets CSE hash-cons it.
-        if len(s.target) > 1:
+        if op == Op.SPLIT:
+            callee = s.attr('callee')
+            if callee is None:
+                raise IRError(f'{Op.SPLIT} without a callee attribute')
             for t in s.target:
                 w(f'{self.ctype(t.type, t)} {self.name(t)}{{}};')
             outs = ', '.join(self.name(t) for t in s.target)
             args = ', '.join(self.operand(a) for a in s.args)
-            w(f'{op}({outs}, {args});')
+            w(f'{callee}({outs}, {args});')
             return
 
         # generic pure op
@@ -776,7 +779,13 @@ class Emitter:
             elif op in _LEXIC_BINOP and len(args) == 2:
                 expr = self._lexic_binop(op, v, args)
             else:
-                expr = f'{op}({", ".join(args)})'
+                # Spelling an unrecognised name as a call is a guess at what
+                # the op meant, and one that C++ resolves against whichever
+                # headers the translation unit happens to have pulled in.  A
+                # call the IR intends is an `Op.CALL` and says so.
+                raise IRError(
+                    f'no spelling for op {op!r} with {len(args)} operand(s); '
+                    f'a function call belongs in `IRBuilder.call`')
             self.declare(v, expr, s)
             return
 

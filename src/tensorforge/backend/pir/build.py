@@ -237,7 +237,17 @@ class IRBuilder:
         Uniformity is propagated: the result is uniform iff every value operand
         is.  That is what lets the verifier reject a barrier under a
         thread-divergent guard.
+
+        The name has to be one `Op.ARITH` lists.  This constructor supplies
+        purity, movability and an empty access set without being asked, and
+        those are answers about scalar arithmetic; for anything else they are
+        a guess, and the guess is the permissive one.
         """
+        if name not in Op.ARITH:
+            raise IRError(
+                f'{name!r} is not scalar arithmetic. Use `call` for a function, '
+                f'`load`/`store` for memory, or add the name to `Op.ARITH` and '
+                f'give the emitter a spelling for it.')
         uniform = _join(args)
         # Same shape as the uniformity join, and for the same reason: an
         # elementwise result lives where its operands live.  Until something
@@ -386,10 +396,17 @@ class IRBuilder:
         argument, pure, and hash-consed like any other expression.  `cse`
         already handles several results -- it zips `s.target` against what it
         recorded -- so nothing there had to change.
+
+        The callee travels as an attribute rather than as the op name, for the
+        same reason `call` puts it there: an op name is a thing pir assigns a
+        meaning to, and `tensorforge::splitFloatTF32` is a thing the emitter
+        prints.  `_cse_key` reads `attrs`, so two different callees still hash
+        apart.
         """
         vs = tuple(self.value(t, hint=h)
                    for t, h in zip(types, list(hints) + [''] * len(types)))
-        self._emit_op(name, vs, tuple(args), pure=True, attrs=attrs)
+        self._emit_op(Op.SPLIT, vs, tuple(args), pure=True,
+                      attrs=(('callee', name),) + tuple(attrs))
         return vs
 
     def asm_stmt(self, template: str, operands: Sequence[Tuple[str, Operand]],

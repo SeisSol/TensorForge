@@ -255,7 +255,7 @@ def test_both_results_follow_the_survivor():
     assert list(add.args) == [u1, l1], (
         f'only some results followed the survivor: {add.args}')
     assert sum(1 for s, _ in walk(body)
-               if 'splitFloatTF32' in str(s.op)) == 1
+               if s.attr('callee') == 'tensorforge::splitFloatTF32') == 1
 
 
 def test_a_pinned_result_keeps_its_own_split():
@@ -277,7 +277,7 @@ def test_a_pinned_result_keeps_its_own_split():
     b.asm_stmt('"use "\n"{%0}, {%1};"', [('+r', u2), ('r', l2)])
     body = passes.cse(b.finish())
     assert sum(1 for s, _ in walk(body)
-               if 'splitFloatTF32' in str(s.op)) == 2
+               if s.attr('callee') == 'tensorforge::splitFloatTF32') == 2
 
 
 def test_a_different_operand_is_not_merged():

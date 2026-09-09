@@ -671,6 +671,7 @@ class Op:
     ACCUM = 'accum'         # `target += value;` -- in-place, no result
     PACK = 'pack'           # `VecTy v{a, b};`  -- aggregate initialisation
     EXTRACT = 'extract'     # `v[i]`            -- element of a packed vector
+    SPLIT = 'split'         # one argument, several results; `callee` names it
     # legacy escape hatches
     RAWEXPR = 'rawexpr'     # exactly one target; `text` is an *expression*
     RAWSTMT = 'rawstmt'     # no target;          `text` is a *statement*
@@ -682,6 +683,25 @@ class Op:
     # statements that lower to a C++ declaration and therefore handle a
     # predicate themselves (as a select) rather than through a guard block
     DECLARING = frozenset({RAWEXPR, LOAD, LOAD_ASYNC, CALL, PACK, EXTRACT})
+
+    # Scalar arithmetic: no memory effect, no ordering constraint, and the
+    # same operands give the same result.  These are the only names that may
+    # carry the permissive defaults without saying so, and the set is closed
+    # by what the emitter can spell without a function call -- an entry here
+    # with no spelling is a statement that cannot be emitted, and a spelling
+    # with no entry is a statement that cannot be built.
+    ARITH = frozenset({
+        'add', 'sub', 'mul', 'div', 'rem', 'neg', 'fma', 'select',
+        'min', 'max',
+        'and', 'or', 'bitand', 'bitor', 'bitxor', 'shl', 'shr',
+        'lt', 'le', 'gt', 'ge', 'eq', 'ne',
+    })
+
+
+# Every name the IR gives a meaning to.  Derived rather than written out, so
+# that adding a constant to `Op` is the whole of adding an op name.
+Op.KNOWN = frozenset(v for k, v in vars(Op).items()
+                     if isinstance(v, str) and not k.startswith('_'))
 
 
 @dataclass(frozen=True)
@@ -701,6 +721,36 @@ class Stmt:
 
     text: Optional[str] = None                      # raw ops only
     attrs: Tuple[Tuple[str, Any], ...] = ()         # small, hashable side data
+
+    def __post_init__(self):
+        """An op name the IR does not know may not claim to be harmless.
+
+        The defaults on the fields above are the permissive answer, which is
+        the right one for the arithmetic they were written for and the wrong
+        one for anything else.  A statement is harmless when nothing stops a
+        pass from deleting it, hash-consing it, or moving it past a store:
+        `pure`, or `movable` with no declared accesses and no effect.  For a
+        name in `Op.KNOWN` or `Op.ARITH` that claim is checkable against what
+        the op means; for any other name it is a claim about a statement the
+        passes cannot read, and the passes will act on it.
+
+        Rejecting rather than quietly substituting the conservative answer:
+        the conservative answer is correct and invisible, so a body that
+        should have been analysable would go on compiling at the speed of one
+        that is not, and nothing would say why.  Declaring an effect or
+        `movable=False` is one argument, and it is the argument that carries
+        the information no default can supply.
+        """
+        if self.op in Op.KNOWN or self.op in Op.ARITH:
+            return
+        harmless = self.pure or (self.movable and not self.accesses
+                                 and self.effect == Effect.NONE)
+        if harmless:
+            raise IRError(
+                f'op {self.op!r} is not a name pir knows, so it must say what '
+                f'it does: give it an `effect`, declare its `accesses`, or set '
+                f'`movable=False`. Scalar arithmetic belongs in `Op.ARITH`; a '
+                f'function call belongs in `IRBuilder.call`.')
 
     # -- convenience ------------------------------------------------------- #
 

@@ -271,11 +271,35 @@ GROUPS = {
              "hint='btile')", 1)),
     ]),
 
+    'op_vocabulary': ('tests/test_pir_op_vocabulary.py', [
+        ('an unknown op keeps the permissive defaults',
+         sub(CORE,
+             "        if self.op in Op.KNOWN or self.op in Op.ARITH:\n"
+             "            return",
+             "        if True:\n"
+             "            return", 1)),
+        ('only purity is denied, not free reordering',
+         sub(CORE,
+             "        harmless = self.pure or (self.movable and not self.accesses\n"
+             "                                 and self.effect == Effect.NONE)",
+             "        harmless = self.pure", 1)),
+        ('the builder takes any name as arithmetic',
+         sub(BUILD,
+             "        if name not in Op.ARITH:",
+             "        if False:", 1)),
+        ('the emitter invents a callee again',
+         sub(EMIT,
+             "                raise IRError(\n"
+             "                    f'no spelling for op {op!r} with {len(args)} operand(s); '\n"
+             "                    f'a function call belongs in `IRBuilder.call`')",
+             "                expr = f'{op}({\", \".join(args)})'", 1)),
+    ]),
+
     'asm': ('tests/test_pir_asm.py', [
         ('the split goes back to a side-effecting call',
          sub(Path('src/tensorforge/backend/pir/build.py'),
-             "        self._emit_op(name, vs, tuple(args), pure=True, attrs=attrs)",
-             "        self._emit_op(name, vs, tuple(args), pure=False, attrs=attrs)", 1)),
+             "        self._emit_op(Op.SPLIT, vs, tuple(args), pure=True,",
+             "        self._emit_op(Op.SPLIT, vs, tuple(args), pure=False,", 1)),
         ('only the first result is declared',
          sub(Path('src/tensorforge/backend/pir/emit.py'),
              "            for t in s.target:\n                w(f'{self.ctype(t.type, t)} {self.name(t)}{{}};')",
