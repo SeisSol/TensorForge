@@ -466,6 +466,24 @@ GROUPS = {
              '    if True:\n        return True')),
     ]),
 
+    'regimage': ('tests/test_distribution.py', [
+        ('the packing counted as part of the distribution',
+         sub(Path('src/tensorforge/backend/symbol.py'),
+             '      coords.append(int(idx) // self.lead_width '
+             'if position == 0 else int(idx))',
+             '      coords.append(int(idx))')),
+        ('a replicating pair of axes taken as a bijection',
+         sub(Path('src/tensorforge/backend/symbol.py'),
+             '    return layout if layout.tiles(self.num_threads) else None',
+             '    return layout')),
+        ('positions read as axes where none were stated',
+         sub(Path('src/tensorforge/backend/symbol.py'),
+             '      if len(self.lead_dims) != 1:\n        return None\n'
+             '      axes = (LaneAxis(self.num_threads, 1),)',
+             '      axes = tuple(LaneAxis(self.num_threads, 1)\n'
+             '                   for _ in self.lead_dims)')),
+    ]),
+
     'staging': ('tests/test_staging.py', [
         ('a vector bit left where it is',
          sub(Path('src/tensorforge/backend/instructions/compute/bitlayout.py'),

@@ -1127,6 +1127,18 @@ class Symbol:
     #: reader does not have to restate a fact about a write it cannot see.
     #: `None` is *unknown*, never *not distributed*.
     self.layout = None
+    #: The axes this image's distributed dimensions are spread over, one per
+    #: entry of `lead_dims`, or `None` for the default -- one axis, the whole
+    #: wave, cyclic.
+    #:
+    #: The hook a producer needs and the only thing `lead_dims` cannot say.
+    #: A chained matrix product leaves its accumulator on two axes -- the row
+    #: in the high lane bits and the column pair in the low ones -- and a
+    #: consumer that takes it as an operand has to read it in exactly that
+    #: distribution or it computes a different matrix, exactly.  Positions
+    #: alone do not distinguish those two axes from any other pair, which is
+    #: why the layout and not the position list is what a reader asks.
+    self.lead_axes = None
     #: The PIR value for this buffer, and the builder that made it.
     #:
     #: A value belongs to the body it was built into.  With one body per loop
@@ -1248,6 +1260,7 @@ class Symbol:
     cloned.layout = self.layout
     cloned._users = [user for user in self._users]
     cloned.lead_dims = [ld for ld in self.lead_dims]
+    cloned.lead_axes = self.lead_axes
     return cloned
 
   def get_fptype(self):
@@ -1858,6 +1871,41 @@ class Symbol:
     else:
       writer.access_stmt(f'{access} = {variable};', self, Effect.WRITE, args=_operands(variable, addrs))
 
+  def register_layout(self):
+    """How this image is distributed, as the layout a consumer compares.
+
+    Derived from the declaration -- `lead_dims`, `lead_axes` and
+    `num_threads` -- and deliberately not from `self.layout`, which is a
+    different fact: that one is what a filler recorded *after* writing, for a
+    reader that cannot see the write.  This is what the image is, stated
+    before anyone reads it, which is what a consumer needs in order to say
+    whether it can take it at all.
+
+    The default is one axis over the whole wave, cyclic, which is what every
+    image in the tree is and what `lead_dims` alone has meant all along.  A
+    producer that leaves its result on something else says so in `lead_axes`,
+    and then this is the statement every reader takes it from rather than
+    each deriving a distribution from a position.
+
+    `None` where the axes do not tile the wave: the lanes then hold copies,
+    an element has no one owner, and an address that names a single lane
+    would name one of several arbitrarily.  `RegisterLayout.tiles` is what
+    decides it, because the same `LaneAxis(16, 4)` is a replication alone and
+    a bijection beside a `LaneAxis(4, 1)` -- the rest of the layout is what
+    settles which, and no per-axis rule can.
+    """
+    if self.stype not in (SymbolType.Register, SymbolType.Scratch):
+      return None
+    axes = self.lead_axes
+    if axes is None:
+      if len(self.lead_dims) != 1:
+        return None
+      axes = (LaneAxis(self.num_threads, 1),)
+    if len(axes) != len(self.lead_dims):
+      return None
+    layout = RegisterLayout(tuple(axes))
+    return layout if layout.tiles(self.num_threads) else None
+
   def owning_lane(self, index):
     """Which lane holds a fixed element of the distributed dimension.
 
@@ -1871,20 +1919,31 @@ class Symbol:
     `StoreRegToGlb` needs it to decide whether either is required at all.  The
     store used to derive it separately and got `threadIdx.x == 32` in a
     32-lane wave, which is the bug this shape removes rather than fixes again.
+
+    Asked of the layout rather than computed here.  `holders` is the same map
+    executable, and it answers at any rank -- which the arithmetic could not:
+    dividing one axis by the wave has no reading when there are two, and
+    returning `None` there was the shape of the restriction rather than a
+    fact about the element.  The width is divided out first, because a
+    packing is a property of the register and not of the distribution: an
+    axis says which lane, and a lane holding `lead_width` neighbours does not
+    change which.
     """
-    if self.stype not in (SymbolType.Register, SymbolType.Scratch):
+    layout = self.register_layout()
+    if layout is None:
       return None
-    if len(self.lead_dims) != 1:
-      return None
-    idx = index[self.lead_dims[0]]
-    lead = unwrap_lead(idx)
-    if lead is not None:
-      return None                 # still distributed; every lane has a share
-    if isinstance(idx, Immediate):
-      idx = idx._value
-    if not isinstance(idx, (int, np.integer)):
-      return None
-    return (int(idx) // self.lead_width) % self.num_threads
+    coords = []
+    for position, dim in enumerate(self.lead_dims):
+      idx = index[dim]
+      if unwrap_lead(idx) is not None:
+        return None               # still distributed; every lane has a share
+      if isinstance(idx, Immediate):
+        idx = idx._value
+      if not isinstance(idx, (int, np.integer)):
+        return None
+      coords.append(int(idx) // self.lead_width if position == 0 else int(idx))
+    holders = layout.holders(tuple(coords), self.num_threads)
+    return holders[0] if len(holders) == 1 else None
 
   def load(self, writer, context: Context, variable, index: List[Union[str, int, Immediate, Variable, LeadIndex]], nontemp, broadcast: bool = True, part: int = 0, parts: int = 1):
     addrs = []

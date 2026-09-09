@@ -299,3 +299,75 @@ def test_two_fill_paths_disagreeing_leave_it_unknown():
     sym._note_layout(RegisterLayout((LaneAxis(16, 1),)))
     sym._note_layout(RegisterLayout((LaneAxis(8, 1),)))
     assert sym.layout is None
+
+
+# -- what a register image says about itself ------------------------------- #
+
+def _register(threads, width=1, dims=(0,), axes=None):
+    from tensorforge.backend.data_types import RegMemObject
+    from tensorforge.backend.symbol import Symbol, SymbolType
+    sym = Symbol(name='r', stype=SymbolType.Register, obj=RegMemObject('r', 64))
+    sym.num_threads, sym.lead_width = threads, width
+    sym.lead_dims, sym.lead_axes = list(dims), axes
+    return sym
+
+
+@pytest.mark.parametrize('threads', [1, 4, 8, 16, 32, 64])
+@pytest.mark.parametrize('width', [1, 2, 4])
+def test_the_owner_is_the_lane_the_arithmetic_named(threads, width):
+    """The answer is derived from the layout now instead of computed here,
+    and at rank one it has to be the same answer bit for bit -- every image
+    in the tree is rank one, so anything else would be an unreviewed change
+    to all of them.
+
+    The width is divided out before the layout is asked, because a packing is
+    a property of the register and not of the distribution: a lane holding
+    `width` neighbours holds them in the lane the axis already named.
+    """
+    sym = _register(threads, width)
+    for element in range(200):
+        assert sym.owning_lane([element]) == (element // width) % threads
+
+
+def test_a_rank_two_image_has_an_owner_once_its_producer_says_so():
+    """What `lead_dims` could not say.  Two positions do not distinguish one
+    pair of axes from another, and the pair is the whole content: `LaneAxis(8,
+    4)` beside `LaneAxis(4, 1)` puts the row in the high lane bits and the
+    column pair in the low ones, which is where a chained matrix product
+    leaves its accumulator."""
+    from tensorforge.backend.pir.core import LaneAxis
+    sym = _register(32, dims=(0, 1), axes=(LaneAxis(8, 4), LaneAxis(4, 1)))
+    assert sym.register_layout() is not None
+    for row in range(8):
+        for col in range(4):
+            assert sym.owning_lane([row, col]) == row * 4 + col
+
+
+def test_axes_that_replicate_have_no_owner():
+    """An element held by four lanes has no one owner, and an address naming
+    a single lane would name one of them arbitrarily.  Refused as a layout
+    rather than at each reader, because whether the same axis replicates is
+    settled by the rest of the layout and not by the axis."""
+    from tensorforge.backend.pir.core import LaneAxis
+    sym = _register(32, dims=(0, 1), axes=(LaneAxis(16, 4), LaneAxis(16, 4)))
+    assert sym.register_layout() is None
+    assert sym.owning_lane([1, 1]) is None
+
+
+def test_a_rank_two_image_without_stated_axes_is_still_unknown():
+    """Positions alone are not a distribution, and reading them as one is
+    what would hand a consumer the wrong element with nothing to notice."""
+    sym = _register(32, dims=(0, 1))
+    assert sym.register_layout() is None
+    assert sym.owning_lane([1, 1]) is None
+
+
+def test_the_declaration_is_not_the_recorded_layout():
+    """Two facts, and the difference matters.  `Symbol.layout` is what a
+    filler wrote down afterwards, for a reader that cannot see the write;
+    this is what the image is, stated before anyone reads it.  A consumer
+    deciding whether it can take an operand needs the second, and at the
+    moment it asks the first does not exist yet."""
+    sym = _register(32)
+    assert sym.layout is None
+    assert sym.register_layout() is not None
