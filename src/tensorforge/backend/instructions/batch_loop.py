@@ -523,37 +523,27 @@ class BatchLoop(AbstractInstruction):
         self.gen_code_inner(writer)
 
     def _structured_loop(self, writer) -> bool:
-        """Should this loop be an `Op.FOR` rather than Writer text?
+        """Should this loop be a construct in the IR rather than Writer text?
 
-        `PERSISTENT` only, for now.  The remaining mode has no loop at all, so
-        there is nothing to put in the IR.
+        Wherever there is a loop at all.  `PERSISTENT` is an `Op.FOR` over the
+        stride; `LAUNCHCTRL` is an `Op.WHILE`, whose successor is the result
+        of `cursor.next(queue)` in its own body and which leaves through an
+        `Op.EXIT` when that answers -1.  `SINGLE` has no loop, so there is
+        nothing to put anywhere.
 
-        `LAUNCHCTRL` is the open one, and it is worth stating what it needs
-        rather than that it needs something.  Everything the IR would buy here
-        hangs off one missing form: a loop whose successor is *queried*, not
-        incremented.  `for_` hands the body `loop.induction` because it
-        computed it; the queue's next index is the result of a statement
-        inside the body -- `cursor.next(queue)` -- and the loop ends when that
-        statement answers -1.  Give the builder that form and the rest follows
-        at once: `batchId0` becomes a value, so the size guard becomes an
-        `Op.IF` on it instead of `writer.If` over text and the body's reads of
-        it are operands; the hand-off becomes an `Op.CALL` carrying
-        `Effect.BARRIER` and its shared accesses, so the barrier it contains
-        stops being invisible to every pass; and the region the passes walk
-        becomes the whole loop rather than the part between the braces.
-
-        Without that form each of those is cosmetic, which is why this returns
-        False rather than half of it.  The cost is a name in `Op` -- a
-        vocabulary deliberately closed -- plus the handle in `build.py`, the
-        spelling and the `break` in `emit.py`, and the uniformity rule in
-        `inspect.py`.  Note also that the loop is *block*-uniform, which the
-        counted loop is not, so the form can carry a stronger answer than
-        `uniform_scope` gives today.
+        What the construct buys is the same in both cases and is not
+        cosmetic.  `batchId0` is a value, so the size guard is an `Op.IF` over
+        it and the body's reads of it are operands rather than text.  The
+        region a pass walks is the whole loop rather than the part between the
+        braces, which is what lets a prologue be expressed and a move across
+        the back edge be licensed by something other than luck.  And the loop
+        states how far entering its body is agreed across threads, so `verify`
+        can decide barrier legality from the form instead of from a comment.
 
         Not when a body is already open: `shared_body` nests, and a second
         one would put the loop inside the body it is meant to contain.
         """
-        if self._mode is not LoopMode.PERSISTENT:
+        if self._mode is LoopMode.SINGLE:
             return False
         if not self._wide_bodies():
             return False
@@ -582,9 +572,11 @@ class BatchLoop(AbstractInstruction):
                 # bindings, the flag guard and every `access_address` in the
                 # body, and it is `size_t` because it is compared against
                 # `numElements`.
+                from tensorforge.backend.pir.core import Uniformity
                 with writer.for_(self._start, self._num_elements(),
                                  self._stride, extern=self._batch(0),
-                                 ctype='size_t') as loop:
+                                 ctype='size_t',
+                                 uniform=Uniformity.MULT) as loop:
                     self._loop_handle = loop
                     # The induction *value*, not just its name.  Anything
                     # inside that mentions `batchId0` has to say so as an
@@ -627,6 +619,9 @@ class BatchLoop(AbstractInstruction):
                    f'launchCursor{self._section_index};')
             writer(f'launchCursor{self._section_index}'
                    f'.start(launchQueue{self._section_index});')
+            if hasattr(writer, 'while_'):
+                self._queried_loop(writer)
+                return
             writer(f'size_t {self._batch(0)} = {self._block_id()};')
             with writer.While('true'):
                 with writer.If(self._size_guard()):
@@ -654,6 +649,78 @@ class BatchLoop(AbstractInstruction):
             writer(f'const size_t {self._batch(0)} = {self._block_id()};')
             with writer.If(self._size_guard()):
                 self._emit_body(writer)
+
+    def _queried_loop(self, builder) -> None:
+        """The launch-control traversal, as an `Op.WHILE` over the work queue.
+
+        Three things are values here rather than text, and each of them is a
+        fact some pass needs.
+
+        The element index is the loop's induction, `MULT`-uniform because the
+        rows of a block hold different elements -- so the size guard is an
+        `Op.IF` over it and every read of it in the body is an operand.
+
+        The hand-off is an `Op.CALL` carrying `Effect.BARRIER` and its access
+        to the queue.  `next` contains a block barrier, and a pass that cannot
+        see it would be free to move a shared-memory access across the point
+        where one element's tile stops being live.  The access is keyed on the
+        queue by name, so it provably does not conflict with the arena.
+
+        The exit is where the trip count is decided, and its condition is
+        `BLOCK`-uniform: every thread reads the same cancel response out of
+        shared memory behind that barrier, so all of them leave on the same
+        iteration.  `_entry_uniformity` reads exactly that off the exit, which
+        is what makes a block barrier legal in this body -- and it stays
+        illegal under the size guard, whose condition is only `MULT`-uniform.
+        """
+        from tensorforge.backend.pir.core import (INDEX, BOOL, Access, Effect,
+                                                  MemSpace, Uniformity)
+
+        index = self._section_index
+        queue = f'launchQueue{index}'
+        lexic = self._vm.get_lexic()
+
+        with builder.while_(self._block_id(), hint=self._batch(0),
+                            extern=self._batch(0), ctype='size_t',
+                            uniform=Uniformity.MULT) as loop:
+            self._loop_handle = loop
+            self._induction = loop.induction
+            AbstractInstruction._induction_value.append(loop.induction)
+            try:
+                guard = builder.op('lt', BOOL, loop.induction,
+                                   self._num_elements(), hint='inrange')
+                with builder.if_(guard):
+                    self._emit_body(builder)
+                self._advance_stage_counter(builder)
+                # Outside the size guard, deliberately.  The barrier `next`
+                # carries separates one element's shared memory from the next
+                # one's, and the guard is per element: the rows of a block
+                # hold different elements, so a barrier inside it is reached
+                # by some rows and not others.  That does not reliably
+                # deadlock -- `bar.sync` pairs arrivals by barrier *number*,
+                # so the rows that skipped rendezvous at the next one instead
+                # and the loop limps on one barrier out of step, reusing the
+                # tile an iteration early.
+                nxt = builder.call(
+                    f'launchCursor{index}.next', INDEX, queue,
+                    hint='next', pure=False, movable=False,
+                    effect=Effect.BARRIER,
+                    accesses=(Access(Effect.READ | Effect.WRITE,
+                                     MemSpace.SHARED, queue),),
+                    uniform=Uniformity.BLOCK, materialize=True)
+                loop.exit_when(builder.op('lt', BOOL, nxt, 0, hint='drained'))
+                # The successor index, in the same shape the initial one has.
+                # `MULT` because `threadIdx.y` is raw text with no uniformity
+                # of its own, and the join over it would answer for the whole
+                # block.
+                offset = builder.op('mul', INDEX, lexic.block_dim_y, nxt,
+                                    hint='row')
+                loop.yield_(builder.op('add', INDEX, lexic.thread_idx_y,
+                                       offset, hint=self._batch(0),
+                                       uniform=Uniformity.MULT))
+            finally:
+                AbstractInstruction._induction_value.pop()
+                self._induction = None
 
     def __str__(self) -> str:
         return (f'batchloop.{self._mode.value} '

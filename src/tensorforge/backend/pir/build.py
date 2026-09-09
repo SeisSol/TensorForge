@@ -79,6 +79,33 @@ def _join(operands) -> Uniformity:
     return min(levels) if levels else Uniformity.GRID
 
 
+def _stated(uniform, joined: Uniformity, what: str) -> Uniformity:
+    """A caller's answer, allowed to narrow the join and never to widen it.
+
+    The join is the right answer wherever the operands carry the fact, and it
+    is not available in two situations.  An operand that is still raw text has
+    no uniformity for the IR to read, so the join over it reads `GRID` --- the
+    strongest claim there is --- for something like `threadIdx.y`, which is
+    the same only within one multiplication.  And a primitive whose result is
+    not a function of its operands' distribution, such as a value every thread
+    of a block reads out of shared memory behind a barrier, is uniform for a
+    reason no operand states.
+
+    Narrowing only, so the override cannot be used to license a barrier: it
+    can make the verifier refuse where the join would have allowed, and never
+    the other way round.
+    """
+    if uniform is None:
+        return joined
+    level = _as_uniformity(uniform)
+    if level > joined:
+        raise IRError(
+            f'{what}: stated uniformity {level.name.lower()} is wider than '
+            f'{joined.name.lower()}, which is what the operands support; an '
+            f'override may narrow the join, never widen it')
+    return level
+
+
 #: An identifier the builder might have emitted.  Values are named `v{id}` or
 #: `v{id}_{hint}`, so this over-matches on purpose and the lookup decides.
 _IDENT = re.compile(r'\bv\d+\w*\b')
@@ -231,7 +258,8 @@ class IRBuilder:
         return v
 
     def op(self, name: str, type_, *args: Operand,
-           hint: str = '', pure: bool = True, escapes: bool = False) -> Value:
+           hint: str = '', pure: bool = True, escapes: bool = False,
+           uniform=None) -> Value:
         """A generic pure operation (``add``, ``mul``, ``fma``, ``select``...).
 
         Uniformity is propagated: the result is uniform iff every value operand
@@ -242,13 +270,16 @@ class IRBuilder:
         purity, movability and an empty access set without being asked, and
         those are answers about scalar arithmetic; for anything else they are
         a guess, and the guess is the permissive one.
+
+        `uniform` narrows the propagated answer for an expression over raw
+        text, whose operands cannot state theirs; see :func:`_stated`.
         """
         if name not in Op.ARITH:
             raise IRError(
                 f'{name!r} is not scalar arithmetic. Use `call` for a function, '
                 f'`load`/`store` for memory, or add the name to `Op.ARITH` and '
                 f'give the emitter a spelling for it.')
-        uniform = _join(args)
+        uniform = _stated(uniform, _join(args), name)
         # Same shape as the uniformity join, and for the same reason: an
         # elementwise result lives where its operands live.  Until something
         # attaches a layout this is `None` in, `None` out.
@@ -266,7 +297,8 @@ class IRBuilder:
              effect: Effect = Effect.NONE,
              accesses: Tuple[Access, ...] = (),
              layout: Optional[RegisterLayout] = None,
-             keep_layout: bool = False, materialize: bool = False) -> Value:
+             keep_layout: bool = False, materialize: bool = False,
+             uniform=None) -> Value:
         """A lexic primitive: ``tensorforge::broadcast<...>``, shuffles, MFMA.
 
         Unlike :meth:`op`, the result layout is *not* inherited by default.
@@ -287,8 +319,12 @@ class IRBuilder:
         into one nested expression.  That is the same value, but it collapses
         a schedule that was written down deliberately and leaves the register
         pressure estimate with nothing to count.
+
+        `uniform` is the same trade as `layout` one paragraph up, for the
+        other property: a primitive whose result agrees across more threads
+        than its operands do has to say so, and may only narrow the join.
         """
-        uniform = _join(args)
+        uniform = _stated(uniform, _join(args), callee)
         if layout is None and keep_layout:
             layout = join_layout(args)
         v = self.value(type_, hint=hint, uniform=uniform, layout=layout)
@@ -1125,7 +1161,8 @@ class IRBuilder:
     def for_(self, lo: Operand, hi: Operand, step: Operand = 1,
              inits: Sequence[Operand] = (), types: Sequence[Any] = (),
              unroll: bool = False, hint: str = 'i', extern: str = None,
-             ctype: str = None, next_index=None) -> '_ForHandle':
+             ctype: str = None, next_index=None,
+             uniform=Uniformity.GRID) -> '_ForHandle':
         """A loop.  ``extern`` and ``ctype`` are for loops the macro layer owns.
 
         An inner loop is the IR's own: it picks the induction variable's name
@@ -1138,9 +1175,34 @@ class IRBuilder:
         Same trade as `extern` on `alloc`, and it ends the same way: the name
         is needed while the things that spell it are still text, and stops
         being needed as they migrate.
+
+        `uniform` is how far the induction value agrees across threads.  An
+        inner loop counts the same way in every lane, which is the default; a
+        loop over the batch does not, because its variable is
+        `threadIdx.y + blockDim.y * blockIdx.x` and the rows of a block hold
+        different elements.  Entering the body is agreed no further than the
+        variable that decides it, so this is what bounds the barriers legal
+        inside.
         """
         return _ForHandle(self, lo, hi, step, tuple(inits), tuple(types),
-                          unroll, hint, extern, ctype, next_index)
+                          unroll, hint, extern, ctype, next_index, uniform)
+
+    def while_(self, init: Operand, hint: str = 'i', extern: str = None,
+               ctype: str = None, uniform=Uniformity.GRID) -> '_WhileHandle':
+        """A loop whose successor is queried, not counted.
+
+        `for_` hands the body an induction value because it derives one from
+        the bounds.  Here there are no bounds: the next index is the result of
+        a statement the body itself contains, and the loop runs until an
+        `exit_when` in the same region fires.  So the induction is bound up
+        front as a region argument, the body computes its successor, and
+        `yield_` carries that successor across the back edge -- the same shape
+        an `iter_arg` has, with the loop variable in the role of the carried
+        value.
+
+        `extern`, `ctype` and `uniform` mean what they mean on `for_`.
+        """
+        return _WhileHandle(self, init, hint, extern, ctype, uniform)
 
     def if_(self, cond: Operand, attrs: Tuple = ()) -> '_IfHandle':
         """Guard without results --- the common case (bounds checks)."""
@@ -1729,7 +1791,8 @@ class _RawBlock:
 
 class _ForHandle:
     def __init__(self, builder, lo, hi, step, inits, types, unroll, hint,
-                 extern=None, ctype=None, next_index=None):
+                 extern=None, ctype=None, next_index=None,
+                 uniform=Uniformity.GRID):
         if len(inits) != len(types):
             raise IRError('for_: one result type per init value required')
         self._extern = extern
@@ -1742,7 +1805,7 @@ class _ForHandle:
         self._args = (lo, hi, step) + inits
         self._types = types
         self._unroll = unroll
-        self.induction = builder.index(hint=hint)
+        self.induction = builder.index(hint=hint, uniform=uniform)
         # A loop-carried value is distributed exactly like the init it starts
         # from -- the back edge cannot change how a value is spread across the
         # lanes, only what it holds.  Left untracked, an accumulator became a
@@ -1830,6 +1893,61 @@ class _ForHandle:
     @property
     def result(self) -> Value:
         return self.results[0]
+
+
+class _WhileHandle:
+    """The queried loop.  Its induction is bound to a value the body produces.
+
+    That is the whole difference from :class:`_ForHandle`, and it is why the
+    handle exists rather than a flag on the other one: a counted loop's
+    successor is arithmetic the builder can write down at construction time,
+    and this one's is a statement that has not been emitted yet when the
+    region opens.  Everything else -- the region argument, the assignment at
+    the back edge, the `extern` name the macro layer owns -- is the same
+    machinery an `iter_arg` already uses.
+    """
+
+    def __init__(self, builder, init, hint, extern=None, ctype=None,
+                 uniform=Uniformity.GRID):
+        self.builder = builder
+        self._init = init
+        self._extern = extern
+        self._ctype = ctype
+        self.induction = builder.index(hint=hint, uniform=uniform)
+
+    def __enter__(self) -> '_WhileHandle':
+        self.builder.push((self.induction,), kind='while')
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        region = self.builder.pop()
+        if exc_type is not None:
+            return False
+        attrs = ()
+        if self._extern is not None:
+            attrs = attrs + (('extern', self._extern),)
+        if self._ctype is not None:
+            attrs = attrs + (('ctype', self._ctype),)
+        self.builder.emit(Stmt(op=Op.WHILE, args=(self._init,),
+                               regions=(region,), pure=False, movable=False,
+                               attrs=attrs))
+        return False
+
+    def exit_when(self, cond: Operand) -> Stmt:
+        """Leave the loop where `cond` holds.
+
+        A statement rather than a property of the loop, because that is what
+        it is: it sits at the point in the body where the answer is known, and
+        the code before it has already run when it fires.  How far the loop's
+        trip count agrees across threads is read off these conditions, so a
+        loop that leaves on a lane-varying answer says so by construction.
+        """
+        return self.builder.emit(Stmt(op=Op.EXIT, args=(cond,), pure=False,
+                                      movable=False))
+
+    def yield_(self, value: Operand):
+        """Carry `value` across the back edge as the next induction value."""
+        return self.builder.yield_(value)
 
 
 class _IfHandle:

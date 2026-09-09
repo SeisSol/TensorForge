@@ -754,6 +754,15 @@ class Emitter:
             self._emit_for(s)
             return
 
+        if op == Op.WHILE:
+            self._emit_while(s)
+            return
+
+        if op == Op.EXIT:
+            with w.If(_unwrap(self.operand(s.exit_cond))):
+                w('break;')
+            return
+
         if op == Op.IF:
             self._emit_if(s)
             return
@@ -843,6 +852,26 @@ class Emitter:
         # defeat empty-block elision.
         with w.For(head, unroll=bool(s.attr('unroll'))):
             self._emit_body(s.regions[0].body, tuple(targets))
+
+    def _emit_while(self, s: Stmt) -> None:
+        """`Ty i = init; while (true) { ... i = next; }`.
+
+        The induction and its successor share one C++ variable, as a `for`'s
+        iter_arg and result do: the `yield` at the bottom is the assignment
+        that closes the back edge, so nothing has to be copied at the latch.
+        The head carries no condition -- every exit is a statement in the body,
+        emitted where the answer it tests becomes available.
+        """
+        ind = s.induction
+        extern = s.attr('extern')
+        if extern is not None:
+            self.bind(ind, extern)
+        name = self.name(ind)
+        ind_ctype = s.attr('ctype') or self.ctype(ind.type, ind)
+        self.writer(f'{ind_ctype} {name} = '
+                    f'{self.operand(s.loop_init, ind.type)};')
+        with self.writer.While('true'):
+            self._emit_body(s.regions[0].body, (name,))
 
     def _emit_if(self, s: Stmt) -> None:
         w = self.writer

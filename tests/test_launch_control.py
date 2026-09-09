@@ -234,3 +234,150 @@ def test_a_grid_barrier_is_refused():
     gen = Generator(descrs, ctx)
     with pytest.raises(GenerationError, match="grid-wide barrier"):
         gen.generate()
+
+
+# -- the loop as a construct ----------------------------------------------- #
+
+def _bodies(**options):
+    """Every PIR body one kernel produces, captured on its way to the writer."""
+    import tensorforge.backend.pir as pir
+
+    out = []
+    real = pir.emit
+
+    def capture(body, writer, context=None):
+        out.append(body)
+        return real(body, writer, context)
+
+    pir.emit = capture
+    try:
+        _kernel(**options).get_kernel()
+    finally:
+        pir.emit = real
+    return out
+
+
+def _the_loop(op, **options):
+    from tensorforge.backend.pir.core import walk
+
+    for body in _bodies(**options):
+        for stmt, _ in walk(body):
+            if stmt.op == op and stmt.attr("extern") == "batchId0":
+                return stmt
+    raise AssertionError(f"no {op} over the batch in the generated body")
+
+
+def test_the_queue_loop_is_a_construct_the_passes_can_walk():
+    """The region is the whole loop, so the hand-off is inside what a pass sees.
+
+    Emitted around the region instead, nothing could be moved across it -- not
+    because the move is illegal but because the statement is not there to
+    reason about.
+    """
+    from tensorforge.backend.pir.core import Effect, MemSpace, Op, walk
+
+    loop = _the_loop(Op.WHILE, launch_control=True)
+    inner = [s for s, _ in walk(loop.regions[0].body)]
+
+    guard = [s for s in inner if s.op == Op.IF]
+    assert guard, "the size guard is not an `if` the passes can see"
+
+    handoff = [s for s in inner
+               if s.op == Op.CALL and "next" in (s.attr("callee") or "")]
+    assert len(handoff) == 1, f"{len(handoff)} hand-offs in the loop"
+    assert handoff[0].effect & Effect.BARRIER, (
+        "`next` carries a block barrier; a pass that cannot see it is free to "
+        "move a shared-memory access across the point where one element's "
+        "tile stops being live")
+    assert any(a.space is MemSpace.SHARED for a in handoff[0].accesses), (
+        "the hand-off reads and writes the response slots")
+
+    assert loop.exits, "the loop has no exit and so no trip count"
+
+
+def test_the_queue_loop_is_block_uniform_and_its_element_guard_is_not():
+    """The two are different questions and the form now answers both.
+
+    Every thread reads the same cancel response out of shared memory behind a
+    barrier, so all of them leave on the same iteration -- the loop is entered
+    block-uniformly.  The guard inside it is per element, and the rows of a
+    block hold different elements.
+    """
+    from tensorforge.backend.pir.core import Op, Uniformity
+    from tensorforge.backend.pir.passes import _entry_uniformity
+
+    loop = _the_loop(Op.WHILE, launch_control=True)
+    assert _entry_uniformity(loop) is Uniformity.BLOCK
+
+    guard = next(s for s in loop.regions[0].body if s.op == Op.IF)
+    assert _entry_uniformity(guard) is Uniformity.MULT
+
+
+def test_the_counted_loop_states_its_own_non_uniformity():
+    """`batchId0` differs between the rows of a block, and the loop says so.
+
+    The bounds are the macro layer's text and carry no uniformity of their
+    own, so the induction is what the answer has to come from.
+    """
+    from tensorforge.backend.pir.core import Op, Uniformity
+    from tensorforge.backend.pir.passes import _entry_uniformity
+
+    assert _entry_uniformity(_the_loop(Op.FOR)) is Uniformity.MULT
+
+
+def _loop_with_a_block_barrier(queried: bool):
+    """One loop over the batch, with a block barrier directly in its body."""
+    from tensorforge.backend.pir.build import IRBuilder
+    from tensorforge.backend.pir.core import BOOL, INDEX, Uniformity
+
+    builder = IRBuilder(fptype=Datatype.F32)
+    if queried:
+        with builder.while_("start", extern="batchId0", ctype="size_t",
+                            uniform=Uniformity.MULT) as loop:
+            builder.barrier(Uniformity.BLOCK)
+            nxt = builder.call("cursor.next", INDEX, "queue", pure=False,
+                               movable=False, uniform=Uniformity.BLOCK,
+                               materialize=True)
+            loop.exit_when(builder.op("lt", BOOL, nxt, 0))
+            loop.yield_(nxt)
+    else:
+        with builder.for_("start", "numElements0", "stride", extern="batchId0",
+                          ctype="size_t", uniform=Uniformity.MULT):
+            builder.barrier(Uniformity.BLOCK)
+    return builder.finish()
+
+
+def test_a_block_barrier_is_legal_in_the_queue_loop_and_not_in_the_counted_one():
+    """The one place where the queue is structurally better than the loop.
+
+    Both loops run over the batch and neither can carry a grid barrier.  They
+    differ on the block: the queue hands every thread of a block the same
+    element sequence, so all of them reach a block barrier the same number of
+    times, and a strided loop over `threadIdx.y + blockDim.y * blockIdx.x`
+    does not.
+    """
+    from tensorforge.backend.pir.passes import verify
+
+    assert verify(_loop_with_a_block_barrier(queried=True), strict=False) == []
+
+    counted = verify(_loop_with_a_block_barrier(queried=False), strict=False)
+    assert any("block-wide barrier" in d for d in counted), (
+        f"the counted loop accepted a block barrier: {counted}")
+
+
+def test_an_exit_belongs_to_the_loop_it_leaves():
+    """Nested, the condition it fires on is not the one the loop is entered under."""
+    from tensorforge.backend.pir.build import IRBuilder
+    from tensorforge.backend.pir.core import BOOL, INDEX, Uniformity
+    from tensorforge.backend.pir.passes import verify
+
+    builder = IRBuilder(fptype=Datatype.F32)
+    with builder.while_("start", extern="batchId0", ctype="size_t") as loop:
+        nxt = builder.call("cursor.next", INDEX, "queue", pure=False,
+                           movable=False, materialize=True)
+        with builder.if_(builder.op("lt", BOOL, nxt, 0)):
+            loop.exit_when(True)
+        loop.yield_(nxt)
+
+    diag = verify(builder.finish(), strict=False)
+    assert any("directly in the region of a `while`" in d for d in diag), diag

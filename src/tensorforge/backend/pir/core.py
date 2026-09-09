@@ -658,6 +658,14 @@ class Op:
     YIELD = 'yield'
     IF = 'if'
     FOR = 'for'
+    # A loop whose successor is *queried* rather than computed.  `FOR` hands
+    # its body an induction value because it derives one from (lo, hi, step);
+    # here the next index is the result of a statement inside the body, and
+    # the loop ends when an `EXIT` in the same region says so.  The two are
+    # separate names because they are separate facts: a counted loop knows
+    # its trip count from its head, and this one does not know it at all.
+    WHILE = 'while'
+    EXIT = 'exit'           # leave the enclosing `while` where the condition holds
     ALLOC = 'alloc'
     LOAD = 'load'
     STORE = 'store'
@@ -677,7 +685,7 @@ class Op:
     RAWSTMT = 'rawstmt'     # no target;          `text` is a *statement*
     RAWBLOCK = 'rawblock'   # one region;         `text` is the block *head*
 
-    CONTROL = frozenset({IF, FOR, RAWBLOCK})
+    CONTROL = frozenset({IF, FOR, WHILE, RAWBLOCK})
     RAW = frozenset({RAWEXPR, RAWSTMT, RAWBLOCK})
     ASYNC = frozenset({COPY_ASYNC, LOAD_ASYNC})
     # statements that lower to a C++ declaration and therefore handle a
@@ -804,13 +812,35 @@ class Stmt:
 
     @property
     def induction(self) -> Value:
-        assert self.op == Op.FOR
+        assert self.op in (Op.FOR, Op.WHILE)
         return self.regions[0].args[0]
 
     @property
     def iter_args(self) -> Tuple[Value, ...]:
         assert self.op == Op.FOR
         return self.regions[0].args[1:]
+
+    @property
+    def loop_init(self) -> Operand:
+        """What the queried loop's induction starts at."""
+        assert self.op == Op.WHILE
+        return self.args[0]
+
+    @property
+    def exits(self) -> Tuple['Stmt', ...]:
+        """The exits of this `while`, which is where its trip count is decided.
+
+        Read off the region rather than carried on the statement: an exit is a
+        statement in its own right, and one that claimed to be somewhere it is
+        not would be a claim nothing checks.
+        """
+        assert self.op == Op.WHILE
+        return tuple(s for s in self.regions[0].body if s.op == Op.EXIT)
+
+    @property
+    def exit_cond(self) -> Operand:
+        assert self.op == Op.EXIT
+        return self.args[0]
 
     # copy.async: args = (dst, src, *dst_index, *src_index); the split is in
     # the `ndst` attribute so that the positional convention stays local.
@@ -1031,6 +1061,13 @@ def dump(body: Tuple[Stmt, ...], indent: int = 0) -> str:
                          f'to {_fmt_operand(hi)} step {_fmt_operand(st)}{it} {{{note}')
             lines.append(dump(s.regions[0].body, indent + 1))
             lines.append(f'{pad}}}')
+        elif s.op == Op.WHILE:
+            lines.append(f'{pad}{head}while %{s.induction} = '
+                         f'{_fmt_operand(s.loop_init)} {{{note}')
+            lines.append(dump(s.regions[0].body, indent + 1))
+            lines.append(f'{pad}}}')
+        elif s.op == Op.EXIT:
+            lines.append(f'{pad}exit if {_fmt_operand(s.exit_cond)}{note}')
         elif s.op == Op.IF:
             lines.append(f'{pad}{head}if {_fmt_operand(s.cond)} {{{note}')
             lines.append(dump(s.regions[0].body, indent + 1))

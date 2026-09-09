@@ -192,8 +192,12 @@ def _same_types(a: Sequence[Operand], b: Sequence[Value]) -> bool:
 
 
 def _check_scope(body: Tuple[Stmt, ...], live: set, diag: List[str],
-                 reachable_at: Uniformity) -> None:
-    """``live`` is the set of value ids visible from enclosing scopes."""
+                 reachable_at: Uniformity, in_while: bool = False) -> None:
+    """``live`` is the set of value ids visible from enclosing scopes.
+
+    ``in_while`` says whether this body is a queried loop's region, which is
+    the only place an ``Op.EXIT`` may sit.
+    """
     live = set(live)
 
     for i, s in enumerate(body):
@@ -320,6 +324,43 @@ def _check_scope(body: Tuple[Stmt, ...], live: set, diag: List[str],
                     elif n and not _same_types(r.yielded, r.args[1:]):
                         diag.append('for: yielded types do not match iter_args')
 
+        elif s.op == Op.WHILE:
+            if len(s.regions) != 1:
+                diag.append('while: expects exactly one region')
+            elif len(s.regions[0].args) != 1:
+                diag.append('while: the region binds the induction variable '
+                            'and nothing else')
+            elif len(s.args) != 1:
+                diag.append('while: expects exactly one init operand')
+            elif s.target:
+                diag.append('while: carries its induction variable only and '
+                            'produces no result')
+            else:
+                r = s.regions[0]
+                if r.terminator is None or len(r.yielded) != 1:
+                    diag.append('while: the region must end in a yield of the '
+                                'next induction value')
+                if not s.exits:
+                    diag.append('while: no exit in the region, so the loop '
+                                'has no trip count at all')
+
+        elif s.op == Op.EXIT:
+            if len(s.args) != 1 or s.target or s.regions:
+                diag.append('exit: takes exactly one condition and nothing else')
+            elif not isinstance(_typeof(s.args[0]), ScalarType):
+                diag.append('exit: the condition must be a scalar')
+            if s.predicate is not None:
+                # A predicate becomes an enclosing guard, which would put the
+                # exit one region deeper than the loop it leaves and out of
+                # reach of the rule below.  A conjunction belongs in the
+                # condition.
+                diag.append('exit: must not be predicated; conjoin the '
+                            'predicate into the condition instead')
+            if not in_while:
+                diag.append('exit: must sit directly in the region of a '
+                            '`while`; nested, the condition it fires on is no '
+                            'longer the one the loop is entered under')
+
         elif s.op == Op.RAWEXPR:
             if len(s.target) != 1 or s.text is None:
                 diag.append('rawexpr: needs exactly one target and text')
@@ -439,7 +480,8 @@ def _check_scope(body: Tuple[Stmt, ...], live: set, diag: List[str],
         if s.regions:
             inner = min(reachable_at, _entry_uniformity(s))
             for r in s.regions:
-                _check_scope(r.body, live | {a.id for a in r.args}, diag, inner)
+                _check_scope(r.body, live | {a.id for a in r.args}, diag, inner,
+                             in_while=(s.op == Op.WHILE))
 
         for t in s.target:
             live.add(t.id)
@@ -462,10 +504,29 @@ def _entry_uniformity(s: Stmt) -> Uniformity:
     if s.op == Op.IF:
         return _operand_uniformity(s.cond)
     if s.op == Op.FOR:
-        return min((_operand_uniformity(b) for b in s.loop_bounds),
+        # The induction variable alongside the bounds.  A bound that is still
+        # raw text carries no uniformity, so the bounds alone answer `GRID`
+        # for a loop over the batch, whose variable is
+        # `threadIdx.y + blockDim.y * blockIdx.x` and therefore differs
+        # between the rows of a block.  The induction states what the text
+        # cannot.
+        levels = [_operand_uniformity(b) for b in s.loop_bounds]
+        if s.regions and s.regions[0].args:
+            levels.append(s.induction.uniformity)
+        return min(levels, default=Uniformity.GRID)
+    if s.op == Op.WHILE:
+        # Read off the exits, since they are what decides the trip count.  A
+        # loop that leaves on a block-uniform answer is entered the same
+        # number of times by every thread of the block, which is stronger than
+        # anything a counted loop over the batch can claim -- and it is the
+        # reason a block barrier may sit in this body and not in that one.
+        return min((_operand_uniformity(e.exit_cond) for e in s.exits),
                    default=Uniformity.GRID)
-    if s.op == Op.RAWBLOCK:
-        # opaque head text: assume the worst
+    if s.regions:
+        # `RAWBLOCK` and anything else carrying a region whose head this
+        # function cannot read.  `GRID` is the permissive answer and it would
+        # be given silently, so a construct added later would license a grid
+        # barrier inside itself by saying nothing.
         return Uniformity.LANE
     return Uniformity.GRID
 
@@ -514,7 +575,11 @@ def _dce_body(body: Tuple[Stmt, ...], uses) -> Tuple[Stmt, ...]:
     for s in body:
         s = replace(s, regions=tuple(replace(r, body=_dce_body(r.body, uses))
                                      for r in s.regions))
-        if s.op == Op.YIELD or s.has_side_effects:
+        if s.op in (Op.YIELD, Op.EXIT, Op.WHILE) or s.has_side_effects:
+            # Control flow, not a value.  An `exit` produces nothing and would
+            # otherwise fall to the rule below, and a `while` may not
+            # terminate, so whether its body is observable says nothing about
+            # whether the loop is.
             out.append(s)
             continue
         if s.attr('escapes'):
