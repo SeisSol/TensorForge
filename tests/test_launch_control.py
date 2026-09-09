@@ -328,13 +328,17 @@ def test_the_counted_loop_states_its_own_non_uniformity():
 def _loop_with_a_block_barrier(queried: bool):
     """One loop over the batch, with a block barrier directly in its body."""
     from tensorforge.backend.pir.build import IRBuilder
-    from tensorforge.backend.pir.core import BOOL, INDEX, Uniformity
+    from tensorforge.backend.pir.core import (BOOL, INDEX, Participants,
+                                              Uniformity)
 
     builder = IRBuilder(fptype=Datatype.F32)
     if queried:
         with builder.while_("start", extern="batchId0", ctype="size_t",
                             uniform=Uniformity.MULT) as loop:
-            builder.barrier(Uniformity.BLOCK)
+            # `Participants` says what the barrier covers in hardware;
+            # `uniform` says what the region guarantees.  Two ladders since
+            # `a51b625b`, and this call names the first one.
+            builder.barrier(Participants.BLOCK)
             nxt = builder.call("cursor.next", INDEX, "queue", pure=False,
                                movable=False, uniform=Uniformity.BLOCK,
                                materialize=True)
@@ -343,7 +347,7 @@ def _loop_with_a_block_barrier(queried: bool):
     else:
         with builder.for_("start", "numElements0", "stride", extern="batchId0",
                           ctype="size_t", uniform=Uniformity.MULT):
-            builder.barrier(Uniformity.BLOCK)
+            builder.barrier(Participants.BLOCK)
     return builder.finish()
 
 
