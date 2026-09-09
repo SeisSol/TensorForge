@@ -181,6 +181,15 @@ class Emitter:
             # carried pointer, which is a narrowing conversion the compiler
             # rejects rather than a wrong answer -- but only because the
             # element type happened to be arithmetic.
+            # The backend's spelling, not one assembled here.  A pointer's
+            # address space is part of its type wherever the target has spaces
+            # in its type system, and dropping it produced a declaration that
+            # converts the space away -- silently, and only where a pass
+            # declares a copy of a pointer rather than the site that bound it.
+            lex = self._lexic()
+            if lex is not None:
+                return lex.pointer_type(t.elem.ctype(), t.space,
+                                        getattr(t, 'readonly', False))
             const = 'const ' if getattr(t, 'readonly', False) else ''
             return f'{const}{t.elem.ctype()}*'
         raise IRError(f'cannot render type {t!r}')

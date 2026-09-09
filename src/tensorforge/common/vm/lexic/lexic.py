@@ -29,6 +29,33 @@ class Lexic(ABC):
     self.grid_constant_kw = ''
     self.simd_mode = False
 
+  def pointer_type(self, elem: str, space=None, readonly: bool = False,
+                   restrict: bool = False, const: bool = False) -> str:
+    """How a pointer into `space` is spelled, for a declaration of one.
+
+    Asked of the backend rather than assembled from `restrict_kw` at the call
+    site, because on one of them the space and the restrict promise are not
+    independently spellable: HIP puts the space in an attribute on the pointee
+    and ships `SpacePtrRestrict` as the fused alias, so a caller concatenating
+    two strings gets something that does not compile.  Both facts arrive here
+    together and the backend decides.
+
+    The default is the generic pointer, which is what every backend without
+    address spaces in its type system wants and what the emitter spelled by
+    hand before this existed.
+
+    `readonly` is about the pointee and `const` about the pointer: a binding
+    the pipelined form advances is `T *` and the ordinary one `T *const`, and
+    both may point at something nothing writes.
+
+    `space` is a `pir.MemSpace`, taken structurally so this module does not
+    have to import the IR.
+    """
+    lhs = 'const ' if readonly else ''
+    ptr = 'const' if const else ''
+    qual = f' {self.restrict_kw}' if restrict and self.restrict_kw else ''
+    return f'{lhs}{elem} *{ptr}{qual}'
+
   @abstractmethod
   def multifile(self):
     pass

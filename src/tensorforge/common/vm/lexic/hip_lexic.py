@@ -41,6 +41,45 @@ class HipLexic(CudaLexic):
     self.grid_dim_x = "gridDim.x"
     self.stream_type = "hipStream_t"
 
+  #: `hip.h`'s names for the address spaces clang numbers.
+  MEMSPACE = {'GLOBAL': 'tensorforge::GlobalMemspace',
+              'CONSTANT': 'tensorforge::ConstantMemspace',
+              'PARAM': 'tensorforge::ConstantMemspace'}
+
+  def pointer_type(self, elem, space=None, readonly=False, restrict=False,
+                   const=False):
+    """The space-qualified pointer, where `hip.h` has a name for the space.
+
+    A named space is worth spelling here and nowhere else: the attribute sits
+    on the *pointee*, so `SpacePtr<T, S>` and `T*` are different types and the
+    conversion between them runs one way only -- a space-qualified pointer
+    converts to a generic one implicitly, and back only through a cast.  Which
+    is why this used to be a cast on the right of one binding with `auto` on
+    the left: with the type unsayable, the only way to have it was to never
+    name it.  A pass declaring a copy of that value from its type got the
+    generic pointer and lost the space silently.
+
+    Restrict is fused rather than appended.  The alias carries both, and
+    `SpacePtr<T, S> __restrict` is not the same declaration -- the attribute
+    would apply to the alias rather than through it.
+
+    Shared and register are left generic.  LDS pointers are produced by the
+    arena binding, which spells its own declarator, and giving them a space
+    here would make every window incompatible with the arena it is a window
+    into.
+    """
+    name = self.MEMSPACE.get(getattr(space, 'name', None))
+    if name is None:
+      return super().pointer_type(elem, space, readonly, restrict, const)
+    ro = 'const ' if readonly else ''
+    alias = 'SpacePtrRestrict' if restrict else 'SpacePtr'
+    # `SpacePtrRestrict<T, S> const` is `T *__restrict const`, which is the
+    # declaration the generic spelling writes as `T *const __restrict__`.  The
+    # alias ends in the pointer, so the qualifier goes after it and means the
+    # same thing.
+    tail = ' const' if const else ''
+    return f'tensorforge::{alias}<{ro}{elem}, {name}>{tail}'
+
   def multifile(self):
     return False
 

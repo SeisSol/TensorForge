@@ -121,8 +121,13 @@ def test_wrapped_declaration_leaves_the_loop(backend, arch):
 def test_peeled_and_wrapped_transfers_use_the_right_element(backend, arch):
     kernel = _generate(CHAIN, backend, arch,
                        enable_wrap_loads=True, wrap_distance=1)
-    peeled = re.findall(r'peel_glb_\w+ = &\w+\[([^\]]+)\]', kernel)
-    wrapped = re.findall(r'wrap_glb_\w+ = &\w+\[([^\]]+)\]', kernel)
+    # `= (cast)&m1[...]` on a backend whose pointers carry an address space:
+    # the address is generic and the declaration is not, so the cast is part
+    # of the binding rather than an artefact of one vendor's spelling.
+    peeled = re.findall(r'peel_glb_\w+ = (?:\([^)]*\))?&\w+\[([^\]]+)\]',
+                        kernel)
+    wrapped = re.findall(r'wrap_glb_\w+ = (?:\([^)]*\))?&\w+\[([^\]]+)\]',
+                         kernel)
     assert peeled, 'no peeled pointer emitted'
     assert wrapped, 'no lookahead pointer emitted'
     # `batchId1` before the loop is `batchId_start` clamped into range, and it

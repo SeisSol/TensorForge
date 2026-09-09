@@ -166,6 +166,48 @@ class GetElementPtr(AbstractInstruction):
       return self._src.name
     return self._table.access(self._variant)
 
+  def _pointer_type(self, datatype, const_mod: str) -> str:
+    """The type of this binding, as the backend spells a pointer into global.
+
+    One place instead of four near-copies, and the reason is not tidiness: on
+    AMD the address space sits in the pointer's type, so three of the four
+    addressing modes were declaring a generic pointer where the fourth cast to
+    a space-qualified one -- the same binding, two types, decided by nothing
+    but which mode the operand happened to use.  Asking the lexic makes them
+    agree, and makes the space something a pass can reproduce when it declares
+    a copy of the value instead of losing it to `auto`.
+
+    `const_mod` is about the pointer and not the pointee: the pipelined form
+    advances the binding, so it may not be `*const`.
+    """
+    return self._vm.get_lexic().pointer_type(
+        f'{datatype}', MemSpace.GLOBAL,
+        readonly=self._src.obj.direction == DataFlowDirection.SOURCE,
+        restrict=True, const=bool(const_mod))
+
+  def _declarator(self, datatype, const_mod: str) -> str:
+    return f'{self._pointer_type(datatype, const_mod)} {self._dest.name}'
+
+  def _coerce(self, datatype, const_mod: str, rhs: str) -> str:
+    """Bring an address into the space the declaration claims for it.
+
+    The right-hand side is arithmetic on a kernel argument, which is generic;
+    a space-qualified pointer is reached from one only through a cast, and the
+    conversion the other way is the implicit one.  So the cast follows the
+    declared type rather than a branch on the vendor: where the backend spells
+    no space this is the identity.
+
+    Note for AMD that this now applies to every addressing mode, where the
+    space used to be claimed for `PTR_BASED` alone.  That is the consistent
+    answer -- all of these point into global memory -- but it is a change in
+    what the compiler is told, not only in how it is spelled, and it wants a
+    measurement before it is taken as settled.
+    """
+    cast = self._pointer_type(datatype, '')
+    if '<' not in cast:
+      return rhs
+    return f'({cast}){rhs}'
+
   def gen_ir(self, writer):
 
     if self._table is not None:
@@ -174,8 +216,7 @@ class GetElementPtr(AbstractInstruction):
       # what varies between iterations is which of them to take, and that is
       # the whole of it.
       datatype = self._vm._fp_type if self._src.obj.datatype is None else self._src.obj.datatype
-      lhs = 'const ' if self._src.obj.direction == DataFlowDirection.SOURCE else ''
-      lhs += f'{datatype} *const {self._vm.get_lexic().restrict_kw} {self._dest.name}'
+      lhs = self._declarator(datatype, 'const')
       self._emit_binding(writer, lhs, self._table.access(self._variant))
       return
 
@@ -196,36 +237,29 @@ class GetElementPtr(AbstractInstruction):
       main_offset = f'{self._INDEX_HOLE} * {batch_addressing.stride}'
       sub_offset = f'{batch_obj.get_offset_to_first_element()}'
       address = f'{main_offset} + {batch_addressing.offset} + {sub_offset}{extra_offset}'
-      rhs = f'&{self.source_name()}[{address}]'
-      lhs = 'const ' if self._src.obj.direction == DataFlowDirection.SOURCE else ''
-      lhs += f'{datatype} *{const_mod} {self._vm.get_lexic().restrict_kw} {self._dest.name}'
+      rhs = self._coerce(datatype, const_mod, f'&{self.source_name()}[{address}]')
+      lhs = self._declarator(datatype, const_mod)
     if batch_addressing == Addressing.STRIDED:
       # distance between batch elements is the *stored* volume, i.e.
       # prod(upper - lower), not prod(shape)
       main_offset = f'{self._INDEX_HOLE} * {batch_obj.storage_volume()}'
       sub_offset = f'{batch_obj.get_offset_to_first_element()}'
       address = f'{main_offset} + {sub_offset}{extra_offset}'
-      rhs = f'&{self.source_name()}[{address}]'
-      lhs = 'const ' if self._src.obj.direction == DataFlowDirection.SOURCE else ''
-      lhs += f'{datatype} *{const_mod} {self._vm.get_lexic().restrict_kw} {self._dest.name}'
+      rhs = self._coerce(datatype, const_mod, f'&{self.source_name()}[{address}]')
+      lhs = self._declarator(datatype, const_mod)
     elif batch_addressing == Addressing.PTR_BASED:
       main_offset = f'{self._INDEX_HOLE}'
       sub_offset = f'{batch_obj.get_offset_to_first_element()}'
       address = f'{main_offset}][{sub_offset}{extra_offset}'
       src_suffix = '_ptr' if self._vm.get_lexic()._backend == 'targetdart' else ''
-      rhs = f'&{self.source_name()}{src_suffix}[{address}]'
-      lhs = 'const ' if self._src.obj.direction == DataFlowDirection.SOURCE else ''
-      if self._context.get_vm().get_hw_descr().vendor == 'amd':
-        lhs += f'{datatype}'
-        rhs = f'(tensorforge::SpacePtrRestrict<{lhs}, tensorforge::GlobalMemspace>){rhs}'
-        lhs = f'auto {self._dest.name}'
-      else:
-        lhs += f'{datatype} *{const_mod} {self._vm.get_lexic().restrict_kw} {self._dest.name}'
+      rhs = self._coerce(
+          datatype, const_mod,
+          f'&{self.source_name()}{src_suffix}[{address}]')
+      lhs = self._declarator(datatype, const_mod)
     elif batch_addressing == Addressing.NONE:
       address = f'{batch_obj.get_offset_to_first_element()}'
-      rhs = f'&{self.source_name()}[{address}]'
-      lhs = 'const ' if self._src.obj.direction == DataFlowDirection.SOURCE else ''
-      lhs += f'{datatype} *{const_mod} {self._vm.get_lexic().restrict_kw} {self._dest.name}'
+      rhs = self._coerce(datatype, const_mod, f'&{self.source_name()}[{address}]')
+      lhs = self._declarator(datatype, const_mod)
     elif batch_addressing == Addressing.SCALAR:
       rhs = f'{self.source_name()}'
       lhs = f'{datatype} {self._dest.name}'

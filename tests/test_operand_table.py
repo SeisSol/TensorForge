@@ -451,12 +451,12 @@ def test_no_struct_is_defined_where_no_table_is_registered():
 
 
 def test_the_loop_takes_the_structured_path_where_one_is_open():
-    """And registers its counter as a value, not only as a name.
+    """And builds its body inside the region, not beside it.
 
-    Anything in the body that mentions the counter has to say so as an
-    operand.  A select chain over four pointers reads nothing else, so to the
-    IR it is a computation with no inputs -- free to be hoisted out of the very
-    loop that defines what it reads, silently and only in the text.
+    A select chain over four pointers reads nothing the IR can see, so nothing
+    in the body would hold it in place.  What does is that it is a raw
+    statement and unmovable -- and that decides where it *stays*, not where it
+    was put, so the region has to be open while the body is built.
     """
     from tensorforge.backend.instructions.abstract_instruction import \
         AbstractInstruction
@@ -467,12 +467,13 @@ def test_the_loop_takes_the_structured_path_where_one_is_open():
 
     class Probe:
         def gen_code(self, writer):
-            depth.append(len(AbstractInstruction._induction_value))
+            depth.append(len(writer._stack))
 
     loop = VariantLoop(context(), 'face', 4, [Probe()])
     with AbstractInstruction.shared_body(context(), Writer()) as builder:
+        root = len(builder._stack)
         loop.gen_code(builder)
-    assert depth == [1]
+    assert depth == [root + 1]
 
 
 def test_the_text_path_still_writes_a_counted_loop():

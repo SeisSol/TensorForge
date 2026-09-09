@@ -118,7 +118,9 @@ def test_a_loop_carries_a_rolling_pointer():
     head = src.split('for (')[0]
     carried = [l.strip() for l in head.splitlines() if l.strip().endswith('= p0;')]
     assert len(carried) == 1, f"expected one carried-value declaration:\n{src}"
-    assert carried[0].startswith('float*'), (
+    # A star in the declarator, not a spelling: the pointer type comes from
+    # the backend now, and `float *` and `float*` are the same declaration.
+    assert '*' in carried[0].split('=')[0], (
         f"the carried pointer must be declared as a pointer, not as its "
         f"element type: {carried[0]!r}\n{src}")
 
