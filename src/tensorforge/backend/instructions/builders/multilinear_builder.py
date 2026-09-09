@@ -804,5 +804,25 @@ class MultilinearBuilder(OperationBuilder):
           shift=self._store_offset())
 
   def _insert_sync_block(self):
+    """A barrier around the shared traffic, where nothing later will derive one.
+
+    `SyncThreadsOpt` begins by deleting *every* `SyncThreads` and re-deriving
+    the set from the region colouring, so with that pass on, everything
+    appended here is provisional -- and provisional barriers are not free.
+    They stand in the stream for the whole optimisation pipeline, and
+    `MoveLoads` treats a barrier as a wall for any transfer that touches
+    shared memory.  On `local_flux` that pinned all five global-to-shared
+    transfers where they were built: not one moved, so every
+    `__pipeline_commit` ended up next to its `__pipeline_wait_prior(0)` and
+    the asynchronous copies were issued and awaited in the same breath.
+
+    So they are inserted only where they are the final word.  With the pass
+    off, nothing else derives a barrier and these are the kernel's own; with
+    it on, `SyncThreadsOpt` reads the final instruction order and puts them
+    where that order needs them, which is strictly better information than
+    this builder has.
+    """
+    if self._context.get_user_options().enable_sync_block_opt:
+      return
     self._instructions.append(SyncThreads(context=self._context,
                                           num_threads_per_mult=self._num_threads))

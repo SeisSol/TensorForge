@@ -351,10 +351,24 @@ def _sched(body: Tuple[Stmt, ...], state: _State,
             out.append(_sched_if(s, state, diag))
             continue
 
-        if s.regions:                       # rawblock and friends: opaque
+        if s.regions:                       # rawblock and friends
             regions = tuple(replace(r, body=_sched(r.body, state.copy(), diag))
                             for r in s.regions)
-            if state.outstanding:
+            # Opaque about *control*, not about flight.  The body is scheduled
+            # against a copy, so whatever it does to the outstanding list is
+            # discarded -- and the list is therefore only unknown afterwards if
+            # the body could have changed it.  A block that merely issues
+            # copies cannot: a copy joins the outstanding list at its commit,
+            # and the commit is not in here.
+            #
+            # The blanket clear cost the whole point of issuing early.  A
+            # predicated tail copy -- `if (threadIdx.x < 24) memcpy_async(...)`
+            # -- is one such block, and it sits between the two transfers of
+            # `local_flux`.  With the count unknown from there on, every wait
+            # fell back to a full drain: two groups in flight and
+            # `__pipeline_wait_prior(0)` waiting for both, so the transfer that
+            # had just been hoisted was awaited immediately anyway.
+            if state.outstanding and _alters_flight(s.regions):
                 state.known = False
             out.append(replace(s, regions=regions))
             continue
@@ -362,6 +376,29 @@ def _sched(body: Tuple[Stmt, ...], state: _State,
         out.append(s)
 
     return tuple(out)
+
+
+def _alters_flight(regions) -> bool:
+    """Could this region's body change the outstanding list?
+
+    Only three things do: closing a group, retiring one, and issuing a unit
+    that is counted on its own.  A `copy.async` is not counted until its
+    commit, so a body holding nothing else leaves the list exactly as it found
+    it -- and a caller may keep counting across it.
+
+    Recursive, because a block may hold a block; conservative on the way out,
+    because a statement kind this does not recognise is one whose effect it
+    cannot rule out.
+    """
+    for r in regions:
+        for s in r.body:
+            if s.op in (Op.COMMIT_ASYNC, Op.WAIT):
+                return True
+            if s.op in Op.ASYNC and s.counter != 'copy':
+                return True
+            if s.regions and _alters_flight(s.regions):
+                return True
+    return False
 
 
 def _sched_wait(s: Stmt, state: _State, diag: List[str]) -> Stmt:
