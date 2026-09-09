@@ -1,0 +1,436 @@
+# SPDX-FileCopyrightText: 2026 SeisSol Group
+#
+# SPDX-License-Identifier: MIT
+"""The generator's options: one place that declares them, one that resolves them.
+
+An option is an *entry* and not a class attribute.  `declare` refuses a name it
+already holds, so a second declaration of `wrap_distance` is an error at import
+naming the option, rather than an assignment in a class body where the last one
+silently wins.
+
+Four layers answer for a value, nearest first:
+
+1. what the caller passed to `Options`,
+2. the option's own environment variable, where the declaration names one,
+3. `TF_OPTIONS`, a comma-separated ``name=value`` list covering every option,
+4. the vendor rule the declaration carries, or its plain default.
+
+Layer 3 is what a caller that cannot reach the constructor uses -- the yateto
+frontend builds its own context -- and layer 2 is for the few switches whose
+spelling is already written down in tools and scripts.
+
+`resolve` runs the layers against one hardware descriptor and returns a frozen
+`ResolvedOptions`: one value per declared name, hashable, and carrying the
+*delta* to what the same hardware would have produced had nothing been asked at
+all.  That delta is what identifies a configuration.  `label` spells it for a
+report and `digest` for a symbol name, and it is empty for a caller that asked
+for nothing, which is what keeps generated names stable for the default build.
+"""
+import hashlib
+import os
+from typing import Any, Callable, Dict, Mapping, Optional
+
+
+class _Unset:
+  """Absence of a value, distinct from `None`.
+
+  `None` is a value some options take -- `merge_max_arity=None` is "no cap" --
+  so it cannot also mean "nothing was said".
+  """
+  _instance = None
+
+  def __new__(cls):
+    if cls._instance is None:
+      cls._instance = super().__new__(cls)
+    return cls._instance
+
+  def __repr__(self):
+    return 'UNSET'
+
+
+UNSET = _Unset()
+
+#: A comma-separated ``name=value`` list setting any declared option, e.g.
+#: ``TF_OPTIONS=enable_pipeline=1,wrap_distance=2``.  A bare ``name`` means
+#: ``name=1``.
+OPTIONS_ENV = 'TF_OPTIONS'
+
+
+# -- value parsers ----------------------------------------------------------- #
+
+def parse_bool(text: str) -> bool:
+  low = text.strip().lower()
+  if low in ('', '0', 'false', 'no', 'off'):
+    return False
+  if low in ('1', 'true', 'yes', 'on'):
+    return True
+  raise ValueError(f'expected a boolean, got {text!r}')
+
+
+def parse_int(text: str) -> int:
+  return int(text.strip())
+
+
+def parse_optional_int(text: str) -> Optional[int]:
+  low = text.strip().lower()
+  if low in ('', 'none'):
+    return None
+  return int(low)
+
+
+def parse_str(text: str) -> str:
+  return text
+
+
+_DEFAULT_PARSERS = {bool: parse_bool, int: parse_int, str: parse_str}
+
+
+class Opt:
+  """One declared option: its name, where its value comes from, and why."""
+  __slots__ = ('name', 'doc', 'default', 'env', 'parse', 'rule', 'codegen')
+
+  def __init__(self,
+               name: str,
+               doc: str,
+               default: Any = UNSET,
+               env: Optional[str] = None,
+               parse: Optional[Callable[[str], Any]] = None,
+               rule: Optional[Callable[[Any], Any]] = None,
+               codegen: bool = True):
+    if rule is None and default is UNSET:
+      raise ValueError(f'option {name!r} needs either a default or a rule')
+    if parse is None:
+      parse = _DEFAULT_PARSERS.get(type(default))
+    if env is not None and parse is None:
+      raise ValueError(f'option {name!r} is settable from {env} but has no parser')
+    self.name = name
+    self.doc = doc
+    self.default = default
+    self.env = env
+    self.parse = parse
+    self.rule = rule
+    #: Whether this option can change the generated text.  A diagnostic that
+    #: only prints stays out of the identity, or switching it on would rename
+    #: every kernel in the build.
+    self.codegen = codegen
+
+  def base(self, hw) -> Any:
+    """The value for this hardware when nobody asked for one."""
+    return self.default if self.rule is None else self.rule(hw)
+
+  def check(self, value: Any) -> None:
+    if value is UNSET:
+      raise ValueError(f'option {self.name!r}: pass a value or omit the option')
+    if value is None and self.default is not None:
+      raise ValueError(
+          f'option {self.name!r} has no value None; omit it to take the default')
+
+  def read(self, text: str, source: str) -> Any:
+    if self.parse is None:
+      raise ValueError(f'{source}: option {self.name!r} cannot be set as text')
+    try:
+      return self.parse(text)
+    except ValueError as exc:
+      raise ValueError(f'{source}={text!r}: {exc}') from None
+
+
+_REGISTRY: Dict[str, Opt] = {}
+_BY_ENV: Dict[str, Opt] = {}
+
+
+def declare(name: str, doc: str, **kwargs) -> Opt:
+  """Register an option, refusing a name or a variable that is already taken."""
+  if name in _REGISTRY:
+    raise ValueError(f'option {name!r} is declared twice; a name is registered once '
+                     f'so that a duplicate is an error and not an overwrite')
+  opt = Opt(name, doc, **kwargs)
+  if opt.env is not None:
+    taken = _BY_ENV.get(opt.env)
+    if taken is not None:
+      raise ValueError(f'{opt.env} already sets option {taken.name!r}, '
+                       f'so it cannot also set {name!r}')
+    _BY_ENV[opt.env] = opt
+  _REGISTRY[name] = opt
+  return opt
+
+
+def registry() -> Mapping[str, Opt]:
+  """Every declared option, by name."""
+  return dict(_REGISTRY)
+
+
+def _spell(value: Any) -> str:
+  if isinstance(value, bool):
+    return '1' if value else '0'
+  if value is None:
+    return 'none'
+  return str(value)
+
+
+def _from_environment(env: Optional[Mapping[str, str]] = None) -> Dict[str, Any]:
+  """Layers 2 and 3, flattened; the specific variable wins over the general one."""
+  env = os.environ if env is None else env
+  out: Dict[str, Any] = {}
+  for item in env.get(OPTIONS_ENV, '').split(','):
+    if not item.strip():
+      continue
+    name, sep, text = item.partition('=')
+    name = name.strip()
+    opt = _REGISTRY.get(name)
+    if opt is None:
+      raise ValueError(f'{OPTIONS_ENV} names an unknown option {name!r}; '
+                       f'declared are {sorted(_REGISTRY)}')
+    out[name] = opt.read(text if sep else '1', f'{OPTIONS_ENV}:{name}')
+  for var, opt in _BY_ENV.items():
+    text = env.get(var)
+    if text is not None:
+      out[opt.name] = opt.read(text, var)
+  return out
+
+
+class Options:
+  """What a caller asked for, before any hardware is known.
+
+  Holds only the options actually passed, so that "asked for nothing" is
+  distinguishable from "asked for the default" -- the two are the same value
+  and a different statement, and only the first follows a changing default.
+  """
+  __slots__ = ('_asked',)
+
+  def __init__(self, **asked):
+    unknown = sorted(set(asked) - set(_REGISTRY))
+    if unknown:
+      raise ValueError(f'unknown option(s) {unknown}; declared are {sorted(_REGISTRY)}')
+    for name, value in asked.items():
+      _REGISTRY[name].check(value)
+    self._asked = tuple(sorted(asked.items()))
+
+  def asked(self) -> Dict[str, Any]:
+    return dict(self._asked)
+
+  def resolve(self, hw) -> 'ResolvedOptions':
+    """Settle every declared option against this hardware descriptor."""
+    from_env = _from_environment()
+    asked = self.asked()
+    values: Dict[str, Any] = {}
+    delta: Dict[str, Any] = {}
+    for name, opt in _REGISTRY.items():
+      base = opt.base(hw)
+      if name in asked:
+        value = asked[name]
+      elif name in from_env:
+        value = from_env[name]
+      else:
+        value = base
+      values[name] = value
+      if opt.codegen and value != base:
+        delta[name] = value
+    return ResolvedOptions(values, delta)
+
+  def __eq__(self, other):
+    return isinstance(other, Options) and self._asked == other._asked
+
+  def __hash__(self):
+    return hash(self._asked)
+
+  def __repr__(self):
+    inner = ', '.join(f'{n}={v!r}' for n, v in self._asked)
+    return f'Options({inner})'
+
+
+class ResolvedOptions:
+  """One value per declared option, fixed, plus the delta that identifies it.
+
+  Fixed because generation reads it from a dozen places and a pass that could
+  answer a question differently the second time it is asked is not a
+  configuration but a mood.
+  """
+  __slots__ = ('_values', '_delta')
+
+  def __init__(self, values: Mapping[str, Any], delta: Mapping[str, Any]):
+    object.__setattr__(self, '_values', dict(values))
+    object.__setattr__(self, '_delta', dict(delta))
+
+  def __setattr__(self, name, value):
+    raise AttributeError(f'options are fixed once resolved; {name!r} cannot be set')
+
+  def __getattr__(self, name):
+    try:
+      return self._values[name]
+    except KeyError:
+      raise AttributeError(f'no option {name!r}; declared are {sorted(self._values)}') from None
+
+  def __contains__(self, name):
+    return name in self._values
+
+  def as_dict(self) -> Dict[str, Any]:
+    return dict(self._values)
+
+  def delta(self) -> Dict[str, Any]:
+    """What this configuration says that the bare default for the same hardware
+    does not.  Empty for the default build."""
+    return dict(self._delta)
+
+  def label(self) -> str:
+    """The delta as text, canonical: same configuration, same spelling."""
+    return ','.join(f'{n}={_spell(v)}' for n, v in sorted(self._delta.items()))
+
+  def digest(self, length: int = 8) -> str:
+    """A short hash of the delta, empty where there is none.
+
+    Empty on purpose: a build that asked for nothing then contributes nothing
+    to whatever names it, and its symbols do not move because this exists.
+    """
+    if not self._delta:
+      return ''
+    sha = hashlib.new('md5', usedforsecurity=False)
+    sha.update(self.label().encode())
+    return sha.hexdigest()[:length]
+
+  def describe(self) -> str:
+    """The delta for a generated file to carry, or a word saying there is none."""
+    return self.label() or 'default'
+
+  def __eq__(self, other):
+    return isinstance(other, ResolvedOptions) and self._values == other._values
+
+  def __hash__(self):
+    return hash(tuple(sorted(self._values.items(), key=lambda kv: kv[0])))
+
+  def __repr__(self):
+    return f'ResolvedOptions({self.label() or "default"})'
+
+
+# -- the options ------------------------------------------------------------- #
+
+declare('exact_contraction_length',
+        default=False,
+        doc='Cover the contraction range exactly rather than rounding it up to '
+            'the lane count.')
+
+declare('align_shr_mem',
+        default=True,
+        doc='Round every shared-memory allocation up to the access alignment.')
+
+declare('enable_sync_block_opt',
+        default=True,
+        doc='Drop barriers a data-flow argument shows to be redundant.')
+
+declare('enable_pipeline',
+        default=False,
+        doc='Software pipelining: advance the address computation of a transfer '
+            'ahead of the iteration that consumes it.\n'
+            'Off pending hardware numbers; correctness does not block it.')
+
+declare('enable_multibuffer',
+        default=False,
+        doc='Rotate the shared-memory buffers on top of the advanced addresses. '
+            'Needs `enable_pipeline`, since the rotation reads the advanced '
+            'pointer, and is implemented for `pipeline_depth == 2` only -- see '
+            'backend/opt/pipeline.py.')
+
+declare('pipeline_depth',
+        default=2,
+        doc='Stages a rotating buffer holds.')
+
+declare('enable_wrap_loads',
+        default=False,
+        doc='Slot-granular prefetch: move a register transfer `wrap_distance` '
+            'compute slots ahead of its consumer, wrapping to the previous '
+            'iteration where that runs off the front of the body.  One buffer '
+            'copy for any distance up to n - 1; see backend/opt/wrap.py.')
+
+declare('wrap_distance',
+        default=1,
+        doc='Compute slots a wrapped transfer is moved ahead by.')
+
+declare('preload_globals',
+        rule=lambda hw: hw.vendor in ('amd',),
+        parse=parse_bool,
+        doc='Stage every `Addressing.NONE` operand into shared memory once per '
+            'block, in the section prologue, instead of reading it from global '
+            'inside the batch loop.\n'
+            'A question and not a constant because the answer is a measurement '
+            'nobody has taken on NVIDIA: the rule is "AMD only", so the whole '
+            'NVIDIA path -- including the tensor-core one, where a batch-constant '
+            'operand would also carry a batch-constant *conversion* -- has never '
+            'been compared against its own alternative.  A benchmark cannot ask '
+            'a question the generator cannot be asked.')
+
+declare('wide_bodies',
+        default=True,
+        env='TF_IR_WIDE',
+        doc='One PIR body per loop body, rather than one per macro instruction.\n'
+            'A pass sees a body.  Per macro instruction that means `RegisterAlloc`, '
+            'the loader that fills the buffer and the multilinear that reads it are '
+            'three separate bodies, and the only thing connecting them is the C++ '
+            'name -- 60.7% of buffers in the corpus are named for that reason alone, '
+            'against 10.3% per loop body (tools/buffer_spans.py).  Everything still '
+            'needing a name here outlives one loop body: the shared arena, its '
+            'scratch tail, and the tiles of the two cases that have two batch loops.\n'
+            'So this is not primarily a code-quality switch -- the cross-instruction '
+            'CSE win is 0.2% -- it is what makes the naming go away, and with it the '
+            'reason `symbol.py` builds addresses as text.\n'
+            '`TF_IR_WIDE=0` reaches it without touching a call site, because a '
+            'setting that moves 71 of 108 generated outputs has to stay bisectable.')
+
+declare('merge_variants',
+        default=False,
+        doc='Macro-op merging: state a repeated run of the descriptor list once '
+            'and bind its varying operands to a counter.  One switch covers both '
+            'the rewrite and the emission, so that a rolled list cannot be '
+            'expanded again on the way out.\n'
+            'Off pending numbers from hardware; the forms are exact against each '
+            'other in the generated text and have not been compared as values.')
+
+declare('merge_min_count',
+        default=3,
+        doc='Shortest run worth merging.  Three rather than two because two '
+            'contributions are cheaper written out than a counter and a select '
+            'per operand, and because a pair of same-shaped operations is the '
+            'commonest accidental run.')
+
+declare('merge_max_arity',
+        default=None,
+        parse=parse_optional_int,
+        doc='Largest operand count a merged run may carry, or None for no cap.')
+
+declare('lead_vectorize',
+        default=False,
+        env='TF_LEAD_VEC',
+        doc='Vectorise the lead dimension.  Off by default, and not out of doubt '
+            'about the mechanism: it changes the thread count of every kernel, and '
+            'the only instrument that can say whether that was a good idea is a '
+            'register and occupancy measurement on real hardware.  The host oracle '
+            'checks that the numbers still come out right; it cannot check that '
+            'they come out faster.')
+
+declare('lead_blocking',
+        default=1,
+        env='TF_LEAD_BLOCK',
+        doc='Vectors per lane in the lead dimension.  1 keeps the arrangement the '
+            'width alone produces; 2 is where the packed FMA starts paying for its '
+            'own splat.  Separate from `lead_vectorize` because it is a *register* '
+            'decision and the width is an instruction one -- they want separate '
+            'measurements.')
+
+declare('k_width',
+        default=1,
+        env='TF_K_WIDTH',
+        doc='Reduction steps one body covers.  Independent of the lead width: it '
+            'removes loads of the broadcast operand rather than instructions on '
+            'the vectorised one, and it works with or without a lead width at all.')
+
+declare('ir_debug',
+        default='',
+        env='TF_IR_DEBUG',
+        codegen=False,
+        doc='Diagnostics from the pseudo-IR.  Any non-empty value reports verifier '
+            'findings and declined prefetches; a value containing `dump` also dumps '
+            'each pass in the pipeline.')
+
+declare('ir_stats',
+        default=False,
+        env='TF_IR_STATS',
+        codegen=False,
+        doc='Print node count and register pressure for every emitted body.')

@@ -247,11 +247,10 @@ class Generator:
     # launch control is (still) broken
     prefer_launchcontrol = False # context.get_vm().get_hw_descr().vendor == 'nvidia' and int(context.get_vm().get_hw_descr().model[3:]) >= 100
     prefer_persistent = context.get_vm().get_hw_descr().vendor in ['amd', 'nvidia'] and not prefer_launchcontrol
-    # The vendor rule is the default, not the decision: `Options.preload_globals`
-    # overrides it either way so that a sweep can price both.
-    _preload_default = context.get_vm().get_hw_descr().vendor in ['amd']
-    _preload_asked = context.get_user_options().preload_globals
-    prefer_preload = ((_preload_default if _preload_asked is None else _preload_asked)
+    # The vendor rule is the default and not the decision; it is carried by the
+    # option's declaration, and a caller asking either way overrides it there,
+    # so that a sweep can price both.
+    prefer_preload = (context.get_user_options().preload_globals
                       and not prefer_launchcontrol)
 
     self._persistent_threading = prefer_persistent
