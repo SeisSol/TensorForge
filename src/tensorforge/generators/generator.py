@@ -1108,6 +1108,17 @@ class Generator:
     # this at all.
     if self._flags is not FlagMode.OPTIONAL:
       sha.update(self._flags.value.encode())
+    # The options identify the kernel too.  Without them two configurations of
+    # one workload carry one symbol name, and anything that keys a report on
+    # the symbol -- a profiler above all -- reports both under it, with
+    # plausible numbers in either row and nothing saying which is which.
+    #
+    # Only the delta to what this hardware would have generated unasked goes
+    # in, so a build that asked for nothing hashes exactly what it did before
+    # options were part of this.  Same reason `OPTIONAL` stays out above.
+    options = self._context.get_user_options().digest()
+    if options:
+      sha.update(options.encode())
     md5encoding = sha.hexdigest()
     self._base_kernel_name = f'kernel_{md5encoding[:Generator.NAME_ENCODING_LENGTH]}'
 
@@ -1120,6 +1131,9 @@ class Generator:
 
   def _write_kernel_meta_data(self, writer):
     writer(f'// generated with TensorForge. Version: {interop.get_version()}')
+    # What was asked for, so that a file found on its own says which of several
+    # configurations of one workload it is.
+    writer(f'// options: {self._context.get_user_options().describe()}')
     writer('// meta data:')
     glb_matrices = self._scopes.get_global_scope().values()
     for matrix in glb_matrices:
