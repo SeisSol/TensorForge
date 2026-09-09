@@ -24,6 +24,7 @@ inline void kernel_kernel_939857c66e(sycl::queue *stream, sycl::range<3> group_c
     sycl::accessor<float, 1, sycl::access::mode::read_write, sycl::access::target::local> totalShrMem (0, cgh); {
       cgh.parallel_for(sycl::nd_range<3>{{group_size.get(0), group_size.get(1), group_count.get(0) * group_size.get(2)}, group_size}, [=](sycl::nd_item<3> item)  {
         // generated with TensorForge. Version: 0.0.1
+        // options: default
         // meta data:
         // m0 32×13(32×13) {0..32}×{0..13} strided
         // m1 32×13(32×13) {0..32}×{0..13} strided
@@ -59,7 +60,8 @@ inline void kernel_kernel_939857c66e(sycl::queue *stream, sycl::range<3> group_c
               }
               float r1[1]{};
               // r1 = load{g>r}(glb_m2);
-              if ((v8_lead >= 10) && (v8_lead < 13)) {
+              bool v26_g = v8_lead < 13;
+              if ((v8_lead >= 10) && v26_g) {
                 #pragma unroll
                 for (int32_t v28_i1 = 8; v28_i1 < 9; ++v28_i1) {
                   float v36_data = glb_m2[(v8_lead + (v28_i1 * 13))];
@@ -114,7 +116,7 @@ inline void kernel_kernel_939857c66e(sycl::queue *stream, sycl::range<3> group_c
               }
               float r4[13]{};
               // r4 = load{g>r}(glb_m4);
-              if (v8_lead < 13) {
+              if (v26_g) {
                 #pragma unroll
                 for (int32_t v111_i1 = 0; v111_i1 < 13; ++v111_i1) {
                   float v119_data = glb_m4[(v8_lead + (v111_i1 * 13))];

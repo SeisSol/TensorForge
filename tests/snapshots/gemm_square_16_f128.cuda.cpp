@@ -46,6 +46,7 @@ __launch_bounds__(256)
   extern __shared__ char totalShrMemPtr[];
    {
     // generated with TensorForge. Version: 0.0.1
+    // options: default
     // meta data:
     // m0 2×2(2×2) {0..2}×{0..2} strided
     // m1 2×2(2×2) {0..2}×{0..2} strided
@@ -76,7 +77,7 @@ __launch_bounds__(256)
             int32_t v21_lead = v14_lead + (v15_i0 * 2);
             #pragma unroll
             for (int32_t v16_i1 = 0; v16_i1 < 2; ++v16_i1) {
-              __float128 v24_data = __ldcg(&glb_m1[(v21_lead + (v16_i1 * 2))]);
+              __float128 v24_data = glb_m1[(v21_lead + (v16_i1 * 2))];
               r0[(v15_i0 + v16_i1)] = v24_data;
             }
           }

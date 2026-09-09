@@ -24,6 +24,7 @@ inline void kernel_kernel_23e9c13a7a(sycl::queue *stream, sycl::range<3> group_c
     sycl::accessor<float, 1, sycl::access::mode::read_write, sycl::access::target::local> totalShrMem (256, cgh); {
       cgh.parallel_for(sycl::nd_range<3>{{group_size.get(0), group_size.get(1), group_count.get(0) * group_size.get(2)}, group_size}, [=](sycl::nd_item<3> item)  {
         // generated with TensorForge. Version: 0.0.1
+        // options: default
         // meta data:
         // m0 16×16(16×16) {0..16}×{0..16} strided
         // m1 16(16) {0..16} strided
@@ -44,15 +45,14 @@ inline void kernel_kernel_23e9c13a7a(sycl::queue *stream, sycl::range<3> group_c
               int32_t v6_lead = item.get_local_id(0) % 16;
               #pragma unroll
               for (int32_t v7_k0 = 0; v7_k0 < 1; ++v7_k0) {
-                int32_t v13_lead = v7_k0 * 16;
-                int32_t v14_lead = v6_lead + v13_lead;
+                int32_t v14_lead = v6_lead + (v7_k0 * 16);
                 float v9_acc0 = -INFINITY;
                 #pragma unroll
                 for (int32_t v8_r1 = 0; v8_r1 < 16; ++v8_r1) {
                   float v17_data = glb_m0[(v14_lead + (v8_r1 * 16))];
                   v9_acc0 = (sycl::max(float(v9_acc0), float(v17_data)));
                 }
-                glb_m1[(v6_lead + v13_lead)] = v9_acc0;
+                glb_m1[v14_lead] = v9_acc0;
               }
             }
           }

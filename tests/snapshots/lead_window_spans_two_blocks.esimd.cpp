@@ -24,6 +24,7 @@ inline void kernel_kernel_671a350836(sycl::queue *stream, sycl::range<3> group_c
     sycl::local_accessor<float, 1> totalShrMem (0, cgh); {
       cgh.parallel_for(sycl::nd_range<3>{{group_size.get(0), group_size.get(1), group_count.get(0) * group_size.get(2)}, group_size}, [=](sycl::nd_item<3> item) [[intel::sycl_explicit_simd]] [[intel::grf_size(256)]] [[intel::kernel_args_restrict]] {
         // generated with TensorForge. Version: 0.0.1
+        // options: default
         // meta data:
         // m0 64×13(64×13) {0..64}×{0..13} pointer_based
         // m1 6(6) {0..6} none
@@ -678,12 +679,12 @@ inline void kernel_kernel_671a350836(sycl::queue *stream, sycl::range<3> group_c
                 int32_t v868_a = 20 + (v864_n1 * 64);
                 #pragma unroll
                 for (int32_t v865_n2 = 0; v865_n2 < 6; ++v865_n2) {
-                  int32_t v867_a = v865_n2 * 64;
+                  int32_t v869_a = v868_a + (v865_n2 * 64);
                   tensorforge::intel_esimd::simd<float, 12> v870_data;
-                  v870_data.copy_from(ir3 + ((v868_a + v867_a)));
+                  v870_data.copy_from(ir3 + (v869_a));
                   tensorforge::intel_esimd::simd<float, 12> v875_data;
-                  v875_data.copy_from(r2 + ((v868_a + v867_a)));
-                  (v875_data + v870_data).copy_to(r3 + ((v868_a + v867_a)));
+                  v875_data.copy_from(r2 + (v869_a));
+                  (v875_data + v870_data).copy_to(r3 + (v869_a));
                 }
               }
               #pragma unroll
@@ -691,12 +692,12 @@ inline void kernel_kernel_671a350836(sycl::queue *stream, sycl::range<3> group_c
                 int32_t v885_a = 32 + (v881_n1 * 64);
                 #pragma unroll
                 for (int32_t v882_n2 = 0; v882_n2 < 6; ++v882_n2) {
-                  int32_t v884_a = v882_n2 * 64;
+                  int32_t v886_a = v885_a + (v882_n2 * 64);
                   tensorforge::intel_esimd::simd<float, 3> v887_data;
-                  v887_data.copy_from(ir3 + ((v885_a + v884_a)));
+                  v887_data.copy_from(ir3 + (v886_a));
                   tensorforge::intel_esimd::simd<float, 3> v892_data;
-                  v892_data.copy_from(r2 + ((v885_a + v884_a)));
-                  (v892_data + v887_data).copy_to(r3 + ((v885_a + v884_a)));
+                  v892_data.copy_from(r2 + (v886_a));
+                  (v892_data + v887_data).copy_to(r3 + (v886_a));
                 }
               }
               // glb_m2 = store{r>g}(r3);

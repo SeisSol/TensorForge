@@ -24,6 +24,7 @@ inline void kernel_kernel_671a350836(sycl::queue *stream, sycl::range<3> group_c
     sycl::accessor<float, 1, sycl::access::mode::read_write, sycl::access::target::local> totalShrMem (0, cgh); {
       cgh.parallel_for(sycl::nd_range<3>{{group_size.get(0), group_size.get(1), group_count.get(0) * group_size.get(2)}, group_size}, [=](sycl::nd_item<3> item)  {
         // generated with TensorForge. Version: 0.0.1
+        // options: default
         // meta data:
         // m0 64×13(64×13) {0..64}×{0..13} pointer_based
         // m1 6(6) {0..6} none
@@ -55,7 +56,8 @@ inline void kernel_kernel_671a350836(sycl::queue *stream, sycl::range<3> group_c
               }
               float r2[12]{};
               // r2 = load{g>r}(glb_m2);
-              if (v6_lead >= 20) {
+              bool v23_g = v6_lead >= 20;
+              if (v23_g) {
                 #pragma unroll
                 for (int32_t v24_i1 = 0; v24_i1 < 1; ++v24_i1) {
                   int32_t v34_a = v6_lead + ((v24_i1 + 12) * 64);
@@ -67,7 +69,8 @@ inline void kernel_kernel_671a350836(sycl::queue *stream, sycl::range<3> group_c
                   }
                 }
               }
-              if (v6_lead < 3) {
+              bool v41_g = v6_lead < 3;
+              if (v41_g) {
                 int32_t v48_lead = v6_lead + 32_i32;
                 #pragma unroll
                 for (int32_t v42_i1 = 0; v42_i1 < 1; ++v42_i1) {
@@ -433,7 +436,7 @@ inline void kernel_kernel_671a350836(sycl::queue *stream, sycl::range<3> group_c
               // r3 = +(r1) + name: r2, type: SymbolType.Register, lead: [0]
               // [(20, 35), (0, 1), (0, 6)] []
               float ir3[12]{};
-              if (v6_lead >= 20) {
+              if (v23_g) {
                 float v849_data = r1[24];
                 float v850_data = ir3[0];
                 ir3[0] = (v850_data + v849_data);
@@ -453,7 +456,7 @@ inline void kernel_kernel_671a350836(sycl::queue *stream, sycl::range<3> group_c
                 float v865_data = ir3[10];
                 ir3[10] = (v865_data + v864_data);
               }
-              if (v6_lead < 3) {
+              if (v41_g) {
                 float v868_data = r1[25];
                 float v869_data = ir3[1];
                 ir3[1] = (v869_data + v868_data);
@@ -473,7 +476,7 @@ inline void kernel_kernel_671a350836(sycl::queue *stream, sycl::range<3> group_c
                 float v884_data = ir3[11];
                 ir3[11] = (v884_data + v883_data);
               }
-              if (v6_lead >= 20) {
+              if (v23_g) {
                 #pragma unroll
                 for (int32_t v890_n1 = 0; v890_n1 < 1; ++v890_n1) {
                   int32_t v892_a = v890_n1 * 2;
@@ -486,21 +489,21 @@ inline void kernel_kernel_671a350836(sycl::queue *stream, sycl::range<3> group_c
                   }
                 }
               }
-              if (v6_lead < 3) {
+              if (v41_g) {
                 #pragma unroll
                 for (int32_t v908_n1 = 0; v908_n1 < 1; ++v908_n1) {
                   int32_t v912_a = 1 + (v908_n1 * 2);
                   #pragma unroll
                   for (int32_t v909_n2 = 0; v909_n2 < 6; ++v909_n2) {
-                    int32_t v911_a = v909_n2 * 2;
-                    float v914_data = ir3[(v912_a + v911_a)];
-                    float v919_data = r2[(v912_a + v911_a)];
-                    r3[(v912_a + v911_a)] = (v919_data + v914_data);
+                    int32_t v913_a = v912_a + (v909_n2 * 2);
+                    float v914_data = ir3[v913_a];
+                    float v919_data = r2[v913_a];
+                    r3[v913_a] = (v919_data + v914_data);
                   }
                 }
               }
               // glb_m2 = store{r>g}(r3);
-              if (v6_lead >= 20) {
+              if (v23_g) {
                 #pragma unroll
                 for (int32_t v929_i1 = 0; v929_i1 < 1; ++v929_i1) {
                   int32_t v931_a = v929_i1 * 2;
@@ -512,7 +515,7 @@ inline void kernel_kernel_671a350836(sycl::queue *stream, sycl::range<3> group_c
                   }
                 }
               }
-              if (v6_lead < 3) {
+              if (v41_g) {
                 int32_t v958_lead = v6_lead + 32_i32;
                 #pragma unroll
                 for (int32_t v947_i1 = 0; v947_i1 < 1; ++v947_i1) {

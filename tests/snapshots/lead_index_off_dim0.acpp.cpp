@@ -24,6 +24,7 @@ inline void kernel_kernel_75d3097b00(sycl::queue *stream, sycl::range<3> group_c
     sycl::accessor<float, 1, sycl::access::mode::read_write, sycl::access::target::local> totalShrMem (0, cgh); {
       cgh.parallel_for(sycl::nd_range<3>{{group_size.get(0), group_size.get(1), group_count.get(0) * group_size.get(2)}, group_size}, [=](sycl::nd_item<3> item)  {
         // generated with TensorForge. Version: 0.0.1
+        // options: default
         // meta data:
         // m0 20×9(20×9) {0..20}×{0..9} strided
         // m1 1×20(1×20) {0..1}×{0..20} strided
@@ -53,11 +54,10 @@ inline void kernel_kernel_75d3097b00(sycl::queue *stream, sycl::range<3> group_c
               }
               float r1[9]{};
               // r1 = load{g>r}(glb_m2);
-              int32_t v20_lead = item.get_local_id(0) % 32;
-              if (v20_lead < 1) {
+              if (v7_lead < 1) {
                 #pragma unroll
                 for (int32_t v22_i1 = 0; v22_i1 < 9; ++v22_i1) {
-                  float v29_data = glb_m2[(v20_lead + v22_i1)];
+                  float v29_data = glb_m2[(v7_lead + v22_i1)];
                   r1[v22_i1] = v29_data;
                 }
               }
@@ -67,7 +67,7 @@ inline void kernel_kernel_75d3097b00(sycl::queue *stream, sycl::range<3> group_c
               // r2 = +(r0 * r1) + None
               // [(0, 20), (0, 9)] [(0, 1)]
               float ir2[9]{};
-              if (v20_lead < 20) {
+              if (v8_g) {
                 float v37_data = r0[0];
                 float v38_data = r1[0];
                 float v41_data = ir2[0];
@@ -97,7 +97,7 @@ inline void kernel_kernel_75d3097b00(sycl::queue *stream, sycl::range<3> group_c
                 float v89_data = ir2[8];
                 ir2[8] = (v89_data + (v37_data * (sycl::group_broadcast(item.get_sub_group(), v86_data, 0))));
               }
-              if (v20_lead < 20) {
+              if (v8_g) {
                 #pragma unroll
                 for (int32_t v95_n1 = 0; v95_n1 < 9; ++v95_n1) {
                   float v97_data = ir2[v95_n1];
@@ -105,11 +105,11 @@ inline void kernel_kernel_75d3097b00(sycl::queue *stream, sycl::range<3> group_c
                 }
               }
               // glb_m0 = store{r>g}(r2);
-              if (v20_lead < 20) {
+              if (v8_g) {
                 #pragma unroll
                 for (int32_t v103_i1 = 0; v103_i1 < 9; ++v103_i1) {
                   float v105_data = r2[v103_i1];
-                  glb_m0[(v20_lead + (v103_i1 * 20))] = v105_data;
+                  glb_m0[(v7_lead + (v103_i1 * 20))] = v105_data;
                 }
               }
             }

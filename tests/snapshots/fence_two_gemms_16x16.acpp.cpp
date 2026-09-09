@@ -24,6 +24,7 @@ inline void kernel_kernel_a5ad08b73b(sycl::queue *stream, sycl::range<3> group_c
     sycl::accessor<float, 1, sycl::access::mode::read_write, sycl::access::target::local> totalShrMem (0, cgh); {
       cgh.parallel_for(sycl::nd_range<3>{{group_size.get(0), group_size.get(1), group_count.get(0) * group_size.get(2)}, group_size}, [=](sycl::nd_item<3> item)  {
         // generated with TensorForge. Version: 0.0.1
+        // options: default
         // meta data:
         // m0 16×16(16×16) {0..16}×{0..16} strided
         // m1 16×16(16×16) {0..16}×{0..16} strided
@@ -51,7 +52,8 @@ inline void kernel_kernel_a5ad08b73b(sycl::queue *stream, sycl::range<3> group_c
               float r0[16]{};
               // r0 = load{g>r}(glb_m1);
               int32_t v9_lead = item.get_local_id(0) % 32;
-              if (v9_lead < 16) {
+              bool v10_g = v9_lead < 16;
+              if (v10_g) {
                 #pragma unroll
                 for (int32_t v11_i1 = 0; v11_i1 < 16; ++v11_i1) {
                   float v19_data = glb_m1[(v9_lead + (v11_i1 * 16))];
@@ -60,7 +62,7 @@ inline void kernel_kernel_a5ad08b73b(sycl::queue *stream, sycl::range<3> group_c
               }
               float r1[16]{};
               // r1 = load{g>r}(glb_m2);
-              if (v9_lead < 16) {
+              if (v10_g) {
                 #pragma unroll
                 for (int32_t v26_i1 = 0; v26_i1 < 16; ++v26_i1) {
                   float v34_data = glb_m2[(v9_lead + (v26_i1 * 16))];
@@ -73,7 +75,7 @@ inline void kernel_kernel_a5ad08b73b(sycl::queue *stream, sycl::range<3> group_c
               // r2 = +(r0 * r1) + None
               // [(0, 16), (0, 16)] [(0, 16)]
               float ir2[16]{};
-              if (v9_lead < 16) {
+              if (v10_g) {
                 float v42_data = r0[0];
                 float v43_data = r1[0];
                 float v46_data = ir2[0];
@@ -124,7 +126,7 @@ inline void kernel_kernel_a5ad08b73b(sycl::queue *stream, sycl::range<3> group_c
                 float v136_data = ir2[15];
                 ir2[15] = (v136_data + (v42_data * (sycl::group_broadcast(item.get_sub_group(), v133_data, 0))));
               }
-              if (v9_lead < 16) {
+              if (v10_g) {
                 float v142_data = r0[1];
                 float v143_data = r1[0];
                 float v146_data = ir2[0];
@@ -175,7 +177,7 @@ inline void kernel_kernel_a5ad08b73b(sycl::queue *stream, sycl::range<3> group_c
                 float v236_data = ir2[15];
                 ir2[15] = (v236_data + (v142_data * (sycl::group_broadcast(item.get_sub_group(), v233_data, 1))));
               }
-              if (v9_lead < 16) {
+              if (v10_g) {
                 float v242_data = r0[2];
                 float v243_data = r1[0];
                 float v246_data = ir2[0];
@@ -226,7 +228,7 @@ inline void kernel_kernel_a5ad08b73b(sycl::queue *stream, sycl::range<3> group_c
                 float v336_data = ir2[15];
                 ir2[15] = (v336_data + (v242_data * (sycl::group_broadcast(item.get_sub_group(), v333_data, 2))));
               }
-              if (v9_lead < 16) {
+              if (v10_g) {
                 float v342_data = r0[3];
                 float v343_data = r1[0];
                 float v346_data = ir2[0];
@@ -277,7 +279,7 @@ inline void kernel_kernel_a5ad08b73b(sycl::queue *stream, sycl::range<3> group_c
                 float v436_data = ir2[15];
                 ir2[15] = (v436_data + (v342_data * (sycl::group_broadcast(item.get_sub_group(), v433_data, 3))));
               }
-              if (v9_lead < 16) {
+              if (v10_g) {
                 float v442_data = r0[4];
                 float v443_data = r1[0];
                 float v446_data = ir2[0];
@@ -328,7 +330,7 @@ inline void kernel_kernel_a5ad08b73b(sycl::queue *stream, sycl::range<3> group_c
                 float v536_data = ir2[15];
                 ir2[15] = (v536_data + (v442_data * (sycl::group_broadcast(item.get_sub_group(), v533_data, 4))));
               }
-              if (v9_lead < 16) {
+              if (v10_g) {
                 float v542_data = r0[5];
                 float v543_data = r1[0];
                 float v546_data = ir2[0];
@@ -379,7 +381,7 @@ inline void kernel_kernel_a5ad08b73b(sycl::queue *stream, sycl::range<3> group_c
                 float v636_data = ir2[15];
                 ir2[15] = (v636_data + (v542_data * (sycl::group_broadcast(item.get_sub_group(), v633_data, 5))));
               }
-              if (v9_lead < 16) {
+              if (v10_g) {
                 float v642_data = r0[6];
                 float v643_data = r1[0];
                 float v646_data = ir2[0];
@@ -430,7 +432,7 @@ inline void kernel_kernel_a5ad08b73b(sycl::queue *stream, sycl::range<3> group_c
                 float v736_data = ir2[15];
                 ir2[15] = (v736_data + (v642_data * (sycl::group_broadcast(item.get_sub_group(), v733_data, 6))));
               }
-              if (v9_lead < 16) {
+              if (v10_g) {
                 float v742_data = r0[7];
                 float v743_data = r1[0];
                 float v746_data = ir2[0];
@@ -481,7 +483,7 @@ inline void kernel_kernel_a5ad08b73b(sycl::queue *stream, sycl::range<3> group_c
                 float v836_data = ir2[15];
                 ir2[15] = (v836_data + (v742_data * (sycl::group_broadcast(item.get_sub_group(), v833_data, 7))));
               }
-              if (v9_lead < 16) {
+              if (v10_g) {
                 float v842_data = r0[8];
                 float v843_data = r1[0];
                 float v846_data = ir2[0];
@@ -532,7 +534,7 @@ inline void kernel_kernel_a5ad08b73b(sycl::queue *stream, sycl::range<3> group_c
                 float v936_data = ir2[15];
                 ir2[15] = (v936_data + (v842_data * (sycl::group_broadcast(item.get_sub_group(), v933_data, 8))));
               }
-              if (v9_lead < 16) {
+              if (v10_g) {
                 float v942_data = r0[9];
                 float v943_data = r1[0];
                 float v946_data = ir2[0];
@@ -583,7 +585,7 @@ inline void kernel_kernel_a5ad08b73b(sycl::queue *stream, sycl::range<3> group_c
                 float v1036_data = ir2[15];
                 ir2[15] = (v1036_data + (v942_data * (sycl::group_broadcast(item.get_sub_group(), v1033_data, 9))));
               }
-              if (v9_lead < 16) {
+              if (v10_g) {
                 float v1042_data = r0[10];
                 float v1043_data = r1[0];
                 float v1046_data = ir2[0];
@@ -634,7 +636,7 @@ inline void kernel_kernel_a5ad08b73b(sycl::queue *stream, sycl::range<3> group_c
                 float v1136_data = ir2[15];
                 ir2[15] = (v1136_data + (v1042_data * (sycl::group_broadcast(item.get_sub_group(), v1133_data, 10))));
               }
-              if (v9_lead < 16) {
+              if (v10_g) {
                 float v1142_data = r0[11];
                 float v1143_data = r1[0];
                 float v1146_data = ir2[0];
@@ -685,7 +687,7 @@ inline void kernel_kernel_a5ad08b73b(sycl::queue *stream, sycl::range<3> group_c
                 float v1236_data = ir2[15];
                 ir2[15] = (v1236_data + (v1142_data * (sycl::group_broadcast(item.get_sub_group(), v1233_data, 11))));
               }
-              if (v9_lead < 16) {
+              if (v10_g) {
                 float v1242_data = r0[12];
                 float v1243_data = r1[0];
                 float v1246_data = ir2[0];
@@ -736,7 +738,7 @@ inline void kernel_kernel_a5ad08b73b(sycl::queue *stream, sycl::range<3> group_c
                 float v1336_data = ir2[15];
                 ir2[15] = (v1336_data + (v1242_data * (sycl::group_broadcast(item.get_sub_group(), v1333_data, 12))));
               }
-              if (v9_lead < 16) {
+              if (v10_g) {
                 float v1342_data = r0[13];
                 float v1343_data = r1[0];
                 float v1346_data = ir2[0];
@@ -787,7 +789,7 @@ inline void kernel_kernel_a5ad08b73b(sycl::queue *stream, sycl::range<3> group_c
                 float v1436_data = ir2[15];
                 ir2[15] = (v1436_data + (v1342_data * (sycl::group_broadcast(item.get_sub_group(), v1433_data, 13))));
               }
-              if (v9_lead < 16) {
+              if (v10_g) {
                 float v1442_data = r0[14];
                 float v1443_data = r1[0];
                 float v1446_data = ir2[0];
@@ -838,7 +840,7 @@ inline void kernel_kernel_a5ad08b73b(sycl::queue *stream, sycl::range<3> group_c
                 float v1536_data = ir2[15];
                 ir2[15] = (v1536_data + (v1442_data * (sycl::group_broadcast(item.get_sub_group(), v1533_data, 14))));
               }
-              if (v9_lead < 16) {
+              if (v10_g) {
                 float v1542_data = r0[15];
                 float v1543_data = r1[0];
                 float v1546_data = ir2[0];
@@ -889,7 +891,7 @@ inline void kernel_kernel_a5ad08b73b(sycl::queue *stream, sycl::range<3> group_c
                 float v1636_data = ir2[15];
                 ir2[15] = (v1636_data + (v1542_data * (sycl::group_broadcast(item.get_sub_group(), v1633_data, 15))));
               }
-              if (v9_lead < 16) {
+              if (v10_g) {
                 #pragma unroll
                 for (int32_t v1642_n1 = 0; v1642_n1 < 16; ++v1642_n1) {
                   float v1644_data = ir2[v1642_n1];
@@ -897,7 +899,7 @@ inline void kernel_kernel_a5ad08b73b(sycl::queue *stream, sycl::range<3> group_c
                 }
               }
               // glb_m0 = store{r>g}(r2);
-              if (v9_lead < 16) {
+              if (v10_g) {
                 #pragma unroll
                 for (int32_t v1650_i1 = 0; v1650_i1 < 16; ++v1650_i1) {
                   float v1652_data = r2[v1650_i1];
@@ -925,7 +927,8 @@ inline void kernel_kernel_a5ad08b73b(sycl::queue *stream, sycl::range<3> group_c
               float r0[16]{};
               // r0 = load{g>r}(glb_m4);
               int32_t v1669_lead = item.get_local_id(0) % 32;
-              if (v1669_lead < 16) {
+              bool v1670_g = v1669_lead < 16;
+              if (v1670_g) {
                 #pragma unroll
                 for (int32_t v1671_i1 = 0; v1671_i1 < 16; ++v1671_i1) {
                   float v1679_data = glb_m4[(v1669_lead + (v1671_i1 * 16))];
@@ -934,7 +937,7 @@ inline void kernel_kernel_a5ad08b73b(sycl::queue *stream, sycl::range<3> group_c
               }
               float r1[16]{};
               // r1 = load{g>r}(glb_m5);
-              if (v1669_lead < 16) {
+              if (v1670_g) {
                 #pragma unroll
                 for (int32_t v1686_i1 = 0; v1686_i1 < 16; ++v1686_i1) {
                   float v1694_data = glb_m5[(v1669_lead + (v1686_i1 * 16))];
@@ -947,7 +950,7 @@ inline void kernel_kernel_a5ad08b73b(sycl::queue *stream, sycl::range<3> group_c
               // r2 = +(r0 * r1) + None
               // [(0, 16), (0, 16)] [(0, 16)]
               float ir2[16]{};
-              if (v1669_lead < 16) {
+              if (v1670_g) {
                 float v1702_data = r0[0];
                 float v1703_data = r1[0];
                 float v1706_data = ir2[0];
@@ -998,7 +1001,7 @@ inline void kernel_kernel_a5ad08b73b(sycl::queue *stream, sycl::range<3> group_c
                 float v1796_data = ir2[15];
                 ir2[15] = (v1796_data + (v1702_data * (sycl::group_broadcast(item.get_sub_group(), v1793_data, 0))));
               }
-              if (v1669_lead < 16) {
+              if (v1670_g) {
                 float v1802_data = r0[1];
                 float v1803_data = r1[0];
                 float v1806_data = ir2[0];
@@ -1049,7 +1052,7 @@ inline void kernel_kernel_a5ad08b73b(sycl::queue *stream, sycl::range<3> group_c
                 float v1896_data = ir2[15];
                 ir2[15] = (v1896_data + (v1802_data * (sycl::group_broadcast(item.get_sub_group(), v1893_data, 1))));
               }
-              if (v1669_lead < 16) {
+              if (v1670_g) {
                 float v1902_data = r0[2];
                 float v1903_data = r1[0];
                 float v1906_data = ir2[0];
@@ -1100,7 +1103,7 @@ inline void kernel_kernel_a5ad08b73b(sycl::queue *stream, sycl::range<3> group_c
                 float v1996_data = ir2[15];
                 ir2[15] = (v1996_data + (v1902_data * (sycl::group_broadcast(item.get_sub_group(), v1993_data, 2))));
               }
-              if (v1669_lead < 16) {
+              if (v1670_g) {
                 float v2002_data = r0[3];
                 float v2003_data = r1[0];
                 float v2006_data = ir2[0];
@@ -1151,7 +1154,7 @@ inline void kernel_kernel_a5ad08b73b(sycl::queue *stream, sycl::range<3> group_c
                 float v2096_data = ir2[15];
                 ir2[15] = (v2096_data + (v2002_data * (sycl::group_broadcast(item.get_sub_group(), v2093_data, 3))));
               }
-              if (v1669_lead < 16) {
+              if (v1670_g) {
                 float v2102_data = r0[4];
                 float v2103_data = r1[0];
                 float v2106_data = ir2[0];
@@ -1202,7 +1205,7 @@ inline void kernel_kernel_a5ad08b73b(sycl::queue *stream, sycl::range<3> group_c
                 float v2196_data = ir2[15];
                 ir2[15] = (v2196_data + (v2102_data * (sycl::group_broadcast(item.get_sub_group(), v2193_data, 4))));
               }
-              if (v1669_lead < 16) {
+              if (v1670_g) {
                 float v2202_data = r0[5];
                 float v2203_data = r1[0];
                 float v2206_data = ir2[0];
@@ -1253,7 +1256,7 @@ inline void kernel_kernel_a5ad08b73b(sycl::queue *stream, sycl::range<3> group_c
                 float v2296_data = ir2[15];
                 ir2[15] = (v2296_data + (v2202_data * (sycl::group_broadcast(item.get_sub_group(), v2293_data, 5))));
               }
-              if (v1669_lead < 16) {
+              if (v1670_g) {
                 float v2302_data = r0[6];
                 float v2303_data = r1[0];
                 float v2306_data = ir2[0];
@@ -1304,7 +1307,7 @@ inline void kernel_kernel_a5ad08b73b(sycl::queue *stream, sycl::range<3> group_c
                 float v2396_data = ir2[15];
                 ir2[15] = (v2396_data + (v2302_data * (sycl::group_broadcast(item.get_sub_group(), v2393_data, 6))));
               }
-              if (v1669_lead < 16) {
+              if (v1670_g) {
                 float v2402_data = r0[7];
                 float v2403_data = r1[0];
                 float v2406_data = ir2[0];
@@ -1355,7 +1358,7 @@ inline void kernel_kernel_a5ad08b73b(sycl::queue *stream, sycl::range<3> group_c
                 float v2496_data = ir2[15];
                 ir2[15] = (v2496_data + (v2402_data * (sycl::group_broadcast(item.get_sub_group(), v2493_data, 7))));
               }
-              if (v1669_lead < 16) {
+              if (v1670_g) {
                 float v2502_data = r0[8];
                 float v2503_data = r1[0];
                 float v2506_data = ir2[0];
@@ -1406,7 +1409,7 @@ inline void kernel_kernel_a5ad08b73b(sycl::queue *stream, sycl::range<3> group_c
                 float v2596_data = ir2[15];
                 ir2[15] = (v2596_data + (v2502_data * (sycl::group_broadcast(item.get_sub_group(), v2593_data, 8))));
               }
-              if (v1669_lead < 16) {
+              if (v1670_g) {
                 float v2602_data = r0[9];
                 float v2603_data = r1[0];
                 float v2606_data = ir2[0];
@@ -1457,7 +1460,7 @@ inline void kernel_kernel_a5ad08b73b(sycl::queue *stream, sycl::range<3> group_c
                 float v2696_data = ir2[15];
                 ir2[15] = (v2696_data + (v2602_data * (sycl::group_broadcast(item.get_sub_group(), v2693_data, 9))));
               }
-              if (v1669_lead < 16) {
+              if (v1670_g) {
                 float v2702_data = r0[10];
                 float v2703_data = r1[0];
                 float v2706_data = ir2[0];
@@ -1508,7 +1511,7 @@ inline void kernel_kernel_a5ad08b73b(sycl::queue *stream, sycl::range<3> group_c
                 float v2796_data = ir2[15];
                 ir2[15] = (v2796_data + (v2702_data * (sycl::group_broadcast(item.get_sub_group(), v2793_data, 10))));
               }
-              if (v1669_lead < 16) {
+              if (v1670_g) {
                 float v2802_data = r0[11];
                 float v2803_data = r1[0];
                 float v2806_data = ir2[0];
@@ -1559,7 +1562,7 @@ inline void kernel_kernel_a5ad08b73b(sycl::queue *stream, sycl::range<3> group_c
                 float v2896_data = ir2[15];
                 ir2[15] = (v2896_data + (v2802_data * (sycl::group_broadcast(item.get_sub_group(), v2893_data, 11))));
               }
-              if (v1669_lead < 16) {
+              if (v1670_g) {
                 float v2902_data = r0[12];
                 float v2903_data = r1[0];
                 float v2906_data = ir2[0];
@@ -1610,7 +1613,7 @@ inline void kernel_kernel_a5ad08b73b(sycl::queue *stream, sycl::range<3> group_c
                 float v2996_data = ir2[15];
                 ir2[15] = (v2996_data + (v2902_data * (sycl::group_broadcast(item.get_sub_group(), v2993_data, 12))));
               }
-              if (v1669_lead < 16) {
+              if (v1670_g) {
                 float v3002_data = r0[13];
                 float v3003_data = r1[0];
                 float v3006_data = ir2[0];
@@ -1661,7 +1664,7 @@ inline void kernel_kernel_a5ad08b73b(sycl::queue *stream, sycl::range<3> group_c
                 float v3096_data = ir2[15];
                 ir2[15] = (v3096_data + (v3002_data * (sycl::group_broadcast(item.get_sub_group(), v3093_data, 13))));
               }
-              if (v1669_lead < 16) {
+              if (v1670_g) {
                 float v3102_data = r0[14];
                 float v3103_data = r1[0];
                 float v3106_data = ir2[0];
@@ -1712,7 +1715,7 @@ inline void kernel_kernel_a5ad08b73b(sycl::queue *stream, sycl::range<3> group_c
                 float v3196_data = ir2[15];
                 ir2[15] = (v3196_data + (v3102_data * (sycl::group_broadcast(item.get_sub_group(), v3193_data, 14))));
               }
-              if (v1669_lead < 16) {
+              if (v1670_g) {
                 float v3202_data = r0[15];
                 float v3203_data = r1[0];
                 float v3206_data = ir2[0];
@@ -1763,7 +1766,7 @@ inline void kernel_kernel_a5ad08b73b(sycl::queue *stream, sycl::range<3> group_c
                 float v3296_data = ir2[15];
                 ir2[15] = (v3296_data + (v3202_data * (sycl::group_broadcast(item.get_sub_group(), v3293_data, 15))));
               }
-              if (v1669_lead < 16) {
+              if (v1670_g) {
                 #pragma unroll
                 for (int32_t v3302_n1 = 0; v3302_n1 < 16; ++v3302_n1) {
                   float v3304_data = ir2[v3302_n1];
@@ -1771,7 +1774,7 @@ inline void kernel_kernel_a5ad08b73b(sycl::queue *stream, sycl::range<3> group_c
                 }
               }
               // glb_m3 = store{r>g}(r2);
-              if (v1669_lead < 16) {
+              if (v1670_g) {
                 #pragma unroll
                 for (int32_t v3310_i1 = 0; v3310_i1 < 16; ++v3310_i1) {
                   float v3312_data = r2[v3310_i1];

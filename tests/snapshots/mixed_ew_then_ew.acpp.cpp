@@ -24,6 +24,7 @@ inline void kernel_kernel_f2b477f03e(sycl::queue *stream, sycl::range<3> group_c
     sycl::accessor<float, 1, sycl::access::mode::read_write, sycl::access::target::local> totalShrMem (1280, cgh); {
       cgh.parallel_for(sycl::nd_range<3>{{group_size.get(0), group_size.get(1), group_count.get(0) * group_size.get(2)}, group_size}, [=](sycl::nd_item<3> item)  {
         // generated with TensorForge. Version: 0.0.1
+        // options: default
         // meta data:
         // m0 8×8(8×8) {0..8}×{0..8} strided
         // m1 8×8(8×8) {0..8}×{0..8} strided
@@ -44,7 +45,8 @@ inline void kernel_kernel_f2b477f03e(sycl::queue *stream, sycl::range<3> group_c
               float r0[8]{};
               // r0 = abs(glb_m0)
               int32_t v7_lead = item.get_local_id(0) % 16;
-              if (v7_lead < 8) {
+              bool v8_g = v7_lead < 8;
+              if (v8_g) {
                 #pragma unroll
                 for (int32_t v9_k1 = 0; v9_k1 < 8; ++v9_k1) {
                   float v17_data = glb_m0[(v7_lead + (v9_k1 * 8))];
@@ -53,7 +55,7 @@ inline void kernel_kernel_f2b477f03e(sycl::queue *stream, sycl::range<3> group_c
               }
               float* __restrict__ s0 = &localShrMem0[0];
               // s0 = store{r>s}(localShrMem0, r0);
-              if (v7_lead < 8) {
+              if (v8_g) {
                 #pragma unroll
                 for (int32_t v25_i1 = 0; v25_i1 < 8; ++v25_i1) {
                   float v27_data = r0[v25_i1];
@@ -63,13 +65,12 @@ inline void kernel_kernel_f2b477f03e(sycl::queue *stream, sycl::range<3> group_c
               }
               sycl::group_barrier(item.get_sub_group());
               // glb_m1 = neg(s0)
-              if (v7_lead < 8) {
+              if (v8_g) {
                 #pragma unroll
                 for (int32_t v42_k1 = 0; v42_k1 < 8; ++v42_k1) {
-                  int32_t v48_a = v42_k1 * 8;
-                  int32_t v49_a = v7_lead + v48_a;
+                  int32_t v49_a = v7_lead + (v42_k1 * 8);
                   float v53_data = s0[(v49_a ^ ((v49_a >> 5) & 31))];
-                  glb_m1[(v7_lead + v48_a)] = ((-v53_data));
+                  glb_m1[v49_a] = ((-v53_data));
                 }
               }
             }

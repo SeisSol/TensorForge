@@ -24,6 +24,7 @@ inline void kernel_kernel_417e1ddcc4(sycl::queue *stream, sycl::range<3> group_c
     sycl::accessor<double, 1, sycl::access::mode::read_write, sycl::access::target::local> totalShrMem (256, cgh); {
       cgh.parallel_for(sycl::nd_range<3>{{group_size.get(0), group_size.get(1), group_count.get(0) * group_size.get(2)}, group_size}, [=](sycl::nd_item<3> item)  {
         // generated with TensorForge. Version: 0.0.1
+        // options: default
         // meta data:
         // m0 16×16(16×16) {0..16}×{0..16} strided
         // m1 16×16(16×16) {0..16}×{0..16} strided

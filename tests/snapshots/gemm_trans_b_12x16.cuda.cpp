@@ -46,6 +46,7 @@ __launch_bounds__(256)
   extern __shared__ char totalShrMemPtr[];
    {
     // generated with TensorForge. Version: 0.0.1
+    // options: default
     // meta data:
     // m0 12×16(12×16) {0..12}×{0..16} strided
     // m1 12×20(12×20) {0..12}×{0..20} strided

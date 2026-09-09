@@ -24,6 +24,7 @@ inline void kernel_kernel_49acf988a6(sycl::queue *stream, sycl::range<3> group_c
     sycl::accessor<float, 1, sycl::access::mode::read_write, sycl::access::target::local> totalShrMem (0, cgh); {
       cgh.parallel_for(sycl::nd_range<3>{{group_size.get(0), group_size.get(1), group_count.get(0) * group_size.get(2)}, group_size}, [=](sycl::nd_item<3> item)  {
         // generated with TensorForge. Version: 0.0.1
+        // options: default
         // meta data:
         // m0 32×13(32×13) {0..32}×{0..13} strided
         // m1 32×13(32×13) {0..32}×{0..13} strided
@@ -131,27 +132,27 @@ inline void kernel_kernel_49acf988a6(sycl::queue *stream, sycl::range<3> group_c
               // glb_m0 = store{r>g}(r2);
               #pragma unroll
               for (int32_t v187_i0 = 0; v187_i0 < 1; ++v187_i0) {
-                int32_t v192_lead = v187_i0 * 32;
-                glb_m0[(v6_lead + v192_lead)] = 0.0f;
-                glb_m0[((v6_lead + v192_lead) + 32)] = 0.0f;
-                glb_m0[((v6_lead + v192_lead) + 64)] = 0.0f;
-                glb_m0[((v6_lead + v192_lead) + 96)] = 0.0f;
-                glb_m0[((v6_lead + v192_lead) + 128)] = 0.0f;
-                glb_m0[((v6_lead + v192_lead) + 160)] = 0.0f;
+                int32_t v193_lead = v6_lead + (v187_i0 * 32);
+                glb_m0[v193_lead] = 0.0f;
+                glb_m0[(v193_lead + 32)] = 0.0f;
+                glb_m0[(v193_lead + 64)] = 0.0f;
+                glb_m0[(v193_lead + 96)] = 0.0f;
+                glb_m0[(v193_lead + 128)] = 0.0f;
+                glb_m0[(v193_lead + 160)] = 0.0f;
                 float v231_data = r2[v187_i0];
-                glb_m0[((v6_lead + v192_lead) + 192)] = v231_data;
+                glb_m0[(v193_lead + 192)] = v231_data;
                 float v239_data = r2[(v187_i0 + 1)];
-                glb_m0[((v6_lead + v192_lead) + 224)] = v239_data;
+                glb_m0[(v193_lead + 224)] = v239_data;
                 float v247_data = r2[(v187_i0 + 2)];
-                glb_m0[((v6_lead + v192_lead) + 256)] = v247_data;
+                glb_m0[(v193_lead + 256)] = v247_data;
                 float v255_data = r2[(v187_i0 + 3)];
-                glb_m0[((v6_lead + v192_lead) + 288)] = v255_data;
+                glb_m0[(v193_lead + 288)] = v255_data;
                 float v263_data = r2[(v187_i0 + 4)];
-                glb_m0[((v6_lead + v192_lead) + 320)] = v263_data;
+                glb_m0[(v193_lead + 320)] = v263_data;
                 float v271_data = r2[(v187_i0 + 5)];
-                glb_m0[((v6_lead + v192_lead) + 352)] = v271_data;
+                glb_m0[(v193_lead + 352)] = v271_data;
                 float v279_data = r2[(v187_i0 + 6)];
-                glb_m0[((v6_lead + v192_lead) + 384)] = v279_data;
+                glb_m0[(v193_lead + 384)] = v279_data;
               }
             }
           }

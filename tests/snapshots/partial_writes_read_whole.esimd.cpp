@@ -24,6 +24,7 @@ inline void kernel_kernel_7ab185b978(sycl::queue *stream, sycl::range<3> group_c
     sycl::local_accessor<float, 1> totalShrMem (3072, cgh); {
       cgh.parallel_for(sycl::nd_range<3>{{group_size.get(0), group_size.get(1), group_count.get(0) * group_size.get(2)}, group_size}, [=](sycl::nd_item<3> item) [[intel::sycl_explicit_simd]] [[intel::grf_size(256)]] [[intel::kernel_args_restrict]] {
         // generated with TensorForge. Version: 0.0.1
+        // options: default
         // meta data:
         // m0 32×9(32×9) {0..32}×{0..9} pointer_based
         // m1 16×9(16×9) {0..16}×{0..9} pointer_based
