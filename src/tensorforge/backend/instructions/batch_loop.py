@@ -523,10 +523,13 @@ class BatchLoop(AbstractInstruction):
         return f'{GeneralLexicon.NUM_ELEMENTS}{self._section_index}'
 
     def _block_id(self, block: Optional[str] = None) -> str:
+        """The same start expression the generator spells, and parenthesised
+        for the same reason: it is a sum handed on as an operand, and whoever
+        splices it decides the precedence."""
         lexic = self._vm.get_lexic()
         if block is None:
             block = lexic.block_idx_x
-        return f'{lexic.thread_idx_y} + {lexic.block_dim_y} * ({block})'
+        return f'({lexic.thread_idx_y} + {lexic.block_dim_y} * ({block}))'
 
     def _size_guard(self) -> str:
         return f'{self._batch(0)} < {self._num_elements()}'

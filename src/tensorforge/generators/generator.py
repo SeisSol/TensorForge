@@ -1486,10 +1486,19 @@ class Generator:
     return f'launcher_{self._base_kernel_name}({args});'
 
   def _get_2d_block_id(self, block=None):
+    """Where a thread's traversal starts, as text the IR carries as an operand.
+
+    Parenthesised, like the stride beside it, because it is a *sum* and the
+    reader decides the precedence.  It reaches the loop as `lo`, and
+    `wrap_prefetch` puts `lo` in the induction's place when it peels an
+    iteration: the peeled address then reads `lo * stride`, which without the
+    parentheses parsed as `threadIdx.y + blockDim.y * blockIdx.x * stride` --
+    the right element for row 0 and the wrong one for every other row.
+    """
     lexic = self._context.get_vm().get_lexic()
     if block is None:
       block = lexic.block_idx_x
-    return f'{lexic.thread_idx_y} + {lexic.block_dim_y} * ({block})'
+    return f'({lexic.thread_idx_y} + {lexic.block_dim_y} * ({block}))'
 
   # NOTE: _get_element_size_guard and _get_flag_guard moved onto BatchLoop,
   # which is the only thing that needed them.
