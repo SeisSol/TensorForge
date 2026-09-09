@@ -24,6 +24,7 @@ from tensorforge.common.basic_types import Datatype
 from tensorforge.common.basic_types import GeneralLexicon
 from tensorforge.common.operation import Operation
 from .core import (Access, BufferType, Effect, IRError, MemSpace, Op, Operand,
+                   Qual,
                    Region, ScalarType, Stmt, TokenType, Value, def_use, walk)
 
 _ATOM = __import__('re').compile(r'^(?:[A-Za-z_][A-Za-z0-9_.:]*|\d[\w.]*)$')
@@ -188,8 +189,11 @@ class Emitter:
             # declares a copy of a pointer rather than the site that bound it.
             lex = self._lexic()
             if lex is not None:
-                return lex.pointer_type(t.elem.ctype(), t.space,
-                                        getattr(t, 'readonly', False))
+                quals = () if value is None else value.quals
+                return lex.pointer_type(
+                    t.elem.ctype(), t.space,
+                    readonly=getattr(t, 'readonly', False),
+                    restrict=Qual.RESTRICT in quals)
             const = 'const ' if getattr(t, 'readonly', False) else ''
             return f'{const}{t.elem.ctype()}*'
         raise IRError(f'cannot render type {t!r}')
@@ -594,9 +598,7 @@ class Emitter:
                 extern = s.attr('extern')
                 if extern is not None:
                     self.bind(v, extern)
-                qual = s.attr('restrict')
-                qual = f'{qual} ' if qual else ''
-                w(f'{t.elem.ctype()}* {qual}{self.name(v)} = &{arena}[{off}];')
+                w(f'{self.ctype(t, v)} {self.name(v)} = &{arena}[{off}];')
                 return
             qual = {MemSpace.CONSTANT: 'const '}.get(t.space, '')
             extern = s.attr('extern')

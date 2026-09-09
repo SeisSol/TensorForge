@@ -7,7 +7,7 @@ from tensorforge.backend.writer import Writer
 from typing import Union
 from tensorforge.common.context import Context
 from tensorforge.common.basic_types import GeneralLexicon
-from tensorforge.backend.pir.core import MemSpace
+from tensorforge.backend.pir.core import Qual, MemSpace
 
 class MemoryInstruction(AbstractInstruction):
   def __init__(self, context: Context):
@@ -162,7 +162,7 @@ class AbstractShrMemWrite(MemoryInstruction):
           hint=self.write_base(), extern=self.write_base(),
           arena=self._arena(),
           offset=int(offset) if offset.isdigit() else offset,
-          restrict=self._vm.get_lexic().restrict_kw,
+          quals=(Qual.RESTRICT,),
           swizzle=self._swizzle(writer))
       self._write_owner = getattr(writer, 'uid', None)
       return
@@ -200,7 +200,7 @@ class AbstractShrMemWrite(MemoryInstruction):
                              arena=self._arena(),
                              offset=int(offset) if offset.isdigit()
                              else offset,
-                             restrict=self._vm.get_lexic().restrict_kw,
+                             quals=(Qual.RESTRICT,),
                              swizzle=self._swizzle(writer))
         self._dest.set_pir_buffer(writer, value)
       else:

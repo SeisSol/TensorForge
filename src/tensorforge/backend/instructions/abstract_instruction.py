@@ -306,8 +306,11 @@ class AbstractInstruction(ABC):
       # the final order.
       from tensorforge.backend.pir.wrap import wrap_prefetch
       why: list = []
-      body = wrap_prefetch(body, lambda ty, hint: builder.value(ty, hint=hint),
-                           report=why)
+      body = wrap_prefetch(
+          body,
+          lambda ty, hint, quals=(): builder.value(ty, hint=hint,
+                                                   quals=quals),
+          report=why)
       body, _ = pir.schedule_async(body)
       if context.get_user_options().ir_debug:
         for w in why:

@@ -52,7 +52,9 @@ def _loop(*, single_buffer, barrier=False):
 
 
 def _moved(b, body, nxt, *, assume_rotated):
-    out = wrap_prefetch(body, lambda ty, h: b.value(ty, hint=h), nxt,
+    out = wrap_prefetch(body,
+                        lambda ty, h, quals=(): b.value(ty, hint=h,
+                                                        quals=quals), nxt,
                         assume_rotated=assume_rotated)
     return any(s.op is Op.FOR and s.target for s, _ in walk(out))
 

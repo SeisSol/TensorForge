@@ -56,6 +56,16 @@ class MemSpace(IntEnum):
     CONSTANT = 4    # __constant__ / read-only
     SCRATCH = 5     # driver-provided scratchpad
     UNKNOWN = 6     # opaque (raw text): conflicts with everything
+    # Where a kernel argument lives: one copy for the whole grid, read-only,
+    # broadcast.  Not `CONSTANT`, which is a fixed bank the host writes before
+    # the launch -- these two are read-only and broadcast for different
+    # reasons and are different spaces on the targets that name spaces at all.
+    #
+    # A space and not an annotation, which is the whole reason it is here:
+    # `__grid_constant__` says where the object *resides*, and residency is
+    # what this enum is.  As one, it also earns the alias answer for free --
+    # nothing reaches param space through a pointer into global.
+    PARAM = 7
 
     @classmethod
     def from_symbol_type(cls, stype: Any) -> 'MemSpace':
@@ -183,6 +193,26 @@ class BufferType:
         swz = f', {self.swizzle!r}' if self.swizzle else ''
         ro = ', readonly' if self.readonly else ''
         return f'buffer<{dims}x{self.elem}, {self.space.name.lower()}{swz}{ro}>'
+
+
+class Qual(Enum):
+    """A promise about a value that its type cannot carry.
+
+    The distinction against `BufferType`'s fields is what a *copy* has to
+    reproduce.  `readonly` and `space` describe the object, so a declaration
+    rendered from the type without them is a different type and usually does
+    not compile.  `restrict` describes the pointer: the standard defines it as
+    a promise that objects reached through *this* pointer are reached through
+    no other in the same scope, so two values of one type can differ in it and
+    a type carrying it would be claiming something about both.
+
+    On the value rather than the declaring statement, because in SSA those are
+    the same thing -- a value is a name -- and because a pass that clones an
+    address computation has the value and not always the statement that first
+    spelled it.
+    """
+
+    RESTRICT = 'restrict'
 
 
 @dataclass(frozen=True)
@@ -599,6 +629,8 @@ class Value:
     # loaders, the vendor intrinsics and the passes can start agreeing on a
     # vocabulary one at a time instead of all at once.
     layout: Optional[RegisterLayout] = None
+    #: Promises about this value that its type does not carry; see `Qual`.
+    quals: Tuple['Qual', ...] = ()
 
     def __post_init__(self):
         """One fact, one place: a distributed value is lane-varying.

@@ -62,7 +62,9 @@ def _loop(*, double_buffer=True, read_before_wait=False, barrier=False,
 
 
 def _wrap(b, body, nxt):
-    return wrap_prefetch(body, lambda ty, hint: b.value(ty, hint=hint), nxt)
+    return wrap_prefetch(body,
+                         lambda ty, hint, quals=(): b.value(ty, hint=hint,
+                                                            quals=quals), nxt)
 
 
 def _moved(body) -> bool:

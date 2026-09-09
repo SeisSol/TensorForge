@@ -25,11 +25,6 @@ def _gfx_level(model):
 class HipLexic(CudaLexic):
   def __init__(self, backend, underlying_hardware):
     super().__init__(backend, underlying_hardware)
-    # HIP has no `__grid_constant__` and needs none: kernel arguments already
-    # live in the constant address space and a uniform index into one is a
-    # scalar load.  Stated rather than inherited, since this shares its base
-    # with the backend that does need the annotation.
-    self.grid_constant_kw = ''
     self._backend = backend
     self.thread_idx_y = "threadIdx.y"
     self.thread_idx_x = "threadIdx.x"
@@ -40,6 +35,13 @@ class HipLexic(CudaLexic):
     self.block_dim_z = "blockDim.z"
     self.grid_dim_x = "gridDim.x"
     self.stream_type = "hipStream_t"
+
+  def storage_class(self, space):
+    # Nothing, and not by omission: HIP kernel arguments already live in the
+    # constant address space, and a uniform index into one is a scalar load.
+    # Stated rather than inherited, since this shares its base with the backend
+    # that does need the annotation.
+    return ''
 
   #: `hip.h`'s names for the address spaces clang numbers.
   MEMSPACE = {'GLOBAL': 'tensorforge::GlobalMemspace',

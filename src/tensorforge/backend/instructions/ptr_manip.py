@@ -9,7 +9,7 @@ from tensorforge.common.helper import get_extra_offset_name, Addressing
 from tensorforge.common.basic_types import GeneralLexicon, DataFlowDirection, StridedAddressing
 from tensorforge.common.exceptions import (GenerationError,
                                            InternalError)
-from tensorforge.backend.pir.core import Effect
+from tensorforge.backend.pir.core import Effect, Qual
 from tensorforge.backend.pir.core import MemSpace
 
 class GetElementPtr(AbstractInstruction):
@@ -327,7 +327,16 @@ class GetElementPtr(AbstractInstruction):
                      readonly=self._src.obj.direction
                      == DataFlowDirection.SOURCE),
           self._src, args=args, kind=Effect.READ, hint=self._dest.name,
-          extern=self._dest.name, alias_root=self._src)
+          extern=self._dest.name, alias_root=self._src,
+          # Only where nothing is written through it.  `restrict` promises
+          # that what this pointer reaches is reached through no other in
+          # scope, and a pass may clone this computation for the next element
+          # while the original is still live -- two pointers into one buffer,
+          # which is a promise kept as long as both only read and broken the
+          # moment one writes.
+          quals=((Qual.RESTRICT,)
+                 if self._src.obj.direction == DataFlowDirection.SOURCE
+                 else ()))
       self._dest.set_pir_buffer(writer, value)
     else:
       writer(f'{lhs} = {rhs};')
@@ -473,9 +482,14 @@ class DeclareOperandTable(AbstractInstruction):
     The annotation is the lexic's, not this site's: what keeps a by-value
     parameter out of per-thread memory is a property of the backend, and on
     most of them the answer is that nothing is needed.
+
+    Asked as a question about *residency* rather than about a keyword.  The
+    table lives in param space -- one copy for the whole grid, read-only,
+    broadcast -- and `__grid_constant__` is CUDA's way of being told so, not a
+    separate fact about the declaration.
     """
     self._require_param()
-    annotation = self._vm.get_lexic().grid_constant_kw
+    annotation = self._vm.get_lexic().storage_class(MemSpace.PARAM)
     annotation = f'{annotation} ' if annotation else ''
     return f'{annotation}const {self.struct_name()} {self._name}'
 

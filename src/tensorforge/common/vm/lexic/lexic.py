@@ -21,13 +21,24 @@ class Lexic(ABC):
     self.block_idx_x = None
     self.stream_type = None
     self.restrict_kw = None
-    #: How a by-value kernel parameter is kept out of per-thread memory when
-    #: its address is taken or it is indexed by a runtime value.  Empty where
-    #: the backend needs no annotation because its kernel arguments already
-    #: live in a broadcast space -- which is most of them; CUDA is the one that
-    #: otherwise copies such a parameter to `.local` per thread.
-    self.grid_constant_kw = ''
     self.simd_mode = False
+
+  def storage_class(self, space) -> str:
+    """How a declaration says where its object resides, where it has to.
+
+    Empty for almost everything, and for two different reasons that are worth
+    keeping apart.  Most spaces need no annotation on a declaration because the
+    declaration's *form* already fixes them -- a kernel argument is a kernel
+    argument.  `MemSpace.PARAM` is the one that does not: CUDA otherwise copies
+    a by-value parameter into per-thread memory as soon as its address is taken
+    or a runtime value indexes it, and `__grid_constant__` is how that copy is
+    refused.  Backends whose kernel arguments already live in a broadcast space
+    -- which is most of them -- need nothing and say so by returning nothing.
+
+    A space and not a keyword the caller looks up, so that the one site asking
+    the question asks it about residency rather than about a vendor.
+    """
+    return ''
 
   def pointer_type(self, elem: str, space=None, readonly: bool = False,
                    restrict: bool = False, const: bool = False) -> str:

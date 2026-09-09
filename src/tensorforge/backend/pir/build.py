@@ -187,7 +187,8 @@ class IRBuilder:
 
     def value(self, type_, hint: str = '',
               uniform: Union[bool, Uniformity] = Uniformity.GRID,
-              layout: Optional[RegisterLayout] = None) -> Value:
+              layout: Optional[RegisterLayout] = None,
+              quals: Tuple = ()) -> Value:
         """``uniform`` accepts a bool for compatibility: True -> GRID,
         False -> LANE.  New code should pass a :class:`Uniformity`.
 
@@ -200,7 +201,7 @@ class IRBuilder:
             self._counter += 1
             ident = self._counter
         v = Value(id=ident, type=type_, uniformity=_as_uniformity(uniform),
-                  hint=hint, layout=layout)
+                  hint=hint, layout=layout, quals=tuple(quals))
         self._by_name[str(v)] = v
         return v
 
@@ -694,7 +695,7 @@ class IRBuilder:
               hint: str = 'buf', extern: str = None,
               init: str = '', arena: str = None, offset=0,
               align: Optional[int] = None,
-              restrict: str = None,
+              quals: Tuple = (),
               swizzle: Optional[XorSwizzle] = None) -> Value:
         """Request a buffer *symbolically*.
 
@@ -723,7 +724,7 @@ class IRBuilder:
         the use site.
         """
         v = self.value(BufferType(elem, tuple(shape), space, swizzle),
-                       hint=hint)
+                       hint=hint, quals=quals)
         attrs: Tuple = ()
         if arena is not None:
             # A window the *region* allocator placed, not the scratch bump
@@ -734,8 +735,6 @@ class IRBuilder:
             # offset for any given buffer -- so an externally placed window
             # says so rather than asking for one it would then have to ignore.
             attrs = (('arena', arena), ('offset', offset))
-            if restrict:
-                attrs = attrs + (('restrict', restrict),)
         elif space == MemSpace.SHARED:
             attrs = self._suballocate(v, elem)
             self._shared_buffers.append(v)
@@ -1520,7 +1519,8 @@ class IRBuilder:
     def decl_expr(self, decl: str, text: str, type_, base: Any, *,
                   kind: Effect = Effect.READ, space: Optional[MemSpace] = None,
                   args: Sequence[Operand] = (), hint: str = 'ptr',
-                  extern: str = None, alias_root: Any = None) -> Value:
+                  extern: str = None, alias_root: Any = None,
+                  quals: Tuple = ()) -> Value:
         """A declaration whose declarator is text too, not only its right side.
 
         `load_expr` renders `{ctype} {name} = {text};`, which is enough while
@@ -1535,13 +1535,20 @@ class IRBuilder:
         interpolating its name, and the def-use edge exists, so a scheduler
         knows the binding cannot sink below a read through it.
 
+        `quals` are the promises the declarator text makes that the type does
+        not carry -- `__restrict__`, in practice.  Stated as well as spelled,
+        because a pass that clones this computation drops `decl` (a declarator
+        with a name in it would be a redefinition) and renders the copy from
+        the type instead: without them the clone is a plain pointer and the
+        promise is quietly gone.
+
         `alias_root` is not optional bookkeeping.  `may_alias` treats two
         distinct bases as never aliasing, so a view that claimed its own
         identity would let a write through the underlying buffer reorder past
         a read through the window.  The root is what the accesses are recorded
         against, so a window is the buffer it is a window into.
         """
-        v = self.value(type_, hint=hint)
+        v = self.value(type_, hint=hint, quals=quals)
         if base is None:
             # Pure text with no memory behind it: the lookahead bindings are
             # index arithmetic over the induction variable and the grid shape,

@@ -188,10 +188,10 @@ def wrap_prefetch(body: Tuple[Stmt, ...], make_value,
     allocate two copies has to be made before the body exists, and a copy of
     these criteria kept elsewhere is a copy that drifts.
 
-    ``make_value(type, hint)`` mints the carried token, the loop result and
-    the prologue's.  A factory rather than a builder, because the statements
-    this produces go where the pass puts them, not where a builder's cursor
-    happens to be.
+    ``make_value(type, hint, quals)`` mints the carried token, the loop result
+    and the prologue's.  A factory rather than a builder, because the
+    statements this produces go where the pass puts them, not where a builder's
+    cursor happens to be.
     """
     # A commit records where a group closed, and this pass is about to change
     # that: the peel closes one group before the loop and the body closes
@@ -519,14 +519,22 @@ def _advance(slice_: Sequence[Stmt], mapping: Dict[int, Value],
     The clones drop `decl` and `extern`.  Those carry a declarator the caller
     wrote with a name in it, and a second statement declaring `glb_m2` would
     be a redefinition rather than a second pointer.  Without them the emitter
-    names the value itself and renders the type, which for a buffer is a
-    plain pointer -- `const` and `__restrict__` are lost on the clone, which
-    costs optimisation and not correctness.
+    names the value itself and renders the type -- which now carries what the
+    declarator used to spell: `const` and the address space come off the type,
+    and `restrict` off the source value's `quals`.
+
+    Carrying the promise is sound here because of what is being cloned.  The
+    clone reads the *next* element of the same buffer while the original is
+    still live, so the two pointers coexist -- which keeps the promise as long
+    as both only read, and breaks it the moment one writes.  The binding sets
+    the qual on read-only operands alone for that reason, so a destination
+    arrives here with nothing to carry.
     """
     out: List[Stmt] = []
     sub = dict(mapping)
     for s in slice_:
-        fresh = tuple(make_value(t.type, t.hint or 'adv') for t in s.target)
+        fresh = tuple(make_value(t.type, t.hint or 'adv', t.quals)
+                      for t in s.target)
         clone = replace(substitute((s,), sub)[0], target=fresh,
                         attrs=tuple(a for a in s.attrs
                                     if a[0] not in ('decl', 'extern')))

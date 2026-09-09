@@ -53,7 +53,7 @@ class CudaLexic(Lexic):
     self.restrict_kw = "__restrict__"
     # sm_70 and up; below it the annotation does not exist and the parameter
     # is copied per thread, which is the behaviour without it anyway.
-    self.grid_constant_kw = '__grid_constant__'
+
 
   def multifile(self):
     return False
@@ -101,6 +101,14 @@ class CudaLexic(Lexic):
   def get_launch_bounds(self, total_num_threads_per_block, min_blocks_per_mp=None):
     params = [str(item) for item in [total_num_threads_per_block, min_blocks_per_mp] if item]
     return f'__launch_bounds__({", ".join(params)})'
+
+  def storage_class(self, space):
+    # The one space CUDA needs told: without it a by-value parameter whose
+    # address is taken, or which a runtime value indexes, is copied to `.local`
+    # per thread -- which is the whole cost `TableForm.PARAM` exists to avoid.
+    if getattr(space, 'name', None) == 'PARAM':
+      return '__grid_constant__'
+    return ''
 
   def kernel_definition(self, file, kernel_bounds, base_name, params, precision=None,
                         total_shared_mem_size=None, global_symbols=None):
