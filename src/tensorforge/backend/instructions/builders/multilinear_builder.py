@@ -40,10 +40,8 @@ class MultilinearBuilder(OperationBuilder):
     section share, so one operator taking a wider group does not constrain
     its neighbours.
     """
-    from tensorforge.backend.instructions.memory import vectorize
-    if vectorize.K_WIDTH <= 1:
-      return 1
-    return vectorize.K_WIDTH
+    width = self._context.get_user_options().k_width
+    return max(1, width)
 
   def resolve_operands(self, descr):
     """Stage every operand where this operation wants to read it.

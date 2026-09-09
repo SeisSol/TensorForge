@@ -29,7 +29,6 @@ halfway through code generation.
 
 from __future__ import annotations
 
-import os
 import time
 from enum import Enum
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set
@@ -171,9 +170,12 @@ class Pass:
 
 
 class PassManager:
-    def __init__(self, debug: str = None):
+    def __init__(self, debug: str = ''):
         self._passes: List[Pass] = []
-        self._debug = os.environ.get('TF_IR_DEBUG', '') if debug is None else debug
+        #: What the `ir_debug` option said, passed in rather than read here:
+        #: a pipeline is built per generation and the options belong to the
+        #: context that asked for it.
+        self._debug = debug
         self.timings: List[tuple] = []
 
     def add(self, p: Pass) -> 'PassManager':

@@ -164,7 +164,8 @@ class MultilinearDescr(OperationDescription):
     fp = context.fp_type.size()
     # The same call `get_num_threads` makes, so the lane count and the width
     # cannot come from two different answers.
-    return vectorize.lead_pair(self._lead_dim(), fp, align)[1]
+    return vectorize.lead_pair(self._lead_dim(), fp, align,
+                               blocking=context.get_user_options().lead_blocking)[1]
 
   def scalar_num_threads(self, context: Context) -> int:
     """The lane count this operator would have had without vectorisation.
@@ -197,7 +198,9 @@ class MultilinearDescr(OperationDescription):
       fp = context.fp_type.size()
       align = min([getattr(m.tensor, 'alignment', 0) or 0
                    for m in self.matrix_list()] or [0])
-      threads, width = vectorize.lead_pair(self._lead_dim(), fp, align)
+      threads, width = vectorize.lead_pair(
+          self._lead_dim(), fp, align,
+          blocking=context.get_user_options().lead_blocking)
       if width > 1:
         # The extent still has to be covered: the loop bound is in elements
         # and the lane count is what it is divided by, so this returns the

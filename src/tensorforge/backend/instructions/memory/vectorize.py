@@ -25,27 +25,7 @@ a 16-byte access that a padded batch stride no longer covers.
 
 from __future__ import annotations
 
-import os
 from typing import List, Sequence, Tuple
-
-#: Whether the lead dimension is vectorised at all.  Off by default, and the
-#: reason is not doubt about the mechanism: it changes the thread count of
-#: every kernel, and the only instrument that can say whether that was a good
-#: idea is a register and occupancy measurement on real hardware.  The host
-#: oracle checks that the numbers still come out right; it cannot check that
-#: they come out faster.
-LEAD_VECTORIZE = os.environ.get('TF_LEAD_VEC', '') not in ('', '0')
-
-#: Vectors per lane in the lead dimension.  1 keeps the arrangement the width
-#: alone produces; 2 is where the packed FMA starts paying for its own splat.
-#: Separate from `LEAD_VECTORIZE` because it is a *register* decision and the
-#: width is an instruction one -- they want separate measurements.
-LEAD_BLOCKING = int(os.environ.get('TF_LEAD_BLOCK', '1') or '1')
-
-#: Reduction steps one body covers.  Independent of the lead width: it removes
-#: loads of the broadcast operand rather than instructions on the vectorised
-#: one, and it works with or without a lead width at all.
-K_WIDTH = int(os.environ.get('TF_K_WIDTH', '1') or '1')
 
 #: No target loads more than 16 bytes in one instruction: `LDG.128`/`LDS.128`
 #: on NVIDIA, `global_load_dwordx4`/`ds_read_b128` on AMD.  So `double4` is
@@ -333,7 +313,8 @@ def lead_threads_and_width(extent: int, elem_bytes: int, align_bytes: int,
     return scalar_threads, 1
 
 
-def lead_pair(extent: int, elem_bytes: int, align_bytes: int):
+def lead_pair(extent: int, elem_bytes: int, align_bytes: int,
+              blocking: int = 1):
     """The `(threads, width)` a lead dimension runs at.  One decision.
 
     `lead_threads_and_width` returns a pair because the two are one choice --
@@ -354,11 +335,15 @@ def lead_pair(extent: int, elem_bytes: int, align_bytes: int):
     So the cap is applied here rather than passed in, and the pair is taken
     whole.  `lead_threads_and_width` keeps its `cap` argument, which is what
     the unit tests vary; nothing in the generator reaches it directly.
+
+    ``blocking`` is the `lead_blocking` option, which every caller has a
+    context to read it from; it is a parameter here so that this stays a
+    function of its arguments.
     """
     return lead_threads_and_width(
         extent, elem_bytes, align_bytes,
         cap=min(lead_width_cap(elem_bytes, align_bytes), VALIDATED_LEAD_WIDTH),
-        blocking=LEAD_BLOCKING)
+        blocking=blocking)
 
 
 def lead_vectorize_supported(context) -> bool:
@@ -379,7 +364,7 @@ def lead_vectorize_supported(context) -> bool:
     correct on the backends that answer yes, and silently wrong on the ones
     that would need `sycl::vec`'s componentwise API instead.
     """
-    if not LEAD_VECTORIZE:
+    if not context.get_user_options().lead_vectorize:
         return False
     lex = context.get_vm().get_lexic()
     return getattr(lex, '_backend', None) in ('cuda', 'hip', 'hipsycl_cuda')

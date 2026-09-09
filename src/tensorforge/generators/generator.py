@@ -50,11 +50,6 @@ class AbstractThreadBlockPolicy:
     pass
 
 
-def _lead_blocking() -> int:
-  from tensorforge.backend.instructions.memory import vectorize
-  return vectorize.LEAD_BLOCKING
-
-
 class RegmaxBlockPolicy(AbstractThreadBlockPolicy):
   def __init__(self, context, global_mem, mem_size_per_mult, num_threads,
                lead_width=1):
@@ -1001,7 +996,7 @@ class Generator:
                                             self._section.shr_mem_obj.get_size_per_mult(),
                                             self._num_threads,
                                             self._lead_width
-                                            * _lead_blocking())
+                                            * self._context.get_user_options().lead_blocking)
     num_mults_per_block = policy.get_num_mults_per_block()
     self._section.shr_mem_obj.set_mults_per_block(num_mults_per_block)
 

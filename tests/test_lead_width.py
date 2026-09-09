@@ -447,7 +447,7 @@ def _run_case(monkeypatch, M, N, width, align=16, dtype=None):
 
     from tensorforge.backend.instructions.memory import vectorize
     from tensorforge.common.basic_types import Addressing, Datatype
-    from tensorforge.common.context import Context
+    from tensorforge.common.context import Context, Options
     from tensorforge.common.matrix.boundingbox import BoundingBox
     from tensorforge.common.matrix.tensor import SubTensor, Tensor
     from tensorforge.generators.descriptions import GemmDescr
@@ -455,7 +455,6 @@ def _run_case(monkeypatch, M, N, width, align=16, dtype=None):
     from kernel_eval import evaluate_wave
 
     dtype = dtype or Datatype.F32
-    monkeypatch.setattr(vectorize, 'LEAD_VECTORIZE', True)
     monkeypatch.setattr(vectorize, 'VALIDATED_LEAD_WIDTH', width)
 
     def t(shape, alias):
@@ -466,7 +465,8 @@ def _run_case(monkeypatch, M, N, width, align=16, dtype=None):
     gen = Generator([GemmDescr(False, False, a=t([M, 8], 'A'),
                                b=t([8, N], 'B'), c=t([M, N], 'D'),
                                alpha=1.0, beta=0.0)],
-                    Context(arch='sm_86', backend='cuda', fp_type=dtype))
+                    Context(arch='sm_86', backend='cuda', fp_type=dtype,
+                            options=Options(lead_vectorize=True)))
     gen.register()
     gen.generate()
     src = gen.get_kernel()

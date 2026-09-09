@@ -7,7 +7,6 @@ from typing import List, Tuple
 from tensorforge.common.context import Context, VM
 from tensorforge.backend.writer import Writer
 from tensorforge.common.exceptions import InternalError
-import os
 import warnings
 from contextlib import contextmanager
 
@@ -307,7 +306,7 @@ class AbstractInstruction(ABC):
     finally:
       cls._shared_body.pop()
     body = builder.finish()
-    if os.environ.get('TF_IR_DEBUG'):
+    if context.get_user_options().ir_debug:
       for d in pir.verify(body, strict=False):
         print(f'pir: {d}')
     body = pir.optimize(body, explicit_simd=_explicit_simd(context))
@@ -327,7 +326,7 @@ class AbstractInstruction(ABC):
       body = wrap_prefetch(body, lambda ty, hint: builder.value(ty, hint=hint),
                            report=why)
       body, _ = pir.schedule_async(body)
-      if os.environ.get('TF_IR_DEBUG'):
+      if context.get_user_options().ir_debug:
         for w in why:
           print(f'wrap: declined -- {w}')
     if getattr(context, 'measure_pressure', False):
@@ -368,7 +367,7 @@ class AbstractInstruction(ABC):
     build(builder)
     body = builder.finish()
 
-    if os.environ.get('TF_IR_DEBUG'):
+    if self._context.get_user_options().ir_debug:
       diag = pir.verify(body, strict=False)
       if diag:
         print(f'pir diagnostics in {type(self).__name__}:')
@@ -386,7 +385,7 @@ class AbstractInstruction(ABC):
     if getattr(self._context, 'measure_pressure', False):
       self._context.record_pressure(
           pir.pressure(body, in_bytes=True, explicit_simd=simd))
-    if os.environ.get('TF_IR_STATS'):
+    if self._context.get_user_options().ir_stats:
       print(f'{type(self).__name__}: {sum(1 for _ in pir.walk(body))} Knoten, '
             f'Registerdruck {pir.pressure(body)} Werte, '
             f'{pir.pressure(body, in_bytes=True, explicit_simd=simd)} B '

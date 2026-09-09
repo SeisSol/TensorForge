@@ -51,7 +51,7 @@ class OptimizationStage:
 
   def _build_pipeline(self) -> PassManager:
     opts = self._user_options
-    pm = PassManager()
+    pm = PassManager(debug=opts.ir_debug)
 
     # Hoist loads away from their uses.  Must run before liveness, since it
     # changes the distance between a definition and its consumers.

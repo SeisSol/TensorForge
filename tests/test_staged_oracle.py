@@ -38,7 +38,7 @@ import numpy as np
 import pytest
 
 import kernel_eval
-from tensorforge.common.context import Context
+from tensorforge.common.context import Context, Options
 from tensorforge.generators.generator import Generator
 
 CASES = pathlib.Path(__file__).parent / 'cases'
@@ -50,7 +50,7 @@ CASES = pathlib.Path(__file__).parent / 'cases'
 STAGED = ['aligned_operands', 'wide_cascade', 'wide_cascade_tail']
 
 
-def _build(name):
+def _build(name, **options):
     """The kernel, and the geometry its launcher starts it with."""
     path = next(p for p in CASES.rglob('*.py') if p.stem == name)
     spec = importlib.util.spec_from_file_location(name, path)
@@ -58,7 +58,8 @@ def _build(name):
     with contextlib.redirect_stdout(io.StringIO()):
         spec.loader.exec_module(mod)
     gen = Generator(mod.descr_list(),
-                    Context(arch='sm_86', backend='cuda', fp_type=mod.DTYPE))
+                    Context(arch='sm_86', backend='cuda', fp_type=mod.DTYPE,
+                            options=Options(**options)))
     with contextlib.redirect_stdout(io.StringIO()):
         gen.generate()
     return (mod, gen.get_kernel(),
@@ -149,15 +150,8 @@ def test_the_widened_build_is_narrower_than_the_plain_one():
     names one number for both configurations is over by a factor of four in
     exactly the configuration it was added to test.
     """
-    from tensorforge.backend.instructions.memory import vectorize
-    old = (vectorize.LEAD_VECTORIZE, vectorize.LEAD_BLOCKING)
-    try:
-        vectorize.LEAD_VECTORIZE, vectorize.LEAD_BLOCKING = False, 1
-        _, _, plain = _build('aligned_operands')
-        vectorize.LEAD_VECTORIZE, vectorize.LEAD_BLOCKING = True, 1
-        _, _, wide = _build('aligned_operands')
-    finally:
-        vectorize.LEAD_VECTORIZE, vectorize.LEAD_BLOCKING = old
+    _, _, plain = _build('aligned_operands', lead_vectorize=False, lead_blocking=1)
+    _, _, wide = _build('aligned_operands', lead_vectorize=True, lead_blocking=1)
     assert wide[0] < plain[0]
 
 

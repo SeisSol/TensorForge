@@ -26,8 +26,7 @@ import pathlib
 import pytest
 
 import kernel_eval
-from tensorforge.backend.instructions.memory import vectorize
-from tensorforge.common.context import Context
+from tensorforge.common.context import Context, Options
 from tensorforge.generators.generator import Generator
 
 VEC_CASES = ['aligned_operands']
@@ -35,20 +34,17 @@ VEC_CASES = ['aligned_operands']
 
 def _build(name, widen, blocking=1):
     """The kernel and the geometry its launcher starts it with."""
-    old = (vectorize.LEAD_VECTORIZE, vectorize.LEAD_BLOCKING)
-    vectorize.LEAD_VECTORIZE, vectorize.LEAD_BLOCKING = widen, blocking
-    try:
-        path = pathlib.Path(__file__).parent / 'cases' / f'{name}.py'
-        spec = importlib.util.spec_from_file_location(name, path)
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
-        gen = Generator(mod.descr_list(),
-                        Context(arch='sm_86', backend='cuda',
-                                fp_type=mod.DTYPE))
-        gen.generate()
-        return gen.get_kernel(), kernel_eval.launch_geometry(gen.get_launcher())
-    finally:
-        vectorize.LEAD_VECTORIZE, vectorize.LEAD_BLOCKING = old
+    path = pathlib.Path(__file__).parent / 'cases' / f'{name}.py'
+    spec = importlib.util.spec_from_file_location(name, path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    gen = Generator(mod.descr_list(),
+                    Context(arch='sm_86', backend='cuda',
+                            fp_type=mod.DTYPE,
+                            options=Options(lead_vectorize=widen,
+                                            lead_blocking=blocking)))
+    gen.generate()
+    return gen.get_kernel(), kernel_eval.launch_geometry(gen.get_launcher())
 
 
 def _destination(name, widen, blocking=1):

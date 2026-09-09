@@ -38,7 +38,7 @@ import pytest
 from tensorforge.backend import atomics, placement
 from tensorforge.backend.instructions.memory import vectorize
 from tensorforge.common.basic_types import Addressing, Datatype
-from tensorforge.common.context import Context
+from tensorforge.common.context import Context, Options
 from tensorforge.common.matrix.boundingbox import BoundingBox
 from tensorforge.common.matrix.tensor import SubTensor, Tensor
 from tensorforge.generators.descriptions import GemmDescr
@@ -57,7 +57,6 @@ def _t(shape, alias):
 
 def _generate(monkeypatch, M, arch, backend, width=2, nvidia_atomics=False):
     """`D += A B`, aligned, at `width`."""
-    monkeypatch.setattr(vectorize, 'LEAD_VECTORIZE', True)
     monkeypatch.setattr(vectorize, 'VALIDATED_LEAD_WIDTH', width)
     if nvidia_atomics:
         monkeypatch.setitem(placement.POLICIES, 'nvidia',
@@ -66,7 +65,8 @@ def _generate(monkeypatch, M, arch, backend, width=2, nvidia_atomics=False):
     descrs = [GemmDescr(trans_a=False, trans_b=False,
                         a=_t([M, K], 'A'), b=_t([K, 3], 'B'),
                         c=_t([M, 3], 'D'), alpha=1.0, beta=1.0)]
-    ctx = Context(arch=arch, backend=backend, fp_type=Datatype.F32)
+    ctx = Context(arch=arch, backend=backend, fp_type=Datatype.F32,
+                  options=Options(lead_vectorize=True))
     gen = Generator(descrs, ctx)
     gen.register()
     gen.generate()

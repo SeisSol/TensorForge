@@ -23,7 +23,6 @@ states it, so ``verify`` can check it instead of the invariant living in a
 comment.
 """
 
-import os
 from enum import Enum
 from typing import List, Optional, Tuple
 
@@ -479,16 +478,7 @@ class BatchLoop(AbstractInstruction):
                 instr.gen_code(writer)
 
     def _wide_bodies(self) -> bool:
-        """One PIR body for the whole region, or one per instruction.
-
-        The option decides; ``TF_IR_WIDE`` overrides it in either direction.
-        The override exists because turning this on moved 71 of 108 generated
-        outputs at once, and a delta that size has to be bisectable without
-        editing a call site or rebuilding.
-        """
-        override = os.environ.get('TF_IR_WIDE')
-        if override is not None:
-            return override not in ('', '0', 'false', 'False')
+        """One PIR body for the whole region, or one per instruction."""
         return self._context.get_user_options().wide_bodies
 
     def gen_code(self, writer) -> None:
