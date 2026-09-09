@@ -172,6 +172,13 @@ CONFIGS: Dict[str, Config] = {
     # which the *next* element's index is known at the top of the iteration,
     # and both are listed because the interesting comparison is between them
     # rather than against the baseline alone.
+    # The prefetch hint, at both levels it can ask for.  Two entries because
+    # the level is the open question: L1 is closer and smaller, so a hint
+    # issued a whole loop body ahead may be evicted before its use, and which
+    # way that falls is the measurement the option's doc defers.
+    'prefetch': Config('prefetch', Options(enable_prefetch=True)),
+    'prefetch-l1': Config('prefetch-l1', Options(enable_prefetch=True,
+                                                 prefetch_level='l1')),
     'launchctrl': Config('launchctrl', Options(launch_control=True)),
     'launchctrl2': Config('launchctrl2', Options(launch_control=True,
                                                  launch_control_depth=2)),
