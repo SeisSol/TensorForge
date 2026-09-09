@@ -227,3 +227,35 @@ class Lexic(ABC):
     loads in hardware and needs no instruction at all (hence None).
     """
     return None
+
+  # --- data prefetch --------------------------------------------------------
+  # A hint and nothing else: it moves no value, releases no token, and the
+  # emitter drops it on a target that has none.  So a backend with no answer
+  # costs a cache policy and not a kernel, which is the same bargain
+  # `has_nontemporal` makes.
+
+  def has_prefetch(self, hw):
+    """Whether this target reaches a data prefetch instruction at all.
+
+    Takes the hardware descriptor for the reason `has_atomic_store` takes a
+    context: the lexic is built from the vendor alone, and the answer here is
+    not a per-vendor one.  On AMD it turns on the architecture -- there is no
+    prefetch below gfx12 -- while a SYCL target answers from the library it
+    compiles against and not from the part it runs on.
+
+    False here, because the spelling below has nothing to give.
+    """
+    return False
+
+  def prefetch(self, address, *, datatype, elems=1, level='l2'):
+    """One prefetch, as a statement.  `address` is a pointer expression.
+
+    `level` is `'l1'` or `'l2'`, and it is a request rather than an
+    instruction: a target with one prefetch for both honours neither, and
+    says so here instead of pretending the distinction survived.  `elems` is
+    likewise honoured only where the instruction takes a count.
+
+    Only reached when `has_prefetch` agreed, so an implementation does not
+    have to answer for the targets that one turns away.
+    """
+    return None

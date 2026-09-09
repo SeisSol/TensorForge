@@ -669,6 +669,7 @@ class Op:
     ALLOC = 'alloc'
     LOAD = 'load'
     STORE = 'store'
+    PREFETCH = 'prefetch'       # a cache hint: names an address, yields nothing
     COPY_ASYNC = 'copy.async'   # global -> shared, completes at its wait
     LOAD_ASYNC = 'load.async'   # global -> register, ditto
     COMMIT_ASYNC = 'commit.async'   # closes issued copies into one counted group
@@ -873,6 +874,19 @@ class Stmt:
     @property
     def load_index(self) -> Tuple[Operand, ...]:
         assert self.op == Op.LOAD_ASYNC
+        return self.args[1:]
+
+    # prefetch: args = (base, *index) -- `load.async`'s shape without the
+    # token, because a hint names a location and promises no value.
+
+    @property
+    def prefetch_base(self) -> Operand:
+        assert self.op == Op.PREFETCH
+        return self.args[0]
+
+    @property
+    def prefetch_index(self) -> Tuple[Operand, ...]:
+        assert self.op == Op.PREFETCH
         return self.args[1:]
 
     @property

@@ -101,6 +101,8 @@ class Emitter:
         self._consts: Dict[int, str] = {}
         self._async_lex = None
         self._async_note = ''
+        self._prefetch_lex = None
+        self._prefetch_note = ''
         self._inline: set = set()
         self._pending: Dict[int, str] = {}   # load.async token id -> C++ name
 
@@ -329,6 +331,34 @@ class Emitter:
                 return
         self._async_lex = lex
 
+    def _decide_prefetch(self, body: Tuple[Stmt, ...]) -> None:
+        """One decision per body, and a lighter one than the copies above.
+
+        A hint a target cannot spell is dropped, and dropping it is safe by
+        construction: the body computes the same thing, more slowly.  What
+        would not be safe is dropping it *quietly*, because "this part has no
+        data prefetch" and "nothing asked for one" then read identically in
+        the output, and only one of them is worth acting on.
+
+        The question goes to the lexic rather than to a table keyed on the
+        vendor.  A SYCL target's answer is about the library it compiles
+        against and not about the part it runs on, and HIP compiles for NVIDIA
+        as well -- a vendor string answers neither.
+        """
+        self._prefetch_lex = None
+        if not any(s.op == Op.PREFETCH for s, _ in walk(body)):
+            return
+
+        lex, hw = self._lexic(), self._hw()
+        if lex is None or hw is None:
+            self._prefetch_note = 'no hardware description available'
+            return
+        if not lex.has_prefetch(hw):
+            self._prefetch_note = (f'{getattr(hw, "model", "?")} has no data '
+                                   f'prefetch')
+            return
+        self._prefetch_lex = lex
+
     def zero(self, t) -> str:
         return t.base.literal(0)
 
@@ -455,6 +485,10 @@ class Emitter:
         if self._async_lex is None and self._async_note:
             self.writer.Comment(f'async copies lowered synchronously: '
                                 f'{self._async_note}')
+        self._decide_prefetch(body)
+        if self._prefetch_lex is None and self._prefetch_note:
+            self.writer.Comment(f'prefetch hints dropped: '
+                                f'{self._prefetch_note}')
         self._emit_body(body, ())
 
     def _emit_body(self, body: Tuple[Stmt, ...],
@@ -618,6 +652,20 @@ class Emitter:
                                 nontemporal=bool(s.attr('nontemporal'))))
                 return
             w(f'{access} = {self.operand(val)};')
+            return
+
+        if op == Op.PREFETCH:
+            # Nothing where the target has no instruction: `run` has said so
+            # once for the whole body, so this is not a silent drop.
+            if self._prefetch_lex is None:
+                return
+            addr = self.address(s.prefetch_base, s.prefetch_index)
+            text = self._prefetch_lex.prefetch(
+                f'&{self.base_name(s.prefetch_base)}[{addr}]',
+                datatype=self.elem_type(s.prefetch_base),
+                elems=s.attr('elems', 1), level=s.attr('level', 'l2'))
+            if text:
+                w(text)
             return
 
         if op == Op.COPY_ASYNC:

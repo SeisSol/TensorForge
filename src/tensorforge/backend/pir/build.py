@@ -1057,6 +1057,43 @@ class IRBuilder:
         self._token_uniform[tok.id] = uniform
         return tok
 
+    def prefetch(self, base: Any, *indices: Operand, level: str = 'l2',
+                 elems: int = 1, space: Optional[MemSpace] = None,
+                 predicate: Optional[Value] = None) -> Stmt:
+        """Ask the cache for an address, and carry on without waiting for it.
+
+        A hint, not a transfer.  Nothing is loaded, no value appears, and no
+        `wait` ever names this --- what it buys is that the line has begun
+        arriving before the load that needs it, so the *position* carries the
+        whole of the meaning and the absent result carries none.
+
+        Which is why the effects below are a plain read and nothing more.  A
+        target with no data prefetch drops the statement in the emitter, so
+        the body without it has to mean exactly what the body with it means;
+        anything stronger than a read would be a claim the dropped version
+        stops honouring.  The read is not nothing, though: it is what stops a
+        pass from lifting a hint above a store to the same buffer, where it
+        would be a hint for a line the store is about to dirty.
+
+        `level` is what the caller wants, not what it gets.  Every target that
+        answers here spells a data prefetch; only NVIDIA spells the level, so
+        `'l1'` and `'l2'` are two instructions there and one everywhere else.
+        Asking for the level the algorithm means keeps that choice in one
+        place for the day a second target can honour it.
+
+        `elems` is how far past the address the hint reaches, in elements.
+        The targets whose instruction takes a count use it; the rest cover one
+        line per statement, so a longer run is several statements and the
+        caller that issues them is the one that knows the line width.
+        """
+        if space is None:
+            space = self._space_of(base)
+        accesses = (Access(Effect.READ, space, self.alias_root(base)),)
+        return self._emit_op(Op.PREFETCH, (), (base,) + tuple(indices),
+                             predicate=predicate, pure=False, movable=True,
+                             effect=Effect.READ, accesses=accesses,
+                             attrs=(('level', level), ('elems', int(elems))))
+
     def wait(self, token: Optional[Value] = None, *also: Value) -> Stmt:
         """Wait for ``token`` (or, with ``None``, drain every outstanding copy).
 

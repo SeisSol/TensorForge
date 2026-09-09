@@ -582,6 +582,13 @@ def _dce_body(body: Tuple[Stmt, ...], uses) -> Tuple[Stmt, ...]:
             # whether the loop is.
             out.append(s)
             continue
+        if s.op == Op.PREFETCH:
+            # A hint has no result and no side effect, which is precisely the
+            # shape the last rule below deletes.  Deleting it is always
+            # *correct* -- and always wrong, since a statement whose entire
+            # content is where it sits has nothing left once it is gone.
+            out.append(s)
+            continue
         if s.attr('escapes'):
             # its name is interpolated into raw text the IR cannot see
             out.append(s)
