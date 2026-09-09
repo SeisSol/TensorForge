@@ -23,6 +23,7 @@ states it, so ``verify`` can check it instead of the invariant living in a
 comment.
 """
 
+from contextlib import contextmanager
 from enum import Enum
 from typing import List, Optional, Tuple
 
@@ -274,6 +275,56 @@ class BatchLoop(AbstractInstruction):
     def _batch(self, n: int = 0) -> str:
         return f'{GeneralLexicon.BATCH_ID_NAME}{n}'
 
+    # -- the indices this loop binds, for the body it binds them in -------- #
+
+    #: One entry per open loop: the builder it is being emitted into, and what
+    #: it has bound so far.
+    _indices: List[Tuple] = []
+
+    @classmethod
+    @contextmanager
+    def batch_indices(cls, builder):
+        """Publish the element indices this loop binds, while its body is open.
+
+        A loop binds more than one -- ``batchId0`` is the element the body is
+        on, ``batchId1..N`` are the ones it will be on -- and an address is
+        entitled to name any of them, so this is a mapping and not a single
+        value.  Keyed by the name the macro layer gives each index, which is
+        the thing an address would otherwise have spelled.  Taking the
+        innermost loop's induction instead answers a question about
+        ``batchId0`` with whatever loop was entered last, and a ``VariantLoop``
+        inside this one binds a counter that is not an element index at all.
+
+        Filled as the bindings are emitted rather than up front, so that an
+        instruction built before them sees exactly what exists at that point.
+
+        Carried with the builder it belongs to, and that half is not
+        bookkeeping.  A value belongs to one body and means nothing in another,
+        and the same *name* means two different things on either side of the
+        loop header: ``batchId1`` is the next element inside the body and the
+        clamped first element ahead of it.  Handing one out across that
+        boundary would address a different element and compile perfectly well.
+        """
+        frame = (builder, {})
+        cls._indices.append(frame)
+        try:
+            yield frame[1]
+        finally:
+            cls._indices.pop()
+
+    @classmethod
+    def indices_in(cls, builder) -> Optional[dict]:
+        """What the loop in ``builder``'s body binds, or ``None`` if it holds none.
+
+        The distinction is what a caller needs: ``None`` says the indices this
+        body names are bound somewhere else, so there is no value here to reach
+        for -- not that the loop binds nothing.
+        """
+        for owner, bound in reversed(cls._indices):
+            if owner is builder:
+                return bound
+        return None
+
     def index_name(self, lookahead: int = 0) -> str:
         """The variable holding the element index ``lookahead`` iterations ahead.
 
@@ -508,31 +559,59 @@ class BatchLoop(AbstractInstruction):
                f'{read.format(self._batch(0))};')
         return 'allowed'
 
-    def _lookahead_bindings(self, writer) -> None:
+    def _lookahead_bindings(self, writer, bound: dict = None) -> None:
         """Bind batchid1..N as clamped element indices, for prefetching.
 
-        Each one reads the previous, and the first reads the induction
-        variable, so the chain is passed as operands rather than spelled into
-        the text.  Without that the IR sees index arithmetic with no inputs,
-        which is loop-invariant as far as it can tell.
+        Arithmetic and not an expression over text: an index is a `select` over
+        a comparison, which is three ops the IR already knows, so there is
+        nothing left for a raw expression to buy.  What it costs is everything
+        a pass would want here -- CSE folds the two additions in one clamp into
+        one statement and the `n`-th clamp's addend into the `n+1`-th's, and a
+        consumer moved to another element is a substitution on an operand
+        rather than a rewrite of a string.
+
+        The stride and the element count stay text.  They are kernel
+        parameters and grid queries, uniform by construction and opaque to the
+        IR either way; as operands of an op they are literals it carries
+        without reading, which is the same thing a name would have been and
+        needs no seam to say so.
+
+        No `extern`, so these are the IR's values with the macro layer's name
+        only as a hint.  Nothing spells them any more: the addresses that used
+        to take them as operands, which is what the frame above is for.
+
+        The first one escapes, and only it.  The loop names its successor index
+        in an *attribute* --- `wrap_prefetch` reads it to rewrite a transfer to
+        the next element --- and an attribute is not an operand, so the use
+        chain does not see it and `dce` would take the definition away from
+        under a pass that has not run yet.  That is what `escapes` says: this
+        is referenced from somewhere the graph does not model.  The rest are
+        ordinary values and now disappear where nothing reads them, which is
+        the two dead clamps every kernel used to carry.
         """
-        if not (hasattr(writer, 'decl_expr') and self._induction is not None):
+        if not (hasattr(writer, 'op') and self._induction is not None):
             for n in range(1, self._lookahead + 1):
                 prev = self._batch(n - 1)
                 writer(f'const auto {self._batch(n)} = '
                        f'{prev} + {self._stride} < {self._num_elements()} ? '
                        f'{prev} + {self._stride} : {prev};')
             return
-        from tensorforge.backend.pir.core import INDEX
+        from tensorforge.backend.pir.core import SIZE, BOOL
         prev = self._induction
         first = None
         for n in range(1, self._lookahead + 1):
-            prev = writer.decl_expr(
-                f'const auto {self._batch(n)}',
-                f'{{0}} + {self._stride} < {self._num_elements()} ? '
-                f'{{0}} + {self._stride} : {{0}}',
-                INDEX, None, args=(prev,), hint=self._batch(n),
-                extern=self._batch(n))
+            # Clamped rather than wrapped: the last iterations of the loop ask
+            # for an element past the end, and the answer that costs nothing is
+            # the one they already hold -- a valid address they prefetch and
+            # never read.
+            ahead = writer.op('add', SIZE, prev, self._stride,
+                              hint=f'ahead{n}')
+            inside = writer.op('lt', BOOL, ahead, self._num_elements(),
+                               hint=f'inbatch{n}')
+            prev = writer.op('select', SIZE, inside, ahead, prev,
+                             hint=self._batch(n), escapes=(n == 1))
+            if bound is not None:
+                bound[self._batch(n)] = prev
             if first is None:
                 first = prev
         self._first_lookahead = first
@@ -675,10 +754,16 @@ class BatchLoop(AbstractInstruction):
                 # bindings, the flag guard and every `access_address` in the
                 # body, and it is `size_t` because it is compared against
                 # `numElements`.
-                from tensorforge.backend.pir.core import Uniformity
+                from tensorforge.backend.pir.core import (SIZE,
+                                                          Uniformity)
+                # Neither `extern` nor `ctype`.  The name is nobody's business
+                # now that every reader of the index takes it as an operand,
+                # and the width is the induction value's own -- an override on
+                # the header widened the variable and left everything computed
+                # from it back at `int32_t`.
                 with writer.for_(self._start, self._num_elements(),
-                                 self._stride, extern=self._batch(0),
-                                 ctype='size_t',
+                                 self._stride, hint=self._batch(0),
+                                 index_type=SIZE,
                                  uniform=Uniformity.MULT) as loop:
                     self._loop_handle = loop
                     # The induction *value*, not just its name.  Anything
@@ -688,18 +773,19 @@ class BatchLoop(AbstractInstruction):
                     # reads -- which is what happened the first time, silently
                     # and only in the generated text.
                     self._induction = loop.induction
-                    AbstractInstruction._induction_value.append(loop.induction)
                     try:
-                        self._lookahead_bindings(writer)
-                        # The first lookahead binding is what this loop calls
-                        # the next element, and `wrap_prefetch` needs exactly
-                        # that: it moves a transfer one iteration earlier and
-                        # has no way to know how the traversal clamps.
-                        loop._next_index = self._first_lookahead
-                        self._emit_body(writer)
-                        self._advance_stage_counter(writer)
+                        with BatchLoop.batch_indices(writer) as bound:
+                            bound[self._batch(0)] = loop.induction
+                            self._lookahead_bindings(writer, bound)
+                            # The first lookahead binding is what this loop
+                            # calls the next element, and `wrap_prefetch` needs
+                            # exactly that: it moves a transfer one iteration
+                            # earlier and has no way to know how the traversal
+                            # clamps.
+                            loop._next_index = self._first_lookahead
+                            self._emit_body(writer)
+                            self._advance_stage_counter(writer)
                     finally:
-                        AbstractInstruction._induction_value.pop()
                         self._induction = None
                 return
             with writer.For(f'size_t {self._batch(0)} = {self._start}; '
@@ -776,20 +862,38 @@ class BatchLoop(AbstractInstruction):
         is what makes a block barrier legal in this body -- and it stays
         illegal under the size guard, whose condition is only `MULT`-uniform.
         """
-        from tensorforge.backend.pir.core import (INDEX, BOOL, Access, Effect,
-                                                  MemSpace, Uniformity)
+        from tensorforge.backend.pir.core import (SIZE, INDEX, BOOL,
+                                                  Access, Effect, MemSpace,
+                                                  Uniformity)
 
         index = self._section_index
         queue = f'launchQueue{index}'
         lexic = self._vm.get_lexic()
 
         with builder.while_(self._block_id(), hint=self._batch(0),
-                            extern=self._batch(0), ctype='size_t',
+                            index_type=SIZE,
                             uniform=Uniformity.MULT) as loop:
             self._loop_handle = loop
             self._induction = loop.induction
-            AbstractInstruction._induction_value.append(loop.induction)
+            # Only `batchId0`: this traversal binds no lookahead, because the
+            # next element is whatever the queue answers and there is nothing
+            # to compute it from ahead of time.  So an address naming
+            # `batchId1` in here is naming the *prologue's* binding, which is a
+            # different element -- and it now says so rather than resolving
+            # against a name that happens to be in scope.
             try:
+                with BatchLoop.batch_indices(builder) as bound:
+                    bound[self._batch(0)] = loop.induction
+                    self._queried_body(builder, loop, index, queue, lexic)
+            finally:
+                self._induction = None
+
+    def _queried_body(self, builder, loop, index, queue, lexic) -> None:
+        """The body of the queried traversal, once its index is published."""
+        from tensorforge.backend.pir.core import (INDEX, BOOL, Access, Effect,
+                                                  MemSpace, Uniformity)
+        if True:
+            if True:
                 guard = builder.op('lt', BOOL, loop.induction,
                                    self._num_elements(), hint='inrange')
                 with builder.if_(guard):
@@ -821,9 +925,6 @@ class BatchLoop(AbstractInstruction):
                 loop.yield_(builder.op('add', INDEX, lexic.thread_idx_y,
                                        offset, hint=self._batch(0),
                                        uniform=Uniformity.MULT))
-            finally:
-                AbstractInstruction._induction_value.pop()
-                self._induction = None
 
     def _gen_grouped(self, writer) -> None:
         """One traversal for a whole group of rows.

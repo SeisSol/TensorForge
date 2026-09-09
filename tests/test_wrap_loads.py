@@ -53,7 +53,11 @@ def _generate(case_file: str, backend: str, arch: str, **opts) -> str:
 
 
 def _loop_start(lines) -> int:
-    return next(i for i, l in enumerate(lines) if "for (size_t batchId0" in l)
+    # `batchId0` is the induction value's *hint*, not its name, since the
+    # addresses in the body take the index as an operand -- so the emitter
+    # puts the value id in front of it.
+    return next(i for i, l in enumerate(lines)
+                if re.search(r"for \(size_t \w*batchId0\b", l))
 
 
 def _wrapped_buffers(kernel: str):
@@ -131,6 +135,12 @@ def test_peeled_and_wrapped_transfers_use_the_right_element(backend, arch):
     # different things either side of the loop header.
     assert all('batchId1' in a for a in peeled), peeled
     assert all('batchId1' in a for a in wrapped), wrapped
+    # ...and they are two different tokens now: the peel names the
+    # prologue's binding, which is still text, while the loop's is a value
+    # whose hint the emitter prefixes.  The collision the note above
+    # describes was in the spelling, and it is gone.
+    assert all(re.search(r'\bbatchId1\b', a) for a in peeled), peeled
+    assert all(re.search(r'\bv\d+_batchId1\b', a) for a in wrapped), wrapped
 
 
 @pytest.mark.parametrize("d", [1, 2, 4, 8])

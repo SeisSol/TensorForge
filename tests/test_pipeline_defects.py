@@ -20,6 +20,8 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 
+import re
+
 import pytest
 
 from tensorforge.common.context import Context, Options
@@ -44,7 +46,9 @@ def _kernel(case_file: str, **opt_kwargs) -> str:
 def _loop_body(kernel: str) -> list:
     """Lines from the batch loop header to the end, with indentation kept."""
     lines = kernel.splitlines()
-    start = next(i for i, l in enumerate(lines) if "for (size_t batchId0" in l)
+    # A hint, not a name: see the note in test_wrap_loads.
+    start = next(i for i, l in enumerate(lines)
+                 if re.search(r"for \(size_t \w*batchId0\b", l))
     return lines[start:]
 
 def test_stage_index_is_not_the_element_id():
@@ -52,8 +56,9 @@ def test_stage_index_is_not_the_element_id():
                      enable_multibuffer=True, pipeline_depth=2)
     staged = [l for l in _loop_body(kernel) if "% 2" in l]
     assert staged, "expected the rotated buffers to appear in the loop body"
-    offenders = [l.strip() for l in staged if "batchId0 %" in l
-                 or "(batchId0 + 1) %" in l]
+    offenders = [l.strip() for l in staged
+                 if re.search(r"\w*batchId0 %", l)
+                 or re.search(r"\(\w*batchId0 \+ 1\) %", l)]
     assert not offenders, (
         "stage index derived from the element id:\n  "
         + "\n  ".join(offenders))

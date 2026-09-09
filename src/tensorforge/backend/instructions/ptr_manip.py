@@ -7,7 +7,8 @@ from .abstract_instruction import AbstractInstruction
 from tensorforge.common.context import Context
 from tensorforge.common.helper import get_extra_offset_name, Addressing
 from tensorforge.common.basic_types import GeneralLexicon, DataFlowDirection, StridedAddressing
-from tensorforge.common.exceptions import GenerationError
+from tensorforge.common.exceptions import (GenerationError,
+                                           InternalError)
 from tensorforge.backend.pir.core import Effect
 from tensorforge.backend.pir.core import MemSpace
 
@@ -45,10 +46,89 @@ class GetElementPtr(AbstractInstruction):
     self._update_dest = update_dest
     self._pipeline = pipeline
 
+  #: Stands in for the element index while an address is being assembled.
+  #:
+  #: The index has to end up as an operand and the address around it is text,
+  #: so the two are spliced somewhere.  Splicing on the *name* -- searching the
+  #: finished address for `batchId0` -- is what this replaces: a search cannot
+  #: tell the index this binding was given from a longer name that happens to
+  #: start alike, and it found nothing at all for the offsets whose name the
+  #: enclosing body does not bind.  A token no address can otherwise contain is
+  #: the same splice without the search.
+  _INDEX_HOLE = '\x00batchIndex\x00'
+
   def batch_index(self) -> str:
+    """The name this binding's element index goes by.
+
+    A key rather than a spelling, since `extern` came off the loop's bindings:
+    what the emitted code calls the index is the IR's business now, and the
+    name survives as what a pass and a loop agree to call the same element.
+    """
     if isinstance(self._batch_offset, str):
       return self._batch_offset
     return f'{GeneralLexicon.BATCH_ID_NAME}{self._batch_offset}'
+
+  def batch_value(self, writer):
+    """The element index, as something this body can name as an operand.
+
+    Two answers, and which one applies is decided by whether the loop is in
+    this body -- not by which element is wanted.
+
+    Where it is, the loop's own binding: the value carries a def-use edge back
+    to the statement computing the index, which is what stops `licm` hoisting
+    an address out of the loop that defines what it reads, and what gives
+    `substitute` something to rewrite when a pass moves this binding to
+    another element.  An index the loop does *not* bind is an error here
+    rather than a name resolved against whatever is in scope -- `batchId1`
+    outside a loop that binds no lookahead is the prologue's binding, a
+    different element, and reading it would have addressed the wrong one and
+    compiled.
+
+    Where the loop is elsewhere, the seam: a value standing for a name bound
+    outside this body.  No edge -- there is nothing here to have an edge to --
+    but the index is an operand rather than text, so the address stops having
+    an element spelled into it.  This is what a peeled binding gets, whose
+    index is bound ahead of the loop, and what every binding gets when a body
+    is one macro instruction wide.
+
+    `None` where the index is not named `batchId<something>`, which nothing
+    produces today; the address then keeps the name as text rather than the
+    emitter being asked to bind one it knows nothing about.
+    """
+    from .batch_loop import BatchLoop
+    if not hasattr(writer, 'batch_id'):
+      return None
+    name = self.batch_index()
+    bound = BatchLoop.indices_in(writer)
+    if bound is not None:
+      value = bound.get(name)
+      if value is None:
+        raise InternalError(
+            f'{self._dest.name} addresses element `{name}`, which the loop in '
+            f'this body does not bind (it binds '
+            f'{", ".join(sorted(bound)) or "nothing"})')
+      return value
+    prefix = GeneralLexicon.BATCH_ID_NAME
+    if not name.startswith(prefix):
+      return None
+    return writer.batch_id(name[len(prefix):])
+
+  def _splice_index(self, writer, text: str):
+    """`(text, args)`, with the hole turned into an operand where there is one.
+
+    The escaping and the placeholder happen in one pass because they cannot be
+    ordered: escaping afterwards turns the `{0}` this writes into `{{0}}`, and
+    escaping before means the hole has to survive it, which it only does by
+    containing no braces -- true of this hole and not something a caller should
+    have to know.
+    """
+    escaped = text.replace('{', '{{').replace('}', '}}')
+    if self._INDEX_HOLE not in escaped:
+      return escaped, ()
+    value = self.batch_value(writer)
+    if value is None:
+      return escaped.replace(self._INDEX_HOLE, self.batch_index()), ()
+    return escaped.replace(self._INDEX_HOLE, '{0}'), (value,)
 
   def dereferences_the_batch(self) -> bool:
     """Does computing this address read memory indexed by the element?
@@ -113,7 +193,7 @@ class GetElementPtr(AbstractInstruction):
 
     address = ''
     if isinstance(batch_addressing, StridedAddressing):
-      main_offset = f'{self.batch_index()} * {batch_addressing.stride}'
+      main_offset = f'{self._INDEX_HOLE} * {batch_addressing.stride}'
       sub_offset = f'{batch_obj.get_offset_to_first_element()}'
       address = f'{main_offset} + {batch_addressing.offset} + {sub_offset}{extra_offset}'
       rhs = f'&{self.source_name()}[{address}]'
@@ -122,14 +202,14 @@ class GetElementPtr(AbstractInstruction):
     if batch_addressing == Addressing.STRIDED:
       # distance between batch elements is the *stored* volume, i.e.
       # prod(upper - lower), not prod(shape)
-      main_offset = f'{self.batch_index()} * {batch_obj.storage_volume()}'
+      main_offset = f'{self._INDEX_HOLE} * {batch_obj.storage_volume()}'
       sub_offset = f'{batch_obj.get_offset_to_first_element()}'
       address = f'{main_offset} + {sub_offset}{extra_offset}'
       rhs = f'&{self.source_name()}[{address}]'
       lhs = 'const ' if self._src.obj.direction == DataFlowDirection.SOURCE else ''
       lhs += f'{datatype} *{const_mod} {self._vm.get_lexic().restrict_kw} {self._dest.name}'
     elif batch_addressing == Addressing.PTR_BASED:
-      main_offset = f'{self.batch_index()}'
+      main_offset = f'{self._INDEX_HOLE}'
       sub_offset = f'{batch_obj.get_offset_to_first_element()}'
       address = f'{main_offset}][{sub_offset}{extra_offset}'
       src_suffix = '_ptr' if self._vm.get_lexic()._backend == 'targetdart' else ''
@@ -153,8 +233,18 @@ class GetElementPtr(AbstractInstruction):
       GenerationError(f'unknown addressing of {self._src.name}, given {batch_addressing}')
 
     if self._update_dest:
+      # Still a statement and still opaque -- the destination is a name the
+      # body writes and its readers spell, so there is no value here to
+      # produce.  The index is an operand all the same, which is the half that
+      # can be had without that: `fmt` leaves the emitter to fill it in, so a
+      # pass moving this advance to another element has something to rewrite.
+      text, args = self._splice_index(writer, rhs)
       writer(f'const auto {self._update_dest.name} = {self._dest.name};')
-      writer(f'{self._dest.name} = {rhs};')
+      if args and hasattr(writer, 'batch_id'):
+        writer(f'{self._dest.name} = {text};', *args, fmt=True)
+      else:
+        writer(f'{self._dest.name} = '
+               f'{rhs.replace(self._INDEX_HOLE, self.batch_index())};')
     else:
       self._emit_binding(writer, lhs, rhs)
 
@@ -191,23 +281,12 @@ class GetElementPtr(AbstractInstruction):
     """
     if hasattr(writer, 'decl_expr'):
       from tensorforge.backend.pir.core import BufferType
-      from .abstract_instruction import AbstractInstruction
-      # Name the element index as an operand where there is one to name.  The
-      # address is `&m2[batchId0 * 324 + ...]`, and with `batchId0` only in
-      # the text a pass that moves this binding to another element has nothing
-      # to substitute -- which is exactly why `wrap_prefetch` could not
-      # advance a transfer that reads through it.
-      text = rhs.replace('{', '{{').replace('}', '}}')
-      args = ()
-      ind = (AbstractInstruction._induction_value[-1]
-             if AbstractInstruction._induction_value else None)
-      # Only for the loop's *own* index.  `batch_index()` is `batchId1` for a
-      # lookahead binding -- the peeled prologue's -- and substituting the
-      # induction there rewrites element k+1 back to element k, silently.
-      if (ind is not None and self._batch_offset == 0
-              and self.batch_index() in rhs):
-        text = text.replace(self.batch_index(), '{0}')
-        args = (ind,)
+      # Name the element index as an operand.  The address is
+      # `&m2[batchId0 * 324 + ...]`, and with the element only in the text a
+      # pass that moves this binding to another one has nothing to substitute
+      # -- which is exactly why `wrap_prefetch` could not advance a transfer
+      # that reads through it.
+      text, args = self._splice_index(writer, rhs)
       value = writer.decl_expr(
           lhs, text,
           BufferType(self._dest.get_fptype(), (1,), MemSpace.GLOBAL,
@@ -501,18 +580,16 @@ class VariantLoop(AbstractInstruction):
       # `extern` and `ctype` because the counter's name and type are the macro
       # layer's: the select chains and every table access spell it out as text.
       #
-      # And the induction *value* is pushed, not merely its name.  Anything
-      # inside that mentions the counter has to say so as an operand, or the
-      # IR sees a computation with no inputs -- a select chain over four
-      # pointers is exactly that -- and is free to hoist it out of the loop
-      # that defines the thing it reads.  Silently, and only in the text.
+      # Which is where the batch index was and no longer is, and the difference
+      # between the two cases is worth stating.  An index reaches its readers
+      # as an operand because the loop hands the value to them; the counter
+      # reaches its readers through `DeclareOperandTable`, whose chain is a
+      # `RAWSTMT` -- opaque and pinned, so nothing may hoist it past the loop
+      # header, but pinned is all it is.  Publishing a value for the counter is
+      # only worth doing together with the readers that would take it.
       with writer.for_(self._start, self._count, 1, extern=self._counter,
-                       ctype='int', unroll=self._unroll) as loop:
-        AbstractInstruction._induction_value.append(loop.induction)
-        try:
-          self._emit_region(writer, per_iteration)
-        finally:
-          AbstractInstruction._induction_value.pop()
+                       ctype='int', unroll=self._unroll):
+        self._emit_region(writer, per_iteration)
       return
 
     with writer.For(self.header(), unroll=self._unroll):

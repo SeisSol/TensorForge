@@ -206,6 +206,15 @@ IRType = Union[ScalarType, BufferType, TokenType]
 
 BOOL = ScalarType(Datatype.BOOL)
 INDEX = ScalarType(Datatype.I32)
+# Anything that crosses the interface: element counts, element indices, the
+# extra offsets.  `INDEX` is the IR's own counter and is 32 bits, which is the
+# right width for a loop over 36 rows and the wrong one here -- an index
+# compared against `numElements` and multiplied into an address would cap what
+# a caller can express at 17.2 GB into an f32 buffer, losing the high bits
+# silently at the call site.  The batch loop's header used to say so with a
+# `ctype` override, which widened the variable and left everything computed
+# from it back at 32 bits.
+SIZE = ScalarType(Datatype.SIZE)
 
 
 # --------------------------------------------------------------------------- #

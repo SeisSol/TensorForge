@@ -23,6 +23,8 @@ form that says which property broke when it breaks.
 
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from tensorforge.common.basic_types import (Addressing, Datatype, FlagMode,
@@ -110,7 +112,11 @@ def test_required_mask_has_no_default_and_no_null_check():
     assert "unsigned* flags0" in header
     assert "flags0 = nullptr" not in header
     kernel = gen.get_kernel()
-    assert "const bool allowed = static_cast<bool>(flags0[batchId0]);" in kernel
+    # The element index is a value with `batchId0` for a hint, so the
+    # emitter spells it with the value id in front; what this pins is the
+    # absence of a null check, not what the index is called.
+    assert re.search(r"const bool allowed = "
+                     r"static_cast<bool>\(flags0\[\w*batchId0\]\);", kernel)
     assert "flags0 == nullptr" not in kernel
 
 

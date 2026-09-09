@@ -227,7 +227,8 @@ class IRBuilder:
 
     def index(self, hint: str = '',
               uniform: Union[bool, Uniformity] = Uniformity.GRID,
-              layout: Optional[RegisterLayout] = None) -> Value:
+              layout: Optional[RegisterLayout] = None,
+              type_=None) -> Value:
         """An integer, replicated across the wave unless said otherwise.
 
         A loop counter and an address are the same in every lane: the loop is
@@ -241,7 +242,8 @@ class IRBuilder:
         and it will have to pass its layout in rather than inherit this
         default.  Stated as a default rather than a hard rule for that reason.
         """
-        return self.value(INDEX, hint=hint, uniform=uniform,
+        return self.value(INDEX if type_ is None else type_, hint=hint,
+                          uniform=uniform,
                           layout=SCALAR_LAYOUT if layout is None else layout)
 
     # -- emission core ----------------------------------------------------- #
@@ -1210,7 +1212,7 @@ class IRBuilder:
              inits: Sequence[Operand] = (), types: Sequence[Any] = (),
              unroll: bool = False, hint: str = 'i', extern: str = None,
              ctype: str = None, next_index=None,
-             uniform=Uniformity.GRID) -> '_ForHandle':
+             uniform=Uniformity.GRID, index_type=None) -> '_ForHandle':
         """A loop.  ``extern`` and ``ctype`` are for loops the macro layer owns.
 
         An inner loop is the IR's own: it picks the induction variable's name
@@ -1224,6 +1226,12 @@ class IRBuilder:
         is needed while the things that spell it are still text, and stops
         being needed as they migrate.
 
+        `index_type` is what the width override becomes once they have.  A
+        `ctype` widens the *variable* and nothing else, so every value computed
+        from the induction is still rendered from `INDEX` and is narrower than
+        the thing it was computed from; a type on the value is carried by
+        everything derived from it.
+
         `uniform` is how far the induction value agrees across threads.  An
         inner loop counts the same way in every lane, which is the default; a
         loop over the batch does not, because its variable is
@@ -1233,10 +1241,12 @@ class IRBuilder:
         inside.
         """
         return _ForHandle(self, lo, hi, step, tuple(inits), tuple(types),
-                          unroll, hint, extern, ctype, next_index, uniform)
+                          unroll, hint, extern, ctype, next_index, uniform,
+                          index_type)
 
     def while_(self, init: Operand, hint: str = 'i', extern: str = None,
-               ctype: str = None, uniform=Uniformity.GRID) -> '_WhileHandle':
+               ctype: str = None, uniform=Uniformity.GRID,
+               index_type=None) -> '_WhileHandle':
         """A loop whose successor is queried, not counted.
 
         `for_` hands the body an induction value because it derives one from
@@ -1250,7 +1260,8 @@ class IRBuilder:
 
         `extern`, `ctype` and `uniform` mean what they mean on `for_`.
         """
-        return _WhileHandle(self, init, hint, extern, ctype, uniform)
+        return _WhileHandle(self, init, hint, extern, ctype, uniform,
+                            index_type)
 
     def if_(self, cond: Operand, attrs: Tuple = ()) -> '_IfHandle':
         """Guard without results --- the common case (bounds checks)."""
@@ -1329,7 +1340,8 @@ class IRBuilder:
 
     def __call__(self, code: str, *args: Operand,
                  defines: Sequence[Value] = (),
-                 accesses: Optional[Sequence[Access]] = None) -> Stmt:
+                 accesses: Optional[Sequence[Access]] = None,
+                 fmt: bool = False) -> Stmt:
         """Raw statement text.  Opaque, therefore impure and pinned.
 
         Two separable facts, and they were being answered by one default.
@@ -1372,6 +1384,13 @@ class IRBuilder:
         `alloc` that produced the tile was reachable by nothing, was removed,
         and the kernel referred to an undeclared pointer.  It compiled cleanly
         as IR and not at all as C++.
+
+        ``fmt`` says the text carries `{0}`.. placeholders for the operands
+        rather than their names.  A use edge and a spelling are separable, and
+        for the statements that were already passing operands they had to be:
+        the text spelled a name the IR also held a value for, so the two agreed
+        only as long as nothing renamed or inlined the value.  With `fmt` the
+        emitter fills them in, and there is one spelling again.
         """
         if accesses is None:
             accesses = self._TOUCHES_EVERYTHING
@@ -1381,7 +1400,8 @@ class IRBuilder:
         return self._emit_op(Op.RAWSTMT, tuple(defines), tuple(args),
                              pure=False, movable=False,
                              effect=Effect.UNKNOWN, text=code,
-                             accesses=accesses)
+                             accesses=accesses,
+                             attrs=(('fmt', True),) if fmt else ())
 
     def _check_declared_accesses(self, code: str,
                                  accesses: Sequence[Access],
@@ -1840,7 +1860,7 @@ class _RawBlock:
 class _ForHandle:
     def __init__(self, builder, lo, hi, step, inits, types, unroll, hint,
                  extern=None, ctype=None, next_index=None,
-                 uniform=Uniformity.GRID):
+                 uniform=Uniformity.GRID, index_type=None):
         if len(inits) != len(types):
             raise IRError('for_: one result type per init value required')
         self._extern = extern
@@ -1853,7 +1873,8 @@ class _ForHandle:
         self._args = (lo, hi, step) + inits
         self._types = types
         self._unroll = unroll
-        self.induction = builder.index(hint=hint, uniform=uniform)
+        self.induction = builder.index(hint=hint, uniform=uniform,
+                                       type_=index_type)
         # A loop-carried value is distributed exactly like the init it starts
         # from -- the back edge cannot change how a value is spread across the
         # lanes, only what it holds.  Left untracked, an accumulator became a
@@ -1956,12 +1977,13 @@ class _WhileHandle:
     """
 
     def __init__(self, builder, init, hint, extern=None, ctype=None,
-                 uniform=Uniformity.GRID):
+                 uniform=Uniformity.GRID, index_type=None):
         self.builder = builder
         self._init = init
         self._extern = extern
         self._ctype = ctype
-        self.induction = builder.index(hint=hint, uniform=uniform)
+        self.induction = builder.index(hint=hint, uniform=uniform,
+                                       type_=index_type)
 
     def __enter__(self) -> '_WhileHandle':
         self.builder.push((self.induction,), kind='while')

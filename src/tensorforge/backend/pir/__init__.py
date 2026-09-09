@@ -22,7 +22,7 @@ have the whole-kernel view that those decisions need.  ``Op.ALLOC`` is the
 seam between the two.
 """
 
-from .core import (ANY_EFFECT, BOOL, INDEX, TOKEN, Access, BufferType, Effect,
+from .core import (ANY_EFFECT, BOOL, INDEX, SIZE, TOKEN, Access, BufferType, Effect,
                    IRError, MemSpace, Op, Operand, Region, ScalarType, Stmt,
                    TokenType, Value, accesses_conflict, collect_accesses,
                    collect_effect, def_use, defined_within, dump, free_values,
@@ -34,7 +34,7 @@ from .passes import cluster_loads, flatten_scopes, if_convert, pressure, cse, dc
 from .emit import Emitter, emit
 
 __all__ = [
-    'ANY_EFFECT', 'BOOL', 'INDEX', 'TOKEN', 'Access', 'BufferType', 'Effect',
+    'ANY_EFFECT', 'BOOL', 'INDEX', 'SIZE', 'TOKEN', 'Access', 'BufferType', 'Effect',
     'Emitter', 'IRBuilder', 'IRError', 'MemSpace', 'Op', 'Operand', 'Region',
     'ScalarType', 'Stmt', 'TokenType', 'Value', 'access_of',
     'accesses_conflict', 'check_tokens', 'collect_accesses', 'collect_effect',

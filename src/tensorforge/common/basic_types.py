@@ -91,6 +91,14 @@ class Datatype(enum.Enum):
   # bind to a `uint32_t &`, so the kernel does not compile -- which is the only
   # reason this member exists.  Nothing in the generator computes with it.
   U32 = 32
+  # What the interface counts, offsets and indexes in.  A role and not a
+  # width, which is why it is not `U64`: `numElements` and the extra offsets
+  # are `size_t` in the signature, and anything compared against the one or
+  # added to the other has to be the same type or the comparison is a
+  # sign-compare warning in every generated kernel.  Whether that is 64 bits
+  # is the platform's answer, and spelling it `size_t` is how it stays the
+  # platform's rather than being asserted here.
+  SIZE = 34
   # The 19-bit E8M10 the matrix units multiply: 1 sign, 8 exponent, 10
   # mantissa, stored in 32 bits.  A storage type and not an arithmetic one --
   # nothing here computes with it, values are *converted into* it and handed
@@ -126,6 +134,10 @@ class Datatype(enum.Enum):
     elif self == self.I16:
       return 2
     elif self == self.I64:
+      return 8
+    elif self == self.SIZE:
+      # The only place this has to commit to a width, and it commits to the
+      # one every target TF generates for actually has.
       return 8
 
   def __str__(self):
@@ -172,6 +184,8 @@ class Datatype(enum.Enum):
       return f'tensorforge::tf32({float(value):.16}f)'
     elif self == self.I64:
       return f'{int(value)}_i64'
+    elif self == self.SIZE:
+      return f'{int(value)}u'
 
   @classmethod
   def as_str(cls, fp):
@@ -186,6 +200,7 @@ class Datatype(enum.Enum):
            Datatype.I32: 'int32_t',
            Datatype.I64: 'int64_t',
            Datatype.U32: 'uint32_t',
+           Datatype.SIZE: 'size_t',
            Datatype.TF32: 'tensorforge::tf32',}
     return map[fp]
 
@@ -205,6 +220,7 @@ class Datatype(enum.Enum):
            'int32_t': Datatype.I32,
            'int64_t': Datatype.I64,
            'uint32_t': Datatype.U32,
+           'size_t': Datatype.SIZE,
            'tensorforge::tf32': Datatype.TF32}
     return map[as_str]
 

@@ -41,6 +41,8 @@ The numbers that decide the default are in the option's own declaration.
 
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from tensorforge.common.basic_types import Addressing, Datatype
@@ -103,7 +105,9 @@ def test_the_queue_is_emitted_when_asked_for():
 def test_the_grid_stride_loop_is_what_the_default_still_gets():
     src = _kernel().get_kernel()
     assert "ClusterLaunchQueue" not in src
-    assert "for (size_t batchId0" in src
+    # `batchId0` is the induction value's hint since the body takes the
+    # index as an operand, so the emitter puts the value id in front of it.
+    assert re.search(r"for \(size_t \w*batchId0\b", src)
 
 
 def test_the_depth_reaches_the_type():
@@ -131,7 +135,8 @@ def test_the_cursor_is_not_in_shared_memory():
 def test_the_handoff_sits_outside_the_element_guard():
     """The barrier it carries has to be reached by every row of the block."""
     src = _kernel(launch_control=True).get_kernel()
-    guard = _depth_of(src, "if (batchId0 < numElements0)")
+    guard = _depth_of(src, re.search(r"if \(\w*batchId0 < numElements0\)",
+                                     src).group(0))
     handoff = _depth_of(src, ".next(launchQueue0)")
     assert handoff == guard, (
         f"the hand-off is nested {handoff - guard} level(s) deeper than the "
@@ -262,7 +267,11 @@ def _the_loop(op, **options):
 
     for body in _bodies(**options):
         for stmt, _ in walk(body):
-            if stmt.op == op and stmt.attr("extern") == "batchId0":
+            # The loop over the batch is the one whose induction carries the
+            # macro layer's name -- as a hint now that nothing spells it, so
+            # this reads the value rather than an `extern` attribute that is
+            # no longer set.
+            if stmt.op == op and stmt.induction.hint == "batchId0":
                 return stmt
     raise AssertionError(f"no {op} over the batch in the generated body")
 
