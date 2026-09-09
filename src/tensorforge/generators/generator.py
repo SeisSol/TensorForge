@@ -704,6 +704,21 @@ class Generator:
       coop = any(section.barrier for section in self._sections)
 
       writer(f'{lexic.kernel_range_object("block", f"{self._num_threads}, {mults_per_block}, 1")};')
+      if self._clusterlaunchcontrol:
+        # Stated, not checked.  The queue is the one traversal with a ceiling
+        # of its own: the grid is sized by the batch rather than by occupancy,
+        # `gridDim.x` stops at 2^31-1, and `query_cancel_get_first_ctaid_x`
+        # answers in 32 bits.  So the batch cannot exceed that many blocks --
+        # here, {ceiling} elements.
+        #
+        # No runtime guard, because the bound is not reachable: at this
+        # kernel's footprint the device would need more memory than exists to
+        # hold that batch, and a branch on every launch is not free when the
+        # caller dispatches thousands of them per step.  The grid-stride loop
+        # has no such ceiling; `batchId0` is 64-bit there and the grid is
+        # occupancy-sized.
+        writer(f'// launch_control: at most {2**31 - 1} blocks, i.e. '
+               f'{(2**31 - 1) * mults_per_block} elements')
       if not self._persistent_threading:
         if coop:
           # Both remaining traversals launch one block per element rather than
