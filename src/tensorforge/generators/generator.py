@@ -691,36 +691,6 @@ class Generator:
 
       for i,section in enumerate(self._sections):
         with writer.AnonymousScope():
-          if self._context.get_vm().get_hw_descr().has_cuda_pipeline():
-            # Size the pipeline to the transfers that may be outstanding at
-            # once.  cuda::make_pipeline() yields a single stage, so a second
-            # producer_acquire() before the matching consumer_wait() blocks on a
-            # slot that never frees -- a hang rather than a wrong answer.  Two
-            # independent things reach that state: software pipelining commits a
-            # peeled transfer before the loop, and a body holding two
-            # shared-memory loads commits twice before waiting.  The latter is
-            # not new; trans_a already did it.
-            # Declared whether or not anything drives it.  Whether a transfer
-            # takes the structured path is decided per body, from whether its
-            # buffers are values there, and this runs before any body exists --
-            # so the choice cannot be made here without building the section
-            # twice.  An unused local is the price, and it is the safe
-            # direction: under-declaring is a compile error, over-declaring is
-            # a line nvcc drops.
-            # The condition is the target's, not the vendor's, because that
-            # last sentence has a floor: below sm_70 the type does not exist
-            # and an unused declaration is a compile error too.
-            depth = async_depth(section.stream)
-            if depth > 1 and False: # disabled for now (not needed for thread_scope_thread)
-              # NOT __shared__: the scope is thread, so the state is private and
-              # each thread needs its own.  Putting a thread-scope state in
-              # shared memory would have every thread of the block driving one
-              # FIFO.
-              writer(f'cuda::pipeline_shared_state<cuda::thread_scope_thread, {depth}> pipelineState;')
-              writer(f'cuda::pipeline<cuda::thread_scope_thread> pipeline = cuda::make_pipeline(cooperative_groups::this_thread(), &pipelineState);')
-            else:
-              writer(f'cuda::pipeline<cuda::thread_scope_thread> pipeline = cuda::make_pipeline();')
-
           start, stride = self._section_traversal(i)
 
           writer(f'const auto {GeneralLexicon.BATCH_ID_NAME}_start = {start};')
