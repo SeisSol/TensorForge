@@ -32,6 +32,7 @@ from tensorforge.backend.instructions.batch_loop import BatchLoop, LoopMode
 from tensorforge.backend.writer import Writer
 from tensorforge.common.exceptions import GenerationError, InternalError
 from tensorforge.common.threads import mults_per_group
+from tensorforge.generators.identity import registry
 
 import tensorforge.interop as interop
 
@@ -218,7 +219,18 @@ def _supports_launch_control(context) -> bool:
 
 
 class Generator:
-  NAME_ENCODING_LENGTH = 10
+  #: Hex characters of the digest that end up in the symbol.  Sixty-four bits
+  #: rather than forty: the digest is the whole of the name's discriminating
+  #: power, and a corpus of 10^5 kernels has a percent-level chance of a
+  #: birthday collision at forty.  A collision is caught (`identity.registry`)
+  #: rather than silent, but being caught means a build that stops.
+  NAME_ENCODING_LENGTH = 16
+
+  #: What stands in for the kernel name while the source that determines it is
+  #: being written.  A C++ identifier, so that the intermediate text is still
+  #: the text it will be -- the substitution has to leave everything except
+  #: this token where it was.
+  NAME_PLACEHOLDER = 'TENSORFORGE_UNNAMED_KERNEL'
 
   def __init__(self,
                gemm_list: List[OperationDescription],
@@ -240,6 +252,11 @@ class Generator:
     self._flags: FlagMode = FlagMode.from_attrs(attrs)
     self._thread_block_policy_type: Type[AbstractThreadBlockPolicy] = thread_block_policy_type
     self._base_kernel_name: Union[str, None] = None
+    #: Whether a completed generation announces its name to the process-wide
+    #: registry.  Off for the generators that only exist to be asked a
+    #: question -- their bodies are built under settings nothing will emit, so
+    #: recording them fills the registry with kernels that reach no file.
+    self._announce_identity: bool = True
 
     self._kernel = None
     self._launcher = None
@@ -398,6 +415,7 @@ class Generator:
 
     probe = Generator(self.descr_list, self._context, attrs=self._attrs)
     probe._rotate = set()
+    probe._announce_identity = False
     _wrap.wrap_prefetch = asking
     try:
       probe.generate()
@@ -441,6 +459,7 @@ class Generator:
 
     check = Generator(self.descr_list, self._context, attrs=self._attrs)
     check._rotate = set(names)
+    check._announce_identity = False
     _wrap.wrap_prefetch = confirming
     try:
       check.generate()
@@ -574,12 +593,19 @@ class Generator:
         self._scopes.remove_scope()
       self._sections += [self._section]
 
-    if not self._base_kernel_name:
-      self._generate_kernel_name()
+    # Write the source before naming it: the name is the digest of what comes
+    # out, so it cannot be known until it has.  Everything the three emitters
+    # would spell as the name spells the placeholder instead, and
+    # `_resolve_identity` puts the real one in afterwards.
+    pinned = self._base_kernel_name is not None
+    if not pinned:
+      self._base_kernel_name = Generator.NAME_PLACEHOLDER
 
     self._generate_kernel()
     self._generate_launcher()
     self._generate_header()
+
+    self._resolve_identity(pinned)
 
   def _verify_section(self, stream, index: int) -> None:
     """Structural check over one section, immediately before emitting it.
@@ -1246,48 +1272,56 @@ class Generator:
                       stype=stype)
         self._scopes.add_to_global(symbol)
 
-  def _generate_kernel_name(self):
-    global_symbols = self._scopes.get_global_scope().values()
-    long_name = []
-    for item in global_symbols:
-      long_name.append(item.obj.gen_descr())
+  def unnamed_source(self) -> str:
+    """Everything this kernel contributes to a file, with the name left out.
 
-    for descr in self.descr_list:
-      long_name.extend([
-        str(descr)
-      ])
+    The three surfaces in the order a translation unit sees them, plus the
+    includes they need.  What identifies a kernel is what a compiler is given
+    for it, so the question the name has to answer -- are these two kernels
+    the same program -- is answered here by comparing exactly that, with the
+    name itself replaced by a fixed token so that it does not answer its own
+    question.
 
-    # needed for type differences (but same names)
-    global_symbols = self._scopes.get_global_scope().values()
-    params = self._generate_base_params_list(symbol_list=global_symbols, with_types=True)
-    long_name.extend(params)
+    Two kernels agreeing on this string differ in nothing a compiler reads,
+    which is what makes one symbol for both correct rather than merely
+    convenient: the routine cache emitting one and discarding the other loses
+    nothing.
+    """
+    parts = [
+        '\n'.join(self.get_helper_headers()),
+        self._header or '',
+        self._launcher or '',
+        self._kernel or '',
+    ]
+    source = '\n'.join(parts)
+    if self._base_kernel_name:
+      source = source.replace(self._base_kernel_name,
+                              Generator.NAME_PLACEHOLDER)
+    return source
 
-    descrs = '\n'.join(f'{descr}' for descr in self.descr_list)
+  def _resolve_identity(self, pinned: bool) -> None:
+    """Name the kernel after its source, then put that name into the source.
 
-    sha = hashlib.new('md5', usedforsecurity=False)
-    sha.update(', '.join(long_name).encode())
-    sha.update(descrs.encode())
-    # `REQUIRED` and `OPTIONAL` have the same parameter list and different
-    # bodies, so parameters alone do not identify the kernel: two kernels
-    # differing only in the mask shape would collide on one name, and the
-    # routine cache keeps whichever it saw first.  `OPTIONAL` stays out of the
-    # hash so that names a caller without attributes gets do not depend on
-    # this at all.
-    if self._flags is not FlagMode.OPTIONAL:
-      sha.update(self._flags.value.encode())
-    # The options identify the kernel too.  Without them two configurations of
-    # one workload carry one symbol name, and anything that keys a report on
-    # the symbol -- a profiler above all -- reports both under it, with
-    # plausible numbers in either row and nothing saying which is which.
-    #
-    # Only the delta to what this hardware would have generated unasked goes
-    # in, so a build that asked for nothing hashes exactly what it did before
-    # options were part of this.  Same reason `OPTIONAL` stays out above.
-    options = self._context.get_user_options().digest()
-    if options:
-      sha.update(options.encode())
-    md5encoding = sha.hexdigest()
-    self._base_kernel_name = f'kernel_{md5encoding[:Generator.NAME_ENCODING_LENGTH]}'
+    Where the caller pinned a name, keep it: `set_kernel_name` exists so that
+    a frontend can address a kernel by a name of its own, and a caller doing
+    that is answering for its uniqueness.  The registry holds it to that.
+    """
+    if not pinned:
+      sha = hashlib.new('md5', usedforsecurity=False)
+      sha.update(self.unnamed_source().encode())
+      digest = sha.hexdigest()[:Generator.NAME_ENCODING_LENGTH]
+      name = f'kernel_{digest}'
+
+      for attr in ('_kernel', '_launcher', '_header'):
+        text = getattr(self, attr)
+        if text is not None:
+          setattr(self, attr, text.replace(Generator.NAME_PLACEHOLDER, name))
+      self._base_kernel_name = name
+
+    if self._announce_identity:
+      registry().register(self._base_kernel_name,
+                          self.unnamed_source(),
+                          self.descr_list)
 
   def get_base_name(self):
     return self._base_kernel_name
@@ -1441,7 +1475,11 @@ class Generator:
       for irinst in section.ir:
         for header in irinst.get_headers():
           headerset.add(header)
-    return list(headerset)
+    # Sorted, not set order.  Iteration over a set of strings depends on
+    # `PYTHONHASHSEED`, so the include list this produces varies between
+    # processes -- which puts a run-to-run difference into the emitted file,
+    # and into the name derived from it.
+    return sorted(headerset)
 
   def generate_call_site(self,
                          mat_name_map,

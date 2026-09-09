@@ -910,8 +910,16 @@ class TensorForgeWriter:
     return 'gpu'
 
   def __eq__(self, other):
+    # The routine cache keys on the name and asks this when a name arrives
+    # twice.  Comparing names would make the answer yes by construction --
+    # the name is how the question got here -- so the second routine would be
+    # dropped whatever it contained.  Comparing the source makes it a real
+    # question, and the two kernels are interchangeable exactly when a
+    # compiler cannot tell them apart.
     if isinstance(other, TensorForgeWriter):
-      return self._basename == other._basename
+      return (self._basename == other._basename
+              and self._generator.unnamed_source()
+                  == other._generator.unnamed_source())
     else:
       return False
 
