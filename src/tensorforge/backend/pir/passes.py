@@ -340,6 +340,9 @@ def _check_scope(body: Tuple[Stmt, ...], live: set, diag: List[str],
                 if r.terminator is None or len(r.yielded) != 1:
                     diag.append('while: the region must end in a yield of the '
                                 'next induction value')
+                elif not _same_types(r.yielded, (s.induction,)):
+                    diag.append('while: the yielded successor does not have '
+                                'the induction variable\'s type')
                 if not s.exits:
                     diag.append('while: no exit in the region, so the loop '
                                 'has no trip count at all')

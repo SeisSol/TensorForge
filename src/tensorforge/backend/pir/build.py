@@ -1217,26 +1217,22 @@ class IRBuilder:
     def for_(self, lo: Operand, hi: Operand, step: Operand = 1,
              inits: Sequence[Operand] = (), types: Sequence[Any] = (),
              unroll: bool = False, hint: str = 'i', extern: str = None,
-             ctype: str = None, next_index=None, peel_index=None,
+             next_index=None, peel_index=None,
              uniform=Uniformity.GRID, index_type=None) -> '_ForHandle':
-        """A loop.  ``extern`` and ``ctype`` are for loops the macro layer owns.
+        """A loop.  ``extern`` is for loops the macro layer owns.
 
-        An inner loop is the IR's own: it picks the induction variable's name
-        and renders its type from `INDEX`.  A loop that already exists in
-        generated code is not -- the batch loop's variable is `batchId0`,
-        spelled out by the lookahead bindings, the flag guard and every
-        `access_address` in the body, and its type is `size_t` rather than
-        `int32_t` because it is compared against `numElements`.
+        An inner loop is the IR's own and picks its induction variable's name.
+        A loop that already exists in generated code does not -- the operand
+        table's counter is spelled out by every select chain that reads it.
 
         Same trade as `extern` on `alloc`, and it ends the same way: the name
         is needed while the things that spell it are still text, and stops
         being needed as they migrate.
 
-        `index_type` is what the width override becomes once they have.  A
-        `ctype` widens the *variable* and nothing else, so every value computed
-        from the induction is still rendered from `INDEX` and is narrower than
-        the thing it was computed from; a type on the value is carried by
-        everything derived from it.
+        `index_type` is the induction's own type: `SIZE` for a loop over the
+        batch, `INDEX` for a loop over a tile.  On the value and not on the
+        declaration, so that everything computed from the induction is as wide
+        as the thing it was computed from.
 
         `uniform` is how far the induction value agrees across threads.  An
         inner loop counts the same way in every lane, which is the default; a
@@ -1247,11 +1243,11 @@ class IRBuilder:
         inside.
         """
         return _ForHandle(self, lo, hi, step, tuple(inits), tuple(types),
-                          unroll, hint, extern, ctype, next_index, peel_index,
+                          unroll, hint, extern, next_index, peel_index,
                           uniform, index_type)
 
     def while_(self, init: Operand, hint: str = 'i', extern: str = None,
-               ctype: str = None, uniform=Uniformity.GRID,
+               uniform=Uniformity.GRID,
                index_type=None) -> '_WhileHandle':
         """A loop whose successor is queried, not counted.
 
@@ -1264,9 +1260,9 @@ class IRBuilder:
         an `iter_arg` has, with the loop variable in the role of the carried
         value.
 
-        `extern`, `ctype` and `uniform` mean what they mean on `for_`.
+        `extern`, `index_type` and `uniform` mean what they mean on `for_`.
         """
-        return _WhileHandle(self, init, hint, extern, ctype, uniform,
+        return _WhileHandle(self, init, hint, extern, uniform,
                             index_type)
 
     def if_(self, cond: Operand, attrs: Tuple = ()) -> '_IfHandle':
@@ -1873,12 +1869,11 @@ class _RawBlock:
 
 class _ForHandle:
     def __init__(self, builder, lo, hi, step, inits, types, unroll, hint,
-                 extern=None, ctype=None, next_index=None, peel_index=None,
+                 extern=None, next_index=None, peel_index=None,
                  uniform=Uniformity.GRID, index_type=None):
         if len(inits) != len(types):
             raise IRError('for_: one result type per init value required')
         self._extern = extern
-        self._ctype = ctype
         # What this loop calls the *next* element.  A clamped successor index
         # is a property of the traversal, which the loop knows and the IR does
         # not, so `wrap_prefetch` reads it here rather than deriving it.
@@ -1943,8 +1938,6 @@ class _ForHandle:
         attrs = (('unroll', True),) if self._unroll else ()
         if self._extern is not None:
             attrs = attrs + (('extern', self._extern),)
-        if self._ctype is not None:
-            attrs = attrs + (('ctype', self._ctype),)
         if self._next_index is not None:
             attrs = attrs + (('next', self._next_index),)
         if self._peel_index is not None:
@@ -1998,12 +1991,11 @@ class _WhileHandle:
     machinery an `iter_arg` already uses.
     """
 
-    def __init__(self, builder, init, hint, extern=None, ctype=None,
+    def __init__(self, builder, init, hint, extern=None,
                  uniform=Uniformity.GRID, index_type=None):
         self.builder = builder
         self._init = init
         self._extern = extern
-        self._ctype = ctype
         self.induction = builder.index(hint=hint, uniform=uniform,
                                        type_=index_type)
 
@@ -2018,8 +2010,6 @@ class _WhileHandle:
         attrs = ()
         if self._extern is not None:
             attrs = attrs + (('extern', self._extern),)
-        if self._ctype is not None:
-            attrs = attrs + (('ctype', self._ctype),)
         self.builder.emit(Stmt(op=Op.WHILE, args=(self._init,),
                                regions=(region,), pure=False, movable=False,
                                attrs=attrs))

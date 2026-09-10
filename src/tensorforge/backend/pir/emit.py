@@ -909,7 +909,7 @@ class Emitter:
         # `ctype` is an override for a loop the macro layer owns: the batch
         # loop compares its induction variable against `numElements`, so it is
         # `size_t` and not the `int32_t` that `INDEX` renders to.
-        ind_ctype = s.attr('ctype') or self.ctype(ind.type, ind)
+        ind_ctype = self.ctype(ind.type, ind)
         head = (f'{ind_ctype} {i} = {self.operand(lo)}; '
                 f'{i} {cmp_} {self.operand(hi)}; {advance}')
         # unroll goes through Writer.For, which folds the pragma into the block
@@ -932,7 +932,7 @@ class Emitter:
         if extern is not None:
             self.bind(ind, extern)
         name = self.name(ind)
-        ind_ctype = s.attr('ctype') or self.ctype(ind.type, ind)
+        ind_ctype = self.ctype(ind.type, ind)
         self.writer(f'{ind_ctype} {name} = '
                     f'{self.operand(s.loop_init, ind.type)};')
         with self.writer.While('true'):

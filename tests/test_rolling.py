@@ -603,14 +603,14 @@ def test_the_loop_generates_and_verifies():
 
 def test_the_loop_form_is_one_body_and_a_counter():
     kernel = _built(True)
-    assert kernel.count('for (int batchIdv') == 1
+    assert kernel.count('for (int32_t batchIdv') == 1
     assert 'Table = (batchIdv' in kernel
 
 
 def test_the_registers_are_declared_outside_the_loop():
     """An allocation is not a per-iteration act, and its users sit outside."""
     lines = _built(True).splitlines()
-    header = next(i for i, l in enumerate(lines) if 'for (int batchIdv' in l)
+    header = next(i for i, l in enumerate(lines) if 'for (int32_t batchIdv' in l)
     allocs = [i for i, l in enumerate(lines)
               if l.strip().startswith('float r') and '[' in l]
     assert allocs and all(i < header for i in allocs)
@@ -645,7 +645,7 @@ def test_the_peeled_iteration_leaves_the_invariants_outside():
 def test_the_loop_runs_the_iterations_the_peel_did_not():
     loop = _loop_region()
     assert (loop.start, loop.count) == (1, 4)
-    assert 'for (int' in loop.header().join(('for (int ', ''))
+    assert loop.header().startswith('int32_t ')
 
 
 def _loop_of(descrs):

@@ -192,7 +192,7 @@ def test_a_chain_is_emitted_inside_the_loop_and_an_array_before_it():
     """A chain is the counter's value; an array does not depend on it."""
     lines = written(VariantLoop(context(), 'face', 4, [Marker('body();')],
                                 tables=[select_table()])).splitlines()
-    head = next(i for i, l in enumerate(lines) if 'for (int face' in l)
+    head = next(i for i, l in enumerate(lines) if 'for (int32_t face' in l)
     decl = next(i for i, l in enumerate(lines) if 'tbl =' in l)
     assert decl > head
 
@@ -222,7 +222,7 @@ def test_the_header_is_a_counted_loop_over_the_members():
     from tensorforge.backend.instructions.ptr_manip import VariantLoop
     loop = VariantLoop(context(), 'face', 4, [Marker('body();')])
     text = written(loop)
-    assert 'for (int face = 0; face < 4; ++face)' in text
+    assert 'for (int32_t face = 0; face < 4; ++face)' in text
     assert 'body();' in text
 
 
@@ -230,7 +230,7 @@ def test_the_body_sits_inside_the_header():
     from tensorforge.backend.instructions.ptr_manip import VariantLoop
     lines = written(VariantLoop(context(), 'face', 2,
                                 [Marker('a();'), Marker('b();')])).splitlines()
-    head = next(i for i, l in enumerate(lines) if 'for (int face' in l)
+    head = next(i for i, l in enumerate(lines) if 'for (int32_t face' in l)
     body = [i for i, l in enumerate(lines) if 'a();' in l or 'b();' in l]
     assert all(i > head for i in body)
     assert len(body) == 2
@@ -246,7 +246,7 @@ def test_the_tables_are_declared_before_the_header_not_inside_it():
     lines = written(VariantLoop(context(), 'face', 2, [Marker('body();')],
                                 tables=[table])).splitlines()
     decl = next(i for i, l in enumerate(lines) if 'tbl[2]' in l)
-    head = next(i for i, l in enumerate(lines) if 'for (int face' in l)
+    head = next(i for i, l in enumerate(lines) if 'for (int32_t face' in l)
     assert decl < head
 
 
@@ -480,4 +480,4 @@ def test_the_text_path_still_writes_a_counted_loop():
     from tensorforge.backend.instructions.ptr_manip import VariantLoop
     text = written(VariantLoop(context(), 'face', 4, [Marker('body();')],
                                start=1))
-    assert 'for (int face = 1; face < 4; ++face)' in text
+    assert 'for (int32_t face = 1; face < 4; ++face)' in text

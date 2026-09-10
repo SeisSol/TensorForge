@@ -28,7 +28,7 @@ import pytest
 
 from tensorforge.backend.pir import emit, optimize, verify
 from tensorforge.backend.pir.build import IRBuilder
-from tensorforge.backend.pir.core import MemSpace
+from tensorforge.backend.pir.core import SIZE, MemSpace
 from tensorforge.backend.writer import Writer
 from tensorforge.common.basic_types import Datatype
 from tensorforge.common.vm.vm import vm_factory
@@ -59,7 +59,7 @@ def test_a_pir_loop_renders_that_header():
     g = b.alloc(Datatype.F32, (16,), MemSpace.GLOBAL, hint="g")
     with b.for_("threadIdx.y + blockDim.y * (blockIdx.x)", "numElements0",
                 "(gridDim.x * blockDim.y)",
-                extern="batchId0", ctype="size_t"):
+                extern="batchId0", index_type=SIZE):
         b.store(g, 1.0, 0)
     body = b.finish()
     verify(body)

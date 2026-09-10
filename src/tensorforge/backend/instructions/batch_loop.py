@@ -1065,8 +1065,8 @@ class BatchLoop(AbstractInstruction):
 
     def _queried_body(self, builder, loop, index, queue, lexic) -> None:
         """The body of the queried traversal, once its index is published."""
-        from tensorforge.backend.pir.core import (INDEX, BOOL, Access, Effect,
-                                                  MemSpace, Uniformity)
+        from tensorforge.backend.pir.core import (INDEX, SIZE, BOOL, Access,
+                                                  Effect, MemSpace, Uniformity)
         if True:
             if True:
                 guard = builder.op('lt', BOOL, loop.induction,
@@ -1096,9 +1096,8 @@ class BatchLoop(AbstractInstruction):
                 # the sum comes out `MULT` without anyone claiming it.
                 offset = builder.op('mul', INDEX, lexic.block_dim_y, nxt,
                                     hint='row')
-                loop.yield_(builder.op('add', INDEX, builder.thread_id('y'),
-                                       offset, hint=self._batch(0),
-                                       uniform=Uniformity.MULT))
+                loop.yield_(builder.op('add', SIZE, builder.thread_id('y'),
+                                       offset, hint=self._batch(0)))
 
     def _gen_grouped(self, writer) -> None:
         """One traversal for a whole group of rows.

@@ -609,7 +609,9 @@ class VariantLoop(AbstractInstruction):
     return self._start
 
   def header(self) -> str:
-    return (f'int {self._counter} = {self._start}; '
+    # `int32_t` and not `int`: the same type, and the spelling the IR renders
+    # from `INDEX`, so the two ways this loop can be emitted agree.
+    return (f'int32_t {self._counter} = {self._start}; '
             f'{self._counter} < {self._count}; ++{self._counter}')
 
   def _emit_region(self, writer, per_iteration) -> None:
@@ -625,8 +627,8 @@ class VariantLoop(AbstractInstruction):
       table.gen_code(writer)
 
     if hasattr(writer, 'for_'):
-      # `extern` and `ctype` because the counter's name and type are the macro
-      # layer's: the select chains and every table access spell it out as text.
+      # `extern` because the counter's name is the macro layer's: the select
+      # chains and every table access spell it out as text.
       #
       # Which is where the batch index was and no longer is, and the difference
       # between the two cases is worth stating.  An index reaches its readers
@@ -636,7 +638,7 @@ class VariantLoop(AbstractInstruction):
       # header, but pinned is all it is.  Publishing a value for the counter is
       # only worth doing together with the readers that would take it.
       with writer.for_(self._start, self._count, 1, extern=self._counter,
-                       ctype='int', unroll=self._unroll):
+                       unroll=self._unroll):
         self._emit_region(writer, per_iteration)
       return
 

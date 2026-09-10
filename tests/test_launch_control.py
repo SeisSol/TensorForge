@@ -337,12 +337,12 @@ def test_the_counted_loop_states_its_own_non_uniformity():
 def _loop_with_a_block_barrier(queried: bool):
     """One loop over the batch, with a block barrier directly in its body."""
     from tensorforge.backend.pir.build import IRBuilder
-    from tensorforge.backend.pir.core import (BOOL, INDEX, Participants,
+    from tensorforge.backend.pir.core import (BOOL, INDEX, SIZE, Participants,
                                               Uniformity)
 
     builder = IRBuilder(fptype=Datatype.F32)
     if queried:
-        with builder.while_("start", extern="batchId0", ctype="size_t",
+        with builder.while_("start", extern="batchId0", index_type=SIZE,
                             uniform=Uniformity.MULT) as loop:
             # `Participants` says what the barrier covers in hardware;
             # `uniform` says what the region guarantees.  Two ladders since
@@ -352,10 +352,10 @@ def _loop_with_a_block_barrier(queried: bool):
                                movable=False, uniform=Uniformity.BLOCK,
                                materialize=True)
             loop.exit_when(builder.op("lt", BOOL, nxt, 0))
-            loop.yield_(nxt)
+            loop.yield_(builder.op("add", SIZE, nxt, 0))
     else:
         with builder.for_("start", "numElements0", "stride", extern="batchId0",
-                          ctype="size_t", uniform=Uniformity.MULT):
+                          index_type=SIZE, uniform=Uniformity.MULT):
             builder.barrier(Participants.BLOCK)
     return builder.finish()
 
@@ -381,16 +381,16 @@ def test_a_block_barrier_is_legal_in_the_queue_loop_and_not_in_the_counted_one()
 def test_an_exit_belongs_to_the_loop_it_leaves():
     """Nested, the condition it fires on is not the one the loop is entered under."""
     from tensorforge.backend.pir.build import IRBuilder
-    from tensorforge.backend.pir.core import BOOL, INDEX, Uniformity
+    from tensorforge.backend.pir.core import BOOL, INDEX, SIZE, Uniformity
     from tensorforge.backend.pir.passes import verify
 
     builder = IRBuilder(fptype=Datatype.F32)
-    with builder.while_("start", extern="batchId0", ctype="size_t") as loop:
+    with builder.while_("start", extern="batchId0", index_type=SIZE) as loop:
         nxt = builder.call("cursor.next", INDEX, "queue", pure=False,
                            movable=False, materialize=True)
         with builder.if_(builder.op("lt", BOOL, nxt, 0)):
             loop.exit_when(True)
-        loop.yield_(nxt)
+        loop.yield_(builder.op("add", SIZE, nxt, 0))
 
     diag = verify(builder.finish(), strict=False)
     assert any("directly in the region of a `while`" in d for d in diag), diag
