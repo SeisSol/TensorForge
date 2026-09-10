@@ -2,41 +2,40 @@
 #
 # SPDX-License-Identifier: MIT
 
-"""Prefetch at slot distance, wrapping across the back edge.
+"""Prefetch across the back edge: the transfer for element ``k + 1``, issued at
+the tail of iteration ``k``.
 
-``Pipeline`` advances a transfer by whole iterations, so depth ``d`` needs
-``d`` copies of every staged buffer.  This advances it by *slots* -- one
-compute instruction each -- and the accounting (see ``slots.py``) is
+``Pipeline`` advances a transfer by whole iterations and needs a copy of the
+buffer per stage.  This moves it the way ``MoveLoads`` would if the loop were
+unrolled once: the transfer for element ``k + 1`` travels up from its place in
+iteration ``k + 1``, across the back edge, and stops after the last
+instruction of iteration ``k`` that touches its buffer.  The write then
+follows the last read, so one buffer is enough -- no rotation, no stage
+index::
 
-    copies = ceil((d + 1) / n)
+    before:  [ l1 c1 l2 c2 ]
+    after:   l1 l2 | [ c1 c2 l1' l2' ]
 
-for a body of ``n`` compute slots.  Every ``d <= n - 1`` therefore needs one
-copy: no rotation, no stage index, no second view into the allocation.  The
-transfers that run off the front of the body are issued at the end of the
-*previous* iteration, for element ``k + 1``::
+with ``l1'`` reading element ``k + 1`` -- the loop's clamped lookahead index --
+and the peeled ``l1`` the thread's first element, clamped likewise.
 
-    before:  [ l1 c1 l2 c2 l3 c3 ]
-    after:   l1 | [ l2 c1 l3 c2 l1' c3 ]
+Everything below the last instruction that touches the buffer is crossed by
+construction, so the tail of the body is a legal place, and it is the one that
+keeps the transfer outside the per-element flag guard: a masked element has to
+go on prefetching its successor, which a mid-body placement under the guard
+cannot.  The same placement for register and shared destinations.  Registers
+used to be placed by *slot* -- ``slots.py`` still has the accounting of what a
+distance costs -- which put the transfer mid-body, under the guard, and gave a
+body with a single compute nothing to move.  Placing by dependence has neither
+problem, and ``wrap_distance`` no longer means anything here.
 
-with ``l1'`` reading element ``k + 1`` and the peeled ``l1`` reading the
-thread's first element.  The buffer is written at the tail of iteration ``k``
-and read at the head of ``k + 1``, and the read precedes the next write, so one
-buffer is enough -- which is the whole point, and why this is worth having
-where ``Pipeline`` is not.
+A register destination needs little from the rest of the pipeline: it is
+thread-private, so a barrier is no obstacle and none is needed; its loads are
+plain loads, so there is no wait to place.  What it does need is its
+declaration out of the loop -- a register declared in the body is a fresh
+object every iteration -- which goes into the loop's prologue with the peel.
 
-Register destinations are placed by slot, as above.  Shared ones are wrapped
-the way ``MoveLoads`` would move them if the loop were unrolled once: the
-transfer for element ``k + 1`` travels up from the top of iteration ``k + 1``,
-across the back edge, and stops after the last instruction of iteration ``k``
-that touches its buffer -- in practice the compute that reads it.  It is
-issued at the tail of the body, after the flag guard, and one buffer is enough
-because the write now follows the last read.  Distance is not counted in slots
-there, so the ``n >= 2`` bound of the register path does not apply: a body
-with a single compute still wraps, and that is most of the corpus.
-
-It used to be refused outright, because a shared write that overtakes the
-previous iteration's read needs a barrier against that read.  What it needs
-from the rest of the pipeline, and now gets:
+A shared destination needs more, and gets it:
 
 * the barriers -- between the last read and the wrapped write, and between
   the wait at the head and the first read.  ``SyncThreadsOpt`` places both,
@@ -48,8 +47,6 @@ from the rest of the pipeline, and now gets:
 * a wait that does not depend on the issue having been emitted first --
   ``LoadWait`` drains for a wrapped transfer, because in program order the
   wait now precedes the issue;
-* the transfer outside the per-element guard -- ``BatchLoop`` emits an
-  unguarded suffix, so a masked element still prefetches the next one;
 * the peeled copy and the drain after the loop inside the loop's own body --
   ``BatchLoop`` emits them there, after the windows are declared and around
   the ``for``.  A transfer is only a ``copy.async`` where its window and its
@@ -59,12 +56,11 @@ from the rest of the pipeline, and now gets:
   iteration prefetches a clamped element nobody reads, into memory the next
   section may reuse.
 
-Known hole, register path only: a wrapped register transfer sits mid-body, by
-slot, and so stays inside the per-element flag guard, where a masked element
-skips it and the next iteration reads what the one before that loaded.
-``BatchLoop`` lifts a prefix or a suffix of the region out of the guard, and a
-mid-body placement is neither -- the shared path goes to the tail for exactly
-this reason.  ``verify`` reports it rather than the pass pretending otherwise.
+And both kinds, where the address comes out of a pointer array: the transfer
+under the flag of the element it fetches -- the next one's in the tail, the
+first one's in the peel.  The array entry is read unconditionally, the clamp
+keeps it in range; the pointer is followed only for an element the caller did
+not mask.
 """
 
 from typing import Dict, List, NamedTuple, Optional, Sequence, Tuple
@@ -82,60 +78,39 @@ from .abstract import AbstractTransformer, Context
 from .slots import SlotModel, Transfer
 
 
-class Wrapped(NamedTuple):
-    transfer: GlbToRegLoader
+class TailWrap(NamedTuple):
+    transfer: AbstractInstruction       # GlbToShrLoader or GlbToRegLoader
     producer: GetElementPtr
-    alloc: Optional[RegisterAlloc]
-    target_index: int          # body index to insert before
-    first_use_slot: int
-    distance: int              # slots, after clamping to this buffer's span
-
-
-class SharedWrap(NamedTuple):
-    transfer: GlbToShrLoader
-    producer: GetElementPtr
+    alloc: Optional[RegisterAlloc]      # a register destination's, hoisted
 
 
 class WrapLoads(AbstractTransformer):
-    """Move transfers ahead of their consumers, across the back edge.
-
-    Register transfers by ``distance`` slots; shared ones as far as
-    ``MoveLoads`` would take them in the loop unrolled once.
-    """
+    """Issue each transfer for the next element at the tail of the body."""
 
     def __init__(self,
                  context: Context,
-                 instructions: List[AbstractInstruction],
-                 distance: int = 1):
+                 instructions: List[AbstractInstruction]):
         super(WrapLoads, self).__init__(context, instructions)
-        if distance < 1:
-            raise ValueError(f'wrap distance must be >= 1, got {distance}')
-        self._distance = distance
         self.rejected: List[Tuple[object, str]] = []
         self.wrapped: List[str] = []
 
     # ------------------------------------------------------------------ #
 
     def apply(self) -> None:
-        out: List[AbstractInstruction] = []
+        # Nothing is added to this stream: peels and drains are emitted by the
+        # loop, inside its own body -- see the module docstring.
         for instr in self._instrs:
-            if not isinstance(instr, BatchLoop):
-                out.append(instr)
-                continue
-            prologue, body = self._wrap_loop(instr)
-            out.extend(prologue)
-            instr.replace_region(0, body)
-            out.append(instr)
-        self._instrs = out
+            if isinstance(instr, BatchLoop):
+                instr.replace_region(0, self._wrap_loop(instr))
 
     # ------------------------------------------------------------------ #
 
-    def _wrap_loop(self, loop: BatchLoop):
+    def _wrap_loop(self, loop: BatchLoop) -> List[AbstractInstruction]:
         body = list(loop.region)
         if loop._mode is LoopMode.SINGLE:
             # one iteration, so there is no next element to prefetch and no
             # back edge to wrap across
-            return [], body
+            return body
         if loop._mode is LoopMode.LAUNCHCTRL:
             # There *is* a next element, and this pass cannot name it.  It
             # prefetches through `index_name(1)`, which the strided loop binds
@@ -146,43 +121,26 @@ class WrapLoads(AbstractTransformer):
             # wrong operands -- no crash, wrong numbers.  `Generator` refuses
             # the combination outright, and the reason lives here because this
             # is what depends on it.
-            return [], body
+            return body
 
-        # Shared transfers first, and not by slot.  They go to the tail, so
-        # nothing the register path does afterwards moves them, and the slot
-        # grid it measures has the same compute positions either way.  Their
-        # peel and drain go to the loop, not to this stream -- see the module
-        # docstring.
+        # One pointer to element k + 1, and one to the first element, per
+        # source -- see `_pointers`.  Per loop: another loop binds its own.
+        self._pointers_for = {}
+        self._names = set()
+
+        # The slot model only enumerates the transfers and their consumers;
+        # placement is by dependence.  Each one wrapped goes to the tail, so
+        # the ones still to be planned keep their place ahead of it.
         for t in SlotModel(body).run().transfers:
-            if not t.shared:
-                continue
-            plan = self._plan_shared(loop, body, t)
+            plan = self._plan(loop, body, t)
             if plan is not None:
-                self._apply_shared(loop, body, plan)
-
-        model = SlotModel(body).run()
-        n = model.n
-        if n < 2:
-            # free distance is n - 1 = 0: nothing to win that Pipeline's second
-            # copy does not already do
-            return [], body
-
-        plans = [p for p in (self._plan(body, model, t, self._distance, n)
-                             for t in model.transfers if not t.shared)
-                 if p is not None]
-        if not plans:
-            return [], body
-
-        prologue: List[AbstractInstruction] = []
-        # Insert from the back so earlier target indices stay valid.
-        for plan in sorted(plans, key=lambda p: p.target_index, reverse=True):
-            prologue = self._apply_one(loop, body, plan) + prologue
-        return prologue, body
+                self._apply(loop, body, plan)
+        return body
 
     # ------------------------------------------------------------------ #
 
-    def _plan_shared(self, loop: BatchLoop, body,
-                     t: Transfer) -> Optional[SharedWrap]:
+    def _plan(self, loop: BatchLoop, body,
+              t: Transfer) -> Optional[TailWrap]:
         """Whether ``MoveLoads`` could take this transfer into the previous iteration.
 
         Unrolled once, the transfer for element ``k + 1`` starts at its place in
@@ -197,23 +155,41 @@ class WrapLoads(AbstractTransformer):
         load = t.load
         dest = load.defs()[0] if load.defs() else None
         name = getattr(dest, 'name', '?')
-        if not isinstance(load, GlbToShrLoader):
-            return self._reject(name, 'shared buffer filled by something other '
-                                      'than a global-to-shared transfer')
+        shared = isinstance(load, GlbToShrLoader)
+        if not shared and not isinstance(load, GlbToRegLoader):
+            return self._reject(name, 'neither a global-to-shared nor a '
+                                      'global-to-register transfer')
         if t.first_use_slot is None:
             return self._reject(name, 'loaded value is never read in this body')
-        if not self._context.get_user_options().wide_bodies:
-            # The peel and the drain have to share a body with the loop, or
-            # the transfers fall back to text -- see the module docstring.
-            return self._reject(name, 'the loop is not one body (wide_bodies '
-                                      'is off), so the peel cannot be issued '
-                                      'as a copy into the window it fills')
-        if getattr(load, '_stages', 1) > 1:
-            return self._reject(name, 'buffer is rotated; the stage it fills '
-                                      'is chosen per iteration, and wrapping '
-                                      'would fill the wrong one')
-        if not hasattr(load, '_ctor_kwargs'):
-            return self._reject(name, 'transfer cannot be cloned for the peel')
+        alloc = None
+        if shared:
+            if not self._context.get_user_options().wide_bodies:
+                # The peel and the drain have to share a body with the loop,
+                # or the transfers fall back to text -- see the module
+                # docstring.
+                return self._reject(name, 'the loop is not one body '
+                                          '(wide_bodies is off), so the peel '
+                                          'cannot be issued as a copy into '
+                                          'the window it fills')
+            if getattr(load, '_stages', 1) > 1:
+                return self._reject(name, 'buffer is rotated; the stage it '
+                                          'fills is chosen per iteration, and '
+                                          'wrapping would fill the wrong one')
+            if not hasattr(load, '_ctor_kwargs'):
+                return self._reject(name, 'transfer cannot be cloned for the '
+                                          'peel')
+        else:
+            alloc = next((i for i in body if isinstance(i, RegisterAlloc)
+                          and i._dest is dest), None)
+            if alloc is None:
+                return self._reject(
+                    name, 'no RegisterAlloc for the destination; the '
+                          'declaration has to leave the loop or the value does '
+                          'not survive the back edge')
+            if alloc._init_value not in (None, 0):
+                return self._reject(name, 'buffer is declared with a non-zero '
+                                          'initialiser, which a hoisted '
+                                          'declaration would apply once')
         producer = self._producer(body, load._src)
         if producer is None:
             return self._reject(
@@ -222,148 +198,6 @@ class WrapLoads(AbstractTransformer):
         if isinstance(producer._batch_offset, str):
             return self._reject(name, 'source pointer already names an index '
                                       'verbatim; already pipelined')
-        if producer.dereferences_the_batch():
-            # The same line `BatchLoop._address_prefix` draws.  The prefetch
-            # runs outside the guard, for an element whose mask it has not
-            # read, and a pointer array promises nothing about the entry of
-            # an element the caller told us to skip.
-            return self._reject(name, 'address reads the pointer array at the '
-                                      'element; the next element may be masked '
-                                      'and its pointer is not promised valid')
-        writers = [i for i in body
-                   if any(o is dest for o in i.defs())
-                   and not isinstance(i, LoadWait)]
-        if len(writers) > 1:
-            kinds = ', '.join(sorted({type(i).__name__ for i in writers}))
-            return self._reject(
-                name, f'buffer is written {len(writers)} times per iteration '
-                      f'({kinds}); a wrapped buffer must hold one element for '
-                      f'the whole iteration')
-        at = body.index(load)
-        for instr in body[:at]:
-            if self._blocks_shared(load, dest, instr):
-                return self._reject(
-                    name, f'{type(instr).__name__} ahead of the transfer '
-                          f'touches its buffer or orders shared memory, so the '
-                          f'transfer cannot leave its own iteration')
-        return SharedWrap(transfer=load, producer=producer)
-
-    @staticmethod
-    def _blocks_shared(load, dest, instr) -> bool:
-        """May ``load``, retargeted to element ``k + 1``, not cross ``instr``?
-
-        ``MoveLoads._conflicts`` with one difference: the moved transfer reads
-        a pointer to the *next* element, bound right in front of it, so this
-        element's pointer binding is no dependence.  What is left is the
-        buffer -- anything reading or writing it -- and the two things
-        ``MoveLoads`` never takes a shared transfer across: a barrier, and an
-        instruction that does not say what it touches.
-        """
-        if instr is load:
-            return False
-        if instr.barrier_scope() is not None:
-            return True
-        if not instr.describes_dataflow():
-            return True
-        return any(s is dest for s in tuple(instr.defs()) + tuple(instr.uses()))
-
-    def _apply_shared(self, loop: BatchLoop, body: List[AbstractInstruction],
-                      plan: SharedWrap) -> None:
-        """Rewrite one shared transfer, and give the loop its peel and drain."""
-        transfer = plan.transfer
-        old_src = transfer._src
-        dest = transfer.defs()[0]
-
-        # A pointer to element k + 1, the loop's clamped lookahead binding --
-        # the same one the register path uses.
-        ahead = Symbol(f'wrap_{old_src.name}', old_src.stype, old_src.obj)
-        ahead.data_view = old_src.data_view
-        ahead_ptr = GetElementPtr(self._context,
-                                  src=plan.producer._src,
-                                  dest=ahead,
-                                  include_extra_offset=plan.producer._include_extra_offset,
-                                  batch_offset=1)
-
-        # The peel: the same transfer for the thread's first element, clamped.
-        peeled = Symbol(f'peel_{old_src.name}', old_src.stype, old_src.obj)
-        peeled.data_view = old_src.data_view
-        peeled_ptr = GetElementPtr(self._context,
-                                   src=plan.producer._src,
-                                   dest=peeled,
-                                   include_extra_offset=plan.producer._include_extra_offset,
-                                   batch_offset=loop.prologue_index())
-        peeled_load = GlbToShrLoader(**{**transfer._ctor_kwargs, 'src': peeled})
-        # Registered at the end of the buffer's user list, and left there: the
-        # in-loop transfer stays the first user, so it keeps declaring the
-        # window, in the loop's body, where `_declare_windows_early` puts it --
-        # and the peel, emitted in that same body right after, writes through
-        # a window the body knows.  Making the peel the first user instead
-        # moved the declaration into a body of its own, and both transfers
-        # fell back to text.
-
-        # Retarget the body transfer in place, as the register path does: the
-        # LoadWait at the consumer keeps pointing at this object.
-        self._drop_user(old_src, transfer)
-        transfer._src = ahead
-        transfer._ctor_kwargs['src'] = ahead
-        ahead.add_user(transfer)
-        transfer._wrapped = True
-
-        body.remove(transfer)
-        body.extend([ahead_ptr, transfer])
-        loop.mark_unguarded_tail([ahead_ptr, transfer])
-
-        if not any(any(u is old_src for u in i.uses()) for i in body):
-            body.remove(plan.producer)
-            self._drop_user(old_src, plan.producer)
-
-        loop.add_wrap_prologue([peeled_ptr, peeled_load])
-        loop.add_wrap_epilogue([LoadWait(transfer)])
-        self.wrapped.append(f'{getattr(dest, "name", "?")} [shr]')
-
-    # ------------------------------------------------------------------ #
-
-    def _plan(self, body, model: SlotModel, t: Transfer,
-              d: int, n: int) -> Optional[Wrapped]:
-        dest = t.load.defs()[0] if t.load.defs() else None
-        name = getattr(dest, 'name', '?')
-
-        if not isinstance(t.load, GlbToRegLoader):
-            return self._reject(name, 'destination is not a register buffer; a '
-                                      'wrapped shared write needs a barrier '
-                                      'against the read it overtakes')
-        if t.first_use_slot is None:
-            return self._reject(name, 'loaded value is never read in this body')
-        # Clamp to what this buffer can take at one copy.  The distance is not
-        # uniform over the body: a value read in slots 1 and 3 stays live for
-        # three slots, so the wrapped write has to land after slot 3, and the
-        # slots it may be moved back by are `n - 1 - span`, not `n - 1`.
-        # Wrapping to the first consumer while a later one still holds the
-        # buffer is a write-after-read on the value the next iteration wants --
-        # silent wrong numbers, and the reason this is clamped per transfer
-        # rather than per body.
-        d = min(d, t.free_distance(n))
-        if d < 1:
-            return self._reject(
-                name, f'consumers span {t.span} of {n} slots, leaving no '
-                      f'distance at one copy')
-        if not t.wraps_at(d, n):
-            # it fits inside the body; MoveLoads already had the chance and the
-            # placement is not this pass's business
-            return None
-
-        src = t.load.uses()[0] if t.load.uses() else None
-        if src is None:
-            return self._reject(name, 'transfer reports no source symbol')
-        producer = self._producer(body, src)
-        if producer is None:
-            return self._reject(
-                name, 'source pointer is not computed by a GetElementPtr in '
-                      'this body, so there is no element index to advance')
-        if isinstance(producer._batch_offset, str):
-            return self._reject(name, 'source pointer already names an index '
-                                      'verbatim; already pipelined')
-
         writers = [i for i in body
                    if any(o is dest for o in i.defs())
                    and not isinstance(i, (RegisterAlloc, LoadWait))]
@@ -373,36 +207,152 @@ class WrapLoads(AbstractTransformer):
                 name, f'buffer is written {len(writers)} times per iteration '
                       f'({kinds}); a wrapped buffer must hold one element for '
                       f'the whole iteration')
-        if self._read_before(body, body.index(t.load), dest):
-            return self._reject(name, 'buffer is read before the transfer, so '
-                                      'moving the transfer changes what that '
-                                      'read observes')
+        at = body.index(load)
+        for instr in body[:at]:
+            if self._blocks(load, dest, instr, shared, alloc):
+                return self._reject(
+                    name, f'{type(instr).__name__} ahead of the transfer '
+                          f'touches its buffer'
+                          f'{" or orders shared memory" if shared else ""}, '
+                          f'so the transfer cannot leave its own iteration')
+        return TailWrap(transfer=load, producer=producer, alloc=alloc)
 
-        target_slot = t.first_use_slot - d + n
-        if not 0 <= target_slot < n:
-            return self._reject(name, f'wrapped slot {target_slot} is outside '
-                                      f'the body')
-        target_index = model.compute_at[target_slot]
-        if target_index <= body.index(t.load):
-            return self._reject(name, 'wrapped position is not later in the '
-                                      'body than the transfer already is')
+    @staticmethod
+    def _blocks(load, dest, instr, shared: bool, alloc) -> bool:
+        """May ``load``, retargeted to element ``k + 1``, not cross ``instr``?
 
-        alloc = next((i for i in body if isinstance(i, RegisterAlloc)
-                      and i._dest is dest), None)
-        if alloc is None:
-            return self._reject(
-                name, 'no RegisterAlloc for the destination; the declaration '
-                      'has to leave the loop or the value does not survive '
-                      'the back edge')
-        if alloc._init_value not in (None, 0):
-            return self._reject(name, 'buffer is declared with a non-zero '
-                                      'initialiser, which a hoisted '
-                                      'declaration would apply once')
+        ``MoveLoads._conflicts`` with one difference: the moved transfer reads
+        a pointer to the *next* element, bound right in front of it, so this
+        element's pointer binding is no dependence.  What is left is the
+        buffer -- anything reading or writing it -- and what ``MoveLoads``
+        never takes a transfer across: an instruction that does not say what it
+        touches, and, for a shared destination only, a barrier.  A barrier
+        orders what other threads did to shared memory; a register is this
+        thread's own.  The register's own declaration is not an obstacle
+        either: it leaves the loop with the transfer.
+        """
+        if instr is load or instr is alloc:
+            return False
+        if instr.barrier_scope() is not None:
+            return shared
+        if not instr.describes_dataflow():
+            return True
+        return any(s is dest for s in tuple(instr.defs()) + tuple(instr.uses()))
 
-        return Wrapped(transfer=t.load, producer=producer, alloc=alloc,
-                       target_index=target_index,
-                       first_use_slot=t.first_use_slot,
-                       distance=d)
+    def _apply(self, loop: BatchLoop, body: List[AbstractInstruction],
+               plan: TailWrap) -> None:
+        """Rewrite one transfer, and give the loop its peel (and drain)."""
+        transfer = plan.transfer
+        old_src = transfer._src
+        dest = transfer.defs()[0]
+        shared = isinstance(transfer, GlbToShrLoader)
+
+        ahead, ahead_ptr, peeled, peeled_ptr = self._pointers(loop, plan)
+        if shared:
+            peeled_load = GlbToShrLoader(**{**transfer._ctor_kwargs,
+                                            'src': peeled})
+            # Registered at the end of the buffer's user list, and left there:
+            # the in-loop transfer stays the first user, so it keeps declaring
+            # the window, in the loop's body, where `_declare_windows_early`
+            # puts it -- and the peel, emitted in that same body right after,
+            # writes through a window the body knows.  Making the peel the
+            # first user instead moved the declaration into a body of its own,
+            # and both transfers fell back to text.
+        else:
+            peeled_load = GlbToRegLoader(context=self._context,
+                                         src=peeled,
+                                         dest=dest,
+                                         num_threads=transfer._num_threads,
+                                         linearize=transfer._linearize,
+                                         src_bbox=transfer._bbox,
+                                         src_offset=transfer._offset)
+
+        # Retarget the body transfer in place: the LoadWait that MoveLoads left
+        # at the consumer keeps pointing at this object, which is what orders
+        # the consumer after it.
+        self._drop_user(old_src, transfer)
+        transfer._src = ahead
+        if shared:
+            transfer._ctor_kwargs['src'] = ahead
+        ahead.add_user(transfer)
+        transfer._wrapped = True
+        if plan.producer.dereferences_the_batch():
+            # A pointer array: the transfer follows the pointer of the element
+            # it fetches, and that pointer is promised only for an element the
+            # caller did not mask.  `BatchLoop` puts it under that element's
+            # flag -- the transfer, not the address, since reading the array
+            # entry is in range.  Refusing instead left `local_flux`, whose
+            # operands all come out of pointer arrays, entirely unwrapped.
+            transfer._guard_by_own_flag = True
+            peeled_load._guard_by_own_flag = True
+
+        body.remove(transfer)
+        if plan.alloc is not None:
+            body.remove(plan.alloc)
+        tail = ([ahead_ptr] if ahead_ptr is not None else []) + [transfer]
+        body.extend(tail)
+        loop.mark_unguarded_tail(tail)
+
+        # The binding may now feed nothing -- but a store names the pointer it
+        # writes through among its `defs()`, not its `uses()`.  Asking `uses()`
+        # alone took `glb_m0` away from under the store to `C` once the load of
+        # `C` for an accumulation had been moved to `wrap_glb_m0`, and the
+        # kernel did not compile.
+        if not any(any(x is old_src for x in tuple(i.uses()) + tuple(i.defs()))
+                   for i in body):
+            body.remove(plan.producer)
+            self._drop_user(old_src, plan.producer)
+
+        hoisted = [plan.alloc] if plan.alloc is not None else []
+        bound = [peeled_ptr] if peeled_ptr is not None else []
+        loop.add_wrap_prologue(hoisted + bound + [peeled_load])
+        if shared:
+            loop.add_wrap_epilogue([LoadWait(transfer)])
+        self.wrapped.append(
+            f'{getattr(dest, "name", "?")} [{"shr" if shared else "reg"}]')
+
+    def _pointers(self, loop: BatchLoop, plan: TailWrap):
+        """`(ahead, ahead_ptr, peeled, peeled_ptr)` for this transfer's source.
+
+        The two bindings -- to element k + 1, the loop's lookahead index,
+        clamped so the last iteration prefetches a valid address it never
+        reads; and to the thread's first element, clamped likewise -- are made
+        once per source symbol.  A second transfer out of the same pointer, `C`
+        read into registers and into shared memory, say, reuses them; the
+        instructions come back as `None` so it does not bind them again.
+        Binding them per transfer declared `peel_glb_m0` twice in one scope,
+        which does not compile -- and each is a 64-bit pointer held across the
+        loop, so a second copy is two registers for nothing.
+
+        Names stay unique even so: two distinct symbols may carry the same
+        name, and then the second pair gets a suffix.
+        """
+        old_src = plan.transfer._src
+        known = self._pointers_for.get(id(old_src))
+        if known is not None:
+            return known[0], None, known[1], None
+        base = old_src.name
+        suffix = ''
+        while f'wrap_{base}{suffix}' in self._names:
+            suffix = f'_{len(self._names)}'
+        self._names.update({f'wrap_{base}{suffix}', f'peel_{base}{suffix}'})
+
+        ahead = Symbol(f'wrap_{base}{suffix}', old_src.stype, old_src.obj)
+        ahead.data_view = old_src.data_view
+        ahead_ptr = GetElementPtr(self._context,
+                                  src=plan.producer._src,
+                                  dest=ahead,
+                                  include_extra_offset=plan.producer._include_extra_offset,
+                                  batch_offset=1)
+        peeled = Symbol(f'peel_{base}{suffix}', old_src.stype, old_src.obj)
+        peeled.data_view = old_src.data_view
+        peeled_ptr = GetElementPtr(self._context,
+                                   src=plan.producer._src,
+                                   dest=peeled,
+                                   include_extra_offset=plan.producer._include_extra_offset,
+                                   batch_offset=loop.prologue_index())
+        self._pointers_for[id(old_src)] = (ahead, peeled)
+        return ahead, ahead_ptr, peeled, peeled_ptr
 
     def _reject(self, name, reason) -> None:
         self.rejected.append((name, reason))
@@ -415,82 +365,6 @@ class WrapLoads(AbstractTransformer):
                                                         for d in instr.defs()):
                 return instr
         return None
-
-    @staticmethod
-    def _read_before(body, before: int, sym) -> bool:
-        for index in range(before):
-            if any(u is sym for u in body[index].uses()):
-                return True
-        return False
-
-    # ------------------------------------------------------------------ #
-
-    def _apply_one(self, loop: BatchLoop, body: List[AbstractInstruction],
-                   plan: Wrapped) -> List[AbstractInstruction]:
-        """Rewrite one transfer in place; return what it adds to the prologue."""
-        transfer = plan.transfer
-        old_src = transfer.uses()[0]
-        dest = transfer.defs()[0]
-
-        # A pointer to element k + 1.  `index_name(1)` is the loop's own
-        # lookahead binding, already clamped to the last element, so the final
-        # iteration prefetches a valid address it will never read rather than
-        # running off the end.
-        ahead = Symbol(f'wrap_{old_src.name}', old_src.stype, old_src.obj)
-        ahead.data_view = old_src.data_view
-        ahead_ptr = GetElementPtr(self._context,
-                                  src=plan.producer._src,
-                                  dest=ahead,
-                                  include_extra_offset=plan.producer._include_extra_offset,
-                                  batch_offset=1)
-
-        # ... and one to the thread's first element, for the peeled copy.
-        peeled = Symbol(f'peel_{old_src.name}', old_src.stype, old_src.obj)
-        peeled.data_view = old_src.data_view
-        peeled_ptr = GetElementPtr(self._context,
-                                   src=plan.producer._src,
-                                   dest=peeled,
-                                   include_extra_offset=plan.producer._include_extra_offset,
-                                   batch_offset=loop.prologue_index())
-
-        peeled_load = GlbToRegLoader(context=self._context,
-                                     src=peeled,
-                                     dest=dest,
-                                     num_threads=transfer._num_threads,
-                                     linearize=transfer._linearize,
-                                     src_bbox=transfer._bbox,
-                                     src_offset=transfer._offset)
-
-        # Retarget the body transfer.  Mutating `_src` rather than rebuilding
-        # keeps the LoadWait that MoveLoads left at the consumer pointing at
-        # this same object, which is what orders the consumer after it.
-        self._drop_user(old_src, transfer)
-        transfer._src = ahead
-        ahead.add_user(transfer)
-
-        # Move the declaration out of the loop: a register declared inside the
-        # body is a fresh object every iteration, so a value written at the
-        # tail of iteration k would not be there at the head of k + 1.
-        body.remove(plan.alloc)
-        body.remove(transfer)
-        insert_at = self._target_after_removals(body, plan)
-        body[insert_at:insert_at] = [ahead_ptr, transfer]
-
-        # The original GetElementPtr may now feed nothing.
-        if not any(any(u is old_src for u in i.uses()) for i in body):
-            body.remove(plan.producer)
-            self._drop_user(old_src, plan.producer)
-
-        self.wrapped.append(getattr(dest, 'name', '?'))
-        return [plan.alloc, peeled_ptr, peeled_load]
-
-    def _target_after_removals(self, body, plan: Wrapped) -> int:
-        """Where the transfer goes, recomputed after alloc/transfer removal."""
-        model = SlotModel(body).run()
-        n = model.n
-        slot = plan.first_use_slot - plan.distance + n
-        slot = min(max(slot, 0), n - 1)
-        return model.compute_at[slot]
 
     @staticmethod
     def _drop_user(sym, instr) -> None:

@@ -264,13 +264,11 @@ def _check_guarded_prefetch(instr: AbstractInstruction,
 
     ``BatchLoop.mark_unguarded`` lifts a *prefix* of the region out of the
     guard and ``mark_unguarded_tail`` a *suffix* -- the guard is one
-    contiguous block, so those are the two shapes it can leave.  A shared
-    transfer ``WrapLoads`` moves across the back edge goes to the tail and is
-    marked, so it does not trip this.  The register path still places its
-    transfer mid-body, by slot, which is neither shape; closing that needs a
-    predicated transfer or the tail placement the shared path uses.  Until
-    then this is reported rather than fixed, and a caller enabling wrap-around
-    on a section that passes a flags array should know.
+    contiguous block, so those are the two shapes it can leave.  ``WrapLoads``
+    puts every transfer it moves at the tail and marks it, so this should not
+    fire for anything it produced.  It stays as the check that a transfer for
+    another element is never left under this element's mask, whichever pass
+    put it there.
     """
     from tensorforge.backend.instructions.batch_loop import BatchLoop
     from tensorforge.backend.instructions.ptr_manip import GetElementPtr

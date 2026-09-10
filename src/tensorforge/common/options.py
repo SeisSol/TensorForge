@@ -348,14 +348,18 @@ declare('enable_move_loads',
 
 declare('enable_wrap_loads',
         default=False,
-        doc='Slot-granular prefetch: move a register transfer `wrap_distance` '
-            'compute slots ahead of its consumer, wrapping to the previous '
-            'iteration where that runs off the front of the body.  One buffer '
-            'copy for any distance up to n - 1; see backend/opt/wrap.py.')
+        doc='Prefetch across the back edge: issue each transfer for the next '
+            'element at the tail of the current iteration, after the last '
+            'instruction that touches its buffer -- where MoveLoads would put '
+            'it in the loop unrolled once.  One buffer copy, register and '
+            'shared destinations alike; see backend/opt/wrap.py.')
 
 declare('wrap_distance',
         default=1,
-        doc='Compute slots a wrapped transfer is moved ahead by.')
+        doc='Not read any more.  `WrapLoads` placed register transfers this '
+            'many compute slots ahead; it now places every transfer by '
+            'dependence.  Still declared because callers pass it (the bench '
+            'suite, the option tests).')
 
 declare('enable_prefetch',
         default=False,

@@ -16,8 +16,11 @@ that, and each of them was a bug at some point while the pass was written:
   its first -- a buffer read in two slots stays live between them, and
   wrapping to the first read overwrites what the second still wants.
 
-The last one is why the distance is clamped per transfer rather than per body:
-``d`` is bounded by ``n - 1 - span``, not by ``n - 1``.
+The pass used to place a register transfer ``wrap_distance`` slots ahead, and
+the last property is why that distance was clamped per transfer.  It now places
+every transfer by dependence, at the tail, where the last one holds by
+construction; the tests keep passing the distances, which the pass no longer
+reads, because this is the property that broke silently before.
 """
 
 from __future__ import annotations
@@ -179,9 +182,22 @@ def test_wrapped_write_lands_after_the_last_read(d, backend, arch):
             f'{min(writes)}: the read sees the next element')
 
 
-def test_single_iteration_loop_is_left_alone():
-    """`SINGLE` has no next element and no back edge to wrap across."""
+def test_single_iteration_loop_is_left_alone(monkeypatch):
+    """`SINGLE` has no next element and no back edge to wrap across.
+
+    Forced, because no configuration reaches it today: the generator takes the
+    grid-stride loop unless it takes the launch queue (`prefer_persistent =
+    not launch_control`).  This used `square_notrans` as it came and passed
+    only because the slot-based placement gave up on a body with a single
+    compute -- the kernel it looked at was a grid-stride loop all along, and
+    placing by dependence wraps it, as it should.
+    """
+    from tensorforge.backend.instructions.batch_loop import LoopMode
+    monkeypatch.setattr(Generator, "_batch_loop_mode",
+                        lambda self: LoopMode.SINGLE)
     kernel = _generate("square_notrans.py", "hip", "gfx90a",
-                       enable_wrap_loads=True, wrap_distance=1)
+                       enable_wrap_loads=True)
+    assert not re.search(r"for \(size_t", kernel), (
+        "expected a single-iteration body, got a batch loop")
     assert 'wrap_glb_' not in kernel
     assert 'peel_glb_' not in kernel

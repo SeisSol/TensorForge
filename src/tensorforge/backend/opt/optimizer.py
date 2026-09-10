@@ -64,8 +64,9 @@ class OptimizationStage:
         scope=PassScope.PER_REGION,
         enabled=lambda pc: getattr(opts, 'enable_move_loads', True)))
 
-    # Slot-granular prefetch.  Whole nest, like Pipeline: the peeled transfer
-    # lands outside the loop.  Runs after MoveLoads, which splits the transfer
+    # Prefetch across the back edge, placed the way MoveLoads would place a
+    # transfer in the loop unrolled once.  Whole nest, like Pipeline: it
+    # rewrites the loop's body and hands the loop its peel.  Runs after MoveLoads, which splits the transfer
     # from its wait -- this pass moves the transfer and leaves the wait where
     # the consumer is -- and before Pipeline, so a body it has already wrapped
     # is not also rotated.
@@ -73,9 +74,7 @@ class OptimizationStage:
     # Off by default.
     pm.add(LegacyTransform(
         'WrapLoads',
-        lambda pc, instrs: WrapLoads(
-            pc.context, instrs,
-            distance=getattr(opts, 'wrap_distance', 1)),
+        lambda pc, instrs: WrapLoads(pc.context, instrs),
         enabled=lambda pc: getattr(opts, 'enable_wrap_loads', False)))
 
     # Software pipelining, one pass where there used to be two (MultiBuffer

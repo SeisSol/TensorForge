@@ -749,8 +749,9 @@ class BatchLoop(AbstractInstruction):
             # element, and running it first keeps the order the pipelining
             # pass arranged whether or not a guard follows it.
             self._emit_guarded(writer, guarded)
-            for instr in tail:
-                instr.gen_code(writer)
+            self._emit_own_flagged(writer, tail,
+                                   lambda: self._tail_element(writer),
+                                   'allowed_next')
             return
         cond = self._flag_guard(writer)
         # A real `Op.IF` where the condition is a value.  A raw block would
@@ -761,8 +762,70 @@ class BatchLoop(AbstractInstruction):
                  and not isinstance(cond, str) else writer.If(cond))
         with guard:
             self._emit_guarded(writer, guarded)
-        for instr in tail:
-            instr.gen_code(writer)
+        self._emit_own_flagged(writer, tail,
+                               lambda: self._tail_element(writer),
+                               'allowed_next')
+
+    def _emit_own_flagged(self, writer, instrs, element, name) -> None:
+        """Emit `instrs`; those that follow their element's pointer, under that
+        element's flag.
+
+        For the transfers `WrapLoads` issues for another element than the one
+        the body is on -- the peel for the first, the tail for the next -- and
+        only where the address comes out of a pointer array.  Such a transfer
+        is outside the guard on purpose, so a masked element still prefetches
+        its successor; but the successor may itself be masked, and nothing in
+        the interface promises the pointer of an element the caller told us to
+        skip.  Reading the array entry is fine, the index is clamped into
+        range; following it is not.  So the transfer, and nothing else, runs
+        under the flag of the element it fetches.  A barrier between two such
+        transfers stays unconditional, and a skipped transfer still commits:
+        an empty group, the same on every lane of the multiplication, which is
+        what every lane's count has to agree on.
+
+        `element` is called only if something here needs the flag, since in
+        the prologue asking for the index emits a binding.
+        """
+        cond = None
+        for instr in instrs:
+            if (self._flags is FlagMode.ABSENT
+                    or not getattr(instr, '_guard_by_own_flag', False)):
+                instr.gen_code(writer)
+                continue
+            if cond is None:
+                cond = self._element_flag(writer, element(), name)
+            guard = (writer.if_(cond) if hasattr(writer, 'if_')
+                     and not isinstance(cond, str) else writer.If(cond))
+            with guard:
+                instr.gen_code(writer)
+
+    def _element_flag(self, writer, index, name):
+        """`flags[index]`, spelled the way `_flag_guard` spells the current one."""
+        flags = f'{GeneralLexicon.FLAGS_NAME}{self._section_index}'
+        read = f'static_cast<bool>({flags}[{{0}}])'
+        if self._flags is FlagMode.OPTIONAL:
+            read = f'{flags} == nullptr ? true : {read}'
+        if hasattr(writer, 'decl_expr') and not isinstance(index, str):
+            from tensorforge.backend.pir.core import BOOL, Effect, MemSpace
+            return writer.decl_expr(
+                f'const bool {name}', read, BOOL, None, args=(index,),
+                kind=Effect.READ, space=MemSpace.GLOBAL, hint=name,
+                extern=name)
+        writer(f'const bool {name} = {read.format(index)};')
+        return name
+
+    def _tail_element(self, writer):
+        """The element the tail prefetches: this loop's clamped successor."""
+        bound = BatchLoop.indices_in(writer)
+        if bound is not None and self._batch(1) in bound:
+            return bound[self._batch(1)]
+        return self._batch(1)
+
+    def _prologue_element(self, writer):
+        """The element the peel fetches: `prologue_index`, bound before the loop."""
+        if hasattr(writer, 'batch_id'):
+            return writer.batch_id(1)
+        return self.prologue_index()
 
     def _emit_guarded(self, writer, guarded) -> None:
         """The part of the region that a mask, if there is one, may skip."""
@@ -852,8 +915,9 @@ class BatchLoop(AbstractInstruction):
             # value whose `extern` binding happens later and the result renders
             # but does not compile.
             self._declare_windows_early(writer, list(self._region))
-            for instr in self._wrap_prologue:
-                instr.gen_code(writer)
+            self._emit_own_flagged(writer, self._wrap_prologue,
+                                   lambda: self._prologue_element(writer),
+                                   'allowed_peel')
             if hasattr(writer, 'for_'):
                 # `extern` and `ctype` because the name and the type are the
                 # macro layer's: `batchId0` is spelled out by the lookahead
