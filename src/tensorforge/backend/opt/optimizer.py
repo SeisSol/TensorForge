@@ -60,7 +60,8 @@ class OptimizationStage:
     # load across a loop boundary.
     pm.add(LegacyTransform(
         'MoveLoads',
-        lambda pc, instrs: MoveLoads(pc.context, instrs),
+        lambda pc, instrs: MoveLoads(pc.context, instrs,
+                                     distance=getattr(opts, 'move_distance', 1)),
         scope=PassScope.PER_REGION,
         enabled=lambda pc: getattr(opts, 'enable_move_loads', True)))
 
@@ -74,7 +75,8 @@ class OptimizationStage:
     # Off by default.
     pm.add(LegacyTransform(
         'WrapLoads',
-        lambda pc, instrs: WrapLoads(pc.context, instrs),
+        lambda pc, instrs: WrapLoads(pc.context, instrs,
+                                     distance=getattr(opts, 'move_distance', 1)),
         enabled=lambda pc: getattr(opts, 'enable_wrap_loads', False)))
 
     # Software pipelining, one pass where there used to be two (MultiBuffer

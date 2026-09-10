@@ -354,12 +354,20 @@ declare('enable_wrap_loads',
             'it in the loop unrolled once.  One buffer copy, register and '
             'shared destinations alike; see backend/opt/wrap.py.')
 
+declare('move_distance',
+        default=1,
+        doc='How many loads a transfer is moved ahead by.  `MoveLoads` lets a '
+            'load travel past this many earlier loads before it stops (1: the '
+            'one before it, as always); `WrapLoads` wraps the transfers whose '
+            'move runs across the back edge, which are the first this many of '
+            'the body.  A dependence stops a transfer whatever the distance.')
+
 declare('wrap_distance',
         default=1,
-        doc='Not read any more.  `WrapLoads` placed register transfers this '
-            'many compute slots ahead; it now places every transfer by '
-            'dependence.  Still declared because callers pass it (the bench '
-            'suite, the option tests).')
+        doc='Not read any more; superseded by `move_distance`.  `WrapLoads` '
+            'placed register transfers this many compute slots ahead; it now '
+            'places every transfer by dependence.  Still declared because '
+            'callers pass it (the bench suite, the option tests).')
 
 declare('enable_prefetch',
         default=False,

@@ -31,12 +31,24 @@ class MoveLoads(AbstractTransformer):
   `defs()`/`uses()` already say what each instruction touches, so the test is
   the ordinary dependence one; a load stops at the first instruction it
   conflicts with.
+
+  How far a load may travel past other loads is `distance`.  At 1 it stops at
+  the one before it -- each transfer is issued one load ahead of where it was,
+  which is what the pass always did.  At 2 it goes on past that one and stops
+  at the next, so two transfers are ahead of every consumer; and so on.  A
+  conflict still stops it at once, whatever the distance: it is a bound on
+  how far, never a licence to cross a dependence.  `WrapLoads` reads the same
+  number across the back edge.
   """
 
   def __init__(self,
                context: Context,
-               instructions: List[AbstractInstruction]):
+               instructions: List[AbstractInstruction],
+               distance: int = 1):
     super(MoveLoads, self).__init__(context, instructions)
+    if distance < 1:
+      raise ValueError(f'move distance must be >= 1, got {distance}')
+    self._distance = distance
 
   @staticmethod
   def _symbols(syms):
@@ -73,15 +85,39 @@ class MoveLoads(AbstractTransformer):
   def apply(self) -> None:
     instrsOut = []
     stored = []
+    # loads each travelling load has gone past so far
+    passed = {}
     def clear_stored(instrsOut):
         while len(stored) > 0:
             delayed = stored.pop(0)
             instrsOut += [delayed]
+    def release_at_load(instrsOut):
+        # At a load: the travelling ones that have now gone past as many loads
+        # as `distance` allows stop here, with the allocations that travel with
+        # them; the rest go on.  In the order they are held, which is what
+        # `clear_stored` keeps -- at distance 1 every one of them stops, and
+        # this is `clear_stored` exactly.
+        released, keep, done = [], [], set()
+        for item in stored:
+            if isinstance(item, LoadInstruction):
+                if passed[id(item)] + 1 >= self._distance:
+                    released.append(item)
+                    done.add(id(item._dest))
+                else:
+                    passed[id(item)] += 1
+                    keep.append(item)
+            elif id(item._dest) in done:
+                released.append(item)
+            else:
+                keep.append(item)
+        instrsOut += released
+        stored[:] = keep
     for instr in reversed(self._instrs):
         if isinstance(instr, LoadInstruction):
             instrsOut += [LoadWait(instr)]
-            clear_stored(instrsOut)
+            release_at_load(instrsOut)
             stored.append(instr)
+            passed[id(instr)] = 0
         elif isinstance(instr, RegisterAlloc):
             for st in stored:
                 if st._dest is instr._dest:

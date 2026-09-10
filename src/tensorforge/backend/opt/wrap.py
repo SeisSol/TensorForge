@@ -27,7 +27,16 @@ cannot.  The same placement for register and shared destinations.  Registers
 used to be placed by *slot* -- ``slots.py`` still has the accounting of what a
 distance costs -- which put the transfer mid-body, under the guard, and gave a
 body with a single compute nothing to move.  Placing by dependence has neither
-problem, and ``wrap_distance`` no longer means anything here.
+problem.
+
+Which transfers go is ``move_distance``, the number ``MoveLoads`` travels by.
+In the loop unrolled once, the ``j``-th transfer of an iteration moves up past
+``d`` loads, and that runs off the top of the body -- into the previous
+iteration -- exactly when ``j < d``.  So at ``d = 1`` the first transfer wraps
+and the rest are ``MoveLoads``' pipeline inside the body; a larger ``d`` wraps
+more of them, and one at least the number of transfers wraps every one it may.
+Where a wrapped transfer lands does not depend on ``d``: it goes to the tail,
+the one place outside the flag guard.  ``wrap_distance`` is not read.
 
 A register destination needs little from the rest of the pipeline: it is
 thread-private, so a barrier is no obstacle and none is needed; its loads are
@@ -90,8 +99,12 @@ class WrapLoads(AbstractTransformer):
 
     def __init__(self,
                  context: Context,
-                 instructions: List[AbstractInstruction]):
+                 instructions: List[AbstractInstruction],
+                 distance: int = 1):
         super(WrapLoads, self).__init__(context, instructions)
+        if distance < 1:
+            raise ValueError(f'move distance must be >= 1, got {distance}')
+        self._distance = distance
         self.rejected: List[Tuple[object, str]] = []
         self.wrapped: List[str] = []
 
@@ -132,7 +145,10 @@ class WrapLoads(AbstractTransformer):
         # The slot model only enumerates the transfers and their consumers;
         # placement is by dependence.  Each one wrapped goes to the tail, so
         # the ones still to be planned keep their place ahead of it.
-        for t in SlotModel(body).run().transfers:
+        # The first `distance` transfers, in body order: the ones whose move
+        # by that many loads runs across the back edge.  Counted before any is
+        # moved, since moving one to the tail would reorder the rest.
+        for t in SlotModel(body).run().transfers[:self._distance]:
             plan = self._plan(loop, body, t)
             if plan is not None:
                 self._apply(loop, body, plan)
