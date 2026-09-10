@@ -65,6 +65,51 @@ def _check_register_budget(body, simd: bool, context, where: str) -> None:
         RegisterBudgetWarning, stacklevel=2)
 
 
+#: How much of `max_reg_per_thread` a body may take and still be expected not
+#: to spill.  From sm_120, where every lane geometry of the corpus that spilled
+#: more than a few registers came out above it under the slot-level
+#: `pir.pressure`, and none that fitted did.
+FIT_FRACTION = 0.85
+
+
+def _fused_if_over_budget(context, attempt):
+  """`attempt()`, and once more with fused broadcasts if the first one does
+  not fit.
+
+  A materialised broadcast -- one DPP move whose result several plain FMAs
+  read, the arrangement VOPD and packed math want -- keeps every moved value
+  in a register of its own until the last product has read it.  Where that
+  fits it lets the FMAs pair; where it does not, the compiler spills: local_flux
+  at 16 lanes on gfx1150 went to 5.6 KB of scratch and ran 46 times slower,
+  and the fused form, one `v_fmac_f32_dpp` per product, ran 8 % *faster* than
+  the default.  `select_broadcast_form` cannot see the body it is part of, so
+  the question is asked of the body instead: built, measured, and built again
+  with the broadcast fused if a materialised one took it over the budget.
+
+  Not under an explicit vector, where `pir.pressure` still counts arrays whole
+  and so would push every body back; and nothing happens where the target
+  states no budget or no broadcast was materialised.
+  """
+  context.materialised_broadcast = False
+  builder, body = attempt()
+  if not getattr(context, 'materialised_broadcast', False):
+    return builder, body
+  simd = _explicit_simd(context)
+  budget = getattr(context.get_vm().get_hw_descr(), 'max_reg_per_thread', None)
+  if simd or budget is None:
+    return builder, body
+  used = pir.pressure(pir.optimize(body, explicit_simd=simd), in_bytes=True,
+                      explicit_simd=simd)
+  if used <= FIT_FRACTION * budget:
+    return builder, body
+  context.force_fused_broadcast = True
+  try:
+    return attempt()
+  finally:
+    context.force_fused_broadcast = False
+    context.materialised_broadcast = False
+
+
 class RegisterBudgetWarning(UserWarning):
   """A body needs more register file per thread than the target provides."""
 
@@ -292,16 +337,44 @@ class AbstractInstruction(ABC):
     assumption is what breaks, and it breaks loudly: the scope's high-water
     mark is checked against the budget.
     """
-    builder = pir.IRBuilder(fptype=context.fp_type, context=context,
-                            alloc=getattr(writer, 'alloc', None),
-                            scratch=(('tempShrMem', scratch) if scratch
-                                     else None))
+    builder = cls._body_builder(context, writer, scratch)
     cls._shared_body.append(builder)
     try:
       yield builder
     finally:
       cls._shared_body.pop()
-    body = builder.finish()
+    cls._finish_shared_body(context, writer, builder, builder.finish())
+
+  @classmethod
+  def build_shared_body(cls, context, writer, fill, scratch: int = 0) -> None:
+    """`shared_body` for a caller that states its contents as `fill(builder)`.
+
+    The one thing a `with` block cannot do is run twice, and that is what this
+    is for: a body that chose a materialised broadcast and came out over the
+    register budget is built again with the broadcast fused into its FMAs
+    (`_fused_if_over_budget`).  Everything after the build is the same as for
+    the context manager.
+    """
+    def attempt():
+      builder = cls._body_builder(context, writer, scratch)
+      cls._shared_body.append(builder)
+      try:
+        fill(builder)
+      finally:
+        cls._shared_body.pop()
+      return builder, builder.finish()
+    builder, body = _fused_if_over_budget(context, attempt)
+    cls._finish_shared_body(context, writer, builder, body)
+
+  @staticmethod
+  def _body_builder(context, writer, scratch):
+    return pir.IRBuilder(fptype=context.fp_type, context=context,
+                         alloc=getattr(writer, 'alloc', None),
+                         scratch=(('tempShrMem', scratch) if scratch
+                                  else None))
+
+  @staticmethod
+  def _finish_shared_body(context, writer, builder, body) -> None:
     if context.get_user_options().ir_debug:
       for d in pir.verify(body, strict=False):
         print(f'pir: {d}')
@@ -360,11 +433,15 @@ class AbstractInstruction(ABC):
     # it rather than in an array of its own.  `temp_shmem()` is 0 for almost
     # everything, and 0 correctly means "this body may not allocate".
     budget = self.temp_shmem()
-    builder = pir.IRBuilder(fptype=self._context.fp_type, context=self._context,
-                            alloc=getattr(writer, 'alloc', None),
-                            scratch=(('tempShrMem', budget) if budget else None))
-    build(builder)
-    body = builder.finish()
+    def attempt():
+      builder = pir.IRBuilder(fptype=self._context.fp_type,
+                              context=self._context,
+                              alloc=getattr(writer, 'alloc', None),
+                              scratch=(('tempShrMem', budget) if budget
+                                       else None))
+      build(builder)
+      return builder, builder.finish()
+    builder, body = _fused_if_over_budget(self._context, attempt)
 
     if self._context.get_user_options().ir_debug:
       diag = pir.verify(body, strict=False)

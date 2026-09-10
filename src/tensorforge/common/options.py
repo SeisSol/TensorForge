@@ -487,8 +487,11 @@ declare('merge_variants',
             'and bind its varying operands to a counter.  One switch covers both '
             'the rewrite and the emission, so that a rolled list cannot be '
             'expanded again on the way out.\n'
-            'Off pending numbers from hardware; the forms are exact against each '
-            'other in the generated text and have not been compared as values.')
+            'Off by default.  On sm_120 `local_flux` (its four faces merged) '
+            'computes the same checksum as the expanded list and runs 5 % faster '
+            'at 32 lanes, 12 % at 16 and 24 % at 8, from a quarter to a half of '
+            'the code; with `k_roll` as well it gained less, the merged rolled '
+            'body taking more registers.')
 
 declare('merge_min_count',
         default=3,

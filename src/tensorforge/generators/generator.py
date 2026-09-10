@@ -897,6 +897,13 @@ class Generator:
 
     builder = GetElementPtrBuilder(self._context, self._scopes)
     for symbol in self._scopes.get_global_scope().values():
+      if getattr(symbol.obj, 'is_variant', False):
+        # A stand-in is not a parameter: it is bound inside the merged loop,
+        # from the table, and `_emit_ir` skips it for the same reason.  Bound
+        # here as well it came out as `glb_v0 = &v0[0]` over a name nothing
+        # declares -- and `get_symbol` then found that binding for the table,
+        # so the loop's own one was named `glb_glb_v0`.
+        continue
       if symbol.obj.addressing == Addressing.SCALAR or (symbol.obj.addressing == Addressing.NONE and (symbol.stype == SymbolType.Data or not self._preload_globals)):
         builder.build(symbol)
         self._section.global_ir.extend(builder.get_instructions())
@@ -1051,9 +1058,18 @@ class Generator:
     for variant in variants:
       members = [self._scopes.get_symbol(view.tensor) for view in variant.members]
       stand_in = self._scopes.get_symbol(variant.stand_in.tensor)
+      # The members are the bindings, not the parameters: `glb_m5` is
+      # already `&m5[batchId][offset]`, one element's data, whatever the
+      # parameter's addressing was -- and the binding after the table reads
+      # it as such.  So the table holds plain data pointers, which is what a
+      # batch-invariant operand's are.  Typed by the stand-in's addressing it
+      # declared `const float **` over `const float *` members.
+      resolved = all(m.name.startswith(GeneralLexicon.GLOBAL_MEM_PREFIX)
+                     for m in members)
       table = DeclareOperandTable(
           self._context, f'{stand_in.name}Table', members,
-          stand_in.obj.addressing, stand_in.obj.datatype,
+          Addressing.NONE if resolved else stand_in.obj.addressing,
+          stand_in.obj.datatype,
           form=(TableForm.SELECT
                 if len(members) <= DeclareOperandTable.SELECT_LIMIT
                 else TableForm.ARRAY),

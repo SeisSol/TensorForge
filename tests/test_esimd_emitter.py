@@ -626,15 +626,21 @@ def test_an_explicit_vector_has_nobody_to_wait_for():
 # the register budget
 # --------------------------------------------------------------------------
 
-def test_only_pvc_states_a_per_thread_budget():
+def test_a_budget_is_stated_where_it_is_known_and_absent_elsewhere():
     """Absent means "not stated", not "unlimited".
 
     A default would quietly pass everything, which is the failure mode a
-    budget check exists to avoid.
+    budget check exists to avoid.  So where a budget is stated it is the
+    documented figure -- 128 GRF of 64 bytes on PVC, 255 registers on NVIDIA,
+    LLVM's addressable VGPRs on AMD (the unified file from gfx90a on) -- and a
+    target nobody looked up still has none.
     """
     from tensorforge.common.vm.hw_descr import hw_descr_factory
     assert hw_descr_factory('pvc', 'oneapi').max_reg_per_thread == 8 * 1024
-    assert hw_descr_factory('sm_86', 'cuda').max_reg_per_thread is None
+    assert hw_descr_factory('sm_86', 'cuda').max_reg_per_thread == 255 * 4
+    assert hw_descr_factory('gfx942', 'hip').max_reg_per_thread == 512 * 4
+    assert hw_descr_factory('gfx1150', 'hip').max_reg_per_thread == 256 * 4
+    assert hw_descr_factory('dg1', 'oneapi').max_reg_per_thread is None
 
 
 def test_a_narrower_vector_does_not_shrink_the_tile():

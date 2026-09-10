@@ -984,10 +984,10 @@ class BatchLoop(AbstractInstruction):
         elif self._wide_bodies():
             # one body for every instruction of the region
             budget = max((i.temp_shmem() for i in guarded), default=0)
-            with AbstractInstruction.shared_body(self._context, writer,
-                                                 scratch=budget):
-                for instr in guarded:
-                    instr.gen_code(writer)
+            AbstractInstruction.build_shared_body(
+                self._context, writer,
+                lambda _builder: [instr.gen_code(writer) for instr in guarded],
+                scratch=budget)
         else:
             for instr in guarded:
                 instr.gen_code(writer)
@@ -1010,9 +1010,8 @@ class BatchLoop(AbstractInstruction):
             # `can_reorder` licenses swaps inside a body, and nothing licenses
             # a move across a back edge made of Writer text.
             budget = self.temp_shmem()
-            with AbstractInstruction.shared_body(self._context, writer,
-                                                 scratch=budget) as builder:
-                self.gen_code_inner(builder)
+            AbstractInstruction.build_shared_body(
+                self._context, writer, self.gen_code_inner, scratch=budget)
             return
         self.gen_code_inner(writer)
 

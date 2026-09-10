@@ -146,9 +146,8 @@ class GuardedRegion(AbstractInstruction):
     if hasattr(writer, 'if_') and hasattr(writer, 'op'):
       self._emit(writer)
       return
-    with AbstractInstruction.shared_body(self._context, writer,
-                                         scratch=self.temp_shmem()) as builder:
-      self._emit(builder)
+    AbstractInstruction.build_shared_body(self._context, writer, self._emit,
+                                          scratch=self.temp_shmem())
 
   def __str__(self) -> str:
     terms = ' && '.join(f'{"!" if negated else ""}{symbol.name}'

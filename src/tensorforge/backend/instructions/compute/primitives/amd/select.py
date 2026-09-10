@@ -131,6 +131,13 @@ def dual_issue_fma_lanes(datatype, ctx) -> int:
 #: measured here, and in the tie region they would have to be worth a 50%
 #: larger inner loop for nothing back.  A measurement is what moves this
 #: number.
+#:
+#: The one taken so far is about the other side of the trade, registers.
+#: `local_flux` at 16 lanes on gfx1150 sits exactly at 4: 828 moves, 196 of
+#: some 8800 FMAs paired, and 5.6 KB of scratch -- 46 times the runtime, where
+#: the fused form was 8 % faster than the default.  So the number stays and
+#: the body decides: `_fused_if_over_budget` builds again fused when the
+#: materialised form does not fit the target's register budget.
 MATERIALISE_FROM = 4
 
 
@@ -173,9 +180,16 @@ def select_broadcast_form(datatype, step, reuse, ctx,
     FMAs is a complete arrangement, not a degraded one.  Where nothing pairs
     the FMAs either, the modifier costs nothing and the move goes back.
     """
+    if getattr(ctx, 'force_fused_broadcast', False):
+        # The body this is part of did not fit with a materialised broadcast
+        # and is being built again; see `_fused_if_over_budget`.
+        return BroadcastForm.FUSED
     form = broadcast_form(datatype, step, reuse, ctx)
-    if form is not BroadcastForm.PACKED or can_pack:
-        return form
-    if dual_issue_fma_lanes(datatype, ctx) > 1:
-        return BroadcastForm.MOVED
-    return BroadcastForm.FUSED
+    if form is BroadcastForm.PACKED and not can_pack:
+        form = (BroadcastForm.MOVED if dual_issue_fma_lanes(datatype, ctx) > 1
+                else BroadcastForm.FUSED)
+    if form is not BroadcastForm.FUSED:
+        # Told to the body, which is the only place the cost can be weighed:
+        # the moved values live in registers until their last product.
+        ctx.materialised_broadcast = True
+    return form
