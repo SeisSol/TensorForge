@@ -2043,25 +2043,39 @@ class Symbol:
       # passed.
       bc_lane, bc_index = None, None
       if self.stype == SymbolType.Register or self.stype == SymbolType.Scratch:
-        assert len(self.lead_dims) == 1
-        idx = index[self.lead_dims[0]]
-        if isinstance(idx, (float, int, np.int32, np.int64)) or not idx.is_thread_dependent():
-          if isinstance(idx, (float, int, np.int32, np.int64)):
-            idx = Immediate(idx, Datatype.I32)
-          if isinstance(idx, Variable):
-            bc_lane, bc_index = idx.write_nonlead(), list(index)
-          else:
-            # Which lane owns a fixed element, and where in its registers it
-            # sits.  At `lead_width == 1` this is the cyclic rule that was
-            # here before; wider, a lane holds `w` adjacent elements, so the
-            # element first divides by the width and only then distributes.
-            #
-            # This is the resolution a peeled tail element goes through -- the
-            # loop hands it over as a plain integer -- so getting it from the
-            # symbol rather than from the caller is what makes the two agree
-            # without the peel having to know anything.
-            w = self.lead_width
-            bc_lane = (idx._value // w) % self.num_threads
+        if len(self.lead_dims) > 1 and self.register_layout() is None:
+          # What the assertion here used to say, kept and narrowed.  It read
+          # `len(self.lead_dims) == 1`, which refused every rank-two image
+          # including the ones that state their axes; this refuses only the
+          # ones that do not.  Letting them through would address both
+          # dimensions by the wave and alias them onto each other, which is
+          # the outcome the assertion existed to prevent.
+          raise InternalError(
+              f'{self.name}: {len(self.lead_dims)} distributed dimensions and '
+              f'no axes stating how they share the lanes')
+        first = index[self.lead_dims[0]] if self.lead_dims else None
+        if (len(self.lead_dims) == 1 and isinstance(first, Variable)
+                and not first.is_thread_dependent()):
+          # A thread-independent *variable*: the lane is a runtime value and
+          # the read index is the caller's, unchanged.  Kept to one axis
+          # because with two there are two runtime coordinates and no
+          # statement of how they combine into a lane -- and inventing one
+          # here would be a guess in the one branch where nothing is checkable.
+          bc_lane, bc_index = first.write_nonlead(), list(index)
+        else:
+          # Which lane owns a fixed element, and where in its registers it
+          # sits.  Asked of `owning_lane` rather than recomputed: it is the
+          # same question the store asks to guard its write and `StoreRegToGlb`
+          # asks to decide whether either is needed, its docstring already
+          # names this as one of the three callers, and it was the one still
+          # deriving its own answer.  It also answers at any rank now, which
+          # is what the assertion that used to stand here could not.
+          #
+          # `None` covers everything this branch used to fall through: an
+          # index still distributed, one that resolves to no number, and a
+          # distribution the symbol cannot state.
+          bc_lane = self.owning_lane(index)
+          if bc_lane is not None:
             # The register float, resolved here rather than carried as a
             # width: this access reads *one* element, so it has to stay
             # scalar.  Handing over a width-`w` index would make the load
@@ -2071,11 +2085,31 @@ class Symbol:
             # tests would not.
             #
             # `w * slot + component`, pre-scaled, so `build_nonlead` returns
-            # it unchanged.
+            # it unchanged, and one per distributed dimension -- each in its
+            # own block, because that is the number the address divides by.
+            # At `lead_width == 1` a slot is the cyclic rule that was here
+            # before; wider, a lane holds `w` adjacent elements, so the
+            # element first divides by the width and only then distributes.
+            #
+            # This is the resolution a peeled tail element goes through -- the
+            # loop hands it over as a plain integer -- so getting it from the
+            # symbol rather than from the caller is what makes the two agree
+            # without the peel having to know anything.
             bc_index = list(index)
-            bc_index[self.lead_dims[0]] = LeadIndex(
-                w * ((idx._value // w) // self.num_threads) + idx._value % w,
-                self.num_threads, 1)
+            w = self.lead_width
+            for dim in self.lead_dims:
+              value = index[dim]
+              if isinstance(value, Immediate):
+                value = value._value
+              value = int(value)
+              # One width for every axis, which is safe rather than sloppy:
+              # `owning_lane` refuses a packed image with more than one axis,
+              # so anything reaching here at rank two has width 1 and the two
+              # readings coincide.  A branch on the position would be a branch
+              # whose sides can never differ.
+              block = self.lead_block(dim)
+              bc_index[dim] = LeadIndex(
+                  w * ((value // w) // block) + value % w, block, 1)
       read_index = bc_index if bc_index is not None else index
 
       if variable is None and self.stype in (

@@ -514,3 +514,69 @@ def test_the_slot_run_is_counted_once_however_many_axes_share_the_wave():
     temps = Temporaries(ctx, Scopes(), 16)
     sym, _ = temps.register_array(_bbox(8, 4), [(0, 4), (1, 4)])
     assert sym.obj.size == slots_for(0, 8, 4) * slots_for(0, 4, 4) * 16
+
+
+# -- allocated and read at the same place ---------------------------------- #
+
+def _read_at(sym, coords):
+    """The register index and the lane a fixed-element read resolves to."""
+    import re
+
+    from tensorforge.backend.pir import emit as pir_emit
+    from tensorforge.backend.pir.build import IRBuilder
+    from tensorforge.backend.writer import Writer
+    from tensorforge.common.basic_types import Datatype
+    from tensorforge.common.context import Context
+    from tensorforge.common.vm.vm import vm_factory
+
+    ctx = Context(arch='sm_86', backend='cuda', fp_type=Datatype.F32)
+    builder = IRBuilder(fptype=Datatype.F32, context=ctx)
+    sym.load(builder, ctx, None, list(coords), False)
+    writer = Writer()
+    pir_emit(builder.finish(), writer, vm_factory('sm_86', 'cuda', 'float'))
+    src = writer.get_src()
+    slot = re.search(rf'{sym.name}\[(\d+)\]', src)
+    lane = re.search(r'readlane\([^,]+, (\d+)\)', src)
+    assert slot and lane, src
+    return int(slot.group(1)), int(lane.group(1))
+
+
+def test_a_rank_two_image_is_allocated_and_read_at_the_same_place():
+    """End to end, which is the only place the two halves can be caught
+    disagreeing.  The allocator sizes each dimension in its own block and the
+    read divides each coordinate by the same one; if either used the wave
+    instead, the register index would run off the end of an array the other
+    one sized."""
+    from tensorforge.backend.symbol import DataView, slots_for
+    from tensorforge.common.basic_types import Datatype
+
+    temps = _temporaries(32)
+    sym, _ = temps.register_array(_bbox(8, 16), [(0, 4), (1, 8)])
+    sym.data_view = DataView([8, 16], None)
+    sym.datatype = Datatype.F32
+
+    rows, cols = slots_for(0, 8, 4), slots_for(0, 16, 8)
+    assert sym.obj.size == rows * cols
+
+    for row in (0, 5, 7):
+        for col in (0, 9, 15):
+            slot, lane = _read_at(sym, (row, col))
+            assert slot == (row // 4) + (col // 8) * rows, (row, col)
+            assert lane == row % 4 + (col % 8) * 4, (row, col)
+            assert slot < sym.obj.size
+
+
+def test_a_rank_two_image_without_axes_is_refused_at_the_read():
+    """The assertion that stood here refused every rank-two image, including
+    the ones that state their axes.  This refuses only the ones that do not,
+    which would otherwise address both dimensions by the wave and alias them
+    onto each other."""
+    from tensorforge.backend.symbol import DataView
+    from tensorforge.common.basic_types import Datatype
+    from tensorforge.common.exceptions import InternalError
+
+    sym = _register(32, dims=(0, 1))
+    sym.data_view = DataView([8, 16], None)
+    sym.datatype = Datatype.F32
+    with pytest.raises(InternalError, match='no axes stating'):
+        _read_at(sym, (1, 1))

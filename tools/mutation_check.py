@@ -477,6 +477,17 @@ GROUPS = {
          sub(Path('src/tensorforge/backend/symbol.py'),
              '    return layout if layout.tiles(self.num_threads) else None',
              '    return layout')),
+        ('the broadcast index divided by the wave on every axis',
+         sub(Path('src/tensorforge/backend/symbol.py'),
+             '              block = self.lead_block(dim)\n'
+             '              bc_index[dim] = LeadIndex(',
+             '              block = self.num_threads\n'
+             '              bc_index[dim] = LeadIndex(')),
+        ('an image with no axes read as though it had them',
+         sub(Path('src/tensorforge/backend/symbol.py'),
+             '        if len(self.lead_dims) > 1 and '
+             'self.register_layout() is None:',
+             '        if False:')),
         ('every axis given stride one',
          sub(Path('src/tensorforge/backend/temporaries.py'),
              '            out.append(stride)\n            stride *= block',
