@@ -13,6 +13,9 @@
   hw_fp_word_size: 4
   mem_access_align_size: 32
   shmem_banks: 32
+  # 255 registers of 4 bytes per thread, what ptxas will allocate at most.
+  # The spill filter compares `pir.pressure` against this.
+  max_reg_per_thread: 1020B
   name: 'nvidia'
 - arch: sm_61
   base: sm_60
@@ -55,6 +58,10 @@
 
 # AMD
 - arch: gfx900
+  # 256 VGPRs of 4 bytes per lane: `getAddressableNumArchVGPRs` in LLVM's
+  # AMDGPUBaseInfo.cpp.  gfx908 inherits it -- its AGPRs are a separate file
+  # the compiler spills into, not addressable VGPRs.
+  max_reg_per_thread: 1kB
   vec_unit_length: 64
   max_local_mem_size_per_block: 64kB
   max_num_threads: 1024
@@ -72,6 +79,9 @@
   max_reg_per_block: 512kB
 - arch: gfx90a
   base: gfx908
+  # `FeatureGFX90AInsts`: one unified file of 512 VGPRs and AGPRs per lane
+  # (`getAddressableNumVGPRs`), inherited by gfx940 to gfx950.
+  max_reg_per_thread: 2kB
 - arch: gfx940
   base: gfx90a
 - arch: gfx941
@@ -82,6 +92,8 @@
   base: gfx90a
   max_local_mem_size_per_block: 160kB
 - arch: gfx1010
+  # 256 VGPRs per lane in wave32 and wave64 alike, through gfx12.
+  max_reg_per_thread: 1kB
   vec_unit_length: 32
   max_local_mem_size_per_block: 128kB # assume WGP mode
   max_num_threads: 1024
@@ -110,6 +122,12 @@
   base: gfx1010
 - arch: gfx1250
   base: gfx1010
+  # `Feature1024AddressableVGPRs` addresses 1024 in wave32, but
+  # `getMaxNumVGPRs` divides the file by the waves per EU the work-group size
+  # implies, and at the block sizes this generator launches hipcc allocated
+  # 512 and spilled beyond it (local_flux, 16 lanes).  The budget is what a
+  # kernel here can actually have, inherited by gfx1251.
+  max_reg_per_thread: 2kB
   max_local_mem_size_per_block: 384kB # WGP(?) mode. With L1 together: 448 kiB
 - arch: gfx1251
   base: gfx1250
