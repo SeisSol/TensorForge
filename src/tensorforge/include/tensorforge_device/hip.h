@@ -376,6 +376,15 @@ __device__ __forceinline__ T swap(T value) {
         : "+v"(c)                                                              \
         : "v"(a), "v"(b)                                                       \
         :)
+// DPP8: every lane of a group of eight reads lane `pos` of that group.  No row
+// or bank mask and no bound control -- DPP8 has neither -- and gfx10 on only.
+#define FMADPP8(pos, c, a, b)                                                        \
+  __asm(                                                                             \
+      "v_fmac_f32_dpp %0, %1, %2 dpp8:[" STR(pos) "," STR(pos) "," STR(pos) "," STR( \
+          pos) "," STR(pos) "," STR(pos) "," STR(pos) "," STR(pos) "]" CMFI          \
+      : "+v"(c)                                                                      \
+      : "v"(a), "v"(b)                                                               \
+      :)
 #define DMADPP16(pos, c, a, b)                                                 \
   __asm("v_fmac_f64_dpp %0, %1, %2 " ROW_BCST16                                \
         ":" STR(pos) " row_mask:0xf bank_mask:0xf bound_ctrl:1" CMFI           \
@@ -397,6 +406,9 @@ __device__ __forceinline__ T swap(T value) {
 
 template <int Row>
 __device__ __forceinline__ void fmacdpp4(float &c, float a, float b);
+
+template <int Row>
+__device__ __forceinline__ void fmacdpp8(float &c, float a, float b);
 
 template <int Row>
 __device__ __forceinline__ void fmacdpp16(float &c, float a, float b);
@@ -431,6 +443,46 @@ __device__ __forceinline__ void fmacdpp4<3>(float &c, float a, float b) {
 }
 #else
 constexpr bool HasFmacDpp4 = false;
+#endif
+
+#if defined(__GFX10__) || defined(__GFX11__) || defined(__GFX12__) ||          \
+    defined(__GFX13__)
+constexpr bool HasFmacDpp8 = true;
+
+template <>
+__device__ __forceinline__ void fmacdpp8<0>(float &c, float a, float b) {
+  FMADPP8(0, c, a, b);
+}
+template <>
+__device__ __forceinline__ void fmacdpp8<1>(float &c, float a, float b) {
+  FMADPP8(1, c, a, b);
+}
+template <>
+__device__ __forceinline__ void fmacdpp8<2>(float &c, float a, float b) {
+  FMADPP8(2, c, a, b);
+}
+template <>
+__device__ __forceinline__ void fmacdpp8<3>(float &c, float a, float b) {
+  FMADPP8(3, c, a, b);
+}
+template <>
+__device__ __forceinline__ void fmacdpp8<4>(float &c, float a, float b) {
+  FMADPP8(4, c, a, b);
+}
+template <>
+__device__ __forceinline__ void fmacdpp8<5>(float &c, float a, float b) {
+  FMADPP8(5, c, a, b);
+}
+template <>
+__device__ __forceinline__ void fmacdpp8<6>(float &c, float a, float b) {
+  FMADPP8(6, c, a, b);
+}
+template <>
+__device__ __forceinline__ void fmacdpp8<7>(float &c, float a, float b) {
+  FMADPP8(7, c, a, b);
+}
+#else
+constexpr bool HasFmacDpp8 = false;
 #endif
 
 #if defined(__gfx90a__) || defined(__gfx940__) || defined(__gfx941__) ||       \

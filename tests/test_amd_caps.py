@@ -6,8 +6,8 @@
 `amd.py` decides which `fmacdpp` width to emit; `hip.h` decides which ones
 exist, behind `#if` guards.  Those are two copies of the same fact in two
 languages, and they had drifted: the generator emitted `fmacdpp4` for gfx900,
-where the specialisations are switched off, and `fmacdpp8`, which the runtime
-does not declare for any target at all.  Neither showed up in a test, because
+where the specialisations are switched off, and `fmacdpp8` at a time when the
+runtime did not declare it for any target at all.  Neither showed up in a test, because
 a call to a template with no definition is a *link* error and nothing here
 links.
 
@@ -82,7 +82,8 @@ def _guard_for(symbol: str) -> str:
     over the directive's line continuations to the `#if` itself.
     """
     src = HIP_H.read_text()
-    flag = {"fmacdpp4": "HasFmacDpp4", "fmacdpp16": "HasFmacDpp16"}[symbol]
+    flag = {"fmacdpp4": "HasFmacDpp4", "fmacdpp8": "HasFmacDpp8",
+            "fmacdpp16": "HasFmacDpp16"}[symbol]
     lines = src.splitlines()
     for i, line in enumerate(lines):
         if re.match(rf"\s*constexpr bool {flag}\s*=\s*true", line):
@@ -124,11 +125,20 @@ def test_has_fmacdpp16_matches_the_header(arch, dtype):
         f"{arch}/{dtype}: codegen says {got}, hip.h says {expected}")
 
 
-def test_fmacdpp8_does_not_exist_in_the_runtime():
-    """Guards against the reverse mistake: enabling a width nobody wrote."""
-    assert "fmacdpp8" not in HIP_H.read_text()
-    for arch in ARCHS:
-        assert not amd.has_fmacdpp8(_ctx(arch))
+@pytest.mark.parametrize("arch", ARCHS)
+def test_has_fmacdpp8_matches_the_header(arch):
+    """DPP8 is gfx10 and later; the predicate and the guard say the same."""
+    expected = _guard_holds(_guard_for("fmacdpp8"), arch)
+    assert amd.has_fmacdpp8(_ctx(arch)) == expected, (
+        f"{arch}: codegen says {amd.has_fmacdpp8(_ctx(arch))}, "
+        f"hip.h says {expected}")
+
+
+def test_fmacdpp8_has_every_row_of_a_group():
+    """Eight specialisations, one per source lane of the group of eight."""
+    src = HIP_H.read_text()
+    rows = set(re.findall(r"void fmacdpp8<(\d+)>\(float", src))
+    assert rows == {str(r) for r in range(8)}, sorted(rows)
 
 
 @pytest.mark.parametrize("arch", ARCHS)
