@@ -777,6 +777,14 @@ class BatchLoop(AbstractInstruction):
         head, guarded, tail = self._split_guard()
         for instr in head:
             instr.gen_code(writer)
+        # The next element's flag, read here and not where the tail first
+        # needs it: there it is a load its user waits on at once, the same
+        # chase as the pointer `WrapLoads` binds at the head for that reason.
+        next_flag = None
+        if self._flags is not FlagMode.ABSENT and any(
+                getattr(i, '_guard_by_own_flag', False) for i in tail):
+            next_flag = self._element_flag(writer, self._tail_element(writer),
+                                           'allowed_next')
         if self._flags is FlagMode.ABSENT:
             # Nothing to skip against, so no condition and no block.  The
             # split above still holds: `head` is what has to run for every
@@ -798,9 +806,10 @@ class BatchLoop(AbstractInstruction):
             self._emit_guarded(writer, guarded)
         self._emit_own_flagged(writer, tail,
                                lambda: self._tail_element(writer),
-                               'allowed_next')
+                               'allowed_next', cond=next_flag)
 
-    def _emit_own_flagged(self, writer, instrs, element, name) -> None:
+    def _emit_own_flagged(self, writer, instrs, element, name,
+                          cond=None) -> None:
         """Emit `instrs`; those that follow their element's pointer, under that
         element's flag.
 
@@ -818,9 +827,9 @@ class BatchLoop(AbstractInstruction):
         what every lane's count has to agree on.
 
         `element` is called only if something here needs the flag, since in
-        the prologue asking for the index emits a binding.
+        the prologue asking for the index emits a binding.  `cond` is that flag
+        where the caller has read it already.
         """
-        cond = None
         for instr in instrs:
             if (self._flags is FlagMode.ABSENT
                     or not getattr(instr, '_guard_by_own_flag', False)):

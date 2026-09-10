@@ -344,9 +344,19 @@ class WrapLoads(AbstractTransformer):
         body.remove(transfer)
         if plan.alloc is not None:
             body.remove(plan.alloc)
-        tail = ([ahead_ptr] if ahead_ptr is not None else []) + [transfer]
-        body.extend(tail)
-        loop.mark_unguarded_tail(tail)
+        if ahead_ptr is not None:
+            # The next element's address at the head of the body, not next to
+            # the transfer at its tail.  Out of a pointer array it is a load,
+            # and bound right before the copy it is a load the copy waits on
+            # at once: on AMD a `vmcnt(0)` per wrapped transfer, since the
+            # counter retires in order and the pointer is the newest load.  At
+            # the head it has the whole body to arrive.  Outside the guard like
+            # the transfer, and as safe: the entry is read at the clamped index,
+            # in range whatever the mask; only following it needs the flag.
+            body.insert(0, ahead_ptr)
+            loop.mark_unguarded([ahead_ptr])
+        body.append(transfer)
+        loop.mark_unguarded_tail([transfer])
 
         # The binding may now feed nothing -- but a store names the pointer it
         # writes through among its `defs()`, not its `uses()`.  Asking `uses()`
