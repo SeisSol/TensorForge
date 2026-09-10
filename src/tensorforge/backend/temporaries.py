@@ -27,6 +27,7 @@ from typing import List, Optional, Tuple
 from tensorforge.backend.data_types import RegMemObject
 from tensorforge.backend.instructions.abstract_instruction import _explicit_simd
 from tensorforge.backend.instructions.allocate import RegisterAlloc
+from tensorforge.backend.pir.core import LaneAxis
 from tensorforge.backend.symbol import slots_for, DataView, Symbol, SymbolType
 from tensorforge.common.exceptions import InternalError
 from tensorforge.common.matrix.boundingbox import BoundingBox
@@ -80,47 +81,106 @@ class Temporaries:
         self._scopes.add_symbol(symbol)
         return symbol
 
-    def register_array(self, bbox: BoundingBox, lead_pos: int,
+    @staticmethod
+    def _strides(blocks):
+        """Lane strides for a run of blocks, innermost first."""
+        stride, out = 1, []
+        for block in blocks:
+            out.append(stride)
+            stride *= block
+        return out
+
+    def _lead_axes(self, lead):
+        """`lead` as an ordered `{dimension: block}`, whichever form it came in.
+
+        A bare dimension index means the one-axis image every caller asks for
+        today: the whole wave, cyclic, which is what `lead_dims` alone has
+        always meant and what `Symbol.lead_block` answers when no axes are
+        written down.
+
+        Refuses blocks that do not tile the wave.  They would leave lanes
+        holding copies, `RegisterLayout.tiles` would then refuse the layout,
+        `Symbol.lead_block` would fall back to the wave -- and the addressing
+        would divide by a number this allocation did not size in.  Better to
+        say so here, where the caller that chose the blocks can hear it, than
+        to alias two dimensions onto each other and let the answer be wrong.
+        """
+        if isinstance(lead, int):
+            return {lead: self._num_threads}
+        axes = {}
+        for dim, block in lead:
+            if dim in axes:
+                raise InternalError(
+                    f'dimension {dim} given two lane axes')
+            axes[dim] = block
+        product = 1
+        for block in axes.values():
+            product *= block
+        if self._num_threads and product != self._num_threads:
+            raise InternalError(
+                f'lane blocks {list(axes.values())} multiply to {product} and '
+                f'do not tile a {self._num_threads}-lane wave; the lanes would '
+                f'hold copies and no element would have one owner')
+        return axes
+
+    def register_array(self, bbox: BoundingBox, lead,
                        shift: int = 0,
                        spp=None) -> Tuple[Symbol, RegisterAlloc]:
-        """An array holding `bbox`, with axis `lead_pos` spread over the lanes.
+        """An array holding `bbox`, with the named axes spread over the lanes.
 
-        `shift` moves the lane axis' origin: the multilinear accumulator is
+        `lead` is a dimension index for the one-axis image everything asks for
+        today, or a sequence of `(dimension, block)` pairs for one that is
+        spread over more than one.  The pairs are in lane order, innermost
+        first: the first gets stride 1, and each later one a stride of the
+        product of the blocks before it, so lane `t` holds
+        ``(t % b0, (t // b0) % b1, ...)``.  That is the nesting, and it is not
+        the dimension order -- a producer that wants a row in the high lane
+        bits and a column pair in the low ones lists the column first.
+
+        Sized and stated together, which is the point of the parameter.  The
+        addressing divides a coordinate on each of these dimensions by that
+        dimension's block (`Symbol.lead_block`), and an allocation in units
+        the addressing does not divide by aliases the next dimension onto this
+        one.  Passing the blocks here and writing them onto the symbol is what
+        makes those the same number by construction rather than by both
+        defaulting to the wave.
+
+        `shift` moves the *first* axis' origin: the multilinear accumulator is
         indexed in the theta-shifted space, and straddling one more block
         boundary is the price of not needing a shuffle.  Everything else
         indexes at origin 0 and leaves it alone.
         """
+        axes = self._lead_axes(lead)
         regsize = 1
-        threads = self._num_threads
         for d in range(bbox.rank()):
-            dim = bbox.size(d)
-            if d != lead_pos or threads == 0:
-                regsize *= dim
+            block = axes.get(d)
+            if block is None or self._num_threads == 0:
+                regsize *= bbox.size(d)
             else:
                 # The same rule addressing uses, called rather than restated.
                 # It was restated, without the width, and a four-wide read of
                 # a three-slot image is how consecutive non-lead indices came
                 # to address overlapping windows.
-                # The block passed is the wave because this states one axis:
-                # `lead_dims = [lead_pos]` below and no `lead_axes`, which is
-                # what `Symbol.lead_block` then answers.  The two have to be
-                # the same number -- an allocation in units the addressing
-                # does not divide by aliases the next dimension onto this one
-                # -- and a producer that leaves its result on two axes has to
-                # say so in both places at once, which is what this signature
-                # cannot express yet.
+                origin = shift if d == next(iter(axes)) else 0
                 regsize *= slots_for(
-                    bbox.lower()[d] + shift, bbox.upper()[d] + shift,
-                    threads, getattr(self, '_lead_width', 1)
-                ) * DataView.lead_lanes(
-                    None, _explicit_simd(self._context), threads)
-                threads //= dim  # TODO?
+                    bbox.lower()[d] + origin, bbox.upper()[d] + origin,
+                    block, getattr(self, '_lead_width', 1))
+        if axes and self._num_threads:
+            # Once, not once per axis.  This is how many register entries one
+            # slot occupies, which is a question about the lowering -- under
+            # ESIMD the work-item holds the whole wave, so a slot is a run of
+            # that many entries however many axes share the wave between them.
+            regsize *= DataView.lead_lanes(
+                None, _explicit_simd(self._context), self._num_threads)
 
         name = self.next_register_name()
         registers = Symbol(name=name, stype=SymbolType.Register,
                            obj=RegMemObject(name, regsize, spp=spp))
-        registers.lead_dims = [lead_pos]
+        registers.lead_dims = list(axes)
         registers.num_threads = self._num_threads
+        registers.lead_axes = None if len(axes) == 1 else tuple(
+            LaneAxis(block, stride) for block, stride in
+            zip(axes.values(), self._strides(axes.values())))
         # The blocking of this image, set once here so every access resolves
         # positions the same way -- the loops that walk it, and the
         # fixed-element reads that go through the broadcast path.

@@ -417,3 +417,100 @@ def test_an_unstated_rank_two_image_still_divides_by_the_wave():
     sym = _register(32, dims=(0, 1))
     assert sym.register_layout() is None
     assert (sym.lead_block(0), sym.lead_block(1)) == (32, 32)
+
+
+# -- allocation and addressing, sized in the same units -------------------- #
+
+def _temporaries(threads=32):
+    from tensorforge.backend.scopes import Scopes
+    from tensorforge.backend.temporaries import Temporaries
+    from tensorforge.common.basic_types import Datatype
+    from tensorforge.common.context import Context
+    ctx = Context(arch='sm_80', backend='cuda', fp_type=Datatype.F32)
+    return Temporaries(ctx, Scopes(), threads)
+
+
+def _bbox(*sizes):
+    from tensorforge.common.matrix.boundingbox import BoundingBox
+    return BoundingBox([0] * len(sizes), list(sizes))
+
+
+def test_a_single_axis_image_is_sized_as_it_always_was():
+    """The neutrality claim.  Every caller passes a bare dimension index, and
+    that has to mean the wave, cyclic, with the same register count."""
+    temps = _temporaries(32)
+    sym, alloc = temps.register_array(_bbox(64, 3), 0)
+    assert sym.lead_dims == [0] and sym.lead_axes is None
+    assert sym.obj.size == (64 // 32) * 3
+    assert sym.lead_block(0) == 32
+
+
+@pytest.mark.parametrize('blocks', [((0, 8), (1, 4)), ((1, 4), (0, 8))])
+def test_the_blocks_it_sized_in_are_the_blocks_the_addressing_divides_by(blocks):
+    """The property the whole parameter exists for.  An allocation in units
+    the addressing does not divide by aliases the next dimension onto this
+    one, and until the blocks could be passed the two agreed only because
+    both defaulted to the wave."""
+    from tensorforge.backend.symbol import slots_for
+    temps = _temporaries(32)
+    sym, _ = temps.register_array(_bbox(16, 8), list(blocks))
+    for dim, block in blocks:
+        assert sym.lead_block(dim) == block
+    assert sym.register_layout() is not None
+    assert sym.obj.size == (slots_for(0, 16, dict(blocks)[0])
+                            * slots_for(0, 8, dict(blocks)[1]))
+
+
+def test_the_lane_nesting_is_the_order_the_pairs_came_in():
+    """Innermost first: the first pair gets stride 1.  A producer that wants
+    a row in the high lane bits and a column pair in the low ones lists the
+    column first, which is why this is the pair order and not the dimension
+    order."""
+    from tensorforge.backend.pir.core import LaneAxis
+    temps = _temporaries(32)
+    sym, _ = temps.register_array(_bbox(16, 8), [(1, 4), (0, 8)])
+    assert sym.lead_dims == [1, 0]
+    assert sym.lead_axes == (LaneAxis(4, 1), LaneAxis(8, 4))
+    # lane t holds column t % 4 and row (t // 4) % 8
+    for row in range(8):
+        for col in range(4):
+            assert sym.owning_lane([row, col]) == row * 4 + col
+
+
+def test_blocks_that_do_not_tile_the_wave_are_refused_where_they_are_chosen():
+    """Rather than at the reader.  They would leave lanes holding copies,
+    `register_layout` would refuse the layout, `lead_block` would fall back to
+    the wave -- and the addressing would then divide by a number this
+    allocation did not size in."""
+    from tensorforge.common.exceptions import InternalError
+    temps = _temporaries(32)
+    with pytest.raises(InternalError, match='do not tile'):
+        temps.register_array(_bbox(16, 8), [(0, 8), (1, 8)])
+    with pytest.raises(InternalError, match='two lane axes'):
+        temps.register_array(_bbox(16, 8), [(0, 8), (0, 4)])
+
+
+def test_a_packed_image_on_two_axes_has_no_owner():
+    """One width and no statement of which axis carries it.  Dividing an
+    arbitrary coordinate by it would name a lane confidently and wrongly."""
+    from tensorforge.backend.pir.core import LaneAxis
+    sym = _register(32, width=2, dims=(0, 1),
+                    axes=(LaneAxis(4, 1), LaneAxis(8, 4)))
+    assert sym.register_layout() is not None
+    assert sym.owning_lane([1, 1]) is None
+
+
+def test_the_slot_run_is_counted_once_however_many_axes_share_the_wave():
+    """How many register entries one slot occupies is a question about the
+    lowering, not about the distribution.  Under ESIMD the work-item holds
+    the whole wave, so a slot is a run of that many entries -- once, however
+    many axes divide the wave between them."""
+    from tensorforge.backend.scopes import Scopes
+    from tensorforge.backend.symbol import slots_for
+    from tensorforge.backend.temporaries import Temporaries
+    from tensorforge.common.basic_types import Datatype
+    from tensorforge.common.context import Context
+    ctx = Context(arch='pvc', backend='esimd', fp_type=Datatype.F32)
+    temps = Temporaries(ctx, Scopes(), 16)
+    sym, _ = temps.register_array(_bbox(8, 4), [(0, 4), (1, 4)])
+    assert sym.obj.size == slots_for(0, 8, 4) * slots_for(0, 4, 4) * 16

@@ -1977,6 +1977,12 @@ class Symbol:
     layout = self.register_layout()
     if layout is None:
       return None
+    if self.lead_width > 1 and len(self.lead_dims) > 1:
+      # One width and no statement of which axis carries it.  The same gap
+      # `lead_width_of` has -- a packing belongs to a named dimension and
+      # neither the symbol nor the access says which -- and dividing an
+      # arbitrary coordinate by it would name a lane confidently and wrongly.
+      return None
     coords = []
     for position, dim in enumerate(self.lead_dims):
       idx = index[dim]

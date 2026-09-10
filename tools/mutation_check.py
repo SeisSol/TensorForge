@@ -477,6 +477,26 @@ GROUPS = {
          sub(Path('src/tensorforge/backend/symbol.py'),
              '    return layout if layout.tiles(self.num_threads) else None',
              '    return layout')),
+        ('every axis given stride one',
+         sub(Path('src/tensorforge/backend/temporaries.py'),
+             '            out.append(stride)\n            stride *= block',
+             '            out.append(1)\n            stride *= block')),
+        ('the slot run counted once per axis',
+         sub(Path('src/tensorforge/backend/temporaries.py'),
+             "                    block, getattr(self, '_lead_width', 1))",
+             "                    block, getattr(self, '_lead_width', 1)) "
+             "* DataView.lead_lanes(\n"
+             "                    None, _explicit_simd(self._context), "
+             "self._num_threads)")),
+        ('blocks that leave the lanes holding copies admitted',
+         sub(Path('src/tensorforge/backend/temporaries.py'),
+             '        if self._num_threads and product != self._num_threads:',
+             '        if False:')),
+        ('a packed image on two axes given an owner anyway',
+         sub(Path('src/tensorforge/backend/symbol.py'),
+             '    if self.lead_width > 1 and len(self.lead_dims) > 1:\n'
+             '      # One width',
+             '    if False:\n      # One width')),
         ('an undeclared lead index read as unspread',
          sub(Path('src/tensorforge/backend/symbol.py'),
              '    if dim not in self.lead_dims:\n      return self.num_threads',

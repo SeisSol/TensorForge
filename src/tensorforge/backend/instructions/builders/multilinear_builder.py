@@ -472,7 +472,7 @@ class MultilinearBuilder(OperationBuilder):
     `[t for t in self._descr.target[0] if t >= 0]` once there is one.
     """
     registers, registerAlloc = self._temporaries.register_array(
-        self._dest_obj.bbox, lead_pos=0, shift=self._theta)
+        self._dest_obj.bbox, lead=0, shift=self._theta)
     self._instructions.append(registerAlloc)
     return registers
 
