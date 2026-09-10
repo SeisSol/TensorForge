@@ -47,7 +47,21 @@ class SyclLexic(Lexic):
     # which is also why nothing noticed: the path is only taken for some
     # arch/occupancy combinations, and no SYCL target was in the snapshot
     # corpus to take it.
-    return f"""""" # TODO: occupancy query via device info
+    #
+    # And once it took three arguments it returned nothing, while the grid
+    # right after it is `std::min(gridsize, ...)`: the first real compile of
+    # an ESIMD kernel stopped at an undeclared `gridsize`.  One work-group per
+    # compute unit, which is what the CUDA/HIP launchers fall back to when
+    # their occupancy query answers nothing; SYCL has no such query.  The
+    # queue is read from the pointer here because the launcher binds `stream`
+    # only after this, and not dereferenced when null -- the null check that
+    # follows is what reports that.
+    ptr = GeneralLexicon.STREAM_PTR_STR
+    return (f"static std::size_t gridsize = 0;\n"
+            f"if (gridsize == 0 && {ptr} != nullptr) {{\n"
+            f"  gridsize = static_cast<{self.stream_type} *>({ptr})->get_device()"
+            f".get_info<sycl::info::device::max_compute_units>();\n"
+            f"}}")
 
   def set_shmem_size(self, func_name, shmem):
     return ''
@@ -163,6 +177,12 @@ class SyclLexic(Lexic):
     return None
 
   def get_headers(self):
+    # The explicit-SIMD lowering spells its body through `tensorforge::
+    # intel_esimd`, which `isycl.h` defines; without it the first real compile
+    # stopped at the first vector.  Only there: the header includes the ESIMD
+    # extension, which AdaptiveCpp does not have.
+    if self.simd_mode:
+      return ['sycl/sycl.hpp', 'tensorforge_device/isycl.h']
     return ['sycl/sycl.hpp']
 
   def has_atomic_store(self, ctx, op, datatype, length=1):

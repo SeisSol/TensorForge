@@ -317,6 +317,15 @@ class EsimdEmitter(Emitter):
                         self.operand(s.args[2], v.type),
                         arms=(s.args[1], s.args[2]))
             return
+        if getattr(s, 'op', None) == Op.EXTRACT:
+            # One element of a vector, as the element.  `x[i]` on a `simd` is
+            # a `simd_view`, and ESIMD has no operator between a view and a
+            # vector: the broadcast operand of every scalar-times-vector FMA
+            # did not compile.  The cast is what the base spelling meant.
+            v = s.target[0]
+            self.declare(v, f'static_cast<{self.ctype(v.type, v)}>('
+                            f'{self.operand(s.args[0])}[{s.attr("lane")}])', s)
+            return
         if getattr(s, 'op', None) == Op.STORE:
             val = s.args[1]
             if isinstance(val, Value) and val.layout is not None and val.distributed:
