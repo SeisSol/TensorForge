@@ -857,3 +857,18 @@ def test_the_minimum_is_the_caller_s_to_lower():
     merged = _with_option(_flux(3), merge_variants=True, merge_min_count=2)
     assert any(type(i).__name__ == 'VariantLoop'
                for i in merged._sections[0].ir)
+
+
+def test_a_stand_in_reads_what_its_members_store():
+    """The body reads every member through the stand-in, so the stand-in has
+    to carry the members' storage: a member held as two TF32 halves per
+    element, read through a stand-in that says one, is a wrong kernel.  The
+    order is left to the instruction that decides it for all of them."""
+    from tensorforge.generators.rolling import _stand_in
+    t = Tensor([4, 4], Addressing.NONE, BoundingBox([0, 0], [4, 4]),
+               alias='Asplit', datatype=DTYPE)
+    t.storage_parts = 2
+    clone = _stand_in(SubTensor(t), 'variant0').tensor
+    assert clone.is_variant
+    assert clone.storage_parts == 2
+    assert clone.storage_order is None

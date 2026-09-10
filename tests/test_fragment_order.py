@@ -305,3 +305,56 @@ def test_what_the_predicate_refuses(kw, why):
     """
     answers = _b_direct(**kw)
     assert answers and not any(answers), why
+
+
+def _merged_local_flux(monkeypatch, parts):
+    """`local_flux` on the matrix path, faces 1-3 merged over a stand-in, `A`
+    prepared and stored as `parts` scalars per element."""
+    import contextlib
+    import importlib.util
+    import io
+    from pathlib import Path
+
+    from tensorforge.common.context import Context
+    from tensorforge.generators.generator import Generator
+
+    monkeypatch.setenv('TF_OPTIONS', 'prepare_operands=1,merge_variants=1')
+    monkeypatch.setattr(nvidia, 'ENABLED', True)
+    case = Path(__file__).parent / 'cases' / 'local_flux.py'
+    spec = importlib.util.spec_from_file_location('lf_fragment_merged', case)
+    mod = importlib.util.module_from_spec(spec)
+    with contextlib.redirect_stdout(io.StringIO()):
+        spec.loader.exec_module(mod)
+    descrs = mod.descr_list()
+    for descr in descrs:
+        for op in getattr(descr, 'ops', ()):
+            if op.tensor.addressing is Addressing.NONE:
+                op.tensor.storage_parts = parts
+    gen = Generator(descrs, Context(arch='sm_120', backend='cuda',
+                                    fp_type=mod.DTYPE))
+    with contextlib.redirect_stdout(io.StringIO()):
+        gen.generate()
+    operands = [s.obj for s in gen._scopes.get_global_scope().values()
+                if getattr(s.obj, 'addressing', None) is Addressing.NONE]
+    return gen.get_kernel(), operands
+
+
+@pytest.mark.parametrize('parts', [1, 2])
+def test_a_merged_run_stores_every_member_in_the_stand_ins_order(monkeypatch,
+                                                                 parts):
+    """Faces 1-3 of `local_flux` merge into one body that reads whichever
+    member the counter selects, in the stand-in's order and at its part
+    count.  Only the stand-in used to be marked: the peeled first face was
+    stored in fragment order and the other three were not, which moved the
+    checksum by 0.8 % -- and by 38 % with the split on top, where the
+    stand-in also read one scalar where two were stored."""
+    src, operands = _merged_local_flux(monkeypatch, parts)
+    members = [o for o in operands if not getattr(o, 'is_variant', False)]
+    stand_ins = [o for o in operands if getattr(o, 'is_variant', False)]
+    assert len(members) == 4 and len(stand_ins) == 1
+    assert all(o.storage_order is not None for o in members + stand_ins)
+    assert len({tuple(o.storage_order) for o in members + stand_ins}) == 1
+    assert all(o.storage_parts == parts for o in members + stand_ins)
+    if parts == 2:
+        # Every A half is read and none is computed: the splits left are B's.
+        assert src.count('splitFloatTF32') < src.count('mma.sync')

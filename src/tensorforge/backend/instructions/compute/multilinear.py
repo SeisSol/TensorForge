@@ -809,7 +809,29 @@ class MultilinearInstruction(ComputeInstruction):
                       self._idest.get_fptype(), self._context,
                       columns=self._output_extent(), lead=lead, depth=depth,
                       threads=self._num_threads)
-        if order is not None:
+        if order is None:
+            return
+        # A stand-in of a merged run is not a buffer: its members are, one per
+        # iteration, and the one body reads whichever the counter selects in
+        # the stand-in's order -- so every member is stored alike or none is,
+        # as in `_offer_simt_order`.  A member already carrying this order is
+        # accepted: a peeled first iteration reads it directly and stores it so.
+        variant = getattr(a_obj, 'is_variant', False)
+        members = (tuple(getattr(a_obj, 'variant_members', ())) if variant
+                   else (a_obj,))
+        shape = tuple(int(x) for x in a_obj.get_actual_shape())
+        if not members:
+            return
+        for member in members:
+            if (member.addressing is not Addressing.NONE
+                    or not member.is_dense()
+                    or tuple(int(x) for x in member.get_actual_shape()) != shape
+                    or (member.storage_order is not None
+                        and tuple(member.storage_order) != tuple(order))):
+                return
+        for member in members:
+            member.storage_order = order
+        if variant:
             a_obj.storage_order = order
 
     def _shape(self) -> ComputeShape:

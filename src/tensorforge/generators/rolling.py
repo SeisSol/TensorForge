@@ -176,6 +176,13 @@ def _stand_in(view, name: str):
                    datatype=source.datatype,
                    alignment=getattr(source, 'alignment', 0))
     clone.direction = source.direction
+    # The body reads every member through the stand-in, so the stand-in has to
+    # read what the members store: an operand held as two TF32 halves per
+    # element read as one scalar is a wrong kernel, not a slow one.  The
+    # members agree on it -- `is_similar` compares it -- so the first speaks
+    # for all.  The order is not copied: `_offer_order` decides it later, for
+    # the stand-in and its members together.
+    clone.storage_parts = getattr(source, 'storage_parts', 1)
     clone.is_variant = True
     return SubTensor(clone, view.bbox, list(view.offset),
                      getattr(view, 'sliced', False))
