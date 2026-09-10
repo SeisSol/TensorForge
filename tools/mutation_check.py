@@ -136,7 +136,8 @@ GROUPS = {
              '        return operand if isinstance(operand, int) else 1 / 0', 1)),
         ('a loop variable no longer resolves to its bound',
          sub(Path('src/tensorforge/backend/pir/banks.py'),
-             '        if stmt.op is Op.FOR and stmt.regions and stmt.regions[0].args:',
+             '        if (stmt.op in (Op.FOR, Op.WHILE) and stmt.regions\n'
+             '                and stmt.regions[0].args):',
              '        if False:', 1)),
         ('an unreadable address counted rather than refused',
          sub(Path('src/tensorforge/backend/pir/banks.py'), '                unresolved += 1\n                continue',

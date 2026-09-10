@@ -89,9 +89,15 @@ def _definitions(body: Sequence[Stmt]) -> Dict[int, object]:
     for stmt, _ in walk(body):
         for t in stmt.target:
             out[id(t)] = stmt
-        if stmt.op is Op.FOR and stmt.regions and stmt.regions[0].args:
-            lo = stmt.args[0] if stmt.args else 0
-            out[id(stmt.regions[0].args[0])] = ('bound', lo)
+        if (stmt.op in (Op.FOR, Op.WHILE) and stmt.regions
+                and stmt.regions[0].args):
+            # What the induction starts at.  Later iterations differ from it
+            # by an amount that is the same in every lane -- a multiple of the
+            # step, or whichever block the queue handed out -- so the pattern
+            # across the lanes, which is the only thing counted here, is the
+            # one the first iteration has.
+            start = stmt.args[0] if stmt.args else 0
+            out[id(stmt.regions[0].args[0])] = ('bound', start)
     return out
 
 

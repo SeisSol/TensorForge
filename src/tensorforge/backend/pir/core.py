@@ -780,7 +780,6 @@ class Op:
     RAWSTMT = 'rawstmt'     # no target;          `text` is a *statement*
     RAWBLOCK = 'rawblock'   # one region;         `text` is the block *head*
 
-    CONTROL = frozenset({IF, FOR, WHILE, RAWBLOCK})
     RAW = frozenset({RAWEXPR, RAWSTMT, RAWBLOCK})
     ASYNC = frozenset({COPY_ASYNC, LOAD_ASYNC})
     # statements that lower to a C++ declaration and therefore handle a

@@ -921,12 +921,11 @@ class BatchLoop(AbstractInstruction):
                     uniform=Uniformity.BLOCK, materialize=True)
                 loop.exit_when(builder.op('lt', BOOL, nxt, 0, hint='drained'))
                 # The successor index, in the same shape the initial one has.
-                # `MULT` because `threadIdx.y` is raw text with no uniformity
-                # of its own, and the join over it would answer for the whole
-                # block.
+                # `threadIdx.y` is the multiplication's index and says so, so
+                # the sum comes out `MULT` without anyone claiming it.
                 offset = builder.op('mul', INDEX, lexic.block_dim_y, nxt,
                                     hint='row')
-                loop.yield_(builder.op('add', INDEX, lexic.thread_idx_y,
+                loop.yield_(builder.op('add', INDEX, builder.thread_id('y'),
                                        offset, hint=self._batch(0),
                                        uniform=Uniformity.MULT))
 

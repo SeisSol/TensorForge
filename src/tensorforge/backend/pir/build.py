@@ -91,14 +91,12 @@ def _join(operands) -> Uniformity:
 def _stated(uniform, joined: Uniformity, what: str) -> Uniformity:
     """A caller's answer, allowed to narrow the join and never to widen it.
 
-    The join is the right answer wherever the operands carry the fact, and it
-    is not available in two situations.  An operand that is still raw text has
-    no uniformity for the IR to read, so the join over it reads `GRID` --- the
-    strongest claim there is --- for something like `threadIdx.y`, which is
-    the same only within one multiplication.  And a primitive whose result is
-    not a function of its operands' distribution, such as a value every thread
-    of a block reads out of shared memory behind a barrier, is uniform for a
-    reason no operand states.
+    The join is the right answer wherever the operands carry the fact, which
+    is everywhere arithmetic reaches: a sum is as uniform as its terms.  A
+    primitive whose result is not a function of its operands' distribution is
+    the exception, and a value every thread of a block reads out of shared
+    memory behind a barrier is one -- it agrees across the block for a reason
+    no operand of the call states.
 
     Narrowing only, so the override cannot be used to license a barrier: it
     can make the verifier refuse where the join would have allowed, and never
@@ -270,8 +268,7 @@ class IRBuilder:
         return v
 
     def op(self, name: str, type_, *args: Operand,
-           hint: str = '', pure: bool = True, escapes: bool = False,
-           uniform=None) -> Value:
+           hint: str = '', pure: bool = True, escapes: bool = False) -> Value:
         """A generic pure operation (``add``, ``mul``, ``fma``, ``select``...).
 
         Uniformity is propagated: the result is uniform iff every value operand
@@ -282,16 +279,13 @@ class IRBuilder:
         purity, movability and an empty access set without being asked, and
         those are answers about scalar arithmetic; for anything else they are
         a guess, and the guess is the permissive one.
-
-        `uniform` narrows the propagated answer for an expression over raw
-        text, whose operands cannot state theirs; see :func:`_stated`.
         """
         if name not in Op.ARITH:
             raise IRError(
                 f'{name!r} is not scalar arithmetic. Use `call` for a function, '
                 f'`load`/`store` for memory, or add the name to `Op.ARITH` and '
                 f'give the emitter a spelling for it.')
-        uniform = _stated(uniform, _join(args), name)
+        uniform = _join(args)
         # Same shape as the uniformity join, and for the same reason: an
         # elementwise result lives where its operands live.  Until something
         # attaches a layout this is `None` in, `None` out.
@@ -561,8 +555,21 @@ class IRBuilder:
         return value
 
     def thread_id(self, axis: str = 'x') -> Value:
-        """The lane index: the narrowest thing there is."""
-        v = self.value(INDEX, hint=f'tid{axis}', uniform=Uniformity.LANE)
+        """The thread index along `axis`.
+
+        `x` is the lane, the narrowest thing there is.  `y` and `z` are not:
+        a multiplication is laid out along `x`, and the multiplications
+        sharing a block are stacked along `y`, so `threadIdx.y` is the
+        multiplication's own index -- the same for every thread working on
+        one, different between them, which is what `MULT` says.
+
+        Answering `LANE` for all three would be safe and would cost the whole
+        difference between the two: a guard derived from `threadIdx.y` would
+        forbid even a wave-wide barrier under it, and
+        `batchId0 < numElements0` is exactly such a guard.
+        """
+        level = Uniformity.LANE if axis == 'x' else Uniformity.MULT
+        v = self.value(INDEX, hint=f'tid{axis}', uniform=level)
         self._emit_op(Op.CALL, (v,), (), attrs=(('callee', f'thread_idx_{axis}'),))
         return v
 
