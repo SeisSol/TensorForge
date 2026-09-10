@@ -40,7 +40,7 @@ class SyclLexic(Lexic):
   def multifile(self):
     return False
 
-  def get_launch_size(self, func_name, block, shmem):
+  def get_launch_size(self, func_name, block, shmem, resident=False):
     # `shmem` was missing here while `generator.py` has passed three arguments
     # for as long as the persistent-launch path has existed, so every SYCL
     # target that reaches it died with a TypeError before emitting a line --

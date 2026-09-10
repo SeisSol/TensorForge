@@ -108,9 +108,22 @@ class RegmaxBlockPolicy(AbstractThreadBlockPolicy):
     self._lane_factor = max(1, lead_width)
 
   def get_num_mults_per_block(self):
-    # the //2 is a heuristic
-    # self._max_threads // self._num_threads // 2
-    max_thread_mults = 256 // (self._num_threads * self._lane_factor)
+    # 128 threads on NVIDIA, four warps: one per scheduler of an SM (four
+    # since Volta), so that an SM holds several independent blocks rather
+    # than one large one.  Through the generator on sm_120: `local_flux`
+    # -6.0 %, `chain_three`, `square_notrans` and `wide_cascade` within the
+    # noise (+0.1 to +1.5 %).  Not on AMD: on gfx1150 the halved block made
+    # `chain_three` 3.6 % and `wide_cascade` 4.1 % slower, so it stays at
+    # 256 there and on the other vendors until something says otherwise.
+    #
+    # And not where the block preloads operators into shared memory
+    # (`global_mem`): its multiplications share that one copy, and halving
+    # the block doubles the copies and halves the blocks that fit.  A
+    # multiplication wider than 128 threads keeps the old bound.
+    lanes = self._num_threads * self._lane_factor
+    vendor = self._context.get_vm().get_hw_descr().vendor
+    threads = 128 if vendor == 'nvidia' and self._global_mem == 0 else 256
+    max_thread_mults = threads // lanes or 256 // lanes
     if self._mem_per_mult == 0:
       mults = max_thread_mults
     else:
@@ -798,7 +811,7 @@ class Generator:
               f'across the grid.')
         num_blocks = f'({GeneralLexicon.NUM_ELEMENTS}0 + {mults_per_block} - 1) / {mults_per_block}'
       else:
-        writer(f'{lexic.get_launch_size(kernel_name, "block", shmemsize)}')
+        writer(f'{lexic.get_launch_size(kernel_name, "block", shmemsize, resident=coop)}')
         if coop:
           num_blocks = 'gridsize'
         else:

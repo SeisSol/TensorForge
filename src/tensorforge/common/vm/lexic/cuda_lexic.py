@@ -58,7 +58,7 @@ class CudaLexic(Lexic):
   def multifile(self):
     return False
 
-  def get_launch_size(self, func_name, block, shmem):
+  def get_launch_size(self, func_name, block, shmem, resident=False):
     return f"""static std::size_t gridsize = 0;
     if (gridsize == 0) {{
       int device, smCount, blocksPerSM;

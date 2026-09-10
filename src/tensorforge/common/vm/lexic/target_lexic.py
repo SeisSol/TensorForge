@@ -24,7 +24,7 @@ class TargetLexic(Lexic):
   def multifile(self):
     return False
 
-  def get_launch_size(self, func_name, block, shmem):
+  def get_launch_size(self, func_name, block, shmem, resident=False):
     return ''
 
   def set_shmem_size(self, func_name, shmem):

@@ -85,14 +85,35 @@ class HipLexic(CudaLexic):
   def multifile(self):
     return False
 
-  def get_launch_size(self, func_name, block, shmem):
+  def get_launch_size(self, func_name, block, shmem, resident=False):
+    # ROCm up to 7.2 sizes a block's LDS against one CU's 64 KB even in WGP
+    # mode, where a "multiprocessor" is a WGP of two CUs and 128 KB -- the
+    # waves and SIMDs it does count per WGP, so only the LDS bound is halved.
+    # An LDS-bound kernel therefore got half the grid on RDNA: `local_flux`
+    # with its 51 KB preload one block per WGP where two fit, 36 % slower on
+    # gfx1150.  Fixed upstream (`localMemSizePerCU_ * (isWGPMode_ ? 2 : 1)` in
+    # clr's `hip_platform.cpp`), so this only ever raises the runtime's answer
+    # and lets a corrected runtime stand.  gfx9 has no WGPs and is untouched.
+    #
+    # Not for a cooperative launch: there every block has to be resident at
+    # once, and the runtime's count is the one it checks the launch against.
+    wgp = "" if resident else f"""
+      int gfxMajor = 0;
+      CHECK_RES(hipDeviceGetAttribute(&gfxMajor, hipDeviceAttributeComputeCapabilityMajor, device));
+      if (gfxMajor >= 10 && ({shmem}) > 0) {{
+        int ldsPerMP = 0, blocksNoLds = 0;
+        CHECK_RES(hipDeviceGetAttribute(&ldsPerMP, hipDeviceAttributeMaxSharedMemoryPerMultiprocessor, device));
+        CHECK_RES(hipOccupancyMaxActiveBlocksPerMultiprocessor(&blocksNoLds, {func_name}, {block}.x * {block}.y * {block}.z, 0));
+        const int blocksByLds = static_cast<int>((2 * static_cast<std::size_t>(ldsPerMP)) / ({shmem}));
+        blocksPerSM = std::max(blocksPerSM, std::min(blocksNoLds, blocksByLds));
+      }}"""
     return f"""static std::size_t gridsize = 0;
     if (gridsize == 0) {{
       int device, smCount, blocksPerSM;
       CHECK_RES(hipGetDevice(&device));
       CHECK_RES(hipDeviceGetAttribute(&smCount, hipDeviceAttributeMultiprocessorCount, device));
       CHECK_RES(hipOccupancyMaxActiveBlocksPerMultiprocessor(&blocksPerSM, {func_name}, {block}.x * {block}.y * {block}.z, {shmem}));
-      CHECK_ERR;
+      CHECK_ERR;{wgp}
       if (blocksPerSM > 0) {{
         gridsize = smCount * blocksPerSM;
       }}
