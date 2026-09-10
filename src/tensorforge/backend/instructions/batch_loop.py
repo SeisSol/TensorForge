@@ -313,6 +313,10 @@ class BatchLoop(AbstractInstruction):
     #: it has bound so far.
     _indices: List[Tuple] = []
 
+    #: One entry per open loop that carries tokens: the builder, and each
+    #: wrapped transfer's carried tokens -- see `carried_tokens`.
+    _carried: List[Tuple] = []
+
     @classmethod
     @contextmanager
     def batch_indices(cls, builder):
@@ -343,6 +347,36 @@ class BatchLoop(AbstractInstruction):
             yield frame[1]
         finally:
             cls._indices.pop()
+
+    @classmethod
+    def carried_tokens(cls, builder, transfer) -> list:
+        """The tokens a loop in `builder`'s body carries for `transfer`.
+
+        The iteration arguments while the body is being built, the loop's
+        results once it is closed -- whichever the loop has published when
+        asked.  Empty where no loop in this body carries the transfer, which
+        is the caller's cue to drain.
+        """
+        for owner, table in reversed(cls._carried):
+            if owner is builder:
+                return list(table.get(id(transfer), ()))
+        return []
+
+    @classmethod
+    def _push_carried(cls, builder) -> dict:
+        table: dict = {}
+        cls._carried.append((builder, table))
+        return table
+
+    @classmethod
+    def _pop_carried(cls) -> None:
+        cls._carried.pop()
+
+    def _carried_transfers(self) -> List[AbstractInstruction]:
+        """The wrapped shared transfers, in the order the tail issues them."""
+        return [i for i in self._region
+                if getattr(i, '_wrapped', False)
+                and getattr(i, '_peel', None) is not None]
 
     @classmethod
     def indices_in(cls, builder) -> Optional[dict]:
@@ -794,6 +828,20 @@ class BatchLoop(AbstractInstruction):
                 continue
             if cond is None:
                 cond = self._element_flag(writer, element(), name)
+            if (hasattr(instr, '_copy_predicate') and hasattr(writer, 'copy_async')
+                    and not isinstance(cond, str)):
+                # A shared transfer: its copies take the flag as a predicate
+                # rather than sit in a block.  A copy in a block is issued on
+                # one path only as far as `asyncmem` can tell, and the loop
+                # carrying its token would lose the steady state its waits are
+                # counted against.  The predicate is a real branch per copy,
+                # so the pointer is still not followed for a masked element.
+                instr._copy_predicate = cond
+                try:
+                    instr.gen_code(writer)
+                finally:
+                    instr._copy_predicate = None
+                continue
             guard = (writer.if_(cond) if hasattr(writer, 'if_')
                      and not isinstance(cond, str) else writer.If(cond))
             with guard:
@@ -931,35 +979,72 @@ class BatchLoop(AbstractInstruction):
                 # and the width is the induction value's own -- an override on
                 # the header widened the variable and left everything computed
                 # from it back at `int32_t`.
-                with writer.for_(self._start, self._num_elements(),
-                                 self._stride, hint=self._batch(0),
-                                 index_type=SIZE,
-                                 peel_index=self.prologue_index(),
-                                 uniform=Uniformity.MULT) as loop:
-                    self._loop_handle = loop
-                    # The induction *value*, not just its name.  Anything
-                    # inside that mentions `batchId0` has to say so as an
-                    # operand, or the IR sees a computation with no inputs and
-                    # hoists it out of the loop that defines the thing it
-                    # reads -- which is what happened the first time, silently
-                    # and only in the generated text.
-                    self._induction = loop.induction
-                    try:
-                        with BatchLoop.batch_indices(writer) as bound:
-                            bound[self._batch(0)] = loop.induction
-                            self._lookahead_bindings(writer, bound)
-                            # The first lookahead binding is what this loop
-                            # calls the next element, and `wrap_prefetch` needs
-                            # exactly that: it moves a transfer one iteration
-                            # earlier and has no way to know how the traversal
-                            # clamps.
-                            loop._next_index = self._first_lookahead
-                            self._emit_body(writer)
-                            self._advance_stage_counter(writer)
-                    finally:
-                        self._induction = None
-                for instr in self._wrap_epilogue:
-                    instr.gen_code(writer)
+                # Each wrapped shared transfer's tokens ride the loop: the
+                # peel's are the first iteration's arguments, the tail's are
+                # yielded as the next one's, and the wait at the consumer names
+                # them -- see `carried_tokens`.  A transfer whose peel issued
+                # nothing structured carries nothing, and its wait drains.
+                inits: list = []
+                types: list = []
+                spans: list = []
+                for transfer in self._carried_transfers():
+                    toks = transfer._peel.tokens_for(writer)
+                    if not toks:
+                        continue
+                    spans.append((transfer, len(inits), len(toks)))
+                    inits.extend(toks)
+                    types.extend(t.type for t in toks)
+                table = BatchLoop._push_carried(writer)
+                try:
+                    with writer.for_(self._start, self._num_elements(),
+                                     self._stride, hint=self._batch(0),
+                                     index_type=SIZE,
+                                     peel_index=self.prologue_index(),
+                                     uniform=Uniformity.MULT,
+                                     inits=tuple(inits),
+                                     types=tuple(types)) as loop:
+                        self._loop_handle = loop
+                        for transfer, at, n in spans:
+                            table[id(transfer)] = loop.iter_args[at:at + n]
+                        # The induction *value*, not just its name.  Anything
+                        # inside that mentions `batchId0` has to say so as an
+                        # operand, or the IR sees a computation with no inputs and
+                        # hoists it out of the loop that defines the thing it
+                        # reads -- which is what happened the first time, silently
+                        # and only in the generated text.
+                        self._induction = loop.induction
+                        try:
+                            with BatchLoop.batch_indices(writer) as bound:
+                                bound[self._batch(0)] = loop.induction
+                                self._lookahead_bindings(writer, bound)
+                                # The first lookahead binding is what this loop
+                                # calls the next element, and `wrap_prefetch` needs
+                                # exactly that: it moves a transfer one iteration
+                                # earlier and has no way to know how the traversal
+                                # clamps.
+                                loop._next_index = self._first_lookahead
+                                self._emit_body(writer)
+                                self._advance_stage_counter(writer)
+                                if spans:
+                                    yielded = []
+                                    for transfer, at, n in spans:
+                                        toks = transfer.tokens_for(writer)
+                                        if len(toks) != n:
+                                            raise InternalError(
+                                                f'{transfer} issued {len(toks)} '
+                                                f'copies in the loop and {n} in '
+                                                f'its peel; the tokens it carries '
+                                                f'cannot line up')
+                                        yielded.extend(toks)
+                                    loop.yield_(*yielded)
+                        finally:
+                            self._induction = None
+                    for transfer, at, n in spans:
+                        table[id(transfer)] = loop.results[at:at + n]
+                    for instr in self._wrap_epilogue:
+                        instr.gen_code(writer)
+                finally:
+                    BatchLoop._pop_carried()
                 return
             with writer.For(f'size_t {self._batch(0)} = {self._start}; '
                             f'{self._batch(0)} < {self._num_elements()}; '

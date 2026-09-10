@@ -579,11 +579,40 @@ def _sched_if(s: Stmt, state: _State, diag: List[str]) -> Stmt:
 
     merged = ends[0]
     if not all(e.same(merged) for e in ends[1:]):
-        merged = _State(merged.outstanding, known=False)
+        merged = _merge_by_suffix(ends)
     state.outstanding = merged.outstanding
     state.known = merged.known
 
     return replace(s, regions=tuple(regions))
+
+
+def _merge_by_suffix(ends: List[_State]) -> _State:
+    """The branches' states after an `if` that differ only in the past.
+
+    A branch that waited has retired what another, having skipped its wait,
+    still holds.  The groups a loop carries across its back edge are the case
+    that needs this: element k waits for them inside `if (allowed)`, and a
+    masked k does not.  Both paths then go on with the same younger entries and
+    differ only in *older* ones at the front.
+
+    Such a merge is as good as the shortest state for every later wait.  A wait
+    counts the entries issued after the one it names (`prior`) and retires
+    everything older than those, so an extra entry older than the named one is
+    retired by that wait on either path.  An entry that only the longer path
+    holds is not named by anything the shorter state knows, and a wait on it
+    is already turned into a full drain by `_sched_wait`.  AMD's unified count
+    counts only what comes after as well, so the same holds there.
+
+    Anything else -- different younger entries, or an unknown branch -- stays
+    unknown, as it did before.
+    """
+    if not all(e.known for e in ends):
+        return _State(ends[0].outstanding, known=False)
+    tail = min(ends, key=lambda e: len(e.outstanding)).outstanding
+    n = len(tail)
+    if any(e.outstanding[len(e.outstanding) - n:] != tail for e in ends):
+        return _State(ends[0].outstanding, known=False)
+    return _State(tail, known=True)
 
 
 # --------------------------------------------------------------------------- #

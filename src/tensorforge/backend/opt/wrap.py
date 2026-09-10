@@ -73,6 +73,7 @@ from tensorforge.backend.instructions.memory.load import (GlbToRegLoader,
                                                           LoadWait)
 from tensorforge.backend.instructions.ptr_manip import GetElementPtr
 from tensorforge.backend.symbol import Symbol
+from tensorforge.common.helper import Addressing
 
 from .abstract import AbstractTransformer, Context
 from .slots import SlotModel, Transfer
@@ -208,6 +209,25 @@ class WrapLoads(AbstractTransformer):
                       f'({kinds}); a wrapped buffer must hold one element for '
                       f'the whole iteration')
         at = body.index(load)
+        # The source, not only the buffer.  A store names the pointer it writes
+        # through among its `defs()`, and a store ahead of the transfer in its
+        # own iteration is a write the transfer has to see: `d += ...; out +=
+        # d * c` reads `d` back after writing it.  Moved to the previous
+        # iteration's tail, the transfer read element k + 1 before k + 1 wrote
+        # it -- `sliced_write_view`, `accumulate_then_read` and two more, all
+        # computing from the stale value.  A batch-invariant source is one
+        # address for every element, so there any store in the body counts.
+        src = load._src
+        batch_invariant = getattr(src.obj, 'addressing', None) is Addressing.NONE
+        region = body if batch_invariant else body[:at]
+        writer = next((i for i in region
+                       if i is not load and self._writes_source(i, src, producer)),
+                      None)
+        if writer is not None:
+            return self._reject(
+                name, f'{type(writer).__name__} writes the tensor the transfer '
+                      f'reads{" (batch-invariant)" if batch_invariant else " ahead of it"}, '
+                      f'so the transfer would read the element before the write')
         for instr in body[:at]:
             if self._blocks(load, dest, instr, shared, alloc):
                 return self._reject(
@@ -218,13 +238,28 @@ class WrapLoads(AbstractTransformer):
         return TailWrap(transfer=load, producer=producer, alloc=alloc)
 
     @staticmethod
+    def _writes_source(instr, src, producer) -> bool:
+        """Does `instr` write the memory `src` points into?
+
+        Through the same pointer, or through another binding of the same
+        tensor.  The binding itself -- the `GetElementPtr` that names `src`, or
+        any other -- computes an address and writes nothing.
+        """
+        if instr is producer or isinstance(instr, GetElementPtr):
+            return False
+        return any(d is src or (getattr(d, 'obj', None) is not None
+                                and d.obj is src.obj)
+                   for d in instr.defs())
+
+    @staticmethod
     def _blocks(load, dest, instr, shared: bool, alloc) -> bool:
         """May ``load``, retargeted to element ``k + 1``, not cross ``instr``?
 
         ``MoveLoads._conflicts`` with one difference: the moved transfer reads
         a pointer to the *next* element, bound right in front of it, so this
-        element's pointer binding is no dependence.  What is left is the
-        buffer -- anything reading or writing it -- and what ``MoveLoads``
+        element's pointer binding is no dependence -- the binding; a store
+        through it is, and `_writes_source` asks that separately.  What is
+        left here is the buffer -- anything reading or writing it -- and what ``MoveLoads``
         never takes a transfer across: an instruction that does not say what it
         touches, and, for a shared destination only, a barrier.  A barrier
         orders what other threads did to shared memory; a register is this
@@ -276,6 +311,10 @@ class WrapLoads(AbstractTransformer):
             transfer._ctor_kwargs['src'] = ahead
         ahead.add_user(transfer)
         transfer._wrapped = True
+        if shared:
+            # The loop carries this transfer's tokens, and the peel's are the
+            # first iteration's: `BatchLoop` needs to know which peel that is.
+            transfer._peel = peeled_load
         if plan.producer.dereferences_the_batch():
             # A pointer array: the transfer follows the pointer of the element
             # it fetches, and that pointer is promised only for an element the

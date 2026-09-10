@@ -85,6 +85,13 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
     self._tokens = []
     self._token_owner = None
     self._issued_structured = False
+    # The predicate the structured copies are issued under, where one is set
+    # from outside: `BatchLoop` puts a transfer out of a pointer array under
+    # the flag of the element it fetches.  A predicate and not a block around
+    # the transfer, because a copy in a block is conditionally issued as far
+    # as `asyncmem` can tell, and a loop that carries its token then has no
+    # steady state to count waits against.
+    self._copy_predicate = None
     #: did this transfer actually put something in flight?  `_use_cuda_memcpy`
     #: is a static choice; the reordering path ignores it and moves the data
     #: synchronously, so the flag alone cannot tell a wait what to do.
@@ -312,9 +319,11 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
                                          self._num_threads, writer)
         dst_buf = self._destination_buffer(writer)
         src_buf = self._src.pir_buffer(writer)
-        def write_load(lhs, rhs, _d=dst_buf, _s=src_buf, _n=increment):
+        def write_load(lhs, rhs, _d=dst_buf, _s=src_buf, _n=increment,
+                       _p=self._copy_predicate):
           self._tokens.append(writer.copy_async(
-              _d, _s, dst_index=(lhs,), src_index=(rhs,), elems=_n))
+              _d, _s, dst_index=(lhs,), src_index=(rhs,), elems=_n,
+              predicate=_p))
       elif structured:
         # No async engine, so the transfer is a load and a store -- which is
         # what it always was, spelled in a way every pass can read.
@@ -735,6 +744,17 @@ class LoadWait(MemoryInstruction, LoadInstruction):
         raise InternalError(
             'a transfer wrapped across the back edge needs a structured wait, '
             'and this writer has none')
+      from tensorforge.backend.instructions.batch_loop import BatchLoop
+      carried = BatchLoop.carried_tokens(writer, self._instr)
+      if carried:
+        # The loop carries this transfer's tokens: in the body they are the
+        # iteration arguments the previous iteration yielded -- the peel's on
+        # the first -- and after it the loop's results.  Naming them is what
+        # lets `asyncmem` count: each wait retires its own group and leaves
+        # the younger ones in flight, where a drain retired all of them, and
+        # `local_flux` waited for all five buffers before its first product.
+        writer.wait(carried[-1], *carried[:-1])
+        return
       writer.wait()
       return
     if not self._instr._issued_async:
