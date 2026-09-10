@@ -375,6 +375,8 @@ class MultilinearInstruction(ComputeInstruction):
 
         # (for broadcasting)
         force_unroll = True #self._context.get_vm().get_hw_descr().vendor == 'amd'
+        # A count here rolls the reduction -- see `_rollable` and the option.
+        k_roll = self._context.get_user_options().k_roll
 
         matrixK = 1
 
@@ -397,7 +399,12 @@ class MultilinearInstruction(ComputeInstruction):
                     # real `for` it would be a runtime comparison per step,
                     # which costs more than the loads it saves.
                     step *= self._k_width
-                loop = [Loop(f'k{i}', dimmin, dimmax, step, unroll=self._sparseK[i] or force_unroll)]
+                rolled = (i == len(self._ks) - 1
+                          and self._rollable(i, dimmin, dimmax, step, k_roll))
+                loop = [Loop(f'k{i}', dimmin, dimmax, step,
+                             unroll=(self._sparseK[i] or force_unroll)
+                             and not rolled,
+                             pragma=k_roll if rolled else True)]
                 if self._sparseK[i] or force_unroll or True:# and False:
                     loopstack += loop
                 else:
@@ -438,6 +445,15 @@ class MultilinearInstruction(ComputeInstruction):
             ftype = (ScalarType(self._idest.get_fptype()) if width == 1
                      else ScalarType(self._idest.get_fptype(), width))
             steps, kslot = self._k_group(varlist, loopmap)
+            # A vector body folds its last factor in as one `fma` op rather
+            # than a multiply and an add.  The compiler contracts the pair
+            # anyway, so the arithmetic is the same; what the op adds is a
+            # name the target can spell itself -- the paired FMA of sm_100
+            # is reached only through `__ffma2_rn`, and nvcc does not form it
+            # from two scalar ones.  The scalar body stays as it was.
+            fused = (ftype.length is not None
+                     and self._productOperation.irop() == 'mul'
+                     and self._sumOperation.irop() == 'add')
 
             # One vector load per operand whose contiguous axis is the
             # reduction, hoisted out of the group: `B[k,n] .. B[k+V-1,n]` are
@@ -445,7 +461,7 @@ class MultilinearInstruction(ComputeInstruction):
             # components of a single load instead of from `V` loads.
             packs = self._k_packs(writer, varlist, loopmap, kslot, len(steps))
 
-            prod = None
+            prods = []
             for c, kval in enumerate(steps):
                 terms = []
                 for i, op in enumerate(self._ops):
@@ -465,26 +481,41 @@ class MultilinearInstruction(ComputeInstruction):
                 if len(terms) == 0:
                     # also zero
                     return
+                if fused and len(terms) >= 2:
+                    prods.append(terms)
+                    continue
                 term = terms[0]
                 for i in range(1, len(terms)):
                     term = self._emit_binop(writer, ftype,
                                             self._productOperation,
                                             term, terms[i])
-                # Accumulated inside the group, so the destination is read and
-                # written once rather than once per reduction step.  Sound
-                # because the sum operation is associative over the reduction
-                # axis by construction -- it is the same operation the loop
-                # itself is folding with.
-                prod = term if prod is None else self._emit_binop(
-                    writer, ftype, self._sumOperation, prod, term)
-            if prod is None:
+                prods.append(term)
+            if not prods:
                 return
             ns = [varlist[loopmap[f'n{i}']] for i, _ in enumerate(self._ns)]
             value = self._vdest.load(writer, self._context, None, ns, False)
             if value is None:
                 assert False
-            total = self._emit_binop(writer, ftype, self._sumOperation,
-                                     value, prod)
+            # Folded into the destination one product at a time, and the
+            # destination is still read and written once per group.  Not
+            # `dest + (p0 + p1)`: without reassociation that is a multiply, a
+            # fused multiply-add and an add for two products, where
+            # `(dest + p0) + p1` contracts into two fused multiply-adds.  It
+            # is also the order `k_width == 1` sums in, so the width no longer
+            # changes the rounding.
+            total = value
+            for term in prods:
+                if isinstance(term, list):
+                    head = term[0]
+                    for factor in term[1:-1]:
+                        head = self._emit_binop(writer, ftype,
+                                                self._productOperation,
+                                                head, factor)
+                    total = writer.op('fma', ftype, head, term[-1], total,
+                                      hint='p')
+                    continue
+                total = self._emit_binop(writer, ftype, self._sumOperation,
+                                         total, term)
             self._vdest.store(writer, self._context, total, ns, False)
 
         write_loops(self._context, writer, loopstack, nonlead_writer)
@@ -504,12 +535,39 @@ class MultilinearInstruction(ComputeInstruction):
             return [None], None
         slot = f'k{len(self._ks) - 1}'
         base = varlist[loopmap[slot]]
-        if self._k_width == 1 or not isinstance(base, Immediate):
+        if self._k_width == 1:
             return [base], slot
+        if not isinstance(base, Immediate):
+            # A rolled reduction: the loop variable is the group's first step
+            # and the rest follow it.  No clipping is needed, since `_rollable`
+            # only rolls an extent that divides into whole groups.
+            return [add_offset(base, c) for c in range(self._k_width)], slot
         _, kmax = self._ks[-1]
         first = base._value
         return ([Immediate(first + c, base._type)
                  for c in range(min(self._k_width, kmax - first))], slot)
+
+    def _rollable(self, i, dimmin, dimmax, step, k_roll):
+        """May reduction loop `i` be a real loop instead of an unrolled one?
+
+        Only when asked (`Options.k_roll`), and only where a runtime value of
+        `k` is something every access it reaches can take.  A register image
+        cannot: its slots are named at compile time, and a runtime index puts
+        the whole array into local memory.  So every operand this loop indexes
+        has to live in memory.  A sparse reduction needs its pattern at
+        compile time, and a ragged extent a clipped last group, which only an
+        unrolled loop can count.
+        """
+        if not k_roll or self._sparseK[i]:
+            return False
+        if step <= 0 or (dimmax - dimmin) % step != 0 or dimmax - dimmin <= step:
+            return False
+        slot = f'k{i}'
+        memory = (SymbolType.Global, SymbolType.Batch, SymbolType.SharedMem)
+        for j, op in enumerate(self._ops):
+            if slot in self._opdim_to_nks[j] and op.symbol.stype not in memory:
+                return False
+        return True
 
     def _k_packs(self, writer, varlist, loopmap, kslot, steps):
         """One wide load per operand contiguous along the reduction axis.
@@ -1047,19 +1105,31 @@ class MultilinearInstruction(ComputeInstruction):
             return lo_i <= int(var.lead()) and hi_i > int(var.lead())
 
         def nonlead_writer(varlist):
+            from tensorforge.backend.symbol import lead_width_of
+            # The body's own width, read off the indices exactly as
+            # `_nonleading_dim` reads it.  The loads already take theirs from
+            # there and come back wide; typing the arithmetic with the
+            # instruction's scalar type instead made the sum a scalar, and the
+            # store wrote a vector into one register slot -- on CUDA an error,
+            # on HIP the same, since a GNU vector does not narrow either.
+            width = lead_width_of(
+                [varlist[loopmap[f'n{i}']] for i, _ in enumerate(self._ns)])
+            btype = (ftype if width == 1
+                     else ScalarType(self._idest.get_fptype(), width))
             needsLoad = all(_dim_covered(i, varlist[loopmap[f'n{i}']]) for i,_ in enumerate(self._ns))
             if needsLoad:
                 valvar = self._vdest.load(writer, self._context, None, [varlist[loopmap[f'n{i}']] for i,_ in enumerate(self._ns)], False)
             else:
-                valvar = writer.const(
+                valvar = self._splat(writer, btype, writer.const(
                     self._sumOperation.neutral(self._context.fp_type),
-                    ftype)
+                    ftype))
 
             if len(self._scalar) > 0:
-                valvar = self._emit_binop(writer, ftype, self._productOperation, valvar, scalar_var)
+                valvar = self._emit_binop(writer, btype, self._productOperation, valvar,
+                                          self._splat(writer, btype, scalar_var))
             if self._prev is not None:
                 oldvalue = self._prev.load(writer, self._context, None, [add_offset(varlist[loopmap[f'n{i}']], self._prev_offset[i]) if self._prev_offset else varlist[loopmap[f'n{i}']] for i,_ in enumerate(self._ns)], False)
-                valvar = self._emit_binop(writer, ftype, self._sumOperation, oldvalue, valvar)
+                valvar = self._emit_binop(writer, btype, self._sumOperation, oldvalue, valvar)
 
             self._dest.store(writer, self._context, valvar, [varlist[loopmap[f'n{i}']] for i,_ in enumerate(self._ns)], False)
 

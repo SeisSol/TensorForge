@@ -155,10 +155,10 @@ class Writer:
     return Block(self, 'if ({})'.format(expression))
 
   def For(self, argument, unroll=False):
-    if unroll:
-      return Block(self, '#pragma unroll\nfor ({})'.format(argument))
-    else:
-      return Block(self, 'for ({})'.format(argument))
+    # `unroll` is `True` for the bare pragma or a count for `#pragma unroll N`;
+    # see `pir.build._unroll_pragma`, which both writers share.
+    from tensorforge.backend.pir.build import _unroll_pragma
+    return Block(self, '{}for ({})'.format(_unroll_pragma(unroll), argument))
 
   def While(self, argument):
     return Block(self, 'while ({})'.format(argument))

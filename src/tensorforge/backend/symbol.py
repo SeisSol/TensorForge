@@ -1016,12 +1016,17 @@ class LeadLoop:
         self._peel(inner, realend * span + hi * self.width, tail)
 
 class Loop:
-  def __init__(self, name, start, end, step=1, unroll=False):
+  def __init__(self, name, start, end, step=1, unroll=False, pragma=True):
     self.start = start
     self.end = end
     self.step = step
     self.unroll = unroll
     self.var = name
+    #: For a real loop (`unroll=False`): the pragma it carries -- `True` for
+    #: the bare `#pragma unroll` every real loop had so far, or a count.  A
+    #: rolled reduction wants a count, since the bare pragma lets the compiler
+    #: unroll a loop with a known trip count all the way back.
+    self.pragma = pragma
 
   def write(self, context: Context, writer: Writer, inner):
     if self.unroll:
@@ -1034,7 +1039,7 @@ class Loop:
       # can reason about, and every loader and store that goes through
       # `write_loops` gets it at once.
       loop = writer.for_(self.start, self.end, self.step,
-                         unroll=True, hint=self.var)
+                         unroll=self.pragma, hint=self.var)
       with loop:
         inner([Variable(str(loop.induction), Datatype.I32, loop.induction)])
 

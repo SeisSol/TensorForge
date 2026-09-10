@@ -329,6 +329,11 @@ class HipLexic(CudaLexic):
       return None
     return f'__builtin_prefetch({address}, 0, 3);'
 
+  def vector_fma(self, a, b, c):
+    # GNU vectors: the infix form contracts, into packed FMAs where the
+    # target has them.  `hip.h` declares no `tensorforge::fma` to call.
+    return None
+
   def get_fptype(self, fptype, length=1, relaxed=False):
     kind = 'VectorRelaxedT' if relaxed else 'VectorT'
     return f'tensorforge::{kind}<{fptype}, {length}>'

@@ -254,6 +254,11 @@ class CudaLexic(Lexic):
     kind = 'VectorRelaxedT' if relaxed else 'VectorT'
     return f'tensorforge::{kind}<{fptype}, {length}>'
 
+  def vector_fma(self, a, b, c):
+    # `cuda.h`: pairwise `__ffma2_rn` where there is a paired FMA, the plain
+    # contracted expression everywhere else.
+    return f'tensorforge::fma({a}, {b}, {c})'
+
   def get_operation(self, op: Operation, fptype, value1, value2):
     fpsuffix = 'f' if fptype == Datatype.F32 else ''
     fpprefix = 'f' if fptype == Datatype.F32 else 'd'

@@ -846,7 +846,8 @@ class Generator:
     # Over the expansion: lane geometry follows from the operations, and a
     # descriptor that stands for several is not one of them.
     flat = [op for descr in self.descr_list for op in descr.operations()]
-    config = self._lanes or lane_config.deduce(flat, self._context)
+    config = (self._lanes or lane_config.requested(flat, self._context)
+              or lane_config.deduce(flat, self._context))
     self._num_threads = config.num_threads
     self._num_active_threads = config.num_active_threads
     self._lead_width = config.lead_width

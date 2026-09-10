@@ -185,6 +185,9 @@ def _py(expr: str) -> str:
     e = re.sub(r'\btensorforge::broadcast\s*<\s*(\d+)\s*,\s*(\d+)\s*,'
                r'\s*(\d+)\s*>\s*\(\s*(\w+)\s*\)',
                r'BROADCAST("\4", \1, \2, \3)', e)
+    # `tensorforge::fma(a, b, c)`, the vector FMA CUDA's lexic names so that
+    # sm_100 can pair it.  The same `a * b + c` the infix spelling computes.
+    e = re.sub(r'\btensorforge::fma\s*\(', 'FMA(', e)
     e = e.replace('&&', ' and ').replace('||', ' or ')
     e = re.sub(r'(?<![=!<>&|])!(?!=)', ' not ', e)
     # `*(SomeVecType*)&p[i]` -> `VLOAD(ADDR(p, i), N)`.  Done before the
@@ -290,6 +293,7 @@ class Interp:
         self.env['READLANE'] = self._readlane
         self.env['BROADCAST'] = self._broadcast
         self.env['VEC'] = lambda *xs: Vec(xs)
+        self.env['FMA'] = lambda a, b, c: a * b + c
         self.env['VLOAD'] = lambda n, p, i: Vec(p[i + k] for k in range(n))
         for fn in ('min', 'max', 'abs'):
             self.env[fn] = __builtins__[fn] if isinstance(__builtins__, dict) \

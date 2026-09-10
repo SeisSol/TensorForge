@@ -502,6 +502,29 @@ declare('merge_max_arity',
         parse=parse_optional_int,
         doc='Largest operand count a merged run may carry, or None for no cap.')
 
+declare('k_roll',
+        default=0,
+        env='TF_K_ROLL',
+        doc='Roll the reduction of a multilinear product into a real loop over '
+            'groups of `k_width` steps, with `#pragma unroll <k_roll>` on it.  '
+            '0 unrolls it completely in the generator, as always.  Only where '
+            'every operand the reduction indexes lives in memory (global, '
+            'batch or shared) -- a register image indexed at runtime would go '
+            'to local memory -- the reduction is dense, and its extent divides '
+            'into whole groups.  For kernels whose fully unrolled body no '
+            'longer fits the instruction cache.')
+
+declare('lanes_per_mult',
+        default=0,
+        env='TF_LANES',
+        doc='Lanes one multiplication is spread over, instead of the deduced '
+            'count.  0 keeps the deduction.  Only narrower counts are taken, '
+            'and only powers of two, so that a warp still holds whole '
+            'multiplications; the rows a lane covers grow to match, with the '
+            'last ones padded.  A search parameter and not a default: on sm_120 '
+            'eight lanes made `local_flux` 10 % faster and `chain_three` four '
+            'times slower, because it spilled -- see `lanes.narrower`.')
+
 declare('lead_vectorize',
         default=False,
         env='TF_LEAD_VEC',

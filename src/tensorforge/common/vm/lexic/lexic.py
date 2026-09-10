@@ -181,6 +181,16 @@ class Lexic(ABC):
   def get_operation(self, op: Operation, value1, value2):
     pass
 
+  def vector_fma(self, a, b, c):
+    """`a * b + c` over the target's vector type, spelled as a call, or
+    None where the infix form already says everything.
+
+    It does for scalars everywhere and for GNU vectors, which contract it.
+    A target whose vector type has no fused operation of its own -- CUDA's
+    structs, whose paired FMA needs an intrinsic -- names its function here.
+    """
+    return None
+
   def reduction(self, variable, optype, fptype, block, subblock=1):
     """An all-reduce of `variable` across `block` lanes, in groups of
     `subblock`.

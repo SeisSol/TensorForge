@@ -40,6 +40,21 @@ def access_of(symbol: Any, kind: Effect) -> Access:
     return Access(kind=kind, space=space, base=symbol)
 
 
+def _unroll_pragma(unroll) -> str:
+    """`#pragma unroll` for `True`, `#pragma unroll N` for a count, nothing else.
+
+    `True` is also an `int`, so it is asked first: a loop that says "unroll"
+    has always meant the bare pragma, and a count is the new case -- a rolled
+    loop that keeps a few iterations per trip, which is what the compiler
+    otherwise cannot be told once the bare pragma has fully unrolled it.
+    """
+    if unroll is True:
+        return '#pragma unroll\n'
+    if isinstance(unroll, int) and not isinstance(unroll, bool) and unroll > 0:
+        return f'#pragma unroll {unroll}\n'
+    return ''
+
+
 class _Scope:
     """One entry of the builder's block stack."""
 
@@ -1737,10 +1752,8 @@ class IRBuilder:
     def If(self, expression) -> '_RawBlock':
         return _RawBlock(self, f'if ({expression})')
 
-    def For(self, argument, unroll: bool = False) -> '_RawBlock':
-        if unroll:
-            return _RawBlock(self, f'#pragma unroll\nfor ({argument})')
-        return _RawBlock(self, f'for ({argument})')
+    def For(self, argument, unroll=False) -> '_RawBlock':
+        return _RawBlock(self, f'{_unroll_pragma(unroll)}for ({argument})')
 
     def While(self, argument) -> '_RawBlock':
         return _RawBlock(self, f'while ({argument})')
@@ -1941,7 +1954,10 @@ class _ForHandle:
                 b = self.builder
                 b._token_results[res.id] = b._token_results.get(y.id, ())
                 b._token_uniform[res.id] = b._token_uniform.get(y.id, True)
-        attrs = (('unroll', True),) if self._unroll else ()
+        # A count is kept as the count; anything else truthy as `True`.
+        unroll = (self._unroll if isinstance(self._unroll, int)
+                  and not isinstance(self._unroll, bool) else bool(self._unroll))
+        attrs = (('unroll', unroll),) if unroll else ()
         if self._extern is not None:
             attrs = attrs + (('extern', self._extern),)
         if self._next_index is not None:

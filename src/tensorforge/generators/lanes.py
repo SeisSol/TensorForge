@@ -116,6 +116,64 @@ def candidates(descr_list: List[OperationDescription],
     return [seen[k] for k in sorted(seen, reverse=True)]
 
 
+#: The narrowest lane count `narrower` offers.  Below it a lane holds so many
+#: rows that the register images of every corpus kernel measured spill.
+MIN_LANES = 8
+
+
+def narrower(descr_list: List[OperationDescription],
+             context: Context,
+             floor: int = MIN_LANES) -> List[LaneConfig]:
+    """The lane geometries below the deduced one, widest first.
+
+    Powers of two only, halving from the deduced count down to `floor`, with
+    the same row count and width: a narrower section covers the lead
+    dimension with more rows per lane and pads the last ones.  Not the
+    divisors of the row count -- 56 rows over 7 or 28 lanes would leave lanes
+    idle in every warp, while a power of two packs whole multiplications into
+    it; 56 over 8 lanes is 7 rows with no padding at all, and 63 over 8 is 8
+    rows with one row padded.
+
+    Candidates, not a choice.  Measured on sm_120 at the deduced count, 16 and
+    8 lanes, the narrower build ranged from 10 % faster (`local_flux` at 8,
+    no padding) to five times slower (`chain_five` at 16, spilling), and
+    among those that did not spill from -5 % to +9 % with nothing in padding
+    or rows per lane that predicted the sign; `peak_pressure` did not separate
+    them either.  So these are for a search that builds and times, which
+    `Options.lanes_per_mult` makes expressible.
+
+    None for a section with an elementwise descriptor: its iteration space is
+    the vector unit's, as in `deduce`.
+    """
+    if any(isinstance(d, ElementwiseDescr) for d in descr_list):
+        return []
+    base = deduce(descr_list, context)
+    out = []
+    n = base.num_threads // 2
+    while n >= floor:
+        out.append(LaneConfig(num_threads=n,
+                              num_active_threads=base.num_active_threads,
+                              lead_width=base.lead_width))
+        n //= 2
+    return out
+
+
+def requested(descr_list: List[OperationDescription],
+              context: Context) -> Optional[LaneConfig]:
+    """The geometry `Options.lanes_per_mult` asks for, or `None`.
+
+    `None` where it is unset, or where the count is not one of `narrower`'s:
+    a wider count than the deduction, or one that is not a power of two, is
+    not taken rather than forced, so that one setting can be passed to a whole
+    corpus and change only the sections it applies to.
+    """
+    want = context.get_user_options().lanes_per_mult
+    if not want:
+        return None
+    return next((c for c in narrower(descr_list, context, floor=1)
+                 if c.num_threads == want), None)
+
+
 def search(descr_factory, context: Context,
            options: Optional[List[LaneConfig]] = None):
     """Build the kernel at each candidate geometry and keep the tightest.

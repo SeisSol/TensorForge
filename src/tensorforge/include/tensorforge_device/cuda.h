@@ -64,11 +64,12 @@ inline constexpr unsigned FullWarpMask = 0xffffffffu;
 /// directions.  It is a member-wise copy of a trivially copyable POD of
 /// identical layout, so it costs nothing the attribute version did not.
 ///
-/// What is lost, and it is a real loss: elementwise arithmetic.  A GNU vector
-/// multiplies with `*`; this does not, and a path that wants that has to say
-/// so per component.  Nothing emits it today.  Lengths CUDA's own structs do
-/// not have are not a special case here --- any N works --- but a length the
-/// hardware has no wide access for simply compiles to N narrow ones.
+/// Elementwise arithmetic is not built in, as it is for a GNU vector, and is
+/// supplied below: the lead-vectorised multilinear body spells its products as
+/// `c + (a * b)` over these types, the same text it emits for HIP.  Lengths
+/// CUDA's own structs do not have are not a special case here --- any N works
+/// --- but a length the hardware has no wide access for simply compiles to N
+/// narrow ones.
 template <typename T, std::size_t N, std::size_t Align>
 struct alignas(Align) VectorStruct {
   T data[N];
@@ -99,6 +100,67 @@ using VectorT = typename VectorOf<T, N>::type;
 
 template <typename T, std::size_t N>
 using VectorRelaxedT = typename VectorOf<T, N>::relaxed;
+
+/// Componentwise, as a GNU vector computes: the result takes the left
+/// operand's alignment, and either side may be the relaxed twin.  Per
+/// component and inlined, so `c + (a * b)` reaches the compiler as N scalar
+/// multiplies feeding N scalar adds, which it contracts into N fused
+/// multiply-adds exactly as it does for the scalar body.
+#define TENSORFORGE_VECTOR_OP(OP)                                              \
+  template <typename T, std::size_t N, std::size_t A, std::size_t B>           \
+  __device__ __forceinline__ VectorStruct<T, N, A> operator OP(                \
+      const VectorStruct<T, N, A> &x, const VectorStruct<T, N, B> &y) {        \
+    VectorStruct<T, N, A> out;                                                 \
+    _Pragma("unroll") for (std::size_t i = 0; i < N; ++i) {                    \
+      out.data[i] = x.data[i] OP y.data[i];                                    \
+    }                                                                          \
+    return out;                                                                \
+  }
+TENSORFORGE_VECTOR_OP(+)
+TENSORFORGE_VECTOR_OP(-)
+TENSORFORGE_VECTOR_OP(*)
+TENSORFORGE_VECTOR_OP(/)
+#undef TENSORFORGE_VECTOR_OP
+
+/// `x * y + z` in one rounding per component: what an `fma` op on a vector
+/// spells to.  Written out rather than left to contraction for one reason,
+/// the paired FMA of sm_100 and sm_103 (`FFMA2`): nvcc reaches it through
+/// `__ffma2_rn` and does not pair two scalar FMAs by itself, so a vector body
+/// that wants it has to say so here.  The pairs are adjacent components, which
+/// is what a lead-vectorised accumulator holds.
+///
+/// sm_120 declares `__ffma2_rn` as well, but has no paired unit: it lowers to
+/// two FFMA.  Not left to do so, because packing the pairs still changed the
+/// code around them -- the same FFMA count, but 8 and 16 more instructions
+/// (moves, NOP padding, address arithmetic) in the two kernels compared.  So
+/// the pairs are formed on 10.x and 11.x only, and everywhere else the plain
+/// expression contracts into N scalar FMAs.
+template <typename T, std::size_t N, std::size_t A, std::size_t B,
+          std::size_t C>
+__device__ __forceinline__ VectorStruct<T, N, C>
+fma(const VectorStruct<T, N, A> &x, const VectorStruct<T, N, B> &y,
+    const VectorStruct<T, N, C> &z) {
+  VectorStruct<T, N, C> out;
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 1000 && __CUDA_ARCH__ < 1200
+  if constexpr (std::is_same<T, float>::value && N % 2 == 0) {
+#pragma unroll
+    for (std::size_t i = 0; i < N; i += 2) {
+      const float2 r = __ffma2_rn(make_float2(x.data[i], x.data[i + 1]),
+                                  make_float2(y.data[i], y.data[i + 1]),
+                                  make_float2(z.data[i], z.data[i + 1]));
+      out.data[i] = r.x;
+      out.data[i + 1] = r.y;
+    }
+  } else
+#endif
+  {
+#pragma unroll
+    for (std::size_t i = 0; i < N; ++i) {
+      out.data[i] = x.data[i] * y.data[i] + z.data[i];
+    }
+  }
+  return out;
+}
 
 } // namespace tensorforge
 

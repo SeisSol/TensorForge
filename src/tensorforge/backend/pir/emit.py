@@ -231,6 +231,21 @@ class Emitter:
         base = getattr(v.type, 'base', None)
         return lex.get_operation(_LEXIC_BINOP[op], base, args[0], args[1])
 
+    def _fma(self, v: Value, args: Sequence[str]) -> str:
+        """`a * b + c`, unless the lexic spells a vector one itself.
+
+        The infix form is exact for scalars, and for GNU vectors, which
+        contract it.  CUDA's vector structs contract it too, through their
+        componentwise operators -- but into scalar FMAs, and the paired FMA of
+        sm_100 is only reached through a call the lexic names.
+        """
+        lex = self._lexic()
+        if lex is not None and getattr(v.type, 'length', None) is not None:
+            spelled = lex.vector_fma(*args)
+            if spelled is not None:
+                return spelled
+        return f'{args[0]} * {args[1]} + {args[2]}'
+
     def _sync(self, participants=None, threads=None, wave=None) -> str:
         """The instruction for what the barrier says it covers.
 
@@ -854,7 +869,7 @@ class Emitter:
             if op in _INFIX and len(args) == 2:
                 expr = f'{args[0]} {_INFIX[op]} {args[1]}'
             elif op == 'fma' and len(args) == 3:
-                expr = f'{args[0]} * {args[1]} + {args[2]}'
+                expr = self._fma(v, args)
             elif op == 'select' and len(args) == 3:
                 expr = f'{args[0]} ? {args[1]} : {args[2]}'
             elif op == 'neg' and len(args) == 1:
@@ -915,7 +930,7 @@ class Emitter:
         # unroll goes through Writer.For, which folds the pragma into the block
         # head; a separate statement would flush the enclosing speculation and
         # defeat empty-block elision.
-        with w.For(head, unroll=bool(s.attr('unroll'))):
+        with w.For(head, unroll=s.attr('unroll') or False):
             self._emit_body(s.regions[0].body, tuple(targets))
 
     def _emit_while(self, s: Stmt) -> None:

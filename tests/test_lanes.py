@@ -435,3 +435,43 @@ def test_the_exact_bound_outranks_the_model_where_it_speaks():
 
     assert config.num_threads == 32, (
         "the modelled figure won against a measured block count")
+
+
+# ----------------------------------------------------------------------
+# narrower lane counts, and asking for one
+# ----------------------------------------------------------------------
+
+def test_narrower_halves_down_to_eight_and_keeps_the_rows():
+    """Powers of two below the deduction; the row count travels unchanged."""
+    ctx = _ctx("sm_86", "cuda")
+    options = lanes.narrower(_gemm(56, 9, 56), ctx)
+    assert [c.num_threads for c in options] == [16, 8]
+    assert {c.num_active_threads for c in options} == {56}
+
+
+def test_a_section_already_at_the_floor_has_nothing_narrower():
+    ctx = _ctx("sm_86", "cuda")
+    assert lanes.narrower(_gemm(8, 8, 8), ctx) == []
+
+
+def _block(gen) -> str:
+    return re.search(r"block \(([^)]*)\)", gen.get_launcher()).group(1)
+
+
+def test_lanes_per_mult_builds_the_narrower_section(monkeypatch):
+    """Eight lanes over 56 rows: seven rows a lane, 16 multiplications a block."""
+    monkeypatch.setenv("TF_LANES", "8")
+    ctx = _ctx("sm_86", "cuda")
+    gen = Generator(_gemm(56, 9, 56), ctx)
+    gen.generate()
+    assert _block(gen).startswith("8,")
+
+
+def test_lanes_per_mult_leaves_a_count_it_cannot_take(monkeypatch):
+    """Wider than the deduction, or not a power of two: the deduction stands."""
+    for want in ("64", "12"):
+        monkeypatch.setenv("TF_LANES", want)
+        ctx = _ctx("sm_86", "cuda")
+        gen = Generator(_gemm(56, 9, 56), ctx)
+        gen.generate()
+        assert _block(gen).startswith("32,"), want
