@@ -191,8 +191,14 @@ def variant_body(loop, prefix: str = 'variant'
     it here keeps the substitution -- which is `antiunify`'s -- out of the
     backend, and keeps the backend's question to where a name resolves.
     """
-    variants = [
-        Variant(_stand_in(column[0], f'{prefix}{index}'), tuple(column))
-        for index, column in enumerate(zip(*loop.general.bindings))]
+    variants = []
+    for index, column in enumerate(zip(*loop.general.bindings)):
+        stand_in = _stand_in(column[0], f'{prefix}{index}')
+        # What the stand-in resolves to, iteration by iteration.  Not needed
+        # to build the body -- that is the point of a stand-in -- but needed
+        # by a decision about the members' storage that the body's reads have
+        # to follow (`MultilinearInstruction._offer_simt_order`).
+        stand_in.tensor.variant_members = tuple(view.tensor for view in column)
+        variants.append(Variant(stand_in, tuple(column)))
     body = substitute(loop.general, [v.stand_in for v in variants])
     return body, variants

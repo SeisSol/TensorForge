@@ -1195,6 +1195,129 @@ class Symbol:
     uid = self._builder_uid(builder)
     return value if uid is not None and owner == uid else None
 
+  def _interleaved_load(self, writer, context: Context, index, nontemp):
+    """One row of an operand stored in the SIMT interleave, or `None`.
+
+    `Tensor.simt_interleave` says where lane `l`'s rows sit: slot `s` of
+    column `k` at `k*ld + (s//group)*group*T + group*l + s%group`.  The slot's
+    whole group is read as one aligned vector and the row taken out of it,
+    so the `group` slots of one lane name the same load and `load_cse` keeps
+    one.  Aligned by construction: the host packs the buffer, the group is
+    16 bytes and every term is a multiple of it.
+
+    `None` for an index this cannot address -- a runtime slot, a slicing
+    shift, a lead index of another width or distribution -- and the caller
+    then reads the logical address, which is wrong for a packed buffer; the
+    offer is made only where these do not arise, and this refuses loudly
+    rather than guessing if one does.
+    """
+    threads, group, ld = self.obj.simt_interleave
+    if len(index) != 2:
+      raise InternalError(f'{self.name}: an interleaved operand is a matrix')
+    lead = unwrap_lead(index[0])
+    if lead is None:
+      raise InternalError(f'{self.name}: interleaved rows need a lead index')
+    li, shift = lead
+    slot = li.nonlead() if li._value is None else li._value
+    if isinstance(slot, Immediate):
+      slot = slot._value
+    if (shift or li.width != 1 or li._block != threads
+            or not isinstance(slot, (int, np.integer))):
+      raise InternalError(
+          f'{self.name}: interleaved rows at {li!r} with shift {shift}; the '
+          f'packing assumes whole slots of a width-1 lead over {threads} lanes')
+    slot = int(slot)
+    k = index[1]
+    if isinstance(k, str):
+      raise InternalError(f'{self.name}: interleaved column named as text')
+    k = k if isinstance(k, (int, np.integer)) else k.build(writer, context)
+    def arith(name, a, b):
+      if isinstance(a, (int, np.integer)) and isinstance(b, (int, np.integer)):
+        return int({'add': a + b, 'mul': a * b}[name])
+      return writer.op(name, INDEX, a, b, hint='a')
+    lane = writer.lane_offset(threads, li._stride, hint='lane')
+    addr = arith('add', arith('mul', k, ld),
+                 arith('add', arith('mul', lane, group),
+                       (slot // group) * group * threads))
+    from tensorforge.backend.pir.core import ScalarType
+    vec = writer.load(self, addr,
+                      type_=ScalarType(self.get_fptype(), group), hint='data',
+                      align=group * self.get_fptype().size(),
+                      layout=layout_of(index, self.num_threads),
+                      nontemporal=nontemp)
+    return writer.extract(vec, slot % group, hint='p')
+
+  def _wide_claim(self, index, width: int, part=0):
+    """The alignment a `width`-wide access at `index` can prove, or `RELAXED`.
+
+    The address is `sum_d (i_d - lower_d) * stride_d`, plus `part`, and the
+    access is aligned where the base is and every term is a multiple of
+    `width` -- all of which is known here as integers, which is why no
+    attribute in the IR has to carry it: the claim travels on the load, and
+    `verify` checks it against the width.
+
+    * the lead term: `LeadIndex.build` gives element `(lane + nonlead *
+      block) * w + shift`, so at the access's own width the first part is a
+      multiple and only `(shift - lower) * stride` is left to check;
+    * a plain index: any value, provided its stride is a multiple -- or a
+      constant, whose term is simply computed;
+    * a `VecIndex`, the reduction's contiguous run: only with a constant base.
+
+    Global, batch and shared memory only.  A register array is private memory
+    with nothing but element alignment (`_linear_claim` says why), and a base
+    the frontend promised nothing about is `elem` from `linear_align_bytes`,
+    which fails the first test.  Anything unproven stays `RELAXED`: legal at
+    any base, and split by the compiler where it cannot see the rest.
+    """
+    if self.stype not in (SymbolType.Global, SymbolType.Batch,
+                          SymbolType.SharedMem):
+      return RELAXED
+    need = width * self.get_fptype().size()
+    if self.linear_align_bytes() < need:
+      return RELAXED
+    if not isinstance(part, (int, np.integer)) or part % width:
+      return RELAXED
+    view = self.data_view
+    if view is None:
+      return RELAXED
+    strides, lowers = view.get_dim_strides(), view.get_dim_offsets()
+    if len(index) != len(strides):
+      return RELAXED
+
+    def constant(x):
+      if isinstance(x, (int, np.integer)):
+        return int(x)
+      if isinstance(x, Immediate):
+        return int(x._value)
+      if isinstance(x, VarOffset):
+        inner = constant(x.variable)
+        return None if inner is None else inner + x.offset
+      return None
+
+    for idx, stride, lower in zip(index, strides, lowers):
+      lead = unwrap_lead(idx)
+      if lead is not None:
+        li, shift = lead
+        if li.width == width:
+          if ((shift - lower) * stride) % width:
+            return RELAXED
+          continue
+      inner, shift = idx, 0
+      while isinstance(inner, VarOffset):
+        shift += inner.offset
+        inner = inner.variable
+      if isinstance(inner, VecIndex):
+        base = constant(inner.value)
+        if base is None or ((base + shift - lower) * stride) % width:
+          return RELAXED
+        continue
+      if stride % width == 0:
+        continue
+      value = constant(idx)
+      if value is None or ((value - lower) * stride) % width:
+        return RELAXED
+    return need
+
   def _linear_claim(self, index, vec: int):
     """The alignment this linearized access can prove, in bytes.
 
@@ -2159,6 +2282,13 @@ class Symbol:
         # second opinion about questions this function already answers.  What
         # the caller decides is *which* part; what that means for the access
         # is one addend.
+        if (bc_lane is None and w == 1 and not part and parts == 1
+                and getattr(self.obj, 'simt_interleave', None) is not None
+                and self.stype in (SymbolType.Global, SymbolType.Batch)):
+          interleaved = self._interleaved_load(writer, context, read_index,
+                                               nontemp)
+          if interleaved is not None:
+            return interleaved
         addr = self.address_value(writer, context, read_index)
         if part:
             addr = writer.op('add', INDEX, addr, part, hint='a')
@@ -2208,7 +2338,8 @@ class Symbol:
                          for i in range(parts))
         value = writer.load(self, addr,
                             type_=ltype, hint='data',
-                            align=None if w == 1 else RELAXED,
+                            align=(None if w == 1
+                                   else self._wide_claim(read_index, w, part)),
                             layout=layout_of(read_index, self.num_threads),
                             nontemporal=nontemp)
         if bc_lane is None or not broadcast:

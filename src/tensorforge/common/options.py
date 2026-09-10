@@ -425,7 +425,12 @@ declare('prepare_operands',
             'Off by default.  On `local_flux` at batch 8192 the fragment order '
             'alone was worth 16%, and 27% with the TF32 split on top -- but '
             'only `Addressing.NONE` operands are eligible at all, so a case '
-            'with none of them pays the question with nothing.')
+            'with none of them pays the question with nothing.\n'
+            'On the FMA path it stores such an operand in the SIMT interleave '
+            '(`Tensor.simt_interleave`): each lane\'s rows side by side in '
+            '16-byte groups, read with one aligned vector load.  Offered where '
+            'the rows fill the lanes -- `local_flux` at 8 lanes, where it cut '
+            'the global loads of the rolled merged kernel and made it 4 % faster.')
 
 declare('launch_control',
         default=False,

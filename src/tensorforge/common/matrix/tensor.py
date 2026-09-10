@@ -65,6 +65,14 @@ class Tensor:
         #: which is what the emitter's own padding registers did before the
         #: order moved into memory.
         self.storage_order = None
+        #: `(threads, group, ld)` when `storage_order` is the SIMT interleave
+        #: `multilinear._offer_simt_order` states: per column `k`, the `group`
+        #: slots `g*group .. g*group+group-1` of lane `l` -- rows
+        #: `l + threads*slot` -- sit together at `k*ld + g*group*threads +
+        #: group*l`, so a lane reads them in one aligned vector.  The order
+        #: says which cell each slot holds, for the host; this says how the
+        #: kernel addresses it, which a bare permutation cannot.
+        self.simt_interleave = None
         self.direction: Union[DataFlowDirection, None] = None
         self.data = data
         self.spp = spp
@@ -333,6 +341,7 @@ class Tensor:
         # this tensor's convention
         twin.storage_parts = self.storage_parts
         twin.storage_order = self.storage_order
+        twin.simt_interleave = self.simt_interleave
         return twin
 
     def get_actual_shape(self):

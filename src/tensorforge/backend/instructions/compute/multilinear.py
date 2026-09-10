@@ -362,6 +362,7 @@ class MultilinearInstruction(ComputeInstruction):
         self._apply_linear(writer)
 
     def _nonleading_dim(self, writer: Writer):
+        self._offer_simt_order()
         loopstack = []
 
         # TODO: preload values where necessary (i.e. no N in there)
@@ -673,6 +674,90 @@ class MultilinearInstruction(ComputeInstruction):
         for mi, mx in self._ns[1:]:
             n *= mx - mi
         return n
+
+    def _offer_simt_order(self):
+        """Let a batch-constant `A` be stored so a lane reads its rows in vectors.
+
+        The generic nest distributes the lead dimension cyclically: lane `l`
+        holds rows `l, l + T, l + 2T, ...`, which are `T` elements apart in a
+        column-major `A` and so arrive one scalar load each.  Stored instead
+        with each lane's rows side by side, in groups of one 16-byte vector,
+        a lane reads `group` rows with one aligned load, and the lanes of a
+        group still read one contiguous run between them.  The multiply and
+        every other operand keep the cyclic layout; only where `A` sits in
+        memory changes, and the host packs it from `storage_map`.
+
+        The conditions of `_offer_order`, for the same reasons -- the caller
+        asked, the operand is `Addressing.NONE`, dense and read by nothing
+        else -- plus what the address needs: the row index is the lead
+        dimension of this nest at width 1, the bounding box is the whole
+        tensor, and the rows fill the lanes, so no guard splits a group's
+        loads into separate scopes.  A stand-in of a merged run is not a
+        buffer: what is stored are its members, one per iteration, and the one
+        body reads whichever the counter selects -- so every member is stored
+        alike, or none is, and the stand-in carries the addressing.
+        """
+        if not self._context.get_user_options().prepare_operands:
+            return
+        if _explicit_simd(self._context) or self._lead_width != 1:
+            return
+        if not self._ops or self._theta:
+            return
+        sym = self._ops[0].symbol
+        a_obj = getattr(sym, 'obj', None)
+        if not isinstance(a_obj, Tensor):
+            return
+        variant = getattr(a_obj, 'is_variant', False)
+        members = (tuple(getattr(a_obj, 'variant_members', ())) if variant
+                   else (a_obj,))
+        if (not members or a_obj.addressing is not Addressing.NONE
+                or not a_obj.is_dense()):
+            return
+        shape = tuple(int(x) for x in a_obj.get_actual_shape())
+        if len(shape) != 2 or self._opdim_to_nks[0] != ['n0', 'k0']:
+            return
+        if 0 not in self._lead_dims:
+            return
+        bbox = self._ops[0].bbox
+        if (list(bbox.lower()) != [0, 0]
+                or tuple(bbox.upper()) != shape
+                or list(a_obj.get_bbox().lower()) != [0, 0]):
+            return
+        if any(user is not self for user in sym.get_user_list()):
+            return
+        threads = self._num_threads
+        rows, cols = shape
+        group = 16 // a_obj.datatype.size()
+        if group < 2 or threads < 1 or rows % threads:
+            return
+        slots = rows // threads
+        groups = -(-slots // group)
+        ld = groups * group * threads
+        order = []
+        for k in range(cols):
+            for g in range(groups):
+                for lane in range(threads):
+                    for c in range(group):
+                        slot = g * group + c
+                        order.append(lane + threads * slot + rows * k
+                                     if slot < slots else -1)
+        # Idempotent, and the same for every member: an order already there
+        # is accepted only if it is this one -- a peeled first iteration reads
+        # a member directly and may have stored it so already -- and anything
+        # else (a fragment order, another geometry) refuses the whole run.
+        for member in members:
+            if (member.addressing is not Addressing.NONE
+                    or not member.is_dense()
+                    or tuple(int(x) for x in member.get_actual_shape()) != shape
+                    or list(member.get_bbox().lower()) != [0, 0]
+                    or (member.storage_order is not None
+                        and tuple(member.storage_order) != tuple(order))):
+                return
+        for member in members:
+            member.storage_order = order
+            member.simt_interleave = (threads, group, ld)
+        if variant:
+            a_obj.simt_interleave = (threads, group, ld)
 
     def _offer_order(self, module, a_obj, lead, depth):
         """Let the target store `A` in the order it will read it.
