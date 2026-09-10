@@ -77,6 +77,11 @@ class BatchLoop(AbstractInstruction):
         self._stage_depth: Optional[int] = None
         # ids of leading region instructions emitted outside the flag guard
         self._unguarded: set = set()
+        # Emitted inside the loop's own body, around the `for`: the peeled
+        # transfers of `WrapLoads` ahead of it and their drains after it.  See
+        # `add_wrap_prologue`.
+        self._wrap_prologue: List[AbstractInstruction] = []
+        self._wrap_epilogue: List[AbstractInstruction] = []
         # `LAUNCHCTRL` only: how many cancel requests are kept in flight.  One
         # is enough to hide the queue's own latency behind the body, because
         # the request for the next element is posted before the current one is
@@ -235,10 +240,37 @@ class BatchLoop(AbstractInstruction):
     # because it does not survive the iteration -- only the region's reads of
     # symbols defined outside are uses of the loop.
 
+    def _emitted(self) -> List[AbstractInstruction]:
+        """Everything this instruction emits, in the order it emits it.
+
+        The region, and around it what `WrapLoads` handed over to be emitted
+        in the loop's own body: the peels ahead of the `for`, the drains after
+        it.  Data flow is read off this and not off the region alone, because
+        the peel is what defines a wrapped buffer before the region reads it.
+        """
+        return self._wrap_prologue + self._region + self._wrap_epilogue
+
+    def entry_defs(self) -> Tuple:
+        """What is defined on the way into the region: the peeled transfers.
+
+        A wrapped buffer is read at the head of the body and written at its
+        tail, so `entering` calls it carried -- initialised ahead of the loop,
+        updated across the back edge.  The initialisation is emitted by this
+        instruction, not by one before it, so a check that walks the region
+        with only the stream's definitions in hand has to be told.
+        """
+        out, seen = [], set()
+        for instr in self._wrap_prologue:
+            for sym in instr.defs():
+                if id(sym) not in seen:
+                    seen.add(id(sym))
+                    out.append(sym)
+        return tuple(out)
+
     def uses(self) -> Tuple:
         defined = set()
         out, seen = [], set()
-        for instr in self._region:
+        for instr in self._emitted():
             for sym in instr.uses():
                 if id(sym) not in defined and id(sym) not in seen:
                     seen.add(id(sym))
@@ -249,7 +281,7 @@ class BatchLoop(AbstractInstruction):
 
     def defs(self) -> Tuple:
         out, seen = [], set()
-        for instr in self._region:
+        for instr in self._emitted():
             for sym in instr.defs():
                 if id(sym) not in seen:
                     seen.add(id(sym))
@@ -258,7 +290,7 @@ class BatchLoop(AbstractInstruction):
 
     def accesses(self) -> Tuple:
         out = []
-        for instr in self._region:
+        for instr in self._emitted():
             out.extend(instr.accesses())
         return tuple(out)
 
@@ -268,7 +300,7 @@ class BatchLoop(AbstractInstruction):
         return max((s for s in inner if s is not None), default=None)
 
     def temp_shmem(self) -> int:
-        return max((i.temp_shmem() for i in self._region), default=0)
+        return max((i.temp_shmem() for i in self._emitted()), default=0)
 
     # -- emission -------------------------------------------------------- #
 
@@ -402,25 +434,90 @@ class BatchLoop(AbstractInstruction):
         Neither is specific to rotation: the address-advance half has the same
         hole.  The marked instructions must form a prefix of the region,
         because the guard is one contiguous block; the pass moves them there.
+        `mark_unguarded_tail` is the other shape the guard can leave, a
+        suffix, for what is issued once the body is done with it.
+
+        Adds to what is marked rather than replacing it, so a head and a tail
+        marked by different passes both survive.
         """
-        self._unguarded = {id(i) for i in instrs}
+        self._unguarded = set(self._unguarded) | {id(i) for i in instrs}
+
+    def mark_unguarded_tail(self, instrs) -> None:
+        """Emit these region instructions *after* the flag guard, unguarded.
+
+        The other half of what `mark_unguarded` says it cannot do.  A transfer
+        `WrapLoads` moves across the back edge is issued for element k + 1 once
+        iteration k has finished with its buffer, which is the end of the body
+        and not its beginning -- so it can only leave the guard as a suffix.
+        The instructions must end the region, barriers aside: see
+        `_split_guard`.
+        """
+        self._unguarded = set(self._unguarded) | {id(i) for i in instrs}
+
+    def add_wrap_prologue(self, instrs) -> None:
+        """Emit these ahead of the loop, but inside the body that holds it.
+
+        For the peel of a shared transfer `WrapLoads` moved across the back
+        edge.  The top-level stream is the obvious place for a peel, and the
+        register path puts its own there -- but a shared transfer is only a
+        `copy.async` where its window and pointer are values of the body it is
+        emitted in, and the window is declared by `_declare_windows_early`,
+        in this body, just before the `for`.  A peel ahead of the loop sits in
+        a body of its own, names a window that body never bound, and renders
+        as text through a pipeline object nothing declares.
+
+        Not part of the region, so no analysis walks it: the buffer is live
+        into the loop through the wait at its head anyway, and `ShrMemOpt`
+        reaches the peel through the buffer's user list.
+        """
+        self._wrap_prologue.extend(instrs)
+
+    def add_wrap_epilogue(self, instrs) -> None:
+        """Emit these after the loop, still inside its body.
+
+        The drain for a wrapped transfer: the last iteration prefetches a
+        clamped element nobody reads, and that copy is in flight into shared
+        memory the next section may reuse.  Inside the body for the same
+        reason as the prologue -- `asyncmem` retires what it can see issued.
+        """
+        self._wrap_epilogue.extend(instrs)
 
     def _split_guard(self):
-        """``(unguarded prefix, guarded remainder)``."""
+        """``(unguarded prefix, guarded middle, unguarded suffix)``.
+
+        The suffix is a trailing run of marked instructions, and barriers may
+        sit inside and after it.  Two land there without being marked: the one
+        `SyncThreadsOpt` puts in front of a wrapped shared transfer, and the
+        one the generator appends to every persistent loop after optimisation
+        -- which would otherwise break the run it is appended to.  A barrier
+        outside the guard is reached by every lane of the multiplication, a
+        masked element's included, so moving one out is never the unsafe
+        direction.  The run is trimmed to start at a marked instruction, so a
+        body with nothing marked at its end keeps its closing barrier inside
+        the guard, as before.
+        """
         unguarded = set(self._unguarded) | self._address_prefix()
         if not unguarded:
-            return [], list(self._region)
+            return [], list(self._region), []
         self._unguarded = unguarded
+        region = self._region
         cut = 0
-        while cut < len(self._region) and id(self._region[cut]) in unguarded:
+        while cut < len(region) and id(region[cut]) in unguarded:
             cut += 1
-        stray = [i for i in self._region[cut:] if id(i) in unguarded]
+        start = len(region)
+        while start > cut and (id(region[start - 1]) in unguarded
+                               or region[start - 1].barrier_scope() is not None):
+            start -= 1
+        while start < len(region) and id(region[start]) not in unguarded:
+            start += 1
+        stray = [i for i in region[cut:start] if id(i) in unguarded]
         if stray:
             raise InternalError(
-                f'{len(stray)} instruction(s) marked unguarded do not form a '
-                f'prefix of the region, first is {type(stray[0]).__name__}; '
-                f'the flag guard is one block and cannot be reopened')
-        return self._region[:cut], self._region[cut:]
+                f'{len(stray)} instruction(s) marked unguarded form neither a '
+                f'prefix nor a suffix of the region, first is '
+                f'{type(stray[0]).__name__}; the flag guard is one block and '
+                f'cannot be reopened')
+        return region[:cut], region[cut:start], region[start:]
 
     def _declare_windows_early(self, writer, guarded) -> None:
         """Declare the shared windows ahead of the flag guard.
@@ -643,7 +740,7 @@ class BatchLoop(AbstractInstruction):
             writer(f'{name} = ({name} + 1) % {d};')
 
     def _emit_body(self, writer) -> None:
-        head, guarded = self._split_guard()
+        head, guarded, tail = self._split_guard()
         for instr in head:
             instr.gen_code(writer)
         if self._flags is FlagMode.ABSENT:
@@ -652,6 +749,8 @@ class BatchLoop(AbstractInstruction):
             # element, and running it first keeps the order the pipelining
             # pass arranged whether or not a guard follows it.
             self._emit_guarded(writer, guarded)
+            for instr in tail:
+                instr.gen_code(writer)
             return
         cond = self._flag_guard(writer)
         # A real `Op.IF` where the condition is a value.  A raw block would
@@ -662,6 +761,8 @@ class BatchLoop(AbstractInstruction):
                  and not isinstance(cond, str) else writer.If(cond))
         with guard:
             self._emit_guarded(writer, guarded)
+        for instr in tail:
+            instr.gen_code(writer)
 
     def _emit_guarded(self, writer, guarded) -> None:
         """The part of the region that a mask, if there is one, may skip."""
@@ -751,6 +852,8 @@ class BatchLoop(AbstractInstruction):
             # value whose `extern` binding happens later and the result renders
             # but does not compile.
             self._declare_windows_early(writer, list(self._region))
+            for instr in self._wrap_prologue:
+                instr.gen_code(writer)
             if hasattr(writer, 'for_'):
                 # `extern` and `ctype` because the name and the type are the
                 # macro layer's: `batchId0` is spelled out by the lookahead
@@ -791,6 +894,8 @@ class BatchLoop(AbstractInstruction):
                             self._advance_stage_counter(writer)
                     finally:
                         self._induction = None
+                for instr in self._wrap_epilogue:
+                    instr.gen_code(writer)
                 return
             with writer.For(f'size_t {self._batch(0)} = {self._start}; '
                             f'{self._batch(0)} < {self._num_elements()}; '
@@ -798,6 +903,8 @@ class BatchLoop(AbstractInstruction):
                 self._lookahead_bindings(writer)
                 self._emit_body(writer)
                 self._advance_stage_counter(writer)
+            for instr in self._wrap_epilogue:
+                instr.gen_code(writer)
         elif self._mode is LoopMode.LAUNCHCTRL:
             self._declare_stage_counter(writer)
             self._declare_windows_early(writer, list(self._region))

@@ -222,10 +222,24 @@ class PassManager:
         on a settled nest.
         """
 
+        # What each region belongs to, innermost last, for a pass that has to
+        # know what kind of block it was handed.  A straight-line block and a
+        # loop body are the same list to `run_region`, and for most passes
+        # that is the point -- a scheduler must not move anything across the
+        # back edge.  Barrier insertion is the exception: a write at the tail
+        # of a loop body is read at its head, one iteration later, and a pass
+        # that cannot tell a body from the top level cannot put the barrier
+        # between the two.
+        enclosing = pc.extra.setdefault('enclosing', [])
+
         def visit(instrs: List[AbstractInstruction]) -> List[AbstractInstruction]:
             for instr in instrs:
                 for index, region in enumerate(instr.regions()):
-                    instr.replace_region(index, visit(list(region)))
+                    enclosing.append(instr)
+                    try:
+                        instr.replace_region(index, visit(list(region)))
+                    finally:
+                        enclosing.pop()
             return list(p.run_region(instrs, pc))
 
         pc.instrs[:] = visit(pc.instrs)

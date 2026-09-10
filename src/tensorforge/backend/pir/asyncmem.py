@@ -244,6 +244,11 @@ def _insert(body: Tuple[Stmt, ...], toks, exact: bool) -> Tuple[Stmt, ...]:
     return body[:at + 1] + (_commit(tuple(toks), exact),) + body[at + 1:]
 
 
+def _waits_inside(body: Tuple[Stmt, ...]) -> bool:
+    """Does anything in this body, at any depth, wait?"""
+    return any(s.op == Op.WAIT for s, _ in walk(body))
+
+
 def _wait_index(body: Tuple[Stmt, ...]) -> Dict[int, int]:
     """Token id -> position of the wait that retires it, in walk order."""
     out: Dict[int, int] = {}
@@ -312,6 +317,19 @@ def _place(body: Tuple[Stmt, ...], waits: Dict[int, int]):
             regions = []
             for r in s.regions:
                 inner, up, up_exact = _place(r.body, waits)
+                if up and s.op == Op.FOR and _waits_inside(r.body):
+                    # Not out of a loop that waits.  A copy nothing names
+                    # rises to the scope with its wait -- right for a hop loop,
+                    # whose copies the wait after it retires -- but in a loop
+                    # body that waits, the wait that retires a copy issued near
+                    # the tail is the one at the head of the *next* iteration,
+                    # which in program order is behind nobody.  Rising put the
+                    # commit after the loop, and every iteration's wait then
+                    # counted groups that had never been closed:
+                    # `wait_prior(0)` retires committed groups only.  So the
+                    # run closes before the back edge, behind its last issue.
+                    inner = _insert(inner, up, up_exact)
+                    up = ()
                 regions.append(replace(r, body=inner))
                 if up:
                     issued += tuple(up)
@@ -325,6 +343,12 @@ def _place(body: Tuple[Stmt, ...], waits: Dict[int, int]):
         # Both closures happen *before* the statement is appended, so that
         # `_insert` still finds the previous run's last issue behind it.
         if s.op == Op.WAIT:
+            flush()
+        elif s.op == Op.FOR and run and _waits_inside(s.regions[0].body):
+            # The same rule on the way in: a run still open ahead of a loop
+            # whose body waits would be retired by that wait only once closed
+            # -- the peel of a wrapped transfer, which the first iteration's
+            # wait at the head is for.
             flush()
         elif groups and run and groups[0][0] != run_wait:
             flush()

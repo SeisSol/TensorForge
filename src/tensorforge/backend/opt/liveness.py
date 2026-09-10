@@ -68,9 +68,16 @@ class LivenessAnalysis(AbstractOptStage):
 
   # -- backward: liveness with a fixed point over back edges ----------- #
 
-  def _transfer(self, instr, live_out: OrderedSet) -> OrderedSet:
-    """Live-in of a single region-free instruction."""
-    killed = {id(s) for s in instr.defs() if self._tracked(s)}
+  def _transfer(self, instr, live_out: OrderedSet,
+                spared: frozenset = frozenset()) -> OrderedSet:
+    """Live-in of a single region-free instruction.
+
+    A definition kills -- unless `spared` names it: a partial write that
+    continues assembling a buffer an earlier write in the same block started.
+    See `_assembling`.
+    """
+    killed = {id(s) for s in instr.defs()
+              if self._tracked(s) and (id(instr), id(s)) not in spared}
     out = OrderedSet(s for s in live_out if id(s) not in killed)
     for sym in instr.uses():
       if self._tracked(sym):
@@ -81,14 +88,45 @@ class LivenessAnalysis(AbstractOptStage):
                 live_out: OrderedSet,
                 live_out_map: Dict[int, OrderedSet]) -> OrderedSet:
     live = live_out
+    spared = self._assembling(body)
     for instr in reversed(list(body)):
       # record the live-out, which is what the forward pass needs
       live_out_map[id(instr)] = live
       if instr.regions():
         live = self._region_transfer(instr, live, live_out_map)
       else:
-        live = self._transfer(instr, live)
+        live = self._transfer(instr, live, spared)
     return live
+
+  @staticmethod
+  def _assembling(body: Sequence[AbstractInstruction]) -> frozenset:
+    """`(instruction, symbol)` pairs whose write must not kill the symbol.
+
+    Every partial write of a buffer after the first one in this block, until
+    a whole write starts over.  Between two slices the first is still wanted
+    -- killing the buffer at the second made the first dead in between, and
+    the allocator gave that stretch to a buffer read there
+    (`mixed/ml_slices_then_ew`).  The first slice does kill: nothing written
+    to the buffer before it is needed, and sparing it too made an assembled
+    buffer live across the whole body and around the back edge, which grew
+    two arenas in the corpus by a third and by nine tenths for nothing.
+
+    Per straight-line block, which is what `_backward` is handed; a nested
+    region is its own block.  A buffer assembled partly before a loop and
+    partly inside it would be cut at the first slice inside -- no case does
+    that.
+    """
+    seen, out = set(), set()
+    for instr in body:
+      partial = {id(s) for s in instr.partial_defs()}
+      for sym in instr.defs():
+        if id(sym) in partial:
+          if id(sym) in seen:
+            out.add((id(instr), id(sym)))
+          seen.add(id(sym))
+        else:
+          seen.discard(id(sym))
+    return frozenset(out)
 
   def _region_transfer(self, instr, live_out: OrderedSet,
                        live_out_map: Dict[int, OrderedSet]) -> OrderedSet:

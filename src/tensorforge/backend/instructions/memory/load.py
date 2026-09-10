@@ -723,6 +723,20 @@ class LoadWait(MemoryInstruction, LoadInstruction):
   def gen_code_inner(self, writer: Writer) -> None:
     if not isinstance(self._instr, GlbToShrLoader):
       return
+    if getattr(self._instr, '_wrapped', False):
+      # Wrapped across the back edge by `WrapLoads`: the transfer is issued at
+      # the tail of the previous iteration, so in program order this wait
+      # comes *first*.  Every flag below is set by the issue, and here still
+      # reads as "nothing in flight" -- which would drop the wait and let the
+      # consumer read a copy that has not landed.  A drain retires what the
+      # previous iteration issued without having to name it, and on the first
+      # iteration it retires the peeled copy ahead of the loop.
+      if not hasattr(writer, 'wait'):
+        raise InternalError(
+            'a transfer wrapped across the back edge needs a structured wait, '
+            'and this writer has none')
+      writer.wait()
+      return
     if not self._instr._issued_async:
       # Nothing was put in flight: the transfer took the reordering path and
       # moved its data with plain loads and stores.  Waiting anyway is what

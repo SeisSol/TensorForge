@@ -136,7 +136,8 @@ class OptimizationStage:
     pm.add(LegacyTransform(
         'SyncThreadsOpt',
         lambda pc, instrs: SyncThreadsOpt(pc.context, instrs,
-                                          pc.get('regions'), pc.num_threads),
+                                          pc.get('regions'), pc.num_threads,
+                                          loop_body=_in_loop_body(pc)),
         preserves=('live_map', 'regions'),
         scope=PassScope.PER_REGION,
         enabled=lambda pc: opts.enable_sync_block_opt))
@@ -201,3 +202,14 @@ class _AssignShrMemOffsets(LegacyTransform):
     # from here on every shared-memory writer has an offset, so verify() can
     # check buffer aliasing (readiness still needs the thread-block policy)
     pc.extra['offsets_assigned'] = True
+
+
+def _in_loop_body(pc) -> bool:
+  """Is the block a per-region pass was just handed the body of a batch loop?
+
+  `PassManager._run_per_region` keeps the enclosing constructs in
+  `pc.extra['enclosing']`; the top level has none.
+  """
+  from tensorforge.backend.instructions.batch_loop import BatchLoop
+  enclosing = pc.extra.get('enclosing') or []
+  return bool(enclosing) and isinstance(enclosing[-1], BatchLoop)

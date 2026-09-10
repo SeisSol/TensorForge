@@ -133,6 +133,19 @@ class AbstractInstruction(ABC):
       return _as_tuple(get_dest())
     return _as_tuple(getattr(self, '_dest', None))
 
+  def partial_defs(self) -> Tuple:
+    """Symbols among `defs()` that this instruction writes only in part.
+
+    A write that covers part of a buffer defines it without ending what was
+    there before: the rest still holds what an earlier write put in, and a
+    later read may want both.  Liveness is the one analysis that has to tell
+    the two apart -- it kills a symbol at its definition, and killing a buffer
+    at its second slice makes the first slice dead in between, so the region
+    allocator hands that stretch to another buffer.  Everything else keeps
+    treating a partial write as a write, which it is.
+    """
+    return ()
+
   def uses(self) -> Tuple:
     """Symbols read by this instruction."""
     out = []

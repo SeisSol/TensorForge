@@ -115,6 +115,13 @@ class StoreRegToShr(AbstractShrMemWrite):
     self._dest_offset = (list(dest_offset) if dest_offset is not None
                          else [0] * src.data_view.get_bbox().rank())
     buffer_bbox = dest_bbox if dest_bbox is not None else src.data_view.get_bbox()
+    # Whether this store writes the whole buffer or one slice of it -- see
+    # `partial_defs`.  Decided here, from the two boxes the constructor is
+    # given, and biased towards "part": calling a whole write partial costs a
+    # longer live range, calling a slice whole is the bug that motivated this.
+    self._partial = (list(src.data_view.get_bbox().sizes())
+                     != list(buffer_bbox.sizes())
+                     or any(o != 0 for o in self._dest_offset))
     dest.data_view = DataView(buffer_bbox.sizes(),
                               permute=None,
                               bbox=buffer_bbox)
@@ -128,6 +135,18 @@ class StoreRegToShr(AbstractShrMemWrite):
     self._shr_mem_offset: Union[int, None] = None
     view: DataView = self._dest.data_view
     self._shm_volume: int = view.get_volume()
+
+  def partial_defs(self):
+    """The buffer, when this store is one of several that assemble it.
+
+    `mixed/ml_slices_then_ew` writes `tmp[:, 0:4]` and `tmp[:, 4:8]` in two
+    stores.  Taken as a whole definition, the second killed the first, so the
+    first half was dead until then; the allocator gave that stretch to a
+    buffer read in between, and the first store overwrote it.  It stayed
+    hidden in the default build only because the colouring happened to put
+    the temporary elsewhere.
+    """
+    return (self._dest,) if self._partial else ()
 
   def gen_code_inner(self, writer: Writer) -> None:
     dest_view = self._dest.data_view

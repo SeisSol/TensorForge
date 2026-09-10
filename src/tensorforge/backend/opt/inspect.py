@@ -228,10 +228,16 @@ def verify(instrs: Sequence[AbstractInstruction],
 
         # -- 6. recurse into regions, tightening the barrier limit
         inner_limit = min(max_barrier_scope, instr.uniform_scope())
+        # Plus what the instruction itself defines on the way in: a batch
+        # loop's peeled transfers, which it emits inside its body but ahead of
+        # the `for`.  Without them a wrapped buffer's first read has no
+        # definition in sight -- although `entering` would call it carried,
+        # and carried is what it is.
+        entry = list(getattr(instr, 'entry_defs', lambda: ())())
         for region in instr.regions():
             diags.extend(verify(region,
                                 max_barrier_scope=inner_limit,
-                                predefined=list(defined),
+                                predefined=list(defined) + entry,
                                 backend=backend,
                                 check_offsets=False,
                                 check_ready=check_ready))
@@ -256,12 +262,15 @@ def _check_guarded_prefetch(instr: AbstractInstruction,
     before that left in the buffer.  Nothing crashes; the numbers are wrong for
     every element after the first masked one.
 
-    ``BatchLoop.mark_unguarded`` lifts instructions out of the guard, but only
-    a *prefix* of the region -- the guard is one contiguous block -- and the
-    slot-granular prefetch belongs mid-body, which is not a prefix.  So this is
-    reported rather than fixed: closing it needs either a second unguarded
-    region after the guard or a predicated transfer, and until then a caller
-    enabling wrap-around on a section that passes a flags array should know.
+    ``BatchLoop.mark_unguarded`` lifts a *prefix* of the region out of the
+    guard and ``mark_unguarded_tail`` a *suffix* -- the guard is one
+    contiguous block, so those are the two shapes it can leave.  A shared
+    transfer ``WrapLoads`` moves across the back edge goes to the tail and is
+    marked, so it does not trip this.  The register path still places its
+    transfer mid-body, by slot, which is neither shape; closing that needs a
+    predicated transfer or the tail placement the shared path uses.  Until
+    then this is reported rather than fixed, and a caller enabling wrap-around
+    on a section that passes a flags array should know.
     """
     from tensorforge.backend.instructions.batch_loop import BatchLoop
     from tensorforge.backend.instructions.ptr_manip import GetElementPtr
