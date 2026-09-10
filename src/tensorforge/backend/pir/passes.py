@@ -1243,6 +1243,17 @@ def pressure(body: Tuple[Stmt, ...], in_bytes: bool = False,
     SSA values of `lead_window_spans_two_blocks` peak at 540 bytes while its
     `float r0[4992]` is 19 KB.
 
+    Register arrays are counted as the slots they become once the compiler has
+    unrolled the loops over them: each slot from its first access to its last
+    (`_register_slot_events`) -- under SPMD.  Under an explicit vector they
+    are still whole for the whole body; see the note at the sweep.  They used to be a floor, every array whole for
+    the whole body, and that is what made the figure useless as a spill
+    predictor: `local_flux`'s four faces each keep an intermediate that is
+    dead before the next face starts, and the floor added all of them up --
+    3868 B at eight lanes for a kernel that fits in 255 registers without a
+    spill, while `chain_three`, which really does hold 518 floats at once,
+    came out lower.
+
     `explicit_simd` says whose registers are being counted, and the byte form
     is wrong on the wrong setting rather than merely imprecise.  See
     `register_bytes`.
@@ -1261,12 +1272,6 @@ def pressure(body: Tuple[Stmt, ...], in_bytes: bool = False,
     weight = ((lambda vid: register_bytes(values[vid], explicit_simd)
                if vid in values else 0)
               if in_bytes else (lambda vid: 1))
-    # Register arrays are live for the whole body, so they are a constant
-    # added to every point rather than something the sweep can see rise and
-    # fall.  Added once here instead of extending their live ranges, which
-    # would say the same thing less clearly.
-    floor = (sum(register_bytes(v, explicit_simd) for v in values.values()
-                 if isinstance(v.type, BufferType)) if in_bytes else 0)
     order, span = _index(body)
     pos: Dict[int, int] = {}          # statement identity -> index
     for i, st in enumerate(order):
@@ -1298,27 +1303,169 @@ def pressure(body: Tuple[Stmt, ...], in_bytes: bool = False,
                 collect(r.body, chain + [i])
     collect(body, [])
 
+    def reach(d: int, i: int) -> int:
+        """How far a use at `i` keeps something defined at `d` alive: to the
+        end of every region around the use that began after the definition."""
+        end = i
+        for anc in enclosing.get(i, []):
+            if anc >= d and not (span[anc][0] <= d <= span[anc][1]):
+                end = max(end, span[anc][1])
+            elif span[anc][0] > d:
+                end = max(end, span[anc][1])
+        return end
+
     for i, st in enumerate(order):
         for v in st.operands():
             d = define.get(v.id)
             if d is None:
                 continue
-            end = i
-            for anc in enclosing.get(i, []):
-                if anc >= d and not (span[anc][0] <= d <= span[anc][1]):
-                    end = max(end, span[anc][1])
-                elif span[anc][0] > d:
-                    end = max(end, span[anc][1])
-            last[v.id] = max(last.get(v.id, d), end)
+            last[v.id] = max(last.get(v.id, d), reach(d, i))
 
+    # A sweep over interval ends rather than a sum per statement: the slots
+    # below add thousands of intervals to a body of tens of thousands of
+    # statements, and the product was the cost.  Ends sort before starts at
+    # the same point, so two ranges that only touch are not both counted.
     v_none = Value(id=-1, type=ScalarType(Datatype.I32))
-    peak = 0
-    for i in range(len(order)):
-        live = sum(weight(vid) for vid, d in define.items()
-                   if d <= i <= last.get(vid, d)
-                   and not isinstance(values.get(vid, v_none).type, BufferType))
+    events: List[Tuple[int, int]] = []
+    for vid, d in define.items():
+        if isinstance(values.get(vid, v_none).type, BufferType):
+            continue
+        w = weight(vid)
+        if w:
+            events += [(d, w), (last.get(vid, d) + 1, -w)]
+    if in_bytes and not explicit_simd:
+        events += _register_slot_events(order, span, enclosing, values, reach)
+    elif in_bytes:
+        # Under an explicit vector the array stays whole for the whole body,
+        # as it always was here.  Not because slots cannot be freed there but
+        # because nobody has checked that IGC frees them: `local_flux` spilled
+        # heavily on PVC even at 256 GRF, and the slot count says it fits in
+        # 128.  Until that is understood the warning keeps its old footing.
+        floor = sum(register_bytes(v, explicit_simd) for v in values.values()
+                    if isinstance(v.type, BufferType))
+        events += [(0, floor), (len(order), -floor)] if floor else []
+    events.sort()
+    live = peak = 0
+    for _, w in events:
+        live += w
         peak = max(peak, live)
-    return peak + floor
+    return peak
+
+
+def _flat_slot(index, shape) -> Optional[int]:
+    """The slot a constant index names, leading dimension first as
+    `Emitter.address` spells it; None where any part of it is not constant."""
+    if any(c is None for c in index):
+        return None
+    if not index:
+        return 0
+    if len(index) == 1:
+        return index[0]
+    if len(index) != len(shape):
+        return None
+    flat = index[-1]
+    for k in reversed(range(len(index) - 1)):
+        flat = index[k] + shape[k] * flat
+    return flat
+
+
+def _register_slot_events(order, span, enclosing, values, reach):
+    """Register arrays as the registers they become: one interval per slot.
+
+    Every loop that indexes a register array is unrolled -- by the generator,
+    or by `#pragma unroll` in the compiler -- because an array indexed at
+    runtime goes to local memory.  Once it is, each slot is a scalar of its
+    own with its own live range, and that range is what occupies a register,
+    not the array's declaration.
+
+    A slot is live from its first access to its last, extended out of any loop
+    it is used in but was not first touched in, as a value is.  What cannot be
+    resolved is counted the way the array used to be, so the figure only moves
+    where the access says which slot it is:
+
+    * a runtime index touches every slot, for the whole innermost loop around
+      it -- which slot a given iteration takes is not known here;
+    * the array as an operand of anything but a plain load or store, or named
+      in raw text, is live whole for the whole body.
+    """
+    arrays = {vid: v for vid, v in values.items()
+              if isinstance(v.type, BufferType)
+              and v.type.space is MemSpace.REGISTER}
+    if not arrays:
+        return []
+    consts = {st.target[0].id: st.attr('value')
+              for st in order if st.op == Op.CONST and st.target}
+    names = {st.target[0].id: st.attr('extern') for st in order
+             if st.op == Op.ALLOC and st.target
+             and st.target[0].id in arrays and st.attr('extern')}
+    # Most accesses do not name the buffer value: the macro layer loads and
+    # stores through its `Symbol`, and the allocation carries that symbol's
+    # name as `extern`.  Both spellings are the same array.
+    by_name = {name: vid for vid, name in names.items()}
+
+    def array_of(base):
+        if isinstance(base, Value):
+            return base.id if base.id in arrays else None
+        if str(getattr(base, 'stype', '')).endswith('Register'):
+            return by_name.get(getattr(base, 'name', None))
+        return None
+
+    def const(x):
+        if isinstance(x, Value):
+            x = consts.get(x.id)
+        return x if isinstance(x, int) and not isinstance(x, bool) else None
+
+    def is_loop(k):
+        st = order[k]
+        if any(r.args for r in st.regions):
+            return True
+        return (st.op == Op.RAWBLOCK and st.text is not None
+                and re.search(r'\b(?:for|while)\s*\(', st.text) is not None)
+
+    end = len(order) - 1
+    touches: Dict[Tuple[int, int], List[int]] = {}
+    whole: Dict[int, List[int]] = {}
+    for i, st in enumerate(order):
+        if st.op == Op.ALLOC:
+            continue
+        if st.op in Op.RAW and st.text:
+            # Comments name arrays all the time (`// r1 = +(r0 * s0)`) and
+            # touch none of them.
+            code = re.sub(r'//[^\n]*|/\*.*?\*/', '', st.text, flags=re.S)
+            for vid, name in names.items():
+                if re.search(rf'\b{re.escape(name)}\b', code):
+                    whole.setdefault(vid, []).extend((0, end))
+        base = st.args[0] if st.args else None
+        vid = (array_of(base) if st.op in (Op.LOAD, Op.STORE) else None)
+        if vid is not None:
+            t = arrays[vid].type
+            index = st.args[1:] if st.op == Op.LOAD else st.args[2:]
+            carried = st.target[0] if st.op == Op.LOAD else st.args[1]
+            width = getattr(getattr(carried, 'type', None), 'length',
+                            None) or 1
+            flat = _flat_slot([const(x) for x in index], t.shape)
+            if flat is not None and t.swizzle is None:
+                for c in range(width):
+                    touches.setdefault((vid, flat + c), []).append(i)
+            else:
+                loops = [k for k in enclosing.get(i, []) if is_loop(k)]
+                whole.setdefault(vid, []).extend(
+                    span[loops[-1]] if loops else (i, i))
+        for a in st.operands():
+            if a.id in arrays and not (vid == a.id and base is a):
+                whole.setdefault(a.id, []).extend((0, end))
+
+    for vid, at in whole.items():
+        for slot in range(arrays[vid].type.volume):
+            touches.setdefault((vid, slot), []).extend(at)
+
+    events: List[Tuple[int, int]] = []
+    for (vid, _), at in touches.items():
+        size = arrays[vid].type.elem.size()
+        first = min(at)
+        last = max(reach(first, i) for i in at)
+        events += [(first, size), (last + 1, -size)]
+    return events
 
 
 def _value_index(body: Tuple[Stmt, ...]) -> Dict[int, Value]:
@@ -1378,9 +1525,11 @@ def register_bytes(v: Value, explicit_simd: bool = True) -> int:
         # its `float r0[4992]` is 19 KB.  Counting only the values would have
         # reported that kernel as comfortable.
         #
-        # Its whole volume, and for the whole body: an array is live from its
-        # declaration to the end of the scope, so there is no live range to
-        # narrow.  Every other space is memory and costs no registers.
+        # Its whole volume: what the array occupies with every slot live.
+        # `pressure` no longer charges that for the whole body -- it counts
+        # the slots live at each point, `_register_slot_events` -- but a
+        # caller asking what one array costs still gets all of it.  Every
+        # other space is memory and costs no registers.
         return (t.volume * t.elem.size()
                 if t.space is MemSpace.REGISTER else 0)
     if not isinstance(t, ScalarType):
