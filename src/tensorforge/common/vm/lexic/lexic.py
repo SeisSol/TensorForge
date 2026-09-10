@@ -96,6 +96,19 @@ class Lexic(ABC):
   def sync_simd(self):
     pass
 
+  def loop_body_fence(self) -> str:
+    """A statement for the head of a loop body that loads cannot be hoisted
+    across, or empty where the backend's compiler needs none.
+
+    For the batch loop without a mask.  With one, the body sits under
+    `if (allowed)`, and a load there runs only conditionally, so LICM may not
+    speculate it into the preheader.  Without one the body runs every
+    iteration and LICM is free to -- and it takes loads that are invariant by
+    design, the operators staged into shared memory once per block, and holds
+    them in registers across the whole loop.
+    """
+    return ''
+
   def has_sync_mult(self, num_threads: int, hw) -> bool:
     """Whether `sync_mult` rendezvouses fewer threads than the whole block.
 

@@ -182,6 +182,25 @@ class HipLexic(CudaLexic):
   def get_headers(self):
     return ["hip/hip_runtime.h", "hip/hip_cooperative_groups.h", "tensorforge_device/hip.h"]
 
+  def loop_body_fence(self):
+    if self._underlying_hardware != 'amd':
+      return super().loop_body_fence()
+    # LLVM hoists the loads of the preloaded operators out of an unguarded
+    # batch loop: on `local_flux`, 112 values from LDS held in registers across
+    # the loop -- 256 VGPRs and half the occupancy on gfx942, 232 bytes of
+    # scratch on gfx1250, and +90 % runtime on gfx1150 with the transfers
+    # wrapped.  NVIDIA's compiler does not do it (150 registers either way).
+    #
+    # A scheduling barrier stops it, and not by accident: the intrinsic is
+    # `IntrHasSideEffects`, which it has to be so that nothing deletes or moves
+    # it, and a side effect is an unknown memory effect to LICM.  `sched_barrier`
+    # rather than an asm memory clobber, because the clobber is opaque to
+    # `SIInsertWaitcnts` and to the scheduler as well (see `wait_async`); the
+    # barrier is what the backend knows how to schedule around.  Mask 0 keeps
+    # the scheduler from moving anything across it, which at the head of the
+    # body is only the head itself.
+    return '__builtin_amdgcn_sched_barrier(0);'
+
   # CDNA has no __pipeline_*; the equivalent is a direct global->LDS load
   # plus an explicit vmcnt wait.  gfx90a/gfx94x accept 1, 2 and 4 bytes per
   # lane, gfx950 additionally 12 and 16.

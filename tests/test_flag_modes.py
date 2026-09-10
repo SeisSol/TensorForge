@@ -103,7 +103,9 @@ def test_absent_is_not_the_same_as_no_attributes():
 def test_no_attributes_keeps_the_nullable_mask():
     gen = _generate(None)
     assert "unsigned* flags0 = nullptr" in gen.get_header()
-    assert "flags0 == nullptr ? true" in gen.get_kernel()
+    # `1` where the loop carries the flag *word* across its back edge rather
+    # than reading the `bool` at the head -- see `BatchLoop._carries_flags`.
+    assert re.search(r"flags0 == nullptr \? (true|1) ", gen.get_kernel())
 
 
 def test_required_mask_has_no_default_and_no_null_check():
@@ -114,9 +116,13 @@ def test_required_mask_has_no_default_and_no_null_check():
     kernel = gen.get_kernel()
     # The element index is a value with `batchId0` for a hint, so the
     # emitter spells it with the value id in front; what this pins is the
-    # absence of a null check, not what the index is called.
-    assert re.search(r"const bool allowed = "
-                     r"static_cast<bool>\(flags0\[\w*batchId0\]\);", kernel)
+    # absence of a null check, not what the index is called.  Where the loop
+    # carries the mask across its back edge (`BatchLoop._carries_flags`), the
+    # guard converts the carried word instead, read from `flags0` without a
+    # check all the same.
+    assert re.search(r"const bool allowed = static_cast<bool>\("
+                     r"(flags0\[\w*batchId0\]|\w+_acc\d+)\);", kernel)
+    assert "flags0[" in kernel
     assert "flags0 == nullptr" not in kernel
 
 

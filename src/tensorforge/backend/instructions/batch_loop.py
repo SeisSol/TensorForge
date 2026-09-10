@@ -317,6 +317,11 @@ class BatchLoop(AbstractInstruction):
     #: wrapped transfer's carried tokens -- see `carried_tokens`.
     _carried: List[Tuple] = []
 
+    #: While the body of a loop that carries the mask is being emitted: the
+    #: flag words of this element and the next, as the loop hands them in --
+    #: see `_carries_flags`.
+    _carried_flags: Optional[Tuple] = None
+
     @classmethod
     @contextmanager
     def batch_indices(cls, builder):
@@ -679,6 +684,8 @@ class BatchLoop(AbstractInstruction):
         `REQUIRED` has no null to check: the parameter has no default, so the
         caller supplied a pointer.
         """
+        if self._carried_flags is not None:
+            return self._word_flag(writer, self._carried_flags[0], 'allowed')
         flags = f'{GeneralLexicon.FLAGS_NAME}{self._section_index}'
         read = f'static_cast<bool>({flags}[{{0}}])'
         if self._flags is FlagMode.OPTIONAL:
@@ -783,13 +790,29 @@ class BatchLoop(AbstractInstruction):
         next_flag = None
         if self._flags is not FlagMode.ABSENT and any(
                 getattr(i, '_guard_by_own_flag', False) for i in tail):
-            next_flag = self._element_flag(writer, self._tail_element(writer),
-                                           'allowed_next')
+            if self._carried_flags is not None:
+                next_flag = self._word_flag(writer, self._carried_flags[1],
+                                            'allowed_next')
+            else:
+                next_flag = self._element_flag(
+                    writer, self._tail_element(writer), 'allowed_next')
         if self._flags is FlagMode.ABSENT:
             # Nothing to skip against, so no condition and no block.  The
             # split above still holds: `head` is what has to run for every
             # element, and running it first keeps the order the pipelining
             # pass arranged whether or not a guard follows it.
+            #
+            # But without the block, nothing keeps the compiler from hoisting
+            # the body's invariant loads out of the loop -- see
+            # `Lexic.loop_body_fence`.  Only where there is a loop to hoist
+            # out of.
+            fence = self._vm.get_lexic().loop_body_fence()
+            if fence and self._mode is not LoopMode.SINGLE:
+                if hasattr(writer, 'decl_expr'):
+                    # It touches nothing the IR models; it only has to stay.
+                    writer(fence, accesses=())
+                else:
+                    writer(fence)
             self._emit_guarded(writer, guarded)
             self._emit_own_flagged(writer, tail,
                                    lambda: self._tail_element(writer),
@@ -870,6 +893,74 @@ class BatchLoop(AbstractInstruction):
                 extern=name)
         writer(f'const bool {name} = {read.format(index)};')
         return name
+
+    def _carries_flags(self, writer) -> bool:
+        """Does the loop hand the mask from one iteration to the next?
+
+        Where it carries prefetches across the back edge, and there is a mask.
+        Read at the head, the element's flag is a load its guard waits on at
+        once, and on AMD that wait is `vmcnt(0)`: the counter retires in
+        order, so it also waits for every copy the previous tail issued, and
+        the pipeline those copies were meant to be is gone -- with a mask
+        passed, `chain_three` keeps one wait per iteration, and it is that
+        one.  So the words ride the loop instead, like the tokens: this
+        element's and the next one's come in, and the one two ahead is read
+        at the head and handed on.  A word is read one iteration before it
+        is first needed, and whatever waits for it waits for loads long done.
+
+        The word and not the `bool`: a comparison right behind the load is a
+        use right behind the load, and the wait comes back with it.  The
+        conversion is made where the flag is used.
+
+        Only on the structured path, which has iteration arguments, and only
+        with a successor index to count on from.
+        """
+        return (self._flags is not FlagMode.ABSENT and bool(self._wrap_prologue)
+                and self._lookahead >= 1 and hasattr(writer, 'for_'))
+
+    def _element_word(self, writer, index, name):
+        """`flags[index]` as the word it is -- see `_carries_flags`.
+
+        One per element, so laid out like the element index itself: every lane
+        of the multiplication holds the same word.  The loop declares the words
+        it carries from that, and the ESIMD lowering refuses a value it cannot
+        tell the spread of.
+        """
+        from tensorforge.backend.pir.core import (SCALAR_LAYOUT, Effect,
+                                                  MemSpace, ScalarType)
+        from tensorforge.common.basic_types import Datatype
+        flags = f'{GeneralLexicon.FLAGS_NAME}{self._section_index}'
+        read = f'{flags}[{{0}}]'
+        if self._flags is FlagMode.OPTIONAL:
+            # `1` and not `1u`: the conditional converts it to the word's
+            # type anyway, and the oracle that reads kernels in the tests
+            # parses C literals without suffixes.
+            read = f'{flags} == nullptr ? 1 : {read}'
+        return writer.decl_expr(
+            f'const uint32_t {name}', read, ScalarType(Datatype.U32), None,
+            args=(index,), kind=Effect.READ, space=MemSpace.GLOBAL, hint=name,
+            extern=name, layout=SCALAR_LAYOUT)
+
+    def _word_flag(self, writer, word, name):
+        """A carried flag word as the condition it stands for."""
+        from tensorforge.backend.pir.core import BOOL
+        return writer.decl_expr(f'const bool {name}', 'static_cast<bool>({0})',
+                                BOOL, None, args=(word,), hint=name,
+                                extern=name)
+
+    def _clamped_successor(self, writer, index, hint):
+        """`index + stride`, clamped the way the lookahead bindings clamp.
+
+        The same clamp and not a simpler one: the word read for an element
+        is the predicate of the copy that follows that element's pointer, so
+        it has to name the element the copy will be issued for -- including
+        at the end of the batch, where the clamp holds the index in place.
+        """
+        from tensorforge.backend.pir.core import BOOL, SIZE
+        ahead = writer.op('add', SIZE, index, self._stride, hint=f'{hint}Ahead')
+        inside = writer.op('lt', BOOL, ahead, self._num_elements(),
+                           hint=f'{hint}In')
+        return writer.op('select', SIZE, inside, ahead, index, hint=hint)
 
     def _tail_element(self, writer):
         """The element the tail prefetches: this loop's clamped successor."""
@@ -972,9 +1063,23 @@ class BatchLoop(AbstractInstruction):
             # value whose `extern` binding happens later and the result renders
             # but does not compile.
             self._declare_windows_early(writer, list(self._region))
+            # The words the loop starts with: the first element's, which is
+            # also what the peel is predicated on, and its successor's.
+            carry = self._carries_flags(writer)
+            peel_flag = None
+            if carry:
+                first = self._prologue_element(writer)
+                word_first = self._element_word(writer, first, 'flagWordFirst')
+                word_second = self._element_word(
+                    writer, self._clamped_successor(writer, first, 'flagSecond'),
+                    'flagWordSecond')
+                if any(getattr(i, '_guard_by_own_flag', False)
+                       for i in self._wrap_prologue):
+                    peel_flag = self._word_flag(writer, word_first,
+                                                'allowed_peel')
             self._emit_own_flagged(writer, self._wrap_prologue,
                                    lambda: self._prologue_element(writer),
-                                   'allowed_peel')
+                                   'allowed_peel', cond=peel_flag)
             if hasattr(writer, 'for_'):
                 # `extern` and `ctype` because the name and the type are the
                 # macro layer's: `batchId0` is spelled out by the lookahead
@@ -1003,6 +1108,10 @@ class BatchLoop(AbstractInstruction):
                     spans.append((transfer, len(inits), len(toks)))
                     inits.extend(toks)
                     types.extend(t.type for t in toks)
+                flags_at = len(inits)
+                if carry:
+                    inits.extend((word_first, word_second))
+                    types.extend((word_first.type, word_second.type))
                 table = BatchLoop._push_carried(writer)
                 try:
                     with writer.for_(self._start, self._num_elements(),
@@ -1032,9 +1141,18 @@ class BatchLoop(AbstractInstruction):
                                 # earlier and has no way to know how the traversal
                                 # clamps.
                                 loop._next_index = self._first_lookahead
+                                if carry:
+                                    own, nxt = loop.iter_args[flags_at:flags_at + 2]
+                                    word_ahead = self._element_word(
+                                        writer, self._clamped_successor(
+                                            writer, self._tail_element(writer),
+                                            'flagAhead'),
+                                        'flagWordAhead')
+                                    self._carried_flags = (own, nxt)
                                 self._emit_body(writer)
+                                self._carried_flags = None
                                 self._advance_stage_counter(writer)
-                                if spans:
+                                if spans or carry:
                                     yielded = []
                                     for transfer, at, n in spans:
                                         toks = transfer.tokens_for(writer)
@@ -1045,9 +1163,12 @@ class BatchLoop(AbstractInstruction):
                                                 f'its peel; the tokens it carries '
                                                 f'cannot line up')
                                         yielded.extend(toks)
+                                    if carry:
+                                        yielded.extend((nxt, word_ahead))
                                     loop.yield_(*yielded)
                         finally:
                             self._induction = None
+                            self._carried_flags = None
                     for transfer, at, n in spans:
                         table[id(transfer)] = loop.results[at:at + n]
                     for instr in self._wrap_epilogue:

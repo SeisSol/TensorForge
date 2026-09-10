@@ -1523,7 +1523,8 @@ class IRBuilder:
                   kind: Effect = Effect.READ, space: Optional[MemSpace] = None,
                   args: Sequence[Operand] = (), hint: str = 'ptr',
                   extern: str = None, alias_root: Any = None,
-                  quals: Tuple = ()) -> Value:
+                  quals: Tuple = (),
+                  layout: Optional[RegisterLayout] = None) -> Value:
         """A declaration whose declarator is text too, not only its right side.
 
         `load_expr` renders `{ctype} {name} = {text};`, which is enough while
@@ -1551,7 +1552,12 @@ class IRBuilder:
         a read through the window.  The root is what the accesses are recorded
         against, so a window is the buffer it is a window into.
         """
-        v = self.value(type_, hint=hint, quals=quals)
+        # `layout` where the caller knows how the value is spread over the
+        # lanes.  A declaration that stays a declaration does not need one,
+        # its text says it; a value the loop carries does -- the loop declares
+        # its iteration arguments from type and layout, and the ESIMD lowering
+        # has no type for a value without one.
+        v = self.value(type_, hint=hint, quals=quals, layout=layout)
         if base is None:
             # Pure text with no memory behind it: the lookahead bindings are
             # index arithmetic over the induction variable and the grid shape,
