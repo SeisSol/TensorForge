@@ -121,6 +121,34 @@ __device__ __forceinline__ auto dppUpdate(T value, T prev) -> T {
   }
 }
 
+/// A DPP8 permutation: lane `8g + p` reads lane `8g + ((Sel >> 3p) & 7)`.
+/// gfx10 and later; a VALU modifier like the DPP16 forms, so it needs neither
+/// the LDS crossbar that `ds_swizzle` goes through nor a wait on it.
+template <unsigned Sel, typename T>
+__device__ __forceinline__ auto dpp8(T value) -> T {
+  IntType<T> it;
+  IntType<T> ot;
+
+  it.value = value;
+#pragma unroll
+  for (int i = 0; i < IntType<T>::IntCount; ++i) {
+    ot.ints[i] = __builtin_amdgcn_mov_dpp8(it.ints[i], Sel);
+  }
+  return ot.value;
+}
+
+/// The DPP8 selector of `broadcast<8, Subblock, Lane>`: lane `p` of a group
+/// reads `Lane * Subblock + p % Subblock`, the formula of the `bpermute`
+/// fallback below restricted to one group of eight.
+template <std::size_t Subblock, std::size_t Lane>
+constexpr unsigned dpp8Broadcast() {
+  unsigned sel = 0;
+  for (unsigned p = 0; p < 8; ++p) {
+    sel |= ((Lane * Subblock + p % Subblock) & 7u) << (3 * p);
+  }
+  return sel;
+}
+
 template <int MaskAnd, int MaskOr, int MaskXor, typename T>
 __device__ __forceinline__ auto swizzle(T value) -> T {
   IntType<T> it;
@@ -194,9 +222,12 @@ __device__ __forceinline__ T broadcast(T value) {
     return (__lane_id() / 16) != Lane
                ? permlanex16<true, false>(value, LaneBcst)
                : value;
-  } else if constexpr (Block == 16 && Subblock == 1 && AsmVersion >= 9010 &&
-                       AsmVersion < 10000) {
+  } else if constexpr (Block == 16 && Subblock == 1 && AsmVersion >= 9010) {
+    // `row_newbcast` on CDNA 2 and 3, `row_share` from gfx10 on: the same
+    // encoding, and both give every lane of a 16-lane row lane `Lane`'s value.
     return dpp<0x150 + Lane, 0xf, 0xf, true>(value);
+  } else if constexpr (Block == 8 && AsmVersion >= 10000) {
+    return dpp8<dpp8Broadcast<Subblock, Lane>()>(value);
   } else if constexpr (Block == 16 && Subblock == 8 && false) {
     // TODO: row mask
     return dpp<0x128, 0xf, 0xf, true>(value);
