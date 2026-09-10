@@ -45,7 +45,7 @@ class SparseDataView:
   def __init__(self, shape: List[int], permute: Union[List[int], None], ssp):
     pass
 
-def slots_for(lower: int, upper: int, num_threads: int,
+def slots_for(lower: int, upper: int, block: int,
               lead_width: int = 1) -> int:
     """Per-lane floats a distributed range `[lower, upper)` occupies.
 
@@ -53,8 +53,14 @@ def slots_for(lower: int, upper: int, num_threads: int,
     addressing and the two allocation sites for sizing, which is the property
     that has to hold: a stride and an allocation derived from different
     formulas alias the next dimension onto this one.
+
+    `block` is how many elements of this dimension one round of the lanes
+    holds, which is the wave for a single-axis image and is `Symbol.lead_block`
+    in general -- it was named `num_threads` while those were the same number,
+    and a name that is only true of the case in hand is how the width came to
+    be missing from this formula the first time.
     """
-    span = num_threads * lead_width
+    span = block * lead_width
     return lead_width * (-(-upper // span) - lower // span)
 
 
@@ -156,14 +162,19 @@ class DataView:
     """
     return num_threads if explicit_simd else 1
 
-  def get_dim_slots(self, index, num_threads, lead_width=1):
+  def get_dim_slots(self, index, block, lead_width=1):
     """Per-thread floats a thread-distributed dimension occupies.
 
-    `w * (ceil(u/(T*w)) - floor(l/(T*w)))`: whole *slots* are rebased away and
+    `w * (ceil(u/(B*w)) - floor(l/(B*w)))`: whole *slots* are rebased away and
     the ragged ends survive as predicates (see LeadLoop.write).  A slot is
-    `T*w` elements, of which this lane holds `w`, so the span to divide by and
+    `B*w` elements, of which this lane holds `w`, so the span to divide by and
     the count to multiply back are both the width -- and at `w == 1` this is
     character for character the expression that was here.
+
+    `B` is the block of this dimension's axis and not the wave.  They are the
+    same number for a single-axis image, which is every image in the tree; for
+    a rank-two one they are not, and dividing either coordinate by the wave
+    has no reading.
 
     Not `ceil((u-l)/(T*w)) * w` either, as soon as [l,u) straddles a slot
     boundary: for l=31, u=33, T=32, w=1 the two give 2 and 1.
@@ -184,7 +195,7 @@ class DataView:
     """
     assert index >= 0 and index < len(self.shape)
     return slots_for(self._bbox.lower()[index], self._bbox.upper()[index],
-                     num_threads, lead_width)
+                     block, lead_width)
 
   def get_dim_strides(self, mask=[]):
     """Strides of the buffer this view describes.
@@ -1343,11 +1354,12 @@ class Symbol:
           lead_index, shift = lead
           simd = bool(getattr(writer, '_explicit_simd', lambda: False)())
           lanes = self.data_view.lead_lanes(simd, self.num_threads)
+          block = self.lead_block(i)
           slot_shift, lane_shift = DataView.split_lead_shift(
-              shift, self.num_threads, lead_index.width)
+              shift, block, lead_index.width)
           assert simd or lane_shift == 0, (
               f'{self.name}: lead-dimension slicing offset {shift} is not a '
-              f'multiple of {self.num_threads}; only whole thread-blocks can '
+              f'multiple of {block}; only whole thread-blocks can '
               f'be applied to a register-resident operand')
           # address = index - lower + shift, and on the lead dimension the
           # first two live in units of whole slots.  So does the shift, except
@@ -1355,12 +1367,12 @@ class Symbol:
           # the slot run, which only exists when the run is more than one
           # entry long.
           parts.append(term(lead_index,
-                            offsets[i] // self.num_threads - slot_shift,
+                            offsets[i] // block - slot_shift,
                             stride * lanes, lead=True))
           if lane_shift:
             parts.append(lane_shift * stride)
           stride *= self.data_view.get_dim_slots(
-              i, self.num_threads, self.lead_width) * lanes
+              i, block, self.lead_width) * lanes
         elif (i in self.lead_dims
               and isinstance(index[i], (int, np.integer))):
           # A *fixed element* of the distributed dimension, which
@@ -1381,11 +1393,11 @@ class Symbol:
           # own the element write their own copy and nothing reads it back --
           # the owner is picked by the `readlane` on the way out.
           w = self.lead_width
-          slot = (int(index[i]) // w) // self.num_threads
+          block = self.lead_block(i)
+          slot = (int(index[i]) // w) // block
           parts.append(term(w * slot + int(index[i]) % w,
-                            offsets[i] // self.num_threads, stride, lead=True))
-          stride *= self.data_view.get_dim_slots(i, self.num_threads,
-                                                 self.lead_width)
+                            offsets[i] // block, stride, lead=True))
+          stride *= self.data_view.get_dim_slots(i, block, self.lead_width)
         else:
           parts.append(term(index[i], offsets[i], stride, lead=True))
           stride *= self.data_view.get_dim_size(i)
@@ -1443,18 +1455,18 @@ class Symbol:
         lead = unwrap_lead(index[i])
         if lead is not None:
           lead_index, shift = lead
+          block = self.lead_block(i)
           # Unconditional here, unlike the structured path above: this is the
           # SPMD spelling, where a lane is a thread and a sub-slot shift is a
           # shuffle.  An explicitly vectorised kernel does not reach it.
-          assert shift % self.num_threads == 0, (
+          assert shift % block == 0, (
               f'{self.name}: lead-dimension slicing offset {shift} is not a '
-              f'multiple of {self.num_threads}; only whole thread-blocks can '
+              f'multiple of {block}; only whole thread-blocks can '
               f'be applied to a register-resident operand')
           terms.append(writeOffset(lead_index,
-                                   offsets[i] // self.num_threads
-                                   - shift // self.num_threads, stride))
-          stride *= self.data_view.get_dim_slots(i, self.num_threads,
-                                                 self.lead_width)
+                                   offsets[i] // block - shift // block,
+                                   stride))
+          stride *= self.data_view.get_dim_slots(i, block, self.lead_width)
         elif (i in self.lead_dims
               and isinstance(index[i], (int, np.integer))):
           # A *fixed element* of the distributed dimension.  It used to fall
@@ -1474,12 +1486,12 @@ class Symbol:
           # own the element write their own copy and nothing reads it back --
           # the owner is selected by the `readlane` on the way out.
           w = self.lead_width
-          slot = (int(index[i]) // w) // self.num_threads
+          block = self.lead_block(i)
+          slot = (int(index[i]) // w) // block
           comp = int(index[i]) % w
           terms.append(writeOffset(w * slot + comp,
-                                   offsets[i] // self.num_threads, stride))
-          stride *= self.data_view.get_dim_slots(i, self.num_threads,
-                                                 self.lead_width)
+                                   offsets[i] // block, stride))
+          stride *= self.data_view.get_dim_slots(i, block, self.lead_width)
         else:
           terms.append(writeOffset(index[i], offsets[i], stride))
           stride *= self.data_view.get_dim_size(i)
@@ -1907,6 +1919,37 @@ class Symbol:
       return None
     layout = RegisterLayout(tuple(axes))
     return layout if layout.tiles(self.num_threads) else None
+
+  def lead_block(self, dim: int) -> int:
+    """How many elements of dimension `dim` one round of the lanes holds.
+
+    The number every register address divides a distributed coordinate by,
+    and the number a distributed extent is allocated in units of.  Those two
+    have to be the same number or the next dimension aliases onto this one,
+    which is why `slots_for` was already the one statement of the rule --
+    this is the same argument one level up, about *which* number the rule is
+    given.
+
+    The wave, for the single-axis image every symbol in the tree is.  The
+    axis's block for one whose producer said otherwise, which is the whole of
+    the generalisation: `LaneAxis(8, 4)` beside `LaneAxis(4, 1)` puts eight
+    rows and four columns in one round of a 32-lane wave, and dividing either
+    coordinate by 32 has no reading at all.
+
+    Asked only about a dimension being addressed as distributed, which is
+    not always one this symbol declared: a `LeadIndex` can arrive on a
+    dimension outside `lead_dims`, and it has always meant the wave there.
+    So that is the answer for one, rather than the 1 a genuinely undistributed
+    dimension would deserve -- a dimension nobody is spreading never reaches
+    here, and a caller that treats an undeclared lead index as unspread
+    changes an address that has been right since before there were axes.
+    """
+    if dim not in self.lead_dims:
+      return self.num_threads
+    layout = self.register_layout()
+    if layout is None:
+      return self.num_threads
+    return layout.axis(self.lead_dims.index(dim)).block
 
   def owning_lane(self, index):
     """Which lane holds a fixed element of the distributed dimension.

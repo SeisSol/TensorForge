@@ -371,3 +371,49 @@ def test_the_declaration_is_not_the_recorded_layout():
     sym = _register(32)
     assert sym.layout is None
     assert sym.register_layout() is not None
+
+
+# -- the number a coordinate is divided by --------------------------------- #
+
+def test_the_block_is_the_wave_for_every_image_in_the_tree():
+    """The neutrality claim, stated so it is checked rather than argued.
+    Every register image is one axis over the whole wave, so every address
+    divides by the number it always did."""
+    for threads in (1, 4, 16, 32, 64):
+        sym = _register(threads)
+        assert sym.lead_block(0) == threads
+        # And for a dimension this symbol did not declare, the wave as well:
+        # a lead index arriving there has always meant the wave, and reading
+        # it as unspread would change an address that has been right since
+        # before there were axes to state.
+        assert sym.lead_block(1) == threads
+
+
+def test_the_block_is_the_axis_where_a_producer_stated_one():
+    """And this is the whole of the generalisation: eight rows and four
+    columns in one round of a 32-lane wave, where dividing either coordinate
+    by 32 has no reading at all."""
+    from tensorforge.backend.pir.core import LaneAxis
+    sym = _register(32, dims=(0, 1), axes=(LaneAxis(8, 4), LaneAxis(4, 1)))
+    assert (sym.lead_block(0), sym.lead_block(1)) == (8, 4)
+
+
+def test_slots_are_counted_in_blocks_and_not_in_waves():
+    """What the rename is about.  A sixteen-element dimension is one slot on
+    a wave that holds sixteen and two on an axis whose block is eight, and
+    the formula never knew which number it was given."""
+    from tensorforge.backend.symbol import slots_for
+    assert slots_for(0, 16, 16) == 1
+    assert slots_for(0, 16, 8) == 2
+    assert slots_for(0, 16, 4) == 4
+    assert slots_for(0, 16, 8, 2) == 2 * 1
+
+
+def test_an_unstated_rank_two_image_still_divides_by_the_wave():
+    """Because that is what it did.  Positions without axes are not a
+    distribution, and changing what they address is not this patch's to
+    make -- `register_layout` refuses them and this falls back to what the
+    addressing has always done."""
+    sym = _register(32, dims=(0, 1))
+    assert sym.register_layout() is None
+    assert (sym.lead_block(0), sym.lead_block(1)) == (32, 32)

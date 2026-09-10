@@ -101,6 +101,14 @@ class Temporaries:
                 # It was restated, without the width, and a four-wide read of
                 # a three-slot image is how consecutive non-lead indices came
                 # to address overlapping windows.
+                # The block passed is the wave because this states one axis:
+                # `lead_dims = [lead_pos]` below and no `lead_axes`, which is
+                # what `Symbol.lead_block` then answers.  The two have to be
+                # the same number -- an allocation in units the addressing
+                # does not divide by aliases the next dimension onto this one
+                # -- and a producer that leaves its result on two axes has to
+                # say so in both places at once, which is what this signature
+                # cannot express yet.
                 regsize *= slots_for(
                     bbox.lower()[d] + shift, bbox.upper()[d] + shift,
                     threads, getattr(self, '_lead_width', 1)
