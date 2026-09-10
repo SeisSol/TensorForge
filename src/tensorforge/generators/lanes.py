@@ -138,9 +138,13 @@ def narrower(descr_list: List[OperationDescription],
     8 lanes, the narrower build ranged from 10 % faster (`local_flux` at 8,
     no padding) to five times slower (`chain_five` at 16, spilling), and
     among those that did not spill from -5 % to +9 % with nothing in padding
-    or rows per lane that predicted the sign; `peak_pressure` did not separate
-    them either.  So these are for a search that builds and times, which
-    `Options.lanes_per_mult` makes expressible.
+    or rows per lane that predicted the sign.  `peak_pressure` separates the
+    spilling ones now that it counts register slots rather than whole arrays
+    -- on sm_120 every build that spilled more than a few registers was above
+    about 85 % of the 255 -- but it says nothing about the sign among the
+    rest.  So these are for a search that builds and times, which
+    `Options.lanes_per_mult` makes expressible, and the pressure is at most a
+    filter in front of it.
 
     None for a section with an elementwise descriptor: its iteration space is
     the vector unit's, as in `deduce`.
