@@ -124,11 +124,30 @@ private:
   T *_p = nullptr;
 };
 
+// -- kernel properties ---------------------------------------------------
+
+// What the ESIMD launch passes between the range and the kernel: the large
+// register file as a compile-time property.  Only the shape matters here.
+namespace ext::oneapi::experimental {
+template <typename... Ps> struct properties {
+  constexpr properties(Ps...) {}
+};
+template <typename... Ps> properties(Ps...) -> properties<Ps...>;
+} // namespace ext::oneapi::experimental
+namespace ext::intel::experimental {
+template <unsigned N> struct grf_size_value {};
+template <unsigned N> inline constexpr grf_size_value<N> grf_size{};
+} // namespace ext::intel::experimental
+
 // -- queue / handler -------------------------------------------------------
 
 class handler {
 public:
   template <int Dim, typename F> void parallel_for(nd_range<Dim>, F &&f) {
+    (void)sizeof(f);
+  }
+  template <int Dim, typename P, typename F>
+  void parallel_for(nd_range<Dim>, P, F &&f) {
     (void)sizeof(f);
   }
 };

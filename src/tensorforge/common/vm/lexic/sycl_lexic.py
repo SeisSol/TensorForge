@@ -83,9 +83,16 @@ class SyclLexic(Lexic):
     else:
       localmem = None
 
+    props = ''
     if self._underlying_hardware == 'intel' and self._backend == 'oneapi':
       if self.simd_mode:
-        add_items = '[[intel::sycl_explicit_simd]] [[intel::grf_size(256)]] [[intel::kernel_args_restrict]]'
+        add_items = '[[intel::sycl_explicit_simd]] [[intel::kernel_args_restrict]]'
+        # The large register file as a kernel property.  It was an attribute,
+        # `[[intel::grf_size(256)]]`, which DPC++ 2026 does not know: it warns
+        # "unknown attribute ignored" and compiles for the small file, so the
+        # kernels that were sized for 256 registers got 128.
+        props = ('sycl::ext::oneapi::experimental::properties{'
+                 'sycl::ext::intel::experimental::grf_size<256>}, ')
       else:
         add_items = '[[intel::reqd_sub_group_size(16)]] [[intel::kernel_args_restrict]]'
     else:
@@ -93,7 +100,7 @@ class SyclLexic(Lexic):
 
     l1 = f"inline void kernel_{base_name}(sycl::queue *stream, sycl::range<3> group_count, sycl::range<3> group_size, {params})"
     l2 = f"stream->submit([&](sycl::handler &cgh)"
-    l3 = f"cgh.parallel_for(sycl::nd_range<3>{{{{group_size.get(0), group_size.get(1), group_count.get(0) * group_size.get(2)}}, group_size}}, [=](sycl::nd_item<3> item) {add_items}"
+    l3 = f"cgh.parallel_for(sycl::nd_range<3>{{{{group_size.get(0), group_size.get(1), group_count.get(0) * group_size.get(2)}}, group_size}}, {props}[=](sycl::nd_item<3> item) {add_items}"
 
     if localmem is None:
       return MultiBlock(file, [l1, l2, l3], ["", ");", ");"])

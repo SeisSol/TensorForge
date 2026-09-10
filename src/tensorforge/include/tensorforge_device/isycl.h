@@ -6,6 +6,7 @@
 
 #include <sycl/ext/intel/esimd.hpp>
 #include <sycl/ext/intel/experimental/esimd/tfloat32.hpp>
+#include <sycl/ext/intel/experimental/grf_size_properties.hpp>
 #include <sycl/sycl.hpp>
 
 #include "base.h"
