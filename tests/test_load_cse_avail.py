@@ -143,3 +143,94 @@ def test_every_branch_is_actually_reached():
 
     for branch in ('sync', 'unknown', 'wildcard', 'exact'):
         assert seen[branch] > 0, branch + ' branch never reached'
+
+
+# --------------------------------------------------------------------------
+# whether an earlier read may stand in for a later one
+# --------------------------------------------------------------------------
+
+def _traced(predicates):
+    """`load; load; ...` of one location, each under the given predicate."""
+    from tensorforge.backend.pir import BOOL, IRBuilder, MemSpace as MS
+    from tensorforge.backend.pir.core import ScalarType, Op, walk
+    from tensorforge.backend.pir.passes import load_cse
+    from tensorforge.common.basic_types import Datatype
+    from dataclasses import replace
+
+    builder = IRBuilder(fptype=Datatype.F32)
+    buf = builder.alloc(Datatype.F32, (16,), MS.REGISTER, hint='buf')
+    guards = {}
+    body = []
+    for name in predicates:
+        if name is not None and name not in guards:
+            guards[name] = builder.op('lt', BOOL, builder.thread_id('x'), 4,
+                                      hint=name)
+    for name in predicates:
+        v = builder.load(buf, 0, type_=ScalarType(Datatype.F32), hint='r')
+        body.append((v, name))
+    stmts = builder.finish()
+    out = []
+    reads = iter(body)
+    for st in stmts:
+        if st.op == Op.LOAD:
+            _, name = next(reads)
+            if name is not None:
+                st = replace(st, predicate=guards[name])
+        out.append(st)
+    lowered = load_cse(tuple(out))
+    return sum(1 for st, _ in walk(lowered) if st.op == Op.LOAD)
+
+
+def test_two_unpredicated_reads_are_one():
+    assert _traced([None, None]) == 1
+
+
+def test_two_reads_under_the_same_guard_are_one():
+    assert _traced(['p', 'p']) == 1
+
+
+def test_a_guarded_read_takes_an_unguarded_one_that_already_happened():
+    """The value is the location's on every lane, which is at least as defined
+    as what the guard would have produced, and the address is legal because
+    the earlier read formed it."""
+    assert _traced([None, 'p']) == 1
+
+
+def test_an_unguarded_read_does_not_take_a_guarded_one():
+    """The guarded value is the else-value where the guard does not hold, and
+    an unguarded read is asking for the real one on those lanes."""
+    assert _traced(['p', None]) == 2
+
+
+def test_reads_under_different_guards_stay_apart():
+    """`q` may cover lanes `p` does not, and there the earlier value is the
+    else-value."""
+    assert _traced(['p', 'q']) == 2
+
+
+def test_the_unguarded_read_becomes_the_one_that_is_offered():
+    """`p`, then unguarded, then `p` again: the middle read replaces the entry,
+    so the third takes it instead of standing alone."""
+    assert _traced(['p', None, 'p']) == 2
+
+
+def test_a_guard_that_widens_its_value_blocks_the_reuse():
+    """Where the mask is lane-varying and the value is not, the mask is what
+    spreads the value over the lanes, so the read under it is not the same
+    declaration as one without."""
+    from tensorforge.backend.pir.core import (LaneAxis, RegisterLayout,
+                                              SCALAR_LAYOUT, ScalarType, Stmt,
+                                              Value, Op)
+    from tensorforge.backend.pir.passes import _may_stand_in
+    from tensorforge.common.basic_types import Datatype
+
+    mask = Value(id=1, type=ScalarType(Datatype.BOOL),
+                 layout=RegisterLayout((LaneAxis(16),)))
+    replicated = Stmt(op=Op.LOAD, predicate=mask,
+                      target=(Value(id=2, type=ScalarType(Datatype.F32),
+                                    layout=SCALAR_LAYOUT),))
+    spread = Stmt(op=Op.LOAD, predicate=mask,
+                  target=(Value(id=3, type=ScalarType(Datatype.F32),
+                                layout=RegisterLayout((LaneAxis(16),))),))
+    assert not _may_stand_in(None, replicated)
+    assert _may_stand_in(None, spread)

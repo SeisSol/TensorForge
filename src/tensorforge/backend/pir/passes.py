@@ -615,7 +615,7 @@ def _dce_body(body: Tuple[Stmt, ...], uses) -> Tuple[Stmt, ...]:
 # Common subexpression elimination
 # --------------------------------------------------------------------------- #
 
-def _cse_key(s: Stmt):
+def _cse_key(s: Stmt, with_predicate: bool = True):
     def k(x: Operand):
         return ('v', x.id) if isinstance(x, Value) else ('c', type(x).__name__, x)
     # The result layout is part of the key, not a detail of the operands: two
@@ -633,8 +633,9 @@ def _cse_key(s: Stmt):
     # element is 0 that still computes the right answer; the same merge on an
     # infinity would not.
     return (s.op, tuple(k(a) for a in s.args), s.text, s.attrs,
-            tuple((t.layout, t.type) for t in s.target),
-            None if s.predicate is None else s.predicate.id)
+            tuple((t.layout, t.type) for t in s.target)) + (
+        (None if s.predicate is None else s.predicate.id,)
+        if with_predicate else ())
 
 
 def cse(body: Tuple[Stmt, ...]) -> Tuple[Stmt, ...]:
@@ -734,10 +735,57 @@ def _reusable_load(s: Stmt) -> bool:
 
 
 def _load_key(s: Stmt):
-    """`_cse_key` plus the buffer identity the text may not distinguish."""
-    return (_cse_key(s),
+    """`_cse_key` plus the buffer identity the text may not distinguish.
+
+    Without the predicate, which travels beside the entry instead: two reads
+    of one location are the same read whether or not a guard was pushed onto
+    them, and whether the earlier one may stand in for the later is a question
+    about the two predicates rather than about the location.  See
+    `_may_stand_in`.
+    """
+    return (_cse_key(s, with_predicate=False),
             tuple((a.space, None if a.base is None else id(a.base))
                   for a in s.accesses))
+
+
+def _predicate_of(s: Stmt):
+    return None if s.predicate is None else s.predicate.id
+
+
+def _may_stand_in(stored, s: Stmt) -> bool:
+    """May a value loaded under `stored` be used where `s` reads?
+
+    Identical predicates, or none on the earlier read.  A read that already
+    happened unconditionally has the location's value on every lane, which is
+    at least as defined as what a predicated one produces: `if_convert` leaves
+    a guarded store guarded, so the value a masked-out lane holds never
+    reaches memory and only has to exist.  And the address is legal, since the
+    earlier read formed it.
+
+    Not the other way round.  A value loaded under `p` is the else-value where
+    `p` does not hold, so an unpredicated read of the same location -- or one
+    under a predicate `p` does not cover -- would take that else-value on
+    lanes that are asking for the real one.
+
+    The exception is a predicate that changes the shape of what it declares.
+    Where the mask is lane-varying and the value is not, the mask is what
+    spreads the value over the lanes, so the read under it is wider than its
+    own layout records and an unpredicated read is not the same declaration.
+    """
+    pred = _predicate_of(s)
+    if stored == pred:
+        return True
+    if stored is not None:
+        return False
+    return not _predicate_widens(s)
+
+
+def _predicate_widens(s: Stmt) -> bool:
+    """Does folding `s`'s predicate distribute a value that was replicated?"""
+    pred = s.predicate
+    if not isinstance(pred, Value) or pred.layout is None or not pred.distributed:
+        return False
+    return any(t.layout is None or not t.distributed for t in s.target)
 
 
 _EMPTY: frozenset = frozenset()
@@ -778,7 +826,8 @@ class _Avail:
     def get(self, key):
         return self.entries.get(key)
 
-    def add(self, key, target, accesses: Tuple[Access, ...]) -> None:
+    def add(self, key, target, accesses: Tuple[Access, ...],
+            predicate=None) -> None:
         # The index is only equivalent to the scan because of what
         # `_reusable_load` admits: a stored access is a pure read with a known
         # space.  Relaxing that gate without revisiting `kill` would make this
@@ -788,7 +837,7 @@ class _Avail:
             'availability entry outside what _reusable_load admits'
         if key in self.entries:
             self._unindex(key)
-        self.entries[key] = (target, accesses)
+        self.entries[key] = (target, accesses, predicate)
         for a in accesses:
             self._by_space.setdefault(a.space, set()).add(key)
             self._by_base.setdefault(
@@ -798,7 +847,7 @@ class _Avail:
                 self._nonregister.add(key)
 
     def _unindex(self, key) -> None:
-        _, accesses = self.entries[key]
+        accesses = self.entries[key][1]
         for a in accesses:
             bucket = self._by_space.get(a.space)
             if bucket is not None:
@@ -879,11 +928,15 @@ def _load_cse_body(body: Tuple[Stmt, ...], available: '_Avail'):
         if _reusable_load(s):
             key = _load_key(s)
             prev = available.get(key)
-            if prev is not None and len(prev[0]) == len(s.target):
+            if (prev is not None and len(prev[0]) == len(s.target)
+                    and _may_stand_in(prev[2], s)):
                 for old, new in zip(s.target, prev[0]):
                     mapping[old.id] = new
                 continue
-            available.add(key, s.target, s.accesses)
+            # An entry this one may not stand in for is replaced by it, so a
+            # read that is available under fewer conditions gives way to one
+            # available under more.
+            available.add(key, s.target, s.accesses, _predicate_of(s))
             out.append(s)
             continue
 
