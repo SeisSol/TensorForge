@@ -154,6 +154,9 @@ class Section:
     self.shr_mem_obj: Union[ShrMemObject, None] = None
     self.scopes: Scopes = Scopes()
     self.barrier = False
+    #: The operators preloaded into shared memory, with their waits and the
+    #: barrier after them: a run of `global_ir` that is emitted as one body.
+    self.preload: List[AbstractInstruction] = []
 
 class _GuardGrouping:
   """Collects the instructions of neighbouring operations under one guard.
@@ -865,8 +868,14 @@ class Generator:
           self._set_mult_stride(section)
           self._verify_section(section.stream, i)
 
+          preload = {id(instr) for instr in section.preload}
           for instruction in section.stream:
-            instruction.gen_code(writer)
+            if id(instruction) not in preload:
+              instruction.gen_code(writer)
+            elif instruction is section.preload[0]:
+              with AbstractInstruction.shared_body(self._context, writer):
+                for member in section.preload:
+                  member.gen_code(writer)
 
     self._kernel = writer.get_src()
     self.peak_pressure = self._context.peak_pressure
@@ -1059,11 +1068,26 @@ class Generator:
       # cap on gfx942 -- and FP64 at b = 56 (98 KB) with it -- and the launch
       # asked for more LDS than the device has.
       if shmem_load * self._context.fp_type.size() < shmem_cap:
-        self._section.global_ir += load_ir
+        # Waited for before the barrier that publishes them.  A barrier orders
+        # the threads, not the copies they issued: without the waits the
+        # block went past `__syncthreads()` with the transfers still in flight
+        # wherever they were asynchronous -- on NVIDIA, every one of them.
+        from tensorforge.backend.instructions.memory.load import (
+            GlbToShrLoader, LoadWait)
+        load_ir += [LoadWait(instr) for instr in load_ir
+                    if isinstance(instr, GlbToShrLoader)]
         if last_barrier:
-          self._section.global_ir.append(SyncGrid(self._context))
+          load_ir.append(SyncGrid(self._context))
         else:
-          self._section.global_ir.append(SyncBlock(self._context))
+          load_ir.append(SyncBlock(self._context))
+        self._section.global_ir += load_ir
+        # One body for the lot, so that a transfer, the pointer it reads and
+        # the wait that retires it are values of the same body -- the
+        # condition for the structured `copy.async`.  Each in a body of its
+        # own, the transfer found no source value and fell back to driving a
+        # `cuda::pipeline` object as text, one no kernel declares: nvcc
+        # refused every NVIDIA kernel with `preload_globals`.
+        self._section.preload = load_ir
         return True
       else:
         # make sure to clean up all new symbols that didn't get added -- and
