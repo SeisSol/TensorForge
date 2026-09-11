@@ -9,6 +9,16 @@ from tensorforge.common.exceptions import GenerationError
 from .abstract import AbstractOptStage, Context
 from .mem_region_allocation import Region
 
+#: The alignment every shared buffer starts at, in bytes.  The arena itself is
+#: the launch's dynamic shared memory, which the runtime gives at least this;
+#: what this file adds is that each region start and the per-multiplication
+#: stride keep it.  Without that the guarantee is an accident of the sizes --
+#: `local_flux` happens to land on it, a case one element wider does not -- and
+#: nothing that reads a buffer wide could rely on it.  `MultilinearDescr`
+#: does: a temporary is the generator's own storage, so it states this
+#: alignment rather than the zero a caller never gets to fill in.
+SHR_ALIGN_BYTES = 16
+
 
 class ShrMemOpt(AbstractOptStage):
   def __init__(self,
@@ -30,7 +40,7 @@ class ShrMemOpt(AbstractOptStage):
 
     max_memory, mem_per_region = self._compute_total_shr_mem_size()
     # add overhead to avoid shmem bank conflicts
-    self._shr_mem_obj.set_size_per_mult(max_memory + self._overhead)
+    self._shr_mem_obj.set_size_per_mult(self._aligned(max_memory + self._overhead))
     self._shr_mem_obj.set_temp_offset(max_memory)
 
     offsets = self._compute_start_addresses(mem_per_region)
@@ -55,11 +65,20 @@ class ShrMemOpt(AbstractOptStage):
       max_memory += max_mem_per_region[index]
     return max_memory, max_mem_per_region
 
+  def _align(self) -> int:
+    """`SHR_ALIGN_BYTES` in elements, at least one."""
+    size = self._context.fp_type.size()
+    return max(1, SHR_ALIGN_BYTES // size) if size else 1
+
+  def _aligned(self, count: int) -> int:
+    align = self._align()
+    return -(-count // align) * align
+
   def _compute_start_addresses(self, mem_per_region: List[int]) -> List[int]:
     num_regions: int = len(mem_per_region)
     offsets: List[int] = [0] * num_regions
     for index in range(1, num_regions):
-      offsets[index] = offsets[index - 1] + mem_per_region[index - 1]
+      offsets[index] = self._aligned(offsets[index - 1] + mem_per_region[index - 1])
     return offsets
 
   def _assign_offsets(self, offsets: List[int]):

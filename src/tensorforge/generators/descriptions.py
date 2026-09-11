@@ -11,6 +11,7 @@ from tensorforge.common.matrix.boundingbox import BoundingBox
 from tensorforge.common.matrix.tensor import Tensor, SubTensor
 from tensorforge.common.basic_types import Addressing
 
+import math
 from typing import List
 
 class GuardLiteral:
@@ -146,6 +147,48 @@ class MultilinearDescr(OperationDescription):
   def _analyze(self):
     pass
 
+  def _lead_matrices(self):
+    """The matrices one lead-dimension vector is read and written through.
+
+    The destination, and an operand whose *axis 0* carries the destination's
+    lead index.  An operand indexed only by the other axes -- `B` in
+    `C[m,n] += A[m,k] B[k,n]` -- is splatted, not loaded wide, so it proves
+    nothing about the vector's address.  `lead_width` said so from the start
+    while the code minimised over every matrix, and that is what held
+    `local_flux` at width one: its 9x9 flux solver claims no alignment.
+    """
+    out = [self.dest]
+    for op, target in zip(self.ops, list(self.target or [])):
+      if target and target[0] == 0:
+        out.append(op)
+    return out
+
+  def _lead_alignment(self, context: Context) -> int:
+    """What the lead matrices prove about a wide access, in bytes.
+
+    Two things have to hold and only one of them is the caller's claim.  The
+    base: a temporary is the generator's own shared buffer, which `ShrMemOpt`
+    starts at `SHR_ALIGN_BYTES`, so it states that rather than the zero of an
+    absent claim.  And the *column* stride, since a vector is read at
+    `column * lead + row`: a lead of 35 floats puts every column after the
+    first 140 bytes along, which keeps 4 of the 16 bytes -- so the effective
+    alignment is the greatest common divisor of the two, and an odd lead falls
+    back to width one by arithmetic rather than by a special case.
+    """
+    from tensorforge.backend.opt.shr_mem_analyzer import SHR_ALIGN_BYTES
+    fp = context.fp_type.size()
+    out = []
+    for m in self._lead_matrices():
+      tensor = m.tensor
+      base = (max(getattr(tensor, 'alignment', 0) or 0, SHR_ALIGN_BYTES)
+              if getattr(tensor, 'is_tmp', False)
+              else (getattr(tensor, 'alignment', 0) or 0))
+      shape = list(getattr(tensor, 'shape', []) or [])
+      if base and len(shape) > 1:
+        base = math.gcd(base, shape[0] * fp)
+      out.append(base)
+    return min(out) if out else 0
+
   def lead_width(self, context: Context) -> int:
     """How many adjacent lead-dimension elements one lane holds.
 
@@ -159,8 +202,7 @@ class MultilinearDescr(OperationDescription):
     from tensorforge.backend.instructions.memory import vectorize
     if not vectorize.lead_vectorize_supported(context):
       return 1
-    align = min([getattr(m.tensor, 'alignment', 0) or 0
-                 for m in self.matrix_list()] or [0])
+    align = self._lead_alignment(context)
     fp = context.fp_type.size()
     # The same call `get_num_threads` makes, so the lane count and the width
     # cannot come from two different answers.
@@ -196,8 +238,7 @@ class MultilinearDescr(OperationDescription):
     from tensorforge.backend.instructions.memory import vectorize
     if vectorize.lead_vectorize_supported(context):
       fp = context.fp_type.size()
-      align = min([getattr(m.tensor, 'alignment', 0) or 0
-                   for m in self.matrix_list()] or [0])
+      align = self._lead_alignment(context)
       threads, width = vectorize.lead_pair(
           self._lead_dim(), fp, align,
           blocking=context.get_user_options().lead_blocking)
