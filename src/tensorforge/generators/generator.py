@@ -157,6 +157,9 @@ class Section:
     #: The operators preloaded into shared memory, with their waits and the
     #: barrier after them: a run of `global_ir` that is emitted as one body.
     self.preload: List[AbstractInstruction] = []
+    #: Where the preloaded images start in the prologue's arena, so that they
+    #: can be laid out again once their operands' storage is settled.
+    self.preload_mark: int = 0
 
 class _GuardGrouping:
   """Collects the instructions of neighbouring operations under one guard.
@@ -558,68 +561,81 @@ class Generator:
       barrier += [False]
 
     for codesection, lastbarrier in zip(descrlist, barrier):
-      scopecnt = self._scopes.get_num_scopes()
-      self._scopes.add_scope()
-      self._section = Section()
+      for _attempt in range(2):
+        scopecnt = self._scopes.get_num_scopes()
+        self._scopes.add_scope()
+        self._section = Section()
 
-      self._emit_global_ir()
-      self._emit_ir(codesection)
+        self._emit_global_ir()
+        self._emit_ir(codesection)
 
-      # Build the loop *before* optimising, so that the passes see one stream
-      # with the body as a region.  This is what removes the
-      # `_global_instrs` side channel: a pipelining pass that wants a prologue
-      # now peels an iteration into this same list, ahead of the loop, instead
-      # of publishing it through a second list nothing else indexed.
-      index = len(self._sections)
-      start, stride = self._section_traversal(index)
-      loop = BatchLoop(context=self._context,
-                       section_index=index,
-                       mode=self._batch_loop_mode(),
-                       start=start,
-                       stride=stride,
-                       region=self._section.ir,
-                       flags=self._flags,
-                       queue_depth=self._launch_control_depth,
-                       group_size=self._group_size(index, start),
-                       narrow_group=self._num_threads
-                       < self._context.get_vm().get_hw_descr().vec_unit_length)
+        # Build the loop *before* optimising, so that the passes see one stream
+        # with the body as a region.  This is what removes the
+        # `_global_instrs` side channel: a pipelining pass that wants a prologue
+        # now peels an iteration into this same list, ahead of the loop, instead
+        # of publishing it through a second list nothing else indexed.
+        index = len(self._sections)
+        start, stride = self._section_traversal(index)
+        loop = BatchLoop(context=self._context,
+                         section_index=index,
+                         mode=self._batch_loop_mode(),
+                         start=start,
+                         stride=stride,
+                         region=self._section.ir,
+                         flags=self._flags,
+                         queue_depth=self._launch_control_depth,
+                         group_size=self._group_size(index, start),
+                         narrow_group=self._num_threads
+                         < self._context.get_vm().get_hw_descr().vec_unit_length)
 
-      # The prologue stays *out* of the rewritable stream.  Its shared-memory
-      # symbols are allocated by ShrMemObject.alloc_global, a separate bump
-      # allocator in a separate arena, so letting them reach the region
-      # allocator gives them a second, conflicting offset -- observable as the
-      # preloaded operators moving from totalShrMem into localShrMem0.  The
-      # optimiser reads the prologue (for symbols live on entry) but never
-      # rewrites it.
-      #
-      # A peeled prologue from a pipelining pass belongs *here*, ahead of the
-      # loop in `instructions`, not in the section prologue.
-      self._apply_rotation(loop)
-      opt = OptimizationStage(context=self._context,
-                              shr_mem=self._section.shr_mem_obj,
-                              instructions=[loop],
-                              num_threads=self._num_threads,
-                              scopes = self._scopes,
-                              global_ir = self._section.global_ir)
-      opt.optimize()
-      self._section.stream = list(self._section.global_ir) + opt.get_instructions()
+        # The prologue stays *out* of the rewritable stream.  Its shared-memory
+        # symbols are allocated by ShrMemObject.alloc_global, a separate bump
+        # allocator in a separate arena, so letting them reach the region
+        # allocator gives them a second, conflicting offset -- observable as the
+        # preloaded operators moving from totalShrMem into localShrMem0.  The
+        # optimiser reads the prologue (for symbols live on entry) but never
+        # rewrites it.
+        #
+        # A peeled prologue from a pipelining pass belongs *here*, ahead of the
+        # loop in `instructions`, not in the section prologue.
+        self._apply_rotation(loop)
+        opt = OptimizationStage(context=self._context,
+                                shr_mem=self._section.shr_mem_obj,
+                                instructions=[loop],
+                                num_threads=self._num_threads,
+                                scopes = self._scopes,
+                                global_ir = self._section.global_ir)
+        opt.optimize()
+        self._section.stream = list(self._section.global_ir) + opt.get_instructions()
 
-      # Final sync for persistent threads, appended *after* optimisation on
-      # purpose: SyncThreadsOpt drops barriers it considers redundant, and this
-      # one guards the next iteration's writes against the previous
-      # iteration's reads -- a dependency across the back edge that the pass
-      # does not model.  Adding it before optimisation removes it again.
-      #
-      # `LAUNCHCTRL` is excluded, and not because it needs the separation less.
-      # It gets it from the hand-off, which carries a block barrier outside the
-      # size guard between one element's body and the next.  Appending a second
-      # one puts it *inside* that guard, where the rows of a block decide the
-      # predicate differently and a barrier is reached by some of them only.
-      if self._persistent_threading:
-        loop.append(SyncThreads(self._context, self._num_threads))
+        # Final sync for persistent threads, appended *after* optimisation on
+        # purpose: SyncThreadsOpt drops barriers it considers redundant, and this
+        # one guards the next iteration's writes against the previous
+        # iteration's reads -- a dependency across the back edge that the pass
+        # does not model.  Adding it before optimisation removes it again.
+        #
+        # `LAUNCHCTRL` is excluded, and not because it needs the separation less.
+        # It gets it from the hand-off, which carries a block barrier outside the
+        # size guard between one element's body and the next.  Appending a second
+        # one puts it *inside* that guard, where the rows of a block decide the
+        # predicate differently and a barrier is reached by some of them only.
+        if self._persistent_threading:
+          loop.append(SyncThreads(self._context, self._num_threads))
 
-      self._deduce_mults_per_block()
-      self._set_threadconfig()
+        settled = self._settle_storage()
+        fits = self._deduce_mults_per_block() and settled
+        if fits or not self._section.preload:
+          self._set_threadconfig()
+          break
+        # The preloaded operators left no room for one multiplication: the
+        # check that admitted them compares against the block's limit before
+        # anything per multiplication is known.  So the section is built again
+        # without them, which is what the check would have decided had it
+        # known -- and the operators are read from global memory, as they are
+        # wherever they do not fit.
+        while scopecnt < self._scopes.get_num_scopes():
+          self._scopes.remove_scope()
+        self._preload_globals = False
 
       if lastbarrier:
         self._section.barrier = True
@@ -731,6 +747,39 @@ class Generator:
                  or any(walk(region) for region in instr.regions())
                  for instr in instrs)
     return walk(self._section.stream or self._section.ir)
+
+  def _settle_storage(self) -> bool:
+    """Settle how every operand is stored, and size the preloaded copies by it.
+
+    An operand's storage order is offered where the matrix path is emitted,
+    and the section prologue's copies of it were sized when they were built,
+    before any body existed.  An order with padding slots -- a fragment image
+    is tiled, 3584 slots for a 56x56 -- then outgrew its copy.  So the orders
+    are settled here, on the final stream, and the images laid out again from
+    the start of the prologue's arena in the order they were built.
+
+    Whether the images still fit the block, against the same limit the
+    prologue checked them against when they were smaller.
+    """
+    def walk(instrs):
+      for instr in instrs:
+        if hasattr(instr, 'settle_storage'):
+          instr.settle_storage()
+        for region in instr.regions():
+          walk(region)
+    walk(self._section.stream)
+    images = [instr for instr in self._section.preload
+              if getattr(instr, '_verbatim', False)]
+    if not images:
+      return True
+    obj = self._section.shr_mem_obj
+    obj.release_global(self._section.preload_mark)
+    for image in images:
+      image._get_bounding_box_dense()
+      image.set_shr_mem_offset(obj.alloc_global(image.compute_shared_mem_size()),
+                               True, True)
+    cap = self._context.get_vm().get_hw_descr().max_local_mem_size_per_block
+    return obj.get_global_size() * self._context.fp_type.size() < cap
 
   @staticmethod
   def _set_mult_stride(section) -> None:
@@ -1040,6 +1089,7 @@ class Generator:
       self._scopes.add_scope()
 
       mark = self._section.shr_mem_obj.get_global_size()
+      self._section.preload_mark = mark
       builder = GlobalLoaderBuilder(self._context, self._scopes, self._section.shr_mem_obj, self._num_threads)
       # A stand-in of a merged run is not an argument: which member it is
       # changes per iteration, through a table over the members.  Preloading
@@ -1379,6 +1429,7 @@ class Generator:
     policy.set_has_barrier(
         any(instr.barrier_scope() is not None for instr in self._section.stream))
     num_mults_per_block = policy.get_num_mults_per_block()
+    fits = num_mults_per_block >= 1
     # A block holds whole groups or the group is not a unit.  Rounding down
     # rather than up, because up would exceed whatever bound produced the
     # number -- shared memory, threads, or the barrier cap itself.
@@ -1395,6 +1446,7 @@ class Generator:
     for instr in self._section.stream:
       if isinstance(instr, BatchLoop):
         instr.set_mults_per_block(num_mults_per_block)
+    return fits
 
   def get_kernel(self):
     return self._kernel

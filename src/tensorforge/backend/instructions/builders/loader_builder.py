@@ -43,7 +43,8 @@ class GlobalLoaderBuilder(AbstractBuilder):
     self._scopes.add_symbol(dest)
 
     shrmem_symbol = self._scopes.get_symbol(self.shrmem_obj)
-    loader = GlbToShrLoader(context=self._context, src=predest, dest=dest, shr_mem=shrmem_symbol, num_threads=self.num_threads, permute=None, blockwide=True, max_load_offset=0)
+    loader = GlbToShrLoader(context=self._context, src=predest, dest=dest, shr_mem=shrmem_symbol, num_threads=self.num_threads, permute=None, blockwide=True, max_load_offset=0,
+                            verbatim=True)
 
     self._instructions.append(loader)
 

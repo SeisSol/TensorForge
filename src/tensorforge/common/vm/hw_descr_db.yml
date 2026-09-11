@@ -95,7 +95,11 @@
   # 256 VGPRs per lane in wave32 and wave64 alike, through gfx12.
   max_reg_per_thread: 1kB
   vec_unit_length: 32
-  max_local_mem_size_per_block: 128kB # assume WGP mode
+  # What one work-group may allocate, not what a WGP holds: 128 kB per WGP,
+  # 64 kB per work-group.  gfx1150 reports 65536 for MaxSharedMemoryPerBlock
+  # and for the opt-in, and `hipFuncSetAttribute` refuses more -- which a
+  # preloaded prologue of 101 kB (local_flux, TF32-split operators) asked for.
+  max_local_mem_size_per_block: 64kB
   max_num_threads: 1024
   max_reg_per_block: 256kB
   max_threads_per_sm: 1280

@@ -698,6 +698,27 @@ class MultilinearInstruction(ComputeInstruction):
             n *= mx - mi
         return n
 
+    def settle_storage(self) -> None:
+        """Offer `A` its storage order now, before anything is sized from it.
+
+        The offer is made where the matrix path is emitted, and that is too
+        late for an operand the section prologue copies into shared memory:
+        the copy is sized, and the arena laid out, before any body exists.  So
+        the generator asks here, once the stream is final, with the arguments
+        emission will use -- and emission then finds the order in place, which
+        is what the offer's idempotence is for.  Only where the plan is the
+        matrix path: that is the only place emission offers one.
+        """
+        if not self._ops or len(self._ns) == 0:
+            return
+        plan = self._plan()
+        if plan[0].strategy is Strategy.GENERIC:
+            return
+        depth = math.prod(mx - mi for mi, mx in self._ks)
+        self._offer_order(_vendor_module(self._context),
+                          self._ops[0].symbol.obj,
+                          self._ns[0][1] - self._ns[0][0], depth)
+
     def _offer_simt_order(self):
         """Let a batch-constant `A` be stored so a lane reads its rows in vectors.
 
@@ -822,8 +843,13 @@ class MultilinearInstruction(ComputeInstruction):
             return
         if len(a_obj.get_actual_shape()) != 2:
             return
-        users = self._ops[0].symbol.get_user_list()
-        if any(user is not self for user in users):
+        # The prologue's copy into shared memory is not a reader: it moves the
+        # storage as it lies, whatever the order (`GlbToShrLoader._verbatim`).
+        sym = self._ops[0].symbol
+        users = sym.get_user_list()
+        if any(user is not self and not (getattr(user, '_verbatim', False)
+                                         and user.get_dest() is sym)
+               for user in users):
             return
         offer = getattr(module, 'prepared_order', None)
         if offer is None:

@@ -60,6 +60,13 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
     else:
       self._alignment = 1
 
+    #: Copy the operand's storage scalar for scalar, as the host laid it out
+    #: -- parts, their planes and any storage order included -- rather than
+    #: its logical elements.  For the section prologue's preloaded operators:
+    #: the image in shared memory is read with the same view as the buffer in
+    #: global memory, so it has to be the same bytes.
+    self._verbatim = kwargs.get('verbatim', False)
+
     self._check()
     self._lid_dim: Union[int, None] = None
     self._align_shm_volume: Union[int, None] = None
@@ -70,16 +77,13 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
     self._shr_mem.add_user(self)
     self._is_ready: bool = False
 
+    #: Whether the transfer is a `copy.async` where it can be one.  Where it
+    #: cannot -- a source that is not a value of the body it is issued in --
+    #: it moves its bytes with ordinary loads.  The third route, driving a
+    #: `cuda::pipeline` object as text, is gone: nothing declared the object,
+    #: so every kernel that took it failed to compile (the preload prologue
+    #: until it became one body, and every loader under `wide_bodies=0`).
     self._use_cuda_memcpy = self._context.get_vm().get_hw_descr().vendor == 'nvidia' and not self._no_memcpy
-    #: The route through the `cuda::pipeline` object, as opposed to the
-    #: structured `copy.async` the emitter lowers itself.  Narrower than
-    #: `_use_cuda_memcpy`: the object comes from `<cuda/pipeline>`, which no
-    #: target below sm_70 can include, so a transfer that finds no structured
-    #: path there has to move its bytes with ordinary loads instead of
-    #: acquiring a pipeline that cannot be declared.
-    self._use_pipeline_object = (
-        self._use_cuda_memcpy
-        and self._context.get_vm().get_hw_descr().has_cuda_pipeline())
     self._use_tma_memcpy = False
     #: tokens issued by this transfer, for the `LoadWait` that retires them
     self._tokens = []
@@ -101,8 +105,6 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
       self._permute = [i for i in range(len(self._src.obj.shape))]
 
     self._needs_reorder = self._permute != [i for i in range(len(self._src.obj.shape))]
-
-    self._pipeline = 'pipeline'
 
     self._get_bounding_box_dense()
 
@@ -138,6 +140,23 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
                                    owner=self._tensor)
 
     src_real_shape = self._tensor.bbox.sizes()
+    if self._verbatim:
+      # One contiguous run of `storage_volume` scalars.  Counted in elements,
+      # as the other branches do, the copy stopped at the first part of a
+      # two-part operand: 3136 of 6272 scalars for a split 56x56, and the
+      # kernel multiplied by whatever the arena held behind them.
+      volume = self._tensor.storage_volume()
+      shape = list(self._tensor.get_actual_shape())
+      self._dest.data_view = DataView(shape=shape, permute=None,
+                                      bbox=self._tensor.get_bbox(),
+                                      elem_parts=self._tensor.storage_parts,
+                                      owner=self._tensor)
+      self._shm_volume = volume
+      self._read_shape = shape
+      self._dst_shape = shape
+      self._loop_indices = []
+      self._loadsize = volume
+      return
     dst_bbox = self._tensor.get_bbox() # BoundingBox([0] * len(self._tensor.shape), src_real_shape)
     dst_shape = []
     read_shape = []
@@ -197,6 +216,14 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
 
   def gen_code_inner(self, writer: Writer) -> None:
     allow_nontemporal = len(self._src.get_user_list()) == 1
+    if self._verbatim and self._tensor.storage_volume() != self._loadsize:
+      # The storage was decided after the image was sized -- an order offered
+      # at emission, say -- and the reservation made for it is the old size.
+      # Copying the new one would run into the next operator's image.
+      raise InternalError(
+          f'{self._dest.name}: {self._tensor.alias} occupies '
+          f'{self._tensor.storage_volume()} scalars now, and its image in '
+          f'shared memory was reserved for {self._loadsize}')
 
 
     if self._needs_reorder:
@@ -222,15 +249,13 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
       write_loops(self._context, writer, loops, inner)
     else:
       structured_issue = self._use_cuda_memcpy and self._structured_copy(writer)
-      # Nothing is in flight unless one of the two routes carried it, and a
+      # Nothing is in flight unless the structured route carried it, and a
       # wait for a transfer that never issued is a wait that never retires.
-      self._issued_async = structured_issue or self._use_pipeline_object
+      self._issued_async = structured_issue
       if structured_issue:
         self._tokens = []
         self._token_owner = getattr(writer, 'uid', None)
         self._issued_structured = True
-      elif self._use_pipeline_object:
-        writer(f'{self._pipeline}.producer_acquire();')
 
       loops = [writer.For(f'int32_t i{i} = 0; i{i} < {self._dest.data_view.shape[i]}; ++i{i}', True) for i in self._loop_indices]
 
@@ -256,9 +281,6 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
         # object those belonged to is gone, and with it the compile-time N
         # that made prefetch distance a number of iterations.
         pass
-      elif self._use_pipeline_object:
-        writer(f'__syncwarp();')
-        writer(f'{self._pipeline}.producer_commit();')
       if self._use_tma_memcpy:
         writer(f'__syncwarp();')
         writer(f'cuda::device::barrier_arrive_tx(mbarrier, 1, {self._loadsize});')
@@ -365,10 +387,6 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
           value = writer.load(_s, rhs, type_=ltype, hint='ld',
                               nontemporal=_nt, layout=_l)
           writer.store(_d, value, lhs)
-      elif self._use_pipeline_object:
-        elsize = self._dest.get_fptype().size() * increment
-        def write_load(lhs, rhs):
-          writer(f'cuda::memcpy_async(&{lhs}, &{rhs}, cuda::aligned_size_t<{elsize}>({elsize}), {self._pipeline});')
       else:
         # `increment`, not 1: above a width of one both sides of this
         # assignment are `*(VectorT<T, N>*)&...`, so the value the hint would
@@ -469,12 +487,14 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
       raise InternalError(f'shr-load: `dest` operand is not a tensor, instead: {self._dest.obj}')
 
   def get_headers(self) -> List[str]:
-    if self._use_pipeline_object:
-      # Both, because the headers are collected before it is known which path
-      # a transfer takes: `cuda::memcpy_async` and the pipeline object come
-      # from cooperative_groups, the `__pipeline_*` primitives the structured
-      # copy lowers to come from cuda_pipeline.h.  Naming only the first is
-      # what made the migrated corpus render and stop compiling.
+    if (self._use_cuda_memcpy
+        and self._context.get_vm().get_hw_descr().has_cuda_pipeline()):
+      # Only `cuda_pipeline.h` is needed now: the structured route lowers to
+      # the `__pipeline_*` primitives, and the `cuda::pipeline` object the
+      # other two served is gone.  They stay because the kernel's name is the
+      # digest of what it includes: dropping two headers `tensorforge_device/
+      # cuda.h` includes anyway renamed every CUDA kernel in the corpus and
+      # changed nothing in any of them.
       return ['cooperative_groups.h', 'cooperative_groups/memcpy_async.h',
               'cuda_pipeline.h']
     if self._use_cuda_memcpy:
@@ -778,10 +798,7 @@ class LoadWait(MemoryInstruction, LoadInstruction):
     if not tokens and self._instr._issued_structured:
       # The transfer issued structurally but into a different body, so its
       # tokens are not nameable here.  Draining is correct and merely waits
-      # longer.  Falling through to `consumer_wait()` would not be: nothing
-      # committed to that object, and libcu++ requires a committed stage --
-      # which is the unmatched wait `test_pipeline_brackets` pins, reachable
-      # more often now that the issue side migrated.
+      # longer; returning without a wait would read the copy in flight.
       writer.wait()
       return
     if tokens:
@@ -790,9 +807,6 @@ class LoadWait(MemoryInstruction, LoadInstruction):
       # of their own -- which is the thing the acquire/release pair was
       # standing in for, expressed as a def-use edge instead.
       writer.wait(tokens[-1], *tokens[:-1])
-    elif self._instr._use_pipeline_object:
-      writer(f'{self._instr._pipeline}.consumer_wait();')
-      writer(f'{self._instr._pipeline}.consumer_release();')
 
   def __str__(self) -> str:
     return f'wait({self._instr});'
