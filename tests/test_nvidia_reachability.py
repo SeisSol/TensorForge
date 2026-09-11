@@ -60,8 +60,12 @@ MODULES = ["nvidia"]
 #: and it is asked at a different time from all of them: before the operand's
 #: buffer is sized, because the answer decides how big it is.
 #: `fragment_order` hangs off it and is reached rather than listed.
+#: `convergence` is the sixth: whether the plan needs the multiplications of a
+#: warp in step, asked while the batch loop is built -- before any body, and
+#: of the target rather than the plan, since `mma.sync` is `.aligned` and
+#: another target's matrix path is not.
 ENTRIES = ["matmul", "supports", "shmsize", "scratch", "strategies",
-           "plan", "ENABLED", "prepared_order"]
+           "plan", "ENABLED", "prepared_order", "convergence"]
 
 # Unreachable on purpose.  Each entry would need a reason that says why
 # deleting it would be worse than keeping it.  There are none.

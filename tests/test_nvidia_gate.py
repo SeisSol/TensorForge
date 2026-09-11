@@ -48,12 +48,18 @@ def test_a_warp_wide_dense_case_of_the_atoms_type_is_admitted():
     assert nvidia.supports(32, ATOM_TYPE, sparse=None)
 
 
-@pytest.mark.parametrize("threads", [1, 2, 4, 8, 16, 64])
+@pytest.mark.parametrize("threads", [1, 2, 4, 8, 16])
+def test_a_width_that_divides_the_wave_is_admitted(threads):
+    """A multiplication narrower than the warp shares it with its neighbours:
+    `matmul` runs one round of fragments per multiplication and wires each
+    one's `B` in and its `D` out through its own shared region."""
+    assert nvidia.supports(threads, ATOM_TYPE, sparse=None)
+
+
+@pytest.mark.parametrize("threads", [3, 12, 24, 48, 64])
 def test_any_other_wave_width_is_turned_away(threads):
-    """The emitter is warp-level throughout -- it stages operands through
-    `__syncwarp` and indexes shared memory by `threadIdx.x` modulo the atom's
-    `k`.  Narrower waves need a warp-level broadcast and a way back; wider
-    ones are a different instruction."""
+    """A width that does not divide the warp would split a multiplication
+    across two of them, and one wider than it is a different instruction."""
     assert not nvidia.supports(threads, ATOM_TYPE, sparse=None)
 
 

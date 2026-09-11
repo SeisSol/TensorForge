@@ -2,12 +2,12 @@
 #
 # SPDX-License-Identifier: MIT
 from tensorforge.common.basic_types import Datatype
-from tensorforge.common.exceptions import GenerationError
+from tensorforge.common.exceptions import GenerationError, InternalError
 from .. import ranking
 from ..bitlayout import Bit, BitLayout, Place
 from ..routes import lead_route as routes_lead_route
 from ..strategy import Strategy, whole
-from tensorforge.backend.pir.core import (BOOL, INDEX, Access, Effect, MemSpace,
+from tensorforge.backend.pir.core import (BOOL, INDEX, Access, Effect, MemSpace, Uniformity,
                                           XorSwizzle,
                                           ScalarType, Value)
 from tensorforge.backend.writer import Writer
@@ -399,7 +399,7 @@ def prepared_order(shape, dtype, ctx, columns=0, lead=0, depth=0,
     for.  A caller asks before it decides to prepare an operand, so a refusal
     has to be an answer rather than an exception.
     """
-    if threads != 32 or len(shape) != 2:
+    if threads > WAVE or WAVE % threads or len(shape) != 2:
         return None
     # The same `sm` the emission will select with, for the reason `scratch`
     # takes a context: an order laid out against one table and read by an
@@ -408,7 +408,10 @@ def prepared_order(shape, dtype, ctx, columns=0, lead=0, depth=0,
                      sm=sm_of(ctx))
     if atom is None:
         return None
-    return fragment_order(shape, atom, threads)
+    # Over the wave and not over one multiplication: the fragment is the
+    # warp's, and a narrower multiplication reads it with its neighbours'
+    # lanes (`matmul`, `shift`).
+    return fragment_order(shape, atom, WAVE)
 
 
 def _bfrag(writer, ops, threadrange, nbase, kbase, ktile, ntile, N,
@@ -501,6 +504,26 @@ ENABLED = False
 MIN_DEPTH = 16
 
 
+#: The wave the fragment layouts are written over.  A multiplication spread
+#: over fewer lanes shares it with its neighbours, and `matmul` runs one
+#: round of the product per multiplication.
+WAVE = 32
+
+
+def convergence(strategy, shape):
+    """How far the threads have to run in step for `strategy` over `shape`.
+
+    `mma.sync` is `.aligned`: every lane of the warp issues it together, so
+    a multiplication narrower than the warp needs its neighbours in the warp
+    to take the same trips through the batch loop.  Asked of the target and
+    not of the plan, because "matrix" is not one instruction: another
+    target's matrix path may have no such demand at all.
+    """
+    if strategy is Strategy.MATRIX and shape.threads < WAVE:
+        return Uniformity.MULTGROUP
+    return None
+
+
 def supports(threads, dtype, sparse, depth=0) -> bool:
     """Whether `matmul` can emit for this shape, asked *before* it is called.
 
@@ -510,11 +533,11 @@ def supports(threads, dtype, sparse, depth=0) -> bool:
     perfectly well, so the preconditions have to be a question the caller can
     ask, not a crash the caller cannot avoid.
 
-    * ``threads == 32``.  The emitter is warp-level throughout -- it stages
-      operands through `__syncwarp` and indexes shared memory by
-      `threadIdx.x` modulo the atom's `k`.  Narrower waves would need a
-      warp-level broadcast and a way back; wider ones are a different
-      instruction.  Neither exists here yet.
+    * ``threads`` divides the wave.  The instruction is the warp's; a
+      multiplication narrower than it shares the warp with its neighbours,
+      and `matmul` runs one round of fragments per multiplication, wiring
+      each one's `B` in and its `D` out through its own shared region.
+      Wider ones are a different instruction, which does not exist here yet.
     * ``not sparse``.  `matmul` already declines these by returning `False`,
       but `temp_shmem` reserves shared memory off the same predicate; if the
       two disagree the reservation is made for a kernel that never uses it.
@@ -523,11 +546,12 @@ def supports(threads, dtype, sparse, depth=0) -> bool:
       "the caller does not know", which is not the same as "shallow" and is
       admitted -- `shmsize` asks without a shape and must keep its upper bound.
     """
-    return (threads == 32 and dtype in (Datatype.F32, Datatype.F64)
+    return (threads <= WAVE and WAVE % threads == 0
+            and dtype in (Datatype.F32, Datatype.F64)
             and not sparse and (depth == 0 or depth >= MIN_DEPTH))
 
 
-def shmsize(stages, dtype, sm=None, a_parts=1):
+def shmsize(stages, dtype, sm=None, a_parts=1, lanes=None):
     """Staging elements to reserve, sized before the entry is chosen.
 
     Over every candidate rather than over the one `instr_for` would return,
@@ -555,7 +579,17 @@ def shmsize(stages, dtype, sm=None, a_parts=1):
         cregs = (atom.m * atom.n) // threads
         return 32 * max(aregs + bregs, cregs)
 
-    return max((size(atom) for atom in instrs_for(dtype, sm)), default=0)
+    # A warp shared by several multiplications staggers each one's copy of a
+    # tile by up to 31 elements (`matmul`, `stagger`), the `A` and `B` tiles
+    # side by side and the epilogue tile over them.  Rounded to the 16 bytes
+    # every region is aligned to: the reservation is part of what one
+    # multiplication owns, and a stride that is not a whole number of vectors
+    # misaligns every other multiplication's wide accesses.
+    mults = WAVE // lanes if lanes and lanes < WAVE else 1
+    pad = 2 * 31 * (mults - 1) if mults <= 8 else 0
+    align = max(1, 16 // dtype.size())
+    pad = -(-pad // align) * align
+    return max((size(atom) for atom in instrs_for(dtype, sm)), default=0) + pad
 
 def lead_route(shape):
     """`routes.lead_route` with this target's rungs, and it has none.
@@ -622,7 +656,8 @@ def scratch(strategy, shape, ctx):
     """
     if strategy is not Strategy.MATRIX:
         return 0
-    return shmsize(1, shape.accumulator, sm_of(ctx), shape.a_parts)
+    return shmsize(1, shape.accumulator, sm_of(ctx), shape.a_parts,
+                   lanes=shape.threads)
 
 
 def plan(strategy, shape, n, ctx):
@@ -635,7 +670,7 @@ def plan(strategy, shape, n, ctx):
     return whole(strategy, n)
 
 
-def _index(writer, *, sub=0, mod=None, div=None, scale=1, add=0):
+def _index(writer, *, sub=0, mod=None, div=None, scale=1, add=0, lane=None):
     """A lane-derived index, built as operations rather than spelled out.
 
     Every address this file computes has the same shape --- the thread index,
@@ -647,9 +682,10 @@ def _index(writer, *, sub=0, mod=None, div=None, scale=1, add=0):
     about the access pattern had nothing to reason over.
 
     Order is `((tid - sub) % mod / div) * scale + add`, which is the order the
-    six call sites already used.
+    six call sites already used.  `lane` replaces `tid` where the index is the
+    warp's rather than the multiplication's (`_warp_group`).
     """
-    v = writer.thread_id('x')
+    v = writer.thread_id('x') if lane is None else lane
     if sub:
         v = writer.op('sub', INDEX, v, sub, hint='a')
     if mod is not None:
@@ -663,13 +699,77 @@ def _index(writer, *, sub=0, mod=None, div=None, scale=1, add=0):
     return v
 
 
+def _warp_group(writer, ops, threads, mults):
+    """The warp lane, this multiplication's place in the warp, and how far
+    another multiplication's copy of a tile is.
+
+    At one multiplication per warp the lane is `threadIdx.x` and there is no
+    other copy, so this answers `None` and no distance -- and that path emits
+    what it always did.  Narrower, the multiplications of a warp are
+    consecutive in `y`: the lane is `threadIdx.x + threads * (threadIdx.y %
+    mults)`, and multiplication `p`'s tile is `p - threadIdx.y % mults`
+    regions from this one's, since every multiplication owns the same layout
+    of shared memory, `mult_stride` elements after its predecessor's.
+
+    The distance is handed to the access as its `shift`, which the builder
+    adds after the tile's swizzle: the permutation stays one of the tile's
+    own index, the same for the multiplication that writes the tile and for
+    the neighbour that reads it.
+    """
+    if mults == 1:
+        return None, None, (lambda p: None)
+    stride = ops.mult_stride
+    if stride is None:
+        raise InternalError(
+            'the MMA path shares a warp between multiplications and addresses '
+            'the shared memory of its neighbours, but was not told how much '
+            'each multiplication owns')
+    mine = writer.op('rem', INDEX, writer.thread_id('y'), mults, hint='m')
+    lane = writer.op('add', INDEX, writer.thread_id('x'),
+                     writer.op('mul', INDEX, mine, threads, hint='m'),
+                     hint='wl')
+    back = writer.op('mul', INDEX, mine, -stride, hint='r')
+
+    def region(p):
+        return writer.op('add', INDEX, back, p * stride, hint='r') if p else back
+    return lane, mine, region
+
+
+def _lanes_of(start, size, threads):
+    """`(slot, first lane, lanes, sub)` for rows `start .. start + size` of a
+    lead distribution over `threads` lanes.
+
+    Row `r` sits in lane `r % threads` at slot `r // threads`, so a run of
+    rows is one slot where it stays below a multiple of the lane count and
+    several where it crosses one.  A lane of the run holds row `lane - sub`
+    counted from `start`.
+    """
+    for s in range(start // threads, (start + size - 1) // threads + 1):
+        lo = max(start - s * threads, 0)
+        hi = min(start + size - s * threads, threads)
+        yield s, lo, hi - lo, start - s * threads
+
+
 def matmul(writer, ops, ctx, span):
     C, A, B = ops.C, ops.A, ops.B
-    # Elements, and the loop below walks them in strides of `threads`.  The
+    # Elements, and the loop below walks them a wave at a time.  The
     # accessors take slots, so `i // threads` is what reaches them.
     M = ops.lead_elements
     N, K, kx = span.stop, ops.k, ops.kx
     threads, dtype, sparse = ops.threads, ops.accumulator, ops.sparse
+    # The warp the fragments are spread over, and how many multiplications
+    # share it.  One is the warp-per-multiplication path this always was.
+    # More, and the warp runs one round of MMAs per multiplication: each one
+    # stages its own `A` and `B` in its own shared region, round `p` reads
+    # its fragments out of multiplication `p`'s, and `D` goes back through
+    # that region to the lanes that own the rows.  The staging stores and the
+    # epilogue reads are the multiplication's (`threadIdx.x`); the fragment
+    # reads and the `D` stores are the warp's (`lane`).
+    wave = WAVE
+    mults = wave // threads
+    # Lead slots per lane.  A wave of rows spans `mults` of them, and one past
+    # the operand's last holds no rows at all.
+    nslots = -(-M // threads)
 
     def threadrange(start, size):
         """The lanes that take part in one staging step.
@@ -717,7 +817,13 @@ def matmul(writer, ops, ctx, span):
     Creg = writer.varalloc()
 
     # `supports()` is the gate; this is the guard for a direct caller.
-    assert threads == 32
+    assert threads <= wave and wave % threads == 0
+    lane, mine, region = _warp_group(writer, ops, threads, mults)
+    # A barrier here meets the warp.  Where the warp holds several
+    # multiplications all of them have to arrive, and the count is what says
+    # so to `barrier` -- as `convergence_scope` says it to the loop around.
+    sync = {} if mults == 1 else {'threads': threads}
+    shift = {} if mults == 1 else {'shift': mine}
 
     ntile = 8
     mtile = 8
@@ -727,14 +833,14 @@ def matmul(writer, ops, ctx, span):
     mregs = atom.m // mtile
     kregs = atom.k // ktile
 
-    aregs = (atom.m * atom.k) // threads
+    aregs = (atom.m * atom.k) // wave
     # How many k tiles a pre-ordered operand was laid out in.  Read from
     # `tile_starts` and not from a ceiling, so the emitter names a tile the
     # same way `fragment_order` did -- the two are one layout, and the only
     # way for them to disagree is to derive it twice.
-    ktiles = len(tile_starts(K, threads, atom.k))
-    bregs = (atom.n * atom.k) // threads
-    cregs = (atom.m * atom.n) // threads
+    ktiles = len(tile_starts(K, wave, atom.k))
+    bregs = (atom.n * atom.k) // wave
+    cregs = (atom.m * atom.n) // wave
 
     # The three staging windows, taken from the scratch tail this instruction
     # declared to ShrMemOpt rather than placed by hand.
@@ -753,7 +859,8 @@ def matmul(writer, ops, ctx, span):
     # sized: the index is `iii + kk * mregs` and `kkk + jj * kregs`, so the
     # bound is a product of loop extents rather than the register count.
     Afrag = [None] * (aregs * mregs * kregs * 8)
-    Bfrag = [None] * (bregs * nregs * kregs * 8)
+    # One list per round: round `p` multiplies multiplication `p`'s `B`.
+    Bfrag = [[None] * (bregs * nregs * kregs * 8) for _ in range(mults)]
     # One staging chain per part.  `a_parts == 1` is the ordinary operand and
     # every list below is one long, which is the shape this code had before
     # there was a second part -- so the prepared case is the general one and
@@ -772,15 +879,52 @@ def matmul(writer, ops, ctx, span):
     # Whether `B` can be read where it lies instead of redistributed.  Asked
     # once and for the whole span: the tile is either needed or it is not, and
     # a path that staged half the fragments would still pay for it.
-    bdirect = (ops.B_frag is not None and ops.B_direct is not None
+    # Only on a warp of its own: a neighbour's `B` lies behind a pointer this
+    # lane does not hold, so it comes through the neighbour's tile.
+    bdirect = (mults == 1
+               and ops.B_frag is not None and ops.B_direct is not None
                and ops.B_direct(ktile, ntile) and atom.n == ntile)
     AregParts = [Areg] + [{} for _ in range(1, aparts)]
-    AfragParts = [[None] * len(Afrag) for _ in range(aparts)]
+    # A warp of its own reads the epilogue tile at the index the lane gives;
+    # a shared one reads its own rows, one run per slot they span.
+    alone = mults == 1
+    # The staging stores and the epilogue reads happen in every
+    # multiplication of the warp at once, each in its own region and at the
+    # same offsets -- so the regions' distance decides their banks, and where
+    # it is a multiple of 32 all of them land on the same ones.  So a tile is
+    # staggered by `stagger(...)` elements per multiplication, making the
+    # distance the one its access pattern needs: `B` is staged in runs of
+    # eight (eight banks apart), and the epilogue reads swizzled rows of eight,
+    # whose banks repeat every eight (`8 / mults` apart, modulo eight).  `A` is
+    # not: it is staged four consecutive elements per lane, which ptxas merges
+    # into one 16-byte store, and a 16-byte access is served eight lanes at a
+    # time -- one multiplication at eight lanes, half of one at sixteen -- so
+    # its regions never meet in a bank, and a stagger that is not a multiple
+    # of four only breaks the merge (measured: twice the stores, 3-way).  The
+    # fragment reads and the `D` stores see one region per instruction, and a
+    # shift common to all lanes does not change their banks.  Measured on
+    # `local_flux` at eight lanes: unstaggered, the `B` stores were 3-way and
+    # the epilogue reads 4-way.
+    def stagger(target):
+        if alone or mults > 8:
+            return 0
+        return (target - ops.mult_stride) % 32
+    apad, bpad, cpad = 0, stagger(atom.k), stagger(8 // mults)
+
+    def at(p, pad):
+        """The shift to multiplication `p`'s copy of a tile staggered by
+        `pad`, or to this lane's own where `p` is `None`."""
+        if alone:
+            return None
+        if p is None:
+            return writer.op('mul', INDEX, mine, pad, hint='r') if pad else None
+        r = region(p)
+        return writer.op('add', INDEX, r, p * pad, hint='r') if pad and p else r
 
     with writer.scratch_scope():
         # `aparts` scalars per slot, adjacent, so a fragment's parts are one
         # access rather than one each -- see the note below the B tile.
-        Ashm = writer.alloc(atom.d, (aparts * aregs * threads,),
+        Ashm = writer.alloc(atom.d, (aparts * aregs * wave + (mults - 1) * apad,),
                             MemSpace.SHARED, hint='atile')
         # The B tile is written a row at a time and read a column at a time,
         # which no linear stride can serve without bank conflicts: 32 lanes
@@ -788,7 +932,7 @@ def matmul(writer, ops, ctx, span):
         # in 128 of bank width.  Padding moves the collision, transposing
         # moves it to the store; permuting each row costs nothing and clears
         # both.  Measured over the emitted addresses: 2-way -> 1-way.
-        Bshm = writer.alloc(atom.d, (bregs * threads,), MemSpace.SHARED,
+        Bshm = writer.alloc(atom.d, (bregs * wave + (mults - 1) * bpad,), MemSpace.SHARED,
                             hint='btile', swizzle=XorSwizzle(atom.k))
         # One tile with the parts *adjacent*, not one tile per part.
         #
@@ -819,8 +963,8 @@ def matmul(writer, ops, ctx, span):
         #   C store    2-w    2-w    2-w    1-w
         #
         # `tools/bank_conflicts.py` is what keeps those honest.
-        Cshm = writer.alloc(atom.d, (cregs * threads,), MemSpace.SHARED,
-                            hint='ctile', swizzle=XorSwizzle(threads))
+        Cshm = writer.alloc(atom.d, (cregs * wave + (mults - 1) * cpad,), MemSpace.SHARED,
+                            hint='ctile', swizzle=XorSwizzle(wave))
 
     x4type = {
         Datatype.F32: 'float4',
@@ -841,7 +985,7 @@ def matmul(writer, ops, ctx, span):
                 for jj in range(min(atom.n, N - j), atom.n):
                     Breg[k // threads, jj] = writer.declare(ScalarType(atom.d),
                                                             hint='bs')
-            for i in range(0, M, threads):
+            for i in range(0, M, wave):
                 with writer.AnonymousScope():
                     # One value per accumulator slot rather than a `[cregs][n]`
                     # array named by `varalloc`.  The array was a C++
@@ -849,13 +993,15 @@ def matmul(writer, ops, ctx, span):
                     # read-write operand could not be a value and the asm had
                     # to stay raw text.  Same registers, same initialisation;
                     # the difference is that each slot now has a definition
-                    # point and a use chain.
-                    Cvals = [[writer.declare(ScalarType(atom.d), hint='c')
-                              for _ in range(threads // atom.m)]
-                             for _ in range(cregs)]
-                    for k in range(0, K, threads):
+                    # point and a use chain.  One set per round: round `p`
+                    # accumulates multiplication `p`'s rows.
+                    Cvals = [[[writer.declare(ScalarType(atom.d), hint='c')
+                               for _ in range(wave // atom.m)]
+                              for _ in range(cregs)]
+                             for _ in range(mults)]
+                    for k in range(0, K, wave):
                         with writer.AnonymousScope():
-                            for kk in range(0, min(threads, K - k), atom.k):
+                            for kk in range(0, min(wave, K - k), atom.k):
                                 with writer.AnonymousScope():
                                     trueK = kk + kx
                                     if not bdirect:
@@ -864,18 +1010,19 @@ def matmul(writer, ops, ctx, span):
                                         # that want it at another.  Where the
                                         # fragment's own address is
                                         # expressible, none of this happens.
-                                        writer.barrier('wave')
-                                        trueSK = min(atom.k, threads - trueK)
-                                        with threadrange(trueK, trueSK):
-                                            for jj in range(0, atom.n):
-                                                writer.store(Bshm, Breg[k // threads, jj],
-                                                             _index(writer, sub=trueK, mod=atom.k, add=jj * atom.k))
-                                        if trueSK != atom.k:
-                                            with threadrange(0, atom.k - trueSK):
+                                        # Every multiplication stages its own
+                                        # rows in its own region, one run per
+                                        # slot the step spans.
+                                        writer.barrier('wave', **sync)
+                                        for s, lo, cnt, sub in _lanes_of(k + trueK, atom.k,
+                                                                         threads):
+                                            with threadrange(lo, cnt):
                                                 for jj in range(0, atom.n):
-                                                    writer.store(Bshm, Breg[k // threads + 1, jj],
-                                                                         _index(writer, sub=-trueSK, mod=atom.k, add=jj * atom.k))
-                                        writer.barrier('wave')
+                                                    writer.store(Bshm, Breg[s, jj],
+                                                                 _index(writer, sub=sub, mod=atom.k,
+                                                                        add=jj * atom.k),
+                                                                 shift=at(None, bpad))
+                                        writer.barrier('wave', **sync)
 
                                     for jj in range(0, nregs):
                                         for kkk in range(0, kregs):
@@ -896,22 +1043,26 @@ def matmul(writer, ops, ctx, span):
                                             # two `thread_id` reads are one
                                             # value after `cse`.
                                             if bdirect:
-                                                Bfrag[kkk + jj * kregs] = _bfrag(
+                                                Bfrag[0][kkk + jj * kregs] = _bfrag(
                                                     writer, ops, threadrange,
                                                     j + jj * ntile,
                                                     k + trueK + kkk * ktile,
                                                     ktile, ntile, N, atom,
                                                     threads)
                                                 continue
-                                            col = _index(writer, mod=ktile)
+                                            col = _index(writer, mod=ktile, lane=lane)
                                             row = _index(writer, div=ktile,
                                                          add=jj * ntile,
-                                                         scale=atom.k)
+                                                         scale=atom.k, lane=lane)
                                             addr = writer.op('add', INDEX, col, row, hint='a')
                                             if kkk * ktile:
                                                 addr = writer.op('add', INDEX, addr,
                                                                  kkk * ktile, hint='a')
-                                            Bfrag[kkk + jj * kregs] = writer.load(Bshm, addr, hint='b')
+                                            # Round `p` reads multiplication
+                                            # `p`'s tile.
+                                            for p in range(mults):
+                                                Bfrag[p][kkk + jj * kregs] = writer.load(
+                                                    Bshm, addr, hint='b', shift=at(p, bpad))
 
                                     # Parts innermost, so one element's parts
                                     # are read next to each other.  They are
@@ -931,123 +1082,157 @@ def matmul(writer, ops, ctx, span):
                                         # pre-ordered operand skips both: it
                                         # was redistributed before the kernel
                                         # ran, so a lane reads its own
-                                        # fragments and nothing else's.
-                                        for kkk in range(0, min(atom.k, K - k - kk)):
-                                            got = A(writer, None, i // threads,
-                                                    k + kk + kkk, parts=aparts)
-                                            got = got if aparts > 1 else (got,)
-                                            for pt in range(aparts):
-                                                AregParts[pt][kkk] = got[pt]
-                                        for kkk in range(min(atom.k, K - k - kk), atom.k):
-                                            for pt in range(aparts):
-                                                # A padding slot reads zero in
-                                                # every part, and for a split
-                                                # that is the right answer: it
-                                                # says the part before it was
-                                                # exact, which for a slot
-                                                # nothing multiplies is true.
-                                                AregParts[pt][kkk] = writer.declare(
-                                                    ScalarType(atom.d), hint='as')
+                                        # fragments and nothing else's.  A
+                                        # wave of rows spans `mults` slots of
+                                        # a lane, and one past the operand's
+                                        # last has no rows and holds zero.
+                                        for q in range(mults):
+                                            slot = i // threads + q
+                                            live = (min(atom.k, K - k - kk)
+                                                    if slot < nslots else 0)
+                                            for kkk in range(0, live):
+                                                got = A(writer, None, slot,
+                                                        k + kk + kkk, parts=aparts)
+                                                got = got if aparts > 1 else (got,)
+                                                for pt in range(aparts):
+                                                    AregParts[pt][q, kkk] = got[pt]
+                                            for kkk in range(live, atom.k):
+                                                for pt in range(aparts):
+                                                    # A padding slot reads zero in
+                                                    # every part, and for a split
+                                                    # that is the right answer: it
+                                                    # says the part before it was
+                                                    # exact, which for a slot
+                                                    # nothing multiplies is true.
+                                                    AregParts[pt][q, kkk] = writer.declare(
+                                                        ScalarType(atom.d), hint='as')
 
-                                    for ii in range(0, min(threads, M - i), atom.m):
+                                    for ii in range(0, min(wave, M - i), atom.m):
                                         with writer.AnonymousScope():
+                                            # The fragments a round multiplies,
+                                            # per part, keyed by the
+                                            # multiplication whose tile they
+                                            # came from -- or by `None` where
+                                            # every round reads the same `A`.
+                                            frags = {}
                                             if aordered:
                                                 # The address the staging tile was *read* at, in memory: the
                                                 # tile base, plus the slot times the wave, plus the lane the
                                                 # accessor supplies.  So a fragment is 32 consecutive elements
                                                 # -- one 128-byte transaction, or 256 with the parts adjacent --
                                                 # and the store, the two barriers and the read back are all
-                                                # gone, not merely cheaper.
+                                                # gone, not merely cheaper.  The operand is batch-constant, so
+                                                # a warp shared by several multiplications reads it once for
+                                                # all of them, over all of its lanes (`shift`).
                                                 mt = (i + ii) // atom.m
                                                 kt = (k + kk) // atom.k
-                                                tbase = (mt * ktiles + kt) * (aregs * threads)
+                                                tbase = (mt * ktiles + kt) * (aregs * wave)
+                                                got_parts = [[None] * len(Afrag) for _ in range(aparts)]
                                                 for kf in range(0, kregs):
                                                     for iii in range(0, mregs):
                                                         fr = iii + kf * mregs
-                                                        got = ops.A_slot(writer, tbase + fr * threads,
-                                                                         parts=aparts)
+                                                        got = ops.A_slot(writer, tbase + fr * wave,
+                                                                         parts=aparts, **shift)
                                                         got = got if aparts > 1 else (got,)
-                                                        Afrag[fr] = got[0]
-                                                        for pt in range(1, aparts):
-                                                            AfragParts[pt][fr] = got[pt]
+                                                        for pt in range(aparts):
+                                                            got_parts[pt][fr] = got[pt]
+                                                frags[None] = got_parts
                                             else:
-                                                writer.barrier('wave')
-                                                with threadrange(ii, atom.m):
-                                                    # for kkk in range(0, atom.k):
-                                                    #     writer(f'{shmptr}[{aoffs} + (threadIdx.x - {ii}) % {atom.m} + {kkk * atom.m}] = {Areg}_{kkk};')
-                                                    for kkk in range(0, atom.k, ktile):
-                                                        # `ktile` consecutive
-                                                        # elements, written one at a
-                                                        # time rather than packed.
-                                                        #
-                                                        # This was a `pack` into
-                                                        # `ScalarType(atom.d, 4)`
-                                                        # and one wide store, which
-                                                        # is what the addresses
-                                                        # deserve -- and which nvcc
-                                                        # refuses.  `CudaLexic`
-                                                        # renders a packed value as
-                                                        # `tensorforge::VectorT<T,
-                                                        # 4>`, a GNU `vector_size`
-                                                        # typedef, and the device
-                                                        # front end declines a
-                                                        # *value* of that type: "is
-                                                        # a vector, which is not
-                                                        # supported in device code",
-                                                        # 101 times over a corpus
-                                                        # case.  `cuda.h` predicted
-                                                        # exactly this.
-                                                        #
-                                                        # The spelling is not fixed
-                                                        # in the lexic because the
-                                                        # lexic is right for its own
-                                                        # reasons: `float4` has no
-                                                        # arithmetic operators and
-                                                        # cannot be assigned through
-                                                        # a `VectorRelaxedT`
-                                                        # pointer, which the staging
-                                                        # transfers need.  Neither
-                                                        # applies here -- this value
-                                                        # is only ever stored -- so
-                                                        # the narrower spelling is
-                                                        # local to the one site that
-                                                        # cannot have the wider one.
-                                                        #
-                                                        # It costs a wide store.
-                                                        # Reinstating one needs a
-                                                        # device-legal vector value,
-                                                        # not a different lexic.
-                                                        base = _index(
-                                                            writer, sub=ii, mod=atom.m,
-                                                            scale=ktile, add=kkk * atom.m)
-                                                        for n in range(ktile):
-                                                            addr = base if n == 0 else writer.op(
-                                                                'add', INDEX, base, n, hint='a')
-                                                            wide = (addr if aparts == 1
-                                                                    else writer.op('mul', INDEX, addr,
-                                                                                   aparts, hint='a'))
-                                                            for pt in range(aparts):
-                                                                at = (wide if pt == 0
-                                                                      else writer.op('add', INDEX,
-                                                                                     wide, pt,
-                                                                                     hint='a'))
-                                                                writer.store(Ashm,
-                                                                             AregParts[pt][kkk + n],
-                                                                             at)
-                                                writer.barrier('wave')
+                                                writer.barrier('wave', **sync)
+                                                for q, lo, cnt, sub in _lanes_of(ii, atom.m, threads):
+                                                    with threadrange(lo, cnt):
+                                                        # for kkk in range(0, atom.k):
+                                                        #     writer(f'{shmptr}[{aoffs} + (threadIdx.x - {ii}) % {atom.m} + {kkk * atom.m}] = {Areg}_{kkk};')
+                                                        for kkk in range(0, atom.k, ktile):
+                                                            # `ktile` consecutive
+                                                            # elements, written one at a
+                                                            # time rather than packed.
+                                                            #
+                                                            # This was a `pack` into
+                                                            # `ScalarType(atom.d, 4)`
+                                                            # and one wide store, which
+                                                            # is what the addresses
+                                                            # deserve -- and which nvcc
+                                                            # refuses.  `CudaLexic`
+                                                            # renders a packed value as
+                                                            # `tensorforge::VectorT<T,
+                                                            # 4>`, a GNU `vector_size`
+                                                            # typedef, and the device
+                                                            # front end declines a
+                                                            # *value* of that type: "is
+                                                            # a vector, which is not
+                                                            # supported in device code",
+                                                            # 101 times over a corpus
+                                                            # case.  `cuda.h` predicted
+                                                            # exactly this.
+                                                            #
+                                                            # The spelling is not fixed
+                                                            # in the lexic because the
+                                                            # lexic is right for its own
+                                                            # reasons: `float4` has no
+                                                            # arithmetic operators and
+                                                            # cannot be assigned through
+                                                            # a `VectorRelaxedT`
+                                                            # pointer, which the staging
+                                                            # transfers need.  Neither
+                                                            # applies here -- this value
+                                                            # is only ever stored -- so
+                                                            # the narrower spelling is
+                                                            # local to the one site that
+                                                            # cannot have the wider one.
+                                                            #
+                                                            # It costs a wide store.
+                                                            # Reinstating one needs a
+                                                            # device-legal vector value,
+                                                            # not a different lexic.
+                                                            base = _index(
+                                                                writer, sub=sub, mod=atom.m,
+                                                                scale=ktile, add=kkk * atom.m)
+                                                            for n in range(ktile):
+                                                                addr = base if n == 0 else writer.op(
+                                                                    'add', INDEX, base, n, hint='a')
+                                                                wide = (addr if aparts == 1
+                                                                        else writer.op('mul', INDEX, addr,
+                                                                                       aparts, hint='a'))
+                                                                for pt in range(aparts):
+                                                                    to = (wide if pt == 0
+                                                                          else writer.op('add', INDEX,
+                                                                                         wide, pt,
+                                                                                         hint='a'))
+                                                                    writer.store(Ashm,
+                                                                                 AregParts[pt][q, kkk + n],
+                                                                                 to, shift=at(None, apad))
+                                                writer.barrier('wave', **sync)
 
-                                                for kk in range(0, kregs):
-                                                    for iii in range(0, mregs):
-                                                        #writer(f'{atom.d.ctype()} {Areg2}_{iii + kk * mregs} = {shmptr}[{aoffs} + (threadIdx.x / {ktile}) + (threadIdx.x % {ktile} + {kk * ktile}) * {atom.m} + {iii * mtile}];')
-                                                        faddr = _index(writer, add=(iii + kk * mregs) * 32)
-                                                        if aparts > 1:
-                                                            faddr = writer.op('mul', INDEX, faddr,
-                                                                              aparts, hint='a')
-                                                        Afrag[iii + kk * mregs] = writer.load(Ashm, faddr, hint='a')
-                                                        for pt in range(1, aparts):
-                                                            AfragParts[pt][iii + kk * mregs] = writer.load(
-                                                                Ashm, writer.op('add', INDEX, faddr, pt,
-                                                                                hint='a'), hint='a')
+                                                # Where `A` is the same for every
+                                                # multiplication every lane reads
+                                                # multiplication 0's copy, once
+                                                # for all rounds -- one region for
+                                                # the whole warp, so the banks are
+                                                # the tile's alone.  Otherwise
+                                                # round `p` reads `p`'s.
+                                                srcs = ([None] if alone else [0] if ops.a_uniform
+                                                        else list(range(mults)))
+                                                for src in srcs:
+                                                    got_parts = [[None] * len(Afrag)
+                                                                 for _ in range(aparts)]
+                                                    for kf in range(0, kregs):
+                                                        for iii in range(0, mregs):
+                                                            #writer(f'{atom.d.ctype()} {Areg2}_{iii + kk * mregs} = {shmptr}[{aoffs} + (threadIdx.x / {ktile}) + (threadIdx.x % {ktile} + {kk * ktile}) * {atom.m} + {iii * mtile}];')
+                                                            faddr = _index(writer, add=(iii + kf * mregs) * wave,
+                                                                           lane=lane)
+                                                            if aparts > 1:
+                                                                faddr = writer.op('mul', INDEX, faddr,
+                                                                                  aparts, hint='a')
+                                                            far = None if src is None else at(src, apad)
+                                                            got_parts[0][iii + kf * mregs] = writer.load(
+                                                                Ashm, faddr, hint='a', shift=far)
+                                                            for pt in range(1, aparts):
+                                                                got_parts[pt][iii + kf * mregs] = writer.load(
+                                                                    Ashm, writer.op('add', INDEX, faddr, pt,
+                                                                                    hint='a'), hint='a',
+                                                                    shift=far)
+                                                    frags[src] = got_parts
 
                                             # Where A was stored prepared the
                                             # parts are handed over as they
@@ -1059,40 +1244,58 @@ def matmul(writer, ops, ctx, span):
                                             # three.  The reinterpretation to
                                             # the operand type is
                                             # arithmetic-free.
-                                            AfragParts[0] = Afrag
-                                            a_split = ([tuple(_as_tf32(writer, AfragParts[pt][f])
-                                                              for pt in range(aparts))
-                                                        for f in range(aregs)]
-                                                       if aparts > 1 else None)
-                                            atom.generate(writer, ctx, Afrag[:aregs], Bfrag[:bregs],
-                                                          [Cvals[i][ii // atom.m] for i in range (cregs)],
-                                                          a_split=a_split)
+                                            splits = {src: ([tuple(_as_tf32(writer, got_parts[pt][f])
+                                                                   for pt in range(aparts))
+                                                             for f in range(aregs)]
+                                                            if aparts > 1 else None)
+                                                      for src, got_parts in frags.items()}
+                                            for p in range(mults):
+                                                src = p if p in frags else next(iter(frags))
+                                                atom.generate(writer, ctx, frags[src][0][:aregs],
+                                                              Bfrag[p][:bregs],
+                                                              [Cvals[p][c][ii // atom.m]
+                                                               for c in range(cregs)],
+                                                              a_split=splits[src])
 
                     # The epilogue's staging registers.  Assigned inside a
                     # thread guard and read outside it, so they are declared
                     # here and written through `assign` rather than being the
                     # result of the load: a value defined inside the guard
                     # would not be visible to the store that follows.
-                    Cout = [writer.declare(ScalarType(atom.d), hint='c')
-                            for _ in range(atom.n)]
+                    Cout = {(q, jj): writer.declare(ScalarType(atom.d), hint='c')
+                            for q in range(mults) for jj in range(atom.n)}
 
-                    for ii in range(0, threads, atom.m):
+                    for ii in range(0, wave, atom.m):
                         with writer.AnonymousScope():
                             # The lane's own term is `2 * t`; the rest is the
                             # instruction's fragment shape, which
                             # `accumulator_slots` states and a test checks.
-                            for slot, off in accumulator_slots(atom):
-                                writer.store(Cshm, Cvals[slot][ii // atom.m],
-                                             _index(writer, scale=2, add=off))
+                            # Round `p`'s `D` goes to multiplication `p`'s
+                            # region, so each one reads its rows back out of
+                            # its own.
+                            for p in range(mults):
+                                for slot, off in accumulator_slots(atom):
+                                    writer.store(Cshm, Cvals[p][slot][ii // atom.m],
+                                                 _index(writer, scale=2, add=off, lane=lane),
+                                                 shift=at(p, cpad))
 
-                            writer.barrier('wave')
-                            with threadrange(ii, atom.m):
-                                for jj in range(0, atom.n):
-                                    _c = writer.load(Cshm, _index(writer, mod=atom.m, scale=atom.n, add=jj), hint='data')
-                                    writer.assign(Cout[jj], _c)
-                            writer.barrier('wave')
+                            writer.barrier('wave', **sync)
+                            for q, lo, cnt, sub in _lanes_of(ii, atom.m, threads):
+                                with threadrange(lo, cnt):
+                                    for jj in range(0, atom.n):
+                                        idx = (_index(writer, mod=atom.m, scale=atom.n, add=jj)
+                                               if alone else
+                                               _index(writer, sub=sub, mod=atom.m,
+                                                      scale=atom.n, add=jj))
+                                        _c = writer.load(Cshm, idx, hint='data',
+                                                         shift=at(None, cpad))
+                                        writer.assign(Cout[q, jj], _c)
+                            writer.barrier('wave', **sync)
 
-                    for jj in range(0, min(atom.n, N - j)):
-                        C(writer, Cout[jj], i // threads, j + jj)
+                    for q in range(mults):
+                        if i // threads + q >= nslots:
+                            continue
+                        for jj in range(0, min(atom.n, N - j)):
+                            C(writer, Cout[q, jj], i // threads + q, j + jj)
 
     return True

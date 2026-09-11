@@ -224,6 +224,18 @@ class AbstractInstruction(ABC):
     """
     return None
 
+  def convergence_scope(self) -> Optional[Uniformity]:
+    """How far threads have to execute this in step, or `None`.
+
+    Not a barrier -- nothing waits here and no memory is ordered -- but the
+    same demand on the region: a wave-collective instruction (a matrix
+    fragment product) is issued by every lane of the wave together, so where a
+    wave holds several multiplications, all of them have to reach it the same
+    number of times.  Separate from `barrier_scope` because passes read that
+    one as "shared memory is ordered here", which this does not promise.
+    """
+    return None
+
   def regions(self) -> Tuple[Tuple['AbstractInstruction', ...], ...]:
     """Nested instruction streams, e.g. a loop body.
 

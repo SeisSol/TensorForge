@@ -12,7 +12,7 @@ from tensorforge.common.context import Context
 from tensorforge.common.operation import ReductionOperator
 from typing import Union, List, Tuple
 from tensorforge.common.basic_types import Addressing, Datatype
-from tensorforge.backend.pir.core import MemSpace
+from tensorforge.backend.pir.core import INDEX, MemSpace, Uniformity
 from tensorforge.backend.instructions.abstract_instruction import _explicit_simd
 
 from tensorforge.common.matrix.tensor import Tensor
@@ -108,6 +108,9 @@ class MultilinearInstruction(ComputeInstruction):
         self._prev_offset = prev_offset
         self._next = next
         self._dest_obj = dest_obj
+        # Shared memory one multiplication owns, set by the generator once
+        # the arena is sized; see `set_mult_stride`.
+        self._mult_stride = None
 
         assert num_threads % blockcount == 0
 
@@ -853,6 +856,35 @@ class MultilinearInstruction(ComputeInstruction):
                             lead_layout=lead_layout(self._num_threads,
                                                     self._lead_width))
 
+    def set_mult_stride(self, stride) -> None:
+        """The shared memory one multiplication owns, in elements.
+
+        Read by a matrix path whose warp holds several multiplications and
+        reads its neighbours' tiles (`nvidia._warp_group`).  Known only once
+        `ShrMemOpt` has sized the arena, which is after the plan is made.
+        """
+        self._mult_stride = stride
+
+    def convergence_scope(self):
+        """How far the threads have to run in step for the plan to be legal.
+
+        An NVIDIA matrix instruction is the warp's collective: every lane
+        issues it together.  Where a multiplication is narrower than the warp,
+        its neighbours in the warp are part of that and have to take the same
+        trips through the batch loop -- which the loop's grouped traversal
+        guarantees and `verify` checks it against.  The target says so
+        (`convergence`); a target that says nothing asks nothing.
+        """
+        module = _vendor_module(self._context)
+        ask = getattr(module, 'convergence', None) if module is not None else None
+        if ask is None or not is_contraction(len(self._ops)):
+            return None
+        shape = self._shape()
+        levels = [level for level in (ask(span.strategy, shape)
+                                      for span in self._plan())
+                  if level is not None]
+        return max(levels) if levels else None
+
     def _plan(self) -> Tuple[Span, ...]:
         """Which arrangements compute this operation, over which columns.
 
@@ -1008,7 +1040,7 @@ class MultilinearInstruction(ComputeInstruction):
                         spec.discard()
                 return res
 
-            def A_slot(writer, slot, parts=1):
+            def A_slot(writer, slot, parts=1, shift=None):
                 """One fragment of a pre-ordered `A`, named by storage slot.
 
                 A prepared operand has no coordinate addressing left, and that
@@ -1025,7 +1057,14 @@ class MultilinearInstruction(ComputeInstruction):
                 """
                 threads = self._num_threads
                 rank = self._ops[0].symbol.data_view.rank()
-                index = ([LeadIndex(slot // threads, threads, 1)]
+                # `shift` is a slot count added at run time: a warp shared by
+                # several multiplications reads a fragment over all of its
+                # lanes, and the lanes past this multiplication's own are
+                # `shift` slots of it further on.
+                nonlead = slot // threads
+                value = (None if shift is None else
+                         writer.op('add', INDEX, shift, nonlead, hint='slot'))
+                index = ([LeadIndex(nonlead, threads, 1, value=value)]
                          + [0] * (rank - 1))
                 with writer.speculative() as spec:
                     res = self._ops[0].symbol.load(writer, self._context, None,
@@ -1113,6 +1152,9 @@ class MultilinearInstruction(ComputeInstruction):
                 A=A, B=B, C=C, sparse=sparse,
                 a_parts=getattr(a_obj, 'storage_parts', 1) if a_obj else 1,
                 B_frag=B_frag, B_direct=B_direct,
+                a_uniform=(a_obj is not None and getattr(a_obj, 'addressing', None)
+                           is Addressing.NONE),
+                mult_stride=self._mult_stride,
                 A_slot=(A_slot if a_obj is not None
                         and getattr(a_obj, 'storage_order', None) is not None
                         else None),

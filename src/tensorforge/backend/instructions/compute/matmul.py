@@ -116,6 +116,16 @@ class MatmulOperands:
     #: *numbered* is this.
     a_parts: int = 1
 
+    #: Whether `A` is the same for every multiplication -- batch-constant --
+    #: so that a warp shared by several reads its fragments once for all of
+    #: them rather than once per multiplication.
+    a_uniform: bool = False
+
+    #: Shared memory one multiplication owns, in elements: the distance from
+    #: its copy of a scratch tile to its neighbour's.  Read only where a warp
+    #: holds several multiplications and reads their tiles.
+    mult_stride: Optional[int] = None
+
     #: ``A_slot(writer, slot, parts) -> value | tuple``, or ``None`` where `A`
     #: is stored in the order the frontend described it.
     #:

@@ -854,6 +854,22 @@ class IRBuilder:
         self._scratch_used = end
         return (('arena', name), ('offset', start))
 
+    def _shifted(self, indices: Tuple[Operand, ...],
+                 shift: Optional[Operand]) -> Tuple[Operand, ...]:
+        """`shift` added to the last index *after* the swizzle.
+
+        For a copy of a tile at a distance known only at run time -- the same
+        tile in another multiplication's region, which has the same layout.
+        The swizzle permutes the tile's own index; applied to the shifted one
+        it would permute by the distance as well, unless that is a multiple of
+        its period, and the copy would be read in another order than it was
+        written in.
+        """
+        if shift is None:
+            return indices
+        *head, last = indices
+        return tuple(head) + (self.op('add', INDEX, last, shift, hint='at'),)
+
     def _swizzled(self, base: Any, index: Operand) -> Operand:
         """The index a swizzled buffer is actually addressed by.
 
@@ -894,8 +910,11 @@ class IRBuilder:
              layout: Optional[RegisterLayout] = None,
              align: Optional[int] = None,
              nontemporal: bool = False,
-             extern: str = None) -> Value:
+             extern: str = None,
+             shift: Optional[Operand] = None) -> Value:
         """``layout`` is how the loaded value ends up spread over the lanes.
+
+        ``shift`` is added to the index after the swizzle -- see `_shifted`.
 
         A load is where a distribution *enters* the IR: every later layout is
         derived from one of these or from an explicit relayout, so dropping it
@@ -910,7 +929,8 @@ class IRBuilder:
             type_ = (ScalarType(base.type.elem)
                      if isinstance(base, Value) and isinstance(base.type, BufferType)
                      else ScalarType(self._fptype))
-        indices = tuple(self._swizzled(base, i) for i in indices)
+        indices = self._shifted(tuple(self._swizzled(base, i) for i in indices),
+                                shift)
         if uniform is None:
             uniform = _join(indices)
         v = self.value(type_, hint=hint or 'ld', uniform=uniform, layout=layout)
@@ -954,7 +974,8 @@ class IRBuilder:
               align: Optional[int] = None,
               atomic: bool = False,
               nontemporal: bool = False,
-              pointer: Optional[str] = None) -> Stmt:
+              pointer: Optional[str] = None,
+              shift: Optional[Operand] = None) -> Stmt:
         """``nontemporal`` is a cache hint, carried the way ``Op.LOAD`` carries
         its own: as an attribute the emitter hands to ``lexic.glb_store``.
 
@@ -966,7 +987,8 @@ class IRBuilder:
             space = (base.type.space if isinstance(base, Value)
                      and isinstance(base.type, BufferType)
                      else MemSpace.from_symbol_type(getattr(base, 'stype', None)))
-        indices = tuple(self._swizzled(base, i) for i in indices)
+        indices = self._shifted(tuple(self._swizzled(base, i) for i in indices),
+                                shift)
         kind = Effect.ATOMIC if atomic else Effect.WRITE
 
         attrs = []

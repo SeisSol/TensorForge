@@ -207,6 +207,18 @@ def verify(instrs: Sequence[AbstractInstruction],
                 f'arrive at the barrier, so the kernel deadlocks rather than '
                 f'producing a wrong answer.'))
 
+        # -- 3b. a wave-collective instruction asks the same of its region
+        conv = instr.convergence_scope()
+        if conv is not None and conv > max_barrier_scope:
+            diags.append(Diagnostic(
+                'error', index,
+                f'{type(instr).__name__} is issued by the whole wave together '
+                f'and needs its region {conv.name.lower()}-uniform, but the '
+                f'construct around it is only '
+                f'{max_barrier_scope.name.lower()}-uniform: the '
+                f'multiplications sharing a wave would take different trips '
+                f'and reach it apart.'))
+
         # -- 4. backend actually supports the requested scope
         if scope is Uniformity.GRID and backend == 'sycl':
             diags.append(Diagnostic(

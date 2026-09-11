@@ -560,7 +560,9 @@ class Generator:
                        region=self._section.ir,
                        flags=self._flags,
                        queue_depth=self._launch_control_depth,
-                       group_size=self._group_size(index, start))
+                       group_size=self._group_size(index, start),
+                       narrow_group=self._num_threads
+                       < self._context.get_vm().get_hw_descr().vec_unit_length)
 
       # The prologue stays *out* of the rewritable stream.  Its shared-memory
       # symbols are allocated by ShrMemObject.alloc_global, a separate bump
@@ -675,11 +677,53 @@ class Generator:
     a change to what the offset means rather than to how it is spelled.
     """
     wave = self._context.get_vm().get_hw_descr().vec_unit_length
+    if self._num_threads < wave and self._needs_wave_group():
+      # The multiplications of one wave, driven together, because something
+      # in the body is issued by the whole wave at once.  A rotated start has
+      # the same trouble as below, and leaves the verifier to refuse.
+      if start != self._get_2d_block_id():
+        return 1
+      return wave // self._num_threads
     if self._num_threads <= wave:
       return 1
     if start != self._get_2d_block_id():
       return 1
     return mults_per_group(self._num_threads, wave)
+
+  def _needs_wave_group(self) -> bool:
+    """Whether the section holds an instruction the whole wave issues together.
+
+    A matrix fragment product is one (`convergence_scope`).  Where a
+    multiplication is narrower than the wave, its neighbours in the wave have
+    to take the same trips through the batch loop, so the loop is driven a
+    wave of rows at a time.
+    """
+    def walk(instrs):
+      return any(instr.convergence_scope() is not None
+                 or any(walk(region) for region in instr.regions())
+                 for instr in instrs)
+    return walk(self._section.stream or self._section.ir)
+
+  @staticmethod
+  def _set_mult_stride(section) -> None:
+    """Tell every instruction how much shared memory one multiplication owns.
+
+    Known only now: `ShrMemOpt` has sized the arena.  A matrix path whose warp
+    holds several multiplications reads its neighbours' tiles at that
+    distance (`nvidia._warp_group`).
+    """
+    obj = section.shr_mem_obj
+    if obj is None or obj.get_size_per_mult() is None:
+      return
+    stride = obj.get_size_per_mult()
+
+    def walk(instrs):
+      for instr in instrs:
+        if hasattr(instr, 'set_mult_stride'):
+          instr.set_mult_stride(stride)
+        for region in instr.regions():
+          walk(region)
+    walk(section.stream)
 
   def _batch_loop_mode(self) -> LoopMode:
     if self._persistent_threading:
@@ -715,6 +759,7 @@ class Generator:
           # is meaningful.  Previously each instruction was tested one at a time
           # and the first unprepared one aborted, hiding every other problem
           # behind it.
+          self._set_mult_stride(section)
           self._verify_section(section.stream, i)
 
           for instruction in section.stream:

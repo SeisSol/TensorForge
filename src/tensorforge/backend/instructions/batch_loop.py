@@ -56,7 +56,8 @@ class BatchLoop(AbstractInstruction):
                  lookahead: int = 2,
                  flags: FlagMode = FlagMode.OPTIONAL,
                  queue_depth: int = 1,
-                 group_size: int = 1):
+                 group_size: int = 1,
+                 narrow_group: bool = False):
         super().__init__(context)
         self._section_index = section_index
         self._mode = mode
@@ -104,6 +105,10 @@ class BatchLoop(AbstractInstruction):
         # rotated section asks for: its start is taken modulo the stride, and a
         # leader's start plus a lane offset is then not the row's own element.
         self._group_size: int = max(1, int(group_size))
+        # Whether the group may be narrower than the block.  Asked for by a
+        # wave-collective instruction (`convergence_scope`), which needs the
+        # rows of one wave in step and nothing of the rest of the block.
+        self._narrow_group = bool(narrow_group)
         self._is_ready = True
 
     # -- structure ------------------------------------------------------- #
@@ -138,9 +143,15 @@ class BatchLoop(AbstractInstruction):
         `LAUNCHCTRL` is excluded: its hand-off carries a block barrier of its
         own outside the size guard, and a second traversal on top of that is a
         second answer to a question already answered.
+
+        Narrower than the block where that was asked for: a wave-collective
+        instruction needs the group in step and nothing more, so the block
+        may hold several groups -- and the loop is then uniform per group,
+        which `uniform_scope` says, rather than per block.
         """
         return (self._group_size > 1
-                and self._mults_per_block == self._group_size
+                and (self._narrow_group
+                     or self._mults_per_block == self._group_size)
                 and self._mode is not LoopMode.LAUNCHCTRL)
 
     def _group_batch(self) -> str:
@@ -229,8 +240,11 @@ class BatchLoop(AbstractInstruction):
         needs the mask off the body and onto the accesses it guards, which is
         what an unguarded body would have to mean.
         """
-        if self._mults_per_block == 1 or self._grouped():
+        if self._mults_per_block == 1 or (
+                self._grouped() and self._mults_per_block == self._group_size):
             return Uniformity.BLOCK
+        if self._grouped():
+            return Uniformity.MULTGROUP
         return Uniformity.MULT
 
     # -- data flow ------------------------------------------------------- #
@@ -1323,6 +1337,17 @@ class BatchLoop(AbstractInstruction):
         share a wave, so a barrier cannot separate them and each one has to
         arrive.
         """
+        if (self._mults_per_block is not None
+                and self._mults_per_block % self._group_size):
+            raise InternalError(
+                f'a block of {self._mults_per_block} multiplications does not '
+                f'hold whole groups of {self._group_size}')
+        # The group a wave-collective instruction asked for is traversed as
+        # IR; the block-wide group keeps the text it has always been emitted as.
+        if (self._narrow_group and self._mode is LoopMode.PERSISTENT
+                and hasattr(writer, 'for_')):
+            self._gen_grouped_ir(writer)
+            return
         self._declare_lane(writer)
         self._declare_stage_counter(writer)
         self._declare_windows_early(writer, list(self._region))
@@ -1342,6 +1367,65 @@ class BatchLoop(AbstractInstruction):
             mask = self._declare_row_element(writer)
             with elementmask.element_mask(None, mask):
                 self._emit_guarded(writer, list(self._region))
+
+    def _gen_grouped_ir(self, writer) -> None:
+        """`_gen_grouped`'s persistent traversal, as IR.
+
+        Spelled as text, the lane, the mask, the element and the lookahead
+        clamps were statements that declared no accesses, so every pass
+        reasoning about the body -- the scratch check among them -- had to
+        assume each touched everything.  As values they are arithmetic and one
+        declared read of the flags, and the loop is one the IR can see.
+
+        The start stays text, as it does for the per-row loop: a bound carries
+        no uniformity then, and the induction states it -- the group's, which
+        is what a wave-wide rendezvous inside needs.
+        """
+        from tensorforge.backend.pir.core import (BOOL, SIZE, Effect, MemSpace,
+                                                  Uniformity)
+        lexic = self._vm.get_lexic()
+        self._declare_stage_counter(writer)
+        self._declare_windows_early(writer, list(self._region))
+        lane = writer.op('rem', SIZE, writer.thread_id('y'), self._group_size,
+                         hint=self._lane())
+        start = (f'({lexic.thread_idx_y} - {lexic.thread_idx_y} % '
+                 f'{self._group_size}) + {lexic.block_dim_y} * '
+                 f'({lexic.block_idx_x})')
+        with writer.for_(start, self._num_elements(), self._stride,
+                         hint=self._group_batch(), index_type=SIZE,
+                         uniform=Uniformity.MULTGROUP) as loop:
+            self._loop_handle = loop
+            group = loop.induction
+            row = writer.op('add', SIZE, group, lane, hint='row')
+            # One named declaration, because every global write spells the
+            # mask as text (`Symbol.store`), and the flags read folded into it
+            # as the text had it: `&&` keeps a row past the end from reading.
+            cond = '{0} < ' + self._num_elements()
+            kind, space = Effect.NONE, None
+            if self._flags is not FlagMode.ABSENT:
+                flags = f'{GeneralLexicon.FLAGS_NAME}{self._section_index}'
+                read = f'static_cast<bool>({flags}[{{0}}])'
+                if self._flags is FlagMode.OPTIONAL:
+                    read = f'({flags} == nullptr || {read})'
+                cond = f'{cond} && {read}'
+                kind, space = Effect.READ, MemSpace.GLOBAL
+            active = writer.decl_expr(f'const bool {self._active()}', cond,
+                                      BOOL, None, kind=kind, space=space,
+                                      args=(row,), hint=self._active(),
+                                      extern=self._active())
+            batch = writer.op('select', SIZE, active, row, group,
+                              hint=self._batch(0))
+            self._induction = batch
+            try:
+                with BatchLoop.batch_indices(writer) as bound:
+                    bound[self._batch(0)] = batch
+                    self._lookahead_bindings(writer, bound)
+                    loop._next_index = self._first_lookahead
+                    with elementmask.element_mask(active, self._active()):
+                        self._emit_guarded(writer, list(self._region))
+                    self._advance_stage_counter(writer)
+            finally:
+                self._induction = None
 
     def __str__(self) -> str:
         return (f'batchloop.{self._mode.value} '
