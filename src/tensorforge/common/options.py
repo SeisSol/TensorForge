@@ -82,6 +82,12 @@ def parse_str(text: str) -> str:
   return text
 
 
+def parse_optional_bool(text: str) -> Optional[bool]:
+  if text.strip().lower() in ('', 'none'):
+    return None
+  return parse_bool(text)
+
+
 _DEFAULT_PARSERS = {bool: parse_bool, int: parse_int, str: parse_str}
 
 
@@ -533,6 +539,28 @@ declare('k_unroll_max',
             '121k lines of CUDA that cicc had not finished after twelve '
             'minutes, and rolled at 56 the same kernel was the fastest FFMA '
             'variant on GB200.')
+
+declare('tensor_cores',
+        default=None,
+        env='TF_TENSOR_CORES',
+        parse=parse_optional_bool,
+        doc='Use the NVIDIA matrix instructions (`mma.sync`) where the shape '
+            'allows.  None takes `primitives.nvidia.ENABLED`, the deployment '
+            'switch, which is off; an option so that one build can ask for the '
+            'path and the next one not, as a search over configurations has '
+            'to -- flipping the module constant changed it for every build in '
+            'the process.')
+
+declare('mma_prefetch',
+        default=None,
+        env='TF_MMA_PREFETCH',
+        parse=parse_optional_int,
+        doc='Steps ahead the matrix path loads a pre-ordered operand\'s '
+            'fragments (0: at the step that uses them).  None takes '
+            '`primitives.nvidia.PREFETCH`.  A search parameter: the second step '
+            'hides more of the load latency and costs about forty registers '
+            '(`local_flux` b56: 149 against 190 on sm_100a), which is a block '
+            'per SM -- only a measurement says which of the two wins.')
 
 declare('lanes_per_mult',
         default=0,

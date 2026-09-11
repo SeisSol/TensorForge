@@ -118,6 +118,10 @@ class Emitter:
     def __init__(self, writer, context: Any = None):
         self.writer = writer
         self.context = context
+        #: How many times the statement being written runs per element: the
+        #: product of the trip counts of the loops around it that have
+        #: constant bounds (`_emit_for`).
+        self._work_scale = 1
         self._names: Dict[int, str] = {}
         self._consts: Dict[int, str] = {}
         self._async_lex = None
@@ -130,9 +134,15 @@ class Emitter:
     def _record_work(self) -> None:
         # The emitter is handed a context or, from older call sites, the VM;
         # only the former counts (`Context.record_work`).
+        # Times the trip counts of the loops around it: a loop the compiler
+        # unrolls, or one rolled by `k_roll`, is written once and runs its
+        # count.  Counted once, rolling a reduction by ten made a kernel look
+        # like a tenth of the arithmetic, and a search ranking by the count
+        # rolled everything it could.  A loop without constant bounds -- the
+        # batch loop -- counts once, so the figure stays per element.
         record = getattr(self.context, 'record_work', None)
         if record is not None:
-            record()
+            record(self._work_scale)
 
     # -- naming ------------------------------------------------------------ #
 
@@ -964,8 +974,15 @@ class Emitter:
         # unroll goes through Writer.For, which folds the pragma into the block
         # head; a separate statement would flush the enclosing speculation and
         # defeat empty-block elision.
-        with w.For(head, unroll=s.attr('unroll') or False):
-            self._emit_body(s.regions[0].body, tuple(targets))
+        trips = (len(range(lo, hi, step))
+                 if all(isinstance(x, int) for x in (lo, hi, step)) and step
+                 else 1)
+        scale, self._work_scale = self._work_scale, self._work_scale * trips
+        try:
+            with w.For(head, unroll=s.attr('unroll') or False):
+                self._emit_body(s.regions[0].body, tuple(targets))
+        finally:
+            self._work_scale = scale
 
     def _emit_while(self, s: Stmt) -> None:
         """`Ty i = init; while (true) { ... i = next; }`.

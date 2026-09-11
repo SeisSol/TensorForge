@@ -1321,6 +1321,29 @@ def pressure(body: Tuple[Stmt, ...], in_bytes: bool = False,
                 continue
             last[v.id] = max(last.get(v.id, d), reach(d, i))
 
+    # An address offset is not a register.  `lane + 2800` feeds a load, and
+    # the compiler puts the 2800 in the instruction's immediate (`LDG
+    # [R+0xaf0]`, and the offset field on AMD) and keeps only `lane`.  Counted
+    # as a value each, the merged `local_flux` -- its offsets hoisted out of
+    # the loop over the faces by `licm`, so all of them live across it --
+    # peaked at 14864 B at eight lanes, 13868 B of it such offsets, for a
+    # kernel ptxas fits in 255 registers without a spill; written out, the
+    # same kernel peaked at 816 B.  So an integer `add`/`sub` of a value and a
+    # constant weighs nothing, and the value it offsets stays live as long as
+    # the offset is used, since that is where the register actually is.
+    #
+    # Scaled the same way: the interleaved operand reads `(lane + 64) * 4 +
+    # 3584`, which is `lane * 4` in one register and 3840 in the immediate.  So
+    # an integer is taken as `root * scale + offset`, every distinct `root *
+    # scale` other than the root itself is one register, and the rest are
+    # immediates (`_affine_costs`).  Without the scale, the prepared merged
+    # `local_flux` stayed at 14900 B for ptxas's 255 registers, and every lead
+    # width of two -- whose rows are `lane * 2 + c` -- read three times high.
+    root, carrier = _affine_costs(order)
+    for vid, keep in root.items():
+        if vid in last:
+            last[keep] = max(last.get(keep, define.get(keep, 0)), last[vid])
+
     # A sweep over interval ends rather than a sum per statement: the slots
     # below add thousands of intervals to a body of tens of thousands of
     # statements, and the product was the cost.  Ends sort before starts at
@@ -1329,6 +1352,8 @@ def pressure(body: Tuple[Stmt, ...], in_bytes: bool = False,
     events: List[Tuple[int, int]] = []
     for vid, d in define.items():
         if isinstance(values.get(vid, v_none).type, BufferType):
+            continue
+        if vid in root and vid not in carrier:
             continue
         w = weight(vid)
         if w:
@@ -1350,6 +1375,84 @@ def pressure(body: Tuple[Stmt, ...], in_bytes: bool = False,
         live += w
         peak = max(peak, live)
     return peak
+
+
+def _is_integer(t) -> bool:
+    return (isinstance(t, ScalarType) and not t.is_vector
+            and (t.base.name.startswith(('I', 'U')) or t.base is Datatype.SIZE))
+
+
+def _affine_costs(order):
+    """Integer values that are affine in another value, and who pays for them.
+
+    Every integer is read as `root * scale + offset` where its definition
+    allows -- a constant, a sum or difference with a constant or with another
+    affine value of the same root, a product with a constant -- and as itself
+    (`scale` 1, offset 0) otherwise.  The offset goes to the instruction's
+    immediate; `root * scale` is a register, the root's own where the scale is
+    one, and one shared register per distinct scale otherwise, held by the
+    first value of that scale.
+
+    Returns `(keep, carriers)`: `keep` maps each affine value to the value
+    whose register it lives in, which has to stay live for as long as it is
+    used -- itself for a constant, which then holds nothing; `carriers` are
+    the values that hold a scaled root, the only ones of them that are
+    counted.
+    """
+    form: Dict[int, Tuple[Optional[int], int, int]] = {}
+    for st in order:
+        if st.op == Op.CONST and st.target:
+            c = st.attr('value')
+            if isinstance(c, int) and not isinstance(c, bool):
+                form[st.target[0].id] = (None, 0, c)
+
+    def of(x):
+        if isinstance(x, bool):
+            return None
+        if isinstance(x, int):
+            return (None, 0, x)
+        if isinstance(x, Value):
+            return form.get(x.id, (x.id, 1, 0))
+        return None
+
+    keep: Dict[int, int] = {}
+    carriers: set = set()
+    scaled: Dict[Tuple[int, int], int] = {}
+    for st in order:
+        if st.op not in ('add', 'sub', 'mul') or len(st.target) != 1:
+            continue
+        t = st.target[0]
+        if not _is_integer(t.type) or len(st.args) != 2:
+            continue
+        a, b = of(st.args[0]), of(st.args[1])
+        if a is None or b is None:
+            continue
+        if st.op == 'mul':
+            if a[0] is None and a[1] == 0:
+                a, b = b, a
+            if not (b[0] is None and b[1] == 0):
+                continue
+            f = (a[0], a[1] * b[2], a[2] * b[2])
+        else:
+            sign = 1 if st.op == 'add' else -1
+            if a[0] is not None and b[0] is not None and a[0] != b[0]:
+                continue
+            f = (a[0] if a[0] is not None else b[0],
+                 a[1] + sign * b[1], a[2] + sign * b[2])
+        form[t.id] = f
+        base, scale, _ = f
+        if base is None or scale == 0:
+            keep[t.id] = t.id           # a constant: nothing to hold
+            carriers.discard(t.id)
+            continue
+        if scale == 1:
+            keep[t.id] = base
+            continue
+        holder = scaled.setdefault((base, scale), t.id)
+        keep[t.id] = holder
+        if holder == t.id:
+            carriers.add(t.id)
+    return keep, carriers
 
 
 def _flat_slot(index, shape) -> Optional[int]:

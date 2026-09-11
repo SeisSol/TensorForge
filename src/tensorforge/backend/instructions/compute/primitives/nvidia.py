@@ -724,6 +724,19 @@ def takes(route) -> bool:
     return route == 0
 
 
+def enabled(ctx) -> bool:
+    """`Options.tensor_cores` where it is set, `ENABLED` where it is not --
+    or where there is no context to ask, as for a shape asked on its own."""
+    asked = None if ctx is None else ctx.get_user_options().tensor_cores
+    return ENABLED if asked is None else bool(asked)
+
+
+def prefetch(ctx) -> int:
+    """`Options.mma_prefetch` where it is set, `PREFETCH` where it is not."""
+    asked = None if ctx is None else ctx.get_user_options().mma_prefetch
+    return PREFETCH if asked is None else int(asked)
+
+
 def strategies(shape, ctx):
     """What this target can emit for this shape.
 
@@ -747,7 +760,7 @@ def strategies(shape, ctx):
     """
     if not takes(lead_route(shape)):
         return frozenset()
-    if (ENABLED
+    if (enabled(ctx)
             and supports(shape.threads, shape.accumulator, shape.sparse,
                          shape.depth)
             and instrs_for(shape.accumulator, sm_of(ctx))):
@@ -1138,7 +1151,7 @@ def matmul(writer, ops, ctx, span):
     # start cold; the loads of the next one are issued in this one, and the
     # scopes around both become plain statements to keep them visible there
     # (the names are the IR's and do not collide without them).
-    ahead = PREFETCH if aordered else 0
+    ahead = prefetch(ctx) if aordered else 0
     sequence = [(i, k, kk) for _ in jstops for i in range(0, M, wave)
                 for k, kk in steps]
     fetched, issued = {}, 0

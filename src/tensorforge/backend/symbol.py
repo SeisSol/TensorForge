@@ -2510,7 +2510,19 @@ class Symbol:
     mask_name = (elementmask.active()[1]
                  if self.stype == SymbolType.Global else None)
 
-    if not structured:
+    # One fixed element of a register dimension -- the peeled last row of an
+    # odd extent at a lead width of two -- written by the lane that owns it.
+    # Structured like the rest: `build_address` resolves a fixed element to
+    # its slot.  As text, the array was named in a raw statement, which the
+    # register model has to take as the whole array live for the whole body:
+    # `local_flux` at 35 rows and width two read 2312 B for ptxas's 213
+    # registers, 2160 B of it arrays counted whole for one element each.
+    named = (not structured and not atomic
+             and self.stype in (SymbolType.Register, SymbolType.Scratch)
+             and isinstance(lead, (int, np.integer))
+             and isinstance(variable, _Value) and hasattr(writer, 'store'))
+
+    if not structured and not named:
       access = self.access(context, index, writer, addrs, base=base)
       fmt = not isinstance(variable, (str, int, float))
       var = '{0}' if fmt else variable
@@ -2598,7 +2610,13 @@ class Symbol:
       if mask_name is not None:
         cond = f'{cond} && {mask_name}'
       with writer.If(cond):
-        writer.access_stmt(assign, self, kind, args=_operands(variable, addrs), fmt=fmt)
+        if named:
+          wide = getattr(getattr(variable, 'type', None), 'length', None)
+          writer.store(self, variable,
+                       self.address_value(writer, context, index),
+                       align=None if wide is None else RELAXED, pointer=base)
+        else:
+          writer.access_stmt(assign, self, kind, args=_operands(variable, addrs), fmt=fmt)
     else:
       # The atomic lands here: `atomic_store` returns an expression the lexic
       # finished, so there is nothing structured to attach a predicate to and
