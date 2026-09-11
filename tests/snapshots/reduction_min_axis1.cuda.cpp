@@ -1,13 +1,13 @@
 // === base name ===
-kernel_8027345bd9773677
+kernel_a580f0f1980c5ccb
 
 // === header ===
-void launcher_kernel_8027345bd9773677(const float* m0, size_t m0_extraOffset, float* m1, size_t m1_extraOffset, size_t numElements0, unsigned* flags0 = nullptr, void* streamPtr = nullptr);
+void launcher_kernel_a580f0f1980c5ccb(const float* m0, size_t m0_extraOffset, float* m1, size_t m1_extraOffset, size_t numElements0, unsigned* flags0 = nullptr, void* streamPtr = nullptr);
 
 
 // === launcher ===
-void launcher_kernel_8027345bd9773677(const float* m0, size_t m0_extraOffset, float* m1, size_t m1_extraOffset, size_t numElements0, unsigned* flags0 , void* streamPtr) {
-  dim3 block (32, 8, 1);
+void launcher_kernel_a580f0f1980c5ccb(const float* m0, size_t m0_extraOffset, float* m1, size_t m1_extraOffset, size_t numElements0, unsigned* flags0 , void* streamPtr) {
+  dim3 block (32, 4, 1);
   static std::size_t gridsize = 0;
       if (gridsize == 0) {
         int device, smCount, blocksPerSM;
@@ -15,7 +15,7 @@ void launcher_kernel_8027345bd9773677(const float* m0, size_t m0_extraOffset, fl
         CHECK_ERR;
         cudaDeviceGetAttribute(&smCount, cudaDevAttrMultiProcessorCount, device);
         CHECK_ERR;
-        cudaOccupancyMaxActiveBlocksPerMultiprocessor(&blocksPerSM, kernel_kernel_8027345bd9773677, block.x * block.y * block.z, 0 * sizeof(float));
+        cudaOccupancyMaxActiveBlocksPerMultiprocessor(&blocksPerSM, kernel_kernel_a580f0f1980c5ccb, block.x * block.y * block.z, 0 * sizeof(float));
         CHECK_ERR;
         if (blocksPerSM > 0) {
           gridsize = smCount * blocksPerSM;
@@ -28,21 +28,21 @@ void launcher_kernel_8027345bd9773677(const float* m0, size_t m0_extraOffset, fl
   dim3 grid (std::min(gridsize, numElements0), 1, 1);
   static bool shmemsizeset = false;
       if (!shmemsizeset) {
-        cudaFuncSetAttribute(kernel_kernel_8027345bd9773677, cudaFuncAttributeMaxDynamicSharedMemorySize, 0 * sizeof(float));
+        cudaFuncSetAttribute(kernel_kernel_a580f0f1980c5ccb, cudaFuncAttributeMaxDynamicSharedMemorySize, 0 * sizeof(float));
         CHECK_ERR;
         shmemsizeset = true;
       }
       
   cudaStream_t stream = (streamPtr != nullptr) ? static_cast<cudaStream_t>(streamPtr) : 0;
-  kernel_kernel_8027345bd9773677<<<grid,block,0 * sizeof(float),stream>>>( m0,  m0_extraOffset,  m1,  m1_extraOffset,  numElements0,  flags0 );
+  kernel_kernel_a580f0f1980c5ccb<<<grid,block,0 * sizeof(float),stream>>>( m0,  m0_extraOffset,  m1,  m1_extraOffset,  numElements0,  flags0 );
   CHECK_ERR;
 }
 
 
 // === kernel ===
 __global__ void 
-__launch_bounds__(256)
- kernel_kernel_8027345bd9773677(const float* m0, size_t m0_extraOffset, float* m1, size_t m1_extraOffset, size_t numElements0, unsigned* flags0 ) {
+__launch_bounds__(128)
+ kernel_kernel_a580f0f1980c5ccb(const float* m0, size_t m0_extraOffset, float* m1, size_t m1_extraOffset, size_t numElements0, unsigned* flags0 ) {
   extern __shared__ char totalShrMemPtr[];
    {
     // generated with TensorForge. Version: 0.0.1
@@ -52,27 +52,26 @@ __launch_bounds__(256)
     // m1 16(16) {0..16} strided
     // OUT = min(A, dims=[1])
     {
-      cuda::pipeline<cuda::thread_scope_thread> pipeline = cuda::make_pipeline();
-      const auto batchId_start = threadIdx.y + blockDim.y * (blockIdx.x);
+      const auto batchId_start = (threadIdx.y + blockDim.y * (blockIdx.x));
       const auto batchId1 = batchId_start < numElements0 ? batchId_start : 0;
       const auto batchId2 = batchId1 + (gridDim.x * blockDim.y) < numElements0 ? batchId1 + (gridDim.x * blockDim.y) : batchId1;
-      for (size_t batchId0 = threadIdx.y + blockDim.y * (blockIdx.x); batchId0 < numElements0; batchId0 += (gridDim.x * blockDim.y)) {
-        const auto batchId1 = batchId0 + (gridDim.x * blockDim.y) < numElements0 ? batchId0 + (gridDim.x * blockDim.y) : batchId0;
-        const auto batchId2 = batchId1 + (gridDim.x * blockDim.y) < numElements0 ? batchId1 + (gridDim.x * blockDim.y) : batchId1;
-        const bool allowed = flags0 == nullptr ? true : static_cast<bool>(flags0[batchId0]);
+      for (size_t v0_batchId0 = (threadIdx.y + blockDim.y * (blockIdx.x)); v0_batchId0 < numElements0; v0_batchId0 += (gridDim.x * blockDim.y)) {
+        size_t v1_ahead1 = v0_batchId0 + (gridDim.x * blockDim.y);
+        size_t v3_batchId1 = (v1_ahead1 < numElements0) ? v1_ahead1 : v0_batchId0;
+        const bool allowed = flags0 == nullptr ? true : static_cast<bool>(flags0[v0_batchId0]);
         if (allowed) {
-          const float *const __restrict__ glb_m0 = &m0[batchId0 * 256 + 0 + m0_extraOffset];
-          float *const __restrict__ glb_m1 = &m1[batchId0 * 16 + 0 + m1_extraOffset];
+          const float *const __restrict__ glb_m0 = &m0[v0_batchId0 * 256 + 0 + m0_extraOffset];
+          float *const __restrict__ glb_m1 = &m1[v0_batchId0 * 16 + 0 + m1_extraOffset];
           // glb_m1 = min(glb_m0, dims=[1])
-          int32_t v8_lead = threadIdx.x % 32;
-          if (v8_lead < 16) {
-            float v11_acc0 = INFINITY;
+          int32_t v12_lead = threadIdx.x % 32;
+          if (v12_lead < 16) {
+            float v15_acc0 = INFINITY;
             #pragma unroll
-            for (int32_t v10_r1 = 0; v10_r1 < 16; ++v10_r1) {
-              float v19_data = glb_m0[(v8_lead + (v10_r1 * 16))];
-              v11_acc0 = (fminf(v11_acc0, v19_data));
+            for (int32_t v14_r1 = 0; v14_r1 < 16; ++v14_r1) {
+              float v23_data = glb_m0[(v12_lead + (v14_r1 * 16))];
+              v15_acc0 = (fminf(v15_acc0, v23_data));
             }
-            glb_m1[v8_lead] = v11_acc0;
+            glb_m1[v12_lead] = v15_acc0;
           }
           __syncwarp();
         }
