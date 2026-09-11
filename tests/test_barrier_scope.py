@@ -202,6 +202,14 @@ def test_a_wide_multiplication_is_packed_by_what_the_target_can_separate():
                               [tensor([56, 18], "E")])
 
         gen = Generator([gemm, ew], ctx)
+        if backend == "hip":
+            # The AMD SIMT path refuses a multiplication wider than the wave:
+            # across waves it came out wrong with no error (measured on
+            # gfx1150), so there is no block to pack.
+            from tensorforge.common.exceptions import GenerationError
+            with pytest.raises(GenerationError):
+                gen.generate()
+            continue
         gen.generate()
         threads = gen._num_threads
         mults = min(s.shr_mem_obj.get_mults_per_block() for s in gen._sections)

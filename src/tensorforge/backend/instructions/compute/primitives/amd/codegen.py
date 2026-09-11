@@ -54,20 +54,19 @@ def hfma(writer: Writer, Cs, As, Bs, repeat, datatype, threads, ctx):
     pairs scalar FMAs by itself.
     """
 
-    # A broadcast here is a register exchange -- DPP, `readlane`, a permute --
-    # and every one of those ends at the wave.  A multiplication wider than
-    # the wave holds its broadcast operand in lanes of another wave, which no
-    # exchange reaches: measured on gfx1150, 64 lanes over 32-wide waves gave
-    # a wrong kernel with no error and no spill.  Refused rather than
-    # approximated, as the relayout below refuses a width it cannot reach;
-    # what lifts it is an exchange through shared memory.
-    wave = ctx.get_vm().get_hw_descr().vec_unit_length
-    if threads > wave:
+    # A multiplication wider than the wave is refused on this path.  Measured
+    # on gfx1150 (local_flux, 64 lanes over 32-wide waves): the kernel came
+    # out wrong with no error and no spill -- first through the DPP broadcast,
+    # which ends at the wave, and still wrong with the broadcast narrowed to
+    # one lane, so it is not the exchange alone.  A wrong kernel is worse than
+    # none; on a 64-wide wave the same width is one wave and builds.
+    hw = ctx.get_vm().get_hw_descr()
+    wave = getattr(hw, 'vec_unit_length', None)
+    if wave and threads > wave:
         raise GenerationError(
-            f'a register broadcast does not cross waves: {threads} lanes span '
-            f'{-(-threads // wave)} waves of {wave} on this target, and the '
-            f'operand one of them holds is out of reach of the others -- '
-            f'this needs the exchange through shared memory')
+            f'a multiplication of {threads} lanes spans {-(-threads // wave)} '
+            f'waves of {wave} on this target, which the AMD SIMT path does not '
+            f'compute correctly (the register broadcast ends at the wave)')
 
     step = select_fmadpp_step(datatype, threads, ctx)
     form = select_broadcast_form(datatype, step, repeat, ctx, can_pack=False)

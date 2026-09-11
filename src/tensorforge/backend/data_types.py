@@ -14,6 +14,15 @@ class ShrMemObject:
     self._global_size += size
     return startpoint
 
+  def release_global(self, mark: int) -> None:
+    """Give back everything allocated since `mark` (a `get_global_size()`).
+
+    For a preload that is built and then abandoned: its loaders reserve as
+    they are built, and dropping the loaders without this left the
+    reservation in the total -- the launch then asked for LDS nothing used.
+    """
+    self._global_size = mark
+
   def set_size_per_mult(self, size):
     self._size_per_mult = size
 

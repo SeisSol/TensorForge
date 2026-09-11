@@ -1030,6 +1030,7 @@ class Generator:
 
       self._scopes.add_scope()
 
+      mark = self._section.shr_mem_obj.get_global_size()
       builder = GlobalLoaderBuilder(self._context, self._scopes, self._section.shr_mem_obj, self._num_threads)
       # A stand-in of a merged run is not an argument: which member it is
       # changes per iteration, through a table over the members.  Preloading
@@ -1052,7 +1053,12 @@ class Generator:
       vm = self._context.get_vm()
       shmem_cap = vm.get_hw_descr().max_local_mem_size_per_block
 
-      if shmem_load < shmem_cap:
+      # Bytes against bytes: `shmem_load` counts elements, the cap is the
+      # hardware's figure in bytes.  Compared as they were, 57600 floats of
+      # preloaded operators (local_flux at b = 120, 225 KB) passed a 64 KB
+      # cap on gfx942 -- and FP64 at b = 56 (98 KB) with it -- and the launch
+      # asked for more LDS than the device has.
+      if shmem_load * self._context.fp_type.size() < shmem_cap:
         self._section.global_ir += load_ir
         if last_barrier:
           self._section.global_ir.append(SyncGrid(self._context))
@@ -1060,8 +1066,12 @@ class Generator:
           self._section.global_ir.append(SyncBlock(self._context))
         return True
       else:
-        # make sure to clean up all new symbols that didn't get added
+        # make sure to clean up all new symbols that didn't get added -- and
+        # the shared memory their loaders reserved while being built, which
+        # otherwise stays in the launch's request (225 KB at b = 120 on a
+        # 64 KB gfx942, with nothing preloaded)
         self._scopes.remove_scope()
+        self._section.shr_mem_obj.release_global(mark)
         self._preload_globals = False
 
     builder = GetElementPtrBuilder(self._context, self._scopes)
