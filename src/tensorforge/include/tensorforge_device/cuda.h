@@ -459,11 +459,30 @@ template <int Depth = 1> struct ClusterLaunchCursor {
 /// it.
 using tf32 = uint32_t;
 
+/// The two TF32 halves 3xTF32 multiplies: `upper` rounded to TF32, `lower`
+/// what that left over.
+///
+/// `lower` goes in unrounded.  The instruction reads a TF32 operand by
+/// ignoring its low 13 bits, so rounding it first changes the result by less
+/// than the truncation that follows anyway -- measured over 4096 m16n8k8
+/// 3xTF32 tiles (K = 56) against an FP64 reference, the error is the same to
+/// two digits (max 18.3 against 18.0, mean 2.43 against 2.42, in units of
+/// 2^-24 of the sum of |a b|).  `upper` takes `cvt.rn` from sm_90 on, which
+/// is one instruction there (`F2FP.TF32.F32.PACK_B`), where `cvt.rna` is
+/// emulated by a compare, a select and two integer operations.  Together two
+/// instructions per value instead of eight, for the same accuracy.
+///
+/// Not the split the host applies to a prepared operand
+/// (`tests/harness/layout.split_tf32`): each is a valid decomposition, and
+/// nothing requires the kernel's own to match it bit for bit.
 __device__ __forceinline__ void splitFloatTF32(tf32 &upper, tf32 &lower,
                                                float value) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
+  asm("cvt.rn.tf32.f32 %0, %1;\n" : "=r"(upper) : "f"(value));
+#else
   asm("cvt.rna.tf32.f32 %0, %1;\n" : "=r"(upper) : "f"(value));
-  const auto upperF = *reinterpret_cast<float *>(&upper);
-  asm("cvt.rna.tf32.f32 %0, %1;\n" : "=r"(lower) : "f"(value - upperF));
+#endif
+  lower = __float_as_uint(value - __uint_as_float(upper));
 }
 
 } // namespace tensorforge

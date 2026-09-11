@@ -148,9 +148,11 @@ def pack(view: np.ndarray, pack_index: np.ndarray,
 def split_tf32(flat: np.ndarray, dt: Datatype) -> np.ndarray:
     """Store each scalar as the two TF32 halves a matrix instruction multiplies.
 
-    The kernel-side counterpart is `splitFloatTF32` in
-    ``tensorforge_device/cuda.h``: `upper` is the value rounded to TF32,
-    `lower` is the same rounding of what the first one left over.  Done here,
+    What `splitFloatTF32` in ``tensorforge_device/cuda.h`` computes for an
+    operand the kernel splits itself, done here for one it reads prepared --
+    though not bit for bit any more: the kernel rounds `upper` to nearest-even
+    and leaves `lower` unrounded, which is as accurate and cheaper there, and
+    either is a valid pair of halves.  Done here,
     once, for an operand that is constant across the batch, the kernel reads
     the pair instead of computing it -- which is the whole point.
 
@@ -168,7 +170,7 @@ def split_tf32(flat: np.ndarray, dt: Datatype) -> np.ndarray:
     ties-to-even, however much the mnemonic looks like `rne`.  The difference
     is two values in four thousand, which is exactly the kind of margin that
     passes every test that does not compare bit for bit -- and this one has
-    been compared bit for bit against the device, over 4096 values, both
+    been compared bit for bit against the device's `cvt.rna`, over 4096 values, both
     halves.
     """
     if np_dtype(dt) != np.float32:
