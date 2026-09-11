@@ -141,6 +141,44 @@ def test_a_decomposed_operand_is_still_contiguous_on_its_first_axis():
     assert _contiguous_first_axis(_Sym(transposed))
 
 
+def test_planar_parts_leave_the_elements_adjacent():
+    """A tensor whose parts are planar -- an operand in fragment order -- is
+    addressed in elements, with each part a whole image further on: the
+    strides do not scale, the plane is the stored element count, and the
+    volume is the same product as for adjacent parts."""
+    t = _dense(shape=(8, 4), parts=2)
+    t.storage_planar = True
+    view = DataView(shape=[8, 4], permute=None, elem_parts=2, owner=t)
+    assert view.get_dim_strides() == [1, 8]
+    assert view.part_plane == 32
+    assert view.elem_parts == 1, 'adjacent in elements, so contiguous'
+    assert view.get_volume() == 64 == t.storage_volume()
+
+
+def test_planar_is_asked_of_the_tensor_when_the_address_is_built():
+    """The view exists before the order and the planarity are decided, so it
+    has to ask rather than copy -- a copy taken at construction would address
+    the operand as adjacent after the instruction stored it planar."""
+    t = _dense(shape=(8, 4), parts=2)
+    view = DataView(shape=[8, 4], permute=None, elem_parts=2, owner=t)
+    assert view.get_dim_strides() == [2, 16] and view.part_plane == 0
+    t.storage_planar = True
+    assert view.get_dim_strides() == [1, 8] and view.part_plane == 32
+
+
+def test_planar_means_nothing_at_one_part():
+    t = _dense(shape=(8, 4), parts=1)
+    t.storage_planar = True
+    view = DataView(shape=[8, 4], permute=None, elem_parts=1, owner=t)
+    assert view.part_plane == 0 and view.get_dim_strides() == [1, 8]
+
+
+def test_two_tensors_differing_only_in_planarity_are_not_similar():
+    a, b = _dense(parts=2), _dense(parts=2)
+    b.storage_planar = True
+    assert not a.is_similar(b)
+
+
 def test_a_storage_convention_below_one_is_refused():
     """Zero scalars per element is not a compressed operand, it is an address
     space that collapses onto one cell."""

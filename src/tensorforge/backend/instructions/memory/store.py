@@ -216,7 +216,8 @@ class StoreRegToGlb(AbstractInstruction):
     dest.data_view = DataView(shape=dest.obj.get_actual_shape(),
                               permute=None,
                               bbox=dest.obj.get_bbox(),
-                              elem_parts=dest.obj.storage_parts)
+                              elem_parts=dest.obj.storage_parts,
+                              owner=dest.obj)
 
     #if dest.data_view.get_dim_size(0) < src.data_view.get_dim_size(0):
     #  raise InternalError('store: `src` and `dest` do not match in size aling dim `0`')

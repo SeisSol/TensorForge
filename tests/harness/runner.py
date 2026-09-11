@@ -193,7 +193,9 @@ def run_case(case, target: Target, cache_root: Path,
             # takes.  Both are invisible to `reference()`, which read its copy
             # of `view` above -- the tensor is the same matrix either way, and
             # only the kernel's reading of it differs.
-            flat = layout.split_tf32(flat, dt)
+            flat = layout.split_tf32(
+                flat, dt, planar=(op.storage_volume // 2
+                                  if op.storage_planar else 0))
         elif op.storage_parts != 1:
             raise NotImplementedError(
                 f"{op.kernel_name}: no host-side preparation for "

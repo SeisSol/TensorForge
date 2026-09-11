@@ -336,10 +336,20 @@ def fragment_order(shape, atom, threads=32):
     """Which bounding-box cell each slot of a pre-ordered A holds.
 
     The operand's storage in the order a lane reads it: tile by tile, and
-    within a tile slot by slot with the 32 lanes contiguous.  The emitter's
-    staged read is `Ashm[lane + threads * f]`, so an operand already in this
-    order is read at that address *in memory* -- a coalesced 128-byte load per
-    fragment, and no shared round trip at all.
+    within a tile lane by lane, each lane's `aregs` fragments adjacent in the
+    order the instruction's operand list takes them.  So a lane reads a tile's
+    fragments with one access into the register group the instruction wants,
+    a warp reads the tile as one contiguous run, and there is no shared round
+    trip at all.  Staged, the same fragments come out of `Ashm[lane + threads
+    * f]`; stored, lane `lane`'s fragment `f` is slot `aregs * lane + f` of
+    its tile.  With the parts planar (`Tensor.storage_planar`) each part is
+    such an image of its own.
+
+    Lane by lane rather than fragment by fragment, which is what this was: with
+    the 32 lanes contiguous per fragment, a lane read its fragments one scalar
+    each, and with the parts adjacent those came in as hi/lo pairs that ptxas
+    had to regroup into the instruction's register quads -- about 1230 moves
+    per element of `local_flux`, measured on sm_100.
 
     The tile's own map is the PTX A layout, and it is the one thing here that
     is the hardware's rather than this module's: lane `t` holds rows
@@ -381,8 +391,8 @@ def fragment_order(shape, atom, threads=32):
     for mt, m0 in enumerate(mstarts):
         for kt, k0 in enumerate(kstarts):
             assert len(order) == (mt * ktiles + kt) * aregs * threads
-            for f in range(aregs):
-                for lane in range(threads):
+            for lane in range(threads):
+                for f in range(aregs):
                     dm, dk = cell[(f, lane)]
                     row, col = m0 + dm, k0 + dk
                     order.append(row + rows * col
@@ -1116,26 +1126,25 @@ def matmul(writer, ops, ctx, span):
                                             # every round reads the same `A`.
                                             frags = {}
                                             if aordered:
-                                                # The address the staging tile was *read* at, in memory: the
-                                                # tile base, plus the slot times the wave, plus the lane the
-                                                # accessor supplies.  So a fragment is 32 consecutive elements
-                                                # -- one 128-byte transaction, or 256 with the parts adjacent --
-                                                # and the store, the two barriers and the read back are all
-                                                # gone, not merely cheaper.  The operand is batch-constant, so
-                                                # a warp shared by several multiplications reads it once for
-                                                # all of them, over all of its lanes (`shift`).
+                                                # A lane's fragments of this tile, where the order put them:
+                                                # `aregs` consecutive slots from `tbase + aregs * lane`, one
+                                                # wide access per part -- the register group the instruction
+                                                # takes, loaded in place (`fragment_order`).  The store, the
+                                                # two barriers and the read back of the staged path are gone,
+                                                # and with the parts planar so are the moves that regrouped
+                                                # adjacent halves.  The operand is batch-constant, so a warp
+                                                # shared by several multiplications reads it once for all of
+                                                # them, over all of its lanes (`shift`).
                                                 mt = (i + ii) // atom.m
                                                 kt = (k + kk) // atom.k
                                                 tbase = (mt * ktiles + kt) * (aregs * wave)
-                                                got_parts = [[None] * len(Afrag) for _ in range(aparts)]
-                                                for kf in range(0, kregs):
-                                                    for iii in range(0, mregs):
-                                                        fr = iii + kf * mregs
-                                                        got = ops.A_slot(writer, tbase + fr * wave,
-                                                                         parts=aparts, **shift)
-                                                        got = got if aparts > 1 else (got,)
-                                                        for pt in range(aparts):
-                                                            got_parts[pt][fr] = got[pt]
+                                                got = ops.A_slot(writer, tbase, parts=aparts,
+                                                                 width=aregs, **shift)
+                                                got = got if aparts > 1 else (got,)
+                                                got_parts = [[(got[pt] if aregs == 1 else
+                                                               writer.extract(got[pt], f, hint='a'))
+                                                              for f in range(aregs)]
+                                                             for pt in range(aparts)]
                                                 frags[None] = got_parts
                                             else:
                                                 writer.barrier('wave', **sync)

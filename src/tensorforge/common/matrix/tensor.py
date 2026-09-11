@@ -48,6 +48,17 @@ class Tensor:
         #: one only says how much room they take, which is what an address
         #: needs to know.
         self.storage_parts = 1
+        #: Whether the parts are planar -- every element's first part, then
+        #: every element's second -- rather than adjacent per element.
+        #:
+        #: Adjacent is the default and right where one lane reads one element:
+        #: its parts are one access.  Planar is for an operand stored in a
+        #: fragment order, where a lane reads several neighbouring slots at
+        #: once and the instruction wants each part's slots in one register
+        #: group; adjacent parts would interleave them and every group would
+        #: have to be sorted back with moves.  Set with the order, by the
+        #: instruction that decides it (`MultilinearInstruction._offer_order`).
+        self.storage_planar = False
         #: Which bounding-box cell each storage slot holds, or `None` for the
         #: identity.
         #:
@@ -340,6 +351,7 @@ class Tensor:
         # the image is expanded from this tensor's memory, so it is read under
         # this tensor's convention
         twin.storage_parts = self.storage_parts
+        twin.storage_planar = self.storage_planar
         twin.storage_order = self.storage_order
         twin.simt_interleave = self.simt_interleave
         return twin
@@ -374,6 +386,7 @@ class Tensor:
         is_similar &= self.addressing == other.addressing
         is_similar &= self.bbox == other.bbox
         is_similar &= self.storage_parts == other.storage_parts
+        is_similar &= self.storage_planar == other.storage_planar
         is_similar &= self.storage_order == other.storage_order
         return is_similar
 
@@ -389,6 +402,7 @@ class Tensor:
         # and a field every operand carries identically is one they all have
         # to parse to learn nothing.
         parts = f' /{self.storage_parts}' if self.storage_parts != 1 else ''
+        parts += ' planar' if self.storage_planar and self.storage_parts != 1 else ''
         parts += ' ordered' if self.storage_order is not None else ''
         return f'{self.name} {"×".join(str(d) for d in self.shape)}({"×".join(str(d) for d in self.bbox.sizes())}) {self.bbox} {self.addressing}{parts}'
 

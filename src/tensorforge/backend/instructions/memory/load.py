@@ -127,7 +127,8 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
     self._src.data_view = DataView(shape=self._tensor.get_actual_shape(),
                                    permute=None,
                                    bbox=self._tensor.get_bbox(),
-                                   elem_parts=self._tensor.storage_parts)
+                                   elem_parts=self._tensor.storage_parts,
+                                   owner=self._tensor)
 
     src_real_shape = self._tensor.bbox.sizes()
     dst_bbox = self._tensor.get_bbox() # BoundingBox([0] * len(self._tensor.shape), src_real_shape)

@@ -832,10 +832,15 @@ class MultilinearInstruction(ComputeInstruction):
                     or (member.storage_order is not None
                         and tuple(member.storage_order) != tuple(order))):
                 return
+        # Parts planar with it: the order puts a lane's fragments side by side,
+        # and the instruction wants each part's in one register group
+        # (`Tensor.storage_planar`).
         for member in members:
             member.storage_order = order
+            member.storage_planar = True
         if variant:
             a_obj.storage_order = order
+            a_obj.storage_planar = True
 
     def _shape(self) -> ComputeShape:
         """What the choice and the reservation are both made from.
@@ -1040,7 +1045,7 @@ class MultilinearInstruction(ComputeInstruction):
                         spec.discard()
                 return res
 
-            def A_slot(writer, slot, parts=1, shift=None):
+            def A_slot(writer, slot, parts=1, shift=None, width=1):
                 """One fragment of a pre-ordered `A`, named by storage slot.
 
                 A prepared operand has no coordinate addressing left, and that
@@ -1056,15 +1061,24 @@ class MultilinearInstruction(ComputeInstruction):
                 still wants that answer, and only this one read does not.
                 """
                 threads = self._num_threads
-                rank = self._ops[0].symbol.data_view.rank()
+                view = self._ops[0].symbol.data_view
+                rank = view.rank()
+                # `width` slots per lane, adjacent: the lane's fragments of one
+                # tile, read as one access per part.  That needs the parts
+                # planar -- adjacent parts would interleave the slots -- which
+                # is how a fragment-ordered operand is stored.
+                if width > 1 and parts > 1 and not view.part_plane:
+                    raise InternalError(
+                        f'{width} adjacent slots of a {parts}-part operand need '
+                        f'its parts planar, and they are adjacent')
                 # `shift` is a slot count added at run time: a warp shared by
                 # several multiplications reads a fragment over all of its
                 # lanes, and the lanes past this multiplication's own are
                 # `shift` slots of it further on.
-                nonlead = slot // threads
+                nonlead = slot // (threads * width)
                 value = (None if shift is None else
                          writer.op('add', INDEX, shift, nonlead, hint='slot'))
-                index = ([LeadIndex(nonlead, threads, 1, value=value)]
+                index = ([LeadIndex(nonlead, threads, 1, value=value, width=width)]
                          + [0] * (rank - 1))
                 with writer.speculative() as spec:
                     res = self._ops[0].symbol.load(writer, self._context, None,

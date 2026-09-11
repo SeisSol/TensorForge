@@ -32,7 +32,8 @@ class GetElementPtrBuilder(AbstractBuilder):
       # TODO: remove this code path
       dest.data_view = DataView(shape=src.obj.get_actual_shape(), permute=None,
                                 bbox=src.obj.get_bbox(),
-                                elem_parts=src.obj.storage_parts)
+                                elem_parts=src.obj.storage_parts,
+                                owner=src.obj)
     else:
       dest.data_view = DataView(shape=src.obj.shape, permute=None)
     self._scopes.add_symbol(dest)

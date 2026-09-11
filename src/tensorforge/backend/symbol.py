@@ -66,8 +66,13 @@ def slots_for(lower: int, upper: int, block: int,
 
 class DataView:
   def __init__(self, shape: List[int], permute: Union[List[int], None],
-               bbox: BoundingBox = None, elem_parts: int = 1):
+               bbox: BoundingBox = None, elem_parts: int = 1, owner=None):
     self.shape = shape
+    #: The tensor this is a view onto, where it has one.  Asked rather than
+    #: copied whether its parts are planar (`Tensor.storage_planar`): that is
+    #: decided with the storage order, when the instruction reading the operand
+    #: is emitted, and this view exists long before.
+    self._owner = owner
     #: Scalars one logical element of this buffer occupies --- `Tensor.
     #: storage_parts` for a view onto a global tensor, and 1 for a staging
     #: tile, whose elements are whatever was staged into it.
@@ -90,9 +95,24 @@ class DataView:
 
     Read it wherever an absolute stride is compared against something rather
     than merely used, since the number that means `adjacent` is this one and
-    only sometimes 1.
+    only sometimes 1.  One where the parts are planar: the elements of one
+    part are adjacent then, and the parts are `part_plane` apart.
     """
-    return self._elem_parts
+    return 1 if self.part_plane else self._elem_parts
+
+  @property
+  def part_plane(self):
+    """Elements from one part of an element to the next where the parts are
+    planar, or 0 where they are adjacent.
+
+    The whole of one part, then the whole of the next, so the distance is the
+    number of stored elements -- the storage order's length for an ordered
+    operand, which counts its padding slots too.
+    """
+    o = self._owner
+    if o is None or self._elem_parts == 1 or not getattr(o, 'storage_planar', False):
+      return 0
+    return int(o.storage_elements())
 
   def get_bbox(self):
     # `BoundingBox` has no mutating API -- `_lower`/`_upper` are tuples and
@@ -217,8 +237,11 @@ class DataView:
     # stored prepared, consecutive logical elements are that many scalars
     # apart, and every stride above them scales with it.  One for everything
     # else, which is every buffer that is not a prepared global operand.
+    #
+    # Planar parts are the exception: an element's parts are not neighbours
+    # there, so the elements are, and the parts are `part_plane` further on.
     strides = []
-    current = self._elem_parts
+    current = 1 if self.part_plane else self._elem_parts
     for i, size in enumerate(self.shape):
       if i not in mask:
         strides += [current]
@@ -2290,8 +2313,23 @@ class Symbol:
           if interleaved is not None:
             return interleaved
         addr = self.address_value(writer, context, read_index)
+        # Planar parts are `plane` elements apart instead of adjacent: the
+        # addend scales, and reading every part is one access per part -- each
+        # as wide as the index asks, which is the point of storing them so.
+        plane = self.data_view.part_plane if self.data_view is not None else 0
         if part:
-            addr = writer.op('add', INDEX, addr, part, hint='a')
+            addr = writer.op('add', INDEX, addr, part * plane if plane else part,
+                             hint='a')
+        if parts > 1 and plane:
+            return tuple(
+                writer.load(self, addr if p == 0 else writer.op(
+                                'add', INDEX, addr, p * plane, hint='a'),
+                            type_=ltype, hint='data',
+                            align=(None if w == 1
+                                   else self._wide_claim(read_index, w, p * plane)),
+                            layout=layout_of(read_index, self.num_threads),
+                            nontemporal=nontemp)
+                for p in range(parts))
         if parts > 1:
             # Every part of one element in a single access.  They are
             # adjacent -- the part index is the innermost stride -- so this is
@@ -2339,7 +2377,9 @@ class Symbol:
         value = writer.load(self, addr,
                             type_=ltype, hint='data',
                             align=(None if w == 1
-                                   else self._wide_claim(read_index, w, part)),
+                                   else self._wide_claim(read_index, w,
+                                                         part * plane if plane
+                                                         else part)),
                             layout=layout_of(read_index, self.num_threads),
                             nontemporal=nontemp)
         if bc_lane is None or not broadcast:

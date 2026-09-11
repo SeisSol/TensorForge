@@ -62,6 +62,9 @@ class DriverOperand:
     #: which case the host has to write the prepared form -- the kernel is
     #: already addressing it that way.
     storage_parts: int = 1
+    #: Whether those parts are planar -- every element's first part, then every
+    #: element's second -- from ``Tensor.storage_planar``; adjacent otherwise.
+    storage_planar: bool = False
     #: For a sparse tensor, the F-order cell of one element that each storage
     #: slot holds; ``None`` when the tensor is stored dense and the two orders
     #: are the same thing.
@@ -116,6 +119,8 @@ def collect_operands(generator) -> List[DriverOperand]:
             is_sink=is_snk,
             storage_volume=int(t.storage_volume()),
             storage_parts=int(getattr(t, "storage_parts", 1)),
+            storage_planar=bool(getattr(t, "storage_planar", False))
+            and int(getattr(t, "storage_parts", 1)) > 1,
             pack_index=t.storage_map(),
             # the kernel addresses the *stored* region: memory spans
             # upper - lower and address 0 is `lower`, so the host buffer is

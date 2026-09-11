@@ -136,7 +136,9 @@ def test_a_table_that_is_not_a_bijection_is_refused():
 @pytest.mark.parametrize('atom', _atoms(),
                          ids=lambda a: f'm{a.m}n{a.n}k{a.k}_{a.d.name}')
 def test_the_order_is_the_one_the_staging_produced(atom):
-    """One tile, read back where the staged read would have looked."""
+    """One tile: every lane finds the fragments the staged read would have
+    handed it, lane by lane and each lane's side by side -- the same cells, at
+    `aregs * lane + f` instead of `lane + threads * f`."""
     rows, cols = atom.m, atom.k
     order = nvidia.fragment_order((rows, cols), atom, THREADS)
     assert len(order) == (atom.m * atom.k), 'one tile, no padding'
@@ -147,7 +149,7 @@ def test_the_order_is_the_one_the_staging_produced(atom):
         for lane in range(THREADS):
             m_local, k_local = want[(lane, f)]
             # F-order over the bounding box: the first axis is the fast one.
-            assert order[THREADS * f + lane] == m_local + rows * k_local, (
+            assert order[aregs * lane + f] == m_local + rows * k_local, (
                 f'fragment {f} of lane {lane}')
 
 
@@ -207,6 +209,23 @@ def test_an_order_that_is_not_one_is_refused(order, why):
 
 
 # -- the host half ---------------------------------------------------------- #
+
+def test_the_planar_split_keeps_each_part_one_run():
+    """`split_tf32` for an operand stored planar: per batch element all the
+    upper halves, then all the lower ones, each in slot order -- so a lane's
+    `aregs` neighbouring slots of one part are one access, the register group
+    the instruction takes."""
+    import numpy as np
+    from harness import layout
+    flat = np.array([1.0, 1.0 + 2.0 ** -12, 3.0, 5.0 + 2.0 ** -14,
+                     7.0, 9.0 + 2.0 ** -13], dtype=np.float32)   # 2 elements of 3
+    inter = layout.split_tf32(flat, Datatype.F32)
+    planar = layout.split_tf32(flat, Datatype.F32, planar=3)
+    hi, lo = inter[0::2], inter[1::2]
+    assert planar.tolist() == (hi[:3].tolist() + lo[:3].tolist()
+                               + hi[3:].tolist() + lo[3:].tolist())
+    assert np.all(hi + lo == flat), 'the halves still add up'
+
 
 def test_the_packer_zeroes_a_slot_with_no_cell():
     """`layout.pack` is a gather, and a padding slot gathers from nowhere.

@@ -30,7 +30,8 @@ class GlobalLoaderBuilder(AbstractBuilder):
     # upper - lower, with address 0 at `lower`
     predest.data_view = DataView(shape=src.obj.get_actual_shape(), permute=None,
                                  bbox=src.obj.get_bbox(),
-                                 elem_parts=src.obj.storage_parts)
+                                 elem_parts=src.obj.storage_parts,
+                                 owner=src.obj)
 
     self._scopes.add_symbol(predest)
     self._instructions.append(GetElementPtr(self._context, src, predest, True))

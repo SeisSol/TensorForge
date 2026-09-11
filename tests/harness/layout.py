@@ -145,7 +145,7 @@ def pack(view: np.ndarray, pack_index: np.ndarray,
     return np.ascontiguousarray(out.ravel(), dtype=np_dtype(dt))
 
 
-def split_tf32(flat: np.ndarray, dt: Datatype) -> np.ndarray:
+def split_tf32(flat: np.ndarray, dt: Datatype, planar: int = 0) -> np.ndarray:
     """Store each scalar as the two TF32 halves a matrix instruction multiplies.
 
     What `splitFloatTF32` in ``tensorforge_device/cuda.h`` computes for an
@@ -159,7 +159,10 @@ def split_tf32(flat: np.ndarray, dt: Datatype) -> np.ndarray:
     Interleaved, `[hi0, lo0, hi1, lo1, ...]`, because that is what
     ``DataView.get_dim_strides`` produces for ``storage_parts == 2``: the part
     index is the innermost stride, so the halves of one element are adjacent
-    and a single wide access fetches both.
+    and a single wide access fetches both.  Planar, `[hi0, hi1, ..., lo0, lo1,
+    ...]` per batch element of ``planar`` elements, where the operand is
+    stored in fragment order (``Tensor.storage_planar``): a lane reads several
+    neighbouring slots there, and each part's have to be one run.
 
     Both halves are stored as ``float`` and not as ``uint32``.  A TF32 value
     *is* a float with its low thirteen mantissa bits zero, so the kernel loads
@@ -186,6 +189,13 @@ def split_tf32(flat: np.ndarray, dt: Datatype) -> np.ndarray:
     x = np.ascontiguousarray(flat, dtype=np.float32)
     hi = _rna(x)
     lo = _rna((x - hi.view(np.float32)).astype(np.float32))
+    if planar:
+        # ``planar`` elements per batch element, and each part of them as one
+        # run: all the upper halves, then all the lower ones --
+        # ``Tensor.storage_planar``, for an operand stored in fragment order.
+        out = np.stack([hi.view(np.float32).reshape(-1, planar),
+                        lo.view(np.float32).reshape(-1, planar)], axis=1)
+        return np.ascontiguousarray(out.ravel())
     out = np.empty(x.size * 2, dtype=np.float32)
     out[0::2] = hi.view(np.float32)
     out[1::2] = lo.view(np.float32)
