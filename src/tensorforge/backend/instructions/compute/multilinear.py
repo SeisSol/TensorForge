@@ -61,6 +61,24 @@ def _contiguous_first_axis(sym) -> bool:
         return False
 
 
+
+def _roll_count(dimmin, dimmax, step, k_roll, k_unroll_max):
+    """The unroll count of a rolled reduction, or 0 to unroll it whole.
+
+    `k_roll` where it is asked for.  Otherwise a reduction longer than
+    `k_unroll_max` steps (`Options.k_unroll_max`) is rolled by the largest
+    divisor of its step count that is no larger, so that the rolled loop runs
+    whole groups -- and by the cap itself where the count is prime.  Whether
+    it can be rolled at all is `_rollable`'s question, not this one's.
+    """
+    if k_roll:
+        return k_roll
+    steps = (dimmax - dimmin) // step if step > 0 else 0
+    if not k_unroll_max or steps <= k_unroll_max:
+        return 0
+    best = max(d for d in range(1, k_unroll_max + 1) if steps % d == 0)
+    return best if best > 1 else k_unroll_max
+
 class MultilinearInstruction(ComputeInstruction):
     def __init__(self,
                context: Context,
@@ -380,7 +398,8 @@ class MultilinearInstruction(ComputeInstruction):
         # (for broadcasting)
         force_unroll = True #self._context.get_vm().get_hw_descr().vendor == 'amd'
         # A count here rolls the reduction -- see `_rollable` and the option.
-        k_roll = self._context.get_user_options().k_roll
+        opts = self._context.get_user_options()
+        k_roll, k_unroll_max = opts.k_roll, opts.k_unroll_max
 
         matrixK = 1
 
@@ -403,12 +422,13 @@ class MultilinearInstruction(ComputeInstruction):
                     # real `for` it would be a runtime comparison per step,
                     # which costs more than the loads it saves.
                     step *= self._k_width
+                roll = _roll_count(dimmin, dimmax, step, k_roll, k_unroll_max)
                 rolled = (i == len(self._ks) - 1
-                          and self._rollable(i, dimmin, dimmax, step, k_roll))
+                          and self._rollable(i, dimmin, dimmax, step, roll))
                 loop = [Loop(f'k{i}', dimmin, dimmax, step,
                              unroll=(self._sparseK[i] or force_unroll)
                              and not rolled,
-                             pragma=k_roll if rolled else True)]
+                             pragma=roll if rolled else True)]
                 if self._sparseK[i] or force_unroll or True:# and False:
                     loopstack += loop
                 else:

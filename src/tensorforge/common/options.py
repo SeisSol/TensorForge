@@ -522,6 +522,18 @@ declare('k_roll',
             'into whole groups.  For kernels whose fully unrolled body no '
             'longer fits the instruction cache.')
 
+declare('k_unroll_max',
+        default=64,
+        env='TF_K_UNROLL_MAX',
+        doc='Most reduction steps the generator unrolls whole when `k_roll` '
+            'is not set.  A longer reduction is rolled as `k_roll` would roll '
+            'it, by the largest divisor of its step count up to this one, '
+            'where it can be (see `k_roll`); 0 unrolls every reduction whole.  '
+            'Above the 56 of `local_flux`: at 120, eight lanes of it were '
+            '121k lines of CUDA that cicc had not finished after twelve '
+            'minutes, and rolled at 56 the same kernel was the fastest FFMA '
+            'variant on GB200.')
+
 declare('lanes_per_mult',
         default=0,
         env='TF_LANES',

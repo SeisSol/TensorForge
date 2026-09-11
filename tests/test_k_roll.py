@@ -8,7 +8,8 @@ and the register broadcasts need their indices at compile time.  A dense
 reduction over operands in memory does not, and on a large kernel the fully
 unrolled body is what no longer fits the instruction cache.  These tests hold
 the three things the option promises: nothing changes without it, the count
-reaches the loop with it, and a reduction it cannot roll stays as it was.
+reaches the loop with it, and a reduction it cannot roll stays as it was --
+and the cap that rolls a long reduction unasked (`Options.k_unroll_max`).
 """
 
 from __future__ import annotations
@@ -83,3 +84,18 @@ def test_a_group_folds_into_the_destination_one_product_at_a_time(monkeypatch):
     src = _kernel(monkeypatch, 56, 9, 56, k_width=2)
     assert not re.search(r"\+ \(\(\w+ \* \w+\) \+ \(\w+ \* \w+\)\)", src)
     assert re.search(r"\(\(\w+ \+ \(\w+ \* \w+\)\) \+ \(\w+ \* \w+\)\)", src)
+
+
+def test_a_reduction_past_the_cap_is_rolled_unasked(monkeypatch):
+    """By the largest divisor of its step count that fits under the cap, so
+    that the rolled loop runs whole groups."""
+    loops = _rolled(_kernel(monkeypatch, 56, 9, 120))
+    assert [(count, extent) for count, extent, _ in loops] == [("60", "120")]
+
+
+def test_a_reduction_the_cap_covers_stays_unrolled(monkeypatch):
+    assert _rolled(_kernel(monkeypatch, 56, 9, 64)) == []
+
+
+def test_a_zero_cap_unrolls_every_reduction(monkeypatch):
+    assert _rolled(_kernel(monkeypatch, 56, 9, 120, k_unroll_max=0)) == []
