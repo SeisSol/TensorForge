@@ -178,24 +178,35 @@ def test_the_default_is_a_measurement_and_says_so():
 # and it can be searched over
 # ----------------------------------------------------------------------
 
-def test_a_target_whose_wave_the_ceiling_does_not_bind_has_one_candidate():
-    """So there is no search to run, and none is run.
-
-    NVIDIA reports a 32-wide wave and RDNA a 32-wide one too, so the ceiling
-    is a no-op there and both ceilings land on the same width.  Measured on
-    gfx1150, not one of the 65 corpus cases had two configurations to choose
-    between -- which is the control that says the ceiling only ever bites
-    where the wave is 64.
-    """
+def test_the_ceiling_alone_leaves_nothing_to_choose_on_a_32_wide_wave():
+    """Which is why the widths below are offered as well: both ceilings land
+    on 32 there, so what the ceiling contributes is a single candidate."""
     for arch, backend in (("sm_86", "cuda"), ("gfx1150", "hip")):
         ctx = _ctx(arch, backend, Datatype.F64)
-        assert len(lanes.candidates(_gemm(56, 9, 56, Datatype.F64), ctx)) == 1
+        pair = {lanes.deduce(_gemm(56, 9, 56, Datatype.F64), ctx,
+                             ceiling=ceiling).num_threads
+                for ceiling in (None, lanes.DEFAULT_LANE_CEILING)}
+        assert pair == {32}
 
 
-def test_a_wave64_target_has_two_and_they_are_ordered_widest_first():
+def test_the_candidates_are_the_widths_a_multiplication_can_take():
+    """The divisors of the lead extent -- those cover the rows without padding
+    -- and the powers of two, each only where its group fits a block."""
+    ctx = _ctx("sm_86", "cuda", Datatype.F64)
+    widths = [c.num_threads for c in
+              lanes.candidates(_gemm(56, 9, 56, Datatype.F64), ctx)]
+    assert widths == sorted(widths, reverse=True), "widest first"
+    assert widths[0] == 56 and 32 in widths
+    assert 28 in widths, "224 threads is a group a block holds"
+    assert 35 not in widths, "lcm(32, 35) is 1120 threads and no block holds it"
+
+
+def test_a_wave64_target_offers_the_wave_and_the_ceiling_widest_first():
     ctx = _ctx("gfx90a", "hip", Datatype.F64)
-    options = lanes.candidates(_gemm(56, 9, 56, Datatype.F64), ctx)
-    assert [c.num_threads for c in options] == [64, 32]
+    widths = [c.num_threads for c in
+              lanes.candidates(_gemm(56, 9, 56, Datatype.F64), ctx)]
+    assert widths == sorted(widths, reverse=True)
+    assert {64, 32} <= set(widths)
 
 
 def test_the_search_measures_nothing_when_there_is_nothing_to_choose():
@@ -205,8 +216,9 @@ def test_the_search_measures_nothing_when_there_is_nothing_to_choose():
     score has to be able to tell "not measured" from "measured zero".
     """
     ctx = _ctx("sm_86", "cuda", Datatype.F64)
+    only = lanes.candidates(_gemm(56, 9, 56, Datatype.F64), ctx)[:1]
     config, scores = lanes.search(
-        lambda: _gemm(56, 9, 56, Datatype.F64), ctx)
+        lambda: _gemm(56, 9, 56, Datatype.F64), ctx, options=only)
     assert scores == {config.num_threads: None}
 
 
@@ -219,8 +231,12 @@ def test_the_search_picks_the_configuration_with_the_lower_footprint():
     occupancy of 2.
     """
     ctx = _ctx("gfx90a", "hip", Datatype.F64)
+    # The two the ceiling contributes, stated rather than searched: what this
+    # holds is the ranking, and the candidate set is another test's subject.
+    pair = [c for c in lanes.candidates(_gemm(56, 9, 56, Datatype.F64), ctx)
+            if c.num_threads in (32, 64)]
     config, scores = lanes.search(
-        lambda: _gemm(56, 9, 56, Datatype.F64), ctx)
+        lambda: _gemm(56, 9, 56, Datatype.F64), ctx, options=pair)
 
     assert set(scores) == {32, 64}
     assert scores[64] < scores[32]
@@ -282,8 +298,9 @@ def test_a_candidate_that_does_not_build_is_not_a_candidate():
     the ones where neither width builds.
     """
     ctx = _ctx("pvc", "acpp", Datatype.F64)
-    assert [c.num_threads for c in
-            lanes.candidates(_gemm(56, 9, 56, Datatype.F64), ctx)] == [32, 16]
+    pair = [c for c in lanes.candidates(_gemm(56, 9, 56, Datatype.F64), ctx)
+            if c.num_threads in (16, 32)]
+    assert [c.num_threads for c in pair] == [32, 16]
 
     calls = {"n": 0}
     real = Generator.generate
@@ -298,7 +315,7 @@ def test_a_candidate_that_does_not_build_is_not_a_candidate():
     Generator.generate = flaky
     try:
         config, scores = lanes.search(
-            lambda: _gemm(56, 9, 56, Datatype.F64), ctx)
+            lambda: _gemm(56, 9, 56, Datatype.F64), ctx, options=pair)
     finally:
         Generator.generate = real
 

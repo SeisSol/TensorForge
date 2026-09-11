@@ -164,29 +164,21 @@ class MultilinearDescr(OperationDescription):
     return out
 
   def _lead_alignment(self, context: Context) -> int:
-    """What the lead matrices prove about a wide access, in bytes.
+    """What the lead matrices prove about a wide access's base, in bytes.
 
-    Two things have to hold and only one of them is the caller's claim.  The
-    base: a temporary is the generator's own shared buffer, which `ShrMemOpt`
-    starts at `SHR_ALIGN_BYTES`, so it states that rather than the zero of an
-    absent claim.  And the *column* stride, since a vector is read at
-    `column * lead + row`: a lead of 35 floats puts every column after the
-    first 140 bytes along, which keeps 4 of the 16 bytes -- so the effective
-    alignment is the greatest common divisor of the two, and an odd lead falls
-    back to width one by arithmetic rather than by a special case.
+    A temporary is the generator's own shared buffer, which `ShrMemOpt` starts
+    at `SHR_ALIGN_BYTES`, so it states that rather than the zero of an absent
+    claim.  The column stride is not this function's question: an odd lead
+    keeps the wide path and has its remainder peeled and guarded
+    (`test_store_exactness`), so it is not a reason to narrow the width.
     """
     from tensorforge.backend.opt.shr_mem_analyzer import SHR_ALIGN_BYTES
-    fp = context.fp_type.size()
     out = []
     for m in self._lead_matrices():
       tensor = m.tensor
-      base = (max(getattr(tensor, 'alignment', 0) or 0, SHR_ALIGN_BYTES)
-              if getattr(tensor, 'is_tmp', False)
-              else (getattr(tensor, 'alignment', 0) or 0))
-      shape = list(getattr(tensor, 'shape', []) or [])
-      if base and len(shape) > 1:
-        base = math.gcd(base, shape[0] * fp)
-      out.append(base)
+      out.append(max(getattr(tensor, 'alignment', 0) or 0, SHR_ALIGN_BYTES)
+                 if getattr(tensor, 'is_tmp', False)
+                 else (getattr(tensor, 'alignment', 0) or 0))
     return min(out) if out else 0
 
   def lead_width(self, context: Context) -> int:

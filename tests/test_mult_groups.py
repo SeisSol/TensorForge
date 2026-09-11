@@ -95,8 +95,12 @@ def test_the_grouped_traversal_is_driven_by_the_leader():
     gen.generate()
     src = gen.get_kernel()
 
-    assert "batchIdLane0 = threadIdx.y % 2" in src
-    assert "batchIdGroup0 = (threadIdx.y - batchIdLane0)" in src, (
+    # 48 lanes over a 32-wide wave: the launch is in units of 16 and the
+    # multiplication's index is derived from the unit (`MultLayout`), so the
+    # group is spelt over `tfMult`, the index `threadIdx.y` used to be.
+    assert re.search(r"dim3 block \(16, 6, 1\)", gen.get_launcher())
+    assert "batchIdLane0 = tfMult % 2" in src
+    assert "batchIdGroup0 = (tfMult - batchIdLane0)" in src, (
         "the loop has to start at the group's lowest index, so that it runs as "
         "often as the row with the most to do")
     assert "const size_t batchId0 = batchIdActive0 ?" in src, (

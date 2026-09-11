@@ -45,9 +45,24 @@ class Context:
     #: register budget is per kernel and the widest body is what has to fit.
     self.peak_pressure: Optional[int] = None
 
+    #: Arithmetic operations written out so far, or None (`record_work`).
+    self.emitted_work: Optional[int] = None
+
   def record_pressure(self, value: int) -> None:
     if self.peak_pressure is None or value > self.peak_pressure:
       self.peak_pressure = value
+
+  def record_work(self, value: int = 1) -> None:
+    """Count arithmetic the emitter wrote out.
+
+    What a lane geometry changes and neither the register model nor blocks per
+    SM can see: a packed FMA does two elements in one operation and a matrix
+    instruction does a whole tile, so a geometry that reaches either issues
+    fewer of these.  Counted per kernel, so a *rolled* reduction
+    (`Options.k_roll`) counts its body once however many times it runs --
+    the same caveat the line estimate carries.
+    """
+    self.emitted_work = (self.emitted_work or 0) + value
 
   def set_fp_type(self, fp_type: Datatype):
     self.fp_type = fp_type

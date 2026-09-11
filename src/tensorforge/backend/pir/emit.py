@@ -94,6 +94,26 @@ _INFIX = {
 _LEXIC_BINOP = {'min': Operation.MIN, 'max': Operation.MAX}
 
 
+#: The operations `Context.record_work` counts, where the result is a floating
+#: point value: the arithmetic a lane geometry changes the amount of.  Index
+#: arithmetic is deliberately out -- it is addressing, it scales with the
+#: geometry for its own reasons, and counting it would drown the term it is
+#: being weighed against.
+_WORK_OPS = frozenset({'add', 'sub', 'mul', 'div', 'fma', 'neg'})
+
+
+#: The floating-point members of `Datatype`, which is what makes an operation
+#: arithmetic here rather than addressing.
+_WORK_TYPES = frozenset({Datatype.F16, Datatype.BF16, Datatype.F32,
+                         Datatype.F64, Datatype.F128})
+
+
+def _counts_as_work(op: str, value) -> bool:
+    if op not in _WORK_OPS:
+        return False
+    return getattr(getattr(value, 'type', None), 'base', None) in _WORK_TYPES
+
+
 class Emitter:
     def __init__(self, writer, context: Any = None):
         self.writer = writer
@@ -106,6 +126,13 @@ class Emitter:
         self._prefetch_note = ''
         self._inline: set = set()
         self._pending: Dict[int, str] = {}   # load.async token id -> C++ name
+
+    def _record_work(self) -> None:
+        # The emitter is handed a context or, from older call sites, the VM;
+        # only the former counts (`Context.record_work`).
+        record = getattr(self.context, 'record_work', None)
+        if record is not None:
+            record()
 
     # -- naming ------------------------------------------------------------ #
 
@@ -760,6 +787,8 @@ class Emitter:
             return
 
         if op == Op.CALL and s.attr('asm') is not None:
+            # A matrix instruction is one operation over a whole tile.
+            self._record_work()
             # The operands are rendered here rather than baked into the
             # template, which is the whole point: the constraint list names
             # values the IR knows, so the split that produced a fragment has a
@@ -865,6 +894,11 @@ class Emitter:
         # generic pure op
         if s.target:
             v = s.target[0]
+            if _counts_as_work(op, v):
+                # One operation, whatever it holds: at a lead width of two the
+                # value is a pair and this is one packed FMA for two elements,
+                # which is the difference the count exists to show.
+                self._record_work()
             args = [self.operand(a) for a in s.args]
             if op in _INFIX and len(args) == 2:
                 expr = f'{args[0]} {_INFIX[op]} {args[1]}'

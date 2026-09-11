@@ -109,11 +109,47 @@ def candidates(descr_list: List[OperationDescription],
     Deduplicated by lane count rather than by config, since two ceilings that
     land on the same width give the same kernel and building it twice buys a
     tie.
+
+    And the widths a multiplication may take at all, which used to be nothing
+    on a 32-wide wave: the *divisors of the lead extent*, because those cover
+    the rows with no padding, and the powers of two, because those are what
+    `narrower` has always offered and what the measurements were taken at.  A
+    width is offered only where its group fits a block -- `lcm(wave, width)`
+    threads, `MultLayout` -- so 35 lanes over 56 rows is not a candidate (1120
+    threads) while 28 is (224).
+
+    Measured on GB200 (package 4), this is the difference between a search
+    with something to choose and none: the winner was 8 lanes at b = 20..56
+    and 16 lanes with a lead width of 2 at b = 80, 120, against a default of
+    32 -- up to a factor of three between geometries of one case.
+
+    An elementwise descriptor waives all of it, as in `narrower`: its
+    iteration space is the vector unit's.
     """
     seen = {}
     for ceiling in (None, DEFAULT_LANE_CEILING):
         config = deduce(descr_list, context, ceiling=ceiling)
         seen.setdefault(config.num_threads, config)
+    if any(isinstance(d, ElementwiseDescr) for d in descr_list):
+        return [seen[k] for k in sorted(seen, reverse=True)]
+
+    base = deduce(descr_list, context)
+    hw = context.get_vm().get_hw_descr()
+    wave, block = hw.vec_unit_length, hw.max_threads_per_block
+    rows = base.num_active_threads or base.num_threads
+    widths = {d for d in range(MIN_LANES // 2, 2 * wave + 1) if rows % d == 0}
+    width = MIN_LANES
+    while width <= base.num_threads:
+        widths.add(width)
+        width *= 2
+    for want in sorted(widths, reverse=True):
+        if want in seen or want <= 0:
+            continue
+        if MultLayout(want, wave).group_threads > block:
+            continue
+        seen[want] = LaneConfig(num_threads=want,
+                                num_active_threads=base.num_active_threads,
+                                lead_width=base.lead_width)
     return [seen[k] for k in sorted(seen, reverse=True)]
 
 
@@ -264,6 +300,7 @@ def search(descr_factory, context: Context,
     context.measure_pressure = True
     scores = {}
     blocks = {}
+    work = {}
     failed = []
     try:
         for config in options:
@@ -276,6 +313,7 @@ def search(descr_factory, context: Context,
                 continue
             scores[config.num_threads] = gen.peak_pressure
             blocks[config.num_threads] = gen.resident_blocks
+            work[config.num_threads] = gen.emitted_work
     finally:
         context.measure_pressure = was
 
@@ -291,8 +329,18 @@ def search(descr_factory, context: Context,
                  if not isinstance(scores.get(c.num_threads), Exception)]
         return built[0], scores
     def rank(width):
-        return (-(blocks.get(width) or 0), scored[width],
-                width != default.num_threads)
+        # Blocks per SM first, because it is a fact; then the arithmetic the
+        # build wrote out, because that is what a geometry changes and what
+        # the register model cannot see -- a packed FMA covers two elements
+        # per operation and a matrix instruction a tile; then the modelled
+        # pressure; then the deduction, so a tie changes nothing.
+        #
+        # Measured on GB200 (package 4): at b = 80 and 120 every candidate had
+        # the same blocks per SM and the *lowest* pressure was the scalar
+        # default, which the measurement put 29-40 % behind the width-2 build
+        # -- the one that issues half the operations.
+        return (-(blocks.get(width) or 0), work.get(width) or 0,
+                scored[width], width != default.num_threads)
 
     best = min(scored, key=rank)
     return next(c for c in options if c.num_threads == best), scores

@@ -133,24 +133,25 @@ class CudaLexic(Lexic):
   NAMED_BARRIERS = 16
 
   def has_sync_mult(self, num_threads: int, hw) -> bool:
-    """Two spellings, and which one applies turns on the layout.
+    """Two spellings, and which one applies turns on the width.
 
-    A multiplication that is a run of lanes inside one wave takes
-    `__syncwarp` with the mask of exactly those lanes.  Anything else takes
-    `barrier.sync id, count`, which meets exactly `count` threads -- and the
-    count must be a multiple of the warp size, so what it meets is the
-    multiplication's *group*: the smallest whole number of waves holding whole
-    multiplications (`MultLayout`).  That is a barrier over several
-    multiplications, and it is safe because a group whose multiplications
-    span waves is driven in lockstep (`Generator._group_size`).
+    Below a wave the multiplication is a run of lanes inside one, and
+    `__syncwarp` takes the mask of exactly those lanes.  Above it the
+    multiplication is a whole number of waves and `barrier.sync id, count`
+    meets exactly `count` threads -- but the count must be a multiple of the
+    warp size, so a width that leaves a partial wave has no spelling here and
+    falls back to the group.  That covers the widths `MultLayout` interleaves
+    as well: their group is driven in lockstep and the block is sized to it,
+    so the block barrier is the group's (`SyncThreads.participants`).
     """
-    return num_threads > 0 and hw.vec_unit_length > 0
+    wave = hw.vec_unit_length
+    if num_threads < wave:
+      return wave % num_threads == 0
+    return num_threads % wave == 0
 
   def sync_mult(self, num_threads: int, hw):
-    from tensorforge.common.threads import MultLayout
     wave = hw.vec_unit_length
-    layout = MultLayout(num_threads, wave)
-    if layout.contiguous and num_threads < wave:
+    if num_threads < wave:
       # The lanes of this multiplication and no others.  A full mask here
       # would wait for the neighbouring multiplications in the same warp,
       # which are free to run the body a different number of times.
@@ -158,17 +159,13 @@ class CudaLexic(Lexic):
       mask = ((1 << num_threads) - 1)
       return (f'__syncwarp(0x{mask:08x}u << '
               f'({self.thread_idx_y} % {mults} * {num_threads}));')
-    # `+ 1`, because barrier 0 is the one `__syncthreads()` takes.  Two groups
-    # sharing an id rendezvous with each other, which is a deadlock the moment
-    # they run the body a different number of times -- so the id is per group,
-    # and `mults_per_block` is capped to the resources by the thread-block
-    # policy.  Where the group holds several multiplications the count is the
-    # group's, since a barrier reaches waves and never parts of one.
-    mpg = layout.mults_per_group
-    ident = (f'{self.thread_idx_y} / {mpg} + 1' if mpg > 1
-             else f'{self.thread_idx_y} + 1')
+    # `threadIdx.y + 1`, because barrier 0 is the one `__syncthreads()` takes.
+    # Two multiplications sharing an id rendezvous with each other, which is a
+    # deadlock the moment they run the body a different number of times -- so
+    # the id has to be per multiplication, and `mults_per_block` is capped to
+    # the resources by the thread-block policy.
     return (f'asm volatile("barrier.sync %0, %1;" :: '
-            f'"r"({ident}), "r"({layout.group_threads}) : "memory");')
+            f'"r"({self.thread_idx_y} + 1), "r"({num_threads}) : "memory");')
 
   def get_sub_group_id(self, sub_group_size):
     return f'{self.thread_idx_x} % {sub_group_size}'

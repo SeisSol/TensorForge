@@ -317,6 +317,8 @@ class Generator:
     #: because the budget is per kernel and the widest body is what has to
     #: fit.
     self.peak_pressure: Optional[int] = None
+    #: Arithmetic operations this build wrote out (`Context.record_work`).
+    self.emitted_work: Optional[int] = None
     #: Blocks resident per SM under the resources that are known exactly --
     #: shared memory and threads.  Not the register limit; see
     #: `_resident_blocks`.
@@ -524,6 +526,7 @@ class Generator:
     # from a previous build would be attributed to this one, and a maximum
     # never falls back on its own.
     self._context.peak_pressure = None
+    self._context.emitted_work = None
 
     self.register()
 
@@ -867,6 +870,7 @@ class Generator:
 
     self._kernel = writer.get_src()
     self.peak_pressure = self._context.peak_pressure
+    self.emitted_work = self._context.emitted_work
     self.resident_blocks = self._resident_blocks()
 
   def _resident_blocks(self) -> Optional[int]:
