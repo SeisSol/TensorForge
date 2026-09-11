@@ -467,9 +467,23 @@ def test_lanes_per_mult_builds_the_narrower_section(monkeypatch):
     assert _block(gen).startswith("8,")
 
 
-def test_lanes_per_mult_leaves_a_count_it_cannot_take(monkeypatch):
-    """Wider than the deduction, or not a power of two: the deduction stands."""
-    for want in ("64", "12"):
+def test_lanes_per_mult_takes_a_width_the_hardware_can_hold(monkeypatch):
+    """A width that neither divides the wave nor is a multiple of it is taken
+    where its group fits a block, and the launch is then in units of
+    `gcd(width, wave)` lanes (`MultLayout`): 48 lanes are three waves holding
+    two multiplications, 16 lanes of each per wave."""
+    for want, unit in (("48", "16,"), ("12", "4,"), ("64", "64,")):
+        monkeypatch.setenv("TF_LANES", want)
+        ctx = _ctx("sm_86", "cuda")
+        gen = Generator(_gemm(56, 9, 56), ctx)
+        gen.generate()
+        assert _block(gen).startswith(unit), want
+
+
+def test_lanes_per_mult_leaves_a_count_with_no_group(monkeypatch):
+    """`lcm(32, 35)` is 1120 threads and no block holds that, so there is no
+    arrangement to take -- and the deduction stands rather than being forced."""
+    for want in ("35", "33"):
         monkeypatch.setenv("TF_LANES", want)
         ctx = _ctx("sm_86", "cuda")
         gen = Generator(_gemm(56, 9, 56), ctx)

@@ -116,7 +116,14 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
   def _linear_idx(self):
     lexic = self._context.get_vm().get_lexic()
     if self._blockwide:
-      return f'({lexic.thread_idx_x} + {lexic.thread_idx_y} * {lexic.block_dim_x})'
+      # The thread's own number in the block, so the *hardware* axes: where a
+      # multiplication spans waves the lane is derived from them
+      # (`Generator._lane_mapping`) and numbers the lanes of one
+      # multiplication, which several threads of the block share.
+      tid_x = getattr(lexic, 'raw_thread_idx_x', lexic.thread_idx_x)
+      tid_y = getattr(lexic, 'raw_thread_idx_y', lexic.thread_idx_y)
+      dim_x = getattr(lexic, 'raw_block_dim_x', lexic.block_dim_x)
+      return f'({tid_x} + {tid_y} * {dim_x})'
     else:
       return f'{lexic.thread_idx_x}'
 

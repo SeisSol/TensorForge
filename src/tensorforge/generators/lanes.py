@@ -26,6 +26,7 @@ from dataclasses import dataclass
 from typing import List, Optional
 
 from tensorforge.common.context import Context
+from tensorforge.common.threads import MultLayout
 from tensorforge.generators.descriptions import (ElementwiseDescr,
                                                  OperationDescription)
 
@@ -174,8 +175,26 @@ def requested(descr_list: List[OperationDescription],
     want = context.get_user_options().lanes_per_mult
     if not want:
         return None
-    return next((c for c in narrower(descr_list, context, floor=1)
-                 if c.num_threads == want), None)
+    base = deduce(descr_list, context)
+    if want == base.num_threads:
+        return base
+    hit = next((c for c in narrower(descr_list, context, floor=1)
+                if c.num_threads == want), None)
+    if hit is not None:
+        return hit
+    # A width that is neither the deduced one nor a halving of it, but that
+    # the hardware can still hold: `lcm(wave, width)` threads are the smallest
+    # group of whole waves holding whole multiplications, and a block has to
+    # fit one (`MultLayout`).  Above that there is no arrangement, and asking
+    # for one is not taken rather than forced -- the same answer a wider count
+    # gets.
+    hw = context.get_vm().get_hw_descr()
+    layout = MultLayout(want, hw.vec_unit_length)
+    if layout.group_threads > hw.max_threads_per_block:
+        return None
+    return LaneConfig(num_threads=want,
+                      num_active_threads=base.num_active_threads,
+                      lead_width=base.lead_width)
 
 
 def search(descr_factory, context: Context,

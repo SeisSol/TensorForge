@@ -31,7 +31,17 @@ from tensorforge.backend.instructions.sync_block import SyncThreads, SyncBlock, 
 from tensorforge.backend.instructions.batch_loop import BatchLoop, LoopMode
 from tensorforge.backend.writer import Writer
 from tensorforge.common.exceptions import GenerationError, InternalError
-from tensorforge.common.threads import mults_per_group
+from contextlib import contextmanager
+
+#: The kernel-side names for a multiplication that spans waves
+#: (`Generator._lane_mapping`).  Declared inside each section's scope, so they
+#: may repeat between sections; bound as the lexic's spelling of the lane and
+#: the multiplication, so that everything which asks for either -- addressing,
+#: guards, barriers, the batch traversal -- reads the derived value.
+UNIT_NAME = 'tfUnit'
+MULT_NAME = 'tfMult'
+LANE_NAME = 'tfLane'
+from tensorforge.common.threads import MultLayout, mults_per_group
 from tensorforge.generators.identity import registry
 
 import tensorforge.interop as interop
@@ -519,6 +529,10 @@ class Generator:
 
     self._deduce_num_threads()
 
+    with self._lane_mapping():
+      return self._generate_bound()
+
+  def _generate_bound(self):
     descrlist = []
     currlist = []
     barrier = []
@@ -677,6 +691,14 @@ class Generator:
     a change to what the offset means rather than to how it is spelled.
     """
     wave = self._context.get_vm().get_hw_descr().vec_unit_length
+    split = MultLayout(self._num_threads, wave)
+    if not (split.contiguous or split.whole_waves):
+      # The lanes of one multiplication sit in several waves, so its barrier
+      # reaches the whole group (`Lexic.sync_mult`) and every multiplication in
+      # the group has to take the same trips through the loop.
+      if start != self._get_2d_block_id():
+        return 1
+      return mults_per_group(self._num_threads, wave)
     if self._num_threads < wave and self._needs_wave_group():
       # The multiplications of one wave, driven together, because something
       # in the body is issued by the whole wave at once.  A rotated start has
@@ -732,6 +754,83 @@ class Generator:
       return LoopMode.LAUNCHCTRL
     return LoopMode.SINGLE
 
+  def _declare_lane_mapping(self, writer) -> None:
+    """Emit the three values `_lane_mapping` binds the spellings to.
+
+    Inside the section's scope, so the names may repeat from section to
+    section; what must not repeat is the arithmetic, which is the layout's
+    (`MultLayout`).
+    """
+    lexic = self._context.get_vm().get_lexic()
+    wave = self._context.get_vm().get_hw_descr().vec_unit_length
+    layout = MultLayout(self._num_threads, wave)
+    if layout.contiguous or layout.whole_waves:
+      return
+    tid_x = getattr(lexic, 'raw_thread_idx_x', lexic.thread_idx_x)
+    tid_y = getattr(lexic, 'raw_thread_idx_y', lexic.thread_idx_y)
+    upg, mpg, unit = layout.units_per_group, layout.mults_per_group, layout.unit
+    writer(f'const auto {UNIT_NAME} = {tid_y};')
+    group = f'({UNIT_NAME} / {upg})' if upg > 1 else '0'
+    within = f'({UNIT_NAME} % {upg})' if upg > 1 else UNIT_NAME
+    writer(f'const auto {MULT_NAME} = {group} * {mpg} + {within} % {mpg};'
+           if mpg > 1 else f'const auto {MULT_NAME} = {group};')
+    writer(f'const auto {LANE_NAME} = {within} / {mpg} * {unit} + {tid_x};')
+
+  @contextmanager
+  def _lane_mapping(self):
+    """Bind the lane and multiplication spellings for the whole build.
+
+    Where a multiplication is a run of lanes inside one wave, `threadIdx.x`
+    *is* the lane and `threadIdx.y` the multiplication, and this binds nothing.
+
+    Where it is not -- 48 lanes over a 32-wide wave -- the two cannot both be
+    an axis of the launch geometry.  Laying the multiplication along `x` would
+    put 32 of its lanes in one wave and 16 in the next, so the three waves of
+    a group would hold three different shapes (32-0, 16-16, 0-32) and the body
+    would have to branch on which one it is in.  So the launch is in units of
+    `gcd` lanes instead (`MultLayout`), dealt out to the multiplications of a
+    group in turn, and the lane and the multiplication are *derived* from the
+    unit: every wave then holds the same shape.
+
+    Named rather than substituted at each use: the two indices are read by the
+    addressing, the guards, the barriers and the batch loop, and every one of
+    them asks the lexic for the spelling.  Rebinding the spelling for the
+    length of the section reaches all of them at once, and `block_dim_y` goes
+    with them -- the batch stride is multiplications per block, which is no
+    longer the `y` extent.
+    """
+    lexic = self._context.get_vm().get_lexic()
+    wave = self._context.get_vm().get_hw_descr().vec_unit_length
+    layout = MultLayout(self._num_threads, wave)
+    # The hardware spellings, kept aside for the few places that mean the
+    # thread and not the lane: a block-wide loader numbering its threads
+    # (`AbstractShrMemLoader._linear_idx`) asks for a unique index over the
+    # block, which the derived lane is not.
+    lexic.raw_thread_idx_x = getattr(lexic, 'thread_idx_x', None)
+    lexic.raw_thread_idx_y = getattr(lexic, 'thread_idx_y', None)
+    # Not every lexic spells a block extent along `x`: SYCL names the axes
+    # differently, and the mapping below is not reached on those targets.
+    lexic.raw_block_dim_x = getattr(lexic, 'block_dim_x', None)
+    if layout.contiguous or layout.whole_waves:
+        # A run of lanes inside one wave, or a whole number of waves: either
+        # way every wave holds one shape already, and `threadIdx.x` is the
+        # lane it always was.
+        yield layout
+        return
+    saved = (lexic.thread_idx_x, lexic.thread_idx_y, lexic.block_dim_y)
+    lexic.thread_idx_x, lexic.thread_idx_y = LANE_NAME, MULT_NAME
+    # Multiplications per block, which is what the batch traversal steps by.
+    # As an expression over the `y` extent rather than the number itself:
+    # `mults_per_block` is decided by `ShrMemOpt`, long after the loop that
+    # reads this was built, and a name declared in the kernel would not reach
+    # the launcher.
+    lexic.block_dim_y = (f'({lexic.block_dim_y} / {layout.units_per_mult})'
+                         if layout.units_per_mult > 1 else lexic.block_dim_y)
+    try:
+        yield layout
+    finally:
+        lexic.thread_idx_x, lexic.thread_idx_y, lexic.block_dim_y = saved
+
   def _generate_kernel(self):
     vm = self._context.get_vm()
 
@@ -748,6 +847,7 @@ class Generator:
 
       for i,section in enumerate(self._sections):
         with writer.AnonymousScope():
+          self._declare_lane_mapping(writer)
           start, stride = self._section_traversal(i)
 
           writer(f'const auto {GeneralLexicon.BATCH_ID_NAME}_start = {start};')
@@ -815,7 +915,14 @@ class Generator:
       # TODO: allow multi-kernel approach instead
       coop = any(section.barrier for section in self._sections)
 
-      writer(f'{lexic.kernel_range_object("block", f"{self._num_threads}, {mults_per_block}, 1")};')
+      # In units, not lanes, where a multiplication spans waves (`_lane_mapping`).
+      wave = self._context.get_vm().get_hw_descr().vec_unit_length
+      layout = MultLayout(self._num_threads, wave)
+      plain = layout.contiguous or layout.whole_waves
+      block_x = self._num_threads if plain else layout.unit
+      block_y = (mults_per_block if plain
+                 else mults_per_block * layout.units_per_mult)
+      writer(f'{lexic.kernel_range_object("block", f"{block_x}, {block_y}, 1")};')
       if self._clusterlaunchcontrol:
         # Stated, not checked.  The queue is the one traversal with a ceiling
         # of its own: the grid is sized by the batch rather than by occupancy,
