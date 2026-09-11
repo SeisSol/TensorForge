@@ -201,3 +201,33 @@ def test_single_iteration_loop_is_left_alone(monkeypatch):
         "expected a single-iteration body, got a batch loop")
     assert 'wrap_glb_' not in kernel
     assert 'peel_glb_' not in kernel
+
+
+def test_a_loop_over_groups_of_rows_is_not_wrapped(monkeypatch):
+    """A group traversed in lockstep emits no peel, so nothing may be wrapped.
+
+    `BatchLoop._gen_grouped` emits the region alone.  Wrapped, the transfer
+    went to the tail for the next element and nothing issued it for the first:
+    `local_flux` at 16 lanes on the MMA path read an unfilled window in its
+    first iteration and came out 7 % off.  The same case on the FFMA path has
+    no group and is still wrapped, which is what shows the refusal is the
+    group's and not the case's.
+    """
+    from tensorforge.backend.instructions.compute.primitives import nvidia
+    monkeypatch.setattr(nvidia, "ENABLED", True)
+    grouped = _generate("local_flux.py", "cuda", "sm_120",
+                        enable_wrap_loads=True, lanes_per_mult=16)
+    assert re.search(r"for \(size_t \w*batchIdGroup0\b", grouped), (
+        "expected the MMA path at 16 lanes to traverse a group of rows")
+    assert 'wrap_glb_' not in grouped
+
+    def body(kernel):
+        # the name hashes the options, and the options are written out
+        kernel = re.sub(r'kernel_[0-9a-f]+', 'kernel', kernel)
+        return re.sub(r'// options:.*', '', kernel)
+    assert body(grouped) == body(_generate("local_flux.py", "cuda", "sm_120",
+                                           lanes_per_mult=16))
+    monkeypatch.setattr(nvidia, "ENABLED", False)
+    plain = _generate("local_flux.py", "cuda", "sm_120",
+                      enable_wrap_loads=True, lanes_per_mult=16)
+    assert 'wrap_glb_' in plain and 'peel_glb_' in plain

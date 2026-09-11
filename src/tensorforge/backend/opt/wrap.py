@@ -136,6 +136,24 @@ class WrapLoads(AbstractTransformer):
             # the combination outright, and the reason lives here because this
             # is what depends on it.
             return body
+        if loop._group_size > 1:
+            # A group of rows traversed in lockstep (`BatchLoop._gen_grouped`)
+            # emits its region and nothing else: no peel, no drain, no carried
+            # tokens.  A wrapped transfer would be issued for every element
+            # but the first, and the first iteration would read a buffer
+            # nothing filled -- no crash, wrong numbers (`local_flux` at 16
+            # lanes on the MMA path: 7 % off).  Nor is `index_name(1)` a row's
+            # next element there: the group's element is `active ? row :
+            # group`, and an inactive row's successor would be its group's.
+            # Refused wherever the loop may be grouped: whether a block-wide
+            # group is depends on the block's multiplication count, which is
+            # settled after the passes run.
+            for t in SlotModel(body).run().transfers[:self._distance]:
+                dest = t.load.defs()[0] if t.load.defs() else None
+                self._reject(getattr(dest, 'name', '?'),
+                             'the loop traverses a group of rows in lockstep, '
+                             'which emits no peel for the first element')
+            return body
 
         # One pointer to element k + 1, and one to the first element, per
         # source -- see `_pointers`.  Per loop: another loop binds its own.

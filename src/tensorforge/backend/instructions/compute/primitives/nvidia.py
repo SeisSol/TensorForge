@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: 2026 SeisSol Group
 #
 # SPDX-License-Identifier: MIT
+import contextlib
+
 from tensorforge.common.basic_types import Datatype
 from tensorforge.common.exceptions import GenerationError, InternalError
 from .. import ranking
@@ -152,7 +154,7 @@ class MMAInstr:
         """How many products one accumulator takes per step (`products`)."""
         return 3 if self.mode == MMAMode.TF32 else 1
 
-    def products(self, writer, A, B, a_split=None):
+    def products(self, writer, A, B, a_split=None, b_split=None):
         """The products one accumulator takes, as `(A, B)` operand lists in
         the order `generate` issues them.
 
@@ -168,7 +170,7 @@ class MMAInstr:
         """
         if self.mode == MMAMode.TF32:
             Atf32 = a_split if a_split is not None else tfconvert(writer, A)
-            Btf32 = tfconvert(writer, B)
+            Btf32 = b_split if b_split is not None else tfconvert(writer, B)
             half = lambda xs, h: [x[h] for x in xs]
             return [(half(Atf32, 0), half(Btf32, 0)),
                     (half(Atf32, 0), half(Btf32, 1)),
@@ -554,14 +556,55 @@ TAIL_MODES = (MMAMode.TF32, MMAMode.DIRECT)
 #: the 170 three blocks allow).
 CHAINS_MIN = 2
 
-#: Whether `matmul` loads a pre-ordered operand's fragments one step ahead,
-#: so that the instructions stop waiting on them (GB200, package 3: `mmaos`
-#: long scoreboard, 54 % of its HMMA stalls, the loads a median 13
-#: instructions ahead).  Not what the registers follow: on sm_100a `mmao` has
-#: 190 with it and 190 without -- and 141 without the remainder on the
-#: fragments (`TAIL_MAX`), which is where they went.  A switch until the two
-#: are measured against each other on the part it was meant for.
-PREFETCH = True
+#: Whether `matmul` splits `B` into its TF32 halves once, where the element's
+#: values are loaded, and stages the two halves -- rather than splitting each
+#: fragment after reading it back.  The count is the same either way (one
+#: `F2FP` per fragment and step, the tiles share it through `cse`); what moves
+#: is the latency: split after the read, the conversion sits between the
+#: `LDS` and the HMMA that waits for it, and on GB200 (package 4) `F2FP`
+#: behind `LDS` was half of the `short_scoreboard` stalls of `mmaosm`.
+#:
+#: Off: the lower halves take a second tile, and a second tile is a second
+#: store and a second read for every value.  Measured on `local_flux` (b56,
+#: sm_120), split once against split per fragment: `STS` 1200 against 723,
+#: `LDS` 1328 against 880, `F2FP` 144 against 224, and 14 % slower
+#: (`m16os`; `m16osm` and `m8osm` alike) -- while the stalls it removes were
+#: 3.7 % of GB200's samples (`m16os`, package 4), of which the HMMA would
+#: still wait for the `LDS` itself.  Worth having only with both halves in
+#: one tile, one 8-byte access each -- which the XOR-8 swizzle cannot serve
+#: conflict-free, since rows two apart then share their banks.
+BSPLIT_STAGED = False
+
+
+def _as_float(writer: Writer, value):
+    """A TF32 half as the float it is, to be stored in a float tile; the
+    inverse of `_as_tf32`, and as free."""
+    return writer.rawexpr('__uint_as_float({0})', value,
+                          type_=ScalarType(Datatype.F32), hint='f', pure=True,
+                          movable=True)
+
+
+#: How many steps ahead `matmul` loads a pre-ordered operand's fragments
+#: (0: at the step that uses them), so that the instructions stop waiting on
+#: them (GB200, package 3: `mmaos` long scoreboard, 54 % of its HMMA stalls,
+#: the loads a median 13 instructions ahead).  Not what the registers follow:
+#: on sm_100a `mmao` has 190 with one step and 190 without -- and 141 without
+#: the remainder on the fragments (`TAIL_MAX`), which is where they went.
+#:
+#: Counted over the whole contraction, not per block of rows: the fragments
+#: do not depend on the block, the column tile or `B`, so the first steps of
+#: the next block load during the last of this one.  Per block, every block
+#: started cold -- and one step was not enough either: GB200, package 4,
+#: `mmaos` b56, HMMA waiting for these loads was 27 % of all samples (b120:
+#: 33 %), 6 % of them at a block start and 17 % one step behind the load.
+#:
+#: One step, because the second is paid in occupancy.  Counted in the SASS
+#: of `mmaos` b56 (sm_120; ptxas decides the same way for sm_100): per block,
+#: 198 of 336 HMMAs within 32 instructions of their load, 150 registers;
+#: across blocks 116, 151 registers; two steps 13, but 190 registers -- two
+#: blocks of 128 per SM instead of three, and capped to three (`168`) it
+#: spills 96 bytes.  Which of latency and occupancy wins is GB200's to say.
+PREFETCH = 1
 
 #: The wave the fragment layouts are written over.  A multiplication spread
 #: over fewer lanes shares it with its neighbours, and `matmul` runs one
@@ -640,7 +683,9 @@ def shmsize(stages, dtype, sm=None, a_parts=1, lanes=None):
         # beside the tile, and its partials -- one per row and lane position
         # -- beside the epilogue's (`TAIL_MAX`).
         tail = atom.mode in TAIL_MODES
-        return max(32 * (aregs + bregs) + tail * TAIL_MAX * atom.k,
+        # `B` staged split takes a second tile of the same size (`BSPLIT_STAGED`).
+        halves = 2 if atom.mode == MMAMode.TF32 else 1
+        return max(32 * (aregs + halves * bregs) + halves * tail * TAIL_MAX * atom.k,
                    32 * cregs + tail * TAIL_MAX * atom.m * 4)
 
     # A warp shared by several multiplications staggers each one's copy of a
@@ -925,6 +970,7 @@ def matmul(writer, ops, ctx, span):
     Afrag = [None] * (aregs * mregs * kregs * 8)
     # One list per round: round `p` multiplies multiplication `p`'s `B`.
     Bfrag = [[None] * (bregs * nregs * kregs * 8) for _ in range(mults)]
+    BfragLo = [[None] * (bregs * nregs * kregs * 8) for _ in range(mults)]
     # One staging chain per part.  `a_parts == 1` is the ordinary operand and
     # every list below is one long, which is the shape this code had before
     # there was a second part -- so the prepared case is the general one and
@@ -985,6 +1031,10 @@ def matmul(writer, ops, ctx, span):
         r = region(p)
         return writer.op('add', INDEX, r, p * pad, hint='r') if pad and p else r
 
+    # `B` split once, as its values are loaded, where it is staged at all.
+    bsplit = BSPLIT_STAGED and not bdirect and atom.mode == MMAMode.TF32
+    BregHi, BregLo = {}, {}
+
     # The columns past the last whole tile.  Padded into a tile of their own
     # they cost as much as a whole one -- three HMMAs a step for the ninth
     # column of `local_flux` -- so a narrow remainder is carried by the last
@@ -1013,6 +1063,12 @@ def matmul(writer, ops, ctx, span):
         Bshm = writer.alloc(atom.d, (bregs * wave + tailed * ntail * atom.k
                                      + (mults - 1) * bpad,), MemSpace.SHARED,
                             hint='btile', swizzle=XorSwizzle(atom.k))
+        # The lower TF32 halves, where `B` is staged split (`BSPLIT_STAGED`):
+        # the same layout, so one address reads both.
+        BshmLo = (writer.alloc(atom.d, (bregs * wave + tailed * ntail * atom.k
+                                        + (mults - 1) * bpad,), MemSpace.SHARED,
+                               hint='btilelo', swizzle=XorSwizzle(atom.k))
+                  if bsplit else None)
         # One tile with the parts *adjacent*, not one tile per part.
         #
         # The first arrangement gave each part its own tile, on the grounds
@@ -1051,11 +1107,57 @@ def matmul(writer, ops, ctx, span):
         Datatype.F64: 'double4'
     }[dtype]
 
+    # Every step of the contraction, per block of rows.
+    steps = [(k, kk) for k in range(0, K, wave)
+             for kk in range(0, min(wave, K - k), atom.k)]
+
+    def quads(i, k, kk):
+        """Every tile's A fragments for one step, as the order stored them:
+        `aregs` consecutive slots from `tbase + aregs * lane`, one wide access
+        per part -- the register group the instruction takes, loaded in place
+        (`fragment_order`).  The operand is batch-constant, so a warp shared
+        by several multiplications reads it once for all of them, over all of
+        its lanes (`shift`)."""
+        out = {}
+        for ii in range(0, min(wave, M - i), atom.m):
+            mt = (i + ii) // atom.m
+            kt = (k + kk) // atom.k
+            tbase = (mt * ktiles + kt) * (aregs * wave)
+            got = ops.A_slot(writer, tbase, parts=aparts, width=aregs, **shift)
+            got = got if aparts > 1 else (got,)
+            out[ii] = {None: [[(got[pt] if aregs == 1 else
+                                writer.extract(got[pt], f, hint='a'))
+                               for f in range(aregs)]
+                              for pt in range(aparts)]}
+        return out
+
+    # `PREFETCH` steps ahead where the fragments come straight from memory:
+    # nothing else stands between such a load and its instruction -- the
+    # split that used to is gone when the operand is stored split.  One
+    # sequence over every column tile and block of rows, so a block does not
+    # start cold; the loads of the next one are issued in this one, and the
+    # scopes around both become plain statements to keep them visible there
+    # (the names are the IR's and do not collide without them).
+    ahead = PREFETCH if aordered else 0
+    sequence = [(i, k, kk) for _ in jstops for i in range(0, M, wave)
+                for k, kk in steps]
+    fetched, issued = {}, 0
+    at_step = 0
+
+    def fetch(upto):
+        nonlocal issued
+        while issued <= min(upto, len(sequence) - 1):
+            fetched[issued] = quads(*sequence[issued])
+            issued += 1
+
+    def scope():
+        return contextlib.nullcontext() if ahead else writer.AnonymousScope()
+
     for j in jstops:
         # The last whole tile carries the narrow remainder, if there is one.
         tail = ntail if tailed and j == jstops[-1] else 0
         ncols = atom.n + tail
-        with writer.AnonymousScope():
+        with scope():
             for k in range(0, K + kx, threads):
                 # `var is None` asks the accessor for the value rather than a
                 # name to write into -- the protocol has said so since the
@@ -1068,8 +1170,13 @@ def matmul(writer, ops, ctx, span):
                 for jj in range(min(ncols, N - j), ncols):
                     Breg[k // threads, jj] = writer.declare(ScalarType(atom.d),
                                                             hint='bs')
+                if bsplit:
+                    for jj in range(ncols):
+                        h, l = tfconvert(writer, [Breg[k // threads, jj]])[0]
+                        BregHi[k // threads, jj] = _as_float(writer, h)
+                        BregLo[k // threads, jj] = _as_float(writer, l)
             for i in range(0, M, wave):
-                with writer.AnonymousScope():
+                with scope():
                     # One value per accumulator slot rather than a `[cregs][n]`
                     # array named by `varalloc`.  The array was a C++
                     # identifier the IR knew nothing about, so `mma.sync`'s
@@ -1094,43 +1201,6 @@ def matmul(writer, ops, ctx, span):
                     # over the `k` it holds.  Values and not declared registers,
                     # because the steps below share one scope.
                     Tvals = {}
-                    # Every step of the contraction, in one scope rather than
-                    # a block each: a value loaded for the next step has to be
-                    # visible there.
-                    steps = [(k, kk) for k in range(0, K, wave)
-                             for kk in range(0, min(wave, K - k), atom.k)]
-
-                    def quads(k, kk):
-                        """Every tile's A fragments for one step, as the order
-                        stored them: `aregs` consecutive slots from `tbase +
-                        aregs * lane`, one wide access per part -- the
-                        register group the instruction takes, loaded in place
-                        (`fragment_order`).  The operand is batch-constant, so
-                        a warp shared by several multiplications reads it once
-                        for all of them, over all of its lanes (`shift`)."""
-                        out = {}
-                        for ii in tiles:
-                            mt = (i + ii) // atom.m
-                            kt = (k + kk) // atom.k
-                            tbase = (mt * ktiles + kt) * (aregs * wave)
-                            got = ops.A_slot(writer, tbase, parts=aparts,
-                                             width=aregs, **shift)
-                            got = got if aparts > 1 else (got,)
-                            out[ii] = {None: [[(got[pt] if aregs == 1 else
-                                                writer.extract(got[pt], f, hint='a'))
-                                               for f in range(aregs)]
-                                              for pt in range(aparts)]}
-                        return out
-
-                    # One step ahead where the fragments come straight from
-                    # memory and a warp holds one multiplication: nothing else
-                    # stands between such a load and its instruction -- the
-                    # split that used to is gone when the operand is stored
-                    # split -- and measured on GB200 the instructions waited on
-                    # it (long scoreboard, 54 % of their stalls, the loads a
-                    # median 13 instructions ahead).  A shared warp has its
-                    # rounds in between already.
-                    ahead = quads(*steps[0]) if aordered and PREFETCH else None
                     for s, (k, kk) in enumerate(steps):
                         trueK = kk + kx
                         if not bdirect:
@@ -1148,10 +1218,14 @@ def matmul(writer, ops, ctx, span):
                                                               threads):
                                 with threadrange(lo, cnt):
                                     for jj in range(0, ncols):
-                                        writer.store(Bshm, Breg[s_, jj],
-                                                     _index(writer, sub=sub, mod=atom.k,
-                                                            add=jj * atom.k),
+                                        to = _index(writer, sub=sub, mod=atom.k,
+                                                    add=jj * atom.k)
+                                        writer.store(Bshm, BregHi[s_, jj] if bsplit
+                                                     else Breg[s_, jj], to,
                                                      shift=at(None, bpad))
+                                        if bsplit:
+                                            writer.store(BshmLo, BregLo[s_, jj], to,
+                                                         shift=at(None, bpad))
                             writer.barrier('wave', **sync)
 
                         for jj in range(0, nregs):
@@ -1193,6 +1267,9 @@ def matmul(writer, ops, ctx, span):
                                 for p in range(mults):
                                     Bfrag[p][kkk + jj * kregs] = writer.load(
                                         Bshm, addr, hint='b', shift=at(p, bpad))
+                                    if bsplit:
+                                        BfragLo[p][kkk + jj * kregs] = writer.load(
+                                            BshmLo, addr, hint='b', shift=at(p, bpad))
 
                         # The remainder's B, at the `k` a lane's A fragments
                         # hold -- `t % ktile` plus the fragment's `ktile` step
@@ -1212,6 +1289,13 @@ def matmul(writer, ops, ctx, span):
                                                  add=kf * ktile + (atom.n + ci) * atom.k)
                                     btail[p, kf, ci] = writer.load(
                                         Bshm, at_, hint='b', shift=at(p, bpad))
+                                    if bsplit:
+                                        # `hi + lo` is the value exactly: `lo`
+                                        # is `b - hi`, which a float holds.
+                                        btail[p, kf, ci] = writer.op(
+                                            'add', ScalarType(atom.d), btail[p, kf, ci],
+                                            writer.load(BshmLo, at_, hint='b',
+                                                        shift=at(p, bpad)), hint='b')
 
                         # Parts innermost, so one element's parts
                         # are read next to each other.  They are
@@ -1225,12 +1309,10 @@ def matmul(writer, ops, ctx, span):
                         # parts cost 1809 global loads; adjacent,
                         # ptxas folds them back into the 905 the
                         # single-part kernel issues.
-                        if aordered and PREFETCH:
-                            frags_by_ii = ahead
-                            ahead = (quads(*steps[s + 1])
-                                     if s + 1 < len(steps) else None)
-                        elif aordered:
-                            frags_by_ii = quads(k, kk)
+                        if aordered:
+                            fetch(at_step + ahead)
+                            frags_by_ii = fetched.pop(at_step)
+                            at_step += 1
                         else:
                             # Read once per lane and redistributed
                             # through the tile below.  A
@@ -1383,9 +1465,12 @@ def matmul(writer, ops, ctx, span):
                                       for src, got_parts in frags.items()}
                             for p in range(mults):
                                 src = p if p in frags else next(iter(frags))
+                                bhalves = ([(_as_tf32(writer, Bfrag[p][f]),
+                                             _as_tf32(writer, BfragLo[p][f]))
+                                            for f in range(bregs)] if bsplit else None)
                                 prods[ii, p] = atom.products(
                                     writer, frags[src][0][:aregs], Bfrag[p][:bregs],
-                                    a_split=splits[src])
+                                    a_split=splits[src], b_split=bhalves)
                         # Term by term across every accumulator of the step,
                         # not accumulator by accumulator: 3xTF32 puts its
                         # three products into one accumulator, and issued
