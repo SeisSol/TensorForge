@@ -32,8 +32,11 @@ The compiler is the caller's to name.  Nothing here assumes one is installed:
 
 from __future__ import annotations
 
-import itertools
+import copy
+import hashlib
+import json
 import os
+import warnings
 import re
 import shutil
 import subprocess
@@ -228,6 +231,51 @@ def space(descrs, context: Context) -> List[Knob]:
     return knobs
 
 
+def simple_space(descrs, context: Context) -> List[Knob]:
+    """The knobs `Options.autotune` turns: only those whose every value is
+    safe to ship without the caller knowing.
+
+    Lane counts are the powers of two from the deduced one down to
+    `lanes.MIN_LANES` -- the geometries measured on every target; the
+    divisors of the extent (5 and 7 lanes for 20 and 35 rows) rank well on
+    both scorers and have never been timed.  A width of two only where one
+    instruction does two FMAs (`has_packed_fp32_fma`) and the extent is even:
+    elsewhere it is two scalar FMAs, and at 35 rows on GB200 it was 70 %
+    slower.  Merging where something repeats, and rolling by the largest
+    divisor up to 32.  Not `prepare_operands`: the host packs for it.  Not
+    `preload_globals` or the matrix path, whose defaults are per vendor and
+    not yet measured.
+    """
+    from tensorforge.common.basic_types import Datatype
+    from tensorforge.generators.descriptions import ElementwiseDescr
+    flat = _flat(descrs)
+    if any(isinstance(d, ElementwiseDescr) for d in flat):
+        return []
+    hw = context.get_vm().get_hw_descr()
+    base = lane_config.deduce(flat, context)
+    rows = base.num_active_threads or base.num_threads
+    geometries = []
+    t = base.num_threads
+    while t >= lane_config.MIN_LANES:
+        geometries.append(LaneConfig(t, base.num_active_threads, base.lead_width))
+        if t & (t - 1):
+            break
+        t //= 2
+    backend = getattr(context.get_vm().get_lexic(), '_backend', None)
+    if (hw.has_packed_fp32_fma() and context.fp_type == Datatype.F32
+            and backend in ('cuda', 'hip') and rows % 2 == 0
+            and base.lead_width == 1):
+        geometries += [LaneConfig(g.num_threads, base.num_active_threads, 2)
+                       for g in list(geometries) if g.num_threads <= rows]
+    knobs = [Knob('lanes', lambda c, g=tuple(geometries): g)] if len(geometries) > 1 else []
+    if _mergeable(descrs, context):
+        knobs.append(Knob('merge_variants', lambda c: (False, True)))
+    rolls = _roll_values(descrs)[:2]
+    if len(rolls) > 1:
+        knobs.append(Knob('k_roll', lambda c, r=tuple(rolls): r))
+    return knobs
+
+
 def start(descrs, context: Context) -> Candidate:
     """The configuration the generator would pick unasked: the deduced lanes
     and every option at the base context's value."""
@@ -308,8 +356,9 @@ def _geometry(result: Build) -> Tuple[int, int, int]:
 def static_score(result: Build):
     """What the build alone says, per multiplication rather than per block.
 
-    Multiplications resident per SM first -- blocks times the multiplications
-    a block holds, since eight lanes put four times as many in a block as 32.
+    Past the register file first (`_over_budget`).  Then multiplications
+    resident per SM -- blocks times the multiplications a block holds, since
+    eight lanes put four times as many in a block as 32.
     Then warp issue slots per multiplication: the arithmetic written out, times
     the share of a warp one multiplication takes.  Then the modelled register
     footprint.  Per block and per lane, as `lanes.search` ranks, the default
@@ -321,7 +370,26 @@ def static_score(result: Build):
     gen = result.generator
     lanes, wave, resident = _geometry(result)
     issue = (gen.emitted_work or 0) * lanes / wave
-    return (-resident, issue, gen.peak_pressure or 0)
+    return (_over_budget(result), -resident, issue, gen.peak_pressure or 0)
+
+
+def _over_budget(result: Build) -> bool:
+    """Whether the modelled footprint is past the register file a thread has.
+
+    First, before anything is ranked: a build that spills is slower than any
+    difference the other keys can see.  Calibrated against ptxas on sm_100a
+    (`local_flux`, 79 builds), registers come out at about 51 + 1.05 times the
+    modelled bytes over four, and every build above the 1020 B a thread has
+    there spilled -- eight lanes at b = 80 and 120, which GB200 then ran 75 %
+    and 148 % behind the default.  Not a spill predictor in the other
+    direction: ptxas also spills at 168 registers where it chooses occupancy,
+    and nothing in the model says when.  Where the target states no budget,
+    there is no guard.
+    """
+    budget = getattr(result.context.get_vm().get_hw_descr(),
+                     'max_reg_per_thread', None)
+    peak = result.generator.peak_pressure
+    return bool(budget and peak and peak > budget)
 
 
 @dataclass
@@ -525,7 +593,8 @@ def exhaustive(descr_factory, context: Context, scorer,
 def coordinate(descr_factory, context: Context, scorer,
                knobs: Optional[Sequence[Knob]] = None,
                origin: Optional[Candidate] = None,
-               rounds: int = 3) -> Outcome:
+               rounds: int = 3, budget: Optional[int] = None,
+               seed: Optional[Dict[Candidate, Trial]] = None) -> Outcome:
     """One knob at a time, from the default, keeping whatever improves.
 
     A round costs the sum of the knobs' value counts rather than their
@@ -536,13 +605,16 @@ def coordinate(descr_factory, context: Context, scorer,
     descrs = descr_factory()
     knobs = space(descrs, context) if knobs is None else knobs
     origin = start(descrs, context) if origin is None else origin
-    cache: Dict[Candidate, Trial] = {}
+    cache: Dict[Candidate, Trial] = dict(seed or {})
     best = _evaluate(descr_factory, context, scorer, origin, cache)
     for _ in range(rounds):
         moved = False
         for knob in knobs:
             for value in knob.values(best.candidate):
                 cand = best.candidate.set(knob.name, value)
+                if (budget is not None and cand not in cache
+                        and len(cache) >= budget):
+                    continue
                 trial = _evaluate(descr_factory, context, scorer, cand, cache)
                 if _better(trial.score, best.score):
                     best, moved = trial, True
@@ -566,3 +638,96 @@ def tune(descr_factory, context: Context, scorer=static_score,
     """Choose a configuration for `descr_factory()`'s kernel on `context`'s
     target.  `descr_factory` returns a fresh descriptor list per call."""
     return strategy(descr_factory, context, scorer, **kwargs)
+
+
+# --------------------------------------------------------------------------- #
+# Autotuning a kernel as it is generated
+# --------------------------------------------------------------------------- #
+
+#: Picks made in this process, by key (`_key`).  The file behind
+#: `Options.autotune_cache` is read into it and written from it.
+_PICKS: Dict[str, Dict[str, Any]] = {}
+_LOADED: set = set()
+
+
+def _key(result: Build, mode: str) -> str:
+    """The default build's source and the target: what the pick depends on.
+
+    The source rather than the descriptors, because it is the one thing that
+    says everything -- shapes, addressing, the options already asked -- and
+    it has been built anyway, as the walk's first point.
+    """
+    hw = result.context.get_vm().get_hw_descr()
+    sha = hashlib.sha256()
+    for part in (mode, hw.model, hw.backend, str(result.context.fp_type),
+                 kernel_source(result)):
+        sha.update(part.encode())
+        sha.update(b'\0')
+    return sha.hexdigest()
+
+
+def _load(path: Optional[str]) -> None:
+    if not path or path in _LOADED:
+        return
+    _LOADED.add(path)
+    try:
+        with open(path) as f:
+            _PICKS.update(json.load(f))
+    except (OSError, ValueError):
+        pass
+
+
+def _store(path: Optional[str], key: str, pick: Candidate) -> None:
+    _PICKS[key] = pick.to_dict()
+    if not path:
+        return
+    tmp = f'{path}.{os.getpid()}.tmp'
+    try:
+        with open(tmp, 'w') as f:
+            json.dump(_PICKS, f, indent=1, sort_keys=True)
+        os.replace(tmp, path)
+    except OSError as exc:
+        warnings.warn(f'autotune: could not write {path}: {exc}')
+
+
+def autotune(descr_factory, context: Context, mode: str = 'static',
+             budget: Optional[int] = 24,
+             cache: Optional[str] = None) -> Optional[Candidate]:
+    """The configuration `Options.autotune` builds a kernel with.
+
+    One build of the default first: its source is the cache key, and a kernel
+    already tuned costs nothing more.  Otherwise a coordinate walk over
+    `simple_space`, the default seeded in, within `budget` builds.  None where
+    the default does not build -- the generator then fails the way it would
+    have, instead of this failing differently.
+    """
+    descrs = descr_factory()
+    knobs = simple_space(descrs, context)
+    origin = start(descrs, context)
+    first = build(descr_factory, context, origin)
+    if not first.ok:
+        return None
+    if not knobs:
+        return origin
+    if mode == 'compiled':
+        scorer = CompiledScore()
+        if not scorer.available(context):
+            warnings.warn('autotune=compiled: no compiler for this target '
+                          '(Toolchain, TF_NVCC, TF_HIPCC); ranking statically')
+            scorer, mode = static_score, 'static'
+    elif mode == 'static':
+        scorer = static_score
+    else:
+        raise ValueError(f'autotune: unknown mode {mode!r}; off, static or compiled')
+    _load(cache)
+    key = _key(first, mode)
+    if key in _PICKS:
+        return Candidate.from_dict(_PICKS[key])
+    try:
+        seed = {origin: Trial(origin, scorer(first))}
+    except Exception as exc:
+        seed = {origin: Trial(origin, None, exc)}
+    out = coordinate(descr_factory, context, scorer, knobs=knobs, origin=origin,
+                     budget=budget, seed=seed)
+    _store(cache, key, out.best)
+    return out.best

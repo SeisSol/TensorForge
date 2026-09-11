@@ -540,6 +540,37 @@ declare('k_unroll_max',
             'minutes, and rolled at 56 the same kernel was the fastest FFMA '
             'variant on GB200.')
 
+declare('autotune',
+        default='off',
+        env='TF_AUTOTUNE',
+        codegen=False,
+        doc='Choose the lane geometry and the safe options per kernel by '
+            'building candidates and ranking them (`generators.tuning`): '
+            '`off`, `static` (the build\'s own figures) or `compiled` (the '
+            'target compiler\'s registers and spills; falls back to `static` '
+            'where none is found).  Only what is safe to ship unasked is '
+            'turned: the lane count, a lead width of two where the target has '
+            'a packed FP32 FMA, merging, and rolling -- not preparing operands, '
+            'which the host has to pack for, and not the matrix path.  Not part '
+            'of the kernel\'s identity: what it picks is, through the options '
+            'and the geometry it builds with.')
+
+declare('autotune_budget',
+        default=24,
+        env='TF_AUTOTUNE_BUDGET',
+        codegen=False,
+        doc='Most builds `autotune` spends on one kernel, the default one '
+            'included.  A coordinate walk over the simple space of '
+            '`local_flux` takes 10 to 20.')
+
+declare('autotune_cache',
+        default='',
+        env='TF_AUTOTUNE_CACHE',
+        codegen=False,
+        doc='A JSON file `autotune` keeps its picks in, keyed by the default '
+            'build\'s source and the target, so that a kernel generated again '
+            'costs one build.  Empty keeps them for the process only.')
+
 declare('tensor_cores',
         default=None,
         env='TF_TENSOR_CORES',

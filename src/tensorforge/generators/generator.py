@@ -268,6 +268,11 @@ class Generator:
                lanes: Optional[LaneConfig] = None,
                attrs: Optional[dict] = None):
     self.descr_list: List[OperationDescription] = gemm_list
+    #: The list as the caller handed it, before merging rewrites it -- what
+    #: `Options.autotune` builds its candidates from and rebuilds the pick on.
+    self._given: List[OperationDescription] = gemm_list
+    #: The configuration `Options.autotune` chose, or None where it did not run.
+    self.tuned = None
     self._context: Context = context
     #: Destination names whose transfer should get two stages, or None to
     #: work that out.  Set to a concrete set on the throwaway generator that
@@ -534,12 +539,48 @@ class Generator:
     self._context.peak_pressure = None
     self._context.emitted_work = None
 
+    self._autotune()
+
     self.register()
 
     self._deduce_num_threads()
 
     with self._lane_mapping():
       return self._generate_bound()
+
+  def _autotune(self) -> None:
+    """Rebuild this generator at the configuration `Options.autotune` picks.
+
+    Only where nobody fixed the geometry: an explicit `lanes` is a caller's
+    decision, and it is also what every candidate build carries, so a
+    candidate never tunes itself.  The candidates are built from deep copies,
+    because preparing and rolling leave their marks on the tensors; the pick
+    is then built here, on the caller's own, which is where the host reads the
+    storage from.
+    """
+    opts = self._context.get_user_options()
+    if opts.autotune in ('', 'off') or self._lanes is not None:
+      return
+    if opts.lanes_per_mult:
+      return
+    import copy
+    from tensorforge.generators import tuning
+    given = self._given
+    pick = tuning.autotune(lambda: copy.deepcopy(given), self._context,
+                           mode=opts.autotune, budget=opts.autotune_budget,
+                           cache=opts.autotune_cache or None)
+    if pick is None:
+      return
+    announce = self._announce_identity
+    rotate = self._rotate
+    self.__init__(given, pick.context(self._context),
+                  self._thread_block_policy_type, lanes=pick.lanes,
+                  attrs=self._attrs)
+    self._announce_identity = announce
+    self._rotate = rotate
+    self.tuned = pick
+    self._context.peak_pressure = None
+    self._context.emitted_work = None
 
   def _generate_bound(self):
     descrlist = []
@@ -1590,6 +1631,8 @@ class Generator:
     # What was asked for, so that a file found on its own says which of several
     # configurations of one workload it is.
     writer(f'// options: {self._context.get_user_options().describe()}')
+    if self.tuned is not None:
+      writer(f'// tuned: {self.tuned.label()}')
     writer('// meta data:')
     glb_matrices = self._scopes.get_global_scope().values()
     for matrix in glb_matrices:

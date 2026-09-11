@@ -84,6 +84,26 @@ class HwDecription:
             and level is not None and level >= 70)
 
 
+  def has_packed_fp32_fma(self) -> bool:
+    """Whether one instruction does two FP32 FMAs, so that a lead width of
+    two halves the arithmetic instead of only regrouping it.
+
+    NVIDIA from sm_100 to sm_11x (`FFMA2`, through `__ffma2_rn`; `cuda.h`
+    forms the pairs on exactly these).  sm_120 declares the intrinsic and
+    lowers it to two FFMA.  AMD on CDNA2 and later and on gfx1250/gfx1251
+    (`v_pk_fma_f32`, which the compiler forms by itself); RDNA3 and 3.5 have
+    no packed FP32 FMA.  A width of two elsewhere is two scalar FMAs and the
+    padding the pair costs.
+    """
+    if self.vendor == 'nvidia':
+      level = self.sm_level()
+      return level is not None and 100 <= level < 120
+    if self.vendor == 'amd':
+      return str(self.model) in ('gfx90a', 'gfx940', 'gfx941', 'gfx942',
+                                 'gfx950', 'gfx1250', 'gfx1251')
+    return False
+
+
 def report_error(usr_vendor, user_sub_arch):
   print(f'{user_sub_arch} is not listed in allowed set for {usr_vendor}')
 
