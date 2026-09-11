@@ -546,14 +546,34 @@ declare('autotune',
         codegen=False,
         doc='Choose the lane geometry and the safe options per kernel by '
             'building candidates and ranking them (`generators.tuning`): '
-            '`off`, `static` (the build\'s own figures) or `compiled` (the '
-            'target compiler\'s registers and spills; falls back to `static` '
-            'where none is found).  Only what is safe to ship unasked is '
+            '`off`; `prefer`, measured preferences only and the default where '
+            'none matches (`generators.preferences`); `static` (the build\'s '
+            'own figures) or `compiled` (the target compiler\'s registers and '
+            'spills; falls back to `static` where none is found), both of which '
+            'take a matching preference first.  Only what is safe to ship unasked is '
             'turned: the lane count, a lead width of two where the target has '
             'a packed FP32 FMA, merging, and rolling -- not preparing operands, '
             'which the host has to pack for, and not the matrix path.  Not part '
             'of the kernel\'s identity: what it picks is, through the options '
             'and the geometry it builds with.')
+
+declare('device',
+        default='',
+        env='TF_DEVICE',
+        codegen=False,
+        doc='Which device of the target architecture, where the architecture '
+            'does not say: `mi300a` or `mi300x` for gfx942, say.  Read only by '
+            'the measured preferences (`generators.preferences`), which name a '
+            'device as `arch:variant` before `arch`.  What a preference then '
+            'picks is part of the kernel; this name is not.')
+
+declare('preferences',
+        default='',
+        env='TF_PREFERENCES_FILE',
+        codegen=False,
+        doc='Files of measured preferences to consult before the shipped one, '
+            'separated by the path separator (`generators.preferences`).  '
+            '`TF_PREFERENCES` names more, after these.')
 
 declare('autotune_budget',
         default=24,

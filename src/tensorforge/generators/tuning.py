@@ -265,8 +265,16 @@ def simple_space(descrs, context: Context) -> List[Knob]:
     if (hw.has_packed_fp32_fma() and context.fp_type == Datatype.F32
             and backend in ('cuda', 'hip') and rows % 2 == 0
             and base.lead_width == 1):
+        # On AMD only where a lane holds one pair per column.  hipcc spilled
+        # every gfx942 build that needed two -- 16 lanes at 35 and 56 rows,
+        # 32 at 80 and 120: 512 registers and 2 to 8 KB of scratch, where the
+        # model saw 200 -- and none that needed one.  ptxas does not: 16 lanes
+        # at width two was GB200's fastest at 80 and 120 rows.
+        one_pair = hw.vendor == 'amd'
         geometries += [LaneConfig(g.num_threads, base.num_active_threads, 2)
-                       for g in list(geometries) if g.num_threads <= rows]
+                       for g in list(geometries)
+                       if g.num_threads <= rows
+                       and (not one_pair or 2 * g.num_threads >= rows)]
     knobs = [Knob('lanes', lambda c, g=tuple(geometries): g)] if len(geometries) > 1 else []
     if _mergeable(descrs, context):
         knobs.append(Knob('merge_variants', lambda c: (False, True)))
@@ -361,20 +369,89 @@ def static_score(result: Build):
     eight lanes put four times as many in a block as 32.
     Then warp issue slots per multiplication: the arithmetic written out, times
     the share of a warp one multiplication takes.  Then the modelled register
-    footprint.  Per block and per lane, as `lanes.search` ranks, the default
-    32 lanes came first at every size GB200 measured, and it was the slowest
-    at three of five.
+    footprint, both in granules of sixteen registers (`_GRANULE`).  Last the
+    length of the source: where nothing else differs, the smaller kernel --
+    merged, on every measurement taken (GB200's winners, sm_120 by 5 to 24 %,
+    and fewer spills from hipcc).  Per block and per lane, as `lanes.search`
+    ranks, the default 32 lanes came first at every size GB200 measured, and
+    it was the slowest at three of five.
     """
     if not result.ok:
         return None
     gen = result.generator
     lanes, wave, resident = _geometry(result)
+    blocks = _register_blocks(result)
+    if blocks is not None:
+        mults = gen._section.shr_mem_obj.get_mults_per_block()
+        resident = min(resident, blocks * mults)
     issue = (gen.emitted_work or 0) * lanes / wave
-    return (_over_budget(result), -resident, issue, gen.peak_pressure or 0)
+    return (_granule(_over_budget(result)), -resident, issue,
+            _granule(gen.peak_pressure or 0), len(gen.get_kernel() or ''))
 
 
-def _over_budget(result: Build) -> bool:
-    """Whether the modelled footprint is past the register file a thread has.
+#: Bytes below which two modelled footprints are the same footprint: sixteen
+#: registers.  The model is within about forty registers of what a compiler
+#: allocates, so a difference of eleven bytes -- merged and written-out
+#: `local_flux` at b = 80, 1359 against 1348 -- is not one the compiler makes;
+#: hipcc spilled 6 KB for the written-out one and nothing for the merged.
+_GRANULE = 64
+
+
+def _granule(value) -> int:
+    return int(value // _GRANULE)
+
+
+#: Registers per lane as a function of the modelled bytes, per vendor, fitted
+#: over builds that did not spill: `(intercept, slope)` on bytes / 4.
+#: NVIDIA: ptxas sm_100a, 52 builds, residuals within 40.  AMD: hipcc gfx942,
+#: 29 builds, residuals within 38 -- no intercept worth the name.
+_REGISTER_FIT = {'nvidia': (51.0, 1.05), 'amd': (0.0, 1.26)}
+
+
+def register_estimate(result: Build) -> Optional[float]:
+    """Registers per lane the target compiler is expected to allocate."""
+    hw = result.context.get_vm().get_hw_descr()
+    fit = _REGISTER_FIT.get(hw.vendor)
+    peak = result.generator.peak_pressure
+    if fit is None or not peak:
+        return None
+    return fit[0] + fit[1] * peak / 4
+
+
+def _register_blocks(result: Build) -> Optional[int]:
+    """Blocks per CU the register file admits, where that is what decides.
+
+    AMD only.  A CDNA lane has 512 registers, VGPRs and AGPRs together, and a
+    SIMD holds as many waves as fit -- eight at 64 registers, one above 256.
+    On gfx942 over `local_flux` a third of the geometries sat at one wave per
+    SIMD without spilling a byte, which blocks per CU from shared memory and
+    threads alone never shows.  NVIDIA keeps what is exact: its fit has an
+    intercept that the occupancy would inherit, and the eight lanes that GB200
+    ran fastest sit right at the limit.
+    """
+    hw = result.context.get_vm().get_hw_descr()
+    if hw.vendor != 'amd':
+        return None
+    regs = register_estimate(result)
+    if regs is None:
+        return None
+    file = (hw.max_reg_per_thread or 1024) // 4
+    granule = 8
+    per_lane = max(granule, -(-int(regs) // granule) * granule)
+    waves_per_simd = max(0, min(8, file // per_lane))
+    gen = result.generator
+    threads = gen._num_threads * gen._section.shr_mem_obj.get_mults_per_block()
+    waves_per_block = max(1, -(-threads // hw.vec_unit_length))
+    return (4 * waves_per_simd) // waves_per_block
+
+
+def _over_budget(result: Build) -> float:
+    """How far the modelled footprint is past the register file a thread
+    has, or 0 where it fits -- an amount and not a verdict, because where
+    every candidate is past it (`local_flux` at b = 120 on gfx942, all of
+    them spilling) the one past it least is the one that spills least: 880 B
+    of scratch at 32 lanes against 11 KB at eight, which a yes/no left to the
+    next key to decide the wrong way.
 
     First, before anything is ranked: a build that spills is slower than any
     difference the other keys can see.  Calibrated against ptxas on sm_100a
@@ -386,10 +463,17 @@ def _over_budget(result: Build) -> bool:
     and nothing in the model says when.  Where the target states no budget,
     there is no guard.
     """
-    budget = getattr(result.context.get_vm().get_hw_descr(),
-                     'max_reg_per_thread', None)
+    hw = result.context.get_vm().get_hw_descr()
+    budget = getattr(hw, 'max_reg_per_thread', None)
     peak = result.generator.peak_pressure
-    return bool(budget and peak and peak > budget)
+    if not (budget and peak):
+        return 0
+    if hw.vendor == 'amd':
+        # hipcc allocates about 1.26 registers per modelled four bytes, so the
+        # byte budget alone let eight lanes at b = 56 through (2449 B against
+        # 2048) that gfx942 spilled 2 KB for.  In bytes, like the rest.
+        return max(0.0, 4 * register_estimate(result) - budget)
+    return max(0, peak - budget)
 
 
 @dataclass
@@ -398,6 +482,9 @@ class Toolchain:
     `TF_HIPCC`, then `PATH`; None where none of them has one."""
     nvcc: Optional[str] = None
     hipcc: Optional[str] = None
+    #: oneAPI's `icpx`.  It needs the environment `setvars.sh` makes; a path
+    #: alone reaches the driver, not the device compiler behind it.
+    icpx: Optional[str] = None
     include: Optional[str] = None
 
     def compiler(self, vendor: str) -> Optional[str]:
@@ -407,6 +494,9 @@ class Toolchain:
         if vendor == 'amd':
             return (self.hipcc or os.environ.get('TF_HIPCC')
                     or shutil.which('hipcc'))
+        if vendor == 'intel':
+            return (self.icpx or os.environ.get('TF_ICPX')
+                    or shutil.which('icpx'))
         return None
 
     def include_dir(self) -> str:
@@ -432,6 +522,32 @@ def parse_ptxas(log: str) -> Optional[Resources]:
         return None
     stores, loads = (int(spill.group(1)), int(spill.group(2))) if spill else (0, 0)
     return Resources(int(regs.group(1)), stores + loads)
+
+
+#: IGC's word for a kernel it compiled twice: the first attempt blew the
+#: register file and it retries with another strategy.  It says nothing else
+#: per kernel -- no register count, and a spill size only where it gives up
+#: (`tools/register_usage.py` reads the same stream).
+_IGC_RETRY = re.compile(r'\[RetryManager\]\s+Start recompilation', re.I)
+_IGC_SPILL = re.compile(
+    r"(?:kernel|Kernel)\s+.*?\bspill(?:s|ed)?\b.*?(?P<value>\d+)\s*bytes"
+    r"|spill(?:ed)?\s+(?P<value2>\d+)\s*bytes", re.I)
+
+
+def parse_igc(log: str) -> Resources:
+    """An Intel AOT build: whether it spilled, and how much where IGC says.
+
+    Always a report, never None: IGC is silent about a kernel that fits, so
+    silence is the answer "no spill" and not a failure to parse.  A retry
+    without a size counts as one byte -- spilled, amount unknown -- so that it
+    ranks behind every build that did not.
+    """
+    spill = 0
+    for m in _IGC_SPILL.finditer(log):
+        spill = max(spill, int(m.group('value') or m.group('value2')))
+    if not spill and _IGC_RETRY.search(log):
+        spill = 1
+    return Resources(None, spill)
 
 
 def parse_amdgpu(log: str) -> Optional[Resources]:
@@ -477,7 +593,8 @@ class CompiledScore:
                 f'no compiler for {hw.vendor}: pass one in `Toolchain`, or set '
                 f'TF_NVCC / TF_HIPCC')
         with tempfile.TemporaryDirectory(prefix='tf-tune-') as tmp:
-            src = os.path.join(tmp, 'kernel.cu')
+            src = os.path.join(tmp, 'kernel.cpp' if hw.vendor == 'intel'
+                               else 'kernel.cu')
             with open(src, 'w') as f:
                 f.write(kernel_source(result))
             inc = self.toolchain.include_dir()
@@ -488,6 +605,15 @@ class CompiledScore:
                 cmd = [compiler, '-cubin', f'-arch={arch}', '--expt-relaxed-constexpr',
                        '-Xptxas', '-v', '-I', inc, '-o', os.path.join(tmp, 'k.cubin'), src]
                 parse = parse_ptxas
+            elif hw.vendor == 'intel':
+                # Linked, as a shared object: the ahead-of-time device build
+                # runs at link time, and `-c` leaves `-device` unused and IGC
+                # silent.
+                cmd = [compiler, '-fsycl', '-fsycl-targets=spir64_gen', '-O3',
+                       '-shared', '-fPIC', '-Xsycl-target-backend',
+                       f'-device {hw.model}', '-I', inc,
+                       '-o', os.path.join(tmp, 'k.so'), src]
+                parse = parse_igc
             else:
                 cmd = [compiler, '-x', 'hip', '-c', f'--offload-arch={hw.model}',
                        '--offload-device-only', '-O3', '-I', inc,
@@ -702,6 +828,20 @@ def autotune(descr_factory, context: Context, mode: str = 'static',
     have, instead of this failing differently.
     """
     descrs = descr_factory()
+    # A measurement first: where one says what is best for this device and
+    # this shape, it is taken as it is, whatever the scorers would say --
+    # they rank what a build reports about itself, and the preference is what
+    # the machine did.  One build, to check that it builds at all.
+    from tensorforge.generators import preferences
+    pref = preferences.lookup(descrs, context)
+    if pref is not None:
+        chosen = preferences.candidate(pref, descrs, context)
+        if build(descr_factory, context, chosen).ok:
+            return chosen
+        warnings.warn(f'autotune: the preference from {pref.source} '
+                      f'({pref.evidence}) does not build here; ranking instead')
+    if mode == 'prefer':
+        return None
     knobs = simple_space(descrs, context)
     origin = start(descrs, context)
     first = build(descr_factory, context, origin)
@@ -718,7 +858,8 @@ def autotune(descr_factory, context: Context, mode: str = 'static',
     elif mode == 'static':
         scorer = static_score
     else:
-        raise ValueError(f'autotune: unknown mode {mode!r}; off, static or compiled')
+        raise ValueError(f'autotune: unknown mode {mode!r}; off, prefer, '
+                         f'static or compiled')
     _load(cache)
     key = _key(first, mode)
     if key in _PICKS:

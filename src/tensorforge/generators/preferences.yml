@@ -1,0 +1,29 @@
+# SPDX-FileCopyrightText: 2026 SeisSol Group
+#
+# SPDX-License-Identifier: MIT
+#
+# Measured preferences (see preferences.py).  Each entry says which device and
+# which kernels it is for, what it prefers, and which measurement says so.
+# Only knobs `autotune` may turn unasked belong here -- no `prepare_operands`,
+# whose storage the host has to pack.
+
+# GB200, package 4 (2026-09-11), local_flux, FP32, batch 262144.  Eight lanes
+# with the faces merged, against the 32-lane default: b20 -33 %, b35 -35 %,
+# b56 -26 % (with the reduction rolled by 28).  Measured with the operators
+# prepared as well; merged alone is the part of it that ships.
+- device: sm_100
+  match: {dtype: f32, rows: [1, 40], columns: [1, 16]}
+  prefer: {lanes: 8, width: 1, merge_variants: true}
+  evidence: "GB200 pkg4 local_flux b20/b35: 8 lanes merged -33/-35 % vs default"
+- device: sm_100
+  match: {dtype: f32, rows: [41, 64], columns: [1, 16]}
+  prefer: {lanes: 8, width: 1, merge_variants: true, k_roll: auto}
+  evidence: "GB200 pkg4 local_flux b56: 8 lanes merged, k_roll 28, -26 % vs default"
+
+# Same package: sixteen lanes at width two (FFMA2) with the faces merged, from
+# b = 80 on, where eight lanes spilled (328 and 1308 B) and ran 75 % and 148 %
+# behind the default: b80 -30 %, b120 -22 %.
+- device: sm_100
+  match: {dtype: f32, rows: [65, 128], columns: [1, 16]}
+  prefer: {lanes: 16, width: 2, merge_variants: true}
+  evidence: "GB200 pkg4 local_flux b80/b120: 16 lanes w2 merged -30/-22 % vs default"

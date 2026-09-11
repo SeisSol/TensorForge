@@ -179,7 +179,9 @@ def test_the_compiler_is_the_callers_then_the_environments_then_the_paths(monkey
     assert tuning.Toolchain().compiler('nvidia') == '/from/env/nvcc'
     monkeypatch.delenv('TF_NVCC')
     assert tuning.Toolchain().compiler('nvidia') == '/on/path/nvcc'
-    assert tuning.Toolchain().compiler('intel') is None
+    assert tuning.Toolchain().compiler('intel') == '/on/path/icpx'
+    assert tuning.Toolchain(icpx='/given/icpx').compiler('intel') == '/given/icpx'
+    assert tuning.Toolchain().compiler('other') is None
 
 
 # ---------------------------------------------------------------------- #
