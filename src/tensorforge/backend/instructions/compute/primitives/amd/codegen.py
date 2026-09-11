@@ -15,6 +15,7 @@ from .exchange_codegen import apply_exchange
 from .relayout import (MOVDPP16, TRANSPOSE4X4, find_relayout,
                        nest_shared, reach, takes, transposed,
                        fmadpp_operand_layout)
+from tensorforge.common.exceptions import GenerationError
 from .select import BroadcastForm, select_broadcast_form, select_fmadpp_step
 
 #: The runtime's BF16 split, in its out-parameter form: each term is a value
@@ -52,6 +53,21 @@ def hfma(writer: Writer, Cs, As, Bs, repeat, datatype, threads, ctx):
     math is out of reach and the move is worth taking only where the target
     pairs scalar FMAs by itself.
     """
+
+    # A broadcast here is a register exchange -- DPP, `readlane`, a permute --
+    # and every one of those ends at the wave.  A multiplication wider than
+    # the wave holds its broadcast operand in lanes of another wave, which no
+    # exchange reaches: measured on gfx1150, 64 lanes over 32-wide waves gave
+    # a wrong kernel with no error and no spill.  Refused rather than
+    # approximated, as the relayout below refuses a width it cannot reach;
+    # what lifts it is an exchange through shared memory.
+    wave = ctx.get_vm().get_hw_descr().vec_unit_length
+    if threads > wave:
+        raise GenerationError(
+            f'a register broadcast does not cross waves: {threads} lanes span '
+            f'{-(-threads // wave)} waves of {wave} on this target, and the '
+            f'operand one of them holds is out of reach of the others -- '
+            f'this needs the exchange through shared memory')
 
     step = select_fmadpp_step(datatype, threads, ctx)
     form = select_broadcast_form(datatype, step, repeat, ctx, can_pack=False)

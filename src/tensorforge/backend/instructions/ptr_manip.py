@@ -11,6 +11,7 @@ from tensorforge.common.exceptions import (GenerationError,
                                            InternalError)
 from tensorforge.backend.pir.core import Effect, Qual
 from tensorforge.backend.pir.core import MemSpace
+from tensorforge.backend.symbol import SymbolType
 
 class GetElementPtr(AbstractInstruction):
   def __init__(self,
@@ -217,7 +218,12 @@ class GetElementPtr(AbstractInstruction):
       # the whole of it.
       datatype = self._vm._fp_type if self._src.obj.datatype is None else self._src.obj.datatype
       lhs = self._declarator(datatype, 'const')
-      self._emit_binding(writer, lhs, self._table.access(self._variant))
+      # The table is declared generic -- its members may come from either
+      # space and a select over them decays -- so the binding casts back into
+      # the space it claims, as every other addressing mode does (`_coerce`).
+      self._emit_binding(writer, lhs,
+                         self._coerce(datatype, 'const',
+                                      self._table.access(self._variant)))
       return
 
     batch_obj = self._src.obj
@@ -499,6 +505,19 @@ class DeclareOperandTable(AbstractInstruction):
     entries = ', '.join(m.name for m in self._members)
     return f'const {self.struct_name()} {self._name} = {{{{{entries}}}}};'
 
+  def _member(self, member, datatype, stars) -> str:
+    """A member as the table holds it: generic.
+
+    Where the backend spells the address space in the pointer's type (AMD),
+    a member is a space-qualified binding and the table is a plain pointer,
+    and the conversion between the two is explicit there.  Elsewhere the
+    cast would be the identity, so it is left out and the text is what it
+    always was.
+    """
+    spaced = '<' in self._vm.get_lexic().pointer_type(
+        f'{datatype}', MemSpace.GLOBAL, readonly=True, restrict=True, const=True)
+    return f'(const {datatype} {stars}){member.name}' if spaced else member.name
+
   def gen_ir(self, writer):
     if self._form is TableForm.PARAM:
       # Nothing to emit: the caller filled it and the signature names it.
@@ -506,14 +525,14 @@ class DeclareOperandTable(AbstractInstruction):
     datatype = self._datatype or self._vm._fp_type
     stars = Addressing.addr2ptr_type(self._addressing)
     if self._form is TableForm.ARRAY:
-      entries = ', '.join(m.name for m in self._members)
+      entries = ', '.join(self._member(m, datatype, stars) for m in self._members)
       writer(f'const {datatype} {stars}const {self._name}'
              f'[{len(self._members)}] = {{{entries}}};')
       return
-    chain = self._members[-1].name
+    chain = self._member(self._members[-1], datatype, stars)
     for index in range(len(self._members) - 2, -1, -1):
-      chain = (f'({self._variant} == {index}) ? {self._members[index].name} '
-               f': {chain}')
+      chain = (f'({self._variant} == {index}) ? '
+               f'{self._member(self._members[index], datatype, stars)} : {chain}')
     writer(f'const {datatype} {stars}const {self._name} = {chain};')
 
   def get_operands(self):

@@ -1031,7 +1031,20 @@ class Generator:
       self._scopes.add_scope()
 
       builder = GlobalLoaderBuilder(self._context, self._scopes, self._section.shr_mem_obj, self._num_threads)
-      for symbol in self._scopes.get_global_scope().values():
+      # A stand-in of a merged run is not an argument: which member it is
+      # changes per iteration, through a table over the members.  Preloading
+      # the stand-in took the address of a name no kernel declares; preloading
+      # its members would make that table select between shared copies while
+      # its binding claims global memory -- a wrong address space that only a
+      # target spelling the space in the type (AMD) notices.  So a merged run
+      # reads its members from global, as it does where nothing is preloaded.
+      scope = self._scopes.get_global_scope()
+      merged = {id(member) for symbol in scope.values()
+                if getattr(symbol.obj, 'is_variant', False)
+                for member in getattr(symbol.obj, 'variant_members', ())}
+      for symbol in scope.values():
+        if getattr(symbol.obj, 'is_variant', False) or id(symbol.obj) in merged:
+          continue
         if symbol.obj.addressing == Addressing.NONE and symbol.stype != SymbolType.Data:
           shmem_load += builder.build(symbol)
           load_ir.extend(builder.get_instructions())

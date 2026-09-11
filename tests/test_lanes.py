@@ -506,3 +506,17 @@ def test_lanes_per_mult_leaves_a_count_with_no_group(monkeypatch):
         gen = Generator(_gemm(56, 9, 56), ctx)
         gen.generate()
         assert _block(gen).startswith("32,"), want
+
+
+def test_an_amd_multiplication_wider_than_the_wave_is_refused(monkeypatch):
+    """The register broadcast of the AMD SIMT path ends at the wave.
+
+    64 lanes over gfx1150's 32-wide waves put half of the broadcast operand in
+    a wave the exchange cannot reach, and before this was refused the kernel
+    came out wrong with no error and no spill.  On a 64-wide wave the same
+    width is one wave and builds.
+    """
+    monkeypatch.setenv("TF_LANES", "64")
+    with pytest.raises(GenerationError):
+        Generator(_gemm(56, 9, 56), _ctx("gfx1150", "hip")).generate()
+    Generator(_gemm(56, 9, 56), _ctx("gfx942", "hip")).generate()
