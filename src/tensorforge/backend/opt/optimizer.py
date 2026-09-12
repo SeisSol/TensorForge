@@ -23,7 +23,7 @@ from .manager import (LegacyAnalysis, LegacyTransform, PassContext, PassManager,
 from .mem_region_allocation import MemoryRegionAllocation
 from .memmove import MoveLoads
 from .pipeline import Pipeline
-from .prefetch import PrefetchBatch
+from .prefetch import PrefetchBatch, PrefetchData
 from .shr_mem_analyzer import ShrMemOpt
 from .wrap import WrapLoads
 from .sync_block import SyncThreadsOpt
@@ -106,6 +106,17 @@ class OptimizationStage:
             pc.context, instrs,
             level=getattr(opts, 'prefetch_level', 'l2')),
         enabled=lambda pc: getattr(opts, 'enable_prefetch', False)))
+
+    # The next element's data, hinted at the tail of the body where
+    # `WrapLoads` would issue its transfer -- the transfer stays.  After
+    # `WrapLoads`, whose wrapped transfers need no hint, and after the pointer
+    # hints, which it shares the head with.  Off by default.
+    pm.add(LegacyTransform(
+        'PrefetchData',
+        lambda pc, instrs: PrefetchData(
+            pc.context, instrs,
+            level=getattr(opts, 'prefetch_level', 'l2')),
+        enabled=lambda pc: getattr(opts, 'prefetch_data', False)))
 
     # Whole nest: a value carried across the loop's back edge is only visible
     # to a fixed point over the region structure.

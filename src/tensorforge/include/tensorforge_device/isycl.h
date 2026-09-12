@@ -41,25 +41,56 @@ using TF32 = tf32;
 ///
 /// DG2 and PVC only, which the generator gates on rather than this: an earlier
 /// Xe part has no LSC prefetch for the API to lower to.
-template <intel_esimd::cache_hint L1H, intel_esimd::cache_hint L2H, typename T>
+///
+/// `N` elements from that address, for a hint that covers an operand rather
+/// than a pointer.  Up to 256 bytes that is the transposed form, one address
+/// and a run of up to 64 dwords -- rounded up to a length the message takes.
+/// Beyond, it is the gather form with one lane per 64-byte line: a line is
+/// what a prefetch brings in whatever it names, so 32 lanes ask for 2 kB in
+/// one message where the block form would take eight.  The offsets stop at
+/// the run's last element -- the lanes past it ask for that line again, and
+/// nothing past the run is touched -- and one lane more than whole lines
+/// covers a run that does not start on one.
+template <intel_esimd::cache_hint L1H, intel_esimd::cache_hint L2H, int N = 1,
+          typename T>
 ESIMD_INLINE void prefetchHinted(const T *ptr) {
-  intel_esimd::prefetch<T>(
-      ptr, intel_esimd::properties{intel_esimd::cache_hint_L1<L1H>,
-                                   intel_esimd::cache_hint_L2<L2H>});
+  constexpr auto props = intel_esimd::properties{
+      intel_esimd::cache_hint_L1<L1H>, intel_esimd::cache_hint_L2<L2H>};
+  constexpr int bytes = N * static_cast<int>(sizeof(T));
+  if constexpr (bytes <= 256) {
+    constexpr int run = N <= 1    ? 1
+                        : N <= 2  ? 2
+                        : N <= 4  ? 4
+                        : N <= 8  ? 8
+                        : N <= 16 ? 16
+                        : N <= 32 ? 32
+                                  : 64;
+    intel_esimd::prefetch<T, run>(ptr, props);
+  } else {
+    constexpr int lines = bytes / 64 + 1;
+    static_assert(lines <= 32,
+                  "one gather message holds 32 lines; split the run");
+    constexpr int lanes = lines <= 8 ? 8 : lines <= 16 ? 16 : 32;
+    intel_esimd::simd<std::uint32_t, lanes> offsets(0, 64);
+    constexpr std::uint32_t last = bytes - static_cast<int>(sizeof(T));
+    offsets.merge(intel_esimd::simd<std::uint32_t, lanes>(last),
+                  offsets > last);
+    intel_esimd::prefetch<T, lanes>(ptr, offsets, props);
+  }
 }
 
 /// Keep it near: cached at both levels.
-template <typename T> ESIMD_INLINE void prefetchL1(const T *ptr) {
+template <int N = 1, typename T> ESIMD_INLINE void prefetchL1(const T *ptr) {
   prefetchHinted<intel_esimd::cache_hint::cached,
-                 intel_esimd::cache_hint::cached>(ptr);
+                 intel_esimd::cache_hint::cached, N>(ptr);
 }
 
 /// Keep it out of L1. A hint issued a whole loop body ahead of its use lands
 /// in L1 long before anything wants it, and displaces what the current
 /// iteration is reading to no purpose.
-template <typename T> ESIMD_INLINE void prefetchL2(const T *ptr) {
+template <int N = 1, typename T> ESIMD_INLINE void prefetchL2(const T *ptr) {
   prefetchHinted<intel_esimd::cache_hint::uncached,
-                 intel_esimd::cache_hint::cached>(ptr);
+                 intel_esimd::cache_hint::cached, N>(ptr);
 }
 
 /// Split a vector of floats into the two TF32 halves a DPAS multiplies.

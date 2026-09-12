@@ -637,6 +637,20 @@ declare('full_lane_tails',
             'window, so that a slice of a larger image (theta) never has its '
             'neighbouring rows overwritten.')
 
+declare('prefetch_data',
+        default=False,
+        env='TF_PREFETCH_DATA',
+        parse=parse_bool,
+        doc='Hint the next element\'s data where `WrapLoads` would issue its '
+            'transfer -- the tail of the loop body -- and leave the transfer '
+            'where it is.\n'
+            'The transfer itself moved costs a register image or a buffer '
+            'that survives the back edge; a hint costs a pointer and a few '
+            'messages, and changes no result.  One hint per cache span of '
+            'each per-element source (`Lexic.prefetch_line_bytes`), for '
+            '`PTR_BASED` and `STRIDED` operands; a batch-invariant one is '
+            'already cached.  At `prefetch_level`.')
+
 declare('lanes_per_mult',
         default=0,
         env='TF_LANES',

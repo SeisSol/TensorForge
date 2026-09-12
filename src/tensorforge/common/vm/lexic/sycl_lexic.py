@@ -303,6 +303,12 @@ class SyclLexic(Lexic):
       return str(getattr(hw, 'model', '')) in self._ESIMD_PREFETCH_ARCHS
     return True
 
+  def prefetch_line_bytes(self) -> int:
+    # ESIMD asks with one message for a run of up to 31 lines -- a gather,
+    # one lane per line, and one lane spare for a run that does not start on
+    # a line (`prefetchHinted` in `isycl.h`); SPMD asks per line.
+    return 31 * 64 if self.simd_mode else 64
+
   def prefetch(self, address, *, datatype, elems=1, level='l2'):
     """Two spellings, and only one of them can carry a level.
 
@@ -325,6 +331,9 @@ class SyclLexic(Lexic):
     """
     if self.simd_mode:
       fn = 'prefetchL1' if str(level).lower() == 'l1' else 'prefetchL2'
+      if elems > 1:
+        # The block form: `elems` elements from one address, one message.
+        return f'tensorforge::{fn}<{int(elems)}>({address});'
       return f'tensorforge::{fn}({address});'
     return (f'sycl::address_space_cast<sycl::access::address_space::'
             f'global_space, sycl::access::decorated::no>({address})'

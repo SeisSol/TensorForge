@@ -60,3 +60,43 @@ class PrefetchBatchPointer(AbstractInstruction):
 
   def __str__(self) -> str:
     return f'prefetch {self._src.name}[{self._loop.index_name(1)}];'
+
+
+class PrefetchData(AbstractInstruction):
+  """Ask for an element's data, `count` elements from `first`, in spans.
+
+  The data half of what `PrefetchBatchPointer` leaves out.  `src` is a
+  pointer already bound to the element -- `PrefetchData` the pass binds one to
+  `k + 1` at the head of the body -- so the address formula is
+  `GetElementPtr`'s alone and this only walks the run.  One statement per
+  `Lexic.prefetch_line_bytes`: a line where the hint names one address, up
+  to 31 lines in one gather message where it takes an extent (ESIMD).
+  """
+
+  def __init__(self, context, src, first: int, count: int, level: str = 'l2'):
+    super().__init__(context)
+    self._src = src
+    self._first = int(first)
+    self._count = int(count)
+    self._level = level
+    self._is_ready = True
+
+  def uses(self):
+    return [self._src]
+
+  def gen_ir(self, writer):
+    if not hasattr(writer, 'prefetch') or self._count <= 0:
+      return
+    datatype = getattr(self._src.obj, 'datatype', None)
+    elem = datatype.size() if datatype is not None else 4
+    per = max(1, self._context.get_vm().get_lexic().prefetch_line_bytes() // elem)
+    end = self._first + self._count
+    for start in range(self._first, end, per):
+      # The run as it is: a target that needs a message-sized length rounds
+      # it (`prefetchHinted` does), one that names a line ignores it.
+      writer.prefetch(self._src, start, level=self._level,
+                      elems=min(per, end - start))
+
+  def __str__(self) -> str:
+    return (f'prefetch {self._src.name}[{self._first}:'
+            f'{self._first + self._count}];')

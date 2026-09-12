@@ -104,7 +104,29 @@ template <typename T, int N> struct vec {
 namespace access {
 enum class mode { read, write, read_write };
 enum class target { local, global_buffer };
+enum class address_space {
+  global_space,
+  local_space,
+  constant_space,
+  private_space,
+  generic_space
+};
+enum class decorated { no, yes, legacy };
 } // namespace access
+
+/// The SYCL 2020 surface the SPMD data prefetch is spelled through:
+/// `address_space_cast<global_space, decorated::no>(p).prefetch(n)`.
+template <typename T, access::address_space Space, access::decorated Dec>
+class multi_ptr {
+public:
+  explicit multi_ptr(T *) {}
+  void prefetch(std::size_t) const {}
+};
+
+template <access::address_space Space, access::decorated Dec, typename T>
+multi_ptr<T, Space, Dec> address_space_cast(T *p) {
+  return multi_ptr<T, Space, Dec>(p);
+}
 
 template <typename T, int Dim, access::mode Mode, access::target Target>
 class accessor {
@@ -535,6 +557,11 @@ template <typename T, int N> intel_esimd::simd<T, N> slmLoad(SlmPtr<T>) {
 }
 template <typename T, int N>
 void slmStore(SlmPtr<T>, intel_esimd::simd<T, N>) {}
+
+/// Mirrors `prefetchL1`/`prefetchL2` in `isycl.h`: one element, or `N` from
+/// the address as one block message.
+template <int N = 1, typename T> void prefetchL1(const T *) {}
+template <int N = 1, typename T> void prefetchL2(const T *) {}
 
 template <std::size_t Bytes> void slmReserve() {}
 

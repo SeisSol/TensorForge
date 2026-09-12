@@ -366,6 +366,15 @@ class Lexic(ABC):
     """
     return False
 
+  def prefetch_line_bytes(self) -> int:
+    """How much one `prefetch` statement covers, in bytes.
+
+    A cache line where the instruction names one address: a longer run is
+    that many statements apart.  A target whose hint takes an extent says how
+    much one can ask for.
+    """
+    return 64
+
   def prefetch(self, address, *, datatype, elems=1, level='l2'):
     """One prefetch, as a statement.  `address` is a pointer expression.
 

@@ -193,14 +193,17 @@ def test_esimd_spells_it_through_the_helper():
 def test_the_hint_sits_at_the_head_of_the_body():
     """Ahead of the first binding, so the whole iteration is cover.
 
-    And inside the flag guard, which is where the head of the region is. That
-    is a limitation rather than a choice -- a masked element issues no hint --
-    and it is pinned so that moving it out is a decision someone makes rather
-    than a side effect of touching the region.
+    And outside the flag guard, ahead of it.  It used to sit inside, which was
+    pinned here as a limitation to be lifted by decision -- a masked element
+    issued no hint.  The decision came with `enable_wrap_loads`: the wrapped
+    transfer's pointer is an unguarded prefix of the body, a hint inside the
+    guard ahead of it made the prefix non-contiguous, and the combination did
+    not generate.  Outside is safe: the address is a clamped index into the
+    pointer array, and nothing dereferences what it asks for.
     """
     src = _kernel(Addressing.PTR_BASED, enable_prefetch=True).splitlines()
     first_hint = next(n for n, ln in enumerate(src)
                       if 'tensorforge::prefetch' in ln)
     first_binding = next(n for n, ln in enumerate(src) if 'glb_m' in ln)
     guard = next(n for n, ln in enumerate(src) if 'if (allowed)' in ln)
-    assert guard < first_hint < first_binding
+    assert first_hint < guard and first_hint < first_binding

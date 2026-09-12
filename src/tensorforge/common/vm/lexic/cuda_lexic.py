@@ -232,6 +232,11 @@ class CudaLexic(Lexic):
     level = hw.sm_level() if hw is not None else None
     return level is not None and level >= 50
 
+  def prefetch_line_bytes(self) -> int:
+    # `prefetch.global.L2` asks for the 128-byte line holding the address;
+    # the same line size on the AMD parts the HIP lexic inherits this for.
+    return 128
+
   def prefetch(self, address, *, datatype, elems=1, level='l2'):
     """The one target where the cache level is part of the instruction.
 
