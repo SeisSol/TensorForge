@@ -357,7 +357,7 @@ class SyclLexic(Lexic):
     return f'sycl::vec<{fptype}, {length}>'
 
   def pointer_type(self, elem, space=None, readonly=False, restrict=False,
-                   const=False):
+                   const=False, depth=1):
     """`SlmPtr<T>` for shared memory under the explicit vector, else generic.
 
     The address space is in the type here for the same reason it is on AMD --
@@ -374,11 +374,13 @@ class SyclLexic(Lexic):
     orders. Saying `__restrict__` about a class type is not a weaker promise,
     it does not parse.
     """
-    if self.simd_mode and getattr(space, 'name', None) == 'SHARED':
+    if (self.simd_mode and getattr(space, 'name', None) == 'SHARED'
+        and depth == 1):
       ro = 'const ' if readonly else ''
       tail = ' const' if const else ''
       return f'tensorforge::SlmPtr<{ro}{elem}>{tail}'
-    return super().pointer_type(elem, space, readonly, restrict, const)
+    return super().pointer_type(elem, space, readonly, restrict, const,
+                                depth)
 
   def shared_pointer_type(self, elem, restrict=False):
     if self.simd_mode:

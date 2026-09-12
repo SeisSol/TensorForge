@@ -1710,14 +1710,16 @@ class Generator:
 
     return params
 
-  def _declare(self, params, with_defaults=False):
+  def _declare(self, params, with_defaults=False, host=False):
     lexic = self._context.get_vm().get_lexic()
-    return [p.declaration(lexic, with_default=with_defaults) for p in params]
+    return [p.declaration(lexic, with_default=with_defaults, host=host)
+            for p in params]
 
   def _generate_kernel_base_args(self):
     global_symbols = self._scopes.get_global_scope().values()
-    return [p.argument() for p in self._base_params(global_symbols,
-                                                    substitute_tables=True)]
+    lexic = self._context.get_vm().get_lexic()
+    return [p.argument(lexic) for p in self._base_params(
+        global_symbols, substitute_tables=True)]
 
   def _generate_kernel_proto(self, writer):
     global_symbols = self._scopes.get_global_scope().values()
@@ -1744,7 +1746,8 @@ class Generator:
     params.append(KernelParam.opaque(
         'void*', GeneralLexicon.STREAM_PTR_STR,
         ' = nullptr' if with_defaults else ''))
-    str_params = ', '.join(self._declare(params, with_defaults=with_defaults))
+    str_params = ', '.join(self._declare(params, with_defaults=with_defaults,
+                                         host=True))
     return f'void launcher_{self._base_kernel_name}({str_params})'
 
   def default_generate_call_site(self):

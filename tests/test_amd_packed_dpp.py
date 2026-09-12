@@ -86,12 +86,15 @@ def test_a_packed_lead_operand_takes_the_dpp_chain():
     assert 'tensorforge::pin(' in src
 
 
-def test_without_the_move_the_wide_chain_is_fused_per_component():
-    """gfx1150 has no packed FMA: the wide chain splits into components and
-    keeps the modifier on every product, as the chain at width one does."""
+def test_without_the_move_the_wide_chain_is_left_to_the_nest():
+    """gfx1150 has no packed FMA, and the chain fused per component ran 7 %
+    behind the nest there (`FUSED_WIDE`): at lead width two the products stay
+    the nest's -- vectors of rows, `B` broadcast -- and no DPP chain is
+    emitted."""
     src = _kernel('local_flux', 'gfx1150', width=2)
     assert not PAIR_MOVE.search(src)
-    assert 'fmacdpp16<' in src
+    assert 'fmacdpp16<' not in src
+    assert 'VectorT<float, 2>' in src
 
 
 def _fused_order(order, name, arch, width=1):

@@ -53,8 +53,17 @@ class KernelParam:
 
     # -- the surfaces ----------------------------------------------------- #
 
-    def declaration(self, lexic, with_default: bool = False) -> str:
-        """With types, for a prototype."""
+    def declaration(self, lexic, with_default: bool = False,
+                    host: bool = False) -> str:
+        """With types, for a prototype.
+
+        `host` is the launcher's prototype, which host code calls with the
+        pointers it has.  Those are generic, and on HIP a space-qualified
+        pointer is a type of its own that a generic one reaches only through a
+        cast: `float *` does not initialise a `SpacePtr<float, 1>` parameter.
+        So the launcher declares the generic spelling, and its call into the
+        kernel casts (`argument`).
+        """
         tail = self.default if with_default else ''
         if self.decl is not None:
             return f'{self.decl}{tail}'
@@ -62,16 +71,28 @@ class KernelParam:
             const = 'const ' if self.readonly else ''
             body = f'{const}{self.datatype}'
         else:
-            body = lexic.pointer_type(f'{self.datatype}', self.space,
+            body = lexic.pointer_type(f'{self.datatype}',
+                                      None if host else self.space,
                                       readonly=self.readonly,
                                       depth=self.depth)
-        storage = lexic.storage_class(self.space)
+        storage = '' if host else lexic.storage_class(self.space)
         storage = f'{storage} ' if storage else ''
         return f'{storage}{body} {self.name}{tail}'
 
-    def argument(self) -> str:
-        """Without types, for a call."""
-        return self.name
+    def argument(self, lexic=None) -> str:
+        """Without types, for a call.
+
+        With `lexic`, for the launcher's call into the kernel: where the
+        kernel declares a space the launcher's generic pointer does not carry,
+        the argument is cast to it.
+        """
+        if lexic is None or self.decl is not None or self.depth == 0:
+            return self.name
+        kernel = lexic.pointer_type(f'{self.datatype}', self.space,
+                                    readonly=self.readonly, depth=self.depth)
+        host = lexic.pointer_type(f'{self.datatype}', None,
+                                  readonly=self.readonly, depth=self.depth)
+        return self.name if kernel == host else f'({kernel}){self.name}'
 
     # -- construction ----------------------------------------------------- #
 

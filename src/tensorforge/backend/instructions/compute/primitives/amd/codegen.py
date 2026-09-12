@@ -51,13 +51,13 @@ FUSED_ORDER = 'auto'
 AUTO_ROWS_FROM = 64
 
 #: Whether lead width above one takes the fused chain where the packed one
-#: does not pay (`_matmuldpp_wide`), rather than leaving it to the nest.  On
-#: gfx1150 (`local_flux`, eight mults, no packed FMA) it ran 7 % behind the
+#: does not pay (`_matmuldpp_wide`), rather than leaving it to the nest.  Off:
+#: on gfx1150 (`local_flux`, eight mults, no packed FMA) it ran 7 % behind the
 #: nest at the same occupancy -- 153 ns an element against 143, 129 VGPRs
-#: against 141 -- in either order.  On regardless: the nest computes
-#: `slice_offset_a` and `slice_offset_a_via_offset` wrong at lead width two
-#: there, and this chain computes them right.
-FUSED_WIDE = True
+#: against 141 -- in either order.  It was on while the nest computed
+#: `slice_offset_a` wrong at lead width two, from a broadcast inside a lane
+#: guard; `passes.converge_crosslane` took that out.
+FUSED_WIDE = False
 
 
 def _check_mfma_operand(operand, threads, callee):
