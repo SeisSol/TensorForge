@@ -746,7 +746,8 @@ class IRBuilder:
         lex = self.context.get_vm().get_lexic()
         text = lex.broadcast('{0}', lane, block)
         return self.rawexpr(text, vec, type_=vec.type, hint=hint,
-                            pure=True, movable=False, layout=SCALAR_LAYOUT)
+                            pure=True, movable=False, layout=SCALAR_LAYOUT,
+                            crosslane=True)
 
     def lane_offset(self, block: int, stride: int = 1,
                     hint: str = 'lane') -> Operand:
