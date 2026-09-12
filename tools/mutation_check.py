@@ -726,7 +726,7 @@ GROUPS = {
     'scratch': ('tests/test_pir_scratch.py', [
         ('a shared alloc declares its own array again',
          sub(EMIT,
-             "                w(f'{t.elem.ctype()}* {qual}{self.name(v)} = &{arena}[{off}];')",
+             "                w(f'{self.ctype(t, v)} {self.name(v)} = &{arena}[{off}];')",
              "                w(f'__shared__ {t.elem.ctype()} {self.name(v)}[{t.volume}];')")),
         ('the budget check dropped',
          sub(BUILD, '        if max(end, self._scratch_peak) > budget:',

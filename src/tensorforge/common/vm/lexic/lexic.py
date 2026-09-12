@@ -44,7 +44,8 @@ class Lexic(ABC):
     return ''
 
   def pointer_type(self, elem: str, space=None, readonly: bool = False,
-                   restrict: bool = False, const: bool = False) -> str:
+                   restrict: bool = False, const: bool = False,
+                   depth: int = 1) -> str:
     """How a pointer into `space` is spelled, for a declaration of one.
 
     Asked of the backend rather than assembled from `restrict_kw` at the call
@@ -62,13 +63,17 @@ class Lexic(ABC):
     the pipelined form advances is `T *` and the ordinary one `T *const`, and
     both may point at something nothing writes.
 
+    `depth` is the indirection.  Above one the space stops applying: an array
+    of pointers in global memory holds pointers whose *pointee* is what the
+    space describes, and the one being declared here only holds them.
+
     `space` is a `pir.MemSpace`, taken structurally so this module does not
     have to import the IR.
     """
     lhs = 'const ' if readonly else ''
     ptr = 'const' if const else ''
     qual = f' {self.restrict_kw}' if restrict and self.restrict_kw else ''
-    return f'{lhs}{elem} *{ptr}{qual}'
+    return f'{lhs}{elem} {"*" * depth}{ptr}{qual}'
 
   def shared_pointer_type(self, elem: str, restrict: bool = False) -> str:
     """The declarator for a window into the shared arena, without the name.

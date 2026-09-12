@@ -8,6 +8,7 @@ from tensorforge.generators.descriptions import ForDescr, OperationDescription, 
 from tensorforge.common.context import Context
 from tensorforge.common.basic_types import Addressing, FlagMode, GeneralLexicon, DataFlowDirection
 from tensorforge.common.helper import get_extra_offset_name
+from tensorforge.generators.kernel_params import KernelParam
 from tensorforge.backend.data_types import ShrMemObject, RegMemObject
 from tensorforge.backend import pir
 from tensorforge.backend.opt import OptimizationStage
@@ -1668,8 +1669,13 @@ class Generator:
     for member in table.get_operands():
       self._table_member[member.name] = table
 
-  def _generate_base_params_list(self, symbol_list, with_types=True,
-                                 with_defaults=False, substitute_tables=False):
+  def _base_params(self, symbol_list, substitute_tables=False):
+    """The kernel's parameters, once, as parameters.
+
+    Four callers used to walk this list building four different strings from
+    it, and nothing but a shared loop body kept the four in step.  They now
+    read one list and ask each entry what it looks like on their surface.
+    """
     params = []
     emitted_tables = set()
     for symbol in symbol_list:
@@ -1680,61 +1686,44 @@ class Generator:
         # In place of the first member, once; the rest of them vanish.
         if id(table) not in emitted_tables:
           emitted_tables.add(id(table))
-          params.append(table.parameter() if with_types else table.name)
+          params.append(KernelParam.table(table))
         continue
       datatype = self._context.fp_type if symbol.obj.datatype is None else symbol.obj.datatype
       if symbol.obj.addressing == Addressing.SCALAR:
         if not symbol.stype == SymbolType.Data:
-          params.extend([f'{datatype} {symbol.name}' if with_types else f'{symbol.name}'])
+          params.append(KernelParam.of_symbol(symbol, datatype))
       else:
-        ptr_type = symbol.obj.addressing.to_pointer()
-        const_modifier = 'const ' if symbol.obj.direction == DataFlowDirection.SOURCE else ''
-        batch_type = f'{const_modifier}{datatype}{ptr_type}' if with_types else ''
-        # `size_t`, and the same `size_t` the element count uses.  This is an
-        # *element* offset added to `batchId0 * stride`, so 32 bits caps what a
-        # caller can express at 2^32-1 elements -- 17.2 GB into an f32 buffer,
-        # 34.4 GB into an f64 one.  Both are reachable on a current card, and a
-        # caller past them loses the high bits silently at the call site, which
-        # is a wrong answer rather than a diagnostic.
-        #
-        # The arithmetic was never the problem: `batchId0 * stride` is already
-        # 64-bit and the unsigned offset promoted into it.  What was capped is
-        # what the *signature* can carry.
-        offset_type = 'size_t' if with_types else ''
-        params.extend([f'{batch_type} {symbol.name}'])
+        params.append(KernelParam.of_symbol(symbol, datatype))
         if symbol.obj.addressing != Addressing.NONE:
-          params.extend([f'{offset_type} {get_extra_offset_name(symbol)}'])
-
-    batch_size_type = 'size_t' if with_types else ''
+          params.append(KernelParam.size(get_extra_offset_name(symbol)))
 
     for i, section in enumerate(self._sections):
-      params.append(f'{batch_size_type} {GeneralLexicon.NUM_ELEMENTS}{i}')
+      params.append(KernelParam.size(f'{GeneralLexicon.NUM_ELEMENTS}{i}'))
 
     if self._flags is not FlagMode.ABSENT:
-      flags_type = 'unsigned*' if with_types else ''
       # A mask the kernel dereferences unconditionally has no default: the
       # signature is where "you have to pass one" is stated.
-      defaulted = with_defaults and self._flags is FlagMode.OPTIONAL
-      default_flags_value = '= nullptr' if defaulted else ''
-
+      default = ' = nullptr' if self._flags is FlagMode.OPTIONAL else ''
       for i, section in enumerate(self._sections):
-        params.append(f'{flags_type} {GeneralLexicon.FLAGS_NAME}{i} {default_flags_value}')
+        params.append(KernelParam.flags(f'{GeneralLexicon.FLAGS_NAME}{i}',
+                                        default))
 
     return params
 
+  def _declare(self, params, with_defaults=False):
+    lexic = self._context.get_vm().get_lexic()
+    return [p.declaration(lexic, with_default=with_defaults) for p in params]
+
   def _generate_kernel_base_args(self):
     global_symbols = self._scopes.get_global_scope().values()
-    args = self._generate_base_params_list(global_symbols, with_types=False,
-                                           substitute_tables=True)
-    return args
+    return [p.argument() for p in self._base_params(global_symbols,
+                                                    substitute_tables=True)]
 
   def _generate_kernel_proto(self, writer):
     global_symbols = self._scopes.get_global_scope().values()
 
-    params = self._generate_base_params_list(symbol_list=global_symbols,
-                                             with_types=True,
-                                             substitute_tables=True)
-    str_params = ', '.join(params)
+    str_params = ', '.join(self._declare(
+        self._base_params(global_symbols, substitute_tables=True)))
 
     mults_per_block = min(section.shr_mem_obj.get_mults_per_block() for section in self._sections)
     shr_total_size = max(section.shr_mem_obj.get_total_size() for section in self._sections)
@@ -1751,13 +1740,11 @@ class Generator:
   def _generate_launcher_proto(self, with_defaults=True):
     global_symbols = self._scopes.get_global_scope().values()
 
-    params = self._generate_base_params_list(symbol_list=global_symbols,
-                                                  with_types=True,
-                                                  with_defaults=with_defaults)
-
-    default_value = ' = nullptr' if with_defaults else ''
-    params.append(f'void* {GeneralLexicon.STREAM_PTR_STR}{default_value}')
-    str_params = ', '.join(params)
+    params = self._base_params(global_symbols)
+    params.append(KernelParam.opaque(
+        'void*', GeneralLexicon.STREAM_PTR_STR,
+        ' = nullptr' if with_defaults else ''))
+    str_params = ', '.join(self._declare(params, with_defaults=with_defaults))
     return f'void launcher_{self._base_kernel_name}({str_params})'
 
   def default_generate_call_site(self):
@@ -1768,11 +1755,7 @@ class Generator:
       if item.obj.alias:
         item.name = item.obj.alias
 
-    args = self._generate_base_params_list(symbol_list=symbols,
-                                                with_types=False)
-
-    if self._flags is not FlagMode.ABSENT:
-      args.append(f'{GeneralLexicon.FLAGS_NAME}')
+    args = [p.argument() for p in self._base_params(symbol_list=symbols)]
     args.append(f'{GeneralLexicon.STREAM_PTR_STR}')
     str_args = ', '.join(args)
     return f'launcher_{self._base_kernel_name}({str_args});'

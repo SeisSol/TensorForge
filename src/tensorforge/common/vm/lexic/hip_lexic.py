@@ -49,7 +49,7 @@ class HipLexic(CudaLexic):
               'PARAM': 'tensorforge::ConstantMemspace'}
 
   def pointer_type(self, elem, space=None, readonly=False, restrict=False,
-                   const=False):
+                   const=False, depth=1):
     """The space-qualified pointer, where `hip.h` has a name for the space.
 
     A named space is worth spelling here and nowhere else: the attribute sits
@@ -65,14 +65,19 @@ class HipLexic(CudaLexic):
     `SpacePtr<T, S> __restrict` is not the same declaration -- the attribute
     would apply to the alias rather than through it.
 
+    Only at one level of indirection.  A `PTR_BASED` operand arrives as an
+    array of pointers, and the space belongs to what those point at -- which
+    is where `ptr_manip` casts it, on the pointer it loads out.
+
     Shared and register are left generic.  LDS pointers are produced by the
     arena binding, which spells its own declarator, and giving them a space
     here would make every window incompatible with the arena it is a window
     into.
     """
     name = self.MEMSPACE.get(getattr(space, 'name', None))
-    if name is None:
-      return super().pointer_type(elem, space, readonly, restrict, const)
+    if name is None or depth != 1:
+      return super().pointer_type(elem, space, readonly, restrict, const,
+                                  depth)
     ro = 'const ' if readonly else ''
     alias = 'SpacePtrRestrict' if restrict else 'SpacePtr'
     # `SpacePtrRestrict<T, S> const` is `T *__restrict const`, which is the

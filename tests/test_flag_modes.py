@@ -102,7 +102,9 @@ def test_absent_is_not_the_same_as_no_attributes():
 
 def test_no_attributes_keeps_the_nullable_mask():
     gen = _generate(None)
-    assert "unsigned* flags0 = nullptr" in gen.get_header()
+    # The spelling of a pointer parameter comes from the backend now; what
+    # this pins is the type and the default, not where the star sits.
+    assert re.search(r"unsigned\s*\*\s*flags0 = nullptr", gen.get_header())
     # `1` where the loop carries the flag *word* across its back edge rather
     # than reading the `bool` at the head -- see `BatchLoop._carries_flags`.
     assert re.search(r"flags0 == nullptr \? (true|1) ", gen.get_kernel())
@@ -111,7 +113,7 @@ def test_no_attributes_keeps_the_nullable_mask():
 def test_required_mask_has_no_default_and_no_null_check():
     gen = _generate({"flags": True})
     header = gen.get_header()
-    assert "unsigned* flags0" in header
+    assert re.search(r"unsigned\s*\*\s*flags0", header)
     assert "flags0 = nullptr" not in header
     kernel = gen.get_kernel()
     # The element index is a value with `batchId0` for a hint, so the
