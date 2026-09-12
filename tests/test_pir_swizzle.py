@@ -98,7 +98,23 @@ def test_both_a_load_and_a_store_apply_it():
     idx = b.rawexpr('threadIdx.x', type_=INDEX, hint='a')
     b.store(tile, b.load(tile, idx, hint='v'), idx)
     text = emitted(b.finish())
-    assert text.count('^') == 2, f"the permutation is not on both sides:\n{text}"
+    # Both sides have to subscript the permuted index.  Counting the `^`
+    # instead would count how many times it was *computed*, and the builder
+    # shares a pure result: one xor reaching two subscripts is the same
+    # address on both sides, which is what this is about.
+    # Every access to the tile has to go through the permutation, however
+    # many times the permutation is *written down*: the builder shares a pure
+    # result, so one xor reaching both subscripts is the same address on both
+    # sides, and a single-use one is inlined into the subscript instead.
+    named = {line.split('=', 1)[0].split()[-1]
+             for line in text.splitlines() if '^' in line and '=' in line}
+    accesses = [line for line in text.splitlines()
+                if '_btile[' in line and 'tempShrMem' not in line]
+    assert len(accesses) == 2, f"expected a read and a write:\n{text}"
+    for line in accesses:
+        subscript = line.split('_btile[', 1)[1].rsplit(']', 1)[0].strip()
+        assert '^' in subscript or subscript in named, (
+            f"the permutation is not on both sides:\n{text}")
 
 
 def test_an_unswizzled_buffer_is_untouched():

@@ -163,8 +163,12 @@ def _traced(predicates):
     body = []
     for name in predicates:
         if name is not None and name not in guards:
-            guards[name] = builder.op('lt', BOOL, builder.thread_id('x'), 4,
-                                      hint=name)
+            # A different bound per name, so that two names are two
+            # conditions.  Spelling them alike and telling them apart by the
+            # hint would make them one value -- the builder shares a pure
+            # result and a hint is not part of what the result is.
+            guards[name] = builder.op('lt', BOOL, builder.thread_id('x'),
+                                      4 + len(guards), hint=name)
     for name in predicates:
         v = builder.load(buf, 0, type_=ScalarType(Datatype.F32), hint='r')
         body.append((v, name))
