@@ -31,7 +31,7 @@ from .core import (BOOL, INDEX, SCALAR_LAYOUT, TOKEN, Access, BufferType,
                    Effect, IRError,
                    LaneAxis, MemSpace, Op, Operand, Region, RegisterLayout,
                    ScalarType, Stmt, TokenType, Value, XorSwizzle, dump, walk, walk_stmts,
-                   join_layout, Uniformity)
+                   join_layout, base_space, Uniformity)
 
 
 def access_of(symbol: Any, kind: Effect) -> Access:
@@ -1294,9 +1294,14 @@ class IRBuilder:
         return stmt
 
     def _space_of(self, base: Any) -> MemSpace:
-        if isinstance(base, Value) and isinstance(base.type, BufferType):
-            return base.type.space
-        return MemSpace.from_symbol_type(getattr(base, 'stype', None))
+        """The base's own space, or `UNKNOWN` where it has none to give.
+
+        `Access` derives the same thing and refuses a contradiction, so this is
+        the answer a caller uses when it has to name one up front -- not a
+        second rule about where a buffer lives.
+        """
+        space = base_space(base)
+        return MemSpace.UNKNOWN if space is None else space
 
     def barrier(self, participants: Union[str, Participants] = Participants.BLOCK,
                 threads: Optional[int] = None) -> Stmt:

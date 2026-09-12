@@ -295,6 +295,36 @@ class Access:
     space: MemSpace
     base: Optional[Any] = None
 
+    def __post_init__(self):
+        """One fact, one place: a base that knows its space decides it.
+
+        Two things were saying where an access lands -- the space passed here
+        and the space on the base's own type -- and nothing held them together.
+        The same shape as ``uniformity`` against ``layout.is_distributed``, and
+        the same reason it matters: a disagreement is invisible, since both
+        answers are well-formed, and `may_alias` reads the one on the access.
+        A write recorded in the wrong space conflicts with nothing and reorders
+        past a read of the buffer it actually wrote.
+
+        `UNKNOWN` is tightened rather than rejected: a caller that could not
+        name the space is not making a claim, and the base can answer for it.
+        A caller that named a *different* space is making one, and it is wrong
+        -- so it is refused here rather than carried into the alias model,
+        where it would decide something and say nothing.
+
+        A base with no space of its own -- a raw name, a scalar operand, a
+        register value -- leaves the caller's answer alone.
+        """
+        stated = base_space(self.base)
+        if stated is None or stated is self.space:
+            return
+        if self.space is MemSpace.UNKNOWN:
+            object.__setattr__(self, 'space', stated)
+            return
+        raise IRError(
+            f'access claims {self.space.name.lower()} for a base that is '
+            f'{stated.name.lower()}: {self.base!r}')
+
     @property
     def writes(self) -> bool:
         return int(self.kind) & _M_WRITES != 0
@@ -303,6 +333,23 @@ class Access:
         k = '+'.join(f.name.lower() for f in Effect if f and (self.kind & f))
         b = 'ยง' if self.base is None else getattr(self.base, 'name', str(self.base))
         return f'{k} {self.space.name.lower()}:{b}'
+
+
+def base_space(base) -> Optional[MemSpace]:
+    """The space a base states about itself, or ``None`` where it states none.
+
+    ``None`` and ``MemSpace.UNKNOWN`` are different answers here.  Unknown is a
+    base that named a space nobody recognises, which is a claim and a bad one;
+    ``None`` is a base that was never asked to have one -- a string naming a
+    queue, a register value, a scalar -- and about which nothing follows.
+    """
+    if isinstance(base, Value):
+        return base.type.space if isinstance(base.type, BufferType) else None
+    stype = getattr(base, 'stype', None)
+    if stype is None:
+        return None
+    space = MemSpace.from_symbol_type(stype)
+    return None if space is MemSpace.UNKNOWN else space
 
 
 def may_alias(a: Access, b: Access) -> bool:
