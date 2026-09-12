@@ -92,3 +92,66 @@ def test_without_the_move_the_wide_chain_is_fused_per_component():
     src = _kernel('local_flux', 'gfx1150', width=2)
     assert not PAIR_MOVE.search(src)
     assert 'fmacdpp16<' in src
+
+
+def _fused_order(order, name, arch, width=1):
+    from tensorforge.backend.instructions.compute.primitives.amd import codegen
+    saved = codegen.FUSED_ORDER, codegen.FUSED_WIDE
+    codegen.FUSED_ORDER, codegen.FUSED_WIDE = order, True
+    try:
+        return _kernel(name, arch, width)
+    finally:
+        codegen.FUSED_ORDER, codegen.FUSED_WIDE = saved
+
+
+def test_the_fused_chain_walks_rows_with_the_same_products():
+    """The row order emits what the column order emits -- the same fused
+    products, the same count -- and pins each row's accumulators, which the
+    column order never needed: there every `A` value was read first and held
+    for the whole chain.  At lead width two with the fused wide chain
+    switched on, which it is not by default."""
+    for width in (1, 2):
+        rows = _fused_order('rows', 'local_flux', 'gfx1150', width)
+        cols = _fused_order('columns', 'local_flux', 'gfx1150', width)
+        assert rows.count('fmacdpp16<') == cols.count('fmacdpp16<') > 0, width
+        assert 'tensorforge::pin(' in rows, width
+        assert 'tensorforge::pin(' not in cols, width
+
+
+def test_the_order_follows_the_size_of_the_a_image():
+    """`'auto'` takes the rows where the column order would hold a large `A`
+    image across columns: `local_flux` holds 112 values a lane (two slots,
+    56 steps) over nine fused columns on gfx1150 and walks rows.  On gfx942
+    the matrix core takes eight of the columns, and the one left over reads
+    each value once in either order, so it keeps the columns."""
+    from tensorforge.backend.instructions.compute.primitives.amd import codegen
+    assert codegen.FUSED_ORDER == 'auto'
+    assert 'tensorforge::pin(' in _kernel('local_flux', 'gfx1150')
+    assert 'tensorforge::pin(' not in _kernel('local_flux', 'gfx942')
+
+
+def test_the_order_weighs_what_the_columns_would_hold():
+    """The two terms of `'auto'` besides the image: an `A` already held in
+    registers (`chain_three`'s intermediate) makes the image free, so the
+    columns stay; a broadcast one lane at a time (FP64 on gfx1150, which has
+    no FP64 DPP) relays a value for every step of every column, and
+    `add_true_f64` takes the rows for that alone."""
+    assert 'tensorforge::pin(' not in _kernel('chain_three', 'gfx1150')
+    assert 'tensorforge::pin(' in _kernel('add_true_f64', 'gfx1150')
+
+
+def test_an_amd_block_keeps_its_threads_at_lead_width_two():
+    """NVIDIA holds the mults and halves the block; on AMD the halved block
+    was measured slower (gfx1150, `local_flux`: 242 against 153 ns an
+    element), so the lanes a mult covers no longer shrink the block there."""
+    from tensorforge.common.basic_types import Datatype
+    from tensorforge.generators.generator import RegmaxBlockPolicy
+
+    def mults(arch, backend, width):
+        ctx = Context(arch=arch, backend=backend, fp_type=Datatype.F32)
+        return RegmaxBlockPolicy(ctx, global_mem=0, mem_size_per_mult=0,
+                                 num_threads=32,
+                                 lead_width=width).get_num_mults_per_block()
+
+    assert mults('gfx1150', 'hip', 2) == mults('gfx1150', 'hip', 1) == 8
+    assert mults('sm_86', 'cuda', 2) * 2 == mults('sm_86', 'cuda', 1)

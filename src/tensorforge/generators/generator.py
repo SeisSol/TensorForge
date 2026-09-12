@@ -115,7 +115,15 @@ class RegmaxBlockPolicy(AbstractThreadBlockPolicy):
     #: to be sized from -- sizing it from the *reduced* count would double
     #: the mults, double the shared memory per block and halve the occupancy,
     #: spending the whole win on memory.
-    self._lane_factor = max(1, lead_width)
+    #:
+    #: Not on AMD, where the smaller block is measured to lose: `local_flux`
+    #: at lead width two on gfx1150 took 242 ns an element at 128 threads
+    #: (four mults) against 153 at 256 (eight), and 256 was the fastest
+    #: arrangement of the kernel at either width.  The same direction as
+    #: the halved NVIDIA block in `get_num_mults_per_block`, which lost there
+    #: too.
+    vendor = context.get_vm().get_hw_descr().vendor
+    self._lane_factor = 1 if vendor == 'amd' else max(1, lead_width)
 
   def get_num_mults_per_block(self):
     # 128 threads on NVIDIA, four warps: one per scheduler of an SM (four

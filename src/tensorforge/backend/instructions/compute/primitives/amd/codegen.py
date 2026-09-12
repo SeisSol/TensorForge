@@ -31,6 +31,34 @@ SPLIT_BF16 = 'tensorforge::splitFloatx4BF16'
 #: goes.
 PIN_MOVED = False
 
+#: How the fused chain walks its products.  `'columns'` is the order `hfma`
+#: was written for: every `A(i, k)` read first (`_load_a`) and held while the
+#: columns go by one after the other.  `'rows'` is the order of the packed
+#: arrangements: the contraction outermost, each `A(i, k)` read at its row and
+#: dead after the last column, the accumulators pinned at the end of each row.
+#: Every accumulator receives the same products in the same order either way,
+#: so the two agree to the bit -- what differs is what is live.  `'auto'`
+#: picks per chain (`_fused_order`).  Measured on gfx1150, `local_flux`: 219
+#: VGPRs down to 130, occupancy 4 to 7, 3.6 % faster; at 16 lanes with the
+#: faces merged 23.5 % faster, and no longer spilling.
+FUSED_ORDER = 'auto'
+
+#: The size of the `A` image, in registers a lane, from which `'auto'`
+#: considers the rows at all.  `local_flux` holds 112 (two slots over 56
+#: steps), which on gfx1150 was half of its 219 VGPRs; below this the image
+#: does not decide the occupancy, and the rows' extra reads and branches are
+#: all that is left of them.
+AUTO_ROWS_FROM = 64
+
+#: Whether lead width above one takes the fused chain where the packed one
+#: does not pay (`_matmuldpp_wide`), rather than leaving it to the nest.  On
+#: gfx1150 (`local_flux`, eight mults, no packed FMA) it ran 7 % behind the
+#: nest at the same occupancy -- 153 ns an element against 143, 129 VGPRs
+#: against 141 -- in either order.  On regardless: the nest computes
+#: `slice_offset_a` and `slice_offset_a_via_offset` wrong at lead width two
+#: there, and this chain computes them right.
+FUSED_WIDE = True
+
 
 def _check_mfma_operand(operand, threads, callee):
     """The A operand of an MFMA has to be laid out as the transpose left it.
@@ -584,7 +612,7 @@ def _load_a(writer, A, M, K, kx):
 
 
 def matmuldpp(writer, start, C, A, B, M, N, K, kx, threads, dtype, sparse,
-              ctx, stop, width=1):
+              ctx, stop, width=1, a_resident=False):
     """`C += A @ B` over columns `[start, stop)`, `B` broadcast across lanes.
 
     Three arrangements of the same products, all reading `B(k, j)` from lane
@@ -608,7 +636,7 @@ def matmuldpp(writer, start, C, A, B, M, N, K, kx, threads, dtype, sparse,
     _refuse_multiwave(threads, ctx)
     if width > 1:
         return _matmuldpp_wide(writer, start, stop, C, A, B, M, K, kx,
-                               threads, dtype, sparse, ctx, width)
+                               threads, dtype, sparse, ctx, width, a_resident)
     scalar = list(range(start, stop))
     if sparse is None and stop - start >= 2 and M % 2 == 0:
         step = select_fmadpp_step(dtype, threads, ctx)
@@ -622,10 +650,109 @@ def matmuldpp(writer, start, C, A, B, M, N, K, kx, threads, dtype, sparse,
         # all of them where a `B` read declined.  Its `A` reads are its own
         # rather than the pairs' -- holding those across the pairs would be
         # the pressure the pairs' order avoids.
-        ab = _load_a(writer, A, M, K, kx)
-        _scalar_chain(writer, scalar[0], scalar[-1] + 1, C, B, ab, M, K, kx,
-                      threads, dtype, sparse, ctx)
+        if sparse is None and _fused_order(
+                scalar, M, K, dtype, select_fmadpp_step(dtype, threads, ctx),
+                threads, a_resident) == 'rows':
+            _fused_rows(writer, scalar, C, A, B, M, K, kx, threads, dtype,
+                        ctx)
+        else:
+            ab = _load_a(writer, A, M, K, kx)
+            _scalar_chain(writer, scalar[0], scalar[-1] + 1, C, B, ab, M, K,
+                          kx, threads, dtype, sparse, ctx)
     return True
+
+
+def _fused_order(cols, M, K, dtype, step, threads, a_resident):
+    """`FUSED_ORDER`, with `'auto'` decided by what each order keeps live.
+
+    The column order keeps two things live that the row order does not.  The
+    `A` image, `M * K` values, across every column -- where `A` is read from
+    memory: one held in registers anyway (`a_resident`) costs nothing more,
+    and a single column reads each value once in either order (`local_flux`
+    on gfx942, whose one fused column is what the matrix core leaves over).
+    And, where the broadcast reaches one lane at a time (no DPP for the type,
+    step one), the value it relays for every step of every column, which
+    nothing stops LLVM from issuing ahead of the products they feed.
+    `add_true_f64` on gfx1150 has 128 of those in FP64: 256 VGPRs and 176 B
+    of scratch, against 83 and none in rows.  A wider broadcast relays one
+    register a sub-block only; counting those took one chain of `chain_five`
+    into rows, for 4 to 7 % more instructions and not a register less.
+
+    The row order keeps every column's accumulators and its `B` register,
+    and pays elsewhere: an `A` value read at one row is one LLVM may sink
+    into a branch of its own where the read is guarded (`rectangular` on
+    gfx1150, 34 more), and one it no longer shares with a neighbouring chain
+    (`local_flux` on gfx942, 220 more LDS reads).  So the rows only where the
+    column order holds a lot and the row order less than half of it.
+    """
+    if FUSED_ORDER != 'auto':
+        return FUSED_ORDER
+    n = len(cols)
+    relayed = step == 1 < threads
+    held = ((M * K if n > 1 and not a_resident else 0)
+            + (n * K if relayed else 0))
+    resident = n * (M + 1) + (n if relayed else 0)
+    words = max(1, dtype.size() // 4)
+    return ('rows' if held * words >= AUTO_ROWS_FROM and 2 * resident <= held
+            else 'columns')
+
+
+_FUSED = {1: fmascalar, 4: fmadpp4, 8: fmadpp8, 16: fmadpp16}
+
+
+def _row_products(writer, form, step, src, ftype, threads, row, terms):
+    """`acc += src[row] * a` for each `(acc, a)` in `terms`, as `hfma` writes
+    them: the row share a modifier on every product, or -- `MOVED` -- one
+    move that plain FMAs read."""
+    emit = _FUSED[step]
+    if form is BroadcastForm.MOVED:
+        mv = dict(threads=threads, row=row)
+        callee = (f'tensorforge::movdpp16Kept<{row}>' if PIN_MOVED
+                  else MOVDPP16.callee.format(**mv))
+        src = writer.call(callee, ftype, src, hint='bc', movable=False,
+                          layout=MOVDPP16.produces(**mv))
+        emit = fmascalar
+    for acc, a in terms:
+        emit(writer, acc, src, a, row)
+
+
+def _fused_rows(writer, cols, C, A, B, M, K, kx, threads, dtype, ctx):
+    """The fused chain over `cols` with the contraction outermost
+    (`FUSED_ORDER`).
+
+    `hfma`'s products in the order `_paired_columns` walks its pairs: for each
+    row of a sub-block, every column's broadcast of that row into every slot,
+    then the next row.  An `A(i, k)` is read at its row and dead after it
+    (`_a_on_demand`); what stays resident is the accumulators and one `B`
+    register a column.  In the column order every `A` value is live for the
+    whole chain: on `local_flux` (gfx1150, two slots, 56 steps) that is 112
+    of its 219 VGPRs, at occupancy 4.
+    """
+    step = select_fmadpp_step(dtype, threads, ctx)
+    form = select_broadcast_form(dtype, step, M, ctx, can_pack=False)
+    ftype = ScalarType(dtype)
+    sources = {(j, k0): B(writer, None, j, k0 // threads)
+               for j in cols for k0 in range(0, K + kx, threads)}
+    acc = {(j, s): writer.declare(ftype, hint='acc')
+           for j in cols for s in range(M)}
+    a_of = _a_on_demand(writer, A, K, kx)
+    for k0 in range(0, K + kx, threads):
+        dk = min(threads, K + kx - k0)
+        for i in range(0, dk, step):
+            rows = {j: _row_source(writer, sources[(j, k0)], ftype, threads,
+                                   step, i // step) for j in cols}
+            for r in range(min(step, dk - i)):
+                avs = [(s, a_of(s, k0 + i + r)) for s in range(M)]
+                avs = [(s, av) for s, av in avs if av is not None]
+                if not avs:
+                    continue
+                for j in cols:
+                    _row_products(writer, form, step, rows[j], ftype, threads,
+                                  r, [(acc[(j, s)], av) for s, av in avs])
+                _pin(writer, [acc[(j, s)] for j in cols for s, _ in avs])
+    for j in cols:
+        for s in range(M):
+            C(writer, acc[(j, s)], s, j)
 
 
 def _a_on_demand(writer, A, K, kx):
@@ -727,7 +854,7 @@ def _paired_columns(writer, C, A, B, pairs, M, K, kx, threads, dtype, step):
 
 
 def _matmuldpp_wide(writer, start, stop, C, A, B, M, K, kx, threads, dtype,
-                    sparse, ctx, width):
+                    sparse, ctx, width, a_resident=False):
     """The chain at lead width `width`: each lane holds `width` adjacent rows.
 
     `A(i, k)` and `C(i, j)` are `width`-vectors then, and so is `B`: its
@@ -807,6 +934,12 @@ def _matmuldpp_wide(writer, start, stop, C, A, B, M, K, kx, threads, dtype,
     # at width one runs, with `width` scalar accumulators a slot -- a DPP
     # modifier writes its accumulator through a reference, which a vector
     # element cannot bind to.
+    if not FUSED_WIDE:
+        return False
+    if _fused_order(cols, M * width, K, dtype, step, threads,
+                    a_resident) == 'rows':
+        return _fused_rows_wide(writer, cols, C, A, sources, M, K, kx,
+                                threads, dtype, ctx, width)
     ab = _load_a(writer, A, M, K, kx)
     if any(_width_of(av) != width for av in ab.values()):
         return False
@@ -837,6 +970,55 @@ def _matmuldpp_wide(writer, start, stop, C, A, B, M, K, kx, threads, dtype,
                      ctx)
         for s in range(M):
             C(writer, writer.pack(vtype, *acc[s]), s, j)
+    return True
+
+
+def _fused_rows_wide(writer, cols, C, A, sources, M, K, kx, threads, dtype,
+                     ctx, width):
+    """`_matmuldpp_wide`'s fused chain with the contraction outermost.
+
+    Within a block of `threads * width` steps the components go outermost,
+    then the rows of each sub-block: the order the column walk gives every
+    accumulator, so the sums agree with it to the bit.  `A(i, k)` is a
+    `width`-vector of rows, read at its step and dead after it.
+    """
+    step = select_fmadpp_step(dtype, threads, ctx)
+    form = select_broadcast_form(dtype, step, M * width, ctx, can_pack=False)
+    ftype = ScalarType(dtype)
+    vtype = ScalarType(dtype, width)
+    span = threads * width
+    acc = {(j, s): [writer.declare(ftype, hint='acc') for _ in range(width)]
+           for j in cols for s in range(M)}
+    a_of = _a_on_demand(writer, A, K, kx)
+    for k0 in range(0, K + kx, span):
+        lanes = -(-min(span, K + kx - k0) // width)
+        for c in range(width):
+            comps = {j: writer.extract(sources[(j, k0)], c, ftype)
+                     for j in cols}
+            for i in range(0, lanes, step):
+                rows = {j: _row_source(writer, comps[j], ftype, threads, step,
+                                       i // step) for j in cols}
+                for r in range(min(step, lanes - i)):
+                    avs = [(s, a_of(s, k0 + width * (i + r) + c))
+                           for s in range(M)]
+                    avs = [(s, av) for s, av in avs if av is not None]
+                    if any(_width_of(av) != width for _, av in avs):
+                        # `A` does not hold the rows as the accumulator does.
+                        return False
+                    if not avs:
+                        continue
+                    parts = [(s, [writer.extract(av, h, ftype)
+                                  for h in range(width)]) for s, av in avs]
+                    for j in cols:
+                        _row_products(writer, form, step, rows[j], ftype,
+                                      threads, r,
+                                      [(acc[(j, s)][h], p) for s, ps in parts
+                                       for h, p in enumerate(ps)])
+                    _pin(writer, [a for j in cols for s, _ in avs
+                                  for a in acc[(j, s)]])
+    for j in cols:
+        for s in range(M):
+            C(writer, writer.pack(vtype, *acc[(j, s)]), s, j)
     return True
 
 

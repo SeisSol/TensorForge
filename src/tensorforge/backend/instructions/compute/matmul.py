@@ -121,6 +121,11 @@ class MatmulOperands:
     #: them rather than once per multiplication.
     a_uniform: bool = False
 
+    #: Whether `A` is held in registers for the section anyway -- a chain's
+    #: intermediate, or an operand loaded into a register image -- so that a
+    #: path keeping all of it live costs nothing beyond what is already there.
+    a_resident: bool = False
+
     #: Adjacent lead elements one lane holds per slot: `Options`' lead width.
     #: `A` and `C` then take and give vectors of this length, and `B`'s
     #: contraction axis is spread over the lanes the same way -- lane `t` of

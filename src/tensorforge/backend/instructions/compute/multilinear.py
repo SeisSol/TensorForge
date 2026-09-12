@@ -1258,6 +1258,8 @@ class MultilinearInstruction(ComputeInstruction):
                 B_frag=B_frag, B_direct=B_direct,
                 a_uniform=(a_obj is not None and getattr(a_obj, 'addressing', None)
                            is Addressing.NONE),
+                a_resident=self._ops[0].symbol.stype in (SymbolType.Register,
+                                                         SymbolType.Scratch),
                 mult_stride=self._mult_stride,
                 A_slot=(A_slot if a_obj is not None
                         and getattr(a_obj, 'storage_order', None) is not None

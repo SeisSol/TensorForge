@@ -256,4 +256,5 @@ def matmul(writer, ops, ctx, span):
         return matmul32(writer, C, A, B, M, N, K, kx, threads, dtype, sparse,
                         ctx, span.start, span.stop)
     return matmuldpp(writer, span.start, C, A, B, M, N, K, kx, threads, dtype,
-                     sparse, ctx, span.stop, width=ops.lead_width)
+                     sparse, ctx, span.stop, width=ops.lead_width,
+                     a_resident=ops.a_resident)
