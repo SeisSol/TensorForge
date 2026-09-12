@@ -26,6 +26,8 @@ from __future__ import annotations
 
 import pytest
 
+from tensorforge.backend.instructions.compute import bitlayout
+from tensorforge.backend.instructions.compute.bitlayout import Place
 from tensorforge.backend.instructions.compute.primitives import nvidia
 from tensorforge.common.basic_types import Addressing, Datatype
 from tensorforge.common.exceptions import GenerationError
@@ -75,6 +77,86 @@ def _atoms():
                     seen.add(key)
                     out.append(atom)
     return out
+
+
+@pytest.mark.parametrize('atom', _atoms(),
+                         ids=lambda a: f'm{a.m}n{a.n}k{a.k}_{a.d.name}')
+def test_the_d_layout_factors_into_bits(atom):
+    """The accumulator's map, against the arithmetic it is stated as.
+
+    Written out here rather than imported, because a table checked against
+    its own generator checks nothing.
+    """
+    bits = nvidia.d_fragment_bits(atom, THREADS)
+    for g in range(atom.m // MTILE):
+        for e in range(2):
+            for lane in range(THREADS):
+                row, col = lane // 4 + MTILE * g, 2 * (lane % 4) + e
+                at = bits.locate(row, col)
+                assert (at.slot, at.lane) == (2 * g + e, lane), (g, e, lane)
+                assert at.element == 0
+
+
+@pytest.mark.parametrize('atom', _atoms(),
+                         ids=lambda a: f'm{a.m}n{a.n}k{a.k}_{a.d.name}')
+def test_the_offsets_are_the_ones_the_closed_form_gave(atom):
+    """`accumulator_slots` reads the bits back now.  The offsets it used to
+    compute are what the epilogue writes at, so they have to be the same
+    tuple in the same order or every accumulator lands somewhere else."""
+    closed = tuple((2 * g + e, e + g * MTILE * atom.n)
+                   for g in range(atom.m // MTILE)
+                   for e in range(2))
+    assert nvidia.accumulator_slots(atom) == closed
+
+
+def _chainable():
+    """Atom pairs a chained product could use: the producer's accumulator
+    handed to the consumer as its A operand, so the producer's `n` is the
+    consumer's `k` and both cover the same rows."""
+    atoms = _atoms()
+    return [(p, c) for p in atoms for c in atoms
+            if p.n == c.k and p.m == c.m]
+
+
+def test_there_is_a_pair_the_chain_could_use():
+    """Otherwise the check below skips everything and reads as coverage."""
+    assert _chainable()
+
+
+@pytest.mark.parametrize('producer,consumer', _chainable(),
+                         ids=lambda a: f'm{a.m}n{a.n}k{a.k}_{a.d.name}')
+def test_nothing_leaves_its_quad_between_the_accumulator_and_the_operand(
+        producer, consumer):
+    """The property that decides what a chained handover costs, computed from
+    the two tables rather than asserted about them.
+
+    Handing D straight to the next product as its A operand is legal only if
+    the difference between the two distributions is something an instruction
+    can perform.  Every bit that moves here has lane weight below four, so no
+    value crosses out of its quad of four consecutive lanes -- which is why
+    the fallback is a width-four shuffle, and why a transpose is not the
+    instrument: a transpose exchanges the row address with the column
+    address, and here the row address stays put.
+    """
+    moves = bitlayout.displacement(
+        nvidia.d_fragment_bits(producer, THREADS),
+        nvidia.a_fragment_bits(consumer, THREADS))
+    assert moves, 'the two are not the same layout'
+    for source, target in moves:
+        for bit in (source, target):
+            assert not (bit.place is Place.LANE and bit.weight >= 4), moves
+
+    # The rows differ in which slot holds the high bit and in nothing else,
+    # which is a permutation of the PTX operand list.
+    rows = [(s, t) for s, t in moves
+            if s.place is Place.SLOT and t.place is Place.SLOT]
+    assert len(rows) == (1 if producer.m // MTILE > 1 else 0)
+
+    # What is left is a cycle through the slot bit and the two low lane bits.
+    cycle = [pair for pair in moves if pair not in rows]
+    assert len(cycle) == 3, cycle
+    assert {b.place for pair in cycle for b in pair} == {Place.SLOT,
+                                                         Place.LANE}
 
 
 @pytest.mark.parametrize('atom', _atoms(),

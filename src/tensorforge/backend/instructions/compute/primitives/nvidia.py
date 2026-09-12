@@ -255,10 +255,56 @@ def accumulator_slots(atom):
     and nothing could see it: the emitter was the only statement of the layout,
     so there was nothing to check it against.  `tests/test_nvidia_gate.py` now
     checks it against the read-back that follows it.
+
+    Read off `d_fragment_bits` rather than written as a closed form.  The
+    offsets and the bits are the same map twice over, and the closed form is
+    the half of it a chained product cannot use: it says where a slot lands in
+    memory and not which lane holds which cell, which is the question asked
+    when the fragment is handed to another instruction instead of written out.
     """
-    return tuple((2 * g + e, e + g * 8 * atom.n)
-                 for g in range(atom.m // 8)
-                 for e in range(2))
+    bits = d_fragment_bits(atom)
+    cells = {}
+    for row in range(atom.m):
+        for col in range(atom.n):
+            at = bits.locate(row, col)
+            if at.lane == 0:
+                cells[at.slot] = row * atom.n + col
+    return tuple((slot, cells[slot]) for slot in sorted(cells))
+
+
+def d_fragment_bits(atom, threads: int = 32) -> BitLayout:
+    """The PTX D layout of one tile, in the vocabulary a value is read in.
+
+    The accumulator's side of the same statement `a_fragment_bits` makes about
+    the operand, and it exists for the sharper reason: an accumulator can be
+    handed to the next instruction instead of written out, and whether that is
+    legal is a question about the two distributions.  Answered by comparing
+    them, once both are said in the same words; before that it could only be
+    asserted, and an assertion about a register layout is the kind that
+    computes a different matrix exactly rather than approximately.
+
+    Both axes factor, as they do for A and for the same reason -- every term
+    of the map is a shift.  Every row in `INSTRS` has `n == 8` and holds D as
+    `m / 8` row groups of two adjacent columns: lane `t` owns rows
+    ``t / 4 + 8 * g`` and columns ``2 * (t % 4) + e``, with the operand list
+    in slot order ``2 * g + e``.  So the row's low three bits are the lane's
+    2..4 and its higher bits are `g`, whose place value in the slot index is
+    2; the column's low bit is `e`, whose place value is 1, and its higher
+    two are the lane's 0..1.
+
+    The `e` bit sitting *below* the lane bits on the column axis is the whole
+    difference from A, where the two lane bits are lowest.  That is why the
+    gap between them is a rotation and not a transpose, and why no value
+    leaves its quad of four consecutive lanes: nothing at lane weight 4 or
+    above moves at all.
+    """
+    mregs = atom.m // 8
+    rows = tuple([Bit(Place.LANE, 1 << (2 + b)) for b in range(3)]
+                 + [Bit(Place.SLOT, 2 << b)
+                    for b in range((mregs - 1).bit_length())])
+    cols = tuple([Bit(Place.SLOT, 1)]
+                 + [Bit(Place.LANE, 1 << b) for b in range(2)])
+    return BitLayout((rows, cols))
 
 
 def tile_starts(extent, threads, atom):

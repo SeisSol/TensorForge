@@ -940,7 +940,27 @@ GROUPS = {
              'def tfconvert(writer: Writer, variables):', 1)),
     ]),
 
-    'fragmentbits': ('tests/test_fragment_order.py', [
+    'fragmentbits': ('tests/test_fragment_order.py tests/test_nvidia_gate.py', [
+        ("the row group's place value in the operand list halved",
+         sub(Path('src/tensorforge/backend/instructions/compute/primitives/nvidia.py'),
+             '                 + [Bit(Place.SLOT, 2 << b)\n'
+             '                    for b in range((mregs - 1).bit_length())])\n'
+             '    cols = tuple([Bit(Place.SLOT, 1)]',
+             '                 + [Bit(Place.SLOT, 1 << b)\n'
+             '                    for b in range((mregs - 1).bit_length())])\n'
+             '    cols = tuple([Bit(Place.SLOT, 1)]')),
+        ("the accumulator's column pair read above its lane bits",
+         sub(Path('src/tensorforge/backend/instructions/compute/primitives/nvidia.py'),
+             '    cols = tuple([Bit(Place.SLOT, 1)]\n'
+             '                 + [Bit(Place.LANE, 1 << b) for b in range(2)])',
+             '    cols = tuple([Bit(Place.LANE, 1 << b) for b in range(2)]\n'
+             '                 + [Bit(Place.SLOT, 1)])')),
+        ('the slot offsets read off a lane that is not the first',
+         sub(Path('src/tensorforge/backend/instructions/compute/primitives/nvidia.py'),
+             '            if at.lane == 0:\n'
+             '                cells[at.slot] = row * atom.n + col',
+             '            if at.lane == 1:\n'
+             '                cells[at.slot] = row * atom.n + col')),
         ("the row's lane bits read one place too low",
          sub(Path('src/tensorforge/backend/instructions/compute/primitives/nvidia.py'),
              'rows = tuple([Bit(Place.LANE, 1 << (2 + b)) for b in range(3)]',
@@ -972,14 +992,16 @@ GROUPS = {
          sub(Path('src/tensorforge/backend/instructions/compute/primitives/nvidia.py'),
              '    return int(digits) if digits else BASELINE_SM',
              '    return BASELINE_SM', 1)),
-        ('the accumulator group stride pinned to m16n8k8',
+        ('the accumulator row stride pinned to m16n8k8',
          sub(Path('src/tensorforge/backend/instructions/compute/primitives/nvidia.py'),
-             '    return tuple((2 * g + e, e + g * 8 * atom.n)',
-             '    return tuple((2 * g + e, e + g * 64)', 1)),
+             '                cells[at.slot] = row * atom.n + col',
+             '                cells[at.slot] = row * 8 + col', 1)),
         ('the accumulator column pair dropped',
          sub(Path('src/tensorforge/backend/instructions/compute/primitives/nvidia.py'),
-             '                 for e in range(2))',
-             '                 for e in range(1))', 1)),
+             '            if at.lane == 0:\n'
+             '                cells[at.slot] = row * atom.n + col',
+             '            if at.lane == 0 and at.slot % 2 == 0:\n'
+             '                cells[at.slot] = row * atom.n + col', 1)),
         ('an address goes back to raw text',
          sub(Path('src/tensorforge/backend/instructions/compute/primitives/nvidia.py'),
              "    v = writer.thread_id('x')",
