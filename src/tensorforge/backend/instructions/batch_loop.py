@@ -867,7 +867,11 @@ class BatchLoop(AbstractInstruction):
         the prologue asking for the index emits a binding.  `cond` is that flag
         where the caller has read it already.
         """
-        for instr in instrs:
+        instrs = list(instrs)
+        i = 0
+        while i < len(instrs):
+            instr = instrs[i]
+            i += 1
             if (self._flags is FlagMode.ABSENT
                     or not getattr(instr, '_guard_by_own_flag', False)):
                 instr.gen_code(writer)
@@ -888,10 +892,22 @@ class BatchLoop(AbstractInstruction):
                 finally:
                     instr._copy_predicate = None
                 continue
+            # The instructions after it that sit under the same flag share its
+            # block: one branch rather than one per instruction, and the
+            # statements side by side where the lowering can take them as one
+            # (the prefetch hints, which ESIMD asks for in one gather).
+            group = [instr]
+            while (i < len(instrs)
+                   and getattr(instrs[i], '_guard_by_own_flag', False)
+                   and not (hasattr(instrs[i], '_copy_predicate')
+                            and hasattr(writer, 'copy_async'))):
+                group.append(instrs[i])
+                i += 1
             guard = (writer.if_(cond) if hasattr(writer, 'if_')
                      and not isinstance(cond, str) else writer.If(cond))
             with guard:
-                instr.gen_code(writer)
+                for member in group:
+                    member.gen_code(writer)
 
     def _element_flag(self, writer, index, name):
         """`flags[index]`, spelled the way `_flag_guard` spells the current one."""

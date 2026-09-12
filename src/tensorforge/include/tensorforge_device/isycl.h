@@ -79,6 +79,70 @@ ESIMD_INLINE void prefetchHinted(const T *ptr) {
   }
 }
 
+namespace detail {
+template <typename P, typename... Ps>
+ESIMD_INLINE const P *firstRun(const P *p, const Ps *...) {
+  return p;
+}
+
+template <int Lane, int Lanes>
+ESIMD_INLINE void fillRuns(intel_esimd::simd<std::uint64_t, Lanes> &,
+                           std::uint64_t) {}
+
+/// The lanes for one run and then the rest: a lane per 64-byte line of the
+/// `B` bytes at `p`, the last clamped onto the run's last dword, as byte
+/// offsets from `base`.  Unsigned, so a run below the base wraps and the sum
+/// comes back to its address.
+template <int Lane, int Lanes, int B, int... Rest, typename P, typename... Ps>
+ESIMD_INLINE void fillRuns(intel_esimd::simd<std::uint64_t, Lanes> &offsets,
+                           std::uint64_t base, const P *p, const Ps *...rest) {
+  constexpr int lines = B / 64 + 1;
+  constexpr std::uint32_t last = static_cast<std::uint32_t>((B - 1) & ~3);
+  intel_esimd::simd<std::uint32_t, lines> within(0, 64);
+  within.merge(intel_esimd::simd<std::uint32_t, lines>(last), within > last);
+  offsets.template select<lines, 1>(Lane) =
+      intel_esimd::simd<std::uint64_t, lines>(within) +
+      (reinterpret_cast<std::uint64_t>(p) - base);
+  fillRuns<Lane + lines, Lanes, Rest...>(offsets, base, rest...);
+}
+} // namespace detail
+
+/// Several runs asked for in one gather: `Bytes[i]` from `ptrs[i]`, a lane per
+/// line of each, as `prefetchHinted` does for one run.  Hints for different
+/// operands are different addresses, which a block message cannot take and a
+/// gather can -- so a body's hints for the next element are one message where
+/// they were one per operand.  The lanes left over ask for the first run's
+/// first line again.
+template <intel_esimd::cache_hint L1H, intel_esimd::cache_hint L2H,
+          int... Bytes, typename... P>
+ESIMD_INLINE void prefetchRunsHinted(const P *...ptrs) {
+  static_assert(sizeof...(Bytes) == sizeof...(P), "one length per run");
+  constexpr int total = (0 + ... + (Bytes / 64 + 1));
+  static_assert(total <= 32,
+                "one gather message holds 32 lines; split the runs");
+  constexpr int lanes = total <= 8 ? 8 : total <= 16 ? 16 : 32;
+  const auto *first = detail::firstRun(ptrs...);
+  const std::uint64_t base = reinterpret_cast<std::uint64_t>(first);
+  intel_esimd::simd<std::uint64_t, lanes> offsets(0);
+  detail::fillRuns<0, lanes, Bytes...>(offsets, base, ptrs...);
+  intel_esimd::prefetch<std::uint32_t, lanes>(
+      reinterpret_cast<const std::uint32_t *>(first), offsets,
+      intel_esimd::properties{intel_esimd::cache_hint_L1<L1H>,
+                              intel_esimd::cache_hint_L2<L2H>});
+}
+
+template <int... Bytes, typename... P>
+ESIMD_INLINE void prefetchRunsL1(const P *...ptrs) {
+  prefetchRunsHinted<intel_esimd::cache_hint::cached,
+                     intel_esimd::cache_hint::cached, Bytes...>(ptrs...);
+}
+
+template <int... Bytes, typename... P>
+ESIMD_INLINE void prefetchRunsL2(const P *...ptrs) {
+  prefetchRunsHinted<intel_esimd::cache_hint::uncached,
+                     intel_esimd::cache_hint::cached, Bytes...>(ptrs...);
+}
+
 /// Keep it near: cached at both levels.
 template <int N = 1, typename T> ESIMD_INLINE void prefetchL1(const T *ptr) {
   prefetchHinted<intel_esimd::cache_hint::cached,

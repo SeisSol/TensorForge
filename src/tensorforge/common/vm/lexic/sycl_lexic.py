@@ -309,6 +309,15 @@ class SyclLexic(Lexic):
     # a line (`prefetchHinted` in `isycl.h`); SPMD asks per line.
     return 31 * 64 if self.simd_mode else 64
 
+  def prefetch_runs(self, addresses, byte_counts, level='l2'):
+    # A gather with a lane per line of each run (`prefetchRunsHinted` in
+    # `isycl.h`); SPMD has no instruction that names several addresses.
+    if not self.simd_mode:
+      return None
+    fn = 'prefetchRunsL1' if str(level).lower() == 'l1' else 'prefetchRunsL2'
+    lengths = ', '.join(str(int(b)) for b in byte_counts)
+    return f'tensorforge::{fn}<{lengths}>({", ".join(addresses)});'
+
   def prefetch(self, address, *, datatype, elems=1, level='l2'):
     """Two spellings, and only one of them can carry a level.
 

@@ -833,6 +833,73 @@ class EsimdEmitter(Emitter):
         if named:
             self.bind(v, named)
 
+    # -- prefetch runs ------------------------------------------------------ #
+
+    #: Lines one gather prefetch asks for: its lanes.
+    PREFETCH_LINES = 32
+
+    def _emit_body(self, body, yield_to) -> None:
+        """As the base emitter, with side-by-side hints asked for together.
+
+        Hints for different operands name different addresses, one message
+        each -- five for `local_flux`'s next element, six for its pointers.
+        A gather takes an address per lane, so a run of prefetch statements
+        under the same guard and at the same level is one statement here
+        (`Lexic.prefetch_runs`), split only where it would pass 32 lines.
+        """
+        i, n = 0, len(body)
+        while i < n:
+            s = body[i]
+            if s.op == Op.PREFETCH and self._prefetch_lex is not None:
+                j = i + 1
+                while (j < n and body[j].op == Op.PREFETCH
+                       and self._same_hint(body[j], s)):
+                    j += 1
+                if j - i > 1:
+                    self._emit_prefetch_runs(body[i:j], yield_to)
+                    i = j
+                    continue
+            super()._emit_body((s,), yield_to)
+            i += 1
+
+    @staticmethod
+    def _same_hint(a, b) -> bool:
+        pa, pb = a.predicate, b.predicate
+        if (pa is None) != (pb is None) or (pa is not None and pa.id != pb.id):
+            return False
+        return a.attr('level', 'l2') == b.attr('level', 'l2')
+
+    def _emit_prefetch_runs(self, stmts, yield_to) -> None:
+        lex = self._prefetch_lex
+        runs = []
+        for s in stmts:
+            base = s.prefetch_base
+            addr = self.address(base, s.prefetch_index)
+            dt = self.elem_type(base)
+            size = dt.size() if dt is not None else 4
+            runs.append((s, f'&{self.base_name(base)}[{addr}]',
+                         int(s.attr('elems', 1)) * size))
+        groups, lines = [[]], 0
+        for run in runs:
+            need = run[2] // 64 + 1
+            if groups[-1] and lines + need > self.PREFETCH_LINES:
+                groups.append([])
+                lines = 0
+            groups[-1].append(run)
+            lines += need
+        pred = stmts[0].predicate
+        for group in groups:
+            text = (lex.prefetch_runs([r[1] for r in group], [r[2] for r in group],
+                                      level=stmts[0].attr('level', 'l2'))
+                    if len(group) > 1 else None)
+            if text is None:
+                super()._emit_body(tuple(r[0] for r in group), yield_to)
+            elif pred is not None:
+                with self.writer.If(self.operand(pred)):
+                    self.writer(text)
+            else:
+                self.writer(text)
+
     # -- load runs ---------------------------------------------------------- #
 
     #: What one block message moves: LSC's transposed read takes at most 64

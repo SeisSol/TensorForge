@@ -562,6 +562,8 @@ void slmStore(SlmPtr<T>, intel_esimd::simd<T, N>) {}
 /// the address as one block message.
 template <int N = 1, typename T> void prefetchL1(const T *) {}
 template <int N = 1, typename T> void prefetchL2(const T *) {}
+template <int... Bytes, typename... P> void prefetchRunsL1(const P *...) {}
+template <int... Bytes, typename... P> void prefetchRunsL2(const P *...) {}
 
 template <std::size_t Bytes> void slmReserve() {}
 

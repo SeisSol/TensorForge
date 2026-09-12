@@ -187,7 +187,9 @@ def test_esimd_spells_it_through_the_helper():
     gen, src = _generate(Addressing.PTR_BASED, arch='pvc', backend='esimd',
                          enable_prefetch=True)
     _needs_a_batch_loop(gen)
-    assert 'tensorforge::prefetchL2(&' in src, src
+    # one hint alone, or several side by side as one gather
+    assert ('tensorforge::prefetchL2(&' in src
+            or 'tensorforge::prefetchRunsL2<' in src), src
 
 
 def test_the_hint_sits_at_the_head_of_the_body():

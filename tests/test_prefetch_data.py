@@ -45,15 +45,30 @@ def test_off_by_default():
     assert 'pf_' not in _kernel()
 
 
+def _esimd_hints(src):
+    """`(statements, bytes asked for)` of the data hints in an ESIMD kernel."""
+    single = [4 * int(n) for n in re.findall(r'prefetchL2<(\d+)>\(&?pf_', src)]
+    runs = [sum(int(b) for b in m.split(','))
+            for m in re.findall(r'prefetchRunsL2<([\d, ]+)>\(&?pf_', src)]
+    return len(single) + len(runs), sum(single) + sum(runs)
+
+
 def test_esimd_asks_for_whole_operands_in_few_messages():
     """`local_flux`'s per-element operands are one 56 x 9 matrix and four
-    9 x 9 ones: 504 and 4 x 81 floats.  One statement asks for up to 31 lines
-    -- a gather with a lane per line -- so the 2016 bytes of the first are two
-    hints and each of the others one: six, where 64-dword blocks were 16."""
-    src = _kernel(prefetch_data=True)
-    runs = [int(n) for n in re.findall(r'prefetchL2<(\d+)>\(&?pf_', src)]
-    assert sum(runs) == 504 + 4 * 81
-    assert len(runs) == 6
+    9 x 9 ones: 504 and 4 x 81 floats.  A gather asks for up to 32 lines with
+    a lane each, and different operands are only different addresses: the
+    first 31 lines of the matrix are one message, its last line and the four
+    small ones another -- two, where 64-dword blocks were 16."""
+    statements, asked = _esimd_hints(_kernel(prefetch_data=True))
+    assert asked == 4 * (504 + 4 * 81)
+    assert statements == 2
+
+
+def test_esimd_asks_for_the_pointers_in_one_message():
+    """Six pointer hints side by side at the head of the body: one gather."""
+    src = _kernel(enable_prefetch=True)
+    assert src.count('prefetchRunsL2<') == 1, src
+    assert src.count('tensorforge::prefetchL2(') == 0
 
 
 def test_cuda_asks_one_line_per_hint():
@@ -79,4 +94,4 @@ def test_pointer_hints_stand_beside_a_wrapped_transfer():
     for backend, arch in (('esimd', 'pvc'), ('cuda', 'sm_100')):
         src = _kernel(backend, arch, enable_prefetch=True,
                       enable_wrap_loads=True, prefetch_data=True)
-        assert 'prefetchL2' in src
+        assert 'prefetchL2' in src or 'prefetchRunsL2' in src

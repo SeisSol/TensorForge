@@ -375,6 +375,15 @@ class Lexic(ABC):
     """
     return 64
 
+  def prefetch_runs(self, addresses, byte_counts, level='l2'):
+    """Several hints as one statement, or None where each is its own.
+
+    `addresses[i]` is a pointer expression and `byte_counts[i]` how far past
+    it the hint reaches.  Only a target whose one instruction can name
+    several addresses answers.
+    """
+    return None
+
   def prefetch(self, address, *, datatype, elems=1, level='l2'):
     """One prefetch, as a statement.  `address` is a pointer expression.
 
