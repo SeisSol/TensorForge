@@ -166,9 +166,7 @@ class AbstractShrMemWrite(MemoryInstruction):
           swizzle=self._swizzle(writer))
       self._write_owner = getattr(writer, 'uid', None)
       return
-    lhs = (f'{self._fp_as_str}* {self._vm.get_lexic().restrict_kw} '
-           f'{self.write_base()}')
-    writer(f'{lhs} = &{self._arena()}[{offset}];')
+    writer(f'{self._shared_window(self.write_base(), offset)};')
 
   def write_buffer(self, writer):
     """The value this transfer writes through, if it belongs to this body.
@@ -204,8 +202,19 @@ class AbstractShrMemWrite(MemoryInstruction):
                              swizzle=self._swizzle(writer))
         self._dest.set_pir_buffer(writer, value)
       else:
-        lhs = f'{self._fp_as_str}* {self._vm.get_lexic().restrict_kw} {self._dest.name}'
-        writer(f'{lhs} = &{self._arena()}[{offset}];')
+        writer(f'{self._shared_window(self._dest.name, offset)};')
+
+  def _shared_window(self, name: str, offset) -> str:
+    """`name` bound to `offset` elements into this transfer's arena.
+
+    Both spellings come from the backend, and together, because on a target
+    where a shared address is not a pointer neither half of the old string is
+    right -- and half of it being right is how a declaration ends up naming a
+    type its initialiser does not produce.
+    """
+    lexic = self._vm.get_lexic()
+    ptr = lexic.shared_pointer_type(self._fp_as_str, restrict=True)
+    return f'{ptr} {name} = {lexic.shared_window_expr(self._arena(), offset)}'
 
   #: Shared memory is 32 banks wide on both vendors, so there is nothing to
   #: gain from permuting over a longer period than that.

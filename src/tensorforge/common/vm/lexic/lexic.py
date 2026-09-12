@@ -70,6 +70,46 @@ class Lexic(ABC):
     qual = f' {self.restrict_kw}' if restrict and self.restrict_kw else ''
     return f'{lhs}{elem} *{ptr}{qual}'
 
+  def shared_pointer_type(self, elem: str, restrict: bool = False) -> str:
+    """The declarator for a window into the shared arena, without the name.
+
+    Separate from `pointer_type` and not a call into it, so that the spelling
+    the macro layer has always used stays exactly what it was: these two call
+    sites wrote `float*` where `pointer_type` writes `float *`, and a
+    whitespace change here is a change to every snapshot on every backend for
+    no reason anybody reading the diff could recover.
+
+    What the hook buys is the question, not the answer: a target where a
+    shared address is not a pointer can now say so in one place instead of
+    having four call sites format `{elem}*` at it.
+    """
+    tail = f' {self.restrict_kw}' if restrict and self.restrict_kw else ''
+    return f'{elem}*{tail}'
+
+  def shared_window_expr(self, arena: str, offset) -> str:
+    """How a window `offset` elements into the shared arena is spelled.
+
+    `&arena[offset]` wherever a shared address is a pointer, which is every
+    backend but one.  Asked rather than formatted because the exception does
+    not have pointers into that space at all: an ESIMD address is an offset,
+    and taking the address of a subscript of one is neither meaningful nor
+    ill-formed enough to be caught -- `&s0[i]` on a proxy is a diagnostic on
+    a good day and a pointer to a temporary otherwise.
+    """
+    return f'&{arena}[{offset}]'
+
+  def get_slm_load(self, elem: str, width: int, address: str) -> str:
+    """A vector read of shared memory, where that is its own instruction.
+
+    None where a shared address is a pointer and the ordinary load spelling
+    already covers it, so a caller tests rather than always substituting.
+    """
+    return None
+
+  def get_slm_store(self, elem: str, width: int, address: str,
+                    value: str) -> str:
+    return None
+
   @abstractmethod
   def multifile(self):
     pass
@@ -83,7 +123,7 @@ class Lexic(ABC):
     pass
 
   @abstractmethod
-  def declare_shared_memory(self, name, precision):
+  def declare_shared_memory(self, name, precision, size=None):
     pass
 
   @abstractmethod

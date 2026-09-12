@@ -79,11 +79,41 @@ class SyclLexic(Lexic):
   def get_launch_code(self, func_name, grid, block, stream, func_params, shmem, coop):
     return f"{func_name}({stream}, {grid}, {block}, {func_params})"
 
-  def declare_shared_memory(self, name, precision):
-    return ""
+  def declare_shared_memory(self, name, precision, size=None):
+    """Nothing under SPMD; the reserved SLM chunk under the explicit vector.
+
+    A `local_accessor` is what SYCL offers and what the SPMD kernel takes, and
+    it is declared in the handler rather than the kernel -- so there is no
+    statement to return here at all.
+
+    ESIMD cannot use it as one.  Local memory there is reached through the
+    `slm_` accessors, which take a byte offset into a chunk reserved by
+    `slm_init`, and an accessor would have to be carried to every access site
+    as a second operand for no gain: the offsets are the same numbers either
+    way.  So the arena becomes the chunk, and its base is offset zero.
+
+    `slm_init` wants the size as a template argument, which is why this now
+    takes one.  The generator has it -- `ShrMemOpt` fixes the arena before any
+    body is built -- but it used to keep it to itself.
+    """
+    if not self.simd_mode:
+      return ""
+    if size is None:
+      raise ValueError('the explicit-vector arena is `slm_init<Bytes>()` and '
+                       'needs its size at the declaration; the caller has it '
+                       'and has to pass it')
+    return (f'tensorforge::SlmPtr<{precision}> {name} = '
+            f'tensorforge::slmArena<{size} * sizeof({precision}), '
+            f'{precision}>()')
 
   def kernel_definition(self, file, kernel_bounds, base_name, params, precision=None, total_shared_mem_size=None, global_symbols=None):
-    if total_shared_mem_size is not None and precision is not None:
+    if self.simd_mode:
+      # The arena is reserved inside the kernel instead; see
+      # `declare_shared_memory`.  Declaring an accessor as well would reserve
+      # the space twice -- once by the accessor's range and once by
+      # `slm_init` -- and the second is the one the accesses address.
+      localmem = None
+    elif total_shared_mem_size is not None and precision is not None:
       if self._backend == 'acpp':
         localmem = f'sycl::accessor<{precision}, 1, sycl::access::mode::read_write, sycl::access::target::local>'
       else:
@@ -298,6 +328,54 @@ class SyclLexic(Lexic):
     # as legal as `sycl::vec` makes it, which is why `widths_for` has to keep
     # answering from a base that proves what it needs.
     return f'sycl::vec<{fptype}, {length}>'
+
+  def pointer_type(self, elem, space=None, readonly=False, restrict=False,
+                   const=False):
+    """`SlmPtr<T>` for shared memory under the explicit vector, else generic.
+
+    The address space is in the type here for the same reason it is on AMD --
+    it is a different space, and a pointer that forgets which one it is in
+    reads the wrong memory -- but the shape of the answer differs. On AMD the
+    space is an attribute on the pointee and the value is still an address;
+    ESIMD has no address into SLM at all, so `SlmPtr` is an offset wearing
+    enough of a pointer's interface (`+`, `[]`) for the generator's own
+    address arithmetic to go through unchanged.
+
+    `restrict` is dropped rather than fused: it is a promise about aliasing
+    between pointers, and there are none here -- two `SlmPtr` are two integers
+    and the accesses they name are ordinary SLM messages the compiler already
+    orders. Saying `__restrict__` about a class type is not a weaker promise,
+    it does not parse.
+    """
+    if self.simd_mode and getattr(space, 'name', None) == 'SHARED':
+      ro = 'const ' if readonly else ''
+      tail = ' const' if const else ''
+      return f'tensorforge::SlmPtr<{ro}{elem}>{tail}'
+    return super().pointer_type(elem, space, readonly, restrict, const)
+
+  def shared_pointer_type(self, elem, restrict=False):
+    if self.simd_mode:
+      # `pointer_type` already answers for this space; the two must not drift.
+      from tensorforge.backend.pir.core import MemSpace
+      return self.pointer_type(elem, MemSpace.SHARED, restrict=restrict)
+    return super().shared_pointer_type(elem, restrict)
+
+  def shared_window_expr(self, arena, offset):
+    if self.simd_mode:
+      # An offset into an offset.  `&arena[off]` would be the address of the
+      # proxy `operator[]` returns, which is a temporary.
+      return f'{arena} + ({offset})'
+    return super().shared_window_expr(arena, offset)
+
+  def get_slm_load(self, elem, width, address):
+    if not self.simd_mode:
+      return None
+    return f'tensorforge::slmLoad<{elem}, {width}>({address})'
+
+  def get_slm_store(self, elem, width, address, value):
+    if not self.simd_mode:
+      return None
+    return f'tensorforge::slmStore<{elem}, {width}>({address}, {value});'
 
   def get_simd(self, fptype, size):
     return f'tensorforge::intel_esimd::simd<{fptype}, {size}>'

@@ -95,7 +95,7 @@ class CudaLexic(Lexic):
     else:
       return f"{func_name}<<<{grid},{block},{shmem},{stream}>>>({func_params})"
 
-  def declare_shared_memory(self, name, precision):
+  def declare_shared_memory(self, name, precision, size=None):
     return f'auto* {name} = reinterpret_cast<{precision}*>({GeneralLexicon.TOTAL_SHR_MEM}Ptr)'
 
   def get_launch_bounds(self, total_num_threads_per_block, min_blocks_per_mp=None):

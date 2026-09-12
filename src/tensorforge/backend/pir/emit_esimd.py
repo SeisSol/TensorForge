@@ -271,8 +271,16 @@ class EsimdEmitter(Emitter):
         if (getattr(s, 'op', None) in (Op.LOAD, Op.LOAD_ASYNC)
                 and v.layout is not None and v.distributed):
             nm = name or self.name(v)
+            ptr = self._as_pointer(expr)
+            slm = self._slm_load(s.args[0], v, ptr)
+            if slm is not None:
+                # An expression rather than the two statements below, because
+                # the SLM read *returns* the vector: there is nothing to fill
+                # in place, so the declaration takes its initialiser.
+                self.writer(f'{self.ctype(v.type, v)} {nm} = {slm};')
+                return
             self.writer(f'{self.ctype(v.type, v)} {nm};')
-            self.writer(f'{nm}.copy_from({self._as_pointer(expr)});')
+            self.writer(f'{nm}.copy_from({ptr});')
             return
         super().declare(v, expr, s, name)
 
@@ -301,6 +309,50 @@ class EsimdEmitter(Emitter):
             base, _, idx = access[:-1].partition('[')
             return f'{base} + ({idx})'
         return f'&{access}'
+
+    # -- shared memory ----------------------------------------------------- #
+
+    @staticmethod
+    def _is_shared(base) -> bool:
+        """Both ways a base names its space, because both still occur.
+
+        A migrated access has the buffer as a `Value` and reads the space off
+        its type.  One that has not migrated has a `Symbol`, whose `stype`
+        says the same thing in the macro layer's vocabulary -- and 35 of the
+        39 vector reads in a plain GEMM are still of the second kind, so
+        answering only for the first is answering for almost none of them.
+        """
+        t = getattr(base, 'type', None)
+        if isinstance(t, BufferType):
+            return t.space is MemSpace.SHARED
+        stype = getattr(base, 'stype', None)
+        return MemSpace.from_symbol_type(stype) is MemSpace.SHARED
+
+    def _vector_width(self, v: Value) -> int:
+        return v.lane_span() * (v.type.length or 1)
+
+    def _slm_load(self, base, v: Value, address: str):
+        """A vector read of a staged tile, where the target has its own one.
+
+        None for global and register, which is every other base: there a
+        vector read is `copy_from` on an address and nothing about the space
+        needs saying.  Shared memory on this target is not addressable that
+        way at all -- `copy_from` on a `SlmPtr` does not compile, and on a raw
+        pointer into the arena it would compile and read global memory, which
+        is the reason this asks rather than assumes.
+        """
+        lex = self._lexic()
+        if lex is None or not self._is_shared(base):
+            return None
+        return lex.get_slm_load(v.type.base.ctype(), self._vector_width(v),
+                                address)
+
+    def _slm_store(self, base, v: Value, address: str, value: str):
+        lex = self._lexic()
+        if lex is None or not self._is_shared(base):
+            return None
+        return lex.get_slm_store(v.type.base.ctype(), self._vector_width(v),
+                                 address, value)
 
     def _emit_stmt(self, s, yield_to) -> None:
         """A distributed value is written back by a transfer too.
@@ -355,6 +407,11 @@ class EsimdEmitter(Emitter):
             if isinstance(val, Value) and val.layout is not None and val.distributed:
                 addr = self.address(s.args[0], s.args[2:])
                 ptr = self._as_pointer(f'{self.base_name(s.args[0])}[{addr}]')
+                slm = self._slm_store(s.args[0], val, ptr,
+                                      self.operand(val))
+                if slm is not None:
+                    self.writer(slm)
+                    return
                 self.writer(f'{self.operand(val)}.copy_to({ptr});')
                 return
         super()._emit_stmt(s, yield_to)

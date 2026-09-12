@@ -117,18 +117,28 @@ class ShrMemAlloc(AbstractInstruction):
 
     lexic = self._vm.get_lexic()
     shr_mem_decl = lexic.declare_shared_memory(name=common_shrmem,
-                                               precision=self._vm.fp_as_str())
+                                               precision=self._vm.fp_as_str(),
+                                               size=common_shrmem_size)
     address = (f'{shrmem_obj.get_size_per_mult()} * {lexic.thread_idx_y} '
                f'+ {shrmem_obj.get_global_size()}')
+
+    from tensorforge.backend.pir.core import BufferType, MemSpace as _MemSpace
+
+    # Asked, not spelled.  A window into shared memory is a pointer on four
+    # of the five backends and an offset on the fifth, and the declaration
+    # and the initialiser have to agree about which -- they were two
+    # independently formatted strings, so on the fifth they did not.
+    def declarator(name):
+      return f'{lexic.shared_pointer_type(self._fp_as_str)} {name}'
 
     if not hasattr(writer, 'decl_expr'):
       if shr_mem_decl:
         writer(f'{shr_mem_decl};')
-      writer(f'{self._fp_as_str}* {shrmem_obj.name} = &{common_shrmem}[{address}];')
-      writer(f'{self._fp_as_str}* tempShrMem = &{shrmem_obj.name}[{shrmem_obj.get_temp_offset()}];')
+      writer(f'{declarator(shrmem_obj.name)} = '
+             f'{lexic.shared_window_expr(common_shrmem, address)};')
+      writer(f'{declarator("tempShrMem")} = '
+             f'{lexic.shared_window_expr(shrmem_obj.name, shrmem_obj.get_temp_offset())};')
       return
-
-    from tensorforge.backend.pir.core import BufferType, MemSpace as _MemSpace
 
     def window(name, decl, text, size):
       return writer.decl_expr(
@@ -143,10 +153,12 @@ class ShrMemAlloc(AbstractInstruction):
       decl, _, rhs = shr_mem_decl.partition(' = ')
       window(common_shrmem, decl, rhs, common_shrmem_size)
 
-    window(shrmem_obj.name, f'{self._fp_as_str}* {shrmem_obj.name}',
-           f'&{common_shrmem}[{address}]', shrmem_obj.get_size_per_mult())
-    window('tempShrMem', f'{self._fp_as_str}* tempShrMem',
-           f'&{shrmem_obj.name}[{shrmem_obj.get_temp_offset()}]',
+    window(shrmem_obj.name, declarator(shrmem_obj.name),
+           lexic.shared_window_expr(common_shrmem, address),
+           shrmem_obj.get_size_per_mult())
+    window('tempShrMem', declarator('tempShrMem'),
+           lexic.shared_window_expr(shrmem_obj.name,
+                                    shrmem_obj.get_temp_offset()),
            common_shrmem_size - shrmem_obj.get_temp_offset())
 
   def is_ready(self):

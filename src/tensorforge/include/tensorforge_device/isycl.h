@@ -9,6 +9,8 @@
 #include <sycl/ext/intel/experimental/grf_size_properties.hpp>
 #include <sycl/sycl.hpp>
 
+#include <cstdint>
+
 #include "base.h"
 
 namespace tensorforge {
@@ -125,6 +127,140 @@ segmentedReduction(intel_esimd::simd<T, Block> v) {
   } else {
     return v;
   }
+}
+
+/// A position in the work-group's shared local memory, counted in elements.
+///
+/// Not a pointer, and it cannot be one.  SLM is a separate address space on
+/// this hardware: the ESIMD block and scalar accessors take a *byte offset*
+/// into the chunk `slm_init` reserved, and the stateless block access a raw
+/// `T*` lowers to reads global memory.  So `s0 + i` and `s0[i]` -- which is
+/// how every consumer in the generator addresses a staged tile -- have to
+/// keep meaning what they meant while ceasing to be pointer arithmetic.
+///
+/// Elements rather than bytes, because that is the unit every address in the
+/// generator is already in.  Converting at the access is one multiplication
+/// stated once; converting at the binding would put `sizeof(T)` into every
+/// offset the macro layer computes, where a single missed site is an address
+/// that is wrong by a factor of four and compiles.
+template <typename T> class SlmRef;
+
+template <typename T> class SlmPtr {
+public:
+  SlmPtr() = default;
+  explicit constexpr SlmPtr(std::uint32_t elements) : elements_(elements) {}
+
+  constexpr std::uint32_t elements() const { return elements_; }
+  constexpr std::uint32_t bytes() const {
+    return elements_ * static_cast<std::uint32_t>(sizeof(T));
+  }
+
+  // Templated on the index type, because the addresses the generator builds
+  // are whatever the expression that produced them was -- `size_t` out of
+  // `get_local_id`, `int32_t` out of a literal.  A fixed `uint32_t` parameter
+  // makes every one of them a narrowing conversion at the call, which is a
+  // warning per access and, under `-Werror`, a build.
+  template <typename I> constexpr SlmPtr operator+(I n) const {
+    return SlmPtr(elements_ + static_cast<std::uint32_t>(n));
+  }
+  template <typename I> constexpr SlmRef<T> operator[](I n) const;
+
+private:
+  std::uint32_t elements_{0};
+};
+
+/// One element of SLM, as something an assignment and a read both work on.
+///
+/// The proxy exists so that `x = s0[i]` and `s0[i] = x` -- the two commonest
+/// statements in a generated kernel by a wide margin -- need no special case
+/// in the emitter.  A scalar access is the one shape where the pointer
+/// spelling and the offset spelling can be made to coincide, and coinciding
+/// is worth a proxy: the alternative is an emitter branch on the address
+/// space at every element read.
+template <typename T> class SlmRef {
+public:
+  explicit constexpr SlmRef(SlmPtr<T> at) : at_(at) {}
+
+  operator T() const { return intel_esimd::slm_scalar_load<T>(at_.bytes()); }
+
+  // `const`, so that the assignment binds to the prvalue `s0[i]` produces.
+  const SlmRef &operator=(T value) const {
+    intel_esimd::slm_scalar_store<T>(at_.bytes(), value);
+    return *this;
+  }
+  const SlmRef &operator=(const SlmRef &other) const {
+    return *this = static_cast<T>(other);
+  }
+
+private:
+  SlmPtr<T> at_;
+};
+
+template <typename T>
+template <typename I>
+constexpr SlmRef<T> SlmPtr<T>::operator[](I n) const {
+  return SlmRef<T>(*this + n);
+}
+
+/// Can `N` elements of `T` be one SLM block message?
+///
+/// A block access takes a power-of-two run within one message, and anything
+/// else has to go as a gather -- which is why this is asked rather than
+/// assumed: a staging tail is `length % num_threads` wide and owes nothing to
+/// a power of two.  Getting it wrong is not a slower kernel, it is a
+/// `static_assert` inside the API or, worse, a message that moves a different
+/// number of elements than the caller believes.
+template <typename T, int N> constexpr bool slmBlockable() {
+  constexpr std::size_t bytes = N * sizeof(T);
+  return bytes >= 4 && bytes <= 512 && (N & (N - 1)) == 0;
+}
+
+/// The alignment an SLM access may assume, stated once.
+///
+/// The tiles this addresses start wherever `ShrMemOpt` placed them --
+/// `272 * threadIdx.y` is a real offset out of the allocator -- so the only
+/// promise that holds is the element's own. The default an ESIMD block access
+/// takes is the *vector's* alignment, which those offsets do not meet, and
+/// the violation is a runtime one because the offset is a runtime value.
+template <typename T>
+inline constexpr auto slmAligned =
+    intel_esimd::properties{intel_esimd::alignment<sizeof(T)>};
+
+/// `N` consecutive elements out of SLM, as a vector.
+template <typename T, int N>
+ESIMD_INLINE intel_esimd::simd<T, N> slmLoad(SlmPtr<T> at) {
+  if constexpr (slmBlockable<T, N>()) {
+    return intel_esimd::slm_block_load<T, N>(at.bytes(), slmAligned<T>);
+  } else {
+    const intel_esimd::simd<std::uint32_t, N> offsets(
+        at.bytes(), static_cast<std::uint32_t>(sizeof(T)));
+    return intel_esimd::slm_gather<T, N>(offsets);
+  }
+}
+
+/// The same run, written.
+template <typename T, int N>
+ESIMD_INLINE void slmStore(SlmPtr<T> at, intel_esimd::simd<T, N> value) {
+  if constexpr (slmBlockable<T, N>()) {
+    intel_esimd::slm_block_store<T, N>(at.bytes(), value, slmAligned<T>);
+  } else {
+    const intel_esimd::simd<std::uint32_t, N> offsets(
+        at.bytes(), static_cast<std::uint32_t>(sizeof(T)));
+    intel_esimd::slm_scatter<T, N>(offsets, value);
+  }
+}
+
+/// Reserve the work-group's SLM chunk and hand back its base.
+///
+/// `Bytes` is a template argument because the API requires a compile-time
+/// size, which is what made this the arena of choice over a `local_accessor`:
+/// the accessor would have to be threaded to every access site as a second
+/// operand, while a reserved chunk is addressed by offset alone.  The size is
+/// a constant in the generated kernel -- `ShrMemOpt` fixes it before any body
+/// is built -- so the requirement costs nothing here.
+template <std::size_t Bytes, typename T> ESIMD_INLINE SlmPtr<T> slmArena() {
+  intel_esimd::slm_init<static_cast<std::uint32_t>(Bytes)>();
+  return SlmPtr<T>(0);
 }
 
 } // namespace tensorforge

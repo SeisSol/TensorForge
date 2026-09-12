@@ -450,6 +450,20 @@ class Emitter:
             return
         self.writer(f'{self.ctype(v.type, v)} {name or self.name(v)} = {expr};')
 
+    def window_expr(self, arena: str, offset) -> str:
+        """A window `offset` elements into the shared arena.
+
+        The backend's spelling, for the same reason the *type* of the window
+        is: on a target where a shared address is an offset rather than a
+        pointer, `&arena[off]` takes the address of what `operator[]`
+        returned, and the declaration on the left of it names a type that
+        expression does not produce.
+        """
+        lex = self._lexic()
+        if lex is None:
+            return f'&{arena}[{offset}]'
+        return lex.shared_window_expr(arena, offset)
+
     def base_name(self, base: Operand) -> str:
         if isinstance(base, Value):
             return self.name(base)
@@ -650,7 +664,8 @@ class Emitter:
                 extern = s.attr('extern')
                 if extern is not None:
                     self.bind(v, extern)
-                w(f'{self.ctype(t, v)} {self.name(v)} = &{arena}[{off}];')
+                w(f'{self.ctype(t, v)} {self.name(v)} = '
+                  f'{self.window_expr(arena, off)};')
                 return
             qual = {MemSpace.CONSTANT: 'const '}.get(t.space, '')
             extern = s.attr('extern')

@@ -471,6 +471,75 @@ private:
 };
 using TF32 = tf32;
 
+/// -- shared local memory ---------------------------------------------------
+///
+/// Mirrors `SlmPtr`/`SlmRef` in `isycl.h`, which exist because SLM on this
+/// target is not addressable as a pointer: the ESIMD accessors for it take a
+/// byte offset into a chunk `slm_init` reserved, so a shared window is an
+/// offset that carries `+` and `[]` and nothing else.
+///
+/// The surface is deliberately exactly that.  No `operator&` and no
+/// conversion to `T*`, so a shared window reaching something that wants a
+/// pointer -- `copy_from`, a reinterpret cast, `&s0[i]` -- is a compile error
+/// here as well as there.  That is the whole point of the type, and a shim
+/// that quietly allowed it would make this check green for the case the
+/// change was made to rule out.
+
+template <typename T> class SlmRef;
+
+template <typename T> class SlmPtr {
+public:
+  SlmPtr() = default;
+  explicit constexpr SlmPtr(std::uint32_t elements) : elements_(elements) {}
+
+  constexpr std::uint32_t elements() const { return elements_; }
+  constexpr std::uint32_t bytes() const {
+    return elements_ * static_cast<std::uint32_t>(sizeof(T));
+  }
+
+  // Templated on the index type, as in the real header: the addresses the
+  // generator builds are `size_t` out of `get_local_id` and `int32_t` out of
+  // a literal, and a fixed parameter would make each one a narrowing
+  // conversion.
+  template <typename I> constexpr SlmPtr operator+(I n) const {
+    return SlmPtr(elements_ + static_cast<std::uint32_t>(n));
+  }
+  template <typename I> constexpr SlmRef<T> operator[](I n) const;
+
+private:
+  std::uint32_t elements_{0};
+};
+
+template <typename T> class SlmRef {
+public:
+  explicit constexpr SlmRef(SlmPtr<T> at) : at_(at) {}
+
+  operator T() const { return T{}; }
+
+  // `const`, so that the assignment binds to the prvalue `s0[i]` produces.
+  const SlmRef &operator=(T) const { return *this; }
+  const SlmRef &operator=(const SlmRef &) const { return *this; }
+
+private:
+  SlmPtr<T> at_;
+};
+
+template <typename T>
+template <typename I>
+constexpr SlmRef<T> SlmPtr<T>::operator[](I n) const {
+  return SlmRef<T>(*this + n);
+}
+
+template <typename T, int N> intel_esimd::simd<T, N> slmLoad(SlmPtr<T>) {
+  return {};
+}
+template <typename T, int N>
+void slmStore(SlmPtr<T>, intel_esimd::simd<T, N>) {}
+
+template <std::size_t Bytes, typename T> SlmPtr<T> slmArena() {
+  return SlmPtr<T>(0);
+}
+
 /// Mirrors the signature in `isycl.h`: a whole run at a time, with the
 /// destinations as views into a fragment, so they are templates by value.
 template <int N, typename UpperT, typename LowerT, typename ValueT>
