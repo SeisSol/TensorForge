@@ -538,6 +538,28 @@ def _entry_uniformity(s: Stmt) -> Uniformity:
 # Substitution
 # --------------------------------------------------------------------------- #
 
+def _map_regions(s: Stmt, fn) -> Stmt:
+    """Rebuild ``s`` with ``fn`` applied to every region body.
+
+    Returns ``s`` itself when nothing moved.  The bodies are immutable, so an
+    unchanged rebuild is a new object with the same contents and every later
+    identity check has to fall back to a structural compare.  Most statements
+    carry no region at all, which is the case this exists for.
+    """
+    if not s.regions:
+        return s
+    regions = []
+    changed = False
+    for r in s.regions:
+        body = fn(r.body)
+        if body is r.body:
+            regions.append(r)
+        else:
+            regions.append(replace(r, body=body))
+            changed = True
+    return replace(s, regions=tuple(regions)) if changed else s
+
+
 def substitute(body: Tuple[Stmt, ...], mapping: Dict[int, Value]) -> Tuple[Stmt, ...]:
     """Replace uses (not definitions) of values according to ``mapping``."""
     if not mapping:
@@ -547,16 +569,17 @@ def substitute(body: Tuple[Stmt, ...], mapping: Dict[int, Value]) -> Tuple[Stmt,
         return mapping.get(x.id, x) if isinstance(x, Value) else x
 
     out: List[Stmt] = []
+    changed = False
     for s in body:
         pred = sub(s.predicate) if s.predicate is not None else None
-        out.append(replace(
-            s,
-            args=tuple(sub(a) for a in s.args),
-            predicate=pred,
-            regions=tuple(replace(r, body=substitute(r.body, mapping))
-                          for r in s.regions),
-        ))
-    return tuple(out)
+        args = tuple(sub(a) for a in s.args)
+        t = _map_regions(s, lambda b: substitute(b, mapping))
+        if args == s.args and pred is s.predicate and t is s:
+            out.append(s)
+            continue
+        out.append(replace(t, args=args, predicate=pred))
+        changed = True
+    return tuple(out) if changed else body
 
 
 # --------------------------------------------------------------------------- #
@@ -568,16 +591,18 @@ def dce(body: Tuple[Stmt, ...]) -> Tuple[Stmt, ...]:
     while True:
         _, uses = def_use(body)
         new = _dce_body(body, uses)
-        if new == body:
+        if new is body:
             return body
         body = new
 
 
 def _dce_body(body: Tuple[Stmt, ...], uses) -> Tuple[Stmt, ...]:
     out: List[Stmt] = []
+    kept = True
     for s in body:
-        s = replace(s, regions=tuple(replace(r, body=_dce_body(r.body, uses))
-                                     for r in s.regions))
+        t = _map_regions(s, lambda __b: _dce_body(__b, uses))
+        kept = kept and t is s
+        s = t
         if s.op in (Op.YIELD, Op.EXIT, Op.WHILE) or s.has_side_effects:
             # Control flow, not a value.  An `exit` produces nothing and would
             # otherwise fall to the rule below, and a `while` may not
@@ -606,12 +631,14 @@ def _dce_body(body: Tuple[Stmt, ...], uses) -> Tuple[Stmt, ...]:
                 Effect.WRITE | Effect.ATOMIC | Effect.BARRIER | Effect.UNKNOWN):
             out.append(s)
             continue
-        if s.target and all(not uses.get(t.id) for t in s.target):
+        if s.target and all(not uses.get(x.id) for x in s.target):
+            kept = False
             continue                    # dead
         if not s.target and not s.regions:
+            kept = False
             continue                    # produces nothing, does nothing
         out.append(s)
-    return tuple(out)
+    return body if kept else tuple(out)
 
 
 # --------------------------------------------------------------------------- #
@@ -1145,8 +1172,7 @@ def licm(body: Tuple[Stmt, ...]) -> Tuple[Stmt, ...]:
     """Hoist loop-invariant statements out of ``for`` loops, innermost first."""
     out: List[Stmt] = []
     for s in body:
-        s = replace(s, regions=tuple(replace(r, body=licm(r.body))
-                                     for r in s.regions))
+        s = _map_regions(s, lambda __b: licm(__b))
         if s.op != Op.FOR:
             out.append(s)
             continue
@@ -1705,8 +1731,7 @@ def flatten_scopes(body: Tuple[Stmt, ...]) -> Tuple[Stmt, ...]:
     """
     out: List[Stmt] = []
     for s in body:
-        s = replace(s, regions=tuple(replace(r, body=flatten_scopes(r.body))
-                                     for r in s.regions))
+        s = _map_regions(s, lambda __b: flatten_scopes(__b))
         if (s.op == Op.RAWBLOCK and not s.text and not s.target
                 and not s.attrs and len(s.regions) == 1
                 and not s.regions[0].args
