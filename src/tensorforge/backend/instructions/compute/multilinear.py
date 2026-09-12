@@ -445,7 +445,9 @@ class MultilinearInstruction(ComputeInstruction):
             else:
                 loopstack += [LeadLoop(f'n{i}', dimmin, dimmax, threads, stride,
                                        unroll=self._sparseN[i] or force_unroll,
-                                       width=self._lead_width)]
+                                       width=self._lead_width,
+                                       full_lane=self._full_lane_tail(
+                                           i, dimmin, dimmax))]
                 threads //= max(1, -(-(dimmax - dimmin) // self._lead_width))
                 stride *= dimmax - dimmin
 
@@ -570,6 +572,35 @@ class MultilinearInstruction(ComputeInstruction):
         first = base._value
         return ([Immediate(first + c, base._type)
                  for c in range(min(self._k_width, kmax - first))], slot)
+
+    def _full_lane_tail(self, i, dimmin, dimmax) -> bool:
+        """May the ragged end of lead dimension `i` compute on every lane?
+
+        Only where the lanes past the end are padding.  A memory access holds
+        itself to the lanes that hold data (`LeadIndex.valid`), so the
+        question is only about the registers the body *writes*: the
+        accumulator's image.  If that image is exactly this loop's window,
+        what follows the window in its last slot is the allocation's rounding
+        up to whole slots; if it is larger -- an accumulation into a slice of
+        an existing image, as the space-time predictor does with its theta
+        shift -- those lanes are the next rows, and writing them is wrong.
+        So: no lead origin shift, and the image's box equals the window.
+
+        Under ESIMD the guard used to cost a narrower vector
+        (`LeadLoop._narrow`); under SPMD a branch around the whole block, which
+        the scheduler cannot look across.
+        """
+        opts = self._context.get_user_options()
+        if not getattr(opts, 'full_lane_tails', False):
+            return False
+        if self._theta or self._lead_width != 1:
+            return False
+        idest = self._idest
+        if idest.stype in (SymbolType.Register, SymbolType.Scratch):
+            box = idest.data_view.get_bbox()
+            if (box.lower()[i], box.upper()[i]) != (dimmin, dimmax):
+                return False
+        return True
 
     def _rollable(self, i, dimmin, dimmax, step, k_roll):
         """May reduction loop `i` be a real loop instead of an unrolled one?

@@ -272,6 +272,20 @@ class EsimdEmitter(Emitter):
                 and v.layout is not None and v.distributed):
             nm = name or self.name(v)
             ptr = self._as_pointer(expr)
+            part = self._valid_width(s, v)
+            if part is not None:
+                # A full-lane tail: the vector is the whole wave, memory past
+                # `valid` is not ours.  Zero, then read the part that is.
+                elem = v.type.base.ctype()
+                self.writer(f'{self.ctype(v.type, v)} {nm}({self.zero(v.type)});')
+                slm = self._slm_load_width(s.args[0], elem, part, ptr)
+                if slm is None:
+                    tmp = f'{nm}_part'
+                    self.writer(f'{self.simd_type(elem, part)} {tmp};')
+                    self.writer(f'{tmp}.copy_from({ptr});')
+                    slm = tmp
+                self.writer(f'{nm}.template select<{part}, 1>(0) = {slm};')
+                return
             slm = self._slm_load(s.args[0], v, ptr)
             if slm is not None:
                 # An expression rather than the two statements below, because
@@ -347,6 +361,22 @@ class EsimdEmitter(Emitter):
         return lex.get_slm_load(v.type.base.ctype(), self._vector_width(v),
                                 address)
 
+    def _valid_width(self, s, v: Value):
+        """Elements of `v` a full-lane tail's access may touch, when fewer
+        than `v` spans (`LeadIndex.valid`, carried as the `valid` attribute).
+        """
+        valid = s.attr('valid') if getattr(s, 'op', None) in (Op.LOAD, Op.STORE) else None
+        if valid is None:
+            return None
+        part = valid * (v.type.length or 1)
+        return part if part < self._vector_width(v) else None
+
+    def _slm_load_width(self, base, elem: str, width: int, address: str):
+        lex = self._lexic()
+        if lex is None or not self._is_shared(base):
+            return None
+        return lex.get_slm_load(elem, width, address)
+
     def _slm_store(self, base, v: Value, address: str, value: str):
         lex = self._lexic()
         if lex is None or not self._is_shared(base):
@@ -407,6 +437,19 @@ class EsimdEmitter(Emitter):
             if isinstance(val, Value) and val.layout is not None and val.distributed:
                 addr = self.address(s.args[0], s.args[2:])
                 ptr = self._as_pointer(f'{self.base_name(s.args[0])}[{addr}]')
+                part = self._valid_width(s, val)
+                if part is not None:
+                    elem = val.type.base.ctype()
+                    whole = self.simd_type(elem, self._vector_width(val))
+                    narrow = (f'{self.simd_type(elem, part)}({whole}('
+                              f'{self.operand(val)}).template select<{part}, 1>(0))')
+                    lex = self._lexic()
+                    slm = (lex.get_slm_store(elem, part, ptr, narrow)
+                           if lex is not None and self._is_shared(s.args[0])
+                           else None)
+                    self.writer(slm if slm is not None
+                                else f'{narrow}.copy_to({ptr});')
+                    return
                 slm = self._slm_store(s.args[0], val, ptr,
                                       self.operand(val))
                 if slm is not None:

@@ -623,6 +623,20 @@ declare('mma_prefetch_across',
             '`mmaosm` 7 % slower -- same instructions, L1 hits 95.2 % against '
             '93.1 % -- so it is a question per kernel, not a constant.')
 
+declare('full_lane_tails',
+        default=False,
+        env='TF_FULL_LANE_TAILS',
+        parse=parse_bool,
+        doc='Whether the ragged end of a lead dimension computes on every '
+            'lane, with only its memory accesses kept to the lanes that hold '
+            'data.  Under ESIMD the guard `lead < 24` otherwise becomes a '
+            '24-wide vector, and a 24-wide operation is issued as 16 + 8: '
+            'local_flux on pvc, 11552 instructions against 9337 with the tail '
+            'at 32.  Only where the extra lanes are padding -- no lead origin '
+            'shift, and the accumulator\'s register image exactly the loop\'s '
+            'window, so that a slice of a larger image (theta) never has its '
+            'neighbouring rows overwritten.')
+
 declare('lanes_per_mult',
         default=0,
         env='TF_LANES',

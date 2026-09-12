@@ -365,8 +365,12 @@ class LeadIndex:
 
   # TODO: make nonlead a variable
   def __init__(self, nonlead, block, stride, value=None, width=1,
-               offset=0):
+               offset=0, valid=None):
     self._nonlead = nonlead
+    #: Lanes, from the base, that hold data -- None for all of them.  Set by
+    #: a full-lane tail (`LeadLoop.full_lane`): the arithmetic runs on
+    #: `block` lanes and only a memory access is held to `valid`.
+    self._valid = valid
     self._block = block
     self._stride = stride
     self._value = value
@@ -432,9 +436,13 @@ class LeadIndex:
   def width(self) -> int:
     return self._width
 
+  @property
+  def valid(self):
+    return self._valid
+
   def _key(self):
     return (self._nonlead, self._block, self._stride, self._value,
-            self._width, self._offset)
+            self._width, self._offset, self._valid)
 
   def __eq__(self, other):
     # Structural, including `nonlead`: this is value equality of the *index*,
@@ -451,8 +459,9 @@ class LeadIndex:
     tail = '' if self._value is None else f', value={self._value!r}'
     wide = '' if self._width == 1 else f', width={self._width}'
     off = '' if self._offset == 0 else f', offset={self._offset}'
+    ok = '' if self._valid is None else f', valid={self._valid}'
     return (f'LeadIndex({self._nonlead!r}, block={self._block}, '
-            f'stride={self._stride}{tail}{wide}{off})')
+            f'stride={self._stride}{tail}{wide}{off}{ok})')
 
   def is_thread_dependent(self):
     return True
@@ -481,7 +490,7 @@ class LeadIndex:
 
   def with_offset(self, offset):
     return LeadIndex(self._nonlead, self._block, self._stride, self._value,
-                     self._width, offset)
+                     self._width, offset, self._valid)
 
   def nonlead(self):
     return self._nonlead
@@ -789,8 +798,12 @@ class LeadLoop:
   """
 
   def __init__(self, name, start, end, threads, stride, unroll=False,
-               neutral=None, width=1):
+               neutral=None, width=1, full_lane=False):
     self.start = start
+    #: The ragged end computes on every lane instead of fewer (see
+    #: `Options.full_lane_tails`).  The caller's to grant: only it knows
+    #: whether the lanes past the end are padding or another slice's rows.
+    self.full_lane = full_lane
     self.end = end
     self.unroll = unroll
     self.threads = threads
@@ -888,6 +901,20 @@ class LeadLoop:
     # `VarOffset` -- and which `split_lead_shift` can put into a register
     # address now that the leftover lanes have a run to sit in.
     return hi - base, elem_lo
+
+  def _full(self, lo) -> bool:
+    """Is this a tail the caller let compute on every lane?  Never a head:
+    the lanes before a window's start are always rows of its own tensor."""
+    return self.full_lane and not lo and self.width == 1
+
+  def _widened(self, narrowed, lo):
+    """`(extent, base, valid)` for a narrowed block -- or, on a full-lane
+    tail, the whole wave with `valid` the lanes that hold data.  24 channels
+    of a 32-wide instruction are one issue; a 24-wide vector is two."""
+    extent, base = narrowed
+    if self._full(lo):
+      return self.threads, base, extent
+    return extent, base, None
 
   def _lane_lo(self, offset):
     """The first lane whose vector reaches element `offset`.
@@ -1002,9 +1029,14 @@ class LeadLoop:
       narrowed = self._narrow(writer, actualstart, lo, hi,
                               self.start, self.end)
       if narrowed is not None:
-        extent, base = narrowed
+        extent, base, valid = self._widened(narrowed, lo)
         inner([LeadIndex(0, extent, self.stride, width=self.width,
-                         offset=base)])
+                         offset=base, valid=valid)])
+      elif hi > 0 and self._full(lo):
+        # SPMD: no guard around the block.  Its memory accesses hold
+        # themselves to `valid` (`Symbol._valid_access`).
+        inner([LeadIndex(actualstart, self.threads, self.stride,
+                         width=self.width, valid=hi)])
       elif hi > 0 or lo is not None:
         index = LeadIndex(actualstart, self.threads, self.stride,
                           width=self.width)
@@ -1027,9 +1059,9 @@ class LeadLoop:
         narrowed = self._narrow(writer, actualstart, lo, None,
                                 self.start, (actualstart + 1) * span)
         if narrowed is not None:
-          extent, base = narrowed
+          extent, base, valid = self._widened(narrowed, lo)
           inner([LeadIndex(0, extent, self.stride,
-                           width=self.width, offset=base)])
+                           width=self.width, offset=base, valid=valid)])
         else:
           index = LeadIndex(actualstart, self.threads, self.stride,
                             width=self.width)
@@ -1051,9 +1083,12 @@ class LeadLoop:
           narrowed = self._narrow(writer, actualend - 1, None, hi,
                                   (actualend - 1) * span, self.end)
           if narrowed is not None:
-            extent, base = narrowed
+            extent, base, valid = self._widened(narrowed, None)
             inner([LeadIndex(0, extent, self.stride, width=self.width,
-                             offset=base)])
+                             offset=base, valid=valid)])
+          elif self._full(None):
+            inner([LeadIndex(actualend - 1, self.threads, self.stride,
+                             width=self.width, valid=hi)])
           else:
             index = LeadIndex(actualend - 1, self.threads, self.stride,
                               width=self.width)
@@ -2160,6 +2195,49 @@ class Symbol:
     holders = layout.holders(tuple(coords), self.num_threads)
     return holders[0] if len(holders) == 1 else None
 
+  def _memory_valid(self, index):
+    """How many lanes a full-lane tail may touch here, or None for all.
+
+    Memory only: a register image has the padding lanes the arithmetic runs
+    on, which is what the caller checked before granting the tail
+    (`LeadLoop.full_lane`), while global and shared memory past the data
+    belong to someone else.
+    """
+    if self.stype not in (SymbolType.Global, SymbolType.Batch,
+                          SymbolType.SharedMem):
+      return None
+    for i in index:
+      lead = unwrap_lead(i)
+      if lead is not None and lead[0].valid is not None:
+        return lead[0].valid
+    return None
+
+  def _valid_access(self, writer, index, valid, ltype=None):
+    """How an access holds itself to a full-lane tail's `valid` lanes.
+
+    As the `valid` attribute where the lowering spells a narrower transfer
+    (ESIMD: a 24-wide read into a zeroed 32-wide vector, a 24-wide write out
+    of it), and as a predicate on the lane elsewhere -- a read then folds to
+    `lane < valid ? p[i] : 0`, and a write keeps its branch.  Zero, not
+    merely defined, so that the padding lanes' arithmetic stays finite.
+    """
+    if valid is None:
+      return {}
+    if getattr(writer, '_explicit_simd', lambda: False)():
+      return {'valid': valid}
+    lead = None
+    for i in index:
+      unwrapped = unwrap_lead(i)
+      if unwrapped is not None and unwrapped[0].valid is not None:
+        lead = unwrapped[0]
+        break
+    lane = writer.lane_index(lead._block, lead._stride, hint='lead')
+    # No `other`: a folded read's default is the type's zero, spelled at the
+    # use.  A constant value here was declared wherever the builder first made
+    # it, and a pass that moves the read ahead of that (the wrap pass does)
+    # left it naming a variable that was never declared.
+    return {'predicate': writer.op('lt', BOOL, lane, valid, hint='g')}
+
   def load(self, writer, context: Context, variable, index: List[Union[str, int, Immediate, Variable, LeadIndex]], nontemp, broadcast: bool = True, part: int = 0, parts: int = 1):
     addrs = []
     if self.stype == SymbolType.Data or (not self.obj.is_dense() and not isinstance(self.obj.spp, BoundingBoxSPP)):
@@ -2318,7 +2396,12 @@ class Symbol:
         # second opinion about questions this function already answers.  What
         # the caller decides is *which* part; what that means for the access
         # is one addend.
+        valid = self._memory_valid(read_index)
+        if valid is not None and parts > 1:
+          raise InternalError(
+              f'{self.name}: a full-lane tail reached a split read')
         if (bc_lane is None and w == 1 and not part and parts == 1
+                and valid is None
                 and getattr(self.obj, 'simt_interleave', None) is not None
                 and self.stype in (SymbolType.Global, SymbolType.Batch)):
           interleaved = self._interleaved_load(writer, context, read_index,
@@ -2394,7 +2477,8 @@ class Symbol:
                                                          part * plane if plane
                                                          else part)),
                             layout=layout_of(read_index, self.num_threads),
-                            nontemporal=nontemp)
+                            nontemporal=nontemp,
+                            **self._valid_access(writer, read_index, valid, ltype))
         if bc_lane is None or not broadcast:
           # `broadcast=False` keeps the register index and drops the
           # cross-lane read of it.  The caller is then saying it will use the
@@ -2424,6 +2508,11 @@ class Symbol:
         return writer.rawexpr(text, value, type_=ltype, hint='bc',
                               pure=True, movable=True)
 
+      if self._memory_valid(read_index) is not None and not (
+          variable is not None and bc_lane is None):
+        raise InternalError(
+            f'{self.name}: a full-lane tail reached a text read, which cannot '
+            f'hold itself to the lanes that hold data')
       pre_access = self.access(context, read_index, writer, addrs)
       if bc_lane is not None:
         access = context.get_vm().get_lexic().broadcast(
@@ -2457,7 +2546,9 @@ class Symbol:
                     type_=ltype, hint='data',
                     align=None if w == 1 else RELAXED,
                     layout=layout_of(index, self.num_threads),
-                    nontemporal=nontemp, extern=str(variable))
+                    nontemporal=nontemp, extern=str(variable),
+                    **self._valid_access(writer, index,
+                                         self._memory_valid(index), ltype))
         return True
       if self.stype == SymbolType.Global:
         # The hint goes on the read and the broadcast goes around it.  Only a
@@ -2535,6 +2626,10 @@ class Symbol:
              and isinstance(lead, (int, np.integer))
              and isinstance(variable, _Value) and hasattr(writer, 'store'))
 
+    if not structured and self._memory_valid(index) is not None:
+      raise InternalError(
+          f'{self.name}: a full-lane tail reached a text store, which cannot '
+          f'hold itself to the lanes that hold data')
     if not structured and not named:
       access = self.access(context, index, writer, addrs, base=base)
       fmt = not isinstance(variable, (str, int, float))
@@ -2592,7 +2687,9 @@ class Symbol:
         writer.store(self, variable,
                      self.address_value(writer, context, index),
                      align=None if wide is None else RELAXED,
-                     nontemporal=bool(nontemp), pointer=base)
+                     nontemporal=bool(nontemp), pointer=base,
+                     **self._valid_access(writer, index,
+                                          self._memory_valid(index)))
     elif (self.stype in (SymbolType.Register, SymbolType.Scratch)
           and not isinstance(lead, LeadIndex)):
       # One named element of a dimension that lives in the registers, so

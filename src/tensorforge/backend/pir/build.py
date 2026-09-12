@@ -1009,7 +1009,8 @@ class IRBuilder:
              align: Optional[int] = None,
              nontemporal: bool = False,
              extern: str = None,
-             shift: Optional[Operand] = None) -> Value:
+             shift: Optional[Operand] = None,
+             valid: Optional[int] = None) -> Value:
         """``layout`` is how the loaded value ends up spread over the lanes.
 
         ``shift`` is added to the index after the swizzle -- see `_shifted`.
@@ -1056,6 +1057,12 @@ class IRBuilder:
             # alone, which cost every pass its view of an access that was
             # otherwise fully described.
             attrs += [('extern', extern)]
+        if valid is not None:
+            # Lanes that hold data, of a value that spans more: a full-lane
+            # tail (`LeadLoop.full_lane`).  An attribute so that the lowering
+            # decides how to hold the access to it, and so that `load_cse`
+            # does not take a partial read for a whole one.
+            attrs += [('valid', valid)]
         attrs = tuple(attrs)
 
         self._emit_op(Op.LOAD, (v,), (base,) + tuple(indices),
@@ -1073,7 +1080,8 @@ class IRBuilder:
               atomic: bool = False,
               nontemporal: bool = False,
               pointer: Optional[str] = None,
-              shift: Optional[Operand] = None) -> Stmt:
+              shift: Optional[Operand] = None,
+              valid: Optional[int] = None) -> Stmt:
         """``nontemporal`` is a cache hint, carried the way ``Op.LOAD`` carries
         its own: as an attribute the emitter hands to ``lexic.glb_store``.
 
@@ -1106,6 +1114,8 @@ class IRBuilder:
             # caller and carried, because the address is an expression the IR
             # cannot evaluate.
             attrs += [('align', align)]
+        if valid is not None:
+            attrs += [('valid', valid)]
         attrs = tuple(attrs)
 
         return self._emit_op(Op.STORE, (), (base, value) + tuple(indices),
