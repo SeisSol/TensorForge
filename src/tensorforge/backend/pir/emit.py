@@ -25,7 +25,7 @@ from tensorforge.common.basic_types import GeneralLexicon
 from tensorforge.common.operation import Operation
 from .core import (Access, BufferType, Effect, IRError, MemSpace, Op, Operand,
                    Qual,
-                   Region, ScalarType, Stmt, TokenType, Value, def_use, walk)
+                   Region, ScalarType, Stmt, TokenType, Value, def_use, walk, walk_stmts)
 
 _ATOM = __import__('re').compile(r'^(?:[A-Za-z_][A-Za-z0-9_.:]*|\d[\w.]*)$')
 
@@ -379,7 +379,7 @@ class Emitter:
         silently wrong rather than merely slow.
         """
         self._async_lex = None
-        copies = [s for s, _ in walk(body) if s.op == Op.COPY_ASYNC]
+        copies = [s for s in walk_stmts(body) if s.op == Op.COPY_ASYNC]
         if not copies:
             return
 
@@ -416,7 +416,7 @@ class Emitter:
         as well -- a vendor string answers neither.
         """
         self._prefetch_lex = None
-        if not any(s.op == Op.PREFETCH for s, _ in walk(body)):
+        if not any(s.op == Op.PREFETCH for s in walk_stmts(body)):
             return
 
         lex, hw = self._lexic(), self._hw()

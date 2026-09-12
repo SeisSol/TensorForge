@@ -58,7 +58,7 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import Dict, List, Optional, Sequence, Set, Tuple
 
-from .core import Effect, Op, Stmt, Value, accesses_conflict, walk
+from .core import Effect, Op, Stmt, Value, accesses_conflict, walk, walk_stmts
 
 #: Effects that no access analysis can reason across.
 _WALL = Effect.BARRIER | Effect.UNKNOWN
@@ -71,7 +71,7 @@ def _defines(s: Stmt) -> Set[int]:
 def _uses(s: Stmt) -> Set[int]:
     ids = {v.id for v in s.operands()}
     for r in s.regions:
-        for inner, _ in walk(r.body):
+        for inner in walk_stmts(r.body):
             ids |= {v.id for v in inner.operands()}
     return ids
 
@@ -104,7 +104,7 @@ def touches(s: Stmt) -> Optional[Tuple]:
         return None
     out = list(s.accesses)
     for r in s.regions:
-        for inner, _ in walk(r.body):
+        for inner in walk_stmts(r.body):
             if inner.effect & _WALL or not inner.movable:
                 return None
             out.extend(inner.accesses)
@@ -153,7 +153,7 @@ def _touches_fixed(s: Stmt) -> Optional[Tuple]:
         return None
     out = list(s.accesses)
     for r in s.regions:
-        for inner, _ in walk(r.body):
+        for inner in walk_stmts(r.body):
             if inner.effect & _WALL:
                 return None
             out.extend(inner.accesses)

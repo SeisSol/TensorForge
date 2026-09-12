@@ -53,7 +53,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 from .asyncmem import strip_commits
 from .core import (Effect, Op, Region, Stmt, TokenType, Value,
-                   accesses_conflict, walk)
+                   accesses_conflict, walk, walk_stmts)
 from .passes import substitute
 from .schedule import (_defines, _touches_fixed, _uses, can_reorder,
                        is_wall, may_cross, touches)
@@ -116,7 +116,7 @@ def _sole_async(region: Region) -> Tuple[int, Stmt, Optional[int]]:
     """
     def _carries_async(st):
         return any(x.op in (Op.COPY_ASYNC, Op.LOAD_ASYNC)
-                   for x, _ in walk((st,)))
+                   for x in walk_stmts((st,)))
 
     guards = [(i, g) for i, g in enumerate(region.body) if g.op is Op.IF]
     if len(guards) > 1:
@@ -149,7 +149,7 @@ def _sole_async(region: Region) -> Tuple[int, Stmt, Optional[int]]:
     # loop included and whole.
     scope = (region.body[guard_at].regions[0].body if guard_at is not None
              else region.body)
-    tokens = {t.id for st in group for x, _ in walk((st,)) for t in x.target
+    tokens = {t.id for st in group for x in walk_stmts((st,)) for t in x.target
               if x.op in (Op.COPY_ASYNC, Op.LOAD_ASYNC)}
     waits = [w for w in scope if w.op is Op.WAIT
              and any(isinstance(a, Value) and a.id in tokens for a in w.args)]
@@ -281,7 +281,7 @@ def _wrap_one(loop: Stmt, make_value,
     # single-buffered destination it was ever given, which is the third time in
     # this function that reading the top level of a group has meant reading
     # nothing (`g.args[:1]` and `g.target[0]` were the first two).
-    dst_writes = [a for g in group for x, _ in walk((g,)) for a in x.accesses
+    dst_writes = [a for g in group for x in walk_stmts((g,)) for a in x.accesses
                   if a.writes]
     # The whole subtree, not the top level.  The compute reads its operand
     # inside nested loops, so a one-level scan found no read of the
@@ -300,8 +300,8 @@ def _wrap_one(loop: Stmt, make_value,
     # was meant -- these are the statements `_sole_async` picked out of this
     # very body, not statements that merely look like them, and two that happen
     # to render alike are two transfers, only one of which is the group's.
-    in_group = {id(x) for g in group for x, _ in walk((g,))}
-    scan = [] if assume_rotated else [st for st, _ in walk(region.body)]
+    in_group = {id(x) for g in group for x in walk_stmts((g,))}
+    scan = [] if assume_rotated else [st for st in walk_stmts(region.body)]
     for s in scan:
         if id(s) in in_group or s.op is Op.WAIT or s.op is Op.IF:
             continue
@@ -335,7 +335,7 @@ def _wrap_one(loop: Stmt, make_value,
     # the group became a section -- and a rotating write window *is* declared
     # inside the loop, because its offset moves with the stage counter.  The
     # peel then names it before it exists, which renders and does not compile.
-    dests = [x.args[0] for g in group for x, _ in walk((g,))
+    dests = [x.args[0] for g in group for x in walk_stmts((g,))
              if x.op in (Op.COPY_ASYNC, Op.LOAD_ASYNC) and x.args]
     if any(isinstance(a, Value) and a.id in defined_in_loop for a in dests):
         raise Refusal('the destination is declared inside the loop, so a '
@@ -355,7 +355,7 @@ def _wrap_one(loop: Stmt, make_value,
     # index it reads is an operand of a statement inside it, not of the block.
     def _names_index(st):
         return any(isinstance(a, Value) and a.id in next_index
-                   for x, _ in walk((st,)) for a in x.args)
+                   for x in walk_stmts((st,)) for a in x.args)
 
     slice_ = _index_slice(region, group, next_index)
     if not slice_ and not any(_names_index(g) for g in group):
@@ -370,7 +370,7 @@ def _wrap_one(loop: Stmt, make_value,
     # inside it.  Reading `g.target[0]` worked only while the group was a set
     # of copies, and raised an IndexError the first time a real section
     # reached here.
-    tokens = [t for g in group for x, _ in walk((g,))
+    tokens = [t for g in group for x in walk_stmts((g,))
               if x.op in (Op.COPY_ASYNC, Op.LOAD_ASYNC) for t in x.target]
     carried = [make_value(t.type, 'cp') for t in tokens]
     swap = dict(zip((t.id for t in tokens), carried))
@@ -480,7 +480,7 @@ def _index_slice(region: Region, group: Sequence[Stmt],
     that wrote anything would write it twice.
     """
     by_def = {t.id: s for s in region.body for t in s.target}
-    want = {a.id for g in group for x, _ in walk((g,))
+    want = {a.id for g in group for x in walk_stmts((g,))
             for a in x.args if isinstance(a, Value)}
     slice_: List[Stmt] = []
     seen = set()

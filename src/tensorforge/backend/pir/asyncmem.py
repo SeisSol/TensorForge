@@ -84,7 +84,7 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import Dict, List, NamedTuple, Optional, Tuple
 
-from .core import Effect, Op, Stmt, TokenType, Value, walk
+from .core import Effect, Op, Stmt, TokenType, Value, walk, walk_stmts
 
 
 class _Unit(NamedTuple):
@@ -246,7 +246,7 @@ def _insert(body: Tuple[Stmt, ...], toks, exact: bool) -> Tuple[Stmt, ...]:
 
 def _waits_inside(body: Tuple[Stmt, ...]) -> bool:
     """Does anything in this body, at any depth, wait?"""
-    return any(s.op == Op.WAIT for s, _ in walk(body))
+    return any(s.op == Op.WAIT for s in walk_stmts(body))
 
 
 def _wait_index(body: Tuple[Stmt, ...]) -> Dict[int, int]:
@@ -265,7 +265,7 @@ def _wait_index(body: Tuple[Stmt, ...]) -> Dict[int, int]:
     # without this they would look alike in that -- which is enough to put
     # them in one group, closed once, after the loop that issues one of them
     # every iteration.
-    for s, _ in walk(body):
+    for s in walk_stmts(body):
         if s.op != Op.FOR:
             continue
         yielded = s.regions[0].yielded
@@ -663,7 +663,7 @@ def check_commits(body: Tuple[Stmt, ...]) -> List[str]:
 def check_tokens(body: Tuple[Stmt, ...], defs, uses) -> List[str]:
     """Tokens are single-use, and a wait releases what its issue promised."""
     diag: List[str] = []
-    for s, _ in walk(body):
+    for s in walk_stmts(body):
         for t in s.target:
             if not isinstance(t.type, TokenType):
                 continue

@@ -30,7 +30,7 @@ from .core import (BOOL, INDEX, SCALAR_LAYOUT, TOKEN, Access, BufferType,
                    Participants,
                    Effect, IRError,
                    LaneAxis, MemSpace, Op, Operand, Region, RegisterLayout,
-                   ScalarType, Stmt, TokenType, Value, XorSwizzle, dump, walk,
+                   ScalarType, Stmt, TokenType, Value, XorSwizzle, dump, walk, walk_stmts,
                    join_layout, Uniformity)
 
 
@@ -1908,7 +1908,7 @@ class IRBuilder:
         kernel and not a slow one.
         """
         swizzled = {}
-        for stmt, _ in walk(body):
+        for stmt in walk_stmts(body):
             if stmt.op != Op.ALLOC:
                 continue
             for t in stmt.target:
@@ -1930,7 +1930,7 @@ class IRBuilder:
                     swizzled[str(extern)] = t
         if not swizzled:
             return
-        for stmt, _ in walk(body):
+        for stmt in walk_stmts(body):
             text = stmt.text
             if not text or text.strip().startswith('//'):
                 # A comment naming the buffer describes it, it does not access

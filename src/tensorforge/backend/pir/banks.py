@@ -41,7 +41,7 @@ from dataclasses import dataclass
 from typing import Dict, List, Sequence, Tuple
 
 from .core import (BufferType, Effect, MemSpace, Op, ScalarType, Stmt, Value,
-                   XorSwizzle, walk)
+                   XorSwizzle, walk, walk_stmts)
 
 #: Bytes one bank serves per cycle.  The count of banks is a property of the
 #: target and comes from `hw_descr.shmem_banks`; the width does not vary
@@ -86,7 +86,7 @@ def _definitions(body: Sequence[Stmt]) -> Dict[int, object]:
     lane-dependent reaches the address through `thread_idx_x`.
     """
     out: Dict[int, object] = {}
-    for stmt, _ in walk(body):
+    for stmt in walk_stmts(body):
         for t in stmt.target:
             out[id(t)] = stmt
         if (stmt.op in (Op.FOR, Op.WHILE) and stmt.regions

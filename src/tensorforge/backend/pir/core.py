@@ -1048,6 +1048,31 @@ def walk(body: Tuple[Stmt, ...],
             yield from walk(r.body, parents + (s,))
 
 
+def walk_stmts(body: Tuple[Stmt, ...]) -> List[Stmt]:
+    """Pre-order traversal of the statements alone, as a list.
+
+    `walk` names the enclosing statements of everything it yields, which costs
+    a tuple per statement and a generator frame per region.  Most callers read
+    only the statement, and on a body of thirty thousand that difference is the
+    traversal.  A list rather than an iterator: the callers that walk a body
+    twice want to walk it twice, and a second traversal of a list is a loop
+    over a list.
+    """
+    out: List[Stmt] = []
+    stack: List[Stmt] = list(body)
+    stack.reverse()
+    while stack:
+        s = stack.pop()
+        out.append(s)
+        if s.regions:
+            sub: List[Stmt] = []
+            for r in s.regions:
+                sub.extend(r.body)
+            sub.reverse()
+            stack.extend(sub)
+    return out
+
+
 def defined_here(body: Tuple[Stmt, ...]) -> Dict[int, Value]:
     """Values defined *directly* in this body (not inside nested regions)."""
     out: Dict[int, Value] = {}
@@ -1060,7 +1085,7 @@ def defined_here(body: Tuple[Stmt, ...]) -> Dict[int, Value]:
 def defined_within(body: Tuple[Stmt, ...]) -> Dict[int, Value]:
     """Values defined anywhere in this body, including nested regions."""
     out: Dict[int, Value] = {}
-    for s, _ in walk(body):
+    for s in walk_stmts(body):
         for r in s.regions:
             for a in r.args:
                 out[a.id] = a
@@ -1081,7 +1106,7 @@ def def_use(body: Tuple[Stmt, ...]):
     defs: Dict[int, Stmt] = {}
     uses: Dict[int, List[Stmt]] = {}
 
-    for s, _ in walk(body):
+    for s in walk_stmts(body):
         for r in s.regions:
             for a in r.args:
                 if a.id in defs:
@@ -1103,7 +1128,7 @@ def free_values(body: Tuple[Stmt, ...]) -> Dict[int, Value]:
     """Values used inside ``body`` but defined outside of it."""
     inside = defined_within(body)
     out: Dict[int, Value] = {}
-    for s, _ in walk(body):
+    for s in walk_stmts(body):
         for v in s.operands():
             if v.id not in inside:
                 out[v.id] = v
@@ -1112,7 +1137,7 @@ def free_values(body: Tuple[Stmt, ...]) -> Dict[int, Value]:
 
 def collect_effect(body: Tuple[Stmt, ...]) -> Effect:
     acc = 0
-    for s, _ in walk(body):
+    for s in walk_stmts(body):
         acc |= int(s.effect)
     return Effect(acc)
 
@@ -1120,7 +1145,7 @@ def collect_effect(body: Tuple[Stmt, ...]) -> Effect:
 def collect_accesses(body: Tuple[Stmt, ...]) -> Tuple[Access, ...]:
     out: List[Access] = []
     seen = set()
-    for s, _ in walk(body):
+    for s in walk_stmts(body):
         for a in s.accesses:
             if a not in seen:
                 seen.add(a)
