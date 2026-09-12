@@ -375,6 +375,49 @@ def matmul(writer, ops, ctx, span):
                         ctx, span.start, span.stop, width=ops.lead_width,
                         tile=fit.tile, lead_wave=lead_wave,
                         mults=mults if lead_wave is not None else 1)
+    mults = wave_mults(threads, ops.a_uniform, ops.lead_width, dtype)
+    if (mults > 1 and ops.lockstep and ops.A_wave is not None
+            and not ops.a_shared):
+        A = _wave_lead(ops, ctx, mults)
     return matmuldpp(writer, span.start, C, A, B, M, N, K, kx, threads, dtype,
                      sparse, ctx, span.stop, width=ops.lead_width,
                      a_resident=ops.a_resident)
+
+
+def _wave_lead(ops, ctx, mults):
+    """`ops.A` for a chain beside `blgp` MFMAs, read the way they read it.
+
+    The MFMAs of a wave take step `k + q` from the lanes of its `q`-th
+    multiplication (`codegen.matmul32`), which read it through `A_wave`.  A
+    chain reading `A(i, k)` itself reads the same elements at other addresses,
+    so the two share no load -- `local_flux`'s ninth column on gfx942 at
+    b = 80: 480 more global loads than without `blgp`.  Here the chain reads
+    through `A_wave` too, the same load as the MFMAs', and takes step `k + q`
+    out of the `q`-th multiplication's lanes with `tensorforge::broadcast`:
+    `bpermute` on CDNA, one LDS-pipe instruction per step and no memory.  At
+    b = 80 that is 7522 instructions and 548 B of scratch against 12585 and
+    6712 for the chain's own loads (11251 and 6064 without `blgp`).
+
+    Not from shared memory (`ops.a_shared`), where the chain's own read is an
+    LDS instruction as well and two steps come in one `ds_read2`: at b = 56,
+    112 reads and 448 moves against 340 reads, and 216 VGPRs against 172.
+
+    Only where the batch loop runs the wave in step (`ops.lockstep`), as the
+    MFMAs need it anyway: the lanes read belong to other multiplications.  A
+    step whose group runs past the contraction reads itself.
+    """
+    from tensorforge.backend.pir.core import ScalarType
+    lexic = ctx.get_vm().get_lexic()
+    ftype = ScalarType(ops.a)
+
+    def A(writer, var, i, k, *rest):
+        g = k - k % mults
+        if var is not None or rest or g + mults > ops.k:
+            return ops.A(writer, var, i, k, *rest)
+        lead = ops.A_wave(writer, i, g, mults)
+        if lead is None or lead is False:
+            return ops.A(writer, var, i, k)
+        text = lexic.broadcast('{0}', k % mults, _MFMA_WAVE, ops.threads)
+        return writer.rawexpr(text, lead, type_=ftype, hint='bc', pure=True,
+                              movable=True, crosslane=True)
+    return A

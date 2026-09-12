@@ -37,8 +37,13 @@ def _blgps(src):
     return [int(m.group(3)) for m in MFMA.finditer(src)]
 
 
-def _kernel_at(name, arch, threads):
-    """`_kernel` at a lane count of the caller's rather than the deduced one."""
+#: A step of the lead operand taken out of the lanes of one of the two
+#: multiplications of a wave.
+WAVE_BROADCAST = re.compile(r'tensorforge::broadcast<64, 32, ([01])>')
+
+
+def _kernel_at(name, arch, threads=None, **options):
+    """`_kernel` at a lane count and with options of the caller's."""
     path = next(CASES.rglob(f'{name}.py'))
     spec = importlib.util.spec_from_file_location('tf_blgp__' + name, path)
     case = importlib.util.module_from_spec(spec)
@@ -46,13 +51,30 @@ def _kernel_at(name, arch, threads):
     with warnings.catch_warnings(), contextlib.redirect_stdout(io.StringIO()):
         warnings.simplefilter('ignore')
         ctx = Context(arch=arch, backend='hip', fp_type=case.DTYPE,
-                      options=Options())
-        gen = Generator(case.descr_list(), ctx,
-                        lanes=LaneConfig(num_threads=threads,
-                                         num_active_threads=threads,
-                                         lead_width=1))
+                      options=Options(**options))
+        lanes = (None if threads is None else
+                 LaneConfig(num_threads=threads, num_active_threads=threads,
+                            lead_width=1))
+        gen = Generator(case.descr_list(), ctx, lanes=lanes)
         gen.generate()
     return gen.get_kernel()
+
+
+def test_the_chain_beside_takes_its_steps_from_the_same_load():
+    """With the operators in global memory, the ninth column's DPP chain
+    reads through the MFMAs' load and takes each step out of its
+    multiplication's lanes -- rather than loading every step again at
+    addresses the MFMAs do not use."""
+    src = _kernel_at('local_flux', 'gfx942', preload_globals=False)
+    steps = WAVE_BROADCAST.findall(src)
+    assert steps.count('0') == steps.count('1') > 0
+
+
+def test_from_shared_memory_the_chain_reads_its_steps_itself():
+    """Staged in LDS, a read is an LDS instruction as a move is, and the
+    chain's own reads come two to a `ds_read2`."""
+    src = _kernel('local_flux', 'gfx942')
+    assert not WAVE_BROADCAST.search(src)
 
 
 def test_two_or_four_multiplications_share_a_wave_of_the_same_rows():

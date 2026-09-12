@@ -1271,6 +1271,9 @@ class MultilinearInstruction(ComputeInstruction):
                     and 'k0' in self._opdim_to_nks[0]
                     and getattr(a_obj, 'storage_parts', 1) == 1
                     and a_obj.is_dense()
+                    # in its logical order: a prepared buffer is not strided
+                    and getattr(a_obj, 'storage_order', None) is None
+                    and getattr(a_obj, 'simt_interleave', None) is None
                     and self._ops[0].symbol.stype in (SymbolType.SharedMem,
                                                       SymbolType.Batch,
                                                       SymbolType.Global)):
@@ -1283,9 +1286,14 @@ class MultilinearInstruction(ComputeInstruction):
 
                 The caller keeps `k + mults - 1` inside the contraction; a
                 masked-off row reads too, at its clamped element, which is the
-                same operand since it does not depend on the element.
+                same operand since it does not depend on the element.  `None`
+                where the steps would wrap around the contraction
+                (`unwindK` takes `k` modulo its extent), and the caller then
+                reads each step itself.
                 """
-                from tensorforge.backend.pir.core import INDEX
+                size = self._ks[0][1] - self._ks[0][0]
+                if k % size + mults > size:
+                    return None
                 p = writer.op('rem', INDEX, writer.thread_id('y'), mults,
                               hint='m')
                 shift = writer.op('mul', INDEX, p, k_stride, hint='r')
@@ -1302,6 +1310,8 @@ class MultilinearInstruction(ComputeInstruction):
                 B_frag=B_frag, B_direct=B_direct,
                 a_uniform=uniform,
                 A_wave=A_wave if k_stride is not None else None,
+                lockstep=self.convergence_scope() is not None,
+                a_shared=self._ops[0].symbol.stype is SymbolType.SharedMem,
                 a_resident=self._ops[0].symbol.stype in (SymbolType.Register,
                                                          SymbolType.Scratch),
                 mult_stride=self._mult_stride,

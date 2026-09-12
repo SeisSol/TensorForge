@@ -2288,10 +2288,12 @@ class Symbol:
         variable is not None or parts > 1
         or self.stype not in (SymbolType.SharedMem, SymbolType.Batch,
                               SymbolType.Global)
-        or not self.obj.is_dense()):
+        or not self.obj.is_dense()
+        or getattr(self.obj, 'storage_order', None) is not None
+        or getattr(self.obj, 'simt_interleave', None) is not None):
       raise InternalError(
-          f'{self.name}: a shifted read needs a dense operand in memory, read '
-          f'as a value')
+          f'{self.name}: a shifted read needs a dense operand in memory, in '
+          f'its logical order, read as a value')
     addrs = []
     if self.stype == SymbolType.Data or (not self.obj.is_dense() and not isinstance(self.obj.spp, BoundingBoxSPP)):
       if variable is None:

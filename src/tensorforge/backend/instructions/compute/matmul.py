@@ -133,6 +133,15 @@ class MatmulOperands:
     #: then hand from one multiplication's lanes to the others' (`blgp`).
     A_wave: Optional[Callable] = None
 
+    #: Whether the multiplications sharing a wave take the same trips through
+    #: the batch loop (`multilinear.convergence_scope`) -- so that a path may
+    #: read what a neighbour's lanes hold, as `A_wave` hands it on.
+    lockstep: bool = False
+
+    #: Whether `A` is read from shared memory, where a read costs about what
+    #: a cross-lane move does -- both are LDS instructions on AMD.
+    a_shared: bool = False
+
     #: Adjacent lead elements one lane holds per slot: `Options`' lead width.
     #: `A` and `C` then take and give vectors of this length, and `B`'s
     #: contraction axis is spread over the lanes the same way -- lane `t` of
