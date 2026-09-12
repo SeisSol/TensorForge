@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import replace
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 from tensorforge.common.basic_types import Datatype
 
@@ -22,7 +22,7 @@ from .schedule import can_reorder
 from .core import (Access, BufferType, Effect, IRError, MemSpace, Op, Operand,
                    Region, ScalarType, Stmt, TokenType, Value,
                    accesses_conflict, collect_accesses, collect_effect,
-                   def_use, defined_within, walk, Uniformity)
+                   def_use, defined_within, walk, walk_stmts, Uniformity)
 from .asyncmem import check_commits, check_tokens, schedule_async
 
 
@@ -80,7 +80,7 @@ def _check_buffer_bounds(body: Tuple[Stmt, ...]) -> List[str]:
     counters: Dict[int, Tuple[int, int]] = {}
     defs: Dict[int, Stmt] = {}
 
-    for s, _ in walk(body):
+    for s in walk_stmts(body):
         for t in s.target:
             defs[t.id] = s
         if s.op == Op.ALLOC and isinstance(getattr(s.target[0], 'type', None),
@@ -122,7 +122,7 @@ def _check_buffer_bounds(body: Tuple[Stmt, ...]) -> List[str]:
         return (min(corners), max(corners))
 
     diag: List[str] = []
-    for s, _ in walk(body):
+    for s in walk_stmts(body):
         if s.op == Op.LOAD:
             base, index = (s.args + (None, None))[0], (s.args + (None, None))[1]
         elif s.op == Op.STORE:
@@ -158,14 +158,14 @@ def _check_dangling_names(body: Tuple[Stmt, ...]) -> List[str]:
     compile.  Cheap to check, and it catches the whole class at once.
     """
     defined = set()
-    for s, _ in walk(body):
+    for s in walk_stmts(body):
         for t in s.target:
             defined.add(t.id)
         for r in s.regions:
             for a in r.args:
                 defined.add(a.id)
     seen, diag = set(), []
-    for s, _ in walk(body):
+    for s in walk_stmts(body):
         if not s.text:
             continue
         for m in _NAMED.finditer(s.text):
@@ -586,58 +586,99 @@ def substitute(body: Tuple[Stmt, ...], mapping: Dict[int, Value]) -> Tuple[Stmt,
 # Dead code elimination
 # --------------------------------------------------------------------------- #
 
+def _dce_protected(s: Stmt) -> bool:
+    """Whether ``s`` has to stay whatever its results are read by.
+
+    The region case reads the body as it stands, and may: every statement this
+    pass removes is one with no effect, so removing any number of them leaves
+    the mask this asks about exactly as it was.
+    """
+    if s.op in (Op.YIELD, Op.EXIT, Op.WHILE) or s.has_side_effects:
+        # Control flow, not a value.  An `exit` produces nothing and would
+        # otherwise fall to the rule below, and a `while` may not
+        # terminate, so whether its body is observable says nothing about
+        # whether the loop is.
+        return True
+    if s.op == Op.PREFETCH:
+        # A hint has no result and no side effect, which is precisely the
+        # shape the last rule below deletes.  Deleting it is always
+        # *correct* -- and always wrong, since a statement whose entire
+        # content is where it sits has nothing left once it is gone.
+        return True
+    if s.attr('escapes'):
+        # its name is interpolated into raw text the IR cannot see
+        return True
+    if s.text is not None:
+        # A raw statement is output by construction -- a Comment has no
+        # target, no region and no effect, and dropping it would silently
+        # change the generated source.
+        return True
+    if s.regions and collect_effect(s.regions[0].body) & (
+            Effect.WRITE | Effect.ATOMIC | Effect.BARRIER | Effect.UNKNOWN):
+        return True
+    # A region with no target is the shape of a scope: there is no result to
+    # find unread, so nothing below applies to it.
+    return bool(s.regions) and not s.target
+
+
 def dce(body: Tuple[Stmt, ...]) -> Tuple[Stmt, ...]:
-    """Drop pure statements whose results nobody reads.  Runs to fixpoint."""
-    while True:
-        _, uses = def_use(body)
-        new = _dce_body(body, uses)
-        if new is body:
-            return body
-        body = new
+    """Drop pure statements whose results nobody reads.
+
+    A worklist rather than repeated sweeps: dropping a statement is the only
+    thing that can make another one dead, and it can only do so to the
+    statements that produced what it read.  So the reads are counted once and
+    then decremented, and a producer is reconsidered exactly when its last
+    reader goes -- instead of re-deriving every def-use edge in the body to
+    find out whether the previous pass over it changed anything.
+    """
+    counts: Dict[int, int] = {}
+    producer: Dict[int, Stmt] = {}
+    for s in walk_stmts(body):
+        for r in s.regions:
+            for a in r.args:
+                counts.setdefault(a.id, 0)
+        for x in s.target:
+            counts.setdefault(x.id, 0)
+            producer[x.id] = s
+    for s in walk_stmts(body):
+        for v in s.operands():
+            counts[v.id] = counts.get(v.id, 0) + 1
+
+    def unread(s: Stmt) -> bool:
+        if s.target:
+            return not any(counts.get(x.id) for x in s.target)
+        return not s.regions
+
+    dead: Set[int] = set()
+    work: List[Stmt] = [s for s in walk_stmts(body)]
+    while work:
+        s = work.pop()
+        if id(s) in dead or _dce_protected(s) or not unread(s):
+            continue
+        dead.add(id(s))
+        # Everything the statement read loses a reader -- including the reads
+        # inside a region that goes with it.
+        for inner in walk_stmts((s,)):
+            for v in inner.operands():
+                left = counts.get(v.id, 1) - 1
+                counts[v.id] = left
+                if left == 0:
+                    owner = producer.get(v.id)
+                    if owner is not None and id(owner) not in dead:
+                        work.append(owner)
+    return _strip(body, dead) if dead else body
 
 
-def _dce_body(body: Tuple[Stmt, ...], uses) -> Tuple[Stmt, ...]:
+def _strip(body: Tuple[Stmt, ...], dead: Set[int]) -> Tuple[Stmt, ...]:
     out: List[Stmt] = []
     kept = True
     for s in body:
-        t = _map_regions(s, lambda __b: _dce_body(__b, uses))
+        if id(s) in dead:
+            kept = False
+            continue
+        t = _map_regions(s, lambda __b: _strip(__b, dead))
         kept = kept and t is s
-        s = t
-        if s.op in (Op.YIELD, Op.EXIT, Op.WHILE) or s.has_side_effects:
-            # Control flow, not a value.  An `exit` produces nothing and would
-            # otherwise fall to the rule below, and a `while` may not
-            # terminate, so whether its body is observable says nothing about
-            # whether the loop is.
-            out.append(s)
-            continue
-        if s.op == Op.PREFETCH:
-            # A hint has no result and no side effect, which is precisely the
-            # shape the last rule below deletes.  Deleting it is always
-            # *correct* -- and always wrong, since a statement whose entire
-            # content is where it sits has nothing left once it is gone.
-            out.append(s)
-            continue
-        if s.attr('escapes'):
-            # its name is interpolated into raw text the IR cannot see
-            out.append(s)
-            continue
-        if s.text is not None:
-            # A raw statement is output by construction -- a Comment has no
-            # target, no region and no effect, and dropping it would silently
-            # change the generated source.
-            out.append(s)
-            continue
-        if s.regions and collect_effect(s.regions[0].body) & (
-                Effect.WRITE | Effect.ATOMIC | Effect.BARRIER | Effect.UNKNOWN):
-            out.append(s)
-            continue
-        if s.target and all(not uses.get(x.id) for x in s.target):
-            kept = False
-            continue                    # dead
-        if not s.target and not s.regions:
-            kept = False
-            continue                    # produces nothing, does nothing
-        out.append(s)
+        out.append(t)
     return body if kept else tuple(out)
 
 
@@ -1600,7 +1641,7 @@ def _register_slot_events(order, span, enclosing, values, reach):
 def _value_index(body: Tuple[Stmt, ...]) -> Dict[int, Value]:
     """Every value the body defines, by id -- targets and region arguments."""
     out: Dict[int, Value] = {}
-    for st, _ in walk(body):
+    for st in walk_stmts(body):
         for r in st.regions:
             for a in r.args:
                 out[a.id] = a
