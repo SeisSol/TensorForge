@@ -267,8 +267,41 @@ def _transpose(writer, tile, ftype, threads, regs):
     return out
 
 
+def _shared_fragment(writer, tile, ftype, threads, regs):
+    """The shared matrix at the layout the A fragment wants.
+
+    Asked rather than assumed.  `matmul32` transposed unconditionally because
+    that is what its own operands need, which is true and is not the same
+    statement as the instruction needing it -- and an operand arriving already
+    right would have been transposed anyway.  `None` here is the gap this
+    instruction does not close; the caller declines rather than emitting
+    something that does not reach the fragment.
+    """
+    block = tile.block
+    route = reach(nest_shared(block, threads), transposed(block, threads),
+                  block, [(c, l) for c in range(block) for l in range(threads)],
+                  wave=threads)
+    if not takes(route):
+        # A staged trip, which this emitter does not write: the buffer has to
+        # be reserved before any body exists.  Declining sends the operation
+        # to the generic nest, which is slower and right, rather than to a
+        # reservation that was never made.  Asked through `takes` rather than
+        # by testing the shape here, because `strategies` decides whether to
+        # offer this arrangement from the same sentence and the two must not
+        # drift.
+        return None
+    if route == 0:
+        return list(regs)
+    if route == 1:
+        return _transpose(writer, tile, ftype, threads, regs)
+    # The same exchange assembled out of swaps and merges, which is what a
+    # width the runtime has no `transpose*` for gets.  More instructions than
+    # the builtin and far fewer than a trip through memory.
+    return apply_exchange(writer, regs, route, ftype)
+
+
 def matmul32(writer: Writer, C, B, A, M, N, K, kx, threads, dtype, sparse,
-             ctx, start, stop):
+             ctx, start, stop, width=1):
     with writer.AnonymousScope():
 
         ftype = ScalarType(dtype)
@@ -279,40 +312,7 @@ def matmul32(writer: Writer, C, B, A, M, N, K, kx, threads, dtype, sparse,
             fn = tile.builtin
 
             def transpose(regs):
-                """The shared matrix at the layout the A fragment wants.
-
-                Asked rather than assumed.  `matmul32` transposed
-                unconditionally because that is what its own operands need,
-                which is true and is not the same statement as the
-                instruction needing it -- and an operand arriving already
-                right would have been transposed anyway.  `None` here is the
-                gap this instruction does not close; the caller declines
-                rather than emitting something that does not reach the
-                fragment.
-                """
-                route = reach(nest_shared(block, threads),
-                              transposed(block, threads), block,
-                              [(c, l) for c in range(block)
-                               for l in range(threads)], wave=threads)
-                if not takes(route):
-                    # A staged trip, which this emitter does not write: the
-                    # buffer has to be reserved before any body exists.
-                    # Declining sends the operation to the generic nest,
-                    # which is slower and right, rather than to a reservation
-                    # that was never made.  Asked through `takes` rather than
-                    # by testing the shape here, because `strategies` decides
-                    # whether to offer this arrangement from the same
-                    # sentence and the two must not drift.
-                    return None
-                if route == 0:
-                    return list(regs)
-                if route == 1:
-                    return _transpose(writer, tile, ftype, threads, regs)
-                # The same exchange assembled out of swaps and merges, which
-                # is what a width the runtime has no `transpose*` for gets.
-                # More instructions than the builtin and far fewer than a trip
-                # through memory.
-                return apply_exchange(writer, regs, route, ftype)
+                return _shared_fragment(writer, tile, ftype, threads, regs)
 
             # The MFMA accumulator layout is deliberately left untracked.
             #
@@ -409,6 +409,83 @@ def matmul32(writer: Writer, C, B, A, M, N, K, kx, threads, dtype, sparse,
                                 C(writer, writer.extract(acc, jj, ftype), i, j + jj)
             return True
 
+        def write_wide(tile, start, end):
+            """`write_matmul` at lead width `width`, one component at a time.
+
+            The lanes of the lane-batched scheme are independent rows, so
+            which row a lane holds is the kernel's business, and at width `w`
+            lane `t` holds `w` of them: `w * t + c` in component `c`
+            (`componentwise`).  Component `c` of every lane is then a
+            lane-batched problem of its own -- one element per lane, as the
+            B fragment wants -- with an accumulator of its own, packed back
+            into the `w`-vector the store takes.
+
+            The shared matrix arrives the same way along its contraction:
+            lane `t` of the block at `k0` holds step `k0 + w * t + c` in
+            component `c`.  So each component is transposed on its own, and
+            its fragment serves the steps `w` apart that it holds, with `abid`
+            picking the quad as before.  The same count of MFMAs as at width
+            one -- `M` is a `w`-th of it and each step issues `w`.  Not quite
+            the same count of transposes: one per component of a contraction
+            block `w` times as long, so a contraction shorter than the block
+            transposes `w` times where width one did once (`local_flux`'s 9x9
+            products: 32 against 24).
+            """
+            block = tile.block
+            scale = tile.scale(threads)
+            fn = tile.builtin
+            span = threads * width
+            vtype = ScalarType(dtype, block)
+            wtype = ScalarType(dtype, width)
+            for j in range(start, end, block):
+                with writer.AnonymousScope():
+                    frag = {}
+                    for k0 in range(0, K + kx, span):
+                        cols = []
+                        for jj in range(min(block, N - j)):
+                            v = A(writer, None, j + jj, k0 // span)
+                            if not _spread(v, width, threads):
+                                return False
+                            cols.append(v)
+                        for c in range(width):
+                            regs = [writer.extract(v, c, ftype) for v in cols]
+                            regs += [writer.const(0.0, ftype)
+                                     for _ in range(block - len(cols))]
+                            reached = _shared_fragment(writer, tile, ftype,
+                                                       threads, regs)
+                            if reached is None:
+                                return False
+                            frag[(k0, c)] = reached
+                    for i in range(M):
+                        with writer.AnonymousScope():
+                            accs = [writer.declare(vtype, hint='acc')
+                                    for _ in range(width)]
+                            for k0 in range(0, K + kx, span):
+                                for t in range(threads):
+                                    for c in range(width):
+                                        k = k0 + width * t + c
+                                        if k >= K + kx:
+                                            continue
+                                        rows = B(writer, None, i, k)
+                                        if rows is None or rows is False:
+                                            continue
+                                        if _width_of(rows) != width:
+                                            return False
+                                        a = frag[(k0, c)][t % block]
+                                        _check_mfma_operand(a, threads, fn)
+                                        for h in range(width):
+                                            accs[h] = writer.call(
+                                                fn, vtype, a,
+                                                writer.extract(rows, h, ftype),
+                                                accs[h], scale, t // block, 0,
+                                                hint='acc', movable=False,
+                                                materialize=True)
+                            for jj in range(min(block, N - j)):
+                                C(writer, writer.pack(wtype, *(
+                                    writer.extract(acc, jj, ftype)
+                                    for acc in accs)), i, j + jj)
+            return True
+
         # The tiling policy, now separate from what the tiles are.  Only the
         # 4-wide tile is reachable today: the 16-wide one needs a shared-memory
         # staging step that is not written, and the 32-wide one has no
@@ -424,7 +501,7 @@ def matmul32(writer: Writer, C, B, A, M, N, K, kx, threads, dtype, sparse,
                 f'no MFMA tile for {dtype} at {threads} threads; '
                 f'matmul() should have taken the DPP path')
 
-        return write_matmul(tile, start, stop)
+        return (write_matmul if width == 1 else write_wide)(tile, start, stop)
 
 
     # TODO: gfx1200, f'__builtin_amdgcn_wmma_f32_16x16x16_bf16_w32_gfx12'

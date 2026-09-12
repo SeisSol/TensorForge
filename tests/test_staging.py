@@ -301,10 +301,13 @@ def test_what_refuses_a_packed_operand_is_the_route_and_not_a_literal():
 
     ctx = _amd_context()
     assert Strategy.MATRIX in amd.strategies(_shape(width=1), ctx)
-    # Refused by the matrix core alone: the DPP chain takes the packed operand
-    # in its registers, and stages nothing for it.
-    assert Strategy.MATRIX not in amd.strategies(_shape(width=4), ctx)
+    # The route is still the trip, and the lane-batched scheme does not take
+    # it: its lanes are independent rows, so it reads the packed operand one
+    # component at a time and stages nothing for it -- as the DPP chain does.
+    assert amd.componentwise(_shape(width=4), ctx)
+    assert Strategy.MATRIX in amd.strategies(_shape(width=4), ctx)
     assert Strategy.DPP in amd.strategies(_shape(width=4), ctx)
+    assert amd.scratch(Strategy.MATRIX, _shape(width=4), ctx) == 0
     assert amd.scratch(Strategy.DPP, _shape(width=4), ctx) == 0
 
 
@@ -394,27 +397,33 @@ def test_an_unpacked_operand_reserves_nothing():
 
 @pytest.mark.parametrize('width', [2, 4])
 @pytest.mark.parametrize('threads', [32, 64])
-def test_a_packed_operand_reserves_one_wave(width, threads):
+def test_a_packed_operand_reserves_one_wave(width, threads, monkeypatch):
     """The buffer carries one operand register at a time, so it does not grow
     with the problem -- which is what lets a reservation be made before any
-    body exists."""
+    body exists.
+
+    For a scheme that takes the trip: the lane-batched one takes the packed
+    operand as it is (`amd.componentwise`), so that is switched off here."""
     from tensorforge.backend.instructions.compute.primitives import amd
     from tensorforge.backend.instructions.compute.strategy import Strategy
+    monkeypatch.setattr(amd, 'componentwise', lambda shape, ctx: False)
     assert amd.scratch(Strategy.MATRIX, _shape(width, threads),
                        None) == threads
 
 
 @pytest.mark.parametrize('width', [2, 4])
-def test_the_reservation_is_the_plan_s_own_size(width):
+def test_the_reservation_is_the_plan_s_own_size(width, monkeypatch):
     """Not a number computed beside it: smaller is an overrun and larger is
     memory nobody writes.
 
     The plan is built from this file's own statement of the two layouts, not
     from the module's, so the check is on the derivation and not a comparison
-    of the implementation with itself.
+    of the implementation with itself.  For a scheme that takes the trip, as
+    in the test above.
     """
     from tensorforge.backend.instructions.compute.primitives import amd
     from tensorforge.backend.instructions.compute.strategy import Strategy
+    monkeypatch.setattr(amd, 'componentwise', lambda shape, ctx: False)
     plan = staging.staged(_packed_lead(width, 64), _flat_lead(64),
                           _indices(64))
     assert amd.scratch(Strategy.MATRIX, _shape(width), None) == \

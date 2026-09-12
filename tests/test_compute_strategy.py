@@ -173,12 +173,15 @@ def test_the_lead_width_is_not_asked_here():
 
 @pytest.mark.parametrize('vendor', ['amd', 'nvidia', 'intel'])
 @pytest.mark.parametrize('width', [2, 4])
-def test_a_packed_lead_operand_reaches_no_matrix_core(vendor, width,
-                                                      monkeypatch):
-    """Separately and for its own reason, and on every target: no emitter
-    writes a route from a packed operand to a fragment yet.  AMD's DPP chain
-    takes one -- its accessors hand it vectors of rows and of contraction
-    steps -- and is the only arrangement anywhere that does.
+def test_a_packed_lead_operand_reaches_only_the_lane_batched_core(
+        vendor, width, monkeypatch):
+    """Separately and for its own reason: no emitter writes the route from a
+    packed operand to a fragment that wants the rows in lane order.  AMD's
+    lane-batched MFMA does not want that order -- its lanes are independent
+    rows -- and takes the packed operand one component at a time
+    (`amd.componentwise`); its DPP chain takes it too, as vectors of rows and
+    of contraction steps.  NVIDIA's and Intel's matrix paths want the order,
+    and nothing there takes one.
 
     The deployment switches are turned on for this, or two of the three would
     answer nothing whatever the width and the check would read as coverage.
@@ -207,9 +210,8 @@ def test_a_packed_lead_operand_reaches_no_matrix_core(vendor, width,
         'the unpacked shape has to be served, or the refusal below says '
         'nothing about the width')
     packed = module.strategies(shape(width), ctx)
-    assert Strategy.MATRIX not in packed
-    assert packed == (frozenset({Strategy.DPP}) if vendor == 'amd'
-                      else frozenset())
+    assert packed == (frozenset({Strategy.MATRIX, Strategy.DPP})
+                      if vendor == 'amd' else frozenset())
 
 
 def test_the_nest_is_always_legal():

@@ -65,7 +65,8 @@ from .relayout import (BROADCAST, MOVDPP16, RELAYOUTS, RUNGS,
                        takes)
 from .select import (BroadcastForm, MATERIALISE_FROM, broadcast_form,
                      dpp_move_instructions, dual_issue_fma_lanes,
-                     packed_broadcast, packed_fma_lanes,
+                     packed_broadcast, packed_broadcast_pays,
+                     packed_fma_lanes,
                      select_broadcast_form, select_fmadpp_step,
                      wanted_fmadpp_step)
 from .unused import (mfma_emu_bf16_f32, mfma_emu_f16_f32, mfma_emu_int8,
@@ -131,15 +132,17 @@ def strategies(shape, ctx):
     conversion.
 
     The matrix core answers through `takes`: an operand at width one already
-    arrives spread one element per lane, and above one it reaches the
-    fragment only through the trip that is priced and not yet emitted.  So
-    that refusal is where the route is, and when the emission lands the offer
-    follows it without a condition being edited.
+    arrives spread one element per lane, and above one it reaches a fragment
+    that wants the rows in lane order only through the trip that is priced
+    and not yet emitted.  The lane-batched scheme does not want that order
+    (`componentwise`), so it takes the packed operand as it is, one component
+    at a time.
     """
     if bitlayout.packed(shape.lead_layout):
         offered = set()
-        if takes(lead_route(shape)) and offers(shape.threads,
-                                               shape.accumulator, ctx):
+        if (not shape.sparse
+                and offers(shape.threads, shape.accumulator, ctx)
+                and (takes(lead_route(shape)) or componentwise(shape, ctx))):
             offered.add(Strategy.MATRIX)
         if not shape.sparse:
             offered.add(Strategy.DPP)
@@ -177,8 +180,10 @@ def scratch(strategy, shape, ctx):
     """
     route = lead_route(shape)
     # The trip is the matrix core's: the DPP chain takes a packed operand in
-    # its registers and stages nothing.
-    if strategy is not Strategy.MATRIX or not isinstance(route, tuple):
+    # its registers and stages nothing, and so does the lane-batched matrix
+    # scheme (`componentwise`).
+    if (strategy is not Strategy.MATRIX or not isinstance(route, tuple)
+            or componentwise(shape, ctx)):
         return 0
     return staging.buffer_elements(route)
 
@@ -190,6 +195,51 @@ def lead_route(shape):
     `scratch` are this target's, and the rungs are not theirs to pass.
     """
     return routes_lead_route(shape, RUNGS)
+
+
+def componentwise(shape, ctx) -> bool:
+    """Whether the matrix core takes a packed lead operand as it is.
+
+    `lead_route` answers for a fragment that wants the rows in lane order,
+    and for a packed operand that is a permutation between lane weights and
+    a trip through memory.  The lane-batched scheme does not want that order.
+    Its lanes are independent rows -- the instruction's N times its block
+    count is the wave, and no product crosses from one lane's row to another's
+    -- so which row a lane holds is the kernel's business.  At width `w` lane
+    `t` holds rows `w * t + c`, and component `c` of every lane is a
+    lane-batched problem of its own: one element per lane, as the B fragment
+    takes it (`codegen.matmul32`).
+
+    Only for that scheme: the exchange and the emulated ones spend lane bits
+    on the contraction and do want the order.
+    """
+    if not bitlayout.packed(shape.lead_layout):
+        return False
+    fit = choose(shape.threads, shape.accumulator, ctx, lead=shape.lead,
+                 depth=shape.depth)
+    return fit is not None and fit.scheme is Scheme.LANE_BATCHED
+
+
+def wide_chain_takes(shape, ctx) -> bool:
+    """Whether the DPP chain would take a span of this packed shape.
+
+    `_matmuldpp_wide`'s own conditions, asked before any body exists: whole
+    vectors of contraction, and the packed form paying where the fused one is
+    switched off (`FUSED_WIDE`).  Asked through `packed_broadcast_pays`, which
+    leaves the body unmarked.  The one condition the chain also has that a
+    shape does not carry is where the contraction starts; an odd start still
+    declines there.
+    """
+    width = 1 << bitlayout.unpacked(shape.lead_layout)[1]
+    if shape.sparse or shape.depth % width:
+        return False
+    from . import codegen
+    if codegen.FUSED_WIDE:
+        return True
+    step = select_fmadpp_step(shape.accumulator, shape.threads, ctx)
+    slots = -(-shape.lead // (shape.threads * width))
+    return packed_broadcast_pays(shape.accumulator, step, slots * width * width,
+                                 width * shape.accumulator.size(), ctx)
 
 
 def plan(strategy, shape, n, ctx):
@@ -216,6 +266,16 @@ def plan(strategy, shape, n, ctx):
     # Asked of the scheme that will run rather than of one of them.  Only the
     # lane-batched one draws a boundary at all, and the threshold behind it is
     # a measurement against its own block width.
+    if componentwise(shape, ctx) and not wide_chain_takes(shape, ctx):
+        # A packed lead operand whose tail the DPP chain would decline -- a
+        # contraction that ends mid-vector, or no 64-bit move with the fused
+        # form off -- goes to the matrix core whole, the last block padded.
+        # A declined tail takes the matrix span down with it: the whole
+        # product went to the nest, `local_flux`'s 9x9 products on gfx942 and
+        # all of it on gfx90a (2100 B of scratch).  Where the chain takes the
+        # tail the width-one boundary stands, which measured one column
+        # cheaper there; at width two that is unmeasured.
+        return whole(Strategy.MATRIX, n)
     edge = boundary(fit, n)
     if edge >= n:
         return whole(Strategy.MATRIX, n)
@@ -237,7 +297,13 @@ def matmul(writer, ops, ctx, span):
         return broadcast.matmul(writer, ops, ctx, span)
     if span.strategy is Strategy.MATRIX:
         fit = choose(threads, dtype, ctx, columns=N,
-                     lead=ops.lead_slots * threads, depth=K + kx)
+                     lead=ops.lead_slots * threads * ops.lead_width,
+                     depth=K + kx)
+        if ops.lead_width > 1 and (fit is None
+                                   or fit.scheme is not Scheme.LANE_BATCHED):
+            # Only the lane-batched scheme takes a packed lead operand; see
+            # `componentwise`, which is what offered this span.
+            return False
         if fit is None or (ops.a, ops.b) != (fit.reads, fit.reads):
             # The entry was selected by what it accumulates in; what it
             # multiplies is a separate property of the same entry, and an
@@ -254,7 +320,7 @@ def matmul(writer, ops, ctx, span):
             return matmul_exchange(writer, C, A, B, M, N, K, kx, threads,
                                    dtype, sparse, ctx, span.start, span.stop)
         return matmul32(writer, C, A, B, M, N, K, kx, threads, dtype, sparse,
-                        ctx, span.start, span.stop)
+                        ctx, span.start, span.stop, width=ops.lead_width)
     return matmuldpp(writer, span.start, C, A, B, M, N, K, kx, threads, dtype,
                      sparse, ctx, span.stop, width=ops.lead_width,
                      a_resident=ops.a_resident)

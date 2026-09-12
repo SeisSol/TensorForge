@@ -142,6 +142,21 @@ def packed_broadcast(datatype, step, products, moved_bytes, ctx) -> bool:
     fused ones.  And only at the row-share width, the one broadcast the
     runtime materialises (`movdpp16`).
     """
+    if not packed_broadcast_pays(datatype, step, products, moved_bytes, ctx):
+        return False
+    # Told to the body, as `select_broadcast_form` does: the moved values and
+    # the paired accumulators live in registers until their last product.
+    ctx.materialised_broadcast = True
+    return True
+
+
+def packed_broadcast_pays(datatype, step, products, moved_bytes, ctx) -> bool:
+    """`packed_broadcast`'s answer without telling the body anything.
+
+    For a caller that asks before any body exists -- a plan deciding whether
+    the DPP chain would take a span at all -- and that must not leave the
+    body marked as holding moved values it never emits.
+    """
     if getattr(ctx, 'force_fused_broadcast', False):
         return False
     if datatype != Datatype.F32 or step < 16:
@@ -149,12 +164,7 @@ def packed_broadcast(datatype, step, products, moved_bytes, ctx) -> bool:
     if packed_fma_lanes(datatype, ctx) < 2:
         return False
     moves = dpp_move_instructions(moved_bytes, ctx)
-    if moves + -(-products // 2) >= products:
-        return False
-    # Told to the body, as `select_broadcast_form` does: the moved values and
-    # the paired accumulators live in registers until their last product.
-    ctx.materialised_broadcast = True
-    return True
+    return moves + -(-products // 2) < products
 
 
 #: Products sharing one broadcast, from which a materialised move is taken.
