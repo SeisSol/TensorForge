@@ -29,6 +29,7 @@ Design decisions (see the region-vs-CFG discussion):
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
+from functools import lru_cache
 from enum import IntEnum, IntFlag, auto, Enum
 from typing import Any, Dict, Iterator, List, Optional, Tuple, Union
 
@@ -467,6 +468,23 @@ class LaneAxis:
                 else f'{self.block}@{self.stride}')
 
 
+@lru_cache(maxsize=None)
+def _replication(axes: Tuple['LaneAxis', ...], threads: int) -> int:
+    """The enumeration behind :meth:`RegisterLayout.replication`, memoized.
+
+    A layout is frozen and the answer depends on nothing else, so the count is
+    a function of the axes and the wave size.  The set of distinct layouts a
+    kernel builds is small and the same ones are asked about once per access,
+    which is often enough for the enumeration to show up on its own.
+    """
+    classes: Dict[Tuple[int, ...], int] = {}
+    for t in range(threads):
+        key = tuple((t // a.stride) % a.block for a in axes)
+        classes[key] = classes.get(key, 0) + 1
+    sizes = set(classes.values())
+    return sizes.pop() if len(sizes) == 1 else 0
+
+
 @dataclass(frozen=True)
 class RegisterLayout:
     """How a register-resident value is distributed over a wave.
@@ -540,13 +558,7 @@ class RegisterLayout:
 
         Returns 0 if the replication is not uniform across lanes.
         """
-        classes = {}
-        for t in range(threads):
-            key = tuple((t // a.stride) % a.block for a in self.axes)
-            classes.setdefault(key, 0)
-            classes[key] += 1
-        sizes = set(classes.values())
-        return sizes.pop() if len(sizes) == 1 else 0
+        return _replication(self.axes, threads)
 
     def compose(self, other: 'RegisterLayout') -> 'RegisterLayout':
         """Append `other`'s axes.  Used to build a multi-dimensional layout
