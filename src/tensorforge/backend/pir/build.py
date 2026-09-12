@@ -55,15 +55,40 @@ def _unroll_pragma(unroll) -> str:
     return ''
 
 
+def _cons_key(name: str, type_, args: Tuple[Operand, ...], extra=None):
+    """A name for the value ``name(args)`` produces, or None if it has none.
+
+    An operand that is a `Value` is named by its id; a literal is named by its
+    type and its `repr`, so that `0.0` and `-0.0` -- equal, differently spelled
+    -- stay apart.  Anything that will not hash has no name and is not shared.
+    """
+    parts = []
+    for a in args:
+        if isinstance(a, Value):
+            parts.append(a.id)
+        else:
+            parts.append((type(a).__name__, repr(a)))
+    try:
+        key = (name, type_, tuple(parts), extra)
+        hash(key)
+    except TypeError:
+        return None
+    return key
+
+
 class _Scope:
     """One entry of the builder's block stack."""
 
-    __slots__ = ('body', 'args', 'kind')
+    __slots__ = ('body', 'args', 'kind', 'avail')
 
     def __init__(self, args: Tuple[Value, ...] = (), kind: str = 'root'):
         self.body: List[Stmt] = []
         self.args = args
         self.kind = kind
+        #: Pure results this scope has already computed, keyed by
+        #: `_cons_key`, with the body index they were emitted at so that a
+        #: discarded speculation can drop them again.
+        self.avail: Dict[Any, Tuple[Value, int]] = {}
 
 
 _BARRIER_ALIASES = {'wave': Participants.WAVE, 'warp': Participants.WAVE,
@@ -266,6 +291,31 @@ class IRBuilder:
         self._stack[-1].body.append(stmt)
         return stmt
 
+    # -- sharing of pure results ------------------------------------------- #
+
+    def _shared(self, key) -> Optional[Value]:
+        """The value some enclosing scope already computed for ``key``.
+
+        Structured control flow makes dominance a question about the scope
+        stack and nothing else: every statement of an enclosing scope that is
+        already in its body runs before this one, and so does every earlier
+        statement of this scope.  A sibling region is not on the stack, so it
+        cannot be reached from here.
+        """
+        if key is None:
+            return None
+        for scope in reversed(self._stack):
+            hit = scope.avail.get(key)
+            if hit is not None:
+                return hit[0]
+        return None
+
+    def _share(self, key, value: Value) -> None:
+        if key is None:
+            return
+        scope = self._stack[-1]
+        scope.avail.setdefault(key, (value, len(scope.body)))
+
     def _emit_op(self, op: str, results, args=(), **kw) -> Stmt:
         args = tuple(args)
         results = tuple(results)
@@ -278,8 +328,14 @@ class IRBuilder:
         it is a different number, so this is the one distribution that needs
         no derivation and can never be wrong."""
         type_ = type_ or ScalarType(self._fptype)
+        key = _cons_key(Op.CONST, type_, (), extra=(type(value).__name__,
+                                                    repr(value)))
+        shared = self._shared(key)
+        if shared is not None:
+            return shared
         v = self.value(type_, hint='c', layout=SCALAR_LAYOUT)
         self._emit_op(Op.CONST, (v,), (), attrs=(('value', value),))
+        self._share(key, v)
         return v
 
     def op(self, name: str, type_, *args: Operand,
@@ -301,6 +357,17 @@ class IRBuilder:
                 f'`load`/`store` for memory, or add the name to `Op.ARITH` and '
                 f'give the emitter a spelling for it.')
         uniform = _join(args)
+        # The same operands in the same order give the same answer, so a
+        # result this scope can already reach is the result.  Uniformity and
+        # layout are both joins over the operands, so the sharing cannot
+        # disagree with them; `escapes` is the name being read from raw text
+        # the IR cannot see, and `pure=False` is the caller saying the answer
+        # is not a function of the arguments.
+        key = (_cons_key(name, type_, args)
+               if pure and not escapes else None)
+        shared = self._shared(key)
+        if shared is not None:
+            return shared
         # Same shape as the uniformity join, and for the same reason: an
         # elementwise result lives where its operands live.  Until something
         # attaches a layout this is `None` in, `None` out.
@@ -311,6 +378,7 @@ class IRBuilder:
         # scaffolding -- it disappears once the consumer takes a Value.
         attrs = (('escapes', True),) if escapes else ()
         self._emit_op(name, (v,), args, pure=pure, attrs=attrs)
+        self._share(key, v)
         return v
 
     def call(self, callee: str, type_, *args: Operand, hint: str = '',
@@ -348,12 +416,27 @@ class IRBuilder:
         uniform = _stated(uniform, _join(args), callee)
         if layout is None and keep_layout:
             layout = join_layout(args)
+        # Shareable on the same terms as `op`, with two properties `op`
+        # derives and this one is told: the stated `layout` and the stated
+        # `uniform` both go in the key, since two calls that agree on callee
+        # and arguments and disagree on either are two different results.
+        # `materialize` is a request for a variable of its own and is taken at
+        # its word; an access set or an effect means the answer depends on
+        # something the key does not name.
+        key = (_cons_key(Op.CALL, type_, args,
+                         extra=(callee, layout, uniform))
+               if pure and effect == Effect.NONE and not accesses
+               and not materialize else None)
+        shared = self._shared(key)
+        if shared is not None:
+            return shared
         v = self.value(type_, hint=hint, uniform=uniform, layout=layout)
         attrs = (('callee', callee),)
         if materialize:
             attrs += (('no_inline', True),)
         self._emit_op(Op.CALL, (v,), args, pure=pure, movable=movable,
                       effect=effect, accesses=accesses, attrs=attrs)
+        self._share(key, v)
         return v
 
     def declare(self, type_=None, *, hint: str = '', init: str = '{}',
@@ -584,8 +667,16 @@ class IRBuilder:
         `batchId0 < numElements0` is exactly such a guard.
         """
         level = Uniformity.LANE if axis == 'x' else Uniformity.MULT
+        # Same key shape as `call`, so that the two cannot both hold a
+        # `thread_idx_x` under different names.
+        key = _cons_key(Op.CALL, INDEX, (),
+                        extra=(f'thread_idx_{axis}', None, level))
+        shared = self._shared(key)
+        if shared is not None:
+            return shared
         v = self.value(INDEX, hint=f'tid{axis}', uniform=level)
         self._emit_op(Op.CALL, (v,), (), attrs=(('callee', f'thread_idx_{axis}'),))
+        self._share(key, v)
         return v
 
     def lane_index(self, block: int, stride: int = 1,
@@ -707,10 +798,17 @@ class IRBuilder:
         """
         # MULT-uniform is a statement about the lanes: every thread of one
         # multiplication has the same batch id, which is exactly replication.
+        key = _cons_key(Op.CALL, INDEX, (),
+                        extra=(f'batch_id_{lookahead}', SCALAR_LAYOUT,
+                               Uniformity.MULT))
+        shared = self._shared(key)
+        if shared is not None:
+            return shared
         v = self.value(INDEX, hint=f'batch{lookahead}', uniform=Uniformity.MULT,
                        layout=SCALAR_LAYOUT)
         self._emit_op(Op.CALL, (v,), (),
                       attrs=(('callee', f'batch_id_{lookahead}'),))
+        self._share(key, v)
         return v
 
     def alloc(self, elem: Datatype, shape: Sequence[int], space: MemSpace,
@@ -1343,6 +1441,9 @@ class IRBuilder:
 
     def _rollback(self, scope, mark, counter, names, depth, undo_mark=0):
         del scope.body[mark:]
+        # Whatever the attempt shared points into the part of the body that
+        # just went away, so it may not be handed to the next caller.
+        scope.avail = {k: e for k, e in scope.avail.items() if e[1] < mark}
         self._counter = counter
         if names is not None:
             # a discarded probe must not burn names either
