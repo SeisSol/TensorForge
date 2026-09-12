@@ -571,13 +571,22 @@ def substitute(body: Tuple[Stmt, ...], mapping: Dict[int, Value]) -> Tuple[Stmt,
     out: List[Stmt] = []
     changed = False
     for s in body:
-        pred = sub(s.predicate) if s.predicate is not None else None
-        args = tuple(sub(a) for a in s.args)
+        # Scanning before rebuilding, rather than rebuilding and comparing: a
+        # mapping names a handful of values and the body is thirty thousand
+        # statements, so the answer is almost always that this one is not
+        # among them, and reaching it should not cost a tuple.
+        hit = ((s.predicate is not None and s.predicate.id in mapping)
+               or any(a.id in mapping for a in s.args
+                      if isinstance(a, Value)))
         t = _map_regions(s, lambda b: substitute(b, mapping))
-        if args == s.args and pred is s.predicate and t is s:
+        if not hit and t is s:
             out.append(s)
             continue
-        out.append(replace(t, args=args, predicate=pred))
+        out.append(replace(
+            t,
+            args=tuple(sub(a) for a in s.args),
+            predicate=(sub(s.predicate) if s.predicate is not None else None),
+        ))
         changed = True
     return tuple(out) if changed else body
 
