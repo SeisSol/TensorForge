@@ -61,8 +61,8 @@ class KernelParam:
         pointers it has.  Those are generic, and on HIP a space-qualified
         pointer is a type of its own that a generic one reaches only through a
         cast: `float *` does not initialise a `SpacePtr<float, 1>` parameter.
-        So the launcher declares the generic spelling, and its call into the
-        kernel casts (`argument`).
+        So the launcher declares the generic spelling, and casts into a local
+        of the kernel's type before it calls the kernel (`binding`).
         """
         tail = self.default if with_default else ''
         if self.decl is not None:
@@ -79,20 +79,36 @@ class KernelParam:
         storage = f'{storage} ' if storage else ''
         return f'{storage}{body} {self.name}{tail}'
 
-    def argument(self, lexic=None) -> str:
-        """Without types, for a call.
-
-        With `lexic`, for the launcher's call into the kernel: where the
-        kernel declares a space the launcher's generic pointer does not carry,
-        the argument is cast to it.
-        """
+    def _kernel_type(self, lexic) -> Optional[str]:
+        """The kernel's pointer spelling, where the launcher's differs."""
         if lexic is None or self.decl is not None or self.depth == 0:
-            return self.name
+            return None
         kernel = lexic.pointer_type(f'{self.datatype}', self.space,
                                     readonly=self.readonly, depth=self.depth)
         host = lexic.pointer_type(f'{self.datatype}', None,
                                   readonly=self.readonly, depth=self.depth)
-        return self.name if kernel == host else f'({kernel}){self.name}'
+        return None if kernel == host else kernel
+
+    def binding(self, lexic) -> Optional[str]:
+        """The launcher's local of the kernel's type, where the two differ.
+
+        A named local rather than a cast in the argument list: a cooperative
+        launch hands the arguments over by address (`argsPtrs(Args &...)`),
+        and a cast has none -- `barrier_two_gemms_16x16` stopped compiling.
+        """
+        kernel = self._kernel_type(lexic)
+        if kernel is None:
+            return None
+        return f'{kernel} {self.name}Arg = ({kernel}){self.name};'
+
+    def argument(self, lexic=None) -> str:
+        """Without types, for a call.
+
+        With `lexic`, for the launcher's call into the kernel, which names
+        the local `binding` declares where there is one.
+        """
+        return (self.name if self._kernel_type(lexic) is None
+                else f'{self.name}Arg')
 
     # -- construction ----------------------------------------------------- #
 

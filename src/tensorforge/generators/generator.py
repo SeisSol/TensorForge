@@ -1094,7 +1094,7 @@ class Generator:
       for table in self._param_tables:
         writer(table.argument())
 
-      args = self._generate_kernel_base_args()
+      args = self._generate_kernel_base_args(writer)
       args = ', '.join(args)
       call_site = lexic.get_launch_code(func_name=kernel_name,
                                         grid='grid',
@@ -1715,11 +1715,21 @@ class Generator:
     return [p.declaration(lexic, with_default=with_defaults, host=host)
             for p in params]
 
-  def _generate_kernel_base_args(self):
+  def _generate_kernel_base_args(self, writer=None):
+    """The arguments of the launcher's call into the kernel.
+
+    With `writer`, the locals they need first (`KernelParam.binding`): a
+    pointer the kernel declares in a space the launcher's does not carry.
+    """
     global_symbols = self._scopes.get_global_scope().values()
     lexic = self._context.get_vm().get_lexic()
-    return [p.argument(lexic) for p in self._base_params(
-        global_symbols, substitute_tables=True)]
+    params = self._base_params(global_symbols, substitute_tables=True)
+    if writer is not None:
+      for p in params:
+        bound = p.binding(lexic)
+        if bound is not None:
+          writer(bound)
+    return [p.argument(lexic) for p in params]
 
   def _generate_kernel_proto(self, writer):
     global_symbols = self._scopes.get_global_scope().values()
