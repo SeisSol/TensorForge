@@ -450,6 +450,16 @@ template <int Row, typename T> __device__ __forceinline__ T movdpp16(T a) {
   return dpp<0x150 + Row, 0xf, 0xf, true>(a);
 }
 
+/// `movdpp16`, kept an instruction of its own.  From gfx10 on LLVM folds a
+/// DPP move into the VALU instruction that reads it -- which is the fused
+/// form again, and a DPP-modified FMA cannot be one half of a VOPD pair.
+/// Pinning the moved value leaves the FMAs that read it plain.
+template <int Row, typename T> __device__ __forceinline__ T movdpp16Kept(T a) {
+  T r = movdpp16<Row>(a);
+  pin(r);
+  return r;
+}
+
 #if !defined(__gfx900__)
 constexpr bool HasFmacDpp4 = true;
 

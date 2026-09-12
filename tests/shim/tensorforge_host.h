@@ -233,6 +233,7 @@ T reduction(const T &value);
 template <int Row, typename T> T movdpp16(T a);
 // An ordering point on a register: an empty `asm volatile` on the device.
 template <typename T> void pin(T &v);
+template <int Row, typename T> T movdpp16Kept(T a);
 
 // cuda.h
 //

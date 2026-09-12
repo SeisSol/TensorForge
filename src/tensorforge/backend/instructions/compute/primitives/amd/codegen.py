@@ -24,6 +24,13 @@ from .select import (BroadcastForm, packed_broadcast, select_broadcast_form,
 #: which is what lets a layout ride on it and a pass see who consumed it.
 SPLIT_BF16 = 'tensorforge::splitFloatx4BF16'
 
+#: Whether the moved broadcast (`BroadcastForm.MOVED`, the VOPD form) keeps
+#: its move from being folded back into the FMAs (`movdpp16Kept`).  LLVM's
+#: DPP combine does that from gfx10 on wherever it can, and a DPP-modified
+#: FMA cannot pair.  Off until the measurement on gfx1150 says which way it
+#: goes.
+PIN_MOVED = False
+
 
 def _check_mfma_operand(operand, threads, callee):
     """The A operand of an MFMA has to be laid out as the transpose left it.
@@ -155,7 +162,9 @@ def hfma(writer: Writer, Cs, As, Bs, repeat, datatype, threads, ctx):
                     # is that these multiplies carry no modifier and may
                     # therefore be issued in pairs.
                     mv = dict(threads=threads, row=j)
-                    ax = [writer.call(MOVDPP16.callee.format(**mv), ftype, aa,
+                    callee = (f'tensorforge::movdpp16Kept<{j}>' if PIN_MOVED
+                              else MOVDPP16.callee.format(**mv))
+                    ax = [writer.call(callee, ftype, aa,
                                       hint='bc', movable=False,
                                       layout=MOVDPP16.produces(**mv))
                           for aa in a]
