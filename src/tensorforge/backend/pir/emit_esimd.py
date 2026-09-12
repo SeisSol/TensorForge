@@ -764,8 +764,17 @@ class EsimdEmitter(Emitter):
         head = self._window_heads.get(id(s))
         if head is not None:
             buf, lo, width, wname, elem = head
-            self.writer(f'{self.simd_type(elem, width)} {wname};')
-            self.writer(f'{wname}.copy_from({self.base_name(buf)} + {lo});')
+            start = f'{self.base_name(buf)} + {lo}'
+            lex = self._lexic()
+            # Through the target's own read of shared memory: a window is an
+            # offset into SLM, and `copy_from` on it does not compile (or, on
+            # a raw pointer, reads global memory).
+            slm = lex.get_slm_load(elem, width, start) if lex is not None else None
+            if slm is not None:
+                self.writer(f'{self.simd_type(elem, width)} {wname} = {slm};')
+            else:
+                self.writer(f'{self.simd_type(elem, width)} {wname};')
+                self.writer(f'{wname}.copy_from({start});')
         wname, k = self._windows[id(s)]
         v = s.target[0]
         named = s.attr('extern')

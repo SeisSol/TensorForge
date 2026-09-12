@@ -1038,7 +1038,7 @@ def test_scalar_shared_reads_share_one_window():
     is a message of its own -- 1836 of them in `local_flux`.  A run with
     constant addresses is one block read, and the reads are registers."""
     src = _esimd_src(_shared_reads)
-    assert src.count('copy_from(s7') == 1, src
+    assert src.count('slmLoad<float, 16>(s7 + ') == 1, src
     assert 's7_w0[0]' in src and 's7_w0[6]' in src, src
     assert 's7[' not in src, src
 
@@ -1052,7 +1052,7 @@ def test_a_shared_store_ends_the_window():
         other = b.alloc(Datatype.F32, (64,), MemSpace.SHARED, extern='s8')
         b.store(other, b.const(1.0), 0)
     src = _esimd_src(lambda b: _shared_reads(b, store))
-    assert src.count('copy_from(s7') == 1, src
+    assert src.count('slmLoad<float, 16>(s7 + ') == 1, src
     assert 's7[9]' in src, 'the read after the store is its own'
 
 

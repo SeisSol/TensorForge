@@ -536,6 +536,8 @@ template <typename T, int N> intel_esimd::simd<T, N> slmLoad(SlmPtr<T>) {
 template <typename T, int N>
 void slmStore(SlmPtr<T>, intel_esimd::simd<T, N>) {}
 
+template <std::size_t Bytes> void slmReserve() {}
+
 template <std::size_t Bytes, typename T> SlmPtr<T> slmArena() {
   return SlmPtr<T>(0);
 }

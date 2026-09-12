@@ -102,9 +102,11 @@ class SyclLexic(Lexic):
       raise ValueError('the explicit-vector arena is `slm_init<Bytes>()` and '
                        'needs its size at the declaration; the caller has it '
                        'and has to pass it')
-    return (f'tensorforge::SlmPtr<{precision}> {name} = '
-            f'tensorforge::slmArena<{size} * sizeof({precision}), '
-            f'{precision}>()')
+    # The base only: `slm_init` is once per kernel, and a kernel of several
+    # sections declares its arena once per section -- IGC refuses the second
+    # call ("slm_init is called more than once").  `kernel_definition`
+    # reserves the largest section's size at the top of the kernel instead.
+    return f'tensorforge::SlmPtr<{precision}> {name} = tensorforge::SlmPtr<{precision}>(0)'
 
   def kernel_definition(self, file, kernel_bounds, base_name, params, precision=None, total_shared_mem_size=None, global_symbols=None):
     if self.simd_mode:
@@ -147,6 +149,13 @@ class SyclLexic(Lexic):
           f"{{group_size.get(2), group_size.get(1), group_size.get(0)}}}}, "
           f"{props}[=](sycl::nd_item<3> item) {add_items}")
 
+    if self.simd_mode and total_shared_mem_size and precision is not None:
+      # Once, before any section binds a window into it; see
+      # `declare_shared_memory`.  `total_shared_mem_size` is the largest
+      # section's arena, which is what every section addresses.
+      reserve = (f'tensorforge::slmReserve<{total_shared_mem_size} * '
+                 f'sizeof({precision})>();')
+      return MultiBlock(file, [l1, l2, l3, reserve], ["", ");", ");", ""])
     if localmem is None:
       return MultiBlock(file, [l1, l2, l3], ["", ");", ");"])
     else:

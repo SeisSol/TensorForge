@@ -68,8 +68,18 @@ def test_the_arena_is_a_reserved_chunk_and_not_an_accessor():
     assert 'local_accessor' not in src, (
         'an accessor alongside `slm_init` reserves the space twice, and the '
         'accesses address the chunk')
-    assert re.search(r'tensorforge::slmArena<\d+ \* sizeof\(float\), float>\(\)',
-                     src)
+    assert re.search(r'tensorforge::slmReserve<\d+ \* sizeof\(float\)>\(\);', src)
+    assert 'tensorforge::SlmPtr<float> totalShrMem = tensorforge::SlmPtr<float>(0)' in src
+
+
+def test_a_kernel_of_several_sections_reserves_once():
+    """`slm_init` may be called once per kernel, and every section binds its
+    own arena: `fence_two_gemms` declared it twice and IGC refused the kernel
+    ("slm_init is called more than once").  The reservation is the kernel's,
+    at the largest section's size; the binding stays the section's."""
+    src = _kernel('fence_two_gemms')
+    assert src.count('slmReserve<') == 1, src
+    assert src.count('SlmPtr<float> totalShrMem = ') == 2, src
 
 
 def test_the_spmd_arena_is_still_an_accessor():

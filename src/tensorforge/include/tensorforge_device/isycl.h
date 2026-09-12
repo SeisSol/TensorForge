@@ -226,27 +226,59 @@ template <typename T>
 inline constexpr auto slmAligned =
     intel_esimd::properties{intel_esimd::alignment<sizeof(T)>};
 
+/// The run a block message can take first out of `N`: the largest power of
+/// two that is a whole message (`slmBlockable`), or 0 where not even one
+/// element is -- a sub-dword type, which only a gather moves.
+///
+/// Largest first, so that a run is as few messages as its binary digits: 24
+/// floats are 16 + 8, 504 are four of 128 and then 64 + 32 + 16 + 8.  A
+/// gather of the same run is one address per element, and a wide one is a
+/// register of offsets on top -- which is what every staging tail and every
+/// run past 512 bytes used to be.
+template <typename T, int N> constexpr int slmChunk() {
+  // `slmBlockable`'s rule, spelled on values: a template argument cannot be
+  // the loop variable.
+  int c = 1;
+  while (2 * c <= N && 2 * c * sizeof(T) <= 512)
+    c *= 2;
+  return c * sizeof(T) >= 4 ? c : 0;
+}
+
 /// `N` consecutive elements out of SLM, as a vector.
 template <typename T, int N>
 ESIMD_INLINE intel_esimd::simd<T, N> slmLoad(SlmPtr<T> at) {
-  if constexpr (slmBlockable<T, N>()) {
+  constexpr int C = slmChunk<T, N>();
+  if constexpr (C == N) {
     return intel_esimd::slm_block_load<T, N>(at.bytes(), slmAligned<T>);
-  } else {
+  } else if constexpr (C == 0) {
     const intel_esimd::simd<std::uint32_t, N> offsets(
         at.bytes(), static_cast<std::uint32_t>(sizeof(T)));
     return intel_esimd::slm_gather<T, N>(offsets);
+  } else {
+    intel_esimd::simd<T, N> out;
+    out.template select<C, 1>(0) =
+        intel_esimd::slm_block_load<T, C>(at.bytes(), slmAligned<T>);
+    out.template select<N - C, 1>(C) = slmLoad<T, N - C>(at + C);
+    return out;
   }
 }
 
 /// The same run, written.
 template <typename T, int N>
 ESIMD_INLINE void slmStore(SlmPtr<T> at, intel_esimd::simd<T, N> value) {
-  if constexpr (slmBlockable<T, N>()) {
+  constexpr int C = slmChunk<T, N>();
+  if constexpr (C == N) {
     intel_esimd::slm_block_store<T, N>(at.bytes(), value, slmAligned<T>);
-  } else {
+  } else if constexpr (C == 0) {
     const intel_esimd::simd<std::uint32_t, N> offsets(
         at.bytes(), static_cast<std::uint32_t>(sizeof(T)));
     intel_esimd::slm_scatter<T, N>(offsets, value);
+  } else {
+    intel_esimd::slm_block_store<T, C>(
+        at.bytes(), intel_esimd::simd<T, C>(value.template select<C, 1>(0)),
+        slmAligned<T>);
+    slmStore<T, N - C>(at + C, intel_esimd::simd<T, N - C>(
+                                   value.template select<N - C, 1>(C)));
   }
 }
 
@@ -258,6 +290,14 @@ ESIMD_INLINE void slmStore(SlmPtr<T> at, intel_esimd::simd<T, N> value) {
 /// operand, while a reserved chunk is addressed by offset alone.  The size is
 /// a constant in the generated kernel -- `ShrMemOpt` fixes it before any body
 /// is built -- so the requirement costs nothing here.
+/// Reserve the work-group's SLM chunk, once per kernel.  `slm_init` may not
+/// be called twice, and a kernel of several sections binds its arena once per
+/// section -- so the reservation is the kernel's and the binding the
+/// section's (`SlmPtr<T>(0)`).
+template <std::size_t Bytes> ESIMD_INLINE void slmReserve() {
+  intel_esimd::slm_init<static_cast<std::uint32_t>(Bytes)>();
+}
+
 template <std::size_t Bytes, typename T> ESIMD_INLINE SlmPtr<T> slmArena() {
   intel_esimd::slm_init<static_cast<std::uint32_t>(Bytes)>();
   return SlmPtr<T>(0);
