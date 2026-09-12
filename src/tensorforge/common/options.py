@@ -613,6 +613,16 @@ declare('mma_prefetch',
             '(`local_flux` b56: 149 against 190 on sm_100a), which is a block '
             'per SM -- only a measurement says which of the two wins.')
 
+declare('mma_prefetch_across',
+        default=True,
+        env='TF_MMA_PREFETCH_ACROSS',
+        doc='Whether the matrix path loads the next block of rows\' first '
+            'fragments during the last steps of this one (`mma_prefetch` '
+            'steps ahead over the whole contraction), or starts every block '
+            'cold.  Across made `mmaos` 10 % faster on GB200 and the merged '
+            '`mmaosm` 7 % slower -- same instructions, L1 hits 95.2 % against '
+            '93.1 % -- so it is a question per kernel, not a constant.')
+
 declare('lanes_per_mult',
         default=0,
         env='TF_LANES',

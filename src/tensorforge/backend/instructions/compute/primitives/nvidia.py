@@ -1202,9 +1202,16 @@ def matmul(writer, ops, ctx, span):
                 for k, kk in steps]
     fetched, issued = {}, 0
     at_step = 0
+    # Within one block of rows only, where the caller asked for that
+    # (`Options.mma_prefetch_across`): the loads stop at the block's last
+    # step, and the next block starts cold, as it did before the sequence
+    # spanned blocks.
+    across = ctx is None or ctx.get_user_options().mma_prefetch_across
 
     def fetch(upto):
         nonlocal issued
+        if not across:
+            upto = min(upto, (at_step // len(steps) + 1) * len(steps) - 1)
         while issued <= min(upto, len(sequence) - 1):
             fetched[issued] = quads(*sequence[issued])
             issued += 1
