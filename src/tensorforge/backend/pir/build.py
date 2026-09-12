@@ -1602,12 +1602,18 @@ class IRBuilder:
 
     def rawexpr(self, text: str, *args: Operand, type_=None, hint: str = '',
                 pure: bool = False, movable: bool = False,
-                layout: Optional[RegisterLayout] = None) -> Value:
+                layout: Optional[RegisterLayout] = None,
+                crosslane: bool = False) -> Value:
         """One escape hatch with a *single* convention: ``{0}`` is ``args[0]``.
 
         The result is declared by the emitter; the text is an expression, never
         a full statement.  (The old writer mixed both conventions --- ``{0}``
         meant the target in ``write()`` but the loop variable in ``For``.)
+
+        ``crosslane`` says the text reads other lanes' registers -- a lane
+        broadcast -- so it has to run where those lanes run too; the text is
+        opaque, so the IR cannot find that out.  `passes.converge_crosslane`
+        takes such a read out of a guard that splits the lanes.
         """
         type_ = type_ or ScalarType(self._fptype)
         uniform = _join(args)
@@ -1623,7 +1629,8 @@ class IRBuilder:
         v = self.value(type_, hint=hint, uniform=uniform,
                        layout=layout if layout is not None else join_layout(args))
         self._emit_op(Op.RAWEXPR, (v,), args, pure=pure, movable=movable,
-                      effect=Effect.NONE if pure else Effect.UNKNOWN, text=text)
+                      effect=Effect.NONE if pure else Effect.UNKNOWN, text=text,
+                      attrs=(('crosslane', True),) if crosslane else ())
         return v
 
     def tempvar(self, prefix: str = 'tmp') -> Value:

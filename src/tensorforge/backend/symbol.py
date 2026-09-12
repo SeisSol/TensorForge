@@ -2534,7 +2534,7 @@ class Symbol:
         text = context.get_vm().get_lexic().broadcast(
             '{0}', bc_lane, self.num_threads)
         return writer.rawexpr(text, value, type_=ltype, hint='bc',
-                              pure=True, movable=True)
+                              pure=True, movable=True, crosslane=True)
 
       if self._memory_valid(read_index) is not None and not (
           variable is not None and bc_lane is None):

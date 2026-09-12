@@ -1284,6 +1284,99 @@ def _split_invariant(loop: Stmt) -> Tuple[List[Stmt], Tuple[Stmt, ...]]:
 
 
 # --------------------------------------------------------------------------- #
+# Cross-lane reads out of lane guards
+# --------------------------------------------------------------------------- #
+
+def converge_crosslane(body: Tuple[Stmt, ...]) -> Tuple[Stmt, ...]:
+    """Take every cross-lane read out of a guard that splits the lanes.
+
+    A broadcast reads another lane's register, so it is defined only where
+    that lane executes it too.  Under `if (lead < 6)` the lanes from six on do
+    not, and what the read returns there is the target's business: DPP with
+    `bound_ctrl` gives zero on AMD, so `slice_offset_a` at lead width two on
+    gfx1150 lost `B`'s rows 12 to 15 -- the lanes that hold them are the ones
+    the guard turned off -- and came out wrong by 8.8.  `__shfl_sync` inside
+    the same branch names lanes that do not execute it, which CUDA leaves
+    undefined and sm_120 happened to answer.
+
+    So a statement marked `crosslane` leaves each guard whose condition varies
+    between lanes, together with what it reads, where what it reads can be
+    computed on every lane: pure arithmetic, and loads from a thread's own
+    registers that nothing earlier in the guard writes.  A read of memory
+    stays, since the guard may be what keeps it in bounds -- and so does the
+    broadcast that needs it.  Inner guards first, so a read taken out of one
+    lands in the next and leaves that one too.
+    """
+    out: List[Stmt] = []
+    for s in body:
+        s = _map_regions(s, converge_crosslane)
+        if s.op == Op.IF and _operand_uniformity(s.cond) == Uniformity.LANE:
+            lifted, s = _lift_crosslane(s)
+            out.extend(lifted)
+        out.append(s)
+    return tuple(out)
+
+
+def _lift_crosslane(guard: Stmt) -> Tuple[List[Stmt], Stmt]:
+    lifted: List[Stmt] = []
+    regions = []
+    for r in guard.regions:
+        taken, rest = _crosslane_chain(r)
+        lifted.extend(taken)
+        regions.append(replace(r, body=rest) if taken else r)
+    if not lifted:
+        return [], guard
+    return lifted, replace(guard, regions=tuple(regions))
+
+
+def _crosslane_chain(region: Region) -> Tuple[List[Stmt], Tuple[Stmt, ...]]:
+    """The cross-lane reads of `region` that may run ahead of it, with the
+    statements they read, in their order -- and what stays behind."""
+    body = region.body
+    inside = {a.id for a in region.args}
+    for s in body:
+        inside.update(t.id for t in s.target)
+    free: Set[int] = set()           # statements that could run on every lane
+    defined_free: Set[int] = set()   # the values those define
+    writes: List[Access] = []
+    opaque = False
+    for i, s in enumerate(body):
+        own_register_read = (
+            s.op == Op.LOAD and s.accesses and not opaque
+            and not (s.effect & (Effect.WRITE | Effect.ATOMIC | Effect.BARRIER
+                                 | Effect.UNKNOWN))
+            and all(a.space is MemSpace.REGISTER and not a.writes
+                    for a in s.accesses)
+            and not any(accesses_conflict(a, w)
+                        for a in s.accesses for w in writes))
+        if (not s.regions and s.predicate is None
+                and (s.attr('crosslane') or own_register_read
+                     or (s.pure and s.effect == Effect.NONE
+                         and not s.accesses))
+                and all(v.id not in inside or v.id in defined_free
+                        for v in s.operands())):
+            free.add(i)
+            defined_free.update(t.id for t in s.target)
+        writes.extend(a for a in s.accesses if a.writes)
+        opaque = opaque or bool(s.effect & Effect.UNKNOWN)
+
+    producer = {t.id: i for i, s in enumerate(body) for t in s.target}
+    need: Set[int] = set()
+    todo = [i for i in free if body[i].attr('crosslane')]
+    while todo:
+        i = todo.pop()
+        if i in need:
+            continue
+        need.add(i)
+        todo.extend(producer[v.id] for v in body[i].operands()
+                    if v.id in producer)
+    if not need:
+        return [], body
+    return ([body[i] for i in sorted(need)],
+            tuple(s for i, s in enumerate(body) if i not in need))
+
+
+# --------------------------------------------------------------------------- #
 # Register pressure
 # --------------------------------------------------------------------------- #
 
@@ -2023,7 +2116,8 @@ def optimize(body: Tuple[Stmt, ...], dump_hook=None,
     final issue order, so anything that may still move statements has to have
     happened already.
     """
-    stages = (('flatten', flatten_scopes), ('fold', fold), ('cse', cse),
+    stages = (('flatten', flatten_scopes), ('converge', converge_crosslane),
+              ('fold', fold), ('cse', cse),
               ('loads', load_cse), ('licm', licm),
               ('fold2', fold), ('cse2', cse), ('dce', dce))
     if explicit_simd:
