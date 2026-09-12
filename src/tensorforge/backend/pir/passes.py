@@ -1403,7 +1403,8 @@ def _index(body: Tuple[Stmt, ...], start: int = 0):
 
 
 def pressure(body: Tuple[Stmt, ...], in_bytes: bool = False,
-             explicit_simd: bool = True) -> int:
+             explicit_simd: bool = True,
+             profile: Optional[List[Tuple[Stmt, int]]] = None) -> int:
     """Peak simultaneously live SSA values, or the bytes they occupy.
 
     `in_bytes` is what a caller comparing against a register budget has to
@@ -1539,11 +1540,38 @@ def pressure(body: Tuple[Stmt, ...], in_bytes: bool = False,
                     if isinstance(v.type, BufferType))
         events += [(0, floor), (len(order), -floor)] if floor else []
     events.sort()
+    if profile is not None:
+        # The same sweep, sampled at every statement: what is live across
+        # statement `i` is every interval that began at or before it and has
+        # not ended, which is the prefix sum of the events up to `i`.
+        delta = [0] * (len(order) + 1)
+        for p, w in events:
+            delta[min(p, len(order))] += w
+        live = 0
+        for st, d in zip(order, delta):
+            live += d
+            profile.append((st, live))
     live = peak = 0
     for _, w in events:
         live += w
         peak = max(peak, live)
     return peak
+
+
+def pressure_profile(body: Tuple[Stmt, ...], in_bytes: bool = True,
+                     explicit_simd: bool = True) -> List[Tuple[Stmt, int]]:
+    """`pressure` at every statement rather than at its worst one.
+
+    Pre-order, as `pressure` numbers the statements, each with the values --
+    or the bytes -- live across it.  The peak of it is `pressure`'s answer;
+    where the figure rises and falls is the question a per-section register
+    budget asks (`setmaxnreg` on NVIDIA, dynamic VGPRs on gfx12): which part of
+    a body needs the registers, and which parts could give them back.
+    """
+    profile: List[Tuple[Stmt, int]] = []
+    pressure(body, in_bytes=in_bytes, explicit_simd=explicit_simd,
+             profile=profile)
+    return profile
 
 
 def _is_integer(t) -> bool:
