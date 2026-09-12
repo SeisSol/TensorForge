@@ -38,6 +38,12 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
     self._src = kwargs['src']
     self._shr_mem = kwargs['shr_mem']
     self._num_threads = kwargs['num_threads']
+    #: Set again by `set_threadconfig_pre`, which is where a blockwide
+    #: transfer widens `_num_threads` to the block and this one does not
+    #: follow.  Initialised here so that a transfer nobody reconfigures --
+    #: the pipelined clone, which is constructed and used in one step --
+    #: still answers the question.
+    self._lanes = kwargs['num_threads']
     #: A shared image is not blocked -- the compute path reads it by element,
     #: not by lane -- so this stays 1 unless a caller says otherwise.
     self._lead_width = kwargs.get('lead_width', 1)
@@ -109,14 +115,56 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
     self._get_bounding_box_dense()
 
   def set_threadconfig_pre(self, num_threads, mults):
+    #: Lanes one work-item covers, as opposed to `_num_threads`, which is how
+    #: many the whole team covers.  The two coincide except for a blockwide
+    #: transfer, where the team is the block and the work-item is still one
+    #: multiplication's worth -- and under an explicit vector that difference
+    #: decides the width of the register the transfer moves through.
+    self._lanes = num_threads
     if self._blockwide:
       self._num_threads = num_threads * mults
 
   def _next_size(self, size):
     return _find_next_coprime(size, self._context.get_vm().get_hw_descr().shmem_banks)
 
+  def _explicit_simd(self) -> bool:
+    return bool(getattr(self._context.get_vm().get_lexic(), 'simd_mode', False))
+
+  def _lane_span(self) -> int:
+    """How many elements of one hop a single work-item carries.
+
+    Under SPMD the answer is one: a thread moves `increment` elements and the
+    team moves `_num_threads` of those. Under an explicit vector the work-item
+    *is* the wave, so it carries `_lanes` granules at once and the transfer's
+    register is that much wider -- which is a fact about the declaration and
+    therefore has to be stated, not left in the address.
+    """
+    return self._lanes if self._explicit_simd() else self._num_threads
+
   def _linear_idx(self):
+    """Where this work-item's share of a linear transfer begins.
+
+    Under SPMD that is the thread's own index, and the lane term rides in the
+    address.  Under an explicit vector there is no lane index to ask for --
+    `EsimdEmitter._thread_idx('x')` refuses the question, since one work-item
+    holds the whole vector -- so the share of a per-multiplication transfer
+    begins at zero and the distribution has moved into the type.
+
+    A blockwide transfer keeps a term, because the team really is several
+    work-items: work-item `y` owns lanes `[y * lanes, (y + 1) * lanes)`, and
+    those are contiguous granules, so its share begins at `y * lanes`.
+
+    This is text rather than a PIR value, and that is why it had to be said
+    here: the transfer is built by the macro layer and never passes the
+    emitter that would have refused `item.get_local_id(0)`.  It reached the
+    generated kernel as an ordinary subscript instead -- an address that is
+    wrong and compiles.
+    """
     lexic = self._context.get_vm().get_lexic()
+    if self._explicit_simd():
+      if self._blockwide:
+        return f'({lexic.thread_idx_y} * {self._lanes})'
+      return '0'
     if self._blockwide:
       # The thread's own number in the block, so the *hardware* axes: where a
       # multiplication spans waves the lane is derived from them
@@ -305,20 +353,75 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
           pos += num_hops
       rest = length % self._num_threads
       if rest > 0:
-        # The tail: `length % num_threads` elements, moved by the lanes below
-        # `rest`.  On the structured path this is the copy's own predicate
-        # rather than a block around it -- a guard block would put the token
-        # in a scope the wait cannot name.
-        # A guard block, not the copy's own predicate, and not for want of
-        # support: `copy_async` takes one, but it has to be a Value and
-        # `_linear_idx()` is still text.  The block costs nothing here -- a
-        # token has no C++ representation, so nothing is scoped inside it that
-        # the wait needs to name.  It becomes the predicate on the commit that
-        # makes the linear index a value.
-        with writer.If(f'{self._linear_idx()} < {rest}'):
-          self._write_hop(writer, src_offset, dst_offset, index, pos, pos+1, 1, nontemporal, linscale)
+        if self._explicit_simd():
+          self._write_tail_vector(writer, src_offset, dst_offset, index, pos,
+                                  rest, nontemporal, linscale)
+        else:
+          # The tail: `length % num_threads` elements, moved by the lanes below
+          # `rest`.  On the structured path this is the copy's own predicate
+          # rather than a block around it -- a guard block would put the token
+          # in a scope the wait cannot name.
+          # A guard block, not the copy's own predicate, and not for want of
+          # support: `copy_async` takes one, but it has to be a Value and
+          # `_linear_idx()` is still text.  The block costs nothing here -- a
+          # token has no C++ representation, so nothing is scoped inside it that
+          # the wait needs to name.  It becomes the predicate on the commit that
+          # makes the linear index a value.
+          with writer.If(f'{self._linear_idx()} < {rest}'):
+            self._write_hop(writer, src_offset, dst_offset, index, pos, pos+1, 1, nontemporal, linscale)
 
-  def _write_hop(self, writer, src_offset, dst_offset, index, start, end, increment, nontemporal, linscale):
+  def _write_tail_vector(self, writer, src_offset, dst_offset, index, pos,
+                         rest, nontemporal, linscale):
+    """The tail, as narrower transfers rather than as a guard on the lane.
+
+    `if (linear_idx < rest)` is a statement about which lanes take part, and
+    under an explicit vector there is no lane to make it about: the condition
+    is a scalar, so the branch is taken whole or not at all and the transfer
+    inside it moves the full register width -- `num_threads` elements where
+    `rest` were meant, over the top of whatever follows the tile.
+
+    What the guard says instead is that the transfer is `rest` elements wide,
+    and a width is something this lowering can spell.  So the tail becomes one
+    transfer per participating work-item, each of a *compile-time* width:
+    work-item `j` carries `min(lanes, rest - j * lanes)` granules beginning at
+    `j * lanes`.  A runtime-varying width would not be expressible, which is
+    why the split is over work-items and not over a bound.
+
+    Per multiplication there is only ever one work-item, so the common case is
+    a single transfer of `rest` and no guard at all.  Blockwide -- which is
+    `preload_globals`, once per block in the prologue -- is where more than one
+    chunk appears, and the guard on `y` there is a scalar branch on a scalar
+    value, which is the kind this model does have.
+    """
+    lexic = self._context.get_vm().get_lexic()
+    lanes = self._lanes
+    for j in range((rest + lanes - 1) // lanes):
+      width = min(lanes, rest - j * lanes)
+      # No separate base: under the guard `y == j` the blockwide
+      # `_linear_idx()` is `j * lanes` already, and per multiplication it is
+      # zero and `j` is only ever zero.  So the address the hop builds is the
+      # one this chunk wants, and only its *width* has to be narrowed.
+      if self._blockwide:
+        with writer.If(f'{lexic.thread_idx_y} == {j}'):
+          self._write_hop(writer, src_offset, dst_offset, index, pos, pos + 1,
+                          1, nontemporal, linscale, lanes=width)
+      else:
+        self._write_hop(writer, src_offset, dst_offset, index, pos, pos + 1,
+                        1, nontemporal, linscale, lanes=width)
+
+  def _write_hop(self, writer, src_offset, dst_offset, index, start, end,
+                 increment, nontemporal, linscale, lanes=None):
+    """`lanes` narrows the transfer's own register without touching the claim
+    the fill leaves on the image.
+
+    Two different statements that used to be one number.  The register is what
+    this work-item moves in one go; the claim is how the *image* is spread
+    once the fill is done, which every later read of it reports.  A tail chunk
+    narrows the first and must not touch the second -- two fills recording
+    different claims about one image leave it unknown, and unknown is a
+    declaration the explicit-vector lowering cannot write.
+    """
+    span = self._lane_span() if lanes is None else lanes
     if end > start:
       if increment > 1:
         vectortype = self._vm.get_lexic().get_fptype(self._dest.get_fptype(), increment)
@@ -346,7 +449,7 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
         # use.  66% of the staged reads on CUDA had no claim behind them for
         # that reason; see `tools/staging_census.py`.
         self._dest._record_linear_layout(dst_offset, increment,
-                                         self._num_threads, writer)
+                                         self._lane_span(), writer)
         dst_buf = self._destination_buffer(writer)
         src_buf = self._src.pir_buffer(writer)
         def write_load(lhs, rhs, _d=dst_buf, _s=src_buf, _n=increment,
@@ -365,7 +468,7 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
         # and `increment` is a vector width rather than a lane stride.  The
         # ESIMD lowering needs this said -- an SPMD backend can leave the
         # distribution in the index expression, a vector one cannot.
-        xfer_layout = RegisterLayout((LaneAxis(self._num_threads, 1),))
+        xfer_layout = RegisterLayout((LaneAxis(span, 1),))
         # Said on the *destination* as well, not only on the value in flight.
         # A later read of this image is `load_linear`, whose address has no
         # lane term at all -- it reports what the fill recorded and can derive
@@ -378,7 +481,7 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
         # Same call `store_linear` makes for the other fill path, so the two
         # cannot record different claims about the same shape.
         self._dest._record_linear_layout(dst_offset, increment,
-                                         self._num_threads, writer)
+                                         self._lane_span(), writer)
         dst_buf = self._dest.pir_buffer(writer)
         src_buf = self._src.pir_buffer(writer)
         def write_load(lhs, rhs, _d=dst_buf, _s=src_buf, _n=increment,

@@ -325,6 +325,29 @@ class Variable:
   def build_nonlead(self, writer, context: Context):
     return self.build(writer, context)
 
+def _linear_addr(context: Context, index, vec) -> str:
+  """Where this work-item's run of a linearized image begins.
+
+  Under SPMD a linear image is spread over the lanes, so lane `t` starts at
+  `t * vec` and the term belongs in the address.  Asked of the lexic rather
+  than spelled `threadIdx.x`, which stood here and was right by accident on
+  the two backends that reached the path.
+
+  Under an explicit vector there is no lane to ask about: the work-item holds
+  the whole run and the distribution has moved into the type of the value
+  being loaded, which is a `simd<T, span * vec>` whose width `_lane_span`
+  recorded when the image was filled.  Leaving the term in produced
+  `s0 + item.get_local_id(0) * 1` -- an index into a work-group coordinate
+  that the ESIMD emitter refuses everywhere it can see it, and here could
+  not, because the address is text by the time it arrives.
+
+  """
+  lexic = context.get_vm().get_lexic()
+  if getattr(lexic, 'simd_mode', False):
+    return f'{index}'
+  return f'{index} + {lexic.thread_idx_x} * {vec}'
+
+
 class LeadIndex:
   """An index into a dimension that is spread across the lanes of a wave.
 
@@ -1839,12 +1862,7 @@ class Symbol:
     if self.stype == SymbolType.Register:
       addr = index // self.num_threads
     else:
-      # Asked of the lexic, not spelled.  `threadIdx.x` stood here and was
-      # correct by accident on the two backends that reach this path
-      # today; it names nothing in a SYCL kernel, so the first target
-      # whose placement sends an operand through here emits a kernel
-      # that does not compile.
-      addr = f'{index} + {context.get_vm().get_lexic().thread_idx_x} * {vec}'
+      addr = _linear_addr(context, index, vec)
     access = f'{self.name}[{addr}]'
 
     if variable is None:
@@ -1992,12 +2010,7 @@ class Symbol:
     if self.stype == SymbolType.Register:
       addr = index // self.num_threads
     else:
-      # Asked of the lexic, not spelled.  `threadIdx.x` stood here and was
-      # correct by accident on the two backends that reach this path
-      # today; it names nothing in a SYCL kernel, so the first target
-      # whose placement sends an operand through here emits a kernel
-      # that does not compile.
-      addr = f'{index} + {context.get_vm().get_lexic().thread_idx_x} * {vec}'
+      addr = _linear_addr(context, index, vec)
     access = f'{name}[{addr}]'
 
     # `base` is the symbol's own name for everything except a rotating
