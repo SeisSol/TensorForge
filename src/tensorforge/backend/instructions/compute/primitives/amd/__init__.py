@@ -492,7 +492,7 @@ def _matmul(writer, ops, ctx, span, width):
         A = _wave_lead(ops, ctx, mults)
     return matmuldpp(writer, span.start, C, A, B, M, N, K, kx, threads, dtype,
                      sparse, ctx, span.stop, width=ops.lead_width,
-                     a_resident=ops.a_resident)
+                     a_resident=ops.a_resident, a_vector=bool(width))
 
 
 def _wave_lead(ops, ctx, mults):

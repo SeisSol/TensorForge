@@ -842,7 +842,7 @@ def _load_a(writer, A, M, K, kx):
 
 
 def matmuldpp(writer, start, C, A, B, M, N, K, kx, threads, dtype, sparse,
-              ctx, stop, width=1, a_resident=False):
+              ctx, stop, width=1, a_resident=False, a_vector=False):
     """`C += A @ B` over columns `[start, stop)`, `B` broadcast across lanes.
 
     Three arrangements of the same products, all reading `B(k, j)` from lane
@@ -882,7 +882,7 @@ def matmuldpp(writer, start, C, A, B, M, N, K, kx, threads, dtype, sparse,
         # the pressure the pairs' order avoids.
         if sparse is None and _fused_order(
                 scalar, M, K, dtype, select_fmadpp_step(dtype, threads, ctx),
-                threads, a_resident) == 'rows':
+                threads, a_resident, a_vector) == 'rows':
             _fused_rows(writer, scalar, C, A, B, M, K, kx, threads, dtype,
                         ctx)
         else:
@@ -892,7 +892,7 @@ def matmuldpp(writer, start, C, A, B, M, N, K, kx, threads, dtype, sparse,
     return True
 
 
-def _fused_order(cols, M, K, dtype, step, threads, a_resident):
+def _fused_order(cols, M, K, dtype, step, threads, a_resident, a_vector=False):
     """`FUSED_ORDER`, with `'auto'` decided by what each order keeps live.
 
     The column order keeps two things live that the row order does not.  The
@@ -908,6 +908,15 @@ def _fused_order(cols, M, K, dtype, step, threads, a_resident):
     register a sub-block only; counting those took one chain of `chain_five`
     into rows, for 4 to 7 % more instructions and not a register less.
 
+    A single column reads each value once in either order -- unless `A` is
+    read several steps at a time (`a_vector`, the k-quads of
+    `amd.prepared_order`).  Then the column order reads every vector before
+    the chain and holds each until its last step is consumed, which is the
+    whole `A` image again: `local_flux` on gfx942 with k-quads, 216 VGPRs in
+    columns against 164 in rows (b = 35: 200 against 152), for 7 % more
+    instructions.  At b = 80 and 120, which spill either way, the two are
+    within 3 %.
+
     The row order keeps every column's accumulators and its `B` register,
     and pays elsewhere: an `A` value read at one row is one LLVM may sink
     into a branch of its own where the read is guarded (`rectangular` on
@@ -919,7 +928,7 @@ def _fused_order(cols, M, K, dtype, step, threads, a_resident):
         return FUSED_ORDER
     n = len(cols)
     relayed = step == 1 < threads
-    held = ((M * K if n > 1 and not a_resident else 0)
+    held = ((M * K if (n > 1 or a_vector) and not a_resident else 0)
             + (n * K if relayed else 0))
     resident = n * (M + 1) + (n if relayed else 0)
     words = max(1, dtype.size() // 4)
