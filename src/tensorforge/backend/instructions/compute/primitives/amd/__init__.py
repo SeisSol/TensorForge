@@ -220,6 +220,53 @@ def componentwise(shape, ctx) -> bool:
     return fit is not None and fit.scheme is Scheme.LANE_BATCHED
 
 
+#: Whether a batch-constant lead operand is read once for the multiplications
+#: sharing a wave and handed between them by the MFMA's `blgp`
+#: (`codegen.matmul32`).  A switch, because it changes the loop as well: the
+#: multiplications of a wave then take the same trips (`convergence`).
+B_DUPLICATION = True
+
+#: The wave of every target with a lane-batched MFMA (CDNA).
+_MFMA_WAVE = 64
+
+
+def wave_mults(threads, a_uniform, width=1, dtype=Datatype.F32) -> int:
+    """How many multiplications of a wave read one lead operand together.
+
+    `blgp` has the patterns for two -- the lower half of the wave's B operand
+    to the upper, or back -- and for four, one quarter to all.  So a lead
+    operand every multiplication reads alike, at lead width one, over 32 or
+    16 lanes: one read of a wave's worth of distinct elements serves two or
+    four contraction steps where each step read the same elements into every
+    multiplication.  One everywhere else, which is the arrangement as it was
+    -- and for F64, whose MFMA spends the field on negation (CDNA3).
+    """
+    if (not B_DUPLICATION or not a_uniform or width != 1 or threads <= 0
+            or dtype != Datatype.F32):
+        return 1
+    mults = _MFMA_WAVE // threads if _MFMA_WAVE % threads == 0 else 1
+    return mults if mults in (2, 4) else 1
+
+
+def convergence(strategy, shape):
+    """How far the threads have to run in step for `strategy` over `shape`.
+
+    The lane-batched MFMA asks nothing of its own: each multiplication feeds
+    its blocks, and `cbsz` keeps the broadcast of A inside them.  Handing the
+    lead operand between the multiplications of a wave does ask: every one of
+    them has to have read its part when the instruction issues, so they take
+    the same trips through the batch loop.
+    """
+    width = (1 << bitlayout.unpacked(shape.lead_layout)[1]
+             if bitlayout.packed(shape.lead_layout) else 1)
+    if (strategy is Strategy.MATRIX
+            and wave_mults(shape.threads, shape.a_uniform, width,
+                           shape.accumulator) > 1):
+        from tensorforge.backend.pir.core import Uniformity
+        return Uniformity.MULTGROUP
+    return None
+
+
 def wide_chain_takes(shape, ctx) -> bool:
     """Whether the DPP chain would take a span of this packed shape.
 
@@ -319,8 +366,15 @@ def matmul(writer, ops, ctx, span):
         if fit.scheme is Scheme.EXCHANGE:
             return matmul_exchange(writer, C, A, B, M, N, K, kx, threads,
                                    dtype, sparse, ctx, span.start, span.stop)
+        # `convergence` asked for the wave group on the same condition, less
+        # the accessor: a lead operand that turns out not to be addressable
+        # reads per step, in a loop that merely runs in step for nothing.
+        mults = wave_mults(threads, ops.a_uniform, ops.lead_width, dtype)
+        lead_wave = ops.A_wave if mults > 1 else None
         return matmul32(writer, C, A, B, M, N, K, kx, threads, dtype, sparse,
-                        ctx, span.start, span.stop, width=ops.lead_width)
+                        ctx, span.start, span.stop, width=ops.lead_width,
+                        tile=fit.tile, lead_wave=lead_wave,
+                        mults=mults if lead_wave is not None else 1)
     return matmuldpp(writer, span.start, C, A, B, M, N, K, kx, threads, dtype,
                      sparse, ctx, span.stop, width=ops.lead_width,
                      a_resident=ops.a_resident)

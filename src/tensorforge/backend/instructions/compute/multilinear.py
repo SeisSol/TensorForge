@@ -936,7 +936,15 @@ class MultilinearInstruction(ComputeInstruction):
                                             'storage_parts', 1)
                             if self._ops and self._ops[0].symbol.obj else 1,
                             lead_layout=lead_layout(self._num_threads,
-                                                    self._lead_width))
+                                                    self._lead_width),
+                            a_uniform=self._a_uniform())
+
+    def _a_uniform(self) -> bool:
+        """Whether the lead operand is the same for every multiplication."""
+        a_obj = (self._ops[0].symbol.obj
+                 if self._ops and self._ops[0].symbol is not None else None)
+        return (a_obj is not None
+                and getattr(a_obj, 'addressing', None) is Addressing.NONE)
 
     def set_mult_stride(self, stride) -> None:
         """The shared memory one multiplication owns, in elements.
@@ -1252,12 +1260,48 @@ class MultilinearInstruction(ComputeInstruction):
             a_obj = self._ops[0].symbol.obj
             self._offer_order(_vendor_module(self._context),
                               a_obj, Mx, K)
+            uniform = self._a_uniform()
+            # One contraction axis, one scalar an element, dense and in
+            # memory: then step `k + p` is `p` strides of that axis further,
+            # which is all `A_wave` adds to the address.  A register image
+            # has no address to add to.
+            k_stride = None
+            view = self._ops[0].symbol.data_view
+            if (uniform and len(self._ks) == 1 and view is not None
+                    and 'k0' in self._opdim_to_nks[0]
+                    and getattr(a_obj, 'storage_parts', 1) == 1
+                    and a_obj.is_dense()
+                    and self._ops[0].symbol.stype in (SymbolType.SharedMem,
+                                                      SymbolType.Batch,
+                                                      SymbolType.Global)):
+                k_stride = view.get_dim_strides()[
+                    self._opdim_to_nks[0].index('k0')]
+
+            def A_wave(writer, i, k, mults):
+                """`A(i, k + p)` in the lanes of the `p`-th of `mults`
+                multiplications sharing a wave (`MatmulOperands.A_wave`).
+
+                The caller keeps `k + mults - 1` inside the contraction; a
+                masked-off row reads too, at its clamped element, which is the
+                same operand since it does not depend on the element.
+                """
+                from tensorforge.backend.pir.core import INDEX
+                p = writer.op('rem', INDEX, writer.thread_id('y'), mults,
+                              hint='m')
+                shift = writer.op('mul', INDEX, p, k_stride, hint='r')
+                with writer.speculative() as spec:
+                    res = self._ops[0].symbol.load(writer, self._context, None,
+                                                   unwindOp(i, 0, k, 0, True),
+                                                   False, shift=shift)
+                    if not res:
+                        spec.discard()
+                return res
             ops = MatmulOperands(
                 A=A, B=B, C=C, sparse=sparse,
                 a_parts=getattr(a_obj, 'storage_parts', 1) if a_obj else 1,
                 B_frag=B_frag, B_direct=B_direct,
-                a_uniform=(a_obj is not None and getattr(a_obj, 'addressing', None)
-                           is Addressing.NONE),
+                a_uniform=uniform,
+                A_wave=A_wave if k_stride is not None else None,
                 a_resident=self._ops[0].symbol.stype in (SymbolType.Register,
                                                          SymbolType.Scratch),
                 mult_stride=self._mult_stride,

@@ -1535,13 +1535,19 @@ class Symbol:
     else:
       return f'{self.name}'
 
-  def build_address(self, writer, context: Context, index):
+  def build_address(self, writer, context: Context, index, shift=None):
     """The address as IR values instead of a string.
 
     Same arithmetic as `access_address` --- sum of `(index - offset) * stride`
     --- but as nodes, so `fold` removes the `- 0` and `* 1` terms the string
     path always wrote out, CSE shares subexpressions between the loads of one
     body, and LICM can lift the loop-invariant part.
+
+    `shift`, a run-time addend, joins the terms that vary before the constant
+    ones: `(lane + shift) + 56 * k` is one base for every step of a run and an
+    immediate offset each, where `(lane + 56 * k) + shift` is a base per step.
+    LLVM did not reassociate the second into the first -- local_flux at b = 80
+    on gfx942 computed a 64-bit address for each of its global loads.
     """
     def arith(name, a, b, py):
       # fold right here when both sides are numbers: an address that is fully
@@ -1629,6 +1635,10 @@ class Symbol:
     else:
       raise NotImplementedError('Not supposed to be called')
 
+    if shift is not None:
+      parts = ([p for p in parts if not isinstance(p, (int, np.integer))]
+               + [shift]
+               + [p for p in parts if isinstance(p, (int, np.integer))])
     if not parts:
       return 0
     total = parts[0]
@@ -1637,7 +1647,8 @@ class Symbol:
     return total
 
   def address_value(self, writer, context: Context,
-                    index: List[Union[str, int, Immediate, Variable, LeadIndex]]):
+                    index: List[Union[str, int, Immediate, Variable, LeadIndex]],
+                    shift=None):
     """The address as an operand, not as a name inside a string.
 
     `access_address` pins its result, because the name is interpolated into
@@ -1647,8 +1658,10 @@ class Symbol:
     the thing standing between the address arithmetic and every pass that
     could improve it --- the same `i * 18 + j` recomputed at sixteen loads
     stays sixteen computations while it is pinned.
+
+    `shift` is a run-time addend, in elements (`load`'s).
     """
-    return self.build_address(writer, context, index)
+    return self.build_address(writer, context, index, shift=shift)
 
   def access_address(self, context: Context, index: List[Union[str, int, Immediate, Variable, LeadIndex]], writer=None, out=None):
     if writer is not None:
@@ -2266,7 +2279,19 @@ class Symbol:
         return lead[0]
     return None
 
-  def load(self, writer, context: Context, variable, index: List[Union[str, int, Immediate, Variable, LeadIndex]], nontemp, broadcast: bool = True, part: int = 0, parts: int = 1):
+  def load(self, writer, context: Context, variable, index: List[Union[str, int, Immediate, Variable, LeadIndex]], nontemp, broadcast: bool = True, part: int = 0, parts: int = 1, shift=None):
+    # `shift` is a run-time addend on the element address -- a value, where
+    # `part` is a constant one.  Only a memory read has an address to add it
+    # to: a register image is indexed by constants, and a sparse operand's
+    # next element is not a fixed distance further on.
+    if shift is not None and (
+        variable is not None or parts > 1
+        or self.stype not in (SymbolType.SharedMem, SymbolType.Batch,
+                              SymbolType.Global)
+        or not self.obj.is_dense()):
+      raise InternalError(
+          f'{self.name}: a shifted read needs a dense operand in memory, read '
+          f'as a value')
     addrs = []
     if self.stype == SymbolType.Data or (not self.obj.is_dense() and not isinstance(self.obj.spp, BoundingBoxSPP)):
       if variable is None:
@@ -2429,14 +2454,14 @@ class Symbol:
           raise InternalError(
               f'{self.name}: a full-lane tail reached a split read')
         if (bc_lane is None and w == 1 and not part and parts == 1
-                and valid is None
+                and valid is None and shift is None
                 and getattr(self.obj, 'simt_interleave', None) is not None
                 and self.stype in (SymbolType.Global, SymbolType.Batch)):
           interleaved = self._interleaved_load(writer, context, read_index,
                                                nontemp)
           if interleaved is not None:
             return interleaved
-        addr = self.address_value(writer, context, read_index)
+        addr = self.address_value(writer, context, read_index, shift=shift)
         # Planar parts are `plane` elements apart instead of adjacent: the
         # addend scales, and reading every part is one access per part -- each
         # as wide as the index asks, which is the point of storing them so.

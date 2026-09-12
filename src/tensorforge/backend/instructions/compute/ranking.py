@@ -85,19 +85,28 @@ def issues(extent: Extent, columns: int, lead: int = 0, depth: int = 0,
             * packing.tiles(products, spare_products(extent, columns)))
 
 
-#: Issue cost per instruction, in cycles.  Empty.
+#: Issue cost per instruction, in passes.
 #:
 #: The numbers are a hardware fact like every row of a catalogue, and they have
-#: to be read off the vendor's own documentation and checked the same way --
-#: AMD states them per instruction in the ISA guide; other vendors would need
-#: their own source, and one that does not publish them leaves its entries out
-#: rather than getting a guess.
+#: to be read off the vendor's own statement and checked the same way -- other
+#: vendors would need their own source, and one that does not publish them
+#: leaves its entries out rather than getting a guess.  Guessing is worse than
+#: not having them: :func:`rank` would then read as a cost model and is a
+#: count.
 #:
-#: Guessing is worse than not having them: :func:`rank` would then read as a
-#: cost model and is a count.  Until it is filled, ranking by issues alone is
-#: exactly wrong where two instructions differ in passes -- fewer issues of a
-#: longer instruction can be slower.
-CYCLES: Dict[str, int] = {}
+#: The AMD rows are LLVM's AMDGPU scheduling model, the one the compiler
+#: schedules by, as `llvm-mca -mcpu=gfx90a` and `-mcpu=gfx942` both report it
+#: (reciprocal throughput; ROCm 7.2).  The check that they are costs and not
+#: guesses is in the numbers: the three lane-batched F32 tiles do 256, 1024 and
+#: 2048 FMAs an issue and take 2, 8 and 16 passes -- the same work per pass,
+#: so ranking them by passes is ranking them by the columns they waste.
+CYCLES: Dict[str, int] = {
+    'mfma_f32_4x4x1f32': 2,
+    'mfma_f32_16x16x1f32': 8,
+    'mfma_f32_32x32x1f32': 16,
+    'mfma_f32_16x16x4f32': 8,
+    'mfma_f32_32x32x2f32': 16,
+}
 
 
 def rank(candidates: Iterable, key: Callable[[object], Tuple[Extent, int]],
@@ -115,9 +124,14 @@ def rank(candidates: Iterable, key: Callable[[object], Tuple[Extent, int]],
     order a module states is the answer, and a tie-break of this function's
     own would silently overrule it.
     """
+    candidates = tuple(candidates)
+    # Passes only where every candidate has them: an entry the table does not
+    # know, counted as one pass, would beat every entry it does.
+    known = all(key(c)[0].name in CYCLES for c in candidates)
+
     def order(candidate):
         extent, products = key(candidate)
         count = issues(extent, columns, lead, depth, products)
-        return (count * CYCLES.get(extent.name, 1), count)
+        return (count * (CYCLES[extent.name] if known else 1), count)
 
     return tuple(sorted(candidates, key=order))

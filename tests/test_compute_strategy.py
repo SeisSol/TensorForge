@@ -434,19 +434,35 @@ def test_only_the_lane_batched_scheme_draws_a_boundary():
 
 # -- choosing the entry within a scheme ------------------------------------ #
 
-def test_the_entry_is_ranked_by_issues_not_by_fit():
+def test_the_entry_is_ranked_by_passes_then_issues():
     """Thirteen columns take four 4x4 issues or one 16x16 that wastes three
-    of its sixteen.  Which is faster is a property of the two instructions
-    rather than of the waste, so the count is what is stated and `CYCLES` is
-    where the rest would go."""
+    of its sixteen.  The count says four to one; the passes (`CYCLES`) say
+    eight to eight, a tie in the columns each one wastes, which the wide tile
+    then wins on issues.  Nine columns are six passes against eight, and the
+    narrow tile wins."""
     from tensorforge.backend.instructions.compute.primitives.amd import (
         MATRIX_OPS, tiling)
     ops = {o.builtin: o for o in MATRIX_OPS}
     narrow, wide = ops['mfma_f32_4x4x1f32'], ops['mfma_f32_16x16x1f32']
     assert tiling.issues(narrow, 13, 56, 56) == 4 * tiling.issues(
         wide, 13, 56, 56)
+    fits = [tiling.Fit(tiling.Scheme.LANE_BATCHED, op) for op in (narrow, wide)]
+    assert tiling.rank(fits, 13, 56, 56)[0].op is wide
+    assert tiling.rank(fits, 9, 56, 56)[0].op is narrow
+
+
+def test_the_passes_are_costs_and_not_guesses():
+    """`CYCLES` is read off LLVM's scheduling model, and the three
+    lane-batched F32 tiles are its check: the same work a pass, so the
+    entries divided by the FMAs an issue does are one number."""
+    from tensorforge.backend.instructions.compute.primitives.amd import (
+        MATRIX_OPS)
     from tensorforge.backend.instructions.compute import ranking
-    assert ranking.CYCLES == {}, 'a guessed cycle count reads as a measurement'
+    ops = {o.builtin: o for o in MATRIX_OPS}
+    names = ('mfma_f32_4x4x1f32', 'mfma_f32_16x16x1f32', 'mfma_f32_32x32x1f32')
+    per_pass = {ops[n].m * ops[n].n * ops[n].blocks / ranking.CYCLES[n]
+                for n in names}
+    assert per_pass == {128.0}
 
 
 def test_a_term_product_takes_the_whole_output_axis():

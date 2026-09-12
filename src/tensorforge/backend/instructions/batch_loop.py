@@ -1461,6 +1461,15 @@ class BatchLoop(AbstractInstruction):
                     bound[self._batch(0)] = batch
                     self._lookahead_bindings(writer, bound)
                     loop._next_index = self._first_lookahead
+                    # No block around the body: the mask holds only the global
+                    # writes, so every read runs on every trip -- the case
+                    # `_emit_body` fences when the flags are absent, and here
+                    # it is every case.  Without it, local_flux on gfx942 held
+                    # the staged operators across the loop: 332 VGPRs and 76
+                    # AGPRs against 232 and 40 for the per-row loop.
+                    fence = lexic.loop_body_fence()
+                    if fence:
+                        writer(fence, accesses=())
                     with elementmask.element_mask(active, self._active()):
                         self._emit_guarded(writer, list(self._region))
                     self._advance_stage_counter(writer)

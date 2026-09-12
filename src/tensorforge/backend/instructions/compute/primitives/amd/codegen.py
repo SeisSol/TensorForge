@@ -11,7 +11,8 @@ from .arch import cdna2, gfx1251, rdna
 from .catalog import mfma_tile_for
 from ... import split
 from .emitters import fmadpp4, fmadpp8, fmadpp16, fmascalar
-from .exchange_codegen import apply_exchange
+from .exchange_codegen import _writeback, apply_exchange
+from .layouts import FRAGMENT_BITS
 from .relayout import (MOVDPP16, TRANSPOSE4X4, find_relayout,
                        nest_shared, reach, takes, transposed,
                        fmadpp_operand_layout)
@@ -60,14 +61,20 @@ AUTO_ROWS_FROM = 64
 FUSED_WIDE = False
 
 
-def _check_mfma_operand(operand, threads, callee):
+def _check_mfma_operand(operand, threads, callee, tile=None):
     """The A operand of an MFMA has to be laid out as the transpose left it.
 
     `None` means untracked and is allowed through: an absent annotation is
     not evidence of a wrong one, and refusing to emit for want of one would
     make the layouts an obstacle rather than a description.  A present layout
     that disagrees is a wrong kernel.
+
+    Only where the transpose hands back values of its own.  One that writes
+    its operands in place (`transpose16x16b32`) leaves them carrying the
+    layout they had before, which says nothing about what they hold now.
     """
+    if tile is not None and not tile.transpose_has_separate_outputs:
+        return
     want = TRANSPOSE4X4.produces(threads=threads)
     got = getattr(operand, 'layout', None)
     if got is not None and got != want:
@@ -230,6 +237,16 @@ def hfma(writer: Writer, Cs, As, Bs, repeat, datatype, threads, ctx):
                                     func(writer, c, ax[bx], bv, j)
 
 
+def _pad(writer, tile, ftype):
+    """A zero for a padding lane of a partial block, as `_transpose` can take
+    it: a constant where the transpose writes fresh outputs, a zeroed variable
+    where it writes its arguments in place (`transpose16x16b32`) -- a
+    reference parameter cannot bind a literal."""
+    if tile.transpose is None or tile.transpose_has_separate_outputs:
+        return writer.const(0.0, ftype)
+    return writer.declare(ftype, hint='pad')
+
+
 def _transpose(writer, tile, ftype, threads, regs):
     """Exchange the register index with the lane index in a quad.
 
@@ -267,6 +284,53 @@ def _transpose(writer, tile, ftype, threads, regs):
     return out
 
 
+def _accumulator_direct(op) -> bool:
+    """Whether element `(m, n)` of block `b` sits in slot `m` of lane
+    `b * n + n` -- the way the lane-batched store reads the accumulator, one
+    output column a slot and the leading dimension across the lanes.
+
+    The 4-wide tile has it.  The 16-wide one spreads a block's output over
+    the whole wave (`catalog.LANE_BATCHED_BLOCKS`), and its columns are
+    gathered back by the epilogue the exchange scheme uses
+    (`accumulator_gathers`).
+    """
+    row = FRAGMENT_BITS.get(op.builtin)
+    if row is None:
+        return False
+    blk, m_bits, n_bits = row[6], row[7], row[8]
+    return (blk == tuple(op.n << b for b in range(len(blk)))
+            and m_bits == tuple(-(1 << b) for b in range(len(m_bits)))
+            and n_bits == tuple(1 << b for b in range(len(n_bits))))
+
+
+def _column(writer, tile, acc, column, ftype):
+    """Output column `column` of one MFMA accumulator, at the store's layout:
+    the slot itself where the layout is direct, gathered where it is not."""
+    if _accumulator_direct(tile.op):
+        return writer.extract(acc, column, ftype)
+    value = _writeback(writer, tile.op, {(0, 0): acc}, 0, column, ftype)
+    if value is None:
+        raise GenerationError(
+            f'{tile.builtin}: column {column} of the accumulator has no '
+            f'gather back to the lanes the store reads')
+    return value
+
+
+def _blgp(mults, q):
+    """The `blgp` handing every lane the B operand of the `q`-th of `mults`
+    multiplications sharing the wave.
+
+    1 and 2 broadcast the lower and the upper 32 lanes to all 64; 4 to 7 one
+    of the four groups of 16.  F32 entries only: on CDNA3 the field is the
+    negation modifier of an F64 MFMA.
+    """
+    if mults == 2:
+        return 1 + q
+    if mults == 4:
+        return 4 + q
+    raise ValueError(f'blgp has no pattern for {mults} multiplications')
+
+
 def _shared_fragment(writer, tile, ftype, threads, regs):
     """The shared matrix at the layout the A fragment wants.
 
@@ -301,7 +365,7 @@ def _shared_fragment(writer, tile, ftype, threads, regs):
 
 
 def matmul32(writer: Writer, C, B, A, M, N, K, kx, threads, dtype, sparse,
-             ctx, start, stop, width=1):
+             ctx, start, stop, width=1, tile=None, lead_wave=None, mults=1):
     with writer.AnonymousScope():
 
         ftype = ScalarType(dtype)
@@ -340,7 +404,7 @@ def matmul32(writer: Writer, C, B, A, M, N, K, kx, threads, dtype, sparse,
                             # The padding lanes of a partial block: real
                             # zeroes, so that the MFMA over the full block
                             # contributes nothing for them.
-                            regs += [writer.const(0.0, ftype)]
+                            regs += [_pad(writer, tile, ftype)]
                         reached = transpose(regs)
                         if reached is None:
                             return False
@@ -350,6 +414,51 @@ def matmul32(writer: Writer, C, B, A, M, N, K, kx, threads, dtype, sparse,
                             vtype = ScalarType(dtype, block)
                             acc = writer.declare(vtype, hint='acc',
                                                  layout=acclayout)
+
+                            def step(acc, trueK, lead, blgp):
+                                """One contraction step: the shared matrix's
+                                slot for `trueK`, broadcast from its block by
+                                `abid`, against the lead operand `lead`."""
+                                km = trueK // threads
+                                kkm = (trueK % threads) // block
+                                kkkm = trueK % block
+                                _check_mfma_operand(tA[km][kkkm], threads, fn,
+                                                    tile)
+                                return writer.call(
+                                    fn, vtype, tA[km][kkkm], lead, acc,
+                                    scale, kkm, blgp,
+                                    hint='acc', movable=False,
+                                    materialize=True, layout=acclayout)
+
+                            if lead_wave is not None:
+                                # The multiplications of a wave read the same
+                                # rows of a batch-constant lead operand, so
+                                # each reads a different step of them -- the
+                                # `p`-th reads `k + p` -- and every MFMA of
+                                # the group takes one of them from its lanes
+                                # (`blgp`).  One read of `mults` steps where
+                                # each step was read `mults` times.  A tail
+                                # shorter than the group reads as before.
+                                depth = K + kx
+                                for g in range(0, depth, mults):
+                                    lead = (lead_wave(writer, i, g, mults)
+                                            if g + mults <= depth else None)
+                                    if lead is not None and lead is not False:
+                                        for q in range(mults):
+                                            acc = step(acc, g + q, lead,
+                                                       _blgp(mults, q))
+                                        continue
+                                    for trueK in range(g, min(g + mults, depth)):
+                                        lead = B(writer, None, i, trueK)
+                                        if lead is None or lead is False:
+                                            continue
+                                        acc = step(acc, trueK, lead, 0)
+                                for jj in range(min(block, N - j)):
+                                    C(writer,
+                                      _column(writer, tile, acc, jj, ftype),
+                                      i, j + jj)
+                                continue
+
                             for k in range(0, K + kx, threads):
                                 dk = min(threads, K + kx - k)
                                 for kk in range(0, dk, block):
@@ -392,7 +501,7 @@ def matmul32(writer: Writer, C, B, A, M, N, K, kx, threads, dtype, sparse,
                                         # since both treat the intrinsic as
                                         # opaque.
                                         _check_mfma_operand(tA[km][kkkm],
-                                                            threads, fn)
+                                                            threads, fn, tile)
                                         # MFMA *returns* the updated
                                         # accumulator, so the chain is
                                         # naturally SSA -- each step reads the
@@ -406,7 +515,8 @@ def matmul32(writer: Writer, C, B, A, M, N, K, kx, threads, dtype, sparse,
                                             layout=acclayout)
 
                             for jj in range(min(block, N - j)):
-                                C(writer, writer.extract(acc, jj, ftype), i, j + jj)
+                                C(writer, _column(writer, tile, acc, jj, ftype),
+                                  i, j + jj)
             return True
 
         def write_wide(tile, start, end):
@@ -449,7 +559,7 @@ def matmul32(writer: Writer, C, B, A, M, N, K, kx, threads, dtype, sparse,
                             cols.append(v)
                         for c in range(width):
                             regs = [writer.extract(v, c, ftype) for v in cols]
-                            regs += [writer.const(0.0, ftype)
+                            regs += [_pad(writer, tile, ftype)
                                      for _ in range(block - len(cols))]
                             reached = _shared_fragment(writer, tile, ftype,
                                                        threads, regs)
@@ -472,7 +582,8 @@ def matmul32(writer: Writer, C, B, A, M, N, K, kx, threads, dtype, sparse,
                                         if _width_of(rows) != width:
                                             return False
                                         a = frag[(k0, c)][t % block]
-                                        _check_mfma_operand(a, threads, fn)
+                                        _check_mfma_operand(a, threads, fn,
+                                                            tile)
                                         for h in range(width):
                                             accs[h] = writer.call(
                                                 fn, vtype, a,
@@ -482,7 +593,7 @@ def matmul32(writer: Writer, C, B, A, M, N, K, kx, threads, dtype, sparse,
                                                 materialize=True)
                             for jj in range(min(block, N - j)):
                                 C(writer, writer.pack(wtype, *(
-                                    writer.extract(acc, jj, ftype)
+                                    _column(writer, tile, acc, jj, ftype)
                                     for acc in accs)), i, j + jj)
             return True
 
@@ -495,7 +606,10 @@ def matmul32(writer: Writer, C, B, A, M, N, K, kx, threads, dtype, sparse,
         # both ask `mfma_tile_for`.  A `next()` without a default raised
         # `StopIteration` here instead, which unwinds out of generation as an
         # unrelated-looking error.
-        tile = mfma_tile_for(threads, dtype, ctx)
+        # The tile `rank` chose, where the caller passes it; the narrowest
+        # otherwise, for a direct caller.
+        if tile is None:
+            tile = mfma_tile_for(threads, dtype, ctx)
         if tile is None:
             raise ValueError(
                 f'no MFMA tile for {dtype} at {threads} threads; '

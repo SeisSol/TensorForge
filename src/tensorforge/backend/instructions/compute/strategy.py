@@ -117,6 +117,11 @@ class ComputeShape:
     #: "can I take this distribution", which a number can only stand in for.
     #: See :func:`lead_layout`.
     lead_layout: Optional[BitLayout] = None
+    #: Whether the lead operand is the same for every multiplication --
+    #: batch-constant, `Addressing.NONE` -- so that the multiplications sharing
+    #: a wave read the same rows of it.  What an arrangement needs before it
+    #: may hand one multiplication's read to its neighbours (AMD's `blgp`).
+    a_uniform: bool = False
 
 
 def lead_layout(threads: int, width: int) -> Optional[BitLayout]:

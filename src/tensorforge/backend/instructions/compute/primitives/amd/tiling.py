@@ -30,7 +30,7 @@ from enum import Enum
 from typing import Dict, FrozenSet, Iterable, List, Optional, Tuple
 
 from ... import packing, ranking
-from .catalog import emu_tile_for, emu_tiles, mfma_tile_for
+from .catalog import emu_tile_for, emu_tiles, mfma_tile_for, mfma_tiles_for
 from .exchange_codegen import exchange_op, exchange_ops
 
 
@@ -126,11 +126,9 @@ def candidates(scheme: Scheme, threads, accumulator, ctx) -> Tuple[Fit, ...]:
     term count -- and this is where that stops mattering to anyone else.
     """
     if scheme is Scheme.LANE_BATCHED:
-        tile = mfma_tile_for(threads, accumulator, ctx)
-        # One, and the policy in `mfma_tile_for` is what keeps it one: the
-        # wider tiles need a staging step that is not written.
-        return () if tile is None else (
-            Fit(scheme, tile.op, tile=tile, reads=tile.op.a.dtype),)
+        # Every width the scheme may run (`mfma_tiles_for`); `rank` picks.
+        return tuple(Fit(scheme, tile.op, tile=tile, reads=tile.op.a.dtype)
+                     for tile in mfma_tiles_for(threads, accumulator, ctx))
     if scheme is Scheme.EXCHANGE:
         return tuple(Fit(scheme, op, reads=op.a.dtype)
                      for op in exchange_ops(accumulator, threads, ctx))

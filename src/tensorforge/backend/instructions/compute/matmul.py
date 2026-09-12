@@ -126,6 +126,13 @@ class MatmulOperands:
     #: path keeping all of it live costs nothing beyond what is already there.
     a_resident: bool = False
 
+    #: ``A_wave(writer, i, k, mults) -> value``, or ``None``: `A(i, k + p)` in
+    #: the lanes of the `p`-th of `mults` multiplications sharing a wave.  One
+    #: read of a wave's worth of distinct elements where `a_uniform` makes the
+    #: rows of every multiplication the same -- which a matrix instruction can
+    #: then hand from one multiplication's lanes to the others' (`blgp`).
+    A_wave: Optional[Callable] = None
+
     #: Adjacent lead elements one lane holds per slot: `Options`' lead width.
     #: `A` and `C` then take and give vectors of this length, and `B`'s
     #: contraction axis is spread over the lanes the same way -- lane `t` of

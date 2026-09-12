@@ -645,7 +645,31 @@ def mfma_tile_for(threads, dtype, ctx):
     nothing raises `StopIteration` out of code generation, which is not a
     diagnosis of anything.
     """
-    # Policy, not capability: the 16-wide tile needs a staging step that is
-    # not written and the 32-wide one has no transpose in the runtime.
+    # The narrowest, as the scheme's representative: whether the scheme runs
+    # here at all.  Which width runs is `rank`'s, over `mfma_tiles_for`.
     return next((t for t in usable_mfma_tiles(threads, dtype, ctx)
                  if t.block == 4), None)
+
+
+#: The tile widths the lane-batched scheme may rank.
+#:
+#: 16 since its accumulator is gathered back to the lanes the store reads
+#: (`codegen._accumulator_direct`): four blocks of 16x16 spread each block's
+#: output over the whole wave, slot `4b + (m & 3)` of lane `n + 16 (m >> 2)`,
+#: where the 4-wide tile leaves element `(m, n)` of block `b` in slot `m` of
+#: lane `4b + n`.  32 is bound the same way and held back: it takes as many
+#: passes a column as the others, so it saves issues and nothing else -- which
+#: may one day be worth it for the instruction cache -- and its A operand has
+#: no transpose in the runtime yet.
+LANE_BATCHED_BLOCKS = (4, 16)
+
+
+def mfma_tiles_for(threads, dtype, ctx):
+    """Every tile the lane-batched scheme may run here, narrowest first.
+
+    Narrowest first because `rank` keeps the order of a tie, and a tie in
+    passes between a narrow and a wide tile is a tie in wasted columns too --
+    the wide one then wins on fewer issues, which `rank` counts second.
+    """
+    return tuple(t for t in reversed(usable_mfma_tiles(threads, dtype, ctx))
+                 if t.block in LANE_BATCHED_BLOCKS)

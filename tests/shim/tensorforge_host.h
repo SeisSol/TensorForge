@@ -69,10 +69,16 @@ template <typename T, std::size_t N> struct Vec {
 // --------------------------------------------------------------------------
 
 typedef tfshim::Vec<float, 4>::type __tfshim_v4f;
+typedef tfshim::Vec<float, 16>::type __tfshim_v16f;
 
 // (a, b, acc, cbsz, abid, blgp) -> acc
 __tfshim_v4f __builtin_amdgcn_mfma_f32_4x4x1f32(float, float, __tfshim_v4f, int,
                                                 int, int);
+__tfshim_v16f __builtin_amdgcn_mfma_f32_16x16x1f32(float, float, __tfshim_v16f,
+                                                   int, int, int);
+
+// The scheduling barrier a batch loop without a guard is fenced with.
+void __builtin_amdgcn_sched_barrier(int);
 
 template <typename T> T __builtin_amdgcn_global_atomic_fadd_f32(T *, T);
 template <typename T> T __builtin_amdgcn_global_atomic_fadd_f64(T *, T);
@@ -195,6 +201,12 @@ void transpose16x16b32(T &w1, T &w2, T &w3, T &w4, T &w5, T &w6, T &w7, T &w8,
                        T &w16);
 
 template <typename T> void transpose16x2(T &w1, T &w2, T v1, T v2);
+
+// The exchange's pieces, as the 16x16 accumulator gather emits them.
+template <std::size_t Block, typename T> T swap(T value);
+template <int Dpp1, int Dpp2, int Dpp3, bool Dpp4, typename T>
+T dppUpdate(T value, T prev);
+template <std::uint64_t Mask, typename T> T laneMerge(T value, T into);
 
 template <typename T>
 void transpose16x4(T &w1, T &w2, T &w3, T &w4, T v1, T v2, T v3, T v4);
