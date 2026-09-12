@@ -417,6 +417,19 @@ declare('preload_globals',
             'been compared against its own alternative.  A benchmark cannot ask '
             'a question the generator cannot be asked.')
 
+declare('preload_partial',
+        default=False,
+        parse=parse_bool,
+        doc='With `preload_globals`, stage the `Addressing.NONE` operands that '
+            'fit into shared memory rather than all of them or none.\n'
+            'Taken first-fit in the order the kernel declares them, under the '
+            'block\'s limit; the rest are read from global memory.  Where the '
+            'staged ones leave no room for one multiplication, the last one '
+            'taken is dropped and the section built again, one at a time, '
+            'instead of dropping them all.  `local_flux` at b = 80 has four '
+            '25.6 KB operators against 64 KB on gfx942, and stages none of '
+            'them without this.')
+
 declare('prepare_operands',
         default=False,
         parse=parse_bool,

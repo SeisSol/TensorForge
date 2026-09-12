@@ -41,7 +41,8 @@ MODULES = ["__init__", "arch", "caps", "features", "catalog", "layouts",
 #: in the same sense: one is asked before generation what has to be reserved,
 #: the other emits.  Computing reachability from the emitter alone would count
 #: the first as dead.
-ENTRIES = ["matmul", "scratch", "strategies", "plan", "convergence"]
+ENTRIES = ["matmul", "scratch", "strategies", "plan", "convergence",
+           "prepared_order"]
 
 # Unreachable on purpose.  Each entry needs a reason that says why deleting it
 # would be worse than keeping it.

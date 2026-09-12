@@ -378,6 +378,14 @@ class Generator:
 
     self._persistent_threading = prefer_persistent
     self._preload_globals = prefer_preload
+    # `preload_partial`: the operands that fit rather than all or none.  How
+    # many of those taken a retry has dropped again, which were staged, and
+    # which were candidates and are read from global memory.
+    self._preload_partial = (prefer_preload
+                             and context.get_user_options().preload_partial)
+    self._preload_drop = 0
+    self._preloaded = set()
+    self._preload_left = set()
 
     self._clusterlaunchcontrol = prefer_launchcontrol
     self._launch_control_depth = context.get_user_options().launch_control_depth
@@ -611,7 +619,12 @@ class Generator:
       barrier += [False]
 
     for codesection, lastbarrier in zip(descrlist, barrier):
-      for _attempt in range(2):
+      self._preload_drop = 0
+      # Two attempts, with the operators preloaded and without -- or, under
+      # `preload_partial`, one more per operator dropped.  Each failed attempt
+      # either drops one or gives up preloading, and an attempt without it
+      # ends the loop, so it ends.
+      while True:
         scopecnt = self._scopes.get_num_scopes()
         self._scopes.add_scope()
         self._section = Section()
@@ -685,7 +698,11 @@ class Generator:
         # wherever they do not fit.
         while scopecnt < self._scopes.get_num_scopes():
           self._scopes.remove_scope()
-        self._preload_globals = False
+        if self._preload_partial and len(self._preloaded) > 1:
+          # One operator fewer rather than none.
+          self._preload_drop += 1
+        else:
+          self._preload_globals = False
 
       if lastbarrier:
         self._section.barrier = True
@@ -1121,9 +1138,24 @@ class Generator:
     self._num_active_threads = config.num_active_threads
     self._lead_width = config.lead_width
 
+  def _preload_selection(self, candidates, cap):
+    """The operands `preload_partial` stages: first fit, in the order the
+    kernel declares them, under the block's shared memory in bytes -- less
+    the last `_preload_drop` of those, which a retry has dropped again."""
+    size = self._context.fp_type.size()
+    chosen, used = [], 0
+    for symbol in candidates:
+      need = int(symbol.obj.storage_volume()) * size
+      if used + need < cap:
+        chosen.append(symbol)
+        used += need
+    return chosen[:max(0, len(chosen) - self._preload_drop)]
+
   def _emit_global_ir(self):
     nonfirst_block = len(self._sections) > 0
     last_barrier = len(self._sections) > 0 and self._sections[-1].barrier
+    self._preloaded = set()
+    self._preload_left = set()
 
     shmbuilder = ShrMemAllocBuilder(self._context, self._scopes)
 
@@ -1157,22 +1189,28 @@ class Generator:
       merged = {id(member) for symbol in scope.values()
                 if getattr(symbol.obj, 'is_variant', False)
                 for member in getattr(symbol.obj, 'variant_members', ())}
-      for symbol in scope.values():
-        if getattr(symbol.obj, 'is_variant', False) or id(symbol.obj) in merged:
-          continue
-        if symbol.obj.addressing == Addressing.NONE and symbol.stype != SymbolType.Data:
-          shmem_load += builder.build(symbol)
-          load_ir.extend(builder.get_instructions())
-
       vm = self._context.get_vm()
       shmem_cap = vm.get_hw_descr().max_local_mem_size_per_block
+      candidates = [symbol for symbol in scope.values()
+                    if not getattr(symbol.obj, 'is_variant', False)
+                    and id(symbol.obj) not in merged
+                    and symbol.obj.addressing == Addressing.NONE
+                    and symbol.stype != SymbolType.Data]
+      chosen = (self._preload_selection(candidates, shmem_cap)
+                if self._preload_partial else candidates)
+      for symbol in chosen:
+        shmem_load += builder.build(symbol)
+        load_ir.extend(builder.get_instructions())
+        self._preloaded.add(id(symbol.obj))
+      self._preload_left = ({id(s.obj) for s in candidates}
+                            - {id(s.obj) for s in chosen})
 
       # Bytes against bytes: `shmem_load` counts elements, the cap is the
       # hardware's figure in bytes.  Compared as they were, 57600 floats of
       # preloaded operators (local_flux at b = 120, 225 KB) passed a 64 KB
       # cap on gfx942 -- and FP64 at b = 56 (98 KB) with it -- and the launch
       # asked for more LDS than the device has.
-      if shmem_load * self._context.fp_type.size() < shmem_cap:
+      if chosen and shmem_load * self._context.fp_type.size() < shmem_cap:
         # Waited for before the barrier that publishes them.  A barrier orders
         # the threads, not the copies they issued: without the waits the
         # block went past `__syncthreads()` with the transfers still in flight
@@ -1186,6 +1224,14 @@ class Generator:
         else:
           load_ir.append(SyncBlock(self._context))
         self._section.global_ir += load_ir
+        # The operands `preload_partial` left out are read from global memory,
+        # bound as they are where nothing is staged -- here, since this branch
+        # returns before that binding below.
+        ptrs = GetElementPtrBuilder(self._context, self._scopes)
+        for symbol in candidates:
+          if id(symbol.obj) in self._preload_left:
+            ptrs.build(symbol)
+            self._section.global_ir.extend(ptrs.get_instructions())
         # One body for the lot, so that a transfer, the pointer it reads and
         # the wait that retires it are values of the same body -- the
         # condition for the structured `copy.async`.  Each in a body of its
@@ -1202,6 +1248,8 @@ class Generator:
         self._scopes.remove_scope()
         self._section.shr_mem_obj.release_global(mark)
         self._preload_globals = False
+        self._preloaded = set()
+        self._preload_left = set()
 
     builder = GetElementPtrBuilder(self._context, self._scopes)
     for symbol in self._scopes.get_global_scope().values():
@@ -1212,7 +1260,7 @@ class Generator:
         # declares -- and `get_symbol` then found that binding for the table,
         # so the loop's own one was named `glb_glb_v0`.
         continue
-      if symbol.obj.addressing == Addressing.SCALAR or (symbol.obj.addressing == Addressing.NONE and (symbol.stype == SymbolType.Data or not self._preload_globals)):
+      if symbol.obj.addressing == Addressing.SCALAR or (symbol.obj.addressing == Addressing.NONE and (symbol.stype == SymbolType.Data or not self._preload_globals or id(symbol.obj) in self._preload_left)):
         builder.build(symbol)
         self._section.global_ir.extend(builder.get_instructions())
 

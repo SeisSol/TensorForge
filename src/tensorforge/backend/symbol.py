@@ -1549,6 +1549,10 @@ class Symbol:
     LLVM did not reassociate the second into the first -- local_flux at b = 80
     on gfx942 computed a 64-bit address for each of its global loads.
     """
+    # Bound here, under a name of its own: the register branch below unpacks
+    # the *slicing* shift into `shift`, and reading the parameter after it
+    # added that as a second addend -- `r0[k - 16]` in `bbox_shared_lower`.
+    addend = shift
     def arith(name, a, b, py):
       # fold right here when both sides are numbers: an address that is fully
       # static should be a literal in the generated source, not a temporary
@@ -1635,9 +1639,9 @@ class Symbol:
     else:
       raise NotImplementedError('Not supposed to be called')
 
-    if shift is not None:
+    if addend is not None:
       parts = ([p for p in parts if not isinstance(p, (int, np.integer))]
-               + [shift]
+               + [addend]
                + [p for p in parts if isinstance(p, (int, np.integer))])
     if not parts:
       return 0

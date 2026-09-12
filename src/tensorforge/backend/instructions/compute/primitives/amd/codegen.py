@@ -365,7 +365,8 @@ def _shared_fragment(writer, tile, ftype, threads, regs):
 
 
 def matmul32(writer: Writer, C, B, A, M, N, K, kx, threads, dtype, sparse,
-             ctx, start, stop, width=1, tile=None, lead_wave=None, mults=1):
+             ctx, start, stop, width=1, tile=None, lead_wave=None, mults=1,
+             lead_quad=None, quad=0):
     with writer.AnonymousScope():
 
         ftype = ScalarType(dtype)
@@ -429,6 +430,44 @@ def matmul32(writer: Writer, C, B, A, M, N, K, kx, threads, dtype, sparse,
                                     scale, kkm, blgp,
                                     hint='acc', movable=False,
                                     materialize=True, layout=acclayout)
+
+                            if lead_quad is not None:
+                                # The operand stored in k-quads
+                                # (`amd.prepared_order`): one read is `quad`
+                                # steps of the lane's row.  With `blgp` the
+                                # `p`-th multiplication reads quad `q + p`, so
+                                # one read serves `mults * quad` steps; the
+                                # quads a group does not fill read alone.
+                                depth = K + kx
+                                group = mults * quad
+                                for g in range(0, depth, quad):
+                                    if g % group == 0 and g + group <= depth:
+                                        lead = lead_quad(writer, i, g // quad,
+                                                         mults)
+                                        for q in range(mults):
+                                            for c in range(quad):
+                                                acc = step(
+                                                    acc, g + q * quad + c,
+                                                    writer.extract(lead, c,
+                                                                   ftype),
+                                                    _blgp(mults, q)
+                                                    if mults > 1 else 0)
+                                        continue
+                                    if mults > 1 and g % group:
+                                        continue
+                                    for q0 in range(g, min(g + group, depth),
+                                                    quad):
+                                        lead = lead_quad(writer, i, q0 // quad)
+                                        for c in range(min(quad, depth - q0)):
+                                            acc = step(
+                                                acc, q0 + c,
+                                                writer.extract(lead, c, ftype),
+                                                0)
+                                for jj in range(min(block, N - j)):
+                                    C(writer,
+                                      _column(writer, tile, acc, jj, ftype),
+                                      i, j + jj)
+                                continue
 
                             if lead_wave is not None:
                                 # The multiplications of a wave read the same

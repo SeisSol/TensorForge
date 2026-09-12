@@ -34,7 +34,10 @@ definition since it was written.  `tests/test_amd_reachability.py` keeps the
 property.
 """
 
+from dataclasses import replace
+
 from tensorforge.common.basic_types import Datatype
+from tensorforge.common.exceptions import InternalError
 
 from ... import bitlayout, broadcast, packing, staging
 from ...routes import lead_route as routes_lead_route
@@ -334,8 +337,112 @@ def plan(strategy, shape, n, ctx):
             Span(Strategy.DPP, edge, n))
 
 
+#: Whether a prepared lead operand is offered in k-quads (`prepared_order`).
+K_QUADS = True
+
+
+def quad_width(dtype) -> int:
+    """Contraction steps one 16-byte read of a prepared operand holds."""
+    return 16 // dtype.size()
+
+
+def quad_order(shape, threads, width):
+    """`Tensor.storage_order` for an operand read in k-quads.
+
+    Lane `l`'s row in slot `s` holds steps `width * q .. width * q + width -
+    1` side by side, and the lanes of one slot one after the other: cell `(r,
+    k)` sits at `((k // width * slots + s) * threads + l) * width + k % width`
+    for `r = s * threads + l`.  So one lane reads `width` steps of its row as
+    one aligned vector, and a wave reads one contiguous run -- where the
+    column-major operand gives it one scalar per step.  Rows past the end and
+    steps past the end are padding (`-1`).
+    """
+    rows, cols = (int(x) for x in shape)
+    slots = -(-rows // threads)
+    order = []
+    for q in range(-(-cols // width)):
+        for s in range(slots):
+            for lane in range(threads):
+                r = s * threads + lane
+                for c in range(width):
+                    k = q * width + c
+                    order.append(r + rows * k if r < rows and k < cols else -1)
+    return order
+
+
+def prepared_order(shape, dtype, ctx, columns=0, lead=0, depth=0,
+                   threads=32):
+    """The order this target would read a two-dimensional A operand in, or
+    `None` (`multilinear._offer_order`).
+
+    k-quads for the lane-batched MFMA (`quad_order`): its lanes are rows and
+    each step reads one element of the lane's row, so four steps are one
+    16-byte read.  F32 only, like the `blgp` it composes with.  Only where the
+    operation reads the whole operand, since the order is laid out over the
+    tensor and read by slot, with no coordinate left to offset.
+    """
+    if not K_QUADS or len(shape) != 2 or dtype != Datatype.F32:
+        return None
+    if tuple(int(x) for x in shape) != (lead, depth):
+        return None
+    fit = choose(threads, dtype, ctx, columns=columns, lead=lead, depth=depth)
+    if fit is None or fit.scheme is not Scheme.LANE_BATCHED:
+        return None
+    return quad_order(shape, threads, quad_width(dtype))
+
+
+def _quad_reader(ops, width):
+    """`read(writer, i, q, mults)`: the quad of steps `width * q ..` of slot
+    `i`, or -- `mults > 1` -- quad `q + p` in the lanes of the `p`-th
+    multiplication of the wave, as `blgp` hands them on (`matmul32`)."""
+    threads, slots = ops.threads, ops.lead_slots
+
+    def read(writer, i, q, mults=1):
+        shift = None
+        if mults > 1:
+            from tensorforge.backend.pir.core import INDEX
+            p = writer.op('rem', INDEX, writer.thread_id('y'), mults, hint='m')
+            shift = writer.op('mul', INDEX, p, slots, hint='r')
+        return ops.A_slot(writer, (q * slots + i) * threads * width,
+                          shift=shift, width=width)
+    return read
+
+
+def _quad_element(ops, width):
+    """`ops.A` for an operand stored in k-quads: the step out of its quad.
+
+    Every path that reads `A` by coordinate reads it through this -- the DPP
+    chain beside the MFMAs, the broadcast chain -- because the buffer is
+    permuted and a coordinate address would read the wrong cell.
+    """
+    from tensorforge.backend.pir.core import ScalarType
+    read = _quad_reader(ops, width)
+    ftype = ScalarType(ops.a)
+
+    def A(writer, var, i, k, part=0, parts=1):
+        if var is not None or part or parts != 1:
+            raise InternalError(
+                'an operand stored in k-quads is read as a value of one part')
+        return writer.extract(read(writer, i, k // width), k % width, ftype)
+    return A
+
+
 def matmul(writer, ops, ctx, span):
     """Emit one span of the plan."""
+    width = quad_width(ops.a) if ops.A_slot is not None else 0
+    if width:
+        ops = replace(ops, A=_quad_element(ops, width))
+    taken = _matmul(writer, ops, ctx, span, width)
+    if not taken and width:
+        # Declining would hand the operation to the nest, which reads `A` by
+        # coordinate out of a buffer stored in k-quads.
+        raise InternalError(
+            f'{span.strategy.value} declined an operand stored in k-quads; '
+            f'no other path reads that order')
+    return taken
+
+
+def _matmul(writer, ops, ctx, span, width):
     C, A, B = ops.C, ops.A, ops.B
     M, N, K, kx = ops.lead_slots, ops.n, ops.k, ops.kx
     threads, dtype, sparse = ops.threads, ops.accumulator, ops.sparse
@@ -369,12 +476,16 @@ def matmul(writer, ops, ctx, span):
         # `convergence` asked for the wave group on the same condition, less
         # the accessor: a lead operand that turns out not to be addressable
         # reads per step, in a loop that merely runs in step for nothing.
-        mults = wave_mults(threads, ops.a_uniform, ops.lead_width, dtype)
-        lead_wave = ops.A_wave if mults > 1 else None
+        mults = (wave_mults(threads, ops.a_uniform, ops.lead_width, dtype)
+                 if ops.lockstep else 1)
+        lead_quad = _quad_reader(ops, width) if width else None
+        lead_wave = ops.A_wave if mults > 1 and not width else None
         return matmul32(writer, C, A, B, M, N, K, kx, threads, dtype, sparse,
                         ctx, span.start, span.stop, width=ops.lead_width,
                         tile=fit.tile, lead_wave=lead_wave,
-                        mults=mults if lead_wave is not None else 1)
+                        lead_quad=lead_quad, quad=width,
+                        mults=(mults if lead_wave is not None
+                               or lead_quad is not None else 1))
     mults = wave_mults(threads, ops.a_uniform, ops.lead_width, dtype)
     if (mults > 1 and ops.lockstep and ops.A_wave is not None
             and not ops.a_shared):

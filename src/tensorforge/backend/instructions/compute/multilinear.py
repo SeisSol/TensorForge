@@ -865,6 +865,10 @@ class MultilinearInstruction(ComputeInstruction):
         """
         if not self._context.get_user_options().prepare_operands:
             return
+        if self._lead_width != 1:
+            # A packed lead operand is read as vectors of rows, and an order
+            # stated for single rows would be read by coordinate -- wrongly.
+            return
         if not isinstance(a_obj, Tensor) or a_obj.storage_order is not None:
             # Only a tensor has a storage convention.  A register-resident
             # operand is already in whatever order the pass that produced it
