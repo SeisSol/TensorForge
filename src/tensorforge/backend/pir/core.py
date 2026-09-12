@@ -90,7 +90,7 @@ class MemSpace(IntEnum):
         }.get(name, cls.UNKNOWN)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ScalarType:
     """Type of an SSA value: a scalar, or a fixed-length vector of scalars."""
 
@@ -282,7 +282,7 @@ _M_SYNC = int(Effect.BARRIER | Effect.ASYNC)
 _M_CLOBBER = int(Effect.WRITE | Effect.ATOMIC | Effect.UNKNOWN)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Access:
     """A *localized* memory effect: what kind, in which space, on which base.
 
@@ -403,7 +403,7 @@ class Participants(Enum):
                 Participants.GRID: Uniformity.GRID}[self]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class LaneAxis:
     """One tensor dimension, spread over the lanes of a wave.
 
@@ -485,7 +485,7 @@ def _replication(axes: Tuple['LaneAxis', ...], threads: int) -> int:
     return sizes.pop() if len(sizes) == 1 else 0
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class RegisterLayout:
     """How a register-resident value is distributed over a wave.
 
@@ -618,7 +618,7 @@ def join_layout(operands) -> Optional[RegisterLayout]:
     return None
 
 
-@dataclass(frozen=True, eq=False)
+@dataclass(frozen=True, eq=False, slots=True)
 class Value:
     """An SSA value.
 
@@ -736,7 +736,7 @@ def value_operands(xs) -> Tuple[Value, ...]:
 # Statements & regions
 # --------------------------------------------------------------------------- #
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Region:
     """A single-entry/single-exit block owned by a statement."""
 
@@ -818,7 +818,7 @@ Op.KNOWN = frozenset(v for k, v in vars(Op).items()
                      if isinstance(v, str) and not k.startswith('_'))
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Stmt:
     op: str
     target: Tuple[Value, ...] = ()
