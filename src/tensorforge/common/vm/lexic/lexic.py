@@ -16,9 +16,12 @@ class Lexic(ABC):
     self.thread_idx_x = None
     self.thread_idx_y = None
     self.thread_idx_z = None
+    self.block_dim_x = None
     self.block_dim_y = None
     self.block_dim_z = None
     self.block_idx_x = None
+    self.block_idx_z = None
+    self.grid_dim_x = None
     self.stream_type = None
     self.restrict_kw = None
     self.simd_mode = False

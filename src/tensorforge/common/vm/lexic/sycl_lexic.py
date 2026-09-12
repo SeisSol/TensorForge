@@ -24,6 +24,7 @@ class SyclLexic(Lexic):
     self.thread_idx_z = "item.get_local_id(0)"
     self.block_idx_x = "item.get_group().get_group_id(2)"
     self.block_idx_z = "item.get_group().get_group_id(0)"
+    self.block_dim_x = "item.get_group().get_local_range(2)"
     self.block_dim_y = "item.get_group().get_local_range(1)"
     self.block_dim_z = "item.get_group().get_local_range(0)"
     self.grid_dim_x = "item.get_group_range(2)"

@@ -12,6 +12,7 @@ class OpenCLLexic(Lexic):
     self.thread_idx_z = "get_local_id(2)"
     self.block_idx_x = "get_group_id(0)"
     self.block_idx_z = "get_group_id(2)"
+    self.block_dim_x = "get_local_size(0)"
     self.block_dim_y = "get_local_size(1)"
     self.block_dim_z = "get_local_size(2)"
     self.grid_dim_x = "get_num_groups(0)"
