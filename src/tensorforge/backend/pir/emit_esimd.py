@@ -65,6 +65,11 @@ class EsimdEmitter(Emitter):
         self._windows: dict = {}
         #: The first read of each window: statement id -> (buffer, lo, width, name).
         self._window_heads: dict = {}
+        #: Vector reads served from one block message (`_plan_runs`):
+        #: statement id -> (run name, element offset), and the run's first
+        #: read -> (element type, width).
+        self._runs: dict = {}
+        self._run_heads: dict = {}
 
     # -- types ------------------------------------------------------------- #
 
@@ -414,6 +419,9 @@ class EsimdEmitter(Emitter):
             return
         if op == Op.LOAD and id(s) in self._windows:
             self._emit_window_load(s)
+            return
+        if op == Op.LOAD and id(s) in self._runs:
+            self._emit_run_load(s)
             return
         if (getattr(s, 'op', None) == 'select' and len(s.args) == 3
                 and s.target and self._masked(s.args[0], s.target[0])):
@@ -825,6 +833,170 @@ class EsimdEmitter(Emitter):
         if named:
             self.bind(v, named)
 
+    # -- load runs ---------------------------------------------------------- #
+
+    #: What one block message moves: LSC's transposed read takes at most 64
+    #: dwords (`d32x64t`) per address.
+    RUN_BYTES = 256
+
+    @staticmethod
+    def _messages(width: int, elem_bytes: int) -> int:
+        """Block messages a `width`-element read is issued as: powers of two,
+        at most `RUN_BYTES` each -- how `copy_from` and `slmLoad` split it."""
+        cap = max(1, EsimdEmitter.RUN_BYTES // elem_bytes)
+        count, left, size = 0, width, cap
+        while left:
+            while size > left:
+                size //= 2
+            count += 1
+            left -= size
+        return count
+
+    def _plan_runs(self, body, allocs) -> None:
+        """Adjacent vector reads of one buffer, as one block message.
+
+        Every message costs about five instructions besides the read: a 64-bit
+        add for the address, a copy of it into the payload register, two
+        `mov null` IGC puts around a send on this part, and a scoreboard wait.
+        A lead dimension of 56 on 32 lanes is two reads per column, one of 32
+        and a tail -- three messages (32 + 16 + 8) where one of 64 would do.
+        Read as one, `local_flux` on pvc went from 9386 instructions to 6450,
+        with the tail at full width (`Options.full_lane_tails`).
+
+        A run is reads of the same buffer at constant, consecutive offsets,
+        each one element per lane, taken together only where that is fewer
+        messages and stays inside the buffer's own extent -- so the elements
+        past a tail's `valid` lanes are the buffer's next ones, in range, and
+        land only in lanes whose results are never stored.  The later reads
+        of a run have to be dominated by the first and nothing may write the
+        buffer in between; for shared memory nothing may synchronise either.
+        """
+        consts, seq = {}, []
+
+        def lin(stmts, depth):
+            for x in stmts:
+                if x.op == Op.CONST and x.target:
+                    consts[x.target[0].id] = x.attr('value')
+                seq.append((x, depth))
+                for r in x.regions:
+                    lin(r.body, depth + 1)
+        lin(body, 0)
+
+        def extent(buf, name):
+            if name in allocs:
+                return allocs[name][1].type.volume
+            if isinstance(buf, Value) and isinstance(buf.type, BufferType):
+                return buf.type.volume
+            view = getattr(buf, 'data_view', None)
+            shape = getattr(view, 'shape', None) if view is not None else None
+            if not shape:
+                return None
+            n = 1
+            for d in shape:
+                n *= int(d)
+            return n
+
+        def ends(x, space) -> bool:
+            if self._comment(x):
+                return False
+            if x.op in Op.RAW or x.op in (Op.CALL, Op.COPY_ASYNC, Op.ACCUM):
+                return True
+            if space is MemSpace.SHARED and x.op in (Op.BARRIER, Op.WAIT,
+                                                      Op.COMMIT_ASYNC):
+                return True
+            return False
+
+        chains = {}          # buffer name -> open chain
+        count = [0]
+
+        def close(name):
+            ch = chains.pop(name, None)
+            if ch is None or len(ch['loads']) < 2:
+                return
+            w, eb = ch['width'], ch['elem_bytes']
+            total = w * len(ch['loads'])
+            before = len(ch['loads']) * self._messages(w, eb)
+            if self._messages(total, eb) >= before:
+                return
+            vol = ch['extent']
+            if vol is None or ch['flat'] + total > vol:
+                return
+            rname = f'{name}_run{count[0]}'
+            count[0] += 1
+            first = ch['loads'][0]
+            self._run_heads[id(first)] = (ch['elem'], total)
+            for k, x in enumerate(ch['loads']):
+                self._runs[id(x)] = (rname, k * w)
+
+        for x, depth in seq:
+            for n in [n for n, ch in chains.items() if depth < ch['depth']]:
+                close(n)
+            if x.op == Op.STORE and x.args and self._is_buffer(x.args[0]):
+                close(self._buf_name(x.args[0]))
+                if self._space(x.args[0]) is MemSpace.SHARED:
+                    for n in [n for n, ch in chains.items()
+                              if ch['space'] is MemSpace.SHARED]:
+                        close(n)
+                continue
+            if any(ends(x, ch['space']) for ch in chains.values()):
+                for n in [n for n, ch in chains.items() if ends(x, ch['space'])]:
+                    close(n)
+            if x.regions:
+                continue
+            if not (x.op == Op.LOAD and x.predicate is None and x.target
+                    and x.args and self._is_buffer(x.args[0])):
+                continue
+            buf, v = x.args[0], x.target[0]
+            space = self._space(buf)
+            if space not in (MemSpace.GLOBAL, MemSpace.SHARED):
+                continue
+            if (not isinstance(v.type, ScalarType) or v.type.length
+                    or v.layout is None or not v.distributed
+                    or v.type.base not in self._VECTOR_ELEMS
+                    or x.attr('nontemporal')):
+                continue
+            flat = self._const_flat(buf, x.args[1:], consts)
+            if flat is None:
+                continue
+            name = self._buf_name(buf)
+            w = self._vector_width(v)
+            ch = chains.get(name)
+            eb = v.type.base.size()
+            if (ch is not None and ch['width'] == w and ch['next'] == flat
+                    and (len(ch['loads']) + 1) * w * eb <= self.RUN_BYTES):
+                ch['loads'].append(x)
+                ch['next'] = flat + w
+                continue
+            close(name)
+            chains[name] = {'loads': [x], 'width': w, 'flat': flat,
+                            'next': flat + w, 'depth': depth, 'space': space,
+                            'elem': v.type.base.ctype(), 'elem_bytes': eb,
+                            'extent': extent(buf, name)}
+        for n in list(chains):
+            close(n)
+
+    def _emit_run_load(self, s) -> None:
+        v, buf = s.target[0], s.args[0]
+        rname, off = self._runs[id(s)]
+        head = self._run_heads.get(id(s))
+        if head is not None:
+            elem, total = head
+            addr = self.address(buf, s.args[1:])
+            ptr = self._as_pointer(f'{self.base_name(buf)}[{addr}]')
+            slm = self._slm_load_width(buf, elem, total, ptr)
+            if slm is not None:
+                self.writer(f'{self.simd_type(elem, total)} {rname} = {slm};')
+            else:
+                self.writer(f'{self.simd_type(elem, total)} {rname};')
+                self.writer(f'{rname}.copy_from({ptr});')
+        named = s.attr('extern')
+        nm = named or self.name(v)
+        w = self._vector_width(v)
+        self.writer(f'{self.ctype(v.type, v)} {nm}({rname}.template '
+                    f'select<{w}, 1>({off}));')
+        if named:
+            self.bind(v, named)
+
     # -- entry ------------------------------------------------------------- #
 
     def run(self, body) -> None:
@@ -843,6 +1015,8 @@ class EsimdEmitter(Emitter):
         self._simd_buffers = self._plan_register_buffers(stmts, allocs, consts, order)
         self._windows, self._window_heads = {}, {}
         self._plan_windows(body, allocs)
+        self._runs, self._run_heads = {}, {}
+        self._plan_runs(body, allocs)
         super().run(body)
         if self.unresolved and self.strict:
             names = ', '.join(repr(v) for v in self.unresolved[:8])
