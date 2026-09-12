@@ -256,15 +256,20 @@ class MultilinearBuilder(OperationBuilder):
     return union
 
   def _register_image_cost(self, i, lead_pos):
-    """`(bytes, budget)` of staging operand `i` in registers, where one
-    work-item would hold the whole image -- or `(None, None)` where it would
-    not, and there is nothing to check.
+    """`(bytes, budget)` of staging operand `i` in registers, or `(None,
+    None)` where there is nothing to check.
 
     The image as the loader allocates it: the operand's box, the lead
     dimension rounded up to whole slots of `num_threads` lanes.
+
+    Under the explicit-SIMD lowering one work-item holds the whole image, and
+    the image alone is held against the thread's register file.  Under SPMD a
+    lane holds `1 / num_threads` of it, which alone never comes near the file;
+    what does is several of them at once.  So there the figure is this
+    image's share per lane plus every register image already resident, held
+    against `Options.preload_register_share` of the lane's file -- and nothing
+    is checked where that share is 0.
     """
-    if not _explicit_simd(self._context):
-      return None, None
     budget = getattr(self._context.get_vm().get_hw_descr(),
                      'max_reg_per_thread', None)
     if budget is None:
@@ -278,7 +283,20 @@ class MultilinearBuilder(OperationBuilder):
     for n in sizes:
       volume *= n
     dtype = getattr(view.symbol.obj, 'datatype', None) or self._context.fp_type
-    return volume * dtype.size(), budget
+    if _explicit_simd(self._context):
+      return volume * dtype.size(), budget
+    share = getattr(self._context.get_user_options(),
+                    'preload_register_share', 0.0) or 0.0
+    if share <= 0:
+      return None, None
+    resident = 0
+    for _, entry in self._residency.items():
+      image = entry.image
+      if image.stype == SymbolType.Register and image.obj.size:
+        elem = getattr(image, 'datatype', None) or self._context.fp_type
+        resident += image.obj.size * elem.size()
+    return (volume // threads * dtype.size() + resident,
+            int(share * budget))
 
   def _stage_shift(self, i, absorb_lead):
     """How the staged image is indexed relative to the tensor.

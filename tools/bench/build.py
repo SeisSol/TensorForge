@@ -118,9 +118,15 @@ class Icpx(Compiler):
         # launch's cost into the measurement, where a warm-up cannot reach it
         # because the compilation happens once per process and not once per
         # launcher.
+        # `TF_ICPX_DEVICE_OPTIONS` reaches the device compiler, e.g.
+        # `-internal_options -ze-opt-disable-sendwarwa`: a question about the
+        # code IGC makes rather than the code TensorForge makes, and part of
+        # the cache key through `_digest`.
+        extra = os.environ.get('TF_ICPX_DEVICE_OPTIONS', '').strip()
         return ['-fsycl', '-std=c++17', '-O3', '-DNDEBUG',
                 '-fsycl-targets=spir64_gen',
-                '-Xsycl-target-backend', f'-device {arch}']
+                '-Xsycl-target-backend',
+                f'-device {arch}' + (f' {extra}' if extra else '')]
 
 
 @dataclass(frozen=True)
@@ -226,6 +232,11 @@ def generate(workload: Workload, unit: BuildUnit) -> Tuple[Optional[str],
 def _digest(unit: BuildUnit, sources: Dict[str, str], driver: str) -> str:
     h = hashlib.sha256()
     h.update(unit.label.encode())
+    # The flags too: the same source compiled differently is another binary,
+    # and a cache keyed on the text alone hands back the first one.
+    compiler = COMPILERS.get(unit.target.backend)
+    if compiler is not None:
+        h.update(' '.join(compiler.compile_flags(unit.target.arch)).encode())
     for name in sorted(sources):
         h.update(name.encode())
         h.update(sources[name].encode())

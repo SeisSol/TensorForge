@@ -658,6 +658,20 @@ declare('prefetch_data',
             'instructions for it -- most in small kernels, which wait on '
             'memory anyway.  Elsewhere off until measured.')
 
+declare('preload_register_share',
+        default=0.0,
+        env='TF_PRELOAD_REGISTER_SHARE',
+        parse=float,
+        doc='Under SPMD, the share of a lane\'s register file '
+            '(`max_reg_per_thread`) that operand images staged in registers '
+            'may take together; an operand that would push the images already '
+            'resident past it is read in place instead.  0: no limit.  Under '
+            'the explicit-SIMD lowering one work-item holds each image whole '
+            'and the limit is the whole file per image, whatever this says.  '
+            'chain_five_multiplies stages two 56 x 56 operators at 448 B a '
+            'lane each: 256 VGPR and 428 B of scratch on gfx1150, 256 VGPR '
+            'and 111 AGPR on gfx942.')
+
 declare('lanes_per_mult',
         default=0,
         env='TF_LANES',

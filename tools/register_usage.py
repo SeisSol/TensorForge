@@ -241,7 +241,12 @@ def generate(mod, arch: str, ceiling: Optional[int],
         gen = Generator(mod.descr_list(), ctx, lanes=config)
         with contextlib.redirect_stdout(io.StringIO()):
             gen.generate()
-        src = gen.get_kernel()
+        # the headers the generator asks for, on top of the backend's own: a
+        # CUDA kernel staging through `__pipeline_memcpy_async` needs
+        # `cuda_pipeline.h`, which no fixed list names
+        wanted = dict.fromkeys(ctx.get_vm().get_headers()
+                               + gen.get_helper_headers())
+        src = ''.join(f'#include "{h}"\n' for h in wanted) + gen.get_kernel()
     except Exception as exc:
         return None, Measurement(mod.NAME, 0, 0, 0, 0,
                                  error=f'{type(exc).__name__}: {exc}')
@@ -302,6 +307,7 @@ class HipBackend(Backend):
 class CudaBackend(Backend):
     def command(self, compiler, arch, src, obj, include, extra):
         return [compiler, '-x', 'cu', f'-arch={arch}', '-O3', '-c',
+                '--expt-relaxed-constexpr',
                 '-Xptxas=-v', '-I', str(include), *extra,
                 str(src), '-o', str(obj)]
 

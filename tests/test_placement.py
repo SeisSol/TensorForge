@@ -255,3 +255,43 @@ def test_a_target_without_the_instruction_never_gets_one():
     """
     assert not result_is_atomic(accumulating=True, pending_is_atomic=True,
                                 supported=False, policy=AMD)
+
+
+def test_a_lane_share_keeps_the_second_large_operator_out():
+    """Under SPMD each image is a slice per lane, and several together are not.
+
+    `chain_five_multiplies` stages two 56 x 56 operators at 448 B a lane each;
+    gfx1150's lane file is 1 kB, and the kernel ran at 256 VGPR with 428 B of
+    scratch.  With half the file for staged images the second one is read in
+    place, and the spill is gone.
+    """
+    import contextlib
+    import importlib.util
+    import io
+    import re
+    import warnings
+    from pathlib import Path
+
+    from tensorforge.common.context import Context, Options
+    from tensorforge.generators.generator import Generator
+
+    path = Path(__file__).parent / 'cases' / 'chain_five.py'
+    spec = importlib.util.spec_from_file_location('tf_place__chain_five', path)
+    case = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(case)
+
+    def staged(share):
+        with warnings.catch_warnings(), \
+                contextlib.redirect_stdout(io.StringIO()):
+            warnings.simplefilter('ignore')
+            gen = Generator(case.descr_list(),
+                            Context(arch='gfx1150', backend='hip',
+                                    fp_type=case.DTYPE,
+                                    options=Options(
+                                        preload_register_share=share)))
+            gen.generate()
+        return set(re.findall(r'// r\d+ = load\{g>r\}\((glb_m[02])\)',
+                              gen.get_kernel()))
+
+    assert staged(0.0) == {'glb_m0', 'glb_m2'}
+    assert staged(0.5) == {'glb_m0'}

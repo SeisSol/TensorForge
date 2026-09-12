@@ -69,8 +69,11 @@ def _sycl_aot_flags(arch: str) -> List[str]:
     """
     if os.environ.get("TF_SYCL_AOT", "") not in ("1", "true", "yes", "on"):
         return []
+    # `TF_SYCL_AOT_OPTIONS` reaches the device compiler, e.g.
+    # `-internal_options -ze-opt-disable-sendwarwa`.
+    extra = os.environ.get("TF_SYCL_AOT_OPTIONS", "").strip()
     return ["-fsycl-targets=spir64_gen", "-Xsycl-target-backend",
-            f"-device {arch}"]
+            f"-device {arch}" + (f" {extra}" if extra else "")]
 
 
 def _probe_compile(backend: str, arch: str, scratch: Path) -> bool:
@@ -188,6 +191,10 @@ class BuildInputs:
 def _cache_hash(b: BuildInputs) -> str:
     h = hashlib.sha256()
     h.update(b.target.id.encode())
+    # the device flags as well: the same source compiled otherwise is another
+    # binary, and a cache keyed on the text alone would return the first
+    if b.target.backend in ("oneapi", "esimd"):
+        h.update(" ".join(_sycl_aot_flags(b.target.arch)).encode())
     for part in (b.includes_src, b.kernel_src, b.header_src, b.launcher_src, b.driver_src):
         h.update(part.encode())
     return h.hexdigest()[:16]
