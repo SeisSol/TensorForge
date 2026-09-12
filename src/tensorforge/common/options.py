@@ -430,6 +430,26 @@ declare('preload_partial',
             '25.6 KB operators against 64 KB on gfx942, and stages none of '
             'them without this.')
 
+declare('stage_members',
+        default=False,
+        parse=parse_bool,
+        doc='In a merged run (`merge_variants`), copy each iteration\'s '
+            'batch-constant operand into a block-shared buffer and read it '
+            'there, rather than every multiplication reading it from global '
+            'memory.\n'
+            'The operators a merged run walks are exactly the ones `preload_globals` '
+            'cannot stage -- its members are selected per iteration and are read '
+            'from global memory -- so the block copies the current one '
+            'cooperatively, behind a block barrier and in front of one, and its '
+            'multiplications share it.  Needs every multiplication of the block '
+            'on the same trips through the batch loop: the block is one group '
+            'of `stage_group` multiplications.')
+
+declare('stage_group',
+        default=8,
+        doc='Multiplications a block holds under `stage_members`, and so how '
+            'many share one staged copy.  Rounded up to whole waves.')
+
 declare('prepare_operands',
         default=False,
         parse=parse_bool,

@@ -56,7 +56,11 @@ class LivenessAnalysis(AbstractOptStage):
   # ------------------------------------------------------------------ #
 
   def _tracked(self, sym) -> bool:
-    return getattr(sym, 'stype', None) in self._stypes
+    # A block-shared buffer (`Generator._stage_member`) sits in the arena the
+    # prologue's images use, at an offset of its own; tracked here it would be
+    # given a place in each multiplication's window instead.
+    return (getattr(sym, 'stype', None) in self._stypes
+            and not getattr(sym, 'block_shared', False))
 
   def _all_symbols(self) -> OrderedSet:
     out = OrderedSet(self._predefined)

@@ -55,6 +55,9 @@ class AbstractThreadBlockPolicy:
     self._num_threads: int = num_threads
     #: Whether the section this sizes a block for contains a barrier at all.
     self._has_barrier: bool = False
+    #: The multiplications a block barrier has to meet, where the section
+    #: states it rather than the lane layout implying it (`stage_members`).
+    self._barrier_group = None
 
     vm = self._context.get_vm()
     self._max_blocks = vm.get_hw_descr().max_block_per_sm
@@ -83,6 +86,8 @@ class AbstractThreadBlockPolicy:
     """
     if not self._has_barrier:
       return None
+    if self._barrier_group:
+      return self._barrier_group
     vm = self._context.get_vm()
     wave = vm.get_hw_descr().vec_unit_length
     if self._num_threads == wave:
@@ -93,6 +98,9 @@ class AbstractThreadBlockPolicy:
 
   def set_has_barrier(self, has_barrier: bool) -> None:
     self._has_barrier = bool(has_barrier)
+
+  def set_barrier_group(self, group) -> None:
+    self._barrier_group = group
 
 
 class RegmaxBlockPolicy(AbstractThreadBlockPolicy):
@@ -169,6 +177,9 @@ class Section:
     #: Where the preloaded images start in the prologue's arena, so that they
     #: can be laid out again once their operands' storage is settled.
     self.preload_mark: int = 0
+    #: The block-wide copies of merged runs' members (`stage_members`), which
+    #: take their buffers from the same arena, after the images.
+    self.stage_loaders: List[AbstractInstruction] = []
 
 class _GuardGrouping:
   """Collects the instructions of neighbouring operations under one guard.
@@ -423,12 +434,17 @@ class Generator:
     self._populate_global_scope()
 
   def _set_threadconfig(self):
-    # Top level only, which is the prologue plus the loop itself.  The default
-    # is a no-op; only a blockwide GlbToShrLoader overrides it, and those live
-    # in the prologue.
+    # Into the regions as well: the default is a no-op, and only a blockwide
+    # GlbToShrLoader overrides it -- the prologue's, and a staged member's
+    # inside a merged run (`_stage_member`).
     mults = self._section.shr_mem_obj.get_mults_per_block()
-    for instr in self._section.stream:
-      instr.set_threadconfig_pre(self._num_threads, mults)
+
+    def walk(instrs):
+      for instr in instrs:
+        instr.set_threadconfig_pre(self._num_threads, mults)
+        for region in instr.regions():
+          walk(region)
+    walk(self._section.stream)
 
   def _rotation_targets(self) -> set:
     """Which transfers should get a second buffer, asked of the pass itself.
@@ -780,6 +796,12 @@ class Generator:
     a change to what the offset means rather than to how it is spelled.
     """
     wave = self._context.get_vm().get_hw_descr().vec_unit_length
+    if self._section.stage_loaders:
+      # A staged member is shared by every multiplication of the block and
+      # fenced by block barriers, so the block is one group on the same trips.
+      if start != self._get_2d_block_id():
+        return 1
+      return self._stage_group()
     split = MultLayout(self._num_threads, wave)
     if not (split.contiguous or split.whole_waves):
       # The lanes of one multiplication sit in several waves, so its barrier
@@ -845,6 +867,12 @@ class Generator:
       image._get_bounding_box_dense()
       image.set_shr_mem_offset(obj.alloc_global(image.compute_shared_mem_size()),
                                True, True)
+    # The staged members' buffers came after the images, and go after them
+    # again rather than under an image that grew.
+    for loader in self._section.stage_loaders:
+      loader._get_bounding_box_dense()
+      loader.set_shr_mem_offset(
+          obj.alloc_global(loader.compute_shared_mem_size()), True, True)
     cap = self._context.get_vm().get_hw_descr().max_local_mem_size_per_block
     return obj.get_global_size() * self._context.fp_type.size() < cap
 
@@ -1407,6 +1435,7 @@ class Generator:
             break
 
     body, variants = loop.decompose()
+    written = {id(d.writes().tensor) for d in body if d.writes() is not None}
     counter = f'{GeneralLexicon.BATCH_ID_NAME}v{len(self._section.ir)}'
 
     tables, region = [], []
@@ -1431,6 +1460,9 @@ class Generator:
                 else TableForm.ARRAY),
           variant=counter)
       tables.append(table)
+      if self._stages(stand_in, written):
+        region.extend(self._stage_member(stand_in, table, counter))
+        continue
       pointers.build(stand_in, table=table, variant=counter)
       region.extend(pointers.get_instructions())
 
@@ -1522,6 +1554,73 @@ class Generator:
         VariantLoop(self._context, counter, loop.iterations, region, tables,
                     start=0 if resident else 1, carried=tuple(carried)))
 
+  def _stages(self, stand_in, written) -> bool:
+    """Whether a merged run's hole is staged per iteration (`stage_members`):
+    a batch-constant, dense operand the body only reads."""
+    obj = stand_in.obj
+    return bool(self._context.get_user_options().stage_members
+                and obj is not None
+                and obj.addressing == Addressing.NONE
+                and obj.is_dense()
+                and id(obj) not in written
+                and stand_in.stype != SymbolType.Data)
+
+  def _stage_member(self, stand_in, table, counter):
+    """The current member of a merged run's batch-constant hole, copied by the
+    whole block into a buffer its multiplications share.
+
+    The table still selects between the members' global bindings, now under a
+    name of their own (`glb_v0g`); the shared copy takes the stand-in's name
+    and, added after it, is what the body's builders find -- the arrangement
+    `GlobalLoaderBuilder` uses for the prologue's images, which is also why
+    the members stay out of the preload: a table over shared copies would
+    claim global memory.  One barrier in front, since the previous iteration's
+    readers -- or the previous element's last -- may still be in the buffer,
+    and one behind, since every multiplication reads what the whole block
+    wrote.  The buffer is in the prologue's arena and out of the liveness
+    that places the per-multiplication windows (`block_shared`).
+    """
+    from tensorforge.backend.scopes import Symbol
+    from tensorforge.backend.instructions.memory.load import (GlbToShrLoader,
+                                                              LoadWait)
+    pointers = GetElementPtrBuilder(self._context, self._scopes)
+    pointers.build(stand_in, table=table, variant=counter,
+                   name=f'{stand_in.name}g')
+    binding = list(pointers.get_instructions())
+    src = self._scopes.get_symbol(stand_in.obj)
+    dest = Symbol(name=f'{GeneralLexicon.GLOBAL_MEM_PREFIX}{stand_in.name}',
+                  stype=SymbolType.SharedMem, obj=stand_in.obj)
+    dest.block_shared = True
+    self._scopes.add_symbol(dest)
+    loader = GlbToShrLoader(context=self._context, src=src, dest=dest,
+                            shr_mem=self._scopes.get_symbol(
+                                self._section.shr_mem_obj),
+                            num_threads=self._num_threads, permute=None,
+                            blockwide=True, max_load_offset=0, verbatim=True)
+    obj = self._section.shr_mem_obj
+    loader.set_shr_mem_offset(obj.alloc_global(loader.compute_shared_mem_size()),
+                              True, True)
+    self._section.stage_loaders.append(loader)
+    # The wait goes where `MoveLoads` puts every load's: at the loader's place,
+    # in front of the second barrier, with the transfer hoisted up to the
+    # first.  Written here as well it would be a second wait the pass takes
+    # for a load.  Without the pass, an asynchronous copy still has to be
+    # retired before the barrier publishes it.
+    wait = ([] if self._context.get_user_options().enable_move_loads
+            else [LoadWait(loader)])
+    return binding + [SyncBlock(self._context), loader, *wait,
+                      SyncBlock(self._context)]
+
+  def _stage_group(self) -> int:
+    """Multiplications per block under `stage_members`: `stage_group`,
+    rounded up to whole waves."""
+    wave = self._context.get_vm().get_hw_descr().vec_unit_length
+    base = (wave // self._num_threads if self._num_threads < wave
+            else mults_per_group(self._num_threads, wave))
+    base = max(1, base)
+    want = max(1, int(self._context.get_user_options().stage_group))
+    return -(-want // base) * base
+
   def _deduce_mults_per_block(self):
     policy = self._thread_block_policy_type(self._context,
                                             self._section.shr_mem_obj.get_global_size(),
@@ -1531,6 +1630,8 @@ class Generator:
                                             * self._context.get_user_options().lead_blocking)
     policy.set_has_barrier(
         any(instr.barrier_scope() is not None for instr in self._section.stream))
+    if self._section.stage_loaders:
+      policy.set_barrier_group(self._stage_group())
     num_mults_per_block = policy.get_num_mults_per_block()
     fits = num_mults_per_block >= 1
     # A block holds whole groups or the group is not a unit.  Rounding down

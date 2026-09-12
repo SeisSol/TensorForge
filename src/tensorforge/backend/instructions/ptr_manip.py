@@ -610,6 +610,14 @@ class VariantLoop(AbstractInstruction):
   def regions(self):
     return (tuple(self._region),)
 
+  def barrier_scope(self):
+    """A loop containing a barrier synchronises, seen from outside -- as
+    `BatchLoop` says of its own body, which asks this of its instructions.
+    Silent, a staged member's block barriers (`Generator._stage_member`) were
+    invisible to the block sizing that has to allow them."""
+    inner = [i.barrier_scope() for i in self._region]
+    return max((s for s in inner if s is not None), default=None)
+
   def replace_region(self, index: int, instrs) -> None:
     if index != 0:
       raise GenerationError(f'a VariantLoop has one region, not {index + 1}')
