@@ -833,14 +833,14 @@ class Emitter:
                 v = s.target[0]
                 self.bind(v, self._thread_idx(callee[-1]))
                 return
-            if callee is not None and callee.startswith('batch_id_'):
-                # Bound, not declared: the macro layer already emits
-                # `batchId{n}` around this body, so the value is a name that
-                # exists rather than a call to make.  This is the seam -- the
-                # micro IR reasons about the batch id as a MULT-uniform value,
-                # the macro IR owns what it is called and how it is computed.
+            if callee is not None and callee.startswith('extern_'):
+                # Bound, not declared: the macro layer already emits the name
+                # around this body, so the value is a name that exists rather
+                # than a call to make.  This is the seam -- the micro IR
+                # reasons about a typed, uniformity-carrying value, the macro
+                # IR owns what it is called and how it comes to exist.
                 v = s.target[0]
-                self.bind(v, f'{GeneralLexicon.BATCH_ID_NAME}{callee[len("batch_id_"):]}')
+                self.bind(v, callee[len('extern_'):])
                 return
             args = ', '.join(self.operand(a) for a in s.args)
             if not s.target:

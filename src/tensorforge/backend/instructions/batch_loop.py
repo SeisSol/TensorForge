@@ -676,6 +676,25 @@ class BatchLoop(AbstractInstruction):
     def _num_elements(self) -> str:
         return f'{GeneralLexicon.NUM_ELEMENTS}{self._section_index}'
 
+    def _count(self, writer):
+        """The element count, as a value where the body can hold one.
+
+        A kernel parameter, so it comes through the seam rather than from a
+        definition: `GRID`-uniform, `SIZE`, stated once instead of inferred at
+        each use.  As text it had none of the three, which is why a comparison
+        against it came out only as uniform as the index it was compared to --
+        `_join` skips what is not a value, so the answer came from the other
+        operand alone.
+
+        Falls back to the name where the body is a `Writer` rather than a
+        builder, which is the traversals that are still spelled as text.
+        """
+        if not hasattr(writer, 'extern_value'):
+            return self._num_elements()
+        from tensorforge.backend.pir.core import SIZE, Uniformity
+        return writer.extern_value(self._num_elements(), SIZE,
+                                   uniform=Uniformity.GRID)
+
     def _block_id(self, block: Optional[str] = None) -> str:
         """The same start expression the generator spells, and parenthesised
         for the same reason: it is a sum handed on as an operand, and whoever
@@ -765,7 +784,7 @@ class BatchLoop(AbstractInstruction):
             # never read.
             ahead = writer.op('add', SIZE, prev, self._stride,
                               hint=f'ahead{n}')
-            inside = writer.op('lt', BOOL, ahead, self._num_elements(),
+            inside = writer.op('lt', BOOL, ahead, self._count(writer),
                                hint=f'inbatch{n}')
             prev = writer.op('select', SIZE, inside, ahead, prev,
                              hint=self._batch(n), escapes=(n == 1))
@@ -992,7 +1011,7 @@ class BatchLoop(AbstractInstruction):
         """
         from tensorforge.backend.pir.core import BOOL, SIZE
         ahead = writer.op('add', SIZE, index, self._stride, hint=f'{hint}Ahead')
-        inside = writer.op('lt', BOOL, ahead, self._num_elements(),
+        inside = writer.op('lt', BOOL, ahead, self._count(writer),
                            hint=f'{hint}In')
         return writer.op('select', SIZE, inside, ahead, index, hint=hint)
 
@@ -1167,7 +1186,7 @@ class BatchLoop(AbstractInstruction):
                     types.extend((word_first.type, word_second.type))
                 table = BatchLoop._push_carried(writer)
                 try:
-                    with writer.for_(self._start, self._num_elements(),
+                    with writer.for_(self._start, self._count(writer),
                                      self._stride, hint=self._batch(0),
                                      index_type=SIZE,
                                      peel_index=self.prologue_index(),
@@ -1338,7 +1357,7 @@ class BatchLoop(AbstractInstruction):
         if True:
             if True:
                 guard = builder.op('lt', BOOL, loop.induction,
-                                   self._num_elements(), hint='inrange')
+                                   self._count(builder), hint='inrange')
                 with builder.if_(guard):
                     self._emit_body(builder)
                 self._advance_stage_counter(builder)

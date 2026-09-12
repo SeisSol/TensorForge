@@ -26,12 +26,13 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 from tensorforge.common.basic_types import Datatype
 from tensorforge.common.exceptions import GenerationError
 
+from tensorforge.common.basic_types import GeneralLexicon
 from .core import (BOOL, INDEX, SCALAR_LAYOUT, TOKEN, Access, BufferType,
                    Participants,
                    Effect, IRError,
                    LaneAxis, MemSpace, Op, Operand, Region, RegisterLayout,
                    ScalarType, Stmt, TokenType, Value, XorSwizzle, dump, walk, walk_stmts,
-                   join_layout, base_space, Uniformity)
+                   join_layout, base_space, Uniformity, SIZE)
 
 
 def access_of(symbol: Any, kind: Effect) -> Access:
@@ -785,6 +786,50 @@ class IRBuilder:
         except AttributeError:
             return False
 
+    def extern_value(self, name: str, type_=None,
+                     uniform: Union[bool, Uniformity] = Uniformity.GRID,
+                     layout: Optional[RegisterLayout] = None,
+                     hint: str = None) -> Value:
+        """A value standing for a name bound outside this body.
+
+        The seam between the two layers, and the only thing it does is let the
+        micro IR *name* something the macro layer owns.  There is no statement
+        to make: the emitter binds the value to `name` and writes nothing, so
+        the generated text is what it was and the IR gains an operand where it
+        had a substring.
+
+        What that buys is one thing and it is not small.  A name baked into a
+        raw expression has no uniformity, no type and no def-use edge, so every
+        pass that reads those has to guess from the other operands -- which is
+        how a comparison against `numElements0` came out only as uniform as the
+        index it was compared to, and how `substitute` found nothing to rewrite
+        in an address that mentioned an element. Stated once here, it is stated
+        for every use.
+
+        What it does *not* buy is an edge to a definition, because there is no
+        definition in this body to have an edge to.  A value with no arguments
+        looks loop-invariant to `licm`, and that is true of a kernel parameter
+        and false of a loop's own binding -- so this is for the things the
+        macro layer binds *around* a body, and a loop's index inside one comes
+        from the loop.  `BatchLoop.indices_in` is that distinction made
+        operational.
+
+        Deduplicated per body: two callers asking for the same name get the
+        same value, so the IR sees one thing where the text has one name.
+        """
+        hint = name if hint is None else hint
+        type_ = SIZE if type_ is None else type_
+        layout = SCALAR_LAYOUT if layout is None else layout
+        uni = _as_uniformity(uniform)
+        key = _cons_key(Op.CALL, type_, (), extra=(f'extern_{name}', layout, uni))
+        shared = self._shared(key)
+        if shared is not None:
+            return shared
+        v = self.value(type_, hint=hint, uniform=uni, layout=layout)
+        self._emit_op(Op.CALL, (v,), (), attrs=(('callee', f'extern_{name}'),))
+        self._share(key, v)
+        return v
+
     def batch_id(self, lookahead: int = 0) -> Value:
         """The element this multiplication is working on.
 
@@ -796,21 +841,16 @@ class IRBuilder:
 
         ``lookahead`` names the index the loop binds that many iterations ahead,
         which is what a peeled or advanced transfer consumes.
+
+        `SIZE`, as the loop's own index is: an index compared against
+        `numElements` and multiplied into an address, and the same quantity
+        whether a body reads it from the loop or through this seam.
         """
         # MULT-uniform is a statement about the lanes: every thread of one
         # multiplication has the same batch id, which is exactly replication.
-        key = _cons_key(Op.CALL, INDEX, (),
-                        extra=(f'batch_id_{lookahead}', SCALAR_LAYOUT,
-                               Uniformity.MULT))
-        shared = self._shared(key)
-        if shared is not None:
-            return shared
-        v = self.value(INDEX, hint=f'batch{lookahead}', uniform=Uniformity.MULT,
-                       layout=SCALAR_LAYOUT)
-        self._emit_op(Op.CALL, (v,), (),
-                      attrs=(('callee', f'batch_id_{lookahead}'),))
-        self._share(key, v)
-        return v
+        return self.extern_value(
+            f'{GeneralLexicon.BATCH_ID_NAME}{lookahead}', SIZE,
+            uniform=Uniformity.MULT, hint=f'batch{lookahead}')
 
     def alloc(self, elem: Datatype, shape: Sequence[int], space: MemSpace,
               hint: str = 'buf', extern: str = None,
