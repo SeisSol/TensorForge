@@ -3,13 +3,13 @@
 # SPDX-License-Identifier: MIT
 """`Options.full_lane_tails`: the ragged end of a lead dimension on every lane.
 
-Off by default.  On, the tail block of a multiplication computes on the whole
+On by default.  On, the tail block of a multiplication computes on the whole
 wave and only its memory accesses are held to the lanes that hold data
 (`LeadIndex.valid`) -- which under ESIMD turns a 24-wide vector, issued as
-16 + 8, into a 32-wide one issued once.  Held here: that it is off unless
-asked, what it changes where it applies, and that it does not apply where
-the lanes past the window are another slice's rows (a lead origin shift, or
-an accumulator image larger than the window).
+16 + 8, into a 32-wide one issued once.  Held here: that it is on unless
+turned off, what it changes where it applies, and that it does not apply
+where the lanes past the window are another slice's rows (a lead origin
+shift, or an accumulator image larger than the window).
 """
 
 from __future__ import annotations
@@ -53,8 +53,8 @@ def _kernel(descrs, backend='esimd', arch='pvc', dtype=Datatype.F32, **opts):
     return re.sub(r'kernel_[0-9a-f]{16}|// options:.*', '', gen.get_kernel())
 
 
-def test_off_by_default():
-    assert registry()['full_lane_tails'].default is False
+def test_on_by_default():
+    assert registry()['full_lane_tails'].default is True
 
 
 def test_the_tail_computes_on_the_whole_wave_under_esimd():
@@ -62,7 +62,7 @@ def test_the_tail_computes_on_the_whole_wave_under_esimd():
     it is a `select<24>` of the accumulator; on, none is, and the operator's
     rows are read 24 wide into a zeroed 32-wide vector."""
     mod = _module('local_flux')
-    off = _kernel(mod.descr_list())
+    off = _kernel(mod.descr_list(), full_lane_tails=False)
     on = _kernel(mod.descr_list(), full_lane_tails=True)
     narrow_update = re.compile(r'\br\d+\.template select<24, 1>\(\d+\) =')
     assert narrow_update.search(off)
@@ -75,7 +75,7 @@ def test_a_lead_origin_shift_keeps_the_tail_narrow():
     its end in the next block are the tensor's next rows."""
     mod = _module('lead_window_spans_two_blocks')
     assert (_kernel(mod.descr_list(), full_lane_tails=True)
-            == _kernel(mod.descr_list()))
+            == _kernel(mod.descr_list(), full_lane_tails=False))
 
 
 def test_spmd_keeps_only_the_memory_to_the_tail():
@@ -83,7 +83,8 @@ def test_spmd_keeps_only_the_memory_to_the_tail():
     folded to `lane < 24 ? p[i] : 0`, and the updates of the accumulator's
     padding lanes unguarded -- so the scheduler can look across them."""
     mod = _module('local_flux')
-    off = _kernel(mod.descr_list(), backend='cuda', arch='sm_100')
+    off = _kernel(mod.descr_list(), backend='cuda', arch='sm_100',
+                  full_lane_tails=False)
     on = _kernel(mod.descr_list(), backend='cuda', arch='sm_100',
                  full_lane_tails=True)
     guarded = re.compile(r'if \(v\d+_g\)')
@@ -121,7 +122,7 @@ def test_an_accumulation_into_a_slice_of_an_image_keeps_the_tail_narrow():
     """The space-time predictor's shape without the shift: the window's end
     is not the image's, so a full-lane tail would overwrite `t[40:64]`."""
     try:
-        off = _kernel(_slice_accumulation())
+        off = _kernel(_slice_accumulation(), full_lane_tails=False)
     except Exception as exc:  # pragma: no cover - shape not lowerable
         import pytest
         pytest.skip(f'the slice accumulation does not lower: {exc}')
@@ -154,12 +155,13 @@ def test_a_zero_filled_tail_is_written_whole():
     under ESIMD a merge and a 32-wide write where it was 16 + 8 and a fill
     nest, under SPMD a select where it was a branch -- and the fill nest has
     nothing left to do."""
-    off = _kernel(_padded_local_flux())
+    off = _kernel(_padded_local_flux(), full_lane_tails=False)
     on = _kernel(_padded_local_flux(), full_lane_tails=True)
     assert 'v' not in re.findall(r'v\d+_pad', off) and not re.search(r'v\d+_pad', off)
     assert re.search(r'v\d+_pad', on), on
     assert not re.search(r'simd<float, 24>\([^;]*\)\.copy_to\(glb_m2', on)
-    cuda_off = _kernel(_padded_local_flux(), backend='cuda', arch='sm_100')
+    cuda_off = _kernel(_padded_local_flux(), backend='cuda', arch='sm_100',
+                       full_lane_tails=False)
     cuda = _kernel(_padded_local_flux(), backend='cuda', arch='sm_100',
                    full_lane_tails=True)
     zeros = re.compile(r'glb_m2\[[^\]]*\] = 0\.0f;')

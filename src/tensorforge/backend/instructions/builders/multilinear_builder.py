@@ -122,12 +122,14 @@ class MultilinearBuilder(OperationBuilder):
         symbol.stype in (SymbolType.Scalar, SymbolType.Data)
         or (isinstance(symbol.obj, Tensor) and len(symbol.obj.shape) == 0)
         or getattr(symbol.obj, 'addressing', None) == Addressing.NONE)
+    image_bytes, budget = (self._register_image_cost(i, lead_pos)
+                           if addressable else (None, None))
     placement = choose_operand_placement(
         legal_operand_placements(addressable=addressable,
                                  transposed=transpose,
                                  carries_lead_dim=has_lead_dim,
                                  policy=self._policy),
-        self._policy)
+        self._policy, image_bytes=image_bytes, register_budget=budget)
 
     name = self._ops[i].symbol.name
 
@@ -252,6 +254,31 @@ class MultilinearBuilder(OperationBuilder):
       union = BoundingBox([l + o for l, o in zip(view.bbox.lower(), view.offset)],
                           [u + o for u, o in zip(view.bbox.upper(), view.offset)])
     return union
+
+  def _register_image_cost(self, i, lead_pos):
+    """`(bytes, budget)` of staging operand `i` in registers, where one
+    work-item would hold the whole image -- or `(None, None)` where it would
+    not, and there is nothing to check.
+
+    The image as the loader allocates it: the operand's box, the lead
+    dimension rounded up to whole slots of `num_threads` lanes.
+    """
+    if not _explicit_simd(self._context):
+      return None, None
+    budget = getattr(self._context.get_vm().get_hw_descr(),
+                     'max_reg_per_thread', None)
+    if budget is None:
+      return None, None
+    view = self._ops[i]
+    sizes = [u - l for l, u in zip(view.bbox.lower(), view.bbox.upper())]
+    threads = self._num_threads or 1
+    if sizes:
+      sizes[lead_pos] = -(-sizes[lead_pos] // threads) * threads
+    volume = 1
+    for n in sizes:
+      volume *= n
+    dtype = getattr(view.symbol.obj, 'datatype', None) or self._context.fp_type
+    return volume * dtype.size(), budget
 
   def _stage_shift(self, i, absorb_lead):
     """How the staged image is indexed relative to the tensor.

@@ -238,3 +238,17 @@ def test_the_tail_is_a_width_and_not_a_lane_guard():
         'a lane-count comparison survived into the fill')
     widths = {int(m.group(1)) for m in _SLM_STORE.finditer(src)}
     assert len(widths) > 1, 'the tail should be narrower than the body hops'
+
+
+def test_an_operator_larger_than_the_register_file_is_read_in_place():
+    """`chain_five_multiplies` stages its two 56 x 56 operators in registers:
+    112 floats a lane under SPMD, 3584 in the one work-item here -- 14 kB
+    against 8, and 17.5 kB of spill.  Here they are read where they lie, a
+    column per reduction step; the SPMD staging on the same device is
+    unchanged."""
+    esimd = _generate('chain_five').get_kernel()
+    spmd = _generate('chain_five', backend='oneapi').get_kernel()
+    staged = re.compile(r'// r\d+ = load\{g>r\}\(glb_m[02]\)')
+    assert not staged.search(esimd), 'the operators are not staged'
+    assert not re.search(r'float r\d+\[3584\]', esimd)
+    assert len(staged.findall(spmd)) == 2, 'SPMD keeps its per-lane images'

@@ -35,7 +35,7 @@ which of them asked.
 
 from dataclasses import dataclass, replace
 from enum import Enum
-from typing import FrozenSet
+from typing import FrozenSet, Optional
 
 
 class Placement(Enum):
@@ -166,11 +166,27 @@ def legal_operand_placements(*,
 
 
 def choose_operand_placement(legal: FrozenSet[Placement],
-                             policy: VendorPolicy) -> Placement:
-    """The best of the legal answers for this hardware."""
+                             policy: VendorPolicy,
+                             image_bytes: Optional[int] = None,
+                             register_budget: Optional[int] = None) -> Placement:
+    """The best of the legal answers for this hardware.
+
+    A register image is preferred only while it fits.  Under SPMD it is spread
+    over the lanes and a lane holds a slice of it; under the explicit-SIMD
+    lowering one work-item holds all of it, and an image larger than a
+    thread's register file is scratch memory with a register's name --
+    `chain_five_multiplies` on pvc staged two 56 x 56 operators, 14 kB each
+    against 8 kB, and spilled 17.5 kB.  Read in place instead, the operator is
+    one column per reduction step, which the lead loop reads once for all of
+    the destination's columns anyway.  `None` for either figure: no limit to
+    check against.
+    """
     if len(legal) == 1:
         return next(iter(legal))
-    if policy.preload_operands_into_registers and Placement.REGISTER in legal:
+    fits = (image_bytes is None or register_budget is None
+            or image_bytes <= register_budget)
+    if (policy.preload_operands_into_registers and Placement.REGISTER in legal
+            and fits):
         return Placement.REGISTER
     if policy.preload_operands_into_shared and Placement.SHARED in legal:
         return Placement.SHARED

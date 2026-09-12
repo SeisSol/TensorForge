@@ -4,8 +4,8 @@
 """`Options.prefetch_data`: the next element's operands, hinted where
 `WrapLoads` would fetch them, with the transfers left where they are.
 
-Held here: off unless asked; under ESIMD a hint is a block of up to 64 dwords,
-elsewhere one line; the transfers themselves do not move; and the pointer
+Held here: on under ESIMD and off elsewhere unless asked; under ESIMD the
+hints of a body are gathered a line per lane, elsewhere one line each; the transfers themselves do not move; and the pointer
 hints of `enable_prefetch` sit outside the flag guard, which is what lets
 them stand next to a wrapped transfer at all.
 """
@@ -20,7 +20,6 @@ import warnings
 from pathlib import Path
 
 from tensorforge.common.context import Context, Options
-from tensorforge.common.options import registry
 from tensorforge.generators.generator import Generator
 
 CASES = Path(__file__).resolve().parent / "cases"
@@ -40,9 +39,13 @@ def _kernel(backend='esimd', arch='pvc', **opts):
     return gen.get_kernel()
 
 
-def test_off_by_default():
-    assert registry()['prefetch_data'].default is False
-    assert 'pf_' not in _kernel()
+def test_the_default_follows_the_backend():
+    """On where one work-item is a whole element and nothing else hides the
+    next one's latency; elsewhere off until measured."""
+    assert 'pf_' in _kernel()
+    assert 'pf_' not in _kernel(prefetch_data=False)
+    assert 'pf_' not in _kernel('cuda', 'sm_100')
+    assert 'pf_' not in _kernel('hip', 'gfx942')
 
 
 def _esimd_hints(src):
@@ -66,7 +69,7 @@ def test_esimd_asks_for_whole_operands_in_few_messages():
 
 def test_esimd_asks_for_the_pointers_in_one_message():
     """Six pointer hints side by side at the head of the body: one gather."""
-    src = _kernel(enable_prefetch=True)
+    src = _kernel(enable_prefetch=True, prefetch_data=False)
     assert src.count('prefetchRunsL2<') == 1, src
     assert src.count('tensorforge::prefetchL2(') == 0
 

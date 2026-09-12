@@ -178,6 +178,25 @@ def test_an_unclaimed_alternative_is_named_rather_than_dead():
         is Placement.SHARED
 
 
+def test_an_image_larger_than_the_register_file_is_read_in_place():
+    """Under the explicit-SIMD lowering one work-item holds the whole image.
+
+    A 56 x 56 operator is 14 kB there against pvc's 8 kB: staged, it is
+    scratch memory; read in place, it is a column per reduction step.
+    """
+    legal = _legal(INTEL)
+    assert choose_operand_placement(legal, INTEL, image_bytes=14336,
+                                    register_budget=8192) is Placement.IN_PLACE
+    assert choose_operand_placement(legal, INTEL, image_bytes=8192,
+                                    register_budget=8192) is Placement.REGISTER
+
+
+def test_without_a_budget_the_size_is_not_asked():
+    """Under SPMD a lane holds a slice of the image, and no figure is passed."""
+    assert choose_operand_placement(_legal(NVIDIA), NVIDIA,
+                                    image_bytes=1 << 20) is Placement.REGISTER
+
+
 # ----------------------------------------------------------------------
 # where and how are two decisions
 # ----------------------------------------------------------------------

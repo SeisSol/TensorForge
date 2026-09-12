@@ -21,7 +21,7 @@ def parseBytes(string):
       return count * 1024**2
 
 class HwDecription:
-  def __init__(self, param_table, arch, backend):
+  def __init__(self, param_table, arch, backend, explicit_simd=False):
     self.vec_unit_length = param_table['vec_unit_length']
     self.hw_fp_word_size = param_table['hw_fp_word_size']
     self.mem_access_align_size = param_table['mem_access_align_size']
@@ -50,6 +50,10 @@ class HwDecription:
     self.shmem_banks = param_table['shmem_banks']
     self.model = arch
     self.backend = backend
+    #: Whether the lowering is an explicit vector per work-item (`esimd`).
+    #: `backend` is the device's and says `oneapi` for both lowerings; an
+    #: option whose default follows the lowering has only this to read.
+    self.explicit_simd = explicit_simd
 
   def sm_level(self):
     """`sm_80` -> 80, and None for anything that is not an `sm_` model.
@@ -116,6 +120,7 @@ def hw_descr_factory(arch, backend):
   # The lowering differs, the device does not: `esimd` runs on the same
   # hardware `oneapi` does and reads the same row of the table.
   from .lexic import EXPLICIT_SIMD_BACKENDS
+  explicit = backend in EXPLICIT_SIMD_BACKENDS
   backend = EXPLICIT_SIMD_BACKENDS.get(backend, backend)
 
   script_dir = os.path.dirname(os.path.realpath(__file__))
@@ -134,22 +139,22 @@ def hw_descr_factory(arch, backend):
 
   if backend == 'cuda':
     if arch in nvidia_map.keys():
-      return HwDecription(known_arch[arch], arch, backend)
+      return HwDecription(known_arch[arch], arch, backend, explicit)
     else:
       report_error(backend, arch)
   elif backend == 'hip':
     if arch in nvidia_map.keys() or arch in amd_map.keys():
-      return HwDecription(known_arch[arch], arch, backend)
+      return HwDecription(known_arch[arch], arch, backend, explicit)
     else:
       report_error(backend, arch)
   elif backend == 'oneapi' or backend == 'acpp':
     if arch in nvidia_map.keys() or arch in amd_map.keys() or arch in intel_map.keys():
-      return HwDecription(known_arch[arch], arch, backend)
+      return HwDecription(known_arch[arch], arch, backend, explicit)
     else:
       report_error(backend, arch)
   elif backend == 'omptarget' or backend == 'targetdart':
     if arch in nvidia_map.keys() or arch in amd_map.keys() or arch in intel_map.keys():
-      return HwDecription(known_arch[arch], arch, backend)
+      return HwDecription(known_arch[arch], arch, backend, explicit)
     else:
       report_error(backend, arch)
 

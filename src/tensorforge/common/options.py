@@ -624,21 +624,24 @@ declare('mma_prefetch_across',
             '93.1 % -- so it is a question per kernel, not a constant.')
 
 declare('full_lane_tails',
-        default=False,
+        default=True,
         env='TF_FULL_LANE_TAILS',
         parse=parse_bool,
         doc='Whether the ragged end of a lead dimension computes on every '
             'lane, with only its memory accesses kept to the lanes that hold '
             'data.  Under ESIMD the guard `lead < 24` otherwise becomes a '
             '24-wide vector, and a 24-wide operation is issued as 16 + 8: '
-            'local_flux on pvc, 11552 instructions against 9337 with the tail '
-            'at 32.  Only where the extra lanes are padding -- no lead origin '
-            'shift, and the accumulator\'s register image exactly the loop\'s '
-            'window, so that a slice of a larger image (theta) never has its '
-            'neighbouring rows overwritten.')
+            'local_flux on pvc, 11552 instructions against 6517 with the tail '
+            'at 32, the ESIMD corpus 60568 against 50013.  Under SPMD it takes '
+            'the branch around the tail block away: local_flux on sm_100 149 '
+            'registers against 116, gfx942 and gfx1250 unchanged.  Only where '
+            'the extra lanes are padding -- no lead origin shift, and the '
+            'accumulator\'s register image exactly the loop\'s window, so that '
+            'a slice of a larger image (theta) never has its neighbouring rows '
+            'overwritten.')
 
 declare('prefetch_data',
-        default=False,
+        rule=lambda hw: hw.explicit_simd,
         env='TF_PREFETCH_DATA',
         parse=parse_bool,
         doc='Hint the next element\'s data where `WrapLoads` would issue its '
@@ -649,7 +652,11 @@ declare('prefetch_data',
             'messages, and changes no result.  One hint per cache span of '
             'each per-element source (`Lexic.prefetch_line_bytes`), for '
             '`PTR_BASED` and `STRIDED` operands; a batch-invariant one is '
-            'already cached.  At `prefetch_level`.')
+            'already cached.  At `prefetch_level`.\n'
+            'On under ESIMD: one work-item per element leaves nothing else to '
+            'cover the latency of the next one, and the corpus pays 6.6 % '
+            'instructions for it -- most in small kernels, which wait on '
+            'memory anyway.  Elsewhere off until measured.')
 
 declare('lanes_per_mult',
         default=0,
