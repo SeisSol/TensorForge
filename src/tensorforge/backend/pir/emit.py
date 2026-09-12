@@ -930,7 +930,11 @@ class Emitter:
             elif op == 'fma' and len(args) == 3:
                 expr = self._fma(v, args)
             elif op == 'select' and len(args) == 3:
-                expr = f'{args[0]} ? {args[1]} : {args[2]}'
+                # The arms in the result's type: an immediate spelled bare is
+                # a `double` in C++, and `p ? x : 0.0` turns a float select
+                # into two conversions.
+                expr = (f'{args[0]} ? {self.operand(s.args[1], v.type)} : '
+                        f'{self.operand(s.args[2], v.type)}')
             elif op == 'neg' and len(args) == 1:
                 expr = f'-{args[0]}'
             elif op in _LEXIC_BINOP and len(args) == 2:

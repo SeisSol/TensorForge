@@ -129,3 +129,55 @@ def test_an_accumulation_into_a_slice_of_an_image_keeps_the_tail_narrow():
     # the 40-row window's tail is 8 lanes; its update stays 8 wide
     assert re.search(r'select<8, 1>', off)
     assert re.search(r'select<8, 1>', on), on
+
+
+def _padded_local_flux():
+    """`local_flux` with its result stored as the whole `64 x 9`: the box is
+    the tensor, 56 rows are computed, and the store promises zeros beyond."""
+    mod = _module('local_flux')
+    made = mod._tensor
+
+    def tensor(shape, alias, *args, **kwargs):
+        if alias == 'R':
+            kwargs['bbox'] = None
+        return made(shape, alias, *args, **kwargs)
+    mod._tensor = tensor
+    try:
+        return mod.descr_list()
+    finally:
+        mod._tensor = made
+
+
+def test_a_zero_filled_tail_is_written_whole():
+    """The rows after the 56 computed ones are zero-filled by the store
+    anyway: the tail writes them in its own write, padding lanes zeroed --
+    under ESIMD a merge and a 32-wide write where it was 16 + 8 and a fill
+    nest, under SPMD a select where it was a branch -- and the fill nest has
+    nothing left to do."""
+    off = _kernel(_padded_local_flux())
+    on = _kernel(_padded_local_flux(), full_lane_tails=True)
+    assert 'v' not in re.findall(r'v\d+_pad', off) and not re.search(r'v\d+_pad', off)
+    assert re.search(r'v\d+_pad', on), on
+    assert not re.search(r'simd<float, 24>\([^;]*\)\.copy_to\(glb_m2', on)
+    cuda_off = _kernel(_padded_local_flux(), backend='cuda', arch='sm_100')
+    cuda = _kernel(_padded_local_flux(), backend='cuda', arch='sm_100',
+                   full_lane_tails=True)
+    zeros = re.compile(r'glb_m2\[[^\]]*\] = 0\.0f;')
+    assert zeros.search(cuda_off) and not zeros.search(cuda), 'no fill nest left'
+    assert re.search(r'glb_m2\[[^\]]*\] = \(v\d+_g \? v\d+_data : 0\.0f\);',
+                     cuda), cuda
+
+
+def test_a_tensor_stored_as_its_box_keeps_its_narrow_write():
+    """Plain `local_flux`: 56 of 64 rows in the box, and stored as the box --
+    there is no row after the tail to write."""
+    mod = _module('local_flux')
+    assert '_pad' not in _kernel(mod.descr_list(), full_lane_tails=True)
+
+
+def test_a_window_ending_inside_the_data_keeps_its_narrow_write():
+    """Theta: `D[20:35] +=` of a 64-row tensor.  An accumulation promises no
+    zeros, and past row 35 are the tensor's own rows."""
+    mod = _module('lead_window_spans_two_blocks')
+    on = _kernel(mod.descr_list(), full_lane_tails=True)
+    assert '_pad' not in on

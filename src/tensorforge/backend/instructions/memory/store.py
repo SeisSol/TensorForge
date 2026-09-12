@@ -277,8 +277,10 @@ class StoreRegToGlb(AbstractInstruction):
       # Widened like the other two: the register image is blocked by the
       # compute width, so reading it back cyclically would put fourteen of
       # sixteen entries in the wrong place for `w = 2`.
+      pad = self._pad_writable(src_bbox, dest_bbox)
       loops += [LeadLoop('i0', src_bbox.lower()[0], src_bbox.upper()[0],
-                         self._num_threads, 1, width=self._lead_width)]
+                         self._num_threads, 1, width=self._lead_width,
+                         full_lane=pad, pad=pad)]
       for i in range(1, src_bbox.rank()):
         unroll = (src_bbox.lower()[i], src_bbox.upper()[i]) != (dest_bbox.lower()[i], dest_bbox.upper()[i])
         lower = min(src_bbox.lower()[i], dest_bbox.lower()[i])
@@ -332,10 +334,42 @@ class StoreRegToGlb(AbstractInstruction):
       else:
         write_loops(self._context, writer, loops, inner)
 
-      self._fill_lead_remainder(writer, src_bbox, dest_bbox, allow_nontemporal)
+      # The whole tail wrote its padding lanes' zeros already.
+      threads = self._num_threads
+      filled = (-(-src_bbox.upper()[0] // threads) * threads) if pad else None
+      self._fill_lead_remainder(writer, src_bbox, dest_bbox, allow_nontemporal,
+                                upper_from=filled)
+
+  def _pad_writable(self, src_bbox, dest_bbox) -> bool:
+    """May the ragged end of the lead dimension be written whole?
+
+    Where this store zero-fills the rows after it anyway.  A tensor whose box
+    is larger than what the multiplication defines -- `64 x 9` with 56 rows
+    computed -- is promised zeros beyond (`_fill_lead_remainder`), and a
+    full-width tail whose padding lanes are zeroed (`Symbol.store`) writes
+    exactly those zeros, in the same write as the data: one message where it
+    was two (16 + 8) and a separate nest under ESIMD, one select where it was
+    a branch under SPMD.  The remainder fill then starts after the slot.
+
+    An accumulation promises nothing -- it adds to what is there -- and a
+    window that ends inside the tensor's data has the next rows after it; both
+    keep the narrow write.  A tensor stored as its box has no rows after it at
+    all (`get_actual_shape` is the box).
+    """
+    opts = self._context.get_user_options()
+    if (not getattr(opts, 'full_lane_tails', False) or self._atomic
+            or not getattr(self, '_zero_fill', True)
+            or self._lead_width != 1 or not self._num_threads):
+      return False
+    threads = self._num_threads
+    hi = src_bbox.upper()[0]
+    if hi % threads == 0:
+      return False
+    slot_end = -(-hi // threads) * threads
+    return dest_bbox.lower()[0] <= src_bbox.lower()[0] and dest_bbox.upper()[0] >= slot_end
 
   def _fill_lead_remainder(self, writer, src_bbox, dest_bbox,
-                           allow_nontemporal) -> None:
+                           allow_nontemporal, upper_from=None) -> None:
     """Zero what the promise covers beyond the accumulator's lead range.
 
     A tensor padded for alignment --- 20 basis functions stored as 32 --- is
@@ -351,7 +385,8 @@ class StoreRegToGlb(AbstractInstruction):
     if src_bbox.rank() == 0 or self._atomic:
       return
     gaps = [(dest_bbox.lower()[0], src_bbox.lower()[0]),
-            (src_bbox.upper()[0], dest_bbox.upper()[0])]
+            (upper_from if upper_from is not None else src_bbox.upper()[0],
+             dest_bbox.upper()[0])]
     for lo, hi in gaps:
       if lo >= hi:
         continue

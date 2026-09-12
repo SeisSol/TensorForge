@@ -365,8 +365,11 @@ class LeadIndex:
 
   # TODO: make nonlead a variable
   def __init__(self, nonlead, block, stride, value=None, width=1,
-               offset=0, valid=None):
+               offset=0, valid=None, pad=False):
     self._nonlead = nonlead
+    #: The lanes past `valid` land on the destination's padding and may be
+    #: written -- with zeros (`Symbol.store`).  See `StoreRegToGlb._pad_writable`.
+    self._pad = bool(pad) and valid is not None
     #: Lanes, from the base, that hold data -- None for all of them.  Set by
     #: a full-lane tail (`LeadLoop.full_lane`): the arithmetic runs on
     #: `block` lanes and only a memory access is held to `valid`.
@@ -440,9 +443,13 @@ class LeadIndex:
   def valid(self):
     return self._valid
 
+  @property
+  def pad(self) -> bool:
+    return self._pad
+
   def _key(self):
     return (self._nonlead, self._block, self._stride, self._value,
-            self._width, self._offset, self._valid)
+            self._width, self._offset, self._valid, self._pad)
 
   def __eq__(self, other):
     # Structural, including `nonlead`: this is value equality of the *index*,
@@ -460,6 +467,7 @@ class LeadIndex:
     wide = '' if self._width == 1 else f', width={self._width}'
     off = '' if self._offset == 0 else f', offset={self._offset}'
     ok = '' if self._valid is None else f', valid={self._valid}'
+    ok += ', pad' if self._pad else ''
     return (f'LeadIndex({self._nonlead!r}, block={self._block}, '
             f'stride={self._stride}{tail}{wide}{off}{ok})')
 
@@ -490,7 +498,7 @@ class LeadIndex:
 
   def with_offset(self, offset):
     return LeadIndex(self._nonlead, self._block, self._stride, self._value,
-                     self._width, offset, self._valid)
+                     self._width, offset, self._valid, self._pad)
 
   def nonlead(self):
     return self._nonlead
@@ -798,8 +806,11 @@ class LeadLoop:
   """
 
   def __init__(self, name, start, end, threads, stride, unroll=False,
-               neutral=None, width=1, full_lane=False):
+               neutral=None, width=1, full_lane=False, pad=False):
     self.start = start
+    #: The lanes past the end are the destination's padding and may be
+    #: written whole (`StoreRegToGlb._pad_writable`), not only computed on.
+    self.pad = pad
     #: The ragged end computes on every lane instead of fewer (see
     #: `Options.full_lane_tails`).  The caller's to grant: only it knows
     #: whether the lanes past the end are padding or another slice's rows.
@@ -1031,12 +1042,14 @@ class LeadLoop:
       if narrowed is not None:
         extent, base, valid = self._widened(narrowed, lo)
         inner([LeadIndex(0, extent, self.stride, width=self.width,
-                         offset=base, valid=valid)])
+                         offset=base, valid=valid,
+                         pad=self.pad and valid is not None)])
       elif hi > 0 and self._full(lo):
         # SPMD: no guard around the block.  Its memory accesses hold
         # themselves to `valid` (`Symbol._valid_access`).
         inner([LeadIndex(actualstart, self.threads, self.stride,
-                         width=self.width, valid=hi)])
+                         width=self.width, valid=hi,
+                         pad=self.pad)])
       elif hi > 0 or lo is not None:
         index = LeadIndex(actualstart, self.threads, self.stride,
                           width=self.width)
@@ -1061,7 +1074,8 @@ class LeadLoop:
         if narrowed is not None:
           extent, base, valid = self._widened(narrowed, lo)
           inner([LeadIndex(0, extent, self.stride,
-                           width=self.width, offset=base, valid=valid)])
+                           width=self.width, offset=base, valid=valid,
+                         pad=self.pad and valid is not None)])
         else:
           index = LeadIndex(actualstart, self.threads, self.stride,
                             width=self.width)
@@ -1085,10 +1099,12 @@ class LeadLoop:
           if narrowed is not None:
             extent, base, valid = self._widened(narrowed, None)
             inner([LeadIndex(0, extent, self.stride, width=self.width,
-                             offset=base, valid=valid)])
+                             offset=base, valid=valid,
+                         pad=self.pad and valid is not None)])
           elif self._full(None):
             inner([LeadIndex(actualend - 1, self.threads, self.stride,
-                             width=self.width, valid=hi)])
+                             width=self.width, valid=hi,
+                         pad=self.pad)])
           else:
             index = LeadIndex(actualend - 1, self.threads, self.stride,
                               width=self.width)
@@ -2238,6 +2254,18 @@ class Symbol:
     # left it naming a variable that was never declared.
     return {'predicate': writer.op('lt', BOOL, lane, valid, hint='g')}
 
+  def _memory_pad(self, index):
+    """The full-lane lead index whose padding lanes this memory access may
+    write, or None."""
+    if self.stype not in (SymbolType.Global, SymbolType.Batch,
+                          SymbolType.SharedMem):
+      return None
+    for i in index:
+      lead = unwrap_lead(i)
+      if lead is not None and lead[0].valid is not None and lead[0].pad:
+        return lead[0]
+    return None
+
   def load(self, writer, context: Context, variable, index: List[Union[str, int, Immediate, Variable, LeadIndex]], nontemp, broadcast: bool = True, part: int = 0, parts: int = 1):
     addrs = []
     if self.stype == SymbolType.Data or (not self.obj.is_dense() and not isinstance(self.obj.spp, BoundingBoxSPP)):
@@ -2683,13 +2711,25 @@ class Symbol:
       # the buffer is typed by its element and would narrow every wide write
       # to its first component.  `RELAXED` for the same reason as in `load`.
       wide = getattr(getattr(variable, 'type', None), 'length', None)
+      padded = self._memory_pad(index)
+      if padded is not None:
+        # The tail written whole: its lanes past `valid` are the tensor's
+        # padding, which the caller may overwrite -- with zeros, so that
+        # nothing a later kernel multiplies by a zero-padded operator can
+        # carry a NaN out of it.  One select, where the narrow write was two
+        # messages (16 + 8) or a branch.
+        lane = writer.lane_index(padded._block, padded._stride, hint='lead')
+        inside = writer.op('lt', BOOL, lane, padded.valid, hint='g')
+        variable = writer.op('select', variable.type, inside, variable, 0.0,
+                             hint='pad')
       with guard:
         writer.store(self, variable,
                      self.address_value(writer, context, index),
                      align=None if wide is None else RELAXED,
                      nontemporal=bool(nontemp), pointer=base,
-                     **self._valid_access(writer, index,
-                                          self._memory_valid(index)))
+                     **({} if padded is not None else
+                        self._valid_access(writer, index,
+                                           self._memory_valid(index))))
     elif (self.stype in (SymbolType.Register, SymbolType.Scratch)
           and not isinstance(lead, LeadIndex)):
       # One named element of a dimension that lives in the registers, so
