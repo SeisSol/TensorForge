@@ -83,6 +83,7 @@ public:
   std::size_t get_local_id(int) const { return 0; }
   std::size_t get_global_id(int) const { return 0; }
   std::size_t get_global_range(int) const { return 0; }
+  std::size_t get_group_range(int) const { return 0; }
   group<Dim> get_group() const { return {}; }
   sub_group get_sub_group() const { return {}; }
   void barrier() const {}

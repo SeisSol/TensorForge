@@ -10,14 +10,23 @@ class SyclLexic(Lexic):
   def __init__(self, backend, underlying_hardware, explicit_simd=False):
     super().__init__(underlying_hardware)
     self._backend = backend
+    # CUDA's x is SYCL's dimension 2, and y is 1: SYCL linearises with the
+    # *last* dimension fastest, and that is the one sub-groups are cut along.
+    # With the lanes in dimension 0 a block of 32 x 8 put two lanes of each
+    # of eight multiplications into every sub-group, so a sub-group broadcast
+    # read another multiplication's lane.  The groups are counted along the
+    # same dimension (`kernel_definition`), and their number is the group
+    # range: `get_global_range` is work-items, and with it the batch loop
+    # stepped 32 times too far and every group started at group 0's element
+    # -- 64 of 1000 elements written on the CPU device, and those wrong.
     self.thread_idx_y = "item.get_local_id(1)"
-    self.thread_idx_x = "item.get_local_id(0)"
-    self.thread_idx_z = "item.get_local_id(2)"
-    self.block_idx_x = "item.get_group().get_group_id(0)"
-    self.block_idx_z = "item.get_group().get_group_id(2)"
+    self.thread_idx_x = "item.get_local_id(2)"
+    self.thread_idx_z = "item.get_local_id(0)"
+    self.block_idx_x = "item.get_group().get_group_id(2)"
+    self.block_idx_z = "item.get_group().get_group_id(0)"
     self.block_dim_y = "item.get_group().get_local_range(1)"
-    self.block_dim_z = "item.get_group().get_local_range(2)"
-    self.grid_dim_x = "item.get_global_range(0)"
+    self.block_dim_z = "item.get_group().get_local_range(0)"
+    self.grid_dim_x = "item.get_group_range(2)"
     self.stream_type = "sycl::queue"
     self.restrict_kw = "__restrict__"
 
@@ -100,7 +109,12 @@ class SyclLexic(Lexic):
 
     l1 = f"inline void kernel_{base_name}(sycl::queue *stream, sycl::range<3> group_count, sycl::range<3> group_size, {params})"
     l2 = f"stream->submit([&](sycl::handler &cgh)"
-    l3 = f"cgh.parallel_for(sycl::nd_range<3>{{{{group_size.get(0), group_size.get(1), group_count.get(0) * group_size.get(2)}}, group_size}}, {props}[=](sycl::nd_item<3> item) {add_items}"
+    # `group_count` and `group_size` come in CUDA order (x, y, z) and go out in
+    # SYCL order, x last; see the index spellings in `__init__`.
+    l3 = (f"cgh.parallel_for(sycl::nd_range<3>{{{{group_count.get(2) * group_size.get(2), "
+          f"group_count.get(1) * group_size.get(1), group_count.get(0) * group_size.get(0)}}, "
+          f"{{group_size.get(2), group_size.get(1), group_size.get(0)}}}}, "
+          f"{props}[=](sycl::nd_item<3> item) {add_items}")
 
     if localmem is None:
       return MultiBlock(file, [l1, l2, l3], ["", ");", ");"])

@@ -139,3 +139,11 @@ def test_igc_reports_a_retry_as_a_spill_and_silence_as_none():
     assert tuning.parse_igc(retry).spill_bytes == 1
     assert tuning.parse_igc('kernel k spilled 384 bytes').spill_bytes == 384
     assert tuning.parse_igc(retry).registers is None
+
+
+def test_igc_reads_the_spill_memory_it_reports():
+    """IGC 2026, ESIMD local_flux on pvc: the figure is on its own line and
+    says nothing of a retry, so it read as no spill at all."""
+    log = ("Spill memory used = 33088 bytes for kernel _ZTSZZ30kernel_kernel\n"
+           " Compiling kernel with spill code may degrade performance.")
+    assert tuning.parse_igc(log).spill_bytes == 33088

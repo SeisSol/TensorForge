@@ -221,7 +221,9 @@ class Writer:
     l1 = "inline void kernel_{}(cl::sycl::queue *stream, cl::sycl::range<3> group_count, cl::sycl::range<3> group_size, {})".format(
       name, arguments)
     l2 = "stream->submit([&](cl::sycl::handler &cgh)"
-    l3 = "cgh.parallel_for(cl::sycl::nd_range<3>{{group_size.get(0), group_size.get(1), group_count.get(0) * group_size.get(2)}, group_size}, [=](cl::sycl::nd_item<3> item)"
+    l3 = ("cgh.parallel_for(cl::sycl::nd_range<3>{{group_count.get(2) * group_size.get(2), "
+          "group_count.get(1) * group_size.get(1), group_count.get(0) * group_size.get(0)}, "
+          "{group_size.get(2), group_size.get(1), group_size.get(0)}}, [=](cl::sycl::nd_item<3> item)")
 
     if lambdaPrefixBlock is None:
       return MultiBlock(self, [l1, l2, l3], ["", ");", ");"])

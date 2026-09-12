@@ -35,7 +35,8 @@ from typing import Any, Optional
 
 from tensorforge.common.basic_types import Datatype
 
-from .core import IRError, Op, ScalarType, TokenType, Value
+from .core import (BufferType, IRError, MemSpace, Op, ScalarType, TokenType,
+                   Value, def_use, walk_stmts)
 from .emit import Emitter, _folds_predicate
 
 
@@ -56,6 +57,14 @@ class EsimdEmitter(Emitter):
         super().__init__(writer, context)
         self.strict = strict
         self.unresolved: list = []
+        #: Register buffers held as one `simd`, by name (`_plan_register_buffers`).
+        self._simd_buffers: set = set()
+        self._alloc_names: dict = {}
+        #: Scalar shared-memory reads served from a register window
+        #: (`_plan_windows`): statement id -> (window, element).
+        self._windows: dict = {}
+        #: The first read of each window: statement id -> (buffer, lo, width, name).
+        self._window_heads: dict = {}
 
     # -- types ------------------------------------------------------------- #
 
@@ -309,6 +318,21 @@ class EsimdEmitter(Emitter):
         ternary lands inside a `copy_to` argument with no declaration to
         override.
         """
+        op = getattr(s, 'op', None)
+        if (op == Op.ALLOC and s.target
+                and self._buf_name(s.target[0]) in self._simd_buffers):
+            self._emit_simd_alloc(s)
+            return
+        if (op in (Op.LOAD, Op.STORE) and s.args and self._is_buffer(s.args[0])
+                and self._buf_name(s.args[0]) in self._simd_buffers):
+            if op == Op.LOAD:
+                self._emit_simd_load(s)
+            else:
+                self._emit_simd_store(s)
+            return
+        if op == Op.LOAD and id(s) in self._windows:
+            self._emit_window_load(s)
+            return
         if (getattr(s, 'op', None) == 'select' and len(s.args) == 3
                 and s.target and self._masked(s.args[0], s.target[0])):
             v = s.target[0]
@@ -362,9 +386,354 @@ class EsimdEmitter(Emitter):
                 f'`_convertible` preconditions.')
         super()._emit_if(s)
 
+    # -- register buffers -------------------------------------------------- #
+
+    _SPACES = {'Global': MemSpace.GLOBAL, 'SharedMem': MemSpace.SHARED,
+               'Register': MemSpace.REGISTER}
+
+    #: What a `simd` holds here.  `__float128` is not a device type on pvc at
+    #: all, and its literal needs a GNU suffix; its arrays stay as they were.
+    _VECTOR_ELEMS = (Datatype.F32, Datatype.F64)
+
+    @staticmethod
+    def _width(v) -> int:
+        """Elements a value spans: its slots, times its lanes if spread."""
+        if not isinstance(v, Value) or not isinstance(v.type, ScalarType):
+            return 1
+        n = v.type.length or 1
+        if v.layout is not None and v.distributed:
+            n *= v.lane_span()
+        return n
+
+    @staticmethod
+    def _is_buffer(x) -> bool:
+        return ((isinstance(x, Value) and isinstance(x.type, BufferType))
+                or hasattr(x, 'stype'))
+
+    def _buf_name(self, x) -> str:
+        """The name a buffer is spelled by.  Accesses reach one either as the
+        `Value` its `Op.ALLOC` defined or as the macro layer's `Symbol`, and
+        only the name says they are the same buffer."""
+        if isinstance(x, Value):
+            return self._alloc_names.get(x.id, str(x))
+        return getattr(x, 'name', str(x))
+
+    def _space(self, x):
+        if isinstance(x, Value) and isinstance(x.type, BufferType):
+            return x.type.space
+        stype = getattr(x, 'stype', None)
+        return self._SPACES.get(getattr(stype, 'name', None), MemSpace.UNKNOWN)
+
+    @staticmethod
+    def _comment(x) -> bool:
+        """A raw statement that is only a comment: the macro layer writes the
+        instruction it lowers above it (`// r1 = +(r0 * s0) + None`), which
+        names every buffer and touches none."""
+        text = (x.text or '').strip()
+        return x.op == Op.RAWSTMT and bool(text) and all(
+            line.strip().startswith('//') for line in text.splitlines())
+
+    def _plan_allocs(self, stmts) -> dict:
+        """name -> the `Value` its `Op.ALLOC` defines."""
+        allocs = {}
+        self._alloc_names = {}
+        for a in stmts:
+            if a.op == Op.ALLOC and a.target and isinstance(a.target[0].type, BufferType):
+                v = a.target[0]
+                name = a.attr('extern') or str(v)
+                self._alloc_names[v.id] = name
+                allocs[name] = (a, v)
+        return allocs
+
+    def _plan_register_buffers(self, stmts, allocs, consts=None, order=None) -> set:
+        """Register arrays that can be one `simd` instead of an array.
+
+        A thread-private array is memory to the compiler: every transfer in
+        and out of it is a `copy_from`/`copy_to` through a pointer, and what
+        IGC cannot promote it keeps in scratch.  Here the array fits in the
+        type -- `simd<float, 576>`, read and written through `select` -- and
+        is registers by construction.  `local_flux` on pvc: 33088 B of spill
+        against 26048 B, 43934 instructions against 23769.
+
+        Only where every access is the base of an unpredicated load or store:
+        a buffer handed on, carried by a loop, named in raw text or accessed
+        under a predicate keeps its array.  And only where no access with a
+        known offset runs past the end: `select` checks its range where the
+        array would have read the next variable.
+        """
+        consts = consts or {}
+        cands = {n for n, (a, v) in allocs.items()
+                 if v.type.space == MemSpace.REGISTER and a.attr('arena') is None
+                 and a.attr('init') in (None, '', '{}')
+                 and v.type.elem in self._VECTOR_ELEMS}
+        bad = set()
+        for x in stmts:
+            if x.op in Op.RAW:
+                if self._comment(x):
+                    continue
+                bad |= {n for n in cands
+                        if re.search(rf'\b{re.escape(n)}\b', x.text or '')}
+                continue
+            for i, arg in enumerate(x.args):
+                if not self._is_buffer(arg):
+                    continue
+                n = self._buf_name(arg)
+                if n not in cands:
+                    continue
+                if not (x.op in (Op.LOAD, Op.STORE) and i == 0
+                        and x.predicate is None
+                        and (x.op == Op.STORE
+                             or isinstance(x.target[0].type, ScalarType))):
+                    bad.add(n)
+                    continue
+                w = self._width(x.target[0] if x.op == Op.LOAD else x.args[1])
+                idx = x.args[1:] if x.op == Op.LOAD else x.args[2:]
+                flat = self._const_flat(arg, idx, consts)
+                if flat is not None and not 0 <= flat <= allocs[n][1].type.volume - w:
+                    bad.add(n)
+        if bad:
+            return set()
+        return self._within_budget(order or [], cands, allocs)
+
+    def _within_budget(self, order, names, allocs) -> set:
+        """As many of `names` as fit in a thread's registers at once.
+
+        A `simd` is registers whatever its size, where an array too big to
+        promote goes to scratch whole and is at least read in blocks.  The
+        arrays are taken smallest first, each only while every point of the
+        body keeps the ones taken and live there within `max_reg_per_thread`
+        (live: first access to last, in program order) -- and then all of them
+        or none.  Measured on pvc, with the shared-memory windows in both
+        columns:
+
+            local_flux             all 15 fit    1344 B -> 0 B spill
+            chain_three_matrices   one of 14 kB  1984 B -> 3392 B
+            chain_five_multiplies  two of 14 kB  17536 B -> 17600 B
+
+        Next to an array IGC has to keep in scratch, the small ones did better
+        as arrays too.
+        """
+        hw = self._hw()
+        budget = getattr(hw, 'max_reg_per_thread', None) or 8192
+        span = {}
+        for pos, x in enumerate(order):
+            for arg in x.args:
+                if self._is_buffer(arg):
+                    n = self._buf_name(arg)
+                    if n in names:
+                        a, b = span.get(n, (pos, pos))
+                        span[n] = (min(a, pos), max(b, pos))
+        load = [0] * (len(order) + 1)
+        taken = set()
+        for n in sorted(names, key=lambda n: (allocs[n][1].type.volume, n)):
+            v = allocs[n][1]
+            size = v.type.volume * v.type.elem.size()
+            a, b = span.get(n, (0, -1))
+            if b < a:
+                taken.add(n)
+                continue
+            if max(load[a:b + 1]) + size > budget:
+                return set()
+            for i in range(a, b + 1):
+                load[i] += size
+            taken.add(n)
+        return taken
+
+    def _emit_simd_alloc(self, s) -> None:
+        v = s.target[0]
+        extern = s.attr('extern')
+        if extern is not None:
+            self.bind(v, extern)
+        init = f'({v.type.elem.literal(0)})' if s.attr('init') == '{}' else ''
+        self.writer(f'{self.simd_type(v.type.elem.ctype(), v.type.volume)} '
+                    f'{self.name(v)}{init};')
+
+    def _emit_simd_load(self, s) -> None:
+        v, buf = s.target[0], s.args[0]
+        addr = self.address(buf, s.args[1:])
+        w = self._width(v)
+        named = s.attr('extern')
+        nm = named or self.name(v)
+        if w == 1:
+            self.writer(f'{self.ctype(v.type, v)} {nm} = {self.base_name(buf)}[{addr}];')
+        else:
+            self.writer(f'{self.ctype(v.type, v)} {nm}({self.base_name(buf)}'
+                        f'.template select<{w}, 1>({addr}));')
+        if named:
+            self.bind(v, named)
+
+    def _emit_simd_store(self, s) -> None:
+        buf, val = s.args[0], s.args[1]
+        addr = self.address(buf, s.args[2:])
+        w = self._width(val)
+        if w == 1:
+            dt = self.elem_type(buf)
+            rhs = self.operand(val, ScalarType(dt) if dt is not None else None)
+            self.writer(f'{self.base_name(buf)}[{addr}] = {rhs};')
+        else:
+            self.writer(f'{self.base_name(buf)}.template select<{w}, 1>({addr}) = '
+                        f'{self.operand(val)};')
+
+    # -- shared-memory windows ---------------------------------------------- #
+
+    #: The widest window, in elements: 64 registers of 64 bytes.
+    WINDOW_MAX = 1024
+
+    def _plan_windows(self, body, allocs) -> None:
+        """Scalar reads of shared memory, served from one block read.
+
+        A broadcast operand is read one element at a time -- `float b =
+        s0[k]` -- and under SPMD that is one load shared by the lanes.  Here
+        one work-item is the whole vector and each read is a message of its
+        own: 1836 SLM reads in `local_flux`, next to 727 global ones.  A run
+        of them with constant addresses and nothing in between that could
+        change the buffer is one `copy_from` into a `simd`, and the reads
+        become register elements.
+
+        What may sit between two reads of a window: anything that does not
+        write shared memory or synchronise.  Any shared store ends every
+        window, not just the stored buffer's -- the arena reuses offsets, and
+        a store through another name can land on the same bytes.  A window
+        reaches into a nested region only if nothing in that region ends it,
+        so a loop cannot read a window that its own last iteration made stale.
+        """
+        shared = {n: v for n, (a, v) in allocs.items()
+                  if v.type.space == MemSpace.SHARED
+                  and v.type.elem in self._VECTOR_ELEMS
+                  and getattr(v.type, 'swizzle', None) is None}
+        consts = {}
+        seq = []
+
+        def lin(stmts, depth):
+            for x in stmts:
+                if x.op == Op.CONST and x.target:
+                    consts[x.target[0].id] = x.attr('value')
+                seq.append((x, depth))
+                for r in x.regions:
+                    lin(r.body, depth + 1)
+        lin(body, 0)
+
+        def ends(x) -> bool:
+            if self._comment(x):
+                return False
+            if x.op in Op.RAW or x.op in (Op.BARRIER, Op.WAIT, Op.CALL,
+                                          Op.COMMIT_ASYNC, Op.COPY_ASYNC,
+                                          Op.ACCUM):
+                return True
+            if x.op == Op.STORE:
+                b = x.args[0] if x.args else None
+                return self._space(b) not in (MemSpace.REGISTER, MemSpace.GLOBAL)
+            return (not x.pure and not x.regions and x.op not in (
+                Op.LOAD, Op.LOAD_ASYNC, Op.PREFETCH, Op.ALLOC, Op.DECLARE,
+                Op.YIELD, Op.EXIT, Op.CONST))
+
+        memo = {}
+
+        def ends_inside(x) -> bool:
+            if id(x) not in memo:
+                memo[id(x)] = any(ends(y) for y in walk_stmts(
+                    tuple(z for r in x.regions for z in r.body)))
+            return memo[id(x)]
+
+        open_ = {}
+        count = [0]
+
+        def close(name):
+            st = open_.pop(name, None)
+            if st is None or len(st['loads']) < 2:
+                return
+            vol = shared[name].type.volume
+            flats = [f for _, f in st['loads']]
+            lo, hi = min(flats), max(flats)
+            width = hi - lo + 1
+            if width > self.WINDOW_MAX or width > 8 * len(flats):
+                return
+            width = min(-(-width // 16) * 16, vol - lo)
+            wname = f'{name}_w{count[0]}'
+            count[0] += 1
+            first = st['loads'][0][0]
+            self._window_heads[id(first)] = (first.args[0], lo, width, wname,
+                                             shared[name].type.elem.ctype())
+            for x, f in st['loads']:
+                self._windows[id(x)] = (wname, f - lo)
+
+        for x, depth in seq:
+            for n in [n for n, st in open_.items() if depth < st['depth']]:
+                close(n)
+            if ends(x) or (x.regions and ends_inside(x)):
+                for n in list(open_):
+                    close(n)
+                continue
+            if not (x.op == Op.LOAD and x.predicate is None and x.target
+                    and x.args and self._is_buffer(x.args[0])):
+                continue
+            buf, v = x.args[0], x.target[0]
+            name = self._buf_name(buf)
+            if (name not in shared or x.attr('nontemporal')
+                    or not isinstance(v.type, ScalarType) or v.type.length
+                    or v.layout is None or v.distributed):
+                continue
+            flat = self._const_flat(buf, x.args[1:], consts)
+            if flat is None or not 0 <= flat < shared[name].type.volume:
+                continue
+            open_.setdefault(name, {'depth': depth, 'loads': []})['loads'].append((x, flat))
+        for n in list(open_):
+            close(n)
+
+    @staticmethod
+    def _const_flat(buf, indices, consts):
+        """The element `address` would compute, if every index is known."""
+        nums = []
+        for i in indices:
+            n = consts.get(i.id) if isinstance(i, Value) else i
+            if isinstance(n, bool) or not isinstance(n, int):
+                return None
+            nums.append(n)
+        if not nums:
+            return 0
+        if isinstance(buf, Value) and isinstance(buf.type, BufferType):
+            shape = buf.type.shape
+        else:
+            view = getattr(buf, 'data_view', None)
+            shape = tuple(view.shape) if view is not None else None
+        if shape is None or len(shape) != len(nums):
+            return sum(nums)
+        flat = nums[-1]
+        for k in reversed(range(len(nums) - 1)):
+            flat = nums[k] + shape[k] * flat
+        return flat
+
+    def _emit_window_load(self, s) -> None:
+        head = self._window_heads.get(id(s))
+        if head is not None:
+            buf, lo, width, wname, elem = head
+            self.writer(f'{self.simd_type(elem, width)} {wname};')
+            self.writer(f'{wname}.copy_from({self.base_name(buf)} + {lo});')
+        wname, k = self._windows[id(s)]
+        v = s.target[0]
+        named = s.attr('extern')
+        self.declare(v, f'{wname}[{k}]', s, name=named)
+        if named:
+            self.bind(v, named)
+
     # -- entry ------------------------------------------------------------- #
 
     def run(self, body) -> None:
+        stmts = walk_stmts(body)
+        allocs = self._plan_allocs(stmts)
+        consts = {x.target[0].id: x.attr('value') for x in stmts
+                  if x.op == Op.CONST and x.target}
+        order = []
+
+        def lin(xs):
+            for x in xs:
+                order.append(x)
+                for r in x.regions:
+                    lin(r.body)
+        lin(body)
+        self._simd_buffers = self._plan_register_buffers(stmts, allocs, consts, order)
+        self._windows, self._window_heads = {}, {}
+        self._plan_windows(body, allocs)
         super().run(body)
         if self.unresolved and self.strict:
             names = ', '.join(repr(v) for v in self.unresolved[:8])

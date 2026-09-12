@@ -924,3 +924,138 @@ def test_a_boolean_select_over_a_replicated_arm_is_refused():
     """
     with pytest.raises(IRError, match='both arms to be masks'):
         _select_src(result_type=ScalarType(Datatype.BOOL), other=False)
+
+
+# --------------------------------------------------------------------------
+# Register arrays as one `simd`, and shared reads through a window
+# --------------------------------------------------------------------------
+
+def _esimd_src(build):
+    """Emit what `build(builder)` builds through the ESIMD lowering."""
+    from tensorforge.backend.pir import IRBuilder
+    from tensorforge.backend.writer import Writer
+
+    builder = IRBuilder(fptype=Datatype.F32, scratch=('tempShrMem', 1 << 16))
+    with builder.scratch_scope():
+        build(builder)
+    ctx = Context(arch='pvc', backend='oneapi', fp_type=Datatype.F32)
+    ctx.get_vm().get_lexic().simd_mode = True
+    writer = Writer()
+    EsimdEmitter(writer=writer, context=ctx, strict=False).run(builder.finish())
+    return writer.get_src()
+
+
+def test_a_register_array_read_in_ranges_is_one_simd():
+    """A private array is memory to IGC: every `copy_from`/`copy_to` through
+    it is a transfer, and what it cannot promote it keeps in scratch.  The
+    same array as a `simd`, read and written through `select`, is registers
+    -- `local_flux` on pvc went from 33088 B of spill to 26048 B on this
+    alone."""
+    from tensorforge.backend.pir import MemSpace
+
+    def build(b):
+        acc = b.alloc(Datatype.F32, (32,), MemSpace.REGISTER, extern='r9', init='{}')
+        lo = b.load(acc, 0, hint='lo', layout=SPREAD16)
+        hi = b.load(acc, 16, hint='hi', layout=SPREAD16)
+        b.store(acc, b.op('add', F32, lo, hi, hint='sum'), 16)
+    src = _esimd_src(build)
+    assert 'simd<float, 32> r9(' in src, src
+    assert 'r9.template select<16, 1>(16)' in src, src
+    assert 'copy_from' not in src and 'copy_to' not in src, src
+
+
+def test_a_register_array_named_in_raw_text_stays_an_array():
+    """Raw text reads the array by name, and a `simd` is not indexable the
+    way the text expects -- so the array is kept whole."""
+    from tensorforge.backend.pir import MemSpace
+
+    def build(b):
+        acc = b.alloc(Datatype.F32, (32,), MemSpace.REGISTER, extern='r9', init='{}')
+        b.load(acc, 0, hint='lo', layout=SPREAD16)
+        b.rawexpr('r9[3]', type_=F32, hint='raw')
+    src = _esimd_src(build)
+    assert 'float r9[32]' in src, src
+    assert 'copy_from(r9' in src, src
+
+
+def test_a_comment_naming_the_array_does_not_keep_it():
+    """The macro layer writes the instruction above its lowering, which names
+    every buffer it touches; `chain_five_multiplies` kept all six of its
+    arrays over those lines and spilled 17 kB for it."""
+    from tensorforge.backend.pir import MemSpace
+
+    def build(b):
+        acc = b.alloc(Datatype.F32, (32,), MemSpace.REGISTER, extern='r9', init='{}')
+        b('// r9 = load{g>r}(glb_m0);')
+        b.load(acc, 0, hint='lo', layout=SPREAD16)
+    src = _esimd_src(build)
+    assert 'simd<float, 32> r9(' in src, src
+
+
+def test_register_arrays_are_simd_all_or_none():
+    """Next to an array that has to stay one, the small ones did better as
+    arrays too (`chain_three_matrices`: 1984 B of spill against 3392 B)."""
+    from tensorforge.backend.pir import MemSpace
+
+    def build(b):
+        small = b.alloc(Datatype.F32, (32,), MemSpace.REGISTER, extern='r8', init='{}')
+        big = b.alloc(Datatype.F32, (4096,), MemSpace.REGISTER, extern='r9', init='{}')
+        b.load(small, 0, hint='lo', layout=SPREAD16)
+        b.load(big, 0, hint='hi', layout=SPREAD16)
+    src = _esimd_src(build)
+    assert 'float r8[32]' in src and 'float r9[4096]' in src, src
+
+
+def test_a_register_array_read_past_its_end_stays_an_array():
+    """`select` checks its range where the array read the next variable; a
+    known offset past the end is left as it was rather than made an error."""
+    from tensorforge.backend.pir import MemSpace
+
+    def build(b):
+        acc = b.alloc(Datatype.F32, (32,), MemSpace.REGISTER, extern='r9', init='{}')
+        b.load(acc, 24, hint='lo', layout=SPREAD16)
+    assert 'float r9[32]' in _esimd_src(build)
+
+
+def _shared_reads(b, between=None):
+    """Three scalar reads of `s7`, folded into a register vector; `between`
+    runs after the second."""
+    from tensorforge.backend.pir import MemSpace
+
+    s = b.alloc(Datatype.F32, (64,), MemSpace.SHARED, extern='s7')
+    acc = b.alloc(Datatype.F32, (16,), MemSpace.REGISTER, extern='r7', init='{}')
+    x = b.load(acc, 0, hint='x', layout=SPREAD16)
+    for i, k in enumerate((3, 5, 9)):
+        if i == 2 and between is not None:
+            between(b, s)
+        c = b.load(s, k, hint='c', layout=SCALAR_LAYOUT)
+        x = b.op('mul', F32, x, c, hint='x')
+    b.store(acc, x, 0)
+
+
+def test_scalar_shared_reads_share_one_window():
+    """One work-item is the whole vector, so each scalar read of shared memory
+    is a message of its own -- 1836 of them in `local_flux`.  A run with
+    constant addresses is one block read, and the reads are registers."""
+    src = _esimd_src(_shared_reads)
+    assert src.count('copy_from(s7') == 1, src
+    assert 's7_w0[0]' in src and 's7_w0[6]' in src, src
+    assert 's7[' not in src, src
+
+
+def test_a_shared_store_ends_the_window():
+    """Through any name: the arena reuses offsets, so a store to another
+    buffer can land on the same bytes."""
+    from tensorforge.backend.pir import MemSpace
+
+    def store(b, s):
+        other = b.alloc(Datatype.F32, (64,), MemSpace.SHARED, extern='s8')
+        b.store(other, b.const(1.0), 0)
+    src = _esimd_src(lambda b: _shared_reads(b, store))
+    assert src.count('copy_from(s7') == 1, src
+    assert 's7[9]' in src, 'the read after the store is its own'
+
+
+def test_a_barrier_ends_the_window():
+    src = _esimd_src(lambda b: _shared_reads(b, lambda b, s: b.barrier()))
+    assert 's7[9]' in src, src

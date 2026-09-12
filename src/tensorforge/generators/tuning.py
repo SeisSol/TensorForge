@@ -54,6 +54,20 @@ from tensorforge.generators.lanes import LaneConfig
 # Candidates
 # --------------------------------------------------------------------------- #
 
+def backend_of(context: Context) -> str:
+    """The backend a context was made for, as `Context` was asked.
+
+    Not `hw.backend`: that is the device's, and `esimd` runs on the `oneapi`
+    device -- a context rebuilt from it is SPMD SYCL, so every ESIMD candidate
+    was built, compiled and scored as the other lowering.
+    """
+    from tensorforge.common.vm.lexic import EXPLICIT_SIMD_BACKENDS
+    backend = context.get_vm().get_hw_descr().backend
+    if getattr(context.get_vm().get_lexic(), 'simd_mode', False):
+        return next(k for k, v in EXPLICIT_SIMD_BACKENDS.items() if v == backend)
+    return backend
+
+
 @dataclass(frozen=True)
 class Candidate:
     """One configuration: a lane geometry and the options it is built with.
@@ -84,8 +98,8 @@ class Candidate:
         hw = base.get_vm().get_hw_descr()
         asked = dict(base._asked_options.asked())
         asked.update(self.options)
-        return Context(arch=hw.model, backend=hw.backend, fp_type=base.fp_type,
-                       options=Options(**asked))
+        return Context(arch=hw.model, backend=backend_of(base),
+                       fp_type=base.fp_type, options=Options(**asked))
 
     def label(self) -> str:
         geo = ('deduced' if self.lanes is None
@@ -529,9 +543,12 @@ def parse_ptxas(log: str) -> Optional[Resources]:
 #: per kernel -- no register count, and a spill size only where it gives up
 #: (`tools/register_usage.py` reads the same stream).
 _IGC_RETRY = re.compile(r'\[RetryManager\]\s+Start recompilation', re.I)
+#: `Spill memory used = 33088 bytes for kernel ...` is what IGC 2026 prints,
+#: for ESIMD and SPMD alike; the other two are older spellings.
 _IGC_SPILL = re.compile(
     r"(?:kernel|Kernel)\s+.*?\bspill(?:s|ed)?\b.*?(?P<value>\d+)\s*bytes"
-    r"|spill(?:ed)?\s+(?P<value2>\d+)\s*bytes", re.I)
+    r"|spill(?:ed)?\s+(?P<value2>\d+)\s*bytes"
+    r"|spill memory used\s*=\s*(?P<value3>\d+)\s*bytes", re.I)
 
 
 def parse_igc(log: str) -> Resources:
@@ -544,7 +561,8 @@ def parse_igc(log: str) -> Resources:
     """
     spill = 0
     for m in _IGC_SPILL.finditer(log):
-        spill = max(spill, int(m.group('value') or m.group('value2')))
+        spill = max(spill, int(m.group('value') or m.group('value2')
+                               or m.group('value3')))
     if not spill and _IGC_RETRY.search(log):
         spill = 1
     return Resources(None, spill)
@@ -785,7 +803,7 @@ def _key(result: Build, mode: str) -> str:
     """
     hw = result.context.get_vm().get_hw_descr()
     sha = hashlib.sha256()
-    for part in (mode, hw.model, hw.backend, str(result.context.fp_type),
+    for part in (mode, hw.model, backend_of(result.context), str(result.context.fp_type),
                  kernel_source(result)):
         sha.update(part.encode())
         sha.update(b'\0')

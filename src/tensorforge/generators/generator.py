@@ -1025,6 +1025,11 @@ class Generator:
       block_x = self._num_threads if plain else layout.unit
       block_y = (mults_per_block if plain
                  else mults_per_block * layout.units_per_mult)
+      if getattr(lexic, 'simd_mode', False):
+        # One work-item is the whole vector of a multiplication.  With the
+        # lanes as work-items as well, every one of them ran the whole body:
+        # 32 threads per multiplication, each doing what one does.
+        block_x, block_y = 1, mults_per_block
       writer(f'{lexic.kernel_range_object("block", f"{block_x}, {block_y}, 1")};')
       if self._clusterlaunchcontrol:
         # Stated, not checked.  The queue is the one traversal with a ceiling
