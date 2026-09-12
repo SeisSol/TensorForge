@@ -1013,7 +1013,18 @@ class MultilinearInstruction(ComputeInstruction):
             for mi, mx in self._ns[1:]:
                 N *= mx - mi
 
-            M *= -(-(self._ns[0][1] - self._ns[0][0]) // self._num_threads)
+            # At lead width `w` a slot is `threads * w` elements, and that is
+            # the unit every lead and contraction index below divides by.  At
+            # width one the arithmetic is what it was.  A packed operand whose
+            # lead or contraction does not start on a whole vector (or a lead
+            # that does not start on a slot) goes to the nest, which peels.
+            width = self._lead_width
+            span = self._num_threads * width
+            ks00 = self._ks[0][0] if len(self._ks) > 0 else 0
+            if width > 1 and (self._ns[0][0] % span or ks00 % width
+                              or ks00 >= span):
+                return False
+            M *= -(-(self._ns[0][1] - self._ns[0][0]) // span)
             Mx = (self._ns[0][1] - self._ns[0][0])
 
             def unwindJ(j):
@@ -1025,8 +1036,9 @@ class MultilinearInstruction(ComputeInstruction):
                 return idx
 
             def unwindI(i):
-                size = -(-(self._ns[0][1] - self._ns[0][0]) // self._num_threads)
-                idx = [LeadIndex(i % size + self._ns[0][0] // self._num_threads, self._num_threads, 1)]
+                size = -(-(self._ns[0][1] - self._ns[0][0]) // span)
+                idx = [LeadIndex(i % size + self._ns[0][0] // span,
+                                 self._num_threads, 1, width=width)]
                 return idx
 
             if len(self._ks) == 0:
@@ -1044,8 +1056,9 @@ class MultilinearInstruction(ComputeInstruction):
                 if full:
                     idx = [k % size + ks00]
                 else:
-                    sizeL = -(-(size + kx) // self._num_threads)
-                    idx = [LeadIndex(k % sizeL + ks00 // self._num_threads, self._num_threads, 1)]
+                    sizeL = -(-(size + kx) // span)
+                    idx = [LeadIndex(k % sizeL + ks00 // span,
+                                     self._num_threads, 1, width=width)]
                 k //= size
                 for mi, mx in self._ks[1:]:
                     size = mx - mi
@@ -1250,7 +1263,7 @@ class MultilinearInstruction(ComputeInstruction):
                         and getattr(a_obj, 'storage_order', None) is not None
                         else None),
                 lead_slots=M, lead_elements=Mx, n=N, k=K, kx=kx,
-                threads=self._num_threads,
+                threads=self._num_threads, lead_width=width,
                 a=self._ops[0].symbol.get_fptype(),
                 b=self._ops[1].symbol.get_fptype(),
                 accumulator=self._idest.get_fptype())

@@ -64,7 +64,8 @@ from .relayout import (BROADCAST, MOVDPP16, RELAYOUTS, RUNGS,
                        TRANSPOSE4X4, Relayout, find_relayout, reach,
                        takes)
 from .select import (BroadcastForm, MATERIALISE_FROM, broadcast_form,
-                     dual_issue_fma_lanes, packed_fma_lanes,
+                     dpp_move_instructions, dual_issue_fma_lanes,
+                     packed_broadcast, packed_fma_lanes,
                      select_broadcast_form, select_fmadpp_step,
                      wanted_fmadpp_step)
 from .unused import (mfma_emu_bf16_f32, mfma_emu_f16_f32, mfma_emu_int8,
@@ -90,8 +91,8 @@ __all__ = [
     'fragment_cost', 'fragment_moves',
     'wanted_fmadpp_step', 'select_fmadpp_step',
     'BroadcastForm', 'MATERIALISE_FROM', 'broadcast_form',
-    'dual_issue_fma_lanes', 'packed_fma_lanes',
-    'select_broadcast_form',
+    'dpp_move_instructions', 'dual_issue_fma_lanes', 'packed_broadcast',
+    'packed_fma_lanes', 'select_broadcast_form',
     'Relayout', 'RELAYOUTS', 'BROADCAST', 'MOVDPP16', 'TRANSPOSE4X4',
     'find_relayout',
     'fmadpp', 'fmadpp4', 'fmadpp8', 'fmadpp16', 'fmascalar',
@@ -120,24 +121,29 @@ def strategies(shape, ctx):
     accepts and which the broadcast chain has no lane to replicate; the DPP
     chain has a branch for it and takes it alone.
 
-    A packed lead operand is declined here rather than by the caller, and the
-    two chains and the matrix core decline it for different reasons.  Both
-    chains index the lanes directly -- a lane holds one element of the lead
-    dimension at the index they compute, and at width `w` it holds `w` of
-    them, so the address is right and the element it names is not.  Nothing
-    converts that, because nothing here was asked to.
+    A packed lead operand is taken by the DPP chain and by nothing else here.
+    The DPP chain indexes the lanes through the accessors, and at width `w`
+    those hand it vectors: `A` and `C` hold `w` rows a lane, and `B` holds `w`
+    contraction steps a lane, so one row share replicates `w` steps and each
+    feeds `w` rows (`codegen._matmuldpp_wide`).  A sparse `B` is read through
+    its linear image, whose entries the rows there do not describe, so it
+    stays with the nest.  The readlane chain has been given no such
+    conversion.
 
-    The matrix core was asked, and answers through `takes`: an operand at
-    width one already arrives spread one element per lane, and above one it
-    reaches the fragment only through the trip that is priced and not yet
-    emitted.  So the refusal is where the route is, and when the emission
-    lands the offer follows it without a condition being edited.
+    The matrix core answers through `takes`: an operand at width one already
+    arrives spread one element per lane, and above one it reaches the
+    fragment only through the trip that is priced and not yet emitted.  So
+    that refusal is where the route is, and when the emission lands the offer
+    follows it without a condition being edited.
     """
     if bitlayout.packed(shape.lead_layout):
-        return (frozenset({Strategy.MATRIX})
-                if takes(lead_route(shape))
-                and offers(shape.threads, shape.accumulator, ctx)
-                else frozenset())
+        offered = set()
+        if takes(lead_route(shape)) and offers(shape.threads,
+                                               shape.accumulator, ctx):
+            offered.add(Strategy.MATRIX)
+        if not shape.sparse:
+            offered.add(Strategy.DPP)
+        return frozenset(offered)
     offered = {Strategy.DPP}
     if not shape.sparse:
         # The same chain the DPP one fuses its broadcast into, available here
@@ -170,7 +176,9 @@ def scratch(strategy, shape, ctx):
     memory nobody writes.
     """
     route = lead_route(shape)
-    if strategy is Strategy.GENERIC or not isinstance(route, tuple):
+    # The trip is the matrix core's: the DPP chain takes a packed operand in
+    # its registers and stages nothing.
+    if strategy is not Strategy.MATRIX or not isinstance(route, tuple):
         return 0
     return staging.buffer_elements(route)
 
@@ -247,7 +255,5 @@ def matmul(writer, ops, ctx, span):
                                    dtype, sparse, ctx, span.start, span.stop)
         return matmul32(writer, C, A, B, M, N, K, kx, threads, dtype, sparse,
                         ctx, span.start, span.stop)
-    else:
-        matmuldpp(writer, span.start, C, A, B, M, N, K, kx, threads, dtype,
-                  sparse, ctx, span.stop)
-    return True
+    return matmuldpp(writer, span.start, C, A, B, M, N, K, kx, threads, dtype,
+                     sparse, ctx, span.stop, width=ops.lead_width)

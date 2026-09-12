@@ -226,12 +226,13 @@ template <typename T, Operation OpT> struct ReductionOperation {
 template <typename Op, std::size_t Block, std::size_t Subblock, typename T>
 T reduction(const T &value);
 
-// Two overloads, not one template.  A single `template <int Row, typename T>
-// T movdpp16(T)` would accept calls the runtime rejects -- `movdpp16<0>` on a
-// `double` has no definition there -- and a shim that is more permissive than
-// the header cannot report the failure it exists to report.
-template <int Row> float2 movdpp16(float2 a);
-template <int Row> float movdpp16(float a);
+// One template, as in the header now: `movdpp16` moves any trivially copyable
+// value, in 64-bit units where the target can -- a float, a `VectorT<float,
+// 2>` pair of broadcast values, a `double`.  It used to be two overloads,
+// because the header defined `float2` alone in inline assembly.
+template <int Row, typename T> T movdpp16(T a);
+// An ordering point on a register: an empty `asm volatile` on the device.
+template <typename T> void pin(T &v);
 
 // cuda.h
 //

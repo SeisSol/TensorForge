@@ -75,16 +75,33 @@ __device__ __forceinline__ auto readlane(T value, int lane) -> T {
 template <typename T>
 inline constexpr bool DppNative = std::is_arithmetic_v<T> && sizeof(T) <= 8;
 
+/// Whole 64-bit units: a `double`, a float pair, a four-float vector as two.
+///
+/// A move is only a bit pattern, so what goes through `mov_dpp` does not have
+/// to be a scalar to be moved in one piece -- only the question above, what
+/// the backend makes of a vector *operand*, is avoided by handing it `long
+/// long`s.  One `v_mov_b64_dpp` per unit where the target moves 64 bits
+/// (gfx942, gfx950, gfx1251), two 32-bit moves where it does not, the
+/// backend's choice either way.  Splitting a pair into `int`s here took that
+/// choice away: `movdpp16` on a `VectorT<float, 2>` was two moves everywhere.
+template <typename T>
+inline constexpr bool DppWide =
+    std::is_trivially_copyable_v<T> && sizeof(T) % 8 == 0;
+
 template <int Dpp1, int Dpp2, int Dpp3, bool Dpp4, typename T>
 __device__ __forceinline__ auto dpp(T value) -> T {
-  if constexpr (DppNative<T> && sizeof(T) == 8) {
+  if constexpr (DppWide<T>) {
     // `mov_dpp` is `anyint`, not `any`: the bit pattern goes through as an
     // integer and comes back, which is a bitcast rather than a conversion.
     union {
       T value;
-      long long bits;
+      long long bits[sizeof(T) / 8];
     } cast{value};
-    cast.bits = __builtin_amdgcn_mov_dpp(cast.bits, Dpp1, Dpp2, Dpp3, Dpp4);
+#pragma unroll
+    for (int i = 0; i < int(sizeof(T) / 8); ++i) {
+      cast.bits[i] =
+          __builtin_amdgcn_mov_dpp(cast.bits[i], Dpp1, Dpp2, Dpp3, Dpp4);
+    }
     return cast.value;
   } else {
     IntType<T> it;
@@ -392,13 +409,6 @@ __device__ __forceinline__ T swap(T value) {
         : "v"(a), "v"(b)                                                       \
         :)
 
-#define MOV64DPP16(pos, c, a)                                                  \
-  __asm("v_mov_b64_dpp %0, %1 " ROW_BCST16                                     \
-        ":" STR(pos) " row_mask:0xf bank_mask:0xf bound_ctrl:1" CMFI           \
-        : "+v"(c)                                                              \
-        : "v"(a)                                                               \
-        :)
-
 // format:
 // c: accumulator
 // a: DPP-broadcasted register
@@ -416,9 +426,27 @@ __device__ __forceinline__ void fmacdpp16(float &c, float a, float b);
 template <int Row>
 __device__ __forceinline__ void fmacdpp16(double &c, double a, double b);
 
-template <int Row> __device__ __forceinline__ float2 movdpp16(float2 a);
+/// Pins `v` to this point of the instruction stream: an empty `asm volatile`
+/// that reads and writes it.  No instruction is emitted; what it buys is
+/// order.  Pure arithmetic carries no chain through instruction selection,
+/// so a long accumulator chain may be linearised with every FMA after every
+/// input it reads -- for a moved broadcast, all of a body's DPP moves first
+/// and each of them live until its FMA: 252 register pairs and 740 VGPRs on
+/// gfx1251 (`local_flux`, lead width two) where 161 do.  A scheduling barrier
+/// between the rows does not help, because the order is already set when the
+/// machine scheduler sees it; pinning the accumulators at the end of a row
+/// makes that row's FMAs precede the next row's moves.
+template <typename T> __device__ __forceinline__ void pin(T &v) {
+  asm volatile("" : "+v"(v));
+}
 
-template <int Row> __device__ __forceinline__ float movdpp16(float a) {
+/// The row share as an instruction of its own: every lane of a 16-lane row
+/// gets lane `Row`'s value.  Any trivially copyable value -- `dpp` moves it
+/// in 64-bit units where the target can, so a float pair or a `double` is one
+/// `v_mov_b64_dpp` on gfx942, gfx950 and gfx1251.  This used to be inline
+/// assembly for `float2` alone, opaque to the optimiser and written into a
+/// zeroed register.
+template <int Row, typename T> __device__ __forceinline__ T movdpp16(T a) {
   return dpp<0x150 + Row, 0xf, 0xf, true>(a);
 }
 
@@ -623,94 +651,8 @@ __device__ __forceinline__ void fmacdpp16<15>(double &c, double a, double b) {
   DMADPP16(0xf, c, a, b);
 }
 
-template <int row> __device__ __forceinline__ float2 movdpp16(float2 a);
-
-template <> __device__ __forceinline__ float2 movdpp16<0>(float2 a) {
-  float2 c{};
-  MOV64DPP16(0x0, c, a);
-  return c;
-}
-template <> __device__ __forceinline__ float2 movdpp16<1>(float2 a) {
-  float2 c{};
-  MOV64DPP16(0x1, c, a);
-  return c;
-}
-template <> __device__ __forceinline__ float2 movdpp16<2>(float2 a) {
-  float2 c{};
-  MOV64DPP16(0x2, c, a);
-  return c;
-}
-template <> __device__ __forceinline__ float2 movdpp16<3>(float2 a) {
-  float2 c{};
-  MOV64DPP16(0x3, c, a);
-  return c;
-}
-template <> __device__ __forceinline__ float2 movdpp16<4>(float2 a) {
-  float2 c{};
-  MOV64DPP16(0x4, c, a);
-  return c;
-}
-template <> __device__ __forceinline__ float2 movdpp16<5>(float2 a) {
-  float2 c{};
-  MOV64DPP16(0x5, c, a);
-  return c;
-}
-template <> __device__ __forceinline__ float2 movdpp16<6>(float2 a) {
-  float2 c{};
-  MOV64DPP16(0x6, c, a);
-  return c;
-}
-template <> __device__ __forceinline__ float2 movdpp16<7>(float2 a) {
-  float2 c{};
-  MOV64DPP16(0x7, c, a);
-  return c;
-}
-template <> __device__ __forceinline__ float2 movdpp16<8>(float2 a) {
-  float2 c{};
-  MOV64DPP16(0x8, c, a);
-  return c;
-}
-template <> __device__ __forceinline__ float2 movdpp16<9>(float2 a) {
-  float2 c{};
-  MOV64DPP16(0x9, c, a);
-  return c;
-}
-template <> __device__ __forceinline__ float2 movdpp16<10>(float2 a) {
-  float2 c{};
-  MOV64DPP16(0xa, c, a);
-  return c;
-}
-template <> __device__ __forceinline__ float2 movdpp16<11>(float2 a) {
-  float2 c{};
-  MOV64DPP16(0xb, c, a);
-  return c;
-}
-template <> __device__ __forceinline__ float2 movdpp16<12>(float2 a) {
-  float2 c{};
-  MOV64DPP16(0xc, c, a);
-  return c;
-}
-template <> __device__ __forceinline__ float2 movdpp16<13>(float2 a) {
-  float2 c{};
-  MOV64DPP16(0xd, c, a);
-  return c;
-}
-template <> __device__ __forceinline__ float2 movdpp16<14>(float2 a) {
-  float2 c{};
-  MOV64DPP16(0xe, c, a);
-  return c;
-}
-template <> __device__ __forceinline__ float2 movdpp16<15>(float2 a) {
-  float2 c{};
-  MOV64DPP16(0xf, c, a);
-  return c;
-}
 #else
 constexpr bool HasFmacDpp16 = false;
-
-template <int Row> __device__ __forceinline__ float2 movdpp16(float2 a) {
-  return dpp<0x150 + Row, 0xf, 0xf, true>(a);
-}
 #endif
 
 template <int Row>

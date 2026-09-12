@@ -108,6 +108,55 @@ def dual_issue_fma_lanes(datatype, ctx) -> int:
     return 1
 
 
+def dpp_move_instructions(nbytes, ctx) -> int:
+    """DPP moves it takes to replicate `nbytes` of one lane across its row.
+
+    64 bits at a time where the target has both a 64-bit DPP unit
+    (`dpp-64bit`) and a 64-bit move for it to modify -- `v_mov_b64`, which
+    LLVM derives from `gfx940-insts` and `gfx1250-insts`: gfx942, gfx950 and
+    gfx1251.  gfx90a has the unit and no move, its DPP64 serving `v_fmac_f64`
+    alone; gfx1250 has the move and no unit.  Both take two 32-bit moves for a
+    pair, which is what LLVM legalises `mov_dpp` on an `i64` into there.
+    """
+    wide = (has_feature(ctx, 'dpp-64bit')
+            and (has_feature(ctx, 'gfx940-insts')
+                 or has_feature(ctx, 'gfx1250-insts')))
+    unit = 8 if wide else 4
+    return -(-nbytes // unit)
+
+
+def packed_broadcast(datatype, step, products, moved_bytes, ctx) -> bool:
+    """Whether one move of `moved_bytes` and packed FMAs beat fused ones.
+
+    `products` is how many multiplies the moved value feeds, all of them in
+    pairs one `v_pk_fma_f32` retires together -- two columns of one lead slot,
+    or the two rows a lane holds at lead width two.  Fused, each product is an
+    issue of its own; packed, the move costs `dpp_move_instructions` and the
+    products half as many.  The same count in slots and in instructions, so
+    unlike `broadcast_form` there is no tie region to argue over: a column
+    pair over two lead slots is 3 against 4 where a 64-bit move exists and 4
+    against 4 where it does not, and only the first is taken.
+
+    FP32 only.  The LLVM of ROCm 7.2 has no `v_pk_fma_f64` on any target, so
+    a pair of doubles would be two moves and four scalar FMAs against four
+    fused ones.  And only at the row-share width, the one broadcast the
+    runtime materialises (`movdpp16`).
+    """
+    if getattr(ctx, 'force_fused_broadcast', False):
+        return False
+    if datatype != Datatype.F32 or step < 16:
+        return False
+    if packed_fma_lanes(datatype, ctx) < 2:
+        return False
+    moves = dpp_move_instructions(moved_bytes, ctx)
+    if moves + -(-products // 2) >= products:
+        return False
+    # Told to the body, as `select_broadcast_form` does: the moved values and
+    # the paired accumulators live in registers until their last product.
+    ctx.materialised_broadcast = True
+    return True
+
+
 #: Products sharing one broadcast, from which a materialised move is taken.
 #:
 #: Two counts, and the move has to win the first without losing the second by

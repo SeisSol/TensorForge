@@ -301,7 +301,11 @@ def test_what_refuses_a_packed_operand_is_the_route_and_not_a_literal():
 
     ctx = _amd_context()
     assert Strategy.MATRIX in amd.strategies(_shape(width=1), ctx)
-    assert amd.strategies(_shape(width=4), ctx) == frozenset()
+    # Refused by the matrix core alone: the DPP chain takes the packed operand
+    # in its registers, and stages nothing for it.
+    assert Strategy.MATRIX not in amd.strategies(_shape(width=4), ctx)
+    assert Strategy.DPP in amd.strategies(_shape(width=4), ctx)
+    assert amd.scratch(Strategy.DPP, _shape(width=4), ctx) == 0
 
 
 def _amd_context():

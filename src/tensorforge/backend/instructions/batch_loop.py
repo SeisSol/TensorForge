@@ -611,6 +611,10 @@ class BatchLoop(AbstractInstruction):
                 continue
             declare(writer)
             instr._declare = False
+            # For this build only; `gen_code_inner` gives it back.
+            cleared = getattr(self, '_cleared_declarations', None)
+            if cleared is not None:
+                cleared.append(instr)
 
     def _address_prefix(self) -> set:
         """The leading address bindings, when a prefetch will need them outside.
@@ -1079,6 +1083,26 @@ class BatchLoop(AbstractInstruction):
         return not hasattr(writer, 'for_')
 
     def gen_code_inner(self, writer) -> None:
+        """The loop, with the hoisted window declarations given back after.
+
+        `_declare_windows_early` declares a window ahead of the flag guard and
+        clears `_declare` on the instruction that fills it, so that one does
+        not declare it a second time.  That is a statement about one build.  A
+        body built twice -- `_fused_if_over_budget`, when a moved broadcast
+        took it over the register budget -- runs this again, and with the flag
+        still cleared nobody declares the window: `chain_five` came out naming
+        an `s0` that no statement introduced.
+        """
+        cleared = []
+        self._cleared_declarations = cleared
+        try:
+            self._gen_code_inner(writer)
+        finally:
+            self._cleared_declarations = None
+            for instr in cleared:
+                instr._declare = True
+
+    def _gen_code_inner(self, writer) -> None:
         if self._grouped():
             self._gen_grouped(writer)
             return

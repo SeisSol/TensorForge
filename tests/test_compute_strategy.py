@@ -173,13 +173,17 @@ def test_the_lead_width_is_not_asked_here():
 
 @pytest.mark.parametrize('vendor', ['amd', 'nvidia', 'intel'])
 @pytest.mark.parametrize('width', [2, 4])
-def test_every_target_declines_a_packed_lead_operand(vendor, width, monkeypatch):
-    """Separately and for its own reason, but all of them today: no emitter
-    writes a route from a packed operand to a fragment yet.
+def test_a_packed_lead_operand_reaches_no_matrix_core(vendor, width,
+                                                      monkeypatch):
+    """Separately and for its own reason, and on every target: no emitter
+    writes a route from a packed operand to a fragment yet.  AMD's DPP chain
+    takes one -- its accessors hand it vectors of rows and of contraction
+    steps -- and is the only arrangement anywhere that does.
 
     The deployment switches are turned on for this, or two of the three would
     answer nothing whatever the width and the check would read as coverage.
     """
+    from tensorforge.backend.instructions.compute.strategy import Strategy
     from tensorforge.backend.instructions.compute.primitives import (
         amd, intel, nvidia)
     from tensorforge.common.context import Context
@@ -202,7 +206,10 @@ def test_every_target_declines_a_packed_lead_operand(vendor, width, monkeypatch)
     assert shape(1) and module.strategies(shape(1), ctx) != frozenset(), (
         'the unpacked shape has to be served, or the refusal below says '
         'nothing about the width')
-    assert module.strategies(shape(width), ctx) == frozenset()
+    packed = module.strategies(shape(width), ctx)
+    assert Strategy.MATRIX not in packed
+    assert packed == (frozenset({Strategy.DPP}) if vendor == 'amd'
+                      else frozenset())
 
 
 def test_the_nest_is_always_legal():

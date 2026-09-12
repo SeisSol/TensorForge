@@ -16,7 +16,8 @@ from .relayout import (MOVDPP16, TRANSPOSE4X4, find_relayout,
                        nest_shared, reach, takes, transposed,
                        fmadpp_operand_layout)
 from tensorforge.common.exceptions import GenerationError
-from .select import BroadcastForm, select_broadcast_form, select_fmadpp_step
+from .select import (BroadcastForm, packed_broadcast, select_broadcast_form,
+                     select_fmadpp_step)
 
 #: The runtime's BF16 split, in its out-parameter form: each term is a value
 #: the generator declared rather than a name bound by a structured binding,
@@ -39,6 +40,24 @@ def _check_mfma_operand(operand, threads, callee):
                          f'got {got!r}')
 
 
+def _refuse_multiwave(threads, ctx):
+    """A multiplication wider than the wave is refused on the DPP paths.
+
+    Measured on gfx1150 (local_flux, 64 lanes over 32-wide waves): the kernel
+    came out wrong with no error and no spill -- first through the DPP
+    broadcast, which ends at the wave, and still wrong with the broadcast
+    narrowed to one lane, so it is not the exchange alone.  A wrong kernel is
+    worse than none; on a 64-wide wave the same width is one wave and builds.
+    """
+    hw = ctx.get_vm().get_hw_descr()
+    wave = getattr(hw, 'vec_unit_length', None)
+    if wave and threads > wave:
+        raise GenerationError(
+            f'a multiplication of {threads} lanes spans {-(-threads // wave)} '
+            f'waves of {wave} on this target, which the AMD SIMT path does not '
+            f'compute correctly (the register broadcast ends at the wave)')
+
+
 def hfma(writer: Writer, Cs, As, Bs, repeat, datatype, threads, ctx):
     """The broadcast chain: one lane of `A` against a row of `B`, per product.
 
@@ -51,22 +70,11 @@ def hfma(writer: Writer, Cs, As, Bs, repeat, datatype, threads, ctx):
     `can_pack=False` states what this emitter holds.  The products of one
     broadcast are separate accumulators here, not a register pair, so packed
     math is out of reach and the move is worth taking only where the target
-    pairs scalar FMAs by itself.
+    pairs scalar FMAs by itself.  The arrangements that do hold register
+    pairs -- two columns of a slot, or the rows of a lane at lead width two --
+    are `matmuldpp`'s, which asks `packed_broadcast` before it comes here.
     """
-
-    # A multiplication wider than the wave is refused on this path.  Measured
-    # on gfx1150 (local_flux, 64 lanes over 32-wide waves): the kernel came
-    # out wrong with no error and no spill -- first through the DPP broadcast,
-    # which ends at the wave, and still wrong with the broadcast narrowed to
-    # one lane, so it is not the exchange alone.  A wrong kernel is worse than
-    # none; on a 64-wide wave the same width is one wave and builds.
-    hw = ctx.get_vm().get_hw_descr()
-    wave = getattr(hw, 'vec_unit_length', None)
-    if wave and threads > wave:
-        raise GenerationError(
-            f'a multiplication of {threads} lanes spans {-(-threads // wave)} '
-            f'waves of {wave} on this target, which the AMD SIMT path does not '
-            f'compute correctly (the register broadcast ends at the wave)')
+    _refuse_multiwave(threads, ctx)
 
     step = select_fmadpp_step(datatype, threads, ctx)
     form = select_broadcast_form(datatype, step, repeat, ctx, can_pack=False)
@@ -481,24 +489,351 @@ def matmulemu(writer: Writer, C, B, A, M, N, K, kx, threads, dtype, sparse,
     return True
 
 
+def _value(v):
+    """A read that produced something, as against the `None` or `False` a
+    declined one hands back."""
+    return v is not None and v is not False
+
+
+def _width_of(v):
+    return getattr(v.type, 'length', None) or 1
+
+
+def _spread(v, width, threads):
+    """Whether a `B` read is what the packed chain broadcasts from.
+
+    `width` elements a lane, one lane per contraction step -- and not a value
+    the loader has already replicated, which is what a fixed element read
+    through the broadcast path is: an image packed another way than the one
+    the chain asks for comes back as `broadcast<16, 1, k>(r[0])`, a correctly
+    typed scalar that holds one element for every lane.  The chain would move
+    it again and multiply the same step into every row.
+    """
+    if not _value(v) or _width_of(v) != width:
+        return False
+    layout = getattr(v, 'layout', None)
+    return layout is None or layout == fmadpp_operand_layout(threads)
+
+
+def _row_source(writer, src, vtype, threads, step, lane):
+    """`src` at the distribution `movdpp16` reads.
+
+    One sub-block of `step` lanes, repeated -- asked of the same table and
+    for the same layout `hfma` asks it for, so the packed arrangements move
+    the same elements the fused one multiplies.
+    """
+    if step == threads:
+        return src
+    want = fmadpp_operand_layout(step)
+    found = find_relayout(want, threads)
+    if found is None:
+        raise ValueError(f'no instruction reaches {want!r} at {threads} '
+                         f'threads')
+    entry, params = found
+    params = dict(params, lane=lane)
+    return writer.call(entry.callee.format(**params), vtype, src, hint='bc',
+                       movable=False, layout=entry.produces(**params))
+
+
+def _move_row(writer, src, vtype, threads, row):
+    """`movdpp16<row>`: lane `row` of each 16-lane row, to all of it."""
+    mv = dict(threads=threads, row=row)
+    return writer.call(MOVDPP16.callee.format(**mv), vtype, src, hint='bc',
+                       movable=False, layout=MOVDPP16.produces(**mv))
+
+
+def _pin(writer, accumulators):
+    """End of a row: its FMAs have to precede the next row's moves.
+
+    `tensorforge::pin` on each accumulator the row wrote.  Arithmetic carries
+    no chain through instruction selection, so without it an accumulator chain
+    is free to be linearised after every input it reads -- a body's moves all
+    first, each live until its FMA.  Measured on `local_flux` (gfx1251, lead
+    width two): 740 VGPRs and 252 moves ahead of the first FMA; pinned every
+    row, 161 and 10.  Every fourth row was not enough for the column pairs
+    (512 VGPRs and 800 B of scratch against 230 and none).
+    """
+    for acc in accumulators:
+        writer.call_stmt('tensorforge::pin', acc, writes=(acc,))
+
+
+def _load_a(writer, A, M, K, kx):
+    """Every `A(i, k)` the chain reads, keyed `(i, k + kx)`.
+
+    `None` asks the loader for the value rather than for a name to fill in:
+    the intrinsics below take these as operands, and an operand whose
+    definition the IR cannot see is invisible to every pass that reasons about
+    ordering or reuse.
+    """
+    ab = {}
+    for k in range(K):
+        for i in range(M):
+            res = A(writer, None, i, k)
+            if _value(res):
+                ab[(i, k + kx)] = res
+    return ab
+
+
 def matmuldpp(writer, start, C, A, B, M, N, K, kx, threads, dtype, sparse,
-              ctx, stop):
+              ctx, stop, width=1):
+    """`C += A @ B` over columns `[start, stop)`, `B` broadcast across lanes.
+
+    Three arrangements of the same products, all reading `B(k, j)` from lane
+    `k` of a row with a row share:
+
+    * the scalar chain (`hfma`): each product carries its broadcast as a DPP
+      modifier, or takes a moved one -- `select_broadcast_form`;
+    * column pairs, at lead width one: `B(k, j)` and `B(k, j + 1)` moved
+      together and multiplied into both columns of a slot by one packed FMA;
+    * lead width above one (`_matmuldpp_wide`), where the lanes hold vectors
+      of rows and of contraction steps both.
+
+    False where it declines, which the nest takes as "compute it yourself".
+    """
     if start >= stop:
         # Nothing left for this path.  Worth an early return rather than
         # letting the loops come out empty: the A operands below are loaded
         # before the first `for j`, so falling through would emit a full set
         # of reads with no consumer.
-        return
-    # `None` asks the loader for the value rather than for a name to fill in:
-    # the intrinsics below take these as operands, and an operand whose
-    # definition the IR cannot see is invisible to every pass that reasons
-    # about ordering or reuse.
-    ab = {}
-    for k in range(K):
-        for i in range(M):
-            res = A(writer, None, i, k)
-            if res is not None and res is not False:
-                ab[(i, k + kx)] = res
+        return True
+    _refuse_multiwave(threads, ctx)
+    if width > 1:
+        return _matmuldpp_wide(writer, start, stop, C, A, B, M, K, kx,
+                               threads, dtype, sparse, ctx, width)
+    scalar = list(range(start, stop))
+    if sparse is None and stop - start >= 2 and M % 2 == 0:
+        step = select_fmadpp_step(dtype, threads, ctx)
+        if packed_broadcast(dtype, step, 2 * M, 2 * dtype.size(), ctx):
+            pairs = list(range(start, stop - 1, 2))
+            if _paired_columns(writer, C, A, B, pairs, M, K, kx, threads,
+                               dtype, step):
+                scalar = scalar[2 * len(pairs):]
+    if scalar:
+        # What is left goes through the scalar chain: an odd last column, or
+        # all of them where a `B` read declined.  Its `A` reads are its own
+        # rather than the pairs' -- holding those across the pairs would be
+        # the pressure the pairs' order avoids.
+        ab = _load_a(writer, A, M, K, kx)
+        _scalar_chain(writer, scalar[0], scalar[-1] + 1, C, B, ab, M, K, kx,
+                      threads, dtype, sparse, ctx)
+    return True
+
+
+def _a_on_demand(writer, A, K, kx):
+    """`A(i, k)` read where it is first used, keyed `(i, k + kx)` like
+    `_load_a`, and read once.
+
+    The packed arrangements walk the contraction outermost, so each value is
+    read, consumed by every column, and dead -- where `_load_a` reads them all
+    first and holds every one across every column.  At two lead slots and 56
+    contraction steps that is 112 registers held for the whole chain, and a
+    packed FMA wants each splat operand in an aligned pair besides: gfx1251
+    went from 226 VGPRs to 512 and 1.6 KB of scratch on it.
+    """
+    cache = {}
+
+    def get(i, key):
+        if (i, key) not in cache:
+            res = (A(writer, None, i, key - kx)
+                   if kx <= key < K + kx else None)
+            cache[(i, key)] = res if _value(res) else None
+        return cache[(i, key)]
+    return get
+
+
+def _paired_columns(writer, C, A, B, pairs, M, K, kx, threads, dtype, step):
+    """Columns `j` and `j + 1`, for each `j` in `pairs`, from one move per row.
+
+    The scalar chain replicates `B(k, j)` into each product of a lead slot
+    with a DPP modifier of its own, one issue per product.  Here both
+    columns' values sit in one register pair, and a row share moves the pair
+    -- one `v_mov_b64_dpp` where the target has it.  The lead slots are
+    paired too: `A(2p, k)` and `A(2p + 1, k)` are adjacent in a register
+    image, so they are one aligned operand, and `acc += A_pair * b[c]` is one
+    `v_pk_fma_f32` with a half of the moved pair splat, which `op_sel` reads
+    from any register pair.  The accumulators are `(C(2p, j), C(2p + 1, j))`
+    per column.
+
+    Pairing the slots is what keeps the operands where they are.  Splatting
+    `A(i, k)` itself across a column pair instead wants each of them in the
+    low half of an aligned pair, and an operator held as a register image --
+    `chain_three`, 112 values a lane -- came out 100 VGPRs over its fused
+    count on gfx1251 and spilled.  Needs an even `M`, which `matmuldpp` asks.
+
+    The contraction is the outer loop and the pairs the inner one, so an
+    `A(i, k)` is read, used by every column and dead; what stays resident is
+    the accumulators.  See `_a_on_demand`.
+
+    False, before any product is emitted, if a `B` read declines; the caller
+    then takes every column through the scalar chain.
+    """
+    ftype = ScalarType(dtype)
+    vtype = ScalarType(dtype, 2)
+    zero = writer.const(0.0, ftype)
+    sources = {}
+    for j in pairs:
+        for k0 in range(0, K + kx, threads):
+            b0 = B(writer, None, j, k0 // threads)
+            b1 = B(writer, None, j + 1, k0 // threads)
+            if not (_spread(b0, 1, threads) and _spread(b1, 1, threads)):
+                return False
+            sources[(j, k0)] = (b0, b1)
+    slots = range(M // 2)
+    acc = {(j, c, p): writer.declare(vtype, hint='acc')
+           for j in pairs for c in range(2) for p in slots}
+    a_of = _a_on_demand(writer, A, K, kx)
+    for k0 in range(0, K + kx, threads):
+        packs = {j: writer.pack(vtype, *sources[(j, k0)]) for j in pairs}
+        dk = min(threads, K + kx - k0)
+        for i in range(0, dk, step):
+            rows = {j: _row_source(writer, packs[j], vtype, threads, step,
+                                   i // step) for j in pairs}
+            for r in range(min(step, dk - i)):
+                k = k0 + i + r
+                halves = {p: (a_of(2 * p, k), a_of(2 * p + 1, k))
+                          for p in slots}
+                halves = {p: h for p, h in halves.items()
+                          if h[0] is not None or h[1] is not None}
+                if not halves:
+                    continue
+                apair = {p: writer.pack(vtype, *(zero if h is None else h
+                                                 for h in hs))
+                         for p, hs in halves.items()}
+                for j in pairs:
+                    m = _move_row(writer, rows[j], vtype, threads, r)
+                    for c in range(2):
+                        mc = writer.extract(m, c, ftype)
+                        for p, ap in apair.items():
+                            writer.accumulate(acc[(j, c, p)], writer.op(
+                                'mul', vtype, mc, ap, hint='p'))
+                _pin(writer, [acc[(j, c, p)] for j in pairs for c in range(2)
+                              for p in apair])
+    for j in pairs:
+        for c in range(2):
+            for p in slots:
+                for h in range(2):
+                    C(writer, writer.extract(acc[(j, c, p)], h, ftype),
+                      2 * p + h, j + c)
+    return True
+
+
+def _matmuldpp_wide(writer, start, stop, C, A, B, M, K, kx, threads, dtype,
+                    sparse, ctx, width):
+    """The chain at lead width `width`: each lane holds `width` adjacent rows.
+
+    `A(i, k)` and `C(i, j)` are `width`-vectors then, and so is `B`: its
+    contraction axis is spread over the lanes the same way, lane `t` of the
+    block at `k0` holding `k = k0 + width * t + c` in component `c`.  A row
+    share therefore replicates `width` contraction steps at once, and each of
+    them feeds the `width` rows of every lead slot.
+
+    Packed where it pays (`packed_broadcast`): the accumulator is the vector,
+    one move per row carries all `width` steps -- one `v_mov_b64_dpp` for a
+    float pair -- and `acc[i] += b[c] * A(i, k)` is a `v_pk_fma_f32` with the
+    moved component splat.  Otherwise the scalar chain over components:
+    `width` scalar accumulators per slot and one broadcast per step, which is
+    `hfma` unchanged, fused DPP included.
+
+    Declines where the contraction does not start and end on whole vectors,
+    and for a sparse `B`, whose linear image the rows here do not describe.
+    """
+    if sparse is not None or kx % width or (K + kx) % width:
+        return False
+    span = threads * width
+    ftype = ScalarType(dtype)
+    vtype = ScalarType(dtype, width)
+    step = select_fmadpp_step(dtype, threads, ctx)
+    cols = range(start, stop)
+    sources = {}
+    for j in cols:
+        for k0 in range(0, K + kx, span):
+            b = B(writer, None, j, k0 // span)
+            if not _spread(b, width, threads):
+                # Declined after emitting reads, which the nest discards
+                # (`Writer.speculative`) before it computes the product.
+                return False
+            sources[(j, k0)] = b
+    if packed_broadcast(dtype, step, M * width * width, width * dtype.size(),
+                        ctx):
+        # Contraction outermost, as for the column pairs: each `A(i, k)` is
+        # read, used by every column and dead, and what stays resident is the
+        # accumulators.
+        acc = {(j, s): writer.declare(vtype, hint='acc')
+               for j in cols for s in range(M)}
+        a_of = _a_on_demand(writer, A, K, kx)
+        for k0 in range(0, K + kx, span):
+            lanes = -(-min(span, K + kx - k0) // width)
+            for i in range(0, lanes, step):
+                rows = {j: _row_source(writer, sources[(j, k0)], vtype,
+                                       threads, step, i // step)
+                        for j in cols}
+                for r in range(min(step, lanes - i)):
+                    base = k0 + width * (i + r)
+                    terms = {c: [(s, a_of(s, base + c)) for s in range(M)]
+                             for c in range(width)}
+                    terms = {c: [(s, av) for s, av in ts if av is not None]
+                             for c, ts in terms.items()}
+                    if any(_width_of(av) != width
+                           for ts in terms.values() for _, av in ts):
+                        # `A` does not hold the rows as the accumulator does.
+                        return False
+                    if not any(terms.values()):
+                        continue
+                    moved = {j: _move_row(writer, rows[j], vtype, threads, r)
+                             for j in cols}
+                    for c, ts in terms.items():
+                        for j in cols:
+                            mc = writer.extract(moved[j], c, ftype)
+                            for s, av in ts:
+                                writer.accumulate(acc[(j, s)], writer.op(
+                                    'mul', vtype, mc, av, hint='p'))
+                    _pin(writer, list(dict.fromkeys(
+                        acc[(j, s)] for ts in terms.values() for j in cols
+                        for s, _ in ts)))
+        for j in cols:
+            for s in range(M):
+                C(writer, acc[(j, s)], s, j)
+        return True
+    # Fused: the scalar chain over components, column by column as the chain
+    # at width one runs, with `width` scalar accumulators a slot -- a DPP
+    # modifier writes its accumulator through a reference, which a vector
+    # element cannot bind to.
+    ab = _load_a(writer, A, M, K, kx)
+    if any(_width_of(av) != width for av in ab.values()):
+        return False
+    for j in cols:
+        acc = [[writer.declare(ftype, hint='acc') for _ in range(width)]
+               for _ in range(M)]
+        for k0 in range(0, K + kx, span):
+            b = sources[(j, k0)]
+            lanes = -(-min(span, K + kx - k0) // width)
+            for c in range(width):
+                # Component `c` of every lane is one contraction step per
+                # lane, `width` apart: a scalar source like any other, and
+                # each of its steps feeds `M * width` scalar products.
+                src = writer.extract(b, c, ftype)
+                avs, cvs = [], []
+                for t in range(lanes):
+                    k = k0 + width * t + c
+                    for s in range(M):
+                        for row in range(width):
+                            if (s, k) in ab:
+                                avs.append(writer.extract(ab[(s, k)], row,
+                                                          ftype))
+                                cvs.append(acc[s][row])
+                            else:
+                                avs.append(None)
+                                cvs.append(None)
+                hfma(writer, [cvs], [src], [avs], M * width, dtype, threads,
+                     ctx)
+        for s in range(M):
+            C(writer, writer.pack(vtype, *acc[s]), s, j)
+    return True
+
+
+def _scalar_chain(writer, start, stop, C, B, ab, M, K, kx, threads, dtype,
+                  sparse, ctx):
+    """The chain `hfma` writes, over columns `[start, stop)`."""
     cx = []
     ax = []
     cb = []

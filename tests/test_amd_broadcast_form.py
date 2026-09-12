@@ -190,3 +190,51 @@ def test_the_tie_region_keeps_the_modifier(arch, reuse):
     """Where the move buys no slot, it is code size spent on nothing."""
     assert amd.broadcast_form(Datatype.F32, 16, reuse, _ctx(arch)) \
         is BroadcastForm.FUSED
+
+
+# --------------------------------------------------------------------------- #
+# the packed arrangements: one move for a register pair
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.parametrize('arch,moves', [
+    ('gfx942', 1), ('gfx950', 1), ('gfx1251', 1),
+    ('gfx90a', 2), ('gfx1250', 2), ('gfx1150', 2), ('gfx1100', 2)])
+def test_a_pair_moves_in_one_instruction_only_with_a_64_bit_move(arch, moves):
+    """`dpp-64bit` alone is not enough, and llvm-mc says why: gfx90a has the
+    unit and no `v_mov_b64` for it to modify, gfx1250 the move and no unit.
+    Both legalise a 64-bit `mov_dpp` into two 32-bit ones."""
+    assert amd.dpp_move_instructions(4, _ctx(arch)) == 1
+    assert amd.dpp_move_instructions(8, _ctx(arch)) == moves
+    assert amd.dpp_move_instructions(16, _ctx(arch)) == 2 * moves
+
+
+@pytest.mark.parametrize('arch,slots,expected', [
+    ('gfx942', 1, False),    # 1 + 1 against 2
+    ('gfx942', 2, True),     # 1 + 2 against 4
+    ('gfx1251', 2, True),
+    ('gfx90a', 2, False),    # 2 + 2 against 4
+    ('gfx90a', 3, True),     # 2 + 3 against 6
+    ('gfx1250', 2, False),
+    ('gfx1250', 3, True),
+    ('gfx1150', 8, False),   # no packed FMA to pair into
+    ('gfx1100', 8, False),
+])
+def test_a_column_pair_is_packed_where_the_move_repays(arch, slots, expected):
+    """One move and `slots` packed FMAs against `2 * slots` fused ones -- the
+    same count in slots and in instructions, so no tie region to argue."""
+    assert amd.packed_broadcast(Datatype.F32, 16, 2 * slots, 8,
+                                _ctx(arch)) is expected
+
+
+@pytest.mark.parametrize('arch', ['gfx942', 'gfx1251'])
+def test_fp64_and_narrow_broadcasts_stay_fused(arch):
+    """No `v_pk_fma_f64` in this LLVM, and no row share to move below 16."""
+    assert not amd.packed_broadcast(Datatype.F64, 16, 8, 16, _ctx(arch))
+    assert not amd.packed_broadcast(Datatype.F32, 8, 8, 8, _ctx(arch))
+
+
+def test_a_body_rebuilt_over_budget_takes_no_move():
+    """`_fused_if_over_budget` asks again with the moves forbidden."""
+    ctx = _ctx('gfx942')
+    ctx.force_fused_broadcast = True
+    assert not amd.packed_broadcast(Datatype.F32, 16, 4, 8, ctx)

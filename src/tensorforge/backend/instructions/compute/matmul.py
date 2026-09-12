@@ -121,6 +121,13 @@ class MatmulOperands:
     #: them rather than once per multiplication.
     a_uniform: bool = False
 
+    #: Adjacent lead elements one lane holds per slot: `Options`' lead width.
+    #: `A` and `C` then take and give vectors of this length, and `B`'s
+    #: contraction axis is spread over the lanes the same way -- lane `t` of
+    #: a block holds `width * t + c`.  One for every path not told otherwise;
+    #: a path that cannot take more declines.
+    lead_width: int = 1
+
     #: Shared memory one multiplication owns, in elements: the distance from
     #: its copy of a scratch tile to its neighbour's.  Read only where a warp
     #: holds several multiplications and reads their tiles.
