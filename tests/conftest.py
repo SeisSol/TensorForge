@@ -85,7 +85,12 @@ def _discover_targets_session(config) -> List[Target]:
     if cached is not None:
         return cached
     gpus = detect_all()
-    targets = discover_targets(gpus, _CACHE_ROOT / "probe")
+    # `TF_TEST_BACKENDS=esimd,oneapi` keeps a run to the lowerings asked for:
+    # on an Intel device both SYCL generators are targets, and a comparison
+    # of one against the other is a run of each.
+    asked = os.environ.get("TF_TEST_BACKENDS")
+    backends = [b.strip() for b in asked.split(",") if b.strip()] if asked else None
+    targets = discover_targets(gpus, _CACHE_ROOT / "probe", backends=backends)
     config._tf_targets = targets
     return targets
 

@@ -26,7 +26,7 @@ from .gpu_detect import DetectedGPU
 @dataclass(frozen=True)
 class Target:
     """A single runnable configuration: a device plus a backend."""
-    backend: str     # "cuda" | "hip" | "sycl"
+    backend: str     # "cuda" | "hip" | "oneapi" | "esimd" | "acpp"
     arch: str
     vendor: str
     device_index: int
@@ -49,11 +49,28 @@ def _compiler_for(backend: str) -> Optional[str]:
         "cuda": os.environ.get("NVCC", "nvcc"),
         "hip": os.environ.get("HIPCC", "hipcc"),
         "oneapi": os.environ.get("ICPX", "icpx"),
+        # the same compiler, the other code generator
+        "esimd": os.environ.get("ICPX", "icpx"),
         "acpp": os.environ.get("ACPP", "acpp"),
     }.get(backend)
     if exe is None or shutil.which(exe) is None:
         return None
     return exe
+
+
+def _sycl_aot_flags(arch: str) -> List[str]:
+    """Ahead-of-time flags for icpx, or none.
+
+    JIT by default: the harness runs on whatever device the queue selector
+    finds.  `TF_SYCL_AOT=1` compiles for the detected device instead, which
+    moves IGC's work from the first launch of every test binary to the build
+    -- worth it on a machine that runs the whole corpus, and it reports a
+    spill at build time rather than never.
+    """
+    if os.environ.get("TF_SYCL_AOT", "") not in ("1", "true", "yes", "on"):
+        return []
+    return ["-fsycl-targets=spir64_gen", "-Xsycl-target-backend",
+            f"-device {arch}"]
 
 
 def _probe_compile(backend: str, arch: str, scratch: Path) -> bool:
@@ -78,16 +95,19 @@ def _probe_compile(backend: str, arch: str, scratch: Path) -> bool:
         src.write_text("#include <hip/hip_runtime.h>\n__global__ void k() {}\n")
         obj = scratch / "probe.o"
         cmd = [cc, "-std=c++17", f"--offload-arch={arch}", "-c", str(src), "-o", str(obj)]
-    elif backend == "oneapi":
-        # icpx -fsycl with the JIT path; AOT (-fsycl-targets=...) is per-arch
-        # and out of MVP scope.
-        src = scratch / "probe.cpp"
+    elif backend in ("oneapi", "esimd"):
+        # icpx -fsycl with the JIT path, or ahead of time where asked
+        # (`_sycl_aot_flags`).  The ESIMD probe includes the ESIMD header: a
+        # toolchain without it builds SPMD SYCL and not a line of the other.
+        src = scratch / f"probe_{backend}.cpp"
         src.write_text(
             "#include <sycl/sycl.hpp>\n"
-            "int main() { sycl::queue q; q.wait(); return 0; }\n"
+            + ("#include <sycl/ext/intel/esimd.hpp>\n" if backend == "esimd" else "")
+            + "int main() { sycl::queue q; q.wait(); return 0; }\n"
         )
-        obj = scratch / "probe.bin"
-        cmd = [cc, "-fsycl", "-std=c++17", str(src), "-o", str(obj)]
+        obj = scratch / f"probe_{backend}.bin"
+        cmd = ([cc, "-fsycl", "-std=c++17"] + _sycl_aot_flags(arch)
+               + [str(src), "-o", str(obj)])
     elif backend == "acpp":
         src = scratch / "probe.cpp"
         src.write_text(
@@ -122,11 +142,13 @@ def discover_targets(gpus: List[DetectedGPU], scratch: Path,
     * ``oneapi``  preferentially Intel; also runs on NVIDIA via plug-ins
                   but we don't auto-enable that — too many bespoke
                   configurations.
+    * ``esimd``   only on Intel: the explicit-SIMD lowering, built by the
+                  same icpx as ``oneapi``.
     * ``acpp``    runs on whatever AdaptiveCpp is configured for; we
                   enable it on every GPU and let the probe filter.
     """
     if backends is None:
-        backends = ["cuda", "hip", "oneapi", "acpp"]
+        backends = ["cuda", "hip", "oneapi", "esimd", "acpp"]
 
     targets: List[Target] = []
     for gpu in gpus:
@@ -135,7 +157,7 @@ def discover_targets(gpus: List[DetectedGPU], scratch: Path,
                 continue
             if backend == "hip" and gpu.vendor != "amd":
                 continue
-            if backend == "oneapi" and gpu.vendor != "intel":
+            if backend in ("oneapi", "esimd") and gpu.vendor != "intel":
                 continue
             if not _probe_compile(backend, gpu.arch, scratch / "probe"):
                 continue
@@ -203,7 +225,7 @@ def build(b: BuildInputs, cache_root: Path) -> Path:
         kernel_file.write_text(b.includes_src + "\n" + b.kernel_src + "\n" + b.launcher_src)
         driver_file = out_dir / "main.cpp"
         _compile_hip(b, kernel_file, driver_file, exe)
-    elif b.target.backend in ("oneapi", "acpp"):
+    elif b.target.backend in ("oneapi", "esimd", "acpp"):
         kernel_file = out_dir / "kernels.cpp"
         # SYCL launchers reference sycl::queue / sycl::range; the kernel
         # source itself is plain SYCL C++. Both go in one TU.
@@ -277,8 +299,8 @@ def _compile_sycl(b: BuildInputs, kernel: Path, driver: Path, exe: Path) -> None
             "-I", str(exe.parent),
             str(driver), str(kernel), str(aux),
             "-o", str(exe)]
-    if b.target.backend == "oneapi":
-        cmd = [cc, "-fsycl"] + base[1:]
+    if b.target.backend in ("oneapi", "esimd"):
+        cmd = [cc, "-fsycl"] + _sycl_aot_flags(b.target.arch) + base[1:]
     else:        # acpp
         cmd = base
     res = subprocess.run(cmd, capture_output=True, text=True, check=False)

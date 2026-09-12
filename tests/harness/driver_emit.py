@@ -334,7 +334,9 @@ def emit(generator, backend: str, default_batch: int) -> str:
         preamble = _PREAMBLE_CUDA
     elif backend == "hip":
         preamble = _PREAMBLE_HIP
-    elif backend in ("oneapi", "acpp", "sycl"):
+    elif backend in ("oneapi", "esimd", "acpp", "sycl"):
+        # ESIMD's launcher takes the same queue as SPMD SYCL's; only the
+        # kernel inside differs.
         preamble = _PREAMBLE_SYCL
     else:
         raise NotImplementedError(f"backend {backend!r} not supported in MVP")
