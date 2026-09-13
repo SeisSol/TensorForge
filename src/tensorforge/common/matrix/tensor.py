@@ -25,18 +25,13 @@ class Tensor:
         self.name = None
         self.alias = alias
         self.shape = tuple(shape)
-        #: Whether the tensor was described without axes and is carried with
-        #: one of extent one.
-        #:
-        #: Not a scalar: one value per batch element, in memory, and every path
-        #: that indexes a destination needs at least one axis to do it with.
-        #: The descriptors read this to tell the carried axis from a real axis
-        #: of extent one -- an operation names an axisless tensor with no
-        #: axis, and which axis it stands for depends on the operation, not on
-        #: the tensor (`MultilinearDescr`).
+        #: Whether the tensor was described without axes and is not a scalar:
+        #: one value per batch element, in memory or in a register.  Carried
+        #: with no axes -- an operand is read with an empty index, and an
+        #: operation whose destination has none is the scalar branch's
+        #: (`ScalarContractionInstruction`), since there is no axis to spread
+        #: over the lanes.
         self.rank0 = len(self.shape) == 0 and addressing != Addressing.SCALAR
-        if self.rank0:
-            self.shape = (1,)
         self.is_tmp = is_tmp
         #: A name a loop body uses where an operand varies between iterations.
         #:
@@ -103,12 +98,10 @@ class Tensor:
         self.datatype = datatype
         self.alignment = alignment
 
-        # an axisless pattern or box describes the tensor as it was stated,
-        # not as it is carried
-        if self.spp is None or (self.rank0 and len(getattr(self.spp, 'shape', (1,))) == 0):
+        if self.spp is None:
             self.spp = FullSPP(self.shape)
 
-        if bbox is not None and not (self.rank0 and bbox.rank() == 0):
+        if bbox is not None:
             self.bbox = bbox
         else:
             self.bbox = BoundingBox([0] * len(self.shape), list(self.shape))
@@ -138,8 +131,6 @@ class Tensor:
                 for pos, value in self.data.items():
                     data[pos] = value
                 self.data = data
-            if self.rank0 and isinstance(self.data, np.ndarray) and self.data.shape == ():
-                self.data = self.data.reshape(self.shape)
             if not isinstance(self.data, np.ndarray):
                 raise GenerationError(
                     f'Tensor {self}: data must be an ndarray of shape '

@@ -160,6 +160,11 @@ class StoreRegToShr(AbstractShrMemWrite):
     src_bbox = self._src.data_view.get_bbox()
     if getattr(self, '_clear', False):
       self._clear_rest(writer, src_bbox)
+    if src_bbox.rank() == 0:
+      # one value, the same on every lane: no loop to distribute
+      value = self._src.load(writer, self._context, None, [], False)
+      self._dest.store(writer, self._context, value, [], False)
+      return
 
     loops = []
     # The width the compute instruction used, not 1.  The register image is
@@ -309,6 +314,13 @@ class StoreRegToGlb(AbstractInstruction):
       dest_bbox = BoundingBox(
           [l - o for l, o in zip(raw_dest_bbox.lower(), self._dest_offset)],
           [u - o for u, o in zip(raw_dest_bbox.upper(), self._dest_offset)])
+    if src_bbox.rank() == 0:
+      # One value, the same on every lane, and every lane writes it: the same
+      # number to the same address, so there is no owner to pick.
+      value = self._src.load(writer, self._context, None, [], False)
+      self._dest.store(writer, self._context, value, [], allow_nontemporal,
+                       self._atomic)
+      return
     with writer.Scope():
       manual = [False]
       loops = []

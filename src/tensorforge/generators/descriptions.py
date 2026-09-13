@@ -189,50 +189,12 @@ def _index_letters(rank, targets):
   return letters
 
 
-def _carried_axes(dest, ops, target, permute, add):
-  """Give every axisless operand the axis its storage carries.
-
-  A tensor described without axes is carried as one axis of extent one
-  (`Tensor.rank0`), and an operation names it with none. Which axis that is
-  depends on the operation. Into an axisless destination -- carried the same
-  way -- it is the destination's axis 0, which every axisless tensor of the
-  operation then shares. Into a destination with axes the operand is a
-  broadcast, and it gets an axis of its own, contracted: a sum over one
-  element, which is the element. The destination's axis 0 there would state
-  that the operand runs along it, and its box of one element then cut that
-  axis down to one row.
-
-  The accumulation mask follows the destination: the empty mask, onto an
-  axisless destination, accumulates onto its carried axis.
-  """
-  if target is None:
-    return target, permute, add
-  target = [list(t) for t in target]
-  permute = None if permute is None else [list(p) for p in permute]
-  shared = getattr(getattr(dest, 'tensor', None), 'rank0', False)
-  free = min([axis for axes in target for axis in axes] + [0]) - 1
-  for i, op in enumerate(ops):
-    if (getattr(getattr(op, 'tensor', None), 'rank0', False)
-            and i < len(target) and len(target[i]) == 0):
-      if shared:
-        target[i] = [0]
-      else:
-        target[i] = [free]
-        free -= 1
-      if permute is not None:
-        permute[i] = [0]
-  if shared and isinstance(add, (list, tuple)) and len(add) == 0:
-    add = [0]
-  return target, permute, add
-
-
 class MultilinearDescr(OperationDescription):
   def __init__(self, dest: Tensor, ops: List[Tensor], target, permute, add: bool = False,
                 strict_match: bool = False,
                 prefer_align: bool = False):
     self.dest = dest
     self.ops = ops
-    target, permute, add = _carried_axes(dest, ops, target, permute, add)
     self.target = target
     self.permute = permute
     # `add` says whether this operation accumulates, and --- when it is a list
@@ -250,7 +212,9 @@ class MultilinearDescr(OperationDescription):
       op.tensor.set_data_flow_direction(DataFlowDirection.SOURCE)
 
   def _lead_dim(self):
-    return self.dest.bbox.sizes()[0]
+    # A destination without axes has nothing to spread over the lanes; the
+    # scalar branch computes it on every lane, which asks for none.
+    return self.dest.bbox.sizes()[0] if self.dest.bbox.rank() else 1
 
   def _analyze(self):
     pass
@@ -503,7 +467,9 @@ class ElementwiseDescr(OperationDescription):
       src.tensor.set_data_flow_direction(DataFlowDirection.SOURCE)
 
     for src in self.tensor_srcs():
-      if list(src.bbox.sizes()) != list(dest.bbox.sizes()):
+      # An operand without axes is a broadcast: read with an empty index at
+      # every point, like a constant source but from memory.
+      if src.bbox.rank() and list(src.bbox.sizes()) != list(dest.bbox.sizes()):
         raise InternalError(
             f'elementwise: operand shape {list(src.bbox.sizes())} does not '
             f'match destination {list(dest.bbox.sizes())}; a shape-changing '
@@ -518,6 +484,9 @@ class ElementwiseDescr(OperationDescription):
                                                   np.floating))]
 
   def get_num_threads(self, context: Context):
+    if not self.dest.bbox.rank():
+      # one value, computed on every lane: it asks the section for nothing
+      return 1, 1
     vul = context.get_vm().get_hw_descr().vec_unit_length
     return vul, vul
 
@@ -554,8 +523,8 @@ class ElementwiseDescr(OperationDescription):
                 op=self.op.name,
                 dest=view_dict(self.dest, data, pack),
                 ops=[view_dict(o, data, pack) for o in srcs],
-                target=[list(axes) for _ in srcs],
-                permute=[list(axes) for _ in srcs],
+                target=[list(axes) if o.bbox.rank() else [] for o in srcs],
+                permute=[list(axes) if o.bbox.rank() else [] for o in srcs],
                 scalars=[float(v) for v in self.scalar_srcs()],
                 add=False)
 

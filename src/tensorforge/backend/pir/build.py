@@ -1460,8 +1460,13 @@ class IRBuilder:
         """Guard without results --- the common case (bounds checks)."""
         return _IfHandle(self, cond, (), attrs)
 
-    def if_else(self, cond: Operand, types: Sequence[Any]) -> '_IfHandle':
-        return _IfHandle(self, cond, tuple(types))
+    def if_else(self, cond: Operand, types: Sequence[Any],
+                layouts: Optional[Sequence[Optional[RegisterLayout]]] = None
+                ) -> '_IfHandle':
+        """``layouts``, one per result, is how each is spread over the lanes,
+        where the caller knows: the arms produce it, and nothing downstream
+        can derive it from the branch."""
+        return _IfHandle(self, cond, tuple(types), layouts=layouts)
 
     # -- speculative emission (replaces the throw-away Writer hack) -------- #
 
@@ -2241,11 +2246,12 @@ class _WhileHandle:
 
 
 class _IfHandle:
-    def __init__(self, builder, cond, types, attrs=()):
+    def __init__(self, builder, cond, types, attrs=(), layouts=None):
         self.builder = builder
         self.cond = cond
         self._types = types
         self._attrs = tuple(attrs)
+        self._layouts = tuple(layouts) if layouts is not None else None
         self._then: Optional[Region] = None
         self._else: Optional[Region] = None
         self.results: Tuple[Value, ...] = ()
@@ -2282,8 +2288,11 @@ class _IfHandle:
         return self.builder.yield_(*values)
 
     def _finish(self):
-        self.results = tuple(self.builder.value(t, hint=f'sel{i}')
-                             for i, t in enumerate(self._types))
+        self.results = tuple(
+            self.builder.value(t, hint=f'sel{i}',
+                               layout=(self._layouts[i] if self._layouts
+                                       else None))
+            for i, t in enumerate(self._types))
         regions = tuple(r for r in (self._then, self._else) if r is not None)
         self.builder.emit(Stmt(op=Op.IF, target=self.results, args=(self.cond,),
                                regions=regions, pure=False, movable=False))

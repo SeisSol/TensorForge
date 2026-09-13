@@ -45,7 +45,8 @@ class ComputeInstruction(AbstractInstruction):
     operand -- elementwise is the case, and the reduction is not, since
     dropping the contracted axes renumbers what is left.
     """
-    leads = {self.lead_dim(v) for v in views}
+    # a view without axes is broadcast, not spread, and has no lane axis
+    leads = {self.lead_dim(v) for v in views if v.bbox.rank()}
     if len(leads) > 1:
       raise InternalError(
           f'{what}: operands disagree about the lane axis '

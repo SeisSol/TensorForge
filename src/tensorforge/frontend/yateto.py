@@ -254,7 +254,10 @@ class DescriptionReader(Reader):
     conformed = []
     for ref, arg in zip(argrefs, args):
       indices = list(ref['indices'])
-      if indices == axes:
+      if indices == axes or (not indices
+                             and getattr(arg.tensor, 'rank0', False)):
+        # The same axes, or none at all: an operand without axes is read
+        # with an empty index and broadcast by the pointwise operation.
         conformed.append(arg)
         continue
       missing = [index for index in indices if index not in axes]
@@ -550,8 +553,9 @@ class DescriptionReader(Reader):
       spp = FullSPP(shape)
       bbox = None
     if storagetype == 'bbox':
-      starts = d['storage']['start'] or [0]
-      sizes = d['storage']['sizes'] or [1]
+      # empty for a tensor without axes, and so is its box
+      starts = d['storage']['start']
+      sizes = d['storage']['sizes']
       lower = list(starts)
       upper = [start + size for start, size in zip(starts, sizes)]
       bbox = BBox(lower, upper)
@@ -570,10 +574,7 @@ class DescriptionReader(Reader):
                                values, datatype, d.get('alignment', 0),
                                residence=residence)
 
-    # as the tensor carries it: an axisless one with its axis of extent one
-    carried = self._cache[name]
-    self._tensor_list[name] = TensorData(datatype_new, list(carried.shape),
-                                         carried.spp, values=values)
+    self._tensor_list[name] = TensorData(datatype_new, shape, spp, values=values)
 
   @staticmethod
   def _values(values):

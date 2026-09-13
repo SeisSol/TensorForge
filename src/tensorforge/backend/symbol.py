@@ -1227,7 +1227,9 @@ class Symbol:
     #: now overrides it -- `multilinear_builder` for both the staged operands
     #: and the destination accumulator.  The compute instructions read it from
     #: here rather than keeping their own copy.
-    self.lead_dims = [0]
+    #:
+    #: None for a tensor without axes: there is no axis to spread.
+    self.lead_dims = [] if getattr(obj, 'rank0', False) else [0]
     #: How many adjacent lead-dimension elements one lane of this symbol's
     #: image holds.  A property of the *image*, not of whoever is walking it:
     #: every loop over it and every fixed-element access has to resolve
@@ -1916,11 +1918,19 @@ class Symbol:
             if isinstance(index[pos], (str, int, float, np.int64)):
               idxvar = index[pos] - offset
             else:
-              strindex = self.build_address(writer, context, index[leadidx])
+              # This dimension's own index, compared against its own range:
+              # it used to be the address of the lead index, which is a
+              # different dimension and not a list to form an address from.
+              strindex = index[pos].build(writer, context)
               idxvar = writer.op('sub', INDEX, strindex, offset, hint='idx')
             cond = writer.op('eq', BOOL, idxvar, runIdx[pos], hint='cond')
 
-            sel = writer.if_else(cond, (ScalarType(self.get_fptype()),))
+            # The condition is this dimension's index, the same on every lane,
+            # so a branch is right; what comes out of it is spread the way the
+            # load in it is, and the explicitly vectorised emitter needs to be
+            # told so to declare it.
+            sel = writer.if_else(cond, (ScalarType(self.get_fptype()),),
+                                 layouts=(layout_of(index, self.num_threads),))
 
             with sel.then():
               wrote_here = self.encode_values(pos + 1, runIdx, writer, context, index, nontemp, leadidx)
@@ -2802,10 +2812,16 @@ class Symbol:
       # writes -- which is a different requirement, and one only an atomic
       # accumulation is sensitive to; see `placement.atomic_write_is_exact`.
       owner = self.owning_lane(index)
-      cond = f'{context.get_vm().get_lexic().thread_idx_x} == {owner}'
+      # No lane owns an element of an image without a distributed axis: a
+      # value without axes is the same on every lane, and each lane writes
+      # its own copy.  Guarding it on `owner` wrote `threadIdx.x == None`.
+      conds = []
+      if owner is not None:
+        conds.append(f'{context.get_vm().get_lexic().thread_idx_x} == {owner}')
       if mask_name is not None:
-        cond = f'{cond} && {mask_name}'
-      with writer.If(cond):
+        conds.append(mask_name)
+
+      def emit():
         if named:
           wide = getattr(getattr(variable, 'type', None), 'length', None)
           writer.store(self, variable,
@@ -2813,6 +2829,12 @@ class Symbol:
                        align=None if wide is None else RELAXED, pointer=base)
         else:
           writer.access_stmt(assign, self, kind, args=_operands(variable, addrs), fmt=fmt)
+
+      if conds:
+        with writer.If(' && '.join(conds)):
+          emit()
+      else:
+        emit()
     else:
       # The atomic lands here: `atomic_store` returns an expression the lexic
       # finished, so there is nothing structured to attach a predicate to and

@@ -63,11 +63,15 @@ def test_it_builds_on_every_target(arch, backend):
 
 
 def test_the_axisless_factor_does_not_narrow_its_destination():
-    """`_tmp14[c,p] = rhoInv[] * stressToFluxX[c,p]` runs over all of `c`."""
+    """`_tmp14[c,p] = rhoInv[] * stressToFluxX[c,p]` runs over all of `c`.
+
+    `rhoInv` takes no axis at all; the destination's are the matrix's.
+    """
     descrs, _ = DescriptionReader(None, {}).read(_description())
     scaled = [d for d in descrs if isinstance(d, MultilinearDescr)
               and getattr(d.dest.tensor, "alias", None) == "_tmp14"]
-    assert scaled and scaled[0].target == [[-1], [0, 1]]
+    assert scaled and scaled[0].target == [[], [0, 1]]
+    assert scaled[0].effective_boxes()[1].sizes() == [6, 3]
 
 
 @pytest.mark.parametrize("arch,backend", TARGETS,

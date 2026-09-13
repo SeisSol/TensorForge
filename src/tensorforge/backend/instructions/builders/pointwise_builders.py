@@ -28,6 +28,9 @@ from tensorforge.backend.instructions.compute.elementwise import (
     ElementwiseInstruction, ScalarLike)
 from tensorforge.backend.instructions.compute.reduction import (
     ReductionInstruction)
+from tensorforge.backend.instructions.compute.scalar import (
+    ScalarContractionInstruction)
+from tensorforge.generators.descriptions import MultilinearDescr
 
 
 class ElementwiseBuilder(OperationBuilder):
@@ -52,6 +55,28 @@ class ElementwiseBuilder(OperationBuilder):
         self._instructions.append(ElementwiseInstruction(
             self._context, descr.op, dest, operands,
             descr.prefer_align, self._num_threads))
+
+
+class ScalarBuilder(OperationBuilder):
+    """A contraction whose destination has no axes.
+
+    A multilinear by its descriptor, and one value by what it computes: see
+    `ScalarContractionInstruction`.  Claimed ahead of `MultilinearBuilder`,
+    which distributes an axis this destination does not have.
+    """
+
+    @staticmethod
+    def accepts(descr) -> bool:
+        return (isinstance(descr, MultilinearDescr)
+                and descr.dest.bbox.rank() == 0)
+
+    def alloc_destination(self, descr, operands):
+        return self.materialise_dest(descr, ()) or self.view_of(descr.dest)
+
+    def emit_compute(self, descr, operands, dest) -> None:
+        self._instructions.append(ScalarContractionInstruction(
+            self._context, dest, operands, descr.target, descr.add,
+            self._num_threads))
 
 
 class ReductionBuilder(OperationBuilder):

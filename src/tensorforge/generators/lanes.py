@@ -89,7 +89,8 @@ def deduce(descr_list: List[OperationDescription],
     # not a side effect to take while extracting a decision.
     cap = (context.get_vm().get_hw_descr().vec_unit_length
            if ceiling is None else ceiling)
-    if not any(isinstance(d, ElementwiseDescr) for d in descr_list):
+    if not any(isinstance(d, ElementwiseDescr) and d.dest.bbox.rank()
+               for d in descr_list):
         num_threads = min(cap, num_threads)
 
     return LaneConfig(num_threads=num_threads,

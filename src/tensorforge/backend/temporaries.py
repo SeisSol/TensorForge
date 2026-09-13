@@ -150,7 +150,9 @@ class Temporaries:
         boundary is the price of not needing a shuffle.  Everything else
         indexes at origin 0 and leaves it alone.
         """
-        axes = self._lead_axes(lead)
+        # A box without axes is one value, the same on every lane: nothing is
+        # spread, whatever the caller named as its lead.
+        axes = {} if bbox.rank() == 0 else self._lead_axes(lead)
         regsize = 1
         for d in range(bbox.rank()):
             block = axes.get(d)

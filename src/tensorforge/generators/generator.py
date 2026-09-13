@@ -24,7 +24,7 @@ from tensorforge.backend.instructions.abstract_instruction import AbstractInstru
 from tensorforge.backend.instructions.builders.loader_builder import GlobalLoaderBuilder
 from tensorforge.backend.instructions.builders.multilinear_builder import MultilinearBuilder
 from tensorforge.backend.instructions.builders.pointwise_builders import (
-    ElementwiseBuilder, ReductionBuilder)
+    ElementwiseBuilder, ReductionBuilder, ScalarBuilder)
 from tensorforge.backend.instructions.builders.ptr_manip_builder import GetElementPtrBuilder
 from tensorforge.backend.instructions.builders.allocator_builder import ShrMemAllocBuilder
 from tensorforge.backend.instructions.control.conditional import GuardedRegion
@@ -1443,6 +1443,9 @@ class Generator:
               self._num_threads, plan, residency, temporaries,
               self._lead_width)
     builders = [
+        # a type, or a test: a contraction without destination axes is a
+        # `MultilinearDescr` the multilinear path cannot distribute
+        (ScalarBuilder.accepts, ScalarBuilder(*common)),
         (MultilinearDescr, MultilinearBuilder(*common)),
         (ElementwiseDescr, ElementwiseBuilder(*common)),
         (ReductionDescr, ReductionBuilder(*common)),
@@ -1467,7 +1470,7 @@ class Generator:
         continue
       for descr in outer.operations():
         for kind, builder in builders:
-          if isinstance(descr, kind):
+          if (isinstance(descr, kind) if isinstance(kind, type) else kind(descr)):
             builder.build(descr)
             guard.add(descr, builder.get_instructions())
             break
@@ -1525,7 +1528,7 @@ class Generator:
     if not resident:
       for descr in loop.body(0):
         for kind, builder in builders:
-          if isinstance(descr, kind):
+          if (isinstance(descr, kind) if isinstance(kind, type) else kind(descr)):
             builder.build(descr)
             self._section.ir.extend(builder.get_instructions())
             break
@@ -1582,7 +1585,7 @@ class Generator:
 
     for descr in body:
       for kind, builder in builders:
-        if isinstance(descr, kind):
+        if (isinstance(descr, kind) if isinstance(kind, type) else kind(descr)):
           builder.build(descr)
           region.extend(builder.get_instructions())
           break
