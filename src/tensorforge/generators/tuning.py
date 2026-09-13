@@ -390,7 +390,8 @@ def _geometry(result: Build) -> Tuple[int, int, int]:
 def static_score(result: Build):
     """What the build alone says, per multiplication rather than per block.
 
-    Past the register file first (`_over_budget`).  Then multiplications
+    Past the register file first (`_over_budget`), then past the instruction
+    cache (`_icache_over`).  Then multiplications
     resident per SM -- blocks times the multiplications a block holds, since
     eight lanes put four times as many in a block as 32.
     Then warp issue slots per multiplication: the arithmetic written out, times
@@ -411,8 +412,23 @@ def static_score(result: Build):
         mults = gen.launch_config().mults_per_block
         resident = min(resident, blocks * mults)
     issue = (gen.emitted_work or 0) * lanes / wave
-    return (_granule(_over_budget(result)), -resident, issue,
-            _granule(gen.peak_pressure or 0), len(gen.get_kernel() or ''))
+    return (_granule(_over_budget(result)), _icache_over(result), -resident,
+            issue, _granule(gen.peak_pressure or 0),
+            len(gen.get_kernel() or ''))
+
+
+def _icache_over(result: Build) -> int:
+    """Kilobytes of code past the instruction cache (`analysis.icache`).
+
+    Right after the register file and before occupancy: a body that does not
+    fit is fetched again on every iteration of the batch loop, which no number
+    of resident multiplications makes up for.  A cliff and not a slope, so 0
+    below the capacity whatever the size, and every kilobyte past it counts.
+    """
+    from tensorforge.analysis.icache import icache_excess
+    hw = result.context.get_vm().get_hw_descr()
+    return icache_excess(getattr(result.generator, 'code_units', None),
+                         hw) // 1024
 
 
 #: Bytes below which two modelled footprints are the same footprint: sixteen
@@ -676,7 +692,8 @@ class CompiledScore:
             blocks = min(result.generator.resident_blocks or 0, report.register_blocks)
             resident = blocks * mults
         issue = (result.generator.emitted_work or 0) * lanes / wave
-        return (report.spill_bytes > 0, report.spill_bytes, -resident, issue)
+        return (report.spill_bytes > 0, report.spill_bytes,
+                _icache_over(result), -resident, issue)
 
 
 class MeasuredScore:

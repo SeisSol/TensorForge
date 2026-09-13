@@ -53,6 +53,12 @@ class HwDecription:
     #: runtime rather than of a spelling: CUDA's limit moved with the toolchain
     #: from Volta on, and a SYCL device reports its own.
     self.max_argument_size = parseBytes(param_table['max_argument_size'])
+    #: Bytes of instruction cache that serve one kernel's resident loop, or
+    #: None where the target states none -- not stated is not unlimited, and
+    #: `analysis.icache` then judges nothing.
+    self.icache_size = (parseBytes(param_table['icache_size'])
+                        if param_table.get('icache_size') is not None
+                        else None)
     self.model = arch
     self.backend = backend
     #: Whether the lowering is an explicit vector per work-item (`esimd`).
@@ -74,6 +80,25 @@ class HwDecription:
       return None
     digits = ''.join(c for c in text[3:] if c.isdigit())
     return int(digits) if digits else None
+
+  @property
+  def instruction_bytes(self) -> int:
+    """Bytes one machine instruction takes in the instruction cache, on
+    average.
+
+    NVIDIA from Volta on encodes every instruction in 128 bits, scheduling
+    control included; Maxwell and Pascal use 64 and add a control word per
+    three, about 11.  AMD mixes 32- and 64-bit encodings, plus 32 bits for a
+    literal constant: 6 is the middle of what the corpus's ISA shows.  Intel
+    is 128 bits, 64 where compacted: 12.  What the calibration fits
+    (`analysis.icache.INSTRUCTIONS_PER_UNIT`) is the count, not these.
+    """
+    if self.vendor == 'nvidia':
+      level = self.sm_level()
+      return 16 if level is None or level >= 70 else 11
+    if self.vendor == 'amd':
+      return 6
+    return 12
 
   def has_cuda_pipeline(self) -> bool:
     """Whether `cuda::pipeline` and `cuda::memcpy_async` exist for this target.

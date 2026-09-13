@@ -93,6 +93,10 @@ class DescriptionReader(Reader):
     #: in one kernel do not land on the same name.
     self._scratch = 0
 
+    #: Numbers the ternaries hoisted into guards (`_hoist_ternary`); each
+    #: gets a guard version of its own.
+    self._hoisted = 0
+
   #: yateto names its operations after the class that implements them; the
   #: enum here is spelled differently and is not a superset.  What is missing
   #: is named in `add_operation_new` rather than mapped to something close.
@@ -112,6 +116,9 @@ class DescriptionReader(Reader):
     'CmpEq': Operation.EQ, 'CmpNe': Operation.NEQ,
     'CmpLt': Operation.LT, 'CmpLe': Operation.LE,
     'CmpGt': Operation.GT, 'CmpGe': Operation.GE,
+    # `where(condition, yes, no)`: yes, no, condition.  One whose condition
+    # has no axes does not get here -- `add_operation_new` hoists it.
+    'Ternary': Operation.SELECT,
   }
 
   #: A reduction carries an operator object, not an enum member: the neutral
@@ -143,10 +150,9 @@ class DescriptionReader(Reader):
       return Operation.COPY
     if name not in self.ELEMENTWISE_OPS:
       raise NotImplementedError(
-        f'yateto operation {name!r} has no counterpart here. The ternary '
-        f'select (it would need a third operand through `Lexic.get_operation`) '
-        f'and the logical, as opposed to bitwise, negation are the ones yateto '
-        f'can currently emit and this side cannot express.')
+        f'yateto operation {name!r} has no counterpart here. The logical, as '
+        f'opposed to bitwise, negation is the one yateto can currently emit '
+        f'and this side cannot express.')
     return self.ELEMENTWISE_OPS[name]
 
   def convert_reduction_op(self, name):
@@ -254,6 +260,12 @@ class DescriptionReader(Reader):
     conformed = []
     for ref, arg in zip(argrefs, args):
       indices = list(ref['indices'])
+      if indices and any(int(size) == 0 for size in arg.bbox.sizes()):
+        # A box with nothing in it: yateto knows the operand is zero
+        # everywhere (`0.0 * C` stores nothing) and says so by its storage.
+        # The number is what the operation reads, a constant source.
+        conformed.append(0)
+        continue
       if indices == axes or (not indices
                              and getattr(arg.tensor, 'rank0', False)):
         # The same axes, or none at all: an operand without axes is read
@@ -392,6 +404,9 @@ class DescriptionReader(Reader):
                                                add=add,
                                                strict_match=False,
                                                prefer_align=False))
+    elif (kind == 'elementwise' and d.get('optype') == 'Ternary'
+          and self._hoistable(d)):
+      return self._hoist_ternary(d, result, condition, linear, add)
     elif kind == 'elementwise':
       dest, accumulate = self._accumulator(d['result'], result, add)
       args = self._conform(d['result'], d['args'], args)
@@ -419,6 +434,49 @@ class DescriptionReader(Reader):
       descr.condition = condition
 
     return 0# self._descr_list[-1].get_flops()
+
+  def _hoistable(self, d):
+    """Whether a ternary's condition is one value per batch element, and not
+    the tensor the ternary writes -- the second half of a hoist reads the
+    condition after the first half has written the result.  Nor where a
+    branch stores nothing (`0.0 * C`): the select takes that as the number 0,
+    and a copy of it would have no cells to copy."""
+    yes, no, cond = d['args']
+    empty = any(ref['indices'] and any(int(size) == 0 for size in
+                                       self.tensor_ref(ref).bbox.sizes())
+                for ref in (yes, no))
+    return (not cond['indices'] and cond['name'] != d['result']['name']
+            and not empty)
+
+  def _hoist_ternary(self, d, result, condition, linear, add):
+    """`result = cond ? yes : no` with a rank-0 condition, as two statements.
+
+    `result = yes` under the guard and `cond`, `result = no` under the guard
+    and not `cond` -- the guards yateto already sends, so the condition is read
+    once where each region opens, the branch not taken is not computed at all,
+    and neither is a select per entry.  Each half is a single-operand
+    multilinear, as an `AS_MULTILINEAR` operation is: that is what broadcasts a
+    branch of lower rank, permutes, accumulates and takes a named factor.
+
+    The version only groups neighbouring statements under one guard, so a
+    hoist's own is a negative one: yateto's start at zero, and two hoists over
+    the same condition tensor must not merge into one region.
+    """
+    self._hoisted += 1
+    version = -self._hoisted
+    cond = self.tensor_ref(d['args'][2])
+    for argref, negated in ((d['args'][0], False), (d['args'][1], True)):
+      argrefs, args = [argref], [self.tensor_ref(argref)]
+      if self._is_named_scalar(linear.get('alpha')):
+        argrefs = argrefs + [linear['alpha']]
+        args = args + [self.tensor_ref(linear['alpha'])]
+      target, permute = self._linear_layout(d['result'], argrefs)
+      descr = MultilinearDescr(result, args, target, permute, add=add,
+                               strict_match=False, prefer_align=False)
+      descr.condition = list(condition) + [GuardLiteral(cond, version,
+                                                        negated)]
+      self._descr_list.append(descr)
+    return 0
 
   def _append_scaling(self, result, alpha, view=None):
     """Scale a result in place, as an operation of its own.

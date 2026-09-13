@@ -48,6 +48,10 @@ class Context:
     #: Arithmetic operations written out so far, or None (`record_work`).
     self.emitted_work: Optional[int] = None
 
+    #: Instructions laid down so far, in the units `pir.emit` counts, or None
+    #: (`record_code`).
+    self.code_units: Optional[int] = None
+
   def record_pressure(self, value: int) -> None:
     if self.peak_pressure is None or value > self.peak_pressure:
       self.peak_pressure = value
@@ -63,6 +67,18 @@ class Context:
     the same caveat the line estimate carries.
     """
     self.emitted_work = (self.emitted_work or 0) + value
+
+  def record_code(self, value: int = 1) -> None:
+    """Count instructions the emitter laid down (`code_units`).
+
+    Not `record_work` again.  That one asks how often a statement runs, so a
+    rolled reduction counts its trip count; this one asks how many copies of it
+    the compiler writes into the kernel, so a rolled loop counts its body once
+    and an unrolled one once per trip -- the figure an instruction cache holds.
+    Every statement is counted, not only the arithmetic: a load or an index
+    calculation occupies the cache as much as an FMA does.
+    """
+    self.code_units = (self.code_units or 0) + value
 
   def set_fp_type(self, fp_type: Datatype):
     self.fp_type = fp_type

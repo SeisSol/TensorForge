@@ -353,6 +353,9 @@ class Generator:
     self.peak_pressure: Optional[int] = None
     #: Arithmetic operations this build wrote out (`Context.record_work`).
     self.emitted_work: Optional[int] = None
+    #: Instructions laid down, in emitter units (`Context.record_code`); what
+    #: `analysis.icache` weighs against the instruction cache.
+    self.code_units: Optional[int] = None
     #: Blocks resident per SM under the resources that are known exactly --
     #: shared memory and threads.  Not the register limit; see
     #: `_resident_blocks`.
@@ -577,6 +580,7 @@ class Generator:
     # never falls back on its own.
     self._context.peak_pressure = None
     self._context.emitted_work = None
+    self._context.code_units = None
 
     self._autotune()
 
@@ -620,6 +624,7 @@ class Generator:
     self.tuned = pick
     self._context.peak_pressure = None
     self._context.emitted_work = None
+    self._context.code_units = None
 
   def _generate_bound(self):
     descrlist = []
@@ -1045,7 +1050,32 @@ class Generator:
     self._kernel = writer.get_src()
     self.peak_pressure = self._context.peak_pressure
     self.emitted_work = self._context.emitted_work
+    self.code_units = self._context.code_units
+    self._warn_icache()
     self.resident_blocks = self._resident_blocks()
+
+  def _warn_icache(self) -> None:
+    """Say so when the kernel's code is larger than the instruction cache.
+
+    A warning, like the register budget's: a kernel that does not fit still
+    runs, and slower -- the batch loop keeps its body resident only if the
+    cache holds it, and otherwise fetches the difference again on every
+    iteration.  The tuning scorer is what acts on it (`tuning.static_score`).
+    """
+    import warnings
+    from tensorforge.analysis.icache import (ICacheBudgetWarning, code_bytes,
+                                             icache_excess)
+    hw = self._context.get_vm().get_hw_descr()
+    excess = icache_excess(self.code_units, hw)
+    if excess:
+      warnings.warn(
+          f'{self._base_kernel_name}: about {code_bytes(self.code_units, hw)} '
+          f'B of code against an instruction cache of {hw.icache_size} B on '
+          f'{hw.model}; the batch loop fetches the difference again on every '
+          f'iteration.  Rolling a reduction (`k_roll`, `k_unroll_max`), '
+          f'merging repeated operations, or fewer lanes with more elements '
+          f'each makes the body smaller.',
+          ICacheBudgetWarning, stacklevel=2)
 
   def _resident_blocks(self) -> Optional[int]:
     """How many of these blocks fit on one SM, counting what is known exactly.

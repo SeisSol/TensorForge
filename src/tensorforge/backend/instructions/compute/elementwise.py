@@ -117,9 +117,11 @@ class ElementwiseInstruction(ComputeInstruction):
         def inner(varlist):
             operands = []
             args = []
+            values = []
             for src in self._srcs:
                 if isinstance(src, ScalarLike):
                     operands.append(self._context.fp_type.literal(src))
+                    values.append(src)
                     continue
                 v = src.symbol.load(writer, self._context, None,
                                     self._index(src, varlist), False)
@@ -127,21 +129,47 @@ class ElementwiseInstruction(ComputeInstruction):
                     return self._body_named(writer, varlist)
                 operands.append('{%d}' % len(args))
                 args.append(v)
+                values.append(v)
 
-            # get_operation always takes two values; unary ops pass '' as the
-            # second.  Handing it placeholders instead of names keeps the
-            # operand order but lets the emitter fill in whatever the value
-            # ends up being called -- or inline it entirely.
-            padded = operands + [''] if len(operands) == 1 else operands
-            lexic = self._context.get_vm().get_lexic()
-            text = lexic.get_operation(self._op, self._context.fp_type, *padded)
-            result = writer.rawexpr(text, *args,
-                                    type_=ScalarType(self._context.fp_type),
-                                    hint='e', pure=True, movable=True)
+            if self._op == Operation.SELECT:
+                result = self._select(writer, *values)
+            else:
+                # get_operation always takes two values; unary ops pass '' as
+                # the second.  Handing it placeholders instead of names keeps
+                # the operand order but lets the emitter fill in whatever the
+                # value ends up being called -- or inline it entirely.
+                padded = operands + [''] if len(operands) == 1 else operands
+                lexic = self._context.get_vm().get_lexic()
+                text = lexic.get_operation(self._op, self._context.fp_type,
+                                           *padded)
+                result = writer.rawexpr(text, *args,
+                                        type_=ScalarType(self._context.fp_type),
+                                        hint='e', pure=True, movable=True)
             self._dest.symbol.store(writer, self._context, result,
                                     self._index(self._dest, varlist), False)
 
         return inner
+
+    def _select(self, writer, yes, no, cond):
+        """`cond ? yes : no`, from yateto's operand order into PIR's.
+
+        A PIR `select` rather than a lexic spelling: every emitter already has
+        one -- a conditional on SPMD, a `merge` under an explicit vector -- and
+        the lexic's operations take two operands.  A condition that is a number
+        decides here; one that is a value and not a boolean is compared with
+        zero, as C would.
+        """
+        from tensorforge.backend.pir.core import BOOL, ScalarType
+        fp = ScalarType(self._context.fp_type)
+
+        def value(x):
+            return writer.const(float(x), fp) if isinstance(x, ScalarLike) else x
+        if isinstance(cond, ScalarLike):
+            return value(yes if cond else no)
+        if getattr(cond, 'type', None) != BOOL:
+            cond = writer.op('ne', BOOL, cond, writer.const(0, cond.type),
+                             hint='c')
+        return writer.op('select', fp, cond, value(yes), value(no), hint='e')
 
     def _body_named(self, writer, varlist):
         """Fallback for operands that cannot yield a value (sparse loads)."""
@@ -162,8 +190,13 @@ class ElementwiseInstruction(ComputeInstruction):
         padded = operands + [''] if len(operands) == 1 else operands
         lexic = self._context.get_vm().get_lexic()
         result = f'v{counter}'
-        writer(f'const auto {result} = '
-               f'{lexic.get_operation(self._op, self._context.fp_type, *padded)};')
+        if self._op == Operation.SELECT:
+            yes, no, cond = operands
+            expression = f'(({cond}) ? ({yes}) : ({no}))'
+        else:
+            expression = lexic.get_operation(self._op, self._context.fp_type,
+                                             *padded)
+        writer(f'const auto {result} = {expression};')
         self._dest.symbol.store(writer, self._context, result,
                                 [f'(n{i} + {o})'
                                  for i, o in enumerate(self._dest.bbox.lower())],

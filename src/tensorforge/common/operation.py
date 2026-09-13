@@ -61,6 +61,9 @@ class Operation(Enum):
   LE = 2003,
   GT = 2004,
   GE = 2005
+  #: `cond ? yes : no`, per element, with yateto's operand order: yes, no,
+  #: condition (`yateto.functions.where`).  The one operation of three.
+  SELECT = 3000
 
 class OperationType(Enum):
   FLOAT = 0,

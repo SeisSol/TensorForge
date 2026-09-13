@@ -439,6 +439,8 @@ class ElementwiseDescr(OperationDescription):
       Operation.SUB, Operation.SHL, Operation.SHR, Operation.SHRS,
       Operation.XOR,
   })
+  #: yes, no, condition -- in that order, as yateto sends `where`.
+  TERNARY = frozenset({Operation.SELECT})
 
   def __init__(self,
                op: Operation,
@@ -454,7 +456,8 @@ class ElementwiseDescr(OperationDescription):
     self.strict_match = strict_match
     self.prefer_align = prefer_align
 
-    expected = 1 if op in self.UNARY else 2 if op in self.BINARY else None
+    expected = (1 if op in self.UNARY else 2 if op in self.BINARY
+                else 3 if op in self.TERNARY else None)
     if expected is None:
       raise InternalError(f'elementwise: unknown arity for {op}')
     if len(self.srcs) != expected:

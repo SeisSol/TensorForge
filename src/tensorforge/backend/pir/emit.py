@@ -114,6 +114,32 @@ def _counts_as_work(op: str, value) -> bool:
     return getattr(getattr(value, 'type', None), 'base', None) in _WORK_TYPES
 
 
+#: Statements that put nothing into the instruction stream: a constant is an
+#: immediate of whatever reads it, a declaration or an extraction names a
+#: register, a yield is the variable the loop already shares.
+_NO_CODE = frozenset({Op.CONST, Op.YIELD, Op.DECLARE, Op.ALLOC, Op.EXTRACT,
+                      Op.SPLIT, Op.PACK})
+
+#: A rolled loop's own instructions per copy of its body: the counter, the
+#: test and the branch.
+_LOOP_OVERHEAD = 3
+
+
+def _code_copies(unroll, trips: Optional[int]) -> int:
+    """How many copies of a `for` body the compiler lays down.
+
+    `#pragma unroll` over a count it knows unrolls the loop whole; `#pragma
+    unroll N` lays down N (and a remainder, not counted); anything else stays a
+    loop, one copy.  `trips` is None where the bounds are not constants -- the
+    batch loop -- and then even the bare pragma leaves a loop.
+    """
+    if unroll is True:
+        return trips or 1
+    if isinstance(unroll, int) and not isinstance(unroll, bool) and unroll > 1:
+        return min(unroll, trips) if trips else unroll
+    return 1
+
+
 class Emitter:
     def __init__(self, writer, context: Any = None):
         self.writer = writer
@@ -122,6 +148,11 @@ class Emitter:
         #: product of the trip counts of the loops around it that have
         #: constant bounds (`_emit_for`).
         self._work_scale = 1
+        #: How many copies of the statement being written the compiler lays
+        #: down: the product of the unroll factors of the loops around it
+        #: (`_code_copies`).  Not `_work_scale`: a loop rolled by `k_roll` runs
+        #: its count and is written once.
+        self._code_scale = 1
         self._names: Dict[int, str] = {}
         self._consts: Dict[int, str] = {}
         self._async_lex = None
@@ -143,6 +174,23 @@ class Emitter:
         record = getattr(self.context, 'record_work', None)
         if record is not None:
             record(self._work_scale)
+
+    def _record_code(self, op) -> None:
+        """What a statement puts into the instruction stream
+        (`Context.record_code`), once per copy of it (`_code_scale`).  One unit
+        a statement, two for a branch; a loop's counter, test and branch are
+        counted where the loop is (`_emit_for`).  Units, not instructions:
+        `analysis.icache` converts, with a factor fitted against the compilers
+        (`tools/calibrate_icache.py`)."""
+        if op in _NO_CODE or op == Op.FOR:
+            return
+        self._record_code_units(2 if op == Op.IF
+                                else _LOOP_OVERHEAD if op == Op.WHILE else 1)
+
+    def _record_code_units(self, units: int) -> None:
+        record = getattr(self.context, 'record_code', None)
+        if record is not None:
+            record(units * self._code_scale)
 
     # -- naming ------------------------------------------------------------ #
 
@@ -588,6 +636,7 @@ class Emitter:
     def _emit_stmt(self, s: Stmt, yield_to: Tuple[Optional[str], ...]) -> None:
         w = self.writer
         op = s.op
+        self._record_code(op)
 
         if op == Op.CONST:
             v = s.target[0]
@@ -993,15 +1042,19 @@ class Emitter:
         # unroll goes through Writer.For, which folds the pragma into the block
         # head; a separate statement would flush the enclosing speculation and
         # defeat empty-block elision.
-        trips = (len(range(lo, hi, step))
-                 if all(isinstance(x, int) for x in (lo, hi, step)) and step
-                 else 1)
+        constant = all(isinstance(x, int) for x in (lo, hi, step)) and step
+        trips = len(range(lo, hi, step)) if constant else 1
         scale, self._work_scale = self._work_scale, self._work_scale * trips
+        copies = _code_copies(s.attr('unroll'), trips if constant else None)
+        if not constant or copies < trips:
+            self._record_code_units(_LOOP_OVERHEAD)
+        code_scale, self._code_scale = self._code_scale, self._code_scale * copies
         try:
             with w.For(head, unroll=s.attr('unroll') or False):
                 self._emit_body(s.regions[0].body, tuple(targets))
         finally:
             self._work_scale = scale
+            self._code_scale = code_scale
 
     def _emit_while(self, s: Stmt) -> None:
         """`Ty i = init; while (true) { ... i = next; }`.
