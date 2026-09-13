@@ -46,7 +46,8 @@ class ComputeInstruction(AbstractInstruction):
     dropping the contracted axes renumbers what is left.
     """
     # a view without axes is broadcast, not spread, and has no lane axis
-    leads = {self.lead_dim(v) for v in views if v.bbox.rank()}
+    leads = {self.lead_dim(v) for v in views
+             if getattr(getattr(v, 'bbox', None), 'rank', lambda: 1)()}
     if len(leads) > 1:
       raise InternalError(
           f'{what}: operands disagree about the lane axis '

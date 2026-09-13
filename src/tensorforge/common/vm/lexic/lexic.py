@@ -206,6 +206,22 @@ class Lexic(ABC):
     """
     return self.sync_block()
 
+  def exchange_reach(self, num_threads: int, hw) -> int:
+    """How many lanes one cross-lane exchange reaches -- a shuffle, a
+    broadcast, a reduction -- for a multiplication of `num_threads`.
+
+    The wave by default.  A target that states its sub-group per kernel
+    reaches that far instead, and one whose lanes are the elements of a
+    work-item's vector reaches the whole multiplication.
+    """
+    return hw.vec_unit_length
+
+  def exchange_xor(self, variable, mask):
+    """`variable` as held by the lane whose index differs from this one's in
+    the bits of `mask` -- one step of a butterfly -- or None where the target
+    has an all-reduce of its own to call instead (`reduction`)."""
+    return None
+
   @abstractmethod
   def get_sub_group_id(self, sub_group_size):
     return None

@@ -95,12 +95,30 @@ def test_the_ceiling_is_a_number_and_the_wave_is_another(backend, arch, wave):
         assert at_wave.num_threads < default.num_threads
 
 
-def test_an_elementwise_descriptor_waives_the_ceiling():
-    """Its iteration space is the vector unit's, not a lead dimension."""
+def test_an_elementwise_descriptor_alone_takes_the_vector_unit_under_the_ceiling():
+    """Nothing else asks, so it does -- and like every other request, the
+    ceiling caps it: it used to waive that, and a contraction beside it then
+    got more lanes than a wave."""
     ctx = _ctx("gfx90a", "hip")
     a, c = _t([64, 64], 'A'), _t([64, 64], 'C')
-    assert lanes.deduce([ew.abs(c, a)], ctx).num_threads \
-        == ctx.get_vm().get_hw_descr().vec_unit_length
+    assert lanes.deduce([ew.abs(c, a)], ctx).num_threads == min(
+        ctx.get_vm().get_hw_descr().vec_unit_length,
+        lanes.DEFAULT_LANE_CEILING)
+
+
+@pytest.mark.parametrize("arch,backend", [("gfx90a", "hip"),
+                                          ("gfx1150", "hip"),
+                                          ("pvc", "oneapi")])
+def test_an_elementwise_descriptor_does_not_raise_a_contraction_s_lanes(
+        arch, backend):
+    """It runs at whatever count it is given, so beside a contraction it takes
+    the contraction's rather than its own."""
+    ctx = _ctx(arch, backend)
+    a, b, c = _t([16, 16], 'A'), _t([16, 16], 'B'), _t([16, 16], 'C')
+    x, y = _t([64, 64], 'X'), _t([64, 64], 'Y')
+    gemm = GemmDescr(False, False, a=a, b=b, c=c)
+    alone = lanes.deduce([gemm], ctx).num_threads
+    assert lanes.deduce([gemm, ew.abs(y, x)], ctx).num_threads == alone
 
 
 def test_the_width_is_a_minimum_where_the_lane_count_is_a_maximum():

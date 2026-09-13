@@ -151,7 +151,7 @@ class ReductionInstruction(ComputeInstruction):
         anyway -- see `tests/test_barrier_scope.py` -- but it would say which
         invariant was violated, and this says which feature is missing.
         """
-        vul = self._context.get_vm().get_hw_descr().vec_unit_length
+        vul = self._reach()
         if self._num_threads > vul:
             raise InternalError(
                 f'reduction: a cross-lane fold over {self._num_threads} '
@@ -172,9 +172,16 @@ class ReductionInstruction(ComputeInstruction):
         """
         if not self._contracts_lead():
             return 0
-        vul = self._context.get_vm().get_hw_descr().vec_unit_length
+        vul = self._reach()
         return max(0, self._num_threads // vul) if self._num_threads > vul \
             else 0
+
+    def _reach(self) -> int:
+        """How far one exchange reaches (`Lexic.exchange_reach`): the wave,
+        a sub-group the kernel states, or under ESIMD the whole vector."""
+        vm = self._context.get_vm()
+        return vm.get_lexic().exchange_reach(self._num_threads,
+                                             vm.get_hw_descr())
 
     def _contracts_lead(self) -> bool:
         return self.lead_dim(self._op) in self._dims
@@ -275,10 +282,11 @@ class ReductionInstruction(ComputeInstruction):
         extent = self._op.bbox.size(src_lead)
         rest = [d for d in self._dims if d != src_lead]
 
-        def fold(slot):
+        def fold(slot, valid=None):
             from tensorforge.backend.symbol import LeadIndex
             inner = dict(index)
-            inner[src_lead] = LeadIndex(slot, self._num_threads, 1)
+            inner[src_lead] = LeadIndex(slot, self._num_threads, 1,
+                                        valid=valid)
             return self._fold_axes(writer, inner, rest, 0)
 
         acc = None
@@ -286,6 +294,17 @@ class ReductionInstruction(ComputeInstruction):
             lo = slot * self._num_threads
             if lo + self._num_threads <= extent:
                 contrib = fold(slot)
+            elif writer._explicit_simd():
+                # A lane-varying condition is a mask here, not a branch: the
+                # load is held to the lanes that own an element (`valid`, the
+                # full-lane tail's mechanism), and the rest take the neutral
+                # element by selection.
+                owned = extent - lo
+                contrib = writer.op(
+                    'select', acc_type,
+                    writer.op('lt', BOOL, lead, owned, hint='own'),
+                    fold(slot, valid=owned),
+                    writer.const(self._neutral(), acc_type), hint='own')
             else:
                 # The guard has to contain the load, not just select after it:
                 # a lane past the end would otherwise read out of bounds.
@@ -348,9 +367,25 @@ class ReductionInstruction(ComputeInstruction):
         from tensorforge.backend.pir.core import ScalarType
 
         lexic = self._context.get_vm().get_lexic()
+        width = self._exchange_width(src_lead)
+        if lexic.exchange_xor('{0}', 1) is not None:
+            # No all-reduce to call, only the exchange (SPMD SYCL): the
+            # butterfly, one step per bit, combined by the operator's `irop`.
+            if width & (width - 1):
+                raise InternalError(
+                    f'reduction: a butterfly over {width} lanes; it pairs '
+                    f'lanes by their bits, which needs a power of two')
+            fp = ScalarType(self._context.fp_type)
+            acc, mask = partial, 1
+            while mask < width:
+                other = writer.rawexpr(lexic.exchange_xor('{0}', mask), acc,
+                                       type_=fp, hint='x', pure=True,
+                                       movable=False, crosslane=True)
+                acc = self._combine(writer, acc, other)
+                mask <<= 1
+            return acc
         text = lexic.reduction('{0}', self._operation.operation(),
-                               self._context.fp_type,
-                               self._exchange_width(src_lead), subblock=1)
+                               self._context.fp_type, width, subblock=1)
         return writer.rawexpr(text, partial,
                               type_=ScalarType(self._context.fp_type),
                               hint='red', pure=True, movable=False)

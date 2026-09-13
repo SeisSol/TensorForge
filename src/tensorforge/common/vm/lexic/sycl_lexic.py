@@ -127,6 +127,32 @@ class SyclLexic(Lexic):
     return (self._underlying_hardware == 'intel' and self._backend == 'oneapi'
             and not self.simd_mode)
 
+  def exchange_reach(self, num_threads: int, hw) -> int:
+    """Under ESIMD the multiplication is one work-item's vector, so an
+    exchange reaches all of it.  Under SPMD with the sub-group stated, the one
+    `sub_group_for` puts it in -- 32 lanes for a 32-lane multiplication on a
+    device whose vector unit is 16."""
+    if self.simd_mode:
+      return num_threads
+    if self._pins_sub_group():
+      size = self.sub_group_for(num_threads)
+      if size is not None:
+        return size
+    return hw.vec_unit_length
+
+  def exchange_xor(self, variable, mask):
+    """Under SPMD, `permute_group_by_xor` over the sub-group.  A mask below
+    the multiplication's width keeps a lane inside its own multiplication,
+    since `sub_group_for` places one where its size divides the sub-group --
+    so several multiplications in one sub-group each exchange among their own
+    lanes, which `reduce_over_group` over the whole sub-group would not.
+    Under ESIMD the lanes are elements of one vector and `reduction` answers
+    directly."""
+    if self.simd_mode:
+      return None
+    return (f'sycl::permute_group_by_xor(item.get_sub_group(), {variable}, '
+            f'{mask})')
+
   def kernel_definition(self, file, kernel_bounds, base_name, params, precision=None, total_shared_mem_size=None, global_symbols=None, lanes=None):
     if self.simd_mode:
       # The arena is reserved inside the kernel instead; see

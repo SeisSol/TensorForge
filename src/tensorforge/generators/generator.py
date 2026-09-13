@@ -816,10 +816,14 @@ class Generator:
       if start != self._get_2d_block_id():
         return 1
       return mults_per_group(self._num_threads, wave)
-    if self._num_threads < wave and self._needs_wave_group():
+    if self._num_threads < wave and (self._needs_wave_group()
+                                     or not self._mult_met_alone()):
       # The multiplications of one wave, driven together, because something
-      # in the body is issued by the whole wave at once.  A rotated start has
-      # the same trouble as below, and leaves the verifier to refuse.
+      # in the body is issued by the whole wave at once -- or because every
+      # rendezvous and every exchange is: SPMD SYCL has no barrier for part
+      # of a sub-group, and its broadcasts are sub-group collectives.  A
+      # rotated start has the same trouble as below, and leaves the verifier
+      # to refuse.
       if start != self._get_2d_block_id():
         return 1
       return wave // self._num_threads
@@ -828,6 +832,16 @@ class Generator:
     if start != self._get_2d_block_id():
       return 1
     return mults_per_group(self._num_threads, wave)
+
+  def _mult_met_alone(self) -> bool:
+    """Whether one multiplication narrower than the wave can be synchronised
+    without its neighbours in the wave (`Lexic.has_sync_mult`).
+
+    Where it cannot, its barriers reach the group, and a group whose rows run
+    the body different numbers of times never arrives at them.
+    """
+    vm = self._context.get_vm()
+    return vm.get_lexic().has_sync_mult(self._num_threads, vm.get_hw_descr())
 
   def _needs_wave_group(self) -> bool:
     """Whether the section holds an instruction the whole wave issues together.

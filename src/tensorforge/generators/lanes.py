@@ -68,18 +68,26 @@ def deduce(descr_list: List[OperationDescription],
     only simd-uniform, so a section wider than a wave would need a group
     barrier where it may not have one.
 
-    An elementwise descriptor waives the ceiling. Its iteration space is the
-    vector unit's, not a contraction's lead dimension, so compressing it below
-    that would leave lanes idle for no gain.
+    An elementwise descriptor asks for lanes only where nothing else does.  It
+    runs at whatever count it is given -- its loop strides by it, and the
+    layout is the lead axis spread cyclically either way -- so letting it raise
+    the section's count, or waive the ceiling, bought nothing and handed the
+    contraction beside it more lanes than a wave.
     """
     num_threads = 0
     num_active = 0
+    pointwise = (0, 0)
     widths = []
     for descr in descr_list:
         threads, active = descr.get_num_threads(context)
+        widths.append(getattr(descr, 'lead_width', lambda _c: 1)(context))
+        if isinstance(descr, ElementwiseDescr):
+            pointwise = (max(threads, pointwise[0]), max(active, pointwise[1]))
+            continue
         num_threads = max(threads, num_threads)
         num_active = max(active, num_active)
-        widths.append(getattr(descr, 'lead_width', lambda _c: 1)(context))
+    if num_threads == 0:
+        num_threads, num_active = pointwise
 
     # Deliberately *not* also clamped to the wave width, which is what the
     # generator has always done.  Clamping would be a change, and a large one:
@@ -89,9 +97,7 @@ def deduce(descr_list: List[OperationDescription],
     # not a side effect to take while extracting a decision.
     cap = (context.get_vm().get_hw_descr().vec_unit_length
            if ceiling is None else ceiling)
-    if not any(isinstance(d, ElementwiseDescr) and d.dest.bbox.rank()
-               for d in descr_list):
-        num_threads = min(cap, num_threads)
+    num_threads = min(cap, num_threads)
 
     return LaneConfig(num_threads=num_threads,
                       num_active_threads=num_active,

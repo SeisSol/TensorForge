@@ -169,19 +169,19 @@ def test_a_target_without_a_sub_block_rendezvous_gets_the_block():
 def test_a_wide_multiplication_is_packed_by_what_the_target_can_separate():
     """The invariant, checked from the outside.
 
-    `_deduce_num_threads` clamps to 32 only when no elementwise descriptor is
-    present, so a multilinear aligning above 32 next to an elementwise gets a
-    64-thread multiplication. What a block then holds is exactly what the
-    target can tell apart: CUDA has `barrier.sync id, count` and packs several,
-    SYCL under SPMD has nothing narrower than the sub-group and gets one.
+    A 64-thread multiplication, asked for outright.  An elementwise descriptor
+    beside the contraction used to lift the lane ceiling and produce one; it
+    no longer does (`lanes.deduce`).  What a block then holds is exactly what
+    the target can tell apart: CUDA has `barrier.sync id, count` and packs
+    several, and ESIMD holds a multiplication in one work-item.
     """
     from tensorforge.common.basic_types import Addressing
+    from tensorforge.common.exceptions import GenerationError
     from tensorforge.common.matrix.boundingbox import BoundingBox
     from tensorforge.common.matrix.tensor import SubTensor, Tensor
-    from tensorforge.common.operation import Operation
-    from tensorforge.generators.descriptions import (ElementwiseDescr,
-                                                     MultilinearDescr)
+    from tensorforge.generators.descriptions import MultilinearDescr
     from tensorforge.generators.generator import Generator
+    from tensorforge.generators.lanes import LaneConfig
 
     def tensor(shape, alias):
         return SubTensor(Tensor(shape, Addressing.STRIDED,
@@ -189,7 +189,7 @@ def test_a_wide_multiplication_is_packed_by_what_the_target_can_separate():
                                 alias=alias, datatype=Datatype.F32))
 
     for arch, backend in (("sm_86", "cuda"), ("gfx1100", "hip"),
-                          ("pvc", "oneapi")):
+                          ("pvc", "oneapi"), ("pvc", "esimd")):
         ctx = Context(arch=arch, backend=backend, fp_type=Datatype.F32)
         vm = ctx.get_vm()
         wave = vm.get_hw_descr().vec_unit_length
@@ -198,15 +198,14 @@ def test_a_wide_multiplication_is_packed_by_what_the_target_can_separate():
         gemm = MultilinearDescr(tensor([56, 18], "C"),
                                 [tensor([56, 18], "A"), tensor([18, 18], "B")],
                                 [[0, -1], [-1, 1]], [[0, 1], [0, 1]])
-        ew = ElementwiseDescr(Operation.ABS, tensor([56, 18], "F"),
-                              [tensor([56, 18], "E")])
-
-        gen = Generator([gemm, ew], ctx)
-        if backend == "hip":
-            # The AMD SIMT path refuses a multiplication wider than the wave:
-            # across waves it came out wrong with no error (measured on
-            # gfx1150), so there is no block to pack.
-            from tensorforge.common.exceptions import GenerationError
+        gen = Generator([gemm], ctx,
+                        lanes=LaneConfig(num_threads=64,
+                                         num_active_threads=56, lead_width=1))
+        if backend in ("hip", "oneapi"):
+            # No block to pack.  The AMD SIMT path refuses a multiplication
+            # wider than the wave: across waves it came out wrong with no error
+            # (measured on gfx1150).  SPMD SYCL places a multiplication in one
+            # sub-group, and none is 64 lanes wide.
             with pytest.raises(GenerationError):
                 gen.generate()
             continue
