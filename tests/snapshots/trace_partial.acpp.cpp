@@ -1,5 +1,5 @@
 // === base name ===
-kernel_41a75482f565163f
+kernel_6a9488552d5116c1
 
 // === header ===
 #ifndef TENSORFORGE_LAUNCH_TYPES
@@ -27,9 +27,9 @@ struct LaunchConfig {
 };
 } // namespace tensorforge
 #endif
-inline constexpr tensorforge::LaunchInfo launch_info_kernel_41a75482f565163f = {{16, 16, 1}, 16, 16, 1, 16, 1024, false, true, 1};
-tensorforge::LaunchConfig launch_config_kernel_41a75482f565163f(size_t numElements0, void* streamPtr = nullptr);
-void launcher_kernel_41a75482f565163f(float * m0, size_t m0_extraOffset, const float * m1, size_t m1_extraOffset, size_t numElements0, unsigned * flags0 = nullptr, void* streamPtr = nullptr);
+inline constexpr tensorforge::LaunchInfo launch_info_kernel_6a9488552d5116c1 = {{16, 16, 1}, 16, 16, 1, 16, 1024, false, true, 1};
+tensorforge::LaunchConfig launch_config_kernel_6a9488552d5116c1(size_t numElements0, void* streamPtr = nullptr);
+void launcher_kernel_6a9488552d5116c1(float * m0, size_t m0_extraOffset, const float * m1, size_t m1_extraOffset, size_t numElements0, unsigned * flags0 = nullptr, void* streamPtr = nullptr);
 
 
 // === launcher ===
@@ -58,7 +58,7 @@ struct LaunchConfig {
 };
 } // namespace tensorforge
 #endif
-tensorforge::LaunchConfig launch_config_kernel_41a75482f565163f(size_t numElements0, void* streamPtr) {
+tensorforge::LaunchConfig launch_config_kernel_6a9488552d5116c1(size_t numElements0, void* streamPtr) {
   (void)numElements0;
   (void)streamPtr;
   sycl::range<3> block (16, 16, 1);
@@ -77,21 +77,21 @@ tensorforge::LaunchConfig launch_config_kernel_41a75482f565163f(size_t numElemen
   config.cooperative = false;
   return config;
 }
-void launcher_kernel_41a75482f565163f(float * m0, size_t m0_extraOffset, const float * m1, size_t m1_extraOffset, size_t numElements0, unsigned * flags0, void* streamPtr) {
-  const tensorforge::LaunchConfig config = launch_config_kernel_41a75482f565163f(numElements0, streamPtr);
+void launcher_kernel_6a9488552d5116c1(float * m0, size_t m0_extraOffset, const float * m1, size_t m1_extraOffset, size_t numElements0, unsigned * flags0, void* streamPtr) {
+  const tensorforge::LaunchConfig config = launch_config_kernel_6a9488552d5116c1(numElements0, streamPtr);
   sycl::range<3> block (config.block[0], config.block[1], config.block[2]);
   sycl::range<3> grid (config.grid[0], config.grid[1], config.grid[2]);
   if (streamPtr == nullptr) {
     throw std::invalid_argument("stream may not be null!");
   }
   sycl::queue *stream = static_cast<sycl::queue *>(streamPtr);
-  kernel_kernel_41a75482f565163f(stream, grid, block, m0, m0_extraOffset, m1, m1_extraOffset, numElements0, flags0);
+  kernel_kernel_6a9488552d5116c1(stream, grid, block, m0, m0_extraOffset, m1, m1_extraOffset, numElements0, flags0);
   CHECK_ERR;
 }
 
 
 // === kernel ===
-inline void kernel_kernel_41a75482f565163f(sycl::queue *stream, sycl::range<3> group_count, sycl::range<3> group_size, float * m0, size_t m0_extraOffset, const float * m1, size_t m1_extraOffset, size_t numElements0, unsigned * flags0) {
+inline void kernel_kernel_6a9488552d5116c1(sycl::queue *stream, sycl::range<3> group_count, sycl::range<3> group_size, float * m0, size_t m0_extraOffset, const float * m1, size_t m1_extraOffset, size_t numElements0, unsigned * flags0) {
   stream->submit([&](sycl::handler &cgh) {
     sycl::accessor<float, 1, sycl::access::mode::read_write, sycl::access::target::local> totalShrMem (256, cgh); {
       cgh.parallel_for(sycl::nd_range<3>{{group_count.get(2) * group_size.get(2), group_count.get(1) * group_size.get(1), group_count.get(0) * group_size.get(0)}, {group_size.get(2), group_size.get(1), group_size.get(0)}}, [=](sycl::nd_item<3> item)  {
@@ -131,7 +131,7 @@ inline void kernel_kernel_41a75482f565163f(sycl::queue *stream, sycl::range<3> g
               }
               // wait(r0 = load{g>r}(glb_m1););
               float r1[1]{};
-              // r1 = +(r0) + None
+              // ir1 = +(r0)
               // [(0, 16)] [(0, 16)]
               float ir1[1]{};
               float v27_data = r0[0];
@@ -182,6 +182,7 @@ inline void kernel_kernel_41a75482f565163f(sycl::queue *stream, sycl::range<3> g
               float v72_data = r0[15];
               float v73_data = ir1[0];
               ir1[0] = (v73_data + v72_data);
+              // r1 = ir1
               #pragma unroll
               for (int32_t v75_n0 = 0; v75_n0 < 1; ++v75_n0) {
                 float v76_data = ir1[v75_n0];

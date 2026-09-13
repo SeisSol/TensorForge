@@ -1,5 +1,5 @@
 // === base name ===
-kernel_363afc6ea92d9f79
+kernel_fb98970d7f0ddd65
 
 // === header ===
 #ifndef TENSORFORGE_LAUNCH_TYPES
@@ -27,9 +27,9 @@ struct LaunchConfig {
 };
 } // namespace tensorforge
 #endif
-inline constexpr tensorforge::LaunchInfo launch_info_kernel_363afc6ea92d9f79 = {{32, 8, 1}, 32, 32, 1, 8, 0, false, true, 1};
-tensorforge::LaunchConfig launch_config_kernel_363afc6ea92d9f79(size_t numElements0, void* streamPtr = nullptr);
-void launcher_kernel_363afc6ea92d9f79(const float ** m0, size_t m0_extraOffset, const float ** m1, size_t m1_extraOffset, float ** m2, size_t m2_extraOffset, size_t numElements0, unsigned * flags0 = nullptr, void* streamPtr = nullptr);
+inline constexpr tensorforge::LaunchInfo launch_info_kernel_fb98970d7f0ddd65 = {{32, 8, 1}, 32, 32, 1, 8, 0, false, true, 1};
+tensorforge::LaunchConfig launch_config_kernel_fb98970d7f0ddd65(size_t numElements0, void* streamPtr = nullptr);
+void launcher_kernel_fb98970d7f0ddd65(const float ** m0, size_t m0_extraOffset, const float ** m1, size_t m1_extraOffset, float ** m2, size_t m2_extraOffset, size_t numElements0, unsigned * flags0 = nullptr, void* streamPtr = nullptr);
 
 
 // === launcher ===
@@ -58,7 +58,7 @@ struct LaunchConfig {
 };
 } // namespace tensorforge
 #endif
-tensorforge::LaunchConfig launch_config_kernel_363afc6ea92d9f79(size_t numElements0, void* streamPtr) {
+tensorforge::LaunchConfig launch_config_kernel_fb98970d7f0ddd65(size_t numElements0, void* streamPtr) {
   (void)numElements0;
   (void)streamPtr;
   dim3 block (32, 8, 1);
@@ -67,14 +67,14 @@ tensorforge::LaunchConfig launch_config_kernel_363afc6ea92d9f79(size_t numElemen
         int device, smCount, blocksPerSM;
         CHECK_RES(hipGetDevice(&device));
         CHECK_RES(hipDeviceGetAttribute(&smCount, hipDeviceAttributeMultiprocessorCount, device));
-        CHECK_RES(hipOccupancyMaxActiveBlocksPerMultiprocessor(&blocksPerSM, kernel_kernel_363afc6ea92d9f79, block.x * block.y * block.z, 0 * sizeof(float)));
+        CHECK_RES(hipOccupancyMaxActiveBlocksPerMultiprocessor(&blocksPerSM, kernel_kernel_fb98970d7f0ddd65, block.x * block.y * block.z, 0 * sizeof(float)));
         CHECK_ERR;
         int gfxMajor = 0;
         CHECK_RES(hipDeviceGetAttribute(&gfxMajor, hipDeviceAttributeComputeCapabilityMajor, device));
         if (gfxMajor >= 10 && (0 * sizeof(float)) > 0) {
           int ldsPerMP = 0, blocksNoLds = 0;
           CHECK_RES(hipDeviceGetAttribute(&ldsPerMP, hipDeviceAttributeMaxSharedMemoryPerMultiprocessor, device));
-          CHECK_RES(hipOccupancyMaxActiveBlocksPerMultiprocessor(&blocksNoLds, kernel_kernel_363afc6ea92d9f79, block.x * block.y * block.z, 0));
+          CHECK_RES(hipOccupancyMaxActiveBlocksPerMultiprocessor(&blocksNoLds, kernel_kernel_fb98970d7f0ddd65, block.x * block.y * block.z, 0));
           const int blocksByLds = static_cast<int>((2 * static_cast<std::size_t>(ldsPerMP)) / (0 * sizeof(float)));
           blocksPerSM = std::max(blocksPerSM, std::min(blocksNoLds, blocksByLds));
         }
@@ -97,20 +97,20 @@ tensorforge::LaunchConfig launch_config_kernel_363afc6ea92d9f79(size_t numElemen
   config.cooperative = false;
   return config;
 }
-void launcher_kernel_363afc6ea92d9f79(const float ** m0, size_t m0_extraOffset, const float ** m1, size_t m1_extraOffset, float ** m2, size_t m2_extraOffset, size_t numElements0, unsigned * flags0, void* streamPtr) {
-  const tensorforge::LaunchConfig config = launch_config_kernel_363afc6ea92d9f79(numElements0, streamPtr);
+void launcher_kernel_fb98970d7f0ddd65(const float ** m0, size_t m0_extraOffset, const float ** m1, size_t m1_extraOffset, float ** m2, size_t m2_extraOffset, size_t numElements0, unsigned * flags0, void* streamPtr) {
+  const tensorforge::LaunchConfig config = launch_config_kernel_fb98970d7f0ddd65(numElements0, streamPtr);
   dim3 block (config.block[0], config.block[1], config.block[2]);
   dim3 grid (config.grid[0], config.grid[1], config.grid[2]);
   static bool shmemsizeset = false;
       if (!shmemsizeset) {
-        CHECK_RES(hipFuncSetAttribute(reinterpret_cast<const void*>(&kernel_kernel_363afc6ea92d9f79), hipFuncAttributeMaxDynamicSharedMemorySize, config.sharedMemBytes));
+        CHECK_RES(hipFuncSetAttribute(reinterpret_cast<const void*>(&kernel_kernel_fb98970d7f0ddd65), hipFuncAttributeMaxDynamicSharedMemorySize, config.sharedMemBytes));
         CHECK_ERR;
         shmemsizeset = true;
       }
       
   hipStream_t stream = (streamPtr != nullptr) ? static_cast<hipStream_t>(streamPtr) : 0;
   tensorforge::SpacePtr<unsigned, tensorforge::GlobalMemspace> flags0Arg = (tensorforge::SpacePtr<unsigned, tensorforge::GlobalMemspace>)flags0;
-  hipLaunchKernelGGL(kernel_kernel_363afc6ea92d9f79, grid, block, config.sharedMemBytes, stream, m0, m0_extraOffset, m1, m1_extraOffset, m2, m2_extraOffset, numElements0, flags0Arg);
+  hipLaunchKernelGGL(kernel_kernel_fb98970d7f0ddd65, grid, block, config.sharedMemBytes, stream, m0, m0_extraOffset, m1, m1_extraOffset, m2, m2_extraOffset, numElements0, flags0Arg);
   CHECK_ERR;
 }
 
@@ -118,7 +118,7 @@ void launcher_kernel_363afc6ea92d9f79(const float ** m0, size_t m0_extraOffset, 
 // === kernel ===
 __global__ void 
 __launch_bounds__(256)
- kernel_kernel_363afc6ea92d9f79(const float ** m0, size_t m0_extraOffset, const float ** m1, size_t m1_extraOffset, float ** m2, size_t m2_extraOffset, size_t numElements0, tensorforge::SpacePtr<unsigned, tensorforge::GlobalMemspace> flags0) {
+ kernel_kernel_fb98970d7f0ddd65(const float ** m0, size_t m0_extraOffset, const float ** m1, size_t m1_extraOffset, float ** m2, size_t m2_extraOffset, size_t numElements0, tensorforge::SpacePtr<unsigned, tensorforge::GlobalMemspace> flags0) {
   extern __shared__ char totalShrMemPtr[];
    {
     // generated with TensorForge. Version: 0.0.1
@@ -197,7 +197,7 @@ __launch_bounds__(256)
           float v51_data = r4[2];
           r4[2] = (v51_data + v44_data);
           float r5[3]{};
-          // r5 = +(r3) + name: r4, type: SymbolType.Register, lead: [0]
+          // ir5 = +(r3)
           // [(0, 32), (0, 3)] []
           float ir5[3]{};
           float v55_data = r3[0];
@@ -209,6 +209,7 @@ __launch_bounds__(256)
           float v61_data = r3[2];
           float v62_data = ir5[2];
           ir5[2] = (v62_data + v61_data);
+          // r5 = ir5 + r4
           #pragma unroll
           for (int32_t v64_n0 = 0; v64_n0 < 1; ++v64_n0) {
             #pragma unroll

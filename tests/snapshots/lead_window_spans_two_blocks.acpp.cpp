@@ -1,5 +1,5 @@
 // === base name ===
-kernel_633015be33184a8e
+kernel_62060aed9842dcf2
 
 // === header ===
 #ifndef TENSORFORGE_LAUNCH_TYPES
@@ -27,9 +27,9 @@ struct LaunchConfig {
 };
 } // namespace tensorforge
 #endif
-inline constexpr tensorforge::LaunchInfo launch_info_kernel_633015be33184a8e = {{32, 1, 1}, 32, 64, 1, 1, 0, false, true, 1};
-tensorforge::LaunchConfig launch_config_kernel_633015be33184a8e(size_t numElements0, void* streamPtr = nullptr);
-void launcher_kernel_633015be33184a8e(const float ** m0, size_t m0_extraOffset, const float * m1, float ** m2, size_t m2_extraOffset, size_t numElements0, unsigned * flags0 = nullptr, void* streamPtr = nullptr);
+inline constexpr tensorforge::LaunchInfo launch_info_kernel_62060aed9842dcf2 = {{32, 1, 1}, 32, 64, 1, 1, 0, false, true, 1};
+tensorforge::LaunchConfig launch_config_kernel_62060aed9842dcf2(size_t numElements0, void* streamPtr = nullptr);
+void launcher_kernel_62060aed9842dcf2(const float ** m0, size_t m0_extraOffset, const float * m1, float ** m2, size_t m2_extraOffset, size_t numElements0, unsigned * flags0 = nullptr, void* streamPtr = nullptr);
 
 
 // === launcher ===
@@ -58,7 +58,7 @@ struct LaunchConfig {
 };
 } // namespace tensorforge
 #endif
-tensorforge::LaunchConfig launch_config_kernel_633015be33184a8e(size_t numElements0, void* streamPtr) {
+tensorforge::LaunchConfig launch_config_kernel_62060aed9842dcf2(size_t numElements0, void* streamPtr) {
   (void)numElements0;
   (void)streamPtr;
   sycl::range<3> block (32, 1, 1);
@@ -77,21 +77,21 @@ tensorforge::LaunchConfig launch_config_kernel_633015be33184a8e(size_t numElemen
   config.cooperative = false;
   return config;
 }
-void launcher_kernel_633015be33184a8e(const float ** m0, size_t m0_extraOffset, const float * m1, float ** m2, size_t m2_extraOffset, size_t numElements0, unsigned * flags0, void* streamPtr) {
-  const tensorforge::LaunchConfig config = launch_config_kernel_633015be33184a8e(numElements0, streamPtr);
+void launcher_kernel_62060aed9842dcf2(const float ** m0, size_t m0_extraOffset, const float * m1, float ** m2, size_t m2_extraOffset, size_t numElements0, unsigned * flags0, void* streamPtr) {
+  const tensorforge::LaunchConfig config = launch_config_kernel_62060aed9842dcf2(numElements0, streamPtr);
   sycl::range<3> block (config.block[0], config.block[1], config.block[2]);
   sycl::range<3> grid (config.grid[0], config.grid[1], config.grid[2]);
   if (streamPtr == nullptr) {
     throw std::invalid_argument("stream may not be null!");
   }
   sycl::queue *stream = static_cast<sycl::queue *>(streamPtr);
-  kernel_kernel_633015be33184a8e(stream, grid, block, m0, m0_extraOffset, m1, m2, m2_extraOffset, numElements0, flags0);
+  kernel_kernel_62060aed9842dcf2(stream, grid, block, m0, m0_extraOffset, m1, m2, m2_extraOffset, numElements0, flags0);
   CHECK_ERR;
 }
 
 
 // === kernel ===
-inline void kernel_kernel_633015be33184a8e(sycl::queue *stream, sycl::range<3> group_count, sycl::range<3> group_size, const float ** m0, size_t m0_extraOffset, const float * m1, float ** m2, size_t m2_extraOffset, size_t numElements0, unsigned * flags0) {
+inline void kernel_kernel_62060aed9842dcf2(sycl::queue *stream, sycl::range<3> group_count, sycl::range<3> group_size, const float ** m0, size_t m0_extraOffset, const float * m1, float ** m2, size_t m2_extraOffset, size_t numElements0, unsigned * flags0) {
   stream->submit([&](sycl::handler &cgh) {
     sycl::accessor<float, 1, sycl::access::mode::read_write, sycl::access::target::local> totalShrMem (0, cgh); {
       cgh.parallel_for(sycl::nd_range<3>{{group_count.get(2) * group_size.get(2), group_count.get(1) * group_size.get(1), group_count.get(0) * group_size.get(0)}, {group_size.get(2), group_size.get(1), group_size.get(0)}}, [=](sycl::nd_item<3> item)  {
@@ -509,7 +509,7 @@ inline void kernel_kernel_633015be33184a8e(sycl::queue *stream, sycl::range<3> g
               r1[155] = (v835_data + (v807_data * v83_data));
               // wait(r2 = load{g>r}(glb_m2););
               float r3[12]{};
-              // r3 = +(r1) + name: r2, type: SymbolType.Register, lead: [0]
+              // ir3 = +(r1)
               // [(20, 35), (0, 1), (0, 6)] []
               float ir3[12]{};
               if (v26_g) {
@@ -552,6 +552,7 @@ inline void kernel_kernel_633015be33184a8e(sycl::queue *stream, sycl::range<3> g
                 float v873_data = ir3[11];
                 ir3[11] = (v873_data + v872_data);
               }
+              // r3 = ir3 + r2
               if (v26_g) {
                 #pragma unroll
                 for (int32_t v875_n1 = 0; v875_n1 < 1; ++v875_n1) {

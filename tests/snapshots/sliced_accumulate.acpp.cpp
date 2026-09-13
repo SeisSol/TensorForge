@@ -1,5 +1,5 @@
 // === base name ===
-kernel_844a8b65e9e596a8
+kernel_d01852b19f76895f
 
 // === header ===
 #ifndef TENSORFORGE_LAUNCH_TYPES
@@ -27,9 +27,9 @@ struct LaunchConfig {
 };
 } // namespace tensorforge
 #endif
-inline constexpr tensorforge::LaunchInfo launch_info_kernel_844a8b65e9e596a8 = {{32, 1, 1}, 32, 32, 1, 1, 0, false, true, 1};
-tensorforge::LaunchConfig launch_config_kernel_844a8b65e9e596a8(size_t numElements0, void* streamPtr = nullptr);
-void launcher_kernel_844a8b65e9e596a8(float * m0, size_t m0_extraOffset, const float * m1, size_t m1_extraOffset, const float * m2, size_t m2_extraOffset, const float * m3, size_t m3_extraOffset, const float * m4, size_t m4_extraOffset, const float * m5, size_t m5_extraOffset, const float * m6, size_t m6_extraOffset, size_t numElements0, unsigned * flags0 = nullptr, void* streamPtr = nullptr);
+inline constexpr tensorforge::LaunchInfo launch_info_kernel_d01852b19f76895f = {{32, 1, 1}, 32, 32, 1, 1, 0, false, true, 1};
+tensorforge::LaunchConfig launch_config_kernel_d01852b19f76895f(size_t numElements0, void* streamPtr = nullptr);
+void launcher_kernel_d01852b19f76895f(float * m0, size_t m0_extraOffset, const float * m1, size_t m1_extraOffset, const float * m2, size_t m2_extraOffset, const float * m3, size_t m3_extraOffset, const float * m4, size_t m4_extraOffset, const float * m5, size_t m5_extraOffset, const float * m6, size_t m6_extraOffset, size_t numElements0, unsigned * flags0 = nullptr, void* streamPtr = nullptr);
 
 
 // === launcher ===
@@ -58,7 +58,7 @@ struct LaunchConfig {
 };
 } // namespace tensorforge
 #endif
-tensorforge::LaunchConfig launch_config_kernel_844a8b65e9e596a8(size_t numElements0, void* streamPtr) {
+tensorforge::LaunchConfig launch_config_kernel_d01852b19f76895f(size_t numElements0, void* streamPtr) {
   (void)numElements0;
   (void)streamPtr;
   sycl::range<3> block (32, 1, 1);
@@ -77,21 +77,21 @@ tensorforge::LaunchConfig launch_config_kernel_844a8b65e9e596a8(size_t numElemen
   config.cooperative = false;
   return config;
 }
-void launcher_kernel_844a8b65e9e596a8(float * m0, size_t m0_extraOffset, const float * m1, size_t m1_extraOffset, const float * m2, size_t m2_extraOffset, const float * m3, size_t m3_extraOffset, const float * m4, size_t m4_extraOffset, const float * m5, size_t m5_extraOffset, const float * m6, size_t m6_extraOffset, size_t numElements0, unsigned * flags0, void* streamPtr) {
-  const tensorforge::LaunchConfig config = launch_config_kernel_844a8b65e9e596a8(numElements0, streamPtr);
+void launcher_kernel_d01852b19f76895f(float * m0, size_t m0_extraOffset, const float * m1, size_t m1_extraOffset, const float * m2, size_t m2_extraOffset, const float * m3, size_t m3_extraOffset, const float * m4, size_t m4_extraOffset, const float * m5, size_t m5_extraOffset, const float * m6, size_t m6_extraOffset, size_t numElements0, unsigned * flags0, void* streamPtr) {
+  const tensorforge::LaunchConfig config = launch_config_kernel_d01852b19f76895f(numElements0, streamPtr);
   sycl::range<3> block (config.block[0], config.block[1], config.block[2]);
   sycl::range<3> grid (config.grid[0], config.grid[1], config.grid[2]);
   if (streamPtr == nullptr) {
     throw std::invalid_argument("stream may not be null!");
   }
   sycl::queue *stream = static_cast<sycl::queue *>(streamPtr);
-  kernel_kernel_844a8b65e9e596a8(stream, grid, block, m0, m0_extraOffset, m1, m1_extraOffset, m2, m2_extraOffset, m3, m3_extraOffset, m4, m4_extraOffset, m5, m5_extraOffset, m6, m6_extraOffset, numElements0, flags0);
+  kernel_kernel_d01852b19f76895f(stream, grid, block, m0, m0_extraOffset, m1, m1_extraOffset, m2, m2_extraOffset, m3, m3_extraOffset, m4, m4_extraOffset, m5, m5_extraOffset, m6, m6_extraOffset, numElements0, flags0);
   CHECK_ERR;
 }
 
 
 // === kernel ===
-inline void kernel_kernel_844a8b65e9e596a8(sycl::queue *stream, sycl::range<3> group_count, sycl::range<3> group_size, float * m0, size_t m0_extraOffset, const float * m1, size_t m1_extraOffset, const float * m2, size_t m2_extraOffset, const float * m3, size_t m3_extraOffset, const float * m4, size_t m4_extraOffset, const float * m5, size_t m5_extraOffset, const float * m6, size_t m6_extraOffset, size_t numElements0, unsigned * flags0) {
+inline void kernel_kernel_d01852b19f76895f(sycl::queue *stream, sycl::range<3> group_count, sycl::range<3> group_size, float * m0, size_t m0_extraOffset, const float * m1, size_t m1_extraOffset, const float * m2, size_t m2_extraOffset, const float * m3, size_t m3_extraOffset, const float * m4, size_t m4_extraOffset, const float * m5, size_t m5_extraOffset, const float * m6, size_t m6_extraOffset, size_t numElements0, unsigned * flags0) {
   stream->submit([&](sycl::handler &cgh) {
     sycl::accessor<float, 1, sycl::access::mode::read_write, sycl::access::target::local> totalShrMem (0, cgh); {
       cgh.parallel_for(sycl::nd_range<3>{{group_count.get(2) * group_size.get(2), group_count.get(1) * group_size.get(1), group_count.get(0) * group_size.get(0)}, {group_size.get(2), group_size.get(1), group_size.get(0)}}, [=](sycl::nd_item<3> item)  {
@@ -163,7 +163,7 @@ inline void kernel_kernel_844a8b65e9e596a8(sycl::queue *stream, sycl::range<3> g
               }
               // wait(r1 = load{g>r}(glb_m2););
               float r2[16]{};
-              // r2 = +(r0 * r1) + None
+              // ir2 = +(r0 * r1)
               // [(0, 32), (0, 16)] [(0, 12)]
               float ir2[16]{};
               float v48_data = r0[0];
@@ -578,6 +578,7 @@ inline void kernel_kernel_844a8b65e9e596a8(sycl::queue *stream, sycl::range<3> g
               ir2[14] = (v1192_data + (v1104_data * (sycl::select_from_group(item.get_sub_group(), v133_data, (item.get_sub_group().get_local_linear_id() / 32) * 32 + (11)))));
               float v1198_data = ir2[15];
               ir2[15] = (v1198_data + (v1104_data * (sycl::select_from_group(item.get_sub_group(), v139_data, (item.get_sub_group().get_local_linear_id() / 32) * 32 + (11)))));
+              // r2 = ir2
               #pragma unroll
               for (int32_t v1200_n0 = 0; v1200_n0 < 1; ++v1200_n0) {
                 #pragma unroll
@@ -632,7 +633,7 @@ inline void kernel_kernel_844a8b65e9e596a8(sycl::queue *stream, sycl::range<3> g
               }
               // wait(r5 = load{g>r}(glb_m0););
               float r6[8]{};
-              // r6 = +(r3 * r4) + name: r5, type: SymbolType.Register, lead: [0]
+              // ir6 = +(r3 * r4)
               // [(0, 32), (0, 8)] [(0, 12)]
               float ir6[8]{};
               float v1240_data = r3[0];
@@ -847,6 +848,7 @@ inline void kernel_kernel_844a8b65e9e596a8(sycl::queue *stream, sycl::range<3> g
               ir6[6] = (v1808_data + (v1768_data * (sycl::select_from_group(item.get_sub_group(), v1277_data, (item.get_sub_group().get_local_linear_id() / 32) * 32 + (11)))));
               float v1814_data = ir6[7];
               ir6[7] = (v1814_data + (v1768_data * (sycl::select_from_group(item.get_sub_group(), v1283_data, (item.get_sub_group().get_local_linear_id() / 32) * 32 + (11)))));
+              // r6 = ir6 + r5
               #pragma unroll
               for (int32_t v1816_n0 = 0; v1816_n0 < 1; ++v1816_n0) {
                 #pragma unroll
@@ -891,7 +893,7 @@ inline void kernel_kernel_844a8b65e9e596a8(sycl::queue *stream, sycl::range<3> g
               // wait(r8 = load{g>r}(glb_m6););
               // wait(r9 = load{g>r}(glb_m0););
               float r10[8]{};
-              // r10 = +(r7 * r8) + name: r9, type: SymbolType.Register, lead: [0]
+              // ir10 = +(r7 * r8)
               // [(0, 32), (0, 8)] [(0, 12)]
               float ir10[8]{};
               float v1850_data = r7[0];
@@ -1106,6 +1108,7 @@ inline void kernel_kernel_844a8b65e9e596a8(sycl::queue *stream, sycl::range<3> g
               ir10[6] = (v2418_data + (v2378_data * (sycl::select_from_group(item.get_sub_group(), v1887_data, (item.get_sub_group().get_local_linear_id() / 32) * 32 + (11)))));
               float v2424_data = ir10[7];
               ir10[7] = (v2424_data + (v2378_data * (sycl::select_from_group(item.get_sub_group(), v1893_data, (item.get_sub_group().get_local_linear_id() / 32) * 32 + (11)))));
+              // r10 = ir10 + r9
               #pragma unroll
               for (int32_t v2426_n0 = 0; v2426_n0 < 1; ++v2426_n0) {
                 #pragma unroll
