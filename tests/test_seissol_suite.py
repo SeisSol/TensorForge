@@ -160,6 +160,50 @@ def test_a_merged_run_stores_where_the_written_out_one_does():
     assert offsets[True] == offsets[False]
 
 
+def test_a_table_over_constants_holds_their_numbers():
+    """The damage step merges runs that differ only in scalar constants.
+    The kernel reads those as literals and declares no name for them, so a
+    table naming them (`glb_m116`) did not compile; the literal was then read
+    off a zero-dimensional array with `[0]` and the merge fell back."""
+    import re
+
+    from tensorforge.generators.generator import MergeFallbackWarning
+
+    system = 'damage-nonlinearck'
+    gen = Generator(_read(system, f'{system}-o4-s', 'gpu_damageStep'),
+                    Context(arch='sm_86', backend='cuda', fp_type=Datatype.F32))
+    with contextlib.redirect_stdout(io.StringIO()), warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        warnings.simplefilter('error', MergeFallbackWarning)
+        gen.generate()
+    src = gen.get_kernel()
+    tables = [line for line in src.splitlines()
+              if re.search(r'const float v\d+Table = ', line)]
+    assert tables, 'no table over scalars'
+    declared = set(re.findall(r'\b(glb_m\d+) = ', src))
+    for line in tables:
+        named = set(re.findall(r'\bglb_m\d+\b', line))
+        assert named <= declared, sorted(named - declared)
+
+
+def test_a_multiplication_that_does_not_fit_is_refused():
+    """At order 6 in double precision one multiplication of the damage step
+    needs more shared memory than a block has.  The block was then sized to
+    hold no multiplication at all -- height 0, the window never declared --
+    and the source went out as if nothing had happened."""
+    from tensorforge.common.context import Options
+    from tensorforge.common.exceptions import GenerationError
+
+    system = 'damage-nonlinearck'
+    gen = Generator(_read(system, f'{system}-o6-d', 'gpu_damageStep'),
+                    Context(arch='sm_86', backend='cuda', fp_type=Datatype.F64,
+                            options=Options(merge_variants=False)))
+    with contextlib.redirect_stdout(io.StringIO()), warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        with pytest.raises(GenerationError, match='shared memory'):
+            gen.generate()
+
+
 def _carried(system, config, kernel):
     from tensorforge.backend.instructions.ptr_manip import VariantLoop
     from tensorforge.generators.generator import MergeFallbackWarning

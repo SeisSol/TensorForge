@@ -581,7 +581,10 @@ class DeclareOperandTable(AbstractInstruction):
     """
     if member.stype == SymbolType.Data:
       spelling = member.obj.datatype or datatype
-      return spelling.literal(member.obj.get_values()[0])
+      values = member.obj.get_values()
+      # A scalar's numbers are a zero-dimensional array: the value itself.
+      value = values.item() if getattr(values, 'ndim', 1) == 0 else values[0]
+      return spelling.literal(value)
     spaced = '<' in self._vm.get_lexic().pointer_type(
         f'{datatype}', MemSpace.GLOBAL, readonly=True, restrict=True, const=True)
     return (f'({self._qual()}{datatype} {stars}){member.name}'
