@@ -1771,9 +1771,13 @@ class Symbol:
 
           value = self.obj.linear_index(runIdx)
           if value is not None:
+            # No lead index: one entry at a constant address, the same in
+            # every lane -- replicated, which is what `layout_of` answers for
+            # a thread-independent index.  `None` said *unknown*, and the
+            # ESIMD emitter cannot type an unknown value.
             wrote = writer.load(self, value,
                              type_=ScalarType(self.get_fptype()), hint='data',
-                             layout=None)
+                             layout=SCALAR_LAYOUT)
             # writer.access_stmt(f'{variable} = {self.name}[{value}];', self, Effect.READ)
         else:
           # SIMD block-aligned sparsity
@@ -1868,6 +1872,17 @@ class Symbol:
                            else writer.const(0.0, ScalarType(self.get_fptype())))
                   wrote = writer.op('select', ScalarType(self.get_fptype()),
                                     cond, local_load, other, hint='masked')
+                elif getattr(writer, '_explicit_simd', lambda: False)():
+                  # Under explicit SIMD the condition is a lane mask, and there
+                  # is no branch on a mask: the if/else below left a result the
+                  # emitter had no layout for. A predicated load is the masked
+                  # read itself -- a lane the mask leaves out issues no access,
+                  # so the bounds that ruled out the select above do not arise.
+                  other = (wrote if wrote is not None
+                           else writer.const(0.0, ScalarType(self.get_fptype())))
+                  wrote = writer.load(self, validx, type_=ScalarType(self.get_fptype()), hint='data',
+                                      predicate=cond, other=other,
+                                      layout=layout_of(index, self.num_threads))
                 else:
                   sel = writer.if_else(cond, (ScalarType(self.get_fptype()),))
 

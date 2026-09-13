@@ -36,6 +36,7 @@ from tensorforge.backend.section_plan import SectionPlan
 from tensorforge.backend.symbol import Symbol, SymbolView
 from tensorforge.backend.temporaries import Temporaries
 from tensorforge.common.context import Context
+from tensorforge.common.exceptions import GenerationError
 from tensorforge.generators.descriptions import OperationDescription
 
 
@@ -150,6 +151,15 @@ class OperationBuilder(AbstractBuilder):
         dest = descr.writes()
         if dest is None or self._scopes.get_symbol(dest.tensor) is not None:
             return None
+        if self._plan.zero_first(dest.tensor):
+            # The deferred writeback below stores the register image alone;
+            # the zeros a later use needs would never be written.
+            raise GenerationError(
+                f'{getattr(dest.tensor, "alias", None) or dest.tensor}: a '
+                f'later operation uses cells of this temporary that nothing '
+                f'defines before it, which are zero, and its first write is '
+                f'a {type(descr).__name__} -- only the contraction\'s store '
+                f'clears a buffer so far (`SectionPlan.zero_first`).')
         home = self._temporaries.shared_symbol(dest.tensor)
         registers, alloc = self._temporaries.register_array(dest.bbox, lead_pos)
         self._instructions.append(alloc)

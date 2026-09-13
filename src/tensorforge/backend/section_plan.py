@@ -10,8 +10,8 @@ all three have to be answered before the first instruction is emitted:
   the one every later operation on that tensor inherits;
 * whether a destination is assembled from several partial writes, which decides
   whether its value may stay in registers between operations;
-* whether a temporary is read anywhere the section never writes, which is an
-  undefined summand and is refused rather than emitted.
+* whether a temporary is used anywhere no earlier write defined it, which is
+  zero and has its buffer cleared by the first store (`zero_first`).
 
 None of that is specific to contraction.  It is a function of the descriptor
 list and of which tensors already have a symbol, so it lives here and is handed
@@ -82,6 +82,11 @@ class SectionPlan:
         #: reasons -- see `written_in_slices`.
         self._guard_reads = set()
         self._guarded_writes = set()
+        #: id(tensor) -> the effective boxes its writes have defined so far,
+        #: in section order; and the temporaries an operation uses where no
+        #: earlier write defined them -- see `zero_first`.
+        self._defined = {}
+        self._zero_first = set()
 
         # Expanded rather than walked: a descriptor that stands for several
         # operations is asked for them, so a section's geometry is the same
@@ -94,6 +99,7 @@ class SectionPlan:
                 self._add_reads(descr, scopes)
                 tensor = self._add_writes(descr)
                 self._add_effective(descr, tensor)
+                self._track_definitions(descr, tensor)
 
         self._check_initialised()
 
@@ -149,17 +155,53 @@ class SectionPlan:
         if tensor is not None:
             self._eff_writes.setdefault(id(tensor), []).append(eff_write)
 
+    def _track_definitions(self, descr, tensor) -> None:
+        """Note every use of a temporary that no earlier write defined.
+
+        In section order, which the union of all writes cannot see: an
+        accumulation onto cells an earlier assignment left out adds to
+        whatever the buffer held, and it counts as a write all the same.
+        yateto means zero there -- an assignment defines its whole
+        destination, the window with values and the rest with zeros
+        (`initializeWithZero`) -- and so does a read of cells no operation
+        writes.  A temporary with such a use has its buffer cleared by the
+        store that first writes it (`zero_first`).
+
+        The first write defines what it writes, accumulating or not: there is
+        no earlier value for it to add to.
+        """
+        eff = descr.effective_boxes()
+        if eff is None:
+            return
+        reads, write = eff
+        for t, box in reads.items():
+            if getattr(t, 'is_tmp', False) and self._undefined(id(t), box):
+                self._zero_first.add(id(t))
+        if tensor is None or not getattr(tensor, 'is_tmp', False):
+            return
+        key = id(tensor)
+        if (key in self._defined and getattr(descr, 'add', False)
+                and self._undefined(key, write)):
+            self._zero_first.add(key)
+        self._defined.setdefault(key, []).append(write)
+
+    def _undefined(self, key, box) -> bool:
+        defined = self._defined.get(key)
+        return not defined or self._uncovered_by(defined, box) is not None
+
     # -- the initialisation check ---------------------------------------- #
 
     def _uncovered(self, key, read):
-        """The first sub-box of `read` that no write covers, or None.
+        return self._uncovered_by(self._eff_writes.get(key, []), read)
+
+    def _uncovered_by(self, boxes, read):
+        """The first sub-box of `read` that none of `boxes` covers, or None.
 
         Coordinate compression: cut every dimension at all the box boundaries
         that fall inside `read`.  Each resulting cell then lies either wholly
         inside or wholly outside every write box, so "is this cell covered" is
         an exact test and the whole check is exact rather than conservative.
         """
-        boxes = self._eff_writes.get(key, [])
         rank = read.rank()
         if rank == 0 or not boxes or any(b.rank() != rank for b in boxes):
             return None
@@ -191,10 +233,12 @@ class SectionPlan:
         contain.  Global inputs and outputs are exempt: an input is legitimately
         never written, and an output may hold a value the caller put there.
 
-        Filling the gap with zeros is the obvious other answer, and the right
-        one once a declaration instruction owns the buffer.  Until then this
-        refuses, because a silently undefined summand is exactly the failure
-        mode that took the longest to find in this area.
+        Cells some operation reads but none writes are zero, and the store that
+        first writes the temporary clears its buffer for them (`zero_first`);
+        that store owns the buffer, since nothing touched it before.  A
+        temporary no operation writes at all has no such store, and is refused.
+        The buffer of a cleared temporary spans what is read as well as what is
+        written, so the zeros have somewhere to be.
         """
         for tensor, read in self._eff_reads.items():
             if not getattr(tensor, 'is_tmp', False):
@@ -205,13 +249,17 @@ class SectionPlan:
                     f'{getattr(tensor, "alias", None) or tensor}: temporary is '
                     f'read over {read} but never written')
             gap = self._uncovered(key, read)
-            if gap is not None:
+            if gap is not None and key not in self._zero_first:
                 raise GenerationError(
                     f'{getattr(tensor, "alias", None) or tensor}: temporary is '
                     f'read over {read} but {gap} is never written by any '
-                    f'operation (writes: {self._eff_writes[key]}). '
-                    f'Zero-filling the gap needs a declaration instruction '
-                    f'that owns the buffer.')
+                    f'operation (writes: {self._eff_writes[key]}), and the '
+                    f'section order did not see the read')
+        for tensor, read in self._eff_reads.items():
+            if id(tensor) in self._zero_first:
+                self._dest_union[id(tensor)] = _hull(
+                    self._dest_union.get(id(tensor)),
+                    self._read_union.get(id(tensor), read))
 
     # -- queries --------------------------------------------------------- #
 
@@ -226,6 +274,14 @@ class SectionPlan:
     def dest_union(self, tensor) -> Optional[BoundingBox]:
         """Everything this tensor's writes cover, declared."""
         return self._dest_union.get(id(tensor))
+
+    def zero_first(self, tensor) -> bool:
+        """Does the store that first writes this temporary clear its buffer?
+
+        Where some operation reads cells, or accumulates onto cells, that no
+        earlier write defined -- see `_track_definitions`.
+        """
+        return id(tensor) in self._zero_first
 
     def written_in_slices(self, tensor) -> bool:
         """Does this tensor get assembled from several writes?
@@ -268,6 +324,9 @@ class SectionPlan:
         # records only that something wrote it.
         key = id(tensor)
         if key in self._guard_reads or key in self._guarded_writes:
+            return True
+        # A cleared buffer holds zeros no register image does.
+        if key in self._zero_first:
             return True
         boxes = (self._eff_writes.get(id(tensor))
                  or self._dest_boxes.get(id(tensor), []))

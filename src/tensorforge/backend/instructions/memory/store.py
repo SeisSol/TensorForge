@@ -89,7 +89,8 @@ class StoreRegToShr(AbstractShrMemWrite):
                num_threads: int,
                lead_width: int = 1,
                dest_bbox=None,
-               dest_offset=None):
+               dest_offset=None,
+               clear: bool = False):
     super(StoreRegToShr, self).__init__(context)
 
     if src.stype != SymbolType.Register:
@@ -122,6 +123,12 @@ class StoreRegToShr(AbstractShrMemWrite):
     self._partial = (list(src.data_view.get_bbox().sizes())
                      != list(buffer_bbox.sizes())
                      or any(o != 0 for o in self._dest_offset))
+    #: Whether this store also zeroes the rest of the buffer -- see
+    #: `SectionPlan.zero_first`.  It is the temporary's first write then, and
+    #: it defines the whole buffer rather than a slice of it.
+    self._clear = clear
+    if clear:
+      self._partial = False
     dest.data_view = DataView(buffer_bbox.sizes(),
                               permute=None,
                               bbox=buffer_bbox)
@@ -151,6 +158,8 @@ class StoreRegToShr(AbstractShrMemWrite):
   def gen_code_inner(self, writer: Writer) -> None:
     dest_view = self._dest.data_view
     src_bbox = self._src.data_view.get_bbox()
+    if getattr(self, '_clear', False):
+      self._clear_rest(writer, src_bbox)
 
     loops = []
     # The width the compute instruction used, not 1.  The register image is
@@ -173,11 +182,45 @@ class StoreRegToShr(AbstractShrMemWrite):
 
     write_loops(self._context, writer, loops, inner)
 
+  def _clear_rest(self, writer: Writer, src_bbox) -> None:
+    """Zero every cell of the buffer this store does not write itself.
+
+    The complement only, as disjoint boxes, and never a cell the store then
+    writes: the two nests map a row to a lane each in their own way -- the
+    data one by the compute's width -- and a cell written twice by two lanes
+    has no order between them.  What a later operation reads from here, the
+    section's barriers order, as they do for every shared write.
+    """
+    buf = self._dest.data_view.get_bbox()
+    own_lo = [l + o for l, o in zip(src_bbox.lower(), self._dest_offset)]
+    own_hi = [u + o for u, o in zip(src_bbox.upper(), self._dest_offset)]
+    lo, hi = list(buf.lower()), list(buf.upper())
+    boxes = []
+    for d in range(buf.rank()):
+      a = min(max(lo[d], own_lo[d]), hi[d])
+      b = max(min(hi[d], own_hi[d]), a)
+      if lo[d] < a:
+        boxes.append((lo[:d] + [lo[d]] + lo[d + 1:], hi[:d] + [a] + hi[d + 1:]))
+      if b < hi[d]:
+        boxes.append((lo[:d] + [b] + lo[d + 1:], hi[:d] + [hi[d]] + hi[d + 1:]))
+      lo[d], hi[d] = a, b
+      if a == b:
+        break
+
+    def zero(indices):
+      self._dest.store(writer, self._context, writer.const(0), indices, False)
+
+    for blo, bhi in boxes:
+      loops = [LeadLoop('z0', blo[0], bhi[0], self._num_threads, 1)]
+      loops += [Loop(f'z{i}', blo[i], bhi[i], 1) for i in range(1, len(blo))]
+      write_loops(self._context, writer, loops, zero)
+
   def get_dest(self) -> Symbol:
     return self._dest
 
   def __str__(self) -> str:
-    return f'{self._dest.name} = store{{r>s}}({self._shr_mem.name}, {self._src.name});'
+    clear = ', clear' if getattr(self, '_clear', False) else ''
+    return f'{self._dest.name} = store{{r>s{clear}}}({self._shr_mem.name}, {self._src.name});'
 
 
 class StoreRegToGlb(AbstractInstruction):

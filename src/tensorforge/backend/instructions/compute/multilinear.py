@@ -1014,6 +1014,15 @@ class MultilinearInstruction(ComputeInstruction):
 
         plan = self._plan()
 
+        # Every vendor path is written for `C[m,n] += A[m,k] B[k,n]`: the lead
+        # index on A and on the destination, B read across the lanes by
+        # `(k, n)`.  A second operand that carries the lead -- the broadcast
+        # operand first, `t[i,j] = s * M[i,j]` -- is read per lane instead, and
+        # the sparse test and the broadcast reads take its lead index for a
+        # number.  The nest computes it.
+        if len(self._ops) > 1 and 'n0' in self._opdim_to_nks[1]:
+            return False
+
         if plan[0].strategy is not Strategy.GENERIC:
             K = 1
             N = 1

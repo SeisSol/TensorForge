@@ -180,25 +180,6 @@ class DescriptionReader(Reader):
   #: which the elementwise one does not.
   AS_MULTILINEAR = {('elementwise', 'Mul'), ('reduction', 'Add')}
 
-  def _is_phantom(self, ref):
-    """Whether this reference names a rank-0 tensor carried as extent one.
-
-    Its one axis is the destination's axis 0, which is what every rank-0
-    tensor in the operation shares -- there is only ever one of them.
-    """
-    if len(ref['indices']) > 0:
-      return False
-    tensor = self._cache.get(f'{self._prefix}{ref["name"]}')
-    return tensor is not None and tensor.addressing != Addressing.SCALAR
-
-  def _fixup_phantom(self, args, target, permute):
-    """Give a rank-0 operand the axis its extent-one shape now has."""
-    for i, arg in enumerate(args):
-      if self._is_phantom(arg) and len(target[i]) == 0:
-        target[i] = [0]
-        permute[i] = [0]
-    return target, permute
-
   def _linear_layout(self, result, args):
     """Where each operand's axes land, in the numbering a multilinear uses.
 
@@ -217,7 +198,7 @@ class DescriptionReader(Reader):
           contracted -= 1
     target = [[axis[index] for index in arg['indices']] for arg in args]
     permute = [list(range(len(arg['indices']))) for arg in args]
-    return self._fixup_phantom(args, target, permute)
+    return target, permute
 
   @staticmethod
   def _accumulates(add):
@@ -375,9 +356,6 @@ class DescriptionReader(Reader):
     # empty mask means a destination without axes is accumulated onto, and
     # `bool([])` says the opposite.
     add = linear.get('add', False)
-    if isinstance(add, list) and self._is_phantom(d['result']):
-      # the axis a rank-0 destination is carried as is accumulated onto too
-      add = [0]
     accumulates = add is not False and add is not None
     # the guard covers every descriptor this operation turns into, the
     # scaling that may follow included
@@ -387,9 +365,8 @@ class DescriptionReader(Reader):
       # the scale is already one of `args` whenever it is not one -- yateto
       # appends it as a rank-0 operand with an empty target -- so `alpha`
       # here is the same value a second time and is deliberately unused.
-      target, permute = self._fixup_phantom(d['args'],
-                                           [list(t) for t in d['target']],
-                                           [list(p) for p in d['permute']])
+      target = [list(t) for t in d['target']]
+      permute = [list(p) for p in d['permute']]
       self._descr_list.append(MultilinearDescr(result,
                                                args,
                                                target,
@@ -569,14 +546,6 @@ class DescriptionReader(Reader):
         f'{addressingStr!r} with residence {residence}, which this frontend '
         f'has no reading for.')
 
-    if addressing != Addressing.SCALAR and len(shape) == 0:
-      # A tensor without axes still holds one element per batch entry, and
-      # every path below indexes a destination by at least one axis. Carrying
-      # it as an axis of extent one is the representation `ReductionDescr`
-      # already allows for a full reduction. A scalar is different: it is
-      # passed by value and is never indexed.
-      shape = [1]
-
     if storagetype == 'full':
       spp = FullSPP(shape)
       bbox = None
@@ -601,7 +570,10 @@ class DescriptionReader(Reader):
                                values, datatype, d.get('alignment', 0),
                                residence=residence)
 
-    self._tensor_list[name] = TensorData(datatype_new, shape, spp, values=values)
+    # as the tensor carries it: an axisless one with its axis of extent one
+    carried = self._cache[name]
+    self._tensor_list[name] = TensorData(datatype_new, list(carried.shape),
+                                         carried.spp, values=values)
 
   @staticmethod
   def _values(values):

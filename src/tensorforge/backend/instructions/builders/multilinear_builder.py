@@ -831,6 +831,8 @@ class MultilinearBuilder(OperationBuilder):
 
       dest_symbol = self._temporaries.shared_symbol(self._dest_obj.tensor)
       if self._plan.written_in_slices(self._dest_obj.tensor):
+        # the first write of the temporary: where the plan found a use of
+        # cells nothing defined before it, this store clears the buffer
         self._instructions.append(StoreRegToShr(context=self._context,
                                                 src=self._temp_regs,
                                                 dest=dest_symbol,
@@ -838,7 +840,8 @@ class MultilinearBuilder(OperationBuilder):
                                                 num_threads=self._num_threads,
                                                 lead_width=self._lead_width,
                                                 dest_bbox=self._plan.dest_union(self._dest_obj.tensor),
-                                                dest_offset=self._store_offset()))
+                                                dest_offset=self._store_offset(),
+                                                clear=self._plan.zero_first(self._dest_obj.tensor)))
         return
       self._residency.record_writeback(
           dest_symbol.name, self._temp_regs, dest_symbol,

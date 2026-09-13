@@ -208,21 +208,79 @@ def test_a_writer_narrower_than_the_read_is_written_in_slices():
 # the initialisation check
 # ----------------------------------------------------------------------
 
-def test_a_temporary_read_where_nothing_writes_is_refused():
-    """`tmp[:, 4:8]` is read and only `tmp[:, 0:4]` is written."""
+def test_a_temporary_read_where_nothing_writes_is_cleared_first():
+    """`tmp[:, 4:8]` is read and only `tmp[:, 0:4]` is written.
+
+    Those cells are zero -- a yateto assignment defines its whole destination,
+    the window with values and the rest with zeros -- and the store that first
+    writes `tmp` clears the buffer for them.  The buffer spans the read, so
+    the zeros have somewhere to be.
+    """
     a = _tensor("A")
     b = _tensor("B", shape=(N, 4))
     tmp = _tensor("TMP", tmp=True)
     out = _tensor("OUT")
     scopes = _scopes(a, b, out)
-    with pytest.raises(GenerationError, match="never written by any operation"):
-        SectionPlan([
-            GemmDescr(False, False, a=SubTensor(a), b=SubTensor(b),
-                      c=_slice(tmp, [0, 0], [N, 4], [0, 0], sliced=True)),
-            GemmDescr(False, False, a=_slice(tmp, [0, 0], [N, 4], [0, 4]),
-                      b=SubTensor(a, BoundingBox([0, 0], [4, N])),
-                      c=SubTensor(out)),
-        ], scopes)
+    plan = SectionPlan([
+        GemmDescr(False, False, a=SubTensor(a), b=SubTensor(b),
+                  c=_slice(tmp, [0, 0], [N, 4], [0, 0], sliced=True)),
+        GemmDescr(False, False, a=_slice(tmp, [0, 0], [N, 4], [0, 4]),
+                  b=SubTensor(a, BoundingBox([0, 0], [4, N])),
+                  c=SubTensor(out)),
+    ], scopes)
+    assert plan.zero_first(tmp)
+    assert plan.written_in_slices(tmp)
+    union = plan.dest_union(tmp)
+    assert (list(union.lower()), list(union.upper())) == ([0, 0], [N, 8])
+
+
+def test_an_accumulation_onto_cells_nothing_defined_clears_first():
+    """`tmp[:, 0:4] = A B`, then `tmp[:, 4:8] += A B`, then `tmp` read whole.
+
+    The writes together cover the read, and the second one still adds to
+    whatever the buffer held.  The SeisSol damage kernel's flux has this
+    shape, with yateto meaning zero under the second term.
+    """
+    a = _tensor("A")
+    b = _tensor("B")
+    tmp = _tensor("TMP", tmp=True)
+    out = _tensor("OUT")
+    scopes = _scopes(a, b, out)
+    plan = SectionPlan([
+        GemmDescr(False, False, a=SubTensor(a),
+                  b=SubTensor(b, BoundingBox([0, 0], [N, 4])),
+                  c=_slice(tmp, [0, 0], [N, 4])),
+        GemmDescr(False, False, a=SubTensor(a),
+                  b=SubTensor(b, BoundingBox([0, 4], [N, N])),
+                  c=_slice(tmp, [0, 4], [N, N]), beta=1.0),
+        GemmDescr(False, False, a=SubTensor(tmp), b=SubTensor(a),
+                  c=SubTensor(out)),
+    ], scopes)
+    assert plan.zero_first(tmp)
+
+
+def test_an_accumulation_chain_over_one_box_is_not_cleared():
+    """`d = a1 b1` then `d += a2 b2`, both over all of `d`.
+
+    What a yateto ADER derivative looks like: every cell is defined before
+    anything adds to it, so there is nothing to clear, and the deferral that
+    keeps the chain in registers stays.
+    """
+    a = _tensor("A")
+    b = _tensor("B")
+    tmp = _tensor("TMP", tmp=True)
+    out = _tensor("OUT")
+    scopes = _scopes(a, b, out)
+    plan = SectionPlan([
+        GemmDescr(False, False, a=SubTensor(a), b=SubTensor(b),
+                  c=SubTensor(tmp)),
+        GemmDescr(False, False, a=SubTensor(b), b=SubTensor(a),
+                  c=SubTensor(tmp), beta=1.0),
+        GemmDescr(False, False, a=SubTensor(tmp), b=SubTensor(a),
+                  c=SubTensor(out)),
+    ], scopes)
+    assert not plan.zero_first(tmp)
+    assert not plan.written_in_slices(tmp)
 
 
 def test_a_temporary_that_is_never_written_at_all_is_refused():
@@ -284,12 +342,12 @@ def test_an_elementwise_read_counts_toward_coverage():
     tmp = _tensor("TMP", tmp=True)
     c = _tensor("C")
     scopes = _scopes(a, b, c)
-    with pytest.raises(GenerationError, match="never written by any operation"):
-        SectionPlan([
-            GemmDescr(False, False, a=SubTensor(a), b=SubTensor(b),
-                      c=_slice(tmp, [0, 0], [N, 4], [0, 0], sliced=True)),
-            ew.abs(SubTensor(c), SubTensor(tmp)),
-        ], scopes)
+    plan = SectionPlan([
+        GemmDescr(False, False, a=SubTensor(a), b=SubTensor(b),
+                  c=_slice(tmp, [0, 0], [N, 4], [0, 0], sliced=True)),
+        ew.abs(SubTensor(c), SubTensor(tmp)),
+    ], scopes)
+    assert plan.zero_first(tmp)
 
 
 def test_a_reduction_states_its_own_shape():
@@ -376,10 +434,10 @@ def test_coverage_is_judged_after_the_range_intersection():
     # The contraction index runs over [0, 4) because A supports only that, so
     # the output index that B carries is narrowed to [0, 4) as well.
     narrow = SubTensor(b, BoundingBox([0, 0], [N, 4]))
-    with pytest.raises(GenerationError, match="never written by any operation"):
-        SectionPlan([
-            GemmDescr(False, False, a=SubTensor(a), b=narrow,
-                      c=SubTensor(tmp)),
-            GemmDescr(False, False, a=SubTensor(tmp), b=SubTensor(a),
-                      c=SubTensor(out)),
-        ], scopes)
+    plan = SectionPlan([
+        GemmDescr(False, False, a=SubTensor(a), b=narrow,
+                  c=SubTensor(tmp)),
+        GemmDescr(False, False, a=SubTensor(tmp), b=SubTensor(a),
+                  c=SubTensor(out)),
+    ], scopes)
+    assert plan.zero_first(tmp)
