@@ -109,6 +109,11 @@ def pytest_addoption(parser):
         help="with --snapshot-update, allow recording a generation failure "
              "over a snapshot that previously generated. Off by default: that "
              "transition is a regression, not an update")
+    parser.addoption(
+        "--seissol", action="store_true", default=False,
+        help="build every recorded SeisSol kernel (fixtures/seissol) on every "
+             "target; hours. Without it a sample is built and everything is "
+             "read")
 
 
 # `tools/mutation_check.py` writes this while a source file is deliberately

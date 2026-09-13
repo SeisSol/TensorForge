@@ -394,8 +394,10 @@ def static_score(result: Build):
     cache (`_icache_over`).  Then multiplications
     resident per SM -- blocks times the multiplications a block holds, since
     eight lanes put four times as many in a block as 32.
-    Then warp issue slots per multiplication: the arithmetic written out, times
-    the share of a warp one multiplication takes.  Then the modeled register
+    Then the least clocks one SM needs per multiplication (`analysis.pipeline`):
+    the busiest pipe at its peak rate, from the statements the emitter counted
+    by what they occupy -- where the build counted nothing, the warp issue
+    slots of the arithmetic written out, as before.  Then the modeled register
     footprint, both in granules of sixteen registers (`_GRANULE`).  Last the
     length of the source: where nothing else differs, the smaller kernel --
     merged, on every measurement taken (GB200's winners, sm_120 by 5 to 24 %,
@@ -411,10 +413,20 @@ def static_score(result: Build):
     if blocks is not None:
         mults = gen.launch_config().mults_per_block
         resident = min(resident, blocks * mults)
-    issue = (gen.emitted_work or 0) * lanes / wave
+    issue = _least_cycles(gen, lanes, wave)
     return (_granule(_over_budget(result)), _icache_over(result), -resident,
             issue, _granule(gen.peak_pressure or 0),
             len(gen.get_kernel() or ''))
+
+
+def _least_cycles(gen, lanes: int, wave: int) -> float:
+    """The busiest pipe's clocks per multiplication (`analysis.pipeline`), or
+    the arithmetic's warp issue slots where the build counted no mix."""
+    from tensorforge.analysis import pipeline
+    b = pipeline.of(gen)
+    if b is not None:
+        return b.cycles
+    return (gen.emitted_work or 0) * lanes / wave
 
 
 def _icache_over(result: Build) -> int:
@@ -691,21 +703,62 @@ class CompiledScore:
         if report.register_blocks is not None and result.context.get_vm().get_hw_descr().vendor == 'nvidia':
             blocks = min(result.generator.resident_blocks or 0, report.register_blocks)
             resident = blocks * mults
-        issue = (result.generator.emitted_work or 0) * lanes / wave
+        issue = _least_cycles(result.generator, lanes, wave)
         return (report.spill_bytes > 0, report.spill_bytes,
                 _icache_over(result), -resident, issue)
 
 
 class MeasuredScore:
-    """A caller's measurement: `run(result)` returns a time, or None where it
-    could not take one.  What a real autotuner plugs in -- this module does
-    not launch anything."""
+    """A caller's measurement: `run(result)` returns the seconds the whole
+    batch took, or None where it could not take one.  What a real autotuner
+    plugs in -- this module does not launch anything.
 
-    def __init__(self, run: Callable[[Build], Optional[float]]):
+    Told the device -- `sms`, `clock_ghz` -- and the `batch` it measures at,
+    it prunes: a candidate whose least time (`analysis.pipeline`, the
+    conservative bound, stretched by the persistent grid's last round) is
+    longer than the best measured so far cannot be better, and is not run.
+    That is a proof and not a guess, which is what makes it safe to skip the
+    measurement; it scores `inf` and is listed in `pruned`.
+    """
+
+    def __init__(self, run: Callable[[Build], Optional[float]],
+                 sms: Optional[int] = None, clock_ghz: Optional[float] = None,
+                 batch: Optional[int] = None):
         self.run = run
+        self.sms, self.clock_ghz, self.batch = sms, clock_ghz, batch
+        self.best: Optional[float] = None
+        self.pruned: List[Candidate] = []
+
+    def least(self, result: Build) -> Optional[float]:
+        """The least seconds `result` can take, or None where unknown."""
+        if not (self.sms and self.clock_ghz and self.batch):
+            return None
+        from tensorforge.analysis import pipeline
+        gen = result.generator
+        b = pipeline.of(gen, conservative=True)
+        if b is None:
+            return None
+        efficiency = 1.0
+        if gen.resident_blocks:
+            efficiency = pipeline.persistent_efficiency(
+                self.batch, gen.launch_config().mults_per_block,
+                gen.resident_blocks, self.sms)
+        return pipeline.least_seconds(b, self.batch, self.sms,
+                                      self.clock_ghz, efficiency)
 
     def __call__(self, result: Build):
-        return self.run(result) if result.ok else None
+        if not result.ok:
+            return None
+        from tensorforge.analysis import pipeline
+        least = self.least(result)
+        if (least is not None and self.best is not None
+                and pipeline.prunable(least, self.best)):
+            self.pruned.append(result.candidate)
+            return float('inf')
+        measured = self.run(result)
+        if measured is not None and (self.best is None or measured < self.best):
+            self.best = measured
+        return measured
 
 
 # --------------------------------------------------------------------------- #

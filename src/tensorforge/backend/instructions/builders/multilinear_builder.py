@@ -249,7 +249,8 @@ class MultilinearBuilder(OperationBuilder):
 
   def _union_of(self, i):
     view = self._ops[i]
-    union = self._plan.operand_union(view.symbol.name)
+    union = self._plan.operand_union(view.symbol.name,
+                                     getattr(view.symbol, 'obj', None))
     if union is None:
       union = BoundingBox([l + o for l, o in zip(view.bbox.lower(), view.offset)],
                           [u + o for u, o in zip(view.bbox.upper(), view.offset)])
@@ -369,12 +370,18 @@ class MultilinearBuilder(OperationBuilder):
       * a *preload*: global memory still holds the value, so the entry is
         simply dropped and the ordinary path stages the range that is actually
         wanted;
-      * a *writeback*: the value exists only in registers and the missing part
-        was produced by some other instruction, so there is nothing to fall
-        back on.
+      * a *writeback*: the value exists only in registers, so it is written
+        home first -- zero-filled over what its producer promised, as its
+        store at the end would have -- and then read back like a preload.
 
-    Sizing the staging to the union of all consumers would avoid the second
-    case entirely; until then it is refused loudly rather than miscompiled.
+    The second used to be refused, on the grounds that the missing part was
+    produced by some other instruction.  It need not be: an assignment covers
+    rows 0..10 and a copy reads rows 0..20, the rest zero by the assignment's
+    promise.  The straight-line build never met it, because its stores go out
+    as they are made; a merged run keeps its accumulations in registers, and
+    SeisSol's time derivative (`dQ(k+1) = dQext(k+1)`) met it on every
+    iteration.  A part written by another instruction is still safe: a
+    destination written in slices is never kept in registers.
     """
     entry = self._residency.get(name)
     view = self._ops[i]
@@ -389,11 +396,15 @@ class MultilinearBuilder(OperationBuilder):
       if entry.is_preload:
         self._residency.drop(name)
         return False
-      raise GenerationError(
-          f'{name}: operand wants {view.bbox} at offset {view.offset} but the '
-          f'staged image only covers {entry.covered} at shift {entry.shift}, '
-          f'and the value exists only in registers. Serving several disjoint '
-          f'slices of one tensor needs the staging sized to their union.')
+      # An atomic writeback is this element's share of a sum others add to as
+      # well: read back, it would be theirs too.
+      if entry.home.stype != SymbolType.Global or entry.atomic:
+        raise GenerationError(
+            f'{name}: operand wants {view.bbox} at offset {view.offset} but '
+            f'the staged image only covers {entry.covered} at shift '
+            f'{entry.shift}, and the value exists only in registers.')
+      self._instructions.extend(self._residency.flush(name))
+      return False
 
     view.offset = [o - s for o, s in zip(view.offset, entry.shift)]
     return True
@@ -690,6 +701,26 @@ class MultilinearBuilder(OperationBuilder):
     """
     self._instructions.extend(self._residency.flush(name))
 
+  def _inherited_promise(self, pending):
+    """What an accumulation onto a pending writeback still owes.
+
+    The assignment it adds to promised zeros outside what it covered, and the
+    store keeps that promise -- the store that is now this entry's, since the
+    residency holds one entry per name.  Dropped, as it used to be, a merged
+    run's `dQext(k+1) = ...; dQext(k+1) += ...` went out with rows 10..20 as
+    whatever the buffer held.  Carried only while it means the same cells: in
+    the same frame, with nothing the pending image held left out.
+    """
+    if (pending is None or pending.is_preload or pending.promise is None
+        or pending.covered is None
+        or list(pending.shift) != list(self._store_offset())):
+      return None
+    covered = self._temp_regs.data_view.get_bbox()
+    inside = all(cl <= pl and pu <= cu for pl, pu, cl, cu in zip(
+        pending.covered.lower(), pending.covered.upper(),
+        covered.lower(), covered.upper()))
+    return pending.promise if inside else None
+
   def _promised_box(self):
     """What this operation undertakes to define, in the accumulator's frame.
 
@@ -813,7 +844,8 @@ class MultilinearBuilder(OperationBuilder):
               covered=self._temp_regs.data_view.get_bbox(),
               shift=self._store_offset(),
               atomic=True if atomic else None,
-              promise=self._promised_box() if not self._add else None)
+              promise=(self._promised_box() if not self._add
+                       else self._inherited_promise(pending)))
         else:
           self._invalidate_residency(dest_symbol.name)
           self._instructions.append(StoreRegToGlb(context=self._context,

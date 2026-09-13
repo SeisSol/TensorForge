@@ -262,6 +262,16 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
     self._loop_indices = loop_indices
     self._loadsize = loadsize
 
+  def lands_at_wait(self) -> bool:
+    """Whether the copy may still be in flight after its issue.
+
+    The structured route issues it asynchronously and it lands at the wait,
+    visible then to the issuing lane only; the reordering path stores as it
+    goes.  Whether the route is taken is settled when it is emitted, after
+    `SyncThreadsOpt` ran, so this answers for the route that may be.
+    """
+    return bool(self._use_cuda_memcpy) and not self._needs_reorder
+
   def gen_code_inner(self, writer: Writer) -> None:
     allow_nontemporal = len(self._src.get_user_list()) == 1
     if self._verbatim and self._tensor.storage_volume() != self._loadsize:

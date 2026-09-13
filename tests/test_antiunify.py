@@ -121,6 +121,30 @@ def test_the_hole_covers_every_slot_that_names_it():
     assert len(result.holes[0]) == 2
 
 
+def test_each_slot_of_a_hole_keeps_its_own_window():
+    """SeisSol's time derivative reads `dQ(k)` through a window per operator
+    (rows 1..18, 1..20): one hole, two windows.  Putting the binding back gave
+    both slots the first one's, and the second reduction lost its last rows."""
+    def derivative(alias):
+        q = Tensor([24, 9], Addressing.STRIDED, BoundingBox([0, 0], [24, 9]),
+                   alias=alias, datatype=DTYPE)
+        out = []
+        for n, hi in enumerate((18, 20)):
+            k = tensor(f'K{n}', [10, 24]).tensor
+            out.append(gemm(SubTensor(k, BoundingBox([0, 1], [10, hi])),
+                            SubTensor(q, BoundingBox([1, 0], [hi, 9])),
+                            tensor(f'T{n}', [10, 9])))
+        return out
+
+    general = anti_unify([derivative('dQ0'), derivative('dQ1')])
+    assert isinstance(general, Generalization) and general.arity == 1
+    for member, alias in enumerate(('dQ0', 'dQ1')):
+        _, views = skeleton(instantiate(general, member))
+        windows = [(list(v.bbox.lower()), list(v.bbox.upper()))
+                   for v in views if v.tensor.alias == alias]
+        assert windows == [([1, 0], [18, 9]), ([1, 0], [20, 9])]
+
+
 # --- families that must not merge -------------------------------------------
 
 

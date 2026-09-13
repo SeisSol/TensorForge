@@ -52,6 +52,14 @@ class Context:
     #: (`record_code`).
     self.code_units: Optional[int] = None
 
+    #: What the instructions occupy, by category (`record_mix`): category ->
+    #: [issued per element and lane, copies in the code], or None.
+    self.issue_mix: Optional[dict] = None
+
+    #: Bytes a lane moves per element, by space and direction (`record_bytes`):
+    #: 'global.read' -> bytes, or None.
+    self.memory_bytes: Optional[dict] = None
+
   def record_pressure(self, value: int) -> None:
     if self.peak_pressure is None or value > self.peak_pressure:
       self.peak_pressure = value
@@ -79,6 +87,26 @@ class Context:
     calculation occupies the cache as much as an FMA does.
     """
     self.code_units = (self.code_units or 0) + value
+
+  def record_mix(self, category: str, issued: int, copies: int) -> None:
+    """Count one statement by what it occupies (`analysis.pipeline`).
+
+    `issued` is how often a lane runs it per element -- the trip counts of the
+    loops around it, as `record_work` -- and `copies` how many times it is
+    written into the code, as `record_code`.  The first is what a pipe has to
+    get through, the second what the instruction cache holds.
+    """
+    if self.issue_mix is None:
+      self.issue_mix = {}
+    slot = self.issue_mix.setdefault(category, [0, 0])
+    slot[0] += issued
+    slot[1] += copies
+
+  def record_bytes(self, key: str, value: int) -> None:
+    """Bytes a lane moves per element through one space, one direction."""
+    if self.memory_bytes is None:
+      self.memory_bytes = {}
+    self.memory_bytes[key] = self.memory_bytes.get(key, 0) + value
 
   def set_fp_type(self, fp_type: Datatype):
     self.fp_type = fp_type

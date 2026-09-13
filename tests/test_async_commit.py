@@ -14,7 +14,11 @@ snapshots, where it would go on not showing.
 
 from __future__ import annotations
 
+import contextlib
+import importlib.util
+import io
 import re
+import warnings
 from pathlib import Path
 
 import pytest
@@ -276,3 +280,65 @@ def test_no_commit_is_more_conditional_than_its_wait(path):
         assert any(blocks == w[:len(blocks)] for w in waits), (
             f'{path.name}: a commit sits inside {blocks[-1]!r}, which no wait '
             f'that counts it is inside')
+
+
+_WAIT = re.compile(r'// wait\((s\d+) = load\{g>s\}')
+
+
+def _first_reads_after_waits(src: str):
+    """`(buffer, fenced)` for each staged transfer's first read after its
+    wait: whether a barrier stands between the two."""
+    lines = src.splitlines()
+    out = []
+    for i, line in enumerate(lines):
+        m = _WAIT.search(line)
+        if not m:
+            continue
+        buf, fenced = m.group(1), False
+        for later in lines[i + 1:]:
+            if '__syncwarp' in later or '__syncthreads' in later:
+                fenced = True
+            if re.search(rf'\b{buf}\[', later) and 'memcpy_async' not in later:
+                out.append((buf, fenced))
+                break
+    return out
+
+
+def _local_flux():
+    path = next((Path(__file__).parent / 'cases').rglob('local_flux.py'))
+    spec = importlib.util.spec_from_file_location('tf_async__local_flux', path)
+    case = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(case)
+    return case.descr_list(), case.DTYPE
+
+
+def _poroelastic_derivative():
+    import seissol_suite as suite
+    from tensorforge.frontend.yateto import DescriptionReader
+    system = 'poroelastic-stp'
+    descrs = DescriptionReader(None, {}).read(
+        suite.description(system, f'{system}-o4-s', 'gpu_derivative'))[0]
+    return descrs, Datatype.F32
+
+
+@pytest.mark.parametrize('source', [_local_flux, _poroelastic_derivative],
+                         ids=['local_flux', 'poroelastic_derivative'])
+def test_a_staged_operand_is_read_behind_a_barrier_after_its_wait(source):
+    """`cp.async.wait` makes a copy visible to the lane that issued it, and a
+    staged operator is read by every lane.  So a barrier has to stand between
+    the wait and the first read; one before the wait fences nothing of it.
+    The sync pass armed the write at the issue, and took the barrier some
+    other buffer's consumer needed for this one's: every staged operator after
+    the first went unfenced -- racecheck on the poroelastic derivative, and 8 %
+    off there once a merged run moved the timing."""
+    from tensorforge.common.context import Context
+    from tensorforge.generators.generator import Generator
+
+    descrs, fp = source()
+    gen = Generator(descrs, Context(arch='sm_86', backend='cuda', fp_type=fp))
+    with contextlib.redirect_stdout(io.StringIO()), warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        gen.generate()
+    reads = _first_reads_after_waits(gen.get_kernel())
+    assert len(reads) > 1, 'fewer than two staged transfers in this kernel'
+    assert all(fenced for _, fenced in reads), reads

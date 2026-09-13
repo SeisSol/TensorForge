@@ -91,14 +91,13 @@ def collect_operands(generator) -> List[DriverOperand]:
         if getattr(t, 'is_variant', False):
             continue
         if sym.stype == SymbolType.Scalar:
-            # Scalar literal (e.g. alpha). Must have a baked-in value;
-            # symbolic-runtime scalars (alpha='alpha') are out of MVP scope.
-            if not getattr(t, 'has_values', lambda: False)() or t.get_values() is None:
-                raise NotImplementedError(
-                    f"scalar operand {sym.name!r} has no constant value; "
-                    f"runtime-symbolic scalars are not yet supported"
-                )
-            value = float(t.get_values()[0])
+            # A scalar literal (alpha) passes its value.  A runtime scalar --
+            # SeisSol's `power(k)` in the time derivative -- has none: the
+            # driver passes a fixed 0.5, deterministic and not 1, so a missed
+            # factor still shows in the numbers.
+            known = (getattr(t, 'has_values', lambda: False)()
+                     and t.get_values() is not None)
+            value = float(t.get_values()[0]) if known else 0.5
             ops.append(DriverOperand(
                 kernel_name=sym.name, alias=t.alias,
                 is_source=True, is_sink=False,

@@ -17,15 +17,17 @@ generated code still looks like something a human would write.
 
 from __future__ import annotations
 
+import re
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from tensorforge.common.basic_types import Datatype
+from tensorforge.common.basic_types import Addressing, Datatype
 
 from tensorforge.common.basic_types import GeneralLexicon
 from tensorforge.common.operation import Operation
 from .core import (Access, BufferType, Effect, IRError, MemSpace, Op, Operand,
                    Qual,
-                   Region, ScalarType, Stmt, TokenType, Value, def_use, walk, walk_stmts)
+                   Region, ScalarType, Stmt, TokenType, Uniformity, Value, def_use,
+                   walk, walk_stmts)
 
 _ATOM = __import__('re').compile(r'^(?:[A-Za-z_][A-Za-z0-9_.:]*|\d[\w.]*)$')
 
@@ -124,6 +126,72 @@ _NO_CODE = frozenset({Op.CONST, Op.YIELD, Op.DECLARE, Op.ALLOC, Op.EXTRACT,
 #: test and the branch.
 _LOOP_OVERHEAD = 3
 
+#: The memory spaces a load or store occupies a pipe for, by the name
+#: `analysis.pipeline` counts them under.  A register access is a name.
+_MIX_SPACES = {MemSpace.GLOBAL: 'global', MemSpace.PARAM: 'global',
+               MemSpace.CONSTANT: 'constant', MemSpace.SHARED: 'shared',
+               MemSpace.SCRATCH: 'local'}
+
+#: Calls that go to the transcendental unit (MUFU, `v_exp`, ...), as a whole
+#: name: `sin` is not `single`.
+_SFU_CALL = re.compile(r'(?:^|[^a-z0-9])_*(exp2?|log2?|sqrt|rsqrt|rcp|sin|cos'
+                       r'|tan|pow|erf|cbrt|tanh|sinh|cosh)f?(?:$|[^a-z0-9])',
+                       re.IGNORECASE)
+
+#: Matrix instructions reached as builtins (`__builtin_amdgcn_mfma_*`, WMMA);
+#: NVIDIA's arrive as inline assembly.
+_MATRIX_CALL = re.compile(r'(mfma|wmma|smfmac)', re.IGNORECASE)
+
+#: An FMA whose operand comes from another lane through a DPP modifier: one
+#: VALU instruction, the move is free.  So it is arithmetic, not a move.
+_FMA_CALL = re.compile(r'(fmac?dpp|fmadpp|fma_dpp)', re.IGNORECASE)
+
+#: Calls that move a value between lanes (`__shfl_sync`, a DPP move,
+#: `readlane`, a sub-group broadcast, a register transpose).
+_CROSSLANE_CALL = re.compile(r'(shfl|dpp|readlane|readfirstlane|permute'
+                             r'|swizzle|broadcast|select_from_group'
+                             r'|group_broadcast|transpose)', re.IGNORECASE)
+
+#: Calls that constrain the compiler and lay nothing down (`pin` is an empty
+#: `asm volatile` holding a value in a register).
+_NO_CODE_CALL = re.compile(r'(^|::)(pin|keep|opaque)$')
+
+#: Raw text that stores into memory: an atomic, or an assignment to a global
+#: window (`glb_m1[...] = ...`) or a shared one.
+_ATOMIC_TEXT = re.compile(r'atomic|fetch_add|atomicAdd', re.IGNORECASE)
+_GLOBAL_STORE_TEXT = re.compile(r'^\s*glb_\w+\s*\[[^\]]*\]\s*=[^=]')
+_SHARED_STORE_TEXT = re.compile(r'^\s*s\d+\s*\[[^\]]*\]\s*=[^=]')
+
+
+def _text_category(text: str, fallback: str) -> str:
+    """The category of a raw expression or statement, read off its text --
+    the one thing the IR cannot see into.  The math library's calls go to the
+    transcendental unit, a reduction or broadcast moves values between lanes,
+    and an atomic or an assignment to a window is a store."""
+    if _ATOMIC_TEXT.search(text) or _GLOBAL_STORE_TEXT.match(text):
+        return 'global.store'
+    if _SHARED_STORE_TEXT.match(text):
+        return 'shared.store'
+    if _CROSSLANE_CALL.search(text) or 'reduction<' in text:
+        return 'xlane'
+    if _SFU_CALL.search(text) or re.match(r'^\(\s*1\s*/', text):
+        return 'sfu'
+    if re.search(r'\bfabsf?\b|\babs\b|\bfmaf?\b|\bfminf?\b|\bfmaxf?\b', text):
+        return 'fp'
+    if re.search(r'(^|::)swap\b', text):
+        return 'int'
+    return fallback
+
+
+def _value_bytes(type_) -> int:
+    """Bytes a value of `type_` occupies: element size times vector width."""
+    base = getattr(type_, 'base', None)
+    try:
+        size = base.size()
+    except (AttributeError, TypeError):
+        return 0
+    return size * (getattr(type_, 'length', None) or 1)
+
 
 def _code_copies(unroll, trips: Optional[int]) -> int:
     """How many copies of a `for` body the compiler lays down.
@@ -191,6 +259,117 @@ class Emitter:
         record = getattr(self.context, 'record_code', None)
         if record is not None:
             record(units * self._code_scale)
+
+    def _record_mix(self, s: Stmt) -> None:
+        """What a statement occupies, and what it moves (`analysis.pipeline`).
+
+        Beside `_record_code`, and counted the same way: per statement, times
+        the trip counts around it for what is issued (`_work_scale`) and times
+        the copies laid down for the code (`_code_scale`).  A register access
+        is a name and occupies nothing; everything else is one instruction of
+        its category, whatever its width -- a packed FMA or a 16-byte load is
+        one issue, which is the point of both.
+        """
+        mix = getattr(self.context, 'record_mix', None)
+        if mix is None:
+            return
+        category, moved = self._mix_category(s)
+        if category is None:
+            return
+        mix(category, self._work_scale, self._code_scale)
+        record = getattr(self.context, 'record_bytes', None)
+        if record is not None:
+            for key, nbytes in moved:
+                record(key, nbytes * self._work_scale)
+
+    def _mix_category(self, s: Stmt):
+        """`(category, [(space.direction, bytes per lane)])` of a statement,
+        or `(None, [])` where it puts nothing into the stream."""
+        op = s.op
+        if op in _NO_CODE or op in (Op.FOR, Op.YIELD):
+            return None, []
+        space = s.accesses[0].space if s.accesses else None
+        if op in (Op.LOAD, Op.STORE):
+            level = _MIX_SPACES.get(space)
+            if level is None:
+                return None, []
+            value = s.target[0] if op == Op.LOAD else s.args[1]
+            nbytes = _value_bytes(getattr(value, 'type', None))
+            if op == Op.LOAD:
+                key = f'{level}.read'
+                # Read by every lane at one address: one broadcast per warp,
+                # not a word per lane -- counted per lane it made a shared
+                # operand's bandwidth bind `gpu_volume` above its measured
+                # time.  And a batch-invariant operand comes out of a cache,
+                # not out of what each element streams in.
+                if getattr(value, 'uniformity', None) not in (None,
+                                                              Uniformity.LANE):
+                    key += '.bcast'
+                elif (level == 'global' and getattr(getattr(
+                        s.args[0], 'obj', None), 'addressing', None)
+                      == Addressing.NONE):
+                    key += '.const'
+                return f'{level}.load', [(key, nbytes)]
+            return f'{level}.store', [(f'{level}.write', nbytes)]
+        if op == Op.LOAD_ASYNC:
+            types = s.attr('types', ())
+            return 'global.load', [('global.read',
+                                    _value_bytes(types[0] if types else None))]
+        if op == Op.COPY_ASYNC:
+            nbytes = s.attr('elems', 1) * self.elem_size(s.copy_dst)
+            return 'async.copy', [('global.read', nbytes),
+                                  ('shared.write', nbytes)]
+        if op == Op.PREFETCH:
+            return 'global.prefetch', []
+        if op in Op.ARITH or op == Op.ACCUM:
+            value = s.target[0] if s.target else (s.args[1] if len(s.args) > 1
+                                                  else None)
+            base = getattr(getattr(value, 'type', None), 'base', None)
+            if base == Datatype.F64:
+                return 'fp64', []
+            return ('fp' if base in _WORK_TYPES else 'int'), []
+        if op == Op.CALL:
+            if s.attr('asm') is not None:
+                return 'matrix', []
+            if s.attr('assign'):
+                return None, []
+            callee = s.attr('callee') or ''
+            if callee.startswith(('thread_idx_', 'extern_')):
+                return None, []
+            if _NO_CODE_CALL.search(callee):
+                return None, []
+            if _MATRIX_CALL.search(callee):
+                return 'matrix', []
+            if _FMA_CALL.search(callee):
+                wide = any(getattr(getattr(a, 'type', None), 'base', None)
+                           == Datatype.F64 for a in s.args)
+                return ('fp64' if wide else 'fp'), []
+            if _SFU_CALL.search(callee):
+                return 'sfu', []
+            if _CROSSLANE_CALL.search(callee):
+                return 'xlane', []
+            return _text_category(callee, 'other'), []
+        if op == Op.RAWEXPR:
+            if s.attr('crosslane'):
+                return 'xlane', []
+            # a pointer binding computes an address once
+            if s.attr('decl') is not None:
+                return 'int', []
+            return _text_category(s.text or '', 'other'), []
+        if op == Op.RAWSTMT:
+            text = (s.text or '').lstrip()
+            if s.attr('bare_newline') or not text or text.startswith('//'):
+                return None, []
+            return _text_category(text, 'other'), []
+        if op == Op.RAWBLOCK:
+            return 'branch', []
+        if op == Op.BARRIER:
+            return 'barrier', []
+        if op in (Op.WAIT, Op.COMMIT_ASYNC):
+            return 'sync', []
+        if op in (Op.IF, Op.WHILE, Op.EXIT):
+            return 'branch', []
+        return 'other', []
 
     # -- naming ------------------------------------------------------------ #
 
@@ -637,6 +816,7 @@ class Emitter:
         w = self.writer
         op = s.op
         self._record_code(op)
+        self._record_mix(s)
 
         if op == Op.CONST:
             v = s.target[0]
@@ -1062,6 +1242,13 @@ class Emitter:
         copies = _code_copies(s.attr('unroll'), trips if constant else None)
         if not constant or copies < trips:
             self._record_code_units(_LOOP_OVERHEAD)
+            # the counter and the test, then the branch, once per iteration
+            # that is not unrolled away
+            mix = getattr(self.context, 'record_mix', None)
+            if mix is not None:
+                runs = scale * trips // max(copies, 1)
+                mix('int', 2 * runs, 2 * self._code_scale)
+                mix('branch', runs, self._code_scale)
         code_scale, self._code_scale = self._code_scale, self._code_scale * copies
         try:
             with w.For(head, unroll=s.attr('unroll') or False):

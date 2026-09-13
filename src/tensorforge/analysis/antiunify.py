@@ -36,10 +36,12 @@ constant, to a loop counter or to a runtime index are three different
 lowerings with three different costs, and none of them is a structural fact.
 """
 
+import copy
 from dataclasses import dataclass
 from itertools import product
 from typing import Dict, List, Optional, Sequence, Tuple, Union
 
+from tensorforge.common.matrix.boundingbox import BoundingBox
 from tensorforge.generators.descriptions import (BarrierDescription,
                                                  ElementwiseDescr,
                                                  MultilinearDescr,
@@ -449,6 +451,51 @@ def rebuild(descr: OperationDescription,
     raise ValueError(f'no way to rebuild a {type(descr).__name__}')
 
 
+def _window(view) -> Tuple:
+    return (_box_key(getattr(view, 'bbox', None)),
+            tuple(getattr(view, 'offset', ()) or ()),
+            bool(getattr(view, 'sliced', False)))
+
+
+def _through(window, view):
+    """`view`'s tensor, seen through the window `window` has.
+
+    A binding is the view the *first* slot of its hole holds, and the other
+    slots may read the same tensor through windows of their own: SeisSol's
+    time derivative contracts `dQ(k)` with three operators over rows 1..18,
+    1..19 and 1..20.  Written into every slot, the first window narrowed the
+    other two reductions to its rows, and the merged kernel was 2..6 % off
+    without a word.  The windows agree slot by slot across the members --
+    `operand_key` compares them -- so the template's is every member's.
+    """
+    if _window(window) == _window(view):
+        return view
+    from tensorforge.common.matrix.tensor import SubTensor
+    return SubTensor(_tensor_of(view), window.bbox, list(window.offset),
+                     getattr(window, 'sliced', False))
+
+
+def _fresh(view):
+    """A view of its own, with its own offset and box.
+
+    Builders adjust a view in place -- rebasing its offset onto a staged image,
+    for one -- and every body substituted from one generalization shared the
+    template's views: the peeled iteration and then the loop built from the
+    same objects, and the loop rebased what the peel already had.  A
+    temporary of the poroelastic time derivative was stored at `lead - 32`
+    instead of `lead - 1`, into the previous multiplication's window.
+    """
+    from tensorforge.common.matrix.tensor import SubTensor
+    if not isinstance(view, SubTensor):
+        return view
+    fresh = copy.copy(view)
+    fresh.offset = list(view.offset)
+    if view.bbox is not None:
+        fresh.bbox = BoundingBox(list(view.bbox.lower()),
+                                 list(view.bbox.upper()))
+    return fresh
+
+
 def substitute(general: Generalization,
                bindings: Sequence[object]) -> List[OperationDescription]:
     """The generalized body with one tensor put in each hole.
@@ -460,16 +507,19 @@ def substitute(general: Generalization,
     bound to a literal is a hole the emitter never sees.
 
     A hole covers every slot naming the same tensor, so one binding reaches all
-    of them; that is what keeps a tensor used twice used twice.
+    of them; that is what keeps a tensor used twice used twice.  What it
+    reaches them with is the tensor, not the window: see `_through`.
     """
     if len(bindings) != len(general.holes):
         raise ValueError(f'{len(general.holes)} hole(s) to fill, '
                          f'got {len(bindings)}')
 
-    filled = list(general.template_views)
+    filled = [_fresh(v) for v in general.template_views]
     for group, view in zip(general.holes, bindings):
         for slot in group:
-            filled[slot] = view
+            filled[slot] = _fresh(
+                view if slot == group[0]
+                else _through(general.template_views[slot], view))
 
     out: List[OperationDescription] = []
     cursor = 0

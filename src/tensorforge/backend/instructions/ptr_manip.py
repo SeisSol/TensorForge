@@ -194,6 +194,10 @@ class GetElementPtr(AbstractInstruction):
     compiler infers whichever space it is.
     """
     readonly = self._src.obj.direction == DataFlowDirection.SOURCE
+    if self._table is not None:
+      # Whatever the stand-in's direction says, the table is what it is read
+      # out of: a writable binding over a `const` table does not compile.
+      readonly = not self._table.writable
     if passed_by_value(self._src):
       space = None
     elif readonly and self._src.obj.addressing == Addressing.NONE:
@@ -235,6 +239,11 @@ class GetElementPtr(AbstractInstruction):
       # what varies between iterations is which of them to take, and that is
       # the whole of it.
       datatype = self._vm._fp_type if self._src.obj.datatype is None else self._src.obj.datatype
+      if self._src.obj.addressing == Addressing.SCALAR:
+        # A table over scalars selects a value, and the binding is that value.
+        self._emit_binding(writer, f'{datatype} {self._dest.name}',
+                           self._table.access(self._variant))
+        return
       lhs = self._declarator(datatype, 'const')
       # The table is declared generic -- its members may come from either
       # space and a select over them decays -- so the binding casts back into
@@ -434,8 +443,14 @@ class DeclareOperandTable(AbstractInstruction):
   SELECT_LIMIT = 8
 
   def __init__(self, context: Context, name: str, members, addressing,
-               datatype=None, form: 'TableForm' = None, variant: str = None):
+               datatype=None, form: 'TableForm' = None, variant: str = None,
+               writable: bool = False):
     super(DeclareOperandTable, self).__init__(context)
+    #: Whether the loop writes through the members: the table then holds
+    #: pointers to mutable data.  It used to be `const` regardless, and a
+    #: written stand-in's binding (`float *const glb_v0`) cannot be
+    #: initialized from a `const float *` -- SeisSol's merged `gpu_derivative`.
+    self._writable = writable
     if not members:
       raise GenerationError('an operand table has at least one member')
     passed = [m.name for m in members if passed_by_value(m)]
@@ -504,8 +519,20 @@ class DeclareOperandTable(AbstractInstruction):
     self._require_param()
     datatype = self._datatype or self._vm._fp_type
     stars = Addressing.addr2ptr_type(self._addressing)
-    return (f'struct {self.struct_name()} {{ const {datatype} {stars}const '
-            f'p[{len(self._members)}]; }};')
+    return (f'struct {self.struct_name()} {{ {self._qual()}{datatype} '
+            f'{self._inner(stars)}p[{len(self._members)}]; }};')
+
+  @property
+  def writable(self) -> bool:
+    return self._writable
+
+  def _qual(self) -> str:
+    return '' if self._writable else 'const '
+
+  def _inner(self, stars: str) -> str:
+    """The pointer's own qualifier; a table of values has no pointer, and a
+    second `const` on the value is a duplicate nvcc rejects."""
+    return f'{stars}const ' if stars else ''
 
   def parameter(self) -> str:
     """How this table is declared in the kernel's signature, for `PARAM`.
@@ -541,7 +568,8 @@ class DeclareOperandTable(AbstractInstruction):
     """
     spaced = '<' in self._vm.get_lexic().pointer_type(
         f'{datatype}', MemSpace.GLOBAL, readonly=True, restrict=True, const=True)
-    return f'(const {datatype} {stars}){member.name}' if spaced else member.name
+    return (f'({self._qual()}{datatype} {stars}){member.name}'
+            if spaced and stars else member.name)
 
   def gen_ir(self, writer):
     if self._form is TableForm.PARAM:
@@ -551,14 +579,14 @@ class DeclareOperandTable(AbstractInstruction):
     stars = Addressing.addr2ptr_type(self._addressing)
     if self._form is TableForm.ARRAY:
       entries = ', '.join(self._member(m, datatype, stars) for m in self._members)
-      writer(f'const {datatype} {stars}const {self._name}'
+      writer(f'{self._qual()}{datatype} {self._inner(stars)}{self._name}'
              f'[{len(self._members)}] = {{{entries}}};')
       return
     chain = self._member(self._members[-1], datatype, stars)
     for index in range(len(self._members) - 2, -1, -1):
       chain = (f'({self._variant} == {index}) ? '
                f'{self._member(self._members[index], datatype, stars)} : {chain}')
-    writer(f'const {datatype} {stars}const {self._name} = {chain};')
+    writer(f'{self._qual()}{datatype} {self._inner(stars)}{self._name} = {chain};')
 
   def get_operands(self):
     return list(self._members)

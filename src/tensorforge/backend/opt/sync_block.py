@@ -4,6 +4,7 @@
 from typing import List
 from tensorforge.backend.instructions.compute import ComputeInstruction
 from tensorforge.backend.instructions.memory import AbstractShrMemWrite
+from tensorforge.backend.instructions.memory.load import LoadWait
 from tensorforge.backend.instructions.sync_block import SyncThreads
 from tensorforge.backend.symbol import SymbolType
 from .abstract import AbstractTransformer, Context, AbstractInstruction
@@ -92,6 +93,18 @@ class SyncThreadsOpt(AbstractTransformer):
     for instr in self._instrs:
       if isinstance(instr, AbstractShrMemWrite):
         writes.append((instr.get_dest(), False))
+      # An asynchronous transfer lands at its wait, and the wait makes it
+      # visible to the lane that issued it and no other.  A barrier between
+      # issue and wait -- the one some other buffer's consumer needed --
+      # fences nothing of it, so the wait arms the write again.  Left to the
+      # issue, every staged operator after the first was read across lanes
+      # with no barrier behind its wait: racecheck on the poroelastic time
+      # derivative, and 8 % off once the merged run shifted the timing.
+      if isinstance(instr, LoadWait):
+        awaited = instr.awaited()
+        if (isinstance(awaited, AbstractShrMemWrite)
+            and getattr(awaited, 'lands_at_wait', lambda: False)()):
+          writes.append((awaited.get_dest(), False))
 
       if isinstance(instr, ComputeInstruction):
         reads = instr.get_operands()

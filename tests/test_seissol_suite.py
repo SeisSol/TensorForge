@@ -100,6 +100,94 @@ def test_a_sample_builds(system, config):
         _build(_read(system, config, kernel), 'cuda', 'sm_86')
 
 
+def test_a_merged_derivative_stores_its_members_before_the_loop():
+    """The anelastic time derivative merges its levels into one loop, which
+    reads `dQ(k)` through a table -- memory, not the registers.  Three things
+    went wrong there, silently: the three contractions with `dQ(k)` read it
+    through the first one's window (`antiunify.substitute`); with that fixed,
+    `dQ(k+1) = dQext(k+1)` asked for rows the register image did not hold and
+    the merge fell back; and the peeled level kept `dQ(1)` in registers,
+    stored after the loop, so the loop read the buffer as the launch found it.
+    """
+    import re
+
+    from tensorforge.generators.generator import MergeFallbackWarning
+
+    system = 'viscoelastic-linearckanelastic'
+    descrs = _read(system, f'{system}-o4-d', 'gpu_derivative')
+    gen = Generator(descrs, Context(arch='sm_86', backend='cuda',
+                                    fp_type=Datatype.F64))
+    with contextlib.redirect_stdout(io.StringIO()), warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        warnings.simplefilter('error', MergeFallbackWarning)
+        gen.generate()
+    src = gen.get_kernel()
+    loop = src.index('for (int32_t batchIdv')
+    members = {m for line in src[loop:].splitlines() if 'Table = ' in line
+               for m in re.findall(r'\bglb_m\d+\b', line)}
+    assert members
+    for member in members:
+        for store in re.finditer(rf'// {member} = store', src):
+            assert store.start() < loop, member
+
+
+def test_a_merged_run_stores_where_the_written_out_one_does():
+    """The poroelastic derivative's loop reads `dQ(k)` over columns 10..13
+    and then 0..13.  Its stand-in answered no question of the section plan,
+    so the staging was sized for the first reader; the second re-staged it
+    from row 1, the lead origin was pinned at 31, and three temporaries went
+    into shared memory at `lead - 32` -- the previous multiplication's window,
+    a race with more than one multiplication per block.  Merged, every store
+    sits where the written-out build puts it."""
+    import re
+
+    from tensorforge.common.context import Options
+
+    system = 'poroelastic-stp'
+    offsets = {}
+    for merge in (False, True):
+        gen = Generator(_read(system, f'{system}-o4-s', 'gpu_derivative'),
+                        Context(arch='sm_86', backend='cuda',
+                                fp_type=Datatype.F32,
+                                options=Options(merge_variants=merge)))
+        with contextlib.redirect_stdout(io.StringIO()), \
+                warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            gen.generate()
+        src = gen.get_kernel()
+        assert merge == ('for (int32_t batchIdv' in src)
+        offsets[merge] = set(re.findall(r'_lead - (\d+);', src))
+    assert offsets[True] == offsets[False]
+
+
+def _carried(system, config, kernel):
+    from tensorforge.backend.instructions.ptr_manip import VariantLoop
+    from tensorforge.generators.generator import MergeFallbackWarning
+
+    descrs = _read(system, config, kernel)
+    fp = Datatype.F64 if config.endswith('-d') else Datatype.F32
+    gen = Generator(descrs, Context(arch='sm_86', backend='cuda', fp_type=fp))
+    with contextlib.redirect_stdout(io.StringIO()), warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        warnings.simplefilter('error', MergeFallbackWarning)
+        gen.generate()
+    loops = [i for s in gen._sections for i in s.ir if isinstance(i, VariantLoop)]
+    assert loops, kernel
+    return [len(loop._carried) for loop in loops]
+
+
+def test_only_a_value_read_before_it_is_assigned_rides_the_back_edge():
+    """The damage model projects four times, each computing `I` afresh
+    (`I = dQ(0) ...; I += ...`) and reading it back: nothing flows from one
+    projection to the next, and chaining `I` anyway renamed its reload but
+    not the product reading it, so `QDR(1..3)` came out zero.  The anelastic
+    derivative adds each level onto `I` and `Iane`: those two do flow."""
+    assert _carried('damage-nonlinearck', 'damage-nonlinearck-o4-s',
+                    'gpu_projectToDR[0]') == [0]
+    system = 'viscoelastic-linearckanelastic'
+    assert _carried(system, f'{system}-o4-d', 'gpu_derivative') == [2]
+
+
 @pytest.mark.parametrize('backend,arch', TARGETS)
 @pytest.mark.parametrize('system,config', CONFIGS,
                          ids=[c for _, c in CONFIGS])

@@ -62,6 +62,10 @@ class SectionPlan:
         #: tensor would give temporaries an entry they do not have today and
         #: change how wide their staging comes out.
         self._operand_union = {}
+        #: The same unions keyed by id(tensor), for a merged run's stand-in: its
+        #: symbol is made after this plan, so its name finds nothing, and it
+        #: answers with its members' (`operand_union`).
+        self._operand_tensor_union = {}
         #: id(tensor) -> union of what its writes cover.  A temporary written
         #: by one operation covering everything can stay in registers until
         #: someone asks for it; one written in slices has to be assembled in
@@ -131,6 +135,8 @@ class SectionPlan:
                 continue
             self._operand_union[symbol.name] = _hull(
                 self._operand_union.get(symbol.name), box)
+            self._operand_tensor_union[id(tensor)] = _hull(
+                self._operand_tensor_union.get(id(tensor)), box)
 
     def _add_writes(self, descr):
         dest = descr.writes()
@@ -263,17 +269,52 @@ class SectionPlan:
 
     # -- queries --------------------------------------------------------- #
 
-    def operand_union(self, symbol_name) -> Optional[BoundingBox]:
+    @staticmethod
+    def _keys(tensor):
+        """The tensors whose facts answer for `tensor`.
+
+        A merged run's body is built against stand-ins, which are made after
+        this plan and appear in no descriptor it saw: asked about one, every
+        query answered as for a tensor nothing writes or reads.  So the body
+        kept in registers what its members, written out, had to assemble in
+        memory -- the poroelastic time derivative writes `dQ(k+1)` in two
+        boxes, and the loop lost one of them.  A stand-in answers as its
+        members do, all of them: what holds for one iteration holds for the
+        body that stands for every one.
+        """
+        members = getattr(tensor, 'variant_members', None)
+        return [id(m) for m in members] if members else [id(tensor)]
+
+    def operand_union(self, symbol_name, tensor=None) -> Optional[BoundingBox]:
         """Every access to this symbol as an operand, or None if it has none.
 
         A staging sized to this serves every consumer in the section, which is
         what lets one be shared rather than refused.
+
+        A stand-in answers with its members, as in every other query here.
+        Unanswered, the poroelastic derivative's loop staged `dQ(k)` for its
+        first reader's columns only; the second reader re-staged it from row
+        1, the offset pinned the lead origin at 31, and a temporary went into
+        shared memory at `lead - 32` -- the previous multiplication's window.
         """
+        members = getattr(tensor, 'variant_members', None)
+        if members:
+            union = None
+            for member in members:
+                box = self._operand_tensor_union.get(id(member))
+                if box is not None:
+                    union = _hull(union, box)
+            return union
         return self._operand_union.get(symbol_name)
 
     def dest_union(self, tensor) -> Optional[BoundingBox]:
         """Everything this tensor's writes cover, declared."""
-        return self._dest_union.get(id(tensor))
+        union = None
+        for key in self._keys(tensor):
+            box = self._dest_union.get(key)
+            if box is not None:
+                union = _hull(union, box)
+        return union
 
     def zero_first(self, tensor) -> bool:
         """Does the store that first writes this temporary clear its buffer?
@@ -281,7 +322,7 @@ class SectionPlan:
         Where some operation reads cells, or accumulates onto cells, that no
         earlier write defined -- see `_track_definitions`.
         """
-        return id(tensor) in self._zero_first
+        return any(key in self._zero_first for key in self._keys(tensor))
 
     def written_in_slices(self, tensor) -> bool:
         """Does this tensor get assembled from several writes?
@@ -312,6 +353,10 @@ class SectionPlan:
         holds only the last one's rows; the read that follows then wants the
         union and finds half of it.
         """
+        return any(self._assembled(key) for key in self._keys(tensor))
+
+    def _assembled(self, key) -> bool:
+        """`written_in_slices` for one tensor, by its id."""
         # A guard breaks the deferral in both directions, so neither case gets
         # as far as looking at boxes.
         #
@@ -322,14 +367,12 @@ class SectionPlan:
         # Written under a guard: whether the register image holds the new
         # value or the old one is decided at run time, and a deferred entry
         # records only that something wrote it.
-        key = id(tensor)
         if key in self._guard_reads or key in self._guarded_writes:
             return True
         # A cleared buffer holds zeros no register image does.
         if key in self._zero_first:
             return True
-        boxes = (self._eff_writes.get(id(tensor))
-                 or self._dest_boxes.get(id(tensor), []))
+        boxes = (self._eff_writes.get(key) or self._dest_boxes.get(key, []))
         union = None
         for b in boxes:
             union = _hull(union, b)
@@ -341,8 +384,8 @@ class SectionPlan:
         # gets read back: `_analyze` intersects `_ns` down to what the operands
         # support, so a single store can easily be narrower than the declared
         # destination box.
-        written = self._dest_union.get(id(tensor))
-        read = self._read_union.get(id(tensor))
+        written = self._dest_union.get(key)
+        read = self._read_union.get(key)
         if written is None or read is None:
             return False
         return any(read.lower()[j] < written.lower()[j]

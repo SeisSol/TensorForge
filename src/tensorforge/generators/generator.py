@@ -270,6 +270,11 @@ def _supports_launch_control(context) -> bool:
   return int(model[3:]) >= 100
 
 
+class MergeFallbackWarning(UserWarning):
+  """`merge_variants=auto` would have merged, and the merged build failed;
+  the kernel was built written out."""
+
+
 class Generator:
   #: Hex characters of the digest that end up in the symbol.  Sixty-four bits
   #: rather than forty: the digest is the whole of the name's discriminating
@@ -357,6 +362,10 @@ class Generator:
     #: Instructions laid down, in emitter units (`Context.record_code`); what
     #: `analysis.icache` weighs against the instruction cache.
     self.code_units: Optional[int] = None
+    #: Statements by what they occupy (`Context.record_mix`) and bytes by
+    #: space (`Context.record_bytes`); what `analysis.pipeline` bounds.
+    self.issue_mix: Optional[dict] = None
+    self.memory_bytes: Optional[dict] = None
     #: Blocks resident per SM under the resources that are known exactly --
     #: shared memory and threads.  Not the register limit; see
     #: `_resident_blocks`.
@@ -588,7 +597,9 @@ class Generator:
 
   def generate(self):
     self._autotune()
-    self._auto_merge()
+    if self._auto_merge():
+      # built merged, by the probe this generator has taken over
+      return None
     # After both, so that the rotation is asked of the list that is built.
     if (self._rotate is None
         and self._context.get_user_options().enable_wrap_loads):
@@ -601,6 +612,8 @@ class Generator:
     self._context.peak_pressure = None
     self._context.emitted_work = None
     self._context.code_units = None
+    self._context.issue_mix = None
+    self._context.memory_bytes = None
 
     self.register()
 
@@ -646,9 +659,10 @@ class Generator:
     self._context.emitted_work = None
     self._context.code_units = None
 
-  def _auto_merge(self) -> None:
+  def _auto_merge(self) -> bool:
     """Merge repeated runs where the kernel written out crowds the
-    instruction cache (`merge_variants='auto'`, the default).
+    instruction cache (`merge_variants='auto'`, the default).  True where the
+    merged kernel was built -- this generator then holds it.
 
     The size that matters is the one the emitter lays down (`code_units`),
     and that is known only once it has: so the list is built unmerged first,
@@ -660,23 +674,28 @@ class Generator:
     `roll` weighed before was a line count fitted to one SeisSol corpus.
 
     Nothing to decide where nothing repeats, where the target states no
-    instruction cache, or where the probe does not build.
+    instruction cache, or where the probe does not build.  And nothing merged
+    where the merged build fails: a default is not entitled to break a kernel
+    that builds without it, so the kernel is built written out, with a
+    warning -- SeisSol's `gpu_derivative`, whose merged chain carries each
+    derivative into the next, was the first to need it.  Asked for with
+    `merge_variants=1`, a failure is a failure.
     """
     opts = self._context.get_user_options()
     if opts.merge_variants != 'auto' or self._merge_decided:
-      return
+      return False
     self._merge_decided = True
     hw = self._context.get_vm().get_hw_descr()
     capacity = getattr(hw, 'icache_size', None)
     if not capacity:
-      return
+      return False
     from tensorforge.analysis.cost import list_cost
     from tensorforge.analysis.icache import code_bytes
     from tensorforge.generators.rolling import roll
     if not any(isinstance(d, ForDescr) for d in roll(
         list(self._given), min_count=opts.merge_min_count,
         max_arity=opts.merge_max_arity)):
-      return
+      return False
 
     probe = Generator(self._given, self._context,
                       self._thread_block_policy_type, lanes=self._lanes,
@@ -687,27 +706,42 @@ class Generator:
     try:
       probe.generate()
     except Exception:
-      return
+      return False
     size = code_bytes(probe.code_units, hw)
     budget = opts.merge_icache_fraction * capacity
     whole = list_cost(list(self._given)).flops
     if size is None or size <= budget or not whole:
-      return
+      return False
 
     def share(descrs):
       return size * list_cost(list(descrs)).flops / whole
 
-    # What the caller set between construction and `generate` survives the
-    # rebuild: a pinned name above all, which the rebuild would otherwise
-    # replace by the digest (`test_name_does_not_change_the_source`).
-    announce, rotate = self._announce_identity, self._rotate
-    name = self._base_kernel_name
-    self.__init__(self._given, self._context, self._thread_block_policy_type,
-                  lanes=self._lanes, attrs=self._attrs,
-                  merge_within=(budget, share))
+    # Built as a probe of its own first, so that a failure leaves this
+    # generator as it was; taken over whole where it succeeds, rather than
+    # built a third time.  What the caller set between construction and
+    # `generate` goes with it -- a pinned name above all, which the build
+    # would otherwise replace by the digest.
+    merged = Generator(self._given, self._context,
+                       self._thread_block_policy_type, lanes=self._lanes,
+                       attrs=self._attrs, merge_within=(budget, share))
+    merged._announce_identity = False
+    merged._base_kernel_name = self._base_kernel_name
+    try:
+      merged.generate()
+    except Exception as error:
+      import warnings
+      warnings.warn(
+          f'merging the repeated runs failed ({type(error).__name__}: '
+          f'{str(error)[:200]}); built written out instead',
+          MergeFallbackWarning, stacklevel=3)
+      return False
+    announce = self._announce_identity
+    self.__dict__.update(merged.__dict__)
     self._announce_identity = announce
-    self._rotate = rotate
-    self._base_kernel_name = name
+    if announce:
+      registry().register(self._base_kernel_name, self.unnamed_source(),
+                          self.descr_list)
+    return True
 
   def _generate_bound(self):
     descrlist = []
@@ -1134,6 +1168,8 @@ class Generator:
     self.peak_pressure = self._context.peak_pressure
     self.emitted_work = self._context.emitted_work
     self.code_units = self._context.code_units
+    self.issue_mix = self._context.issue_mix
+    self.memory_bytes = self._context.memory_bytes
     self._warn_icache()
     self.resident_blocks = self._resident_blocks()
 
@@ -1829,6 +1865,17 @@ class Generator:
 
     body, variants = loop.decompose()
     written = {id(d.writes().tensor) for d in body if d.writes() is not None}
+
+    # The loop reaches its members through a table, and a table is an address:
+    # it reads memory and never asks the residency.  So a member whose newest
+    # copy is still in registers has to be stored before the loop, or the loop
+    # reads the buffer as it was.  SeisSol's anelastic time derivative is the
+    # case -- the peeled level left `dQ(1)` in registers, stored after the
+    # loop, and the next level read the launch's input in its place.
+    for variant in variants:
+      for view in variant.members:
+        member = self._scopes.get_symbol(view.tensor)
+        self._section.ir.extend(self._residency.flush(member.name))
     counter = f'{GeneralLexicon.BATCH_ID_NAME}v{len(self._section.ir)}'
 
     tables, region = [], []
@@ -1842,12 +1889,25 @@ class Generator:
       # it as such.  So the table holds plain data pointers, which is what a
       # batch-invariant operand's are.  Typed by the stand-in's addressing it
       # declared `const float **` over `const float *` members.
+      # A member staged into shared memory (`s0`, the peeled first one of a
+      # preloaded run) is a data pointer as much as a binding is: left out,
+      # SeisSol's `gpu_localFluxAll` typed its table `const float **` over
+      # `s0` and `glb_m5` and nvcc refused it.
       resolved = all(m.name.startswith(GeneralLexicon.GLOBAL_MEM_PREFIX)
-                     for m in members)
+                     or m.stype == SymbolType.SharedMem for m in members)
+      # A scalar stays a scalar: its bindings are values, and a table of them
+      # is a select over values -- typed as data pointers because they were
+      # named `glb_`, it declared `const float *` over `float`s.  And a table
+      # over members the loop writes is not `const`.
+      if stand_in.obj.addressing == Addressing.SCALAR:
+        addressing = Addressing.SCALAR
+      else:
+        addressing = Addressing.NONE if resolved else stand_in.obj.addressing
       table = DeclareOperandTable(
           self._context, f'{stand_in.name}Table', members,
-          Addressing.NONE if resolved else stand_in.obj.addressing,
+          addressing,
           stand_in.obj.datatype,
+          writable=id(variant.stand_in.tensor) in written,
           form=(TableForm.SELECT
                 if len(members) <= DeclareOperandTable.SELECT_LIMIT
                 else TableForm.ARRAY),
@@ -1867,10 +1927,26 @@ class Generator:
     # links exist.  Keyed by the *binding*, which is what the residency is
     # keyed by -- the tensor is `m0`, its entry is `glb_m0`, and asking for the
     # tensor finds nothing and looks exactly like nothing to carry.
-    accumulated = [descr.writes() for descr in body
-                   if getattr(descr, 'add', False) and descr.writes() is not None]
-    keys = [f'{GeneralLexicon.GLOBAL_MEM_PREFIX}{v.tensor.name}'
-            for v in accumulated]
+    #
+    # And only what the body reads before it assigns it rides the back edge.
+    # A tensor assigned first starts afresh on every pass: each of the damage
+    # model's projections computes `I = dQ(0) ...; I += ...` and reads it
+    # back, and chaining that `I` round the loop renamed its reload and not
+    # the product reading it -- `QDR(1..3)` came out zero.
+    def carries(tensor) -> bool:
+      for descr in body:
+        if any(view.tensor is tensor for view in descr.reads()):
+          return True
+        dest = descr.writes()
+        if dest is not None and dest.tensor is tensor:
+          return bool(getattr(descr, 'add', False))
+      return False
+
+    keys = list(dict.fromkeys(
+        f'{GeneralLexicon.GLOBAL_MEM_PREFIX}{descr.writes().tensor.name}'
+        for descr in body
+        if getattr(descr, 'add', False) and descr.writes() is not None
+        and carries(descr.writes().tensor)))
     before = {}
     for key in keys:
       entry = self._residency.get(key)
@@ -1898,28 +1974,37 @@ class Generator:
     from tensorforge.backend.instructions.allocate import RegisterAlloc
     allocations = [i for i in region if isinstance(i, RegisterAlloc)]
     region = [i for i in region if not isinstance(i, RegisterAlloc)]
+    # A preload at the end is a value memory holds, so nothing rides the back
+    # edge.  Kept as (key, init, result): pairing a filtered key list with the
+    # pairs afterwards lost step as soon as one key was not carried.
     carried = []
     for key in keys:
       entry = self._residency.get(key)
       was = before.get(key)
-      if was is not None and entry is not None and entry.image is not was:
-        carried.append((was, entry.image))
+      if (was is not None and entry is not None and not entry.is_preload
+          and entry.image is not was):
+        carried.append((key, was, entry.image))
 
     # Close the chain: the body reads one register and writes another, and a
     # loop needs the two to be one.  Substituted on the built region rather
     # than arranged during the build, because what the residency hands out is
     # its business and the fact that a repeated body must land where it
     # started is not something it can know.
-    for key, (init, result) in zip(
-            [k for k in keys if k in before], carried):
+    for key, init, result in carried:
       for instr in region:
         instr.substitute(result, init)
       # And tell the residency where the value now lives, because the
       # writeback is emitted after this returns and would otherwise store a
       # register the substitution has just made unreachable.
+      # Only the image moves: what it covers and what its store owes stay.
+      # Re-recorded bare, the store forgot the assignment's promise and left
+      # rows 20..24 of the anelastic derivative's `I` as the buffer had them.
       entry = self._residency.get(key)
-      self._residency.record_writeback(key, init, entry.home)
-    carried = tuple((init, init) for init, _ in carried)
+      self._residency.record_writeback(key, init, entry.home,
+                                       covered=entry.covered,
+                                       shift=entry.shift, atomic=entry.atomic,
+                                       promise=entry.promise)
+    carried = tuple((init, init) for _, init, _ in carried)
 
     # A destination that *varies* has to be stored inside the loop, and one
     # that does not must not be.
