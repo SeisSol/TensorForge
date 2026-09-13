@@ -41,8 +41,22 @@ def _tensor(shape, alias, dtype):
                             alias=alias, datatype=dtype))
 
 
+def _wide_generator(ctx, lead, dtype):
+    """`_wide_section` at the width its lead aligns to, asked for outright.
+
+    An elementwise descriptor used to waive the lane ceiling, and that is how
+    this reached a width above the wave; it no longer does (`lanes.deduce`),
+    so the width is requested instead of provoked.
+    """
+    from tensorforge.generators.lanes import LaneConfig
+    return Generator(_wide_section(lead, dtype), ctx,
+                     lanes=LaneConfig(num_threads=ctx.align(num=lead),
+                                      num_active_threads=lead, lead_width=1))
+
+
 def _wide_section(lead, dtype):
-    """A multilinear beside an elementwise, which is what waives the lane cap."""
+    """A multilinear beside an elementwise: a grouped body with both kinds of
+    global write in it."""
     gemm = MultilinearDescr(_tensor([lead, 18], "C", dtype),
                             [_tensor([lead, 18], "A", dtype),
                              _tensor([18, 18], "B", dtype)],
@@ -78,7 +92,7 @@ def test_the_block_holds_exactly_one_group():
     """
     ctx = Context(arch="sm_86", backend="cuda", fp_type=Datatype.F64)
     wave = ctx.get_vm().get_hw_descr().vec_unit_length
-    gen = Generator(_wide_section(40, Datatype.F64), ctx)
+    gen = _wide_generator(ctx, 40, Datatype.F64)
     gen.generate()
 
     threads = gen._num_threads
@@ -91,7 +105,7 @@ def test_the_block_holds_exactly_one_group():
 
 def test_the_grouped_traversal_is_driven_by_the_leader():
     ctx = Context(arch="sm_86", backend="cuda", fp_type=Datatype.F64)
-    gen = Generator(_wide_section(40, Datatype.F64), ctx)
+    gen = _wide_generator(ctx, 40, Datatype.F64)
     gen.generate()
     src = gen.get_kernel()
 
@@ -111,7 +125,7 @@ def test_the_grouped_traversal_is_driven_by_the_leader():
 def test_every_global_write_of_a_grouped_body_runs_under_the_mask():
     """The row that has no element runs the body and writes nothing."""
     ctx = Context(arch="sm_86", backend="cuda", fp_type=Datatype.F64)
-    gen = Generator(_wide_section(40, Datatype.F64), ctx)
+    gen = _wide_generator(ctx, 40, Datatype.F64)
     gen.generate()
     lines = [line.strip() for line in gen.get_kernel().splitlines()]
 
@@ -127,7 +141,7 @@ def test_the_body_of_a_grouped_loop_is_group_uniform():
     from tensorforge.backend.instructions.batch_loop import BatchLoop
 
     ctx = Context(arch="sm_86", backend="cuda", fp_type=Datatype.F64)
-    gen = Generator(_wide_section(40, Datatype.F64), ctx)
+    gen = _wide_generator(ctx, 40, Datatype.F64)
     gen.generate()
     loops = [i for s in gen._sections for i in s.stream
              if isinstance(i, BatchLoop)]
@@ -145,7 +159,7 @@ def test_a_rotated_start_stays_per_row():
     rather than a deadlock -- so the group is refused instead.
     """
     ctx = Context(arch="sm_86", backend="cuda", fp_type=Datatype.F64)
-    gen = Generator(_wide_section(40, Datatype.F64), ctx)
+    gen = _wide_generator(ctx, 40, Datatype.F64)
     gen._num_threads = 48
     plain = gen._get_2d_block_id()
     assert gen._group_size(0, plain) == 2

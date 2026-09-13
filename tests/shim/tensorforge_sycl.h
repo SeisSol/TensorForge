@@ -199,6 +199,11 @@ template <typename G, typename T> T select_from_group(G, T x, std::size_t) {
   return x;
 }
 
+// One step of a butterfly: what an SPMD cross-lane reduction is built from.
+template <typename G, typename T> T permute_group_by_xor(G, T x, std::size_t) {
+  return x;
+}
+
 template <typename G> void group_barrier(G) {}
 
 // -- math ------------------------------------------------------------------
