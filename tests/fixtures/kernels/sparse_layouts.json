@@ -94,11 +94,12 @@
  },
  "descriptions": {
   "sparse_layouts_0": {
-   "version": 5,
+   "version": 7,
    "tensors": [
     {
      "name": "C",
      "addressing": "n&+o&",
+     "residence": "memory",
      "datatype": "f64",
      "storage": {
       "shape": [
@@ -125,6 +126,7 @@
     {
      "name": "A",
      "addressing": "n&+o&",
+     "residence": "memory",
      "datatype": "f64",
      "storage": {
       "shape": [
@@ -150,6 +152,7 @@
     {
      "name": "_scalar0",
      "addressing": "",
+     "residence": "argument",
      "datatype": "f64",
      "storage": {
       "shape": [],

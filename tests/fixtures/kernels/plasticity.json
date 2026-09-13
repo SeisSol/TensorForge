@@ -428,11 +428,12 @@
  },
  "descriptions": {
   "plasticity_0": {
-   "version": 5,
+   "version": 7,
    "tensors": [
     {
      "name": "_tmp0",
      "addressing": "n*N+o&",
+     "residence": "memory",
      "datatype": "bool",
      "storage": {
       "shape": [
@@ -459,6 +460,7 @@
     {
      "name": "S",
      "addressing": "n&+o&",
+     "residence": "memory",
      "datatype": "f64",
      "storage": {
       "shape": [
@@ -485,6 +487,7 @@
     {
      "name": "Y",
      "addressing": "n&+o&",
+     "residence": "memory",
      "datatype": "f64",
      "storage": {
       "shape": [
@@ -511,6 +514,7 @@
     {
      "name": "_scalar0",
      "addressing": "",
+     "residence": "argument",
      "datatype": "f64",
      "storage": {
       "shape": [],
@@ -534,6 +538,7 @@
     {
      "name": "_tmp1",
      "addressing": "n*N+o&",
+     "residence": "memory",
      "datatype": "bool",
      "storage": {
       "shape": [
@@ -557,6 +562,7 @@
     {
      "name": "_scalar1",
      "addressing": "",
+     "residence": "argument",
      "datatype": "f64",
      "storage": {
       "shape": [],
@@ -580,6 +586,7 @@
     {
      "name": "flag",
      "addressing": "n*N+o&",
+     "residence": "memory",
      "datatype": "bool",
      "storage": {
       "shape": [],
@@ -597,6 +604,7 @@
     {
      "name": "_scalar2",
      "addressing": "",
+     "residence": "argument",
      "datatype": "f64",
      "storage": {
       "shape": [],
@@ -620,6 +628,7 @@
     {
      "name": "o1",
      "addressing": "n&+o&",
+     "residence": "memory",
      "datatype": "f64",
      "storage": {
       "shape": [
@@ -646,6 +655,7 @@
     {
      "name": "_scalar3",
      "addressing": "",
+     "residence": "argument",
      "datatype": "f64",
      "storage": {
       "shape": [],

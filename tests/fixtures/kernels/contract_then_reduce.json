@@ -242,11 +242,12 @@
  },
  "descriptions": {
   "kernel_e62aee1d95": {
-   "version": 5,
+   "version": 7,
    "tensors": [
     {
      "name": "A",
      "addressing": "n&+o&",
+     "residence": "memory",
      "datatype": "f64",
      "storage": {
       "shape": [
@@ -273,6 +274,7 @@
     {
      "name": "B",
      "addressing": "n&+o&",
+     "residence": "memory",
      "datatype": "f64",
      "storage": {
       "shape": [
@@ -299,6 +301,7 @@
     {
      "name": "C",
      "addressing": "n&+o&",
+     "residence": "memory",
      "datatype": "f64",
      "storage": {
       "shape": [
@@ -325,6 +328,7 @@
     {
      "name": "_scalar0",
      "addressing": "",
+     "residence": "argument",
      "datatype": "f64",
      "storage": {
       "shape": [],
@@ -348,6 +352,7 @@
     {
      "name": "v",
      "addressing": "n&+o&",
+     "residence": "memory",
      "datatype": "f64",
      "storage": {
       "shape": [
@@ -371,6 +376,7 @@
     {
      "name": "_scalar1",
      "addressing": "",
+     "residence": "argument",
      "datatype": "f64",
      "storage": {
       "shape": [],

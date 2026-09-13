@@ -10,6 +10,34 @@ class DataFlowDirection(enum.Enum):
   SINK = 1
   SOURCESINK = 2
 
+class Residence(enum.Enum):
+  """Where an operand's data is while the kernel runs.
+
+  Not the same question as `Addressing`, which says how an address is
+  formed from a parameter: `MEMORY` leaves every addressing open, while
+  `ARGUMENT` and `CODE` each admit one thing and it is not an address.
+
+  `CODE` is the one that changes what a generator has to do. There is no
+  parameter and no address, so the numbers themselves are what the kernel
+  reads, and they are only available because the description carries them.
+  """
+  MEMORY = 0
+  ARGUMENT = 1
+  CODE = 2
+
+  def __str__(self):
+    return self.name.lower()
+
+  @classmethod
+  def str2residence(cls, string):
+    known = {str(residence): residence for residence in cls}
+    if string not in known:
+      raise ValueError(
+        f'residence must be one of {", ".join(sorted(known))}; '
+        f'given: {string}')
+    return known[string]
+
+
 class Addressing(enum.Enum):
   NONE = 0
   STRIDED = 1

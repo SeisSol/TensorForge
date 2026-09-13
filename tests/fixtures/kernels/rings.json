@@ -152,11 +152,12 @@
  },
  "descriptions": {
   "kernel_7ef38582db": {
-   "version": 5,
+   "version": 7,
    "tensors": [
     {
      "name": "A",
      "addressing": "n&+o&",
+     "residence": "memory",
      "datatype": "f64",
      "storage": {
       "shape": [
@@ -183,6 +184,7 @@
     {
      "name": "B",
      "addressing": "n&+o&",
+     "residence": "memory",
      "datatype": "f64",
      "storage": {
       "shape": [
@@ -209,6 +211,7 @@
     {
      "name": "C",
      "addressing": "n&+o&",
+     "residence": "memory",
      "datatype": "f64",
      "storage": {
       "shape": [
@@ -235,6 +238,7 @@
     {
      "name": "_scalar0",
      "addressing": "",
+     "residence": "argument",
      "datatype": "f64",
      "storage": {
       "shape": [],
@@ -366,11 +370,12 @@
    ]
   },
   "rings_1": {
-   "version": 5,
+   "version": 7,
    "tensors": [
     {
      "name": "_tmp0",
      "addressing": "n*N+o&",
+     "residence": "memory",
      "datatype": "bool",
      "storage": {
       "shape": [
@@ -400,6 +405,7 @@
     {
      "name": "AB",
      "addressing": "n&+o&",
+     "residence": "memory",
      "datatype": "bool",
      "storage": {
       "shape": [
@@ -426,6 +432,7 @@
     {
      "name": "BB",
      "addressing": "n&+o&",
+     "residence": "memory",
      "datatype": "bool",
      "storage": {
       "shape": [
@@ -452,6 +459,7 @@
     {
      "name": "_scalar0",
      "addressing": "",
+     "residence": "argument",
      "datatype": "f64",
      "storage": {
       "shape": [],
@@ -475,6 +483,7 @@
     {
      "name": "CB",
      "addressing": "n&+o&",
+     "residence": "memory",
      "datatype": "bool",
      "storage": {
       "shape": [
@@ -501,6 +510,7 @@
     {
      "name": "_scalar1",
      "addressing": "",
+     "residence": "argument",
      "datatype": "f64",
      "storage": {
       "shape": [],

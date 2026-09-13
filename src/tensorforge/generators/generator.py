@@ -6,7 +6,7 @@ from copy import deepcopy
 import hashlib
 from tensorforge.generators.descriptions import ForDescr, OperationDescription, MultilinearDescr, ElementwiseDescr, RegionDescription, ReductionDescr
 from tensorforge.common.context import Context
-from tensorforge.common.basic_types import Addressing, FlagMode, GeneralLexicon, DataFlowDirection
+from tensorforge.common.basic_types import Addressing, FlagMode, GeneralLexicon, DataFlowDirection, Residence
 from tensorforge.common.helper import get_extra_offset_name
 from tensorforge.generators.kernel_params import KernelParam
 from tensorforge.backend.data_types import ShrMemObject, RegMemObject
@@ -1807,7 +1807,11 @@ class Generator:
     """
     for matrix in self._matrix_list:
       if matrix not in self._tmp_list:
-        if matrix.addressing == Addressing.SCALAR:
+        if getattr(matrix, 'residence', Residence.MEMORY) is Residence.CODE:
+          # Its numbers are the operand, whatever its rank: there is no
+          # parameter and no address, so `Data` is the only symbol it can be.
+          stype = SymbolType.Data
+        elif matrix.addressing == Addressing.SCALAR:
           # known scalars will always be inlined
           if matrix.has_values():
             stype = SymbolType.Data
@@ -1996,14 +2000,15 @@ class Generator:
           emitted_tables.add(id(table))
           params.append(KernelParam.table(table))
         continue
+      if symbol.stype == SymbolType.Data:
+        # Its numbers are in the kernel, so there is nothing to pass and no
+        # offset into anything. One statement of that, for every rank and
+        # every addressing a `Data` symbol can come from.
+        continue
       datatype = self._context.fp_type if symbol.obj.datatype is None else symbol.obj.datatype
-      if symbol.obj.addressing == Addressing.SCALAR:
-        if not symbol.stype == SymbolType.Data:
-          params.append(KernelParam.of_symbol(symbol, datatype))
-      else:
-        params.append(KernelParam.of_symbol(symbol, datatype))
-        if symbol.obj.addressing != Addressing.NONE:
-          params.append(KernelParam.size(get_extra_offset_name(symbol)))
+      params.append(KernelParam.of_symbol(symbol, datatype))
+      if symbol.obj.addressing not in (Addressing.SCALAR, Addressing.NONE):
+        params.append(KernelParam.size(get_extra_offset_name(symbol)))
 
     for i, section in enumerate(self._sections):
       params.append(KernelParam.size(f'{GeneralLexicon.NUM_ELEMENTS}{i}'))
@@ -2105,6 +2110,9 @@ class Generator:
     # add tensors
     symbols = list(self._scopes.get_global_scope().values())
     for symbol in symbols:
+      if symbol.stype == SymbolType.Data:
+        # nothing is passed for it, so the call site names nothing either
+        continue
       if symbol.obj.alias in mat_name_map:
         args.append(mat_name_map[symbol.obj.alias])
         if symbol.obj.addressing not in [Addressing.SCALAR, Addressing.NONE]:

@@ -105,11 +105,12 @@
  },
  "descriptions": {
   "guards_0": {
-   "version": 5,
+   "version": 7,
    "tensors": [
     {
      "name": "A",
      "addressing": "n&+o&",
+     "residence": "memory",
      "datatype": "f64",
      "storage": {
       "shape": [
@@ -136,6 +137,7 @@
     {
      "name": "B",
      "addressing": "n&+o&",
+     "residence": "memory",
      "datatype": "f64",
      "storage": {
       "shape": [
@@ -162,6 +164,7 @@
     {
      "name": "X",
      "addressing": "n&+o&",
+     "residence": "memory",
      "datatype": "bool",
      "storage": {
       "shape": [],
@@ -179,6 +182,7 @@
     {
      "name": "_scalar0",
      "addressing": "",
+     "residence": "argument",
      "datatype": "f64",
      "storage": {
       "shape": [],

@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: MIT
 
 from tensorforge.interface import YatetoInterface as yi
-from tensorforge.common.basic_types import Addressing, Datatype, DataFlowDirection
+from tensorforge.common.basic_types import Addressing, Datatype, DataFlowDirection, Residence
 from tensorforge.common.context import Context
 from tensorforge.common.helper import generate_tmp_tensor
 from tensorforge.common.matrix.tensor import Tensor, SubTensor
@@ -545,6 +545,8 @@ class DescriptionReader(Reader):
     shape = d['storage']['shape']
     storagetype = d['storage']['type']
 
+    residence = Residence.str2residence(d['residence'])
+
     addressingStr = d['addressing']
     if addressingStr == '&':
       addressing = Addressing.NONE
@@ -554,6 +556,18 @@ class DescriptionReader(Reader):
       addressing = Addressing.PTR_BASED
     elif addressingStr == '':
       addressing = Addressing.SCALAR
+    elif addressingStr is None and residence is Residence.CODE:
+      # There is no formula because there is no parameter. `NONE` is still
+      # what the operand *is* -- one and the same datum for every batch
+      # element -- and the paths that ask read the residence for the rest.
+      addressing = Addressing.NONE
+    else:
+      # An unhandled spelling used to leave `addressing` unbound, and the
+      # first read of it blamed a line that had nothing to do with it.
+      raise NotImplementedError(
+        f'tensor {name}: the description states addressing '
+        f'{addressingStr!r} with residence {residence}, which this frontend '
+        f'has no reading for.')
 
     if addressing != Addressing.SCALAR and len(shape) == 0:
       # A tensor without axes still holds one element per batch entry, and
@@ -584,7 +598,8 @@ class DescriptionReader(Reader):
     is_constant = d['flags']['constant']
 
     self._cache[name] = Tensor(shape, addressing, bbox, name, is_temporary, spp,
-                               values, datatype, d.get('alignment', 0))
+                               values, datatype, d.get('alignment', 0),
+                               residence=residence)
 
     self._tensor_list[name] = TensorData(datatype_new, shape, spp, values=values)
 
@@ -965,7 +980,7 @@ class YatetoFrontend:
   #: The version of yateto's export interface this reads. yateto refuses an
   #: exporter that speaks an older one, because the fields added since would
   #: be dropped silently rather than missed loudly.
-  INTERFACE_VERSION = 5
+  INTERFACE_VERSION = 7
 
   def __init__(self, arch, attrs=None):
     """The routine exporter yateto instantiates, once per kernel.

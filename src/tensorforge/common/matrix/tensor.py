@@ -7,7 +7,7 @@ from functools import reduce
 from typing import List, Union
 
 import numpy as np
-from ..basic_types import Addressing, DataFlowDirection, Datatype
+from ..basic_types import Addressing, DataFlowDirection, Datatype, Residence
 from tensorforge.common.exceptions import GenerationError
 
 class Tensor:
@@ -20,7 +20,8 @@ class Tensor:
         spp: SparsityPattern = None,
         data: Union[np.ndarray, dict, None] = None,
         datatype: Datatype = None,
-        alignment: int = 0):
+        alignment: int = 0,
+        residence: Residence = Residence.MEMORY):
         self.name = None
         self.alias = alias
         self.shape = tuple(shape)
@@ -99,6 +100,7 @@ class Tensor:
             self.bbox = BoundingBox([0] * len(shape), shape)
 
         self.addressing = addressing
+        self.residence = residence
         self.ptr_type = self.addressing.to_pointer()
 
         if self.addressing == Addressing.SCALAR:
@@ -130,6 +132,12 @@ class Tensor:
                 raise GenerationError(
                     f'Tensor {self}: data has shape {self.data.shape}, '
                     f'tensor is {self.shape}')
+
+        if self.residence is Residence.CODE and not self.has_values():
+            # Nothing else can supply them: there is no parameter for the
+            # operand and no address to read.
+            raise GenerationError(
+                f'Tensor {self} resides in the code but carries no data.')
 
         # check whether bbox was given correctly
         if any(dimshape < dimsize for dimshape, dimsize in zip(self.shape, self.bbox.sizes())):
