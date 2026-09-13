@@ -46,7 +46,7 @@ def _hull(a: Optional[BoundingBox], b: BoundingBox) -> BoundingBox:
 class SectionPlan:
     """The read/write geometry of one section, keyed by tensor.
 
-    Constructing it runs the initialisation check, so a section that reads a
+    Constructing it runs the initialization check, so a section that reads a
     temporary somewhere nothing writes fails here rather than several hundred
     lines of generated source later.
     """
@@ -101,7 +101,7 @@ class SectionPlan:
                 self._add_effective(descr, tensor)
                 self._track_definitions(descr, tensor)
 
-        self._check_initialised()
+        self._check_initialized()
 
     # -- construction ---------------------------------------------------- #
 
@@ -189,7 +189,7 @@ class SectionPlan:
         defined = self._defined.get(key)
         return not defined or self._uncovered_by(defined, box) is not None
 
-    # -- the initialisation check ---------------------------------------- #
+    # -- the initialization check ---------------------------------------- #
 
     def _uncovered(self, key, read):
         return self._uncovered_by(self._eff_writes.get(key, []), read)
@@ -225,7 +225,7 @@ class SectionPlan:
             return BoundingBox(lo, hi)
         return None
 
-    def _check_initialised(self):
+    def _check_initialized(self):
         """Refuse to read a temporary where nothing ever wrote.
 
         A temporary is created by the kernel, so anything read outside what the

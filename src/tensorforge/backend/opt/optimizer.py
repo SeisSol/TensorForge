@@ -2,7 +2,7 @@
 #
 # SPDX-License-Identifier: MIT
 
-"""Macro-level optimisation stage, driven by the pass manager.
+"""Macro-level optimization stage, driven by the pass manager.
 
 The pipeline used to be a hardcoded sequence with the order implicit, three
 passes commented out, one constructed but never applied, and analysis results

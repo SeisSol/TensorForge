@@ -121,7 +121,7 @@ template <typename T> struct ReductionOperation<T, Operation::And> {
 };
 
 template <typename T> struct ReductionOperation<T, Operation::Or> {
-  // Was `Operation::And`, copied along with the rest of the specialisation.
+  // Was `Operation::And`, copied along with the rest of the specialization.
   // Every `Op::Op == Operation::Or` test was therefore false, and an Or
   // reduction took whichever branch And had been given.
   static constexpr Operation Op = Operation::Or;

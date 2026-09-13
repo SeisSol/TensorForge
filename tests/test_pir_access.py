@@ -10,7 +10,7 @@ structured and the dereference around it was not, so a pass could see neither
 the def-use edge to the address nor that two accesses touch the same place.
 
 Most of that is now `Op.LOAD` and `Op.STORE`. Three cases are still text, each
-for a different reason, and each is one careless generalisation away from
+for a different reason, and each is one careless generalization away from
 being wrong rather than merely unmigrated:
 
   * a **scalar** is not a subscripted access at all --- `access` returns the

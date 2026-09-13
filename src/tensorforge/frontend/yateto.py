@@ -184,7 +184,7 @@ class DescriptionReader(Reader):
   #: a multilinear over which no axis is contracted, and a sum over one axis
   #: is a multilinear with a single operand over which that axis is. Both go
   #: that way rather than to their own descriptor: the multilinear path
-  #: carries the optimisations, and it broadcasts an operand of lower rank,
+  #: carries the optimizations, and it broadcasts an operand of lower rank,
   #: which the elementwise one does not.
   AS_MULTILINEAR = {('elementwise', 'Mul'), ('reduction', 'Add')}
 
@@ -528,7 +528,7 @@ class DescriptionReader(Reader):
     multilinear, as an `AS_MULTILINEAR` operation is: that is what broadcasts a
     branch of lower rank, permutes, accumulates and takes a named factor.
 
-    The version only groups neighbouring statements under one guard, so a
+    The version only groups neighboring statements under one guard, so a
     hoist's own is a negative one: yateto's start at zero, and two hoists over
     the same condition tensor must not merge into one region.
     """
@@ -784,7 +784,7 @@ class TermReader(Reader):
   def is_scalar(op):
     """Whether this operand is a named scalar rather than a tensor.
 
-    Asked of the object, since recognising yateto's `Scalar` by type would
+    Asked of the object, since recognizing yateto's `Scalar` by type would
     mean importing yateto. It carries no memory layout, and a factor that is
     a literal arrives as a number instead.
     """

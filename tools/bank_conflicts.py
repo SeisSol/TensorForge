@@ -65,7 +65,7 @@ _ASSIGN = re.compile(r'^\s*(?:const\s+)?[\w:<>,\s*]+?\s(\w+)\s*=\s*([^;]+);\s*$'
 #: back unresolved -- and an unresolved access is one the census does not
 #: count, which is a blind spot rather than a caveat.
 #:
-#: Substituting the initialiser is sound because these are loop bounds over
+#: Substituting the initializer is sound because these are loop bounds over
 #: tensor dimensions: every lane in the wave is on the same iteration, so the
 #: value shifts every lane's address by the same amount and leaves the bank
 #: pattern exactly as it was.  Anything lane-dependent reaches the address
@@ -285,7 +285,7 @@ def accesses(source: str):
             width = _VECTOR_WIDTH.get(wide.group(1).strip()) if wide else None
             # A cast store writes through the cast, so the line does not begin
             # with the buffer name.  Deciding direction on that alone put every
-            # vectorised store in the load column.
+            # vectorized store in the load column.
             written = (line.strip().startswith(f'{name}[')
                        or (wide is not None
                            and re.search(re.escape(name) + r'\[[^\]]*\]\s*=',

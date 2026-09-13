@@ -32,7 +32,7 @@ _ATOM = __import__('re').compile(r'^(?:[A-Za-z_][A-Za-z0-9_.:]*|\d[\w.]*)$')
 
 # A predicate becomes a select only where suppressing the statement is not the
 # point.  Reads -- synchronous or asynchronous -- may be evaluated under a
-# ternary; anything that writes, is atomic, synchronises or is opaque has to
+# ternary; anything that writes, is atomic, synchronizes or is opaque has to
 # keep a real branch, or the effect would happen when it must not.  This used
 # to be a test on the *shape* of the statement (does it have a target?), which
 # would silently fold a value-returning atomic into a ternary.
@@ -240,7 +240,7 @@ class Emitter:
         ``value`` is the value being declared, when there is one.  This
         emitter does not need it -- in SPMD the lane is in the *address*, so a
         value's type says nothing about how it is spread across the wave.  An
-        explicitly vectorised emitter needs exactly that, and it needs it at
+        explicitly vectorized emitter needs exactly that, and it needs it at
         every declaration; passing the value here rather than threading a
         second parameter through six call sites is what keeps the two
         emitters one class apart instead of one file apart.
@@ -525,7 +525,7 @@ class Emitter:
         writes several of them at once and has to be spelled through a pointer
         of the wider type.  That cast is not new -- ``load_linear`` and
         ``store_linear`` formatted the same one into a raw string.  Putting it
-        *here* is what lets a vectorised access stay an ``Op.LOAD``/``Op.STORE``
+        *here* is what lets a vectorized access stay an ``Op.LOAD``/``Op.STORE``
         with the buffer as an operand: the string form had to leave the
         structured path (``pir_buffer`` was consulted only for ``vec == 1``),
         which cost every pass its view of which buffer the access touches.
@@ -543,11 +543,11 @@ class Emitter:
             return f'*({self._vector_ctype(t, relaxed)}*)&{access}'
         return access
 
-    def initialiser(self, v: Value, name: str, expr: str) -> str:
+    def initializer(self, v: Value, name: str, expr: str) -> str:
         """The declaration that starts a loop-carried value at `expr`.
 
         Its own method because the two lowerings spell it differently, and the
-        difference is not cosmetic: see `EsimdEmitter.initialiser`.
+        difference is not cosmetic: see `EsimdEmitter.initializer`.
         """
         return f'{self.ctype(v.type, v)} {name} = {expr};'
 
@@ -919,7 +919,7 @@ class Emitter:
 
         if op == Op.DECLARE:
             v = s.target[0]
-            # No initialiser to inline, so `declare()`'s folding machinery does
+            # No initializer to inline, so `declare()`'s folding machinery does
             # not apply -- this is the plain declaration the raw text used to
             # emit, byte for byte.
             w(f'{self.ctype(v.type, v)} {self.name(v)}{s.attr("init", "{}")};')
@@ -927,7 +927,7 @@ class Emitter:
 
         if op == Op.PACK:
             # Never inlined -- see `_plan_inlining`.  `{a, b}` is an
-            # *initialiser*, not an expression: `x * {a, b}` is not C++, and
+            # *initializer*, not an expression: `x * {a, b}` is not C++, and
             # inlining a pack into its consumer produced exactly that as soon
             # as a splatted operand met a multiply.  It has to keep its own
             # declaration, which is also how the vendor path has always used
@@ -1003,7 +1003,7 @@ class Emitter:
             elif op in _LEXIC_BINOP and len(args) == 2:
                 expr = self._lexic_binop(op, v, args)
             else:
-                # Spelling an unrecognised name as a call is a guess at what
+                # Spelling an unrecognized name as a call is a guess at what
                 # the op meant, and one that C++ resolves against whichever
                 # headers the translation unit happens to have pulled in.  A
                 # call the IR intends is an `Op.CALL` and says so.
@@ -1033,7 +1033,7 @@ class Emitter:
                 continue
             nm = self.name(arg)
             self.bind(res, nm)
-            w(self.initialiser(arg, nm, self.operand(init, arg.type)))
+            w(self.initializer(arg, nm, self.operand(init, arg.type)))
             targets.append(nm)
 
         extern = s.attr('extern')

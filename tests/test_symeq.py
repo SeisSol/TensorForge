@@ -111,7 +111,7 @@ def test_accumulator_chain_is_visible_to_the_checker():
     """Guards the checker's own blind spot.
 
     The pre-SSA kernels update the accumulator with a bare `v15 = mfma(...)`.
-    A parser that recognises declarations and array stores but not scalar
+    A parser that recognizes declarations and array stores but not scalar
     reassignment silently drops the entire chain --- and then every output
     slot compares equal as an untouched zero, which reads as success.
     """

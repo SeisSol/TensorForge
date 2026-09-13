@@ -20,7 +20,7 @@ NumPy evaluation of the same descriptor list the frontend handed the backend.
 Agreement to machine precision is then a real statement about the kernel.
 
 Validated against the poroelastic order-4 set: 56 of 60 kernels run (the other
-four use vectorised loads the interpreter does not model), and on a correct
+four use vectorized loads the interpreter does not model), and on a correct
 backend all 56 match with a relative deviation below 1e-15.
 
 ## Setup
@@ -95,7 +95,7 @@ register as a disagreement that is not one.
 `read_before_write.py` reports reads with no preceding write.  Not all of them
 are defects: a global output may be filled by the caller.  In the poroelastic
 set it flags `spaceTimePredictor` row 0 and the alignment padding, which are
-SeisSol's to initialise --- worth confirming on that side, since nothing in the
+SeisSol's to initialize --- worth confirming on that side, since nothing in the
 kernel does it.
 
 One kernel is executed per run, for one batch element, with `flags0 == nullptr`

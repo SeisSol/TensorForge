@@ -139,7 +139,7 @@ def check_snapshot(path: Path, cxx: Optional[str] = None) -> Result:
     kernel = kernel_section(path.read_text())
     if kernel is None:
         return Result(path, None, reason="no kernel section (generation "
-                                         "failure or unrecognised layout)")
+                                         "failure or unrecognized layout)")
     return check_source(kernel, cxx, path, shim_for(backend_of(path)))
 
 
@@ -173,7 +173,7 @@ def snapshots(pattern: str = "*.cpp") -> List[Path]:
 
 @dataclass(frozen=True)
 class _DeviceFrontEnd:
-    #: Overriding variable, the same names `toolchain.py` honours.
+    #: Overriding variable, the same names `toolchain.py` honors.
     env: str
     default: str
     #: The architecture to compile *for*.  A front end targets any

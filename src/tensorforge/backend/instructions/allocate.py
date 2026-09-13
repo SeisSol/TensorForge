@@ -126,7 +126,7 @@ class ShrMemAlloc(AbstractInstruction):
 
     # Asked, not spelled.  A window into shared memory is a pointer on four
     # of the five backends and an offset on the fifth, and the declaration
-    # and the initialiser have to agree about which -- they were two
+    # and the initializer have to agree about which -- they were two
     # independently formatted strings, so on the fifth they did not.
     def declarator(name):
       return f'{lexic.shared_pointer_type(self._fp_as_str)} {name}'

@@ -98,7 +98,7 @@ def test_operand_union_is_absent_for_a_tensor_with_no_symbol():
     """A temporary has no symbol when the plan runs, so it has no union.
 
     Consumers fall back to their own box for those, which is what keeps a
-    temporary's staging sized by whoever materialises it rather than by an
+    temporary's staging sized by whoever materializes it rather than by an
     entry that could not exist yet.
     """
     a, b = _tensor("A"), _tensor("B")
@@ -140,7 +140,7 @@ def test_an_accumulation_chain_is_not_written_in_slices():
 
     This is the case the register residency exists for, and forcing a store per
     term would cost a round trip on each of them.  Several writers are not by
-    themselves a reason to materialise.
+    themselves a reason to materialize.
     """
     a1, b1, a2, b2 = (_tensor(n) for n in ("A1", "B1", "A2", "B2"))
     tmp = _tensor("TMP", tmp=True)
@@ -183,7 +183,7 @@ def test_a_writer_narrower_than_the_read_is_written_in_slices():
 
     The destination here is global, and it has to be.  For a *temporary* this
     geometry never reaches the question: reading `tmp[:, 4:8]` where only
-    `tmp[:, 0:4]` was written is an uncovered gap, and the initialisation check
+    `tmp[:, 0:4]` was written is an uncovered gap, and the initialization check
     refuses the section before anything asks `written_in_slices`.  So the
     second half of that predicate -- the declared write union against the
     declared read union -- is reachable only for a tensor the check exempts,
@@ -205,7 +205,7 @@ def test_a_writer_narrower_than_the_read_is_written_in_slices():
 
 
 # ----------------------------------------------------------------------
-# the initialisation check
+# the initialization check
 # ----------------------------------------------------------------------
 
 def test_a_temporary_read_where_nothing_writes_is_cleared_first():
@@ -310,7 +310,7 @@ def test_a_global_output_may_be_read_without_being_written():
 # every descriptor kind states its own geometry
 # ----------------------------------------------------------------------
 
-def test_an_elementwise_write_initialises_a_temporary():
+def test_an_elementwise_write_initializes_a_temporary():
     """`tmp = abs(A)` counts as writing `tmp`.
 
     While the analysis only looked at contractions, a temporary produced
@@ -377,11 +377,11 @@ def test_an_elementwise_scalar_operand_contributes_no_read():
 
 
 def test_a_contraction_scalar_is_a_rank_zero_read():
-    """`alpha != 1` is modelled as a rank-0 tensor operand, not as a value.
+    """`alpha != 1` is modeled as a rank-0 tensor operand, not as a value.
 
     Worth stating rather than assuming, because the two descriptor kinds do
     genuinely differ here and a reader may expect them not to.  It is harmless:
-    a rank-0 box has nothing to cover, so the initialisation check leaves it
+    a rank-0 box has nothing to cover, so the initialization check leaves it
     alone, and a scalar is never a temporary.
     """
     a, b, c = _tensor("A"), _tensor("B"), _tensor("C")

@@ -223,7 +223,7 @@ class WrapLoads(AbstractTransformer):
                           'not survive the back edge')
             if alloc._init_value not in (None, 0):
                 return self._reject(name, 'buffer is declared with a non-zero '
-                                          'initialiser, which a hoisted '
+                                          'initializer, which a hoisted '
                                           'declaration would apply once')
         producer = self._producer(body, load._src)
         if producer is None:

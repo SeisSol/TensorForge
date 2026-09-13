@@ -6,12 +6,12 @@
 An index that leaves its register array is invisible to the numeric oracle:
 the interpreter keeps registers in a dict, so it happily reads and writes past
 the end and still produces an answer. On a GPU the same access lands on a
-neighbouring register or spill slot. That makes this a check nothing else in
+neighboring register or spill slot. That makes this a check nothing else in
 the suite can make, which is reason enough to pin what it covers.
 
 The case that motivated the pinning is a base offset of -1 on a carry-in: the
 array is filled at 0..5 and read at -1..4, so the accumulation picks up an
-uninitialised slot and drops the last element. Both halves of it are easy to
+uninitialized slot and drops the last element. Both halves of it are easy to
 miss -- the index is composed rather than a bare name, and it is negative
 rather than too large.
 """

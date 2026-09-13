@@ -3,11 +3,11 @@
 # SPDX-License-Identifier: MIT
 """Regenerate `tests/data/amd_matrix_builtins.json` from LLVM.
 
-The catalogue in `primitives/amd/catalog.py` states shapes, block counts and
+The catalog in `primitives/amd/catalog.py` states shapes, block counts and
 fragment widths.  Those are facts about instructions LLVM already describes,
 so they are a copy -- and copies drift.  This extracts the same facts from
 LLVM's own sources into a vendored table, which `tests/test_amd_catalog.py`
-checks the catalogue against.  Vendored rather than fetched, so the test suite
+checks the catalog against.  Vendored rather than fetched, so the test suite
 stays offline and a change to the table shows up in review as a diff.
 
 Usage::

@@ -178,7 +178,7 @@ def frontier(groups: Sequence[Sequence[Placement]], machine: Machine,
     Returns one entry per *achieved* residency, best first by throughput.  A
     target block count that the resulting plan overshoots is reported at the
     residency it actually reaches, not the one it aimed at, and duplicates are
-    resolved in favour of the cheaper plan.
+    resolved in favor of the cheaper plan.
     """
     best: dict = {}
     for target in range(1, machine.max_blocks + 1):

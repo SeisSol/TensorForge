@@ -57,7 +57,7 @@ def test_transpose16x4_exchanges_the_register_with_lane_bits_three_and_two():
 
     Not the low ones: `transpose4x4b32` takes those. This one moves a register
     against bits 3 and 2 inside each row of sixteen, which is why the two are
-    not interchangeable and why the catalogue's transpose table is keyed by
+    not interchangeable and why the catalog's transpose table is keyed by
     tile width.
     """
     out = wavesim.transpose16x4(_tagged(4))

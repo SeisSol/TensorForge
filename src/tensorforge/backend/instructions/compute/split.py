@@ -17,9 +17,9 @@ and states it once per target: the number of terms disappears into the arity
 of whatever split routine it calls, and the order the products accumulate in
 becomes whatever the tuple happened to be written in.
 
-What is *not* here is which arithmetic to reach for.  That is a catalogue
+What is *not* here is which arithmetic to reach for.  That is a catalog
 question -- which entries a target has, at what tile -- and it is answered
-where the catalogue is.
+where the catalog is.
 """
 
 from math import ceil

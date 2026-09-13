@@ -4,7 +4,7 @@
 """Phase-1 measurement over SeisSol's `matrices_N.xml`.
 
 The operator matrices are the corpus the sparse-constant cost model has to be
-fitted to, so they get measured before anything is modelled.  This reads the
+fitted to, so they get measured before anything is modeled.  This reads the
 XML SeisSol ships, groups the matrices into families, and runs
 `tools/spp_metrics.py` over each one.
 

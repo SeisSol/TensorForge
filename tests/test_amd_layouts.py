@@ -67,9 +67,9 @@ def test_the_table_covers_exactly_what_the_calculator_knows():
     assert set(layouts.FRAGMENT_BITS) == set(_rows())
 
     uncovered = {b for names in _table()["not_covered"].values() for b in names}
-    catalogued = {op.builtin for op in catalog.MATRIX_OPS}
-    assert uncovered == catalogued - set(layouts.FRAGMENT_BITS)
-    assert uncovered, "the calculator does not reach every catalogue entry"
+    cataloged = {op.builtin for op in catalog.MATRIX_OPS}
+    assert uncovered == cataloged - set(layouts.FRAGMENT_BITS)
+    assert uncovered, "the calculator does not reach every catalog entry"
 
 
 MEASURED = [o for o in catalog.MATRIX_OPS if layouts.established(o)]
@@ -405,7 +405,7 @@ def test_the_shift_and_mask_form_agrees_with_the_bit_gather(op):
 def test_an_address_costs_a_handful_of_terms(op):
     """The point of collapsing runs: fragments are cheap to address.
 
-    Three shift-and-mask terms is the worst case in the whole catalogue: an
+    Three shift-and-mask terms is the worst case in the whole catalog: an
     address is a couple of VALU operations, not a bit gather. Which is what
     makes reading a fragment straight out of shared memory a real option
     rather than a table lookup per element.

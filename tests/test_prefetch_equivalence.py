@@ -115,7 +115,7 @@ def test_a_rotation_is_only_granted_where_the_wrap_survives_it():
     rotated on the strength of that, and declined for a reason the rotation
     created.
 
-    What came out was not a missed optimisation: the compute reads stage
+    What came out was not a missed optimization: the compute reads stage
     `pipeStage % 2` while the transfer fills the other one, so no iteration
     ever fills the stage it reads and the first element computes from whatever
     the arena held.  `trans_a` did exactly that -- 192 of 432 destination

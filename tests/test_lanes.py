@@ -363,7 +363,7 @@ def test_a_kernel_that_builds_at_no_width_still_raises():
 
 
 # ----------------------------------------------------------------------
-# what is known exactly, and what is only modelled
+# what is known exactly, and what is only modeled
 # ----------------------------------------------------------------------
 
 def test_the_resident_block_count_uses_only_what_is_known():
@@ -419,7 +419,7 @@ def test_a_tie_keeps_the_configuration_the_descriptors_asked_for():
 
     Changing it anyway is exactly where "the wider one measured slower" would
     bite: six of the fourteen contested cases on gfx90a are ties, and moving
-    all six for no modelled reason would be six chances to lose and none to
+    all six for no modeled reason would be six chances to lose and none to
     win.
     """
     ctx = _ctx("gfx90a", "hip", Datatype.F64)
@@ -469,7 +469,7 @@ def test_the_exact_bound_outranks_the_model_where_it_speaks():
         Generator.generate = real
 
     assert config.num_threads == 32, (
-        "the modelled figure won against a measured block count")
+        "the modeled figure won against a measured block count")
 
 
 # ----------------------------------------------------------------------

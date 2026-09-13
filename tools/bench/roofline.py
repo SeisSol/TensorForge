@@ -28,7 +28,7 @@ is `rocprof-compute --roof-only` and needs MI200 or newer; Intel's is Advisor's.
 Neither is wrapped here, and both are better than this when they are available:
 they know their own machine. What this gives is a roof on the machine in front
 of you, from the toolchain you already needed, without a profiler and without a
-licence.
+license.
 
 ## The two ceilings
 
@@ -431,10 +431,10 @@ def svg(points: List[Point], ceiling: Ceiling) -> str:
     roof = ' '.join(
         f'{px(x):.1f},{py(ceiling.bound(x)):.1f}'
         for x in (x0, ceiling.ridge, x1))
-    colours = {'memory': '#2f6fb2', 'compute': '#b2452f', 'neither': '#888888'}
+    colors = {'memory': '#2f6fb2', 'compute': '#b2452f', 'neither': '#888888'}
     dots = '\n'.join(
         f'<circle cx="{px(p.intensity):.1f}" cy="{py(p.achieved):.1f}" r="4" '
-        f'fill="{colours[p.regime]}" opacity="0.75">'
+        f'fill="{colors[p.regime]}" opacity="0.75">'
         f'<title>{p.workload} / {p.config} @ {p.batch}: '
         f'{p.achieved / 1e9:.1f} GFLOP/s, {p.fraction * 100:.0f}% of roof'
         f'</title></circle>'

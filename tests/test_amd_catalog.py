@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 SeisSol Group
 #
 # SPDX-License-Identifier: MIT
-"""The MFMA catalogue describes instructions that exist.
+"""The MFMA catalog describes instructions that exist.
 
 `MFMA_TILES` names, per tile width, the intrinsic to call and the cross-lane
 transpose its A operand needs.  The transpose names are a copy of a fact that
@@ -73,7 +73,7 @@ def _defined_in_header() -> set:
 
 
 # --------------------------------------------------------------------------- #
-# The catalogue against the header
+# The catalog against the header
 # --------------------------------------------------------------------------- #
 
 def test_defined_transposes_matches_the_header():
@@ -182,12 +182,12 @@ def test_unused_transposes_are_recorded_not_silently_dropped():
     """`DEFINED_TRANSPOSES` means what its name says.
 
     Two of its entries belong to no tile. Trimming the set to only what the
-    catalogue uses would make the check against `hip.h` pass by construction
+    catalog uses would make the check against `hip.h` pass by construction
     and stop being a check at all.
     """
     used = {t.transpose for t in amd.MFMA_TILES} - {None}
     unused = amd.DEFINED_TRANSPOSES - used
-    assert unused, "the set has been trimmed to what the catalogue uses"
+    assert unused, "the set has been trimmed to what the catalog uses"
 
 
 @pytest.mark.parametrize("arch", ARCHS)
@@ -208,7 +208,7 @@ def test_an_offered_tile_can_always_be_emitted(arch, threads):
 
 
 # --------------------------------------------------------------------------- #
-# The catalogue against LLVM
+# The catalog against LLVM
 # --------------------------------------------------------------------------- #
 #
 # `MATRIX_OPS` states shapes, block counts, per-lane fragment widths and
@@ -218,7 +218,7 @@ def test_an_offered_tile_can_always_be_emitted(arch, threads):
 #
 # The table is vendored rather than fetched: the suite stays offline, and a
 # change to what LLVM says shows up in review as a diff to
-# `tests/data/amd_matrix_builtins.json` next to the catalogue change it
+# `tests/data/amd_matrix_builtins.json` next to the catalog change it
 # justifies.  Regenerate with `tools/amd_matrix_table.py`.
 
 import json
@@ -228,8 +228,8 @@ from tensorforge.backend.instructions.compute.primitives.amd import catalog
 LLVM_TABLE = Path(__file__).parent / "data" / "amd_matrix_builtins.json"
 
 #: Element formats a split can reach back to F32 or F64 from.  Anything
-#: narrower is in `NOT_MODELLED`.
-MODELLED_INPUTS = {"f32", "f64", "f16", "bf16", "xf32"}
+#: narrower is in `NOT_MODELED`.
+MODELED_INPUTS = {"f32", "f64", "f16", "bf16", "xf32"}
 
 
 def _llvm():
@@ -237,21 +237,21 @@ def _llvm():
 
 
 def _llvm_rows():
-    """The builtins the catalogue claims to cover: float in, F32/F64 out."""
+    """The builtins the catalog claims to cover: float in, F32/F64 out."""
     return {r["builtin"]: r for r in _llvm()["builtins"]
-            if r["out"] in ("f32", "f64") and r["in"] in MODELLED_INPUTS}
+            if r["out"] in ("f32", "f64") and r["in"] in MODELED_INPUTS}
 
 
-def test_the_catalogue_covers_every_float_matrix_builtin():
+def test_the_catalog_covers_every_float_matrix_builtin():
     """Equality, not containment.
 
     Containment would let a new generation's instructions arrive unnoticed:
     `wmma_f64_16x16x4_f64` appeared with gfx1251 and is the whole reason the
-    FP64 path on that target is direct rather than emulated. `NOT_MODELLED`
+    FP64 path on that target is direct rather than emulated. `NOT_MODELED`
     says which families are left out on purpose; nothing else may be.
     """
     assert {op.builtin for op in catalog.MATRIX_OPS} == set(_llvm_rows()), (
-        "the catalogue and LLVM disagree about which float matrix "
+        "the catalog and LLVM disagree about which float matrix "
         "instructions exist; rerun tools/amd_matrix_table.py")
 
 
@@ -286,7 +286,7 @@ def test_a_stricter_row_is_a_subset_of_what_clang_accepts(op):
 def test_blocks_and_replication_account_for_every_slot(op):
     """The invariant that makes `blocks` a checkable claim.
 
-    LLVM states `per_lane * wave`; the catalogue splits it into a block count
+    LLVM states `per_lane * wave`; the catalog splits it into a block count
     and a replication factor, and only their product is determined. Asserting
     the product turns a wrong split into a failure at whichever of the three
     operands it does not fit -- which is what distinguishes a genuine 4-block
@@ -480,7 +480,7 @@ def test_cbsz_reproduces_the_hand_written_table():
 
 
 def test_only_the_k1_f32_tiles_are_lane_batched():
-    """The precondition, spelled out over the whole catalogue.
+    """The precondition, spelled out over the whole catalog.
 
     `matmul32` puts the leading dimension in the lanes and one contraction
     value per instruction, so the instruction's `n * blocks` has to be the
@@ -547,7 +547,7 @@ def test_f64_still_takes_the_dpp_path():
 
     `fmacdpp16(double&, double, double)` is in the runtime and `select` picks
     it on CDNA 2, so F64 is served -- the point is that the reason is now a
-    structural one the catalogue states.
+    structural one the catalog states.
     """
     for arch in ("gfx90a", "gfx942", "gfx950"):
         assert catalog.mfma_tile_for(64, Datatype.F64,

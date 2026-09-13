@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: MIT
 """Metrics over the sparsity pattern of a globally constant matrix.
 
-Phase 1 of the sparse-constant plan: measure the corpus before modelling it.
+Phase 1 of the sparse-constant plan: measure the corpus before modeling it.
 Nothing here touches the code generator, so a pattern whose kernel cannot yet
 be generated -- orders 7 and 8, where the lane ladder caps at 32 and the
 unrolled body runs to five figures -- is measurable all the same.
@@ -18,7 +18,7 @@ What each number is for:
 
 ``blocks``
     Occupied tiles for one candidate tile shape.  The shape comes from the
-    matrix-instruction catalogue: the contraction extent is the instruction's
+    matrix-instruction catalog: the contraction extent is the instruction's
     ``K``, the free extent is what the lane block gives.  ``padding`` is the
     structural zeros a tile-dense layout has to store, and it is a price worth
     paying when it buys a wider access.

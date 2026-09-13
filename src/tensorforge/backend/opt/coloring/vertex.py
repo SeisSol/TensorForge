@@ -9,28 +9,28 @@ VertexType = TypeVar('VertexType')
 class Vertex(Generic[VertexType]):
   def __init__(self, vid: int):
     self._id: int = vid
-    # ordered: the colouring walks neighbours, so iteration order leaks
+    # ordered: the coloring walks neighbors, so iteration order leaks
     # into the emitted shared-memory offsets
-    self._neighbours: OrderedSet = OrderedSet()
+    self._neighbors: OrderedSet = OrderedSet()
 
   def add_neighbor(self, vertex: VertexType) -> None:
     if not (vertex == self):
-      self._neighbours.add(vertex)
+      self._neighbors.add(vertex)
 
   def get_neighbors(self) -> OrderedSet:
-    return self._neighbours
+    return self._neighbors
 
-  def has_neighbours(self) -> bool:
-    return bool(self._neighbours)
+  def has_neighbors(self) -> bool:
+    return bool(self._neighbors)
 
-  def remove_neighbour(self, vertex: VertexType) -> None:
-    self._neighbours.remove(vertex)
+  def remove_neighbor(self, vertex: VertexType) -> None:
+    self._neighbors.remove(vertex)
 
   def get_id(self) -> int:
     return self._id
 
-  def get_num_neighbours(self) -> int:
-    return len(self._neighbours)
+  def get_num_neighbors(self) -> int:
+    return len(self._neighbors)
 
   def __eq__(self, other: VertexType) -> bool:
     return True if self._id == other.get_id() else False
@@ -39,9 +39,9 @@ class Vertex(Generic[VertexType]):
     return not (self == other)
 
   def __str__(self) -> str:
-    neighbours_str = [str(vertex.get_id()) for vertex in self._neighbours]
-    neighbours_str = ', '.join(neighbours_str)
-    return f'{self._id} -> {neighbours_str}'
+    neighbors_str = [str(vertex.get_id()) for vertex in self._neighbors]
+    neighbors_str = ', '.join(neighbors_str)
+    return f'{self._id} -> {neighbors_str}'
 
   def __hash__(self) -> int:
     return hash(self._id)

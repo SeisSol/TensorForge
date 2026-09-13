@@ -219,7 +219,7 @@ class ReductionInstruction(ComputeInstruction):
         3. lane 0 stores.
 
         Step 1's `if`/`else` is load-bearing.  `LeadLoop` would emit a bare
-        guard, and a shuffle under a guard is undefined behaviour whenever the
+        guard, and a shuffle under a guard is undefined behavior whenever the
         mask names a lane that did not reach it: with a lead extent of 16 and
         32 threads, half the warp would sit outside the region while the other
         half asked it for a value.  `LeadLoop.neutral` looks like it addresses
@@ -345,7 +345,7 @@ class ReductionInstruction(ComputeInstruction):
 
         `writer.lane_index`, not `threadIdx.x % num_threads` spelled out.  The
         arithmetic here was the SPMD answer written as though it were the only
-        one -- and it is not: an explicitly vectorised lowering holds every
+        one -- and it is not: an explicitly vectorized lowering holds every
         element at once, so the answer is a vector of all `num_threads`
         indices rather than one of them.
 

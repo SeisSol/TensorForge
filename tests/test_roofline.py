@@ -90,7 +90,7 @@ def test_a_kernel_far_under_its_roof_is_neither():
     """The interesting case for batched small operators, and the one a
     two-label scheme gets wrong: a kernel at four percent of the bandwidth roof
     is not bandwidth bound, it is bound by something the roofline does not
-    draw. Calling it *memory bound* sends a reader to optimise reuse that was
+    draw. Calling it *memory bound* sends a reader to optimize reuse that was
     never the constraint."""
     point, = rl.place([_row(flops=40_000_000, intensity=1.0,
                             event_ns=1_000_000.0)], CEILING)

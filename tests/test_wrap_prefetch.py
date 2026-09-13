@@ -115,7 +115,7 @@ def test_it_refuses_a_read_of_the_destination_before_the_wait():
 
 def test_it_refuses_to_cross_a_barrier():
     """Crossing a back edge is a stronger move than a swap, so it needs at
-    least the same licence -- and `can_reorder` never crosses a barrier."""
+    least the same license -- and `can_reorder` never crosses a barrier."""
     b, body, nxt = _loop(barrier=True)
     assert not _moved(_wrap(b, body, nxt))
 

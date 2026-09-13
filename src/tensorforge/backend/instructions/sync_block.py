@@ -29,7 +29,7 @@ class SyncThreads(AbstractInstruction):
     `AbstractThreadBlockPolicy` sizes a block from, and asking for less is
     occupancy.
 
-    Under an explicit vector there is nothing to synchronise.  The wave is not
+    Under an explicit vector there is nothing to synchronize.  The wave is not
     a hardware sub-group whose width the multiplication has to fit inside; it
     *is* the work-item, and `num_threads` is the length of its registers.  A
     32-thread multiplication is a 32-wide vector held by one work-item,

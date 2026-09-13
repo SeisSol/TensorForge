@@ -18,7 +18,7 @@ slice has to be told no rather than handed the wrong elements.
 
 `kind` is stated rather than derived.  It used to be read back off `image is
 home`, which is true but reads as an accident at each of the three sites that
-did it, and the neighbouring test on `home.stype` -- which looks equivalent and
+did it, and the neighboring test on `home.stype` -- which looks equivalent and
 is not, since a writeback into a shared-memory temporary has a non-global home
 -- is a step away.
 """

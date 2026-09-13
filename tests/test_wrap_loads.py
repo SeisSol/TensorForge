@@ -126,7 +126,7 @@ def test_peeled_and_wrapped_transfers_use_the_right_element(backend, arch):
                        enable_wrap_loads=True, wrap_distance=1)
     # `= (cast)&m1[...]` on a backend whose pointers carry an address space:
     # the address is generic and the declaration is not, so the cast is part
-    # of the binding rather than an artefact of one vendor's spelling.
+    # of the binding rather than an artifact of one vendor's spelling.
     peeled = re.findall(r'peel_glb_\w+ = (?:\([^)]*\))?&\w+\[([^\]]+)\]',
                         kernel)
     wrapped = re.findall(r'wrap_glb_\w+ = (?:\([^)]*\))?&\w+\[([^\]]+)\]',

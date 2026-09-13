@@ -117,7 +117,7 @@ def entering(region: Sequence[AbstractInstruction],
 
     *carried*  is also written later in the region.  The value the first
                iteration reads is the one the *previous* iteration wrote, so it
-               is a loop-carried argument: initialised before the header,
+               is a loop-carried argument: initialized before the header,
                updated across the back edge.  An accumulator is this.
 
     *missing*  is never written in the region at all.  Nothing carries it and
@@ -162,7 +162,7 @@ def verify(instrs: Sequence[AbstractInstruction],
                        the constructor default 0 and every pair of buffers
                        looks like it overlaps.
     ``check_ready``    needs the thread-block policy, which runs *after* the
-                       optimisation stage -- ``ShrMemAlloc.is_ready()`` asks
+                       optimization stage -- ``ShrMemAlloc.is_ready()`` asks
                        for the arena size.  So this is an emit-time check,
                        not a between-passes one.
 
@@ -311,7 +311,7 @@ def _check_shared_aliasing(instrs: Sequence[AbstractInstruction]
                            ) -> List[Diagnostic]:
     """Two simultaneously-live shared-memory buffers must not overlap.
 
-    This is the check that would have caught a mis-colouring: the region
+    This is the check that would have caught a mis-coloring: the region
     allocator assigns byte offsets, and nothing downstream ever validated
     that co-live buffers landed in disjoint ranges.
     """
@@ -453,7 +453,7 @@ def _check_async_depth(instrs: Sequence[AbstractInstruction]
 
 def _flatten(instrs: Sequence[AbstractInstruction]
              ) -> List[AbstractInstruction]:
-    """Depth-first linearisation, for checks that only need an ordering.
+    """Depth-first linearization, for checks that only need an ordering.
 
     Correct for the shared-memory aliasing check because a region executes
     where it sits; it is *not* a substitute for a real analysis over the

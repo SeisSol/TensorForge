@@ -64,7 +64,7 @@ def _check_buffer_bounds(body: Tuple[Stmt, ...]) -> List[str]:
     """Every access lands inside the buffer it names.
 
     A register array is a fixed number of registers, and an index one past
-    either end is a neighbouring register or a spill slot -- a value that is
+    either end is a neighboring register or a spill slot -- a value that is
     wrong without being absent, so it survives every check that asks whether
     something was computed.  A host interpreter does not see it either: it
     keeps registers in a dict, serves index -1, and answers.
@@ -388,7 +388,7 @@ def _check_scope(body: Tuple[Stmt, ...], live: set, diag: List[str],
             if len(s.target) != 1 or s.args or s.regions or s.text is not None:
                 diag.append('declare: needs exactly one target and nothing else')
             if s.predicate is not None:
-                # There is no initialiser to turn into a select, and wrapping
+                # There is no initializer to turn into a select, and wrapping
                 # the declaration in a guard would scope the value inside it.
                 diag.append('declare: must not be predicated')
             if s.target and isinstance(s.target[0].type, BufferType):
@@ -1813,14 +1813,14 @@ def register_bytes(v: Value, explicit_simd: bool = True) -> int:
     array's, and the array is the smaller term. Over the cases where the lane
     ceiling binds on gfx90a the median ratio at 64 lanes against 32 is 1.03
     for the wave total and 0.57 per lane -- and 0.57 is what the register
-    slots do, which is what the figure is meant to track. A search minimising
+    slots do, which is what the figure is meant to track. A search minimizing
     the wave total would keep 32 lanes precisely where 64 is what relieves the
     pressure.
     """
     t = v.type
     if isinstance(t, BufferType):
         # A register-space allocation *is* register file, and on the explicitly
-        # vectorised path it is the biggest thing in it by a wide margin: the
+        # vectorized path it is the biggest thing in it by a wide margin: the
         # SSA values of `lead_window_spans_two_blocks` peak at 540 bytes while
         # its `float r0[4992]` is 19 KB.  Counting only the values would have
         # reported that kernel as comfortable.
@@ -1846,8 +1846,8 @@ def register_bytes(v: Value, explicit_simd: bool = True) -> int:
 # --------------------------------------------------------------------------- #
 
 #: A raw statement that introduces a C++ name.  What may follow the name is
-#: the whole question: `=` for an initialiser, `;` for a bare declaration, `[`
-#: for an array --- and also `{` for brace initialisation and `,` for a second
+#: the whole question: `=` for an initializer, `;` for a bare declaration, `[`
+#: for an array --- and also `{` for brace initialization and `,` for a second
 #: declarator, both of which this missed.  10% of the declarations the corpus
 #: emits took one of those two forms, and every one of them was invisible to
 #: `flatten_scopes`, which then spliced away braces that were the only thing
@@ -1994,7 +1994,7 @@ def if_convert(body: Tuple[Stmt, ...],
 
     ``sink_into_loops`` additionally moves a guard *through* a loop; see
     :func:`_sinkable_loop`.  Off by default because for a real branch it is a
-    pessimisation -- the loop runs its full trip count instead of being
+    pessimization -- the loop runs its full trip count instead of being
     skipped.  Where the guard is a lane mask there is no branch to skip with,
     so it is the only lowering rather than a trade.
     """
@@ -2149,7 +2149,7 @@ def optimize(body: Tuple[Stmt, ...], dump_hook=None,
               ('loads', load_cse), ('licm', licm),
               ('fold2', fold), ('cse2', cse), ('dce', dce))
     if explicit_simd:
-        # Not an optimisation here.  A guard over a lane-varying condition is
+        # Not an optimization here.  A guard over a lane-varying condition is
         # a mask in this model and there is no branch to lower it to, so the
         # conversion is the only legal path rather than a trade of one shared
         # brace for several.  It runs before `fold`, so that the predicates it

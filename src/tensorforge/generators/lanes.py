@@ -104,7 +104,7 @@ def deduce(descr_list: List[OperationDescription],
         # wait for the threads of one.  Where a multiplication narrower than
         # the wave has no rendezvous of its own -- SYCL under SPMD, whose
         # narrowest barrier is the whole sub-group -- the barrier waits for
-        # the neighbour sharing the sub-group, which may not take the branch:
+        # the neighbor sharing the sub-group, which may not take the branch:
         # yateto's `conditional` kernels were refused by `verify` for exactly
         # that on oneapi.  At the full wave the barrier is the
         # multiplication's own.
@@ -264,7 +264,7 @@ def search(descr_factory, context: Context,
     a reference to should know.
 
     Three keys, in order, and the order is the point: what is known exactly
-    decides before what is modelled, and neither decides where both are
+    decides before what is modeled, and neither decides where both are
     silent.
 
     First, blocks resident per SM under shared memory and threads per block.
@@ -281,7 +281,7 @@ def search(descr_factory, context: Context,
     bodies, since a budget is per kernel and the widest body has to fit.
 
     Third, the geometry the descriptors asked for.  A tie means the model sees
-    no difference, and changing the configuration for no modelled reason is
+    no difference, and changing the configuration for no modeled reason is
     exactly where "the wider one measured slower" would bite -- so a tie keeps
     what the generator would have done anyway.  Six of the corpus's fourteen
     contested cases on gfx90a are ties.
@@ -353,7 +353,7 @@ def search(descr_factory, context: Context,
         # Blocks per SM first, because it is a fact; then the arithmetic the
         # build wrote out, because that is what a geometry changes and what
         # the register model cannot see -- a packed FMA covers two elements
-        # per operation and a matrix instruction a tile; then the modelled
+        # per operation and a matrix instruction a tile; then the modeled
         # pressure; then the deduction, so a tie changes nothing.
         #
         # Measured on GB200 (package 4): at b = 80 and 120 every candidate had

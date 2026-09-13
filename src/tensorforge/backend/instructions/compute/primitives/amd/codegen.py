@@ -107,7 +107,7 @@ def hfma(writer: Writer, Cs, As, Bs, repeat, datatype, threads, ctx):
     `select_fmadpp_step`.  Whether it is a modifier on each multiply or an
     instruction of its own is `select_broadcast_form`, and `repeat` is what
     that turns on: it is how many products read the same replicated value, so
-    it is what a materialised move would be divided by.
+    it is what a materialized move would be divided by.
 
     `can_pack=False` states what this emitter holds.  The products of one
     broadcast are separate accumulators here, not a register pair, so packed
@@ -814,7 +814,7 @@ def _pin(writer, accumulators):
 
     `tensorforge::pin` on each accumulator the row wrote.  Arithmetic carries
     no chain through instruction selection, so without it an accumulator chain
-    is free to be linearised after every input it reads -- a body's moves all
+    is free to be linearized after every input it reads -- a body's moves all
     first, each live until its FMA.  Measured on `local_flux` (gfx1251, lead
     width two): 740 VGPRs and 252 moves ahead of the first FMA; pinned every
     row, 161 and 10.  Every fourth row was not enough for the column pairs
@@ -930,7 +930,7 @@ def _fused_order(cols, M, K, dtype, step, threads, a_resident, a_vector=False):
     The row order keeps every column's accumulators and its `B` register,
     and pays elsewhere: an `A` value read at one row is one LLVM may sink
     into a branch of its own where the read is guarded (`rectangular` on
-    gfx1150, 34 more), and one it no longer shares with a neighbouring chain
+    gfx1150, 34 more), and one it no longer shares with a neighboring chain
     (`local_flux` on gfx942, 220 more LDS reads).  So the rows only where the
     column order holds a lot and the row order less than half of it.
     """

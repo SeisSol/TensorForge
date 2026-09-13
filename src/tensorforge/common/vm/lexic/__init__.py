@@ -8,7 +8,7 @@ from .sycl_lexic import SyclLexic
 from .target_lexic import TargetLexic
 from .ocl_lexic import OpenCLLexic
 
-#: Backend labels that select the explicitly vectorised lowering.
+#: Backend labels that select the explicitly vectorized lowering.
 #:
 #: A label rather than a flag on `Context`, because the lowering is not a
 #: variation of a target -- it is a different set of generated code for the

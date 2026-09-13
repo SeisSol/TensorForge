@@ -134,7 +134,7 @@ def test_the_other_axes_still_answer(emitter):
 
 
 # --------------------------------------------------------------------------
-# memory: a distributed value moves by transfer, not by initialiser
+# memory: a distributed value moves by transfer, not by initializer
 # --------------------------------------------------------------------------
 
 def test_a_subscript_becomes_a_pointer(emitter):
@@ -312,7 +312,7 @@ def test_a_lane_varying_bound_does_not_sink():
 
 
 def test_sinking_is_off_by_default():
-    """For a real branch it is a pessimisation -- the loop runs its full trip
+    """For a real branch it is a pessimization -- the loop runs its full trip
     count instead of being skipped.  Only a mask has no branch to skip with."""
     from tensorforge.backend.pir import passes
     from tensorforge.backend.pir.core import Op
@@ -340,7 +340,7 @@ def test_a_ragged_end_narrows_instead_of_masking():
     """12 elements over a 16-lane wave.
 
     SPMD has to mask lanes 12..15: the wave width is the hardware's whatever
-    the operand looks like.  An explicitly vectorised kernel makes the vector
+    the operand looks like.  An explicitly vectorized kernel makes the vector
     12 wide and there is no ragged end to mask.
     """
     assert _leadloop()._narrow(_FakeWriter(True), 0, None, 12, 0, 12) == (12, 0)
@@ -693,7 +693,7 @@ def test_a_loop_carried_value_adopts_the_distribution_it_is_yielded():
     assert loop.iter_args[0].layout == SPREAD16
 
 
-def test_a_vector_accumulator_is_direct_initialised(emitter):
+def test_a_vector_accumulator_is_direct_initialized(emitter):
     """`simd<float, 16> acc = 0.0f;` does not compile.
 
     ESIMD makes the broadcast constructor explicit on purpose -- filling a
@@ -701,7 +701,7 @@ def test_a_vector_accumulator_is_direct_initialised(emitter):
     starting at its neutral element is exactly that case.
     """
     v = val(80, F32, SPREAD16)
-    out = emitter.initialiser(v, 'acc', '0.0f')
+    out = emitter.initializer(v, 'acc', '0.0f')
     assert out == 'tensorforge::intel_esimd::simd<float, 16> acc(0.0f);'
 
 

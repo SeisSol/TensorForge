@@ -16,7 +16,7 @@ follows another *without* a barrier starts at
 ``(blockId + numElements0) % stride`` rather than at ``blockId``,
 deliberately, "so that consecutive sections do not all hammer the same
 elements".  A case that made section 1 read what section 0 wrote would
-therefore be reading another block's output with no synchronisation
+therefore be reading another block's output with no synchronization
 between the two -- racy by construction, and green only by luck.  This
 case used to be exactly that, and carried a ``TODO`` saying so.
 

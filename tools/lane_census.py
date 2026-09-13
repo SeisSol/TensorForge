@@ -91,7 +91,7 @@ def main():
     backend = sys.argv[2] if len(sys.argv) > 2 else 'acpp'
     rows = survey(arch, backend)
 
-    print(f'{arch}/{backend}: lane utilisation per case\n')
+    print(f'{arch}/{backend}: lane utilization per case\n')
     print(f'{"case":34s} {"n":>2s} {"T":>3s} {"used":>6s} {"slots":>6s} '
           f'{"util":>6s} {"per-descr":>10s}')
     tot_used = tot_have = tot_ideal = 0
@@ -110,7 +110,7 @@ def main():
     # question is being asked at all, and no case in `tests/cases` has its
     # shrinking-chain shape -- so it is stated rather than measured, and
     # marked as such.
-    print('\nSeisSol space-time predictor (modelled, not in the corpus):')
+    print('\nSeisSol space-time predictor (modeled, not in the corpus):')
     print(f'{"order":>6s} {"leading dims":34s} {"util":>6s} {"per-descr":>10s}')
     for order in (4, 5, 6, 7):
         nb = lambda o: o * (o + 1) * (o + 2) // 6

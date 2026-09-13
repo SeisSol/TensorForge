@@ -64,7 +64,7 @@ def test_a_scalar_is_not_one():
 
 
 def test_its_operand_takes_no_axis():
-    """The descriptor states it as given: an empty target, no normalisation."""
+    """The descriptor states it as given: an empty target, no normalization."""
     s = _t([], 'rhoInv', tmp=True)
     m = _t([K, N], 'S', Addressing.NONE)
     d = _t([K, N], 'T', tmp=True)

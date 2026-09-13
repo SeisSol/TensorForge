@@ -238,7 +238,7 @@ class DataView:
     # apart, and every stride above them scales with it.  One for everything
     # else, which is every buffer that is not a prepared global operand.
     #
-    # Planar parts are the exception: an element's parts are not neighbours
+    # Planar parts are the exception: an element's parts are not neighbors
     # there, so the elements are, and the parts are `part_plane` further on.
     strides = []
     current = 1 if self.part_plane else self._elem_parts
@@ -547,7 +547,7 @@ class LeadIndex:
       # The lane's share of this dimension, asked of the builder rather than
       # spelled out here.  The arithmetic used to be inline -- `(tid/stride) %
       # block` -- which is the SPMD answer written down as though it were the
-      # only one there is.  It is not: an explicitly vectorised lowering holds
+      # only one there is.  It is not: an explicitly vectorized lowering holds
       # the whole dimension in one register and contributes nothing to the
       # address, and the difference belongs where the model is known.
       lane = writer.lane_offset(self._block, self._stride, hint='lane')
@@ -555,7 +555,7 @@ class LeadIndex:
                        writer.op('mul', INDEX, nl, self._block, hint='lead'),
                        hint='lead')
       # The scaling is on the *whole* index, not on the lane term alone: a
-      # lane's share starts `width` elements after its neighbour's, and the
+      # lane's share starts `width` elements after its neighbor's, and the
       # next slot starts `width * block` after this one.  Scaling only the
       # lane would interleave the slots into each other's lanes.
       if self._width > 1:
@@ -671,7 +671,7 @@ def layout_of(index, num_threads=None):
     # `None` here said *unknown*, the strictly weaker claim, on every load of
     # a scalar or a broadcast operand.  The distinction is invisible to the
     # SPMD emitter (both spell the value `float x`) and load-bearing for an
-    # explicitly vectorised one, where replicated is `T` and unknown is a
+    # explicitly vectorized one, where replicated is `T` and unknown is a
     # value that cannot be given a type at all.
     return SCALAR_LAYOUT
   if len(leads) == 1:
@@ -755,7 +755,7 @@ def lead_width_of(index) -> int:
   One number for the whole access: the lead dimension is the only one that
   is distributed, so at most one index in the list can be wide, and an access
   whose lead index is a plain integer -- a broadcast, a sliced constant -- is
-  scalar however wide its neighbours are.
+  scalar however wide its neighbors are.
   """
   for idx in index:
     lead = unwrap_lead(idx)
@@ -834,7 +834,7 @@ class LeadLoop:
 
     The arithmetic used to be written out here as `(tid / stride) % threads`.
     That is the SPMD answer, and it is only *an* answer: the explicitly
-    vectorised lowering holds every element of the dimension in one register
+    vectorized lowering holds every element of the dimension in one register
     and returns all `threads` indices at once, which makes the guard below a
     mask instead of a branch.  Asking the builder is what lets the two
     differ without this function knowing which one it is talking to.
@@ -871,7 +871,7 @@ class LeadLoop:
     A guard on the lead axis is a *ragged edge*: the dimension is 12 elements
     wide, the wave is 16, and lanes 12..15 are masked off.  In SPMD that mask
     is unavoidable -- the wave is 16 threads whatever the operand looks like.
-    Explicitly vectorised, the vector width is a compile-time choice, so the
+    Explicitly vectorized, the vector width is a compile-time choice, so the
     honest answer is a 12-wide vector and no mask at all.
 
     `lo`/`hi` are lane bounds and `elem_lo`/`elem_hi` the element range the
@@ -1283,7 +1283,7 @@ class Symbol:
 
     `id()` is not one.  A body that has been finished and collected frees its
     address, and the next builder can be given the same address -- so a
-    buffer declared in the pre-loop preload was recognised as belonging to
+    buffer declared in the pre-loop preload was recognized as belonging to
     the batch loop's body, and its reads were emitted against a value whose
     declaration was in another scope.  That compiles to a name that does not
     exist, which the corpus renders happily and only the syntax check catches.
@@ -1618,7 +1618,7 @@ class Symbol:
         elif (i in self.lead_dims
               and isinstance(index[i], (int, np.integer))):
           # A *fixed element* of the distributed dimension, which
-          # `unwrap_lead` does not recognise -- it looks for a `LeadIndex`,
+          # `unwrap_lead` does not recognize -- it looks for a `LeadIndex`,
           # and this is a bare integer.  It used to fall through to the branch
           # below, which treats the index as an ordinary coordinate and takes
           # it as the register address unchanged: a store to element 34 of a
@@ -1626,7 +1626,7 @@ class Symbol:
           # lane.
           #
           # Nothing reached it before.  A fixed lead element only arises from
-          # a peeled tail, and the tail is what the vectorisation introduced;
+          # a peeled tail, and the tail is what the vectorization introduced;
           # the same resolution in `load` was added for the same reason and
           # this is its other half, so a peeled element is now written and
           # read at the same place.
@@ -1707,7 +1707,7 @@ class Symbol:
           block = self.lead_block(i)
           # Unconditional here, unlike the structured path above: this is the
           # SPMD spelling, where a lane is a thread and a sub-slot shift is a
-          # shuffle.  An explicitly vectorised kernel does not reach it.
+          # shuffle.  An explicitly vectorized kernel does not reach it.
           assert shift % block == 0, (
               f'{self.name}: lead-dimension slicing offset {shift} is not a '
               f'multiple of {block}; only whole thread-blocks can '
@@ -1725,7 +1725,7 @@ class Symbol:
           # with eight floats per lane.
           #
           # Nothing reached it before: a fixed lead element only arises from a
-          # peeled tail, and the tail is what the vectorisation introduced.
+          # peeled tail, and the tail is what the vectorization introduced.
           # The resolution is the one `load` already uses for the same case,
           # and it lives here so both go through it: the element first divides
           # by the blocking, then distributes, and the remainder picks the
@@ -1973,7 +1973,7 @@ class Symbol:
 
             # The condition is this dimension's index, the same on every lane,
             # so a branch is right; what comes out of it is spread the way the
-            # load in it is, and the explicitly vectorised emitter needs to be
+            # load in it is, and the explicitly vectorized emitter needs to be
             # told so to declare it.
             sel = writer.if_else(cond, (ScalarType(self.get_fptype()),),
                                  layouts=(layout_of(index, self.num_threads),))
@@ -2032,7 +2032,7 @@ class Symbol:
         # elements already lived (`LaneAxis` says so in as many words: packing
         # is a vector type over the slot dimension, not a lane axis), and the
         # ESIMD emitter already reads it -- `span * (length or 1)` is its
-        # `simd<>` width.  So the vectorised path needs no new state, only the
+        # `simd<>` width.  So the vectorized path needs no new state, only the
         # type it always had and an emitter that spells the access for it.
         from tensorforge.backend.pir.core import ScalarType
         ltype = (ScalarType(self.get_fptype()) if vec == 1
@@ -2285,7 +2285,7 @@ class Symbol:
 
     The wave, for the single-axis image every symbol in the tree is.  The
     axis's block for one whose producer said otherwise, which is the whole of
-    the generalisation: `LaneAxis(8, 4)` beside `LaneAxis(4, 1)` puts eight
+    the generalization: `LaneAxis(8, 4)` beside `LaneAxis(4, 1)` puts eight
     rows and four columns in one round of a 32-lane wave, and dividing either
     coordinate by 32 has no reading at all.
 
@@ -2324,7 +2324,7 @@ class Symbol:
     returning `None` there was the shape of the restriction rather than a
     fact about the element.  The width is divided out first, because a
     packing is a property of the register and not of the distribution: an
-    axis says which lane, and a lane holding `lead_width` neighbours does not
+    axis says which lane, and a lane holding `lead_width` neighbors does not
     change which.
     """
     layout = self.register_layout()
@@ -2561,7 +2561,7 @@ class Symbol:
         # declared -- the symbol it reads, the effect, the layout -- survives;
         # what it could not say is that `base` and the address are *operands*,
         # so a pass could neither see the def-use edge to the address nor
-        # recognise two reads of the same place.
+        # recognize two reads of the same place.
         #
         # A Scalar stays on the text path below: it is not a subscripted
         # access at all -- `access` returns the bare name -- so `Op.LOAD`
@@ -2573,7 +2573,7 @@ class Symbol:
         # constant that this call cannot see the divisibility of, and a
         # claim that is wrong is worse than one that is weak.  The relaxed
         # type is legal at any base; tightening it needs the constant part
-        # of the address modelled, which is its own step.
+        # of the address modeled, which is its own step.
         #
         # At most one of the two widths is ever greater than one for a given
         # symbol: the lead width lives on the distributed axis and the vector
@@ -2637,7 +2637,7 @@ class Symbol:
             # reads, ptxas merged the *shared* pair (2269 -> 477 LDS plus 896
             # LDS.64) and left the *global* one alone at 1809 LDG.E against
             # 905 for the single-part kernel, whether or not the two reads
-            # were neighbours in the instruction stream.  So the width is
+            # were neighbors in the instruction stream.  So the width is
             # stated rather than hoped for.
             #
             # And the alignment with it, which is the difference between a
@@ -2969,7 +2969,7 @@ class Symbol:
     that instruction emit the declaration.  A pass that rewrites an instruction
     by appending its replacement leaves the *replaced* one first, so the region
     is sized from a stale object -- observably, a rotating buffer sized for one
-    stage and then overlapping its neighbour.
+    stage and then overlapping its neighbor.
     """
     for i, user in enumerate(self._users):
       if user is old:

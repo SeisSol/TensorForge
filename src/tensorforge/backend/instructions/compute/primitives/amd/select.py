@@ -116,7 +116,7 @@ def dpp_move_instructions(nbytes, ctx) -> int:
     LLVM derives from `gfx940-insts` and `gfx1250-insts`: gfx942, gfx950 and
     gfx1251.  gfx90a has the unit and no move, its DPP64 serving `v_fmac_f64`
     alone; gfx1250 has the move and no unit.  Both take two 32-bit moves for a
-    pair, which is what LLVM legalises `mov_dpp` on an `i64` into there.
+    pair, which is what LLVM legalizes `mov_dpp` on an `i64` into there.
     """
     wide = (has_feature(ctx, 'dpp-64bit')
             and (has_feature(ctx, 'gfx940-insts')
@@ -140,13 +140,13 @@ def packed_broadcast(datatype, step, products, moved_bytes, ctx) -> bool:
     FP32 only.  The LLVM of ROCm 7.2 has no `v_pk_fma_f64` on any target, so
     a pair of doubles would be two moves and four scalar FMAs against four
     fused ones.  And only at the row-share width, the one broadcast the
-    runtime materialises (`movdpp16`).
+    runtime materializes (`movdpp16`).
     """
     if not packed_broadcast_pays(datatype, step, products, moved_bytes, ctx):
         return False
     # Told to the body, as `select_broadcast_form` does: the moved values and
     # the paired accumulators live in registers until their last product.
-    ctx.materialised_broadcast = True
+    ctx.materialized_broadcast = True
     return True
 
 
@@ -167,7 +167,7 @@ def packed_broadcast_pays(datatype, step, products, moved_bytes, ctx) -> bool:
     return moves + -(-products // 2) < products
 
 
-#: Products sharing one broadcast, from which a materialised move is taken.
+#: Products sharing one broadcast, from which a materialized move is taken.
 #:
 #: Two counts, and the move has to win the first without losing the second by
 #: more.  In *issue slots* a fused product cannot pair, so `n` of them cost
@@ -185,7 +185,7 @@ def packed_broadcast_pays(datatype, step, products, moved_bytes, ctx) -> bool:
 #: Three things the slot count does not hold argue for going lower -- a
 #: DPP-modified FMA carries a throughput tax of its own on several parts, it
 #: gives up the chance to co-issue with unrelated VALU work, and it pays the
-#: wait states when its source register was just written, which materialising
+#: wait states when its source register was just written, which materializing
 #: pays once at the move instead of once per product.  None of them is
 #: measured here, and in the tie region they would have to be worth a 50%
 #: larger inner loop for nothing back.  A measurement is what moves this
@@ -196,8 +196,8 @@ def packed_broadcast_pays(datatype, step, products, moved_bytes, ctx) -> bool:
 #: some 8800 FMAs paired, and 5.6 KB of scratch -- 46 times the runtime, where
 #: the fused form was 8 % faster than the default.  So the number stays and
 #: the body decides: `_fused_if_over_budget` builds again fused when the
-#: materialised form does not fit the target's register budget.
-MATERIALISE_FROM = 4
+#: materialized form does not fit the target's register budget.
+MATERIALIZE_FROM = 4
 
 
 def broadcast_form(datatype, step, reuse, ctx) -> BroadcastForm:
@@ -209,12 +209,12 @@ def broadcast_form(datatype, step, reuse, ctx) -> BroadcastForm:
     products share it the less of the move each carries.
 
     `step` is the broadcast width, and it bounds the answer from the other
-    side: the runtime materialises a row share (`movdpp16`) and nothing else,
+    side: the runtime materializes a row share (`movdpp16`) and nothing else,
     so a quad-permute broadcast has no move to be taken out of it and stays
     fused however often it is reused.  Adding the quad-permute move is what
     would lift that, and it belongs with the instruction rather than here.
     """
-    if step < 16 or reuse < MATERIALISE_FROM:
+    if step < 16 or reuse < MATERIALIZE_FROM:
         return BroadcastForm.FUSED
     if packed_fma_lanes(datatype, ctx) > 1:
         return BroadcastForm.PACKED
@@ -240,7 +240,7 @@ def select_broadcast_form(datatype, step, reuse, ctx,
     the FMAs either, the modifier costs nothing and the move goes back.
     """
     if getattr(ctx, 'force_fused_broadcast', False):
-        # The body this is part of did not fit with a materialised broadcast
+        # The body this is part of did not fit with a materialized broadcast
         # and is being built again; see `_fused_if_over_budget`.
         return BroadcastForm.FUSED
     form = broadcast_form(datatype, step, reuse, ctx)
@@ -250,5 +250,5 @@ def select_broadcast_form(datatype, step, reuse, ctx,
     if form is not BroadcastForm.FUSED:
         # Told to the body, which is the only place the cost can be weighed:
         # the moved values live in registers until their last product.
-        ctx.materialised_broadcast = True
+        ctx.materialized_broadcast = True
     return form

@@ -90,7 +90,7 @@ def reach(have, want, ext: int, indices, wave: Optional[int] = None,
     if composed is None:
         return trip
     # The last two rungs are compared rather than ordered.  Registers beat
-    # memory at every width in the AMD catalogue -- 224 instructions against
+    # memory at every width in the AMD catalog -- 224 instructions against
     # 1024 accesses at width eight -- but that is a count and not a law, and a
     # gap with one region per element would not.
     stores, loads = staging.accesses(trip)

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 SeisSol Group
 #
 # SPDX-License-Identifier: MIT
-"""Explicitly vectorised lowering of the pseudo-IR, for Intel ESIMD.
+"""Explicitly vectorized lowering of the pseudo-IR, for Intel ESIMD.
 
 The difference from :class:`~tensorforge.backend.pir.emit.Emitter` is one
 sentence long, and everything else follows from it:
@@ -19,7 +19,7 @@ distribution.  The information was always there -- ``LeadIndex`` computed it
 and printed it -- but it was spent on an index and not recorded, and a value
 whose distribution is unknown cannot be given a type here.  There is no
 conservative fallback: in SPMD an untracked value is merely one that passes
-cannot optimise, so `None` costs precision; here it is a declaration that
+cannot optimize, so `None` costs precision; here it is a declaration that
 cannot be written, so `None` costs the kernel.
 
 That is deliberate, and the error message says so.  A silent guess would pick
@@ -146,8 +146,8 @@ class EsimdEmitter(Emitter):
             raise IRError('the ESIMD emitter needs a lexic with get_simd()')
         return get(elem, width)
 
-    def initialiser(self, v: Value, name: str, expr: str) -> str:
-        """Direct-initialisation, because the broadcast constructor is explicit.
+    def initializer(self, v: Value, name: str, expr: str) -> str:
+        """Direct-initialization, because the broadcast constructor is explicit.
 
         `simd<float, 16> acc = 0.0f;` does not compile: ESIMD makes the
         broadcast constructor `explicit`, on purpose -- filling a vector from
@@ -203,7 +203,7 @@ class EsimdEmitter(Emitter):
         where a conversion existed it would pick one arm for all N elements.
         The vector form declares the else-value and merges the then-value in
         under the mask, which is two statements, so it cannot be an
-        initialiser expression.
+        initializer expression.
 
         And the *result* of a masked select is distributed even when both arms
         are replicated: masked lanes keep one value, unmasked lanes take the
@@ -261,7 +261,7 @@ class EsimdEmitter(Emitter):
         self.writer(f'{nm}.merge({ty}({then_expr}), {self.operand(cond)});')
 
     def _declare_unpredicated(self, v: Value, expr: str, s, name: str = None) -> None:
-        """A distributed value is filled by a transfer, not by an initialiser.
+        """A distributed value is filled by a transfer, not by an initializer.
 
         `simd<T, N>` has no constructor taking a `T` lvalue, and `= p[i]` would
         either fail to compile or -- worse, where a conversion exists --
@@ -270,7 +270,7 @@ class EsimdEmitter(Emitter):
         one statement.
 
         Only for loads: an arithmetic result of `simd` operands is already a
-        `simd` and initialises normally.  `Op.LOAD` marks its own statements,
+        `simd` and initializes normally.  `Op.LOAD` marks its own statements,
         so the split is keyed on that rather than guessed from the text.
         """
         if (getattr(s, 'op', None) in (Op.LOAD, Op.LOAD_ASYNC)
@@ -295,7 +295,7 @@ class EsimdEmitter(Emitter):
             if slm is not None:
                 # An expression rather than the two statements below, because
                 # the SLM read *returns* the vector: there is nothing to fill
-                # in place, so the declaration takes its initialiser.
+                # in place, so the declaration takes its initializer.
                 self.writer(f'{self.ctype(v.type, v)} {nm} = {slm};')
                 return
             self.writer(f'{self.ctype(v.type, v)} {nm};')
@@ -479,7 +479,7 @@ class EsimdEmitter(Emitter):
         `passes.if_convert` is exactly that transformation and already exists;
         it is documented as not being in the default pipeline because nothing
         yet used the freedom it buys.  This lowering does: for an explicitly
-        vectorised kernel the conversion is not an optimisation but the only
+        vectorized kernel the conversion is not an optimization but the only
         legal lowering, so reaching here means it did not run or could not
         convert this guard -- `_convertible` refuses regions containing
         barriers, nested regions, or raw declarations.
@@ -699,7 +699,7 @@ class EsimdEmitter(Emitter):
         become register elements.
 
         What may sit between two reads of a window: anything that does not
-        write shared memory or synchronise.  Any shared store ends every
+        write shared memory or synchronize.  Any shared store ends every
         window, not just the stored buffer's -- the arena reuses offsets, and
         a store through another name can land on the same bytes.  A window
         reaches into a nested region only if nothing in that region ends it,
@@ -936,7 +936,7 @@ class EsimdEmitter(Emitter):
         past a tail's `valid` lanes are the buffer's next ones, in range, and
         land only in lanes whose results are never stored.  The later reads
         of a run have to be dominated by the first and nothing may write the
-        buffer in between; for shared memory nothing may synchronise either.
+        buffer in between; for shared memory nothing may synchronize either.
         """
         consts, seq = {}, []
 

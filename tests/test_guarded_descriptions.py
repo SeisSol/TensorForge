@@ -16,7 +16,7 @@ A guard lowers to a `GuardedRegion`: the operations under one conjunction
 become one region, the condition is read once where it opens, and `verify`
 recurses through the region as it does through a loop's body.  Asserted here
 is that the guard reaches the descriptor, that the section sees the tensors
-it reads, that neighbours under one guard share a region, and that a region
+it reads, that neighbors under one guard share a region, and that a region
 is only mult-uniform -- a block-wide barrier inside one deadlocks.
 """
 
@@ -125,7 +125,7 @@ def test_a_guarded_operation_becomes_a_region():
     assert len(regions.region()) > 0
 
 
-def test_neighbours_under_one_guard_share_a_region():
+def test_neighbors_under_one_guard_share_a_region():
     """The condition is read once, not once per operation."""
     flag = _flag("c")
     first, second = _sqrt(dest="A"), _sqrt(dest="C")
@@ -141,7 +141,7 @@ def test_a_different_guard_is_a_different_region():
     assert len(_regions(_generate([first, second]))) == 2
 
 
-def test_an_unguarded_neighbour_stays_out_of_the_region():
+def test_an_unguarded_neighbor_stays_out_of_the_region():
     guarded, plain = _sqrt(dest="A"), _sqrt(dest="C")
     guarded.condition = [GuardLiteral(_flag("c"))]
     regions = _regions(_generate([guarded, plain]))

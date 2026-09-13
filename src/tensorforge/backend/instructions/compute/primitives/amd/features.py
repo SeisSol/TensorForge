@@ -114,7 +114,7 @@ FEATURE_TARGETS = {
                            *_REMOVED_FROM_LLVM),
     'atomic-global-pk-add-bf16-inst': (0x942, 0x950, 0x1200, 0x1201,
                                        0x1250, 0x1251, 0x1310),
-    #: Whether the hardware add honours the denormal mode.  Where it does not,
+    #: Whether the hardware add honors the denormal mode.  Where it does not,
     #: the compiler wants `-fatomic-ignore-denormal-mode` before it will emit
     #: the instruction -- which is why gfx90a needs the flag and gfx942 does
     #: not, on hardware that has the same instruction.
@@ -171,7 +171,7 @@ def has_feature(ctx, feature: str) -> bool:
     """Does this target carry `feature`?
 
     Unknown feature names raise rather than answering `False`: a typo in a
-    catalogue entry would otherwise turn into "this instruction is available
+    catalog entry would otherwise turn into "this instruction is available
     nowhere", which is indistinguishable from a correct entry for hardware we
     do not target.
     """

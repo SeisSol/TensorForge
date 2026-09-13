@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 SeisSol Group
 #
 # SPDX-License-Identifier: MIT
-"""The matrix instruction catalogue.
+"""The matrix instruction catalog.
 
 What an instruction *is* --- its shape, how many blocks it computes, what each
 lane holds of A, B and D --- is a fact about the target; which one to use is a
@@ -44,7 +44,7 @@ Entries are restricted to instructions with an F32 or F64 accumulator.  The
 integer, FP8/FP6/FP4 and F16/BF16-accumulator instructions exist and are in
 the vendored table; they are absent here because no operator this generator
 emits can consume them, and the check against LLVM treats the omission as
-`NOT_MODELLED` rather than passing over it.
+`NOT_MODELED` rather than passing over it.
 """
 
 from dataclasses import dataclass
@@ -87,7 +87,7 @@ class Call(Enum):
 #: per storage type: `xf32` arrives in `float` registers and is rounded to a
 #: narrower significand inside the matrix unit, which no C++ type records.
 #: Re-exported: the significand widths are a property of the formats, and
-#: `MatrixOp.significand` is the catalogue's reading of them.
+#: `MatrixOp.significand` is the catalog's reading of them.
 MANTISSA = MANTISSA
 
 
@@ -159,7 +159,7 @@ class MatrixOp:
     def callee(self) -> str:
         """The name a call site writes.
 
-        The catalogue stores the bare name because that is how the vendored
+        The catalog stores the bare name because that is how the vendored
         table stores it, and the table is what the rows are checked against.
         The prefix is added here so a mismatch cannot hide behind it.
         """
@@ -400,10 +400,10 @@ _GFX1251 = _ops('gfx1251-gemm-insts', Call.WMMA_MODS, 32, (
 MATRIX_OPS = (_MAI + _XF32 + _GFX90A + _GFX950
               + _WMMA_256B + _WMMA_128B + _WMMA_N16 + _GFX1250 + _GFX1251)
 
-#: Families the vendored table lists and this catalogue leaves out, with the
+#: Families the vendored table lists and this catalog leaves out, with the
 #: reason.  Stated so the check against LLVM can be an equality: a new builtin
 #: matching none of these shows up as a failure rather than as silence.
-NOT_MODELLED = {
+NOT_MODELED = {
     'i32 accumulator': 'no operator accumulates in integers',
     'fp8/bf8/fp6/fp4 operands': 'below what any split reaches back to F32',
     'f16/bf16 accumulator': 'every operator accumulates in F32 or F64',
@@ -412,7 +412,7 @@ NOT_MODELLED = {
 
 
 def ops_for(dtype, ctx, threads=None):
-    """Every catalogue entry emittable here, largest tile first.
+    """Every catalog entry emittable here, largest tile first.
 
     Says nothing about whether one *should* be used.  A BF16 entry offered for
     an F32 accumulator is offered as the substrate of a split, and whether
@@ -425,11 +425,11 @@ def ops_for(dtype, ctx, threads=None):
 
 
 def lane_batched_ops(dtype, ctx):
-    """Every catalogue entry the lane-batched scheme could emit, largest first.
+    """Every catalog entry the lane-batched scheme could emit, largest first.
 
     The F32 policy does not go through this --- it goes through `MFMA_TILES`,
     which carries the transposes as well.  This is the same question asked of
-    the whole catalogue, for the emitter that will need it: it is what says
+    the whole catalog, for the emitter that will need it: it is what says
     that widening the type check to F64 finds nothing, rather than finding
     `mfma_f64_16x16x4f64` and feeding it wrongly.
     """
@@ -441,7 +441,7 @@ def lane_batched_ops(dtype, ctx):
 # The F32 K=1 tiling policy
 # --------------------------------------------------------------------------- #
 #
-# What follows is not a second catalogue.  It is the policy `matmul32` runs on
+# What follows is not a second catalog.  It is the policy `matmul32` runs on
 # today: three square K=1 F32 tiles, each fed through a cross-lane transpose.
 # The transpose is the part that is *ours* --- it is how this generator
 # arranges A, not something the instruction requires --- which is why it lives
@@ -490,7 +490,7 @@ _TILE_TRANSPOSES = {
 class MfmaTile:
     """One square K=1 MFMA tile: the intrinsic, and how its A operand is fed.
 
-    A `MatrixOp` plus the one fact the catalogue does not carry --- the
+    A `MatrixOp` plus the one fact the catalog does not carry --- the
     cross-lane transpose that feeds A.  That transpose is *ours*: it is how
     this generator arranges the operand, not something the instruction
     requires, and it is the reason this type still exists beside `MatrixOp`.
@@ -602,7 +602,7 @@ def emu_tiles(threads, dtype, ctx):
     """Every tile an emulated path could run here, largest first.
 
     Restricted to entries whose k-vector is exactly the block width.  That is
-    the *emitter's* limit and not the catalogue's: `matmulemu` hands the
+    the *emitter's* limit and not the catalog's: `matmulemu` hands the
     instruction the registers one `kk` step already holds, which are the
     fragment's slots only when the two widths agree.  The stacking itself
     holds wider -- `layouts.position` says so for the 16- and 32-wide entries

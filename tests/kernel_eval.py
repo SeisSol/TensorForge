@@ -214,7 +214,7 @@ def _py(expr: str) -> str:
         i = j
     e = ''.join(out)
     # `{a, b}` in an expression is a vector literal.  A bare `{}` is
-    # zero-initialisation and is handled by `_DECL`, so it never reaches here.
+    # zero-initialization and is handled by `_DECL`, so it never reaches here.
     e = re.sub(r'\{\s*([^{}]+?)\s*\}', r'VEC(\1)', e)
 
     out, i = [], 0                                    # &p[i] -> ADDR(p, i)
@@ -338,7 +338,7 @@ class Interp:
     def _broadcast(self, name: str, block: int, subblock: int, lane: int):
         """`tensorforge::broadcast<Block, Subblock, Lane>(name)` for this lane.
 
-        Modelled from the definition in `include/tensorforge_device/cuda.h`
+        Modeled from the definition in `include/tensorforge_device/cuda.h`
         rather than from what it is used for.  The degenerate case returns the
         lane's own copy; otherwise it is a `__shfl_sync` with a *width*, which
         splits the warp into segments of `Block` lanes and resolves the source
@@ -431,7 +431,7 @@ class Interp:
         if vm:
             # `*(SomeVecType*)&name[expr] = value;`  The components go to
             # consecutive slots, which is the whole content of a wide store --
-            # and the reason this had to be modelled rather than skipped: a
+            # and the reason this had to be modeled rather than skipped: a
             # cyclic reader of a blocked image produces plausible code and
             # wrong numbers, and nothing else in the harness looks at numbers.
             _ty, name, idx, rhs = vm.groups()
@@ -454,11 +454,11 @@ class Interp:
             # every oracle test passed without touching the arithmetic it was
             # there to check.
             #
-            # Refused rather than modelled.  Modelling it means vector values
+            # Refused rather than modeled.  Modeling it means vector values
             # in the interpreter, which is worth doing; until it is done, an
             # abort is the honest answer and a silent skip is the dangerous
             # one.
-            raise Abort(f'vector assignment not modelled: {stmt!r}')
+            raise Abort(f'vector assignment not modeled: {stmt!r}')
         cp = _ASYNC_COPY.match(stmt)
         if cp:
             # The transfer half of the pipeline primitives.  It moves data, so
@@ -470,7 +470,7 @@ class Interp:
             # the transfer.  Two such kernels then agreed with each other for
             # the same reason, which is what an oracle exists to rule out.
             #
-            # Completion is not modelled and does not need to be.  The wait is
+            # Completion is not modeled and does not need to be.  The wait is
             # the only point at which the copy is guaranteed done, this
             # interpreter is sequential, and finishing early is the one
             # rounding of `cp.async` that no reader here can observe.
@@ -480,7 +480,7 @@ class Interp:
             # Another spelling -- the four-argument zero-fill form, say.
             # Refused rather than swallowed: a transfer that quietly does
             # nothing is the defect this branch exists to keep from recurring.
-            raise Abort(f'async copy not modelled: {stmt!r}')
+            raise Abort(f'async copy not modeled: {stmt!r}')
         if (('pipeline' in stmt or '::' in stmt)
                 and not _VEC_DECL.match(stmt) and 'tensorforge::' not in stmt):
             # The catch-all was written for `cuda::pipeline` and friends, which
@@ -524,7 +524,7 @@ class Interp:
             # so summing the arrivals *is* the hardware's guarantee, and the
             # ordering an atomic also promises does not change a sum.
             #
-            # Modelled rather than skipped, and rather than treated as a
+            # Modeled rather than skipped, and rather than treated as a
             # store.  Skipping leaves the accumulation out of the comparison
             # entirely, which is how the atomic path came to have no numerical
             # coverage on the host at all; treating it as `=` would agree with
@@ -536,7 +536,7 @@ class Interp:
             ptr[slot] = (ptr[slot] or 0.0) + self.ev(value)
             return
         if stmt.startswith('extern ') or stmt.startswith('__shared__'):
-            return                      # the shared arena, modelled as a base
+            return                      # the shared arena, modeled as a base
         if re.match(r'^(?:const\s+)?auto\s*\*?\s*\w+', stmt) and '=' not in stmt:
             return
         if (('pipeline' in stmt or '::' in stmt)
@@ -729,7 +729,7 @@ def evaluate_wave(src: str, lanes: int, seed: int = 0,
     numerical coverage before.
 
     `lanes` is the kernel's own, from `launch_geometry`, not a round number:
-    see there for what a surplus lane does once the copies are modelled.
+    see there for what a surplus lane does once the copies are modeled.
     """
     body = src[src.index('{'):]
     mem = Slot(seed)

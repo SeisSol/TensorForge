@@ -63,7 +63,7 @@ lowered_site = Counter()
 # Which site emitted a given piece of raw text.  Attributing *lowered* nodes
 # needs this indirection: the passes rebuild statements with `replace`, so the
 # emitting frame is long gone by the time `optimize` returns, and putting the
-# site in `attrs` would change behaviour -- `flatten_scopes` keys on `attrs`
+# site in `attrs` would change behavior -- `flatten_scopes` keys on `attrs`
 # being empty.  Text is stable across `replace` and specific enough in
 # practice; where two sites emit identical text, the more frequent one wins,
 # which is the right guess and a rare case.

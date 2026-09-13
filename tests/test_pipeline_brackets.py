@@ -12,7 +12,7 @@ retires it.
 
 libcu++ states the precondition plainly --- `consumer_wait()` requires a
 committed stage.  Waiting on a pipeline nothing was committed to is undefined
-behaviour, and it generates, renders and snapshots exactly like correct code.
+behavior, and it generates, renders and snapshots exactly like correct code.
 
 `asyncmem.py` already checks the property this test approximates: every token
 consumed exactly once, no wait naming a token that is not in flight.  It checks
@@ -94,7 +94,7 @@ def test_pipeline_brackets_balance():
     assert not new, (
         "these kernels acquire, commit, wait and release different numbers of "
         f"times: {new}. A `consumer_wait()` with no committed stage is "
-        "undefined behaviour and generates like anything else")
+        "undefined behavior and generates like anything else")
 
     fixed = set(KNOWN_UNBALANCED) - set(unbalanced)
     assert not fixed, (

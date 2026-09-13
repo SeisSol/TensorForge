@@ -60,7 +60,7 @@ class KernelParam:
         `host` is the launcher's prototype, which host code calls with the
         pointers it has.  Those are generic, and on HIP a space-qualified
         pointer is a type of its own that a generic one reaches only through a
-        cast: `float *` does not initialise a `SpacePtr<float, 1>` parameter.
+        cast: `float *` does not initialize a `SpacePtr<float, 1>` parameter.
         So the launcher declares the generic spelling, and casts into a local
         of the kernel's type before it calls the kernel (`binding`).
         """

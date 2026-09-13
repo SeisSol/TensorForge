@@ -215,7 +215,7 @@ def test_the_driver_declares_exactly_what_it_is_given():
         assert f"tfb_launch_{tag}" in src
     assert src.count("tfb_setup_") == 2 * len(names)      # decl and table
     assert "odd name/with-chars" in src, (
-        "the table lost the human-readable name to sanitisation; the driver "
+        "the table lost the human-readable name to sanitization; the driver "
         "matches on it and the report keys on it")
 
 

@@ -49,7 +49,7 @@ TARGETS = [("cuda", "sm_86"), ("hip", "gfx90a"),
 #:
 #: The clone `_advance` makes of a slice member drops `decl` and `extern`,
 #: because a declarator with a name in it cannot be emitted twice.  The
-#: emitter then renders the type itself, and for a vectorised transfer that is
+#: emitter then renders the type itself, and for a vectorized transfer that is
 #: `tensorforge::VectorT<float, 4>` -- which is what the CUDA and HIP paths
 #: use and is not what the SPMD lowering wants, where the destination is a
 #: `sycl::vec<float, 4>`.  So the clone is correct C++ and the wrong type.

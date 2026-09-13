@@ -12,7 +12,7 @@ It carried two different maps until now. Four branches toggled one bit and two
 read the mirror lane, `i ^ (Block - 1)`, which is what the comment in
 `reduction` described as well. Nothing distinguished them: the sole caller is a
 butterfly reduction over groups that are already uniform, so any lane of the
-neighbouring group answers and both maps reduce correctly. An exact
+neighboring group answers and both maps reduce correctly. An exact
 permutation is not so forgiving, which is why the map is now stated and
 checked.
 """
@@ -72,11 +72,11 @@ def test_the_two_branches_that_disagreed_now_agree():
 
 
 @pytest.mark.parametrize("subblock", (1, 2, 4, 8, 16, 32))
-def test_the_reduction_butterfly_still_pairs_neighbours(subblock):
+def test_the_reduction_butterfly_still_pairs_neighbors(subblock):
     """The one caller, under the new map.
 
     `reduction` calls `swap<2 * Subblock>` once each group of `Subblock` lanes
-    holds a uniform value, and needs the result to come from the neighbouring
+    holds a uniform value, and needs the result to come from the neighboring
     group. Both maps satisfy that, which is why this cannot be the test that
     pins `swap` -- but it is the test that says the change is safe.
     """

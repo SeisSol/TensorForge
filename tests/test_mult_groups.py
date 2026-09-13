@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 SeisSol Group
 #
 # SPDX-License-Identifier: MIT
-"""A multiplication that does not divide the wave shares one with its neighbour.
+"""A multiplication that does not divide the wave shares one with its neighbor.
 
 A barrier reaches waves, never parts of one. So where `num_threads` is not a
 multiple of the wave, the smallest set of multiplications a barrier can
@@ -111,7 +111,7 @@ def test_the_grouped_traversal_is_driven_by_the_leader():
 
     # 48 lanes over a 32-wide wave: the launch is in units of 16 and the
     # multiplication's index is derived from the unit (`MultLayout`), so the
-    # group is spelt over `tfMult`, the index `threadIdx.y` used to be.
+    # group is spelled over `tfMult`, the index `threadIdx.y` used to be.
     assert re.search(r"dim3 block \(16, 6, 1\)", gen.get_launcher())
     assert "batchIdLane0 = tfMult % 2" in src
     assert "batchIdGroup0 = (tfMult - batchIdLane0)" in src, (

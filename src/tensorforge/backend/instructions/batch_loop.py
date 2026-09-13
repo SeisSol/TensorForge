@@ -268,8 +268,8 @@ class BatchLoop(AbstractInstruction):
         """What is defined on the way into the region: the peeled transfers.
 
         A wrapped buffer is read at the head of the body and written at its
-        tail, so `entering` calls it carried -- initialised ahead of the loop,
-        updated across the back edge.  The initialisation is emitted by this
+        tail, so `entering` calls it carried -- initialized ahead of the loop,
+        updated across the back edge.  The initialization is emitted by this
         instruction, not by one before it, so a check that walks the region
         with only the stream's definitions in hand has to be told.
         """
@@ -309,7 +309,7 @@ class BatchLoop(AbstractInstruction):
         return tuple(out)
 
     def barrier_scope(self) -> Uniformity:
-        """A loop containing a barrier synchronises, seen from outside."""
+        """A loop containing a barrier synchronizes, seen from outside."""
         inner = [i.barrier_scope() for i in self._region]
         return max((s for s in inner if s is not None), default=None)
 
@@ -473,7 +473,7 @@ class BatchLoop(AbstractInstruction):
 
         The guard is ``if (flags[batchId0])``: a runtime mask that skips
         individual elements.  Anything the loop carries across the back edge
-        has to sit outside it, or a skipped element desynchronises it from the
+        has to sit outside it, or a skipped element desynchronizes it from the
         element sequence for the rest of the loop.  Two things in a pipelined
         loop do:
 
@@ -541,7 +541,7 @@ class BatchLoop(AbstractInstruction):
         The suffix is a trailing run of marked instructions, and barriers may
         sit inside and after it.  Two land there without being marked: the one
         `SyncThreadsOpt` puts in front of a wrapped shared transfer, and the
-        one the generator appends to every persistent loop after optimisation
+        one the generator appends to every persistent loop after optimization
         -- which would otherwise break the run it is appended to.  A barrier
         outside the guard is reached by every lane of the multiplication, a
         masked element's included, so moving one out is never the unsafe
@@ -696,7 +696,7 @@ class BatchLoop(AbstractInstruction):
                                    uniform=Uniformity.GRID)
 
     def _block_id(self, block: Optional[str] = None) -> str:
-        """The same start expression the generator spells, and parenthesised
+        """The same start expression the generator spells, and parenthesized
         for the same reason: it is a sum handed on as an operand, and whoever
         splices it decides the precedence."""
         lexic = self._vm.get_lexic()
@@ -803,7 +803,7 @@ class BatchLoop(AbstractInstruction):
         """Advance the counter *outside* the flag guard.
 
         Inside would tie the counter to the compute, and the transfer it indexes
-        is issued for the *next* element -- so a skipped element desynchronises
+        is issued for the *next* element -- so a skipped element desynchronizes
         them either way.  Outside is the placement that stays correct once the
         pipelined transfer is hoisted out of the guard, which is what closing
         that hole needs; see the note in opt/pipeline.py.

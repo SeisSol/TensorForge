@@ -76,7 +76,7 @@ def _fused_if_over_budget(context, attempt):
   """`attempt()`, and once more with fused broadcasts if the first one does
   not fit.
 
-  A materialised broadcast -- one DPP move whose result several plain FMAs
+  A materialized broadcast -- one DPP move whose result several plain FMAs
   read, the arrangement VOPD and packed math want -- keeps every moved value
   in a register of its own until the last product has read it.  Where that
   fits it lets the FMAs pair; where it does not, the compiler spills: local_flux
@@ -84,15 +84,15 @@ def _fused_if_over_budget(context, attempt):
   and the fused form, one `v_fmac_f32_dpp` per product, ran 8 % *faster* than
   the default.  `select_broadcast_form` cannot see the body it is part of, so
   the question is asked of the body instead: built, measured, and built again
-  with the broadcast fused if a materialised one took it over the budget.
+  with the broadcast fused if a materialized one took it over the budget.
 
   Not under an explicit vector, where `pir.pressure` still counts arrays whole
   and so would push every body back; and nothing happens where the target
-  states no budget or no broadcast was materialised.
+  states no budget or no broadcast was materialized.
   """
-  context.materialised_broadcast = False
+  context.materialized_broadcast = False
   builder, body = attempt()
-  if not getattr(context, 'materialised_broadcast', False):
+  if not getattr(context, 'materialized_broadcast', False):
     return builder, body
   simd = _explicit_simd(context)
   budget = getattr(context.get_vm().get_hw_descr(), 'max_reg_per_thread', None)
@@ -107,7 +107,7 @@ def _fused_if_over_budget(context, attempt):
     return attempt()
   finally:
     context.force_fused_broadcast = False
-    context.materialised_broadcast = False
+    context.materialized_broadcast = False
 
 
 class RegisterBudgetWarning(UserWarning):
@@ -267,7 +267,7 @@ class AbstractInstruction(ABC):
     return Uniformity.GRID
 
   def accesses(self) -> Tuple[Access, ...]:
-    """Localised memory effects, in ``pir``'s vocabulary."""
+    """Localized memory effects, in ``pir``'s vocabulary."""
     if not self.describes_dataflow():
       # opaque: conflicts with everything
       return (Access(Effect.READ | Effect.WRITE, MemSpace.UNKNOWN, None),)
@@ -362,7 +362,7 @@ class AbstractInstruction(ABC):
     """`shared_body` for a caller that states its contents as `fill(builder)`.
 
     The one thing a `with` block cannot do is run twice, and that is what this
-    is for: a body that chose a materialised broadcast and came out over the
+    is for: a body that chose a materialized broadcast and came out over the
     register budget is built again with the broadcast fused into its FMAs
     (`_fused_if_over_budget`).  Everything after the build is the same as for
     the context manager.

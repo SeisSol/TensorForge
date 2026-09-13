@@ -75,7 +75,7 @@ class Relayout:
 
 def _broadcast_result(threads, step, lane):
     # Result lane `l` takes the source value from `lane*step + l % step`, so
-    # the result repeats every `step` lanes with neighbours differing.
+    # the result repeats every `step` lanes with neighbors differing.
     return RegisterLayout((LaneAxis(step, 1),))
 
 
@@ -175,7 +175,7 @@ def has_transpose(ext: int) -> bool:
 
     A copy of a C++ fact, and the reason a gap that *is* the exchange still
     may not be one instruction: `DEFINED_TRANSPOSES` names four widths and the
-    catalogue has entries at others.
+    catalog has entries at others.
     """
     return f'tensorforge::transpose{ext}x{ext}b32' in catalog.DEFINED_TRANSPOSES
 
@@ -197,7 +197,7 @@ def _single(have, want, ext: int) -> bool:
     Two facts, and both have to hold: the gap has to *be* what the
     instruction does, which is `transposes_between`'s question, and the
     runtime has to define it at this width -- `DEFINED_TRANSPOSES` names four
-    and the catalogue has entries at others.
+    and the catalog has entries at others.
     """
     return transposes_between(have, want, ext) == 1 and has_transpose(ext)
 

@@ -120,7 +120,7 @@ class ComputeShape:
     #: Whether the lead operand is the same for every multiplication --
     #: batch-constant, `Addressing.NONE` -- so that the multiplications sharing
     #: a wave read the same rows of it.  What an arrangement needs before it
-    #: may hand one multiplication's read to its neighbours (AMD's `blgp`).
+    #: may hand one multiplication's read to its neighbors (AMD's `blgp`).
     a_uniform: bool = False
 
 

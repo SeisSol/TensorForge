@@ -6,7 +6,7 @@
 Nothing here says what a target can *do* -- that is `caps`.  Keeping the
 two apart is not tidiness: answering a capability question with a family
 predicate is what let the generator emit `fmacdpp4` on gfx900, where the
-specialisations are switched off.
+specializations are switched off.
 """
 
 

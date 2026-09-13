@@ -56,7 +56,7 @@ def reachable(defs: Dict[str, List[ast.AST]],
     return seen
 
 
-def analyse(root: Path, modules: Sequence[str],
+def analyze(root: Path, modules: Sequence[str],
             entries: Sequence[str]) -> Tuple[Dict[str, List[ast.AST]],
                                              Set[str]]:
     """Definitions and reachability across a whole package.

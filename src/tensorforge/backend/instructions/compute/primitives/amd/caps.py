@@ -34,7 +34,7 @@ def has_fmacdpp8(ctx):
 def has_fmacdpp16(ctx, datatype):
     """The `__gfx90a__ || __gfx940__ || ... || __GFX10__ ... || __GFX13__` block.
 
-    Float and double specialisations live under the same guard, so the
+    Float and double specializations live under the same guard, so the
     datatype does not currently split the answer -- it is a parameter because
     the C++ side declares them separately and could.
     """

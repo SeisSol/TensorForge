@@ -4,7 +4,7 @@
 """What a repeated region needs that it does not start with.
 
 Two kinds, and they want opposite treatments: one is a loop-carried argument
-initialised before the header, the other is a read nobody produces and is owed
+initialized before the header, the other is a read nobody produces and is owed
 a definition by whoever assembled the region.  One answer for both would send
 half of them to the wrong fix.
 """

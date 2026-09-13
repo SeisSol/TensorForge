@@ -43,7 +43,7 @@ SNAPSHOT_DIR = Path(__file__).parent / "snapshots"
 BACKENDS = (
     ("cuda", "sm_86"),
     ("hip", "gfx90a"),
-    # SPMD SYCL, and the explicitly vectorised lowering of the same device.
+    # SPMD SYCL, and the explicitly vectorized lowering of the same device.
     #
     # `oneapi` in SPMD mode used to sit here as a third SYCL entry and was
     # dropped: it differed from `acpp` in two lines out of several hundred --

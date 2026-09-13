@@ -211,7 +211,7 @@ def test_fp64_reaches_two_from_the_same_base():
     assert lead_vector_width(0, 32, 16, elem_bytes=8, align_bytes=16) == 2
 
 
-def test_the_default_cap_is_two_and_is_a_judgement():
+def test_the_default_cap_is_two_and_is_a_judgment():
     assert lead_vector_width(0, 64, 16, elem_bytes=4, align_bytes=16) == 2
     assert lead_vector_width(0, 64, 16, elem_bytes=4, align_bytes=16,
                              cap=4) == 4
@@ -302,7 +302,7 @@ def test_blocking_reduces_the_lane_count_a_second_time():
     """`R` vectors per lane means `R` times fewer lanes, at constant total.
 
     The same lever as the width, one level down. What it buys is not loads --
-    those are already wide -- but the amortisation of everything that is per
+    those are already wide -- but the amortization of everything that is per
     `b` rather than per element: one load of `b` and one splat of it now feed
     `R` fused multiply-adds instead of one.
     """
@@ -333,7 +333,7 @@ def test_blocking_does_nothing_without_a_width():
     """It is a second factor on the same decision, not an independent one.
 
     An operand that cannot prove its alignment gets no width, and then there
-    is no splat to amortise and no reason to give up lanes.
+    is no splat to amortize and no reason to give up lanes.
     """
     assert lead_threads_and_width(32, 4, 0, blocking=4) == (32, 1)
 
@@ -390,7 +390,7 @@ def test_the_fma_width_is_not_the_cap(vendor, arch):
     """A vector wider than the packed FMA is several of them, not none.
 
     The intuition runs the other way, so this states it: every element past
-    the first amortises the one load and the one splat further, and the
+    the first amortizes the one load and the one splat further, and the
     per-element instruction count falls with the width whether or not the
     arithmetic packs.  A scalar-FMA target gains *more* from the step to 4
     than a packed one does, which is the opposite of a ceiling.
@@ -484,7 +484,7 @@ def _wrong_lead_indices(monkeypatch, M, N, width, **kw):
     extent puts the operand broadcast in its template form
     (`tensorforge::broadcast<8, 1, 4>`), which `kernel_eval` does not parse.
     Raised as a skip rather than filtered out of the parameter list, so the
-    day it is modelled these cases start running instead of staying quietly
+    day it is modeled these cases start running instead of staying quietly
     absent.
     """
     from kernel_eval import Abort
@@ -502,7 +502,7 @@ def _slot_stride(extent, threads, width):
     return -(-extent // threads), width * -(-extent // (threads * width))
 
 
-#: The extents the old slot count got wrong, kept as the parametrisation
+#: The extents the old slot count got wrong, kept as the parametrization
 #: rather than replaced by a round set: they are where `ceil(u/T)` and
 #: `w * ceil(u/(T*w))` disagree, and a regression in `slots_for` shows up here
 #: first.

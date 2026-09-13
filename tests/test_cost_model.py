@@ -227,7 +227,7 @@ def test_sparsity_is_recorded_and_not_applied():
 def test_the_whole_corpus_costs_without_gaps():
     """Every case that constructs gets a full answer.
 
-    `unmodelled` is how the model reports a descriptor shape it cannot count,
+    `unmodeled` is how the model reports a descriptor shape it cannot count,
     and an entry appearing there is the signal that a new descriptor kind
     landed without one -- which otherwise shows up as a roofline point silently
     sitting at zero.
@@ -246,7 +246,7 @@ def test_the_whole_corpus_costs_without_gaps():
         cost = list_cost(descrs, batch=getattr(mod, "BATCH", 8),
                          datatype=mod.DTYPE)
         costed += 1
-        for reason in cost.unmodelled:
+        for reason in cost.unmodeled:
             gaps.setdefault(reason, []).append(mod.NAME)
 
     assert costed >= 60, f"only {costed} cases costed; the corpus is larger"
@@ -299,6 +299,6 @@ def test_a_barrier_costs_nothing_and_is_not_a_gap():
     one = _case("square_notrans.py")
     batch = getattr(one, "BATCH", 8)
     cost = list_cost(fence.descr_list(), batch=batch, datatype=fence.DTYPE)
-    assert not cost.unmodelled
+    assert not cost.unmodeled
     assert cost.flops == 2 * list_cost(one.descr_list(), batch=batch,
                                        datatype=one.DTYPE).flops

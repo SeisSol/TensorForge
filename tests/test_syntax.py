@@ -77,7 +77,7 @@ KNOWN_BAD_BACKENDS: dict = {}
 #: branch condition.
 #:
 #: Twelve before `LeadLoop._narrow`: most lead guards are a ragged end, and an
-#: explicitly vectorised kernel answers those with a shorter vector rather
+#: explicitly vectorized kernel answers those with a shorter vector rather
 #: than a mask.  What is left needs a base offset (`lane >= lo`) or sits in a
 #: later slot, and both change the address rather than just the width -- see
 #: `_narrow` for why guessing there would put a wrong address behind a

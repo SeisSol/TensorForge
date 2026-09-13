@@ -20,7 +20,7 @@ Two numbers come out, and they answer different things:
 * **Correlation and scale.** How the model's bytes track the reported VGPRs.
   This is what a *threshold* would need -- "will this fit under 256" -- and it
   is the harder ask, since the model counts live value bytes while the
-  compiler reports registers after allocation, coalescing and rematerialisation.
+  compiler reports registers after allocation, coalescing and rematerialization.
 
 Run it where ROCm is installed::
 
@@ -29,7 +29,7 @@ Run it where ROCm is installed::
     python3 tools/register_usage.py --arch gfx90a --json out.json
 
 It compiles each case twice -- at the default lane ceiling and at the wave
-width -- so a run costs two compilations per case.  `--jobs` parallelises them.
+width -- so a run costs two compilations per case.  `--jobs` parallelizes them.
 
 Nothing here changes generated code.  A failed compilation is reported and
 skipped, not raised: the point is a measurement over whatever compiles, and a
@@ -74,7 +74,7 @@ from tensorforge.generators.generator import Generator  # noqa: E402
 #: Spill` and `VGPRs Spill`, not one count.  Matching a name list against that
 #: silently returns nothing for the fields that matter most, on a tool whose
 #: whole job is to report numbers, so this takes whatever `name: integer` the
-#: remarks contain and normalises the name afterwards.  Non-numeric remarks
+#: remarks contain and normalizes the name afterwards.  Non-numeric remarks
 #: (`Function Name`, `Dynamic Stack: False`) simply do not match.
 _REMARK = re.compile(
     r'remark:\s*(?P<field>[A-Za-z][A-Za-z ]*?)\s*'

@@ -48,7 +48,7 @@ zero, so a caller can tell "no device clock here" from "took no time".
 Filled on the host with a deterministic pattern in [0.5, 1.5) and copied once,
 outside the timed region. The values do not matter for correctness -- nothing
 is compared -- but they matter for speed: zeros and denormals are not
-representative on any of these machines, and a buffer left uninitialised can
+representative on any of these machines, and a buffer left uninitialized can
 contain both.
 """
 
@@ -69,7 +69,7 @@ def slug(name: str) -> str:
     """A C++ identifier fragment for a workload name.
 
     Workload names come from case modules and from captured kernel symbols, so
-    they are not identifiers. Sanitised rather than hashed, because the point of
+    they are not identifiers. Sanitized rather than hashed, because the point of
     the name in the source is that someone reading a compiler error can tell
     which workload it belongs to.
     """
@@ -378,7 +378,7 @@ static void run_one(const TfbWorkload& w, bool timing, size_t batch,
     return;
   }
 
-  /* Wall: back to back on one stream, synchronised once at the end, so the
+  /* Wall: back to back on one stream, synchronized once at the end, so the
      launch overhead is inside the measurement the way it is in a solve. */
   auto t0 = std::chrono::steady_clock::now();
   for (size_t i = 0; i < iters; ++i) w.launch(DEV_STREAM_PTR(stream), batch);

@@ -301,7 +301,7 @@ def test_the_fused_arrangement_is_a_bijection():
 def test_stride_means_replication_alone_and_a_second_dimension_in_company():
     """The observation that makes rank 2 more than rank 1 twice over.
 
-    `LaneAxis(16, 4)` by itself puts one element in four neighbouring lanes,
+    `LaneAxis(16, 4)` by itself puts one element in four neighboring lanes,
     which hold copies. Beside a `LaneAxis(4, 1)` the same axis puts one
     element of dimension 1 in those lanes, and they differ in dimension 0.
     Identical field, identical number, opposite meaning -- so "is this
@@ -368,11 +368,11 @@ def test_packing_does_not_change_the_distribution():
     assert scalar.layout.holders((0,), 64) == packed.layout.holders((0,), 64)
 
 
-def test_the_degenerate_axis_is_normalised():
+def test_the_degenerate_axis_is_normalized():
     """`LaneAxis(1, s)` is not distributed whatever `s` is.
 
     Equality is the one thing this type exists for, so distributions that are
-    the same have to compare the same. Without normalising, `movdpp16` at 16
+    the same have to compare the same. Without normalizing, `movdpp16` at 16
     threads produced `LaneAxis(1, 16)` while the hardware simulation recovered
     `LaneAxis(1, 1)` -- the same distribution, unequal, and a relayout search
     that would not find an instruction sitting right in the table.

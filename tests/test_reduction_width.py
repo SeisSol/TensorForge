@@ -69,7 +69,7 @@ def test_fp64_stops_at_two():
     assert w(elem=8) == 2
 
 
-def test_the_cap_is_honoured():
+def test_the_cap_is_honored():
     assert w(cap=2) == 2
     assert w(cap=1) == 1
 

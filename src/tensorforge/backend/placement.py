@@ -15,7 +15,7 @@ wrong produces a kernel that is wrong.
 *Preference* is what the hardware makes worthwhile among the legal answers.
 Staging an operand into registers pays on one vendor and not on another;
 deferring a store pays when it saves a read-modify-write and costs when it
-serialises against the next slice.  Getting one wrong produces a kernel that is
+serializes against the next slice.  Getting one wrong produces a kernel that is
 slower.
 
 They were interleaved, as five booleans set in a constructor from a vendor
@@ -58,7 +58,7 @@ class ResultPlacement(Enum):
     *Where* it is kept and *how* it is written are two decisions, not one.  A
     deferred store can itself be atomic: the update goes out at the section
     boundary rather than here, and is still an add rather than an overwrite.
-    Modelling atomicity as a third placement collapses that and quietly turns
+    Modeling atomicity as a third placement collapses that and quietly turns
     an accumulation into an assignment.
     """
 

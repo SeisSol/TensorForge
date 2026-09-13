@@ -86,7 +86,7 @@ def test_the_tables_reach_the_interleaved_rows():
                 places = {Place.LANE if w > 0 else Place.SLOT for w in bits}
                 if len(places) > 1:
                     split.append((op.builtin, which))
-    assert split, 'no interleaved index in the catalogue'
+    assert split, 'no interleaved index in the catalog'
 
 
 def test_a_fragment_bit_is_never_a_vector_bit():
@@ -570,6 +570,6 @@ def test_a_replicated_fragment_gets_no_plan():
     wave64, and they are declined rather than served approximately."""
     from tensorforge.backend.instructions.compute.primitives.amd import reorder
     replicated = [op for op in MATRIX_OPS if op.replication('b') != 1]
-    assert replicated, 'the catalogue has replicated fragments'
+    assert replicated, 'the catalog has replicated fragments'
     for op in replicated:
         assert reorder.fragment_moves(op, 'B', 0, 0) is None, op.builtin

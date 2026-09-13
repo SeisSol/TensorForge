@@ -69,7 +69,7 @@ __device__ __forceinline__ auto readlane(T value, int lane) -> T {
 /// and costs a `double` twice the DPP moves on every CDNA 2 and later part.
 ///
 /// Scalars only, and at most 8 bytes.  A vector or a struct would also be
-/// accepted by `llvm_any_ty`, but what the backend does when legalising one
+/// accepted by `llvm_any_ty`, but what the backend does when legalizing one
 /// through a DPP intrinsic is a different question from the one the
 /// signature answers, and the split path below is a known answer.
 template <typename T>
@@ -331,7 +331,7 @@ __device__ __forceinline__ auto permlane16(T value) -> T {
 /// the *mirror* lane, which the comment in `reduction` also described.  Both
 /// are defensible readings of the name and nothing here could tell them
 /// apart: the sole caller is a butterfly reduction, where each group is
-/// already uniform, so any lane of the neighbouring group answers and the two
+/// already uniform, so any lane of the neighboring group answers and the two
 /// maps are indistinguishable.
 ///
 /// They are not indistinguishable to anything that needs an exact
@@ -429,7 +429,7 @@ __device__ __forceinline__ void fmacdpp16(double &c, double a, double b);
 /// Pins `v` to this point of the instruction stream: an empty `asm volatile`
 /// that reads and writes it.  No instruction is emitted; what it buys is
 /// order.  Pure arithmetic carries no chain through instruction selection,
-/// so a long accumulator chain may be linearised with every FMA after every
+/// so a long accumulator chain may be linearized with every FMA after every
 /// input it reads -- for a moved broadcast, all of a body's DPP moves first
 /// and each of them live until its FMA: 252 register pairs and 740 VGPRs on
 /// gfx1251 (`local_flux`, lead width two) where 161 do.  A scheduling barrier
@@ -444,7 +444,7 @@ template <typename T> __device__ __forceinline__ void pin(T &v) {
 /// gets lane `Row`'s value.  Any trivially copyable value -- `dpp` moves it
 /// in 64-bit units where the target can, so a float pair or a `double` is one
 /// `v_mov_b64_dpp` on gfx942, gfx950 and gfx1251.  This used to be inline
-/// assembly for `float2` alone, opaque to the optimiser and written into a
+/// assembly for `float2` alone, opaque to the optimizer and written into a
 /// zeroed register.
 template <int Row, typename T> __device__ __forceinline__ T movdpp16(T a) {
   return dpp<0x150 + Row, 0xf, 0xf, true>(a);
@@ -855,11 +855,11 @@ __device__ __forceinline__ T reduction(const T &value) {
 
   // `swap<N>` exchanges the two halves of an N-sized group.  Once each
   // Subblock-sized group holds a uniform value, exchanging across
-  // `2*Subblock` pairs each group with its neighbour, which is the butterfly
+  // `2*Subblock` pairs each group with its neighbor, which is the butterfly
   // step -- so the width has to grow with the recursion.  `swap<Block>`
   // repeated the same full-width exchange at every level instead.
   //
-  // This reads any lane of the neighbouring group, and the group is uniform,
+  // This reads any lane of the neighboring group, and the group is uniform,
   // so it cannot tell which lane it got. That is why `swap` could carry two
   // different maps for as long as this was its only caller.
   const auto other = swap<(Subblock << 1)>(value);

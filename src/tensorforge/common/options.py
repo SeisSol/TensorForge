@@ -559,7 +559,7 @@ declare('launch_control',
             'elements, and the hand-off needs one because every thread has to '
             'read the response before the slot is reused.  So the switch '
             'becomes interesting for a configuration that already '
-            'synchronises block-wide, and for work whose cost varies per '
+            'synchronizes block-wide, and for work whose cost varies per '
             'element -- not for the row-independent, uniform-cost kernels '
             'this generator emits today.')
 
@@ -752,7 +752,7 @@ declare('full_lane_tails',
             'registers against 116, gfx942 and gfx1250 unchanged.  Only where '
             'the extra lanes are padding -- no lead origin shift, and the '
             'accumulator\'s register image exactly the loop\'s window, so that '
-            'a slice of a larger image (theta) never has its neighbouring rows '
+            'a slice of a larger image (theta) never has its neighboring rows '
             'overwritten.')
 
 declare('prefetch_data',
@@ -801,7 +801,7 @@ declare('lanes_per_mult',
 declare('lead_vectorize',
         default=False,
         env='TF_LEAD_VEC',
-        doc='Vectorise the lead dimension.  Off by default, and not out of doubt '
+        doc='Vectorize the lead dimension.  Off by default, and not out of doubt '
             'about the mechanism: it changes the thread count of every kernel, and '
             'the only instrument that can say whether that was a good idea is a '
             'register and occupancy measurement on real hardware.  The host oracle '
@@ -822,7 +822,7 @@ declare('k_width',
         env='TF_K_WIDTH',
         doc='Reduction steps one body covers.  Independent of the lead width: it '
             'removes loads of the broadcast operand rather than instructions on '
-            'the vectorised one, and it works with or without a lead width at all.')
+            'the vectorized one, and it works with or without a lead width at all.')
 
 declare('ir_debug',
         default='',

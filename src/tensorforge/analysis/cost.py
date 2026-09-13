@@ -123,7 +123,7 @@ class Cost:
     batch: int = 1
     tensors: List[TensorTraffic] = field(default_factory=list)
     #: Why a figure is missing, where one is.  Empty when everything counted.
-    unmodelled: List[str] = field(default_factory=list)
+    unmodeled: List[str] = field(default_factory=list)
 
     @property
     def flops(self) -> int:
@@ -176,7 +176,7 @@ class Cost:
             write_bytes=sum(t.write * scale[t.per_batch] for t in tensors),
             batch=self.batch,
             tensors=tensors,
-            unmodelled=self.unmodelled + other.unmodelled)
+            unmodeled=self.unmodeled + other.unmodeled)
 
 
 # -- helpers ---------------------------------------------------------------- #
@@ -294,7 +294,7 @@ def _traffic(descr, datatype) -> List[TensorTraffic]:
 
 
 def _finish(counts: Dict[str, int], tensors: List[TensorTraffic],
-            batch: int, unmodelled: List[str]) -> Cost:
+            batch: int, unmodeled: List[str]) -> Cost:
     scale = {True: batch, False: 1}
     return Cost(
         mults=counts.get('mults', 0) * batch,
@@ -303,7 +303,7 @@ def _finish(counts: Dict[str, int], tensors: List[TensorTraffic],
         nonarith=counts.get('nonarith', 0) * batch,
         read_bytes=sum(t.read * scale[t.per_batch] for t in tensors),
         write_bytes=sum(t.write * scale[t.per_batch] for t in tensors),
-        batch=batch, tensors=tensors, unmodelled=unmodelled)
+        batch=batch, tensors=tensors, unmodeled=unmodeled)
 
 
 # -- per descriptor --------------------------------------------------------- #
@@ -324,7 +324,7 @@ def descr_cost(descr, batch: int = 1,
     if isinstance(descr, MultilinearDescr):
         ranges = _multilinear_ranges(descr)
         if ranges is None:
-            return Cost(batch=batch, unmodelled=[
+            return Cost(batch=batch, unmodeled=[
                 f'{type(descr).__name__}: operand ranks do not line up with '
                 f'their target index lists; no iteration space to count'])
         points = _points(ranges)
@@ -360,7 +360,7 @@ def descr_cost(descr, batch: int = 1,
         return _finish(_bucket(descr.op.operation(), max(0, points - kept)),
                        _traffic(descr, datatype), batch, [])
 
-    return Cost(batch=batch, unmodelled=[
+    return Cost(batch=batch, unmodeled=[
         f'{type(descr).__name__}: no cost model'])
 
 

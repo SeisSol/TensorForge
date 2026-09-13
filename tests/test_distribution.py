@@ -4,7 +4,7 @@
 """Distribution is total, and it is the only statement about lane-varying.
 
 Three properties, each of which was false before and each of which an
-explicitly vectorised emitter depends on:
+explicitly vectorized emitter depends on:
 
 1. ``uniformity`` and ``layout`` cannot disagree.  They did, on 71443 of the
    93837 values in the corpus that carried a layout, and always in the unsafe
@@ -322,7 +322,7 @@ def test_the_owner_is_the_lane_the_arithmetic_named(threads, width):
 
     The width is divided out before the layout is asked, because a packing is
     a property of the register and not of the distribution: a lane holding
-    `width` neighbours holds them in the lane the axis already named.
+    `width` neighbors holds them in the lane the axis already named.
     """
     sym = _register(threads, width)
     for element in range(200):
@@ -390,7 +390,7 @@ def test_the_block_is_the_wave_for_every_image_in_the_tree():
 
 
 def test_the_block_is_the_axis_where_a_producer_stated_one():
-    """And this is the whole of the generalisation: eight rows and four
+    """And this is the whole of the generalization: eight rows and four
     columns in one round of a 32-lane wave, where dividing either coordinate
     by 32 has no reading at all."""
     from tensorforge.backend.pir.core import LaneAxis

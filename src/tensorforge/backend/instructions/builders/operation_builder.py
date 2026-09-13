@@ -114,7 +114,7 @@ class OperationBuilder(AbstractBuilder):
     def record_result(self, descr, dest) -> None:
         """Say where the result now is.
 
-        Nothing to do by default: a destination materialised into registers
+        Nothing to do by default: a destination materialized into registers
         got its writeback recorded when the array was allocated, because the
         two are one fact, and a destination that already had a symbol was
         written in place.
@@ -127,7 +127,7 @@ class OperationBuilder(AbstractBuilder):
         symbol = self._scopes.get_symbol(subtensor.tensor)
         return SymbolView(symbol, subtensor.bbox, subtensor.offset)
 
-    def materialise_dest(self, descr, lead_pos: int) -> Optional[SymbolView]:
+    def materialize_dest(self, descr, lead_pos: int) -> Optional[SymbolView]:
         """A destination this section produces itself, and where it goes.
 
         A temporary that no operation has written yet has no symbol at all, so

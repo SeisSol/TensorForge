@@ -9,7 +9,7 @@ Discovery flow:
    toolchains (``toolchain.discover_targets``). The result is cached on
    pytest's config-cache so repeated runs skip the probe compile.
 2. Walk ``tests_new/cases/**/*.py``; each file is one case module.
-3. ``pytest_generate_tests`` parametrises every test taking a
+3. ``pytest_generate_tests`` parametrizes every test taking a
    ``case``/``target`` fixture pair across the cross product.
 
 The build cache lives under ``~/.cache/tensorforge-tests`` by default;
@@ -184,7 +184,7 @@ def pytest_generate_tests(metafunc):
     if "target" in metafunc.fixturenames:
         targets = _discover_targets_session(metafunc.config)
         if not targets:
-            # Parametrise with a single skip-marker so the test still
+            # Parametrize with a single skip-marker so the test still
             # appears in the report rather than vanishing silently.
             metafunc.parametrize(
                 "target",

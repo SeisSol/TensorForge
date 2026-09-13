@@ -11,14 +11,14 @@ descriptor and back again.
 `unroll(roll(x))` is the property the rest of the work is checked against.  A
 rewrite that cannot be undone exactly is a rewrite whose meaning is only
 approximately the original's, and the whole approach -- one body, several
-bindings -- rests on binding being the inverse of generalising.  Testing it on
+bindings -- rests on binding being the inverse of generalizing.  Testing it on
 the loop binder tests it for the binders that follow, since they differ only
 in what the hole is bound *to*.
 
 Two refusals are deliberate.  A run whose chunk contains a barrier is not
 rolled: the descriptor list is split into sections at every barrier, so a
 barrier inside a loop body is one the split cannot see, and hiding it would
-turn a synchronisation into a silent reordering.  A run that varies in nothing
+turn a synchronization into a silent reordering.  A run that varies in nothing
 is not rolled either -- it is the same computation done several times, which is
 a question for whoever wrote it and not something to make tidier.
 """

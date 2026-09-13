@@ -251,7 +251,7 @@ namespace tensorforge {
 // The vector alias, same as the host shim's.
 //
 // Present here because the SPMD lowering emits `VectorT<float, N>` for a
-// vectorised transfer just as the CUDA and HIP ones do -- it is not an
+// vectorized transfer just as the CUDA and HIP ones do -- it is not an
 // AMD-specific spelling, and this shim's not having it meant `aligned_operands`
 // on acpp compiled everywhere except where it was checked.  It surfaced when
 // the wrapped-syntax test grew from two backends to four; the gap was older

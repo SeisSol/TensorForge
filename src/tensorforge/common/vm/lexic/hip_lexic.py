@@ -187,7 +187,7 @@ class HipLexic(CudaLexic):
       return None
     # Reached only once `has_sync_mult` agrees above a wave, which needs the
     # prologue.  The expected count would be in *waves* and not threads:
-    # `s_barrier` synchronises at wavefront granularity, so what the object
+    # `s_barrier` synchronizes at wavefront granularity, so what the object
     # counts is how many waves have to arrive.
     return self.sync_block()
 
@@ -265,7 +265,7 @@ class HipLexic(CudaLexic):
     # better than we can.
     #
     # `copy_async` lowers to `llvm.amdgcn.global.load.lds`, which the pass
-    # recognises as an LDS DMA: it tracks which LDS buffer each one writes
+    # recognizes as an LDS DMA: it tracks which LDS buffer each one writes
     # and emits the smallest count before the `ds_read` that needs it --
     # `vmcnt(2)` then `vmcnt(0)` for two distinct arrays, not `vmcnt(0)`
     # twice.  Its alias tracking has a fixed number of slots and falls back
@@ -323,7 +323,7 @@ class HipLexic(CudaLexic):
     The builtin takes (address, rw, locality) and always asks for the data
     cache. On AMDGPU the locality is what becomes a memory *scope* -- 0 is
     SCOPE_SYS, 1 SCOPE_DEV, 2 and 3 SCOPE_SE -- so there is no L1/L2 choice
-    to make here and the requested level is honoured by being ignored.
+    to make here and the requested level is honored by being ignored.
     SCOPE_CU, which is what a locality argument would have to reach for the
     nearest cache, is not generated at all: it is unsafe on an address that
     does not resolve, and a prefetch that faults is worse than one that

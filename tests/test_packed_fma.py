@@ -36,7 +36,7 @@ F32, F64 = 4, 8
 
 @pytest.mark.parametrize('arch', ['sm_80', 'sm_86', 'sm_89', 'sm_90'])
 def test_nvidia_before_blackwell_has_no_packed_fp32(arch):
-    """Two scalar FFMAs. `float2` there is a load optimisation, not a math one."""
+    """Two scalar FFMAs. `float2` there is a load optimization, not a math one."""
     assert packed_fma_width('nvidia', arch, F32) == 1
 
 
@@ -101,7 +101,7 @@ def test_the_exclusion_is_an_amd_fact():
 @pytest.mark.parametrize('vendor,arch', [
     ('intel', 'pvc'), (None, 'sm_100'), ('nvidia', None), ('nvidia', 'sm_95'),
 ])
-def test_an_unrecognised_target_gets_scalar_fmas(vendor, arch):
+def test_an_unrecognized_target_gets_scalar_fmas(vendor, arch):
     """Guessing from the shape of an arch name would emit what the assembler
     rejects, and on a new architecture that is the likely case."""
     assert packed_fma_width(vendor, arch, F32) == 1

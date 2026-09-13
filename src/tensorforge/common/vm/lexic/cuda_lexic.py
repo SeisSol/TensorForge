@@ -52,7 +52,7 @@ class CudaLexic(Lexic):
     self.stream_type = "cudaStream_t"
     self.restrict_kw = "__restrict__"
     # sm_70 and up; below it the annotation does not exist and the parameter
-    # is copied per thread, which is the behaviour without it anyway.
+    # is copied per thread, which is the behavior without it anyway.
 
 
   def multifile(self):
@@ -154,7 +154,7 @@ class CudaLexic(Lexic):
     wave = hw.vec_unit_length
     if num_threads < wave:
       # The lanes of this multiplication and no others.  A full mask here
-      # would wait for the neighbouring multiplications in the same warp,
+      # would wait for the neighboring multiplications in the same warp,
       # which are free to run the body a different number of times.
       mults = wave // num_threads
       mask = ((1 << num_threads) - 1)

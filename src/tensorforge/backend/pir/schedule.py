@@ -186,7 +186,7 @@ def sink_waits(body: Tuple[Stmt, ...]) -> Tuple[Stmt, ...]:
     """Move every `wait` as late as legality allows.
 
     A transfer overlaps with whatever sits between its issue and its wait, so
-    the distance between them is the thing worth maximising and the only thing
+    the distance between them is the thing worth maximizing and the only thing
     this pass changes.  It stops at the first statement it may not cross;
     ``can_reorder`` decides that, and for a `wait` the binding constraint is
     usually the first read of what the transfer wrote --- which is the answer

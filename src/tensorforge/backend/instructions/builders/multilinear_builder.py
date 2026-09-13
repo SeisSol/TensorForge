@@ -38,7 +38,7 @@ class MultilinearBuilder(OperationBuilder):
     Decided per operator rather than per section, unlike the lead width: the
     reduction does not touch the register image that the descriptors of a
     section share, so one operator taking a wider group does not constrain
-    its neighbours.
+    its neighbors.
     """
     width = self._context.get_user_options().k_width
     return max(1, width)
@@ -171,7 +171,7 @@ class MultilinearBuilder(OperationBuilder):
     # cells have no dimension-wise address in the first place, which is why
     # the flat map is the right one there and the only one there.  Both sides
     # read the same predicate.  Note this says *which map*, not how wide it is
-    # walked -- a vectorised fill stays available under either.
+    # walked -- a vectorized fill stays available under either.
     dense = symbol.obj is None or symbol.obj.is_dense()
     linearize = lane_axis_needs_moving and lead_pos == 0 and not dense
 
@@ -791,7 +791,7 @@ class MultilinearBuilder(OperationBuilder):
         # Atomics are exempt from that *only* if they really do go out on
         # their own.  Deferring one is what makes it collide with the next
         # slice, so with several writers the update is emitted here instead
-        # of at the epilogue; there is nothing to serialise, since an atomic
+        # of at the epilogue; there is nothing to serialize, since an atomic
         # add is order-independent by construction.  With a single covering
         # writer deferring still pays --- it saves the read-modify-write.
         if result is ResultPlacement.MEMORY and atomic:
@@ -862,9 +862,9 @@ class MultilinearBuilder(OperationBuilder):
     """A barrier around the shared traffic, where nothing later will derive one.
 
     `SyncThreadsOpt` begins by deleting *every* `SyncThreads` and re-deriving
-    the set from the region colouring, so with that pass on, everything
+    the set from the region coloring, so with that pass on, everything
     appended here is provisional -- and provisional barriers are not free.
-    They stand in the stream for the whole optimisation pipeline, and
+    They stand in the stream for the whole optimization pipeline, and
     `MoveLoads` treats a barrier as a wall for any transfer that touches
     shared memory.  On `local_flux` that pinned all five global-to-shared
     transfers where they were built: not one moved, so every

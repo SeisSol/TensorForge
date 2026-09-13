@@ -19,18 +19,18 @@ Two spellings, one access.  Reviewing thousands of those by eye is how a real
 change gets waved through in the middle of them.
 
 So: expand every SSA name in every subscript transitively down to leaves ---
-loop variables, thread indices, literals --- canonicalise, and compare the
+loop variables, thread indices, literals --- canonicalize, and compare the
 resulting multiset of ``(base, address)`` pairs against a git revision.  If it
 matches, the refactor moved names and not memory.
 
-Canonicalised away, because a migration produces all three and none of them is
-a change in behaviour:
+Canonicalized away, because a migration produces all three and none of them is
+a change in behavior:
 
 * renumbering --- names are replaced by order of first appearance
-* parenthesisation --- ``ast.unparse`` gives a minimal-paren form
+* parenthesization --- ``ast.unparse`` gives a minimal-paren form
 * ``0 + x`` and ``1 * x`` --- what folding does once the address is foldable
 
-Deliberately *not* canonicalised: associativity and distribution.  ``a*(b+c)``
+Deliberately *not* canonicalized: associativity and distribution.  ``a*(b+c)``
 and ``a*b + c`` stay different, because on an address they usually are.
 
     python3 tools/access_equiv.py            # against HEAD
@@ -70,7 +70,7 @@ _INTRINSIC = (('threadIdx.x', 'TIDX'), ('threadIdx.y', 'TIDY'),
 # `32_i32` is a C++ literal with a type suffix and a Python syntax error.  The
 # suffix carries no address information, so strip it rather than letting the
 # expression fall back to a flat-text comparison -- text is sensitive to
-# exactly the parenthesisation this tool exists to see past.
+# exactly the parenthesization this tool exists to see past.
 _SUFFIX = re.compile(r'\b(\d+)_[iu]\d+\b')
 
 

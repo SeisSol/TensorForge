@@ -22,7 +22,7 @@ Two resources, kept apart because they are spent from different budgets:
     traversal, and ``traversals`` is a property of the kernel's loop
     structure, not a constant anyone has to guess.
 
-Minimising traffic alone would answer every question with the tightest
+Minimizing traffic alone would answer every question with the tightest
 encoding there is, because a wide access buys nothing it can see.  So the
 objective is cycles, with traffic converted at a stated bandwidth and the
 access count carried alongside it.  A window only pays if it holds more than
@@ -34,12 +34,12 @@ ISAs moves sixteen bytes, so a four-wide FP64 window is two accesses and an
 eight-wide one is four.  Counting windows rather than accesses would make
 wide windows look free and pick them everywhere.
 
-Index metadata is reported but not optimised over.  It is lane-uniform and
+Index metadata is reported but not optimized over.  It is lane-uniform and
 goes to constant space, so it competes for a budget these operators come
 nowhere near filling.
 
 The choice is a multiple-choice knapsack and is solved exactly.  The operand
-count is small and the budget quantises to a few hundred buckets, so there is
+count is small and the budget quantizes to a few hundred buckets, so there is
 no reason to be greedy about it and then wonder whether the answer was the
 answer.
 """
@@ -52,7 +52,7 @@ from typing import List, Optional, Sequence, Tuple
 
 from spp_metrics import PatternMetrics
 
-#: LDS is quantised to this many bytes when planning.  Rounding *up* keeps a
+#: LDS is quantized to this many bytes when planning.  Rounding *up* keeps a
 #: plan feasible; the residue is at most this much per operand.
 QUANTUM = 256
 

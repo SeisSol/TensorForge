@@ -208,7 +208,7 @@ def lead_width_cap(elem_bytes: int, align_bytes: int) -> int:
     The *FMA* width is deliberately not part of this, and that is the part
     worth stating because the intuition runs the other way.  A vector wider
     than the target's packed FMA is not an instruction that does not exist --
-    it is several of them, and every element past the first amortises the one
+    it is several of them, and every element past the first amortizes the one
     load and the one splat further.  Per m-element at one vector per lane,
     with `p` the packed FMA width:
 
@@ -271,7 +271,7 @@ def lead_threads_and_width(extent: int, elem_bytes: int, align_bytes: int,
     ``blocking`` is how many vectors a lane should hold at once, and it is a
     second lever on the same quantity: `R` vectors per lane means `R` times
     fewer lanes, again at constant total registers.  What it buys is not the
-    loads -- those are already wide -- but the *amortisation* of everything
+    loads -- those are already wide -- but the *amortization* of everything
     that is per-`b` rather than per-element.  Per `(n, k)` a lane issues one
     load of `b`, one splat of it, and `R` fused multiply-adds, so:
 
@@ -388,7 +388,7 @@ def reduction_vector_width(extent: int, elem_bytes: int, align_bytes: int,
     * It does **not** remove a single splat.  The `V` components still feed
       `V` separate FMAs against `V` different `A` vectors, and each still
       needs its own `{b, b}`.  Anything that claims otherwise is confusing
-      this with vectorising the reduction on *both* operands, which needs `A`
+      this with vectorizing the reduction on *both* operands, which needs `A`
       staged k-contiguous and turns the accumulator into a partial sum.
 
     Unlike the lead dimension, a remainder here is free: the reduction is a

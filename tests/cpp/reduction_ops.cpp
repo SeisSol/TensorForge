@@ -7,7 +7,7 @@
 // the whole contract is checkable at compile time by a host compiler that is
 // already installed for `test_syntax.py`.
 //
-// Nothing checked it, and three of the seven specialisations were wrong:
+// Nothing checked it, and three of the seven specializations were wrong:
 //
 //   - `Max::neutral()` was `numeric_limits<T>::min()`. For an integer type
 //     that is the lower bound and correct; for floating point it is the
@@ -15,7 +15,7 @@
 //     data that happened to be entirely negative therefore returned 1e-38.
 //   - `And::neutral()` was `numeric_limits<T>::max()`, which on a signed type
 //     is `0x7fff...`: the sign bit came back cleared whatever the data held.
-//   - the `Or` specialisation tagged itself `Op = Operation::And`, so every
+//   - the `Or` specialization tagged itself `Op = Operation::And`, so every
 //     `Op::Op == Operation::Or` dispatch in `cuda.h` and `hip.h` was false.
 //
 // The identity law is the useful thing to assert rather than the literal
@@ -34,7 +34,7 @@ using namespace tensorforge;
 
 template <typename T, Operation Op> using RO = ReductionOperation<T, Op>;
 
-// --- the tag matches the specialisation ---------------------------------- //
+// --- the tag matches the specialization ---------------------------------- //
 //
 // A mismatch is invisible at the call site: dispatch silently takes another
 // operator's branch and returns a number of the right type.
@@ -146,7 +146,7 @@ static_assert(RO<int, Operation::Xor>::applyOperation(6, 3) == 5, "xor");
 // NaN is not asserted on: `min`/`max` here are a plain comparison, which
 // propagates whichever operand the branch happens to select, and the device
 // intrinsics the generated code uses do not agree with it. Pinning a
-// behaviour neither side actually guarantees would be worse than saying
+// behavior neither side actually guarantees would be worse than saying
 // nothing.
 
 } // namespace

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 SeisSol Group
 #
 # SPDX-License-Identifier: MIT
-"""A lead-vectorised body, spelled in each target's vector types.
+"""A lead-vectorized body, spelled in each target's vector types.
 
 With a lead width above one a lane holds adjacent rows, and the multilinear
 body loads, multiplies and stores them as one vector.  Two places did not
@@ -74,7 +74,7 @@ def _narrowing_stores(src):
 
 def test_the_accumulating_face_stores_a_whole_vector():
     src = _kernel("sm_86", "cuda", _WIDE)
-    assert "VectorT<float, 4>" in src, "the body did not vectorise at all"
+    assert "VectorT<float, 4>" in src, "the body did not vectorize at all"
     assert _narrowing_stores(src) == []
 
 

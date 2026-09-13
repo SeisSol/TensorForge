@@ -37,7 +37,7 @@ class GraphColoring:
     self._vertex2color_map: Dict[Vertex, Union[int, None]] = {v: None for v in self._graph}
 
   def apply(self) -> Dict[Vertex, object]:
-    self._graph = sorted(self._graph, key=lambda x: x.get_num_neighbours(), reverse=True)
+    self._graph = sorted(self._graph, key=lambda x: x.get_num_neighbors(), reverse=True)
 
     # run the first part of the algorithm
     while self._coarse_graph():
@@ -45,8 +45,8 @@ class GraphColoring:
 
     # Chaitin simplify is done.  It stops either because the residual graph
     # has no edges (the intended bottom case) *or* because no vertex has
-    # degree < k -- the spill case.  Colouring the latter with a single
-    # colour silently aliases two simultaneously-live buffers, so assert
+    # degree < k -- the spill case.  Coloring the latter with a single
+    # color silently aliases two simultaneously-live buffers, so assert
     # instead.  For a straight-line instruction list the interference graph
     # is an interval graph, hence chordal, hence k = max|liveset| always
     # suffices; this fires only if that premise breaks (e.g. once loops
@@ -54,9 +54,9 @@ class GraphColoring:
     residual = [v for v in self._graph if v.get_neighbors()]
     if residual:
       raise RuntimeError(
-          f'graph colouring failed to simplify: {len(residual)} vertices of '
+          f'graph coloring failed to simplify: {len(residual)} vertices of '
           f'degree >= {self._max_num_colors} remain '
-          f'({", ".join(str(v.get_id()) for v in residual)}). Colouring them '
+          f'({", ".join(str(v.get_id()) for v in residual)}). Coloring them '
           f'alike would alias live shared-memory buffers.')
 
     # it is the bottom case i.e., a graph consists of only nodes without edges
@@ -82,7 +82,7 @@ class GraphColoring:
   def _coarse_graph(self) -> bool:
     for index, vertex in enumerate(self._graph):
       if vertex.get_neighbors():
-        if self._max_num_colors > vertex.get_num_neighbours():
+        if self._max_num_colors > vertex.get_num_neighbors():
           candidate = self._graph.pop(index)
           self._stack.add_edges(candidate)
           self._remove_edges(candidate)
@@ -90,10 +90,10 @@ class GraphColoring:
     return False
 
   def _remove_edges(self, vertex) -> None:
-    for neighbour in vertex.get_neighbors():
+    for neighbor in vertex.get_neighbors():
       for item in self._graph:
-        if neighbour == item:
-          item.remove_neighbour(vertex)
+        if neighbor == item:
+          item.remove_neighbor(vertex)
 
   def _restore_graph_and_color(self) -> None:
     vertex = self._stack.pop_edges()
@@ -102,18 +102,18 @@ class GraphColoring:
 
   def _assign_color(self, vertex) -> None:
     occupied_colors = set()
-    for neighbour in vertex.get_neighbors():
-      assigned_color = self._vertex2color_map[neighbour]
+    for neighbor in vertex.get_neighbors():
+      assigned_color = self._vertex2color_map[neighbor]
       occupied_colors.add(assigned_color)
     free_colors = self._allowed_color_set - occupied_colors
     if not free_colors:
-      raise RuntimeError(f'no free colour for vertex {vertex.get_id()}')
+      raise RuntimeError(f'no free color for vertex {vertex.get_id()}')
     # min(), not set.pop(): make the choice explicit rather than relying on
     # CPython's small-int set ordering
     self._vertex2color_map[vertex] = min(free_colors)
 
   def _add_edges_to_graph(self, vertex) -> None:
-    for neighbour in vertex.get_neighbors():
+    for neighbor in vertex.get_neighbors():
       for item in self._graph:
-        if item == neighbour:
+        if item == neighbor:
           item.add_neighbor(vertex)

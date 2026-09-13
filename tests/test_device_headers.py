@@ -10,7 +10,7 @@ result.
 
 `base.h` needs no device: no intrinsics, no execution-space keywords, not even
 the shim that `test_syntax.py` uses. It also had three wrong neutral elements
-and a mistagged specialisation, none of which any test could have caught,
+and a mistagged specialization, none of which any test could have caught,
 because the C++ side of this repository had no test at all until the syntax
 check arrived --- and that one only asks whether generated code parses, which
 these headers do regardless of what they compute.

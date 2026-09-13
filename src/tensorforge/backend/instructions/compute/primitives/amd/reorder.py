@@ -53,7 +53,7 @@ cover between them:
   not reachable by a mask at all and needs a `cndmask`, which is a ternary on
   the lane id.
 
-Every region in the catalogue today is whole 16-lane rows, so every select is
+Every region in the catalog today is whole 16-lane rows, so every select is
 a `row_mask`.  That is not luck --- a lane bit only carries the contraction
 once the leading dimension and the blocks have used the ones below, and `n *
 blocks` is 16 or 32 everywhere --- but it is also not a property to build on:
@@ -286,7 +286,7 @@ def a_exchange(op) -> Optional[Exchange]:
     `None` where the instruction broadcasts its own A, where `hip.h` has no
     transpose of the right width, or where the fragment keeps part of its
     contraction in the register --- with more than one element per lane the
-    relabelling has to be injective across slots as well, which is a further
+    relabeling has to be injective across slots as well, which is a further
     claim and not one this has checked.
     """
     if broadcast_feeds_a(op) or op.a.per_lane != 1:

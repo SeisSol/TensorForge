@@ -210,7 +210,7 @@ def test_assign_is_pinned():
 def test_a_two_result_op_is_hash_consed():
     """`splitFloatTF32` is a function: one input, two halves, deterministic.
 
-    Modelling it as a call that writes through references made it
+    Modeling it as a call that writes through references made it
     side-effecting, and CSE skips those -- so the corpus split the same value
     twice in 15% of cases, with no store and no reload in between, just a
     second `kk` block asking for the same fragment.  The reference-out

@@ -13,8 +13,8 @@ What these pin is that the three agree on what a hint *is*: something that may
 move, may not be deleted, and may be missing from a target's output without
 the body meaning anything different. The spelling per backend is checked too,
 but it is the smaller half -- an instruction that reaches no hardware is a
-missed optimisation, while a hint that survives DCE only on the targets that
-can spell it is a body that optimises differently depending on who reads it.
+missed optimization, while a hint that survives DCE only on the targets that
+can spell it is a body that optimizes differently depending on who reads it.
 """
 
 from __future__ import annotations
@@ -109,7 +109,7 @@ def test_a_hint_verifies_and_needs_no_wait():
     assert verify(_body()) == []
 
 
-def test_the_optimiser_leaves_one_hint_standing():
+def test_the_optimizer_leaves_one_hint_standing():
     """End to end through the default pipeline, which is where DCE runs."""
     body = optimize(_body())
     assert sum(1 for s, _ in walk(body) if s.op == Op.PREFETCH) == 1
@@ -206,7 +206,7 @@ def test_amd_has_one_instruction_for_both_levels(level):
     """The locality argument is a scope on this target, not a cache level.
 
     Stated as a test because the level is accepted here and dropped, which is
-    the kind of silent non-honouring worth pinning: a caller that starts
+    the kind of silent non-honoring worth pinning: a caller that starts
     depending on the distinction should find out from this, not from a
     profile.
     """

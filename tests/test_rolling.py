@@ -141,7 +141,7 @@ def test_alternating_buffers_show_a_period_and_still_escape():
     Two named buffers taking turns give each hole a period of two.  They are
     also tensors the caller passed in, so writing them is observable and a
     rotation over them would not be a rotation but a change of what the kernel
-    leaves behind.  Period alone is not the licence; that is the point of
+    leaves behind.  Period alone is not the license; that is the point of
     asking both.
     """
     descrs = [gemm(make('A', [56, 56]), make(f'buf{k % 2}', [56, 9]),

@@ -49,7 +49,7 @@ class PipelineAnalysis:
     """Which transfers in a loop body may be pipelined, and why not.
 
     Kept separate from the transform so that the decision is inspectable: the
-    old passes made it implicitly, by transforming everything they recognised.
+    old passes made it implicitly, by transforming everything they recognized.
     """
 
     def __init__(self, body: Sequence[AbstractInstruction]):

@@ -65,7 +65,7 @@ KEPT_UNREACHABLE = {
         "matrix path, to be repaired rather than rewritten",
     "wmma3atom":
         "matrix path, to be repaired rather than rewritten",
-    # The catalogue describes every float matrix instruction; `matmul()` still
+    # The catalog describes every float matrix instruction; `matmul()` still
     # selects from the three K=1 F32 tiles through `usable_mfma_tiles`, so the
     # general query and the split arithmetic have no call site yet. They lose
     # their entry here when the emitter that consumes them lands -- which is
@@ -98,7 +98,7 @@ KEPT_UNREACHABLE = {
         "fragment placement; the emitter that stages an operand into one is "
         "not written",
     "lane_batched_ops":
-        "the same precondition asked of the whole catalogue; the F32 policy "
+        "the same precondition asked of the whole catalog; the F32 policy "
         "reaches it through MFMA_TILES instead",
     "issues":
         "the axis count, read by the ranking through `ranking.issues` and by "
@@ -114,14 +114,14 @@ KEPT_UNREACHABLE = {
         "what unpacking a packed operand costs; `reach` unpacks before it "
         "answers, but nothing weighs the price yet -- no emitter writes a "
         "route that starts from a packed operand",
-    "NOT_MODELLED":
-        "documents the catalogue's boundary; read by the LLVM cross-check",
+    "NOT_MODELED":
+        "documents the catalog's boundary; read by the LLVM cross-check",
 }
 
 
 @pytest.fixture(scope="module")
 def analysis():
-    return reachability.analyse(AMD, MODULES, ENTRIES)
+    return reachability.analyze(AMD, MODULES, ENTRIES)
 
 
 def test_entry_points_exist(analysis):

@@ -22,7 +22,7 @@ from tensorforge.backend.instructions.compute.primitives import amd
 from tensorforge.backend.instructions.compute.primitives.amd.features import (
     has_feature)
 from tensorforge.backend.instructions.compute.primitives.amd.select import (
-    BroadcastForm, MATERIALISE_FROM)
+    BroadcastForm, MATERIALIZE_FROM)
 from tensorforge.common.basic_types import Datatype
 from tensorforge.common.context import Context
 
@@ -153,7 +153,7 @@ def test_fp64_reaches_the_move_only_where_packed_fp64_exists():
 
 @pytest.mark.parametrize('step', [1, 4])
 def test_a_narrower_broadcast_has_no_move_to_be_taken_out_of_it(step):
-    """The runtime materialises a row share and nothing narrower.
+    """The runtime materializes a row share and nothing narrower.
 
     A quad-permute broadcast would need a `movdpp4` that does not exist, so
     reuse cannot reach past the modifier there however high it goes.
@@ -181,7 +181,7 @@ def test_the_threshold_is_where_both_counts_agree():
         [4, 5, 6, 7]
     assert [n for n in range(1, 8) if slots_moved(n) == slots_fused(n)] == [2, 3]
     assert all(1 + n > n for n in range(1, 8))
-    assert MATERIALISE_FROM == 4
+    assert MATERIALIZE_FROM == 4
 
 
 @pytest.mark.parametrize('arch', RDNA3PLUS + GFX125X)
@@ -202,7 +202,7 @@ def test_the_tie_region_keeps_the_modifier(arch, reuse):
 def test_a_pair_moves_in_one_instruction_only_with_a_64_bit_move(arch, moves):
     """`dpp-64bit` alone is not enough, and llvm-mc says why: gfx90a has the
     unit and no `v_mov_b64` for it to modify, gfx1250 the move and no unit.
-    Both legalise a 64-bit `mov_dpp` into two 32-bit ones."""
+    Both legalize a 64-bit `mov_dpp` into two 32-bit ones."""
     assert amd.dpp_move_instructions(4, _ctx(arch)) == 1
     assert amd.dpp_move_instructions(8, _ctx(arch)) == moves
     assert amd.dpp_move_instructions(16, _ctx(arch)) == 2 * moves

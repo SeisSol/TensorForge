@@ -119,9 +119,9 @@ python3 tools/bench/profile.py suites/corpus.py --dry-run
 python3 tools/bench/profile.py suites/seissol.py --tool rocprofv3 --out prof/
 ```
 
-Only a short set is normalised: duration, DRAM bytes each way, L2 bytes,
+Only a short set is normalized: duration, DRAM bytes each way, L2 bytes,
 achieved occupancy, launch geometry. Everything else stays in the vendor's own
-file, kept beside the normalised rows rather than parsed. Normalising more
+file, kept beside the normalized rows rather than parsed. Normalizing more
 would mean claiming `dram__bytes_read.sum` and `FETCH_SIZE` are the same
 quantity in more places than they are, and that claim fails as a table that
 looks comparable and is not. Cross-vendor comparison belongs to `run.py`: a
@@ -136,7 +136,7 @@ hit, so near one means the cache did its job and near the block count means it
 did not. No timing run can tell those apart; they differ in where the bytes
 came from, not in how many arrived.
 
-Intel has two entries. `unitrace` is the default because it needs no licence
+Intel has two entries. `unitrace` is the default because it needs no license
 and gives kernel timings; the memory counters are behind `--tool vtune`, which
 collects and then reports, hence two commands. A roofline on that stack is
 Advisor's own (`advisor --collect=roofline --profile-gpu`) and is named rather
@@ -187,7 +187,7 @@ Points get three labels, not two. On the memory slope the lever is reuse; on
 the flat it is arithmetic; and a point below half the roof its intensity allows
 is bound by something the roofline does not draw — occupancy, launch overhead,
 latency — which for batched small operators is the common case. Calling that
-one *memory bound* would send a reader to optimise reuse that was never the
+one *memory bound* would send a reader to optimize reuse that was never the
 constraint.
 
 The plot is a hand-written SVG with no plotting dependency: this directory
@@ -197,7 +197,7 @@ and diffs as text.
 
 ## Build flags
 
-`tests/harness/toolchain.py` compiles with no optimisation flag at all, which is
+`tests/harness/toolchain.py` compiles with no optimization flag at all, which is
 right for a correctness harness and wrong here — under `hipcc` that is `-O0`.
 The measurement path builds with `-O3 -DNDEBUG` through its own recipe.
 `-DNDEBUG` also turns `CHECK_ERR` into a no-op, so correctness has to have been

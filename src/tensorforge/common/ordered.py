@@ -6,7 +6,7 @@
 
 Why this exists: several IR analyses accumulate sets of ``Symbol`` /
 ``Vertex`` objects and then *iterate* them to derive code -- register
-allocation, memory-region colouring, barrier placement.  Neither class
+allocation, memory-region coloring, barrier placement.  Neither class
 overrides ``__hash__``, so a builtin ``set`` orders them by ``id()``,
 i.e. by heap address.  Iteration order then varies between runs and the
 emitted source is not reproducible.
@@ -15,7 +15,7 @@ Observed on ``tests/cases/chain_five.py`` before this was introduced: two
 consecutive generations in one process assigned the two live shared-memory
 buffers *swapped* offsets (0 / 608) **and** placed the ``__syncwarp()``
 at different points, because barrier insertion keys on region membership.
-A synchronisation decision that depends on heap addresses is a race that
+A synchronization decision that depends on heap addresses is a race that
 appears and disappears between builds.
 
 Ordering by first insertion makes every such decision a function of

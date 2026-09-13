@@ -61,7 +61,7 @@ class Tensor:
         #:
         #: Adjacent is the default and right where one lane reads one element:
         #: its parts are one access.  Planar is for an operand stored in a
-        #: fragment order, where a lane reads several neighbouring slots at
+        #: fragment order, where a lane reads several neighboring slots at
         #: once and the instruction wants each part's slots in one register
         #: group; adjacent parts would interleave them and every group would
         #: have to be sorted back with moves.  Set with the order, by the

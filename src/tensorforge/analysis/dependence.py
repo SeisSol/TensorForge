@@ -24,7 +24,7 @@ what they share and how:
   is part of the meaning and there is nothing to overlap.
 
 The three want different lowerings, and telling them apart is arithmetic on
-the accesses rather than a judgement, so it belongs here rather than in
+the accesses rather than a judgment, so it belongs here rather than in
 whoever ends up choosing.
 
 Identity is object identity, deliberately.  Within one descriptor list two

@@ -9,7 +9,7 @@ scheduler give up its state and nothing reorders across one.  Whether a region
 *can* cause one is decided by `_CDECL`, a regex over the raw text.
 
 It required `=`, `;` or `[` immediately after the declared name, so it did not
-recognise brace initialisation (`float x{};`) or a second declarator
+recognize brace initialization (`float x{};`) or a second declarator
 (`uint32_t a, b;`).  Ten percent of the declarations the corpus emits take one
 of those two forms.
 
@@ -42,13 +42,13 @@ from tensorforge.common.basic_types import Datatype
     "float x;",
     "float x[4];",
     "float x[4][2]{};",
-    "float x{};",                       # brace initialisation
+    "float x{};",                       # brace initialization
     "uint32_t a, b;",                   # two declarators
     "const float x = y;",
     "int32_t v11_a = -4_i32 + 0;",
     "auto x = y;",
 ])
-def test_a_declaration_is_recognised(text):
+def test_a_declaration_is_recognized(text):
     assert passes._CDECL.search(text), (
         f"{text!r} declares a name; a region containing it must keep its "
         f"braces")
@@ -108,7 +108,7 @@ def test_two_sibling_regions_declaring_one_name_stay_separate():
 
 
 def test_the_masking_that_hid_it():
-    """A region declaring an array *and* a brace-initialised name.
+    """A region declaring an array *and* a brace-initialized name.
 
     The array matched on `[` and carried the region; the other declaration was
     never seen.  Removing the array is what exposed the miss, so a region with

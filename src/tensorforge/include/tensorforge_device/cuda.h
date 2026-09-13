@@ -65,7 +65,7 @@ inline constexpr unsigned FullWarpMask = 0xffffffffu;
 /// identical layout, so it costs nothing the attribute version did not.
 ///
 /// Elementwise arithmetic is not built in, as it is for a GNU vector, and is
-/// supplied below: the lead-vectorised multilinear body spells its products as
+/// supplied below: the lead-vectorized multilinear body spells its products as
 /// `c + (a * b)` over these types, the same text it emits for HIP.  Lengths
 /// CUDA's own structs do not have are not a special case here --- any N works
 /// --- but a length the hardware has no wide access for simply compiles to N
@@ -148,7 +148,7 @@ TENSORFORGE_VECTOR_OP(/)
 /// the paired FMA of sm_100 and sm_103 (`FFMA2`): nvcc reaches it through
 /// `__ffma2_rn` and does not pair two scalar FMAs by itself, so a vector body
 /// that wants it has to say so here.  The pairs are adjacent components, which
-/// is what a lead-vectorised accumulator holds.
+/// is what a lead-vectorized accumulator holds.
 ///
 /// sm_120 declares `__ffma2_rn` as well, but has no paired unit: it lowers to
 /// two FFMA.  Not left to do so, because packing the pairs still changed the
@@ -329,7 +329,7 @@ __device__ __forceinline__ T broadcast(T value) {
 ///
 /// `clusterlaunchcontrol.try_cancel` asks the grid launcher to *not* launch a
 /// CTA that has not started yet, and hands the caller its id.  A block that
-/// keeps cancelling therefore drains the grid without the launcher ever
+/// keeps canceling therefore drains the grid without the launcher ever
 /// putting those blocks on an SM, which is a persistent kernel whose work
 /// queue is the grid itself -- and, unlike a grid-stride loop, one that needs
 /// no occupancy query to size the launch.
@@ -365,7 +365,7 @@ template <int Depth = 1> struct alignas(16) ClusterLaunchQueue {
         ptx::mbarrier_init(&barrier[i], 1);
       }
       // `try_cancel` completes the barrier through the *async* proxy, and an
-      // initialisation written through the generic one is not ordered against
+      // initialization written through the generic one is not ordered against
       // it without this.  It works without the fence on the part this was
       // measured on, which is not the same as being allowed to omit it.
       ptx::fence_proxy_async(ptx::space_shared);

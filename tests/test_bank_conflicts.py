@@ -92,7 +92,7 @@ def test_an_unreadable_guard_leaves_the_lanes_alone():
     assert bc._lanes_under(["someRuntimeFlag"]) == list(range(bc.LANES))
 
 
-def test_a_vector_cast_is_recognised():
+def test_a_vector_cast_is_recognized():
     """The spelling the emitter actually produces, not the one a `float4`
     would have."""
     line = "*(tensorforge::VectorT<float, 4>*)&v59_atile[v225_a] = v224_q;"
@@ -117,11 +117,11 @@ def test_an_address_that_is_not_static_is_reported_not_guessed():
 # What the census could not see
 # --------------------------------------------------------------------------- #
 
-def test_a_loop_variable_is_resolved_at_its_initialiser():
+def test_a_loop_variable_is_resolved_at_its_initializer():
     """An unresolved access is one the census does not count, which is a blind
     spot and not a caveat.  77 of them were loop variables.
 
-    Substituting the initialiser is sound because these are bounds over tensor
+    Substituting the initializer is sound because these are bounds over tensor
     dimensions: every lane in the wave is on the same iteration, so the value
     shifts every lane's address by the same amount and the bank pattern is
     unchanged.  Anything lane-dependent reaches the address through

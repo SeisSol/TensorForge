@@ -199,7 +199,7 @@ class Lexic(ABC):
     Only reached where the multiplication is *wider* than a wave -- narrower
     than that and `SyncThreads` asks for `sync_simd` directly, because the
     threads are in lockstep anyway.  So the default is the honest one: a whole
-    block, which over-synchronises but never deadlocks, and which is exact
+    block, which over-synchronizes but never deadlocks, and which is exact
     once `has_sync_mult` says False, because the policy then puts one
     multiplication in a block.
 
@@ -308,7 +308,7 @@ class Lexic(ABC):
     answered on the same terms: what the caller needs to know is whether the
     hint *exists* for this type, not whether something could be written.  A
     target without one says False and the access is emitted plainly, which
-    costs a cache policy and nothing else -- the hint is an optimisation over
+    costs a cache policy and nothing else -- the hint is an optimization over
     exactly that access.
 
     False here, because the base spelling below has no hint to give.
@@ -425,9 +425,9 @@ class Lexic(ABC):
     """One prefetch, as a statement.  `address` is a pointer expression.
 
     `level` is `'l1'` or `'l2'`, and it is a request rather than an
-    instruction: a target with one prefetch for both honours neither, and
+    instruction: a target with one prefetch for both honors neither, and
     says so here instead of pretending the distinction survived.  `elems` is
-    likewise honoured only where the instruction takes a count.
+    likewise honored only where the instruction takes a count.
 
     Only reached when `has_prefetch` agreed, so an implementation does not
     have to answer for the targets that one turns away.

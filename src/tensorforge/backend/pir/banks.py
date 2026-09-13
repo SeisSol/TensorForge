@@ -14,7 +14,7 @@ sit beside it.  It is checked against it first: `tests/test_pir_banks.py`
 compares the two over the corpus, and until they agree everywhere the text
 version is the one that decides.
 
-Run it on the *optimised* body.  A freshly finished one still holds the loads
+Run it on the *optimized* body.  A freshly finished one still holds the loads
 that `dce` and `cse` are about to remove -- twice as many in `chain_three` --
 and the addresses the hardware sees are the ones that survive.  That is also
 where a pass acting on this would sit: after the passes that change what is
@@ -190,7 +190,7 @@ def _active(parents: Sequence[Stmt], defs: Dict[int, Stmt]) -> List[int]:
     return lanes or list(range(LANES))
 
 
-def analyse(body: Sequence[Stmt], banks: int = 32) -> Tuple[List[Access], int]:
+def analyze(body: Sequence[Stmt], banks: int = 32) -> Tuple[List[Access], int]:
     """Every shared access in this body, and how many were not static."""
     defs = _definitions(body)
     found: List[Access] = []

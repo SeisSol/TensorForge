@@ -275,7 +275,7 @@ def test_a_settled_temporary_is_published_before_it_is_read(backend, arch):
     No barrier is emitted next to the flush, deliberately: `SyncThreadsOpt`
     discards every sync in the section and reinserts them from the
     shared-memory write/use pairs.  One placed by hand would be removed again.
-    This is the assertion that the pair is recognised.
+    This is the assertion that the pair is recognized.
 
     Asked of the instruction stream rather than of the source, because a
     SIMD-scope barrier lowers to nothing on the targets where a wave runs in
@@ -320,7 +320,7 @@ def test_a_contraction_reads_a_produced_temporary_out_of_registers(
     all -- the writeback is dropped unflushed when nothing else wants it.
 
     This is the difference between settling a value because a consumer cannot
-    see it and settling it on principle, and it is the reason `materialise`
+    see it and settling it on principle, and it is the reason `materialize`
     goes through registers rather than writing shared memory directly.
     """
     try:

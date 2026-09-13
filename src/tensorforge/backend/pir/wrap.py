@@ -41,7 +41,7 @@ What it refuses, and why each one would be wrong:
   *next* element's transfer is landing into.
 * **Anything between the issue and the wait that `can_reorder` will not let
   the issue cross.**  Crossing the back edge is a stronger move than a swap,
-  so it needs at least the same licence.
+  so it needs at least the same license.
 * **A loop that already carries the token.**  Applying this twice would build
   a distance of two iterations behind one buffer.
 """

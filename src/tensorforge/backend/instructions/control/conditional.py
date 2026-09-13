@@ -103,7 +103,7 @@ class GuardedRegion(AbstractInstruction):
     return tuple(out)
 
   def barrier_scope(self) -> Uniformity:
-    """A region containing a barrier synchronises, seen from outside."""
+    """A region containing a barrier synchronizes, seen from outside."""
     inner = [instr.barrier_scope() for instr in self._region]
     return max((s for s in inner if s is not None), default=None)
 

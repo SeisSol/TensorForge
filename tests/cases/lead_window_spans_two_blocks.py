@@ -12,7 +12,7 @@ the tensor's own lead coordinates.  The store then read past the end of the
 register array, which on a GPU is whatever register happens to follow.
 
 Order 4 never showed this: with 32 or fewer rows every window fell inside a
-single block, and the double-counted theta cancelled.  Order 6 has 64 rows.
+single block, and the double-counted theta canceled.  Order 6 has 64 rows.
 
 Nothing in the emitted numbers gives it away either --- the host interpreter
 does not enforce array bounds, so this needs the structural check that

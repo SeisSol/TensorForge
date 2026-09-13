@@ -12,7 +12,7 @@ largest relative deviation over every tensor the kernel writes; anything above
 1e-6 is a real disagreement, since both sides do the same arithmetic in double
 precision on the host.
 
-Kernels that use vectorised loads (`*(float4*)&...`) abort: `kernel_eval` does
+Kernels that use vectorized loads (`*(float4*)&...`) abort: `kernel_eval` does
 not model them.  That is a gap in the interpreter, not a finding.
 """
 import sys

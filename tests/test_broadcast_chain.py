@@ -60,7 +60,7 @@ def test_the_chain_imports_no_vendor_module():
 
 @pytest.mark.parametrize('vendor', ['amd', 'intel'])
 def test_neither_target_keeps_its_own_copy(vendor):
-    """Two emitters for one arrangement is how they drift: the AMD catalogue
+    """Two emitters for one arrangement is how they drift: the AMD catalog
     orders its split terms smallest-first and the DPAS path orders them
     largest-first, which is exactly the disagreement two copies produce."""
     module = {'amd': amd, 'intel': intel}[vendor]

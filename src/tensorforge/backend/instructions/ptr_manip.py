@@ -384,7 +384,7 @@ class TableForm(enum.Enum):
   stored anywhere; the chain is `n - 1` selects long, which is why it is the
   choice for a handful of members and not for many.
 
-  `ARRAY` is an initialised array indexed by the counter.  Constant in the
+  `ARRAY` is an initialized array indexed by the counter.  Constant in the
   length of the run, and it pays for that by being *memory*: an array with a
   dynamic index cannot be promoted out of its allocation, so it lands in the
   per-thread space -- `.local` on NVIDIA, scratch on AMD -- where every thread
@@ -636,7 +636,7 @@ class VariantLoop(AbstractInstruction):
     return (tuple(self._region),)
 
   def barrier_scope(self):
-    """A loop containing a barrier synchronises, seen from outside -- as
+    """A loop containing a barrier synchronizes, seen from outside -- as
     `BatchLoop` says of its own body, which asks this of its instructions.
     Silent, a staged member's block barriers (`Generator._stage_member`) were
     invisible to the block sizing that has to allow them."""

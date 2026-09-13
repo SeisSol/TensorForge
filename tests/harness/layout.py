@@ -172,7 +172,7 @@ def split_tf32(flat: np.ndarray, dt: Datatype, planar: int = 0) -> np.ndarray:
     and a single wide access fetches both.  Planar, `[hi0, hi1, ..., lo0, lo1,
     ...]` per batch element of ``planar`` elements, where the operand is
     stored in fragment order (``Tensor.storage_planar``): a lane reads several
-    neighbouring slots there, and each part's have to be one run.
+    neighboring slots there, and each part's have to be one run.
 
     Both halves are stored as ``float`` and not as ``uint32``.  A TF32 value
     *is* a float with its low thirteen mantissa bits zero, so the kernel loads

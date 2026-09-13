@@ -159,7 +159,7 @@ def test_the_plan_declines_rather_than_approximating():
     assert reorder.fragment_moves(op, "B", 0, group=99) is None
 
 
-def test_every_operand_in_the_catalogue_has_a_layout_to_plan_from():
+def test_every_operand_in_the_catalog_has_a_layout_to_plan_from():
     """The fourth decline case does not exist, and that is worth saying.
 
     `fragment_moves` returns `None` for an operand without a layout, and no
@@ -242,10 +242,10 @@ def test_a_mask_writes_exactly_its_region(lanes):
     assert written == set(lanes)
 
 
-def test_every_region_in_the_catalogue_is_still_a_row_mask():
+def test_every_region_in_the_catalog_is_still_a_row_mask():
     """Recorded, not relied on.
 
-    Every plan the catalogue produces today selects whole rows, because a lane
+    Every plan the catalog produces today selects whole rows, because a lane
     bit only carries the contraction once `n * blocks` has used the ones below
     and that is 16 or 32 everywhere. This test is what tells a later reader
     that the bank and `cndmask` paths above are exercised by construction
@@ -441,7 +441,7 @@ def test_the_instructions_this_work_targets_all_need_the_exchange():
     Both FP64 MFMAs, gfx1250's native F32 WMMA and gfx1251's native F64 one
     have a single block, so none of them can broadcast its A operand and all
     four need the register-to-lane exchange. `_TILE_TRANSPOSES` in the
-    catalogue already names which transpose belongs to which width; whether
+    catalog already names which transpose belongs to which width; whether
     `hip.h` defines the one a 16-wide tile wants is what
     `DEFINED_TRANSPOSES` answers.
     """
@@ -503,7 +503,7 @@ def test_both_operands_name_the_same_contraction(op):
     out the same.
 
     And over the whole k-block, every contraction value has to appear exactly
-    once -- a relabelling that dropped or repeated one would still pass every
+    once -- a relabeling that dropped or repeated one would still pass every
     per-fragment check above.
     """
     exchange = reorder.a_exchange(op)
@@ -543,7 +543,7 @@ def test_the_exchange_declines_where_the_contraction_reaches_the_register():
     """Two slots is a further claim, and it is not made here.
 
     With more than one element per lane the fragment keeps part of its
-    contraction in the register, so the relabelling has to stay injective
+    contraction in the register, so the relabeling has to stay injective
     across slots as well as lane rows. That may well hold -- both XF32 entries
     and both native gfx125x WMMAs are in that shape -- but it is not what the
     simulation above checked, so `a_exchange` says nothing about them.

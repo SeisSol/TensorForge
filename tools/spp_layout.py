@@ -216,7 +216,7 @@ def gap_sweep(masks, gaps: Sequence[int] = (0, 2, 3, 4, 6, 8, 12, 16),
 
     Issue and traffic are put in one currency the way `spp_plan` does it, so
     the total has a minimum rather than falling forever: closing gaps buys
-    iterations and costs bytes, and the gap that minimises the sum is
+    iterations and costs bytes, and the gap that minimizes the sum is
     `beta / alpha` for the corpus rather than for one matrix, which is the
     number the generator would carry.
     """

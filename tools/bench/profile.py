@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 SeisSol Group
 #
 # SPDX-License-Identifier: MIT
-"""Drive the vendor's profiler over a suite, and normalise just enough of it.
+"""Drive the vendor's profiler over a suite, and normalize just enough of it.
 
 The same binary `run.py` times, run in its `profile` mode: a fixed number of
 dispatches after the warm-up and no timing of its own, so the tool attached to
@@ -9,11 +9,11 @@ it is the only clock. One workload per process, which keeps a counter
 collection small and keeps `rocprof-compute` -- which re-runs the whole
 application once per counter pass -- to a runtime measured in seconds.
 
-## What is normalised, and what is not
+## What is normalized, and what is not
 
 A small common set: duration, DRAM bytes each way, L2 bytes, achieved
 occupancy, launch geometry. Everything else stays in the vendor's own file,
-which is kept beside the normalised rows rather than parsed. Normalising more
+which is kept beside the normalized rows rather than parsed. Normalizing more
 would mean claiming that `dram__bytes_read.sum` and `FETCH_SIZE` are the same
 quantity in more places than they are, and the failure mode of that claim is a
 table that looks comparable and is not.
@@ -72,9 +72,9 @@ from tensorforge.analysis.cost import list_cost                 # noqa: E402
 
 @dataclass(frozen=True)
 class Metric:
-    """One normalised quantity and the vendor metric that supplies it.
+    """One normalized quantity and the vendor metric that supplies it.
 
-    `scale` converts the vendor's unit to the normalised one -- bytes for
+    `scale` converts the vendor's unit to the normalized one -- bytes for
     traffic, nanoseconds for time, a fraction for occupancy. Kept beside the
     name because the unit is part of what the name means: ROCm's `FETCH_SIZE`
     is kilobytes and Nsight's `dram__bytes_read.sum` is bytes, and a table
@@ -86,8 +86,8 @@ class Metric:
     note: str = ''
 
 
-#: The normalised set.  Deliberately short; see the module docstring.
-NORMALISED = ('duration_ns', 'dram_read_bytes', 'dram_write_bytes',
+#: The normalized set.  Deliberately short; see the module docstring.
+NORMALIZED = ('duration_ns', 'dram_read_bytes', 'dram_write_bytes',
               'l2_bytes', 'occupancy', 'grid_size', 'block_size')
 
 
@@ -171,7 +171,7 @@ def read_long_csv(text: str) -> Tuple[Dict[str, Dict[str, float]], str]:
     return out, note
 
 
-def normalise(per_kernel: Dict[str, Dict[str, float]],
+def normalize(per_kernel: Dict[str, Dict[str, float]],
               metrics: Sequence[Metric]) -> List[Dict]:
     """Vendor metric names to the common set, keeping the rest verbatim."""
     by_expr = {m.expr: m for m in metrics}
@@ -297,7 +297,7 @@ class NsightCompute(Profiler):
         if not path.exists():
             return [], [], 'ncu wrote no CSV'
         per_kernel, note = read_long_csv(path.read_text())
-        return normalise(per_kernel, metrics), [str(path)], note
+        return normalize(per_kernel, metrics), [str(path)], note
 
 
 class RocprofV3(Profiler):
@@ -358,14 +358,14 @@ class RocprofV3(Profiler):
                 rows.setdefault(kernel, {}).update(values)
         if not rows:
             return [], raw, 'rocprofv3 wrote no counter rows'
-        return normalise(rows, metrics), raw, '; '.join(notes)
+        return normalize(rows, metrics), raw, '; '.join(notes)
 
 
 class Unitrace(Profiler):
     """`unitrace`, from intel/pti-gpu.
 
     Level Zero metrics rather than a counter file: the tool writes its own
-    report, and what is normalised out of it is the kernel timing. The deeper
+    report, and what is normalized out of it is the kernel timing. The deeper
     memory counters on this stack come from VTune (`gpu-hotspots`) and the
     roofline from Advisor, both of which are separate programs with their own
     output formats -- so this adapter collects what unitrace gives and names
@@ -400,8 +400,8 @@ class Unitrace(Profiler):
                 rows.setdefault(kernel, {}).update(values)
         if not rows:
             return [], raw, ('kernel timings are in the unitrace report, '
-                             'which is kept verbatim; no CSV to normalise')
-        return normalise(rows, metrics), raw, ''
+                             'which is kept verbatim; no CSV to normalize')
+        return normalize(rows, metrics), raw, ''
 
 
 class Vtune(Profiler):
@@ -442,7 +442,7 @@ class Vtune(Profiler):
         if not path.exists():
             return [], [], 'vtune wrote no CSV report'
         per_kernel, note = read_long_csv(path.read_text())
-        return normalise(per_kernel, metrics), [str(path)], note
+        return normalize(per_kernel, metrics), [str(path)], note
 
 
 #: Metric sets, per vendor.  These are the names to check first on a new
@@ -483,7 +483,7 @@ PROFILERS: Dict[str, Profiler] = {
 }
 
 #: Which profiler answers for which device vendor, when none was named.
-#: Intel has two and the default is the one that needs no licence; `--tool
+#: Intel has two and the default is the one that needs no license; `--tool
 #: vtune` is the way to the memory counters.
 BY_VENDOR = {'nvidia': 'ncu', 'amd': 'rocprofv3', 'intel': 'unitrace'}
 

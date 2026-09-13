@@ -5,7 +5,7 @@
 
 `codegen.matmul32` covers the K=1 tiles: the instruction broadcasts its own A
 operand and its accumulator already sits where the nest wants it, so the whole
-path is a transpose, a chain of issues and a store.  Nothing in it generalises,
+path is a transpose, a chain of issues and a store.  Nothing in it generalizes,
 because every one of those three is a property of `k == 1`.
 
 This is the other shape.  Three plans do the arranging and this only emits
@@ -94,7 +94,7 @@ def _merge(writer, into, value, select, ftype):
     masks carry the region.  A region no mask reaches would need a ternary on
     the lane id; `Select` reports that as `cndmask` and this refuses it rather
     than emitting a lane id read the rest of the path does not need --- there
-    is no such region in the catalogue today, and one appearing is a thing to
+    is no such region in the catalog today, and one appearing is a thing to
     look at rather than to paper over.
     """
     if not select.free:

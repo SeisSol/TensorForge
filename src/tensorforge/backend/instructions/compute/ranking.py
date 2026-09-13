@@ -14,7 +14,7 @@ instruction covers so many output columns, so many elements of the leading
 dimension and so many contraction steps per issue, and the shape needs so
 many of each.  What differs per target is how those three numbers are read
 off an entry, which is why :class:`Extent` is what this takes rather than a
-catalogue type.
+catalog type.
 
 It counts issues, not time.  Two instructions that differ in passes do not
 cost the same per issue, which is what :data:`CYCLES` is for and why nothing
@@ -87,7 +87,7 @@ def issues(extent: Extent, columns: int, lead: int = 0, depth: int = 0,
 
 #: Issue cost per instruction, in passes.
 #:
-#: The numbers are a hardware fact like every row of a catalogue, and they have
+#: The numbers are a hardware fact like every row of a catalog, and they have
 #: to be read off the vendor's own statement and checked the same way -- other
 #: vendors would need their own source, and one that does not publish them
 #: leaves its entries out rather than getting a guess.  Guessing is worse than

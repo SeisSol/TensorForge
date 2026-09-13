@@ -10,7 +10,7 @@ until now the bridge could only be tested against descriptors written by hand,
 which say what someone thought yateto sends rather than what it does.
 
 `tests/fixtures/kernels/` holds captures as `dump_descriptors.py` writes
-them.  Everything here is parametrised over that directory, so a capture
+them.  Everything here is parametrized over that directory, so a capture
 dropped in -- a real SeisSol kernel, say -- is covered without a test being
 edited.  The one the specific assertions are written against is a
 two-statement kernel: a contraction whose result a reduction then sums.
@@ -35,7 +35,7 @@ KERNELS = pathlib.Path(__file__).parent / "fixtures" / "kernels"
 def _recordings():
     """Every capture in the fixture directory, kernel by kernel.
 
-    Parametrised over the directory rather than over a list, so that a
+    Parametrized over the directory rather than over a list, so that a
     capture dropped in here -- a real SeisSol kernel, say -- is covered by
     everything below without a test being edited.
     """

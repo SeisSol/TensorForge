@@ -134,8 +134,8 @@ class Recorder:
         guards the whole body to that lane, which is also what removes the
         cross-lane read of a value the writing lane already has.
 
-        This counted `threads` before, and that was not a modelling choice: it
-        was the behaviour.  The peeled write had no guard at all, so the wave
+        This counted `threads` before, and that was not a modeling choice: it
+        was the behavior.  The peeled write had no guard at all, so the wave
         stored the element -- right under `=`, and `threads` times the
         contribution under `+=`.
         """

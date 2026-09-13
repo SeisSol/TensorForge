@@ -12,7 +12,7 @@ every space.
 That has a specific cost.  One raw statement between two shared-memory
 accesses keeps every buffer live, so a body that is nine tenths converted has
 the same interference graph as one that is not converted at all, and a
-colouring over it reuses nothing.  The conversion is all-or-nothing, and an
+coloring over it reuses nothing.  The conversion is all-or-nothing, and an
 all-or-nothing conversion does not get done.  `accesses=` is the way out;
 omitting it means exactly what it meant before.
 

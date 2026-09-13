@@ -7,7 +7,7 @@ Recorded in `fixtures/kernels/yateto_codegen_gaps.json` (seissol/yateto
 50200d3, interface 7).  Three gaps, each closed on this side:
 
 * a guard on SYCL -- the barrier of a multiplication narrower than the
-  sub-group is the sub-group's, and waited inside the guard for a neighbour
+  sub-group is the sub-group's, and waited inside the guard for a neighbor
   that may not take the branch; `verify` refused it;
 * `LogicalNot`, which had no counterpart;
 * an operand whose box is narrower than the destination (`trace` stores three

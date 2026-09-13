@@ -8,7 +8,7 @@ so the same descriptors generated with `atomic_accumulation` on and off have
 to leave the same numbers behind.  That is a differential the host
 interpreter can settle without a device: `evaluate_wave` runs every lane of
 one block over a shared memory image, which is exactly the guarantee an
-atomic add needs modelled -- summing the arrivals is what the hardware does,
+atomic add needs modeled -- summing the arrivals is what the hardware does,
 and the ordering an atomic also promises does not change a sum.
 
 Before this the atomic path had no numerical coverage at all on the host.
@@ -21,7 +21,7 @@ the lead index is `threadIdx.x % num_threads` -- so running more lanes than
 that is not a wider wave, it is a second block's worth of threads addressing
 one block's memory.  Doing so makes every store arrive twice, which under `=`
 is the same value written twice and under `+=` is exactly double: a harness
-artefact that mimics a codegen defect closely enough to be worth naming here.
+artifact that mimics a codegen defect closely enough to be worth naming here.
 On hardware the extra lanes of a warp carry a different `threadIdx.y`, hence
 a different batch element and a different destination base.
 

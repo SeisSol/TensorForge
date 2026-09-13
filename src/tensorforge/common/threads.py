@@ -110,7 +110,7 @@ class MultLayout:
         """Which multiplication unit `index` of a block belongs to.
 
         Units are dealt out to the multiplications of a group in turn, so the
-        neighbours in a wave belong to *different* multiplications; the wave
+        neighbors in a wave belong to *different* multiplications; the wave
         then holds the same shape wherever it sits in the group.
         """
         group, within = divmod(index, self.units_per_group)

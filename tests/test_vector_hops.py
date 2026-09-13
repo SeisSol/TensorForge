@@ -118,7 +118,7 @@ def test_the_tail_is_smaller_than_one_scalar_hop(total, threads):
 def test_the_regression_the_old_arithmetic_had():
     """96 elements, 16 threads: the case that both overran and double-covered.
 
-    Old behaviour: width 4 emitted hops at 0 and 64 -- the second reading to
+    Old behavior: width 4 emitted hops at 0 and 64 -- the second reading to
     128, 32 elements past the end -- then `start` came back to 64 and width 2
     covered `[64, 96)` again.
     """

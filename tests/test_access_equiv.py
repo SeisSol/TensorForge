@@ -3,10 +3,10 @@
 # SPDX-License-Identifier: MIT
 """Can `access_equiv` tell two different addressings apart?
 
-The tool's output is a licence to not read a 55000-line diff, which makes it
+The tool's output is a license to not read a 55000-line diff, which makes it
 exactly the kind of check that is dangerous when it is too permissive. It
-canonicalises three things away on purpose --- renumbering, parenthesisation,
-identity terms --- and each of those is one step from canonicalising away a
+canonicalizes three things away on purpose --- renumbering, parenthesization,
+identity terms --- and each of those is one step from canonicalizing away a
 real difference. A checker that says "identical" for everything reads as
 verification and is worse than not checking.
 
@@ -133,7 +133,7 @@ def test_an_unparseable_subscript_raises():
 
 
 def test_renaming_is_positional_not_wholesale():
-    """Two distinct names must not both canonicalise to the same one.
+    """Two distinct names must not both canonicalize to the same one.
 
     Renaming by order of first appearance is what makes renumbering
     invisible; done wrong it would also make `s0[i] + s0[j]` and

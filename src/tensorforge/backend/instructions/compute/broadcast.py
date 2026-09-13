@@ -56,7 +56,7 @@ def matmul(writer, ops, ctx, span):
         # The accumulator is spread over the lanes exactly like the output it
         # holds -- one element of the lead dimension per lane.  Declared with
         # that layout rather than left untracked, because untracked is not a
-        # conservative default here: an explicitly vectorised declaration
+        # conservative default here: an explicitly vectorized declaration
         # cannot be written without it.
         acc = [writer.declare(hint='acc', layout=out_layout) for _ in range(M)]
         for k0 in range(0, depth, threads):

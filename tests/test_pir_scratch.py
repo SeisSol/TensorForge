@@ -4,7 +4,7 @@
 """A shared alloc is a window into the arena, not an array of its own.
 
 Shared memory in a generated kernel is one arena per thread block. `ShrMemOpt`
-sizes it before any instruction body is built: the coloured region area, plus
+sizes it before any instruction body is built: the colored region area, plus
 a bank-conflict pad, plus a scratch tail whose size is the maximum of
 `temp_shmem()` over the stream. That number is what the occupancy calculation
 reads and what the barrier placement keys on.
@@ -40,7 +40,7 @@ ARENA = 'tempShrMem'
 
 
 def _src(builder) -> str:
-    """Emit without the optimiser: DCE drops a buffer nothing reads.
+    """Emit without the optimizer: DCE drops a buffer nothing reads.
 
     That is correct of DCE and unhelpful here -- these tests are about where a
     buffer is placed, not about whether it survives. The tests that do go
@@ -117,7 +117,7 @@ def test_windows_are_16_byte_aligned(dtype, align):
     """`nvidia.matmul` stores through `float4`; an unaligned window faults.
 
     The alignment is in elements, so it depends on the element size -- which is
-    why this is parametrised rather than asserting `% 4 == 0`. `ShrMemOpt` pads
+    why this is parametrized rather than asserting `% 4 == 0`. `ShrMemOpt` pads
     the arena to the same boundary, so a window that is aligned within the tail
     is aligned absolutely.
     """

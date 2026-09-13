@@ -150,7 +150,7 @@ class StoreRegToShr(AbstractShrMemWrite):
     stores.  Taken as a whole definition, the second killed the first, so the
     first half was dead until then; the allocator gave that stretch to a
     buffer read in between, and the first store overwrote it.  It stayed
-    hidden in the default build only because the colouring happened to put
+    hidden in the default build only because the coloring happened to put
     the temporary elsewhere.
     """
     return (self._dest,) if self._partial else ()
@@ -327,7 +327,7 @@ class StoreRegToGlb(AbstractInstruction):
       # The lead loop is built from the accumulator alone: it drives the thread
       # mapping, and widening it would hand `inner` a LeadIndex outside what
       # the register array holds, which the `needsLoad` test below cannot see
-      # (it recognises `Immediate` only).  What the promise covers beyond it
+      # (it recognizes `Immediate` only).  What the promise covers beyond it
       # gets its own nest below, which writes zeros and never touches `src`.
       # Widened like the other two: the register image is blocked by the
       # compute width, so reading it back cyclically would put fourteen of

@@ -6,7 +6,7 @@
 The other direction, and it fails earlier and for a different reason.
 `MultilinearBuilder.plan` walks the descriptor list to decide which temporaries
 are written where, and skips every descriptor that is not a `MultilinearDescr`.
-An elementwise write is therefore invisible to it, so `_check_initialised` sees
+An elementwise write is therefore invisible to it, so `_check_initialized` sees
 a temporary that is read and never written and refuses to generate.
 
 Nothing about the refusal is wrong except its premise: the write exists, the

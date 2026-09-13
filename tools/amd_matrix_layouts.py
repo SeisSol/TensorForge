@@ -61,7 +61,7 @@ def mnemonic(builtin: str) -> str:
     clang's way of naming the overload, and the hardware has one opcode whose
     wave the calculator takes as `-w`.  Getting this wrong is not quiet --- the
     calculator refuses an unknown opcode --- which is why it is a rewrite here
-    rather than a second name in the catalogue.
+    rather than a second name in the catalog.
     """
     return 'v_' + re.sub(r'_(?:w32|w64)(?:_gfx12)?$|_gfx12$', '', builtin)
 
@@ -73,7 +73,7 @@ def read_layout(calculator, arch, instruction, which, wave=None):
     element more than once: lanes 0--15 and 16--31 carry the same 16x16x16
     operand at wave32.  Keeping only the last one seen puts the origin of the
     layout at lane 16 and makes the base look like an offset, which is a
-    parsing artefact dressed as a hardware fact.
+    parsing artifact dressed as a hardware fact.
     """
     cmd = [sys.executable, str(calculator), '-a', arch, '-i', instruction,
            f'-{which}', '--matrix-layout', '--csv']

@@ -107,11 +107,11 @@ def test_the_copy_writes_the_slots_it_names():
     assert [mem.read('dst', 2 + i) for i in range(4)] == [0.5, 1.5, 2.5, 3.5]
 
 
-def test_an_unmodelled_copy_refuses_instead_of_vanishing():
+def test_an_unmodeled_copy_refuses_instead_of_vanishing():
     """The four-argument zero-fill form, or anything else new.
 
     A transfer that quietly does nothing is the defect this branch exists to
-    keep from recurring, so an unrecognised spelling is an abort rather than a
+    keep from recurring, so an unrecognized spelling is an abort rather than a
     return.
     """
     interp = kernel_eval.Interp(kernel_eval.Slot(0), {})

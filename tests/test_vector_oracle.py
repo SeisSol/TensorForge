@@ -4,13 +4,13 @@
 """The widened path, checked against the scalar one by evaluating both.
 
 Until the host oracle could model vector values there was no numerical
-coverage of the vectorised path at all -- and worse than none for a while,
+coverage of the vectorized path at all -- and worse than none for a while,
 because a catch-all for `cuda::pipeline` swallowed every statement containing
 `::`, so a widened kernel evaluated to a destination of all zeros and every
 oracle test passed without touching the arithmetic it was there to check.
 
 What these compare is the generated code against *itself*: the same case with
-the vectorisation off and on has to write the same numbers to the same places.
+the vectorization off and on has to write the same numbers to the same places.
 That is the check that catches a lane-mapping disagreement, which is the
 failure mode the whole arrangement is prone to -- the compute instruction
 blocks the register image by the width and every other loop over it has to
@@ -52,7 +52,7 @@ def _destination(name, widen, blocking=1):
 
     This used to run each lane on its own and merge the results, over a fixed
     64 tids.  Both halves of that stopped being true once `kernel_eval` began
-    modelling the async copy.  A staged operand arrives cooperatively --- lane
+    modeling the async copy.  A staged operand arrives cooperatively --- lane
     `t` copies its own stripe and no other --- so a lane on its own memory
     computes from a window that is one stripe of operand and seed fill
     everywhere else, and two configurations then agree because they were both
@@ -97,7 +97,7 @@ def test_the_widened_kernel_writes_the_same_numbers(vcase):
     """
     _, base = _destination(vcase, widen=False)
     src, wide = _destination(vcase, widen=True)
-    assert 'VectorT' in src, 'the case did not actually vectorise'
+    assert 'VectorT' in src, 'the case did not actually vectorize'
     assert set(base) == set(wide), 'the widened kernel wrote elsewhere'
     for key in sorted(base):
         assert base[key] == pytest.approx(wide[key], abs=1e-4), key

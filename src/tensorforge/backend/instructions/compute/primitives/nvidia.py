@@ -218,7 +218,7 @@ def sm_of(ctx) -> int:
     `hw_descr().model` is the arch string the context was built with
     (`'sm_120'`).  Anything that does not parse as one -- a non-NVIDIA model
     reaching here, or a name shape this does not know -- yields the floor
-    rather than a guess, so an unrecognised target declines instructions
+    rather than a guess, so an unrecognized target declines instructions
     instead of being credited with them.
     """
     try:
@@ -478,7 +478,7 @@ def prepared_order(shape, dtype, ctx, columns=0, lead=0, depth=0,
     if atom is None:
         return None
     # Over the wave and not over one multiplication: the fragment is the
-    # warp's, and a narrower multiplication reads it with its neighbours'
+    # warp's, and a narrower multiplication reads it with its neighbors'
     # lanes (`matmul`, `shift`).
     return fragment_order(shape, atom, WAVE)
 
@@ -653,7 +653,7 @@ def _as_float(writer: Writer, value):
 PREFETCH = 1
 
 #: The wave the fragment layouts are written over.  A multiplication spread
-#: over fewer lanes shares it with its neighbours, and `matmul` runs one
+#: over fewer lanes shares it with its neighbors, and `matmul` runs one
 #: round of the product per multiplication.
 WAVE = 32
 
@@ -662,7 +662,7 @@ def convergence(strategy, shape):
     """How far the threads have to run in step for `strategy` over `shape`.
 
     `mma.sync` is `.aligned`: every lane of the warp issues it together, so
-    a multiplication narrower than the warp needs its neighbours in the warp
+    a multiplication narrower than the warp needs its neighbors in the warp
     to take the same trips through the batch loop.  Asked of the target and
     not of the plan, because "matrix" is not one instruction: another
     target's matrix path may have no such demand at all.
@@ -682,7 +682,7 @@ def supports(threads, dtype, sparse, depth=0) -> bool:
     ask, not a crash the caller cannot avoid.
 
     * ``threads`` divides the wave.  The instruction is the warp's; a
-      multiplication narrower than it shares the warp with its neighbours,
+      multiplication narrower than it shares the warp with its neighbors,
       and `matmul` runs one round of fragments per multiplication, wiring
       each one's `B` in and its `D` out through its own shared region.
       Wider ones are a different instruction, which does not exist here yet.
@@ -882,7 +882,7 @@ def _warp_group(writer, ops, threads, mults):
     The distance is handed to the access as its `shift`, which the builder
     adds after the tile's swizzle: the permutation stays one of the tile's
     own index, the same for the multiplication that writes the tile and for
-    the neighbour that reads it.
+    the neighbor that reads it.
     """
     if mults == 1:
         return None, None, (lambda p: None)
@@ -890,7 +890,7 @@ def _warp_group(writer, ops, threads, mults):
     if stride is None:
         raise InternalError(
             'the MMA path shares a warp between multiplications and addresses '
-            'the shared memory of its neighbours, but was not told how much '
+            'the shared memory of its neighbors, but was not told how much '
             'each multiplication owns')
     mine = writer.op('rem', INDEX, writer.thread_id('y'), mults, hint='m')
     lane = writer.op('add', INDEX, writer.thread_id('x'),
@@ -1041,15 +1041,15 @@ def matmul(writer, ops, ctx, span):
     # allocation.
     aparts = ops.a_parts
     # Whether `A` is stored in the order this reads it.  Where it is, the
-    # staging tile below is not an optimisation that was skipped -- it is a
+    # staging tile below is not an optimization that was skipped -- it is a
     # transform that already happened, once, on the host, for a batch that
     # shares the operand.
     aordered = ops.A_slot is not None
     # Whether `B` can be read where it lies instead of redistributed.  Asked
     # once and for the whole span: the tile is either needed or it is not, and
     # a path that staged half the fragments would still pay for it.
-    # Only on a warp of its own: a neighbour's `B` lies behind a pointer this
-    # lane does not hold, so it comes through the neighbour's tile.
+    # Only on a warp of its own: a neighbor's `B` lies behind a pointer this
+    # lane does not hold, so it comes through the neighbor's tile.
     bdirect = (mults == 1
                and ops.B_frag is not None and ops.B_direct is not None
                and ops.B_direct(ktile, ntile) and atom.n == ntile)
@@ -1133,7 +1133,7 @@ def matmul(writer, ops, ctx, span):
         # The first arrangement gave each part its own tile, on the grounds
         # that the fragment read indexes by slot times the wave and a shared
         # tile holding several parts per slot would change that arithmetic.
-        # True, and the wrong thing to optimise: it saved one allocation and
+        # True, and the wrong thing to optimize: it saved one allocation and
         # paid one access per fragment per part.  Measured, two parts cost
         # +896 LDS and +904 global loads against the single-part kernel, and
         # the kernel is bound by exactly that traffic.
@@ -1141,7 +1141,7 @@ def matmul(writer, ops, ctx, span):
         # Adjacent, the two halves of one fragment are one 8-byte access, and
         # the same holds in global memory, where `DataView._elem_parts` already
         # interleaves them.  The address gains a factor and an addend; ptxas
-        # merges the neighbouring scalar accesses, as it already does for the
+        # merges the neighboring scalar accesses, as it already does for the
         # four consecutive stores below.
 
     with writer.scratch_scope():
@@ -1247,7 +1247,7 @@ def matmul(writer, ops, ctx, span):
                     # array named by `varalloc`.  The array was a C++
                     # identifier the IR knew nothing about, so `mma.sync`'s
                     # read-write operand could not be a value and the asm had
-                    # to stay raw text.  Same registers, same initialisation;
+                    # to stay raw text.  Same registers, same initialization;
                     # the difference is that each slot now has a definition
                     # point and a use chain.  One set per round: round `p`
                     # accumulates multiplication `p`'s rows.
@@ -1367,8 +1367,8 @@ def matmul(writer, ops, ctx, span):
                         # are read next to each other.  They are
                         # adjacent in memory -- the part index is
                         # the innermost stride -- but a compiler
-                        # merges neighbouring accesses only where
-                        # they are also neighbours in the
+                        # merges neighboring accesses only where
+                        # they are also neighbors in the
                         # instruction stream, and reading all of
                         # part 0 and then all of part 1 leaves them
                         # far apart.  Measured: separated, the two

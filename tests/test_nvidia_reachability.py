@@ -74,7 +74,7 @@ KEPT_UNREACHABLE: dict = {}
 
 @pytest.fixture(scope="module")
 def analysis():
-    return reachability.analyse(PRIMITIVES, MODULES, ENTRIES)
+    return reachability.analyze(PRIMITIVES, MODULES, ENTRIES)
 
 
 def test_entry_points_exist(analysis):

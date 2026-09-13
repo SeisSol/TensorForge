@@ -295,7 +295,7 @@ def test_an_order_that_is_not_one_is_refused(order, why):
 def test_the_planar_split_keeps_each_part_one_run():
     """`split_tf32` for an operand stored planar: per batch element all the
     upper halves, then all the lower ones, each in slot order -- so a lane's
-    `aregs` neighbouring slots of one part are one access, the register group
+    `aregs` neighboring slots of one part are one access, the register group
     the instruction takes."""
     import numpy as np
     from harness import layout

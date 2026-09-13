@@ -484,7 +484,7 @@ def strategies(shape, ctx):
     chain over the lanes.  Which wins is a measurement, not a preference, and
     neither flag is on by accident.
 
-    The broadcast chain is offered only under the explicitly vectorised
+    The broadcast chain is offered only under the explicitly vectorized
     lowering, and that is its whole argument: a lane broadcast is `v[k]` out
     of this work-item's own registers there, and a real cross-lane
     instruction in SPMD.  Offering it on an Intel target lowered as SPMD would

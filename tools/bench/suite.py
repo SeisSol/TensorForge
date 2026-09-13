@@ -242,7 +242,7 @@ def from_dump(path: Path, pattern: str = '*',
     Tensors are shared across the descriptors of one kernel by name, which is
     what makes a chain a chain -- rebuilding each descriptor's operands
     independently would give the generator two tensors where the kernel has
-    one, and no temporary would ever be recognised as such.
+    one, and no temporary would ever be recognized as such.
     """
     blob = json.loads(Path(path).read_text())
     kernels = blob['all'] if 'all' in blob else blob

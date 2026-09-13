@@ -307,7 +307,7 @@ def test_a_sixteen_bit_operand_packs_two_depths_into_one_dword():
 
 def test_every_fragment_slot_is_used_exactly_once():
     """A permutation, not merely a map into the right range: a collision would
-    silently drop an element and a gap would read an uninitialised one."""
+    silently drop an element and a gap would read an uninitialized one."""
     for name, atom in intel.ATOMS.items():
         for off, n_slots, dims in (
                 (intel.a_offset, atom.a_elems, (atom.m, atom.k)),

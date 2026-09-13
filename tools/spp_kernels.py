@@ -111,7 +111,7 @@ def constants_of(rows: Sequence[Optional[dict]]) -> Tuple[Dict[str, dict],
     return found, uses
 
 
-def analyse(path: Path, arch: str = 'gfx90a', backend: str = 'hip',
+def analyze(path: Path, arch: str = 'gfx90a', backend: str = 'hip',
             fp_bytes: int = 8, threads_per_block: int = 256, mults: int = 8,
             fixed_lds: int = 0, latency: float = 600.0,
             cache_hit: float = 0.0, bytes_per_cycle: float = 64.0) -> List[dict]:
@@ -189,7 +189,7 @@ def main(argv=None) -> int:
     ap.add_argument('--json', type=Path, default=None)
     args = ap.parse_args(argv)
 
-    rows = analyse(args.capture, arch=args.arch, backend=args.backend,
+    rows = analyze(args.capture, arch=args.arch, backend=args.backend,
                    fp_bytes=args.fp, threads_per_block=args.threads,
                    mults=args.mults, fixed_lds=args.fixed_lds,
                    latency=args.latency, cache_hit=args.cache_hit)

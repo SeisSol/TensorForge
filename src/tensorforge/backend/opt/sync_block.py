@@ -54,7 +54,7 @@ class SyncThreadsOpt(AbstractTransformer):
   def _insert_sync_before_use(self):
     # Around the back edge, for a loop body: the writes still unfenced when
     # the body ends are the ones its head reads next iteration.  Nothing put
-    # them there before `WrapLoads` learnt shared memory -- a transfer for
+    # them there before `WrapLoads` learned shared memory -- a transfer for
     # element k + 1 issued after the last read of its buffer, and read at the
     # top of the next iteration, behind its wait.  Scanning once to find what
     # is carried and once more starting from it puts the barrier where a

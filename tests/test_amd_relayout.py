@@ -39,8 +39,8 @@ def test_quad_perm_decoding():
     assert wavesim.quad_perm(0x44) == (0, 1, 0, 1)
 
 
-def test_unmodelled_dpp_control_is_refused_not_guessed():
-    """A half-modelled instruction is worse than an absent one."""
+def test_unmodeled_dpp_control_is_refused_not_guessed():
+    """A half-modeled instruction is worse than an absent one."""
     with pytest.raises(NotImplementedError):
         wavesim.dpp(0x150, list(range(64)))
 

@@ -129,7 +129,7 @@ def test_the_censuses_still_see_something(tool, marker):
     """Each wraps a builder method and would report an empty corpus if the
     method it wraps were renamed, without any error to notice."""
     out = _run(tool)
-    assert re.search(marker, out), f"{tool} produced nothing recognisable:\n{out[-800:]}"
+    assert re.search(marker, out), f"{tool} produced nothing recognizable:\n{out[-800:]}"
     numbers = [int(n) for n in re.findall(r"^\s*(\d+)\s", out, re.M)]
     assert numbers and max(numbers) > 0, f"{tool} counted nothing:\n{out[-800:]}"
 

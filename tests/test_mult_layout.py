@@ -35,7 +35,7 @@ def test_forty_eight_lanes_are_three_waves_holding_two_multiplications():
 
 
 def test_the_waves_of_a_group_hold_the_same_shape():
-    """Neighbouring units belong to different multiplications, so a wave holds
+    """Neighboring units belong to different multiplications, so a wave holds
     a slice of each rather than one whole multiplication and part of another."""
     layout = MultLayout(48, 32)
     waves = [[layout.mult_of_unit(u) for u in range(w * layout.units_per_wave,

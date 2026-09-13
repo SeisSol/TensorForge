@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 SeisSol Group
 #
 # SPDX-License-Identifier: MIT
-"""``C = A_sub @ B`` — both shifts active on A at once, and cancelling.
+"""``C = A_sub @ B`` — both shifts active on A at once, and canceling.
 
 A's *memory* bounding box is ``[4,16) x [0,16)``: the buffer holds 12x16
 reals and address 0 is row 4.  That box lives in A's own coordinates, so

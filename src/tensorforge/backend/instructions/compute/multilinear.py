@@ -313,7 +313,7 @@ class MultilinearInstruction(ComputeInstruction):
             # `prev`/`next` are adopted for their *layout*: when the result is
             # handed to or taken from a register image, the accumulator has to
             # be indexed the way that image is, or the transfer between them is
-            # off.  Two things disqualify a neighbour.  A global or shared
+            # off.  Two things disqualify a neighbor.  A global or shared
             # symbol describes the whole buffer, not the box this operation
             # writes.  And a register image is only usable if it is an image of
             # the *same* box: `_deferred_stores` is keyed by symbol name and
@@ -324,14 +324,14 @@ class MultilinearInstruction(ComputeInstruction):
             # box; the accumulator then claimed elements it never computed, and
             # the store wrote all of them --- reading past the end of the
             # register array on the way.
-            for neighbour in (self._prev, self._next):
-                if (neighbour is not None
-                        and neighbour.stype in (SymbolType.Register,
+            for neighbor in (self._prev, self._next):
+                if (neighbor is not None
+                        and neighbor.stype in (SymbolType.Register,
                                                 SymbolType.Scratch)
-                        and neighbour.data_view is not None
-                        and self._same_box(neighbour.data_view.get_bbox(),
+                        and neighbor.data_view is not None
+                        and self._same_box(neighbor.data_view.get_bbox(),
                                            self._idest.data_view.get_bbox())):
-                    self._dest.data_view = neighbour.data_view
+                    self._dest.data_view = neighbor.data_view
             if self._dest.data_view is None:
                 self._dest.data_view = self._idest.data_view
 
@@ -556,7 +556,7 @@ class MultilinearInstruction(ComputeInstruction):
         """The reduction values this body covers, and which slot they fill.
 
         `(values, slot)`.  At `k_width == 1` that is the single value the loop
-        handed over and the behaviour is unchanged.  Wider, the loop steps by
+        handed over and the behavior is unchanged.  Wider, the loop steps by
         `k_width` and this expands the base into the group -- clipped at the
         extent, so a ragged reduction simply gets a shorter last group.  No
         guard and no masking: unlike the lead dimension, a reduction has no
@@ -848,7 +848,7 @@ class MultilinearInstruction(ComputeInstruction):
         every instruction exists, so the question "does anything else read
         this operand" has an answer.  Earlier it does not, and marking an
         operand a second reader then addresses by row and column is not a
-        missed optimisation but a wrong kernel.
+        missed optimization but a wrong kernel.
 
         Four conditions, and each one is a way the marking could be wrong
         rather than merely unhelpful:
@@ -960,7 +960,7 @@ class MultilinearInstruction(ComputeInstruction):
         """The shared memory one multiplication owns, in elements.
 
         Read by a matrix path whose warp holds several multiplications and
-        reads its neighbours' tiles (`nvidia._warp_group`).  Known only once
+        reads its neighbors' tiles (`nvidia._warp_group`).  Known only once
         `ShrMemOpt` has sized the arena, which is after the plan is made.
         """
         self._mult_stride = stride
@@ -970,7 +970,7 @@ class MultilinearInstruction(ComputeInstruction):
 
         An NVIDIA matrix instruction is the warp's collective: every lane
         issues it together.  Where a multiplication is narrower than the warp,
-        its neighbours in the warp are part of that and have to take the same
+        its neighbors in the warp are part of that and have to take the same
         trips through the batch loop -- which the loop's grouped traversal
         guarantees and `verify` checks it against.  The target says so
         (`convergence`); a target that says nothing asks nothing.
@@ -1429,7 +1429,7 @@ class MultilinearInstruction(ComputeInstruction):
     def needs_epilogue(self) -> bool:
         """Whether the accumulator is not the destination.
 
-        A scalar factor, a previous value to add, a neighbour whose layout the
+        A scalar factor, a previous value to add, a neighbor whose layout the
         destination takes, or a destination box the accumulated range does not
         match -- any of them, and the result goes through
         `MultilinearEpilogue` rather than straight into the destination.

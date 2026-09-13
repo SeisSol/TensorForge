@@ -11,7 +11,7 @@ So each guard has a matching mutation --- the defect it was written for, put
 back --- and this runs them all and reports which are caught.  The mutations
 are the real ones from the session's history, not invented ones:
 
-* `fmacdpp4` emitted for gfx900, where the specialisations are switched off
+* `fmacdpp4` emitted for gfx900, where the specializations are switched off
 * `fmacdpp8` selected, which the runtime declares nowhere
 * the MFMA tail recomputed, so two paths wrote the same columns
 * the `LaneAxis` lane map as first documented, with `stride` read as packing
@@ -344,7 +344,7 @@ GROUPS = {
     ]),
 
     'cdecl': ('tests/test_flatten_scopes.py', [
-        ('brace initialisation not seen as a declaration',
+        ('brace initialization not seen as a declaration',
          sub(Path('src/tensorforge/backend/pir/passes.py'),
              r"\w+_t)\s+(\w+)\s*[=;\[{,]')",
              r"\w+_t)\s+(\w+)\s*[=;\[,]')", 1)),
@@ -844,7 +844,7 @@ GROUPS = {
     # One list, two readers.  The tool reported three permanent failures for
     # cases the suite already tracked, which is how a check stops being read.
     'knownbad': ('tests/test_tools.py::test_the_runner_agrees_with_the_suite', [
-        ('the tool stops recognising a tracked failure',
+        ('the tool stops recognizing a tracked failure',
          sub(Path('tools/syntax_check.py'),
              '    reason = syntax.known_bad(r.path)',
              "    reason = ''", 1)),

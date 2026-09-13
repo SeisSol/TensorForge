@@ -15,7 +15,7 @@ whatever the buffer happened to contain.
 No case in the corpus reaches either of that predicate's True branches --- it
 returns False for every case, either because a single writer covers everything
 or because no read union was recorded at all. So the branch that decides
-"materialise this, do not keep it in registers" is exercised by nothing, while
+"materialize this, do not keep it in registers" is exercised by nothing, while
 it is on the hot path for any chain of yateto-style contractions.
 """
 
@@ -57,7 +57,7 @@ def descr_list():
 
 
 def reference(inputs, dest_in):
-    # The temporary is zero-initialised and only its first WRITTEN_COLS columns
+    # The temporary is zero-initialized and only its first WRITTEN_COLS columns
     # are produced; the rest stay zero and must contribute nothing.
     tmp = np.zeros((inputs["B"].shape[0], 12, 12), dtype=inputs["B"].dtype)
     tmp[:, :, :WRITTEN_COLS] = np.einsum(

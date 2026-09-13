@@ -48,7 +48,7 @@ class ElementwiseBuilder(OperationBuilder):
             ElementwiseInstruction,
             [v for v in operands if not isinstance(v, ScalarLike)],
             'elementwise')
-        return self.materialise_dest(descr, lead_pos) \
+        return self.materialize_dest(descr, lead_pos) \
             or self.view_of(descr.dest)
 
     def emit_compute(self, descr, operands, dest) -> None:
@@ -71,7 +71,7 @@ class ScalarBuilder(OperationBuilder):
                 and descr.dest.bbox.rank() == 0)
 
     def alloc_destination(self, descr, operands):
-        return self.materialise_dest(descr, ()) or self.view_of(descr.dest)
+        return self.materialize_dest(descr, ()) or self.view_of(descr.dest)
 
     def emit_compute(self, descr, operands, dest) -> None:
         self._instructions.append(ScalarContractionInstruction(
@@ -93,7 +93,7 @@ class ReductionBuilder(OperationBuilder):
         kept = [d for d in range(var.bbox.rank()) if d not in set(descr.dims)]
         src_lead = ComputeInstruction.lead_dim(var)
         lead_pos = kept.index(src_lead) if src_lead in kept else 0
-        return self.materialise_dest(descr, lead_pos) \
+        return self.materialize_dest(descr, lead_pos) \
             or self.view_of(descr.dest)
 
     def emit_compute(self, descr, operands, dest) -> None:

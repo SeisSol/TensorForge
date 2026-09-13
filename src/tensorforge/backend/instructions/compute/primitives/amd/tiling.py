@@ -72,7 +72,7 @@ class Fit:
     """
 
     scheme: Scheme
-    #: The catalogue entry that will be issued.
+    #: The catalog entry that will be issued.
     op: object
     #: The tile, where the scheme carries one beside the entry; the transpose
     #: that feeds A is not a property of the instruction.

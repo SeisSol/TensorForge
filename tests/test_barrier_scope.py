@@ -109,7 +109,7 @@ def test_a_multiplication_inside_a_wave_asks_for_a_masked_wave(context):
     who, threads = _requested(context, half)
     assert who is Participants.MULT
     assert SyncThreads(context, half).barrier_scope() is Uniformity.MULT, (
-        "the neighbouring multiplication in this wave is free to run the body "
+        "the neighboring multiplication in this wave is free to run the body "
         "a different number of times, so it must not be waited for")
 
     text = _sync_text(context, Participants.MULT, half)
@@ -157,7 +157,7 @@ def test_the_arrival_of_a_wave_barrier_follows_the_geometry():
 
 
 def test_a_target_without_a_sub_block_rendezvous_gets_the_block():
-    """The default answer over-synchronises but never deadlocks."""
+    """The default answer over-synchronizes but never deadlocks."""
     from tensorforge.backend.pir.core import Participants
 
     ctx = Context(arch="pvc", backend="oneapi", fp_type=Datatype.F32)
@@ -268,7 +268,7 @@ def test_the_loop_reports_block_uniformity_only_at_one_mult_per_block():
     assert loop.uniform_scope() is Uniformity.BLOCK
 
 
-def test_the_reduction_refuses_a_cross_lane_fold_it_cannot_synchronise():
+def test_the_reduction_refuses_a_cross_lane_fold_it_cannot_synchronize():
     """Better a named refusal than a generic barrier diagnostic.
 
     `ReductionInstruction` reads the same fact from the other side. The

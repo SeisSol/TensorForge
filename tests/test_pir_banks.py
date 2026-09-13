@@ -37,8 +37,8 @@ def builder(budget=4096):
 
 
 def _one(b, tile, index):
-    """The single access in this body, analysed."""
-    accesses, unresolved = banks.analyse(b.finish())
+    """The single access in this body, analyzed."""
+    accesses, unresolved = banks.analyze(b.finish())
     assert unresolved == 0
     assert len(accesses) == 1
     return accesses[0]
@@ -103,7 +103,7 @@ def test_a_vector_store_takes_its_width_from_the_value():
     idx = b.op('mul', INDEX, b.thread_id('x'), 4, hint='a')
     quad = b.rawexpr('q', type_=ScalarType(Datatype.F32, 4), hint='q')
     b.store(tile, quad, idx)
-    accesses, _ = banks.analyse(b.finish())
+    accesses, _ = banks.analyze(b.finish())
     assert accesses[0].kind == 'store'
     assert accesses[0].ways == 1, (
         'eight lanes of sixteen bytes cover the bank width exactly')
@@ -140,7 +140,7 @@ def test_a_raw_address_is_refused_not_guessed():
     tile = b.alloc(Datatype.F32, (64,), MemSpace.SHARED, hint='s')
     b.load(tile, b.rawexpr('0 + threadIdx.x * 1', type_=INDEX, hint='a'),
            hint='v')
-    accesses, unresolved = banks.analyse(b.finish())
+    accesses, unresolved = banks.analyze(b.finish())
     assert accesses == [] and unresolved == 1
 
 
@@ -170,7 +170,7 @@ def test_a_loop_variable_resolves_to_its_bound():
     with b.for_(0, 4) as loop:
         i = loop.index if hasattr(loop, 'index') else None
         b.load(tile, b.thread_id('x'), hint='v')
-    accesses, unresolved = banks.analyse(b.finish())
+    accesses, unresolved = banks.analyze(b.finish())
     assert unresolved == 0 and accesses[0].ways == 1
 
 
@@ -178,8 +178,8 @@ def test_the_analysis_belongs_after_the_passes():
     """A freshly finished body still holds what `dce` and `cse` will remove.
 
     `chain_three` has 1172 shared loads at `finish()` and 587 after
-    optimisation, and the emitted source shows 590 -- so measuring the
-    unoptimised body counted twice as many accesses as the hardware will make.
+    optimization, and the emitted source shows 590 -- so measuring the
+    unoptimized body counted twice as many accesses as the hardware will make.
     That is also where a pass acting on this would sit: after the passes that
     change what is there, before the emitter that fixes it.
     """
@@ -193,8 +193,8 @@ def test_the_analysis_belongs_after_the_passes():
     b('use(%s);' % kept, kept, accesses=())
     body = b.finish()
 
-    before, _ = banks.analyse(body)
-    after, _ = banks.analyse(passes.optimize(body))
+    before, _ = banks.analyze(body)
+    after, _ = banks.analyze(passes.optimize(body))
     assert len(before) == 2
     assert len(after) == 1, (
         'the dead load is still counted; the analysis has to run on the body '

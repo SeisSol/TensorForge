@@ -37,8 +37,8 @@ single-use addresses inline into their loads, so thousands of lines move
 without a single access moving. It expands every subscript down to leaves and
 compares the multiset of `(base, address)` pairs against a git revision.
 
-What it canonicalises away -- renumbering, parenthesisation, `0 + x` -- is
-chosen; what it refuses to canonicalise -- associativity, distribution -- is
+What it canonicalizes away -- renumbering, parenthesization, `0 + x` -- is
+chosen; what it refuses to canonicalize -- associativity, distribution -- is
 chosen just as deliberately, because on an address those are usually real. Its
 answer licenses not reading the diff, so `tests/test_access_equiv.py` pins both
 directions: for each thing it ignores, a pair it must call identical, and next
@@ -56,7 +56,7 @@ fivefold.
 Both are attributed to the function that emitted them. Lowered nodes are
 matched back to their site by their raw text, since the passes rebuild
 statements with `replace` and the emitting frame is gone by then -- and putting
-the site in `attrs` would change behaviour, because `flatten_scopes` keys on
+the site in `attrs` would change behavior, because `flatten_scopes` keys on
 `attrs` being empty.
 
 It runs the whole case corpus -- recursively, the way `conftest.py` discovers
@@ -99,12 +99,12 @@ before the caches were cleared.
 `access_equiv.py` answers the question a snapshot diff cannot during a
 migration. Unpinning an address renumbers every later SSA value and lets the
 emitter fold single-use addresses into their loads, so 55000 lines move and
-almost none of it is a change in behaviour. Reviewing that by eye is how a real
+almost none of it is a change in behavior. Reviewing that by eye is how a real
 change gets waved through in the middle of it.
 
-So it expands every SSA name in every subscript down to leaves, canonicalises,
+So it expands every SSA name in every subscript down to leaves, canonicalizes,
 and compares the multiset of `(base, address)` pairs against a git revision.
-Renumbering, parenthesisation and identity terms are canonicalised away;
+Renumbering, parenthesization and identity terms are canonicalized away;
 associativity and distribution deliberately are not, because on an address
 `a*(b+c)` and `a*b + c` usually differ for a reason.
 

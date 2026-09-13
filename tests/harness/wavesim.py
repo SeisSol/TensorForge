@@ -10,7 +10,7 @@ checked by reading, and the attempt has already failed twice in this codebase
 from it, both times producing the right numbers in the wrong roles.
 
 So the claims are checked against an execution instead.  Each primitive is
-modelled from its own definition in `include/tensorforge_device/hip.h`: give
+modeled from its own definition in `include/tensorforge_device/hip.h`: give
 every (register, lane) slot a distinct tag, run the instruction, and read off
 where each tag ended up.  That map is ground truth; the table has to match it.
 
@@ -40,11 +40,11 @@ def dpp(ctrl: int, vals: Sequence) -> Lanes:
     """`dpp<ctrl, 0xf, 0xf, true>`, quad permute and row rotate.
 
     0x121-0x12F is `row_ror:n`: within each row of sixteen, lane `l` reads
-    lane `(l + n) % 16`. Modelled because `swap<16>` is `row_ror:8` and that
+    lane `(l + n) % 16`. Modeled because `swap<16>` is `row_ror:8` and that
     is the only way to check what `swap` does.
 
-    `row_shl` and `row_shr` stay unmodelled even though they sit next door,
-    and the wave controls likewise: nothing names them, and a half-modelled
+    `row_shl` and `row_shr` stay unmodeled even though they sit next door,
+    and the wave controls likewise: nothing names them, and a half-modeled
     instruction would be worse than an absent one.
     """
     if 0x121 <= ctrl <= 0x12F:
@@ -82,7 +82,7 @@ def transpose16x16b32(regs: Sequence[Sequence]) -> List[Lanes]:
     with alternating bank masks, then a 16x16 stage on `row_ror:8`.
 
     Two of its controls were the wrong way round when this was written, and
-    that is how it was found. Modelled because nothing checked it. The runtime has had it since before
+    that is how it was found. Modeled because nothing checked it. The runtime has had it since before
     the relayout table, and `test_amd_relayout.py` covers `transpose4x4b32`
     only -- so what this one does to a lane index was, until now, whatever the
     reader assumed.
@@ -123,7 +123,7 @@ def swizzle(and_mask: int, or_mask: int, xor_mask: int,
 def swap(vals: Sequence, block: int) -> Lanes:
     """`tensorforge::swap<Block>`, from the branch that Block selects.
 
-    Each branch is modelled from its own source rather than from the map the
+    Each branch is modeled from its own source rather than from the map the
     template documents, which is the point: the template documented one map
     and two of its branches implemented another.
     """
@@ -151,7 +151,7 @@ def broadcast(vals: Sequence, block: int, subblock: int, lane: int) -> Lanes:
 
     Result lane `l` takes the source value from lane `Lane*Subblock + l %
     Subblock` within its own block, so the result repeats every `Subblock`
-    lanes with neighbours differing.
+    lanes with neighbors differing.
     """
     assert block % subblock == 0
     assert lane * subblock < block

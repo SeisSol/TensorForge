@@ -57,7 +57,7 @@ class OperationDescription:
   #: `effective_boxes` and deliberately does not know what kinds there are. A
   #: wrapper would have to be unwrapped by every one of those walks, and a
   #: walk that forgot would read a guarded write as an unconditional one,
-  #: which is the failure that leaves no trace. Grouping neighbours that share
+  #: which is the failure that leaves no trace. Grouping neighbors that share
   #: a guard is then a pass over the list, which is where it belongs.
   condition = None
 
@@ -233,7 +233,7 @@ class MultilinearDescr(OperationDescription):
     lead index.  An operand indexed only by the other axes -- `B` in
     `C[m,n] += A[m,k] B[k,n]` -- is splatted, not loaded wide, so it proves
     nothing about the vector's address.  `lead_width` said so from the start
-    while the code minimised over every matrix, and that is what held
+    while the code minimized over every matrix, and that is what held
     `local_flux` at width one: its 9x9 flux solver claims no alignment.
     """
     out = [self.dest]
@@ -281,7 +281,7 @@ class MultilinearDescr(OperationDescription):
                                blocking=context.get_user_options().lead_blocking)[1]
 
   def scalar_num_threads(self, context: Context) -> int:
-    """The lane count this operator would have had without vectorisation.
+    """The lane count this operator would have had without vectorization.
 
     What `RegmaxBlockPolicy` has to divide by.  Sizing `mults_per_block` from
     the *reduced* lane count would double the mults, double the shared memory
@@ -678,7 +678,7 @@ class GemmDescr(MultilinearDescr):
 class ForDescr(OperationDescription):
   """A run of chunks stated once, with a table of what varies.
 
-  Holds the generalisation of the run rather than a body with placeholders in
+  Holds the generalization of the run rather than a body with placeholders in
   it: iteration `i` *is* the common body with `bindings[i]` in its holes, so
   there is one definition of what the loop means and `unroll` is its inverse
   rather than a second implementation of it.

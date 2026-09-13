@@ -135,7 +135,7 @@ each operand. For anything more exotic (chains, fused operations,
 custom epilogues), define `reference(inputs, dest_in)` returning the
 expected `(batch, *shape)` array.
 
-Optional module-level knobs the harness recognises:
+Optional module-level knobs the harness recognizes:
 
 | Name              | Type               | Effect                                                                                              |
 |-------------------|--------------------|-----------------------------------------------------------------------------------------------------|
@@ -250,7 +250,7 @@ sections, with a section boundary inside it. Two cases under
 
 The cross-section dataflow is verified by the comparison: the second
 GEMM reads what the first wrote, so a fence/barrier that doesn't
-actually synchronise produces a numerically-wrong result.
+actually synchronize produces a numerically-wrong result.
 
 #### Multi-section dispatch in the driver
 

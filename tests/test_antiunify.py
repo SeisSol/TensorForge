@@ -49,7 +49,7 @@ def body(operator_alias, **kwargs):
 # --- families that merge ----------------------------------------------------
 
 
-def test_single_body_generalises_to_itself():
+def test_single_body_generalizes_to_itself():
     result = anti_unify([body('rDivM0')])
     assert isinstance(result, Generalization)
     assert result.arity == 0
@@ -231,9 +231,9 @@ def test_family_size_does_not_change_the_answer(members):
 
 
 def test_round_trip_returns_each_member():
-    """Generalise a family, bind hole by hole, get the members back.
+    """Generalize a family, bind hole by hole, get the members back.
 
-    The property that says the generalisation kept everything it had to: if
+    The property that says the generalization kept everything it had to: if
     binding reproduces every input, nothing that distinguished them was lost
     into the common part.
     """

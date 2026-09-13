@@ -50,7 +50,7 @@ def test_a_warp_wide_dense_case_of_the_atoms_type_is_admitted():
 
 @pytest.mark.parametrize("threads", [1, 2, 4, 8, 16])
 def test_a_width_that_divides_the_wave_is_admitted(threads):
-    """A multiplication narrower than the warp shares it with its neighbours:
+    """A multiplication narrower than the warp shares it with its neighbors:
     `matmul` runs one round of fragments per multiplication and wires each
     one's `B` in and its `D` out through its own shared region."""
     assert nvidia.supports(threads, ATOM_TYPE, sparse=None)
@@ -347,7 +347,7 @@ def test_the_context_is_what_brings_an_entry_into_reach():
 def test_an_unreadable_target_falls_to_the_floor():
     """A model this cannot parse yields the floor, not a guess.
 
-    The failure mode it forecloses: crediting an unrecognised target with
+    The failure mode it forecloses: crediting an unrecognized target with
     instructions it may not have.  `None` reaches here from the tests that
     call `strategies` without a context.
     """

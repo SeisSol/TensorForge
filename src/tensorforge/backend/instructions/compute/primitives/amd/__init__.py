@@ -47,7 +47,7 @@ from .arch import amdarch, cdna2, gfx1250, gfx1251, rdna
 from .caps import has_fmacdpp4, has_fmacdpp8, has_fmacdpp16
 from .catalog import (DEFINED_SPLITS, DEFINED_TRANSPOSES, MANTISSA,
                       MATRIX_OPS, MFMA_TILES, emu_tile_for, emu_tiles,
-                      NOT_MODELLED, Call, Fragment, MatrixOp,
+                      NOT_MODELED, Call, Fragment, MatrixOp,
                       MfmaTile, lane_batched_ops, mfma_tile_for, ops_for,
                       usable_mfma_tiles)
 from .features import FEATURE_TARGETS, has_feature, wave_size
@@ -66,7 +66,7 @@ from .emitters import fmadpp, fmadpp4, fmadpp8, fmadpp16, fmascalar
 from .relayout import (BROADCAST, MOVDPP16, RELAYOUTS, RUNGS,
                        TRANSPOSE4X4, Relayout, find_relayout, reach,
                        takes)
-from .select import (BroadcastForm, MATERIALISE_FROM, broadcast_form,
+from .select import (BroadcastForm, MATERIALIZE_FROM, broadcast_form,
                      dpp_move_instructions, dual_issue_fma_lanes,
                      packed_broadcast, packed_broadcast_pays,
                      packed_fma_lanes,
@@ -84,7 +84,7 @@ __all__ = [
     'EXCHANGE', 'Scheme', 'Fit', 'exchange_op', 'exchange_ops',
     'matmul_exchange', 'emu_tiles', 'candidates', 'issues',
     'rank', 'spare_products',
-    'NOT_MODELLED', 'ops_for',
+    'NOT_MODELED', 'ops_for',
     'MfmaTile', 'DEFINED_TRANSPOSES', 'MFMA_TILES', 'usable_mfma_tiles',
     'lane_batched_ops', 'mfma_tile_for',
     'FRAGMENT_BITS', 'Provenance', 'covers', 'established',
@@ -94,7 +94,7 @@ __all__ = [
     'accumulator_cost', 'accumulator_gathers',
     'fragment_cost', 'fragment_moves',
     'wanted_fmadpp_step', 'select_fmadpp_step',
-    'BroadcastForm', 'MATERIALISE_FROM', 'broadcast_form',
+    'BroadcastForm', 'MATERIALIZE_FROM', 'broadcast_form',
     'dpp_move_instructions', 'dual_issue_fma_lanes', 'packed_broadcast',
     'packed_fma_lanes', 'select_broadcast_form',
     'Relayout', 'RELAYOUTS', 'BROADCAST', 'MOVDPP16', 'TRANSPOSE4X4',

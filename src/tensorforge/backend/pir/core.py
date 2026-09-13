@@ -257,7 +257,7 @@ class Effect(IntFlag):
     READ = auto()       # reads memory
     WRITE = auto()      # writes memory
     ATOMIC = auto()     # read-modify-write
-    BARRIER = auto()    # block-wide / wave-wide synchronisation
+    BARRIER = auto()    # block-wide / wave-wide synchronization
     ASYNC = auto()      # issued here, completes only at a matching `wait`
     UNKNOWN = auto()    # opaque raw text: assume it does everything
 
@@ -339,7 +339,7 @@ def base_space(base) -> Optional[MemSpace]:
     """The space a base states about itself, or ``None`` where it states none.
 
     ``None`` and ``MemSpace.UNKNOWN`` are different answers here.  Unknown is a
-    base that named a space nobody recognises, which is a claim and a bad one;
+    base that named a space nobody recognizes, which is a claim and a bad one;
     ``None`` is a base that was never asked to have one -- a string naming a
     queue, a register value, a scalar -- and about which nothing follows.
     """
@@ -464,7 +464,7 @@ class LaneAxis:
     again every ``stride * block`` threads after that.
 
     So ``block`` is how many distinct elements the dimension is spread over
-    before it wraps to the next slot, and ``stride`` is how many neighbouring
+    before it wraps to the next slot, and ``stride`` is how many neighboring
     threads hold a *copy* of the same element.  ``stride`` is replication, not
     packing: it does not mean a lane holds several elements.  A lane holding
     four consecutive elements is a vector *type* (``ScalarType(base, 4)``)
@@ -485,7 +485,7 @@ class LaneAxis:
             raise IRError(f'lane stride must be >= 1, got {self.stride}')
         if self.block == 1:
             # Not distributed: every thread holds the whole extent, and no
-            # stride changes that.  Normalised because equality is the one
+            # stride changes that.  Normalized because equality is the one
             # thing this type is *for* --- two axes describing the same
             # distribution have to compare equal, or a pass refuses a merge
             # that was legitimate and a relayout search fails to find an
@@ -581,7 +581,7 @@ class RegisterLayout:
 
         This is the question a single axis cannot answer, and the reason
         ``stride`` reads differently at rank 1 and rank 2.  ``LaneAxis(16, 4)``
-        on its own puts one element in four neighbouring lanes: they hold a
+        on its own puts one element in four neighboring lanes: they hold a
         *copy*, and the value is replicated fourfold.  The same axis beside a
         ``LaneAxis(4, 1)`` puts one element of *dimension 1* in those four
         lanes, and they differ in dimension 0 -- no copy anywhere.
@@ -829,9 +829,9 @@ class Op:
     WAIT = 'wait'
     BARRIER = 'barrier'
     CALL = 'call'
-    DECLARE = 'declare'     # `Ty name{};` -- a definition with no initialiser
+    DECLARE = 'declare'     # `Ty name{};` -- a definition with no initializer
     ACCUM = 'accum'         # `target += value;` -- in-place, no result
-    PACK = 'pack'           # `VecTy v{a, b};`  -- aggregate initialisation
+    PACK = 'pack'           # `VecTy v{a, b};`  -- aggregate initialization
     EXTRACT = 'extract'     # `v[i]`            -- element of a packed vector
     SPLIT = 'split'         # one argument, several results; `callee` names it
     # legacy escape hatches

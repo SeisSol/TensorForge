@@ -37,7 +37,7 @@ class MoveLoads(AbstractTransformer):
   which is what the pass always did.  At 2 it goes on past that one and stops
   at the next, so two transfers are ahead of every consumer; and so on.  A
   conflict still stops it at once, whatever the distance: it is a bound on
-  how far, never a licence to cross a dependence.  `WrapLoads` reads the same
+  how far, never a license to cross a dependence.  `WrapLoads` reads the same
   number across the back edge.
   """
 
@@ -100,14 +100,14 @@ class MoveLoads(AbstractTransformer):
   def apply(self) -> None:
     instrsOut = []
     stored = []
-    # loads each travelling load has gone past so far
+    # loads each traveling load has gone past so far
     passed = {}
     def clear_stored(instrsOut):
         while len(stored) > 0:
             delayed = stored.pop(0)
             instrsOut += [delayed]
     def release_at_load(instrsOut):
-        # At a load: the travelling ones that have now gone past as many loads
+        # At a load: the traveling ones that have now gone past as many loads
         # as `distance` allows stop here, with the allocations that travel with
         # them; the rest go on.  In the order they are held, which is what
         # `clear_stored` keeps -- at distance 1 every one of them stops, and
@@ -141,7 +141,7 @@ class MoveLoads(AbstractTransformer):
             else:
                 instrsOut += [instr]
         else:
-            # `stored` holds loads whose transfer is still travelling up the
+            # `stored` holds loads whose transfer is still traveling up the
             # stream.  Any of them that this instruction feeds --- or whose
             # destination it touches --- has gone as far as it may.  Releasing
             # them together keeps their relative order without a second sort.

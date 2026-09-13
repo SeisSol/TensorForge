@@ -111,9 +111,9 @@ class RegmaxBlockPolicy(AbstractThreadBlockPolicy):
                lead_width=1):
     super().__init__(context, global_mem, mem_size_per_mult, num_threads)
     #: Lanes times width is what the lane count *was* before the lead
-    #: dimension was vectorised, and it is the right divisor here.
+    #: dimension was vectorized, and it is the right divisor here.
     #:
-    #: This is the whole occupancy story of the vectorisation, so it is worth
+    #: This is the whole occupancy story of the vectorization, so it is worth
     #: stating: `256 // num_threads` binds in every case in the corpus -- the
     #: memory bound never does -- so halving the lane count would otherwise
     #: double the mults, double the shared memory per block and halve the
@@ -165,7 +165,7 @@ class RegmaxBlockPolicy(AbstractThreadBlockPolicy):
 class Section:
   def __init__(self):
     # `global_ir` and `ir` are what the builders author: the section prologue
-    # and the per-element body.  `stream` is the optimised result -- prologue
+    # and the per-element body.  `stream` is the optimized result -- prologue
     # followed by one BatchLoop carrying the body as its region -- and is what
     # gets emitted.
     self.ir: List[AbstractInstruction] = []
@@ -185,7 +185,7 @@ class Section:
     self.stage_loaders: List[AbstractInstruction] = []
 
 class _GuardGrouping:
-  """Collects the instructions of neighbouring operations under one guard.
+  """Collects the instructions of neighboring operations under one guard.
 
   An operation's guard is a conjunction of literals, and two operations that
   state the same conjunction run under the same condition -- so their
@@ -526,7 +526,7 @@ class Generator:
     # rotated on the strength of that, and then declined for a reason the
     # rotation itself created.
     #
-    # Rotated-and-not-wrapped is not a missed optimisation, it is wrong code:
+    # Rotated-and-not-wrapped is not a missed optimization, it is wrong code:
     # the compute reads stage `pipeStage % 2` and the transfer fills the other
     # one, so no iteration ever fills the stage it reads and the first element
     # computes from whatever the arena held.  `trans_a` did exactly that.
@@ -735,7 +735,7 @@ class Generator:
         self._emit_global_ir()
         self._emit_ir(codesection)
 
-        # Build the loop *before* optimising, so that the passes see one stream
+        # Build the loop *before* optimizing, so that the passes see one stream
         # with the body as a region.  This is what removes the
         # `_global_instrs` side channel: a pipelining pass that wants a prologue
         # now peels an iteration into this same list, ahead of the loop, instead
@@ -759,7 +759,7 @@ class Generator:
         # allocator in a separate arena, so letting them reach the region
         # allocator gives them a second, conflicting offset -- observable as the
         # preloaded operators moving from totalShrMem into localShrMem0.  The
-        # optimiser reads the prologue (for symbols live on entry) but never
+        # optimizer reads the prologue (for symbols live on entry) but never
         # rewrites it.
         #
         # A peeled prologue from a pipelining pass belongs *here*, ahead of the
@@ -774,11 +774,11 @@ class Generator:
         opt.optimize()
         self._section.stream = list(self._section.global_ir) + opt.get_instructions()
 
-        # Final sync for persistent threads, appended *after* optimisation on
+        # Final sync for persistent threads, appended *after* optimization on
         # purpose: SyncThreadsOpt drops barriers it considers redundant, and this
         # one guards the next iteration's writes against the previous
         # iteration's reads -- a dependency across the back edge that the pass
-        # does not model.  Adding it before optimisation removes it again.
+        # does not model.  Adding it before optimization removes it again.
         #
         # `LAUNCHCTRL` is excluded, and not because it needs the separation less.
         # It gets it from the hand-off, which carries a block barrier outside the
@@ -916,8 +916,8 @@ class Generator:
     return mults_per_group(self._num_threads, wave)
 
   def _mult_met_alone(self) -> bool:
-    """Whether one multiplication narrower than the wave can be synchronised
-    without its neighbours in the wave (`Lexic.has_sync_mult`).
+    """Whether one multiplication narrower than the wave can be synchronized
+    without its neighbors in the wave (`Lexic.has_sync_mult`).
 
     Where it cannot, its barriers reach the group, and a group whose rows run
     the body different numbers of times never arrives at them.
@@ -929,7 +929,7 @@ class Generator:
     """Whether the section holds an instruction the whole wave issues together.
 
     A matrix fragment product is one (`convergence_scope`).  Where a
-    multiplication is narrower than the wave, its neighbours in the wave have
+    multiplication is narrower than the wave, its neighbors in the wave have
     to take the same trips through the batch loop, so the loop is driven a
     wave of rows at a time.
     """
@@ -983,7 +983,7 @@ class Generator:
     """Tell every instruction how much shared memory one multiplication owns.
 
     Known only now: `ShrMemOpt` has sized the arena.  A matrix path whose warp
-    holds several multiplications reads its neighbours' tiles at that
+    holds several multiplications reads its neighbors' tiles at that
     distance (`nvidia._warp_group`).
     """
     obj = section.shr_mem_obj
@@ -1159,7 +1159,7 @@ class Generator:
     Shared memory per block and threads per block are not estimates: the first
     is what `ShrMemOpt` allocated and the second is the launch geometry, and
     both budgets are in the hardware description.  So this half of occupancy
-    can be computed rather than modelled -- unlike the register half, where
+    can be computed rather than modeled -- unlike the register half, where
     the figure is bytes of live values and the hardware counts registers after
     allocation, a mapping that spreads over a factor of seventy across the
     corpus.
@@ -1297,7 +1297,7 @@ class Generator:
           raise GenerationError(
               f'this kernel has a grid-wide barrier, which needs a '
               f'cooperative launch over resident workers; {how}. Use the '
-              f'grid-stride traversal for a section that synchronises '
+              f'grid-stride traversal for a section that synchronizes '
               f'across the grid.')
         num_blocks = f'({GeneralLexicon.NUM_ELEMENTS}0 + {mults_per_block} - 1) / {mults_per_block}'
       else:
@@ -1745,7 +1745,7 @@ class Generator:
     # same body, which is the state the loop's own lowering has to be measured
     # against before it replaces this.
     #
-    # Neighbours under one guard become one region rather than one region
+    # Neighbors under one guard become one region rather than one region
     # each: the condition is then read once, and a body that is skipped is
     # skipped as a whole.
     guard = _GuardGrouping(self._context, self._scopes, residency,
@@ -1785,7 +1785,7 @@ class Generator:
     from tensorforge.backend.instructions.builders.ptr_manip_builder import \
         GetElementPtrBuilder
 
-    # The first iteration is peeled, and it is not an optimisation.
+    # The first iteration is peeled, and it is not an optimization.
     #
     # A body built cold does what the *first* of the expanded descriptors did:
     # it loads the destination and computes a result from it.  Repeating that
@@ -1877,7 +1877,7 @@ class Generator:
           region.extend(builder.get_instructions())
           break
       else:
-        # A descriptor nobody recognises used to fall out of the loop and be
+        # A descriptor nobody recognizes used to fall out of the loop and be
         # dropped, which turns a missing builder into a wrong kernel rather
         # than an error.
         raise InternalError(
@@ -2030,7 +2030,7 @@ class Generator:
                                 - num_mults_per_block % group)
     self._section.shr_mem_obj.set_mults_per_block(num_mults_per_block)
     # The loop reads it to answer how far its body is uniform, and the answer
-    # is what `verify` weighs a barrier against.  Over the optimised stream
+    # is what `verify` weighs a barrier against.  Over the optimized stream
     # rather than the loop this method's caller built: a pass may have
     # replaced it.
     for instr in self._section.stream:
@@ -2461,7 +2461,7 @@ class Generator:
   def _get_2d_block_id(self, block=None):
     """Where a thread's traversal starts, as text the IR carries as an operand.
 
-    Parenthesised, like the stride beside it, because it is a *sum* and the
+    Parenthesized, like the stride beside it, because it is a *sum* and the
     reader decides the precedence.  It reaches the loop as `lo`, and
     `wrap_prefetch` puts `lo` in the induction's place when it peels an
     iteration: the peeled address then reads `lo * stride`, which without the

@@ -100,7 +100,7 @@ def run_binary(exe: Path, workload: str, batch: int, iters: int, warmup: int,
     """One invocation, one workload.
 
     One process per measurement rather than a loop inside the binary. It costs
-    a device initialisation each time, and it buys two things worth more than
+    a device initialization each time, and it buys two things worth more than
     that: a workload that hangs or faults takes down its own run and not the
     sweep, and the profiling path -- which wants exactly one workload per
     process so a counter collection stays small -- drives the same binary the

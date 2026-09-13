@@ -4,7 +4,7 @@
 """Turn a build unit into one binary, and say what the compiler said about it.
 
 Deliberately not `tests/harness/toolchain.py`. That one compiles with no
-optimisation flag at all, which is right where the question is whether the
+optimization flag at all, which is right where the question is whether the
 numbers come out correct and wrong where the question is how long they take:
 under `hipcc` and `icpx` it means `-O0`, and a measurement of `-O0` code is a
 measurement of nothing anybody runs. `tools/register_usage.py` already passes
@@ -197,7 +197,7 @@ def generate(workload: Workload, unit: BuildUnit) -> Tuple[Optional[str],
 
     Generation is not thread-safe -- `Context.peak_pressure` is per-context but
     the lane deduction reaches into module state -- so callers run this
-    serially and parallelise the compilation, which is the slow part anyway.
+    serially and parallelize the compilation, which is the slow part anyway.
     """
     record = WorkloadBuild(name=workload.name, origin=workload.origin)
     options = unit.config.options or Options()

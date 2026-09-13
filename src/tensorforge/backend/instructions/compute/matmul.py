@@ -23,7 +23,7 @@ error anywhere, one product accumulated into everything.  Both counts are
 named so that a path has to say which it means.
 
 **Three types, not one.**  `A`, `B` and the accumulator each have their own,
-mirroring the `a`, `b` and `d` fragments a catalogue entry carries.  They
+mirroring the `a`, `b` and `d` fragments a catalog entry carries.  They
 coincide for everything the front end produces today, which is exactly why
 collapsing them into a single field survives: nothing reads the difference
 until something needs it, and then it is not there to read.
@@ -31,7 +31,7 @@ until something needs it, and then it is not there to read.
 The type the instruction *multiplies in* is deliberately not among them.  An
 emulated path splits an F32 operand into TF32 or BF16 terms and accumulates
 their products; which substrate it picks is a choice it makes out of the
-catalogue against `split_terms`, not something the caller can state.  Putting
+catalog against `split_terms`, not something the caller can state.  Putting
 it here would let a caller name an arithmetic the hardware does not have.
 
 **Declining is free only through the writer.**  A path returns ``False`` to
@@ -95,7 +95,7 @@ class MatmulOperands:
     b: Datatype
     #: Type the sum is kept in, and the one legality is asked about:
     #: `MatrixOp.available_for` matches an instruction by `d.dtype`, and the
-    #: catalogue offers a BF16 entry for an F32 accumulator precisely because
+    #: catalog offers a BF16 entry for an F32 accumulator precisely because
     #: the two are different questions.
     accumulator: Datatype
 
@@ -135,7 +135,7 @@ class MatmulOperands:
 
     #: Whether the multiplications sharing a wave take the same trips through
     #: the batch loop (`multilinear.convergence_scope`) -- so that a path may
-    #: read what a neighbour's lanes hold, as `A_wave` hands it on.
+    #: read what a neighbor's lanes hold, as `A_wave` hands it on.
     lockstep: bool = False
 
     #: Whether `A` is read from shared memory, where a read costs about what
@@ -150,7 +150,7 @@ class MatmulOperands:
     lead_width: int = 1
 
     #: Shared memory one multiplication owns, in elements: the distance from
-    #: its copy of a scratch tile to its neighbour's.  Read only where a warp
+    #: its copy of a scratch tile to its neighbor's.  Read only where a warp
     #: holds several multiplications and reads their tiles.
     mult_stride: Optional[int] = None
 

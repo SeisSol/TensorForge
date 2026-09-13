@@ -46,7 +46,7 @@ CASES = ROOT / 'tests' / 'cases'
 
 
 def _capture_models():
-    """Hook OptimizationStage so every optimised stream is modelled.
+    """Hook OptimizationStage so every optimized stream is modeled.
 
     The stream is only assembled inside `Generator._generate_kernel`, and the
     BatchLoop's region is only populated there.  Rather than re-deriving the

@@ -735,7 +735,7 @@ def test_accumulator_is_sized_for_every_block_it_spans(backend, arch):
     `_alloc_register_array` sized for one, because it added theta to a box
     that already carried it --- the bias image is staged in the tensor's own
     lead coordinates.  Order 4 hid it: every window fell inside one block, and
-    the double count cancelled.
+    the double count canceled.
 
     The host interpreter does not enforce array bounds, so the emitted numbers
     do not give this away; the store's indices against the declared length do.
@@ -951,7 +951,7 @@ def test_register_arrays_match_what_is_written(backend, arch):
 
 
 def test_broadcast_accumulation_is_refused_rather_than_miscompiled():
-    """`add` as a list is accepted, and rejected when it cannot be honoured.
+    """`add` as a list is accepted, and rejected when it cannot be honored.
 
     yateto states `add` as a bool today; the array form is meant to say which
     of the destination's indices the tensor being added carries.  `prev` here

@@ -10,10 +10,10 @@ question :mod:`tensorforge.analysis.antiunify` answers: that module says
 whether given bodies are one body, this one says which slices of a list to ask
 about.
 
-The search is cheap for a reason worth stating.  Two bodies generalise exactly
+The search is cheap for a reason worth stating.  Two bodies generalize exactly
 when their skeletons are equal -- the comparison has no third outcome -- so a
 run of chunks can be found by computing one skeleton per chunk and testing
-equality, and the generalisation itself is built once, for the run that wins.
+equality, and the generalization itself is built once, for the run that wins.
 
 A chunk is a contiguous slice, and everything in it takes part: a fence sitting
 between two operations is a descriptor like any other, with no slots and an

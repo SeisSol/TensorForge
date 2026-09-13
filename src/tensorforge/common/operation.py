@@ -124,7 +124,7 @@ class ReductionOperator(Operator):
 
     `irop()` names the pseudo-IR op and `__str__` the C++ spelling; neither
     round-trips back to the enum, which is what a lexic needs to pick the
-    matching `tensorforge::ReductionOperation` specialisation.
+    matching `tensorforge::ReductionOperation` specialization.
     """
 
   @abstractmethod

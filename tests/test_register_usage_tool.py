@@ -105,7 +105,7 @@ def test_several_kernels_report_the_largest():
 def test_nothing_parsed_is_distinguishable_from_zero():
     """Which is what the caller turns into a diagnosable error.
 
-    An empty dict means the format was not recognised; a dict of zeros means
+    An empty dict means the format was not recognized; a dict of zeros means
     the kernel is free.  Conflating them is how a tool reports that nothing
     correlates when in fact nothing was measured.
     """

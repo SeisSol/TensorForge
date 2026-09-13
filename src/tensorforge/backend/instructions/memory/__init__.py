@@ -210,7 +210,7 @@ class AbstractShrMemWrite(MemoryInstruction):
     Both spellings come from the backend, and together, because on a target
     where a shared address is not a pointer neither half of the old string is
     right -- and half of it being right is how a declaration ends up naming a
-    type its initialiser does not produce.
+    type its initializer does not produce.
     """
     lexic = self._vm.get_lexic()
     ptr = lexic.shared_pointer_type(self._fp_as_str, restrict=True)

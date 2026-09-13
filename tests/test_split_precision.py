@@ -5,7 +5,7 @@
 
 The term count and the product order are an error analysis, and an error
 analysis written out per target is one that nothing compares.  The AMD
-catalogue derived both from the significand widths and no emitter read it; the
+catalog derived both from the significand widths and no emitter read it; the
 DPAS path wrote its three products out as a tuple and named the product count
 `TF32_TERMS`, which is not the term count.  These pin what the two agree on
 and what the move changed.

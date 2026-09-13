@@ -135,7 +135,7 @@ def test_slicing_cases_construct_and_generate():
 
     The host-only assertion is: the bbox is strictly smaller than the
     storage shape on at least one axis of at least one operand —
-    otherwise the case is mislabelled and isn't testing slicing. The
+    otherwise the case is mislabeled and isn't testing slicing. The
     generation pass guards against the bbox.lower offset arithmetic
     crashing the address writer.
     """
@@ -371,7 +371,7 @@ def test_barriers_cases_construct_and_generate():
             f"{path.name}: only {len(gen._sections)} section(s) — the "
             "barrier didn't split the descr list")
 
-        # GridBarrierDescr is the cooperative variant; recognise by name.
+        # GridBarrierDescr is the cooperative variant; recognize by name.
         # We assert on the kernel content rather than the descr class so
         # the test stays valid if either class gets renamed.
         if "barrier" in path.stem:
@@ -526,7 +526,7 @@ def test_pipelined_work_sits_outside_the_element_flag_guard():
     """Anything carried across the back edge must not be under ``flags``.
 
     ``flags`` is a runtime per-element mask, so a skipped element must not be
-    able to desynchronise the pipeline from the element sequence. Two things
+    able to desynchronize the pipeline from the element sequence. Two things
     qualify:
 
     * the rolling pointer's advance — skipped once, it trails the loop

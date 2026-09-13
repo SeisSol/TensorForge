@@ -10,7 +10,7 @@ What can be checked here is the part that is arithmetic and structure -- which
 dispatches the sample window names, that the two vendors' ways of spelling that
 window mean the same window, that the driver arguments are in the order the
 driver reads them, and that a unit conversion happens where the vendor's unit
-differs from the normalised one.
+differs from the normalized one.
 
 What cannot be checked here is whether `dram__bytes_read.sum` is still a metric
 name. `--probe` asks the installed tool that, and `--dry-run` prints the
@@ -203,35 +203,35 @@ def test_kilobytes_become_bytes_and_percent_becomes_a_fraction():
     in bytes. Mixing them silently is a factor of 1024 in a column nobody
     re-derives."""
     roc, _ = bench_profile.read_long_csv(ROCPROF_CSV)
-    rows = bench_profile.normalise(
+    rows = bench_profile.normalize(
         roc, bench_profile.PROFILERS["rocprofv3"].metrics)
     assert rows[0]["dram_read_bytes"] == 2048 * 1024
     assert rows[0]["dram_write_bytes"] == 1024 * 1024
 
     ncu, _ = bench_profile.read_long_csv(NCU_CSV)
-    rows = bench_profile.normalise(ncu,
+    rows = bench_profile.normalize(ncu,
                                    bench_profile.PROFILERS["ncu"].metrics)
     assert rows[0]["dram_read_bytes"] == 1048576
 
 
 def test_the_vendor_row_is_kept_whole():
-    """Only a short set is normalised; everything else stays under `vendor` so
+    """Only a short set is normalized; everything else stays under `vendor` so
     a metric this does not understand is still in the report."""
     ncu, _ = bench_profile.read_long_csv(NCU_CSV)
-    row = bench_profile.normalise(ncu,
+    row = bench_profile.normalize(ncu,
                                   bench_profile.PROFILERS["ncu"].metrics)[0]
     assert "launch__grid_size" in row["vendor"]
     assert row["grid_size"] == 108
 
 
-def test_every_normalised_key_a_metric_claims_is_in_the_declared_set():
-    """`NORMALISED` is what a consumer may rely on. A metric normalising to a
+def test_every_normalized_key_a_metric_claims_is_in_the_declared_set():
+    """`NORMALIZED` is what a consumer may rely on. A metric normalizing to a
     key outside it is a column that appears in one vendor's rows and no
     other's, which is the shape of an accidental cross-vendor comparison."""
     for name, profiler in bench_profile.PROFILERS.items():
         for metric in profiler.metrics:
-            assert metric.key in bench_profile.NORMALISED, (
-                f"{name}: {metric.expr} normalises to {metric.key!r}")
+            assert metric.key in bench_profile.NORMALIZED, (
+                f"{name}: {metric.expr} normalizes to {metric.key!r}")
 
 
 def test_each_vendor_has_a_profiler_and_each_profiler_a_metric_set():
@@ -239,7 +239,7 @@ def test_each_vendor_has_a_profiler_and_each_profiler_a_metric_set():
     for vendor, tool in bench_profile.BY_VENDOR.items():
         assert tool in bench_profile.PROFILERS, vendor
     for name, profiler in bench_profile.PROFILERS.items():
-        assert profiler.metrics, f"{name} normalises nothing"
+        assert profiler.metrics, f"{name} normalizes nothing"
 
 
 def test_a_multi_step_tool_runs_the_program_once():
@@ -252,7 +252,7 @@ def test_a_multi_step_tool_runs_the_program_once():
     assert "-report" in steps[1]
 
 
-def test_the_intel_default_needs_no_licence():
+def test_the_intel_default_needs_no_license():
     """`unitrace` is free and `vtune` is not, so an unqualified Intel run
     reaches for the one that is there. The memory counters are behind
     `--tool vtune`, and that is a choice the caller makes knowingly."""

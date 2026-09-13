@@ -15,7 +15,7 @@ input slots, and two kernels are equivalent when those trees match after
 renaming the temporaries.  Uninterpreted is the point --- nothing needs to
 model what an MFMA does, only that both versions apply it to the same things.
 
-In-place mutation is modelled explicitly: `transpose4x4b32(a,b,c,d, a,b,c,d)`
+In-place mutation is modeled explicitly: `transpose4x4b32(a,b,c,d, a,b,c,d)`
 and `fmacdpp16<r>(c, a, b)` rebind their written arguments, which is how a
 wrongly reused pre-transpose value would show up as a mismatch.
 """
@@ -129,13 +129,13 @@ class Env:
             return self.var[expr]
         # A leaf that still carries text -- an address expression, say --  may
         # name generated temporaries.  Those names are allocated per kernel and
-        # carry no meaning, so normalise them: the comparison is equivalence
+        # carry no meaning, so normalize them: the comparison is equivalence
         # *up to renaming*, not textual identity.
         return ('lit', _rename_free(expr))
 
     def eval_index(self, idx: str):
         """Indices are concrete in the unrolled body; keep them textual but
-        normalised, so `8` and `8 ` compare equal."""
+        normalized, so `8` and `8 ` compare equal."""
         idx = idx.strip()
         try:
             return str(eval(idx, {'__builtins__': {}}, {}))   # noqa: S307

@@ -22,7 +22,7 @@ and gfx908 has only in its non-returning form.  Four of the thirteen
 architectures in `hw_descr_db.yml` could not compile the kernel they were
 handed, and a fifth compiled a different instruction than the one named.
 
-What is *not* modelled here, and why:
+What is *not* modeled here, and why:
 
 * **Shared memory.**  Nothing reaches an atomic on a non-global symbol today,
   and `Symbol.store` now says so rather than silently writing a plain
@@ -34,7 +34,7 @@ What is *not* modelled here, and why:
   add at all), so the parameter is threaded through to keep the question
   askable, and answered only for addition.
 
-**Width** is modelled, and answering it honestly is what lets
+**Width** is modeled, and answering it honestly is what lets
 `placement.atomic_write_is_exact` stop standing in for it.  That condition
 refused every widened lead for two reasons at once -- a peeled tail element no
 lane owns, and a wide value handed to a scalar instruction -- and only the

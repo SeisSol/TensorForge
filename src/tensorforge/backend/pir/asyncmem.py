@@ -20,7 +20,7 @@ On the copy class the counted unit is not the copy but the *group*, and a
 group is closed by a `commit.async`.  That is why the commit is a statement
 here rather than a line the emitter appends to each copy: `cp.async.commit_group`
 and `__pipeline_commit` are **per thread**, so a lane that skipped a copy also
-skipped its commit and has one group fewer in flight than its neighbour, while
+skipped its commit and has one group fewer in flight than its neighbor, while
 the `wait` that counts them is one statement for all of them.  A lane-predicated
 tail hop and a hop loop therefore both used to make the count describe one
 lane's path and not another's.  Nothing went wrong only because every wait in
@@ -452,7 +452,7 @@ def _alters_flight(regions) -> bool:
     it -- and a caller may keep counting across it.
 
     Recursive, because a block may hold a block; conservative on the way out,
-    because a statement kind this does not recognise is one whose effect it
+    because a statement kind this does not recognize is one whose effect it
     cannot rule out.
     """
     for r in regions:

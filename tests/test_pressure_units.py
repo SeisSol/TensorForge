@@ -13,7 +13,7 @@ register file.  The sum was then in two different units.
 That has a direction, which is what makes it worth a test rather than a
 comment.  Doubling the lane count halves every array and doubles the per-value
 figure, so the two nearly cancel and the total barely moves -- while the thing
-a caller wants, one lane's footprint, halves.  A search minimising the old
+a caller wants, one lane's footprint, halves.  A search minimizing the old
 figure would pick 32 lanes on gfx90a precisely where 64 is what relieves the
 pressure.
 """

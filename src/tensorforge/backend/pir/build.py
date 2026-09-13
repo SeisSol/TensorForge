@@ -11,7 +11,7 @@ for the subset that instruction code actually uses (``__call__``, ``varalloc``,
 ``Comment``, ``Pragma``).  Legacy call sites keep working unchanged and simply
 produce opaque ``raw*`` nodes; new code uses the structured constructors
 (``for_``, ``if_``, ``load``, ``store``, ``alloc``, ``op``) and gets real
-optimisation.  Migration progress is measurable: count the ``raw*`` nodes.
+optimization.  Migration progress is measurable: count the ``raw*`` nodes.
 
 The builder knows nothing about C++ syntax.  Rendering lives in ``pir.emit``.
 """
@@ -274,7 +274,7 @@ class IRBuilder:
         A loop counter and an address are the same in every lane: the loop is
         entered the same number of times and the subscript is computed from
         the same operands.  `None` here said *unknown*, which is a weaker
-        claim than the truth and one an explicitly vectorised emitter cannot
+        claim than the truth and one an explicitly vectorized emitter cannot
         act on -- it has to decide between `int` and `simd<int, N>` at the
         declaration, and unknown is not one of the two.
 
@@ -443,7 +443,7 @@ class IRBuilder:
     def declare(self, type_=None, *, hint: str = '', init: str = '{}',
                 uniform: Union[bool, Uniformity] = Uniformity.GRID,
                 layout: Optional[RegisterLayout] = None) -> Value:
-        """A definition with no computed initialiser: ``Ty name{};``.
+        """A definition with no computed initializer: ``Ty name{};``.
 
         The accumulator of a hand-written intrinsic sequence is written by
         `fmacdpp` through a reference, so it is not the result of any single
@@ -455,7 +455,7 @@ class IRBuilder:
         This node closes that hole without changing what is emitted: the value
         has a definition point, so def-use analysis works, while the C++ text
         stays byte-for-byte what the raw statement produced.  It is
-        deliberately *not* in ``Op.DECLARING``: there is no initialiser to fold
+        deliberately *not* in ``Op.DECLARING``: there is no initializer to fold
         a predicate into, so a predicated declaration is rejected rather than
         silently lowered to a select.
 
@@ -478,7 +478,7 @@ class IRBuilder:
         statement, and until now that statement was raw text.  864 of them in
         the NVIDIA epilogue alone, each naming two values the IR already knew.
 
-        Modelled exactly as `call_stmt`'s ``writes``: a declared register
+        Modeled exactly as `call_stmt`'s ``writes``: a declared register
         access keyed on the target, so two assignments to different values
         provably do not conflict, and the target pinned because a value whose
         name is assigned to must keep that name rather than be folded into its
@@ -499,7 +499,7 @@ class IRBuilder:
         """A vendor intrinsic invoked for its effect, not for a result.
 
         ``fmacdpp16<0>(c, a, b)`` and ``transpose4x4b32(...)`` return nothing
-        and write through a reference, so they cannot be modelled as pure
+        and write through a reference, so they cannot be modeled as pure
         SSA producers.  They can still stop being *opaque*: the arguments go
         in as values, so the def-use edges are real, and the registers written
         go in as declared :class:`Access` es keyed on the value itself.  Two
@@ -528,7 +528,7 @@ class IRBuilder:
 
         `splitFloatTF32(uint32_t &upper, uint32_t &lower, float value)` is a
         function in every sense that matters -- the same input gives the same
-        two halves -- but modelling it as a call that writes through references
+        two halves -- but modeling it as a call that writes through references
         makes it side-effecting, and CSE skips it.  The corpus splits the same
         value twice in 15% of cases, with no store and no reload in between.
 
@@ -692,7 +692,7 @@ class IRBuilder:
 
         SPMD: ``(tid / stride) % block``, one integer per thread.
 
-        Explicitly vectorised: ``0, 1, ... block-1`` as a vector, because the
+        Explicitly vectorized: ``0, 1, ... block-1`` as a vector, because the
         work-item holds every element of the dimension and "which index am I
         at" has ``block`` answers at once.  A guard over it is therefore a
         mask, not a branch -- which is a statement about the *whole* enclosing
@@ -728,7 +728,7 @@ class IRBuilder:
         lane `l'`, so this is a cross-lane instruction -- `__shfl`, a DPP
         broadcast, `group_broadcast`.  It is why `amd/relayout.py` exists.
 
-        Explicitly vectorised, the whole vector is in this work-item's own
+        Explicitly vectorized, the whole vector is in this work-item's own
         registers and `v[lane]` is an ordinary element read.  The broadcast
         costs nothing, which is what makes a register-only matmul preferable
         to staging operands through shared memory here where it is not on
@@ -763,7 +763,7 @@ class IRBuilder:
 
         SPMD: ``(tid / stride) % block``, the lane's element of the dimension.
 
-        Explicitly vectorised: ``0``.  The dimension *is* the vector, the
+        Explicitly vectorized: ``0``.  The dimension *is* the vector, the
         work-item holds all of it, and its base offset in the register is
         zero.  The lane term then folds out of the address by the ordinary
         identity rules -- ``add(0, x) -> x`` -- rather than by a second code
@@ -938,7 +938,7 @@ class IRBuilder:
         and it is here only because that analysis cannot yet run: a raw
         statement that does not declare its accesses conflicts with every
         buffer in every space, so a body still made mostly of raw text has an
-        interference graph in which everything interferes and a colouring that
+        interference graph in which everything interferes and a coloring that
         reuses nothing.
 
         `nvidia.matmul` is the case.  Its A and B windows live only inside the
@@ -949,7 +949,7 @@ class IRBuilder:
         the total.
 
         Written to be replaceable rather than to last.  What it computes is a
-        peak, which is exactly what a colouring computes, so when the body is
+        peak, which is exactly what a coloring computes, so when the body is
         structured enough for liveness the two are comparable and this can go.
         """
         mark = self._scratch_used
@@ -977,7 +977,7 @@ class IRBuilder:
                 f'instruction building this body returns 0 from temp_shmem(), '
                 f'so ShrMemOpt reserved nothing for it to sit in')
         name, budget = self._scratch
-        # 16 bytes is what the vectorised paths need -- `nvidia.matmul` stores
+        # 16 bytes is what the vectorized paths need -- `nvidia.matmul` stores
         # through `float4` -- and matches the alignment ShrMemOpt already pads
         # the arena to.  Aligning every suballocation keeps that property
         # independent of the order they are requested in.
@@ -1274,7 +1274,7 @@ class IRBuilder:
         target with no data prefetch drops the statement in the emitter, so
         the body without it has to mean exactly what the body with it means;
         anything stronger than a read would be a claim the dropped version
-        stops honouring.  The read is not nothing, though: it is what stops a
+        stops honoring.  The read is not nothing, though: it is what stops a
         pass from lifting a hint above a store to the same buffer, where it
         would be a hint for a line the store is about to dirty.
 
@@ -1282,7 +1282,7 @@ class IRBuilder:
         answers here spells a data prefetch; only NVIDIA spells the level, so
         `'l1'` and `'l2'` are two instructions there and one everywhere else.
         Asking for the level the algorithm means keeps that choice in one
-        place for the day a second target can honour it.
+        place for the day a second target can honor it.
 
         `elems` is how far past the address the hint reaches, in elements.
         The targets whose instruction takes a count use it; the rest cover one
@@ -1879,7 +1879,7 @@ class IRBuilder:
         return _ValueBlock(self, type_, base, kind, hint, layout)
 
     def pack(self, type_, *parts: Operand, hint: str = 'pk') -> Value:
-        """Aggregate initialisation: ``VecTy v{a, b};``.
+        """Aggregate initialization: ``VecTy v{a, b};``.
 
         The vendor path builds a short vector to hand a pair of accumulators
         to one cross-lane instruction.  As raw text the elements were names

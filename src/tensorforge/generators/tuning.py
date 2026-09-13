@@ -395,7 +395,7 @@ def static_score(result: Build):
     resident per SM -- blocks times the multiplications a block holds, since
     eight lanes put four times as many in a block as 32.
     Then warp issue slots per multiplication: the arithmetic written out, times
-    the share of a warp one multiplication takes.  Then the modelled register
+    the share of a warp one multiplication takes.  Then the modeled register
     footprint, both in granules of sixteen registers (`_GRANULE`).  Last the
     length of the source: where nothing else differs, the smaller kernel --
     merged, on every measurement taken (GB200's winners, sm_120 by 5 to 24 %,
@@ -431,7 +431,7 @@ def _icache_over(result: Build) -> int:
                          hw) // 1024
 
 
-#: Bytes below which two modelled footprints are the same footprint: sixteen
+#: Bytes below which two modeled footprints are the same footprint: sixteen
 #: registers.  The model is within about forty registers of what a compiler
 #: allocates, so a difference of eleven bytes -- merged and written-out
 #: `local_flux` at b = 80, 1359 against 1348 -- is not one the compiler makes;
@@ -443,7 +443,7 @@ def _granule(value) -> int:
     return int(value // _GRANULE)
 
 
-#: Registers per lane as a function of the modelled bytes, per vendor, fitted
+#: Registers per lane as a function of the modeled bytes, per vendor, fitted
 #: over builds that did not spill: `(intercept, slope)` on bytes / 4.
 #: NVIDIA: ptxas sm_100a, 52 builds, residuals within 40.  AMD: hipcc gfx942,
 #: 29 builds, residuals within 38 -- no intercept worth the name.
@@ -488,7 +488,7 @@ def _register_blocks(result: Build) -> Optional[int]:
 
 
 def _over_budget(result: Build) -> float:
-    """How far the modelled footprint is past the register file a thread
+    """How far the modeled footprint is past the register file a thread
     has, or 0 where it fits -- an amount and not a verdict, because where
     every candidate is past it (`local_flux` at b = 120 on gfx942, all of
     them spilling) the one past it least is the one that spills least: 880 B
@@ -498,7 +498,7 @@ def _over_budget(result: Build) -> float:
     First, before anything is ranked: a build that spills is slower than any
     difference the other keys can see.  Calibrated against ptxas on sm_100a
     (`local_flux`, 79 builds), registers come out at about 51 + 1.05 times the
-    modelled bytes over four, and every build above the 1020 B a thread has
+    modeled bytes over four, and every build above the 1020 B a thread has
     there spilled -- eight lanes at b = 80 and 120, which GB200 then ran 75 %
     and 148 % behind the default.  Not a spill predictor in the other
     direction: ptxas also spills at 168 registers where it chooses occupancy,
@@ -511,7 +511,7 @@ def _over_budget(result: Build) -> float:
     if not (budget and peak):
         return 0
     if hw.vendor == 'amd':
-        # hipcc allocates about 1.26 registers per modelled four bytes, so the
+        # hipcc allocates about 1.26 registers per modeled four bytes, so the
         # byte budget alone let eight lanes at b = 56 through (2449 B against
         # 2048) that gfx942 spilled 2 KB for.  In bytes, like the rest.
         return max(0.0, 4 * register_estimate(result) - budget)

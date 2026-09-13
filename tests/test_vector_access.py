@@ -5,7 +5,7 @@
 
 `load_linear` and `store_linear` have taken a `vec` argument all along, and it
 has always left the structured path: `pir_buffer` was consulted only for
-`vec == 1`, so a vectorised read became a `load_expr` around a hand-formatted
+`vec == 1`, so a vectorized read became a `load_expr` around a hand-formatted
 reinterpret cast. The buffer was then not an operand of anything, which costs
 every pass its view of the one access that moves the most bytes -- CSE cannot
 match two of them, LICM cannot hoist one, the scratch checker cannot see the
@@ -22,7 +22,7 @@ These tests do not run through the corpus, and cannot: `GlbToRegLoader`
 still iterates `for g in [1]` with the wider widths commented out, so nothing
 generated today takes this path. That is the reason to pin it here rather
 than in a snapshot -- a snapshot of a path nothing reaches proves nothing,
-and this is the path the vectorisation work turns on next.
+and this is the path the vectorization work turns on next.
 """
 
 from __future__ import annotations

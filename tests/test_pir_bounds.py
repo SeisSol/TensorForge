@@ -4,7 +4,7 @@
 """`verify` bounds every access it can resolve against its buffer.
 
 A register array is a fixed number of registers. An index one past either end
-is a neighbouring register or a spill slot, so the access reads a value rather
+is a neighboring register or a spill slot, so the access reads a value rather
 than nothing, and every check that asks whether something was computed is
 satisfied by it. The host oracle is no help either: it keeps registers in a
 dict, serves index -1, and answers.

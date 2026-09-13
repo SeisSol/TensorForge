@@ -377,7 +377,7 @@ def anti_unify(bodies: Sequence[Sequence[OperationDescription]]
     """The least general body of which every input is an instance.
 
     Fewer than two bodies is not an error and not a special case: one body
-    generalises to itself with no holes, which is the identity the callers of
+    generalizes to itself with no holes, which is the identity the callers of
     this want when a family turns out to have one member.
     """
     if not bodies:
@@ -451,12 +451,12 @@ def rebuild(descr: OperationDescription,
 
 def substitute(general: Generalization,
                bindings: Sequence[object]) -> List[OperationDescription]:
-    """The generalised body with one tensor put in each hole.
+    """The generalized body with one tensor put in each hole.
 
     Binding every hole to a constant is what turns the common body back into a
-    particular one, and the round trip -- generalise a family, bind hole by
-    hole, get each member back -- is the property that says the generalisation
-    kept everything it had to.  It is also the specialised form itself: a hole
+    particular one, and the round trip -- generalize a family, bind hole by
+    hole, get each member back -- is the property that says the generalization
+    kept everything it had to.  It is also the specialized form itself: a hole
     bound to a literal is a hole the emitter never sees.
 
     A hole covers every slot naming the same tensor, so one binding reaches all
@@ -482,5 +482,5 @@ def substitute(general: Generalization,
 
 def instantiate(general: Generalization, member: int
                 ) -> List[OperationDescription]:
-    """The generalised body bound as the ``member``-th input had it."""
+    """The generalized body bound as the ``member``-th input had it."""
     return substitute(general, general.bindings[member])

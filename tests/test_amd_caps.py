@@ -6,7 +6,7 @@
 `amd.py` decides which `fmacdpp` width to emit; `hip.h` decides which ones
 exist, behind `#if` guards.  Those are two copies of the same fact in two
 languages, and they had drifted: the generator emitted `fmacdpp4` for gfx900,
-where the specialisations are switched off, and `fmacdpp8` at a time when the
+where the specializations are switched off, and `fmacdpp8` at a time when the
 runtime did not declare it for any target at all.  Neither showed up in a test, because
 a call to a template with no definition is a *link* error and nothing here
 links.
@@ -45,7 +45,7 @@ def _family_macros(arch: str) -> set:
     installed here.
 
     It matters: if `__GFX12__` is *not* defined for gfx1250, then hip.h's
-    guard is false there, `fmacdpp16` has no specialisations, and the
+    guard is false there, `fmacdpp16` has no specializations, and the
     generator emits a call to an undeclared template -- exactly the gfx900
     failure, one family over.  The assumption is written down here rather than
     buried in a string slice so that it can be settled with one compile.
@@ -75,7 +75,7 @@ def _guard_holds(cond: str, arch: str) -> bool:
 
 
 def _guard_for(symbol: str) -> str:
-    """The `#if` condition guarding the first specialisation of `symbol`.
+    """The `#if` condition guarding the first specialization of `symbol`.
 
     Scans for the `constexpr bool Has...` flag that each block opens with,
     which is what the header uses to advertise the capability, then walks back
@@ -135,7 +135,7 @@ def test_has_fmacdpp8_matches_the_header(arch):
 
 
 def test_fmacdpp8_has_every_row_of_a_group():
-    """Eight specialisations, one per source lane of the group of eight."""
+    """Eight specializations, one per source lane of the group of eight."""
     src = HIP_H.read_text()
     rows = set(re.findall(r"void fmacdpp8<(\d+)>\(float", src))
     assert rows == {str(r) for r in range(8)}, sorted(rows)

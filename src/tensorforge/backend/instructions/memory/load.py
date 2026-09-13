@@ -40,7 +40,7 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
     self._num_threads = kwargs['num_threads']
     #: Set again by `set_threadconfig_pre`, which is where a blockwide
     #: transfer widens `_num_threads` to the block and this one does not
-    #: follow.  Initialised here so that a transfer nobody reconfigures --
+    #: follow.  Initialized here so that a transfer nobody reconfigures --
     #: the pipelined clone, which is constructed and used in one step --
     #: still answers the question.
     self._lanes = kwargs['num_threads']
@@ -738,10 +738,10 @@ class GlbToRegLoader(MemoryInstruction, LoadInstruction):
         # Fewer than `num_threads` elements, so some lanes have nothing to
         # read.  Emitted unguarded, which is what the `range` loop did by
         # accident and what this now does on purpose: the lanes past the end
-        # read into the neighbouring matrix of the batch and their registers
+        # read into the neighboring matrix of the batch and their registers
         # are never consumed.  It is still a read past the tensor -- 23 of 32
         # lanes for a 9-element operand -- and at the last matrix in the batch
-        # there is no neighbour.  Guarding it is a decision about the buffer,
+        # there is no neighbor.  Guarding it is a decision about the buffer,
         # not about the width, so it is left where it was rather than changed
         # under cover of this one; `_write_datatransfer` already predicates
         # its own tail and is the shape to copy when that decision is made.
@@ -892,7 +892,7 @@ class LoadWait(MemoryInstruction, LoadInstruction):
       # Nothing was put in flight: the transfer took the reordering path and
       # moved its data with plain loads and stores.  Waiting anyway is what
       # produced `consumer_wait()` on a pipeline that nothing committed to --
-      # undefined behaviour per libcu++, generated for two cases in the corpus
+      # undefined behavior per libcu++, generated for two cases in the corpus
       # and invisible because raw statements say nothing about their pairing.
       # The flag this keyed on before, `_use_cuda_memcpy`, is a static choice
       # rather than a record of what happened.

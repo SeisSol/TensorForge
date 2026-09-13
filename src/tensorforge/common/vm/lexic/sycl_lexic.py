@@ -10,7 +10,7 @@ class SyclLexic(Lexic):
   def __init__(self, backend, underlying_hardware, explicit_simd=False):
     super().__init__(underlying_hardware)
     self._backend = backend
-    # CUDA's x is SYCL's dimension 2, and y is 1: SYCL linearises with the
+    # CUDA's x is SYCL's dimension 2, and y is 1: SYCL linearizes with the
     # *last* dimension fastest, and that is the one sub-groups are cut along.
     # With the lanes in dimension 0 a block of 32 x 8 put two lanes of each
     # of eight multiplications into every sub-group, so a sub-group broadcast
@@ -222,7 +222,7 @@ class SyclLexic(Lexic):
 
   def sync_simd(self):
     if self.simd_mode:
-      # One work-item *is* the vector: there are no lanes to synchronise.
+      # One work-item *is* the vector: there are no lanes to synchronize.
       return None
     # A sub-group barrier, not a work-group one.
     #
@@ -540,7 +540,7 @@ class SyclLexic(Lexic):
 
   #: C++ `tensorforge::Operation` members, by the `Operation` they lower from.
   #: The same table `CudaLexic` has, because it names the same device-side
-  #: `ReductionOperation` specialisations -- `base.h` defines them once for
+  #: `ReductionOperation` specializations -- `base.h` defines them once for
   #: every backend.
   REDUCTION_OPS = {
       Operation.ADD: 'Add',
