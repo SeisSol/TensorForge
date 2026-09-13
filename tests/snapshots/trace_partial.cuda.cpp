@@ -1,12 +1,66 @@
 // === base name ===
-kernel_80a774885c863646
+kernel_508942059be6cbdd
 
 // === header ===
-void launcher_kernel_80a774885c863646(float* m0, size_t m0_extraOffset, const float* m1, size_t m1_extraOffset, size_t numElements0, unsigned* flags0 = nullptr, void* streamPtr = nullptr);
+#ifndef TENSORFORGE_LAUNCH_TYPES
+#define TENSORFORGE_LAUNCH_TYPES
+#include <cstddef>
+namespace tensorforge {
+// Fixed when the kernel is generated: `launch_info_<kernel>`.
+struct LaunchInfo {
+  unsigned block[3];
+  unsigned threadsPerMult;
+  unsigned activeThreads;
+  unsigned leadWidth;
+  unsigned multsPerBlock;
+  std::size_t sharedMemBytes;
+  bool cooperative;
+  bool persistent;
+  unsigned sections;
+};
+// What one launch uses, the grid included: `launch_config_<kernel>`.
+struct LaunchConfig {
+  std::size_t grid[3];
+  std::size_t block[3];
+  std::size_t sharedMemBytes;
+  bool cooperative;
+};
+} // namespace tensorforge
+#endif
+inline constexpr tensorforge::LaunchInfo launch_info_kernel_508942059be6cbdd = {{16, 8, 1}, 16, 16, 1, 8, 512, false, true, 1};
+tensorforge::LaunchConfig launch_config_kernel_508942059be6cbdd(size_t numElements0, void* streamPtr = nullptr);
+void launcher_kernel_508942059be6cbdd(float * m0, size_t m0_extraOffset, const float * m1, size_t m1_extraOffset, size_t numElements0, unsigned * flags0 = nullptr, void* streamPtr = nullptr);
 
 
 // === launcher ===
-void launcher_kernel_80a774885c863646(float* m0, size_t m0_extraOffset, const float* m1, size_t m1_extraOffset, size_t numElements0, unsigned* flags0 , void* streamPtr) {
+#ifndef TENSORFORGE_LAUNCH_TYPES
+#define TENSORFORGE_LAUNCH_TYPES
+#include <cstddef>
+namespace tensorforge {
+// Fixed when the kernel is generated: `launch_info_<kernel>`.
+struct LaunchInfo {
+  unsigned block[3];
+  unsigned threadsPerMult;
+  unsigned activeThreads;
+  unsigned leadWidth;
+  unsigned multsPerBlock;
+  std::size_t sharedMemBytes;
+  bool cooperative;
+  bool persistent;
+  unsigned sections;
+};
+// What one launch uses, the grid included: `launch_config_<kernel>`.
+struct LaunchConfig {
+  std::size_t grid[3];
+  std::size_t block[3];
+  std::size_t sharedMemBytes;
+  bool cooperative;
+};
+} // namespace tensorforge
+#endif
+tensorforge::LaunchConfig launch_config_kernel_508942059be6cbdd(size_t numElements0, void* streamPtr) {
+  (void)numElements0;
+  (void)streamPtr;
   dim3 block (16, 8, 1);
   static std::size_t gridsize = 0;
       if (gridsize == 0) {
@@ -15,7 +69,7 @@ void launcher_kernel_80a774885c863646(float* m0, size_t m0_extraOffset, const fl
         CHECK_ERR;
         cudaDeviceGetAttribute(&smCount, cudaDevAttrMultiProcessorCount, device);
         CHECK_ERR;
-        cudaOccupancyMaxActiveBlocksPerMultiprocessor(&blocksPerSM, kernel_kernel_80a774885c863646, block.x * block.y * block.z, 128 * sizeof(float));
+        cudaOccupancyMaxActiveBlocksPerMultiprocessor(&blocksPerSM, kernel_kernel_508942059be6cbdd, block.x * block.y * block.z, 128 * sizeof(float));
         CHECK_ERR;
         if (blocksPerSM > 0) {
           gridsize = smCount * blocksPerSM;
@@ -25,16 +79,30 @@ void launcher_kernel_80a774885c863646(float* m0, size_t m0_extraOffset, const fl
         }
       }
       
-  dim3 grid (std::min(gridsize, numElements0), 1, 1);
+  tensorforge::LaunchConfig config{};
+  config.grid[0] = std::min(gridsize, numElements0);
+  config.grid[1] = 1;
+  config.grid[2] = 1;
+  config.block[0] = 16;
+  config.block[1] = 8;
+  config.block[2] = 1;
+  config.sharedMemBytes = 128 * sizeof(float);
+  config.cooperative = false;
+  return config;
+}
+void launcher_kernel_508942059be6cbdd(float * m0, size_t m0_extraOffset, const float * m1, size_t m1_extraOffset, size_t numElements0, unsigned * flags0, void* streamPtr) {
+  const tensorforge::LaunchConfig config = launch_config_kernel_508942059be6cbdd(numElements0, streamPtr);
+  dim3 block (config.block[0], config.block[1], config.block[2]);
+  dim3 grid (config.grid[0], config.grid[1], config.grid[2]);
   static bool shmemsizeset = false;
       if (!shmemsizeset) {
-        cudaFuncSetAttribute(kernel_kernel_80a774885c863646, cudaFuncAttributeMaxDynamicSharedMemorySize, 128 * sizeof(float));
+        cudaFuncSetAttribute(kernel_kernel_508942059be6cbdd, cudaFuncAttributeMaxDynamicSharedMemorySize, config.sharedMemBytes);
         CHECK_ERR;
         shmemsizeset = true;
       }
       
   cudaStream_t stream = (streamPtr != nullptr) ? static_cast<cudaStream_t>(streamPtr) : 0;
-  kernel_kernel_80a774885c863646<<<grid,block,128 * sizeof(float),stream>>>( m0,  m0_extraOffset,  m1,  m1_extraOffset,  numElements0,  flags0 );
+  kernel_kernel_508942059be6cbdd<<<grid,block,config.sharedMemBytes,stream>>>(m0, m0_extraOffset, m1, m1_extraOffset, numElements0, flags0);
   CHECK_ERR;
 }
 
@@ -42,15 +110,18 @@ void launcher_kernel_80a774885c863646(float* m0, size_t m0_extraOffset, const fl
 // === kernel ===
 __global__ void 
 __launch_bounds__(128)
- kernel_kernel_80a774885c863646(float* m0, size_t m0_extraOffset, const float* m1, size_t m1_extraOffset, size_t numElements0, unsigned* flags0 ) {
+ kernel_kernel_508942059be6cbdd(float * m0, size_t m0_extraOffset, const float * m1, size_t m1_extraOffset, size_t numElements0, unsigned * flags0) {
   extern __shared__ char totalShrMemPtr[];
    {
     // generated with TensorForge. Version: 0.0.1
     // options: default
-    // meta data:
-    // m0 16(16) {0..16} strided
-    // m1 16×16(16×16) {0..16}×{0..16} strided
-    // m0 16(16) {0..16} strided({0..16})[0] = m1 16×16(16×16) {0..16}×{0..16} strided({0..16}×{0..16})[0, -1]
+    // launch: 16 lanes x 8 per block = block 16x8x1, 512 B shared, occupancy grid
+    // operands:
+    //   m0 16(16) {0..16} strided
+    //   m1 16×16(16×16) {0..16}×{0..16} strided
+    // operations:
+    //   m0[i] = m1[i,k]
+    // tensorforge-meta: {"fp":"float","launch":{"active_threads":16,"block":[16,8,1],"cooperative":false,"lead_width":1,"mults_per_block":8,"persistent":true,"sections":[{"barrier":false,"mults_per_block":8,"shared_elements":128}],"shared_bytes":512,"shared_elements":128,"threads_per_mult":16},"loops":[],"operands":[{"addressing":"strided","alias":"OUT","bbox":[[0],[16]],"name":"m0","ordered":false,"parts":1,"shape":[16],"variant":false},{"addressing":"strided","alias":"A","bbox":[[0,0],[16,16]],"name":"m1","ordered":false,"parts":1,"shape":[16,16],"variant":false}],"operations":[{"add":false,"dest":{"addressing":"strided","bbox":[[0],[16]],"is_tmp":false,"name":"m0","offset":[0],"shape":[16]},"kind":"multilinear","ops":[{"addressing":"strided","bbox":[[0,0],[16,16]],"is_tmp":false,"name":"m1","offset":[0,0],"shape":[16,16]}],"permute":[[0,1]],"target":[[0,-1]]}],"version":"0.0.1\n"}
     {
       const auto batchId_start = (threadIdx.y + blockDim.y * (blockIdx.x));
       const auto batchId1 = batchId_start < numElements0 ? batchId_start : 0;
@@ -58,23 +129,23 @@ __launch_bounds__(128)
       auto* totalShrMem = reinterpret_cast<float*>(totalShrMemPtr);
       float* localShrMem0 = &totalShrMem[16 * threadIdx.y + 0];
       float* tempShrMem = &localShrMem0[0];
-      for (size_t v3_batchId0 = (threadIdx.y + blockDim.y * (blockIdx.x)); v3_batchId0 < numElements0; v3_batchId0 += (gridDim.x * blockDim.y)) {
-        size_t v4_ahead1 = v3_batchId0 + (gridDim.x * blockDim.y);
-        size_t v6_batchId1 = (v4_ahead1 < numElements0) ? v4_ahead1 : v3_batchId0;
-        const bool allowed = flags0 == nullptr ? true : static_cast<bool>(flags0[v3_batchId0]);
+      for (size_t v4_batchId0 = (threadIdx.y + blockDim.y * (blockIdx.x)); v4_batchId0 < numElements0; v4_batchId0 += (gridDim.x * blockDim.y)) {
+        size_t v5_ahead1 = v4_batchId0 + (gridDim.x * blockDim.y);
+        size_t v7_batchId1 = (v5_ahead1 < numElements0) ? v5_ahead1 : v4_batchId0;
+        const bool allowed = flags0 == nullptr ? true : static_cast<bool>(flags0[v4_batchId0]);
         if (allowed) {
-          float *const __restrict__ glb_m0 = &m0[v3_batchId0 * 16 + 0 + m0_extraOffset];
-          const float *const __restrict__ glb_m1 = &m1[v3_batchId0 * 256 + 0 + m1_extraOffset];
+          float *const __restrict__ glb_m0 = &m0[v4_batchId0 * 16 + 0 + m0_extraOffset];
+          const float *const __restrict__ glb_m1 = &m1[v4_batchId0 * 256 + 0 + m1_extraOffset];
           float r0[16]{};
           // r0 = load{g>r}(glb_m1);
-          int32_t v16_lead = threadIdx.x % 16;
+          int32_t v17_lead = threadIdx.x % 16;
           #pragma unroll
-          for (int32_t v17_i0 = 0; v17_i0 < 1; ++v17_i0) {
-            int32_t v23_lead = v16_lead + (v17_i0 * 16);
+          for (int32_t v18_i0 = 0; v18_i0 < 1; ++v18_i0) {
+            int32_t v21_lead = v17_lead + (v18_i0 * 16);
             #pragma unroll
-            for (int32_t v18_i1 = 0; v18_i1 < 16; ++v18_i1) {
-              float v26_data = __ldcg(&glb_m1[(v23_lead + (v18_i1 * 16))]);
-              r0[(v17_i0 + v18_i1)] = v26_data;
+            for (int32_t v19_i1 = 0; v19_i1 < 16; ++v19_i1) {
+              float v24_data = __ldcg(&glb_m1[(v21_lead + (v19_i1 * 16))]);
+              r0[(v18_i0 + v19_i1)] = v24_data;
             }
           }
           // wait(r0 = load{g>r}(glb_m1););
@@ -82,64 +153,64 @@ __launch_bounds__(128)
           // r1 = +(r0) + None
           // [(0, 16)] [(0, 16)]
           float ir1[1]{};
-          float v33_data = r0[0];
-          float v34_data = ir1[0];
-          ir1[0] = (v34_data + v33_data);
-          float v39_data = r0[1];
-          float v40_data = ir1[0];
-          ir1[0] = (v40_data + v39_data);
-          float v45_data = r0[2];
-          float v46_data = ir1[0];
-          ir1[0] = (v46_data + v45_data);
-          float v51_data = r0[3];
-          float v52_data = ir1[0];
-          ir1[0] = (v52_data + v51_data);
-          float v57_data = r0[4];
-          float v58_data = ir1[0];
-          ir1[0] = (v58_data + v57_data);
-          float v63_data = r0[5];
-          float v64_data = ir1[0];
-          ir1[0] = (v64_data + v63_data);
-          float v69_data = r0[6];
-          float v70_data = ir1[0];
-          ir1[0] = (v70_data + v69_data);
-          float v75_data = r0[7];
-          float v76_data = ir1[0];
-          ir1[0] = (v76_data + v75_data);
-          float v81_data = r0[8];
-          float v82_data = ir1[0];
-          ir1[0] = (v82_data + v81_data);
-          float v87_data = r0[9];
-          float v88_data = ir1[0];
-          ir1[0] = (v88_data + v87_data);
-          float v93_data = r0[10];
-          float v94_data = ir1[0];
-          ir1[0] = (v94_data + v93_data);
-          float v99_data = r0[11];
-          float v100_data = ir1[0];
-          ir1[0] = (v100_data + v99_data);
-          float v105_data = r0[12];
-          float v106_data = ir1[0];
-          ir1[0] = (v106_data + v105_data);
-          float v111_data = r0[13];
-          float v112_data = ir1[0];
-          ir1[0] = (v112_data + v111_data);
-          float v117_data = r0[14];
-          float v118_data = ir1[0];
-          ir1[0] = (v118_data + v117_data);
-          float v123_data = r0[15];
-          float v124_data = ir1[0];
-          ir1[0] = (v124_data + v123_data);
+          float v28_data = r0[0];
+          float v29_data = ir1[0];
+          ir1[0] = (v29_data + v28_data);
+          float v31_data = r0[1];
+          float v32_data = ir1[0];
+          ir1[0] = (v32_data + v31_data);
+          float v34_data = r0[2];
+          float v35_data = ir1[0];
+          ir1[0] = (v35_data + v34_data);
+          float v37_data = r0[3];
+          float v38_data = ir1[0];
+          ir1[0] = (v38_data + v37_data);
+          float v40_data = r0[4];
+          float v41_data = ir1[0];
+          ir1[0] = (v41_data + v40_data);
+          float v43_data = r0[5];
+          float v44_data = ir1[0];
+          ir1[0] = (v44_data + v43_data);
+          float v46_data = r0[6];
+          float v47_data = ir1[0];
+          ir1[0] = (v47_data + v46_data);
+          float v49_data = r0[7];
+          float v50_data = ir1[0];
+          ir1[0] = (v50_data + v49_data);
+          float v52_data = r0[8];
+          float v53_data = ir1[0];
+          ir1[0] = (v53_data + v52_data);
+          float v55_data = r0[9];
+          float v56_data = ir1[0];
+          ir1[0] = (v56_data + v55_data);
+          float v58_data = r0[10];
+          float v59_data = ir1[0];
+          ir1[0] = (v59_data + v58_data);
+          float v61_data = r0[11];
+          float v62_data = ir1[0];
+          ir1[0] = (v62_data + v61_data);
+          float v64_data = r0[12];
+          float v65_data = ir1[0];
+          ir1[0] = (v65_data + v64_data);
+          float v67_data = r0[13];
+          float v68_data = ir1[0];
+          ir1[0] = (v68_data + v67_data);
+          float v70_data = r0[14];
+          float v71_data = ir1[0];
+          ir1[0] = (v71_data + v70_data);
+          float v73_data = r0[15];
+          float v74_data = ir1[0];
+          ir1[0] = (v74_data + v73_data);
           #pragma unroll
-          for (int32_t v129_n0 = 0; v129_n0 < 1; ++v129_n0) {
-            float v130_data = ir1[v129_n0];
-            r1[v129_n0] = v130_data;
+          for (int32_t v76_n0 = 0; v76_n0 < 1; ++v76_n0) {
+            float v77_data = ir1[v76_n0];
+            r1[v76_n0] = v77_data;
           }
           // glb_m0 = store{r>g}(r1);
           #pragma unroll
-          for (int32_t v134_i0 = 0; v134_i0 < 1; ++v134_i0) {
-            float v135_data = r1[v134_i0];
-            glb_m0[(v16_lead + (v134_i0 * 16))] = v135_data;
+          for (int32_t v78_i0 = 0; v78_i0 < 1; ++v78_i0) {
+            float v79_data = r1[v78_i0];
+            glb_m0[(v17_lead + (v78_i0 * 16))] = v79_data;
           }
           __syncwarp(0x0000ffffu << (threadIdx.y % 2 * 16));
         }
