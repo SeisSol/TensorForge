@@ -238,6 +238,18 @@ def space(descrs, context: Context) -> List[Knob]:
     rolls = _roll_values(descrs)
     if len(rolls) > 1:
         knobs.append(Knob('k_roll', lambda c, r=tuple(rolls): r))
+    # The literal limit at exactly the counts that change a kernel: 0, and each
+    # batch-constant operand's non-zero entries, where the description carries
+    # its numbers.  Which of those the generator inlines also depends on the
+    # role and the unrolling (`Generator._embed_constants`); a value that
+    # changes nothing here costs a duplicate build, not a wrong one.
+    counts = sorted({sum(1 for v in values if v != 0)
+                     for values in (t.storage_values() for t in _tensors(descrs)
+                                    if t.addressing == Addressing.NONE)
+                     if values is not None})
+    if counts:
+        knobs.append(Knob('inline_constants',
+                          lambda c, v=tuple([0] + counts): v))
     if hw.vendor == 'nvidia' and contraction_lengths(descrs):
         knobs.append(Knob('tensor_cores', lambda c: (False, True)))
         knobs.append(Knob('mma_prefetch',

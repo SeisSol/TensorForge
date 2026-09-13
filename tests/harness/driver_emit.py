@@ -107,8 +107,10 @@ def collect_operands(generator) -> List[DriverOperand]:
                 is_scalar=True, scalar_value=value,
             ))
             continue
-        if sym.stype != SymbolType.Batch:
-            # Other symbol kinds (Data, SharedMem, …) are kernel-internal.
+        if sym.stype != SymbolType.Batch and not getattr(sym, "inlined", False):
+            # Other symbol kinds (Data, SharedMem, …) are kernel-internal --
+            # but one the generator inlined from the description's numbers
+            # (`inline_constants`) is still a launcher parameter, unread.
             continue
         direction = t.direction
         is_src = direction in (DataFlowDirection.SOURCE,

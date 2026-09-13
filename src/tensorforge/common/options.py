@@ -430,6 +430,27 @@ declare('preload_partial',
             '25.6 KB operators against 64 KB on gfx942, and stages none of '
             'them without this.')
 
+declare('inline_constants',
+        rule=lambda hw: 4096 if hw.vendor == 'nvidia' else 64,
+        parse=parse_int,
+        doc='Most non-zero entries of a batch-constant broadcast operand -- `B` '
+            'in `C = A B` -- whose numbers the description carries, for the '
+            'kernel to take them as literals; 0 takes none.\n'
+            'An FMA then reads the number as an immediate, and a zero drops its '
+            'product.  Only where every reduction reading the operand unrolls '
+            'whole (no `k_roll`, no extent over `k_unroll_max`): a literal has '
+            'no address a loop could index.  The interface keeps the pointer '
+            'and does not read it, as with `argument_constants`, which takes '
+            'what this leaves.\n'
+            'Large on NVIDIA, where a 32-bit immediate fits the instruction: in '
+            'a chain of four 9x9 operators on sm_120 the kernel had 768 '
+            'instructions instead of 888 by value, and ran as fast as by value '
+            '-- both about 1.5 % ahead of memory; the chain is memory-bound.  '
+            'Small elsewhere: on AMD a literal is another dword per instruction '
+            'or a scalar register, of which there are about a hundred -- the '
+            'same chain with its 81-entry operators as literals was 6 % slower '
+            'on gfx1150 than read from the constant space; Intel is unmeasured.')
+
 declare('argument_constants',
         rule=lambda hw: hw.vendor in ('nvidia',),
         parse=parse_bool,

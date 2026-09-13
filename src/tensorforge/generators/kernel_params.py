@@ -140,6 +140,12 @@ class KernelParam:
                           values=getattr(symbol, 'embedded', None))
 
     @classmethod
+    def host_only(cls, symbol, datatype) -> 'HostOnlyParam':
+        """The pointer a caller passes for an operand the kernel has as literals."""
+        return HostOnlyParam(symbol.name, datatype, MemSpace.GLOBAL,
+                             readonly=True, depth=1)
+
+    @classmethod
     def size(cls, name: str) -> 'KernelParam':
         """An element count or an element offset.
 
@@ -226,3 +232,29 @@ class ValueParam(KernelParam):
 
     def argument(self, lexic=None) -> str:
         return self.name if lexic is None else f'{self.name}Arg'
+
+
+@dataclass(frozen=True)
+class HostOnlyParam(KernelParam):
+    """A launcher parameter the kernel does not take.
+
+    What the caller passes for an operand whose numbers the kernel already has
+    as literals (`inline_constants`).  The interface keeps it, so a caller
+    written against the operand in memory still compiles and still passes its
+    buffer -- which nothing reads.
+    """
+
+    def declaration(self, lexic, with_default: bool = False,
+                    host: bool = False) -> Optional[str]:
+        if not host:
+            return None
+        tail = self.default if with_default else ''
+        body = lexic.pointer_type(f'{self.datatype}', None, readonly=True,
+                                  depth=1)
+        return f'{body} {self.name}{tail}'
+
+    def binding(self, lexic) -> Optional[str]:
+        return f'(void){self.name};'
+
+    def argument(self, lexic=None) -> Optional[str]:
+        return self.name if lexic is None else None

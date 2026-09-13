@@ -247,6 +247,9 @@ class TestEmbedded:
 
     def gemm(self, backend='cuda', arch='sm_86', role='B', size=N, spp=None,
              **options):
+        # By value, not as literals: `inline_constants` would take these first
+        # (`test_inline_constants`).
+        options.setdefault('inline_constants', 0)
         k = constant('K', size, spp)
         x, c = tensor('X', size=size), tensor('C', size=size)
         first, second = (x, k) if role == 'B' else (k, x)

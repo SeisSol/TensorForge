@@ -1322,32 +1322,38 @@ class Generator:
     return seen - lead
 
   def _embed_constants(self):
-    """Which batch-constant operands the kernel takes by value, with the
-    numbers the description carries (`argument_constants`).
+    """Which batch-constant operands the kernel takes with the numbers the
+    description carries, and how.
 
     Broadcast operands with numbers, only read, stored as they are (not
     prepared), and not the members of a merged run -- a table holds addresses.
-    First fit in declaration order under `max_argument_size`, less an
-    allowance for the kernel's other parameters; the rest stay in memory, as
-    they were.  Decided once, before any instruction asks: the binding's
-    spelling, the arrangement a product takes and the parameter list all read
-    it.  On the symbol rather than the tensor, which another kernel may share
-    and decide otherwise for.
+    As literals (`inline_constants`) where every reduction reading them
+    unrolls whole and they have at most that many non-zero entries: a `Data`
+    symbol, as if the description had said `code`.  Otherwise by value
+    (`argument_constants`), first fit in declaration order under
+    `max_argument_size`, less an allowance for the kernel's other parameters.
+    The rest stay in memory, as they were.  Either way the launcher keeps the
+    pointer the caller passes, and does not read it.
+
+    Decided once, before any instruction asks: the binding's spelling, the
+    arrangement a product takes and the parameter list all read it.  On the
+    symbol rather than the tensor, which another kernel may share and decide
+    otherwise for.
     """
     from tensorforge.common.basic_types import DataFlowDirection
     scope = list(self._scopes.get_global_scope().values())
     for symbol in scope:
       symbol.embedded = None
+      symbol.inlined = False
     context = self._context
-    if not context.get_user_options().argument_constants:
-      return
-    if getattr(context.get_vm().get_lexic(), 'simd_mode', False):
-      return
+    options = context.get_user_options()
+    explicit = getattr(context.get_vm().get_lexic(), 'simd_mode', False)
     hw = context.get_vm().get_hw_descr()
     merged = {id(member) for symbol in scope
               if getattr(symbol.obj, 'is_variant', False)
               for member in getattr(symbol.obj, 'variant_members', ())}
     broadcast = self._broadcast_operands()
+    unrolled = self._unrolled_operands(options)
     size = lambda obj: (int(obj.storage_volume())
                         * (obj.datatype or context.fp_type).size())
     # A pointer and an offset per operand, a count and a mask per section,
@@ -1364,10 +1370,44 @@ class Generator:
           or id(obj) not in broadcast):
         continue
       values = obj.storage_values()
-      if values is None or size(obj) > budget:
+      if values is None:
+        continue
+      if (options.inline_constants > 0 and id(obj) in unrolled
+          and sum(1 for v in values if v != 0) <= options.inline_constants):
+        # Literals: the symbol reads its numbers as a `Data` one does.
+        symbol.stype = SymbolType.Data
+        symbol.inlined = True
+        continue
+      if not options.argument_constants or explicit or size(obj) > budget:
         continue
       symbol.embedded = values
       budget -= size(obj)
+
+  def _unrolled_operands(self, options):
+    """The operands whose every reduction the nest unrolls whole.
+
+    A literal has no address, so a loop indexing it at run time has nothing
+    to read -- and `_rollable` refuses to roll a reduction over an operand
+    that is not in memory, so inlining one the reduction would have been
+    rolled over unrolls it after all, however long.  So none where a roll is
+    asked for (`k_roll`), and none a reduction longer than `k_unroll_max`
+    reaches.
+    """
+    if options.k_roll:
+      return set()
+    limit = options.k_unroll_max
+    seen, rolled = set(), set()
+    for op in (o for d in self.descr_list for o in d.operations()):
+      if not (hasattr(op, 'ops') and hasattr(op, 'target')):
+        continue
+      for sub, target in zip(op.ops, op.target or ()):
+        tensor = getattr(sub, 'tensor', sub)
+        seen.add(id(tensor))
+        box = getattr(sub, 'bbox', None) or tensor.bbox
+        if limit and any(t < 0 and box.size(d) > limit
+                         for d, t in enumerate(target or ())):
+          rolled.add(id(tensor))
+    return seen - rolled
 
   def _check_arguments(self, params):
     """Refuse operands passed by value where the kernel cannot take them."""
@@ -2084,6 +2124,9 @@ class Generator:
       # the caller still passes is not read (`argument_constants`).
       if getattr(symbol, 'embedded', None) is not None:
         row['embedded'] = True
+      # ... or as literals (`inline_constants`).
+      if getattr(symbol, 'inlined', False):
+        row['inlined'] = True
       return row
 
     # An operation names its operands rather than restating them: the
@@ -2151,7 +2194,12 @@ class Generator:
       if symbol.stype == SymbolType.Data:
         # Its numbers are in the kernel, so there is nothing to pass and no
         # offset into anything. One statement of that, for every rank and
-        # every addressing a `Data` symbol can come from.
+        # every addressing a `Data` symbol can come from.  Except that where
+        # the generator took them from the description (`inline_constants`),
+        # the launcher keeps the pointer the caller passes, and ignores it.
+        if getattr(symbol, 'inlined', False):
+          params.append(KernelParam.host_only(
+              symbol, symbol.obj.datatype or self._context.fp_type))
         continue
       datatype = self._context.fp_type if symbol.obj.datatype is None else symbol.obj.datatype
       if passed_by_value(symbol):
@@ -2178,8 +2226,10 @@ class Generator:
 
   def _declare(self, params, with_defaults=False, host=False):
     lexic = self._context.get_vm().get_lexic()
-    return [p.declaration(lexic, with_default=with_defaults, host=host)
-            for p in params]
+    # `None` is a parameter this surface does not have (`HostOnlyParam`).
+    declared = [p.declaration(lexic, with_default=with_defaults, host=host)
+                for p in params]
+    return [d for d in declared if d is not None]
 
   def _generate_kernel_base_args(self, writer=None):
     """The arguments of the launcher's call into the kernel.
@@ -2195,7 +2245,7 @@ class Generator:
         bound = p.binding(lexic)
         if bound is not None:
           writer(bound)
-    return [p.argument(lexic) for p in params]
+    return [a for a in (p.argument(lexic) for p in params) if a is not None]
 
   def _generate_kernel_proto(self, writer):
     global_symbols = self._scopes.get_global_scope().values()
