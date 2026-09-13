@@ -205,3 +205,54 @@ def test_a_longer_run_wins_over_a_shorter_one():
     runs = find_repeats(descrs)
     assert len(runs) == 1
     assert runs[0].count == 6
+
+
+def test_the_hashed_search_finds_what_comparing_every_skeleton_finds():
+    """Chunks are compared by a hash of per-descriptor signatures, and a
+    skeleton is built only where the hashes agree.  Building one per chunk and
+    period took SeisSol's damage step (1787 operations) over an hour before a
+    line was generated; the runs have to come out the same all the same, at
+    every period and with and without an arity bound."""
+    import seissol_suite as suite
+    from tensorforge.analysis import families
+    from tensorforge.frontend.yateto import DescriptionReader
+
+    system = 'damage-nonlinearck'
+    descrs = DescriptionReader(None, {}).read(suite.description(
+        system, f'{system}-o4-s', 'gpu_damageStep'))[0][:160]
+
+    def every_skeleton(period, max_arity):
+        skeletons = families._chunk_skeletons(descrs, period)
+        runs, start = [], 0
+        while start + period * 2 <= len(descrs):
+            count, seen = 1, None
+            while start + period * (count + 1) <= len(descrs):
+                nxt = start + period * count
+                if skeletons[nxt] != skeletons[start]:
+                    break
+                if max_arity is not None:
+                    groups = skeletons[start].groups()
+                    if seen is None:
+                        seen = [{i} for i in families._identities(
+                            descrs, start, period, groups)]
+                    widened = [s | {i} for s, i in zip(
+                        seen, families._identities(descrs, nxt, period,
+                                                   groups))]
+                    if sum(1 for s in widened if len(s) > 1) > max_arity:
+                        break
+                    seen = widened
+                count += 1
+            if count >= 2:
+                runs.append((start, count))
+                start += period * count
+            else:
+                start += 1
+        return runs
+
+    found = 0
+    for period in range(1, 13):
+        for max_arity in (None, 2):
+            expected = every_skeleton(period, max_arity)
+            assert families._runs_at(descrs, period, 2, max_arity) == expected
+            found += len(expected)
+    assert found

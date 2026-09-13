@@ -27,7 +27,8 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from tensorforge.analysis.antiunify import (Generalization, Skeleton,
-                                            _identity, _slots, anti_unify,
+                                            _attrs, _identity, _slots,
+                                            anti_unify, operand_key,
                                             skeleton)
 from tensorforge.generators.descriptions import OperationDescription
 
@@ -77,6 +78,58 @@ def _chunk_skeletons(descrs: Sequence[OperationDescription],
     return out
 
 
+_MOD = (1 << 61) - 1
+_BASE = 1_000_003
+
+
+class _Chunks:
+    """Chunk comparisons for one descriptor list, at every period.
+
+    Equal skeletons are the test, and building one per chunk and period was
+    the search's whole cost: every period up to half the list, every start,
+    every operand key again -- quadratic in the period, and over an hour for
+    SeisSol's damage step (1787 operations) before anything was generated.
+
+    A skeleton's shape and keys come one descriptor at a time, so two chunks
+    can only be equal where their strings of per-descriptor signatures are.
+    Those are compared in constant time with prefix hashes; the skeleton,
+    which adds how the slots share tensors, is built only for chunks that
+    pass, once each.  Equal is still exactly equal skeletons: a hash
+    collision is caught by the skeletons, and equal strings hash alike.
+    """
+
+    def __init__(self, descrs: Sequence[OperationDescription]):
+        self._descrs = descrs
+        ids: Dict[Tuple, int] = {}
+        n = len(descrs)
+        self._prefix = [0] * (n + 1)
+        self._power = [1] * (n + 1)
+        for i, descr in enumerate(descrs):
+            slots = _slots(descr)
+            signature = (_attrs(descr), tuple(role for role, _ in slots),
+                         tuple(operand_key(view) for _, view in slots))
+            code = ids.setdefault(signature, len(ids) + 1)
+            self._prefix[i + 1] = (self._prefix[i]
+                                   + code * self._power[i]) % _MOD
+            self._power[i + 1] = self._power[i] * _BASE % _MOD
+        self._skeletons: Dict[Tuple[int, int], Skeleton] = {}
+
+    def skeleton(self, start: int, period: int) -> Skeleton:
+        key = (start, period)
+        if key not in self._skeletons:
+            self._skeletons[key] = skeleton(
+                self._descrs[start:start + period])[0]
+        return self._skeletons[key]
+
+    def same(self, a: int, b: int, period: int) -> bool:
+        # Both hashes brought to the same power of the base: no inverse needed.
+        ha = (self._prefix[a + period] - self._prefix[a]) * self._power[b]
+        hb = (self._prefix[b + period] - self._prefix[b]) * self._power[a]
+        if ha % _MOD != hb % _MOD:
+            return False
+        return self.skeleton(a, period) == self.skeleton(b, period)
+
+
 def _identities(descrs: Sequence[OperationDescription],
                 start: int, period: int, groups: List[List[int]]) -> Tuple:
     """What each slot group of one chunk names, in the chunk's own terms."""
@@ -86,7 +139,8 @@ def _identities(descrs: Sequence[OperationDescription],
 
 
 def _runs_at(descrs: Sequence[OperationDescription], period: int,
-             min_count: int, max_arity: Optional[int]) -> List[Tuple[int, int]]:
+             min_count: int, max_arity: Optional[int],
+             chunks: Optional[_Chunks] = None) -> List[Tuple[int, int]]:
     """Maximal ``(start, count)`` runs of equal chunks at one period.
 
     Maximal in both directions: a run is reported from where it begins, and a
@@ -103,24 +157,26 @@ def _runs_at(descrs: Sequence[OperationDescription], period: int,
     or six.  ``max_arity`` is where a caller states how much it is willing to
     pay; without it every operation of one shape joins one run.
     """
-    skeletons = _chunk_skeletons(descrs, period)
-    groups = skeletons[0].groups() if 0 in skeletons else []
+    if chunks is None:
+        chunks = _Chunks(descrs)
     runs: List[Tuple[int, int]] = []
     start = 0
     while start + period * min_count <= len(descrs):
         count = 1
         if max_arity is None:
             while (start + period * (count + 1) <= len(descrs)
-                   and skeletons[start + period * count] == skeletons[start]):
+                   and chunks.same(start + period * count, start, period)):
                 count += 1
         else:
-            groups = skeletons[start].groups()
-            seen = [{ident} for ident in
-                    _identities(descrs, start, period, groups)]
+            groups = seen = None
             while start + period * (count + 1) <= len(descrs):
                 nxt = start + period * count
-                if skeletons[nxt] != skeletons[start]:
+                if not chunks.same(nxt, start, period):
                     break
+                if groups is None:
+                    groups = chunks.skeleton(start, period).groups()
+                    seen = [{ident} for ident in
+                            _identities(descrs, start, period, groups)]
                 widened = [s | {ident} for s, ident in
                            zip(seen, _identities(descrs, nxt, period, groups))]
                 if sum(1 for s in widened if len(s) > 1) > max_arity:
@@ -157,8 +213,10 @@ def find_repeats(descrs: Sequence[OperationDescription],
         ceiling = min(ceiling, max_period)
 
     candidates: List[Repeat] = []
+    table = _Chunks(descrs)
     for period in range(1, ceiling + 1):
-        for start, count in _runs_at(descrs, period, min_count, max_arity):
+        for start, count in _runs_at(descrs, period, min_count, max_arity,
+                                     table):
             chunks = [list(descrs[start + period * i:start + period * (i + 1)])
                       for i in range(count)]
             general = anti_unify(chunks)

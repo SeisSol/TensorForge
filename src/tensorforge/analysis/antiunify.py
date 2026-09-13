@@ -64,15 +64,27 @@ def _spp_key(tensor) -> Tuple:
     and not how it was spelled.  The enumeration is over the declared shape,
     which for the operators this is aimed at is a few thousand entries at
     worst and is computed once per tensor.
+
+    Once, that is, now: it was computed per chunk the run search tried, and
+    SeisSol's damage step -- 1787 operations -- spent over 99 % of an hour in
+    it.  Kept on the tensor for as long as its pattern and shape are the ones
+    it was computed from.
     """
-    spp = tensor.spp
+    spp, shape = tensor.spp, tuple(tensor.shape)
+    cached = getattr(tensor, '_spp_key_cache', None)
+    if cached is not None and cached[0] is spp and cached[1] == shape:
+        return cached[2]
     if spp is None:
-        return ('full', tuple(tensor.shape))
-    nz = tuple(idx for idx in product(*(range(d) for d in tensor.shape))
-               if spp.is_nz(idx))
-    if len(nz) == _prod(tensor.shape):
-        return ('full', tuple(tensor.shape))
-    return ('nz', nz)
+        key = ('full', shape)
+    else:
+        nz = tuple(idx for idx in product(*(range(d) for d in shape))
+                   if spp.is_nz(idx))
+        key = ('full', shape) if len(nz) == _prod(shape) else ('nz', nz)
+    try:
+        tensor._spp_key_cache = (spp, shape, key)
+    except AttributeError:        # a tensor that takes no attributes
+        pass
+    return key
 
 
 def _prod(shape) -> int:
