@@ -98,6 +98,27 @@ template <typename T, std::size_t N> struct VectorOf {
 template <typename T, std::size_t N>
 using VectorT = typename VectorOf<T, N>::type;
 
+/// An operand passed by value (`Residence.ARGUMENT`): its numbers, not their
+/// address.  A struct so that the array stays a value -- an array parameter
+/// decays to a pointer -- and so that it lives where kernel arguments live,
+/// the constant bank; `__grid_constant__` on the parameter keeps it there when
+/// the body takes an element's address.  It indexes like the pointer a
+/// batch-constant operand in memory is, which is all the body asks of it.
+/// `from` is the launcher's: it copies the host array the caller passed.
+template <typename T, std::size_t N> struct ValueArray {
+  T v[N];
+  __device__ __forceinline__ const T &operator[](std::size_t i) const {
+    return v[i];
+  }
+  static ValueArray from(const T *values) {
+    ValueArray out{};
+    for (std::size_t i = 0; i < N; ++i) {
+      out.v[i] = values[i];
+    }
+    return out;
+  }
+};
+
 template <typename T, std::size_t N>
 using VectorRelaxedT = typename VectorOf<T, N>::relaxed;
 

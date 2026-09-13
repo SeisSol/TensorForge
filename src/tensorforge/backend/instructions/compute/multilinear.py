@@ -1006,6 +1006,13 @@ class MultilinearInstruction(ComputeInstruction):
         # The nest reads it as literals.
         if self._ops[1].symbol.stype == SymbolType.Data:
             return whole(Strategy.GENERIC, n)
+        # Nor is one passed by value spread over the lanes: it is a scalar to
+        # every product, read at one index by all of them -- from the constant
+        # bank or into an SGPR -- which is what the nest does with it.  Spread,
+        # its index is the lane's, and the struct it is passed as is copied
+        # into private memory to be indexed at all.
+        if getattr(self._ops[1].symbol.obj, 'passed_by_value', False):
+            return whole(Strategy.GENERIC, n)
         shape = self._shape()
         chosen = choose_strategy(
             legal_strategies(module.strategies(shape, self._context)),

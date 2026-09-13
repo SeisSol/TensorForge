@@ -114,13 +114,29 @@ class KernelParam:
 
     @classmethod
     def of_symbol(cls, symbol, datatype) -> 'KernelParam':
-        """The parameter a data operand is passed as."""
+        """The parameter a data operand is passed as.
+
+        A batch-constant operand the kernel only reads is declared in the
+        constant space.  On AMD that is what lets a read every lane makes at
+        the same address be a scalar load into an SGPR -- the operand a
+        `v_fma` takes as it is -- rather than a vector load of one value into
+        every lane; elsewhere the spelling is the same as global.
+        """
         addressing = symbol.obj.addressing
         readonly = symbol.obj.direction == DataFlowDirection.SOURCE
         if addressing == Addressing.SCALAR:
             return cls(symbol.name, datatype, MemSpace.NONE, readonly, depth=0)
-        return cls(symbol.name, datatype, MemSpace.GLOBAL, readonly,
+        space = (MemSpace.CONSTANT
+                 if readonly and addressing == Addressing.NONE
+                 else MemSpace.GLOBAL)
+        return cls(symbol.name, datatype, space, readonly,
                    depth=len(Addressing.addr2ptr_type(addressing)))
+
+    @classmethod
+    def value(cls, symbol, datatype) -> 'ValueParam':
+        """The parameter an operand passed by value is (`Residence.ARGUMENT`)."""
+        return ValueParam(symbol.name, datatype, MemSpace.PARAM, readonly=True,
+                          count=int(symbol.obj.storage_volume()))
 
     @classmethod
     def size(cls, name: str) -> 'KernelParam':
@@ -158,3 +174,46 @@ class KernelParam:
     def opaque(cls, decl: str, name: str, default: str = '') -> 'KernelParam':
         """A parameter whose type this module has nothing to say about."""
         return cls(name, decl=f'{decl} {name}', default=default)
+
+
+@dataclass(frozen=True)
+class ValueParam(KernelParam):
+    """An operand passed by value: `Residence.ARGUMENT`.
+
+    The caller hands over the numbers rather than an address.  The kernel takes
+    them as a `tensorforge::ValueArray` -- a struct, so that the array stays a
+    value and does not decay to a pointer -- and that lives wherever kernel
+    arguments live: param space on NVIDIA (`__grid_constant__`, the constant
+    bank an FFMA takes an operand from), the kernarg segment on AMD (scalar
+    loads into SGPRs), the payload on Intel.  It indexes like the pointer a
+    `MEMORY` operand would be, so the kernel body reads `m3[i]` and `&m3[0]`
+    either way.
+
+    The launcher's side stays a pointer, into host memory: the launcher copies
+    `count` elements from it into the struct it passes.
+    """
+
+    #: Elements passed: the operand's stored volume.
+    count: int = 0
+
+    def type_name(self) -> str:
+        return f'tensorforge::ValueArray<{self.datatype}, {self.count}>'
+
+    def byte_size(self) -> int:
+        return self.count * self.datatype.size()
+
+    def declaration(self, lexic, with_default: bool = False,
+                    host: bool = False) -> str:
+        tail = self.default if with_default else ''
+        if host:
+            return f'const {self.datatype} *{self.name}{tail}'
+        storage = lexic.storage_class(MemSpace.PARAM)
+        storage = f'{storage} ' if storage else ''
+        return f'{storage}const {self.type_name()} {self.name}{tail}'
+
+    def binding(self, lexic) -> Optional[str]:
+        return (f'const auto {self.name}Arg = '
+                f'{self.type_name()}::from({self.name});')
+
+    def argument(self, lexic=None) -> str:
+        return self.name if lexic is None else f'{self.name}Arg'

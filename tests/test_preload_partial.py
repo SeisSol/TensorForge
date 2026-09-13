@@ -17,7 +17,9 @@ from test_amd_blgp import _kernel_at
 from tensorforge.generators import generator as G
 
 STAGED = re.compile(r'glb_(m\d+) = &totalShrMem\[')
-GLOBAL = re.compile(r'GlobalMemspace> const glb_(m[0468]) =')
+# Read where they are: in device memory, through the constant space a
+# batch-constant operand the kernel only reads is declared in.
+GLOBAL = re.compile(r'ConstantMemspace> const glb_(m[0468]) =')
 
 
 @pytest.fixture

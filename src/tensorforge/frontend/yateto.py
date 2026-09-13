@@ -536,10 +536,12 @@ class DescriptionReader(Reader):
       addressing = Addressing.PTR_BASED
     elif addressingStr == '':
       addressing = Addressing.SCALAR
-    elif addressingStr is None and residence is Residence.CODE:
-      # There is no formula because there is no parameter. `NONE` is still
-      # what the operand *is* -- one and the same datum for every batch
-      # element -- and the paths that ask read the residence for the rest.
+    elif addressingStr is None and residence in (Residence.CODE,
+                                                 Residence.ARGUMENT):
+      # There is no formula because there is no address: the numbers are in
+      # the code, or passed as they are. `NONE` is still what the operand
+      # *is* -- one and the same datum for every batch element -- and the
+      # paths that ask read the residence for the rest.
       addressing = Addressing.NONE
     else:
       # An unhandled spelling used to leave `addressing` unbound, and the

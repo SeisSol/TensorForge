@@ -1276,6 +1276,73 @@ class Generator:
     self._num_active_threads = config.num_active_threads
     self._lead_width = config.lead_width
 
+  def _preload_admits(self, symbol) -> bool:
+    """Whether `preload_globals` may stage this batch-constant operand."""
+    if getattr(symbol.obj, 'passed_by_value', False):
+      return False
+    roles = self._context.get_user_options().preload_roles
+    if roles == 'all':
+      return True
+    if roles == 'broadcast':
+      return id(symbol.obj) in self._broadcast_operands()
+    if roles == 'lead':
+      return id(symbol.obj) not in self._broadcast_operands()
+    raise GenerationError(
+        f"preload_roles is 'all', 'broadcast' or 'lead'; given {roles!r}")
+
+  def _broadcast_operands(self):
+    """The operands no operation reads along the destination's lead index.
+
+    `B` in `C[m,n] += A[m,k] B[k,n]`: every lane of a multiplication reads the
+    same element of it at the same time, so to each product it is a scalar,
+    and staged it is one broadcast read from shared memory per element.  An
+    operand that carries the lead anywhere is read per lane -- and that is the
+    kind whose staging takes the block's shared memory and with it occupancy
+    (the damage kernel's three 14 kB `kDivM`, +23 % on sm_120).  Pointwise and
+    reduced operands are read at the destination's positions, so they count
+    as carrying it.  `id`s of the tensors, as the preload bookkeeping keeps.
+    """
+    lead, seen = set(), set()
+    for op in (o for d in self.descr_list for o in d.operations()):
+      if hasattr(op, 'ops') and hasattr(op, 'target'):
+        for sub, target in zip(op.ops, op.target or ()):
+          tensor = getattr(sub, 'tensor', sub)
+          seen.add(id(tensor))
+          if 0 in (target or ()):
+            lead.add(id(tensor))
+        continue
+      for sub in list(getattr(op, 'srcs', ())) + [getattr(op, 'var', None)]:
+        tensor = getattr(sub, 'tensor', None)
+        if tensor is None:
+          continue
+        seen.add(id(tensor))
+        if len(getattr(tensor, 'shape', ())) > 0:
+          lead.add(id(tensor))
+    return seen - lead
+
+  def _check_arguments(self, params):
+    """Refuse operands passed by value where the kernel cannot take them."""
+    from tensorforge.generators.kernel_params import ValueParam
+    passed = [p for p in params if isinstance(p, ValueParam)]
+    if not passed:
+      return
+    lexic = self._context.get_vm().get_lexic()
+    if getattr(lexic, 'simd_mode', False):
+      # ESIMD reads a batch-constant operand with block loads, which address
+      # device memory; the struct an argument is passed as is not there.
+      raise GenerationError(
+          f'{", ".join(p.name for p in passed)}: passed by value, which the '
+          f'explicit-SIMD backend does not read yet')
+    hw = self._context.get_vm().get_hw_descr()
+    # Every other parameter is a pointer or a size: eight bytes each.
+    total = (sum(p.byte_size() for p in passed)
+             + 8 * (len(params) - len(passed)))
+    if total > hw.max_argument_size:
+      raise GenerationError(
+          f'{", ".join(p.name for p in passed)}: passed by value, the kernel '
+          f'takes {total} bytes of arguments, more than the '
+          f'{hw.max_argument_size} {hw.model} admits')
+
   def _preload_selection(self, candidates, cap):
     """The operands `preload_partial` stages: first fit, in the order the
     kernel declares them, under the block's shared memory in bytes -- less
@@ -1329,18 +1396,23 @@ class Generator:
                 for member in getattr(symbol.obj, 'variant_members', ())}
       vm = self._context.get_vm()
       shmem_cap = vm.get_hw_descr().max_local_mem_size_per_block
-      candidates = [symbol for symbol in scope.values()
-                    if not getattr(symbol.obj, 'is_variant', False)
-                    and id(symbol.obj) not in merged
-                    and symbol.obj.addressing == Addressing.NONE
-                    and symbol.stype != SymbolType.Data]
+      memory = [symbol for symbol in scope.values()
+                if not getattr(symbol.obj, 'is_variant', False)
+                and id(symbol.obj) not in merged
+                and symbol.obj.addressing == Addressing.NONE
+                and symbol.stype != SymbolType.Data]
+      # What is not staged at all is read where it is, as what
+      # `preload_partial` leaves out is: an operand passed by value already
+      # lives where kernel arguments do, and `preload_roles` may leave the
+      # operands read along the lead index in global memory.
+      candidates = [symbol for symbol in memory if self._preload_admits(symbol)]
       chosen = (self._preload_selection(candidates, shmem_cap)
                 if self._preload_partial else candidates)
       for symbol in chosen:
         shmem_load += builder.build(symbol)
         load_ir.extend(builder.get_instructions())
         self._preloaded.add(id(symbol.obj))
-      self._preload_left = ({id(s.obj) for s in candidates}
+      self._preload_left = ({id(s.obj) for s in memory}
                             - {id(s.obj) for s in chosen})
 
       # Bytes against bytes: `shmem_load` counts elements, the cap is the
@@ -1366,7 +1438,7 @@ class Generator:
         # bound as they are where nothing is staged -- here, since this branch
         # returns before that binding below.
         ptrs = GetElementPtrBuilder(self._context, self._scopes)
-        for symbol in candidates:
+        for symbol in memory:
           if id(symbol.obj) in self._preload_left:
             ptrs.build(symbol)
             self._section.global_ir.extend(ptrs.get_instructions())
@@ -1946,14 +2018,19 @@ class Generator:
 
     def operand(obj):
       box = obj.get_bbox()
-      return dict(name=obj.name, alias=obj.alias,
-                  shape=[int(d) for d in obj.shape],
-                  bbox=[[int(v) for v in box.lower()],
-                        [int(v) for v in box.upper()]],
-                  addressing=str(obj.addressing),
-                  parts=int(obj.storage_parts),
-                  ordered=obj.storage_order is not None,
-                  variant=bool(getattr(obj, 'is_variant', False)))
+      row = dict(name=obj.name, alias=obj.alias,
+                 shape=[int(d) for d in obj.shape],
+                 bbox=[[int(v) for v in box.lower()],
+                       [int(v) for v in box.upper()]],
+                 addressing=str(obj.addressing),
+                 parts=int(obj.storage_parts),
+                 ordered=obj.storage_order is not None,
+                 variant=bool(getattr(obj, 'is_variant', False)))
+      # Only where the caller passes numbers where an address would be: the
+      # key is part of the source every kernel is named after.
+      if getattr(obj, 'passed_by_value', False):
+        row['residence'] = str(obj.residence)
+      return row
 
     # An operation names its operands rather than restating them: the
     # tensors are under `operands`, and a view is which one and which part.
@@ -2023,9 +2100,14 @@ class Generator:
         # every addressing a `Data` symbol can come from.
         continue
       datatype = self._context.fp_type if symbol.obj.datatype is None else symbol.obj.datatype
+      if getattr(symbol.obj, 'passed_by_value', False):
+        # Its numbers, by value: nothing to offset into.
+        params.append(KernelParam.value(symbol, datatype))
+        continue
       params.append(KernelParam.of_symbol(symbol, datatype))
       if symbol.obj.addressing not in (Addressing.SCALAR, Addressing.NONE):
         params.append(KernelParam.size(get_extra_offset_name(symbol)))
+    self._check_arguments(params)
 
     for i, section in enumerate(self._sections):
       params.append(KernelParam.size(f'{GeneralLexicon.NUM_ELEMENTS}{i}'))

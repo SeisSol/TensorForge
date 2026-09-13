@@ -17,6 +17,24 @@ namespace tensorforge {
 namespace intel_esimd = sycl::ext::intel::esimd;
 namespace intel_xmx = intel_esimd::xmx;
 
+/// An operand passed by value (`Residence.ARGUMENT`): its numbers, not their
+/// address.  A struct so that the array stays a value -- an array parameter
+/// decays to a pointer -- and the kernel lambda captures it by value, into the
+/// kernel's arguments.  It indexes like the pointer a batch-constant operand in
+/// memory is, which is all the body asks of it.  `from` is the launcher's: it
+/// copies the host array the caller passed.
+template <typename T, std::size_t N> struct ValueArray {
+  T v[N];
+  const T &operator[](std::size_t i) const { return v[i]; }
+  static ValueArray from(const T *values) {
+    ValueArray out{};
+    for (std::size_t i = 0; i < N; ++i) {
+      out.v[i] = values[i];
+    }
+    return out;
+  }
+};
+
 /// The same 19-bit E8M10, and here it is a real type rather than a bit
 /// pattern: `simd<float, N>` does not convert to `simd<tf32, N>` implicitly,
 /// so a fragment staged with the wrong precision is a compile error.  On CUDA

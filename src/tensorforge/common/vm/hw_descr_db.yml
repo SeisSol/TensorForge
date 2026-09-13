@@ -4,6 +4,10 @@
 
 # NVIDIA
 - arch: sm_60
+  # Bytes of parameters a kernel may take: 4 kB up to CUDA 12.0, 32764 from
+  # CUDA 12.1 on Volta and later.  Stated as the larger figure only where the
+  # architecture already needs a toolchain that new.
+  max_argument_size: 4kB
   vec_unit_length: 32
   max_local_mem_size_per_block: 48kB
   max_num_threads: 1024
@@ -49,15 +53,23 @@
   max_local_mem_size_per_block: 227kB # shared with L1; together 256 kiB
 - arch: sm_100
   base: sm_90
+  max_argument_size: 32764B
 - arch: sm_101
   base: sm_90
+  max_argument_size: 32764B
 - arch: sm_110
   base: sm_90
+  max_argument_size: 32764B
 - arch: sm_120
   base: sm_89
+  max_argument_size: 32764B
 
 # AMD
 - arch: gfx900
+  # The HIP runtime's classic limit on a kernel's arguments.  Only operands
+  # passed by value count against it: a batch-constant one in memory is
+  # read through the constant space, which reaches device memory.
+  max_argument_size: 4kB
   # 256 VGPRs of 4 bytes per lane: `getAddressableNumArchVGPRs` in LLVM's
   # AMDGPUBaseInfo.cpp.  gfx908 inherits it -- its AGPRs are a separate file
   # the compiler spills into, not addressable VGPRs.
@@ -92,6 +104,10 @@
   base: gfx90a
   max_local_mem_size_per_block: 160kB
 - arch: gfx1010
+  # The HIP runtime's classic limit on a kernel's arguments.  Only operands
+  # passed by value count against it: a batch-constant one in memory is
+  # read through the constant space, which reaches device memory.
+  max_argument_size: 4kB
   # 256 VGPRs per lane in wave32 and wave64 alike, through gfx12.
   max_reg_per_thread: 1kB
   vec_unit_length: 32
@@ -138,6 +154,8 @@
 
 # Intel
 - arch: pvc
+  # What Intel GPUs report as their kernel parameter size.
+  max_argument_size: 2kB
   # Xe-HPC: 128 general registers of 64 bytes per thread, or 256 with the
   # large-GRF mode ([[intel::grf_size(256)]]).  The smaller one is the default
   # and the honest budget -- a kernel that only fits in large GRF halves the
@@ -154,6 +172,8 @@
   shmem_banks: 32
   name: 'intel'
 - arch: dg1
+  # What Intel GPUs report as their kernel parameter size.
+  max_argument_size: 2kB
   vec_unit_length: 64
   max_local_mem_size_per_block: 64kB
   max_num_threads: 512
@@ -165,6 +185,8 @@
   shmem_banks: 32
   name: 'intel'
 - arch: bdw
+  # What Intel GPUs report as their kernel parameter size.
+  max_argument_size: 2kB
   vec_unit_length: 32
   max_local_mem_size_per_block: 48kB
   max_num_threads: 256

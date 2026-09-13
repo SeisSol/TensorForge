@@ -140,11 +140,26 @@ class Tensor:
                     f'Tensor {self}: data has shape {self.data.shape}, '
                     f'tensor is {self.shape}')
 
+        #: A batch-constant array whose numbers the caller passes rather than
+        #: their address (`Residence.ARGUMENT`).  A scalar with that residence
+        #: is passed by value as every scalar is, so it is not one of these.
+        self.passed_by_value = (self.residence is Residence.ARGUMENT
+                                and self.addressing == Addressing.NONE)
         if self.residence is Residence.CODE and not self.has_values():
             # Nothing else can supply them: there is no parameter for the
             # operand and no address to read.
             raise GenerationError(
                 f'Tensor {self} resides in the code but carries no data.')
+        if (self.residence is Residence.ARGUMENT
+                and self.addressing not in (Addressing.NONE,
+                                            Addressing.SCALAR)):
+            # A value is passed once per launch -- a scalar factor, or a
+            # batch-constant array; what varies per batch element can only be
+            # reached through an address.
+            raise GenerationError(
+                f'Tensor {self} is passed as an argument, which holds one datum '
+                f'for every batch element, and it is addressed '
+                f'{self.addressing}.')
 
         # check whether bbox was given correctly
         if any(dimshape < dimsize for dimshape, dimsize in zip(self.shape, self.bbox.sizes())):

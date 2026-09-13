@@ -48,6 +48,11 @@ class HwDecription:
     self.max_block_per_sm = param_table['max_block_per_sm']
     self.vendor = param_table['name']
     self.shmem_banks = param_table['shmem_banks']
+    #: Bytes of parameters one kernel may take, the operands it is passed by
+    #: value (`Residence.ARGUMENT`) included.  A property of the target and its
+    #: runtime rather than of a spelling: CUDA's limit moved with the toolchain
+    #: from Volta on, and a SYCL device reports its own.
+    self.max_argument_size = parseBytes(param_table['max_argument_size'])
     self.model = arch
     self.backend = backend
     #: Whether the lowering is an explicit vector per work-item (`esimd`).

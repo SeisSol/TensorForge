@@ -54,6 +54,9 @@ class DriverOperand:
     addressing: str
     is_scalar: bool = False
     scalar_value: float | None = None
+    #: ``memory``, or ``argument`` for an operand the launcher takes by value
+    #: -- from a host pointer, which it copies into the kernel's argument.
+    residence: str = "memory"
     #: Scalars one batch element occupies, from ``Tensor.storage_volume``.
     #: Equal to ``volume`` for a dense tensor and smaller for a sparse one.
     storage_volume: int = 0
@@ -129,6 +132,8 @@ def collect_operands(generator) -> List[DriverOperand]:
             volume=int(t.get_actual_volume()),
             ctype=ctype(t.datatype),
             addressing=str(t.addressing),
+            residence=("argument" if getattr(t, "passed_by_value", False)
+                       else "memory"),
         ))
     return ops
 
@@ -165,6 +170,10 @@ def launcher_call_expr(generator, ops: List[DriverOperand], *,
         else:
             if op.addressing == "pointer_based":
                 call_args.append(f"d_p_{op.kernel_name}")
+            elif op.residence == "argument":
+                # by value: the launcher copies it out of host memory
+                call_args.append(
+                    f"static_cast<const {op.ctype}*>(h_{op.kernel_name})")
             else:
                 call_args.append(f"d_{op.kernel_name}")
             # The launcher only takes an ``extraOffset`` for STRIDED

@@ -430,6 +430,23 @@ declare('preload_partial',
             '25.6 KB operators against 64 KB on gfx942, and stages none of '
             'them without this.')
 
+declare('preload_roles',
+        default='all',
+        parse=parse_str,
+        doc='Which `Addressing.NONE` operands `preload_globals` stages: `all`; '
+            '`broadcast` -- only those no operation reads along the lead '
+            'index, `B` in `C = A B`; or `lead`, the others.\n'
+            '`lead` is the one for AMD\'s constant space: a broadcast operand '
+            'left in memory is read at one address by every lane, which is a '
+            'scalar load into the register a `v_fma` takes as it is.\n'
+            'Those are a scalar to every product, and staged each element is '
+            'one broadcast read from shared memory.  The operands read along '
+            'the lead are the ones whose staging can cost the block its '
+            'occupancy: on sm_120 staging all of them made `local_flux` 12 % '
+            'faster and the damage kernel, with three 14 kB `kDivM`, 23 % '
+            'slower.  The rest are read from global memory, as '
+            '`preload_partial` leaves them.')
+
 declare('stage_members',
         default=False,
         parse=parse_bool,

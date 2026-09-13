@@ -6,7 +6,7 @@ import enum
 from .abstract_instruction import AbstractInstruction
 from tensorforge.common.context import Context
 from tensorforge.common.helper import get_extra_offset_name, Addressing
-from tensorforge.common.basic_types import GeneralLexicon, DataFlowDirection, StridedAddressing
+from tensorforge.common.basic_types import GeneralLexicon, DataFlowDirection, StridedAddressing, Residence
 from tensorforge.common.exceptions import (GenerationError,
                                            InternalError)
 from tensorforge.backend.pir.core import Effect, Qual
@@ -180,10 +180,28 @@ class GetElementPtr(AbstractInstruction):
 
     `const_mod` is about the pointer and not the pointee: the pipelined form
     advances the binding, so it may not be `*const`.
+
+    A batch-constant operand the kernel only reads is spelled in the constant
+    space (`KernelParam.of_symbol` says why).  Only the spelling: where a
+    backend names no spaces it is the same text, and the IR keeps calling it
+    global, which is what the loads and their ordering care about.
+
+    One passed by value is spelled in no space at all.  Its elements are
+    where the argument is, and that is not always the argument segment: a
+    read at an index the compiler cannot resolve takes the struct's address,
+    and clang then copies it into private memory first.  Cast into the
+    constant space, that private address faulted on gfx1150; generic, the
+    compiler infers whichever space it is.
     """
+    readonly = self._src.obj.direction == DataFlowDirection.SOURCE
+    if getattr(self._src.obj, 'passed_by_value', False):
+      space = None
+    elif readonly and self._src.obj.addressing == Addressing.NONE:
+      space = MemSpace.CONSTANT
+    else:
+      space = MemSpace.GLOBAL
     return self._vm.get_lexic().pointer_type(
-        f'{datatype}', MemSpace.GLOBAL,
-        readonly=self._src.obj.direction == DataFlowDirection.SOURCE,
+        f'{datatype}', space, readonly=readonly,
         restrict=True, const=bool(const_mod))
 
   def _declarator(self, datatype, const_mod: str) -> str:
@@ -420,6 +438,14 @@ class DeclareOperandTable(AbstractInstruction):
     super(DeclareOperandTable, self).__init__(context)
     if not members:
       raise GenerationError('an operand table has at least one member')
+    passed = [m.name for m in members
+              if getattr(getattr(m, 'obj', None), 'passed_by_value', False)]
+    if passed:
+      # A table holds addresses, and these are values: the struct a member is
+      # passed as is not a pointer to select or to store.
+      raise GenerationError(
+          f'operand table {name}: {", ".join(passed)} are passed by value, '
+          f'and a table reaches its members through their addresses')
     self._name = name
     self._members = list(members)
     self._addressing = addressing
