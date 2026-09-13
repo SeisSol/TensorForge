@@ -19,7 +19,7 @@ from tensorforge.backend.section_plan import SectionPlan
 from tensorforge.generators import lanes as lane_config
 from tensorforge.generators.lanes import LaneConfig
 from tensorforge.backend.temporaries import Temporaries
-from tensorforge.backend.symbol import Symbol, SymbolType
+from tensorforge.backend.symbol import Symbol, SymbolType, passed_by_value
 from tensorforge.backend.instructions.abstract_instruction import AbstractInstruction
 from tensorforge.backend.instructions.builders.loader_builder import GlobalLoaderBuilder
 from tensorforge.backend.instructions.builders.multilinear_builder import MultilinearBuilder
@@ -437,6 +437,7 @@ class Generator:
   def register(self):
     self._collect_tmp_matrices()
     self._populate_global_scope()
+    self._embed_constants()
 
   def _set_threadconfig(self):
     # Into the regions as well: the default is a no-op, and only a blockwide
@@ -1278,7 +1279,7 @@ class Generator:
 
   def _preload_admits(self, symbol) -> bool:
     """Whether `preload_globals` may stage this batch-constant operand."""
-    if getattr(symbol.obj, 'passed_by_value', False):
+    if passed_by_value(symbol):
       return False
     roles = self._context.get_user_options().preload_roles
     if roles == 'all':
@@ -1319,6 +1320,54 @@ class Generator:
         if len(getattr(tensor, 'shape', ())) > 0:
           lead.add(id(tensor))
     return seen - lead
+
+  def _embed_constants(self):
+    """Which batch-constant operands the kernel takes by value, with the
+    numbers the description carries (`argument_constants`).
+
+    Broadcast operands with numbers, only read, stored as they are (not
+    prepared), and not the members of a merged run -- a table holds addresses.
+    First fit in declaration order under `max_argument_size`, less an
+    allowance for the kernel's other parameters; the rest stay in memory, as
+    they were.  Decided once, before any instruction asks: the binding's
+    spelling, the arrangement a product takes and the parameter list all read
+    it.  On the symbol rather than the tensor, which another kernel may share
+    and decide otherwise for.
+    """
+    from tensorforge.common.basic_types import DataFlowDirection
+    scope = list(self._scopes.get_global_scope().values())
+    for symbol in scope:
+      symbol.embedded = None
+    context = self._context
+    if not context.get_user_options().argument_constants:
+      return
+    if getattr(context.get_vm().get_lexic(), 'simd_mode', False):
+      return
+    hw = context.get_vm().get_hw_descr()
+    merged = {id(member) for symbol in scope
+              if getattr(symbol.obj, 'is_variant', False)
+              for member in getattr(symbol.obj, 'variant_members', ())}
+    broadcast = self._broadcast_operands()
+    size = lambda obj: (int(obj.storage_volume())
+                        * (obj.datatype or context.fp_type).size())
+    # A pointer and an offset per operand, a count and a mask per section,
+    # and the sections are not built yet: an allowance, generous on purpose.
+    budget = (hw.max_argument_size - 16 * len(scope) - 256
+              - sum(size(s.obj) for s in scope if passed_by_value(s)))
+    for symbol in scope:
+      obj = symbol.obj
+      if (symbol.stype != SymbolType.Batch
+          or obj.addressing != Addressing.NONE
+          or getattr(obj, 'residence', Residence.MEMORY) is not Residence.MEMORY
+          or obj.direction != DataFlowDirection.SOURCE
+          or getattr(obj, 'is_variant', False) or id(obj) in merged
+          or id(obj) not in broadcast):
+        continue
+      values = obj.storage_values()
+      if values is None or size(obj) > budget:
+        continue
+      symbol.embedded = values
+      budget -= size(obj)
 
   def _check_arguments(self, params):
     """Refuse operands passed by value where the kernel cannot take them."""
@@ -2016,7 +2065,8 @@ class Generator:
     kernel whose source named its target would be a different kernel on a
     target it is the same program for (`test_syntax`'s f128 check)."""
 
-    def operand(obj):
+    def operand(symbol):
+      obj = symbol.obj
       box = obj.get_bbox()
       row = dict(name=obj.name, alias=obj.alias,
                  shape=[int(d) for d in obj.shape],
@@ -2030,6 +2080,10 @@ class Generator:
       # key is part of the source every kernel is named after.
       if getattr(obj, 'passed_by_value', False):
         row['residence'] = str(obj.residence)
+      # The kernel takes the description's numbers for it, and the pointer
+      # the caller still passes is not read (`argument_constants`).
+      if getattr(symbol, 'embedded', None) is not None:
+        row['embedded'] = True
       return row
 
     # An operation names its operands rather than restating them: the
@@ -2058,7 +2112,7 @@ class Generator:
     return dict(version=interop.get_version(),
                 fp=self._context.fp_as_str(),
                 launch=self._launch.to_dict() if self._launch else None,
-                operands=[operand(s.obj)
+                operands=[operand(s)
                           for s in self._scopes.get_global_scope().values()],
                 operations=operations,
                 loops=loops)
@@ -2100,7 +2154,7 @@ class Generator:
         # every addressing a `Data` symbol can come from.
         continue
       datatype = self._context.fp_type if symbol.obj.datatype is None else symbol.obj.datatype
-      if getattr(symbol.obj, 'passed_by_value', False):
+      if passed_by_value(symbol):
         # Its numbers, by value: nothing to offset into.
         params.append(KernelParam.value(symbol, datatype))
         continue

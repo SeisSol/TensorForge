@@ -25,6 +25,7 @@ from tensorforge.common.basic_types import Addressing, Datatype, Residence
 from tensorforge.common.context import Context, Options
 from tensorforge.common.exceptions import GenerationError
 from tensorforge.common.matrix.boundingbox import BoundingBox
+from tensorforge.common.matrix.spp import ListSPP
 from tensorforge.common.matrix.tensor import SubTensor, Tensor
 from tensorforge.generators.descriptions import GemmDescr
 from tensorforge.generators.generator import Generator
@@ -226,3 +227,86 @@ class TestPreloadRoles:
     def test_an_unknown_role_is_refused(self):
         with pytest.raises(GenerationError, match='preload_roles'):
             self.kernel('b')
+
+
+def constant(alias, size=N, spp=None):
+    """A batch-constant operand in memory that carries its numbers."""
+    values = np.arange(1, size * size + 1, dtype=np.float64).reshape(size, size)
+    if spp is not None:
+        values = np.where(np.vectorize(lambda i, j: spp.is_nz((i, j)))(
+            *np.indices((size, size))), values, 0.0)
+    return Tensor([size, size], Addressing.NONE,
+                  BoundingBox([0, 0], [size, size]), alias=alias,
+                  datatype=Datatype.F32, spp=spp, data=values)
+
+
+class TestEmbedded:
+    """`argument_constants`: a broadcast operand whose numbers the description
+    carries is passed by value -- implicitly, the launcher keeps taking the
+    pointer and passes the numbers instead."""
+
+    def gemm(self, backend='cuda', arch='sm_86', role='B', size=N, spp=None,
+             **options):
+        k = constant('K', size, spp)
+        x, c = tensor('X', size=size), tensor('C', size=size)
+        first, second = (x, k) if role == 'B' else (k, x)
+        generator = generated([GemmDescr(False, False, SubTensor(first),
+                                         SubTensor(second), SubTensor(c),
+                                         alpha=1.0, beta=0.0)],
+                              backend, arch, **options)
+        return generator, k
+
+    @staticmethod
+    def embedded(generator, k):
+        return (f'ValueArray<float, {k.storage_volume()}> {k.name}'
+                in generator.get_kernel().split('{')[0])
+
+    @staticmethod
+    def numbers(generator, k):
+        found = re.search(rf'static const tensorforge::ValueArray<float, \d+> '
+                          rf'{k.name}Arg\{{\{{([^}}]*)\}}\}}; \(void\){k.name};',
+                          generator.get_launcher())
+        return found.group(1).split(', ') if found else None
+
+    def test_nvidia_passes_the_numbers(self):
+        generator, k = self.gemm()
+        assert self.embedded(generator, k)
+        assert re.search(rf'const float \*{k.name}\b', generator.get_header())
+
+    def test_the_numbers_are_in_storage_order(self):
+        generator, k = self.gemm()
+        want = [Datatype.F32.literal(v) for v in k.data.flatten(order='F')]
+        assert self.numbers(generator, k) == want
+
+    def test_a_sparse_operand_passes_its_entries_in_their_order(self):
+        entries = [(i, j) for j in range(N) for i in range(N)
+                   if abs(i - j) <= 1][::-1]
+        generator, k = self.gemm(spp=ListSPP(entries, [N, N]))
+        assert self.numbers(generator, k) == [
+            Datatype.F32.literal(k.data[e]) for e in entries]
+
+    def test_a_lead_operand_stays_in_memory(self):
+        generator, k = self.gemm(role='A')
+        assert not self.embedded(generator, k)
+
+    def test_amd_reads_it_out_of_memory_through_the_constant_space(self):
+        generator, k = self.gemm('hip', 'gfx942')
+        assert not self.embedded(generator, k)
+        assert f'ConstantMemspace> {k.name}' in generator.get_kernel()
+
+    def test_switched_off_it_stays_in_memory(self):
+        generator, k = self.gemm(argument_constants=False)
+        assert not self.embedded(generator, k)
+
+    def test_what_does_not_fit_stays_in_memory(self):
+        """6.4 kB: over sm_86's 4 kB, so memory and no error; sm_120 takes it."""
+        generator, k = self.gemm(size=40)
+        assert not self.embedded(generator, k)
+        generator, k = self.gemm(arch='sm_120', size=40)
+        assert self.embedded(generator, k)
+
+    def test_the_meta_says_so(self):
+        generator, k = self.gemm()
+        rows = {row['alias']: row for row in meta(generator)['operands']}
+        assert rows['K'].get('embedded') is True
+        assert 'embedded' not in rows['X']

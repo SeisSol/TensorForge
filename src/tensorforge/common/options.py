@@ -430,6 +430,24 @@ declare('preload_partial',
             '25.6 KB operators against 64 KB on gfx942, and stages none of '
             'them without this.')
 
+declare('argument_constants',
+        rule=lambda hw: hw.vendor in ('nvidia',),
+        parse=parse_bool,
+        doc='Pass a batch-constant operand every product reads as a scalar -- '
+            '`B` in `C = A B` -- by value, with the numbers the description '
+            'carries for it, instead of reading the buffer the caller passes.\n'
+            'The numbers then live where kernel arguments do: the constant '
+            'bank on NVIDIA, which an FFMA takes an operand from (sm_120: '
+            'LDCU into a uniform register, and no LDG).  The interface does '
+            'not change -- the launcher still takes the pointer and does not '
+            'read it -- so this is only right where the description\'s numbers '
+            'are the buffer\'s, as they are for a constant matrix.  What does '
+            'not fit `max_argument_size` stays in memory, first fit in '
+            'declaration order.\n'
+            'NVIDIA only by default: on AMD the same read out of device memory '
+            'through the constant space is a scalar load already and measured '
+            'as fast or faster; Intel is unmeasured.')
+
 declare('preload_roles',
         default='all',
         parse=parse_str,

@@ -136,7 +136,8 @@ class KernelParam:
     def value(cls, symbol, datatype) -> 'ValueParam':
         """The parameter an operand passed by value is (`Residence.ARGUMENT`)."""
         return ValueParam(symbol.name, datatype, MemSpace.PARAM, readonly=True,
-                          count=int(symbol.obj.storage_volume()))
+                          count=int(symbol.obj.storage_volume()),
+                          values=getattr(symbol, 'embedded', None))
 
     @classmethod
     def size(cls, name: str) -> 'KernelParam':
@@ -195,6 +196,10 @@ class ValueParam(KernelParam):
 
     #: Elements passed: the operand's stored volume.
     count: int = 0
+    #: The numbers themselves, where the generator took them from the
+    #: description (`argument_constants`): the launcher passes those, and the
+    #: caller's pointer -- the interface does not change -- is not read.
+    values: Optional[tuple] = None
 
     def type_name(self) -> str:
         return f'tensorforge::ValueArray<{self.datatype}, {self.count}>'
@@ -212,6 +217,10 @@ class ValueParam(KernelParam):
         return f'{storage}const {self.type_name()} {self.name}{tail}'
 
     def binding(self, lexic) -> Optional[str]:
+        if self.values is not None:
+            numbers = ', '.join(self.datatype.literal(v) for v in self.values)
+            return (f'static const {self.type_name()} {self.name}Arg'
+                    f'{{{{{numbers}}}}}; (void){self.name};')
         return (f'const auto {self.name}Arg = '
                 f'{self.type_name()}::from({self.name});')
 

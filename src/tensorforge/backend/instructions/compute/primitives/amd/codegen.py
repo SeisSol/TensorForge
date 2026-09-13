@@ -863,6 +863,16 @@ def matmuldpp(writer, start, C, A, B, M, N, K, kx, threads, dtype, sparse,
         # before the first `for j`, so falling through would emit a full set
         # of reads with no consumer.
         return True
+    if K == 1:
+        # One contraction row -- an outer product, `t[i,j,l] = A[i,j] v[l]`.
+        # There is nothing to spread over the lanes: `B(0, j)` is read at the
+        # same address by all of them, and the row share only repeats it.  It
+        # was also wrong: that uniform value lives in an SGPR once its operand
+        # is in the constant space, LLVM copies it into a VGPR only under the
+        # lane mask where it is used, and the DPP in the inline assembly reads
+        # lanes the copy never reached (`lead_window_spans_two_blocks`,
+        # gfx1150, 18 % off).  The nest multiplies by the scalar.
+        return False
     _refuse_multiwave(threads, ctx)
     if width > 1:
         return _matmuldpp_wide(writer, start, stop, C, A, B, M, K, kx,

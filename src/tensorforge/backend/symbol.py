@@ -2928,3 +2928,16 @@ class SymbolView:
 
   def __repr__(self):
     return self.__str__()
+
+
+def passed_by_value(symbol) -> bool:
+  """Whether the kernel takes this operand's numbers rather than its address.
+
+  Either the caller passes them (`Residence.ARGUMENT`), or the generator took
+  them from the description (`argument_constants`) -- which it decides per
+  kernel, so that is the symbol's `embedded` and not the tensor's, which
+  several kernels may share.
+  """
+  return (getattr(symbol, 'embedded', None) is not None
+          or bool(getattr(getattr(symbol, 'obj', None), 'passed_by_value',
+                          False)))

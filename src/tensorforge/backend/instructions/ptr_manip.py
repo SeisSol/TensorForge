@@ -11,7 +11,7 @@ from tensorforge.common.exceptions import (GenerationError,
                                            InternalError)
 from tensorforge.backend.pir.core import Effect, Qual
 from tensorforge.backend.pir.core import MemSpace
-from tensorforge.backend.symbol import SymbolType
+from tensorforge.backend.symbol import SymbolType, passed_by_value
 
 class GetElementPtr(AbstractInstruction):
   def __init__(self,
@@ -194,7 +194,7 @@ class GetElementPtr(AbstractInstruction):
     compiler infers whichever space it is.
     """
     readonly = self._src.obj.direction == DataFlowDirection.SOURCE
-    if getattr(self._src.obj, 'passed_by_value', False):
+    if passed_by_value(self._src):
       space = None
     elif readonly and self._src.obj.addressing == Addressing.NONE:
       space = MemSpace.CONSTANT
@@ -438,8 +438,7 @@ class DeclareOperandTable(AbstractInstruction):
     super(DeclareOperandTable, self).__init__(context)
     if not members:
       raise GenerationError('an operand table has at least one member')
-    passed = [m.name for m in members
-              if getattr(getattr(m, 'obj', None), 'passed_by_value', False)]
+    passed = [m.name for m in members if passed_by_value(m)]
     if passed:
       # A table holds addresses, and these are values: the struct a member is
       # passed as is not a pointer to select or to store.

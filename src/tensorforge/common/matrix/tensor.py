@@ -335,6 +335,32 @@ class Tensor:
                 f'the pattern and the index map disagree')
         return tuple(slots)
 
+    def storage_values(self):
+        """The numbers the tensor carries, slot by slot as it is stored.
+
+        What a caller puts into its buffer, in the order the kernel addresses
+        it: the bounding box in F-order where the tensor is stored dense, the
+        order of `storage_map` where not.  `None` without numbers, and for an
+        operand stored prepared (`storage_parts`, a storage order), whose
+        slots hold something other than a cell's value.
+        """
+        if (not self.has_values() or self.storage_parts != 1
+                or self._storage_order is not None):
+            return None
+        box = tuple(int(extent) for extent in self.get_actual_shape())
+        lower = tuple(int(bound) for bound in self.bbox.lower())
+        smap = self.storage_map()
+        cells = range(int(np.prod(box))) if smap is None else smap
+        out = []
+        for cell in cells:
+            if cell < 0:
+                out.append(0.0)
+                continue
+            local = np.unravel_index(int(cell), box, order='F')
+            out.append(float(self.data[tuple(lo + c for lo, c
+                                              in zip(lower, local))]))
+        return tuple(out)
+
     def storage_runs(self):
         """The stored cells as `(slot, cell, length)` runs, or `None`.
 

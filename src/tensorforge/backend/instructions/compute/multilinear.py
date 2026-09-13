@@ -5,7 +5,7 @@ from typing import Union
 import math
 from . import ComputeInstruction
 from tensorforge.common.matrix.boundingbox import BoundingBox
-from tensorforge.backend.symbol import slots_for, VecIndex, SymbolType, add_offset, Symbol, SymbolView, DataView, Loop, LeadLoop, write_loops, LeadIndex, LinearizedLoop, Immediate
+from tensorforge.backend.symbol import slots_for, VecIndex, SymbolType, add_offset, Symbol, SymbolView, DataView, Loop, LeadLoop, write_loops, LeadIndex, LinearizedLoop, Immediate, passed_by_value
 from tensorforge.common.exceptions import InternalError, GenerationError
 from tensorforge.backend.writer import Writer
 from tensorforge.common.context import Context
@@ -1011,7 +1011,7 @@ class MultilinearInstruction(ComputeInstruction):
         # bank or into an SGPR -- which is what the nest does with it.  Spread,
         # its index is the lane's, and the struct it is passed as is copied
         # into private memory to be indexed at all.
-        if getattr(self._ops[1].symbol.obj, 'passed_by_value', False):
+        if passed_by_value(self._ops[1].symbol):
             return whole(Strategy.GENERIC, n)
         shape = self._shape()
         chosen = choose_strategy(
