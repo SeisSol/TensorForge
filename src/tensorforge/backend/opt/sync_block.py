@@ -10,6 +10,19 @@ from .abstract import AbstractTransformer, Context, AbstractInstruction
 from .mem_region_allocation import Region
 
 
+def _one_lane_stores(symbol) -> bool:
+  """Whether a computation's store of `symbol` is one lane's.
+
+  A destination without axes has no lane axis to spread over: every lane holds
+  the value and the owner alone writes it to memory.  In a register there is
+  no store at all, and nothing to fence.
+  """
+  obj = getattr(symbol, 'obj', None)
+  rank = len(getattr(obj, 'shape', ()) or ())
+  return rank == 0 and symbol.stype in (SymbolType.Global, SymbolType.Batch,
+                                        SymbolType.SharedMem)
+
+
 class SyncThreadsOpt(AbstractTransformer):
   def __init__(self,
                context: Context,
@@ -46,20 +59,47 @@ class SyncThreadsOpt(AbstractTransformer):
     # per iteration to every kernel.
     carried = self._scan_before_use([])[1] if self._loop_body else []
     selected, _ = self._scan_before_use(carried)
-    self._insert_sync_instrs(selected)
+    for instr, handoff in selected:
+      index = self._instrs.index(instr)
+      self._instrs.insert(index, SyncThreads(self._context, self._num_threads,
+                                             handoff=handoff))
 
   def _scan_before_use(self, writes):
-    """`(computes needing a barrier before them, writes unfenced at the end)`."""
+    """`(computes needing a barrier before them, writes unfenced at the end)`.
+
+    Two kinds of write are fenced before whatever reads them next: a transfer
+    into shared memory, and a value without axes a computation stores in
+    memory -- one number, stored by one lane (the owner) and read back by all
+    of them.  The second went unfenced, and with it the guard over a condition
+    the kernel had just reduced (`X1 = all(B >= C)`, then `if (X1)`): the
+    lanes that read before the owner's store took the other branch, and one
+    element mixed both.  A guard reads its condition through `uses`, not as an
+    operand, so it is asked that way.
+
+    Both lists pair each entry with whether a one-lane store is what it
+    fences: the barrier then also owes the compiler a fence where the
+    rendezvous costs no instruction (`Lexic.handoff_fence`).
+    """
     selected = []
     writes = list(writes)
     for instr in self._instrs:
       if isinstance(instr, AbstractShrMemWrite):
-        writes.append(instr.get_dest())
+        writes.append((instr.get_dest(), False))
 
       if isinstance(instr, ComputeInstruction):
-        if any(op in writes for op in instr.get_operands()):
-          selected.append(instr)
-          writes = []
+        reads = instr.get_operands()
+      elif hasattr(instr, 'region') and hasattr(instr, 'uses'):
+        reads = instr.uses()
+      else:
+        reads = ()
+      hits = [handoff for sym, handoff in writes if sym in reads]
+      if hits:
+        selected.append((instr, any(hits)))
+        writes = []
+
+      if isinstance(instr, ComputeInstruction):
+        writes.extend((sym, True) for sym in instr.defs()
+                      if _one_lane_stores(sym))
     return selected, writes
 
   def _insert_sync_after_use(self):

@@ -1374,6 +1374,12 @@ class Generator:
     scope = list(self._scopes.get_global_scope().values())
     for symbol in scope:
       symbol.embedded = None
+      # Undone whole, not only flagged: asked a second time, a symbol left a
+      # `Data` one without the flag fell through the filter below as not a
+      # batch operand -- the launcher and the call site then disagreed about
+      # whether it is a parameter, which is a signature mismatch in the caller.
+      if getattr(symbol, 'inlined', False):
+        symbol.stype = SymbolType.Batch
       symbol.inlined = False
     context = self._context
     options = context.get_user_options()
@@ -2343,8 +2349,12 @@ class Generator:
     # add tensors
     symbols = list(self._scopes.get_global_scope().values())
     for symbol in symbols:
-      if symbol.stype == SymbolType.Data:
-        # nothing is passed for it, so the call site names nothing either
+      if symbol.stype == SymbolType.Data and not getattr(symbol, 'inlined',
+                                                         False):
+        # nothing is passed for it, so the call site names nothing either --
+        # unless the generator inlined it itself (`inline_constants`): the
+        # launcher keeps that pointer (`HostOnlyParam`), and a call without
+        # it is one argument short of the signature
         continue
       if symbol.obj.alias in mat_name_map:
         args.append(mat_name_map[symbol.obj.alias])

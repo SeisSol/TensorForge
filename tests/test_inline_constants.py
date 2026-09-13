@@ -157,3 +157,22 @@ def test_the_harness_still_passes_the_buffer():
     from harness.driver_emit import collect_operands
     generator, (_, k, _) = product()
     assert k.name in [op.kernel_name for op in collect_operands(generator)]
+
+
+@pytest.mark.parametrize('options', [{}, {'inline_constants': 0},
+                                     {'inline_constants': 0,
+                                      'argument_constants': False}],
+                         ids=['literals', 'by-value', 'memory'])
+def test_the_call_yateto_is_given_matches_the_launcher(options):
+    """The yateto frontend writes the call through `generate_call_site`,
+    which skipped every `Data` symbol -- an inlined one included, whose
+    pointer the launcher still takes: one argument short of the signature."""
+    generator, _ = product(**options)
+    generator.register()
+    names = {s.obj.alias: s.obj.alias
+             for s in generator._scopes.get_global_scope().values()}
+    call = generator.generate_call_site(names, {n: '0' for n in names})
+    arguments = call.split('(', 1)[1].rsplit(')', 1)[0].split(', ')
+    prototype = generator.get_header().split(
+        f'launcher_{generator.get_base_name()}(')[1].split(')')[0]
+    assert len(arguments) == len(prototype.split(', '))

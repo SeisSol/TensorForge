@@ -158,6 +158,21 @@ class Lexic(ABC):
     """
     return ''
 
+  def handoff_fence(self):
+    """What orders one lane's store before the other lanes' load, where the
+    rendezvous itself is spelled as nothing -- or None where it is not.
+
+    A barrier that costs nothing because the lanes are in lockstep is still no
+    barrier to the compiler.  One lane storing a value and every lane reading
+    it back from the same address is, seen by the compiler, one thread storing
+    under a condition and then loading: it may forward the stored value where
+    the store ran and hoist the load above it for the rest, which then read
+    what was there before.  Where `sync_simd` already is an instruction
+    (`__syncwarp`, a sub-group barrier), it orders memory as well, and nothing
+    more is needed.
+    """
+    return None
+
   def has_sync_mult(self, num_threads: int, hw) -> bool:
     """Whether `sync_mult` rendezvouses fewer threads than the whole block.
 

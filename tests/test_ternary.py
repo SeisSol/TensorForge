@@ -16,6 +16,7 @@ import contextlib
 import io
 import json
 import pathlib
+import re
 
 import numpy as np
 import pytest
@@ -154,7 +155,8 @@ class TestSelect:
 FIXTURE = pathlib.Path(__file__).parent / 'fixtures' / 'kernels' / 'ternary.json'
 RECORDED = ['ternary_rank0', 'ternary_tensor', 'ternary_written',
             'ternary_literal', 'ternary_rank0_t', 'ternary_tensor_t',
-            'ternary_written_t', 'ternary_literal_t']
+            'ternary_written_t', 'ternary_literal_t', 'ternary_rank0_s',
+            'ternary_written_s', 'ternary_written_any']
 
 
 def recorded(name, strided=False):
@@ -224,3 +226,45 @@ class TestRecorded:
         got = np.array([[mem.get((a.name, i + j * N), np.nan)
                          for j in range(N)] for i in range(N)])
         assert np.allclose(got, want)
+
+
+@pytest.mark.parametrize('backend,arch,fence', [
+    ('cuda', 'sm_86', '__syncwarp'),
+    ('hip', 'gfx1150', '__builtin_amdgcn_fence'),
+    ('hip', 'gfx942', '__builtin_amdgcn_fence')])
+def test_the_guard_waits_for_the_owner_lane_to_store_its_condition(
+        backend, arch, fence):
+    """`X1 = all(B >= C^T)` is one number: the owner lane stores it, and the
+    guard over it is read by every lane.  With nothing in between, sm_120
+    took both branches in one element, and so did gfx1150 -- where the
+    rendezvous of a wave is no instruction at all, and LLVM hoisted the
+    other lanes' load above the owner's store until a fence stood there."""
+    descrs = recorded('ternary_written_t')
+    generator = Generator(descrs, Context(arch=arch, backend=backend,
+                                          fp_type=Datatype.F32))
+    with contextlib.redirect_stdout(io.StringIO()):
+        generator.generate()
+    lines = [line.strip() for line in generator.get_kernel().splitlines()]
+    store = next(i for i, line in enumerate(lines)
+                 if re.match(r'glb_\w+\[0\] = v\w+_red;', line))
+    load = next(i for i, line in enumerate(lines)
+                if i > store and re.match(r'bool v\w+ = glb_\w+\[0\];', line))
+    assert any(fence in line for line in lines[store:load])
+
+
+@pytest.mark.parametrize('backend,arch', [('cuda', 'sm_86'), ('hip', 'gfx1150')])
+def test_a_boolean_staged_in_shared_memory_is_a_window_of_its_own_type(
+        backend, arch):
+    """The comparison `B >= C^T` is staged in the arena, which is an array of
+    the kernel's float: `bool *s = &arena[0]` did not compile anywhere; the
+    window is a reinterpret of the arena's address."""
+    descrs = recorded('ternary_tensor_t')
+    generator = Generator(descrs, Context(arch=arch, backend=backend,
+                                          fp_type=Datatype.F32))
+    with contextlib.redirect_stdout(io.StringIO()):
+        generator.generate()
+    kernel = generator.get_kernel()
+    bools = [line for line in kernel.splitlines()
+             if line.strip().startswith('bool') and 'ShrMem' in line]
+    assert bools
+    assert all('reinterpret_cast<bool*>' in line for line in bools)

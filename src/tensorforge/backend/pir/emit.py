@@ -694,6 +694,8 @@ class Emitter:
         if op == Op.BARRIER:
             sync_instr = self._sync(s.attr('participants'), s.attr('threads'),
                                     s.attr('wave'))
+            if not sync_instr and s.attr('handoff') and self._lexic() is not None:
+                sync_instr = self._lexic().handoff_fence()
             if sync_instr is not None:
                 w(sync_instr)
             return
@@ -713,8 +715,20 @@ class Emitter:
                 extern = s.attr('extern')
                 if extern is not None:
                     self.bind(v, extern)
-                w(f'{self.ctype(t, v)} {self.name(v)} = '
-                  f'{self.window_expr(arena, off)};')
+                window = self.window_expr(arena, off)
+                # The arena is an array of the kernel's floating-point type; a
+                # buffer of another element -- the boolean a comparison
+                # writes, an integer -- is a window of that type into it, and
+                # `&arena[off]` is still a pointer to the arena's.  Where the
+                # window is an offset rather than a pointer (explicit SIMD),
+                # there is no pointer to convert.  The room reserved is in
+                # arena elements, so one no larger than those fits.
+                fp = getattr(self.context, 'fp_type', None)
+                elem = getattr(t.elem, 'base', t.elem)
+                if (fp is not None and window.startswith('&')
+                        and elem != fp):
+                    window = f'reinterpret_cast<{elem.ctype()}*>({window})'
+                w(f'{self.ctype(t, v)} {self.name(v)} = {window};')
                 return
             qual = {MemSpace.CONSTANT: 'const '}.get(t.space, '')
             extern = s.attr('extern')

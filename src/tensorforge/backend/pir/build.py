@@ -1355,7 +1355,8 @@ class IRBuilder:
         return MemSpace.UNKNOWN if space is None else space
 
     def barrier(self, participants: Union[str, Participants] = Participants.BLOCK,
-                threads: Optional[int] = None) -> Stmt:
+                threads: Optional[int] = None,
+                handoff: bool = False) -> Stmt:
         """A rendezvous of the threads ``participants`` names.
 
         Two things travel with the statement, and they answer different
@@ -1376,6 +1377,11 @@ class IRBuilder:
         needs -- every one of them counts, in threads, waves or sub-groups
         depending on the target, which is why the count and not a pre-divided
         number is what travels.
+
+        ``handoff`` says the barrier carries one lane's store to the others'
+        loads of the same address -- where the rendezvous is spelled as
+        nothing, the emitter then still owes the compiler a fence
+        (`Lexic.handoff_fence`).
         """
         who = _as_participants(participants)
         wave = 1
@@ -1386,6 +1392,8 @@ class IRBuilder:
         attrs = (('scope', level), ('participants', who), ('wave', wave))
         if threads is not None:
             attrs += (('threads', int(threads)),)
+        if handoff:
+            attrs += (('handoff', True),)
         return self._emit_op(Op.BARRIER, (), (), pure=False, movable=False,
                              effect=Effect.BARRIER, attrs=attrs)
 

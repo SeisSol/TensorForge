@@ -32,6 +32,10 @@ _DTYPE_MAP = {
     Datatype.F32: np.float32,
     Datatype.F64: np.float64,
     Datatype.F128: np.float128,
+    # conditions and comparisons (yateto's `where`, guards) and integer data
+    Datatype.BOOL: np.bool_,
+    Datatype.I32: np.int32,
+    Datatype.I64: np.int64,
 }
 
 # maintain a different set of datatypes for export/import
@@ -41,6 +45,9 @@ _DTYPE_EXPORT_MAP = {
     Datatype.F32: np.float32,
     Datatype.F64: np.float64,
     Datatype.F128: np.float128,#QuadPrecDType(),
+    Datatype.BOOL: np.bool_,
+    Datatype.I32: np.int32,
+    Datatype.I64: np.int64,
 }
 
 _CTYPE_MAP = {
@@ -48,6 +55,9 @@ _CTYPE_MAP = {
     Datatype.F32: "float",
     Datatype.F64: "double",
     Datatype.F128: "__float128",
+    Datatype.BOOL: "bool",
+    Datatype.I32: "int32_t",
+    Datatype.I64: "int64_t",
 }
 
 def np_dtype(dt: Datatype) -> np.dtype:

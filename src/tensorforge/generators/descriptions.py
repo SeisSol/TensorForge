@@ -30,6 +30,13 @@ class GuardLiteral:
     self.tensor = tensor
     self.version = version
     self.negated = negated
+    # A condition is read, whether or not an operation also reads it: a
+    # tensor only a guard names had no direction, so its parameter came out
+    # writable where every other operand the kernel only reads is `const`.
+    # Written as well elsewhere in the kernel, it becomes SOURCESINK.
+    underlying = getattr(tensor, 'tensor', tensor)
+    if hasattr(underlying, 'set_data_flow_direction'):
+      underlying.set_data_flow_direction(DataFlowDirection.SOURCE)
 
   def key(self):
     return (id(getattr(self.tensor, 'tensor', self.tensor)),

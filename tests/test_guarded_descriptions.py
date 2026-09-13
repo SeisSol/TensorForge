@@ -215,7 +215,7 @@ def test_a_descriptor_nobody_builds_stops_the_generator():
         def __str__(self):
             return "an operation nothing builds"
 
-    with pytest.raises(InternalError, match="no builder"):
+    with pytest.raises(InternalError, match="no registered builder"):
         _generate([Unknown()])
 
 
@@ -224,7 +224,10 @@ def test_a_descriptor_nobody_builds_stops_the_generator():
 # ----------------------------------------------------------------------
 
 def _tensor(name, shape):
-    return dict(name=name, addressing="n&+o&", datatype="f64",
+    # `residence` is part of interface 7, which every yateto that sends it
+    # states; a description without it is refused before a guard is read
+    return dict(name=name, addressing="n&+o&", residence="memory",
+                datatype="f64",
                 storage=dict(shape=list(shape), type="bbox",
                              start=[0] * len(shape), sizes=list(shape)),
                 values=None, alignment=64,
@@ -242,7 +245,8 @@ def _matmul_description():
     return dict(
         version=6,
         tensors=[_tensor(n, [8, 8]) for n in ("A", "B", "C")] + [
-            dict(name="_scalar0", addressing="", datatype="f64",
+            dict(name="_scalar0", addressing="", residence="argument",
+                 datatype="f64",
                  storage=dict(shape=[], type="full"), alignment=0,
                  values=dict(kind="entries", data=[[[], 1.0]]),
                  flags=dict(temporary=False, constant=True))],

@@ -8,9 +8,12 @@ from tensorforge.backend.pir.core import Participants, Uniformity
 class SyncThreads(AbstractInstruction):
   """A rendezvous of the threads of one multiplication."""
 
-  def __init__(self, context: Context, num_threads_per_mult):
+  def __init__(self, context: Context, num_threads_per_mult, handoff=False):
     super().__init__(context)
     self._num_threads = num_threads_per_mult
+    # Whether the barrier carries one lane's store to every lane's load of the
+    # same address -- see `Lexic.handoff_fence`.
+    self._handoff = handoff
     self._is_ready = True
 
   def _wave(self) -> int:
@@ -61,7 +64,8 @@ class SyncThreads(AbstractInstruction):
     return ()
 
   def gen_ir(self, writer):
-    writer.barrier(self.participants(), threads=self._num_threads)
+    extra = {'handoff': True} if self._handoff else {}
+    writer.barrier(self.participants(), threads=self._num_threads, **extra)
 
   def __str__(self) -> str:
     return f'{self.participants().value}({self._num_threads})'

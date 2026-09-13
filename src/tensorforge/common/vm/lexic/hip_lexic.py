@@ -191,6 +191,14 @@ class HipLexic(CudaLexic):
     # counts is how many waves have to arrive.
     return self.sync_block()
 
+  def handoff_fence(self):
+    """A fence at wavefront scope: no instruction on any AMD target (the
+    memory model orders a wave's own accesses), but a statement LLVM will not
+    move a load across.  Without it, `X1 = all(B >= C)` stored by the owner
+    lane and read back by the guard read the old `X1` in the other lanes on
+    gfx1150 -- one element in a thousand took both branches."""
+    return '__builtin_amdgcn_fence(__ATOMIC_ACQ_REL, "wavefront");'
+
   def get_sub_group_id(self, sub_group_size):
     return f'{self.thread_idx_x} % {sub_group_size}'
 

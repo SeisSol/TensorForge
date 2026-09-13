@@ -76,6 +76,26 @@ class ReductionInstruction(ComputeInstruction):
 
     # -- iteration space ------------------------------------------------- #
 
+    @property
+    def _dtype(self):
+        """What the reduction runs in: its operand's datatype.
+
+        It was the kernel's floating-point type throughout -- accumulator,
+        neutral element, combine and exchange -- so `all(B >= C)`, an `And`
+        over booleans, instantiated `ReductionOperation<float, And>`, whose
+        `&&` does not exist for `float`: no target compiled it.  The kernel's
+        type is only the answer where the operand states none.
+        """
+        dtype = (getattr(self._op.symbol.obj, 'datatype', None)
+                 or self._context.fp_type)
+        # Narrower than a register, a value is widened for the exchange: the
+        # cross-lane moves are defined in whole 32-bit words (`hip.h` asserts
+        # it, and gfx1150 refused `all` over booleans), and 0/1 in an int is
+        # what `&`, `|` and `^` fold correctly.  The store narrows it again.
+        if dtype in (Datatype.BOOL, Datatype.I8, Datatype.I16):
+            return Datatype.I32
+        return dtype
+
     def _kept(self) -> List[int]:
         rank = self._op.bbox.rank()
         return [i for i in range(rank) if i not in self._dims]
@@ -278,7 +298,7 @@ class ReductionInstruction(ComputeInstruction):
         """
         from tensorforge.backend.pir.core import BOOL, ScalarType
 
-        acc_type = ScalarType(self._context.fp_type)
+        acc_type = ScalarType(self._dtype)
         extent = self._op.bbox.size(src_lead)
         rest = [d for d in self._dims if d != src_lead]
 
@@ -375,7 +395,7 @@ class ReductionInstruction(ComputeInstruction):
                 raise InternalError(
                     f'reduction: a butterfly over {width} lanes; it pairs '
                     f'lanes by their bits, which needs a power of two')
-            fp = ScalarType(self._context.fp_type)
+            fp = ScalarType(self._dtype)
             acc, mask = partial, 1
             while mask < width:
                 other = writer.rawexpr(lexic.exchange_xor('{0}', mask), acc,
@@ -385,9 +405,9 @@ class ReductionInstruction(ComputeInstruction):
                 mask <<= 1
             return acc
         text = lexic.reduction('{0}', self._operation.operation(),
-                               self._context.fp_type, width, subblock=1)
+                               self._dtype, width, subblock=1)
         return writer.rawexpr(text, partial,
-                              type_=ScalarType(self._context.fp_type),
+                              type_=ScalarType(self._dtype),
                               hint='red', pure=True, movable=False)
 
     def _body(self, writer: Writer, kept: Sequence[int]):
@@ -426,7 +446,7 @@ class ReductionInstruction(ComputeInstruction):
 
         axis = axes[depth]
         lo, hi = 0, self._op.bbox.size(axis)
-        acc_type = ScalarType(self._context.fp_type)
+        acc_type = ScalarType(self._dtype)
 
         if lo >= hi:
             # An empty contraction is the neutral element by definition.  It
@@ -444,7 +464,7 @@ class ReductionInstruction(ComputeInstruction):
         return loop.result
 
     def _neutral(self):
-        """The operator's identity, as a literal of the kernel's dtype.
+        """The operator's identity, as a literal of the reduction's dtype.
 
         The operator answers per type, so the integer case no longer needs
         rejecting here: `min` over `I32` starts at `INT32_MAX`, not at an
@@ -454,7 +474,7 @@ class ReductionInstruction(ComputeInstruction):
         # `literal` itself on a CONST's value.  Formatting here too worked by
         # accident for the infinities, since `float('-INFINITY')` parses, and
         # not at all for `0.0f`, which does not.
-        return self._operation.neutral(self._context.fp_type)
+        return self._operation.neutral(self._dtype)
 
     def _combine(self, writer: Writer, acc, value):
         from tensorforge.backend.pir.core import ScalarType
@@ -463,7 +483,7 @@ class ReductionInstruction(ComputeInstruction):
             raise InternalError(
                 f'reduction: {self._operation} has no pseudo-IR op to combine '
                 f'with')
-        return writer.op(irop, ScalarType(self._context.fp_type), acc, value,
+        return writer.op(irop, ScalarType(self._dtype), acc, value,
                          hint='r', pure=True)
 
     def _load(self, writer: Writer, index: dict):
