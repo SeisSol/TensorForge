@@ -191,6 +191,16 @@ class TestRecorded:
         assert hoisted[0].condition[0].tensor.tensor \
             is hoisted[1].condition[0].tensor.tensor
 
+    def test_a_factor_is_an_operand_of_the_multilinear_it_scales(self):
+        """`2.0 * C^T` as a branch: yateto states the 2.0 in `linear.alpha`
+        and nowhere else, and the reader used to drop it -- the branch
+        computed `C^T`, and so did every scaled contraction."""
+        scale = recorded('ternary_rank0_s')[0]
+        assert len(scale.ops) == 2
+        assert scale.target[1] == [] and scale.permute[1] == []
+        kernel = generated(recorded('ternary_rank0_s')).get_kernel()
+        assert '2.0' in kernel
+
     def test_a_branch_that_stores_nothing_is_the_number_zero(self):
         select = recorded('ternary_literal')[-1]
         assert select.op is Operation.SELECT

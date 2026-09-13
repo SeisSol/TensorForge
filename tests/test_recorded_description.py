@@ -148,13 +148,10 @@ def test_replaying_it_twice_gives_the_same_thing(description):
 #: entry then has to go, which is the point at which the gap is closed. Each
 #: capture stops at the first kernel that cannot be built, so the kernels
 #: before it in the same file are ones that can.
-STOPS_AT = {
-    "sparse_layouts": "LeadIndex",
-    "index_permutations": "not in shared mem",
-    "rings": "shape-changing operation is not elementwise",
-    "elementwise": "accumulates onto its destination",
-    "guards": "runs under a guard",
-    "plasticity": "runs under a guard",
+STOPS_AT: dict = {
+    # Empty since 2026-09-13: `sparse_layouts` (a sparse lead dimension under
+    # a slot loop), `index_permutations`, `rings`, `elementwise`, `guards`
+    # and `plasticity` all build.
 }
 
 
@@ -186,3 +183,37 @@ def test_a_capture_builds_or_stops_where_it_is_recorded_as_stopping(path):
         f"{path.stem} is recorded as stopping at {STOPS_AT[path.stem]!r}, "
         f"but every kernel in it builds -- remove the entry")
     assert any(STOPS_AT[path.stem] in reason for reason in reasons), reasons
+
+
+@pytest.mark.parametrize("backend,arch", [("cuda", "sm_86"), ("cuda", "sm_120"),
+                                          ("hip", "gfx942"), ("hip", "gfx1150")])
+def test_a_sparse_vector_broadcast_fills_its_stored_rows(backend, arch):
+    """`C_ab = A_a` over an `A` that stores rows 0 and 3 only.
+
+    It used to stop the build (a sparse lead dimension under a slot loop), and
+    once it built, row 3 read the register image of `A` by the pattern's
+    storage index -- `r0[1]` of a one-entry image, a different number on
+    every target.  The image is dense over its box; only memory is packed."""
+    import numpy as np
+
+    import kernel_eval
+
+    blob = json.loads((KERNELS / "sparse_layouts.json").read_text())
+    description = blob["descriptions"]["sparse_layouts_0"]
+    for tensor in description["tensors"]:
+        if tensor["addressing"] == "n&+o&":     # the oracle follows no arrays
+            tensor["addressing"] = "n*N+o&"
+    descrs, _ = DescriptionReader(None, {}).read(description)
+    generator = Generator(descrs, Context(arch=arch, backend=backend,
+                                          fp_type=Datatype.F64))
+    generator.generate()
+    c, a = descrs[0].dest.tensor, descrs[0].ops[0].tensor
+    lanes, mults = kernel_eval.launch_geometry(generator.get_launcher())
+    mem = kernel_eval.evaluate_wave(generator.get_kernel(), lanes, seed=3,
+                                    globals_only=True, mults=mults)
+    stored = [mem.get((a.name, k), np.nan) for k in range(2)]
+    got = np.array([[mem.get((c.name, i + 4 * j), np.nan) for j in range(4)]
+                    for i in range(4)])
+    want = np.zeros((4, 4))
+    want[0, :], want[3, :] = stored
+    assert np.allclose(got, want)

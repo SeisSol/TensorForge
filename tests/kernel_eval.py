@@ -170,8 +170,12 @@ def _py(expr: str) -> str:
     e = re.sub(r'\b(\d+)_i32\b', r'\1', e)
     e = re.sub(r'(\d)[fF]\b', r'\1', e)
     e = re.sub(r'\b(?:static_cast|reinterpret_cast|const_cast)\s*<[^>]*>\s*', '', e)
+    # the C-style cast to a memory-space pointer a global window is bound
+    # through: `(tensorforge::SpacePtrRestrict<double, ...>)&m0[...]`
+    e = re.sub(r'\(\s*tensorforge::\w+<[^()]*>\s*(?:const\s*)?\)\s*', '', e)
     e = re.sub(r'\b__ldcg\s*\(\s*&', 'DEREF(', e)
     e = re.sub(r'\b__ldg\s*\(\s*&', 'DEREF(', e)
+    e = re.sub(r'\b__builtin_nontemporal_load\s*\(\s*&', 'DEREF(', e)
     # `readlane(v, L)` reads lane `L`'s copy of `v`.  Captured as a *name*
     # rather than a value: by the time Python evaluated the argument it would
     # already hold this lane's copy, which is the one thing the call is not
@@ -412,6 +416,12 @@ class Interp:
             dst[di + k] = src[si + k]
 
     def assign(self, stmt: str) -> None:
+        # A global window bound through a memory-space pointer,
+        # `tensorforge::SpacePtrRestrict<double, tensorforge::GlobalMemspace>
+        # const glb_m0 = ...`, is a pointer to its element type here: the
+        # comma inside the template arguments kept `_DECL` from matching it.
+        stmt = re.sub(r'^tensorforge::SpacePtr\w*\s*<\s*((?:const\s+)?[\w:]+)\s*,[^>]*>'
+                      r'\s*(?:const\s+)?(\w+\s*=)', r'\1 * const \2', stmt)
         m = _DECL.match(stmt)
         am = re.match(r'^(?:const\s+)?auto\s*&\s*(\w+)\s*=\s*(.+)$', stmt)
         if am:

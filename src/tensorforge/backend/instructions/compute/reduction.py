@@ -21,7 +21,7 @@ thread-distributed one:
 from typing import List, Sequence
 
 from tensorforge.backend.symbol import (LeadLoop, Loop, SymbolView, Variable,
-                                        VarOffset, write_loops)
+                                        add_offset, write_loops)
 from tensorforge.backend.writer import Writer
 from tensorforge.common.basic_types import Datatype
 from tensorforge.common.context import Context
@@ -513,8 +513,9 @@ class ReductionInstruction(ComputeInstruction):
 
     @staticmethod
     def _offset(view: SymbolView, varlist: List) -> List:
-        """Fold the bounding box's lower corner into each index."""
-        return [VarOffset(varlist[i], o) if o else varlist[i]
+        """Fold the bounding box's lower corner into each index -- into a
+        `LeadIndex` itself, which a `VarOffset` may not wrap."""
+        return [add_offset(varlist[i], o)
                 for i, o in enumerate(view.bbox.lower())]
 
     def __str__(self):

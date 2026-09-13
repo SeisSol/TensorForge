@@ -95,8 +95,22 @@ def deduce(descr_list: List[OperationDescription],
     # take 35 kernels from refusing to generate -- a group barrier inside a
     # simd-uniform loop -- to generating. That is a lead worth following and
     # not a side effect to take while extracting a decision.
-    cap = (context.get_vm().get_hw_descr().vec_unit_length
-           if ceiling is None else ceiling)
+    hw = context.get_vm().get_hw_descr()
+    wave = hw.vec_unit_length
+    if (0 < num_threads < wave
+            and any(getattr(d, 'guarded', lambda: False)() for d in descr_list)
+            and not context.get_vm().get_lexic().has_sync_mult(num_threads, hw)):
+        # A guard decides per multiplication, so a barrier inside it may only
+        # wait for the threads of one.  Where a multiplication narrower than
+        # the wave has no rendezvous of its own -- SYCL under SPMD, whose
+        # narrowest barrier is the whole sub-group -- the barrier waits for
+        # the neighbour sharing the sub-group, which may not take the branch:
+        # yateto's `conditional` kernels were refused by `verify` for exactly
+        # that on oneapi.  At the full wave the barrier is the
+        # multiplication's own.
+        num_threads = wave
+
+    cap = wave if ceiling is None else ceiling
     num_threads = min(cap, num_threads)
 
     return LaneConfig(num_threads=num_threads,

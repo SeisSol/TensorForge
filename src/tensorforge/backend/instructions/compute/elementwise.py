@@ -11,7 +11,7 @@ import numpy as np
 
 from tensorforge.backend.scopes import Scopes
 from tensorforge.backend.symbol import (LeadLoop, Loop, Symbol, SymbolView,
-                                        write_loops, VarOffset)
+                                        write_loops, add_offset)
 from tensorforge.backend.writer import Writer
 from tensorforge.common.context import Context
 from tensorforge.common.exceptions import InternalError
@@ -107,8 +107,12 @@ class ElementwiseInstruction(ComputeInstruction):
         # optree emitted `(n{k} + bbox.lower()[k])` as text, which forced a
         # named `n{k}` variable and left the address arithmetic opaque.  A
         # `VarOffset` carries the loop value itself, so the offset folds and
-        # the whole address becomes IR.
-        return [VarOffset(varlist[i], o) if o else varlist[i]
+        # the whole address becomes IR.  `add_offset` rather than the wrapper
+        # itself: on the lead dimension the loop value is a `LeadIndex`, which
+        # takes the offset into itself -- a box starting past the lead's
+        # origin (yateto's `elementwise` cut at a stored table's edge) was
+        # refused by `VarOffset`.
+        return [add_offset(varlist[i], o)
                 for i, o in enumerate(view.bbox.lower())]
 
     def _body(self, writer: Writer):

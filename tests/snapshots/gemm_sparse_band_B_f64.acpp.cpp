@@ -1,5 +1,5 @@
 // === base name ===
-kernel_df54db3dbe264db6
+kernel_ae99ee79b8ce3057
 
 // === header ===
 #ifndef TENSORFORGE_LAUNCH_TYPES
@@ -27,9 +27,9 @@ struct LaunchConfig {
 };
 } // namespace tensorforge
 #endif
-inline constexpr tensorforge::LaunchInfo launch_info_kernel_df54db3dbe264db6 = {{16, 16, 1}, 16, 16, 1, 16, 2048, false, true, 1};
-tensorforge::LaunchConfig launch_config_kernel_df54db3dbe264db6(size_t numElements0, void* streamPtr = nullptr);
-void launcher_kernel_df54db3dbe264db6(double * m0, size_t m0_extraOffset, const double * m1, size_t m1_extraOffset, const double * m2, size_t m2_extraOffset, size_t numElements0, unsigned * flags0 = nullptr, void* streamPtr = nullptr);
+inline constexpr tensorforge::LaunchInfo launch_info_kernel_ae99ee79b8ce3057 = {{16, 16, 1}, 16, 16, 1, 16, 2048, false, true, 1};
+tensorforge::LaunchConfig launch_config_kernel_ae99ee79b8ce3057(size_t numElements0, void* streamPtr = nullptr);
+void launcher_kernel_ae99ee79b8ce3057(double * m0, size_t m0_extraOffset, const double * m1, size_t m1_extraOffset, const double * m2, size_t m2_extraOffset, size_t numElements0, unsigned * flags0 = nullptr, void* streamPtr = nullptr);
 
 
 // === launcher ===
@@ -58,7 +58,7 @@ struct LaunchConfig {
 };
 } // namespace tensorforge
 #endif
-tensorforge::LaunchConfig launch_config_kernel_df54db3dbe264db6(size_t numElements0, void* streamPtr) {
+tensorforge::LaunchConfig launch_config_kernel_ae99ee79b8ce3057(size_t numElements0, void* streamPtr) {
   (void)numElements0;
   (void)streamPtr;
   sycl::range<3> block (16, 16, 1);
@@ -77,21 +77,21 @@ tensorforge::LaunchConfig launch_config_kernel_df54db3dbe264db6(size_t numElemen
   config.cooperative = false;
   return config;
 }
-void launcher_kernel_df54db3dbe264db6(double * m0, size_t m0_extraOffset, const double * m1, size_t m1_extraOffset, const double * m2, size_t m2_extraOffset, size_t numElements0, unsigned * flags0, void* streamPtr) {
-  const tensorforge::LaunchConfig config = launch_config_kernel_df54db3dbe264db6(numElements0, streamPtr);
+void launcher_kernel_ae99ee79b8ce3057(double * m0, size_t m0_extraOffset, const double * m1, size_t m1_extraOffset, const double * m2, size_t m2_extraOffset, size_t numElements0, unsigned * flags0, void* streamPtr) {
+  const tensorforge::LaunchConfig config = launch_config_kernel_ae99ee79b8ce3057(numElements0, streamPtr);
   sycl::range<3> block (config.block[0], config.block[1], config.block[2]);
   sycl::range<3> grid (config.grid[0], config.grid[1], config.grid[2]);
   if (streamPtr == nullptr) {
     throw std::invalid_argument("stream may not be null!");
   }
   sycl::queue *stream = static_cast<sycl::queue *>(streamPtr);
-  kernel_kernel_df54db3dbe264db6(stream, grid, block, m0, m0_extraOffset, m1, m1_extraOffset, m2, m2_extraOffset, numElements0, flags0);
+  kernel_kernel_ae99ee79b8ce3057(stream, grid, block, m0, m0_extraOffset, m1, m1_extraOffset, m2, m2_extraOffset, numElements0, flags0);
   CHECK_ERR;
 }
 
 
 // === kernel ===
-inline void kernel_kernel_df54db3dbe264db6(sycl::queue *stream, sycl::range<3> group_count, sycl::range<3> group_size, double * m0, size_t m0_extraOffset, const double * m1, size_t m1_extraOffset, const double * m2, size_t m2_extraOffset, size_t numElements0, unsigned * flags0) {
+inline void kernel_kernel_ae99ee79b8ce3057(sycl::queue *stream, sycl::range<3> group_count, sycl::range<3> group_size, double * m0, size_t m0_extraOffset, const double * m1, size_t m1_extraOffset, const double * m2, size_t m2_extraOffset, size_t numElements0, unsigned * flags0) {
   stream->submit([&](sycl::handler &cgh) {
     sycl::accessor<double, 1, sycl::access::mode::read_write, sycl::access::target::local> totalShrMem (256, cgh); {
       cgh.parallel_for(sycl::nd_range<3>{{group_count.get(2) * group_size.get(2), group_count.get(1) * group_size.get(1), group_count.get(0) * group_size.get(0)}, {group_size.get(2), group_size.get(1), group_size.get(0)}}, [=](sycl::nd_item<3> item)  {
@@ -142,180 +142,138 @@ inline void kernel_kernel_df54db3dbe264db6(sycl::queue *stream, sycl::range<3> g
               // wait(r0 = load{g>r}(glb_m1););
               // wait(r1 = load{g>r}(glb_m2););
               double r2[16]{};
-              // r2 = +(r0 * r1) + None
+              // ir2 = +(r0 * r1)
               // [(0, 16), (0, 16)] [(0, 16)]
               double ir2[16]{};
               double v32_data = r0[0];
               double v33_data = r1[0];
-              double v35_data = ir2[0];
-              ir2[0] = (v35_data + (v32_data * v33_data));
-              double v38_data = r1[2];
-              double v40_data = ir2[1];
-              ir2[1] = (v40_data + (v32_data * v38_data));
-              double v56_data = r0[1];
-              double v57_data = r1[1];
-              double v59_data = ir2[0];
-              ir2[0] = (v59_data + (v56_data * v57_data));
-              double v62_data = r1[3];
-              double v64_data = ir2[1];
-              ir2[1] = (v64_data + (v56_data * v62_data));
-              double v67_data = r1[5];
-              double v69_data = ir2[2];
-              ir2[2] = (v69_data + (v56_data * v67_data));
-              double v84_data = r0[2];
-              double v86_data = r1[4];
-              double v88_data = ir2[1];
-              ir2[1] = (v88_data + (v84_data * v86_data));
-              double v91_data = r1[6];
-              double v93_data = ir2[2];
-              ir2[2] = (v93_data + (v84_data * v91_data));
-              double v96_data = r1[8];
-              double v98_data = ir2[3];
-              ir2[3] = (v98_data + (v84_data * v96_data));
-              double v112_data = r0[3];
-              double v115_data = r1[7];
-              double v117_data = ir2[2];
-              ir2[2] = (v117_data + (v112_data * v115_data));
-              double v120_data = r1[9];
-              double v122_data = ir2[3];
-              ir2[3] = (v122_data + (v112_data * v120_data));
-              double v125_data = r1[11];
-              double v127_data = ir2[4];
-              ir2[4] = (v127_data + (v112_data * v125_data));
-              double v140_data = r0[4];
-              double v144_data = r1[10];
-              double v146_data = ir2[3];
-              ir2[3] = (v146_data + (v140_data * v144_data));
-              double v149_data = r1[12];
-              double v151_data = ir2[4];
-              ir2[4] = (v151_data + (v140_data * v149_data));
-              double v154_data = r1[14];
-              double v156_data = ir2[5];
-              ir2[5] = (v156_data + (v140_data * v154_data));
-              double v168_data = r0[5];
-              double v173_data = r1[13];
-              double v175_data = ir2[4];
-              ir2[4] = (v175_data + (v168_data * v173_data));
-              double v178_data = r1[15];
-              double v180_data = ir2[5];
-              ir2[5] = (v180_data + (v168_data * v178_data));
-              double v183_data = r1[17];
-              double v185_data = ir2[6];
-              ir2[6] = (v185_data + (v168_data * v183_data));
-              double v196_data = r0[6];
-              double v202_data = r1[16];
-              double v204_data = ir2[5];
-              ir2[5] = (v204_data + (v196_data * v202_data));
-              double v207_data = r1[18];
-              double v209_data = ir2[6];
-              ir2[6] = (v209_data + (v196_data * v207_data));
-              double v212_data = r1[20];
-              double v214_data = ir2[7];
-              ir2[7] = (v214_data + (v196_data * v212_data));
-              double v224_data = r0[7];
-              double v231_data = r1[19];
-              double v233_data = ir2[6];
-              ir2[6] = (v233_data + (v224_data * v231_data));
-              double v236_data = r1[21];
-              double v238_data = ir2[7];
-              ir2[7] = (v238_data + (v224_data * v236_data));
-              double v241_data = r1[23];
-              double v243_data = ir2[8];
-              ir2[8] = (v243_data + (v224_data * v241_data));
-              double v252_data = r0[8];
-              double v260_data = r1[22];
-              double v262_data = ir2[7];
-              ir2[7] = (v262_data + (v252_data * v260_data));
-              double v265_data = r1[24];
-              double v267_data = ir2[8];
-              ir2[8] = (v267_data + (v252_data * v265_data));
-              double v270_data = r1[26];
-              double v272_data = ir2[9];
-              ir2[9] = (v272_data + (v252_data * v270_data));
-              double v280_data = r0[9];
-              double v289_data = r1[25];
-              double v291_data = ir2[8];
-              ir2[8] = (v291_data + (v280_data * v289_data));
-              double v294_data = r1[27];
-              double v296_data = ir2[9];
-              ir2[9] = (v296_data + (v280_data * v294_data));
-              double v299_data = r1[29];
-              double v301_data = ir2[10];
-              ir2[10] = (v301_data + (v280_data * v299_data));
-              double v308_data = r0[10];
-              double v318_data = r1[28];
-              double v320_data = ir2[9];
-              ir2[9] = (v320_data + (v308_data * v318_data));
-              double v323_data = r1[30];
-              double v325_data = ir2[10];
-              ir2[10] = (v325_data + (v308_data * v323_data));
-              double v328_data = r1[32];
-              double v330_data = ir2[11];
-              ir2[11] = (v330_data + (v308_data * v328_data));
-              double v336_data = r0[11];
-              double v347_data = r1[31];
-              double v349_data = ir2[10];
-              ir2[10] = (v349_data + (v336_data * v347_data));
-              double v352_data = r1[33];
-              double v354_data = ir2[11];
-              ir2[11] = (v354_data + (v336_data * v352_data));
-              double v357_data = r1[35];
-              double v359_data = ir2[12];
-              ir2[12] = (v359_data + (v336_data * v357_data));
-              double v364_data = r0[12];
-              double v376_data = r1[34];
-              double v378_data = ir2[11];
-              ir2[11] = (v378_data + (v364_data * v376_data));
-              double v381_data = r1[36];
-              double v383_data = ir2[12];
-              ir2[12] = (v383_data + (v364_data * v381_data));
-              double v386_data = r1[38];
-              double v388_data = ir2[13];
-              ir2[13] = (v388_data + (v364_data * v386_data));
-              double v392_data = r0[13];
-              double v405_data = r1[37];
-              double v407_data = ir2[12];
-              ir2[12] = (v407_data + (v392_data * v405_data));
-              double v410_data = r1[39];
-              double v412_data = ir2[13];
-              ir2[13] = (v412_data + (v392_data * v410_data));
-              double v415_data = r1[41];
-              double v417_data = ir2[14];
-              ir2[14] = (v417_data + (v392_data * v415_data));
-              double v420_data = r0[14];
-              double v434_data = r1[40];
-              double v436_data = ir2[13];
-              ir2[13] = (v436_data + (v420_data * v434_data));
-              double v439_data = r1[42];
-              double v441_data = ir2[14];
-              ir2[14] = (v441_data + (v420_data * v439_data));
-              double v444_data = r1[44];
-              double v446_data = ir2[15];
-              ir2[15] = (v446_data + (v420_data * v444_data));
-              double v448_data = r0[15];
-              double v463_data = r1[43];
-              double v465_data = ir2[14];
-              ir2[14] = (v465_data + (v448_data * v463_data));
-              double v468_data = r1[45];
-              double v470_data = ir2[15];
-              ir2[15] = (v470_data + (v448_data * v468_data));
+              double v36_data = ir2[0];
+              ir2[0] = (v36_data + (v32_data * (sycl::select_from_group(item.get_sub_group(), v33_data, (item.get_sub_group().get_local_linear_id() / 16) * 16 + (0)))));
+              double v42_data = ir2[1];
+              ir2[1] = (v42_data + (v32_data * (sycl::select_from_group(item.get_sub_group(), v33_data, (item.get_sub_group().get_local_linear_id() / 16) * 16 + (2)))));
+              double v58_data = r0[1];
+              double v62_data = ir2[0];
+              ir2[0] = (v62_data + (v58_data * (sycl::select_from_group(item.get_sub_group(), v33_data, (item.get_sub_group().get_local_linear_id() / 16) * 16 + (1)))));
+              double v68_data = ir2[1];
+              ir2[1] = (v68_data + (v58_data * (sycl::select_from_group(item.get_sub_group(), v33_data, (item.get_sub_group().get_local_linear_id() / 16) * 16 + (3)))));
+              double v74_data = ir2[2];
+              ir2[2] = (v74_data + (v58_data * (sycl::select_from_group(item.get_sub_group(), v33_data, (item.get_sub_group().get_local_linear_id() / 16) * 16 + (5)))));
+              double v89_data = r0[2];
+              double v94_data = ir2[1];
+              ir2[1] = (v94_data + (v89_data * (sycl::select_from_group(item.get_sub_group(), v33_data, (item.get_sub_group().get_local_linear_id() / 16) * 16 + (4)))));
+              double v100_data = ir2[2];
+              ir2[2] = (v100_data + (v89_data * (sycl::select_from_group(item.get_sub_group(), v33_data, (item.get_sub_group().get_local_linear_id() / 16) * 16 + (6)))));
+              double v106_data = ir2[3];
+              ir2[3] = (v106_data + (v89_data * (sycl::select_from_group(item.get_sub_group(), v33_data, (item.get_sub_group().get_local_linear_id() / 16) * 16 + (8)))));
+              double v120_data = r0[3];
+              double v126_data = ir2[2];
+              ir2[2] = (v126_data + (v120_data * (sycl::select_from_group(item.get_sub_group(), v33_data, (item.get_sub_group().get_local_linear_id() / 16) * 16 + (7)))));
+              double v132_data = ir2[3];
+              ir2[3] = (v132_data + (v120_data * (sycl::select_from_group(item.get_sub_group(), v33_data, (item.get_sub_group().get_local_linear_id() / 16) * 16 + (9)))));
+              double v138_data = ir2[4];
+              ir2[4] = (v138_data + (v120_data * (sycl::select_from_group(item.get_sub_group(), v33_data, (item.get_sub_group().get_local_linear_id() / 16) * 16 + (11)))));
+              double v151_data = r0[4];
+              double v158_data = ir2[3];
+              ir2[3] = (v158_data + (v151_data * (sycl::select_from_group(item.get_sub_group(), v33_data, (item.get_sub_group().get_local_linear_id() / 16) * 16 + (10)))));
+              double v164_data = ir2[4];
+              ir2[4] = (v164_data + (v151_data * (sycl::select_from_group(item.get_sub_group(), v33_data, (item.get_sub_group().get_local_linear_id() / 16) * 16 + (12)))));
+              double v170_data = ir2[5];
+              ir2[5] = (v170_data + (v151_data * (sycl::select_from_group(item.get_sub_group(), v33_data, (item.get_sub_group().get_local_linear_id() / 16) * 16 + (14)))));
+              double v182_data = r0[5];
+              double v190_data = ir2[4];
+              ir2[4] = (v190_data + (v182_data * (sycl::select_from_group(item.get_sub_group(), v33_data, (item.get_sub_group().get_local_linear_id() / 16) * 16 + (13)))));
+              double v196_data = ir2[5];
+              ir2[5] = (v196_data + (v182_data * (sycl::select_from_group(item.get_sub_group(), v33_data, (item.get_sub_group().get_local_linear_id() / 16) * 16 + (15)))));
+              double v199_data = r1[1];
+              double v202_data = ir2[6];
+              ir2[6] = (v202_data + (v182_data * (sycl::select_from_group(item.get_sub_group(), v199_data, (item.get_sub_group().get_local_linear_id() / 16) * 16 + (1)))));
+              double v213_data = r0[6];
+              double v222_data = ir2[5];
+              ir2[5] = (v222_data + (v213_data * (sycl::select_from_group(item.get_sub_group(), v199_data, (item.get_sub_group().get_local_linear_id() / 16) * 16 + (0)))));
+              double v228_data = ir2[6];
+              ir2[6] = (v228_data + (v213_data * (sycl::select_from_group(item.get_sub_group(), v199_data, (item.get_sub_group().get_local_linear_id() / 16) * 16 + (2)))));
+              double v234_data = ir2[7];
+              ir2[7] = (v234_data + (v213_data * (sycl::select_from_group(item.get_sub_group(), v199_data, (item.get_sub_group().get_local_linear_id() / 16) * 16 + (4)))));
+              double v244_data = r0[7];
+              double v254_data = ir2[6];
+              ir2[6] = (v254_data + (v244_data * (sycl::select_from_group(item.get_sub_group(), v199_data, (item.get_sub_group().get_local_linear_id() / 16) * 16 + (3)))));
+              double v260_data = ir2[7];
+              ir2[7] = (v260_data + (v244_data * (sycl::select_from_group(item.get_sub_group(), v199_data, (item.get_sub_group().get_local_linear_id() / 16) * 16 + (5)))));
+              double v266_data = ir2[8];
+              ir2[8] = (v266_data + (v244_data * (sycl::select_from_group(item.get_sub_group(), v199_data, (item.get_sub_group().get_local_linear_id() / 16) * 16 + (7)))));
+              double v275_data = r0[8];
+              double v286_data = ir2[7];
+              ir2[7] = (v286_data + (v275_data * (sycl::select_from_group(item.get_sub_group(), v199_data, (item.get_sub_group().get_local_linear_id() / 16) * 16 + (6)))));
+              double v292_data = ir2[8];
+              ir2[8] = (v292_data + (v275_data * (sycl::select_from_group(item.get_sub_group(), v199_data, (item.get_sub_group().get_local_linear_id() / 16) * 16 + (8)))));
+              double v298_data = ir2[9];
+              ir2[9] = (v298_data + (v275_data * (sycl::select_from_group(item.get_sub_group(), v199_data, (item.get_sub_group().get_local_linear_id() / 16) * 16 + (10)))));
+              double v306_data = r0[9];
+              double v318_data = ir2[8];
+              ir2[8] = (v318_data + (v306_data * (sycl::select_from_group(item.get_sub_group(), v199_data, (item.get_sub_group().get_local_linear_id() / 16) * 16 + (9)))));
+              double v324_data = ir2[9];
+              ir2[9] = (v324_data + (v306_data * (sycl::select_from_group(item.get_sub_group(), v199_data, (item.get_sub_group().get_local_linear_id() / 16) * 16 + (11)))));
+              double v330_data = ir2[10];
+              ir2[10] = (v330_data + (v306_data * (sycl::select_from_group(item.get_sub_group(), v199_data, (item.get_sub_group().get_local_linear_id() / 16) * 16 + (13)))));
+              double v337_data = r0[10];
+              double v350_data = ir2[9];
+              ir2[9] = (v350_data + (v337_data * (sycl::select_from_group(item.get_sub_group(), v199_data, (item.get_sub_group().get_local_linear_id() / 16) * 16 + (12)))));
+              double v356_data = ir2[10];
+              ir2[10] = (v356_data + (v337_data * (sycl::select_from_group(item.get_sub_group(), v199_data, (item.get_sub_group().get_local_linear_id() / 16) * 16 + (14)))));
+              double v359_data = r1[2];
+              double v362_data = ir2[11];
+              ir2[11] = (v362_data + (v337_data * (sycl::select_from_group(item.get_sub_group(), v359_data, (item.get_sub_group().get_local_linear_id() / 16) * 16 + (0)))));
+              double v368_data = r0[11];
+              double v382_data = ir2[10];
+              ir2[10] = (v382_data + (v368_data * (sycl::select_from_group(item.get_sub_group(), v199_data, (item.get_sub_group().get_local_linear_id() / 16) * 16 + (15)))));
+              double v388_data = ir2[11];
+              ir2[11] = (v388_data + (v368_data * (sycl::select_from_group(item.get_sub_group(), v359_data, (item.get_sub_group().get_local_linear_id() / 16) * 16 + (1)))));
+              double v394_data = ir2[12];
+              ir2[12] = (v394_data + (v368_data * (sycl::select_from_group(item.get_sub_group(), v359_data, (item.get_sub_group().get_local_linear_id() / 16) * 16 + (3)))));
+              double v399_data = r0[12];
+              double v414_data = ir2[11];
+              ir2[11] = (v414_data + (v399_data * (sycl::select_from_group(item.get_sub_group(), v359_data, (item.get_sub_group().get_local_linear_id() / 16) * 16 + (2)))));
+              double v420_data = ir2[12];
+              ir2[12] = (v420_data + (v399_data * (sycl::select_from_group(item.get_sub_group(), v359_data, (item.get_sub_group().get_local_linear_id() / 16) * 16 + (4)))));
+              double v426_data = ir2[13];
+              ir2[13] = (v426_data + (v399_data * (sycl::select_from_group(item.get_sub_group(), v359_data, (item.get_sub_group().get_local_linear_id() / 16) * 16 + (6)))));
+              double v430_data = r0[13];
+              double v446_data = ir2[12];
+              ir2[12] = (v446_data + (v430_data * (sycl::select_from_group(item.get_sub_group(), v359_data, (item.get_sub_group().get_local_linear_id() / 16) * 16 + (5)))));
+              double v452_data = ir2[13];
+              ir2[13] = (v452_data + (v430_data * (sycl::select_from_group(item.get_sub_group(), v359_data, (item.get_sub_group().get_local_linear_id() / 16) * 16 + (7)))));
+              double v458_data = ir2[14];
+              ir2[14] = (v458_data + (v430_data * (sycl::select_from_group(item.get_sub_group(), v359_data, (item.get_sub_group().get_local_linear_id() / 16) * 16 + (9)))));
+              double v461_data = r0[14];
+              double v478_data = ir2[13];
+              ir2[13] = (v478_data + (v461_data * (sycl::select_from_group(item.get_sub_group(), v359_data, (item.get_sub_group().get_local_linear_id() / 16) * 16 + (8)))));
+              double v484_data = ir2[14];
+              ir2[14] = (v484_data + (v461_data * (sycl::select_from_group(item.get_sub_group(), v359_data, (item.get_sub_group().get_local_linear_id() / 16) * 16 + (10)))));
+              double v490_data = ir2[15];
+              ir2[15] = (v490_data + (v461_data * (sycl::select_from_group(item.get_sub_group(), v359_data, (item.get_sub_group().get_local_linear_id() / 16) * 16 + (12)))));
+              double v492_data = r0[15];
+              double v510_data = ir2[14];
+              ir2[14] = (v510_data + (v492_data * (sycl::select_from_group(item.get_sub_group(), v359_data, (item.get_sub_group().get_local_linear_id() / 16) * 16 + (11)))));
+              double v516_data = ir2[15];
+              ir2[15] = (v516_data + (v492_data * (sycl::select_from_group(item.get_sub_group(), v359_data, (item.get_sub_group().get_local_linear_id() / 16) * 16 + (13)))));
+              // r2 = ir2
               #pragma unroll
-              for (int32_t v472_n0 = 0; v472_n0 < 1; ++v472_n0) {
+              for (int32_t v518_n0 = 0; v518_n0 < 1; ++v518_n0) {
                 #pragma unroll
-                for (int32_t v473_n1 = 0; v473_n1 < 16; ++v473_n1) {
-                  int32_t v474_a = v472_n0 + v473_n1;
-                  double v475_data = ir2[v474_a];
-                  r2[v474_a] = v475_data;
+                for (int32_t v519_n1 = 0; v519_n1 < 16; ++v519_n1) {
+                  int32_t v520_a = v518_n0 + v519_n1;
+                  double v521_data = ir2[v520_a];
+                  r2[v520_a] = v521_data;
                 }
               }
               // glb_m0 = store{r>g}(r2);
               #pragma unroll
-              for (int32_t v476_i0 = 0; v476_i0 < 1; ++v476_i0) {
-                int32_t v481_lead = v17_lead + (v476_i0 * 16);
+              for (int32_t v522_i0 = 0; v522_i0 < 1; ++v522_i0) {
+                int32_t v527_lead = v17_lead + (v522_i0 * 16);
                 #pragma unroll
-                for (int32_t v477_i1 = 0; v477_i1 < 16; ++v477_i1) {
-                  double v479_data = r2[(v476_i0 + v477_i1)];
-                  glb_m0[(v481_lead + (v477_i1 * 16))] = v479_data;
+                for (int32_t v523_i1 = 0; v523_i1 < 16; ++v523_i1) {
+                  double v525_data = r2[(v522_i0 + v523_i1)];
+                  glb_m0[(v527_lead + (v523_i1 * 16))] = v525_data;
                 }
               }
               sycl::group_barrier(item.get_sub_group());

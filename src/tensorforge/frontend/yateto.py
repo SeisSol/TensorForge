@@ -20,6 +20,8 @@ from tensorforge.ir.logical.compute import Multilinear
 from tensorforge.ir.type import BaseDatatype
 from tensorforge.ir.data.memory import Logical
 
+import copy
+import itertools
 import numpy as np
 import re
 
@@ -150,9 +152,9 @@ class DescriptionReader(Reader):
       return Operation.COPY
     if name not in self.ELEMENTWISE_OPS:
       raise NotImplementedError(
-        f'yateto operation {name!r} has no counterpart here. The logical, as '
-        f'opposed to bitwise, negation is the one yateto can currently emit '
-        f'and this side cannot express.')
+        f'yateto operation {name!r} has no counterpart here '
+        f'({", ".join(sorted(self.ELEMENTWISE_OPS))}, LogicalNot and casts '
+        f'do).')
     return self.ELEMENTWISE_OPS[name]
 
   def convert_reduction_op(self, name):
@@ -377,11 +379,24 @@ class DescriptionReader(Reader):
     first = len(self._descr_list)
 
     if kind == 'multilinear':
-      # the scale is already one of `args` whenever it is not one -- yateto
-      # appends it as a rank-0 operand with an empty target -- so `alpha`
-      # here is the same value a second time and is deliberately unused.
       target = [list(t) for t in d['target']]
       permute = [list(p) for p in d['permute']]
+      # A factor other than one becomes one more operand over no axis.  This
+      # used to assume yateto had appended it to `args` already, and dropped
+      # `alpha` as the same value a second time: interface 7 never does -- in
+      # every recorded description the factor is in `alpha` alone -- so
+      # `2.0 * C` computed `C`, and so did the scaled contractions of yateto's
+      # `rings` test.  Asked by name, so a yateto that does append it is not
+      # scaled twice.  Not where the result stores nothing -- `0.0 * C` comes
+      # as a temporary whose box is empty, and a factor over no cells became
+      # a zero-length register array.
+      alpha = linear.get('alpha')
+      empty = any(int(size) == 0 for size in result.bbox.sizes())
+      if (self._is_named_scalar(alpha) and not empty
+          and alpha['name'] not in [ref['name'] for ref in d['args']]):
+        args = args + [self.tensor_ref(alpha)]
+        target.append([])
+        permute.append([])
       self._descr_list.append(MultilinearDescr(result,
                                                args,
                                                target,
@@ -410,11 +425,16 @@ class DescriptionReader(Reader):
     elif kind == 'elementwise':
       dest, accumulate = self._accumulator(d['result'], result, add)
       args = self._conform(d['result'], d['args'], args)
-      self._descr_list.append(ElementwiseDescr(self.convert_op(d['optype'], d['result']),
-                                               dest,
-                                               args,
-                                               strict_match=False,
-                                               prefer_align=False))
+      if d.get('optype') == 'LogicalNot':
+        # `!x` as `x == 0`: the logical negation, where `Not` is the bitwise
+        # one (`~true` is -2, and true again as a condition).
+        op, args = Operation.EQ, args + [0]
+      else:
+        op = self.convert_op(d['optype'], d['result'])
+      for cell, cell_args in self._cells(dest, args):
+        self._descr_list.append(ElementwiseDescr(op, cell, cell_args,
+                                                 strict_match=False,
+                                                 prefer_align=False))
       self._append_scaling(d['result'], linear.get('alpha'), dest)
       accumulate()
     elif kind == 'reduction':
@@ -434,6 +454,56 @@ class DescriptionReader(Reader):
       descr.condition = condition
 
     return 0# self._descr_list[-1].get_flops()
+
+  @staticmethod
+  def _cells(dest, args):
+    """The destination cut into boxes on which each operand is all or nothing.
+
+    yateto narrows an operand's box to where it can be non-zero -- a table
+    storing three of eight entries has a box of three -- and a pointwise
+    operation over the whole destination reads zero outside it: `exp` of it
+    is one, `x + 0` is `x`, `0 > 0` is false.  An `ElementwiseDescr` runs one
+    operation over one box, and refused operands of another shape, which
+    stopped three of yateto's `elementwise` kernels.  So the destination is
+    cut at every edge an operand's box has inside it; in each piece an
+    operand either covers it and is read there, or misses it and is the
+    number 0.  One piece, the destination itself, where every box agrees.
+    """
+    def boxed(arg):
+      return (hasattr(arg, 'bbox') and arg.bbox.rank() > 0
+              and arg.bbox.rank() == dest.bbox.rank())
+    lower, upper = list(dest.bbox.lower()), list(dest.bbox.upper())
+    boxes = [arg.bbox for arg in args if boxed(arg)]
+    if all(list(box.lower()) == lower and list(box.upper()) == upper
+           for box in boxes):
+      return [(dest, args)]
+    cuts = []
+    for dim in range(len(lower)):
+      points = {lower[dim], upper[dim]}
+      for box in boxes:
+        points.update(min(max(int(p), lower[dim]), upper[dim])
+                      for p in (box.lower()[dim], box.upper()[dim]))
+      points = sorted(points)
+      cuts.append(list(zip(points, points[1:])))
+    cells = []
+    for pieces in itertools.product(*cuts):
+      lo = [piece[0] for piece in pieces]
+      hi = [piece[1] for piece in pieces]
+      cell = copy.copy(dest)
+      cell.bbox = BBox(lo, hi)
+      cell_args = []
+      for arg in args:
+        if not boxed(arg):
+          cell_args.append(arg)
+        elif all(arg.bbox.lower()[k] <= lo[k] and hi[k] <= arg.bbox.upper()[k]
+                 for k in range(len(lo))):
+          part = copy.copy(arg)
+          part.bbox = BBox(lo, hi)
+          cell_args.append(part)
+        else:
+          cell_args.append(0)
+      cells.append((cell, cell_args))
+    return cells
 
   def _hoistable(self, d):
     """Whether a ternary's condition is one value per batch element, and not

@@ -1244,6 +1244,10 @@ class Symbol:
     #: reader does not have to restate a fact about a write it cannot see.
     #: `None` is *unknown*, never *not distributed*.
     self.layout = None
+    #: The runs `store_linear` filled this register image with, `(start,
+    #: width)` each, when it holds packed storage flat across the lanes rather
+    #: than a box -- the one fact `_linear_image_load` needs to find an entry.
+    self.linear_runs = None
     #: The axes this image's distributed dimensions are spread over, one per
     #: entry of `lead_dims`, or `None` for the default -- one axis, the whole
     #: wave, cyclic.
@@ -1498,6 +1502,7 @@ class Symbol:
     cloned.data_view = deepcopy(self.data_view)
     cloned.datatype = self.datatype
     cloned.layout = self.layout
+    cloned.linear_runs = self.linear_runs
     cloned._users = [user for user in self._users]
     cloned.lead_dims = [ld for ld in self.lead_dims]
     cloned.lead_axes = self.lead_axes
@@ -1857,22 +1862,21 @@ class Symbol:
             idxvar = writer.op('sub', INDEX, strindex, offset, hint='idx')
 
             lead = index[leadidx]
-            if not isinstance(lead._nonlead, (int, np.integer)):
-              # The slot has to be a number here: what follows sorts the runs
-              # into those that cover the lane block, those that clip it and
-              # those that miss it, and that is a comparison against the
+            if isinstance(lead._nonlead, (int, np.integer)):
+              bndS = lead._nonlead * lead._block
+              bndE = (lead._nonlead + 1) * lead._block
+            else:
+              # What follows sorts the runs into those that cover the lane
+              # block, those that clip it and those that miss it, against the
               # block's bounds.  A slot that is a loop induction variable has
-              # no bounds until the loop runs, and multiplying its name by the
-              # block width is Python string repetition -- it does not raise
-              # where it goes wrong, it raises two lines further on comparing
-              # a number to a sixty-character string.
-              raise GenerationError(
-                  f'{self.name}: a sparse lead dimension needs its slot known '
-                  f'when the code is written, and this one is the induction '
-                  f'variable {lead._nonlead!r} of a loop that was not '
-                  f'unrolled')
-            bndS = lead._nonlead * lead._block
-            bndE = (lead._nonlead + 1) * lead._block
+              # none until the loop runs, so the bounds are those of every
+              # slot at once: every run then clips, and is chosen per lane by
+              # its condition at run time, which is exact for any slot.  (Its
+              # name times the block width is Python string repetition, and
+              # this used to stop the build: `C_ab = A_a` over a sparse `A`,
+              # yateto's `sparse_layouts`.)
+              slots = -(-self.data_view.get_dim_size(leadidx) // lead._block)
+              bndS, bndE = 0, slots * lead._block
 
             for rngS, rngE in rngs:
               runIdx[leadidx] = rngS
@@ -1904,7 +1908,12 @@ class Symbol:
                 # when they do not the branch is what keeps the read legal.
                 lo = (value - rngS) + bndS
                 hi = (value - rngS) + bndE - 1
-                if 0 <= lo and hi < self.obj.storage_volume():
+                # a register image has a size and no storage; one of neither
+                # takes the branch
+                volume = (self.obj.storage_volume()
+                          if hasattr(self.obj, 'storage_volume')
+                          else getattr(self.obj, 'size', None))
+                if volume is not None and 0 <= lo and hi < volume:
                   local_load = writer.load(self, validx, type_=ScalarType(self.get_fptype()), hint='data',
                                           layout=layout_of(index, self.num_threads))
                   other = (wrote if wrote is not None
@@ -2047,6 +2056,50 @@ class Symbol:
       writer(f'tensorforge::VectorT<{self.get_fptype()}, {vec}> {variable} = *(tensorforge::VectorT<{self.get_fptype()}, {vec}>*)&{access};')
     return None
 
+  def _linear_image_load(self, writer, context: Context, index):
+    """One entry of a register image `store_linear` filled from packed storage.
+
+    Each run `(i, g)` of the fill put entries `i + t*g` to `i + t*g + g - 1`
+    into lane `t`, from slot `i // T` on.  So entry `p` of the pattern has one
+    owner and one slot, and every lane takes it from there by a broadcast.
+    Read by the pattern's index as if it were the slot -- what this did before
+    -- `gemm_sparse_band_B` under SYCL read up to `r1[45]` of a 16-entry
+    image; read as a box, it broadcast rows the fill never put there.
+
+    Fixed entries only: an entry chosen per lane would have its slot chosen
+    per lane too, and a register array is not indexed by a lane's value.
+    """
+    from tensorforge.backend.pir.core import ScalarType
+    fp = ScalarType(self.get_fptype())
+    coords = []
+    for idx in index:
+      if isinstance(idx, Immediate):
+        idx = idx._value
+      if not isinstance(idx, (int, np.integer)):
+        raise GenerationError(
+            f'{self.name}: a register image filled from packed storage is '
+            f'read one fixed entry at a time, and {idx!r} is not one')
+      coords.append(int(idx))
+    p = self.obj.linear_index(tuple(coords))
+    if p is None:
+      # A structural zero is no read at all, as for packed memory in
+      # `encode_values`: the caller leaves the product out.  A zero constant
+      # kept it, as `a * 0.0f`, in every cell outside the band.
+      return None
+    threads = self.num_threads
+    for start, width in self.linear_runs:
+      if start <= p < start + threads * width:
+        slot = start // threads + (p - start) % width
+        lane = (p - start) // width
+        break
+    else:
+      raise InternalError(
+          f'{self.name}: entry {p} lies in none of the runs its fill wrote')
+    value = writer.load(self, slot, type_=fp, hint='data', layout=self.layout)
+    text = context.get_vm().get_lexic().broadcast('{0}', lane, threads)
+    return writer.rawexpr(text, value, type_=fp, hint='bc', pure=True,
+                          movable=True, crosslane=True)
+
   def _note_layout(self, layout, writer=None):
     """Record how this symbol's image is distributed, or give up knowing.
 
@@ -2139,6 +2192,12 @@ class Symbol:
     self._record_linear_layout(index, vec, threads, writer)
     if self.stype == SymbolType.Register:
       addr = index // self.num_threads
+      # Where this run's entries land, for a reader that asks by entry: a
+      # speculative fill that is discarded takes its run with it.
+      if writer is not None and hasattr(writer, 'on_rollback'):
+        previous = self.linear_runs
+        writer.on_rollback(lambda: setattr(self, 'linear_runs', previous))
+      self.linear_runs = list(self.linear_runs or []) + [(int(index), int(vec))]
     else:
       addr = _linear_addr(context, index, vec)
     access = f'{name}[{addr}]'
@@ -2361,7 +2420,26 @@ class Symbol:
           f'{self.name}: a shifted read needs a dense operand in memory, in '
           f'its logical order, read as a value')
     addrs = []
-    if self.stype == SymbolType.Data or (not self.obj.is_dense() and not isinstance(self.obj.spp, BoundingBoxSPP)):
+    # A register image of a sparse operand keeps the pattern, but not its
+    # storage: it is laid out densely over the box, in slots
+    # (`TemporaryManager` sizes it from the box), and holds zero wherever the
+    # pattern has nothing, because the load that filled it wrote every slot.
+    # Read by the pattern's storage index it was read past its end --
+    # `C_ab = A_a` over a sparse `A`, yateto's `sparse_layouts`: row 3 read
+    # `r0[1]` of a one-entry image, a different number on every target.
+    packed = (not self.obj.is_dense()
+              and not isinstance(self.obj.spp, BoundingBoxSPP))
+    if (packed and self.stype == SymbolType.Register and self.linear_runs):
+      # The other kind of register image: packed storage laid flat across
+      # the lanes by `store_linear`, neither the box nor the pattern's order.
+      if variable is not None or parts > 1 or part or shift is not None:
+        raise InternalError(
+            f'{self.name}: a register image filled from packed storage is '
+            f'read one entry at a time, as a value')
+      return self._linear_image_load(writer, context, index)
+    sparse = packed and self.stype not in (SymbolType.Register,
+                                           SymbolType.Scratch)
+    if self.stype == SymbolType.Data or sparse:
       if variable is None:
         leadidx = None
         for i, idx in enumerate(index):
