@@ -1756,10 +1756,47 @@ class Symbol:
     if self.stype == SymbolType.Data:
       return self.get_fptype().literal(self.obj.value(index))
 
+  def _encode_lead_values(self, runIdx, writer, context: Context, index, leadidx):
+    """Numbers in the code along the lead index: one per lane, chosen by it.
+
+    Every other index is a number by now; the lead index is not -- it is the
+    lane's.  The entry at `runIdx` as it stands is row 0's, and reading that
+    gave every lane row 0's number.  So each row that has a number is a
+    literal, and the lane whose row it is selects it; a row with none, or a
+    zero, leaves the lane at zero.  Selects, not a branch: the condition
+    differs across the lanes.
+    """
+    fp = ScalarType(self.get_fptype())
+    lead = index[leadidx]
+    offset = self.data_view.get_dim_offsets()[leadidx]
+    idxvar = writer.op('sub', INDEX, lead.build(writer, context), offset,
+                       hint='idx')
+    rows = range(self.data_view.get_dim_size(leadidx))
+    if isinstance(getattr(lead, '_nonlead', None), (int, np.integer)):
+      # the lane block's rows, as the sparse runs below bound them; the rest
+      # are no lane's
+      rows = range(max(rows.start, lead._nonlead * lead._block),
+                   min(rows.stop, (lead._nonlead + 1) * lead._block))
+    wrote = None
+    for i in rows:
+      runIdx[leadidx] = i
+      value = self.obj.value(runIdx)
+      if value is None or value == 0:
+        continue
+      cond = writer.op('eq', BOOL, idxvar, i, hint='cond')
+      other = (wrote if wrote is not None else writer.const(0.0, fp))
+      wrote = writer.op('select', fp, cond, writer.const(value, fp), other,
+                        hint='masked')
+    runIdx[leadidx] = 0
+    return wrote
+
   def encode_values(self, pos, runIdx, writer, context: Context, index: List[Union[str, int, Immediate, Variable, LeadIndex]], nontemp, leadidx):
     wrote = None
     if pos == len(index):
-      if self.stype == SymbolType.Data:
+      if self.stype == SymbolType.Data and leadidx is not None:
+        wrote = self._encode_lead_values(runIdx, writer, context, index,
+                                         leadidx)
+      elif self.stype == SymbolType.Data:
         # constant value (data) load
 
         value = self.obj.value(runIdx)

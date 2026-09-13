@@ -72,6 +72,11 @@ class ScalarContractionInstruction(ComputeInstruction):
                 self._ranges[axis] = ((max(prev[0], lo), min(prev[1], hi))
                                       if prev else (lo, hi))
         self._axes = sorted(self._ranges, reverse=True)
+        #: Whether an operand's numbers are in the code (`Residence.CODE`):
+        #: they are read by index when the code is written, so every index
+        #: has to be a number then.
+        self._in_code = any(v.symbol.stype == SymbolType.Data
+                            for v in self._ops)
 
     def defs(self):
         return (self._dest.symbol,)
@@ -87,6 +92,9 @@ class ScalarContractionInstruction(ComputeInstruction):
         from tensorforge.backend.pir.core import ScalarType
         fp = ScalarType(self._context.fp_type)
         total = self._fold(writer, {}, 0, fp)
+        if total is None:
+            # every term had a zero in the code among its factors
+            total = writer.const(0.0, fp)
         if self._add:
             old = self._load(writer, self._dest, [])
             total = writer.op(AddOperator().irop(), fp, old, total, hint='s',
@@ -101,6 +109,19 @@ class ScalarContractionInstruction(ComputeInstruction):
         lo, hi = self._ranges[axis]
         if lo >= hi:
             return writer.const(0.0, fp)
+        if self._in_code:
+            # Unrolled here rather than by the loop: each factor in the code
+            # becomes its literal, and an entry that is zero drops its term.
+            total = None
+            for i in range(lo, hi):
+                index[axis] = i
+                term = self._fold(writer, index, depth + 1, fp)
+                if term is not None:
+                    total = term if total is None else writer.op(
+                        AddOperator().irop(), fp, total, term, hint='s',
+                        pure=True)
+            del index[axis]
+            return total
         loop = writer.for_(lo, hi, 1, inits=(0.0,), types=(fp,), unroll=True,
                            hint=f's{-axis - 1}')
         with loop:
@@ -116,7 +137,17 @@ class ScalarContractionInstruction(ComputeInstruction):
     def _product(self, writer: Writer, index: dict, fp):
         value = None
         for view, axes in zip(self._ops, self._target):
-            factor = self._load(writer, view, [index[a] for a in axes])
+            coords = [index[a] for a in axes]
+            if view.symbol.stype == SymbolType.Data:
+                # the number itself; a zero -- or no entry -- ends the term
+                offset = list(getattr(view, 'offset', None) or [0] * len(coords))
+                number = view.symbol.obj.value(
+                    [c + o for c, o in zip(coords, offset)])
+                if number is None or number == 0:
+                    return None
+                factor = writer.const(float(number), fp)
+            else:
+                factor = self._load(writer, view, coords)
             value = factor if value is None else writer.op(
                 MulOperator().irop(), fp, value, factor, hint='s', pure=True)
         return value if value is not None else writer.const(1.0, fp)

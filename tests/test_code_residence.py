@@ -12,8 +12,15 @@ allocates nothing.
 
 from __future__ import annotations
 
+import contextlib
+import io
+import json
+import re
+
 import numpy as np
 import pytest
+
+import kernel_eval
 
 from tensorforge.common.basic_types import Addressing, Datatype, Residence
 from tensorforge.common.context import Context
@@ -95,3 +102,58 @@ class TestGeneratedKernel:
         """The name is the hash of the source, and the source differs."""
         assert generated(Residence.CODE).get_base_name() \
             != generated(Residence.MEMORY).get_base_name()
+
+
+def product(code_first, backend='cuda', arch='sm_86'):
+    """`C[b] = A @ B[b]` (or `B[b] @ A`), A in the code; the generator and the
+    two per-batch tensors."""
+    perBatch = [Tensor([N, N], Addressing.STRIDED, BoundingBox([0, 0], [N, N]),
+                       alias=alias, datatype=Datatype.F32)
+                for alias in ('B', 'C')]
+    b, c = (SubTensor(t) for t in perBatch)
+    first, second = ((operator(Residence.CODE), b) if code_first
+                     else (b, operator(Residence.CODE)))
+    context = Context(arch=arch, backend=backend, fp_type=Datatype.F32)
+    generator = Generator([GemmDescr(False, False, first, second, c,
+                                     alpha=1.0, beta=0.0)], context)
+    with contextlib.redirect_stdout(io.StringIO()):
+        generator.generate()
+    return generator, perBatch
+
+
+@pytest.mark.parametrize('code_first', [True, False], ids=['A', 'B'])
+def test_the_numbers_are_the_right_ones(code_first):
+    """Against numpy, through the host oracle.
+
+    As the first operand the numbers run along the lead index, which is the
+    lane's: reading them as the other indices are read gave every lane row
+    0's numbers, and `C` came out as `0.5 B[0, :]` in every row.
+    """
+    generator, (b, c) = product(code_first)
+    lanes, mults = kernel_eval.launch_geometry(generator.get_launcher())
+    mem = kernel_eval.evaluate_wave(generator.get_kernel(), lanes, seed=3,
+                                    globals_only=True, mults=mults)
+    seed = kernel_eval.Slot(3)
+    batch = np.array([[seed.read(b.name, i + j * N) for j in range(N)]
+                      for i in range(N)])
+    want = data() @ batch if code_first else batch @ data()
+    got = np.array([[mem.get((c.name, i + j * N), np.nan) for j in range(N)]
+                    for i in range(N)])
+    assert np.max(np.abs(got - want)) < 1e-4 * np.max(np.abs(want))
+
+
+@pytest.mark.parametrize('backend,arch', [('hip', 'gfx942'),
+                                          ('hip', 'gfx1150'),
+                                          ('oneapi', 'pvc')])
+@pytest.mark.parametrize('code_first', [True, False], ids=['A', 'B'])
+def test_nothing_reads_it_by_a_name(code_first, backend, arch):
+    """The AMD broadcast path loaded a second operand in the code by the
+    parameter name it does not have (`m15[threadIdx.x]`), and hipcc stopped
+    at the undeclared name."""
+    generator, _ = product(code_first, backend, arch)
+    meta = generator.get_kernel().split('tensorforge-meta: ')[1].split('\n')[0]
+    name = next(o['name'] for o in json.loads(meta)['operands']
+                if o['alias'] == 'A')
+    # the banner spells the operation in index notation, which is no read
+    code = re.sub(r'//[^\n]*', '', generator.get_kernel())
+    assert not re.search(rf'\b{name}\s*\[', code)

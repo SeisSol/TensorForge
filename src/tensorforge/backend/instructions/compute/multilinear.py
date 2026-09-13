@@ -1000,6 +1000,12 @@ class MultilinearInstruction(ComputeInstruction):
         module = _vendor_module(self._context)
         if module is None or not is_contraction(len(self._ops)):
             return whole(Strategy.GENERIC, n)
+        # A second operand whose numbers are in the code has no memory: the
+        # vendor paths read B through it -- spread over the lanes and
+        # broadcast (AMD), as fragments, staged -- and it has none of those.
+        # The nest reads it as literals.
+        if self._ops[1].symbol.stype == SymbolType.Data:
+            return whole(Strategy.GENERIC, n)
         shape = self._shape()
         chosen = choose_strategy(
             legal_strategies(module.strategies(shape, self._context)),

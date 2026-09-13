@@ -648,6 +648,19 @@ def test_the_loop_runs_the_iterations_the_peel_did_not():
     assert loop.header().startswith('int32_t ')
 
 
+def _writer_of_the_destination(loop):
+    """The instruction that reads the accumulated value and writes it back.
+
+    An accumulation's epilogue (`MultilinearEpilogue`): the contraction only
+    fills its own accumulator, and the previous value and the destination are
+    the epilogue's.  Where there is none the contraction itself.
+    """
+    kinds = [type(i).__name__ for i in loop.region]
+    kind = ('MultilinearEpilogue' if 'MultilinearEpilogue' in kinds
+            else 'MultilinearInstruction')
+    return next(i for i in loop.region if type(i).__name__ == kind)
+
+
 def _loop_of(descrs):
     from tensorforge.common.context import Context
     from tensorforge.generators.generator import Generator
@@ -673,8 +686,7 @@ def test_the_loop_names_the_value_its_body_threads_through_itself():
     # Reported after the substitution closed it, so the two links are one.
     assert init is result
 
-    compute = next(i for i in loop.region
-                   if type(i).__name__ == 'MultilinearInstruction')
+    compute = _writer_of_the_destination(loop)
     assert init in compute.uses()
     assert init in compute.defs()
 
@@ -692,8 +704,7 @@ def test_the_body_reads_and_writes_the_same_register():
     body will be repeated is not something it can know.
     """
     loop = _loop_of(roll(accumulation()))
-    compute = next(i for i in loop.region
-                   if type(i).__name__ == 'MultilinearInstruction')
+    compute = _writer_of_the_destination(loop)
     written = {s.name for s in compute.defs()}
     assert written & {s.name for s in compute.uses()} == written
 
