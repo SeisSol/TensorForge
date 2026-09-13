@@ -832,6 +832,21 @@ class Generator:
         settled = self._settle_storage()
         fits = self._deduce_mults_per_block() and settled
         if fits or not self._section.preload:
+          # With nothing preloaded left to drop, a block that holds no
+          # multiplication is not a smaller launch but no launch: block
+          # height 0 and a shared window never declared.  SeisSol's damage
+          # step at order 6 in double precision went that far, in silence.
+          obj = self._section.shr_mem_obj
+          if not obj.get_mults_per_block():
+            per_mult = obj.get_size_per_mult() or 0
+            size = self._context.fp_type.size()
+            cap = self._context.get_vm().get_hw_descr() \
+                .max_local_mem_size_per_block
+            raise GenerationError(
+                f'one multiplication needs {per_mult * size} B of shared '
+                f'memory ({per_mult} elements, plus {obj.get_global_size() * size}'
+                f' B for the whole block), and a block on this device has '
+                f'{cap} B')
           self._set_threadconfig()
           break
         # The preloaded operators left no room for one multiplication: the

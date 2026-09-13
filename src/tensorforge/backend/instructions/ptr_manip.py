@@ -460,6 +460,14 @@ class DeclareOperandTable(AbstractInstruction):
       raise GenerationError(
           f'operand table {name}: {", ".join(passed)} are passed by value, '
           f'and a table reaches its members through their addresses')
+    # Numbers the kernel carries in its code: a scalar is a literal, which a
+    # table can hold (`_member`); an array has no address to select.
+    inlined = [m.name for m in members if m.stype == SymbolType.Data
+               and m.obj.addressing != Addressing.SCALAR]
+    if inlined:
+      raise GenerationError(
+          f'operand table {name}: {", ".join(inlined)} are in the code as '
+          f'literals, and a table of addresses has nothing to point at')
     self._name = name
     self._members = list(members)
     self._addressing = addressing
@@ -565,7 +573,15 @@ class DeclareOperandTable(AbstractInstruction):
     and the conversion between the two is explicit there.  Elsewhere the
     cast would be the identity, so it is left out and the text is what it
     always was.
+
+    A constant scalar has no name at all: the kernel reads it as a literal,
+    and its binding is never declared.  So the table holds its number --
+    SeisSol's damage step selects between such constants in its merged
+    loops, and a table naming them did not compile.
     """
+    if member.stype == SymbolType.Data:
+      spelling = member.obj.datatype or datatype
+      return spelling.literal(member.obj.get_values()[0])
     spaced = '<' in self._vm.get_lexic().pointer_type(
         f'{datatype}', MemSpace.GLOBAL, readonly=True, restrict=True, const=True)
     return (f'({self._qual()}{datatype} {stars}){member.name}'
