@@ -624,20 +624,27 @@ class MultilinearBuilder(OperationBuilder):
 
   def _make_compute(self):
     prev = self._get_target_symbol(True) if self._add else None
-    self._instructions.append(MultilinearInstruction(context=self._context,
-                                   ops=self._mem_regions,
-                                   target=self._descr.target,
-                                   dest=self._temp_regs,
-                                   num_threads=self._num_threads,
-                                   prev=prev,
-                                   prev_offset=self._prev_offset(prev),
-                                   next=self._get_target_symbol(True, True),
-                                   productOperation=MulOperator(),
-                                   sumOperation=AddOperator(),
-                                   dest_obj=self._dest_obj,
-                                   theta=self._theta,
-                                   lead_width=getattr(self, '_lead_width', 1),
-                                   k_width=self._k_width(self._descr)))
+    compute = MultilinearInstruction(context=self._context,
+                                     ops=self._mem_regions,
+                                     target=self._descr.target,
+                                     dest=self._temp_regs,
+                                     num_threads=self._num_threads,
+                                     prev=prev,
+                                     prev_offset=self._prev_offset(prev),
+                                     next=self._get_target_symbol(True, True),
+                                     productOperation=MulOperator(),
+                                     sumOperation=AddOperator(),
+                                     dest_obj=self._dest_obj,
+                                     theta=self._theta,
+                                     lead_width=getattr(self, '_lead_width', 1),
+                                     k_width=self._k_width(self._descr))
+    self._instructions.append(compute)
+    # What the multiplication does with its result -- scale it, add the
+    # previous value, write the destination's box -- is an instruction of its
+    # own, right behind it.
+    epilogue = compute.epilogue()
+    if epilogue is not None:
+      self._instructions.append(epilogue)
 
   def _prev_offset(self, prev):
     """Where the accumulation bias sits, relative to the loop indices.

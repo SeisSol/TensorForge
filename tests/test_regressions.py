@@ -542,7 +542,10 @@ def _resolved_address(lines, name, depth=8):
     return expr
 
 
-_BIAS = re.compile(r"//\s*(\w+) = \+\(.*?\) \+ name: (\w+),")
+# The bias is the epilogue's operand (`MultilinearEpilogue`): its comment
+# names the destination, the accumulator, any scalar factors and the bias,
+# and the loops that follow it are the lanes that use the bias.
+_BIAS = re.compile(r"//\s*(\w+) = \w+(?: \* \w+)* \+ (\w+)\s*$")
 _GUARD_LINE = re.compile(r"if \((.+)\) \{")
 # The read used to be handed the fixed name `oldvalue`; it is an SSA
 # value now, so the name varies.  The pair this test needs is still

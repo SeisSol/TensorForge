@@ -156,6 +156,7 @@ class MultilinearInstruction(ComputeInstruction):
         self._target = target2
 
         self._analyze()
+        self._has_epilogue = self.needs_epilogue()
 
     def _eff_offset(self, i, j):
         """Operand offset as seen from the shifted lead origin."""
@@ -355,7 +356,13 @@ class MultilinearInstruction(ComputeInstruction):
         # touching every buffer, and this one sits above them all.
         writer.Comment(f'{self._ns} {self._ks}')
 
-        if len(self._scalar) == 0 and self._prev is None and self._next is None and self._idest.data_view == self._dest.data_view:
+        if self.needs_epilogue() != self._has_epilogue:
+            # decided when the builder appended the epilogue, or not; a view
+            # that changed since would leave the two disagreeing
+            raise InternalError(
+                f'{self}: whether it needs an epilogue changed after the '
+                f'builder decided it')
+        if not self._has_epilogue:
             self._vdest = self._dest
         elif hasattr(writer, 'alloc') and callable(getattr(writer, 'alloc')):
             # Same shape `RegisterAlloc` stopped emitting as text, from a
@@ -380,7 +387,6 @@ class MultilinearInstruction(ComputeInstruction):
             self._nonleading_dim(writer)
         if len(self._ns) == 0:
             self._leading_dim(writer)
-        self._apply_linear(writer)
 
     def _nonleading_dim(self, writer: Writer):
         self._offer_simt_order()
@@ -1350,113 +1356,6 @@ class MultilinearInstruction(ComputeInstruction):
             return taken
         return False
 
-    def _apply_linear(self, writer: Writer):
-        if len(self._scalar) == 0 and self._prev is None and self._next is None and self._idest.data_view == self._dest.data_view:
-            # no linear needed
-            return
-
-        from tensorforge.backend.pir.core import ScalarType
-        ftype = ScalarType(self._idest.get_fptype())
-
-        if len(self._scalar) > 0:
-            scalar_var = self._scalar[0].symbol.load(writer, self._context, None, [], False)
-            assert scalar_var is not None
-
-            for scalar in self._scalar[1:]:
-                scalar_add = scalar.symbol.load(writer, self._context, None, [], False)
-                scalar_var = self._emit_binop(writer, ftype, self._productOperation, scalar_add, scalar_var)
-                assert scalar_var is not None
-
-        loopstack = []
-        loopmap = {}
-
-        # TODO: not fully ideal; might need only a copy paritally (i.e. use the original dimmin/dimmax)
-        stride = 1
-        threads = self._num_threads
-        for i, (dimmin, dimmax) in enumerate(self._ns):
-            loopmap[f'n{i}'] = len(loopstack)
-            dimmin = self._dest.data_view.get_bbox().lower()[i]
-            dimmax = self._dest.data_view.get_bbox().upper()[i]
-
-            dimmini = self._idest.data_view.get_bbox().lower()[i]
-            dimmaxi = self._idest.data_view.get_bbox().upper()[i]
-
-            unroll = dimmini != dimmin or dimmaxi != dimmax
-            if i not in self._lead_dims or threads == 0:
-                loopstack += [Loop(f'n{i}', dimmin, dimmax, 1, unroll=unroll)]
-            else:
-                # Same width as `_apply_nonlead`.  This nest walks the *same*
-                # register image -- it is the beta/prologue pass over the
-                # destination -- so a cyclic walk here and a blocked one there
-                # disagree about which lane owns which element.
-                loopstack += [LeadLoop(f'n{i}', dimmin, dimmax, threads, stride,
-                                       unroll=unroll, width=self._lead_width)]
-                threads //= max(1, -(-(dimmax - dimmin) // self._lead_width))
-                stride *= dimmax - dimmin
-
-        def _dim_covered(i, var):
-            """Is position `var` of this dim inside idest's coverage?
-
-            Static shortcut first: if idest's bounds for this dimension already
-            contain dest's *whole* iteration range, the answer is yes no matter
-            where in that range the current lane sits --- true statically, no
-            need to inspect `var` at all.
-
-            The dynamic fallback (`.lead()`, a block-start value: `nonlead *
-            block`, always a multiple of the block size) only agrees with true
-            per-lane containment while idest's lower bound is itself a multiple
-            of that block size.  A theta-shifted accumulator's bounds need not
-            be: theta is chosen mod num_threads for lane alignment, but here
-            `block` is this loop's own per-dimension stride factor, which can
-            differ.  Comparing a block-start against raw, non-block-aligned
-            bounds silently answered `False` for a lead dimension whose
-            coverage was in fact exact, which is exactly the static case above
-            already resolves --- so this fallback is only reached for the
-            genuinely partial-overlap case it was written for.
-            """
-            lo_i = self._idest.data_view.get_bbox().lower()[i]
-            hi_i = self._idest.data_view.get_bbox().upper()[i]
-            lo_d = self._dest.data_view.get_bbox().lower()[i]
-            hi_d = self._dest.data_view.get_bbox().upper()[i]
-            if lo_i <= lo_d and hi_i >= hi_d:
-                return True
-            if not isinstance(var, (Immediate, LeadIndex)):
-                return True
-            if isinstance(var.nonlead(), (str,)):
-                return True
-            return lo_i <= int(var.lead()) and hi_i > int(var.lead())
-
-        def nonlead_writer(varlist):
-            from tensorforge.backend.symbol import lead_width_of
-            # The body's own width, read off the indices exactly as
-            # `_nonleading_dim` reads it.  The loads already take theirs from
-            # there and come back wide; typing the arithmetic with the
-            # instruction's scalar type instead made the sum a scalar, and the
-            # store wrote a vector into one register slot -- on CUDA an error,
-            # on HIP the same, since a GNU vector does not narrow either.
-            width = lead_width_of(
-                [varlist[loopmap[f'n{i}']] for i, _ in enumerate(self._ns)])
-            btype = (ftype if width == 1
-                     else ScalarType(self._idest.get_fptype(), width))
-            needsLoad = all(_dim_covered(i, varlist[loopmap[f'n{i}']]) for i,_ in enumerate(self._ns))
-            if needsLoad:
-                valvar = self._vdest.load(writer, self._context, None, [varlist[loopmap[f'n{i}']] for i,_ in enumerate(self._ns)], False)
-            else:
-                valvar = self._splat(writer, btype, writer.const(
-                    self._sumOperation.neutral(self._context.fp_type),
-                    ftype))
-
-            if len(self._scalar) > 0:
-                valvar = self._emit_binop(writer, btype, self._productOperation, valvar,
-                                          self._splat(writer, btype, scalar_var))
-            if self._prev is not None:
-                oldvalue = self._prev.load(writer, self._context, None, [add_offset(varlist[loopmap[f'n{i}']], self._prev_offset[i]) if self._prev_offset else varlist[loopmap[f'n{i}']] for i,_ in enumerate(self._ns)], False)
-                valvar = self._emit_binop(writer, btype, self._sumOperation, oldvalue, valvar)
-
-            self._dest.store(writer, self._context, valvar, [varlist[loopmap[f'n{i}']] for i,_ in enumerate(self._ns)], False)
-
-        write_loops(self._context, writer, loopstack, nonlead_writer)
-
     def _cublasdx_nonleadim_dim(self, writer: Writer):
         assert self._is_log
         with writer.Scope():
@@ -1511,14 +1410,46 @@ class MultilinearInstruction(ComputeInstruction):
                 loop.__exit__(None, None, None)
 
     def get_operands(self):
-        inops = [op.symbol for op in self._ops] + [op.symbol for op in self._scalar]
-        if self._prev is None:
-            return inops
-        else:
-            return inops + [self._prev]
+        # The scalar factors and the previous value are the epilogue's.
+        return [op.symbol for op in self._ops]
+
+    def needs_epilogue(self) -> bool:
+        """Whether the accumulator is not the destination.
+
+        A scalar factor, a previous value to add, a neighbour whose layout the
+        destination takes, or a destination box the accumulated range does not
+        match -- any of them, and the result goes through
+        `MultilinearEpilogue` rather than straight into the destination.
+        """
+        return not (len(self._scalar) == 0 and self._prev is None
+                    and self._next is None
+                    and self._idest.data_view == self._dest.data_view)
+
+    def epilogue(self):
+        """The instruction that writes the destination from this one's
+        accumulator, or None where the accumulator already is it."""
+        if not self._has_epilogue:
+            return None
+        from .epilogue import MultilinearEpilogue
+        return MultilinearEpilogue(self._context, self._idest, self._dest,
+                                   self._scalar, self._prev,
+                                   self._prev_offset, self._ns,
+                                   self._lead_dims, self._num_threads,
+                                   self._lead_width, self._productOperation,
+                                   self._sumOperation)
+
+    def defs(self):
+        # the accumulator, where an epilogue writes the destination from it
+        return (self._idest,) if self._has_epilogue else (self._dest,)
 
     def __str__(self):
-        return f'{self._dest.name} = {self._sumOperation}({f" {self._productOperation} ".join(op.symbol.name for op in self._ops)}) {self._sumOperation} {self._prev}' # TODO: dimensions
+        product = f" {self._productOperation} ".join(op.symbol.name for op in self._ops)
+        if self._has_epilogue:
+            return f'{self._idest.name} = {self._sumOperation}({product})'
+        # Unchanged where there is no epilogue, down to the `None` standing for
+        # the absent previous value: the comment is part of every kernel's
+        # source, and so of its name.
+        return f'{self._dest.name} = {self._sumOperation}({product}) {self._sumOperation} {self._prev}' # TODO: dimensions
 
     def temp_shmem(self):
         """What the path this operation will take needs staged.
