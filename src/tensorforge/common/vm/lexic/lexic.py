@@ -133,7 +133,8 @@ class Lexic(ABC):
 
   @abstractmethod
   def kernel_definition(self, file, kernel_bounds, base_name, params, precision=None,
-                        total_shared_mem_size=None, global_symbols=None):
+                        total_shared_mem_size=None, global_symbols=None,
+                        lanes=None):
     pass
 
   @abstractmethod

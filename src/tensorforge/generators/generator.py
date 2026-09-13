@@ -2055,7 +2055,8 @@ class Generator:
     launch_bounds = (total_num_threads_per_block,)
 
     return lexic.kernel_definition(writer, launch_bounds, self._base_kernel_name, str_params, self._context.fp_as_str(),
-                                         shr_total_size, global_symbols)
+                                         shr_total_size, global_symbols,
+                                         lanes=self._num_threads)
 
   def _generate_launcher_proto(self, with_defaults=True):
     global_symbols = self._scopes.get_global_scope().values()

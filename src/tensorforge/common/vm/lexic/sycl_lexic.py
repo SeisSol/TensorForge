@@ -108,7 +108,26 @@ class SyclLexic(Lexic):
     # reserves the largest section's size at the top of the kernel instead.
     return f'tensorforge::SlmPtr<{precision}> {name} = tensorforge::SlmPtr<{precision}>(0)'
 
-  def kernel_definition(self, file, kernel_bounds, base_name, params, precision=None, total_shared_mem_size=None, global_symbols=None):
+  #: The sub-group sizes an SPMD kernel may require: Xe's SIMD16 and SIMD32.
+  SUB_GROUP_SIZES = (16, 32)
+
+  @classmethod
+  def sub_group_for(cls, lanes):
+    """The sub-group one multiplication of `lanes` lanes is held in: the
+    smallest supported size it fits and divides, so that every
+    multiplication lies within one sub-group.  `None` where none does."""
+    for size in cls.SUB_GROUP_SIZES:
+      if lanes <= size and size % lanes == 0:
+        return size
+    return None
+
+  def _pins_sub_group(self) -> bool:
+    """Whether the kernel states its sub-group size (`kernel_definition`),
+    so that the lexic knows it; elsewhere it is the device's."""
+    return (self._underlying_hardware == 'intel' and self._backend == 'oneapi'
+            and not self.simd_mode)
+
+  def kernel_definition(self, file, kernel_bounds, base_name, params, precision=None, total_shared_mem_size=None, global_symbols=None, lanes=None):
     if self.simd_mode:
       # The arena is reserved inside the kernel instead; see
       # `declare_shared_memory`.  Declaring an accessor as well would reserve
@@ -136,7 +155,18 @@ class SyclLexic(Lexic):
         props = ('sycl::ext::oneapi::experimental::properties{'
                  'sycl::ext::intel::experimental::grf_size<256>}, ')
       else:
-        add_items = '[[intel::reqd_sub_group_size(16)]] [[intel::kernel_args_restrict]]'
+        # The sub-group follows the multiplication.  It was 16 always, while
+        # the lane search puts 32 lanes on a multiplication -- the ceiling is
+        # deliberately not the 16-wide vector unit (`lanes.deduce`) -- so a
+        # multiplication spanned two sub-groups, and a broadcast addressed
+        # within one read undefined lanes: on the CPU the kernel wrote
+        # nothing, or 1e27 (chain_five).  A kernel of no multiplication
+        # asks what it always did.
+        size = (self.sub_group_for(lanes) or
+                next((s for s in self.SUB_GROUP_SIZES if s >= lanes),
+                     self.SUB_GROUP_SIZES[-1])) if lanes else 16
+        add_items = (f'[[intel::reqd_sub_group_size({size})]] '
+                     f'[[intel::kernel_args_restrict]]')
     else:
       add_items = ''
 
@@ -222,7 +252,29 @@ class SyclLexic(Lexic):
       # `group_broadcast(-1, ...)` before: an unqualified name and `-1` where
       # a group object belongs.  A placeholder nothing had ever reached, which
       # is how it survived -- the Intel register path is the first caller.
-      return f'sycl::group_broadcast(item.get_sub_group(), {variable}, {lane})'
+      #
+      # `lane` counts within the multiplication, and `group_broadcast` takes
+      # one index for the whole sub-group.  The two agree only where the
+      # sub-group *is* the multiplication, which is known where the kernel
+      # states its size.  Everywhere else a sub-group may hold several
+      # multiplications -- 16 lanes in a sub-group of 32, or of a size the
+      # device picks (acpp, a plug-in) -- and each has to read its own lanes,
+      # at its own base: an index per work-item, `select_from_group`.
+      group = 'item.get_sub_group()'
+      if block is None:
+        return f'sycl::group_broadcast({group}, {variable}, {lane})'
+      if self._pins_sub_group():
+        size = self.sub_group_for(block)
+        if size is None:
+          from tensorforge.common.exceptions import GenerationError
+          raise GenerationError(
+              f'a multiplication of {block} lanes lies in no sub-group of '
+              f'{" or ".join(map(str, self.SUB_GROUP_SIZES))} lanes, so a '
+              f'broadcast over it cannot address its lanes within one')
+        if size == block:
+          return f'sycl::group_broadcast({group}, {variable}, {lane})'
+      base = f'({group}.get_local_linear_id() / {block}) * {block}'
+      return f'sycl::select_from_group({group}, {variable}, {base} + ({lane}))'
 
   def kernel_range_object(self, name, values):
     return f"sycl::range<3> {name} ({values})"

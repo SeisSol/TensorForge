@@ -76,6 +76,7 @@ public:
 class sub_group {
 public:
   id<1> get_local_id() const { return {}; }
+  std::size_t get_local_linear_id() const { return 0; }
 };
 
 template <int Dim> class nd_item {
@@ -189,6 +190,12 @@ public:
 // -- collectives -----------------------------------------------------------
 
 template <typename G, typename T> T group_broadcast(G, T x, std::size_t) {
+  return x;
+}
+
+// A lane index per work-item, where `group_broadcast` takes one for all:
+// what a multiplication narrower than its sub-group reads its lanes with.
+template <typename G, typename T> T select_from_group(G, T x, std::size_t) {
   return x;
 }
 
