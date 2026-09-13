@@ -21,7 +21,7 @@ import re
 from pathlib import Path
 
 from tensorforge.backend.instructions.compute.primitives.amd import select
-from tensorforge.common.context import Context
+from tensorforge.common.context import Context, Options
 from tensorforge.generators.generator import Generator
 from tensorforge.generators.lanes import LaneConfig
 
@@ -33,7 +33,10 @@ def _kernel(budget=None):
     mod = importlib.util.module_from_spec(spec)
     with contextlib.redirect_stdout(io.StringIO()):
         spec.loader.exec_module(mod)
-    ctx = Context(arch="gfx1150", backend="hip", fp_type=mod.DTYPE)
+    # unmerged: whether `local_flux` is merged follows its code size, and the
+    # materialized and the fused body are not the same size
+    ctx = Context(arch="gfx1150", backend="hip", fp_type=mod.DTYPE,
+                  options=Options(merge_variants=False))
     if budget is not None:
         ctx.get_vm().get_hw_descr().max_reg_per_thread = budget
     gen = Generator(mod.descr_list(), ctx, lanes=LaneConfig(16, 56, 1))

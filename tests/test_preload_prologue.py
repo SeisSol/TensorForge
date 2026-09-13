@@ -50,6 +50,9 @@ def _descrs(parts: int = 1):
 
 def _generate(arch, backend="cuda", parts=1, **opts):
     mod, descrs = _descrs(parts)
+    # unmerged: a merged run reads its operators through a table from global
+    # memory, and the images asserted here are the unmerged kernel's
+    opts.setdefault("merge_variants", False)
     ctx = Context(arch=arch, backend=backend, fp_type=mod.DTYPE,
                   options=Options(preload_globals=True, **opts))
     gen = Generator(descrs, ctx)

@@ -43,7 +43,11 @@ WAVE_BROADCAST = re.compile(r'tensorforge::broadcast<64, 32, ([01])>')
 
 
 def _kernel_at(name, arch, threads=None, **options):
-    """`_kernel` at a lane count and with options of the caller's."""
+    """`_kernel` at a lane count and with options of the caller's.
+
+    Unmerged unless asked: a merged run reads its operators through a table,
+    and the chains and images asserted here are the unmerged kernel's."""
+    options.setdefault('merge_variants', False)
     path = next(CASES.rglob(f'{name}.py'))
     spec = importlib.util.spec_from_file_location('tf_blgp__' + name, path)
     case = importlib.util.module_from_spec(spec)
@@ -72,8 +76,10 @@ def test_the_chain_beside_takes_its_steps_from_the_same_load():
 
 def test_from_shared_memory_the_chain_reads_its_steps_itself():
     """Staged in LDS, a read is an LDS instruction as a move is, and the
-    chain's own reads come two to a `ds_read2`."""
-    src = _kernel('local_flux', 'gfx942')
+    chain's own reads come two to a `ds_read2`.  Unmerged, as `_kernel_at`
+    builds it: merged, the operators are read through a table from global
+    memory and nothing is staged in LDS."""
+    src = _kernel_at('local_flux', 'gfx942', lead_vectorize=False)
     assert not WAVE_BROADCAST.search(src)
 
 

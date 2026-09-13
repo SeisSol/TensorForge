@@ -634,11 +634,13 @@ class Generator:
       return
     announce = self._announce_identity
     rotate = self._rotate
+    name = self._base_kernel_name
     self.__init__(given, pick.context(self._context),
                   self._thread_block_policy_type, lanes=pick.lanes,
                   attrs=self._attrs)
     self._announce_identity = announce
     self._rotate = rotate
+    self._base_kernel_name = name
     self.tuned = pick
     self._context.peak_pressure = None
     self._context.emitted_work = None
@@ -695,12 +697,17 @@ class Generator:
     def share(descrs):
       return size * list_cost(list(descrs)).flops / whole
 
+    # What the caller set between construction and `generate` survives the
+    # rebuild: a pinned name above all, which the rebuild would otherwise
+    # replace by the digest (`test_name_does_not_change_the_source`).
     announce, rotate = self._announce_identity, self._rotate
+    name = self._base_kernel_name
     self.__init__(self._given, self._context, self._thread_block_policy_type,
                   lanes=self._lanes, attrs=self._attrs,
                   merge_within=(budget, share))
     self._announce_identity = announce
     self._rotate = rotate
+    self._base_kernel_name = name
 
   def _generate_bound(self):
     descrlist = []

@@ -26,6 +26,9 @@ CASES = Path(__file__).resolve().parent / "cases"
 
 
 def _kernel(backend='esimd', arch='pvc', **opts):
+    # unmerged: the hints counted here are one per operator of the unmerged
+    # kernel, and a merged run reads its operators through a table
+    opts.setdefault('merge_variants', False)
     path = CASES / 'local_flux.py'
     spec = importlib.util.spec_from_file_location('tf_pfd__local_flux', path)
     mod = importlib.util.module_from_spec(spec)
