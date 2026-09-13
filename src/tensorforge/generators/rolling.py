@@ -24,10 +24,9 @@ a question for whoever wrote it and not something to make tidier.
 """
 
 from dataclasses import dataclass
-from typing import List, Optional, Sequence, Tuple
+from typing import Callable, List, Optional, Sequence, Tuple
 
 from tensorforge.analysis.antiunify import substitute
-from tensorforge.analysis.cost import estimated_lines
 from tensorforge.analysis.dependence import (binding_period, carried,
                                              escapes, shifts)
 from tensorforge.analysis.families import find_repeats
@@ -45,9 +44,10 @@ def roll(descrs: Sequence[OperationDescription],
          max_period: Optional[int] = None,
          max_arity: Optional[int] = None,
          allow_barriers: bool = False,
-         keep_unrolled_under: Optional[int] = None,
-         fit_within: Optional[int] = None,
-         num_threads: int = 32) -> List[OperationDescription]:
+         keep_unrolled_under: Optional[float] = None,
+         fit_within: Optional[float] = None,
+         size: Optional[Callable[[Sequence[OperationDescription]], float]] = None,
+         ) -> List[OperationDescription]:
     """Replace each repeated run of a descriptor list with a `ForDescr`.
 
     Runs that are not rolled are left where they are, so the result is the same
@@ -57,21 +57,29 @@ def roll(descrs: Sequence[OperationDescription],
     separately because they are not the same question.
 
     `keep_unrolled_under` asks whether *this* run is worth a loop at all.  A
-    small body is better left alone: written out it costs a few hundred lines
-    and keeps every operand at a compile-time address, while rolled it costs a
-    counter, an indexed load per varying operand, and a residency that has to
-    survive the back edge.
+    small body is better left alone: written out it keeps every operand at a
+    compile-time address, while rolled it costs a counter, an indexed load per
+    varying operand, and a residency that has to survive the back edge.
 
-    `fit_within` asks whether the *list* is too large, in estimated lines, and
-    is the one that answers to an instruction cache.  A cache holds the body
-    that repeats, not one run of it, so every roll changes the same total and
-    a threshold applied run by run answers a question nobody asked.  Runs are
-    taken in order of what they save until the total fits, so a list that
-    already fits keeps every operand where it was.
+    `fit_within` asks whether the *list* is too large, and is the one that
+    answers to an instruction cache.  A cache holds the body that repeats, not
+    one run of it, so every roll changes the same total and a threshold applied
+    run by run answers a question nobody asked.  Runs are taken in order of
+    what they save until the total fits, so a list that already fits keeps
+    every operand where it was.
 
-    Left unset neither is weighed and every run is rolled, which is what the
-    tests want and not what a generator should do.
+    Both are stated in whatever `size` answers in -- what a list of
+    descriptors becomes.  The generator measures it: bytes of code from an
+    unmerged build, split over the list by arithmetic (`Generator._auto_merge`).
+    It used to be a line count from a regression over one SeisSol corpus,
+    which was twice too large at the other end of the scale.
+
+    Left unset neither is weighed and every run is rolled.
     """
+    if (keep_unrolled_under is not None or fit_within is not None) \
+            and size is None:
+        raise ValueError('a budget is weighed against a size, and none was '
+                         'given')
     runs = find_repeats(descrs, min_count=min_count, max_period=max_period,
                         max_arity=max_arity)
 
@@ -83,15 +91,14 @@ def roll(descrs: Sequence[OperationDescription],
         if run.arity == 0:
             continue
         flat = [d for chunk in chunks for d in chunk]
-        written_out = estimated_lines(flat, num_threads)
+        written_out = size(flat) if size is not None else 0
         if keep_unrolled_under is not None and written_out < keep_unrolled_under:
             continue
-        saving = written_out - estimated_lines(chunks[0], num_threads)
+        saving = written_out - size(chunks[0]) if size is not None else 0
         eligible.append((run, chunks, saving))
 
     if fit_within is not None:
-        total = estimated_lines(
-            [op for descr in descrs for op in descr.operations()], num_threads)
+        total = size([op for descr in descrs for op in descr.operations()])
         # Largest saving first, and only as many as the total needs.  Ties go
         # to the earlier run so that the same list always rolls the same way.
         taken = []

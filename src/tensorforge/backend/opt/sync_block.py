@@ -29,7 +29,8 @@ class SyncThreadsOpt(AbstractTransformer):
                instructions: List[AbstractInstruction],
                regions: List[Region],
                num_threads: int,
-               loop_body: bool = False):
+               loop_body: bool = False,
+               wraps_reads: bool = False):
 
     super(SyncThreadsOpt, self).__init__(context, instructions)
     self._regions = regions
@@ -38,6 +39,12 @@ class SyncThreadsOpt(AbstractTransformer):
     # does, so a shared write near its tail is read near its head one
     # iteration later -- see `_insert_sync_before_use`.
     self._loop_body = loop_body
+    # Whether the other direction around the back edge is this pass's too: a
+    # read near the tail against a write near the head.  The generator appends
+    # a barrier to every batch loop for it; a merged run's `VariantLoop` has
+    # none, and its body reused one shared window for the staged operand at
+    # the head and the product read at the tail.
+    self._wraps_reads = wraps_reads
 
   def apply(self) -> None:
     self._remove_previous_sync_instructions()
@@ -103,8 +110,18 @@ class SyncThreadsOpt(AbstractTransformer):
     return selected, writes
 
   def _insert_sync_after_use(self):
+    # Around the back edge where nobody else fences it: the regions still read
+    # and unfenced when the body ends are the ones a write at its head
+    # overwrites next iteration.  Scanned once for that, then again from it.
+    carried = self._scan_after_use(None)[1] if self._wraps_reads else None
+    selected, _ = self._scan_after_use(carried)
+    self._insert_sync_instrs(selected)
+
+  def _scan_after_use(self, flags):
+    """`(shared writes needing a barrier before them, regions read and not yet
+    fenced at the end)`."""
     selected = []
-    flags = [False] * len(self._regions)
+    flags = list(flags) if flags is not None else [False] * len(self._regions)
     for index, instr in enumerate(self._instrs):
       if isinstance(instr, ComputeInstruction):
         for src in instr.get_operands():
@@ -121,7 +138,7 @@ class SyncThreadsOpt(AbstractTransformer):
             selected.append(instr)
             flags = [False] * len(self._regions)
 
-    self._insert_sync_instrs(selected)
+    return selected, flags
 
   def _insert_sync_instrs(self, selected):
     for instr in selected:

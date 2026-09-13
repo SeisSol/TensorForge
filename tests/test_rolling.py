@@ -378,80 +378,71 @@ def test_a_rolled_chain_generates_the_same_body():
 # --- whether a run is worth rolling -----------------------------------------
 
 
+def _flops(descrs):
+    """A size for the budgets below.  The generator's is bytes of code from
+    a build; any measure that adds up over a list asks the same question."""
+    from tensorforge.analysis.cost import list_cost
+    return list_cost(list(descrs)).flops
+
+
 def test_a_small_run_is_left_alone_under_a_budget():
-    """A body worth a few hundred lines is cheaper written out.
+    """A small body is cheaper written out.
 
     Rolled it costs a counter, an indexed load per varying operand and a
-    residency that has to survive the back edge; written out it costs lines
-    and keeps every operand at a compile-time address.  Which way that goes is
-    a size question, so the budget is where the caller states it.
+    residency that has to survive the back edge; written out it keeps every
+    operand at a compile-time address.  Which way that goes is a size
+    question, so the budget is where the caller states it.
     """
-    from tensorforge.analysis.cost import estimated_lines
-
-    descrs = _contributions(3)
-    size = estimated_lines(descrs, 32)
+    size = _flops(_contributions(3))
     assert not any(isinstance(d, ForDescr) for d in
-                   roll(_contributions(3), keep_unrolled_under=size * 2))
+                   roll(_contributions(3), keep_unrolled_under=size * 2,
+                        size=_flops))
     assert any(isinstance(d, ForDescr) for d in
-               roll(_contributions(3), keep_unrolled_under=size // 2))
+               roll(_contributions(3), keep_unrolled_under=size // 2,
+                    size=_flops))
 
 
 def test_without_a_budget_every_run_rolls():
     assert any(isinstance(d, ForDescr) for d in roll(_contributions(3)))
 
 
-def test_the_estimate_follows_the_arithmetic_and_the_lanes():
-    from tensorforge.analysis.cost import estimated_lines
-
-    small = estimated_lines(_contributions(2), 32)
-    large = estimated_lines(_contributions(6), 32)
-    assert large > small
-    assert estimated_lines(_contributions(6), 64) < large
+def test_a_budget_without_a_size_is_refused():
     with pytest.raises(ValueError):
-        estimated_lines(_contributions(2), 0)
+        roll(_contributions(3), fit_within=100)
 
 
 def test_a_list_that_already_fits_keeps_every_operand_where_it_was():
     """The question an instruction cache asks is about the list, not a run."""
-    from tensorforge.analysis.cost import estimated_lines
-
-    descrs = _contributions(4)
-    total = estimated_lines(descrs, 32)
+    total = _flops(_contributions(4))
     assert not any(isinstance(d, ForDescr) for d in
-                   roll(_contributions(4), fit_within=total + 1))
+                   roll(_contributions(4), fit_within=total + 1, size=_flops))
     assert any(isinstance(d, ForDescr) for d in
-               roll(_contributions(4), fit_within=total // 2))
+               roll(_contributions(4), fit_within=total // 2, size=_flops))
 
 
 def test_only_as_many_runs_are_rolled_as_the_total_needs():
-    from tensorforge.analysis.cost import estimated_lines
-
     both = _contributions(4) + _chain(4)
-    budget = estimated_lines(both, 32) - estimated_lines(_chain(4), 32) // 2
-    rolled = roll(_contributions(4) + _chain(4), fit_within=budget)
+    budget = _flops(both) - _flops(_chain(4)) // 2
+    rolled = roll(_contributions(4) + _chain(4), fit_within=budget,
+                  size=_flops)
     assert sum(isinstance(d, ForDescr) for d in rolled) == 1
 
 
 def test_the_budget_does_not_change_what_the_list_means():
-    from tensorforge.analysis.cost import estimated_lines
-
-    original = _contributions(4) + _chain(4)
-    total = estimated_lines(original, 32)
+    total = _flops(_contributions(4) + _chain(4))
     for budget in (total * 2, total, total // 2, 1):
-        rolled = roll(_contributions(4) + _chain(4), fit_within=budget)
+        rolled = roll(_contributions(4) + _chain(4), fit_within=budget,
+                      size=_flops)
         assert same_shape(unroll(rolled)) == \
             same_shape(_contributions(4) + _chain(4))
 
 
 def test_the_two_questions_are_asked_separately():
     """A run below the floor is left alone however tight the budget is."""
-    from tensorforge.analysis.cost import estimated_lines
-
-    descrs = _contributions(3)
-    floor = estimated_lines(descrs, 32) * 2
+    floor = _flops(_contributions(3)) * 2
     assert not any(isinstance(d, ForDescr) for d in
                    roll(_contributions(3), keep_unrolled_under=floor,
-                        fit_within=1))
+                        fit_within=1, size=_flops))
 
 
 # --- what a builder gets ----------------------------------------------------
@@ -832,29 +823,115 @@ def test_the_driver_counts_what_the_launcher_takes():
 # --- one switch -------------------------------------------------------------
 
 
-def _with_option(descrs, **options):
+def _with_option(descrs, arch='sm_86', backend='cuda', **options):
     from tensorforge.common.context import Context, Options
     from tensorforge.generators.generator import Generator
-    gen = Generator(descrs, Context(arch='sm_86', backend='cuda',
+    gen = Generator(descrs, Context(arch=arch, backend=backend,
                                     fp_type=DTYPE, options=Options(**options)))
     gen.generate()
     return gen
 
 
+def _merged(gen):
+    return any(type(i).__name__ == 'VariantLoop'
+               for i in gen._sections[0].ir)
+
+
 def test_the_option_rewrites_and_emits_in_one_step():
     """Two separately reachable switches let a list be rolled and expanded."""
-    plain = _with_option(_flux())
+    plain = _with_option(_flux(), merge_variants=False)
     merged = _with_option(_flux(), merge_variants=True)
-    assert not any(type(i).__name__ == 'VariantLoop'
-                   for i in plain._sections[0].ir)
-    assert any(type(i).__name__ == 'VariantLoop'
-               for i in merged._sections[0].ir)
+    assert not _merged(plain)
+    assert _merged(merged)
     assert len(merged.get_kernel()) < len(plain.get_kernel())
 
 
-def test_the_option_is_off_by_default():
-    assert not any(type(i).__name__ == 'VariantLoop'
-                   for i in _with_option(_flux())._sections[0].ir)
+def test_by_default_a_kernel_that_fits_the_cache_is_written_out():
+    """`auto` weighs the kernel written out against the instruction cache,
+    and four small contributions take a sliver of it."""
+    assert not _merged(_with_option(_flux()))
+
+
+def test_by_default_a_kernel_that_crowds_the_cache_is_merged():
+    assert _merged(_with_option(_flux(), merge_icache_fraction=1e-6))
+
+
+def test_auto_merges_nothing_where_the_cache_is_unknown():
+    """Intel states no instruction cache, and unknown is not over."""
+    assert not _merged(_with_option(_flux(), arch='pvc', backend='oneapi',
+                                    merge_icache_fraction=1e-6))
+
+
+def _accumulate_then_read():
+    import importlib.util
+    from pathlib import Path
+    path = Path(__file__).parent / 'cases' / 'accumulate_then_read.py'
+    spec = importlib.util.spec_from_file_location('accumulate_then_read', path)
+    case = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(case)
+    return case
+
+
+@pytest.mark.parametrize('arch', ['sm_70', 'sm_86'])
+def test_a_merged_accumulation_is_read_back_after_the_loop(arch):
+    """`D += W_i Q B_i` three times, merged, then `O = D C`.
+
+    The loop states no definitions of its own and counts as a barrier, and
+    `MoveLoads` let the final product's read of `D` cross it: every row of `O`
+    was computed from a `D` two terms short.  The merged build is checked on
+    its own against numpy, since it names its buffers differently."""
+    import numpy as np
+
+    import kernel_eval
+    case = _accumulate_then_read()
+    descrs = case.descr_list()
+    gen = _with_option(descrs, arch=arch, merge_variants=True)
+    assert _merged(gen)
+    tensors = {}
+    for d in descrs:
+        for m in d.matrix_list():
+            t = getattr(m, 'tensor', m)
+            tensors.setdefault(t.alias, t)
+    lanes, mults = kernel_eval.launch_geometry(gen.get_launcher())
+    mem = kernel_eval.evaluate_wave(gen.get_kernel(), lanes, seed=11,
+                                    globals_only=True, mults=mults)
+
+    def read(alias, rows, cols):
+        return np.array([[mem.get((tensors[alias].name, i + rows * j), np.nan)
+                          for j in range(cols)] for i in range(rows)])
+
+    m, n, half = case.M, case.N, case.HALF
+    q = read('Q', m, n)
+    d = q @ read('S', n, n)
+    for i in range(case.TERMS):
+        d[:half] += read(f'W{i}', half, m) @ (q @ read(f'B{i}', n, n))
+    assert np.allclose(read('D', m, n), d, rtol=1e-4, atol=1e-3)
+    assert np.allclose(read('O', m, n), d @ read('C', n, n),
+                       rtol=1e-4, atol=1e-2)
+
+
+def test_a_merged_loop_fences_its_head_against_its_tail():
+    """The staged operand at the head reuses the window the product at the
+    tail read the iteration before, and nothing appends a barrier to this
+    loop the way the generator does to a batch loop."""
+    from tensorforge.backend.instructions.memory import AbstractShrMemWrite
+    from tensorforge.backend.instructions.sync_block import SyncThreads
+    gen = _with_option(_accumulate_then_read().descr_list(), arch='sm_70',
+                       merge_variants=True)
+    loop, = [i for i in gen._sections[0].ir
+             if type(i).__name__ == 'VariantLoop']
+    body = list(loop.region)
+    first_write = next(k for k, i in enumerate(body)
+                       if isinstance(i, AbstractShrMemWrite))
+    assert any(isinstance(i, SyncThreads) for i in body[:first_write])
+
+
+def test_the_probe_leaves_nothing_behind():
+    """The unmerged build that measures the code is a probe: the counters
+    the rebuild reports are its own."""
+    merged = _with_option(_flux(), merge_icache_fraction=1e-6)
+    explicit = _with_option(_flux(), merge_variants=True)
+    assert merged.code_units == explicit.code_units
 
 
 def test_a_pair_is_not_a_run_by_default():

@@ -289,7 +289,8 @@ class Generator:
                context: Context,
                thread_block_policy_type: Type[AbstractThreadBlockPolicy] = RegmaxBlockPolicy,
                lanes: Optional[LaneConfig] = None,
-               attrs: Optional[dict] = None):
+               attrs: Optional[dict] = None,
+               merge_within: Optional[tuple] = None):
     self.descr_list: List[OperationDescription] = gemm_list
     #: The list as the caller handed it, before merging rewrites it -- what
     #: `Options.autotune` builds its candidates from and rebuilds the pick on.
@@ -364,15 +365,25 @@ class Generator:
     self._section: Section = Section()
     self._sections: List[Section] = []
 
-    if context.get_user_options().merge_variants:
+    #: Whether `merge_variants='auto'` is settled for this list -- by
+    #: `_auto_merge`, or because this generator is one of its probes or the
+    #: rebuild it asked for -- so that neither probes in turn.
+    self._merge_decided: bool = merge_within is not None
+
+    options = context.get_user_options()
+    if options.merge_variants is True or merge_within is not None:
       # Before the operands are named, which is the first thing that reads the
       # list -- a stand-in arriving after it has no name and then no symbol,
       # and the failure is a table built from `None` several phases later.
+      #
+      # `merge_within` is `(budget, size)` from `_auto_merge`: as many runs as
+      # it takes to fit, rather than every one.
       from tensorforge.generators.rolling import roll
-      options = context.get_user_options()
+      budget = ({} if merge_within is None
+                else dict(fit_within=merge_within[0], size=merge_within[1]))
       self.descr_list = roll(self.descr_list,
                              min_count=options.merge_min_count,
-                             max_arity=options.merge_max_arity)
+                             max_arity=options.merge_max_arity, **budget)
       self._emit_loops = True
 
     self._name_operands(self.descr_list)
@@ -494,6 +505,9 @@ class Generator:
     probe = Generator(self.descr_list, self._context, attrs=self._attrs)
     probe._rotate = set()
     probe._announce_identity = False
+    # The list as this generator builds it, merged or not.
+    probe._emit_loops = self._emit_loops
+    probe._merge_decided = True
     _wrap.wrap_prefetch = asking
     try:
       probe.generate()
@@ -538,6 +552,8 @@ class Generator:
     check = Generator(self.descr_list, self._context, attrs=self._attrs)
     check._rotate = set(names)
     check._announce_identity = False
+    check._emit_loops = self._emit_loops
+    check._merge_decided = True
     _wrap.wrap_prefetch = confirming
     try:
       check.generate()
@@ -571,18 +587,20 @@ class Generator:
       instr.set_stages(2, f'{stage} % 2', f'({stage} + 1) % 2')
 
   def generate(self):
+    self._autotune()
+    self._auto_merge()
+    # After both, so that the rotation is asked of the list that is built.
     if (self._rotate is None
         and self._context.get_user_options().enable_wrap_loads):
       self._rotate = self._rotation_targets()
-    # Reset rather than only read at the end: a context outlives one generator
-    # -- a search builds several against the same one -- so a figure left over
-    # from a previous build would be attributed to this one, and a maximum
-    # never falls back on its own.
+    # Reset rather than only read at the end, and after every probe above: a
+    # context outlives one generator -- a search builds several against the
+    # same one, and so does each probe -- so a figure left over from a
+    # previous build would be attributed to this one, and a maximum never
+    # falls back on its own.
     self._context.peak_pressure = None
     self._context.emitted_work = None
     self._context.code_units = None
-
-    self._autotune()
 
     self.register()
 
@@ -625,6 +643,64 @@ class Generator:
     self._context.peak_pressure = None
     self._context.emitted_work = None
     self._context.code_units = None
+
+  def _auto_merge(self) -> None:
+    """Merge repeated runs where the kernel written out crowds the
+    instruction cache (`merge_variants='auto'`, the default).
+
+    The size that matters is the one the emitter lays down (`code_units`),
+    and that is known only once it has: so the list is built unmerged first,
+    by a probe that announces nothing.  Past `merge_icache_fraction` of the
+    target's instruction cache this generator is rebuilt merged, as many runs
+    as it takes to fit, largest saving first (`rolling.roll`, `fit_within`).
+    A run's share of the measured code is taken to be its share of the
+    arithmetic -- a split of a measured size, not a model of one; what
+    `roll` weighed before was a line count fitted to one SeisSol corpus.
+
+    Nothing to decide where nothing repeats, where the target states no
+    instruction cache, or where the probe does not build.
+    """
+    opts = self._context.get_user_options()
+    if opts.merge_variants != 'auto' or self._merge_decided:
+      return
+    self._merge_decided = True
+    hw = self._context.get_vm().get_hw_descr()
+    capacity = getattr(hw, 'icache_size', None)
+    if not capacity:
+      return
+    from tensorforge.analysis.cost import list_cost
+    from tensorforge.analysis.icache import code_bytes
+    from tensorforge.generators.rolling import roll
+    if not any(isinstance(d, ForDescr) for d in roll(
+        list(self._given), min_count=opts.merge_min_count,
+        max_arity=opts.merge_max_arity)):
+      return
+
+    probe = Generator(self._given, self._context,
+                      self._thread_block_policy_type, lanes=self._lanes,
+                      attrs=self._attrs)
+    probe._merge_decided = True
+    probe._announce_identity = False
+    probe._rotate = set()
+    try:
+      probe.generate()
+    except Exception:
+      return
+    size = code_bytes(probe.code_units, hw)
+    budget = opts.merge_icache_fraction * capacity
+    whole = list_cost(list(self._given)).flops
+    if size is None or size <= budget or not whole:
+      return
+
+    def share(descrs):
+      return size * list_cost(list(descrs)).flops / whole
+
+    announce, rotate = self._announce_identity, self._rotate
+    self.__init__(self._given, self._context, self._thread_block_policy_type,
+                  lanes=self._lanes, attrs=self._attrs,
+                  merge_within=(budget, share))
+    self._announce_identity = announce
+    self._rotate = rotate
 
   def _generate_bound(self):
     descrlist = []

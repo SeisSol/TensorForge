@@ -147,9 +147,10 @@ class OptimizationStage:
     # previous *iteration*.
     pm.add(LegacyTransform(
         'SyncThreadsOpt',
-        lambda pc, instrs: SyncThreadsOpt(pc.context, instrs,
-                                          pc.get('regions'), pc.num_threads,
-                                          loop_body=_in_loop_body(pc)),
+        lambda pc, instrs: SyncThreadsOpt(
+            pc.context, instrs, pc.get('regions'), pc.num_threads,
+            loop_body=_enclosing_loop(pc) is not None,
+            wraps_reads=_enclosing_loop(pc) == 'variant'),
         preserves=('live_map', 'regions'),
         scope=PassScope.PER_REGION,
         enabled=lambda pc: opts.enable_sync_block_opt))
@@ -216,12 +217,22 @@ class _AssignShrMemOffsets(LegacyTransform):
     pc.extra['offsets_assigned'] = True
 
 
-def _in_loop_body(pc) -> bool:
-  """Is the block a per-region pass was just handed the body of a batch loop?
+def _enclosing_loop(pc):
+  """`'batch'` or `'variant'` where the block a per-region pass was just
+  handed is the body of a batch loop or of a merged run's loop, else None.
 
   `PassManager._run_per_region` keeps the enclosing constructs in
-  `pc.extra['enclosing']`; the top level has none.
+  `pc.extra['enclosing']`; the top level has none.  A merged run's body runs
+  again after its last instruction like a batch loop's, and unlike one it has
+  no barrier appended behind it.
   """
   from tensorforge.backend.instructions.batch_loop import BatchLoop
+  from tensorforge.backend.instructions.ptr_manip import VariantLoop
   enclosing = pc.extra.get('enclosing') or []
-  return bool(enclosing) and isinstance(enclosing[-1], BatchLoop)
+  if not enclosing:
+    return None
+  if isinstance(enclosing[-1], BatchLoop):
+    return 'batch'
+  if isinstance(enclosing[-1], VariantLoop):
+    return 'variant'
+  return None

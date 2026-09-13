@@ -65,9 +65,20 @@ class MoveLoads(AbstractTransformer):
 
     Conservative on purpose: an instruction that does not describe its
     dataflow conflicts with everything, and all three dependence kinds are
-    barriers.  This is a latency optimisation --- giving up on one load costs
+    barriers.  This is a latency optimization --- giving up on one load costs
     a few cycles, getting it wrong costs the answer.
+
+    A construct -- a merged run's loop, a guard -- is judged by what it
+    contains.  `VariantLoop` states no definitions of its own and counts as a
+    barrier once its body holds one, so the barrier rule below let a global
+    read cross the whole loop: in `accumulate_then_read` merged, the final
+    product read `D` above the loop that accumulates into it, and every row
+    of `O` came out wrong.
     """
+    body = [inner for region in instr.regions() for inner in region]
+    if body:
+      return (any(cls._conflicts(load, inner) for inner in body)
+              or cls._dataflow_conflicts(load, instr))
     if instr.barrier_scope() is not None:
       # A barrier is not a memory operation --- `accesses()` is empty --- it
       # orders what *other* threads did.  Only a load that reads or writes
@@ -76,6 +87,10 @@ class MoveLoads(AbstractTransformer):
       return cls._touches_shared(load)
     if not instr.describes_dataflow() or not load.describes_dataflow():
       return True
+    return cls._dataflow_conflicts(load, instr)
+
+  @classmethod
+  def _dataflow_conflicts(cls, load, instr) -> bool:
     reads, writes = cls._symbols(load.uses()), cls._symbols(load.defs())
     idefs, iuses = cls._symbols(instr.defs()), cls._symbols(instr.uses())
     return bool(reads & idefs           # read-after-write: the point of this

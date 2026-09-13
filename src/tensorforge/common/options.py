@@ -88,6 +88,17 @@ def parse_optional_bool(text: str) -> Optional[bool]:
   return parse_bool(text)
 
 
+def parse_bool_or_auto(text: str):
+  """`auto`, or a boolean."""
+  if text.strip().lower() == 'auto':
+    return 'auto'
+  return parse_bool(text)
+
+
+def parse_float(text: str) -> float:
+  return float(text.strip())
+
+
 _DEFAULT_PARSERS = {bool: parse_bool, int: parse_int, str: parse_str}
 
 
@@ -582,16 +593,31 @@ declare('wide_bodies',
             'setting that moves 71 of 108 generated outputs has to stay bisectable.')
 
 declare('merge_variants',
-        default=False,
+        default='auto',
+        parse=parse_bool_or_auto,
         doc='Macro-op merging: state a repeated run of the descriptor list once '
             'and bind its varying operands to a counter.  One switch covers both '
             'the rewrite and the emission, so that a rolled list cannot be '
             'expanded again on the way out.\n'
-            'Off by default.  On sm_120 `local_flux` (its four faces merged) '
-            'computes the same checksum as the expanded list and runs 5 % faster '
-            'at 32 lanes, 12 % at 16 and 24 % at 8, from a quarter to a half of '
-            'the code; with `k_roll` as well it gained less, the merged rolled '
-            'body taking more registers.')
+            '`auto`, the default, merges where the kernel written out takes more '
+            'than `merge_icache_fraction` of the instruction cache, as many runs '
+            'as it takes to fit (`Generator._auto_merge`); `1` merges every run, '
+            '`0` none.  On sm_120 `local_flux` (its four faces merged) computes '
+            'the same checksum as the expanded list and runs 5 % faster at 32 '
+            'lanes, 12 % at 16 and 24 % at 8, from a quarter to a half of the '
+            'code; on GB200 22 to 35 % (preferences.yml).  With `k_roll` as well '
+            'it gained less, the merged rolled body taking more registers.')
+
+declare('merge_icache_fraction',
+        default=0.25,
+        parse=parse_float,
+        doc='How much of the instruction cache a kernel written out may take '
+            'before `merge_variants=auto` merges its repeated runs.  Generous on '
+            'purpose: merging measured faster wherever it was tried, and the '
+            'code size is an estimate that runs up to +89 % over what the '
+            'compiler emits at the 90th percentile (`analysis.icache`).  Where '
+            'the target states no instruction cache (Intel), `auto` merges '
+            'nothing.')
 
 declare('merge_min_count',
         default=3,
