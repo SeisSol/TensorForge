@@ -92,7 +92,12 @@ def _split_top_level(text: str):
 
 
 def _prototype_params(header: str):
-    inner = header[header.index("(") + 1:header.rindex(")")]
+    """The launcher's parameters.  The header states the launch as well
+    (`launch_info_*`, `launch_config_*`), so the prototype is found by name
+    rather than taken to be the whole header."""
+    line = next(ln for ln in header.splitlines()
+                if ln.startswith("void launcher_"))
+    inner = line[line.index("(") + 1:line.rindex(")")]
     return _split_top_level(inner)
 
 

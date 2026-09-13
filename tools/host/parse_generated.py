@@ -71,9 +71,59 @@ def parse_operand(match, pool):
     return SubTensor(pool[key], box), _target(match['target'])
 
 
-def parse_kernel(text, pool=None):
-    """Every operation stated in one kernel's comment block, in order."""
+#: The kernel's metadata as one JSON line (`Generator.kernel_info`).
+META = re.compile(r'//\s*tensorforge-meta:\s*(\{.*\})\s*$', re.M)
+
+
+def _meta_view(row, pool, tensors):
+    """One operand of an operation: the tensor from `operands` where the
+    kernel lists it there, and from the view itself for a temporary."""
+    shape = row['shape'] or [1]
+    name = row['name']
+    if name in tensors:
+        tbox = BoundingBox(*tensors[name]['bbox'])
+    else:
+        lower = [l + o for l, o in zip(row['bbox'][0], row['offset'])]
+        upper = [u + o for u, o in zip(row['bbox'][1], row['offset'])]
+        tbox = BoundingBox(lower, upper)
+    key = (name, tuple(shape))
+    if key not in pool:
+        pool[key] = Tensor(shape, ADDRESSING[row['addressing']], tbox,
+                           alias=name, is_tmp=bool(row.get('is_tmp')),
+                           datatype=Datatype.F32)
+    return SubTensor(pool[key], BoundingBox(*row['bbox']))
+
+
+def parse_meta(text, pool=None):
+    """The multilinear operations of a kernel carrying a `tensorforge-meta`
+    line, or None for one that does not (generated before it existed)."""
+    import json
+    found = META.search(text)
+    if found is None:
+        return None
     pool = {} if pool is None else pool
+    meta = json.loads(found.group(1))
+    tensors = {o['name']: o for o in meta.get('operands', [])}
+    descrs = []
+    for row in meta.get('operations', []):
+        if row.get('kind') != 'multilinear':
+            continue
+        descrs.append(MultilinearDescr(
+            _meta_view(row['dest'], pool, tensors),
+            [_meta_view(o, pool, tensors) for o in row['ops']],
+            row['target'], row['permute'], row['add']))
+    return descrs
+
+
+def parse_kernel(text, pool=None):
+    """Every operation stated in one kernel's comment block, in order.
+
+    From the `tensorforge-meta` line where the kernel has one, and from the
+    descriptor lines older kernels carry otherwise."""
+    pool = {} if pool is None else pool
+    meta = parse_meta(text, pool)
+    if meta is not None:
+        return meta
     descrs = []
     for line in text.splitlines():
         line = line.strip()

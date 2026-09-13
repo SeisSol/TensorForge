@@ -36,78 +36,12 @@ from tensorforge.generators.descriptions import (ElementwiseDescr,
                                                  ReductionDescr)
 
 
-def _sub(x):
-    t = x.tensor
-    return dict(name=t.name or t.alias, alias=t.alias,
-                shape=list(t.shape),
-                ashape=list(t.get_actual_shape()),
-                tbbox=[list(t.bbox.lower()), list(t.bbox.upper())],
-                bbox=[list(x.bbox.lower()), list(x.bbox.upper())],
-                offset=[int(o) for o in x.offset],
-                addressing=str(t.addressing),
-                is_tmp=bool(t.is_tmp),
-                storage=int(t.storage_volume()),
-                pack=(list(t.storage_map()) if t.storage_map() is not None
-                      else None),
-                sliced=bool(getattr(x, "sliced", False)),
-                data=(t.data.tolist() if getattr(t.data, 'tolist', None)
-                      else (list(t.data) if t.data is not None else None)))
-
-
-def _multilinear(d):
-    keep = [(o, t, p) for o, t, p in zip(d.ops, d.target, d.permute)
-            if hasattr(o, "tensor")]
-    return dict(kind="multilinear",
-                dest=_sub(d.dest),
-                ops=[_sub(o) for o, _, _ in keep],
-                target=[list(t) for _, t, _ in keep],
-                permute=[list(p) for _, _, p in keep],
-                add=bool(d.add))
-
-
-def _elementwise(d):
-    """Every operand has the destination's shape, so every axis lines up."""
-    srcs = d.tensor_srcs()
-    axes = list(range(len(d.dest.bbox.sizes())))
-    return dict(kind="elementwise",
-                op=d.op.name,
-                dest=_sub(d.dest),
-                ops=[_sub(o) for o in srcs],
-                target=[list(axes) for _ in srcs],
-                permute=[list(axes) for _ in srcs],
-                scalars=[float(v) for v in d.scalar_srcs()],
-                add=False)
-
-
-def _reduction(d):
-    """`dims` are axes of the operand; the ones that survive keep their order,
-    so the operand maps onto the destination in order with the reduced axes
-    numbered negative, the way a contraction states it."""
-    kept, contracted = [], -1
-    for axis in range(d.var.bbox.rank()):
-        if axis in d.dims:
-            kept.append(contracted)
-            contracted -= 1
-        else:
-            kept.append(len([a for a in kept if a >= 0]))
-    return dict(kind="reduction",
-                op=str(d.op),
-                dest=_sub(d.dest),
-                ops=[_sub(d.var)],
-                target=[kept],
-                permute=[list(range(d.var.bbox.rank()))],
-                add=False)
-
-
 def _row(d):
-    """One descriptor, as data. `None` for a kind nothing here reads yet --
-    a barrier, a region marker -- so that positions still line up."""
-    if isinstance(d, MultilinearDescr):
-        return _multilinear(d)
-    if isinstance(d, ElementwiseDescr):
-        return _elementwise(d)
-    if isinstance(d, ReductionDescr):
-        return _reduction(d)
+    """One descriptor, as data (`to_dict`, with the values and the storage
+    order).  `None` for a kind nothing here reads yet -- a barrier, a region
+    marker, a merged run -- so that positions still line up."""
+    if isinstance(d, (MultilinearDescr, ElementwiseDescr, ReductionDescr)):
+        return d.to_dict(data=True, pack=True)
     return None
 
 

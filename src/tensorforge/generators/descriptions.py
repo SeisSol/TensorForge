@@ -119,6 +119,76 @@ class OperationDescription:
       reads[tensor] = box if prev is None else prev.unite(box)
     return reads, dest.storage_box()
 
+#: Index letters for `summary`: output axes, then summed ones.
+_OUT_INDICES = 'ijlmnoqr'
+_SUM_INDICES = 'kpstuvwxyz'
+
+
+def _ints(values):
+  return [int(v) for v in values]
+
+
+def operand_name(view) -> str:
+  """The name a view's tensor has in the kernel (`m0`, `t1`, `v0`)."""
+  tensor = getattr(view, 'tensor', None)
+  if tensor is None:
+    return str(view)
+  return str(tensor.name or tensor.alias)
+
+
+def _slice_note(view) -> str:
+  """`@{..}` for the part of its tensor a view takes, or '' for all of it."""
+  tensor = view.tensor
+  try:
+    whole = tensor.get_bbox()
+    lower = [l + o for l, o in zip(view.bbox.lower(), view.offset)]
+    upper = [u + o for u, o in zip(view.bbox.upper(), view.offset)]
+    if _ints(lower) == _ints(whole.lower()) and _ints(upper) == _ints(whole.upper()):
+      return ''
+  except (AttributeError, TypeError):
+    return ''
+  return '@' + '×'.join(f'{{{l}..{u}}}' for l, u in zip(_ints(lower), _ints(upper)))
+
+
+def view_dict(view, data=False, pack=False) -> dict:
+  """One operand as data: the tensor it views and the part it takes.
+
+  The fields `tools/host/dump_descriptors.py` has always written, so that its
+  files and the kernel's `tensorforge-meta` line describe an operand alike.
+  `data` and `pack` are the values and the storage order, which are large and
+  asked for only where they are needed.
+  """
+  t = view.tensor
+  out = dict(name=t.name or t.alias, alias=t.alias,
+             shape=_ints(t.shape),
+             ashape=_ints(t.get_actual_shape()),
+             tbbox=[_ints(t.bbox.lower()), _ints(t.bbox.upper())],
+             bbox=[_ints(view.bbox.lower()), _ints(view.bbox.upper())],
+             offset=_ints(view.offset),
+             addressing=str(t.addressing),
+             is_tmp=bool(t.is_tmp),
+             storage=int(t.storage_volume()),
+             sliced=bool(getattr(view, 'sliced', False)))
+  if pack:
+    out['pack'] = (list(t.storage_map()) if t.storage_map() is not None
+                   else None)
+  if data:
+    out['data'] = (t.data.tolist() if getattr(t.data, 'tolist', None)
+                   else (list(t.data) if t.data is not None else None))
+  return out
+
+
+def _index_letters(rank, targets):
+  """A letter per index: the output's first, in its order, then the rest."""
+  letters, out, summed = {}, iter(_OUT_INDICES), iter(_SUM_INDICES)
+  ids = sorted({i for t in targets for i in t} | set(range(rank)),
+               key=lambda i: (not 0 <= i < rank, i if i >= 0 else -i))
+  for i in ids:
+    pool = out if 0 <= i < rank else summed
+    letters[i] = next(pool, None) or f'x{len(letters)}'
+  return letters
+
+
 class MultilinearDescr(OperationDescription):
   def __init__(self, dest: Tensor, ops: List[Tensor], target, permute, add: bool = False,
                 strict_match: bool = False,
@@ -302,6 +372,35 @@ class MultilinearDescr(OperationDescription):
     desttarget = [i for i in range(self.dest.bbox.rank())]
     return f'{self.dest}{desttarget} {"+" if self.add else ""}= {"×".join(f"{op}{optarget}" for op, optarget in zip(self.ops, self.target))}'
 
+  def summary(self) -> str:
+    """Index notation with the kernel's names: `m2[i,j] += m0[i,k] × m1[k,j]`.
+
+    `__str__` stays as it is -- `tools/host/parse_generated.py` reads it back
+    out of older kernels -- and this is what the kernel's comment block shows:
+    which index is summed, and which part of a tensor a view takes, where
+    `__str__` spells every box in full and every index as a number.
+    """
+    rank = self.dest.bbox.rank()
+    letters = _index_letters(rank, self.target)
+    def term(view, idx):
+      if not hasattr(view, 'tensor'):
+        return str(view)
+      inner = ','.join(letters[i] for i in idx)
+      return f'{operand_name(view)}[{inner}]{_slice_note(view)}'
+    dest = term(self.dest, range(rank))
+    ops = ' × '.join(term(op, t) for op, t in zip(self.ops, self.target))
+    return f'{dest} {"+=" if self.add else "="} {ops}'
+
+  def to_dict(self, data=False, pack=False) -> dict:
+    keep = [(o, t, p) for o, t, p in zip(self.ops, self.target, self.permute)
+            if hasattr(o, 'tensor')]
+    return dict(kind='multilinear',
+                dest=view_dict(self.dest, data, pack),
+                ops=[view_dict(o, data, pack) for o, _, _ in keep],
+                target=[_ints(t) for _, t, _ in keep],
+                permute=[_ints(p) for _, _, p in keep],
+                add=bool(self.add))
+
 class ElementwiseDescr(OperationDescription):
   """One scalar operation applied pointwise: ``dest = op(*srcs)``.
 
@@ -406,6 +505,22 @@ class ElementwiseDescr(OperationDescription):
     args = ', '.join(self._name(s) for s in self.srcs)
     return f'{self._name(self.dest)} = {self.op.name.lower()}({args})'
 
+  def summary(self) -> str:
+    return str(self)
+
+  def to_dict(self, data=False, pack=False) -> dict:
+    """Every operand has the destination's shape, so every axis lines up."""
+    srcs = self.tensor_srcs()
+    axes = list(range(len(self.dest.bbox.sizes())))
+    return dict(kind='elementwise',
+                op=self.op.name,
+                dest=view_dict(self.dest, data, pack),
+                ops=[view_dict(o, data, pack) for o in srcs],
+                target=[list(axes) for _ in srcs],
+                permute=[list(axes) for _ in srcs],
+                scalars=[float(v) for v in self.scalar_srcs()],
+                add=False)
+
 class ReductionDescr(OperationDescription):
   """``dest = reduce(op, var, dims)`` -- deliberately *not* an ElementwiseDescr.
 
@@ -464,6 +579,28 @@ class ReductionDescr(OperationDescription):
   def __str__(self):
     return (f'{self._name(self.dest)} = {self.op}'
             f'({self._name(self.var)}, dims={self.dims})')
+
+  def summary(self) -> str:
+    return str(self)
+
+  def to_dict(self, data=False, pack=False) -> dict:
+    """`dims` are axes of the operand; the ones that survive keep their
+    order, so the operand maps onto the destination in order with the reduced
+    axes numbered negative, the way a contraction states it."""
+    kept, contracted = [], -1
+    for axis in range(self.var.bbox.rank()):
+      if axis in self.dims:
+        kept.append(contracted)
+        contracted -= 1
+      else:
+        kept.append(len([a for a in kept if a >= 0]))
+    return dict(kind='reduction',
+                op=str(self.op),
+                dest=view_dict(self.dest, data, pack),
+                ops=[view_dict(self.var, data, pack)],
+                target=[kept],
+                permute=[list(range(self.var.bbox.rank()))],
+                add=False)
 
 class GemmDescr(MultilinearDescr):
   def __init__(self,
@@ -653,6 +790,32 @@ class ForDescr(OperationDescription):
     order = 'in order' if self.sequential else 'any order'
     return (f'for {self.iterations} ({self.arity} varying, {order}): '
             f'{len(self.general.template)} op(s)')
+
+  def summary(self) -> str:
+    """The loop, its body over the stand-ins, and what each stand-in is at
+    each iteration -- a macro-op as the kernel states it, where `__str__` only
+    counts."""
+    body, variants = self.decompose()
+    order = 'in order' if self.sequential else 'any order'
+    lines = [f'for {self.iterations} iterations ({order}):']
+    for descr in body:
+      text = descr.summary() if hasattr(descr, 'summary') else str(descr)
+      lines.extend(f'  {line}' for line in text.splitlines())
+    for variant in variants:
+      members = ', '.join(operand_name(m) for m in variant.members)
+      lines.append(f'  {operand_name(variant.stand_in)} ∈ {{{members}}}')
+    return '\n'.join(lines)
+
+  def to_dict(self, data=False, pack=False) -> dict:
+    body, variants = self.decompose()
+    return dict(kind='for',
+                iterations=int(self.iterations),
+                sequential=bool(self.sequential),
+                body=[d.to_dict(data, pack) if hasattr(d, 'to_dict')
+                      else dict(kind=str(d)) for d in body],
+                holes=[dict(stand_in=operand_name(v.stand_in),
+                            members=[operand_name(m) for m in v.members])
+                       for v in variants])
 
 class IfDescr:
   def __init__(self, condition, subdescr):

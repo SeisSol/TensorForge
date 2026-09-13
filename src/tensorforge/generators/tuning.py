@@ -371,7 +371,7 @@ def _geometry(result: Build) -> Tuple[int, int, int]:
     """`(lanes, wave, resident multiplications per SM from what is exact)`."""
     gen = result.generator
     hw = result.context.get_vm().get_hw_descr()
-    mults = gen._section.shr_mem_obj.get_mults_per_block()
+    mults = gen.launch_config().mults_per_block
     return gen._num_threads, hw.vec_unit_length, (gen.resident_blocks or 0) * mults
 
 
@@ -396,7 +396,7 @@ def static_score(result: Build):
     lanes, wave, resident = _geometry(result)
     blocks = _register_blocks(result)
     if blocks is not None:
-        mults = gen._section.shr_mem_obj.get_mults_per_block()
+        mults = gen.launch_config().mults_per_block
         resident = min(resident, blocks * mults)
     issue = (gen.emitted_work or 0) * lanes / wave
     return (_granule(_over_budget(result)), -resident, issue,
@@ -454,7 +454,7 @@ def _register_blocks(result: Build) -> Optional[int]:
     per_lane = max(granule, -(-int(regs) // granule) * granule)
     waves_per_simd = max(0, min(8, file // per_lane))
     gen = result.generator
-    threads = gen._num_threads * gen._section.shr_mem_obj.get_mults_per_block()
+    threads = gen._num_threads * gen.launch_config().mults_per_block
     waves_per_block = max(1, -(-threads // hw.vec_unit_length))
     return (4 * waves_per_simd) // waves_per_block
 
@@ -645,7 +645,7 @@ class CompiledScore:
             return None
         if hw.vendor == 'nvidia' and report.registers:
             gen = result.generator
-            threads = gen._num_threads * gen._section.shr_mem_obj.get_mults_per_block()
+            threads = gen._num_threads * gen.launch_config().mults_per_block
             per_thread = -(-report.registers // 8) * 8
             report = replace(report, register_blocks=hw.max_reg_per_block
                              // max(1, per_thread * threads))
@@ -659,7 +659,7 @@ class CompiledScore:
         if report is None:
             return None
         lanes, wave, resident = _geometry(result)
-        mults = result.generator._section.shr_mem_obj.get_mults_per_block()
+        mults = result.generator.launch_config().mults_per_block
         if report.register_blocks is not None and result.context.get_vm().get_hw_descr().vendor == 'nvidia':
             blocks = min(result.generator.resident_blocks or 0, report.register_blocks)
             resident = blocks * mults

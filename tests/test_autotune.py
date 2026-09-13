@@ -154,6 +154,13 @@ class _FakeGen:
             shr_mem_obj = _Obj()
         self._section = _Section()
 
+        class _Launch:
+            mults_per_block = mults
+        self._launch = _Launch()
+
+    def launch_config(self):
+        return self._launch
+
 
 def _fake(arch, backend, threads, mults, peak):
     ctx = Context(arch=arch, backend=backend, fp_type=_case().DTYPE)

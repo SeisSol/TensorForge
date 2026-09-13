@@ -44,6 +44,9 @@ MULT_NAME = 'tfMult'
 LANE_NAME = 'tfLane'
 from tensorforge.common.threads import MultLayout, mults_per_group
 from tensorforge.generators.identity import registry
+from tensorforge.generators.launch import (LaunchConfig, SectionLaunch,
+                                           launch_info_initializer,
+                                           launch_types)
 
 import tensorforge.interop as interop
 
@@ -397,6 +400,8 @@ class Generator:
     self._preload_drop = 0
     self._preloaded = set()
     self._preload_left = set()
+    #: The launch every section runs under, once the sections are built.
+    self._launch = None
 
     self._clusterlaunchcontrol = prefer_launchcontrol
     self._launch_control_depth = context.get_user_options().launch_control_depth
@@ -735,6 +740,7 @@ class Generator:
     if not pinned:
       self._base_kernel_name = Generator.NAME_PLACEHOLDER
 
+    self._launch = self._make_launch_config()
     self._generate_kernel()
     self._generate_launcher()
     self._generate_header()
@@ -1046,12 +1052,11 @@ class Generator:
     exists: applying it would need the register count, which is the thing that
     is not known.
     """
-    if self._section is None or self._section.shr_mem_obj is None:
+    if self._launch is None:
       return None
     hw = self._context.get_vm().get_hw_descr()
-    shr = self._section.shr_mem_obj
-    per_block = shr.get_total_size() * self._context.fp_type.size()
-    threads = self._num_threads * shr.get_mults_per_block()
+    per_block = self._launch.shared_bytes
+    threads = self._num_threads * self._launch.mults_per_block
     limits = [hw.max_block_per_sm]
     if per_block:
       limits.append(hw.max_local_mem_size_per_block // per_block)
@@ -1059,32 +1064,82 @@ class Generator:
       limits.append(hw.max_threads_per_sm // threads)
     return max(0, min(limits))
 
-  def _generate_launcher(self):
-    writer = Writer()
-    proto = self._generate_launcher_proto(with_defaults=False)
-    mults_per_block = self._section.shr_mem_obj.get_mults_per_block()
+  def _make_launch_config(self) -> LaunchConfig:
+    """The launch every section runs under (`generators.launch`).
+
+    One launch serves all sections, so they have to agree on how many
+    multiplications a block holds: a section planned for fewer would find
+    per-multiplication windows and groups it never laid out.  None of the
+    corpus's multi-section kernels disagree; the launcher took the last
+    section's figure and the launch bounds the smallest, so a disagreement
+    would have been a wrong launch rather than an error.  The shared memory
+    is the largest any section needs.
+    """
+    sections = tuple(
+        SectionLaunch(section.shr_mem_obj.get_mults_per_block(),
+                      section.shr_mem_obj.get_total_size(),
+                      bool(section.barrier))
+        for section in self._sections)
+    mults = {s.mults_per_block for s in sections}
+    if len(mults) != 1:
+      raise InternalError(
+          f'the sections of one kernel planned {sorted(mults)} '
+          f'multiplications per block, and one launch serves them all')
+    mults_per_block = mults.pop()
+    shared = max(s.shared_elements for s in sections)
     lexic = self._context.get_vm().get_lexic()
-    with writer.Block(f'{proto}'):
-      kernel_name = f'kernel_{self._base_kernel_name}'
+    wave = self._context.get_vm().get_hw_descr().vec_unit_length
+    layout = MultLayout(self._num_threads, wave)
+    plain = layout.contiguous or layout.whole_waves
+    block_x = self._num_threads if plain else layout.unit
+    block_y = (mults_per_block if plain
+               else mults_per_block * layout.units_per_mult)
+    if getattr(lexic, 'simd_mode', False):
+      # One work-item per multiplication: the lanes are the vector, and the
+      # block counts multiplications (`EsimdLexic`).
+      block_x, block_y = 1, mults_per_block
+    return LaunchConfig(
+        threads_per_mult=self._num_threads,
+        active_threads=self._num_active_threads,
+        lead_width=self._lead_width,
+        mults_per_block=mults_per_block,
+        block=(block_x, block_y, 1),
+        shared_elements=shared,
+        shared_bytes=shared * self._context.fp_type.size(),
+        cooperative=any(s.barrier for s in sections),
+        persistent=bool(self._persistent_threading),
+        sections=sections)
 
-      shmemsize = f'{self._section.shr_mem_obj.get_total_size()} * sizeof({self._context.fp_as_str()})'
+  def launch_config(self) -> LaunchConfig:
+    """The launch this kernel runs under; `None` before `generate`."""
+    return self._launch
 
-      # TODO: allow multi-kernel approach instead
-      coop = any(section.barrier for section in self._sections)
+  def _launch_config_proto(self, with_defaults=True):
+    """`launch_config_<kernel>(numElements..., streamPtr)`, the function that
+    decides the launch at run time -- declared in the header, defined next to
+    the launcher, which calls it."""
+    params = [KernelParam.size(f'{GeneralLexicon.NUM_ELEMENTS}{i}')
+              for i in range(len(self._sections))]
+    params.append(KernelParam.opaque(
+        'void*', GeneralLexicon.STREAM_PTR_STR,
+        ' = nullptr' if with_defaults else ''))
+    str_params = ', '.join(self._declare(params, with_defaults=with_defaults,
+                                         host=True))
+    return (f'tensorforge::LaunchConfig '
+            f'launch_config_{self._base_kernel_name}({str_params})')
 
-      # In units, not lanes, where a multiplication spans waves (`_lane_mapping`).
-      wave = self._context.get_vm().get_hw_descr().vec_unit_length
-      layout = MultLayout(self._num_threads, wave)
-      plain = layout.contiguous or layout.whole_waves
-      block_x = self._num_threads if plain else layout.unit
-      block_y = (mults_per_block if plain
-                 else mults_per_block * layout.units_per_mult)
-      if getattr(lexic, 'simd_mode', False):
-        # One work-item is the whole vector of a multiplication.  With the
-        # lanes as work-items as well, every one of them ran the whole body:
-        # 32 threads per multiplication, each doing what one does.
-        block_x, block_y = 1, mults_per_block
-      writer(f'{lexic.kernel_range_object("block", f"{block_x}, {block_y}, 1")};')
+  def _generate_launch_config(self, writer, lexic, kernel_name, shmemsize):
+    """The body of `launch_config_<kernel>`: the block and the shared memory
+    as generated, the grid as the device and the element count allow."""
+    launch = self._launch
+    mults_per_block = launch.mults_per_block
+    coop = launch.cooperative
+    block_x, block_y, block_z = launch.block
+    with writer.Block(self._launch_config_proto(with_defaults=False)):
+      for i in range(len(self._sections)):
+        writer(f'(void){GeneralLexicon.NUM_ELEMENTS}{i};')
+      writer(f'(void){GeneralLexicon.STREAM_PTR_STR};')
+      writer(f'{lexic.kernel_range_object("block", f"{block_x}, {block_y}, {block_z}")};')
       if self._clusterlaunchcontrol:
         # Stated, not checked.  The queue is the one traversal with a ceiling
         # of its own: the grid is sized by the batch rather than by occupancy,
@@ -1130,9 +1185,41 @@ class Generator:
           num_blocks = 'gridsize'
         else:
           num_blocks = f'std::min(gridsize, {GeneralLexicon.NUM_ELEMENTS}0)'
-      writer(f'{lexic.kernel_range_object("grid", f"{num_blocks}, 1, 1")};')
+      writer('tensorforge::LaunchConfig config{};')
+      writer(f'config.grid[0] = {num_blocks};')
+      writer('config.grid[1] = 1;')
+      writer('config.grid[2] = 1;')
+      writer(f'config.block[0] = {block_x};')
+      writer(f'config.block[1] = {block_y};')
+      writer(f'config.block[2] = {block_z};')
+      writer(f'config.sharedMemBytes = {shmemsize};')
+      writer(f'config.cooperative = {"true" if coop else "false"};')
+      writer('return config;')
 
-      writer(lexic.set_shmem_size(kernel_name, shmemsize))
+  def _generate_launcher(self):
+    """`launch_config_<kernel>`, then the launcher, which launches what it
+    decides -- so the launch host code can ask about and the launch that
+    happens are one computation (`generators.launch`)."""
+    writer = Writer()
+    lexic = self._context.get_vm().get_lexic()
+    kernel_name = f'kernel_{self._base_kernel_name}'
+    shmemsize = (f'{self._launch.shared_elements} * '
+                 f'sizeof({self._context.fp_as_str()})')
+    coop = self._launch.cooperative
+    # Guarded, and here as well as in the header: a translation unit holding
+    # the launcher need not include the header.
+    writer(launch_types())
+    self._generate_launch_config(writer, lexic, kernel_name, shmemsize)
+    with writer.Block(self._generate_launcher_proto(with_defaults=False)):
+      counts = [f'{GeneralLexicon.NUM_ELEMENTS}{i}'
+                for i in range(len(self._sections))]
+      writer(f'const tensorforge::LaunchConfig config = '
+             f'launch_config_{self._base_kernel_name}'
+             f'({", ".join(counts + [GeneralLexicon.STREAM_PTR_STR])});')
+      writer(f'{lexic.kernel_range_object("block", "config.block[0], config.block[1], config.block[2]")};')
+      writer(f'{lexic.kernel_range_object("grid", "config.grid[0], config.grid[1], config.grid[2]")};')
+
+      writer(lexic.set_shmem_size(kernel_name, 'config.sharedMemBytes'))
 
       lexic.get_stream_via_pointer(writer, 'stream', GeneralLexicon.STREAM_PTR_STR)
 
@@ -1146,14 +1233,23 @@ class Generator:
                                         block='block',
                                         stream='stream',
                                         func_params=args,
-                                        shmem=shmemsize,
+                                        shmem='config.sharedMemBytes',
                                         coop=coop)
       writer(f'{call_site};')
       writer('CHECK_ERR;')
     self._launcher = writer.get_src()
 
   def _generate_header(self):
-    self._header = f'{self._generate_launcher_proto(with_defaults=True)};\n'
+    """The launcher's prototype, and what host code may ask about the launch
+    without calling it: `launch_info_<kernel>` for what generation fixed, and
+    `launch_config_<kernel>` for the grid as well (`generators.launch`)."""
+    self._header = (
+        f'{launch_types()}'
+        f'inline constexpr tensorforge::LaunchInfo '
+        f'launch_info_{self._base_kernel_name} = '
+        f'{launch_info_initializer(self._launch)};\n'
+        f'{self._launch_config_proto(with_defaults=True)};\n'
+        f'{self._generate_launcher_proto(with_defaults=True)};\n')
 
   def _deduce_num_threads(self):
     """Adopt the section's lane geometry: the caller's, or the deduced one."""
@@ -1796,15 +1892,78 @@ class Generator:
     writer(f'// options: {self._context.get_user_options().describe()}')
     if self.tuned is not None:
       writer(f'// tuned: {self.tuned.label()}')
-    writer('// meta data:')
-    glb_matrices = self._scopes.get_global_scope().values()
-    for matrix in glb_matrices:
-      writer(f'// {matrix.obj.gen_descr()}')
-
-    writer.new_line()
+    if self._launch is not None:
+      writer(f'// launch: {self._launch.describe()}')
+    writer('// operands:')
+    for matrix in self._scopes.get_global_scope().values():
+      writer(f'//   {matrix.obj.gen_descr()}')
+    writer('// operations:')
     for item in self.descr_list:
-      writer(f'// {item}')
+      text = item.summary() if hasattr(item, 'summary') else str(item)
+      for line in text.splitlines():
+        writer(f'//   {line}')
+    # The same, as data, on one line: what `kernel_info` returns, for a tool
+    # that reads a kernel back without the generator (`parse_generated`).
+    import json
+    writer('// tensorforge-meta: '
+           + json.dumps(self.kernel_info(), sort_keys=True,
+                        separators=(',', ':'), ensure_ascii=False))
     writer.new_line()
+
+  def kernel_info(self) -> dict:
+    """What this kernel is, as data: the operands, every operation (a merged
+    run's written out, its loop kept beside) and the launch.  The
+    `tensorforge-meta` line of the kernel's comment block carries it.
+    Deterministic, since it is part of the source the kernel is named after.
+
+    Not the options or the tuning label: those have lines of their own, and a
+    comparison of two kernels that differ only in how they were asked for
+    (`test_wrap_loads`, `test_full_lane_tails`) strips exactly those.  Nor
+    the kernel's name or the target: the name is the prototype's, and a
+    kernel whose source named its target would be a different kernel on a
+    target it is the same program for (`test_syntax`'s f128 check)."""
+
+    def operand(obj):
+      box = obj.get_bbox()
+      return dict(name=obj.name, alias=obj.alias,
+                  shape=[int(d) for d in obj.shape],
+                  bbox=[[int(v) for v in box.lower()],
+                        [int(v) for v in box.upper()]],
+                  addressing=str(obj.addressing),
+                  parts=int(obj.storage_parts),
+                  ordered=obj.storage_order is not None,
+                  variant=bool(getattr(obj, 'is_variant', False)))
+
+    # An operation names its operands rather than restating them: the
+    # tensors are under `operands`, and a view is which one and which part.
+    def ref(view):
+      return {k: view[k] for k in ('name', 'shape', 'bbox', 'offset',
+                                   'addressing', 'is_tmp')}
+
+    def compact(row):
+      row = dict(row)
+      if 'dest' in row:
+        row['dest'] = ref(row['dest'])
+      if 'ops' in row:
+        row['ops'] = [ref(o) for o in row['ops']]
+      if 'body' in row:
+        row['body'] = [compact(b) for b in row['body']]
+      return row
+
+    operations, loops = [], []
+    for descr in self.descr_list:
+      if hasattr(descr, 'decompose') and hasattr(descr, 'to_dict'):
+        loops.append(compact(descr.to_dict()))
+      for op in descr.operations():
+        operations.append(compact(op.to_dict()) if hasattr(op, 'to_dict')
+                          else dict(kind=str(op)))
+    return dict(version=interop.get_version(),
+                fp=self._context.fp_as_str(),
+                launch=self._launch.to_dict() if self._launch else None,
+                operands=[operand(s.obj)
+                          for s in self._scopes.get_global_scope().values()],
+                operations=operations,
+                loops=loops)
 
   def register_param_table(self, table) -> None:
     """Take a table into the kernel's signature in place of its members.
@@ -1886,8 +2045,8 @@ class Generator:
     str_params = ', '.join(self._declare(
         self._base_params(global_symbols, substitute_tables=True)))
 
-    mults_per_block = min(section.shr_mem_obj.get_mults_per_block() for section in self._sections)
-    shr_total_size = max(section.shr_mem_obj.get_total_size() for section in self._sections)
+    mults_per_block = self._launch.mults_per_block
+    shr_total_size = self._launch.shared_elements
 
     total_num_threads_per_block = self._num_threads * mults_per_block
 
