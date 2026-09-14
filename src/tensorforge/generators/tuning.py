@@ -307,6 +307,16 @@ def simple_space(descrs, context: Context) -> List[Knob]:
     rolls = _roll_values(descrs)[:2]
     if len(rolls) > 1:
         knobs.append(Knob('k_roll', lambda c, r=tuple(rolls): r))
+    # And unrolled whole where `k_unroll_max` would roll.  Rolled, a reduction
+    # reads its operands from memory at every step; SeisSol's elastic time
+    # derivative at order 8 (K = 119, rolled by 17 under the cap) ran 30 %
+    # faster whole on sm_120, 60k lines against 25k.  The cap stays the
+    # default, which is the origin the walk starts from -- `coordinate` sets a
+    # value as it is, so the knob offers only the other side.
+    cap = context.get_user_options().k_unroll_max
+    lengths = contraction_lengths(descrs)
+    if cap and lengths and max(lengths) > cap:
+        knobs.append(Knob('k_unroll_max', lambda c: (0,)))
     return knobs
 
 
