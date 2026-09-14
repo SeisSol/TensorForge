@@ -115,6 +115,18 @@ class Lexic(ABC):
                     value: str) -> str:
     return None
 
+  def bounds_grid(self) -> bool:
+    """Whether a grid-stride launch is sized to the device or to the batch.
+
+    True: `get_launch_size` answers how many blocks the device holds and the
+    grid is the smaller of that and the batch, so each block loops over its
+    share.  False: the grid covers the batch in one round,
+    `ceil(elements / mults_per_block)` blocks, and every block runs its loop
+    once.  A cooperative launch is bounded either way -- it has to be
+    resident at once.
+    """
+    return True
+
   @abstractmethod
   def multifile(self):
     pass

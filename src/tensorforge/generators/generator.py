@@ -1359,11 +1359,19 @@ class Generator:
               f'across the grid.')
         num_blocks = f'({GeneralLexicon.NUM_ELEMENTS}0 + {mults_per_block} - 1) / {mults_per_block}'
       else:
-        writer(f'{lexic.get_launch_size(kernel_name, "block", shmemsize, resident=coop)}')
+        # Bounded by what the device holds, or covering the batch in one round
+        # where the target runs a looping block slowly (`Lexic.bounds_grid`).
+        # A cooperative launch is bounded either way.
+        bounded = coop or lexic.bounds_grid()
+        if bounded:
+          writer(f'{lexic.get_launch_size(kernel_name, "block", shmemsize, resident=coop)}')
         if coop:
           num_blocks = 'gridsize'
-        else:
+        elif bounded:
           num_blocks = f'std::min(gridsize, {GeneralLexicon.NUM_ELEMENTS}0)'
+        else:
+          num_blocks = (f'({GeneralLexicon.NUM_ELEMENTS}0 + {mults_per_block} - 1) '
+                        f'/ {mults_per_block}')
       writer('tensorforge::LaunchConfig config{};')
       writer(f'config.grid[0] = {num_blocks};')
       writer('config.grid[1] = 1;')

@@ -1,5 +1,5 @@
 // === base name ===
-kernel_436d7b921d07228e
+kernel_a9f40e6949297d79
 
 // === header ===
 #ifndef TENSORFORGE_LAUNCH_TYPES
@@ -27,9 +27,9 @@ struct LaunchConfig {
 };
 } // namespace tensorforge
 #endif
-inline constexpr tensorforge::LaunchInfo launch_info_kernel_436d7b921d07228e = {{16, 16, 1}, 16, 16, 1, 16, 1024, false, true, 1};
-tensorforge::LaunchConfig launch_config_kernel_436d7b921d07228e(size_t numElements0, void* streamPtr = nullptr);
-void launcher_kernel_436d7b921d07228e(const float * m0, size_t m0_extraOffset, float * m1, size_t m1_extraOffset, size_t numElements0, unsigned * flags0 = nullptr, void* streamPtr = nullptr);
+inline constexpr tensorforge::LaunchInfo launch_info_kernel_a9f40e6949297d79 = {{16, 16, 1}, 16, 16, 1, 16, 1024, false, true, 1};
+tensorforge::LaunchConfig launch_config_kernel_a9f40e6949297d79(size_t numElements0, void* streamPtr = nullptr);
+void launcher_kernel_a9f40e6949297d79(const float * m0, size_t m0_extraOffset, float * m1, size_t m1_extraOffset, size_t numElements0, unsigned * flags0 = nullptr, void* streamPtr = nullptr);
 
 
 // === launcher ===
@@ -58,16 +58,12 @@ struct LaunchConfig {
 };
 } // namespace tensorforge
 #endif
-tensorforge::LaunchConfig launch_config_kernel_436d7b921d07228e(size_t numElements0, void* streamPtr) {
+tensorforge::LaunchConfig launch_config_kernel_a9f40e6949297d79(size_t numElements0, void* streamPtr) {
   (void)numElements0;
   (void)streamPtr;
   sycl::range<3> block (16, 16, 1);
-  static std::size_t gridsize = 0;
-  if (gridsize == 0 && streamPtr != nullptr) {
-    gridsize = static_cast<sycl::queue *>(streamPtr)->get_device().get_info<sycl::info::device::max_compute_units>();
-  }
   tensorforge::LaunchConfig config{};
-  config.grid[0] = std::min(gridsize, numElements0);
+  config.grid[0] = (numElements0 + 16 - 1) / 16;
   config.grid[1] = 1;
   config.grid[2] = 1;
   config.block[0] = 16;
@@ -77,21 +73,21 @@ tensorforge::LaunchConfig launch_config_kernel_436d7b921d07228e(size_t numElemen
   config.cooperative = false;
   return config;
 }
-void launcher_kernel_436d7b921d07228e(const float * m0, size_t m0_extraOffset, float * m1, size_t m1_extraOffset, size_t numElements0, unsigned * flags0, void* streamPtr) {
-  const tensorforge::LaunchConfig config = launch_config_kernel_436d7b921d07228e(numElements0, streamPtr);
+void launcher_kernel_a9f40e6949297d79(const float * m0, size_t m0_extraOffset, float * m1, size_t m1_extraOffset, size_t numElements0, unsigned * flags0, void* streamPtr) {
+  const tensorforge::LaunchConfig config = launch_config_kernel_a9f40e6949297d79(numElements0, streamPtr);
   sycl::range<3> block (config.block[0], config.block[1], config.block[2]);
   sycl::range<3> grid (config.grid[0], config.grid[1], config.grid[2]);
   if (streamPtr == nullptr) {
     throw std::invalid_argument("stream may not be null!");
   }
   sycl::queue *stream = static_cast<sycl::queue *>(streamPtr);
-  kernel_kernel_436d7b921d07228e(stream, grid, block, m0, m0_extraOffset, m1, m1_extraOffset, numElements0, flags0);
+  kernel_kernel_a9f40e6949297d79(stream, grid, block, m0, m0_extraOffset, m1, m1_extraOffset, numElements0, flags0);
   CHECK_ERR;
 }
 
 
 // === kernel ===
-inline void kernel_kernel_436d7b921d07228e(sycl::queue *stream, sycl::range<3> group_count, sycl::range<3> group_size, const float * m0, size_t m0_extraOffset, float * m1, size_t m1_extraOffset, size_t numElements0, unsigned * flags0) {
+inline void kernel_kernel_a9f40e6949297d79(sycl::queue *stream, sycl::range<3> group_count, sycl::range<3> group_size, const float * m0, size_t m0_extraOffset, float * m1, size_t m1_extraOffset, size_t numElements0, unsigned * flags0) {
   stream->submit([&](sycl::handler &cgh) {
     sycl::accessor<float, 1, sycl::access::mode::read_write, sycl::access::target::local> totalShrMem (256, cgh); {
       cgh.parallel_for(sycl::nd_range<3>{{group_count.get(2) * group_size.get(2), group_count.get(1) * group_size.get(1), group_count.get(0) * group_size.get(0)}, {group_size.get(2), group_size.get(1), group_size.get(0)}}, [=](sycl::nd_item<3> item)  {

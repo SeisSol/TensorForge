@@ -50,6 +50,15 @@ class SyclLexic(Lexic):
   def multifile(self):
     return False
 
+  def bounds_grid(self) -> bool:
+    # On a Data Center GPU Max 1550 a work-group that loops over more than one
+    # round of the batch is slow, whatever the occupancy: the SeisSol elastic
+    # kernels at a batch of 262144 ran as slowly at 2 rounds as at 32, and
+    # twice as fast (geomean, up to 7x) at 1, with VTune counting the same
+    # occupancy either way.  Bounded by `max_compute_units` they looped over
+    # one round per XVE.  So the grid covers the batch.
+    return False
+
   def get_launch_size(self, func_name, block, shmem, resident=False):
     # `shmem` was missing here while `generator.py` has passed three arguments
     # for as long as the persistent-launch path has existed, so every SYCL
