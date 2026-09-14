@@ -307,8 +307,13 @@ _DRIVER_PREAMBLE_HIP = r"""
 """
 
 # The queue is in-order and owned here; the workload TUs allocate through it.
-# No event macros: a SYCL launcher submits internally and returns void, so
-# there is no event to time. Absence is reported as absence.
+# A SYCL launcher submits internally and returns void, so there is no event of
+# its own to time -- but on an in-order queue the command it submitted is the
+# queue's last one (sycl_ext_oneapi_in_order_queue_events), and with profiling
+# on, that event carries the device's start and end.  Recorded after the
+# launch it is the kernel; the "before" record is the previous command and is
+# not used.  A launcher that submitted more than one command would be timed
+# by its last.  Without the extension, absence is reported as absence.
 _DRIVER_PREAMBLE_SYCL = r"""
 #include <sycl/sycl.hpp>
 sycl::queue* tfb_queue = nullptr;
@@ -316,12 +321,25 @@ sycl::queue* tfb_queue = nullptr;
 #define DEV_STREAM_T           sycl::queue*
 #define DEV_STREAM_CREATE(s)   do { \
     (s) = new sycl::queue(sycl::default_selector_v, \
-                          sycl::property::queue::in_order()); \
+                          sycl::property_list{sycl::property::queue::in_order(), \
+                              sycl::property::queue::enable_profiling()}); \
     tfb_queue = (s); } while(0)
 #define DEV_STREAM_DESTROY(s)  do { delete (s); tfb_queue = nullptr; } while(0)
 #define DEV_STREAM_SYNC(s)     (s)->wait()
 #define DEV_STREAM_PTR(s)      ((void*)(s))
+#ifdef SYCL_EXT_ONEAPI_IN_ORDER_QUEUE_EVENTS
+#define DEV_HAS_EVENTS         1
+#define DEV_EVENT_T            sycl::event
+#define DEV_EVENT_CREATE(e)    (void)(e)
+#define DEV_EVENT_DESTROY(e)   (void)(e)
+#define DEV_EVENT_RECORD(e,s)  ((e) = (s)->ext_oneapi_get_last_event())
+#define DEV_EVENT_SYNC(e)      (e).wait()
+#define DEV_EVENT_MS(o,a,b)    ((o) = (float)(1e-6 * (double)( \
+    (b).get_profiling_info<sycl::info::event_profiling::command_end>() - \
+    (b).get_profiling_info<sycl::info::event_profiling::command_start>())))
+#else
 #define DEV_HAS_EVENTS         0
+#endif
 """
 
 _DRIVER_BODY = r"""

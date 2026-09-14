@@ -99,9 +99,11 @@ to tell which regime it came from.
 Two clocks per row. Wall time over back-to-back launches on one stream includes
 the launch overhead, which SeisSol pays for real — it dispatches thousands of
 small kernels per timestep. Device event time around one launch excludes the
-queueing and is what an achieved FLOP-per-second should be divided by. SYCL has
-only the first: the launcher submits internally and does not return its event,
-so the device clock is reported absent rather than as a zero.
+queueing and is what an achieved FLOP-per-second should be divided by. A SYCL
+launcher submits internally and does not return its event; the driver takes
+it from the in-order queue instead (`sycl_ext_oneapi_in_order_queue_events`,
+queue built with `enable_profiling`). Where the extension is missing, the
+device clock is reported absent rather than as a zero.
 
 ## Profiling
 
