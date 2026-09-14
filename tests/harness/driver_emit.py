@@ -316,13 +316,15 @@ int main(int argc, char** argv) {{
 
     char path[1024];
 
+    // Before any device allocation: under SYCL, DEV_MALLOC and the copies
+    // go through the queue this creates, and a null one segfaults.
+    DEV_STREAM_T stream;
+    DEV_STREAM_CREATE(stream);
+
 {allocs_host}
 {reads}
 {allocs_dev}
 {h2d}
-
-    DEV_STREAM_T stream;
-    DEV_STREAM_CREATE(stream);
 
     {launcher_call};
 
@@ -331,8 +333,9 @@ int main(int argc, char** argv) {{
 {d2h}
 {writes}
 
-    DEV_STREAM_DESTROY(stream);
 {frees}
+    // After the frees, which under SYCL go through this queue.
+    DEV_STREAM_DESTROY(stream);
     return 0;
 }}
 """
