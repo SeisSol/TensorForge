@@ -14,6 +14,7 @@ target-selection logic in :mod:`toolchain` joins the two.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -125,8 +126,16 @@ def detect_intel() -> List[DetectedGPU]:
     the entries in ``hw_descr_db.yml``; ambiguous devices are returned
     as ``arch="intel-unknown"`` so the operator notices and the
     toolchain probe filters them out.
+
+    A line reads ``[backend:gpu][backend:N] <platform>, <device> <driver>
+    [<version>]``.  The version in brackets at the end is why the name is
+    not "whatever follows the last ``]``" -- that is empty.  Every device is
+    listed once per backend that sees it, so one backend is counted: Level
+    Zero where it lists any GPU, OpenCL otherwise (a node whose DRM cards
+    the user may not open still shows its GPUs through OpenCL).
     """
-    out = _run(["sycl-ls"])
+    # sycl-ls loads every adapter first; five seconds was not always enough.
+    out = _run(["sycl-ls"], timeout=60.0)
     if out is None:
         return []
 
@@ -139,26 +148,22 @@ def detect_intel() -> List[DetectedGPU]:
         ("UHD Graphics 6",     "skl"),
     ]
 
-    gpus: List[DetectedGPU] = []
-    idx = 0
+    by_backend: dict = {}
     for line in out.splitlines():
-        # Lines look like "[ext_oneapi_level_zero:gpu][...] Intel(R) ...".
-        # We only want the "gpu" rows.
-        if "gpu" not in line.lower():
+        m = re.match(r"\s*\[(\w+):gpu\]\[[^\]]*\]\s*(.*)$", line)
+        if m is None or "Intel" not in m.group(2):
             continue
-        # Pull out the human-readable name segment after the last ']'.
-        if "]" not in line:
-            continue
-        tail = line.rsplit("]", 1)[1].strip()
-        if "Intel" not in tail:
-            continue
-        arch = "intel-unknown"
-        for needle, value in name_to_arch:
-            if needle in tail:
-                arch = value
-                break
-        gpus.append(DetectedGPU("intel", arch, idx, tail))
-        idx += 1
+        text = re.sub(r"\s*\[[^\]]*\]\s*$", "", m.group(2))
+        # "<platform>, <device>": the device is the last comma-separated part.
+        name = text.rsplit(", ", 1)[-1].strip()
+        by_backend.setdefault(m.group(1), []).append(name)
+
+    names = by_backend.get("level_zero") or next(iter(by_backend.values()), [])
+    gpus: List[DetectedGPU] = []
+    for idx, name in enumerate(names):
+        arch = next((value for needle, value in name_to_arch if needle in name),
+                    "intel-unknown")
+        gpus.append(DetectedGPU("intel", arch, idx, name))
     return gpus
 
 
