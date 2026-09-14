@@ -205,7 +205,12 @@ def generate(workload: Workload, unit: BuildUnit) -> Tuple[Optional[str],
         descrs = workload.descrs()
         ctx = Context(arch=unit.target.arch, backend=unit.target.backend,
                       fp_type=unit.datatype, options=options)
-        config = lanes.deduce(descrs, ctx, ceiling=unit.config.lane_ceiling)
+        # `Options.lanes_per_mult` first: the generator takes an explicit
+        # `lanes` over the option (`Generator` builds with `self._lanes or
+        # lanes.requested(...)`), so passing only the deduction here built
+        # every lane-count configuration at the deduced count.
+        config = (lanes.requested(descrs, ctx)
+                  or lanes.deduce(descrs, ctx, ceiling=unit.config.lane_ceiling))
         gen = Generator(descrs, ctx, attrs=workload.attrs, lanes=config)
         with contextlib.redirect_stdout(io.StringIO()):
             gen.generate()
