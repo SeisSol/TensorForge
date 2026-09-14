@@ -2480,6 +2480,12 @@ class Generator:
     lexic = self._context.get_vm().get_lexic()
 
     launch_bounds = (total_num_threads_per_block,)
+    # A block the SM can always hold, so that ptxas sizes the registers for
+    # that and not for an occupancy it guesses (`min_blocks_per_sm`).
+    min_blocks = self._context.get_user_options().min_blocks_per_sm
+    if (min_blocks
+        and self._context.get_vm().get_hw_descr().vendor == 'nvidia'):
+      launch_bounds += (min_blocks,)
 
     return lexic.kernel_definition(writer, launch_bounds, self._base_kernel_name, str_params, self._context.fp_as_str(),
                                          shr_total_size, global_symbols,

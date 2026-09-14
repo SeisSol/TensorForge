@@ -655,6 +655,18 @@ declare('k_unroll_max',
             'minutes, and rolled at 56 the same kernel was the fastest FFMA '
             'variant on GB200.')
 
+declare('min_blocks_per_sm',
+        default=1,
+        env='TF_MIN_BLOCKS_PER_SM',
+        doc='NVIDIA only: the second argument of `__launch_bounds__`, the '
+            'blocks an SM must be able to hold at once; 0 leaves it out.  One '
+            'rather than none: with only the thread count, ptxas -O3 gave '
+            'SeisSol\'s viscoelastic time derivative (order 6, single '
+            'precision) 40 registers and 58 KB of spill stores, and it ran at '
+            '7.3 us an element on sm_120; told one block, it took 255 and ran '
+            'at 1.3 us.  HIP reads the second argument as warps per execution '
+            'unit, so it is not passed there.')
+
 declare('autotune',
         default='off',
         env='TF_AUTOTUNE',
