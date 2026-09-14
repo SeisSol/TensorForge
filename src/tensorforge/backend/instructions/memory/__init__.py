@@ -305,7 +305,11 @@ class AbstractShrMemWrite(MemoryInstruction):
   def compute_shared_mem_size(self) -> int:
     # What the region allocator must reserve: every stage at once.  Returning
     # the per-stage size here would silently overlap the stages.
-    return self._stages * self.stage_size()
+    # `int`, because a sparse operand's stage size is a numpy count, and it
+    # rides through every offset into `LaunchConfig.shared_elements`, where
+    # `json.dumps` in the kernel metadata refuses it -- unless
+    # `align_shr_mem` happens to round it back into an `int` on the way.
+    return int(self._stages * self.stage_size())
 
   def set_shr_mem_offset(self, offset: int, first: bool, global_offset: bool) -> None:
     self._shr_mem_offset = offset
