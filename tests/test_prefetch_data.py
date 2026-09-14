@@ -4,8 +4,9 @@
 """`Options.prefetch_data`: the next element's operands, hinted where
 `WrapLoads` would fetch them, with the transfers left where they are.
 
-Held here: on under ESIMD and off elsewhere unless asked; under ESIMD the
-hints of a body are gathered a line per lane, elsewhere one line each; the transfers themselves do not move; and the pointer
+Held here: off unless asked, ESIMD included; under ESIMD the hints of a body
+are gathered a line per lane, elsewhere one line each; the transfers
+themselves do not move; and the pointer
 hints of `enable_prefetch` sit outside the flag guard, which is what lets
 them stand next to a wrapped transfer at all.
 """
@@ -42,11 +43,11 @@ def _kernel(backend='esimd', arch='pvc', **opts):
     return gen.get_kernel()
 
 
-def test_the_default_follows_the_backend():
-    """On where one work-item is a whole element and nothing else hides the
-    next one's latency; elsewhere off until measured."""
-    assert 'pf_' in _kernel()
-    assert 'pf_' not in _kernel(prefetch_data=False)
+def test_the_default_is_off_everywhere():
+    """ESIMD included: on pvc the hints cost more than the latency they hid
+    (see the option's doc).  Asking still turns them on."""
+    assert 'pf_' not in _kernel()
+    assert 'pf_' in _kernel(prefetch_data=True)
     assert 'pf_' not in _kernel('cuda', 'sm_100')
     assert 'pf_' not in _kernel('hip', 'gfx942')
 

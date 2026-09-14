@@ -790,7 +790,7 @@ declare('full_lane_tails',
             'overwritten.')
 
 declare('prefetch_data',
-        rule=lambda hw: hw.explicit_simd,
+        default=False,
         env='TF_PREFETCH_DATA',
         parse=parse_bool,
         doc='Hint the next element\'s data where `WrapLoads` would issue its '
@@ -802,10 +802,17 @@ declare('prefetch_data',
             'each per-element source (`Lexic.prefetch_line_bytes`), for '
             '`PTR_BASED` and `STRIDED` operands; a batch-invariant one is '
             'already cached.  At `prefetch_level`.\n'
-            'On under ESIMD: one work-item per element leaves nothing else to '
-            'cover the latency of the next one, and the corpus pays 6.6 % '
-            'instructions for it -- most in small kernels, which wait on '
-            'memory anyway.  Elsewhere off until measured.')
+            'Off everywhere.  It used to be on under ESIMD, where one '
+            'work-item per element leaves nothing else to cover the latency '
+            'of the next one, at 6.6 % more instructions over the corpus.  '
+            'Measured on pvc it does not pay for them: the SeisSol elastic '
+            'kernels (F32, batch 65536, the grid covering the batch in one '
+            'round) ran 1.12x (order 4) and 1.03x (order 6) faster in '
+            'geometric mean without the hints, single kernels up to 1.35x, '
+            'and 1.28-1.66x before the grid did; nearly every fastest ESIMD '
+            'configuration had it off.  The pointer hint at L1 '
+            '(`enable_prefetch`, `prefetch_level=l1`) in its place was '
+            'neutral, 0.99-1.03x.  Elsewhere never measured faster.')
 
 declare('preload_register_share',
         default=0.0,
