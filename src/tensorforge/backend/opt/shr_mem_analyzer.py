@@ -38,13 +38,31 @@ class ShrMemOpt(AbstractOptStage):
   def apply(self) -> None:
     self._check_regions()
 
-    max_memory, mem_per_region = self._compute_total_shr_mem_size()
+    if self._regions and all(r.offset is not None for r in self._regions):
+      # placed buffer by buffer (`MemoryRegionAllocation._pack`): a buffer
+      # starts where the first stretch it covers does
+      starts: Dict[int, Tuple[int, Symbol]] = {}
+      for region in self._regions:
+        for symbol in region:
+          if id(symbol) not in starts or region.offset < starts[id(symbol)][0]:
+            starts[id(symbol)] = (region.offset, symbol)
+      max_memory = max(r.offset + r.size for r in self._regions)
+      placements = list(starts.values())
+    else:
+      mem_per_region = self._compute_total_shr_mem_size()[1]
+      offsets = self._compute_start_addresses(mem_per_region)
+      # Where the last color ends, and not the sum of the colors: each starts
+      # aligned, so a color after one of odd length starts past the sum, and
+      # a window that ends at the sum ends inside the last color -- in the
+      # next multiplication's first one.
+      max_memory = offsets[-1] + mem_per_region[-1] if offsets else 0
+      placements = [(offset, symbol) for offset, region in zip(offsets, self._regions)
+                    for symbol in region]
     # add overhead to avoid shmem bank conflicts
     self._shr_mem_obj.set_size_per_mult(self._aligned(max_memory + self._overhead))
     self._shr_mem_obj.set_temp_offset(max_memory)
 
-    offsets = self._compute_start_addresses(mem_per_region)
-    self._assign_offsets(offsets)
+    self._assign_offsets(placements)
 
   def _check_regions(self) -> None:
     for region in self._regions:
@@ -81,12 +99,11 @@ class ShrMemOpt(AbstractOptStage):
       offsets[index] = self._aligned(offsets[index - 1] + mem_per_region[index - 1])
     return offsets
 
-  def _assign_offsets(self, offsets: List[int]):
-    for offset, region in zip(offsets, self._regions):
-      for symbol in region:
-        shr_mem_instr = symbol.get_first_user()
-        shr_mem_instr.set_shr_mem_offset(offset, True, False)
+  def _assign_offsets(self, placements: List[Tuple[int, Symbol]]):
+    for offset, symbol in placements:
+      shr_mem_instr = symbol.get_first_user()
+      shr_mem_instr.set_shr_mem_offset(offset, True, False)
 
-        for user in symbol.get_user_list()[1:]:
-          if isinstance(user, AbstractShrMemWrite):
-            user.set_shr_mem_offset(offset, False, False)
+      for user in symbol.get_user_list()[1:]:
+        if isinstance(user, AbstractShrMemWrite):
+          user.set_shr_mem_offset(offset, False, False)

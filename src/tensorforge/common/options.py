@@ -678,6 +678,17 @@ declare('early_writebacks',
             'registers through the whole kernel -- `dQ(0)` for 19,000 of its '
             '19,500 lines -- 72 registers of 255 that only waited for a store.')
 
+declare('shared_packing',
+        default=True,
+        parse=parse_bool,
+        env='TF_SHARED_PACKING',
+        doc='Place each shared-memory buffer on its own -- first fit by '
+            'decreasing size, against the buffers live at the same time -- '
+            'where that needs less than the coloring, whose every color is as '
+            'large as the largest buffer in it.  SeisSol\'s damage step '
+            '(order 6, double): 145 KB per multiplication colored, which no '
+            'block holds, and 65 KB packed, the most that is ever live.')
+
 declare('autotune',
         default='off',
         env='TF_AUTOTUNE',

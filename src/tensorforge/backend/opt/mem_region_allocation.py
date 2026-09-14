@@ -1,10 +1,11 @@
 # SPDX-FileCopyrightText: 2026 SeisSol Group
 #
 # SPDX-License-Identifier: MIT
+from bisect import bisect_left
 from collections import OrderedDict
 from copy import copy
 from tensorforge.common.ordered import OrderedSet
-from typing import Dict, Set, Union, List, Tuple
+from typing import Dict, Optional, Set, Union, List, Tuple
 from tensorforge.backend.symbol import Symbol
 from .abstract import AbstractOptStage, Context
 from .coloring import Vertex
@@ -12,9 +13,21 @@ from .coloring import GraphColoring
 
 
 class Region:
-  def __init__(self):
+  """Buffers that may share memory.
+
+  Either a color -- every buffer in it starts at one offset, which `ShrMemOpt`
+  sizes by the largest of them -- or, where the allocation placed each buffer
+  itself (`MemoryRegionAllocation._pack`), one stretch of the arena, `size`
+  elements from `offset`, holding every buffer that covers it.  A buffer is
+  then in every region it spans.  Either way two buffers share a region
+  exactly when they may share memory, which is what the barrier pass asks.
+  """
+
+  def __init__(self, offset: Optional[int] = None, size: Optional[int] = None):
     self._items: List[Symbol] = []
     self._counter: int = 0
+    self.offset = offset
+    self.size = size
 
   def add_item(self, item: Symbol) -> None:
     self._items.append(item)
@@ -55,8 +68,86 @@ class MemoryRegionAllocation(AbstractOptStage):
       mem_region = coloring_map[vertex]
       mem_region.add_item(vertices2objects[vertex])
 
+    if getattr(self._context.get_user_options(), 'shared_packing', True):
+      packed = self._pack()
+      if packed is not None:
+        self._regions = packed
+
   def get_regions(self) -> List[Region]:
     return self._regions
+
+  def _pack(self) -> Optional[List[Region]]:
+    """Each buffer placed on its own, or None where that is no smaller.
+
+    The coloring counts colors, not bytes: it needs as many as there are
+    buffers live at once, and each color is as large as the largest buffer it
+    was given.  SeisSol's damage step (order 6, double) has 908 buffers, never
+    more than 22 of them live and never more than 65 KB; colored, the arena
+    was 145 KB per multiplication and no block held one.  Placing the largest
+    first, each at the lowest offset clear of every buffer it is live with,
+    gives the 65 KB.
+
+    Against the same interference the coloring uses, so what may share memory
+    has not changed -- only where it lands.  Where the coloring is as small,
+    it stays, and so does every kernel it already laid out well.
+    """
+    from .shr_mem_analyzer import SHR_ALIGN_BYTES
+    symbols = list(self._objects2vertices_map)
+    if not symbols:
+      return None
+    sizes: Dict[int, int] = {}
+    for sym in symbols:
+      size = _size(sym)
+      if size is None:
+        return None
+      sizes[id(sym)] = size
+    fp = self._context.fp_type.size()
+    align = max(1, SHR_ALIGN_BYTES // fp) if fp else 1
+
+    def aligned(count: int) -> int:
+      return -(-count // align) * align
+
+    # the coloring's arena as `ShrMemOpt` lays it out: each color from the
+    # next aligned offset, as large as its largest buffer
+    colored = 0
+    for region in self._regions:
+      colored = aligned(colored) + max((sizes[id(s)] for s in region), default=0)
+
+    neighbors: Dict[int, Set[int]] = {id(s): set() for s in symbols}
+    for live_vars in self._live_map.values():
+      ids = [id(s) for s in live_vars]
+      for i in ids:
+        neighbors[i].update(ids)
+
+    placed: Dict[int, int] = {}
+    # largest first; `sorted` is stable, so equal sizes keep program order
+    for sym in sorted(symbols, key=lambda s: -sizes[id(s)]):
+      size = sizes[id(sym)]
+      taken = sorted((placed[n], placed[n] + sizes[n])
+                     for n in neighbors[id(sym)] if n in placed and n != id(sym))
+      at = 0
+      for lo, hi in taken:
+        if at + size <= lo:
+          break
+        at = max(at, aligned(hi))
+      placed[id(sym)] = at
+    if max(placed[id(s)] + sizes[id(s)] for s in symbols) >= colored:
+      return None
+
+    edges = sorted({p for s in symbols
+                    for p in (placed[id(s)], placed[id(s)] + sizes[id(s)])})
+    stretches = [Region(offset=lo, size=hi - lo) for lo, hi in zip(edges, edges[1:])]
+    empty: List[Region] = []
+    for sym in symbols:
+      start, end = placed[id(sym)], placed[id(sym)] + sizes[id(sym)]
+      first, last = bisect_left(edges, start), bisect_left(edges, end)
+      if first == last:
+        # nothing to share, but `ShrMemOpt` still has to find its offset
+        empty.append(Region(offset=start, size=0))
+        empty[-1].add_item(sym)
+      for index in range(first, last):
+        stretches[index].add_item(sym)
+    return [r for r in stretches if list(r)] + empty
 
   def _get_variable_set(self) -> Dict[Symbol, None]:
     ordered_variable_set = OrderedDict()
@@ -96,3 +187,12 @@ class MemoryRegionAllocation(AbstractOptStage):
     for prog_point in live_map.values():
       num_regions = max(num_regions, len(prog_point))
     return num_regions
+
+
+def _size(symbol: Symbol) -> Optional[int]:
+  """Elements, as `ShrMemOpt` sizes a buffer: by its first user."""
+  user = symbol.get_first_user()
+  size_fn = getattr(user, 'compute_shared_mem_size', None)
+  if not callable(size_fn):
+    return None
+  return size_fn()

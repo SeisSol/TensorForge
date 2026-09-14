@@ -188,20 +188,44 @@ def test_a_table_over_constants_holds_their_numbers():
 
 def test_a_multiplication_that_does_not_fit_is_refused():
     """At order 6 in double precision one multiplication of the damage step
-    needs more shared memory than a block has.  The block was then sized to
-    hold no multiplication at all -- height 0, the window never declared --
-    and the source went out as if nothing had happened."""
+    needs more shared memory than a block has, colored.  The block was then
+    sized to hold no multiplication at all -- height 0, the window never
+    declared -- and the source went out as if nothing had happened."""
     from tensorforge.common.context import Options
     from tensorforge.common.exceptions import GenerationError
 
     system = 'damage-nonlinearck'
     gen = Generator(_read(system, f'{system}-o6-d', 'gpu_damageStep'),
                     Context(arch='sm_86', backend='cuda', fp_type=Datatype.F64,
-                            options=Options(merge_variants=False)))
+                            options=Options(merge_variants=False,
+                                            shared_packing=False)))
     with contextlib.redirect_stdout(io.StringIO()), warnings.catch_warnings():
         warnings.simplefilter('ignore')
         with pytest.raises(GenerationError, match='shared memory'):
             gen.generate()
+
+
+def test_packed_buffers_take_what_is_live_and_no_more():
+    """The same damage step has 908 shared buffers, never more than 22 of
+    them live at once and never more than 65 KB.  The coloring made 22
+    colors, each as large as its largest buffer: 145 KB per multiplication,
+    and no block held one.  Packed, the arena is what is live, and no two
+    buffers live at the same time share a byte of it."""
+    from tensorforge.backend.opt.inspect import _check_shared_aliasing
+
+    system = 'damage-nonlinearck'
+    gen = Generator(_read(system, f'{system}-o6-d', 'gpu_damageStep'),
+                    Context(arch='sm_86', backend='cuda', fp_type=Datatype.F64))
+    with contextlib.redirect_stdout(io.StringIO()), warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        gen.generate()
+    for section in gen._sections:
+        assert section.shr_mem_obj.get_mults_per_block() >= 1
+        assert section.shr_mem_obj.get_size_per_mult() * 8 < 70_000
+        prologue = {id(i) for i in section.global_ir}
+        stream = [i for i in section.stream if id(i) not in prologue]
+        assert not [d for d in _check_shared_aliasing(stream)
+                    if d.severity == 'error']
 
 
 def test_a_result_is_stored_once_nothing_reads_it_again():

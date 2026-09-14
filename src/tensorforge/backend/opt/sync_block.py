@@ -35,6 +35,12 @@ class SyncThreadsOpt(AbstractTransformer):
 
     super(SyncThreadsOpt, self).__init__(context, instructions)
     self._regions = regions
+    # A buffer placed on its own spans every region it covers (`Region`), so
+    # a symbol maps to a list.  With colors the list has one entry.
+    self._region_ids = {}
+    for region_id, region in enumerate(regions):
+      for symbol in region:
+        self._region_ids.setdefault(id(symbol), []).append(region_id)
     self._num_threads = num_threads
     # Whether this block runs again after its last instruction.  A loop body
     # does, so a shared write near its tail is read near its head one
@@ -138,18 +144,18 @@ class SyncThreadsOpt(AbstractTransformer):
     for index, instr in enumerate(self._instrs):
       if isinstance(instr, ComputeInstruction):
         for src in instr.get_operands():
-          if src.stype == SymbolType.SharedMem and self._get_region_id(src) is not None:
-            flags[self._get_region_id(src)] = True
+          if src.stype == SymbolType.SharedMem:
+            for region_id in self._get_region_ids(src):
+              flags[region_id] = True
 
       if isinstance(instr, SyncThreads):
         flags = [False] * len(self._regions)
 
       if isinstance(instr, AbstractShrMemWrite):
         dest = instr.get_dest()
-        if self._get_region_id(dest) is not None:
-          if flags[self._get_region_id(dest)]:
-            selected.append(instr)
-            flags = [False] * len(self._regions)
+        if any(flags[region_id] for region_id in self._get_region_ids(dest)):
+          selected.append(instr)
+          flags = [False] * len(self._regions)
 
     return selected, flags
 
@@ -158,10 +164,8 @@ class SyncThreadsOpt(AbstractTransformer):
       index = self._instrs.index(instr)
       self._instrs.insert(index, SyncThreads(self._context, self._num_threads))
 
-  def _get_region_id(self, symbol):
-    for region_id, region in enumerate(self._regions):
-      if symbol in region:
-        return region_id
+  def _get_region_ids(self, symbol):
+    return self._region_ids.get(id(symbol), ())
 
   def _remove_previous_sync_instructions(self):
     self._instrs = [item for item in self._instrs if not isinstance(item, SyncThreads)]
