@@ -81,6 +81,7 @@ from tensorforge.common.basic_types import Datatype             # noqa: E402
 #: buying throughput, fewer leaves the pipeline stalling on its own result and
 #: measures the latency instead of the rate.
 ACCUMULATORS = 8
+SYCL_ACCUMULATORS = 32
 
 _CTYPE = {Datatype.F32: 'float', Datatype.F64: 'double'}
 
@@ -187,7 +188,14 @@ _SYCL = r'''
 using T = %(ctype)s;
 
 int main(int argc, char** argv) {
-  sycl::queue q{sycl::default_selector_v, sycl::property::queue::in_order()};
+  // Asynchronous errors thrown, not dropped: a kernel that did not run would
+  // otherwise time as an empty launch and report an absurd rate.
+  sycl::queue q{sycl::default_selector_v,
+                [](sycl::exception_list el) {
+                  for (auto& e : el) std::rethrow_exception(e);
+                },
+                sycl::property_list{sycl::property::queue::in_order(),
+                                    sycl::property::queue::enable_profiling()}};
   const size_t block = 256;
   const size_t cus =
       q.get_device().get_info<sycl::info::device::max_compute_units>();
@@ -195,27 +203,35 @@ int main(int argc, char** argv) {
   const unsigned long long iters = 4096;
 
   T* out = sycl::malloc_device<T>(grid * block, q);
+  // Runtime values, so nothing about the chain is known at compile time.
+  const T bv = (T)(1.0 + 1e-7 * argc), cv = (T)(1.0 - 1e-7 * argc);
 
   double fma_best = 0.0;
   for (int rep = 0; rep < 5; ++rep) {
     q.wait();
-    auto t0 = std::chrono::steady_clock::now();
-    q.parallel_for(sycl::nd_range<1>{grid * block, block},
+    sycl::event ev = q.parallel_for(sycl::nd_range<1>{grid * block, block},
                    [=](sycl::nd_item<1> it) {
       T a[%(acc)d];
       size_t lid = it.get_local_id(0);
       for (int k = 0; k < %(acc)d; ++k) a[k] = (T)(lid + k) * (T)1e-3;
-      const T b = (T)1.0000001, c = (T)0.9999999;
+      const T b = bv, c = cv;
       for (unsigned long long i = 0; i < iters; ++i)
 #pragma unroll
-        for (int k = 0; k < %(acc)d; ++k) a[k] = a[k] * b + c;
+        // `sycl::fma`, not `a * b + c`: icpx defaults to -fp-model=fast,
+        // under which the expression may be rewritten -- the chain then
+        // measured 2 PFLOP/s on a 52 TFLOP/s part -- and under
+        // -fp-model=precise it is not contracted, halving the rate.
+        for (int k = 0; k < %(acc)d; ++k) a[k] = sycl::fma(a[k], b, c);
       T s = (T)0;
       for (int k = 0; k < %(acc)d; ++k) s += a[k];
       out[it.get_global_id(0)] = s;
     });
-    q.wait();
-    auto t1 = std::chrono::steady_clock::now();
-    double s = std::chrono::duration<double>(t1 - t0).count();
+    q.wait_and_throw();
+    // The device clock, as CUDA/HIP use, rather than the host clock around
+    // a submission and its wait.
+    double s = 1e-9 * (double)(
+        ev.get_profiling_info<sycl::info::event_profiling::command_end>() -
+        ev.get_profiling_info<sycl::info::event_profiling::command_start>());
     double flops = 2.0 * %(acc)d * (double)iters * (double)(grid * block);
     if (rep > 0) fma_best = fma_best > flops / s ? fma_best : flops / s;
   }
@@ -230,13 +246,15 @@ int main(int argc, char** argv) {
   double bw_best = 0.0;
   for (int rep = 0; rep < 5; ++rep) {
     q.wait();
-    auto t0 = std::chrono::steady_clock::now();
-    q.parallel_for(sycl::range<1>{n}, [=](sycl::id<1> i) {
+    sycl::event ev = q.parallel_for(sycl::range<1>{n}, [=](sycl::id<1> i) {
       c[i] = a[i] + (T)1.5 * b[i];
     });
-    q.wait();
-    auto t1 = std::chrono::steady_clock::now();
-    double s = std::chrono::duration<double>(t1 - t0).count();
+    q.wait_and_throw();
+    // The device clock, as CUDA/HIP use, rather than the host clock around
+    // a submission and its wait.
+    double s = 1e-9 * (double)(
+        ev.get_profiling_info<sycl::info::event_profiling::command_end>() -
+        ev.get_profiling_info<sycl::info::event_profiling::command_start>());
     double bytes = 3.0 * (double)n * sizeof(T);
     if (rep > 0) bw_best = bw_best > bytes / s ? bw_best : bytes / s;
   }
@@ -265,7 +283,10 @@ def emit_ceiling(backend: str, datatype: Datatype) -> str:
             f'no ceiling microbenchmark for {datatype.name}; the roof for a '
             f'type the machine emulates is not a hardware property')
     if backend in ('oneapi', 'acpp', 'esimd'):
-        return _SYCL % {'ctype': ctype, 'acc': ACCUMULATORS}
+        # More chains than CUDA/HIP need: on PVC the F64 chain stays
+        # latency-bound at 8 (17.6 TFLOP/s) and gains at 32 (21.2); F32 is
+        # at its 51.7 either way.
+        return _SYCL % {'ctype': ctype, 'acc': SYCL_ACCUMULATORS}
     return _CUDAHIP % {
         'ctype': ctype, 'acc': ACCUMULATORS,
         'prefix': 'cuda' if backend == 'cuda' else 'hip',
@@ -319,17 +340,25 @@ def measure_ceiling(device: bench_run.Device, datatype: Datatype,
     out = cache / 'ceiling' / f'{backend}-{device.spec.arch}-{datatype.name}'
     out.mkdir(parents=True, exist_ok=True)
     src = out / f'ceiling{compiler.source_suffix()}'
-    src.write_text(source)
     exe = out / 'ceiling'
+    cmd = [cc, *compiler.link_flags(device.spec.arch), str(src),
+           '-o', str(exe)]
+    # Rebuilt whenever the source or the command differs from the last build.
+    # Keyed on the executable alone, a changed microbenchmark kept measuring
+    # the binary built before the change.
+    stamp = out / 'ceiling.stamp'
+    identity = source + '\n' + ' '.join(cmd)
+    stale = (not exe.exists() or not stamp.exists()
+             or stamp.read_text() != identity)
+    src.write_text(source)
 
-    if not exe.exists():
-        cmd = [cc, *compiler.link_flags(device.spec.arch), str(src),
-               '-o', str(exe)]
+    if stale:
         proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
         if proc.returncode != 0:
             (out / 'build.log').write_text(
                 ' '.join(cmd) + '\n\n' + proc.stdout + '\n' + proc.stderr)
             return None, f'ceiling did not build; see {out / "build.log"}'
+        stamp.write_text(identity)
 
     env = os.environ.copy()
     if device.vendor == 'nvidia':
