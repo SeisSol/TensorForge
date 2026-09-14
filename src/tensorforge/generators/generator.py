@@ -1808,10 +1808,19 @@ class Generator:
     # skipped as a whole.
     guard = _GuardGrouping(self._context, self._scopes, residency,
                            self._section.ir)
+    # Counted over the operations and not the list: a rolled list and the same
+    # list written out have to generate the same body, and a loop stands for
+    # all of its iterations' operations, not for one.
+    last = (self._last_touch(descr_list)
+            if self._context.get_user_options().early_writebacks else None)
+    index = -1
     for outer in descr_list:
       if isinstance(outer, ForDescr) and self._emit_loops:
         guard.flush()
         self._emit_variant_loop(outer, builders)
+        index += len(outer.operations())
+        if last is not None:
+          self._retire_writebacks(residency, last, index, guard)
         continue
       for descr in outer.operations():
         for kind, builder in builders:
@@ -1821,12 +1830,56 @@ class Generator:
             break
         else:
           raise InternalError(f'{type(descr)} has no registered builder.')
+        index += 1
+        if last is not None:
+          self._retire_writebacks(residency, last, index, guard)
 
     guard.flush()
 
     # Anything the section still holds only in registers has to reach memory
     # before the section ends.
     self._section.ir.extend(residency.flush_all())
+
+  @staticmethod
+  def _last_touch(descr_list):
+    """id(tensor) -> the index, among the list's operations, of the last one
+    that reads it, guards on it or writes it."""
+    last = {}
+    index = -1
+    for outer in descr_list:
+      if not isinstance(outer, OperationDescription):
+        continue
+      for descr in outer.operations():
+        index += 1
+        views = (list(descr.reads()) + list(descr.condition_reads())
+                 + [descr.writes()])
+        for view in views:
+          tensor = getattr(view, 'tensor', None)
+          if tensor is not None:
+            last[id(tensor)] = index
+    return last
+
+  def _retire_writebacks(self, residency, last, index, guard) -> None:
+    """Store now what the rest of the section will not touch again
+    (`early_writebacks`).
+
+    A result left in registers is final once no later descriptor reads or
+    writes its tensor, and holding it to the section's end only holds its
+    registers: SeisSol's elastic derivative kept every `dQ(k)` until the last
+    line.  Only a global home -- a shared temporary no one reads is simply
+    dead.  The guard's open run is closed first, so that the store is not
+    conditional on it.  A tensor the list does not name -- a merged run's
+    stand-in -- keeps its place at the end.
+    """
+    done = [name for name, entry in residency.items()
+            if not entry.is_preload
+            and entry.home.stype == SymbolType.Global
+            and last.get(id(entry.home.obj), float('inf')) <= index]
+    if not done:
+      return
+    guard.flush()
+    for name in done:
+      self._section.ir.extend(residency.flush(name))
 
   def _emit_variant_loop(self, loop, builders) -> None:
     """One body, one counter, and one binding per varying operand.

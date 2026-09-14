@@ -204,6 +204,37 @@ def test_a_multiplication_that_does_not_fit_is_refused():
             gen.generate()
 
 
+def test_a_result_is_stored_once_nothing_reads_it_again():
+    """The elastic derivative computes `dQ(0)` first and reads it once, at the
+    start of the first level; held to the section's end, it and every later
+    `dQ(k)` waited in registers for their stores -- `dQ(0)` for all but the
+    first few hundred of 19,500 lines, 72 registers of 255 by the end."""
+    import re
+
+    from tensorforge.common.context import Options
+
+    system = 'elastic-linearck'
+    where = {}
+    for early in (False, True):
+        gen = Generator(_read(system, f'{system}-o6-s', 'gpu_derivative'),
+                        Context(arch='sm_86', backend='cuda',
+                                fp_type=Datatype.F32,
+                                options=Options(early_writebacks=early)))
+        with contextlib.redirect_stdout(io.StringIO()), \
+                warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            gen.generate()
+        lines = gen.get_kernel().splitlines()
+        dq0 = next(s.name for s in gen._scopes.get_global_scope().values()
+                   if getattr(s.obj, 'alias', None) == 'dQ(0)')
+        # the store names the binding, `glb_m3`, and not the parameter
+        store = next(i for i, l in enumerate(lines)
+                     if re.search(rf'// (?:glb_)?{dq0} = store', l))
+        where[early] = store / len(lines)
+    assert where[False] > 0.9
+    assert where[True] < 0.1
+
+
 def _carried(system, config, kernel):
     from tensorforge.backend.instructions.ptr_manip import VariantLoop
     from tensorforge.generators.generator import MergeFallbackWarning

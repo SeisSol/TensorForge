@@ -667,6 +667,17 @@ declare('min_blocks_per_sm',
             'at 1.3 us.  HIP reads the second argument as warps per execution '
             'unit, so it is not passed there.')
 
+declare('early_writebacks',
+        default=True,
+        parse=parse_bool,
+        env='TF_EARLY_WRITEBACKS',
+        doc='Store a result that stayed in registers as soon as the rest of '
+            'the section neither reads nor writes it, rather than with every '
+            'other one at the section\'s end.  Held to the end, SeisSol\'s '
+            'elastic time derivative (order 6) kept all six `dQ(k)` in '
+            'registers through the whole kernel -- `dQ(0)` for 19,000 of its '
+            '19,500 lines -- 72 registers of 255 that only waited for a store.')
+
 declare('autotune',
         default='off',
         env='TF_AUTOTUNE',
