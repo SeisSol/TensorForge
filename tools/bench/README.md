@@ -73,9 +73,15 @@ failure is silent — two rows, one name, plausible numbers.
 
 So the build unit is one binary per `(target, datatype, options, lane
 ceiling)`, holding every workload in the suite. Inside a binary the
-configuration is fixed and the hash is unique per workload, which is what a
+configuration is fixed and the hash is unique per kernel, which is what a
 report needs; across binaries the configuration is the binary's identity and
 goes in the manifest. The batch is a runtime argument and forces no rebuild.
+
+Unique per kernel is not unique per workload: two workloads can generate the
+same kernel — a pointwise operation that does not change with the order, for
+one — and one binary cannot define its symbol twice. The second is built into
+no binary and reported as `same kernel as <first>`; the first one's number is
+its number.
 
 ## Why the manifest is not optional
 

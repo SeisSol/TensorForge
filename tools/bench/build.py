@@ -278,11 +278,22 @@ def build(unit: BuildUnit, cache: Path = CACHE,
     # reason the answer was wanted.
     sources: Dict[str, str] = {}
     records: List[WorkloadBuild] = []
+    first: Dict[str, str] = {}
     for workload in unit.workloads:
         src, record = generate(workload, unit)
         records.append(record)
-        if src is not None:
-            sources[workload.name] = src
+        if src is None:
+            continue
+        # Two workloads can generate the same kernel -- a pointwise operation
+        # does not change with the order, say -- and then carry the same
+        # symbol, which hashes the source.  One binary cannot define it twice:
+        # the second translation unit would take the whole unit down at the
+        # link.  The first one's number is the second one's.
+        if record.symbol in first:
+            record.error = f'same kernel as {first[record.symbol]}'
+            continue
+        first[record.symbol] = workload.name
+        sources[workload.name] = src
 
     cc = compiler_binary(compiler)
     if cc is None:
@@ -299,11 +310,17 @@ def build(unit: BuildUnit, cache: Path = CACHE,
         # The cache is keyed on the source text, so a hit is the same binary.
         # The static figures are re-read from the stored logs rather than
         # recompiled: they are what the compiler said about this exact source.
+        # A workload that did not compile then has no remarks, and it has to
+        # come back refused with a reason, as it did the first time: without
+        # one it is neither measured nor reported as a failure.
         for record in records:
-            log = out / f'{driver_bench.slug(record.name)}.remarks'
+            tag = driver_bench.slug(record.name)
+            log = out / f'{tag}.remarks'
             if log.exists():
                 record.static = compiler.parse(log.read_text())
-                record.obj = out / f'{driver_bench.slug(record.name)}.o'
+                record.obj = out / f'{tag}.o'
+            elif not record.error:
+                record.error = f'did not compile; see {out / (tag + ".log")}'
         return UnitBuild(unit, exe, records)
 
     out.mkdir(parents=True, exist_ok=True)

@@ -150,7 +150,9 @@ def measure(unit_build: bench_build.UnitBuild, device: Device,
             'static': record.static,
         }
         if not record.ok:
-            rows.append({**base, 'error': record.error})
+            # A refusal always carries a reason: `report` takes a row without
+            # an error for a measurement, and a measurement has a batch.
+            rows.append({**base, 'error': record.error or 'not built'})
             continue
         for batch in unit_build.unit.batches:
             cost = list_cost(by_name[record.name].descrs(), batch=batch,
