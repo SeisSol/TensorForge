@@ -605,6 +605,20 @@ void castTF32(PartT part, ValueT value) {
   part = intel_esimd::simd<tf32, N>(intel_esimd::simd<float, N>(value));
 }
 
+/// Mirrors `expF64` in `isycl.h`: e^x for doubles, a vector, one, or a view.
+template <int N>
+intel_esimd::simd<double, N> expF64(intel_esimd::simd<double, N> x) {
+  return x;
+}
+inline double expF64(double x) { return x; }
+template <typename T,
+          typename = std::enable_if_t<!std::is_arithmetic_v<
+              std::remove_cv_t<std::remove_reference_t<T>>>>>
+auto expF64(const T &x) {
+  constexpr int N = std::remove_cv_t<std::remove_reference_t<T>>::length;
+  return expF64<N>(intel_esimd::simd<double, N>(x));
+}
+
 } // namespace tensorforge
 
 #endif // SEISSOL_TESTS_SHIM_TENSORFORGE_SYCL_H_

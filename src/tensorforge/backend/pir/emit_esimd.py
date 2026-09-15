@@ -396,12 +396,52 @@ class EsimdEmitter(Emitter):
             return None
         return lex.get_slm_load(elem, width, address)
 
-    def _slm_store(self, base, v: Value, address: str, value: str):
+    def _slm_store(self, base, v: Value, address: str, value: str,
+                   elem: str = None):
         lex = self._lexic()
         if lex is None or not self._is_shared(base):
             return None
-        return lex.get_slm_store(v.type.base.ctype(), self._vector_width(v),
-                                 address, value)
+        return lex.get_slm_store(elem or v.type.base.ctype(),
+                                 self._vector_width(v), address, value)
+
+    @staticmethod
+    def lexic_mask_type(width) -> str:
+        return f'tensorforge::intel_esimd::simd_mask<{width}>'
+
+    _COMPARISONS = frozenset(('lt', 'le', 'gt', 'ge', 'eq', 'ne'))
+
+    def _infix(self, op: str, v: Value, args) -> str:
+        """A comparison of vectors is a `simd_mask`, whatever the IR types it.
+
+        Typed as a number -- a boolean tensor's register image is the kernel's
+        floating-point type, and a comparison is written into it -- it has to
+        be 1 and 0 of that type: a mask has no `copy_to` into one and no
+        arithmetic with one (every SeisSol `damageStep`).  Typed as a boolean
+        it stays the mask a `merge` takes.
+        """
+        expr = super()._infix(op, v, args)
+        if op not in self._COMPARISONS or v.type.base is Datatype.BOOL:
+            return expr
+        ctype = v.type.base.ctype()
+        if v.layout is not None and v.distributed:
+            return f'tensorforge::maskAs<{ctype}>({expr})'
+        return f'static_cast<{ctype}>({expr})'
+
+    def _as_buffer_elem(self, buf, val: Value, expr: str):
+        """`(expr, elem)`: the value as the element type it is written as.
+
+        A comparison's mask written into the register image of its tensor --
+        which is the kernel's floating-point type -- is 1 and 0 of that type:
+        a `simd_mask` has no `copy_to` into one (every SeisSol `damageStep`).
+        Into a boolean buffer it stays a mask; `slmStore` writes it as bytes.
+        """
+        velem = val.type.base.ctype()
+        belem = getattr(getattr(buf, 'type', None), 'elem', None)
+        belem = getattr(belem, 'base', belem)
+        belem = belem.ctype() if belem is not None else None
+        if velem == 'bool' and belem not in (None, 'bool'):
+            return f'tensorforge::maskAs<{belem}>({expr})', belem
+        return expr, velem
 
     def _emit_stmt(self, s, yield_to) -> None:
         """A distributed value is written back by a transfer too.
@@ -459,12 +499,17 @@ class EsimdEmitter(Emitter):
             if isinstance(val, Value) and val.layout is not None and val.distributed:
                 addr = self.address(s.args[0], s.args[2:])
                 ptr = self._as_pointer(f'{self.base_name(s.args[0])}[{addr}]')
+                expr, elem = self._as_buffer_elem(s.args[0], val,
+                                                  self.operand(val))
                 part = self._valid_width(s, val)
                 if part is not None:
-                    elem = val.type.base.ctype()
-                    whole = self.simd_type(elem, self._vector_width(val))
-                    narrow = (f'{self.simd_type(elem, part)}({whole}('
-                              f'{self.operand(val)}).template select<{part}, 1>(0))')
+                    if elem == 'bool':
+                        narrow = (f'{self.lexic_mask_type(part)}(({expr})'
+                                  f'.template select<{part}, 1>(0))')
+                    else:
+                        whole = self.simd_type(elem, self._vector_width(val))
+                        narrow = (f'{self.simd_type(elem, part)}({whole}('
+                                  f'{expr}).template select<{part}, 1>(0))')
                     lex = self._lexic()
                     slm = (lex.get_slm_store(elem, part, ptr, narrow)
                            if lex is not None and self._is_shared(s.args[0])
@@ -472,12 +517,11 @@ class EsimdEmitter(Emitter):
                     self.writer(slm if slm is not None
                                 else f'{narrow}.copy_to({ptr});')
                     return
-                slm = self._slm_store(s.args[0], val, ptr,
-                                      self.operand(val))
+                slm = self._slm_store(s.args[0], val, ptr, expr, elem)
                 if slm is not None:
                     self.writer(slm)
                     return
-                self.writer(f'{self.operand(val)}.copy_to({ptr});')
+                self.writer(f'{expr}.copy_to({ptr});')
                 return
         super()._emit_stmt(s, yield_to)
 

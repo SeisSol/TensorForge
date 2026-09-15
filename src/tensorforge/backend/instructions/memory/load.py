@@ -739,7 +739,8 @@ class GlbToRegLoader(MemoryInstruction, LoadInstruction):
         # keeps any region whose raw text declares a name.  Those braces
         # were 427 blocking nodes: an opaque block head makes the async
         # scheduler drop its state and nothing reorders across one.
-        staged = self._src.load_linear(writer, self._context, None, i, g)
+        staged = self._src.load_linear(writer, self._context, None, i, g,
+                                       threads=self._num_threads)
         self._dest.store_linear(writer, self._context, staged, i, g,
                                 base=self.write_base(),
                                 threads=self._num_threads)
@@ -758,7 +759,8 @@ class GlbToRegLoader(MemoryInstruction, LoadInstruction):
         self._dest.store_linear(
             writer, self._context,
             self._src.load_linear(writer, self._context, None,
-                                  total_size - tail, 1),
+                                  total_size - tail, 1,
+                                  threads=self._num_threads),
             total_size - tail, 1, base=self.write_base(),
             threads=self._num_threads)
 

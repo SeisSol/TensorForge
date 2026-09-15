@@ -482,6 +482,11 @@ class Emitter:
         vm = self._vm()
         return None if vm is None else vm.get_hw_descr()
 
+    def _infix(self, op: str, v: Value, args: Sequence[str]) -> str:
+        """`a op b`.  A hook: the explicit-vector emitter spells a comparison
+        by the type its result is declared as."""
+        return f'{args[0]} {_INFIX[op]} {args[1]}'
+
     def _lexic_binop(self, op: str, v: Value, args: Sequence[str]) -> str:
         """`min`/`max` as the lexic spells them, by result dtype.
 
@@ -900,14 +905,19 @@ class Emitter:
                 # buffer of another element -- the boolean a comparison
                 # writes, an integer -- is a window of that type into it, and
                 # `&arena[off]` is still a pointer to the arena's.  Where the
-                # window is an offset rather than a pointer (explicit SIMD),
-                # there is no pointer to convert.  The room reserved is in
-                # arena elements, so one no larger than those fits.
+                # window is an offset rather than a pointer (explicit SIMD), it
+                # is the same byte address counted in the other element: it
+                # used to be left alone, and `SlmPtr<bool> = SlmPtr<float> +
+                # off` does not compile (every SeisSol `damageStep`).  The room
+                # reserved is in arena elements, so one no larger than those
+                # fits.
                 fp = getattr(self.context, 'fp_type', None)
                 elem = getattr(t.elem, 'base', t.elem)
-                if (fp is not None and window.startswith('&')
-                        and elem != fp):
-                    window = f'reinterpret_cast<{elem.ctype()}*>({window})'
+                if fp is not None and elem != fp:
+                    lex = self._lexic()
+                    window = (lex.shared_window_retype(window, elem.ctype())
+                              if lex is not None
+                              else f'reinterpret_cast<{elem.ctype()}*>({window})')
                 w(f'{self.ctype(t, v)} {self.name(v)} = {window};')
                 return
             qual = {MemSpace.CONSTANT: 'const '}.get(t.space, '')
@@ -1169,7 +1179,7 @@ class Emitter:
                 self._record_work()
             args = [self.operand(a) for a in s.args]
             if op in _INFIX and len(args) == 2:
-                expr = f'{args[0]} {_INFIX[op]} {args[1]}'
+                expr = self._infix(op, v, args)
             elif op == 'fma' and len(args) == 3:
                 expr = self._fma(v, args)
             elif op == 'select' and len(args) == 3:

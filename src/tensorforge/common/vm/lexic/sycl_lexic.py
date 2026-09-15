@@ -483,6 +483,13 @@ class SyclLexic(Lexic):
       return f'{arena} + ({offset})'
     return super().shared_window_expr(arena, offset)
 
+  def shared_window_retype(self, window, elem):
+    if self.simd_mode:
+      # An offset counts elements of its own type, so the same byte address
+      # is another count; `slmCast` converts through the bytes.
+      return f'tensorforge::slmCast<{elem}>({window})'
+    return super().shared_window_retype(window, elem)
+
   def get_slm_load(self, elem, width, address):
     if not self.simd_mode:
       return None
@@ -513,6 +520,13 @@ class SyclLexic(Lexic):
   _ESIMD_BINARY = {
     Operation.MIN: 'min', Operation.MAX: 'max', Operation.POW: 'pow',
   }
+  #: What the library takes in float and half only, spelled for double.
+  #: `exp` is composed (`tensorforge::expF64`) and a reciprocal is a division;
+  #: handed a `simd<double, N>`, `intel_esimd::exp` and `inv` are compile
+  #: errors (every F64 `damageStep`).
+  _ESIMD_F64 = {
+    Operation.EXP: 'tensorforge::expF64({})', Operation.RCP: '(1.0 / {})',
+  }
   #: Spelled with C++ operators, which `simd<>` overloads.
   _ESIMD_INFIX = {
     Operation.ADD: '+', Operation.SUB: '-', Operation.MUL: '*',
@@ -520,6 +534,8 @@ class SyclLexic(Lexic):
     Operation.LT: '<', Operation.LE: '<=', Operation.GT: '>',
     Operation.GE: '>=', Operation.EQ: '==', Operation.NEQ: '!=',
   }
+  _ESIMD_COMPARISONS = frozenset((Operation.LT, Operation.LE, Operation.GT,
+                                  Operation.GE, Operation.EQ, Operation.NEQ))
 
   def _esimd_operation(self, op: Operation, fptype, value1, value2):
     ns = 'tensorforge::intel_esimd'
@@ -527,16 +543,38 @@ class SyclLexic(Lexic):
       return value1
     if op == Operation.NEG:
       return f'(-{value1})'
+    if fptype == Datatype.F64 and op in self._ESIMD_F64:
+      return self._ESIMD_F64[op].format(value1)
     if op in self._ESIMD_UNARY:
       return f'{ns}::{self._ESIMD_UNARY[op]}({value1})'
     if op in self._ESIMD_BINARY:
       return f'{ns}::{self._ESIMD_BINARY[op]}({value1}, {value2})'
+    if op in self._ESIMD_COMPARISONS and fptype != Datatype.BOOL:
+      # A comparison of vectors is a `simd_mask`; asked for as a number --
+      # the value a boolean tensor's register image holds, which is the
+      # kernel's floating-point type -- it is 1 and 0 of that type.  The
+      # mask has no `copy_to` into one (every SeisSol `damageStep`).
+      return (f'tensorforge::asNumber<{fptype.ctype()}>('
+              f'{value1} {self._ESIMD_INFIX[op]} {value2})')
     if op in self._ESIMD_INFIX:
       return f'({value1} {self._ESIMD_INFIX[op]} {value2})'
+    # A logical operation typed as a floating-point number -- the value a
+    # boolean tensor's register image holds -- takes its operands as masks,
+    # whatever they arrive as, and gives 1 and 0 of that type.  `~` and `&`
+    # are bitwise on a float, which is not an operation at all, and on masks
+    # they give a mask that has no `copy_to` into the image.
+    logical = fptype != Datatype.BOOL and fptype.ctype() in ('float', 'double')
     if op == Operation.NOT:
+      if logical:
+        return (f'tensorforge::asNumber<{fptype.ctype()}>('
+                f'!tensorforge::asMask({value1}))')
       return f'(!{value1})' if fptype == Datatype.BOOL else f'(~{value1})'
     if op in (Operation.AND, Operation.OR):
       sym = {Operation.AND: '&', Operation.OR: '|'}[op]
+      if logical:
+        return (f'tensorforge::asNumber<{fptype.ctype()}>('
+                f'tensorforge::asMask({value1}) {sym} '
+                f'tensorforge::asMask({value2}))')
       if fptype == Datatype.BOOL:
         sym *= 2
       return f'({value1} {sym} {value2})'

@@ -103,6 +103,14 @@ class Lexic(ABC):
     """
     return f'&{arena}[{offset}]'
 
+  def shared_window_retype(self, window: str, elem: str) -> str:
+    """`window` as a window of `elem` at the same address.
+
+    For a buffer of another element than the arena's -- the boolean a
+    comparison writes.  A pointer cast wherever a window is a pointer.
+    """
+    return f'reinterpret_cast<{elem}*>({window})'
+
   def get_slm_load(self, elem: str, width: int, address: str) -> str:
     """A vector read of shared memory, where that is its own instruction.
 

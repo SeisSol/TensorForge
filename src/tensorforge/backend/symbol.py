@@ -2107,7 +2107,31 @@ class Symbol:
 
     return wrote
 
-  def load_linear(self, writer, context: Context, variable, index, vec = 1):
+  def _linear_read_layout(self, index, vec, threads):
+    """The distribution of a linear run as it is read.
+
+    What the fill recorded (`_record_linear_layout`), where this image was
+    filled here.  A global operand was not: it is read straight into a
+    register image, and the read leaves the very distribution the fill then
+    records for its destination -- lane `t` holds `index + t * vec` onward,
+    `LaneAxis(threads, 1)` -- so the loader, which knows `threads`, passes it,
+    and the claim is made under the same condition as the fill's.
+
+    It was `None` for every global read, which under SPMD costs precision and
+    under ESIMD is an IRError: a declaration cannot be written without the
+    distribution (`damageCellIntegral` at k_roll 4, 16 lanes, lead_vectorize).
+    """
+    if self.layout is not None or threads is None:
+      return self.layout
+    if self.stype != SymbolType.Global:
+      return self.layout
+    if not isinstance(index, int) or index % (threads * vec) != 0:
+      return None
+    from tensorforge.backend.pir.core import LaneAxis, RegisterLayout
+    return RegisterLayout((LaneAxis(threads, 1),))
+
+  def load_linear(self, writer, context: Context, variable, index, vec = 1,
+                  threads=None):
     addrs = []
     if self.stype == SymbolType.Register:
       addr = index // self.num_threads
@@ -2149,17 +2173,20 @@ class Symbol:
         ltype = (ScalarType(self.get_fptype()) if vec == 1
                  else ScalarType(self.get_fptype(), vec))
         return writer.load(buf, addr, type_=ltype, hint='lin',
-                           layout=self.layout,
+                           layout=self._linear_read_layout(index, vec,
+                                                           threads),
                            align=self._linear_claim(index, vec))
       from tensorforge.backend.pir.core import ScalarType
       type_ = (ScalarType(self.get_fptype()) if vec == 1
                else ScalarType(self.get_fptype(), vec))
       text = (access if vec == 1
               else f'*(tensorforge::VectorT<{self.get_fptype()}, {vec}>*)&{access}')
-      # Whatever the fill recorded, unchanged: this read cannot see the
-      # distribution, so it reports rather than derives.
+      # Whatever the fill recorded, or the loader's run for a global operand:
+      # this read cannot see the distribution, so it reports rather than
+      # derives.
       return writer.load_expr(text, type_, self, hint='lin',
-                              layout=self.layout)
+                              layout=self._linear_read_layout(index, vec,
+                                                              threads))
 
     if vec == 1:
       writer.access_stmt(f'{self.get_fptype()} {variable} = {access};', self, Effect.READ, args=_operands(variable, addrs))
