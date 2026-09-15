@@ -673,6 +673,15 @@ class MultilinearInstruction(ComputeInstruction):
             sym = op.symbol
             if not _contiguous_first_axis(sym):
                 continue
+            if (sym.stype == SymbolType.Register
+                    and getattr(sym, 'linear_runs', None)):
+                # A register image filled from packed storage holds the
+                # pattern's entries where `store_linear` put them, and is read
+                # one fixed entry at a time (`Symbol._linear_image_load`):
+                # adjacent steps are not adjacent there, and there is no
+                # vector of them to load.  Its steps are read one by one --
+                # `derivative` at k_width 2 did not generate at all.
+                continue
             base = varlist[loopmap[kslot]]
             idx = [add_offset(VecIndex(base, steps) if j == 0
                               else varlist[loopmap[nk]],

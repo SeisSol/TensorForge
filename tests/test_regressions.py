@@ -44,6 +44,28 @@ def _generate(name, backend="cuda", arch="sm_86"):
     return gen
 
 
+@pytest.mark.parametrize("backend", ["oneapi", "esimd", "cuda"])
+def test_a_packed_register_image_is_read_step_by_step_at_k_width_2(backend):
+    """SeisSol's damage `derivative` at k_width 2.  The reduction packs two
+    steps of an operand into one vector read (`_k_packs`), and under oneapi
+    one operand is a register image filled from packed storage -- whose
+    entries sit where `store_linear` put them, one fixed entry per read.  It
+    raised a GenerationError instead of reading those steps one by one."""
+    import seissol_suite as fx
+    from tensorforge.common.context import Options
+    from tensorforge.frontend.yateto import DescriptionReader
+
+    system, config = "damage-nonlinearck", "damage-nonlinearck-o4-s"
+    descrs = DescriptionReader(None, {}).read(
+        fx.description(system, config, "gpu_derivative"))[0]
+    arch = "sm_80" if backend == "cuda" else "pvc"
+    ctx = Context(arch=arch, backend=backend, fp_type=Datatype.F32,
+                  options=Options(k_width=2))
+    gen = Generator(descrs, ctx)
+    gen.generate()
+    assert gen.get_kernel()
+
+
 def _walk(instrs):
     for ins in instrs or []:
         yield ins
