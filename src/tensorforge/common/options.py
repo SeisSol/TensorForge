@@ -715,7 +715,12 @@ declare('skip_known_zeros',
             'volume kernel (order 6) reads kDivM dense, 16% of its cells '
             'nonzero, and its first 32-row slot needs 20 of 35 columns.  '
             'Exact for finite operands; a product of zero with an infinity '
-            'or a NaN in the other factor is no longer formed.')
+            'or a NaN in the other factor is no longer formed.  It takes the '
+            'description at its word: the buffer the caller passes has to hold '
+            'the numbers the description gives -- as SeisSol\'s global '
+            'matrices do, and as yateto\'s own sparse kernels assume -- and a '
+            'caller that fills it with anything else gets the products of '
+            'those numbers, not of its own.')
 
 declare('autotune',
         default='off',
