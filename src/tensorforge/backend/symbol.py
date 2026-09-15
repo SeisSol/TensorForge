@@ -2810,12 +2810,20 @@ class Symbol:
           raise InternalError(
               f'{self.name}: a full-lane tail or a window head reached a '
               f'split read')
+        # A full-lane tail (`valid`) takes the interleave too: its lanes past
+        # the data read the order's padding, inside the buffer.  So does the
+        # section's verbatim copy of the operand in shared memory, which holds
+        # the storage as the host laid it out (`verbatim`).
+        in_order = (self.stype in (SymbolType.Global, SymbolType.Batch)
+                    or (self.stype is SymbolType.SharedMem
+                        and getattr(self, 'verbatim', False)))
         if (bc_lane is None and w == 1 and not part and parts == 1
                 and valid is None and not first and shift is None
                 and getattr(self.obj, 'simt_interleave', None) is not None
-                and self.stype in (SymbolType.Global, SymbolType.Batch)):
-          interleaved = self._interleaved_load(writer, context, read_index,
-                                               nontemp)
+                and in_order):
+          interleaved = self._interleaved_load(
+              writer, context, read_index,
+              nontemp and self.stype is not SymbolType.SharedMem)
           if interleaved is not None:
             return interleaved
         if (bc_lane is None

@@ -2145,6 +2145,8 @@ class Generator:
     dest = Symbol(name=f'{GeneralLexicon.GLOBAL_MEM_PREFIX}{stand_in.name}',
                   stype=SymbolType.SharedMem, obj=stand_in.obj)
     dest.block_shared = True
+    # a verbatim copy, laid out as the member is (`GlobalLoaderBuilder`)
+    dest.verbatim = True
     self._scopes.add_symbol(dest)
     loader = GlbToShrLoader(context=self._context, src=src, dest=dest,
                             shr_mem=self._scopes.get_symbol(
@@ -2152,7 +2154,13 @@ class Generator:
                             num_threads=self._num_threads, permute=None,
                             blockwide=True, max_load_offset=0, verbatim=True)
     obj = self._section.shr_mem_obj
-    loader.set_shr_mem_offset(obj.alloc_global(loader.compute_shared_mem_size()),
+    # on 16 bytes where an order may be offered, as `GlobalLoaderBuilder`
+    align = 1
+    dtype = getattr(stand_in.obj, 'datatype', None)
+    if self._context.get_user_options().prepare_operands and dtype is not None:
+      align = max(1, 16 // dtype.size())
+    loader.set_shr_mem_offset(obj.alloc_global(loader.compute_shared_mem_size(),
+                                               align=align),
                               True, True)
     self._section.stage_loaders.append(loader)
     # The wait goes where `MoveLoads` puts every load's: at the loader's place,

@@ -178,6 +178,25 @@ def test_a_preloaded_operator_is_copied_as_it_is_stored():
         assert at[second] - at[first] >= stored[first]
 
 
+def test_a_preloaded_operator_is_copied_as_it_is_stored():
+    """With `preload_globals` the section prologue copies each operator into
+    shared memory as it lies, and the nest reads the copy in the interleave.
+    The copy has to hold the whole stored operator: sized for the dense one,
+    the interleaved reads ran into the next operator's copy.  So each image
+    is laid out at least as long as its storage, one after the other."""
+    src, operators = _seissol("volume", options={"prepare_operands": True,
+                                                  "preload_globals": True})
+    stored = {a.name: int(a.storage_volume()) for a in operators
+              if a.simt_interleave is not None}
+    assert len(stored) == 3
+    assert all(size > 64 * 35 for size in stored.values())
+    at = {m.group(1)[len("glb_"):]: int(m.group(2)) for m in re.finditer(
+        r"\* __restrict__ (glb_m\d+) = &totalShrMem\[(\d+)\];", src)}
+    names = sorted(stored, key=lambda name: at[name])
+    for first, second in zip(names, names[1:]):
+        assert at[second] - at[first] >= stored[first]
+
+
 def test_a_merged_run_stores_every_member_alike(monkeypatch):
     """Faces 1-3 of `local_flux` merge into one body over a stand-in.  The
     stand-in is no buffer; its members are, and the one body reads whichever

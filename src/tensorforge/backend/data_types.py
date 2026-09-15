@@ -9,9 +9,11 @@ class ShrMemObject:
     self._global_size = 0
     self._temp_offset = 0
 
-  def alloc_global(self, size):
-    startpoint = self._global_size
-    self._global_size += size
+  def alloc_global(self, size, align: int = 1):
+    """`size` elements of the block-wide part, starting on a multiple of
+    `align` elements -- a copy read as wide vectors needs its base on one."""
+    startpoint = -(-self._global_size // align) * align
+    self._global_size = startpoint + size
     return startpoint
 
   def release_global(self, mark: int) -> None:

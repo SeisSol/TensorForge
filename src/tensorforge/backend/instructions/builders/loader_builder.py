@@ -39,6 +39,12 @@ class GlobalLoaderBuilder(AbstractBuilder):
     dest = Symbol(name=f'{GeneralLexicon.GLOBAL_MEM_PREFIX}{src.name}',
                     stype=SymbolType.SharedMem,
                     obj=src.obj)
+    # Copied verbatim, with the tensor's own bounding box and storage
+    # (`GlbToShrLoader`): an index into the image is a cell of the tensor, and
+    # an order the host stored it in is the image's order as well -- which is
+    # what lets a reader of the image take that order (`_offer_simt_order`,
+    # `Symbol._interleaved_load`).
+    dest.verbatim = True
 
     self._scopes.add_symbol(dest)
 
@@ -48,7 +54,16 @@ class GlobalLoaderBuilder(AbstractBuilder):
 
     self._instructions.append(loader)
 
-    offset = self.shrmem_obj.alloc_global(loader.compute_shared_mem_size())
+    # An order the host prepared is read out of the image in 16-byte groups
+    # (the SIMT interleave), so the image starts on 16 bytes where one may be
+    # offered -- which is decided later, by the reading instruction, and only
+    # where the caller lets operands be prepared at all.
+    align = 1
+    if self._context.get_user_options().prepare_operands:
+      align = max(1, 16 // src.obj.datatype.size()) if getattr(
+          src.obj, 'datatype', None) is not None else 1
+    offset = self.shrmem_obj.alloc_global(loader.compute_shared_mem_size(),
+                                          align=align)
     loader.set_shr_mem_offset(offset, True, True)
 
     return loader.compute_shared_mem_size()

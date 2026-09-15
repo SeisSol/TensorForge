@@ -766,25 +766,29 @@ class MultilinearInstruction(ComputeInstruction):
     def settle_storage(self) -> None:
         """Offer `A` its storage order now, before anything is sized from it.
 
-        The offer is made where the matrix path is emitted, and that is too
-        late for an operand the section prologue copies into shared memory:
-        the copy is sized, and the arena laid out, before any body exists.  So
-        the generator asks here, once the stream is final, with the arguments
+        The offer is made where the operation is emitted, and that is too late
+        for an operand the section prologue copies into shared memory: the
+        copy is sized, and the arena laid out, before any body exists.  So the
+        generator asks here, once the stream is final, with the arguments
         emission will use -- and emission then finds the order in place, which
-        is what the offer's idempotence is for.  Only where the plan is the
-        matrix path: that is the only place emission offers one.
+        is what the offers' idempotence is for.  The matrix path offers its
+        fragment order, the nest its SIMT interleave (`_offer_simt_order`):
+        offered only at emission, the interleave outgrew the preloaded image,
+        which was sized for the dense operand, and the reads ran into the next
+        image.
         """
         if not self._ops or len(self._ns) == 0:
             return
         plan = self._plan()
         if plan[0].strategy is Strategy.GENERIC:
+            self._offer_simt_order(settling=True)
             return
         depth = math.prod(mx - mi for mi, mx in self._ks)
         self._offer_order(_vendor_module(self._context),
                           self._ops[0].symbol.obj,
                           self._ns[0][1] - self._ns[0][0], depth)
 
-    def _offer_simt_order(self):
+    def _offer_simt_order(self, settling=False):
         """Let a batch-constant `A` be stored so a lane reads its rows in vectors.
 
         The generic nest distributes the lead dimension cyclically: lane `l`
@@ -837,7 +841,12 @@ class MultilinearInstruction(ComputeInstruction):
         if len(shape) != 2 or not self._reads_interleavable(sym, a_obj):
             return
         threads = self._num_threads
+        # The prologue's copy into shared memory is not a reader: it moves the
+        # storage as it lies (`GlbToShrLoader._verbatim`), and the image it
+        # writes is read in the order the host stored (`Symbol.verbatim`).
         if any(user is not self
+               and not (getattr(user, '_verbatim', False)
+                        and user.get_dest() is sym)
                and not (isinstance(user, MultilinearInstruction)
                         and user._num_threads == threads
                         and user._reads_interleavable(sym, a_obj))
@@ -862,6 +871,16 @@ class MultilinearInstruction(ComputeInstruction):
             return
         groups = -(-slots // group)
         ld = groups * group * threads
+        # A preloaded image is sized and laid out once the stream is settled
+        # (`settle_storage`, where this is asked first).  Asked later -- a
+        # matrix plan that declined at emission -- an order that stores more
+        # than the dense operand would outgrow that image, so then only one
+        # of the operand's own size.
+        preloaded = any(getattr(user, '_verbatim', False)
+                        and user.get_dest() is sym
+                        for user in sym.get_user_list())
+        if not settling and preloaded and ld != rows:
+            return
         order = []
         for k in range(cols):
             for g in range(groups):
