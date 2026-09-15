@@ -118,11 +118,9 @@ def test_fp64_has_no_dpas():
 
 
 def test_a_sparse_operand_is_still_servable():
-    """It disqualifies DPAS -- a packed operand has no fragment to read -- and
-    not the broadcast chain, which reads `B` by linear index and replicates
-    one lane at a time.  Refusing both over a property only one of them cares
-    about sent every sparse operator to the generic loop; `strategies` drops
-    MATRIX instead."""
+    """By the target: `supports` is about the wave and the type.  Which
+    arrangement serves a packed `B` is `strategies`' question -- and the
+    answer there is neither (see below)."""
     assert intel.supports(16, Datatype.F32, True)
 
 
@@ -135,13 +133,21 @@ def test_fp32_is_emulated_through_tf32():
 
 
 def test_dpas_is_not_offered_for_a_packed_operand():
-    """The strategy drops out, not the target."""
+    """The strategies drop out, not the target.
+
+    DPAS has no fragment to read out of a packed `B`.  Nor has the broadcast
+    chain a column to read: it asks `B(j, k0 // threads)`, the lane vector of
+    depths `k0..` of column `j`, and a packed operand answers that with its
+    storage slots from `k0 // threads` on -- slot 0 for every column of
+    `damageCellIntegral`, which is a wrong product where it compiles and an
+    IRError under ESIMD, where the read has no distribution to declare.  The
+    nest reads a packed operand by its pattern, so it goes there."""
     from tensorforge.backend.instructions.compute.strategy import ComputeShape
     from tensorforge.backend.instructions.compute.strategy import Strategy
     shape = ComputeShape(threads=16, accumulator=Datatype.F32, sparse=True,
                          explicit_simd=True)
     assert Strategy.MATRIX not in intel.strategies(shape, None)
-    assert Strategy.BROADCAST in intel.strategies(shape, None)
+    assert Strategy.BROADCAST not in intel.strategies(shape, None)
 
 
 # --------------------------------------------------------------------------

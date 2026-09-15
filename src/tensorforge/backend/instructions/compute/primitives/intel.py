@@ -703,6 +703,11 @@ def strategies(shape, ctx):
     emits `esimd::xmx::dpas` over `simd` fragments, which an SPMD kernel
     cannot call; the SPMD lowering reaches this with a 16-wide
     multiplication just as well, and there the path has to stay out.
+    Neither for a packed `B`.  The broadcast chain asks `B(j, k0 // threads)`
+    -- the lane vector of depths `k0..` of column `j` -- and a packed operand
+    answers by storage slot, the same slots for every column: a wrong product,
+    and under ESIMD not even that, since the read has no distribution to
+    declare.  The nest reads a packed operand by its pattern.
     """
     if lead_route(shape) != 0:
         return frozenset()
@@ -711,7 +716,7 @@ def strategies(shape, ctx):
     offered = set()
     if enabled(ctx) and shape.explicit_simd and not shape.sparse:
         offered.add(Strategy.MATRIX)
-    if BROADCAST_ENABLED and shape.explicit_simd:
+    if BROADCAST_ENABLED and shape.explicit_simd and not shape.sparse:
         offered.add(Strategy.BROADCAST)
     return frozenset(offered)
 
