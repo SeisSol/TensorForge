@@ -418,15 +418,22 @@ class CudaLexic(Lexic):
     """
     return length == 1 and datatype in _CACHE_HINT_TYPES
 
+  @staticmethod
+  def _hint_kind(nontemporal):
+    """`cs` where the access asked to stream (`Options.cache_hints`), `cg`
+    for any other hint -- a bare `True` included.  `__ldcs`/`__stcs` are
+    declared beside `__ldcg`/`__stcg`, over the same types."""
+    return 'cs' if nontemporal == 'cs' else 'cg'
+
   def glb_store(self, lhs, rhs, *, datatype, length=1, nontemporal=False):
     if nontemporal and self.has_nontemporal(datatype, length):
-      return f'__stcg(&{lhs}, {rhs});'
+      return f'__st{self._hint_kind(nontemporal)}(&{lhs}, {rhs});'
     else:
       return f'{lhs} = {rhs};'
 
   def glb_load(self, rhs, *, datatype, length=1, nontemporal=False):
     if nontemporal and self.has_nontemporal(datatype, length):
-      return f'__ldcg(&{rhs})'
+      return f'__ld{self._hint_kind(nontemporal)}(&{rhs})'
     else:
       return f'{rhs}'
 

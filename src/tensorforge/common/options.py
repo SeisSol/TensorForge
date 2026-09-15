@@ -415,6 +415,32 @@ declare('prefetch_level',
             'loop body: L1 is small enough that the line is likely gone again '
             'before the iteration that wants it.')
 
+declare('cache_hints',
+        default='cg',
+        parse=parse_str,
+        doc='Which cache policy a global transfer that may take a hint gets: '
+            '`cg` (L2 only: `__ldcg`/`__stcg`, what it always was), `cs` '
+            '(streaming, evict first at every level: `__ldcs`/`__stcs`) or '
+            '`none`.\n'
+            'Which transfers may take one is `hint_outputs`\'s question.  A '
+            'hint is a cache policy and never a value, so the choice is a '
+            'measurement: data a kernel reads once gains nothing from staying '
+            'in a cache, and displaces the operators every element reuses.  '
+            'NVIDIA spells both kinds, AMD one '
+            '(`__builtin_nontemporal_*`), SYCL none.')
+
+declare('hint_outputs',
+        default=False,
+        parse=parse_bool,
+        doc='Let the outputs take the cache hint too.\n'
+            'A load takes one where it is the only user of its source, and a '
+            'store where its register source has no other user -- which an '
+            'accumulated image never has.  So no output store of a SeisSol '
+            'kernel took one, and neither did the one read of a `+=` '
+            'destination.  With this, a load takes the hint where it is the '
+            'only reader of its source, and a store where nothing reads the '
+            'destination but transfers (a `+=` destination\'s own preload).')
+
 declare('preload_globals',
         rule=lambda hw: hw.vendor in ('amd',),
         parse=parse_bool,

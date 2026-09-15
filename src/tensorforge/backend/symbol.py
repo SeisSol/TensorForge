@@ -3127,7 +3127,9 @@ class Symbol:
         writer.store(self, variable,
                      self.address_value(writer, context, index),
                      align=None if wide is None else RELAXED,
-                     nontemporal=bool(nontemp), pointer=base,
+                     # the kind of hint, not only whether there is one
+                     # (`hints.cache_hint`): `bool` made every one `cg`
+                     nontemporal=nontemp or False, pointer=base,
                      **({} if padded is not None else
                         self._valid_access(writer, index,
                                            self._memory_valid(index))))

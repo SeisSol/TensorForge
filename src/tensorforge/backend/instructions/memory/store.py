@@ -10,6 +10,7 @@ from tensorforge.backend.symbol import Symbol, SymbolType, DataView, LeadIndex, 
 from tensorforge.common.exceptions import InternalError
 from tensorforge.backend.writer import Writer
 from . import AbstractShrMemWrite, MemoryInstruction
+from .hints import cache_hint, readers
 from ..abstract_instruction import AbstractInstruction
 
 
@@ -299,7 +300,14 @@ class StoreRegToGlb(AbstractInstruction):
     writer.new_line()
     dest_view = self._dest.data_view
 
-    allow_nontemporal = len(self._src.get_user_list()) == 1 # self._src.get_last_user() is self
+    # With `Options.hint_outputs`, also a destination that nothing reads but
+    # transfers -- a `+=` destination's own preload: an accumulated register
+    # image always has other users, so no output store took the hint before.
+    allowed = len(self._src.get_user_list()) == 1  # self._src.get_last_user() is self
+    if not allowed and self._context.get_user_options().hint_outputs:
+      allowed = all(getattr(r, '_src', None) is self._dest
+                    for r in readers(self._dest))
+    allow_nontemporal = cache_hint(self._context, allowed)
 
     writer.Comment(f'{self}')
     src_bbox = self._src.data_view.get_bbox()

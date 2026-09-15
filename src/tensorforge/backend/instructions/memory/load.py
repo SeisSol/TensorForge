@@ -11,6 +11,23 @@ from tensorforge.backend.writer import Writer
 from tensorforge.common.matrix.boundingbox import BoundingBox
 from tensorforge.common.context import Context
 from tensorforge.backend.data_types import RegMemObject
+from .hints import cache_hint, readers
+
+
+def _hint_allowed(loader) -> bool:
+  """Whether a load from global memory may take the cache hint.
+
+  Where it is the only user of its source, as it always was.  With
+  `Options.hint_outputs` also where it is the only *reader*: the one read of a
+  `+=` destination, whose other users only write it.
+  """
+  src = loader._src
+  if len(src.get_user_list()) == 1:
+    return True
+  if not loader._context.get_user_options().hint_outputs:
+    return False
+  mine = readers(src)
+  return len(mine) == 1 and mine[0] is loader
 from typing import Union, List
 
 # to find a number coprime to the number of shared memory banks
@@ -273,7 +290,7 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
     return bool(self._use_cuda_memcpy) and not self._needs_reorder
 
   def gen_code_inner(self, writer: Writer) -> None:
-    allow_nontemporal = len(self._src.get_user_list()) == 1
+    allow_nontemporal = cache_hint(self._context, _hint_allowed(self))
     if self._verbatim and self._tensor.storage_volume() != self._loadsize:
       # The storage was decided after the image was sized -- an order offered
       # at emission, say -- and the reservation made for it is the old size.
@@ -702,7 +719,7 @@ class GlbToRegLoader(MemoryInstruction, LoadInstruction):
     writer.new_line()
     dest_view = self._dest.data_view
 
-    allow_nontemporal = len(self._src.get_user_list()) == 1
+    allow_nontemporal = cache_hint(self._context, _hint_allowed(self))
 
     src_bbox = self._bbox
 

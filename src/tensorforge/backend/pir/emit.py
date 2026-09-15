@@ -945,8 +945,10 @@ class Emitter:
             # swizzle all see the access.
             named = s.attr('extern')
             if nontemporal:
+                # The attribute is the kind of hint (`hints.cache_hint`), and
+                # the lexic spells whichever it has.
                 dt, width = self.access_type(v.type, s.args[0])
-                self.declare(v, f'{lex.glb_load(access, datatype=dt, length=width, nontemporal=True)}',
+                self.declare(v, f'{lex.glb_load(access, datatype=dt, length=width, nontemporal=nontemporal)}',
                              s, name=named)
             else:
                 self.declare(v, access, s, name=named)
@@ -986,7 +988,7 @@ class Emitter:
                 dt, width = self.access_type(vt, s.args[0])
                 w(lex.glb_store(access, self.operand(val),
                                 datatype=dt, length=width,
-                                nontemporal=bool(s.attr('nontemporal'))))
+                                nontemporal=s.attr('nontemporal') or False))
                 return
             w(f'{access} = {self.operand(val)};')
             return
