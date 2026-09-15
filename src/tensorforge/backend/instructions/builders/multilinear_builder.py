@@ -635,7 +635,20 @@ class MultilinearBuilder(OperationBuilder):
 
   def _make_compute(self):
     prev = self._get_target_symbol(True) if self._add else None
+    # A register image `_get_target_symbol` hands out holds the destination's
+    # whole box -- it fits exactly or it is not handed out -- so the result is
+    # written over all of it: the product where this term reaches, `prev`
+    # elsewhere.  Left to this term's own box, a chain whose terms narrow (the
+    # ADER Taylor expansion, `I += dQ(k) c_k` over fewer rows each time) kept
+    # only the last term's rows, which is why such a chain went through memory
+    # on every term.
+    whole_prev = (prev is not None and prev.stype == SymbolType.Register
+                  and any(e.image is prev for _, e in self._residency.items()))
+    # Whether this result is built on the pending image; `_narrows_pending`
+    # keeps one that was not from displacing it.
+    self._built_on_pending = whole_prev
     compute = MultilinearInstruction(context=self._context,
+                                     whole_prev=whole_prev,
                                      ops=self._mem_regions,
                                      target=self._descr.target,
                                      dest=self._temp_regs,
@@ -760,11 +773,39 @@ class MultilinearBuilder(OperationBuilder):
       upper[0] += self._theta
     return BoundingBox(lower, upper)
 
+  def _narrows_pending(self, name) -> bool:
+    """Would recording this result displace a pending writeback that holds
+    more than it does?
+
+    The plan keeps a chain in registers where every term can write the whole
+    image (`whole_prev`).  Where one cannot after all -- its accumulator is
+    not in the image's frame, or it did not take the image's box -- recording
+    it would drop the rows only the pending image holds.  Then the pending
+    image goes to its home first, and this result follows it there.
+    """
+    entry = self._residency.get(name)
+    if entry is None or entry.is_preload or entry.covered is None:
+      return False
+    # An accumulation that was not built on the pending image -- an atomic
+    # policy takes no bias, a view that did not fit was not handed out --
+    # holds only its own term; the pending one's would be lost.
+    if self._add and not getattr(self, '_built_on_pending', False):
+      return True
+    if entry.shift and list(entry.shift) != list(self._store_offset()):
+      return True
+    mine = self._temp_regs.data_view.get_bbox()
+    if mine.rank() != entry.covered.rank():
+      return True
+    return any(lm > le or um < ue for lm, um, le, ue in zip(
+        mine.lower(), mine.upper(),
+        entry.covered.lower(), entry.covered.upper()))
+
   def _make_store(self):
     if self._dest_obj.tensor in self._scopes:
       dest_symbol = self._scopes.get_symbol(self._dest_obj.tensor)
       if dest_symbol.stype == SymbolType.SharedMem:
-        if self._plan.written_in_slices(self._dest_obj.tensor):
+        if (self._plan.written_in_slices(self._dest_obj.tensor)
+            or self._narrows_pending(dest_symbol.name)):
           self._invalidate_residency(dest_symbol.name)
           # assembled from several writes: this slice has to land in the shared
           # buffer now, since `_temp_regs` only ever holds our own part and the
@@ -787,7 +828,8 @@ class MultilinearBuilder(OperationBuilder):
             covered=self._temp_regs.data_view.get_bbox(),
             shift=self._store_offset())
       elif dest_symbol.stype == SymbolType.Global:
-        in_slices = self._plan.written_in_slices(self._dest_obj.tensor)
+        in_slices = (self._plan.written_in_slices(self._dest_obj.tensor)
+                     or self._narrows_pending(dest_symbol.name))
         pending = self._residency.get(dest_symbol.name)
         atomic = result_is_atomic(
             accumulating=self._add,
@@ -869,7 +911,10 @@ class MultilinearBuilder(OperationBuilder):
         raise InternalError(f'gemm-buider: `res` is not in scopes and thus must be tmp')
 
       dest_symbol = self._temporaries.shared_symbol(self._dest_obj.tensor)
-      if self._plan.written_in_slices(self._dest_obj.tensor):
+      if (self._plan.written_in_slices(self._dest_obj.tensor)
+          or self._narrows_pending(dest_symbol.name)):
+        # a pending image that holds more than this result goes out first
+        self._invalidate_residency(dest_symbol.name)
         # the first write of the temporary: where the plan found a use of
         # cells nothing defined before it, this store clears the buffer
         self._instructions.append(StoreRegToShr(context=self._context,

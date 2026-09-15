@@ -696,7 +696,7 @@ def test_shared_bias_carries_the_destination_offset(backend, arch):
 # ----------------------------------------------------------------------
 
 @pytest.mark.parametrize("backend,arch", [("cuda", "sm_86"), ("hip", "gfx90a")])
-def test_partial_writes_are_staged_for_the_whole_read(backend, arch):
+def test_partial_writes_accumulate_into_the_whole_image(backend, arch):
     """Successive partial writes, then a read of the union.
 
     `t = Q; t += F0; t += F1; O = t x M`, where every descriptor declares the
@@ -706,19 +706,32 @@ def test_partial_writes_are_staged_for_the_whole_read(backend, arch):
     covering everything, so the value was kept in registers; the image left
     behind then held only the last writer's rows, and the read that follows
     wants the union.  It was refused outright, which is where the elastic
-    build stopped.
+    build stopped -- and then sent through shared memory term by term.
 
-    The tensor has to go through memory instead, so ask the question of the
-    boxes that are actually written.
+    Each accumulation writes the whole image now: its own rows from the
+    product, the others from the image the assignment left.  So no term goes
+    out on its own; the numbers are `test_kernels`'s to check.
     """
     src = _generate("partial_writes_read_whole", backend, arch).get_kernel()
-    # each partial write goes out as it is produced ...
-    assert src.count("store{r>s}") >= 3, (
-        "the partial writes are not being staged out; the register image "
-        "would hold only the last one's rows")
-    # ... and the read that follows takes the union from there
-    reads = re.findall(r"//\s*\w+ = \+\((s\d+) \* ", src)
-    assert reads, "the final contraction does not read the staged tensor"
+    assert src.count("store{r>s}") <= 1, (
+        "the partial writes are staged out one by one; the chain should "
+        "accumulate into the register image the assignment left")
+
+
+@pytest.mark.parametrize("backend,arch", [("cuda", "sm_86"), ("hip", "gfx90a"),
+                                          ("oneapi", "pvc"), ("esimd", "pvc")])
+def test_a_narrowing_accumulation_chain_is_stored_once(backend, arch):
+    """`D = Q; D += F0; D += F1; D += F2`, each term over fewer rows.
+
+    The shape of the ADER Taylor expansion into a global output.  It was
+    stored after every term and read back for the next one -- three global
+    round trips per element, 1.1-2x the bytes the operation needs on GH200.
+    """
+    src = _generate("accumulate_narrowing_chain", backend, arch).get_kernel()
+    stores = re.findall(r"//\s*(\w+) = store\{r>g\}", src)
+    assert len(stores) == 1, f"stored {len(stores)} times: {stores}"
+    assert not re.search(rf"= load\{{g>[rs]\}}\({stores[0]}\b", src), (
+        "the output is read back after it was stored")
 
 
 # ----------------------------------------------------------------------

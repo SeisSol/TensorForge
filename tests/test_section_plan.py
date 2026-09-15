@@ -178,6 +178,54 @@ def test_two_half_writes_are_written_in_slices():
     assert plan.written_in_slices(tmp) is True
 
 
+def test_nested_accumulations_after_a_whole_assignment_are_not_written_in_slices():
+    """`t = Q; t += F0; t += F1`, the two accumulations over half the rows.
+
+    Each accumulation writes half -- `_analyze` narrows it to its operand --
+    but the assignment before them covers the whole box, so the register image
+    it leaves holds everything and every later term is added into that image.
+    One image, stored once.  The ADER Taylor expansion (`I = dQ(0) c_0;
+    I += dQ(k) c_k`, each term over fewer rows) went through global memory on
+    every term for want of this.
+    """
+    q, m = _tensor("Q"), _tensor("M")
+    f0 = _tensor("F0", shape=(N // 2, N))
+    f1 = _tensor("F1", shape=(N // 2, N))
+    tmp = _tensor("TMP", tmp=True)
+    out = _tensor("OUT")
+    scopes = _scopes(q, f0, f1, m, out)
+    copy = dict(target=[[0, 1]], permute=[[0, 1]])
+    plan = SectionPlan([
+        MultilinearDescr(dest=SubTensor(tmp), ops=[SubTensor(q)], **copy),
+        MultilinearDescr(dest=SubTensor(tmp), ops=[SubTensor(f0)], add=True,
+                         **copy),
+        MultilinearDescr(dest=SubTensor(tmp), ops=[SubTensor(f1)], add=True,
+                         **copy),
+        MultilinearDescr(dest=SubTensor(out),
+                         ops=[SubTensor(tmp), SubTensor(m)],
+                         target=[[0, -1], [-1, 1]], permute=[[0, 1], [0, 1]]),
+    ], scopes)
+
+    assert plan.written_in_slices(tmp) is False
+
+
+def test_an_accumulation_the_assignment_does_not_cover_is_written_in_slices():
+    """The same chain with the assignment over half the rows: its image holds
+    half, and the term that reaches the other half has nothing to add into."""
+    q_half, m = _tensor("QH", shape=(N // 2, N)), _tensor("M")
+    f = _tensor("F")
+    out = _tensor("OUT")
+    scopes = _scopes(q_half, f, m, out)
+    copy = dict(target=[[0, 1]], permute=[[0, 1]])
+    plan = SectionPlan([
+        MultilinearDescr(dest=SubTensor(out), ops=[SubTensor(q_half)], **copy),
+        MultilinearDescr(dest=SubTensor(out), ops=[SubTensor(f)], add=True,
+                         **copy),
+    ], scopes)
+
+    assert plan.written_in_slices(out) is True
+
+
 def test_a_writer_narrower_than_the_read_is_written_in_slices():
     """One writer is not enough if it covers less than what is read back.
 

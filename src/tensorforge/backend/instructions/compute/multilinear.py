@@ -95,8 +95,14 @@ class MultilinearInstruction(ComputeInstruction):
                theta: int=0,
                lead_width: int=1,
                k_width: int=1,
-               prev_offset=None):
+               prev_offset=None,
+               whole_prev: bool = False):
         super(MultilinearInstruction, self).__init__(context)
+        #: `prev` is a register image of the destination's whole box -- the
+        #: one the previous term of an accumulation chain left behind.  The
+        #: result is then written over all of it, the product where this term
+        #: reaches and `prev` elsewhere, so the image stays whole.
+        self._whole_prev = whole_prev
         self._dest = dest
         self._ops = ops
         self._target = target
@@ -324,13 +330,26 @@ class MultilinearInstruction(ComputeInstruction):
             # box; the accumulator then claimed elements it never computed, and
             # the store wrote all of them --- reading past the end of the
             # register array on the way.
+            #
+            # A whole image of the destination (`whole_prev`) is adopted even
+            # where this term's own box is narrower: the result *is* the
+            # image, updated where the term reaches, so it takes the image's
+            # box, and the epilogue copies `prev` into the rest.
+            def inside(a, b):
+                return (a.rank() == b.rank() and all(
+                    lb <= la and ua <= ub for la, ua, lb, ub in
+                    zip(a.lower(), a.upper(), b.lower(), b.upper())))
+
             for neighbor in (self._prev, self._next):
                 if (neighbor is not None
                         and neighbor.stype in (SymbolType.Register,
                                                 SymbolType.Scratch)
                         and neighbor.data_view is not None
-                        and self._same_box(neighbor.data_view.get_bbox(),
-                                           self._idest.data_view.get_bbox())):
+                        and (self._same_box(neighbor.data_view.get_bbox(),
+                                            self._idest.data_view.get_bbox())
+                             or (neighbor is self._prev and self._whole_prev
+                                 and inside(self._idest.data_view.get_bbox(),
+                                            neighbor.data_view.get_bbox())))):
                     self._dest.data_view = neighbor.data_view
             if self._dest.data_view is None:
                 self._dest.data_view = self._idest.data_view

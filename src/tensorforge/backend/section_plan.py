@@ -77,6 +77,9 @@ class SectionPlan:
         #: writes to [0,2) and [8,10) union to [0,10), and a union-against-union
         #: test would wave through a read of [2,8) that nothing ever wrote.
         self._dest_boxes = {}
+        #: id(tensor) -> whether each of those writes accumulates, in the same
+        #: order: what tells an accumulation chain from pieces.
+        self._write_adds = {}
         #: tensor -> effective read box, and id(tensor) -> effective write
         #: boxes.  These are what coverage is judged on.
         self._eff_reads = {}
@@ -149,6 +152,9 @@ class SectionPlan:
         self._dest_union[id(tensor)] = _hull(self._dest_union.get(id(tensor)),
                                              box)
         self._dest_boxes.setdefault(id(tensor), []).append(box)
+        self._write_adds.setdefault(id(tensor), []).append(
+            (bool(getattr(descr, 'add', False)),
+             bool(getattr(tensor, 'is_tmp', False))))
         return tensor
 
     def _add_effective(self, descr, tensor) -> None:
@@ -355,6 +361,44 @@ class SectionPlan:
         """
         return any(self._assembled(key) for key in self._keys(tensor))
 
+    def _accumulation_chain(self, key) -> bool:
+        """Is this tensor an accumulation chain every term can add into?
+
+        The first write assigns its whole declared box -- nothing narrowed it
+        -- and every later one accumulates onto that same declared box, however
+        few of its rows the term's operands reach.  Then the first term's
+        register image holds everything, and each later term writes the whole
+        image back: the product where it reaches, the image elsewhere
+        (`MultilinearInstruction`'s `whole_prev`).  The ADER Taylor
+        expansion, `I = dQ(0) c_0` then `I += dQ(k) c_k` over fewer rows each
+        time, is the shape; judged as pieces it went through global memory on
+        every term.
+        """
+        declared = self._dest_boxes.get(key, [])
+        eff = self._eff_writes.get(key, [])
+        writes = self._write_adds.get(key, [])
+        if (len(declared) < 2 or len(eff) != len(declared)
+                or len(writes) != len(declared)):
+            return False
+        adds = [add for add, _ in writes]
+        temporary = any(tmp for _, tmp in writes)
+
+        def same(a, b):
+            return (list(a.lower()) == list(b.lower())
+                    and list(a.upper()) == list(b.upper()))
+
+        first = declared[0]
+        if not all(add and same(box, first)
+                   for box, add in zip(declared[1:], adds[1:])):
+            return False
+        # The first image holds the whole box when the first term assigns all
+        # of it -- or, for a tensor memory holds, when it accumulates too:
+        # its bias is the destination staged from memory, which is the whole
+        # box.  A temporary has nothing in memory to start from.
+        if adds[0]:
+            return not temporary
+        return same(eff[0], first)
+
     def _assembled(self, key) -> bool:
         """`written_in_slices` for one tensor, by its id."""
         # A guard breaks the deferral in both directions, so neither case gets
@@ -376,9 +420,11 @@ class SectionPlan:
         union = None
         for b in boxes:
             union = _hull(union, b)
+        # Unless it is a chain every term adds into (`_accumulation_chain`).
         if union is not None and any(
                 b.lower()[j] > union.lower()[j] or b.upper()[j] < union.upper()[j]
-                for b in boxes for j in range(union.rank())):
+                for b in boxes for j in range(union.rank())) \
+                and not self._accumulation_chain(key):
             return True
         # One writer is still not enough if it does not cover everything that
         # gets read back: `_analyze` intersects `_ns` down to what the operands
