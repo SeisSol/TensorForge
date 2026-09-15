@@ -20,8 +20,9 @@ thread-distributed one:
 
 from typing import List, Sequence
 
-from tensorforge.backend.symbol import (LeadLoop, Loop, SymbolView, Variable,
-                                        add_offset, write_loops)
+from tensorforge.backend.symbol import (LeadLoop, Loop, SymbolType,
+                                        SymbolView, Variable, add_offset,
+                                        write_loops)
 from tensorforge.backend.writer import Writer
 from tensorforge.common.basic_types import Datatype
 from tensorforge.common.context import Context
@@ -264,13 +265,35 @@ class ReductionInstruction(ComputeInstruction):
         # one work-item -- so there is no second writer, and a guard would be
         # `if (mask)` over a comparison against a vector lane index, which is
         # not a branch condition at all.
-        if writer._explicit_simd():
+        #
+        # Nor into registers, where there is no address to race on: every lane
+        # writes its own copy, and every copy has to hold the answer.  A
+        # temporary's image is written to its buffer by every lane at once
+        # (`StoreRegToShr`: one value, the same on every lane) or read where
+        # it is.  Guarded, lane 0 alone held it, and the other lanes stored
+        # their zeros to the address lane 0 stored the answer to: SeisSol's
+        # damage step takes the `max` of ten temporaries this way, and read
+        # back whichever lane won.  `_exchange_width` makes the all-reduce
+        # reach every lane for it.
+        if writer._explicit_simd() or self._into_registers():
             self._dest.symbol.store(writer, self._context, total,
                                     self._dest_index(kept, varlist), False)
             return
         with writer.if_(writer.op('eq', BOOL, lead, 0, hint='w')):
             self._dest.symbol.store(writer, self._context, total,
                                     self._dest_index(kept, varlist), False)
+
+    def _into_registers(self) -> bool:
+        """Is the destination one value in registers, a copy on every lane?
+
+        Without axes only.  With kept axes the fold runs them as sequential
+        loops, and a register image spread over the lanes is not addressed by
+        a sequential index at all -- `Symbol.access_address` takes it for the
+        slot -- so there is nothing a guard could make right or wrong there.
+        """
+        return (self._dest.bbox.rank() == 0
+                and self._dest.symbol.stype in (SymbolType.Register,
+                                                SymbolType.Scratch))
 
     def _slots(self, src_lead: int) -> int:
         """How many elements of the lead axis one lane owns.
@@ -364,9 +387,12 @@ class ReductionInstruction(ComputeInstruction):
         lane that holds data -- and lane 0 is the one that stores.
 
         16 over 32 threads is four exchanges instead of five.  With more than
-        one slot every lane holds data and the full width is the answer.
+        one slot every lane holds data and the full width is the answer.  So
+        it is for a destination in registers, whatever the extent: there every
+        lane keeps the answer (`_fold_across_lanes`), and a lane outside lane
+        0's group would keep its own group's fold of neutral elements.
         """
-        if self._slots(src_lead) > 1:
+        if self._slots(src_lead) > 1 or self._into_registers():
             return self._num_threads
         extent = self._op.bbox.size(src_lead)
         width = 1
