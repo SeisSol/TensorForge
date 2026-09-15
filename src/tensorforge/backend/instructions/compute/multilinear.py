@@ -38,6 +38,8 @@ _VENDOR_MODULES = {
 def _vendor_module(context):
     return _VENDOR_MODULES.get(context.get_vm().get_hw_descr().vendor)
 
+import itertools
+
 import numpy as np
 
 from copy import copy
@@ -370,6 +372,60 @@ class MultilinearInstruction(ComputeInstruction):
         # staged register image, and `Symbol.load` addresses through it.
         self._lead_dims = [self.lead_dim(self._dest)]
 
+    def _known_zero(self, i, idx) -> bool:
+        """Is operand `i` zero at every cell one step of the loop reads?
+
+        Asked of a batch-constant operand the description gives numbers for
+        (`Tensor.has_values`) -- SeisSol's global matrices, whose values yateto
+        passes along -- and answerable only where every index is a number: the
+        reduction's, and the lane slot's, which the contraction unrolls.  A
+        slot covers `block` lanes of `width` elements each, and the product is
+        left out only if all of them read a zero; one row with a value keeps
+        the step, since the lanes issue it together.
+
+        Cells outside the rows the loop iterates are not read -- a ragged slot
+        guards them off -- so they neither keep a step nor allow one to go.
+        `skip_known_zeros` turns the question off.
+        """
+        if not self._context.get_user_options().skip_known_zeros:
+            return False
+        symbol = self._ops[i].symbol
+        obj = getattr(symbol, 'obj', None)
+        # The tensor itself, read where the caller put it: an index then is a
+        # cell of the tensor, which is what its values are indexed by.  A
+        # staged copy -- in shared memory under `preload_globals`, or in
+        # registers -- is addressed in its own window, shifted, and is left
+        # alone rather than translated back.
+        if (symbol.stype is not SymbolType.Global or not isinstance(obj, Tensor)
+                or obj.addressing is not Addressing.NONE or not obj.has_values()):
+            return False
+        data = obj.get_values()
+        axes = []
+        for j, x in enumerate(idx):
+            if isinstance(x, Immediate):
+                x = x.nonlead()
+            if isinstance(x, (int, np.integer)):
+                cells = [int(x)]
+            elif (isinstance(x, LeadIndex)
+                  and isinstance(x.nonlead(), (int, np.integer))):
+                width, block = x.width, x._block
+                base = width * block * int(x.nonlead()) + x.offset()
+                cells = [base + width * lane + c for lane in range(block)
+                         for c in range(width)]
+                target = self._target[i][j]
+                if target >= 0:
+                    # the rows this contraction iterates, in the operand's
+                    # coordinates: the loop's range moved by the offset
+                    lo, hi = self._ns[target]
+                    shift = self._eff_offset(i, j)
+                    cells = [r for r in cells if lo + shift <= r < hi + shift]
+            else:
+                return False
+            if any(not 0 <= r < data.shape[j] for r in cells):
+                return False
+            axes.append(cells)
+        return all(data[cell] == 0 for cell in itertools.product(*axes))
+
     def gen_code_inner(self, writer: Writer):
         # A comment touches nothing.  Left conservative it would be read as
         # touching every buffer, and this one sits above them all.
@@ -514,17 +570,22 @@ class MultilinearInstruction(ComputeInstruction):
 
             prods = []
             for c, kval in enumerate(steps):
+                idxs = [[add_offset(varlist[loopmap[nk]]
+                                    if nk != kslot else kval,
+                                    self._eff_offset(i, j))
+                         for j, nk in enumerate(self._opdim_to_nks[i])]
+                        for i in range(len(self._ops))]
+                if any(self._known_zero(i, idx) for i, idx in enumerate(idxs)):
+                    # A factor the description says is zero at every cell
+                    # this step reads: no load, and no product to add.
+                    continue
                 terms = []
                 for i, op in enumerate(self._ops):
                     if (i, c) in packs:
                         v = packs[(i, c)]
                     else:
-                        idx = [add_offset(varlist[loopmap[nk]]
-                                          if nk != kslot else kval,
-                                          self._eff_offset(i, j))
-                               for j, nk in enumerate(self._opdim_to_nks[i])]
-                        v = op.symbol.load(writer, self._context, None, idx,
-                                           False)
+                        v = op.symbol.load(writer, self._context, None,
+                                           idxs[i], False)
                     if v is None:
                         # zero; no data
                         return

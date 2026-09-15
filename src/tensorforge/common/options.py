@@ -704,6 +704,19 @@ declare('register_temporaries',
             'followed by a barrier; arrays trade the shared buffer for '
             'registers that stay live until their last reader.')
 
+declare('skip_known_zeros',
+        default=True,
+        parse=parse_bool,
+        env='TF_SKIP_KNOWN_ZEROS',
+        doc='Leave out a product whose batch-constant factor the description '
+            'gives numbers for and which is zero at every cell the step reads '
+            '-- in the per-lane loop, every row of the lane slot at that '
+            'reduction index.  No load and no multiply-add.  SeisSol\'s '
+            'volume kernel (order 6) reads kDivM dense, 16% of its cells '
+            'nonzero, and its first 32-row slot needs 20 of 35 columns.  '
+            'Exact for finite operands; a product of zero with an infinity '
+            'or a NaN in the other factor is no longer formed.')
+
 declare('autotune',
         default='off',
         env='TF_AUTOTUNE',
