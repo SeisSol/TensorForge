@@ -81,11 +81,60 @@ def test_nothing_is_prepared_unless_asked(monkeypatch):
     assert all(a.simt_interleave is None for a in operators)
 
 
-def test_rows_that_do_not_fill_the_lanes_are_left_alone(monkeypatch):
-    """At 32 lanes 56 rows leave a guarded block, whose loads a guard would
-    split into separate scopes; the order is not offered there."""
-    _, operators = _generate(monkeypatch, "prepare_operands=1")
-    assert all(a.simt_interleave is None for a in operators)
+def test_a_ragged_last_slot_is_padding(monkeypatch):
+    """At 32 lanes 56 rows are two slots, the second 24 rows deep: one group
+    of four a lane and column, of which rows 56 and on are padding.  It was
+    not offered at all, since the rows do not fill the lanes; the tail's
+    lanes past the data read the padding, which is zero and stored."""
+    src, operators = _generate(monkeypatch, "prepare_operands=1")
+    assert len(operators) == 4
+    for a in operators:
+        assert a.simt_interleave == (32, 4, 128)
+        order = a.storage_map()
+        assert len(order) == 128 * 56
+        assert sorted(c for c in order if c >= 0) == list(range(56 * 56))
+    reads = re.findall(r"\*\((tensorforge::\w+<[^>]*>)\*\)&glb_m[0468]\[", src)
+    assert reads and set(reads) == {"tensorforge::VectorT<float, 4>"}
+    assert not re.search(r"= glb_m[0468]\[", src)
+
+
+def _seissol(kernel, config="elastic-linearck-o6-s", options=None):
+    import seissol_suite as fx
+    from tensorforge.common.basic_types import Addressing, Datatype
+    from tensorforge.common.context import Options
+    from tensorforge.frontend.yateto import DescriptionReader
+    system = config.rsplit("-o", 1)[0]
+    descrs = DescriptionReader(None, {}).read(
+        fx.description(system, config, f"gpu_{kernel}"))[0]
+    ctx = Context(arch="sm_80", backend="cuda", fp_type=Datatype.F32,
+                  options=Options(**(options or {})))
+    gen = Generator(descrs, ctx)
+    with contextlib.redirect_stdout(io.StringIO()):
+        gen.generate()
+    operators = [s.obj for s in gen._scopes.get_global_scope().values()
+                 if getattr(s.obj, "addressing", None) is Addressing.NONE]
+    return gen.get_kernel(), operators
+
+
+def test_a_box_that_starts_on_a_slot_takes_the_order():
+    """SeisSol's order-6 `volume` reads rows 1 to 54 of each 64-row `kDivM`:
+    whole slots of it from the first, which is all the address needs."""
+    _, operators = _seissol("volume", options={"prepare_operands": True})
+    assert len(operators) == 3
+    assert all(a.simt_interleave is not None for a in operators)
+
+
+def test_every_reader_of_an_operator_shares_its_interleave():
+    """The order-6 `derivative` reads each `kDivMT` five times, over boxes
+    that shrink with the order, and stores it from column 1.  Every reader
+    is a nest of the same lanes, so all take the one order."""
+    src, operators = _seissol("derivative", options={"prepare_operands": True})
+    assert len(operators) == 3
+    for a in operators:
+        assert a.simt_interleave is not None, a.alias
+        assert list(a.get_bbox().lower()) == [0, 1]
+    plain, _ = _seissol("derivative")
+    assert src.count("VectorT<float, 4>") > plain.count("VectorT<float, 4>")
 
 
 def test_a_merged_run_stores_every_member_alike(monkeypatch):

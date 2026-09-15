@@ -788,20 +788,31 @@ class MultilinearInstruction(ComputeInstruction):
         memory changes, and the host packs it from `storage_map`.
 
         The conditions of `_offer_order`, for the same reasons -- the caller
-        asked, the operand is `Addressing.NONE`, dense and read by nothing
-        else -- plus what the address needs: the row index is the lead
-        dimension of this nest at width 1, the bounding box is the whole
-        tensor, and the rows fill the lanes, so no guard splits a group's
-        loads into separate scopes.  A stand-in of a merged run is not a
-        buffer: what is stored are its members, one per iteration, and the one
-        body reads whichever the counter selects -- so every member is stored
-        alike, or none is, and the stand-in carries the addressing.
+        asked, the operand is `Addressing.NONE` and dense -- plus what the
+        address needs (`_reads_interleavable`): the row index is the lead
+        dimension of a nest at width 1, and every read starts its rows on a
+        slot.  Not the whole tensor, and not rows that fill the lanes: a read
+        that starts on a slot names whole slots of the order, whatever its
+        extent, and a ragged last slot is padding, which a full-lane tail
+        reads as zeros.  SeisSol reads its operators in boxes -- `volume` rows
+        1 to 54 of 64, the derivative fewer each order -- and none of them was
+        offered before.
+
+        Nor only one reader.  The order is the tensor's, not this operation's:
+        `Symbol._interleaved_load` addresses every read of it, so another
+        multiplication may read it as long as it is a nest of the same lanes
+        that reads it the same way -- the derivative reads each operator once
+        per order.  A matrix path reads fragments of an order it prepared
+        itself, and a loader copies by coordinate; either one refuses.
+
+        A stand-in of a merged run is not a buffer: what is stored are its
+        members, one per iteration, and the one body reads whichever the
+        counter selects -- so every member is stored alike, or none is, and
+        the stand-in carries the addressing.
         """
         if not self._context.get_user_options().prepare_operands:
             return
-        if _explicit_simd(self._context) or self._lead_width != 1:
-            return
-        if not self._ops or self._theta:
+        if not self._ops:
             return
         sym = self._ops[0].symbol
         a_obj = getattr(sym, 'obj', None)
@@ -814,23 +825,20 @@ class MultilinearInstruction(ComputeInstruction):
                 or not a_obj.is_dense()):
             return
         shape = tuple(int(x) for x in a_obj.get_actual_shape())
-        if len(shape) != 2 or self._opdim_to_nks[0] != ['n0', 'k0']:
-            return
-        if 0 not in self._lead_dims:
-            return
-        bbox = self._ops[0].bbox
-        if (list(bbox.lower()) != [0, 0]
-                or tuple(bbox.upper()) != shape
-                or list(a_obj.get_bbox().lower()) != [0, 0]):
-            return
-        if any(user is not self for user in sym.get_user_list()):
+        if len(shape) != 2 or not self._reads_interleavable(sym, a_obj):
             return
         threads = self._num_threads
+        if any(user is not self
+               and not (isinstance(user, MultilinearInstruction)
+                        and user._num_threads == threads
+                        and user._reads_interleavable(sym, a_obj))
+               for user in sym.get_user_list()):
+            return
         rows, cols = shape
         group = 16 // a_obj.datatype.size()
-        if group < 2 or threads < 1 or rows % threads:
+        if group < 2 or threads < 1:
             return
-        slots = rows // threads
+        slots = -(-rows // threads)
         groups = -(-slots // group)
         ld = groups * group * threads
         order = []
@@ -838,9 +846,8 @@ class MultilinearInstruction(ComputeInstruction):
             for g in range(groups):
                 for lane in range(threads):
                     for c in range(group):
-                        slot = g * group + c
-                        order.append(lane + threads * slot + rows * k
-                                     if slot < slots else -1)
+                        row = lane + threads * (g * group + c)
+                        order.append(row + rows * k if row < rows else -1)
         # Idempotent, and the same for every member: an order already there
         # is accepted only if it is this one -- a peeled first iteration reads
         # a member directly and may have stored it so already -- and anything
@@ -849,7 +856,8 @@ class MultilinearInstruction(ComputeInstruction):
             if (member.addressing is not Addressing.NONE
                     or not member.is_dense()
                     or tuple(int(x) for x in member.get_actual_shape()) != shape
-                    or list(member.get_bbox().lower()) != [0, 0]
+                    or list(member.get_bbox().lower())
+                    != list(a_obj.get_bbox().lower())
                     or (member.storage_order is not None
                         and tuple(member.storage_order) != tuple(order))):
                 return
@@ -858,6 +866,29 @@ class MultilinearInstruction(ComputeInstruction):
             member.simt_interleave = (threads, group, ld)
         if variant:
             a_obj.simt_interleave = (threads, group, ld)
+
+    def _reads_interleavable(self, sym, a_obj) -> bool:
+        """Whether this multiplication reads `A` the way the SIMT interleave
+        addresses it (`Symbol._interleaved_load`).
+
+        As its own lead operand, at width 1 over its lanes, with the row index
+        the lead dimension of the nest; with its rows starting on a slot --
+        both the box's own start and this read's offset whole slots, since a
+        lane vector that starts inside a slot is spread over two groups; and
+        by the generic nest, which reads `A` through `Symbol.load`.  A matrix
+        path reads the fragments of an order it prepared for itself, and one
+        that found this one would take it for that.
+        """
+        if (_explicit_simd(self._context) or self._lead_width != 1
+                or not self._ops or self._ops[0].symbol is not sym):
+            return False
+        if self._opdim_to_nks[0] != ['n0', 'k0'] or 0 not in self._lead_dims:
+            return False
+        threads = self._num_threads
+        if (threads < 1 or a_obj.get_bbox().lower()[0] % threads
+                or self._eff_offset(0, 0) % threads):
+            return False
+        return self._plan()[0].strategy is Strategy.GENERIC
 
     def _offer_order(self, module, a_obj, lead, depth):
         """Let the target store `A` in the order it will read it.
@@ -1368,6 +1399,9 @@ class MultilinearInstruction(ComputeInstruction):
                 mult_stride=self._mult_stride,
                 A_slot=(A_slot if a_obj is not None
                         and getattr(a_obj, 'storage_order', None) is not None
+                        # An interleaved operand is ordered for the nest's
+                        # lanes, not for a fragment: read by coordinate.
+                        and getattr(a_obj, 'simt_interleave', None) is None
                         else None),
                 lead_slots=M, lead_elements=Mx, n=N, k=K, kx=kx,
                 threads=self._num_threads, lead_width=width,

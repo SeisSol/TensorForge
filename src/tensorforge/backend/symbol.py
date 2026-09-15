@@ -1308,10 +1308,17 @@ class Symbol:
     one.  Aligned by construction: the host packs the buffer, the group is
     16 bytes and every term is a multiple of it.
 
-    `None` for an index this cannot address -- a runtime slot, a slicing
-    shift, a lead index of another width or distribution -- and the caller
-    then reads the logical address, which is wrong for a packed buffer; the
-    offer is made only where these do not arise, and this refuses loudly
+    The index is the tensor's: storage counts from the box's corner, so a
+    slicing shift and the box's start are subtracted -- whole slots on the
+    rows, any number of columns.  A ragged last slot, and the lanes past a
+    full-lane tail's `valid`, read the order's padding, which is zero and
+    stored: the vector never leaves the buffer.
+
+    `None` for an index this cannot address -- a runtime slot, a shift or a
+    box start inside a slot, a lead index of another width or distribution --
+    and the caller then reads the logical address, which is wrong for a packed
+    buffer; the offer is made only where these do not arise
+    (`MultilinearInstruction._reads_interleavable`), and this refuses loudly
     rather than guessing if one does.
     """
     threads, group, ld = self.obj.simt_interleave
@@ -1324,12 +1331,15 @@ class Symbol:
     slot = li.nonlead() if li._value is None else li._value
     if isinstance(slot, Immediate):
       slot = slot._value
-    if (shift or li.width != 1 or li._block != threads
+    lower = [int(x) for x in self.data_view.get_dim_offsets()]
+    if (shift % threads or lower[0] % threads or li.width != 1
+            or li._block != threads
             or not isinstance(slot, (int, np.integer))):
       raise InternalError(
-          f'{self.name}: interleaved rows at {li!r} with shift {shift}; the '
-          f'packing assumes whole slots of a width-1 lead over {threads} lanes')
-    slot = int(slot)
+          f'{self.name}: interleaved rows at {li!r} with shift {shift} in a '
+          f'box from {lower}; the packing assumes whole slots of a width-1 '
+          f'lead over {threads} lanes')
+    slot = int(slot) + (shift - lower[0]) // threads
     k = index[1]
     if isinstance(k, str):
       raise InternalError(f'{self.name}: interleaved column named as text')
@@ -1337,7 +1347,10 @@ class Symbol:
     def arith(name, a, b):
       if isinstance(a, (int, np.integer)) and isinstance(b, (int, np.integer)):
         return int({'add': a + b, 'mul': a * b}[name])
+      if name == 'add' and isinstance(b, (int, np.integer)) and b == 0:
+        return a
       return writer.op(name, INDEX, a, b, hint='a')
+    k = arith('add', k, -lower[1])
     lane = writer.lane_offset(threads, li._stride, hint='lane')
     addr = arith('add', arith('mul', k, ld),
                  arith('add', arith('mul', lane, group),
@@ -2599,8 +2612,10 @@ class Symbol:
         if valid is not None and parts > 1:
           raise InternalError(
               f'{self.name}: a full-lane tail reached a split read')
+        # A full-lane tail (`valid`) takes the interleave too: its lanes past
+        # the data read the order's padding, inside the buffer.
         if (bc_lane is None and w == 1 and not part and parts == 1
-                and valid is None and shift is None
+                and shift is None
                 and getattr(self.obj, 'simt_interleave', None) is not None
                 and self.stype in (SymbolType.Global, SymbolType.Batch)):
           interleaved = self._interleaved_load(writer, context, read_index,
