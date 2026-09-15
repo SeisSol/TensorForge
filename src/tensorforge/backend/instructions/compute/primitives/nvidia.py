@@ -1280,17 +1280,32 @@ def matmul(writer, ops, ctx, span):
                             # slot the step spans -- the remainder's
                             # columns with them.
                             writer.barrier('wave', **sync)
+
+                            def breg(regs, s_, jj):
+                                """`B`'s slot `s_`, or zero past the
+                                operand's depth.  The slots are read up to
+                                the step's last depth, which a deep atom
+                                (sm_90's F64, sixteen) takes past the last
+                                slot `B` filled -- a KeyError, where `A`'s
+                                padding makes every such product zero."""
+                                got = regs.get((s_, jj))
+                                return (got if got is not None else
+                                        writer.declare(ScalarType(atom.d),
+                                                       hint='bs'))
+
                             for s_, lo, cnt, sub in _lanes_of(k + trueK, atom.k,
                                                               threads):
                                 with threadrange(lo, cnt):
                                     for jj in range(0, ncols):
                                         to = _index(writer, sub=sub, mod=atom.k,
                                                     add=jj * atom.k)
-                                        writer.store(Bshm, BregHi[s_, jj] if bsplit
-                                                     else Breg[s_, jj], to,
-                                                     shift=at(None, bpad))
+                                        writer.store(Bshm,
+                                                     breg(BregHi if bsplit
+                                                          else Breg, s_, jj),
+                                                     to, shift=at(None, bpad))
                                         if bsplit:
-                                            writer.store(BshmLo, BregLo[s_, jj], to,
+                                            writer.store(BshmLo,
+                                                         breg(BregLo, s_, jj), to,
                                                          shift=at(None, bpad))
                             writer.barrier('wave', **sync)
 
@@ -1396,9 +1411,21 @@ def matmul(writer, ops, ctx, span):
                                 for kkk in range(0, live):
                                     got = A(writer, None, slot,
                                             k + kk + kkk, parts=aparts)
-                                    got = got if aparts > 1 else (got,)
+                                    got = ((got,) if aparts == 1 else got) or (None,) * aparts
                                     for pt in range(aparts):
-                                        AregParts[pt][q, kkk] = got[pt]
+                                        # A structural zero of a sparse `A`
+                                        # is no read at all (`Symbol.load`),
+                                        # and the tile still needs its zero
+                                        # -- in every part, as a padding slot
+                                        # below.  Handed on as it came, it
+                                        # was a store of nothing: SeisSol's
+                                        # damage `derivative` and
+                                        # `damageCellIntegral` did not
+                                        # generate under tensor cores.
+                                        AregParts[pt][q, kkk] = (
+                                            got[pt] if got[pt] is not None
+                                            else writer.declare(
+                                                ScalarType(atom.d), hint='as'))
                                 for kkk in range(live, atom.k):
                                     for pt in range(aparts):
                                         # A padding slot reads zero in

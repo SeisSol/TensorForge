@@ -112,6 +112,58 @@ def enabled(monkeypatch):
     monkeypatch.setattr(nvidia, "ENABLED", True)
 
 
+@pytest.mark.parametrize("config, kernel", [
+    ("damage-nonlinearck-o4-s", "derivative"),
+    ("damage-nonlinearck-o6-s", "damageCellIntegral"),
+])
+def test_a_sparse_a_stages_its_zeros(config, kernel):
+    """SeisSol's damage operators are sparse, and a structural zero of `A` is
+    no read at all (`Symbol.load`).  The staging tile still needs the zero;
+    handed on as it came it was a store of nothing, and neither kernel
+    generated under tensor cores ("a None operand reached the emitter")."""
+    import contextlib
+    import io
+
+    import seissol_suite as fx
+    from tensorforge.common.context import Options
+    from tensorforge.frontend.yateto import DescriptionReader
+    from tensorforge.generators.generator import Generator
+
+    descrs = DescriptionReader(None, {}).read(
+        fx.description("damage-nonlinearck", config, f"gpu_{kernel}"))[0]
+    ctx = Context(arch="sm_80", backend="cuda", fp_type=Datatype.F32,
+                  options=Options(tensor_cores=True))
+    gen = Generator(descrs, ctx)
+    with contextlib.redirect_stdout(io.StringIO()):
+        gen.generate()
+    assert nvidia.INSTRS[1].name in gen.get_kernel()
+
+
+@pytest.mark.parametrize("config", ["damage-nonlinearck-o4-d",
+                                    "damage-nonlinearck-o6-d"])
+def test_a_deep_atom_reads_zero_past_b(config):
+    """sm_90's F64 atom is sixteen deep, so the last step of a reduction can
+    reach a slot of `B` past the operand's depth -- one the staging never
+    filled, since nothing lies there to read.  It was a KeyError; `A`'s
+    padding makes every product there zero, and the slot reads zero."""
+    import contextlib
+    import io
+
+    import seissol_suite as fx
+    from tensorforge.common.context import Options
+    from tensorforge.frontend.yateto import DescriptionReader
+    from tensorforge.generators.generator import Generator
+
+    descrs = DescriptionReader(None, {}).read(
+        fx.description("damage-nonlinearck", config, "gpu_derivative"))[0]
+    ctx = Context(arch="sm_90", backend="cuda", fp_type=Datatype.F64,
+                  options=Options(tensor_cores=True))
+    gen = Generator(descrs, ctx)
+    with contextlib.redirect_stdout(io.StringIO()):
+        gen.generate()
+    assert "mma.sync" in gen.get_kernel()
+
+
 def test_the_switch_is_off():
     """Not an opinion about whether it should be -- a place where the
     deployment decision is written down once, so flipping it is a diff."""
