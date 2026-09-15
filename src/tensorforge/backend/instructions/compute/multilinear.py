@@ -790,9 +790,9 @@ class MultilinearInstruction(ComputeInstruction):
         The generic nest distributes the lead dimension cyclically: lane `l`
         holds rows `l, l + T, l + 2T, ...`, which are `T` elements apart in a
         column-major `A` and so arrive one scalar load each.  Stored instead
-        with each lane's rows side by side, in groups of one 16-byte vector,
-        a lane reads `group` rows with one aligned load, and the lanes of a
-        group still read one contiguous run between them.  The multiply and
+        with each lane's rows side by side, in groups of up to one 16-byte
+        vector, a lane reads `group` rows with one aligned load, and the
+        lanes of a group still read one contiguous run between them.  The multiply and
         every other operand keep the cyclic layout; only where `A` sits in
         memory changes, and the host packs it from `storage_map`.
 
@@ -844,10 +844,22 @@ class MultilinearInstruction(ComputeInstruction):
                for user in sym.get_user_list()):
             return
         rows, cols = shape
-        group = 16 // a_obj.datatype.size()
-        if group < 2 or threads < 1:
+        widest = 16 // a_obj.datatype.size()
+        if widest < 2 or threads < 1:
             return
         slots = -(-rows // threads)
+        # As wide as a lane's rows need, and no wider.  A vector past the rows
+        # a lane holds is padding every load carries: 64 rows over 32 lanes
+        # are two a lane, and a group of four read half zeros -- the operator
+        # stored at twice its size, and at one row a lane four times.  Of the
+        # widths that take the fewest loads, the narrowest: two rows a lane
+        # in one 8-byte pair, three still in one 16-byte group (a quarter of
+        # it padding, for one load rather than two), and one row in none --
+        # the plain layout already hands the lanes of a column one run.
+        group = min((w for w in (1, 2, 4, 8, 16) if w <= widest),
+                    key=lambda w: (-(-slots // w), w))
+        if group < 2:
+            return
         groups = -(-slots // group)
         ld = groups * group * threads
         order = []
