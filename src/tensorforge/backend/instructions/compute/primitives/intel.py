@@ -440,7 +440,8 @@ def _run(writer, frag, start, size, hint):
 #: handful of `select`s rather than a loop over elements.
 
 
-def dpas_matmul(writer, C, A, B, M, N, K, kx, threads, dtype, ctx, parts=1):
+def dpas_matmul(writer, C, A, B, M, N, K, kx, threads, dtype, ctx,
+                a_zero=None, parts=1):
     """`C += A x B` through XMX, with FP32 emulated over three TF32 products.
 
     Three products, not four: `lo*lo` falls below the accumulator's rounding.
@@ -456,6 +457,13 @@ def dpas_matmul(writer, C, A, B, M, N, K, kx, threads, dtype, ctx, parts=1):
 
     `parts == 2` where `A` is stored as its two TF32 halves
     (`prepared_order`): Src1 is then read half by half rather than split.
+
+    A slot whose sixteen rows of `A` are known to be zero over a block's
+    depths (`MatmulOperands.A_zero`, `Options.skip_known_zeros`) takes no
+    Src1, no split and no product; a block where every slot is zero takes no
+    Src2 either.  Asked only where the contraction starts at depth zero: past
+    `K` the accessor wraps around it, and a block there is not the columns
+    its depths name.
     """
     atom = atom_for(dtype, columns=N, lead=M * threads, depth=K + kx,
                     budget=register_budget(ctx))
@@ -469,6 +477,11 @@ def dpas_matmul(writer, C, A, B, M, N, K, kx, threads, dtype, ctx, parts=1):
         accs = [_fragment(writer, dtype, atom.c_elems, 'dacc')
                 for _ in range(M)]
         for k0 in range(0, depth, atom.k):
+            zero = [a_zero is not None and kx == 0
+                    and a_zero(i * threads, (i + 1) * threads, k0, k0 + atom.k)
+                    for i in range(M)]
+            if all(zero):
+                continue
             ahi = _fragment(writer, Datatype.TF32, atom.a_elems, 'ahi')
             alo = _fragment(writer, Datatype.TF32, atom.a_elems, 'alo')
             bhi = _fragment(writer, Datatype.TF32, atom.b_elems, 'bhi')
@@ -512,6 +525,8 @@ def dpas_matmul(writer, C, A, B, M, N, K, kx, threads, dtype, ctx, parts=1):
                                  writes=(ahi, alo))
 
             for i, acc in enumerate(accs):
+                if zero[i]:
+                    continue
                 bhi = _fragment(writer, Datatype.TF32, atom.b_elems, 'bhi')
                 blo = _fragment(writer, Datatype.TF32, atom.b_elems, 'blo')
 
@@ -777,7 +792,7 @@ def matmul(writer, ops, ctx, span):
             taken = False
         else:
             taken = dpas_matmul(writer, C, A, B, M, N, K, kx, threads, dtype,
-                                ctx, parts=ops.a_parts)
+                                ctx, parts=ops.a_parts, a_zero=ops.A_zero)
         if not taken and ops.a_parts != 1:
             # Declining hands the operation to the nest, which reads one
             # scalar per element -- of an operand stored as two, the upper
