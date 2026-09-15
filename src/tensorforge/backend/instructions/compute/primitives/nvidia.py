@@ -1548,8 +1548,18 @@ def matmul(writer, ops, ctx, span):
                         # three.  The reinterpretation to
                         # the operand type is
                         # arithmetic-free.
+                        # Tiles whose rows of `A` are zero over this step's
+                        # contraction indices, where the operand's numbers are
+                        # known (`MatmulOperands.A_zero`): no product is issued
+                        # for them.  Their fragments are still read -- a lane's
+                        # load serves every tile of its slot -- so what goes is
+                        # the instruction, and with it the remainder's FMAs.
+                        live = [ii for ii in tiles
+                                if ops.A_zero is None
+                                or not ops.A_zero(i + ii, i + ii + atom.m,
+                                                  k + kk, k + kk + atom.k)]
                         prods = {}
-                        for ii in tiles:
+                        for ii in live:
                             frags = frags_by_ii[ii]
                             splits = {src: ([tuple(_as_tf32(writer, got_parts[pt][f])
                                                    for pt in range(aparts))
@@ -1572,8 +1582,8 @@ def matmul(writer, ops, ctx, span):
                         # issued per 8): two accumulators between them cost
                         # 25 % at one warp per scheduler, eight cost nothing
                         # -- and a shared warp has `2 * mults`.
-                        for term in range(len(prods[tiles[0], 0])):
-                            for ii in tiles:
+                        for term in range(len(prods[live[0], 0]) if live else 0):
+                            for ii in live:
                                 for p in range(mults):
                                     a_op, b_op = prods[ii, p][term]
                                     acc = [accs[term % naccs][p][c][ii // atom.m]
@@ -1589,7 +1599,7 @@ def matmul(writer, ops, ctx, span):
                         if tail:
                             fp = ScalarType(atom.d)
                             full = {}
-                            for ii in tiles:
+                            for ii in live:
                                 frags = frags_by_ii[ii]
                                 for p in range(mults):
                                     src = p if p in frags else next(iter(frags))
@@ -1612,6 +1622,17 @@ def matmul(writer, ops, ctx, span):
                                                        writer.op('fma', fp, a_, b_, acc,
                                                                  hint='t'))
                                             Tvals[p, ii, ci, iii] = acc
+
+                    # A tile left out at every step has no remainder partials;
+                    # the epilogue reads them per tile that exists, and zero is
+                    # what they sum to.
+                    for ii in tiles:
+                        for p in range(mults):
+                            for ci in range(tail):
+                                for iii in range(mregs):
+                                    if (p, ii, ci, iii) not in Tvals:
+                                        Tvals[p, ii, ci, iii] = writer.const(
+                                            0.0, ScalarType(atom.d))
 
                     # The separate accumulators, summed: the corrections first,
                     # which are small against the product they correct.

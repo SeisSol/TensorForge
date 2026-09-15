@@ -187,6 +187,15 @@ class MatmulOperands:
     #: because a path that staged some fragments and read the rest would need
     #: the tile it was removing.
     B_direct: Optional[Callable] = None
+    #: ``A_zero(e_lo, e_hi, k_lo, k_hi) -> bool``, or ``None``: whether `A` is
+    #: known to be zero over lead elements ``[e_lo, e_hi)`` -- counted from
+    #: the first slot the accessors read, in elements, not slots -- and
+    #: contraction steps ``[k_lo, k_hi)``.  Known where the operand is a
+    #: batch-constant tensor the description gives numbers for
+    #: (`Options.skip_known_zeros`); a path asks it per tile and leaves out
+    #: the instruction of a tile that is all zero.  `False` means unknown as
+    #: well as nonzero, so a path that never asks is exactly as before.
+    A_zero: Optional[Callable] = None
 
 
 def scratch(dtype: Datatype) -> int:

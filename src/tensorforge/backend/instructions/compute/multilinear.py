@@ -426,6 +426,44 @@ class MultilinearInstruction(ComputeInstruction):
             axes.append(cells)
         return all(data[cell] == 0 for cell in itertools.product(*axes))
 
+    def _zero_block(self, e_lo, e_hi, k_lo, k_hi, span) -> bool:
+        """`_known_zero` for a matrix path: is `A` zero over a block?
+
+        `e` counts lead elements from the first slot the path reads, `k`
+        contraction steps from the first it walks -- the coordinates of
+        `MatmulOperands.A`, whose `unwindI`/`unwindK` this mirrors.  Rows past
+        the ones this contraction keeps and steps past its depth are padding
+        the path fills with zeros, so they neither keep a block nor allow one
+        to go; a block with nothing else left is all padding and goes.
+        """
+        if not self._context.get_user_options().skip_known_zeros:
+            return False
+        symbol = self._ops[0].symbol
+        obj = getattr(symbol, 'obj', None)
+        if (symbol.stype is not SymbolType.Global or not isinstance(obj, Tensor)
+                or obj.addressing is not Addressing.NONE or not obj.has_values()
+                or len(self._ks) != 1
+                or sorted(self._opdim_to_nks[0]) != ['k0', 'n0']):
+            return False
+        nks = self._opdim_to_nks[0]
+        lead, red = nks.index('n0'), nks.index('k0')
+        lo, hi = self._ns[0]
+        base = (lo // span) * span
+        rows = [base + e + self._eff_offset(0, lead)
+                for e in range(e_lo, e_hi) if lo <= base + e < hi]
+        kfirst, klast = self._ks[0]
+        ks = [kfirst + k + self._eff_offset(0, red)
+              for k in range(k_lo, k_hi) if k < klast - kfirst]
+        if not rows or not ks:
+            return True
+        data = obj.get_values()
+        if (min(rows) < 0 or max(rows) >= data.shape[lead]
+                or min(ks) < 0 or max(ks) >= data.shape[red]):
+            return False
+        block = (data[np.ix_(rows, ks)] if lead == 0
+                 else data[np.ix_(ks, rows)])
+        return not np.any(block)
+
     def gen_code_inner(self, writer: Writer):
         # A comment touches nothing.  Left conservative it would be read as
         # touching every buffer, and this one sits above them all.
@@ -1501,6 +1539,12 @@ class MultilinearInstruction(ComputeInstruction):
                         spec.discard()
                 return res
 
+            def A_zero(e_lo, e_hi, k_lo, k_hi):
+                """Whether `A` is known to be zero over lead elements
+                `[e_lo, e_hi)` and contraction steps `[k_lo, k_hi)`
+                (`MatmulOperands.A_zero`, `_zero_block`)."""
+                return self._zero_block(e_lo, e_hi, k_lo, k_hi, span)
+
             a_obj = self._ops[0].symbol.obj
             self._offer_order(_vendor_module(self._context),
                               a_obj, Mx, K)
@@ -1565,6 +1609,7 @@ class MultilinearInstruction(ComputeInstruction):
                         # lanes, not for a fragment: read by coordinate.
                         and getattr(a_obj, 'simt_interleave', None) is None
                         else None),
+                A_zero=A_zero if width == 1 else None,
                 lead_slots=M, lead_elements=Mx, n=N, k=K, kx=kx,
                 threads=self._num_threads, lead_width=width,
                 a=self._ops[0].symbol.get_fptype(),
