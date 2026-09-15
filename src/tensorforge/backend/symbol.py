@@ -1391,11 +1391,12 @@ class Symbol:
     memory is its storage copied verbatim (`GlbToShrLoader._verbatim`), so it
     is addressed the same way.
 
-    A slicing shift of whole slots is a change of slot and folds in.  Anything
-    else would move rows between lanes, and the order has no address for a
-    lane vector that starts inside a slot -- the offer is made only where that
-    cannot arise (`MultilinearInstruction._slot_major_fits`), and this refuses
-    loudly rather than read the wrong rows if it does.
+    A slicing shift of whole slots is a change of slot and folds in, and so
+    does a box whose rows start on a slot boundary.  Anything else would move
+    rows between lanes, and the order has no address for a lane vector that
+    starts inside a slot -- the offer is made only where that cannot arise
+    (`MultilinearInstruction._slot_major_fits`), and this refuses loudly
+    rather than read the wrong rows if it does.
     """
     threads, depth = self.obj.slot_major
     if len(index) != 2:
@@ -1404,16 +1405,17 @@ class Symbol:
     if lead is None:
       raise InternalError(f'{self.name}: slot-major rows need a lead index')
     li, shift = lead
+    lower = [int(x) for x in self.data_view.get_dim_offsets()]
     if (li.width != 1 or li._block != threads or li._stride != 1
-            or shift % threads):
+            or shift % threads or lower[0] % threads):
       raise InternalError(
-          f'{self.name}: slot-major rows at {li!r} with shift {shift}; the '
-          f'order holds whole slots of a width-1 lead over {threads} lanes')
-    if (any(int(x) for x in self.data_view.get_dim_offsets())
-            or self.data_view.get_dim_strides()[0] != 1):
+          f'{self.name}: slot-major rows at {li!r} with shift {shift} in a box '
+          f'from {lower}; the order holds whole slots of a width-1 lead over '
+          f'{threads} lanes')
+    if self.data_view.get_dim_strides()[0] != 1:
       raise InternalError(
-          f'{self.name}: a slot-major view starts at its origin with rows of '
-          f'stride one; this one is {self.data_view}')
+          f'{self.name}: a slot-major view has rows of stride one; this one '
+          f'is {self.data_view}')
     slot = li.nonlead() if li._value is None else li._value
     if isinstance(slot, Immediate):
       slot = slot._value
@@ -1428,15 +1430,23 @@ class Symbol:
     def arith(name, a, b):
       if isinstance(a, (int, np.integer)) and isinstance(b, (int, np.integer)):
         return int({'add': a + b, 'mul': a * b}[name])
+      if name == 'add' and isinstance(b, (int, np.integer)) and b == 0:
+        return a
       return writer.op(name, INDEX, a, b, hint='a')
-    run = arith('add', arith('mul', arith('add', slot, shift // threads),
-                             depth), k)
+    # Storage counts from the box's corner: slot `slot + (shift - lower0)/T`
+    # of the stored ones, column `k - lower1`.  The view subtracts the corner
+    # from whatever index it is handed, so the one handed back carries it:
+    # `lower0 / T` slots more on the lead, and `lower1` as the column, which
+    # the view takes back to zero.
+    stored = arith('add', slot, (shift - lower[0]) // threads)
+    run = arith('add', arith('mul', stored, depth), arith('add', k, -lower[1]))
+    run = arith('add', run, lower[0] // threads)
     if isinstance(run, (int, np.integer)):
       lead_index = LeadIndex(int(run), threads, 1, valid=li.valid, pad=li.pad)
     else:
       lead_index = LeadIndex(0, threads, 1, value=run, valid=li.valid,
                              pad=li.pad)
-    return [lead_index, 0]
+    return [lead_index, lower[1]]
 
   def _wide_claim(self, index, width: int, part=0):
     """The alignment a `width`-wide access at `index` can prove, or `RELAXED`.

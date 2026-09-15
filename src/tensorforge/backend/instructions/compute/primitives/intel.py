@@ -604,6 +604,14 @@ class SlotMajorOrder(tuple):
         return self
 
 
+#: Whether an order stated here serves every multiplication that reads the
+#: operand, and not only the one it was asked for (`multilinear._offer_order`).
+#: A slot-major order is the tensor's: `Symbol.load` rewrites each read of it,
+#: so any reader over the same lanes in whole slots reads it right -- which is
+#: what lets the derivative's reads of one operator, one per order, share it.
+ORDERS_EVERY_READER = True
+
+
 def prepared_order(shape, dtype, ctx, columns=0, lead=0, depth=0,
                    threads=EXECUTION_SIZE):
     """The order this target reads a two-dimensional A operand in, or `None`

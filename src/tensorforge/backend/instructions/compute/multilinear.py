@@ -936,11 +936,16 @@ class MultilinearInstruction(ComputeInstruction):
             return
         # The prologue's copy into shared memory is not a reader: it moves the
         # storage as it lies, whatever the order (`GlbToShrLoader._verbatim`).
+        # Nor is another multiplication that reads a slot-major order the way
+        # this one does: that order is the tensor's and not this operation's
+        # -- the address is rewritten in `Symbol.load`, for every read -- so
+        # the derivative's five reads of one operator all take it.  Only a
+        # target whose orders can be that is asked with other readers about.
         sym = self._ops[0].symbol
-        users = sym.get_user_list()
-        if any(user is not self and not (getattr(user, '_verbatim', False)
-                                         and user.get_dest() is sym)
-               for user in users):
+        readers = [user for user in sym.get_user_list() if user is not self
+                   and not (getattr(user, '_verbatim', False)
+                            and user.get_dest() is sym)]
+        if readers and not getattr(module, 'ORDERS_EVERY_READER', False):
             return
         offer = getattr(module, 'prepared_order', None)
         if offer is None:
@@ -950,6 +955,11 @@ class MultilinearInstruction(ComputeInstruction):
                       columns=self._output_extent(), lead=lead, depth=depth,
                       threads=self._num_threads)
         if order is None:
+            return
+        slot_major = getattr(order, 'slot_major', None)
+        if any(not (slot_major is not None
+                    and self._reads_slot_major(user, sym, a_obj, slot_major))
+               for user in readers):
             return
         # A stand-in of a merged run is not a buffer: its members are, one per
         # iteration, and the one body reads whichever the counter selects in
@@ -968,13 +978,13 @@ class MultilinearInstruction(ComputeInstruction):
         # halves a matrix instruction multiplies rather than splitting them.
         # An order that says nothing about parts leaves them to whoever set
         # them -- a caller may store an operand split before any order exists.
-        slot_major = getattr(order, 'slot_major', None)
         parts = getattr(order, 'parts', None)
         if (parts is not None and parts != 1
-                and self._plan()[0].strategy is not Strategy.MATRIX):
+                and any(reader._plan()[0].strategy is not Strategy.MATRIX
+                        for reader in [self] + readers)):
             # The halves are what a matrix instruction multiplies; any other
             # arrangement multiplies the floats, and would read the first
-            # half as one.
+            # half as one -- so every reader has to be one.
             parts = 1
         if slot_major is not None and not self._slot_major_fits(a_obj):
             return
@@ -1003,16 +1013,25 @@ class MultilinearInstruction(ComputeInstruction):
 
         A slot-major operand (`Tensor.slot_major`) is addressed by the lane
         vector: slot `s` of column `k` is one run of `threads` rows.  A read
-        whose rows start inside a slot -- a lead origin or a slicing offset
-        that is not a whole number of slots -- has no such run, and nor does a
-        lead index of another width.  The column is free: every column of every
-        slot is stored.  So is the operand's view, as long as it starts at the
-        tensor's origin, which is what the address is counted from.
+        whose rows start inside a slot -- a lead origin, a slicing offset or a
+        box that is not a whole number of slots from the rows' start -- has no
+        such run, and nor does a lead index of another width.  The column is
+        free: every column of every slot is stored.
         """
         return (self._lead_width == 1
                 and self._opdim_to_nks[0] == ['n0', 'k0']
-                and list(a_obj.get_bbox().lower()) == [0, 0]
+                and a_obj.get_bbox().lower()[0] % self._num_threads == 0
                 and self._eff_offset(0, 0) % self._num_threads == 0)
+
+    @staticmethod
+    def _reads_slot_major(user, sym, a_obj, slot_major) -> bool:
+        """Whether `user`, another reader of `A`, reads a slot-major order as
+        the one offering it would: as its own lead operand, over the same
+        lanes, in whole slots."""
+        return (isinstance(user, MultilinearInstruction)
+                and bool(user._ops) and user._ops[0].symbol is sym
+                and user._num_threads == slot_major[0]
+                and user._slot_major_fits(a_obj))
 
     def _shape(self) -> ComputeShape:
         """What the choice and the reservation are both made from.

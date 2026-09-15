@@ -374,6 +374,40 @@ def test_dpas_reads_the_halves_it_was_stored_as():
         assert not offsets & {1, 2, 3}, m
 
 
+def test_every_reader_of_an_operator_shares_its_order():
+    """SeisSol's order-6 `derivative`: each `kDivMT` is read five times, once
+    per derivative order, over boxes that shrink with it, and is stored from
+    column 1 (the constant's derivative is zero).  The order is the tensor's
+    -- `Symbol.load` rewrites every read -- so all five readers take it, and
+    the box's column offset folds into the address."""
+    import contextlib
+    import io
+    import seissol_suite as fx
+    from tensorforge.common.basic_types import Addressing
+    from tensorforge.frontend.yateto import DescriptionReader
+    from tensorforge.generators.generator import Generator
+
+    def generate(**options):
+        system, config = 'elastic-linearck', 'elastic-linearck-o6-s'
+        descrs = DescriptionReader(None, {}).read(
+            fx.description(system, config, 'gpu_derivative'))[0]
+        with contextlib.redirect_stdout(io.StringIO()):
+            gen = Generator(descrs, _ctx('esimd', lanes_per_mult=16,
+                                         **options))
+            gen.generate()
+        return gen.get_kernel(), [
+            s.obj for s in gen._scopes.get_global_scope().values()
+            if getattr(s.obj, 'addressing', None) is Addressing.NONE]
+
+    src, operators = generate(prepare_operands=True)
+    assert len(operators) == 3
+    for op in operators:
+        assert op.slot_major is not None, op.alias
+        assert list(op.get_bbox().lower()) == [0, 1]
+    plain, _ = generate()
+    assert 3 * src.count('copy_from') < plain.count('copy_from')
+
+
 @pytest.mark.parametrize('case_file', ['square_notrans', 'csa_alpha'])
 def test_a_run_is_as_wide_as_its_select(case_file):
     """A run of B's lane vector was declared `simd<float, 16 * 8>` around an
