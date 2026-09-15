@@ -491,9 +491,39 @@ def _matmul(writer, ops, ctx, span, width):
     if (mults > 1 and ops.lockstep and ops.A_wave is not None
             and not ops.a_shared):
         A = _wave_lead(ops, ctx, mults)
+    if sparse is None:
+        A = _known_zero_steps(A, ops.A_zero, threads)
     return matmuldpp(writer, span.start, C, A, B, M, N, K, kx, threads, dtype,
                      sparse, ctx, span.stop, width=ops.lead_width,
                      a_resident=ops.a_resident, a_vector=bool(width))
+
+
+def _known_zero_steps(A, zero, threads):
+    """`A` less the steps the description says are zero (`A_zero`).
+
+    For the DPP chain, which runs beside the matrix instructions or in their
+    place -- every F64 contraction, while `tiling.EXCHANGE` is off.  A step of
+    slot `i` is one value a lane, the slot's `threads` rows at step `k`, and
+    the wave issues it together: it goes only where every one of those rows
+    reads a zero, and then with its read, its broadcast and its products.
+    Handing back nothing is how a declined read already leaves a step out
+    (`_load_a`, `_a_on_demand`).  `k` is `A`'s own step, counted from the
+    first the contraction walks, as `A_zero` counts it and as the matrix
+    path asks it too (`matmul32`'s `zero`) -- at any `kx`.
+
+    Not for a sparse `B`: `_scalar_chain` pairs its products with `B`'s
+    stored entries by position, `M` of them an entry, and a step left out
+    of one slot would move every later product onto the wrong entry.
+    """
+    if zero is None:
+        return A
+
+    def read(writer, var, i, k, *rest):
+        if (var is None and not rest
+                and zero(i * threads, (i + 1) * threads, k, k + 1)):
+            return None
+        return A(writer, var, i, k, *rest)
+    return read
 
 
 def _wave_lead(ops, ctx, mults):
