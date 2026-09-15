@@ -159,7 +159,22 @@ TF32_TERMS = len(split.products(TF32_SPLIT_TERMS))
 #: What is left is what no front end can answer: whether three TF32 products
 #: through a systolic array give the FP32 result the generic path gives, on a
 #: machine.  That is a run, not an argument.
+#:
+#: The default only.  `Options.tensor_cores` asks for the path per build (see
+#: `enabled`), the same option that drives `primitives.nvidia`.
 ENABLED = False
+
+
+def enabled(ctx) -> bool:
+    """`Options.tensor_cores` where it is set, `ENABLED` where it is not --
+    or where there is no context to ask, as for a shape asked on its own.
+
+    The same reading as `nvidia.enabled`, and for the same reason: a search
+    over configurations builds with the path and without it in one process,
+    and a module constant would change it for every build at once.
+    """
+    asked = None if ctx is None else ctx.get_user_options().tensor_cores
+    return ENABLED if asked is None else bool(asked)
 
 
 # --------------------------------------------------------------------------- #
@@ -387,9 +402,13 @@ def _run(writer, frag, start, size, hint):
     it looks into 128, and typing it by the fragment makes the accumulator
     read-out claim to store 128 elements where it stores one output column.
     """
+    # A run is a slot vector the work-item holds whole, whatever it was cut
+    # out of.  Left to the join, a run of a lane-distributed operand -- B's
+    # 16-lane load -- inherited that distribution and was declared
+    # `simd<float, 16 * size>` around a `size`-wide `select`.
     return writer.rawexpr(f'{{0}}.template select<{size}, 1>({start})', frag,
                           type_=ScalarType(frag.type.base, size), hint=hint,
-                          pure=True)
+                          pure=True, layout=SCALAR_LAYOUT)
 
 
 #: Which of this generator's operands is which of the instruction's.
@@ -448,15 +467,23 @@ def dpas_matmul(writer, C, A, B, M, N, K, kx, threads, dtype, ctx):
                                  v, writes=(bhi, blo))
 
             # Src2 <- this generator's B: one run per repeat row.
+            # `B(j, k0 // threads)` is the lane vector holding depths
+            # `k0 .. k0 + threads - 1`, so this block's depths start at lane
+            # `k0 % threads` of it.  Taking lane 0 read k = 0..7 again for
+            # every second block of a 16-lane vector.  And only the depths
+            # that exist: past them the load holds the next row, or memory
+            # past the operand, and the fragment's zeros have to stay zeros --
+            # `0 * inf` is not zero.
+            width = min(atom.k, depth - k0)
             for m in range(rows):
                 v = B(writer, None, j0 + m, k0 // threads)
                 if v is None or v is False:
                     return False
                 off = a_offset(atom, m, 0)
-                writer.call_stmt(f'tensorforge::splitFloatTF32<{atom.k}>',
-                                 _run(writer, ahi, off, atom.k, 'ah'),
-                                 _run(writer, alo, off, atom.k, 'al'),
-                                 _run(writer, v, 0, atom.k, 'bk'),
+                writer.call_stmt(f'tensorforge::splitFloatTF32<{width}>',
+                                 _run(writer, ahi, off, width, 'ah'),
+                                 _run(writer, alo, off, width, 'al'),
+                                 _run(writer, v, k0 % threads, width, 'bk'),
                                  writes=(ahi, alo))
 
             bterms, aterms = (bhi, blo), (ahi, alo)
@@ -502,13 +529,18 @@ def strategies(shape, ctx):
     out of the work-item's own registers -- neither moves bits between a lane
     index and a register index, which is what a rung is.  So the answer is
     the trip, and `takes` is `route == 0` because nothing here writes one.
+
+    DPAS, too, only under the explicitly vectorized lowering.  `dpas_matmul`
+    emits `esimd::xmx::dpas` over `simd` fragments, which an SPMD kernel
+    cannot call; the SPMD lowering reaches this with a 16-wide
+    multiplication just as well, and there the path has to stay out.
     """
     if lead_route(shape) != 0:
         return frozenset()
     if not supports(shape.threads, shape.accumulator, shape.sparse):
         return frozenset()
     offered = set()
-    if ENABLED and not shape.sparse:
+    if enabled(ctx) and shape.explicit_simd and not shape.sparse:
         offered.add(Strategy.MATRIX)
     if BROADCAST_ENABLED and shape.explicit_simd:
         offered.add(Strategy.BROADCAST)

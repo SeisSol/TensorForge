@@ -145,6 +145,131 @@ def test_dpas_is_not_offered_for_a_packed_operand():
 
 
 # --------------------------------------------------------------------------
+# `Options.tensor_cores` asks for the path per build
+# --------------------------------------------------------------------------
+
+def _ctx(backend='esimd', **options):
+    from tensorforge.common.context import Context, Options
+    return Context(arch='pvc', backend=backend, fp_type=Datatype.F32,
+                   options=Options(**options))
+
+
+def _dense(explicit_simd=True):
+    return ComputeShape(threads=16, accumulator=Datatype.F32, sparse=False,
+                        explicit_simd=explicit_simd)
+
+
+def test_the_default_build_does_not_take_dpas(monkeypatch):
+    """Unset, the option defers to `ENABLED` -- off -- so a default build is
+    the one it was before the option reached this module."""
+    monkeypatch.delenv('TF_TENSOR_CORES', raising=False)
+    ctx = _ctx()
+    assert ctx.get_user_options().tensor_cores is None
+    assert not intel.enabled(ctx)
+    assert Strategy.MATRIX not in intel.strategies(_dense(), ctx)
+    assert Strategy.BROADCAST in intel.strategies(_dense(), ctx)
+
+
+def test_the_option_asks_for_dpas():
+    ctx = _ctx(tensor_cores=True)
+    assert intel.enabled(ctx)
+    assert Strategy.MATRIX in intel.strategies(_dense(), ctx)
+
+
+def test_the_option_wins_over_the_module_default(monkeypatch):
+    """Both ways: set, it is the answer whatever the constant says."""
+    monkeypatch.setattr(intel, 'ENABLED', True)
+    assert Strategy.MATRIX in intel.strategies(_dense(), None)
+    assert Strategy.MATRIX not in intel.strategies(
+        _dense(), _ctx(tensor_cores=False))
+
+
+def test_spmd_never_takes_dpas():
+    """`esimd::xmx::dpas` is ESIMD's, and an SPMD kernel cannot call it --
+    yet the SPMD lowering reaches the gate with 16-wide multiplications too
+    (20 cases of the corpus under `oneapi`, had the old gate been on)."""
+    ctx = _ctx('oneapi', tensor_cores=True)
+    assert Strategy.MATRIX not in intel.strategies(_dense(False), ctx)
+
+
+def _kernel(case, backend, **options):
+    import contextlib
+    import importlib.util
+    import io
+    from pathlib import Path
+    from tensorforge.generators.generator import Generator
+    path = Path(__file__).parent / 'cases' / f'{case}.py'
+    spec = importlib.util.spec_from_file_location(case, path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    with contextlib.redirect_stdout(io.StringIO()):
+        gen = Generator(mod.descr_list(), _ctx(backend, **options))
+        gen.generate()
+    return gen.get_kernel()
+
+
+def test_the_option_reaches_the_emitter(monkeypatch):
+    """`gemm_square_16`: a 16x16 GEMM, one 16-wide multiplication.  Asked for,
+    two column blocks of eight at three TF32 products each; not asked for,
+    the same kernel as before; SPMD, never."""
+    monkeypatch.delenv('TF_TENSOR_CORES', raising=False)
+    on = _kernel('square_notrans', 'esimd', tensor_cores=True)
+    assert on.count('intel_xmx::dpas<') == 2 * intel.TF32_TERMS * 2
+    assert 'intel_xmx::dpas<' not in _kernel('square_notrans', 'esimd')
+    assert 'intel_xmx::dpas<' not in _kernel('square_notrans', 'oneapi',
+                                             tensor_cores=True)
+
+
+# -- which lanes of B each block reads ------------------------------------- #
+
+_SELECT = r'\w+\.template select<(\d+), 1>\((\d+)\)'
+#: A Src2 fill: the run of B arrives inline, `(x.template select<W, 1>(S))`,
+#: or through a name the emitter declared -- whether it materializes one is
+#: its business, and either way it is a `select`.
+_SRC2 = (r'splitFloatTF32<\d+>\(\(\w+_ahi\.template select<\d+, 1>\(\d+\)\), '
+         r'\(\w+_alo\.template select<\d+, 1>\(\d+\)\), '
+         r'(?:\(' + _SELECT + r'\)|(\w+))\);')
+_DECLARED = r'simd<\w+, (\d+)> (\w+) = ' + _SELECT + ';'
+
+
+def _src2_runs(case):
+    """`(width, B lane)` of every Src2 fill, as emitted."""
+    import re
+    src = _kernel(case, 'esimd', tensor_cores=True)
+    named = {name: (int(w), int(lane))
+             for _, name, w, lane in re.findall(_DECLARED, src)}
+    return [(int(w), int(lane)) if w else named.get(name)
+            for w, lane, name in re.findall(_SRC2, src)]
+
+
+def test_the_second_block_of_depths_reads_the_upper_lanes():
+    """`gemm_square_16`: K = 16, so two blocks of eight out of one 16-lane
+    vector of B.  The second starts at lane 8.  It started at lane 0 -- k = 0..7
+    twice and k = 8..15 never -- and nothing on the host could tell."""
+    runs = _src2_runs('square_notrans')
+    assert runs, 'the Src2 fills are no longer where this test looks'
+    assert set(runs) == {(8, 0), (8, 8)}
+
+
+def test_a_ragged_block_reads_only_the_depths_that_exist():
+    """`gemm_alpha_9x9`: K = 9, so the second block has one depth.  One lane of B,
+    not eight: the other seven are the next row, or past the operand."""
+    runs = _src2_runs('csa_alpha')
+    assert set(runs) == {(8, 0), (1, 8)}
+
+
+@pytest.mark.parametrize('case_file', ['square_notrans', 'csa_alpha'])
+def test_a_run_is_as_wide_as_its_select(case_file):
+    """A run of B's lane vector was declared `simd<float, 16 * 8>` around an
+    8-wide `select`: it inherited B's distribution over the lanes."""
+    import re
+    src = _kernel(case_file, 'esimd', tensor_cores=True)
+    wrong = [(w, name, sel) for w, name, sel, _ in re.findall(_DECLARED, src)
+             if w != sel]
+    assert not wrong
+
+
+# --------------------------------------------------------------------------
 # the fragment layout, from vISA rather than from the SYCL header
 # --------------------------------------------------------------------------
 
