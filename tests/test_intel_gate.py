@@ -258,6 +258,28 @@ def test_a_ragged_block_reads_only_the_depths_that_exist():
     assert set(runs) == {(8, 0), (1, 8)}
 
 
+def test_every_lead_slot_is_multiplied():
+    """`local_flux` at 16 lanes: a lead of 56 is four slots of sixteen rows.
+
+    Per face, `X = A_f @ B` is two column blocks of eight over seven depth
+    blocks, and `X @ C_f` two over two -- eighteen, at three TF32 products
+    each, in every slot.  Only slot 0 used to be computed: a quarter of the
+    products, the other 40 rows never stored.  And each operator is read in
+    every slot: column 0 at rows 0, 16, 32 and 48.
+    """
+    import re
+    src = _kernel('local_flux', 'esimd', tensor_cores=True, lanes_per_mult=16)
+    slots, faces = 4, 4
+    assert src.count('intel_xmx::dpas<') == (
+        faces * slots * (2 * 7 + 2 * 2) * intel.TF32_TERMS)
+    operators = {m for m in re.findall(r'glb_m\d+', src)
+                 if re.search(m + r' \+ \(16(?:_i32)?\)', src)}
+    assert len(operators) == faces
+    for m in operators:
+        rows = {int(x) for x in re.findall(m + r' \+ \((\d+)(?:_i32)?\)', src)}
+        assert {0, 16, 32, 48} <= rows, m
+
+
 @pytest.mark.parametrize('case_file', ['square_notrans', 'csa_alpha'])
 def test_a_run_is_as_wide_as_its_select(case_file):
     """A run of B's lane vector was declared `simd<float, 16 * 8>` around an

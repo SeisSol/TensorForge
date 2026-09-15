@@ -292,28 +292,30 @@ def supports(threads, dtype, sparse) -> bool:
 REPEATS = (8, 4, 2, 1)
 
 
-def fragment_bytes(atom, terms=TF32_SPLIT_TERMS) -> int:
+def fragment_bytes(atom, terms=TF32_SPLIT_TERMS, slots=1) -> int:
     """Register file one issue group's fragments hold, in bytes.
 
-    The accumulator once and each operand once per split term, which is what
-    `dpas_matmul` declares inside a `j0` tile.  `repeat` scales the
-    accumulator and Src2 and leaves Src1 alone, so this is the register half
-    of the trade the repeat count makes -- the issue half is `ranking.issues`.
+    One accumulator per lead slot and each operand once per split term, which
+    is what `dpas_matmul` declares inside a `j0` tile: the slots keep their
+    accumulators across the contraction, the operand fragments live for one
+    block of it.  `repeat` scales the accumulators and Src2 and leaves Src1
+    alone, so this is the register half of the trade the repeat count makes
+    -- the issue half is `ranking.issues`.
 
     A lower bound on what the body holds, not the body's own figure: the
     surrounding loop nest has registers of its own, and
     `_check_register_budget` is what weighs the whole of it.
     """
-    elems = atom.c_elems + terms * (atom.a_elems + atom.b_elems)
+    elems = slots * atom.c_elems + terms * (atom.a_elems + atom.b_elems)
     return elems * Datatype.F32.size()
 
 
-def atoms_for(dtype, budget=None):
+def atoms_for(dtype, budget=None, slots=1):
     """Every repeat count this type could be emitted at, widest first.
 
     `repeat` is the only free parameter here, and it trades register pressure
     for issue count: eight columns of output per issue against one, and eight
-    times the accumulator and Src2 to hold them.  A budget in bytes drops the
+    times the accumulators and Src2 to hold them.  A budget in bytes drops the
     candidates whose fragments alone would not fit.
     """
     if dtype != Datatype.F32:
@@ -321,7 +323,8 @@ def atoms_for(dtype, budget=None):
     base = ATOMS['tf32']
     out = [base.with_repeat(repeat) for repeat in REPEATS]
     if budget is not None:
-        out = [atom for atom in out if fragment_bytes(atom) <= budget]
+        out = [atom for atom in out
+               if fragment_bytes(atom, slots=slots) <= budget]
     return tuple(out)
 
 
@@ -342,7 +345,11 @@ def atom_for(dtype, columns=0, lead=0, depth=0, budget=None):
         return (ranking.Extent(columns=atom.m, lanes=atom.n, depth=atom.k,
                                name=f'{atom.name}x{atom.repeat}'), 1)
 
-    found = ranking.rank(atoms_for(dtype, budget), key, columns, lead, depth)
+    # A lead longer than the wave is several slots, each holding an
+    # accumulator for the whole contraction (`dpas_matmul`).
+    slots = max(1, -(-int(lead) // EXECUTION_SIZE)) if lead else 1
+    found = ranking.rank(atoms_for(dtype, budget, slots), key, columns, lead,
+                         depth)
     return found[0] if found else None
 
 
@@ -438,6 +445,13 @@ def dpas_matmul(writer, C, A, B, M, N, K, kx, threads, dtype, ctx):
     Three products, not four: `lo*lo` falls below the accumulator's rounding.
     The same arrangement as `nvidia.py`'s `mma.sync ... .tf32`, and it has to
     be -- the error analysis belongs to the split, not to either instruction.
+
+    Every lead slot, each with its own accumulator and Src1.  The execution
+    size is one slot of sixteen rows, and an operation whose lead is longer --
+    54 rows in an order-6 `volume` -- is `M` of them.  They share Src2, the
+    same output columns and depths for all of them, so that is split once per
+    block.  Only slot 0 used to be computed: the other rows were neither
+    multiplied nor stored, and nothing on the host could tell from the timing.
     """
     atom = atom_for(dtype, columns=N, lead=M * threads, depth=K + kx,
                     budget=register_budget(ctx))
@@ -448,23 +462,11 @@ def dpas_matmul(writer, C, A, B, M, N, K, kx, threads, dtype, ctx):
 
     for j0 in range(0, N, atom.m):
         rows = min(atom.m, N - j0)
-        acc = _fragment(writer, dtype, atom.c_elems, 'dacc')
+        accs = [_fragment(writer, dtype, atom.c_elems, 'dacc')
+                for _ in range(M)]
         for k0 in range(0, depth, atom.k):
             ahi = _fragment(writer, Datatype.TF32, atom.a_elems, 'ahi')
             alo = _fragment(writer, Datatype.TF32, atom.a_elems, 'alo')
-            bhi = _fragment(writer, Datatype.TF32, atom.b_elems, 'bhi')
-            blo = _fragment(writer, Datatype.TF32, atom.b_elems, 'blo')
-
-            # Src1 <- this generator's A: one lane vector per contraction step.
-            for k in range(min(atom.k, depth - k0)):
-                v = A(writer, None, 0, k0 + k)
-                if v is None or v is False:
-                    return False
-                off = b_offset(atom, k, 0)
-                writer.call_stmt(f'tensorforge::splitFloatTF32<{atom.n}>',
-                                 _run(writer, bhi, off, atom.n, 'bh'),
-                                 _run(writer, blo, off, atom.n, 'bl'),
-                                 v, writes=(bhi, blo))
 
             # Src2 <- this generator's B: one run per repeat row.
             # `B(j, k0 // threads)` is the lane vector holding depths
@@ -486,20 +488,38 @@ def dpas_matmul(writer, C, A, B, M, N, K, kx, threads, dtype, ctx):
                                  _run(writer, v, k0 % threads, width, 'bk'),
                                  writes=(ahi, alo))
 
-            bterms, aterms = (bhi, blo), (ahi, alo)
-            for i, j in split.products(TF32_SPLIT_TERMS):
-                bf, af = bterms[i], aterms[j]
-                writer.assign(acc, writer.rawexpr(
-                    f'tensorforge::intel_xmx::dpas<{atom.depth}, '
-                    f'{atom.repeat}, {acc_ct}>({{0}}, {{1}}, {{2}})',
-                    acc, bf, af, type_=acc.type, hint='dp', pure=True))
+            for i, acc in enumerate(accs):
+                bhi = _fragment(writer, Datatype.TF32, atom.b_elems, 'bhi')
+                blo = _fragment(writer, Datatype.TF32, atom.b_elems, 'blo')
+
+                # Src1 <- this generator's A: one lane vector per contraction
+                # step, out of slot `i`.
+                for k in range(min(atom.k, depth - k0)):
+                    v = A(writer, None, i, k0 + k)
+                    if v is None or v is False:
+                        return False
+                    off = b_offset(atom, k, 0)
+                    writer.call_stmt(f'tensorforge::splitFloatTF32<{atom.n}>',
+                                     _run(writer, bhi, off, atom.n, 'bh'),
+                                     _run(writer, blo, off, atom.n, 'bl'),
+                                     v, writes=(bhi, blo))
+
+                bterms, aterms = (bhi, blo), (ahi, alo)
+                for p, q in split.products(TF32_SPLIT_TERMS):
+                    bf, af = bterms[p], aterms[q]
+                    writer.assign(acc, writer.rawexpr(
+                        f'tensorforge::intel_xmx::dpas<{atom.depth}, '
+                        f'{atom.repeat}, {acc_ct}>({{0}}, {{1}}, {{2}})',
+                        acc, bf, af, type_=acc.type, hint='dp', pure=True))
 
         # Read-out is a run too: `c_offset(m, n) = m*N + n`, so one output
         # column is `acc.select<N, 1>(m * N)` -- already the shape the store
         # wants.
-        for m in range(rows):
-            C(writer, _run(writer, acc, c_offset(atom, m, 0), atom.n, 'cr'),
-              0, j0 + m)
+        for i, acc in enumerate(accs):
+            for m in range(rows):
+                C(writer, _run(writer, acc, c_offset(atom, m, 0), atom.n,
+                               'cr'),
+                  i, j0 + m)
     return True
 
 
