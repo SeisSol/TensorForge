@@ -5,6 +5,7 @@
 #define SEISSOL_TENSORFORGE_INCLUDE_TENSORFORGE_DEVICE_ISYCL_H_
 
 #include <sycl/ext/intel/esimd.hpp>
+#include <sycl/ext/intel/experimental/esimd/math.hpp>
 #include <sycl/ext/intel/experimental/esimd/tfloat32.hpp>
 #include <sycl/ext/intel/experimental/grf_size_properties.hpp>
 #include <sycl/sycl.hpp>
@@ -107,6 +108,72 @@ template <typename T,
 ESIMD_INLINE auto expF64(const T &x) {
   constexpr int N = std::remove_cv_t<std::remove_reference_t<T>>::length;
   return expF64<N>(intel_esimd::simd<double, N>(x));
+}
+
+/// tanh for floats: the experimental ESIMD math has it (`experimental::esimd::
+/// tanh`, float only), the supported one does not.  Its vector overload takes a
+/// `simd<float, N>` by value, so a view or an expression -- what the body hands
+/// an elementwise operation -- does not deduce `N`; this converts first.
+ESIMD_INLINE float tanhF32(float x) {
+  return sycl::ext::intel::experimental::esimd::tanh(x);
+}
+template <typename T,
+          typename = std::enable_if_t<!std::is_arithmetic_v<
+              std::remove_cv_t<std::remove_reference_t<T>>>>>
+ESIMD_INLINE auto tanhF32(const T &x) {
+  constexpr int N = std::remove_cv_t<std::remove_reference_t<T>>::length;
+  return sycl::ext::intel::experimental::esimd::tanh<N>(
+      intel_esimd::simd<float, N>(x));
+}
+
+/// tanh for doubles, which no ESIMD library takes.  Two ranges:
+///
+/// * `|x| < 1/4`: the odd series to `x^23` -- the terms fall by about 1/40
+///   each at the edge, so the truncation is below 1e-17 relative;
+/// * beyond: `(1 - e) / (1 + e)` with `e = exp(-2|x|)` (`expF64`), where
+///   `1 - e` keeps its relative error within twice `e`'s (e <= 0.61).
+///
+/// The sign is put back, a NaN stays one, and `|x| > 20` is one exactly
+/// (`e < 5e-18`).  Within 3 ulp of `math.tanh` over [-30, 30] and down to
+/// 1e-300 (a numpy mirror, `exp` in place of `expF64`; 0.3 ulp on average).
+template <int N>
+ESIMD_INLINE intel_esimd::simd<double, N> tanhF64(intel_esimd::simd<double, N> x) {
+  using D = intel_esimd::simd<double, N>;
+  const D a = intel_esimd::abs(x);
+  const D e = expF64<N>(D(-2.0) * intel_esimd::min(a, D(20.0)));
+  D big = (1.0 - e) / (1.0 + e);
+  const D z = x * x;
+  // tanh x = x + x z p(z), z = x^2; the coefficients of x^3 .. x^25,
+  // 2^2n (2^2n - 1) B_2n / (2n)!, highest first.
+  D p(1.5918905069328964e-05);
+  p = p * z + -3.9278323883316833e-05;
+  p = p * z + 9.6915379569294509e-05;
+  p = p * z + -2.3912911424355248e-04;
+  p = p * z + 5.9002744094558595e-04;
+  p = p * z + -1.4558343870513183e-03;
+  p = p * z + 3.5921280365724811e-03;
+  p = p * z + -8.8632355299021973e-03;
+  p = p * z + 2.1869488536155203e-02;
+  p = p * z + -5.3968253968253971e-02;
+  p = p * z + 1.3333333333333333e-01;
+  p = p * z + -3.3333333333333331e-01;
+  const D small = x + x * (z * p);
+  D y = intel_esimd::merge(-big, big, x < 0.0);
+  y.merge(small, a < 0.25);
+  y.merge(x, x != x);
+  return y;
+}
+
+/// The same for one double, and for a view or expression of `N` of them.
+ESIMD_INLINE double tanhF64(double x) {
+  return tanhF64<1>(intel_esimd::simd<double, 1>(x))[0];
+}
+template <typename T,
+          typename = std::enable_if_t<!std::is_arithmetic_v<
+              std::remove_cv_t<std::remove_reference_t<T>>>>>
+ESIMD_INLINE auto tanhF64(const T &x) {
+  constexpr int N = std::remove_cv_t<std::remove_reference_t<T>>::length;
+  return tanhF64<N>(intel_esimd::simd<double, N>(x));
 }
 
 /// Ask a cache for the word at `ptr`, under the hints this API requires.

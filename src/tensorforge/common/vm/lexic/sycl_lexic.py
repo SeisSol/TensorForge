@@ -523,9 +523,17 @@ class SyclLexic(Lexic):
   #: What the library takes in float and half only, spelled for double.
   #: `exp` is composed (`tensorforge::expF64`) and a reciprocal is a division;
   #: handed a `simd<double, N>`, `intel_esimd::exp` and `inv` are compile
-  #: errors (every F64 `damageStep`).
+  #: errors (every F64 `damageStep`).  `tanh` is composed from `expF64` too.
   _ESIMD_F64 = {
     Operation.EXP: 'tensorforge::expF64({})', Operation.RCP: '(1.0 / {})',
+    Operation.TANH: 'tensorforge::tanhF64({})',
+  }
+  #: What only the experimental ESIMD math has, float only, through a helper
+  #: in `isycl.h` that takes a view as well (`tanhF32`).  A scalar
+  #: `sycl::tanh` is refused outright in ESIMD code ("not supported in ESIMD
+  #: context", oneAPI 2025.0).
+  _ESIMD_F32 = {
+    Operation.TANH: 'tensorforge::tanhF32({})',
   }
   #: Spelled with C++ operators, which `simd<>` overloads.
   _ESIMD_INFIX = {
@@ -545,6 +553,8 @@ class SyclLexic(Lexic):
       return f'(-{value1})'
     if fptype == Datatype.F64 and op in self._ESIMD_F64:
       return self._ESIMD_F64[op].format(value1)
+    if fptype == Datatype.F32 and op in self._ESIMD_F32:
+      return self._ESIMD_F32[op].format(value1)
     if op in self._ESIMD_UNARY:
       return f'{ns}::{self._ESIMD_UNARY[op]}({value1})'
     if op in self._ESIMD_BINARY:
