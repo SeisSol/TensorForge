@@ -471,6 +471,25 @@ def dpas_matmul(writer, C, A, B, M, N, K, kx, threads, dtype, ctx, parts=1):
         for k0 in range(0, depth, atom.k):
             ahi = _fragment(writer, Datatype.TF32, atom.a_elems, 'ahi')
             alo = _fragment(writer, Datatype.TF32, atom.a_elems, 'alo')
+            bhi = _fragment(writer, Datatype.TF32, atom.b_elems, 'bhi')
+            blo = _fragment(writer, Datatype.TF32, atom.b_elems, 'blo')
+
+            # Src1 <- this generator's A: one lane vector per contraction step.
+            # `k0` counts `B`'s steps, from its block's start; `A` counts from
+            # the first step the contraction walks, `kx` later.  A step before
+            # the window has no `A`, and its slot stays the zero the fragment
+            # was declared as.
+            for k in range(min(atom.k, depth - k0)):
+                if k0 + k < kx:
+                    continue
+                v = A(writer, None, 0, k0 + k - kx)
+                if v is None or v is False:
+                    return False
+                off = b_offset(atom, k, 0)
+                writer.call_stmt(f'tensorforge::splitFloatTF32<{atom.n}>',
+                                 _run(writer, bhi, off, atom.n, 'bh'),
+                                 _run(writer, blo, off, atom.n, 'bl'),
+                                 v, writes=(bhi, blo))
 
             # Src2 <- this generator's B: one run per repeat row.
             # `B(j, k0 // threads)` is the lane vector holding depths

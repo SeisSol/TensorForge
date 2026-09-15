@@ -39,13 +39,19 @@ def matmul(writer, ops, ctx, span):
     # `None` asks the loader for the value rather than for a name to fill in:
     # these are operands, and an operand whose definition the IR cannot see is
     # invisible to every pass that reasons about ordering or reuse.
+    #
+    # Keyed by `B`'s step, `kx` past `A`'s own, as `_load_a` keys the DPP
+    # chain: `B` is read a block of lanes at a time from the block's start,
+    # and `A` counts from the first step the contraction walks.  Keyed by
+    # `A`'s step, lane `k` of `B` met `A`'s step `k` -- one step too far on
+    # every product of a window starting at depth 1.
     a = {}
     out_layout = None
     for i in range(M):
-        for k in range(depth):
+        for k in range(ops.k):
             v = A(writer, None, i, k)
             if v is not None and v is not False:
-                a[(i, k)] = v
+                a[(i, k + ops.kx)] = v
                 # Taken from the operand rather than constructed: A is indexed
                 # by the same output index the accumulator is, so whatever
                 # distribution its loads came out with is the one to hold.

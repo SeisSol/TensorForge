@@ -431,6 +431,18 @@ def matmul32(writer: Writer, C, B, A, M, N, K, kx, threads, dtype, sparse,
                                     hint='acc', movable=False,
                                     materialize=True, layout=acclayout)
 
+                            # Two counts of the contraction meet here.  The
+                            # shared matrix is transposed a block of lanes at
+                            # a time from the block's start, so `step` takes
+                            # the step as the block counts it; the lead
+                            # accessor counts from the first step the
+                            # contraction walks, `kx` later -- as `_load_a`
+                            # keys it for the chain.  Step `r` of the lead is
+                            # therefore step `kx + r` of the shared matrix.
+                            # Counting both from the block's start paired the
+                            # lead's step `r + kx` with the shared matrix's
+                            # `r` wherever a window starts inside the block:
+                            # SeisSol's time derivative, from depth 1.
                             if lead_quad is not None:
                                 # The operand stored in k-quads
                                 # (`amd.prepared_order`): one read is `quad`
@@ -438,16 +450,15 @@ def matmul32(writer: Writer, C, B, A, M, N, K, kx, threads, dtype, sparse,
                                 # `p`-th multiplication reads quad `q + p`, so
                                 # one read serves `mults * quad` steps; the
                                 # quads a group does not fill read alone.
-                                depth = K + kx
                                 group = mults * quad
-                                for g in range(0, depth, quad):
-                                    if g % group == 0 and g + group <= depth:
+                                for g in range(0, K, quad):
+                                    if g % group == 0 and g + group <= K:
                                         lead = lead_quad(writer, i, g // quad,
                                                          mults)
                                         for q in range(mults):
                                             for c in range(quad):
                                                 acc = step(
-                                                    acc, g + q * quad + c,
+                                                    acc, kx + g + q * quad + c,
                                                     writer.extract(lead, c,
                                                                    ftype),
                                                     _blgp(mults, q)
@@ -455,12 +466,12 @@ def matmul32(writer: Writer, C, B, A, M, N, K, kx, threads, dtype, sparse,
                                         continue
                                     if mults > 1 and g % group:
                                         continue
-                                    for q0 in range(g, min(g + group, depth),
+                                    for q0 in range(g, min(g + group, K),
                                                     quad):
                                         lead = lead_quad(writer, i, q0 // quad)
-                                        for c in range(min(quad, depth - q0)):
+                                        for c in range(min(quad, K - q0)):
                                             acc = step(
-                                                acc, q0 + c,
+                                                acc, kx + q0 + c,
                                                 writer.extract(lead, c, ftype),
                                                 0)
                                 for jj in range(min(block, N - j)):
@@ -478,20 +489,19 @@ def matmul32(writer: Writer, C, B, A, M, N, K, kx, threads, dtype, sparse,
                                 # (`blgp`).  One read of `mults` steps where
                                 # each step was read `mults` times.  A tail
                                 # shorter than the group reads as before.
-                                depth = K + kx
-                                for g in range(0, depth, mults):
+                                for g in range(0, K, mults):
                                     lead = (lead_wave(writer, i, g, mults)
-                                            if g + mults <= depth else None)
+                                            if g + mults <= K else None)
                                     if lead is not None and lead is not False:
                                         for q in range(mults):
-                                            acc = step(acc, g + q, lead,
+                                            acc = step(acc, kx + g + q, lead,
                                                        _blgp(mults, q))
                                         continue
-                                    for trueK in range(g, min(g + mults, depth)):
-                                        lead = B(writer, None, i, trueK)
+                                    for r in range(g, min(g + mults, K)):
+                                        lead = B(writer, None, i, r)
                                         if lead is None or lead is False:
                                             continue
-                                        acc = step(acc, trueK, lead, 0)
+                                        acc = step(acc, kx + r, lead, 0)
                                 for jj in range(min(block, N - j)):
                                     C(writer,
                                       _column(writer, tile, acc, jj, ftype),
@@ -512,7 +522,11 @@ def matmul32(writer: Writer, C, B, A, M, N, K, kx, threads, dtype, sparse,
                                     tB = [None] * block
                                     dkk = min(block, dk - kk)
                                     for kkk in range(dkk):
-                                        tB[kkk] = B(writer, None, i, k + kk + kkk)
+                                        # The lead's step, `kx` behind the
+                                        # block's; none before the window.
+                                        s = k + kk + kkk
+                                        tB[kkk] = (B(writer, None, i, s - kx)
+                                                   if s >= kx else None)
                                     for kkk in range(dkk, block):
                                         tB[kkk] = writer.const(0.0, ftype)
                                     for kkk in range(dkk):
@@ -613,9 +627,9 @@ def matmul32(writer: Writer, C, B, A, M, N, K, kx, threads, dtype, sparse,
                                 for t in range(threads):
                                     for c in range(width):
                                         k = k0 + width * t + c
-                                        if k >= K + kx:
+                                        if k < kx or k >= K + kx:
                                             continue
-                                        rows = B(writer, None, i, k)
+                                        rows = B(writer, None, i, k - kx)
                                         if rows is None or rows is False:
                                             continue
                                         if _width_of(rows) != width:

@@ -1,5 +1,5 @@
 // === base name ===
-kernel_6f3b4a1807fac754
+kernel_23d69f63317e39c6
 
 // === header ===
 #ifndef TENSORFORGE_LAUNCH_TYPES
@@ -27,9 +27,9 @@ struct LaunchConfig {
 };
 } // namespace tensorforge
 #endif
-inline constexpr tensorforge::LaunchInfo launch_info_kernel_6f3b4a1807fac754 = {{1, 16, 1}, 16, 16, 1, 16, 10240, false, true, 1};
-tensorforge::LaunchConfig launch_config_kernel_6f3b4a1807fac754(size_t numElements0, void* streamPtr = nullptr);
-void launcher_kernel_6f3b4a1807fac754(float * m0, size_t m0_extraOffset, const float * m1, const float * m2, size_t m2_extraOffset, size_t numElements0, unsigned * flags0 = nullptr, void* streamPtr = nullptr);
+inline constexpr tensorforge::LaunchInfo launch_info_kernel_23d69f63317e39c6 = {{1, 16, 1}, 16, 16, 1, 16, 10240, false, true, 1};
+tensorforge::LaunchConfig launch_config_kernel_23d69f63317e39c6(size_t numElements0, void* streamPtr = nullptr);
+void launcher_kernel_23d69f63317e39c6(float * m0, size_t m0_extraOffset, const float * m1, const float * m2, size_t m2_extraOffset, size_t numElements0, unsigned * flags0 = nullptr, void* streamPtr = nullptr);
 
 
 // === launcher ===
@@ -58,7 +58,7 @@ struct LaunchConfig {
 };
 } // namespace tensorforge
 #endif
-tensorforge::LaunchConfig launch_config_kernel_6f3b4a1807fac754(size_t numElements0, void* streamPtr) {
+tensorforge::LaunchConfig launch_config_kernel_23d69f63317e39c6(size_t numElements0, void* streamPtr) {
   (void)numElements0;
   (void)streamPtr;
   sycl::range<3> block (1, 16, 1);
@@ -77,21 +77,21 @@ tensorforge::LaunchConfig launch_config_kernel_6f3b4a1807fac754(size_t numElemen
   config.cooperative = false;
   return config;
 }
-void launcher_kernel_6f3b4a1807fac754(float * m0, size_t m0_extraOffset, const float * m1, const float * m2, size_t m2_extraOffset, size_t numElements0, unsigned * flags0, void* streamPtr) {
-  const tensorforge::LaunchConfig config = launch_config_kernel_6f3b4a1807fac754(numElements0, streamPtr);
+void launcher_kernel_23d69f63317e39c6(float * m0, size_t m0_extraOffset, const float * m1, const float * m2, size_t m2_extraOffset, size_t numElements0, unsigned * flags0, void* streamPtr) {
+  const tensorforge::LaunchConfig config = launch_config_kernel_23d69f63317e39c6(numElements0, streamPtr);
   sycl::range<3> block (config.block[0], config.block[1], config.block[2]);
   sycl::range<3> grid (config.grid[0], config.grid[1], config.grid[2]);
   if (streamPtr == nullptr) {
     throw std::invalid_argument("stream may not be null!");
   }
   sycl::queue *stream = static_cast<sycl::queue *>(streamPtr);
-  kernel_kernel_6f3b4a1807fac754(stream, grid, block, m0, m0_extraOffset, m1, m2, m2_extraOffset, numElements0, flags0);
+  kernel_kernel_23d69f63317e39c6(stream, grid, block, m0, m0_extraOffset, m1, m2, m2_extraOffset, numElements0, flags0);
   CHECK_ERR;
 }
 
 
 // === kernel ===
-inline void kernel_kernel_6f3b4a1807fac754(sycl::queue *stream, sycl::range<3> group_count, sycl::range<3> group_size, float * m0, size_t m0_extraOffset, const float * m1, const float * m2, size_t m2_extraOffset, size_t numElements0, unsigned * flags0) {
+inline void kernel_kernel_23d69f63317e39c6(sycl::queue *stream, sycl::range<3> group_count, sycl::range<3> group_size, float * m0, size_t m0_extraOffset, const float * m1, const float * m2, size_t m2_extraOffset, size_t numElements0, unsigned * flags0) {
   stream->submit([&](sycl::handler &cgh) {
     cgh.parallel_for(sycl::nd_range<3>{{group_count.get(2) * group_size.get(2), group_count.get(1) * group_size.get(1), group_count.get(0) * group_size.get(0)}, {group_size.get(2), group_size.get(1), group_size.get(0)}}, sycl::ext::oneapi::experimental::properties{sycl::ext::intel::experimental::grf_size<256>}, [=](sycl::nd_item<3> item) [[intel::sycl_explicit_simd]] [[intel::kernel_args_restrict]] {
       tensorforge::slmReserve<2560 * sizeof(float)>(); {
@@ -161,216 +161,199 @@ inline void kernel_kernel_6f3b4a1807fac754(sycl::queue *stream, sycl::range<3> g
               tensorforge::intel_esimd::simd<float, 16> v51_data(glb_m1_run3.template select<16, 1>(16));
               tensorforge::intel_esimd::simd<float, 16> v53_data(glb_m1_run3.template select<16, 1>(32));
               tensorforge::intel_esimd::simd<float, 16> v55_data(glb_m1_run3.template select<16, 1>(48));
-              tensorforge::intel_esimd::simd<float, 16> v57_acc{};
-              tensorforge::intel_esimd::simd<float, 16> v60_data(0.0f);
-              v60_data.template select<15, 1>(1) = tensorforge::slmLoad<float, 15>((s0 + (-1_i32)) + 1);
-              v57_acc += ((static_cast<float>(v60_data[0])) * v25_data);
-              v57_acc += ((static_cast<float>(v60_data[1])) * v27_data);
-              v57_acc += ((static_cast<float>(v60_data[2])) * v29_data);
-              v57_acc += ((static_cast<float>(v60_data[3])) * v31_data);
-              v57_acc += ((static_cast<float>(v60_data[4])) * v33_data);
-              v57_acc += ((static_cast<float>(v60_data[5])) * v35_data);
-              v57_acc += ((static_cast<float>(v60_data[6])) * v37_data);
-              v57_acc += ((static_cast<float>(v60_data[7])) * v39_data);
-              v57_acc += ((static_cast<float>(v60_data[8])) * v41_data);
-              v57_acc += ((static_cast<float>(v60_data[9])) * v43_data);
-              v57_acc += ((static_cast<float>(v60_data[10])) * v45_data);
-              v57_acc += ((static_cast<float>(v60_data[11])) * v47_data);
-              v57_acc += ((static_cast<float>(v60_data[12])) * v49_data);
-              v57_acc += ((static_cast<float>(v60_data[13])) * v51_data);
-              v57_acc += ((static_cast<float>(v60_data[14])) * v53_data);
-              v57_acc += ((static_cast<float>(v60_data[15])) * v55_data);
-              tensorforge::intel_esimd::simd<float, 16> v97_data = tensorforge::slmLoad<float, 16>(s0 + (15_i32));
-              float v98_bc = static_cast<float>(v97_data[0]);
-              v57_acc += (v98_bc * v25_data);
-              ir0.template select<16, 1>(0) = v57_acc;
-              tensorforge::intel_esimd::simd<float, 16> v100_acc{};
-              v100_acc += (v98_bc * v25_data);
-              v100_acc += ((static_cast<float>(v97_data[1])) * v27_data);
-              v100_acc += ((static_cast<float>(v97_data[2])) * v29_data);
-              v100_acc += ((static_cast<float>(v97_data[3])) * v31_data);
-              v100_acc += ((static_cast<float>(v97_data[4])) * v33_data);
-              v100_acc += ((static_cast<float>(v97_data[5])) * v35_data);
-              v100_acc += ((static_cast<float>(v97_data[6])) * v37_data);
-              v100_acc += ((static_cast<float>(v97_data[7])) * v39_data);
-              v100_acc += ((static_cast<float>(v97_data[8])) * v41_data);
-              v100_acc += ((static_cast<float>(v97_data[9])) * v43_data);
-              v100_acc += ((static_cast<float>(v97_data[10])) * v45_data);
-              v100_acc += ((static_cast<float>(v97_data[11])) * v47_data);
-              v100_acc += ((static_cast<float>(v97_data[12])) * v49_data);
-              v100_acc += ((static_cast<float>(v97_data[13])) * v51_data);
-              v100_acc += ((static_cast<float>(v97_data[14])) * v53_data);
-              v100_acc += ((static_cast<float>(v97_data[15])) * v55_data);
-              tensorforge::intel_esimd::simd<float, 16> v136_data = tensorforge::slmLoad<float, 16>(s0 + (31_i32));
-              float v137_bc = static_cast<float>(v136_data[0]);
-              v100_acc += (v137_bc * v25_data);
-              ir0.template select<16, 1>(16) = v100_acc;
-              tensorforge::intel_esimd::simd<float, 16> v139_acc{};
-              v139_acc += (v137_bc * v25_data);
-              v139_acc += ((static_cast<float>(v136_data[1])) * v27_data);
-              v139_acc += ((static_cast<float>(v136_data[2])) * v29_data);
-              v139_acc += ((static_cast<float>(v136_data[3])) * v31_data);
-              v139_acc += ((static_cast<float>(v136_data[4])) * v33_data);
-              v139_acc += ((static_cast<float>(v136_data[5])) * v35_data);
-              v139_acc += ((static_cast<float>(v136_data[6])) * v37_data);
-              v139_acc += ((static_cast<float>(v136_data[7])) * v39_data);
-              v139_acc += ((static_cast<float>(v136_data[8])) * v41_data);
-              v139_acc += ((static_cast<float>(v136_data[9])) * v43_data);
-              v139_acc += ((static_cast<float>(v136_data[10])) * v45_data);
-              v139_acc += ((static_cast<float>(v136_data[11])) * v47_data);
-              v139_acc += ((static_cast<float>(v136_data[12])) * v49_data);
-              v139_acc += ((static_cast<float>(v136_data[13])) * v51_data);
-              v139_acc += ((static_cast<float>(v136_data[14])) * v53_data);
-              v139_acc += ((static_cast<float>(v136_data[15])) * v55_data);
-              tensorforge::intel_esimd::simd<float, 16> v175_data = tensorforge::slmLoad<float, 16>(s0 + (47_i32));
-              float v176_bc = static_cast<float>(v175_data[0]);
-              v139_acc += (v176_bc * v25_data);
-              ir0.template select<16, 1>(32) = v139_acc;
-              tensorforge::intel_esimd::simd<float, 16> v178_acc{};
-              v178_acc += (v176_bc * v25_data);
-              v178_acc += ((static_cast<float>(v175_data[1])) * v27_data);
-              v178_acc += ((static_cast<float>(v175_data[2])) * v29_data);
-              v178_acc += ((static_cast<float>(v175_data[3])) * v31_data);
-              v178_acc += ((static_cast<float>(v175_data[4])) * v33_data);
-              v178_acc += ((static_cast<float>(v175_data[5])) * v35_data);
-              v178_acc += ((static_cast<float>(v175_data[6])) * v37_data);
-              v178_acc += ((static_cast<float>(v175_data[7])) * v39_data);
-              v178_acc += ((static_cast<float>(v175_data[8])) * v41_data);
-              v178_acc += ((static_cast<float>(v175_data[9])) * v43_data);
-              v178_acc += ((static_cast<float>(v175_data[10])) * v45_data);
-              v178_acc += ((static_cast<float>(v175_data[11])) * v47_data);
-              v178_acc += ((static_cast<float>(v175_data[12])) * v49_data);
-              v178_acc += ((static_cast<float>(v175_data[13])) * v51_data);
-              v178_acc += ((static_cast<float>(v175_data[14])) * v53_data);
-              v178_acc += ((static_cast<float>(v175_data[15])) * v55_data);
-              tensorforge::intel_esimd::simd<float, 16> v214_data = tensorforge::slmLoad<float, 16>(s0 + (63_i32));
-              float v215_bc = static_cast<float>(v214_data[0]);
-              v178_acc += (v215_bc * v25_data);
-              ir0.template select<16, 1>(48) = v178_acc;
-              tensorforge::intel_esimd::simd<float, 16> v217_acc{};
-              v217_acc += (v215_bc * v25_data);
-              v217_acc += ((static_cast<float>(v214_data[1])) * v27_data);
-              v217_acc += ((static_cast<float>(v214_data[2])) * v29_data);
-              v217_acc += ((static_cast<float>(v214_data[3])) * v31_data);
-              v217_acc += ((static_cast<float>(v214_data[4])) * v33_data);
-              v217_acc += ((static_cast<float>(v214_data[5])) * v35_data);
-              v217_acc += ((static_cast<float>(v214_data[6])) * v37_data);
-              v217_acc += ((static_cast<float>(v214_data[7])) * v39_data);
-              v217_acc += ((static_cast<float>(v214_data[8])) * v41_data);
-              v217_acc += ((static_cast<float>(v214_data[9])) * v43_data);
-              v217_acc += ((static_cast<float>(v214_data[10])) * v45_data);
-              v217_acc += ((static_cast<float>(v214_data[11])) * v47_data);
-              v217_acc += ((static_cast<float>(v214_data[12])) * v49_data);
-              v217_acc += ((static_cast<float>(v214_data[13])) * v51_data);
-              v217_acc += ((static_cast<float>(v214_data[14])) * v53_data);
-              v217_acc += ((static_cast<float>(v214_data[15])) * v55_data);
-              tensorforge::intel_esimd::simd<float, 16> v253_data = tensorforge::slmLoad<float, 16>(s0 + (79_i32));
-              float v254_bc = static_cast<float>(v253_data[0]);
-              v217_acc += (v254_bc * v25_data);
-              ir0.template select<16, 1>(64) = v217_acc;
-              tensorforge::intel_esimd::simd<float, 16> v256_acc{};
-              v256_acc += (v254_bc * v25_data);
-              v256_acc += ((static_cast<float>(v253_data[1])) * v27_data);
-              v256_acc += ((static_cast<float>(v253_data[2])) * v29_data);
-              v256_acc += ((static_cast<float>(v253_data[3])) * v31_data);
-              v256_acc += ((static_cast<float>(v253_data[4])) * v33_data);
-              v256_acc += ((static_cast<float>(v253_data[5])) * v35_data);
-              v256_acc += ((static_cast<float>(v253_data[6])) * v37_data);
-              v256_acc += ((static_cast<float>(v253_data[7])) * v39_data);
-              v256_acc += ((static_cast<float>(v253_data[8])) * v41_data);
-              v256_acc += ((static_cast<float>(v253_data[9])) * v43_data);
-              v256_acc += ((static_cast<float>(v253_data[10])) * v45_data);
-              v256_acc += ((static_cast<float>(v253_data[11])) * v47_data);
-              v256_acc += ((static_cast<float>(v253_data[12])) * v49_data);
-              v256_acc += ((static_cast<float>(v253_data[13])) * v51_data);
-              v256_acc += ((static_cast<float>(v253_data[14])) * v53_data);
-              v256_acc += ((static_cast<float>(v253_data[15])) * v55_data);
-              tensorforge::intel_esimd::simd<float, 16> v292_data = tensorforge::slmLoad<float, 16>(s0 + (95_i32));
-              float v293_bc = static_cast<float>(v292_data[0]);
-              v256_acc += (v293_bc * v25_data);
-              ir0.template select<16, 1>(80) = v256_acc;
-              tensorforge::intel_esimd::simd<float, 16> v295_acc{};
-              v295_acc += (v293_bc * v25_data);
-              v295_acc += ((static_cast<float>(v292_data[1])) * v27_data);
-              v295_acc += ((static_cast<float>(v292_data[2])) * v29_data);
-              v295_acc += ((static_cast<float>(v292_data[3])) * v31_data);
-              v295_acc += ((static_cast<float>(v292_data[4])) * v33_data);
-              v295_acc += ((static_cast<float>(v292_data[5])) * v35_data);
-              v295_acc += ((static_cast<float>(v292_data[6])) * v37_data);
-              v295_acc += ((static_cast<float>(v292_data[7])) * v39_data);
-              v295_acc += ((static_cast<float>(v292_data[8])) * v41_data);
-              v295_acc += ((static_cast<float>(v292_data[9])) * v43_data);
-              v295_acc += ((static_cast<float>(v292_data[10])) * v45_data);
-              v295_acc += ((static_cast<float>(v292_data[11])) * v47_data);
-              v295_acc += ((static_cast<float>(v292_data[12])) * v49_data);
-              v295_acc += ((static_cast<float>(v292_data[13])) * v51_data);
-              v295_acc += ((static_cast<float>(v292_data[14])) * v53_data);
-              v295_acc += ((static_cast<float>(v292_data[15])) * v55_data);
-              tensorforge::intel_esimd::simd<float, 16> v331_data = tensorforge::slmLoad<float, 16>(s0 + (111_i32));
-              float v332_bc = static_cast<float>(v331_data[0]);
-              v295_acc += (v332_bc * v25_data);
-              ir0.template select<16, 1>(96) = v295_acc;
-              tensorforge::intel_esimd::simd<float, 16> v334_acc{};
-              v334_acc += (v332_bc * v25_data);
-              v334_acc += ((static_cast<float>(v331_data[1])) * v27_data);
-              v334_acc += ((static_cast<float>(v331_data[2])) * v29_data);
-              v334_acc += ((static_cast<float>(v331_data[3])) * v31_data);
-              v334_acc += ((static_cast<float>(v331_data[4])) * v33_data);
-              v334_acc += ((static_cast<float>(v331_data[5])) * v35_data);
-              v334_acc += ((static_cast<float>(v331_data[6])) * v37_data);
-              v334_acc += ((static_cast<float>(v331_data[7])) * v39_data);
-              v334_acc += ((static_cast<float>(v331_data[8])) * v41_data);
-              v334_acc += ((static_cast<float>(v331_data[9])) * v43_data);
-              v334_acc += ((static_cast<float>(v331_data[10])) * v45_data);
-              v334_acc += ((static_cast<float>(v331_data[11])) * v47_data);
-              v334_acc += ((static_cast<float>(v331_data[12])) * v49_data);
-              v334_acc += ((static_cast<float>(v331_data[13])) * v51_data);
-              v334_acc += ((static_cast<float>(v331_data[14])) * v53_data);
-              v334_acc += ((static_cast<float>(v331_data[15])) * v55_data);
-              tensorforge::intel_esimd::simd<float, 16> v370_data = tensorforge::slmLoad<float, 16>(s0 + (127_i32));
-              float v371_bc = static_cast<float>(v370_data[0]);
-              v334_acc += (v371_bc * v25_data);
-              ir0.template select<16, 1>(112) = v334_acc;
-              tensorforge::intel_esimd::simd<float, 16> v373_acc{};
-              v373_acc += (v371_bc * v25_data);
-              v373_acc += ((static_cast<float>(v370_data[1])) * v27_data);
-              v373_acc += ((static_cast<float>(v370_data[2])) * v29_data);
-              v373_acc += ((static_cast<float>(v370_data[3])) * v31_data);
-              v373_acc += ((static_cast<float>(v370_data[4])) * v33_data);
-              v373_acc += ((static_cast<float>(v370_data[5])) * v35_data);
-              v373_acc += ((static_cast<float>(v370_data[6])) * v37_data);
-              v373_acc += ((static_cast<float>(v370_data[7])) * v39_data);
-              v373_acc += ((static_cast<float>(v370_data[8])) * v41_data);
-              v373_acc += ((static_cast<float>(v370_data[9])) * v43_data);
-              v373_acc += ((static_cast<float>(v370_data[10])) * v45_data);
-              v373_acc += ((static_cast<float>(v370_data[11])) * v47_data);
-              v373_acc += ((static_cast<float>(v370_data[12])) * v49_data);
-              v373_acc += ((static_cast<float>(v370_data[13])) * v51_data);
-              v373_acc += ((static_cast<float>(v370_data[14])) * v53_data);
-              v373_acc += ((static_cast<float>(v370_data[15])) * v55_data);
-              tensorforge::intel_esimd::simd<float, 16> v409_data = tensorforge::slmLoad<float, 16>(s0 + (143_i32));
-              v373_acc += ((static_cast<float>(v409_data[0])) * v25_data);
-              ir0.template select<16, 1>(128) = v373_acc;
+              tensorforge::intel_esimd::simd<float, 16> v56_acc{};
+              tensorforge::intel_esimd::simd<float, 16> v59_data(0.0f);
+              v59_data.template select<15, 1>(1) = tensorforge::slmLoad<float, 15>((s0 + (-1_i32)) + 1);
+              v56_acc += ((static_cast<float>(v59_data[1])) * v25_data);
+              v56_acc += ((static_cast<float>(v59_data[2])) * v27_data);
+              v56_acc += ((static_cast<float>(v59_data[3])) * v29_data);
+              v56_acc += ((static_cast<float>(v59_data[4])) * v31_data);
+              v56_acc += ((static_cast<float>(v59_data[5])) * v33_data);
+              v56_acc += ((static_cast<float>(v59_data[6])) * v35_data);
+              v56_acc += ((static_cast<float>(v59_data[7])) * v37_data);
+              v56_acc += ((static_cast<float>(v59_data[8])) * v39_data);
+              v56_acc += ((static_cast<float>(v59_data[9])) * v41_data);
+              v56_acc += ((static_cast<float>(v59_data[10])) * v43_data);
+              v56_acc += ((static_cast<float>(v59_data[11])) * v45_data);
+              v56_acc += ((static_cast<float>(v59_data[12])) * v47_data);
+              v56_acc += ((static_cast<float>(v59_data[13])) * v49_data);
+              v56_acc += ((static_cast<float>(v59_data[14])) * v51_data);
+              v56_acc += ((static_cast<float>(v59_data[15])) * v53_data);
+              tensorforge::intel_esimd::simd<float, 16> v95_data = tensorforge::slmLoad<float, 16>(s0 + (15_i32));
+              v56_acc += ((static_cast<float>(v95_data[0])) * v55_data);
+              ir0.template select<16, 1>(0) = v56_acc;
+              tensorforge::intel_esimd::simd<float, 16> v98_acc{};
+              v98_acc += ((static_cast<float>(v95_data[1])) * v25_data);
+              v98_acc += ((static_cast<float>(v95_data[2])) * v27_data);
+              v98_acc += ((static_cast<float>(v95_data[3])) * v29_data);
+              v98_acc += ((static_cast<float>(v95_data[4])) * v31_data);
+              v98_acc += ((static_cast<float>(v95_data[5])) * v33_data);
+              v98_acc += ((static_cast<float>(v95_data[6])) * v35_data);
+              v98_acc += ((static_cast<float>(v95_data[7])) * v37_data);
+              v98_acc += ((static_cast<float>(v95_data[8])) * v39_data);
+              v98_acc += ((static_cast<float>(v95_data[9])) * v41_data);
+              v98_acc += ((static_cast<float>(v95_data[10])) * v43_data);
+              v98_acc += ((static_cast<float>(v95_data[11])) * v45_data);
+              v98_acc += ((static_cast<float>(v95_data[12])) * v47_data);
+              v98_acc += ((static_cast<float>(v95_data[13])) * v49_data);
+              v98_acc += ((static_cast<float>(v95_data[14])) * v51_data);
+              v98_acc += ((static_cast<float>(v95_data[15])) * v53_data);
+              tensorforge::intel_esimd::simd<float, 16> v133_data = tensorforge::slmLoad<float, 16>(s0 + (31_i32));
+              v98_acc += ((static_cast<float>(v133_data[0])) * v55_data);
+              ir0.template select<16, 1>(16) = v98_acc;
+              tensorforge::intel_esimd::simd<float, 16> v136_acc{};
+              v136_acc += ((static_cast<float>(v133_data[1])) * v25_data);
+              v136_acc += ((static_cast<float>(v133_data[2])) * v27_data);
+              v136_acc += ((static_cast<float>(v133_data[3])) * v29_data);
+              v136_acc += ((static_cast<float>(v133_data[4])) * v31_data);
+              v136_acc += ((static_cast<float>(v133_data[5])) * v33_data);
+              v136_acc += ((static_cast<float>(v133_data[6])) * v35_data);
+              v136_acc += ((static_cast<float>(v133_data[7])) * v37_data);
+              v136_acc += ((static_cast<float>(v133_data[8])) * v39_data);
+              v136_acc += ((static_cast<float>(v133_data[9])) * v41_data);
+              v136_acc += ((static_cast<float>(v133_data[10])) * v43_data);
+              v136_acc += ((static_cast<float>(v133_data[11])) * v45_data);
+              v136_acc += ((static_cast<float>(v133_data[12])) * v47_data);
+              v136_acc += ((static_cast<float>(v133_data[13])) * v49_data);
+              v136_acc += ((static_cast<float>(v133_data[14])) * v51_data);
+              v136_acc += ((static_cast<float>(v133_data[15])) * v53_data);
+              tensorforge::intel_esimd::simd<float, 16> v171_data = tensorforge::slmLoad<float, 16>(s0 + (47_i32));
+              v136_acc += ((static_cast<float>(v171_data[0])) * v55_data);
+              ir0.template select<16, 1>(32) = v136_acc;
+              tensorforge::intel_esimd::simd<float, 16> v174_acc{};
+              v174_acc += ((static_cast<float>(v171_data[1])) * v25_data);
+              v174_acc += ((static_cast<float>(v171_data[2])) * v27_data);
+              v174_acc += ((static_cast<float>(v171_data[3])) * v29_data);
+              v174_acc += ((static_cast<float>(v171_data[4])) * v31_data);
+              v174_acc += ((static_cast<float>(v171_data[5])) * v33_data);
+              v174_acc += ((static_cast<float>(v171_data[6])) * v35_data);
+              v174_acc += ((static_cast<float>(v171_data[7])) * v37_data);
+              v174_acc += ((static_cast<float>(v171_data[8])) * v39_data);
+              v174_acc += ((static_cast<float>(v171_data[9])) * v41_data);
+              v174_acc += ((static_cast<float>(v171_data[10])) * v43_data);
+              v174_acc += ((static_cast<float>(v171_data[11])) * v45_data);
+              v174_acc += ((static_cast<float>(v171_data[12])) * v47_data);
+              v174_acc += ((static_cast<float>(v171_data[13])) * v49_data);
+              v174_acc += ((static_cast<float>(v171_data[14])) * v51_data);
+              v174_acc += ((static_cast<float>(v171_data[15])) * v53_data);
+              tensorforge::intel_esimd::simd<float, 16> v209_data = tensorforge::slmLoad<float, 16>(s0 + (63_i32));
+              v174_acc += ((static_cast<float>(v209_data[0])) * v55_data);
+              ir0.template select<16, 1>(48) = v174_acc;
+              tensorforge::intel_esimd::simd<float, 16> v212_acc{};
+              v212_acc += ((static_cast<float>(v209_data[1])) * v25_data);
+              v212_acc += ((static_cast<float>(v209_data[2])) * v27_data);
+              v212_acc += ((static_cast<float>(v209_data[3])) * v29_data);
+              v212_acc += ((static_cast<float>(v209_data[4])) * v31_data);
+              v212_acc += ((static_cast<float>(v209_data[5])) * v33_data);
+              v212_acc += ((static_cast<float>(v209_data[6])) * v35_data);
+              v212_acc += ((static_cast<float>(v209_data[7])) * v37_data);
+              v212_acc += ((static_cast<float>(v209_data[8])) * v39_data);
+              v212_acc += ((static_cast<float>(v209_data[9])) * v41_data);
+              v212_acc += ((static_cast<float>(v209_data[10])) * v43_data);
+              v212_acc += ((static_cast<float>(v209_data[11])) * v45_data);
+              v212_acc += ((static_cast<float>(v209_data[12])) * v47_data);
+              v212_acc += ((static_cast<float>(v209_data[13])) * v49_data);
+              v212_acc += ((static_cast<float>(v209_data[14])) * v51_data);
+              v212_acc += ((static_cast<float>(v209_data[15])) * v53_data);
+              tensorforge::intel_esimd::simd<float, 16> v247_data = tensorforge::slmLoad<float, 16>(s0 + (79_i32));
+              v212_acc += ((static_cast<float>(v247_data[0])) * v55_data);
+              ir0.template select<16, 1>(64) = v212_acc;
+              tensorforge::intel_esimd::simd<float, 16> v250_acc{};
+              v250_acc += ((static_cast<float>(v247_data[1])) * v25_data);
+              v250_acc += ((static_cast<float>(v247_data[2])) * v27_data);
+              v250_acc += ((static_cast<float>(v247_data[3])) * v29_data);
+              v250_acc += ((static_cast<float>(v247_data[4])) * v31_data);
+              v250_acc += ((static_cast<float>(v247_data[5])) * v33_data);
+              v250_acc += ((static_cast<float>(v247_data[6])) * v35_data);
+              v250_acc += ((static_cast<float>(v247_data[7])) * v37_data);
+              v250_acc += ((static_cast<float>(v247_data[8])) * v39_data);
+              v250_acc += ((static_cast<float>(v247_data[9])) * v41_data);
+              v250_acc += ((static_cast<float>(v247_data[10])) * v43_data);
+              v250_acc += ((static_cast<float>(v247_data[11])) * v45_data);
+              v250_acc += ((static_cast<float>(v247_data[12])) * v47_data);
+              v250_acc += ((static_cast<float>(v247_data[13])) * v49_data);
+              v250_acc += ((static_cast<float>(v247_data[14])) * v51_data);
+              v250_acc += ((static_cast<float>(v247_data[15])) * v53_data);
+              tensorforge::intel_esimd::simd<float, 16> v285_data = tensorforge::slmLoad<float, 16>(s0 + (95_i32));
+              v250_acc += ((static_cast<float>(v285_data[0])) * v55_data);
+              ir0.template select<16, 1>(80) = v250_acc;
+              tensorforge::intel_esimd::simd<float, 16> v288_acc{};
+              v288_acc += ((static_cast<float>(v285_data[1])) * v25_data);
+              v288_acc += ((static_cast<float>(v285_data[2])) * v27_data);
+              v288_acc += ((static_cast<float>(v285_data[3])) * v29_data);
+              v288_acc += ((static_cast<float>(v285_data[4])) * v31_data);
+              v288_acc += ((static_cast<float>(v285_data[5])) * v33_data);
+              v288_acc += ((static_cast<float>(v285_data[6])) * v35_data);
+              v288_acc += ((static_cast<float>(v285_data[7])) * v37_data);
+              v288_acc += ((static_cast<float>(v285_data[8])) * v39_data);
+              v288_acc += ((static_cast<float>(v285_data[9])) * v41_data);
+              v288_acc += ((static_cast<float>(v285_data[10])) * v43_data);
+              v288_acc += ((static_cast<float>(v285_data[11])) * v45_data);
+              v288_acc += ((static_cast<float>(v285_data[12])) * v47_data);
+              v288_acc += ((static_cast<float>(v285_data[13])) * v49_data);
+              v288_acc += ((static_cast<float>(v285_data[14])) * v51_data);
+              v288_acc += ((static_cast<float>(v285_data[15])) * v53_data);
+              tensorforge::intel_esimd::simd<float, 16> v323_data = tensorforge::slmLoad<float, 16>(s0 + (111_i32));
+              v288_acc += ((static_cast<float>(v323_data[0])) * v55_data);
+              ir0.template select<16, 1>(96) = v288_acc;
+              tensorforge::intel_esimd::simd<float, 16> v326_acc{};
+              v326_acc += ((static_cast<float>(v323_data[1])) * v25_data);
+              v326_acc += ((static_cast<float>(v323_data[2])) * v27_data);
+              v326_acc += ((static_cast<float>(v323_data[3])) * v29_data);
+              v326_acc += ((static_cast<float>(v323_data[4])) * v31_data);
+              v326_acc += ((static_cast<float>(v323_data[5])) * v33_data);
+              v326_acc += ((static_cast<float>(v323_data[6])) * v35_data);
+              v326_acc += ((static_cast<float>(v323_data[7])) * v37_data);
+              v326_acc += ((static_cast<float>(v323_data[8])) * v39_data);
+              v326_acc += ((static_cast<float>(v323_data[9])) * v41_data);
+              v326_acc += ((static_cast<float>(v323_data[10])) * v43_data);
+              v326_acc += ((static_cast<float>(v323_data[11])) * v45_data);
+              v326_acc += ((static_cast<float>(v323_data[12])) * v47_data);
+              v326_acc += ((static_cast<float>(v323_data[13])) * v49_data);
+              v326_acc += ((static_cast<float>(v323_data[14])) * v51_data);
+              v326_acc += ((static_cast<float>(v323_data[15])) * v53_data);
+              tensorforge::intel_esimd::simd<float, 16> v361_data = tensorforge::slmLoad<float, 16>(s0 + (127_i32));
+              v326_acc += ((static_cast<float>(v361_data[0])) * v55_data);
+              ir0.template select<16, 1>(112) = v326_acc;
+              tensorforge::intel_esimd::simd<float, 16> v364_acc{};
+              v364_acc += ((static_cast<float>(v361_data[1])) * v25_data);
+              v364_acc += ((static_cast<float>(v361_data[2])) * v27_data);
+              v364_acc += ((static_cast<float>(v361_data[3])) * v29_data);
+              v364_acc += ((static_cast<float>(v361_data[4])) * v31_data);
+              v364_acc += ((static_cast<float>(v361_data[5])) * v33_data);
+              v364_acc += ((static_cast<float>(v361_data[6])) * v35_data);
+              v364_acc += ((static_cast<float>(v361_data[7])) * v37_data);
+              v364_acc += ((static_cast<float>(v361_data[8])) * v39_data);
+              v364_acc += ((static_cast<float>(v361_data[9])) * v41_data);
+              v364_acc += ((static_cast<float>(v361_data[10])) * v43_data);
+              v364_acc += ((static_cast<float>(v361_data[11])) * v45_data);
+              v364_acc += ((static_cast<float>(v361_data[12])) * v47_data);
+              v364_acc += ((static_cast<float>(v361_data[13])) * v49_data);
+              v364_acc += ((static_cast<float>(v361_data[14])) * v51_data);
+              v364_acc += ((static_cast<float>(v361_data[15])) * v53_data);
+              tensorforge::intel_esimd::simd<float, 16> v399_data = tensorforge::slmLoad<float, 16>(s0 + (143_i32));
+              v364_acc += ((static_cast<float>(v399_data[0])) * v55_data);
+              ir0.template select<16, 1>(128) = v364_acc;
               // r0 = ir0
               #pragma unroll
-              for (int32_t v412_n0 = 0; v412_n0 < 1; ++v412_n0) {
-                int32_t v414_a = v412_n0 * 16;
+              for (int32_t v402_n0 = 0; v402_n0 < 1; ++v402_n0) {
+                int32_t v404_a = v402_n0 * 16;
                 #pragma unroll
-                for (int32_t v413_n1 = 0; v413_n1 < 9; ++v413_n1) {
-                  int32_t v416_a = v414_a + (v413_n1 * 16);
-                  tensorforge::intel_esimd::simd<float, 16> v417_data(ir0.template select<16, 1>(v416_a));
-                  r0.template select<16, 1>(v416_a) = v417_data;
+                for (int32_t v403_n1 = 0; v403_n1 < 9; ++v403_n1) {
+                  int32_t v406_a = v404_a + (v403_n1 * 16);
+                  tensorforge::intel_esimd::simd<float, 16> v407_data(ir0.template select<16, 1>(v406_a));
+                  r0.template select<16, 1>(v406_a) = v407_data;
                 }
               }
               // glb_m0 = store{r>g}(r0);
               #pragma unroll
-              for (int32_t v418_i0 = 0; v418_i0 < 1; ++v418_i0) {
-                int32_t v420_a = v418_i0 * 16;
+              for (int32_t v408_i0 = 0; v408_i0 < 1; ++v408_i0) {
+                int32_t v410_a = v408_i0 * 16;
                 #pragma unroll
-                for (int32_t v419_i1 = 0; v419_i1 < 9; ++v419_i1) {
-                  int32_t v422_a = v420_a + (v419_i1 * 16);
-                  tensorforge::intel_esimd::simd<float, 16> v423_data(r0.template select<16, 1>(v422_a));
-                  v423_data.copy_to(glb_m0 + (v422_a));
+                for (int32_t v409_i1 = 0; v409_i1 < 9; ++v409_i1) {
+                  int32_t v412_a = v410_a + (v409_i1 * 16);
+                  tensorforge::intel_esimd::simd<float, 16> v413_data(r0.template select<16, 1>(v412_a));
+                  v413_data.copy_to(glb_m0 + (v412_a));
                 }
               }
             }
