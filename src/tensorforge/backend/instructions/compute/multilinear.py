@@ -962,22 +962,57 @@ class MultilinearInstruction(ComputeInstruction):
         shape = tuple(int(x) for x in a_obj.get_actual_shape())
         if not members:
             return
+        # What an order may say beyond which cell a slot holds: how the kernel
+        # addresses it where that is not a fragment read (`Tensor.slot_major`),
+        # and how many scalars an element takes where the target reads the
+        # halves a matrix instruction multiplies rather than splitting them.
+        # An order that says nothing about parts leaves them to whoever set
+        # them -- a caller may store an operand split before any order exists.
+        slot_major = getattr(order, 'slot_major', None)
+        parts = getattr(order, 'parts', None)
+        if (parts is not None and parts != 1
+                and self._plan()[0].strategy is not Strategy.MATRIX):
+            # The halves are what a matrix instruction multiplies; any other
+            # arrangement multiplies the floats, and would read the first
+            # half as one.
+            parts = 1
+        if slot_major is not None and not self._slot_major_fits(a_obj):
+            return
         for member in members:
             if (member.addressing is not Addressing.NONE
                     or not member.is_dense()
                     or tuple(int(x) for x in member.get_actual_shape()) != shape
                     or (member.storage_order is not None
-                        and tuple(member.storage_order) != tuple(order))):
+                        and tuple(member.storage_order) != tuple(order))
+                    or (parts is not None
+                        and member.storage_parts not in (1, parts))):
                 return
         # Parts planar with it: the order puts a lane's fragments side by side,
         # and the instruction wants each part's in one register group
         # (`Tensor.storage_planar`).
-        for member in members:
-            member.storage_order = order
-            member.storage_planar = True
-        if variant:
-            a_obj.storage_order = order
-            a_obj.storage_planar = True
+        for target in members + ((a_obj,) if variant else ()):
+            target.storage_order = order
+            target.storage_planar = True
+            if slot_major is not None:
+                target.slot_major = slot_major
+            if parts is not None and parts != 1:
+                target.storage_parts = parts
+
+    def _slot_major_fits(self, a_obj) -> bool:
+        """Whether every read of `A` here names whole slots of its rows.
+
+        A slot-major operand (`Tensor.slot_major`) is addressed by the lane
+        vector: slot `s` of column `k` is one run of `threads` rows.  A read
+        whose rows start inside a slot -- a lead origin or a slicing offset
+        that is not a whole number of slots -- has no such run, and nor does a
+        lead index of another width.  The column is free: every column of every
+        slot is stored.  So is the operand's view, as long as it starts at the
+        tensor's origin, which is what the address is counted from.
+        """
+        return (self._lead_width == 1
+                and self._opdim_to_nks[0] == ['n0', 'k0']
+                and list(a_obj.get_bbox().lower()) == [0, 0]
+                and self._eff_offset(0, 0) % self._num_threads == 0)
 
     def _shape(self) -> ComputeShape:
         """What the choice and the reservation are both made from.

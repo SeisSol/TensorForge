@@ -89,6 +89,22 @@ class DataView:
     self._permute = permute
     self._bbox = bbox
 
+  def _parts(self):
+    """Scalars one element takes: the owner's `storage_parts` where the view
+    has an owner, and what it was made with where it does not.
+
+    Asked rather than copied, as `part_plane` asks whether they are planar.
+    Every view made with an owner is made with the owner's count, so the two
+    readings agree when it is made -- and only this one still agrees once an
+    order offered later has split the operand (`MultilinearInstruction.
+    _offer_order`).  Copied, the second half of a split read one scalar on
+    from the first instead of a plane on.
+    """
+    o = self._owner
+    if o is None:
+      return self._elem_parts
+    return int(getattr(o, 'storage_parts', self._elem_parts))
+
   @property
   def elem_parts(self):
     """Scalars per element --- the stride a contiguous axis carries.
@@ -98,7 +114,7 @@ class DataView:
     only sometimes 1.  One where the parts are planar: the elements of one
     part are adjacent then, and the parts are `part_plane` apart.
     """
-    return 1 if self.part_plane else self._elem_parts
+    return 1 if self.part_plane else self._parts()
 
   @property
   def part_plane(self):
@@ -110,7 +126,7 @@ class DataView:
     operand, which counts its padding slots too.
     """
     o = self._owner
-    if o is None or self._elem_parts == 1 or not getattr(o, 'storage_planar', False):
+    if o is None or self._parts() == 1 or not getattr(o, 'storage_planar', False):
       return 0
     return int(o.storage_elements())
 
@@ -139,7 +155,7 @@ class DataView:
     # get_dim_strides for why this is `shape` and not the bounding box.
     # In scalars, because that is the unit an allocation is made in: the one
     # caller sizes a shared-memory buffer with it.
-    volume = self._elem_parts
+    volume = self._parts()
     for s in self.shape:
       volume *= s
     return volume
@@ -241,7 +257,7 @@ class DataView:
     # Planar parts are the exception: an element's parts are not neighbors
     # there, so the elements are, and the parts are `part_plane` further on.
     strides = []
-    current = 1 if self.part_plane else self._elem_parts
+    current = 1 if self.part_plane else self._parts()
     for i, size in enumerate(self.shape):
       if i not in mask:
         strides += [current]
@@ -271,7 +287,7 @@ class DataView:
     return addr
 
   def __str__(self):
-    parts = f', parts: {self._elem_parts}' if self._elem_parts != 1 else ''
+    parts = f', parts: {self._parts()}' if self._parts() != 1 else ''
     return f'shape: {self.shape}, permute: {self._permute}{parts}'
 
 class Immediate:
@@ -1363,6 +1379,65 @@ class Symbol:
                       nontemporal=nontemp)
     return writer.extract(vec, slot % group, hint='p')
 
+  def _slot_major_index(self, writer, context: Context, index):
+    """A read of a slot-major operand (`Tensor.slot_major`), as the index of
+    the lane vector it is in storage.
+
+    Row `s*T + l` of column `k` sits at `(s*depth + k)*T + l` -- which is lead
+    index `s*depth + k` over the same `T` lanes, in a first dimension of
+    stride one, with zero in the second.  Handed back in that form, the read
+    takes the ordinary path: the lane term, the parts (planar, a plane apart),
+    a tail's `valid`, the layout claim.  And an image of the operand in shared
+    memory is its storage copied verbatim (`GlbToShrLoader._verbatim`), so it
+    is addressed the same way.
+
+    A slicing shift of whole slots is a change of slot and folds in.  Anything
+    else would move rows between lanes, and the order has no address for a
+    lane vector that starts inside a slot -- the offer is made only where that
+    cannot arise (`MultilinearInstruction._slot_major_fits`), and this refuses
+    loudly rather than read the wrong rows if it does.
+    """
+    threads, depth = self.obj.slot_major
+    if len(index) != 2:
+      raise InternalError(f'{self.name}: a slot-major operand is a matrix')
+    lead = unwrap_lead(index[0])
+    if lead is None:
+      raise InternalError(f'{self.name}: slot-major rows need a lead index')
+    li, shift = lead
+    if (li.width != 1 or li._block != threads or li._stride != 1
+            or shift % threads):
+      raise InternalError(
+          f'{self.name}: slot-major rows at {li!r} with shift {shift}; the '
+          f'order holds whole slots of a width-1 lead over {threads} lanes')
+    if (any(int(x) for x in self.data_view.get_dim_offsets())
+            or self.data_view.get_dim_strides()[0] != 1):
+      raise InternalError(
+          f'{self.name}: a slot-major view starts at its origin with rows of '
+          f'stride one; this one is {self.data_view}')
+    slot = li.nonlead() if li._value is None else li._value
+    if isinstance(slot, Immediate):
+      slot = slot._value
+    if isinstance(slot, str):
+      raise InternalError(f'{self.name}: slot-major slot named as text')
+    k = index[1]
+    if isinstance(k, Immediate):
+      k = k._value
+    if isinstance(k, str):
+      raise InternalError(f'{self.name}: slot-major column named as text')
+    k = k if isinstance(k, (int, np.integer)) else k.build(writer, context)
+    def arith(name, a, b):
+      if isinstance(a, (int, np.integer)) and isinstance(b, (int, np.integer)):
+        return int({'add': a + b, 'mul': a * b}[name])
+      return writer.op(name, INDEX, a, b, hint='a')
+    run = arith('add', arith('mul', arith('add', slot, shift // threads),
+                             depth), k)
+    if isinstance(run, (int, np.integer)):
+      lead_index = LeadIndex(int(run), threads, 1, valid=li.valid, pad=li.pad)
+    else:
+      lead_index = LeadIndex(0, threads, 1, value=run, valid=li.valid,
+                             pad=li.pad)
+    return [lead_index, 0]
+
   def _wide_claim(self, index, width: int, part=0):
     """The alignment a `width`-wide access at `index` can prove, or `RELAXED`.
 
@@ -2428,7 +2503,8 @@ class Symbol:
                               SymbolType.Global)
         or not self.obj.is_dense()
         or getattr(self.obj, 'storage_order', None) is not None
-        or getattr(self.obj, 'simt_interleave', None) is not None):
+        or getattr(self.obj, 'simt_interleave', None) is not None
+        or getattr(self.obj, 'slot_major', None) is not None):
       raise InternalError(
           f'{self.name}: a shifted read needs a dense operand in memory, in '
           f'its logical order, read as a value')
@@ -2622,6 +2698,14 @@ class Symbol:
                                                nontemp)
           if interleaved is not None:
             return interleaved
+        if (bc_lane is None
+                and getattr(self.obj, 'slot_major', None) is not None
+                and self.stype in (SymbolType.Global, SymbolType.Batch,
+                                   SymbolType.SharedMem)):
+          # Rewritten rather than handled: from here on this is an ordinary
+          # read of a run, and the parts, the tail's `valid` and the layout
+          # claim below are the same questions they always were.
+          read_index = self._slot_major_index(writer, context, read_index)
         addr = self.address_value(writer, context, read_index, shift=shift)
         # Planar parts are `plane` elements apart instead of adjacent: the
         # addend scales, and reading every part is one access per part -- each

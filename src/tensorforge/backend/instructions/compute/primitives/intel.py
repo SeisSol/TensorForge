@@ -47,6 +47,7 @@ gain.
 
 from tensorforge.backend.pir.core import SCALAR_LAYOUT, ScalarType
 from tensorforge.common.basic_types import Datatype
+from tensorforge.common.exceptions import InternalError
 from .. import broadcast, ranking, split
 from ..routes import lead_route
 from ..strategy import Strategy, whole
@@ -439,7 +440,7 @@ def _run(writer, frag, start, size, hint):
 #: handful of `select`s rather than a loop over elements.
 
 
-def dpas_matmul(writer, C, A, B, M, N, K, kx, threads, dtype, ctx):
+def dpas_matmul(writer, C, A, B, M, N, K, kx, threads, dtype, ctx, parts=1):
     """`C += A x B` through XMX, with FP32 emulated over three TF32 products.
 
     Three products, not four: `lo*lo` falls below the accumulator's rounding.
@@ -452,6 +453,9 @@ def dpas_matmul(writer, C, A, B, M, N, K, kx, threads, dtype, ctx):
     same output columns and depths for all of them, so that is split once per
     block.  Only slot 0 used to be computed: the other rows were neither
     multiplied nor stored, and nothing on the host could tell from the timing.
+
+    `parts == 2` where `A` is stored as its two TF32 halves
+    (`prepared_order`): Src1 is then read half by half rather than split.
     """
     atom = atom_for(dtype, columns=N, lead=M * threads, depth=K + kx,
                     budget=register_budget(ctx))
@@ -493,16 +497,37 @@ def dpas_matmul(writer, C, A, B, M, N, K, kx, threads, dtype, ctx):
                 blo = _fragment(writer, Datatype.TF32, atom.b_elems, 'blo')
 
                 # Src1 <- this generator's A: one lane vector per contraction
-                # step, out of slot `i`.
-                for k in range(min(atom.k, depth - k0)):
-                    v = A(writer, None, i, k0 + k)
-                    if v is None or v is False:
+                # step, out of slot `i`.  Every read before any conversion: a
+                # call ends a run (`EsimdEmitter._plan_runs`), and the steps of
+                # a slot-major operand are one run -- a fragment in two block
+                # messages where it was eight.
+                steps = range(min(atom.k, depth - k0))
+                if parts == 1:
+                    vs = [A(writer, None, i, k0 + k) for k in steps]
+                    if any(v is None or v is False for v in vs):
                         return False
-                    off = b_offset(atom, k, 0)
-                    writer.call_stmt(f'tensorforge::splitFloatTF32<{atom.n}>',
-                                     _run(writer, bhi, off, atom.n, 'bh'),
-                                     _run(writer, blo, off, atom.n, 'bl'),
-                                     v, writes=(bhi, blo))
+                    for k, v in zip(steps, vs):
+                        off = b_offset(atom, k, 0)
+                        writer.call_stmt(
+                            f'tensorforge::splitFloatTF32<{atom.n}>',
+                            _run(writer, bhi, off, atom.n, 'bh'),
+                            _run(writer, blo, off, atom.n, 'bl'),
+                            v, writes=(bhi, blo))
+                else:
+                    # Stored split: each half is a plane of its own, so the
+                    # halves are read one plane after the other and each is
+                    # a run as well.
+                    for part, frag, hint in ((0, bhi, 'bh'), (1, blo, 'bl')):
+                        vs = [A(writer, None, i, k0 + k, part=part)
+                              for k in steps]
+                        if any(v is None or v is False for v in vs):
+                            return False
+                        for k, v in zip(steps, vs):
+                            writer.call_stmt(
+                                f'tensorforge::castTF32<{atom.n}>',
+                                _run(writer, frag, b_offset(atom, k, 0),
+                                     atom.n, hint),
+                                v, writes=(frag,))
 
                 bterms, aterms = (bhi, blo), (ahi, alo)
                 for p, q in split.products(TF32_SPLIT_TERMS):
@@ -521,6 +546,103 @@ def dpas_matmul(writer, C, A, B, M, N, K, kx, threads, dtype, ctx):
                                'cr'),
                   i, j0 + m)
     return True
+
+
+def _simd_mode(ctx) -> bool:
+    """Whether `ctx` lowers with the lane in the type (ESIMD).
+
+    `abstract_instruction._explicit_simd`'s question, asked of the lexic the
+    same way; restated rather than imported, since that package imports this
+    one.
+    """
+    try:
+        return bool(ctx.get_vm().get_lexic().simd_mode)
+    except AttributeError:
+        return False
+
+
+def slot_major_order(shape, threads, depth):
+    """`Tensor.storage_order` for an operand read slot by slot.
+
+    Row `r = s*threads + l` of column `k` at `(s*depth + k)*threads + l`: for
+    each slot, every column's lane vector, one after the other.  So the lane
+    vectors one slot reads over consecutive columns are one contiguous run,
+    and `depth` -- the columns, rounded up to the reader's block -- is how
+    many of them a slot holds.  Rows past the end of the last slot and
+    columns past the last are padding (`-1`, stored as zero).
+
+    At sixteen lanes and a depth in blocks of eight, columns `k0 .. k0 + 7` of
+    a slot are a DPAS Src1 fragment exactly as it lies: `b_offset(k, n) =
+    k*N + n`.
+    """
+    rows, cols = (int(x) for x in shape)
+    slots = -(-rows // threads)
+    order = []
+    for s in range(slots):
+        for k in range(depth):
+            for lane in range(threads):
+                r = s * threads + lane
+                order.append(r + rows * k if r < rows and k < cols else -1)
+    return tuple(order)
+
+
+class SlotMajorOrder(tuple):
+    """A slot-major storage order, and what it takes to address it.
+
+    The order alone says which cell each slot holds, which is all the host
+    needs.  The kernel needs the geometry -- `slot_major`, the `(threads,
+    depth)` of `Tensor.slot_major` -- and, where the matrix path reads the
+    TF32 halves rather than splitting the operand itself, how many scalars
+    an element takes (`parts`).  `MultilinearInstruction._offer_order` sets
+    both from here.
+    """
+
+    def __new__(cls, order, threads, depth, parts=1):
+        self = super().__new__(cls, order)
+        self.slot_major = (int(threads), int(depth))
+        self.parts = int(parts)
+        return self
+
+
+def prepared_order(shape, dtype, ctx, columns=0, lead=0, depth=0,
+                   threads=EXECUTION_SIZE):
+    """The order this target reads a two-dimensional A operand in, or `None`
+    (`multilinear._offer_order`).
+
+    Slot-major (`slot_major_order`).  Both arrangements here read `A` a lane
+    vector at a time, slot by slot: the broadcast chain every depth of a slot
+    in turn, DPAS eight of them per Src1 fragment.  Stored column-major those
+    are a row stride apart, one block message each; stored slot-major they
+    are adjacent, and the ESIMD emitter reads adjacent vectors as one message
+    of up to 256 bytes (`EsimdEmitter._plan_runs`) -- four depths at sixteen
+    lanes, a whole fragment in two.
+
+    Under DPAS the depths are rounded up to whole blocks of eight, so a
+    fragment never runs into the next slot, and the operand is offered as the
+    two TF32 halves the three products multiply (`parts`), planar, so that
+    each half of a fragment is one run too.  Split once on the host instead
+    of in every multiplication of every element: `castTF32` where it was
+    `splitFloatTF32`.  Whether the halves are taken is the caller's to say --
+    only the matrix path reads them.
+
+    `None` where neither arrangement reads it: not under the explicitly
+    vectorized lowering, not sixteen lanes, not F32, not a matrix.
+    """
+    if len(shape) != 2 or ctx is None or not _simd_mode(ctx):
+        return None
+    if not supports(threads, dtype, False):
+        return None
+    rows, cols = (int(x) for x in shape)
+    # The question `strategies` answers for MATRIX, which `PREFERENCES` takes
+    # first wherever it is offered.
+    dpas = enabled(ctx) and atom_for(dtype, columns=columns, lead=lead,
+                                     depth=depth,
+                                     budget=register_budget(ctx)) is not None
+    block = ATOMS['tf32'].k if dpas else 1
+    padded = -(-cols // block) * block
+    return SlotMajorOrder(slot_major_order((rows, cols), threads, padded),
+                          threads, padded,
+                          parts=TF32_SPLIT_TERMS if dpas else 1)
 
 
 def strategies(shape, ctx):
@@ -605,6 +727,10 @@ def matmul(writer, ops, ctx, span):
     threads, dtype, sparse = ops.threads, ops.accumulator, ops.sparse
 
     if span.strategy is Strategy.BROADCAST:
+        if ops.a_parts != 1:
+            raise InternalError(
+                'an operand stored as its TF32 halves reached the broadcast '
+                'chain, which multiplies the floats they were split from')
         return broadcast.matmul(writer, ops, ctx, span)
     if span.start != 0 or span.stop != N:
         # DPAS does not take a range; `plan` never asks for one, and a direct
@@ -616,6 +742,16 @@ def matmul(writer, ops, ctx, span):
             # would produce two halves of a number it never had.  The atom is
             # chosen by the accumulator, so nothing upstream has checked what
             # the operands arrive as.
-            return False
-        return dpas_matmul(writer, C, A, B, M, N, K, kx, threads, dtype, ctx)
+            taken = False
+        else:
+            taken = dpas_matmul(writer, C, A, B, M, N, K, kx, threads, dtype,
+                                ctx, parts=ops.a_parts)
+        if not taken and ops.a_parts != 1:
+            # Declining hands the operation to the nest, which reads one
+            # scalar per element -- of an operand stored as two, the upper
+            # half, and the result off by about a thousandth.
+            raise InternalError(
+                'an operand stored as its TF32 halves for DPAS, and DPAS '
+                'declined the operation; nothing else reads the halves')
+        return taken
     return False

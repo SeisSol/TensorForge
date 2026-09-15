@@ -599,6 +599,12 @@ void splitFloatTF32(UpperT upper, LowerT lower, ValueT value) {
   lower = intel_esimd::simd<tf32, N>(v - hiF);
 }
 
+/// Mirrors `castTF32` in `isycl.h`: one half of an operand stored split.
+template <int N, typename PartT, typename ValueT>
+void castTF32(PartT part, ValueT value) {
+  part = intel_esimd::simd<tf32, N>(intel_esimd::simd<float, N>(value));
+}
+
 } // namespace tensorforge
 
 #endif // SEISSOL_TESTS_SHIM_TENSORFORGE_SYCL_H_

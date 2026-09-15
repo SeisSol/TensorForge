@@ -954,6 +954,14 @@ class EsimdEmitter(Emitter):
                 return allocs[name][1].type.volume
             if isinstance(buf, Value) and isinstance(buf.type, BufferType):
                 return buf.type.volume
+            # A prepared operand is longer than its matrix: its order pads
+            # (`Tensor.storage_order`), and the padding is stored -- which is
+            # what lets a run of a slot-major operand read to the end of its
+            # last slot.
+            obj = getattr(buf, 'obj', None)
+            if (obj is not None
+                    and getattr(obj, 'storage_order', None) is not None):
+                return int(obj.storage_volume())
             view = getattr(buf, 'data_view', None)
             shape = getattr(view, 'shape', None) if view is not None else None
             if not shape:

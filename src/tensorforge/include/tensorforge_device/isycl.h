@@ -203,6 +203,19 @@ ESIMD_INLINE void splitFloatTF32(UpperT upper, LowerT lower, ValueT value) {
   lower = intel_esimd::simd<tf32, N>(v - hiF);
 }
 
+/// One TF32 half of an operand stored split (`storage_parts == 2`), into the
+/// fragment DPAS multiplies.
+///
+/// What `splitFloatTF32` computes, done once on the host for an operand that
+/// is the same for the whole batch (`primitives.intel.prepared_order`): each
+/// half is a float whose low thirteen mantissa bits are zero, so the
+/// conversion is exact and the split is read rather than computed.  Views go
+/// by value, as there.
+template <int N, typename PartT, typename ValueT>
+ESIMD_INLINE void castTF32(PartT part, ValueT value) {
+  part = intel_esimd::simd<tf32, N>(intel_esimd::simd<float, N>(value));
+}
+
 /// A segmented all-reduce over a vector: each group of `Subblock` lanes ends
 /// holding the reduction over the lanes that share its position in the group.
 ///

@@ -280,6 +280,100 @@ def test_every_lead_slot_is_multiplied():
         assert {0, 16, 32, 48} <= rows, m
 
 
+# -- the prepared order: slot-major, and for DPAS the halves --------------- #
+
+def _prepared(case, **options):
+    """`(source, batch-constant operands)` of `case` under ESIMD on pvc."""
+    import contextlib
+    import importlib.util
+    import io
+    from pathlib import Path
+    from tensorforge.common.basic_types import Addressing
+    from tensorforge.generators.generator import Generator
+    path = Path(__file__).parent / 'cases' / f'{case}.py'
+    spec = importlib.util.spec_from_file_location(f'{case}_prepared', path)
+    mod = importlib.util.module_from_spec(spec)
+    with contextlib.redirect_stdout(io.StringIO()):
+        spec.loader.exec_module(mod)
+        gen = Generator(mod.descr_list(), _ctx('esimd', **options))
+        gen.generate()
+    operands = [s.obj for s in gen._scopes.get_global_scope().values()
+                if getattr(s.obj, 'addressing', None) is Addressing.NONE]
+    return gen.get_kernel(), operands
+
+
+def test_the_slot_major_order_is_a_padded_permutation():
+    """Row `s*16 + l` of column `k` at `(s*depth + k)*16 + l`: every cell
+    once, and the rows past 20 and the columns past 9 padding."""
+    order = intel.slot_major_order((20, 9), 16, 16)
+    assert len(order) == 2 * 16 * 16
+    assert sorted(c for c in order if c != -1) == list(range(20 * 9))
+    assert order[(1 * 16 + 3) * 16 + 1] == 17 + 20 * 3
+    assert order[(1 * 16 + 3) * 16 + 4] == -1     # row 20
+    assert order[(0 * 16 + 9) * 16 + 0] == -1     # column 9
+
+
+def test_the_order_is_offered_where_an_arrangement_reads_it():
+    """Under ESIMD at sixteen lanes and F32, which is where the broadcast
+    chain and DPAS are; with DPAS the depths come in whole fragments and the
+    operand in the two halves the three products multiply."""
+    esimd = _ctx('esimd')
+    fma = intel.prepared_order((56, 56), Datatype.F32, esimd, lead=56,
+                               depth=56, threads=16)
+    assert fma.slot_major == (16, 56) and fma.parts == 1
+    dpas = intel.prepared_order((56, 35), Datatype.F32,
+                                _ctx('esimd', tensor_cores=True), columns=9,
+                                lead=56, depth=35, threads=16)
+    assert dpas.slot_major == (16, 40) and dpas.parts == intel.TF32_SPLIT_TERMS
+    assert len(dpas) == 4 * 40 * 16
+    for shape, dtype, ctx, threads in (
+            ((56, 56), Datatype.F32, _ctx('oneapi'), 16),
+            ((56, 56), Datatype.F32, esimd, 32),
+            ((56, 56), Datatype.F64, esimd, 16),
+            ((4, 4, 4), Datatype.F32, esimd, 16)):
+        assert intel.prepared_order(shape, dtype, ctx, threads=threads) is None
+
+
+def test_a_prepared_operator_is_read_in_runs():
+    """`local_flux` at 16 lanes: each 56x56 operator stored slot-major, and
+    its 224 lane vectors read in 56 block messages of four -- where the
+    broadcast chain read them a row stride apart, one message each."""
+    import re
+    src, operands = _prepared('local_flux', lanes_per_mult=16,
+                              prepare_operands=True)
+    assert len(operands) == 4
+    for op in operands:
+        assert op.slot_major == (16, 56) and op.storage_parts == 1
+        assert len(op.storage_order) == 4 * 56 * 16
+    runs = [len(re.findall(m + r'_run\d+;', src))
+            for m in set(re.findall(r'(glb_m\d+)_run\d+;', src))]
+    assert sorted(runs) == [56] * 4
+    plain, _ = _prepared('local_flux', lanes_per_mult=16)
+    assert 3 * src.count('copy_from') < plain.count('copy_from')
+
+
+def test_dpas_reads_the_halves_it_was_stored_as():
+    """With DPAS the operators are stored as their TF32 halves, planar.  Src1
+    is converted from what it reads (`castTF32`) rather than split, and the
+    lower halves are read a plane -- the order's length -- further on.  The
+    view asks the operand for its part count: copied when the view was made,
+    before the order split it, the lower half was read one float on."""
+    import re
+    src, operands = _prepared('local_flux', lanes_per_mult=16,
+                              prepare_operands=True, tensor_cores=True)
+    plane = 4 * 56 * 16
+    for op in operands:
+        assert op.storage_parts == 2 and op.storage_planar
+        assert len(op.storage_order) == plane
+    faces, blocks, slots, depth = 4, 2, 4, 56
+    assert src.count('castTF32<16>') == faces * blocks * slots * depth * 2
+    for m in set(re.findall(r'(glb_m\d+)_run\d+;', src)):
+        offsets = {int(x) for x in
+                   re.findall(m + r' \+ \((\d+)(?:_i32)?\)', src)}
+        assert 0 in offsets and plane in offsets, m
+        assert not offsets & {1, 2, 3}, m
+
+
 @pytest.mark.parametrize('case_file', ['square_notrans', 'csa_alpha'])
 def test_a_run_is_as_wide_as_its_select(case_file):
     """A run of B's lane vector was declared `simd<float, 16 * 8>` around an

@@ -92,6 +92,17 @@ class Tensor:
         #: says which cell each slot holds, for the host; this says how the
         #: kernel addresses it, which a bare permutation cannot.
         self.simt_interleave = None
+        #: `(threads, depth)` when `storage_order` is slot-major
+        #: (`primitives.intel.slot_major_order`): row `s*threads + l` of column
+        #: `k` at `(s*depth + k)*threads + l`, a slot's columns side by side and
+        #: `depth` of them per slot -- the columns, rounded up to what the
+        #: reader takes in one block.  So the lane vectors one slot reads over
+        #: consecutive columns are one contiguous run, which the explicitly
+        #: vectorized lowering reads as one block message where a column-major
+        #: operand costs one per column.  The order says which cell each slot
+        #: holds, for the host; this says how the kernel addresses it
+        #: (`Symbol._slot_major_index`).
+        self.slot_major = None
         self.direction: Union[DataFlowDirection, None] = None
         self.data = data
         self.spp = spp
@@ -410,6 +421,7 @@ class Tensor:
         twin.storage_planar = self.storage_planar
         twin.storage_order = self.storage_order
         twin.simt_interleave = self.simt_interleave
+        twin.slot_major = self.slot_major
         return twin
 
     def get_actual_shape(self):
