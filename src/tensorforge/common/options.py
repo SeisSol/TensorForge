@@ -689,6 +689,21 @@ declare('shared_packing',
             '(order 6, double): 145 KB per multiplication colored, which no '
             'block holds, and 65 KB packed, the most that is ever live.')
 
+declare('register_temporaries',
+        default='scalars',
+        env='TF_REGISTER_TEMPORARIES',
+        doc='Which temporaries a pointwise operation -- elementwise, a '
+            'reduction, a contraction to one value -- reads straight out of '
+            'the register image its producer left them in, rather than having '
+            'the image stored to its shared-memory buffer first and loading it '
+            'back: `none`; `scalars`, the temporaries without axes, which are '
+            'one value on every lane and need neither a buffer nor a barrier; '
+            '`all`, arrays as well where the image spreads the lanes the way '
+            'the buffer would.  SeisSol\'s damage step (order 4, single, 32 '
+            'lanes) stored 398 scalars and loaded them 2061 times, each store '
+            'followed by a barrier; arrays trade the shared buffer for '
+            'registers that stay live until their last reader.')
+
 declare('autotune',
         default='off',
         env='TF_AUTOTUNE',

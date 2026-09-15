@@ -145,7 +145,9 @@ class MultilinearBuilder(OperationBuilder):
     #     which is exactly what a shared placement already does (and what the CUDA
     #     path does for every transposed operand anyway).
     staged = self._residency.get(name)
-    if staged is not None and not self._lane_axis_matches(name, lead_pos):
+    scalar = staged is not None and self._scalar_image(i)
+    if (staged is not None and not scalar
+            and not self._lane_axis_matches(name, lead_pos)):
       if staged.is_preload:
         self._residency.drop(name)
       else:
@@ -177,7 +179,11 @@ class MultilinearBuilder(OperationBuilder):
 
     if name in self._residency and self._resolve_reuse(i, name):
       entry = self._residency.get(name)
-      if placement is Placement.SHARED and entry.home.stype == SymbolType.SharedMem:
+      if scalar:
+        # One value, and every lane holds it: read where it is, whatever the
+        # placement said -- a shared copy adds a store, a barrier and a load.
+        self._ops[i].symbol = entry.image
+      elif placement is Placement.SHARED and entry.home.stype == SymbolType.SharedMem:
         self._instructions.append(StoreRegToShr(context=self._context,
                                                 src=entry.image,
                                                 dest=entry.home,
@@ -340,6 +346,18 @@ class MultilinearBuilder(OperationBuilder):
     own logical box, with its offset rebased onto the image."""
     return SymbolView(staged.symbol, self._ops[i].bbox,
                       [o - s for o, s in zip(self._ops[i].offset, shift)])
+
+  def _scalar_image(self, i) -> bool:
+    """Is operand `i` a temporary without axes, still in its register image?
+
+    Such an image has no lane axis to agree with -- it is one value, the same
+    on every lane -- so `_lane_axis_matches`, which asks for one, is not the
+    question.  Whether it may be read at all is `image_in_place`'s, and the
+    option's (`register_temporaries`).
+    """
+    return (self._ops[i].bbox.rank() == 0
+            and self.image_in_place(self._descr.ops[i], arrays=False)
+            is not None)
 
   def _lane_axis_matches(self, name, lead_pos):
     """Does the staged image spread the dimension this operand needs?

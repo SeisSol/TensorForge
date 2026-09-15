@@ -29,15 +29,20 @@ unique across everything the section produces.
 from abc import abstractmethod
 from typing import List, Optional
 
+from tensorforge.backend.instructions.abstract_instruction import _explicit_simd
 from tensorforge.backend.instructions.builders.abstract_builder import (
     AbstractBuilder)
 from tensorforge.backend.residency import Residency
 from tensorforge.backend.section_plan import SectionPlan
-from tensorforge.backend.symbol import Symbol, SymbolView
+from tensorforge.backend.symbol import Symbol, SymbolType, SymbolView
 from tensorforge.backend.temporaries import Temporaries
 from tensorforge.common.context import Context
 from tensorforge.common.exceptions import GenerationError
+from tensorforge.common.matrix.boundingbox import BoundingBox
 from tensorforge.generators.descriptions import OperationDescription
+
+#: The values of `register_temporaries`, fewest images read in place first.
+REGISTER_TEMPORARIES = ('none', 'scalars', 'all')
 
 
 class OperationBuilder(AbstractBuilder):
@@ -98,10 +103,112 @@ class OperationBuilder(AbstractBuilder):
         if dest is not None:
             views.append(dest)
         for view in views:
-            symbol = self._scopes.get_symbol(view.tensor)
-            if symbol is not None:
-                self._instructions.extend(self._residency.flush(symbol.name))
+            self._settle(view)
         return [self.view_of(view) for view in descr.reads()]
+
+    def resolve_in_place(self, descr, arrays: bool) -> List:
+        """`resolve_operands`, for an operation that can read a register image.
+
+        A temporary whose newest copy is still the register image its producer
+        computed into is read there; everything else settles as before.  The
+        image *is* the value -- the writeback is pending because the registers
+        are the only copy -- so reading it gives what the store and the load
+        back would have given, without either of them and without the barrier
+        the store needs before another lane may load.
+
+        The entry is left where it is.  A later reader that cannot take the
+        image settles it then, one that can reads it too, and at the end of the
+        section a temporary's image is dropped (`Residency.flush_all`): its
+        shared buffer is then never written, and never sized.  The destination
+        settles for the reason `resolve_operands` gives.
+
+        `arrays` says whether the operation can read an image with axes at
+        all; `image_in_place` has the rest.
+        """
+        reads = list(descr.reads())
+        images = [self.image_in_place(view, arrays) for view in reads]
+        for view, image in zip(reads, images):
+            if image is None:
+                self._settle(view)
+        dest = descr.writes()
+        if dest is not None:
+            self._settle(dest)
+        return [image or self.view_of(view)
+                for view, image in zip(reads, images)]
+
+    def image_in_place(self, subtensor, arrays: bool) -> Optional[SymbolView]:
+        """The register image `subtensor` can be read from, or None.
+
+        Only a temporary's: a writeback pending to a shared buffer, which is a
+        value nothing else holds and nothing after the section reads.  A global
+        result has a home other elements and later kernels see, a preload is a
+        copy in whatever orientation its contraction staged it, and an atomic
+        writeback is this element's share of a sum rather than its value.
+
+        An image without axes is one value, held by every lane, so it serves
+        any reader (`register_temporaries=scalars`).  One with axes (`all`)
+        spreads a dimension over the lanes, and a pointwise operation lays its
+        own loop over them without being asked how.  So the image serves only
+        where that loop lands on it as it would on the buffer: the lane axis is
+        the buffer's; the window starts on a whole round of the lanes, which is
+        all `Symbol.build_address` can apply to a register image; a lane holds
+        one element per round; and the lanes are threads -- under explicit SIMD
+        the elementwise reads through names (`_body_named`), which carry no
+        lane term.
+        """
+        mode = self._context.get_user_options().register_temporaries
+        if mode not in REGISTER_TEMPORARIES:
+            raise ValueError(
+                f'register_temporaries={mode!r}: expected one of '
+                f'{", ".join(REGISTER_TEMPORARIES)}')
+        if mode == 'none':
+            return None
+        symbol = self._scopes.get_symbol(subtensor.tensor)
+        entry = self._residency.get(symbol.name) if symbol is not None else None
+        if (entry is None or entry.is_preload or entry.atomic
+                or entry.home.stype != SymbolType.SharedMem
+                or entry.image.stype != SymbolType.Register):
+            return None
+        # An image is allocated in the kernel's floating-point type
+        # (`Temporaries.register_array`) whatever the tensor holds, so a
+        # condition is a number there and a boolean again only in its buffer.
+        # Read in place, `and(a, b)` over two of them was `&` on two floats,
+        # which CUDA refuses (SeisSol's damage step).
+        held = getattr(entry.image, 'datatype', None)
+        declared = getattr(symbol.obj, 'datatype', None)
+        if held is not None and declared is not None and held != declared:
+            return None
+        rank = subtensor.bbox.rank()
+        if rank == 0:
+            return SymbolView(entry.image, subtensor.bbox)
+        if mode != 'all' or not arrays or entry.covered is None:
+            return None
+        offset = list(subtensor.offset or [0] * rank)
+        if not entry.holds(subtensor.bbox, offset):
+            return None
+        image = entry.image
+        # The window in the image's own coordinates: position `r` holds
+        # element `r + shift`, and the pointwise instructions index by the box.
+        move = [o - s for o, s in zip(offset, entry.shift or [0] * rank)]
+        box = BoundingBox([l + m for l, m in zip(subtensor.bbox.lower(), move)],
+                          [u + m for u, m in zip(subtensor.bbox.upper(), move)])
+        lead = list(image.lead_dims)
+        threads = self._num_threads
+        if (len(lead) != 1 or lead != list(symbol.lead_dims)
+                or image.lead_axes is not None
+                or getattr(image, 'linear_runs', None)
+                or getattr(image, 'lead_width', 1) != 1
+                or _explicit_simd(self._context)
+                or (threads and box.lower()[lead[0]] % threads)):
+            return None
+        return SymbolView(image, box, [0] * rank)
+
+    def _settle(self, subtensor) -> None:
+        """Write a pending image of `subtensor`'s tensor to where its symbol
+        says, so a read through the symbol sees the newest value."""
+        symbol = self._scopes.get_symbol(subtensor.tensor)
+        if symbol is not None:
+            self._instructions.extend(self._residency.flush(symbol.name))
 
     @abstractmethod
     def alloc_destination(self, descr, operands) -> SymbolView:

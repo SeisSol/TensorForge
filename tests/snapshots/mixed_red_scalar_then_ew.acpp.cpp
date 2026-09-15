@@ -1,5 +1,5 @@
 // === base name ===
-kernel_0a9b6436839ac4ce
+kernel_0ca72d399185c380
 
 // === header ===
 #ifndef TENSORFORGE_LAUNCH_TYPES
@@ -27,9 +27,9 @@ struct LaunchConfig {
 };
 } // namespace tensorforge
 #endif
-inline constexpr tensorforge::LaunchInfo launch_info_kernel_0a9b6436839ac4ce = {{16, 16, 1}, 16, 16, 1, 16, 4096, false, true, 1};
-tensorforge::LaunchConfig launch_config_kernel_0a9b6436839ac4ce(size_t numElements0, void* streamPtr = nullptr);
-void launcher_kernel_0a9b6436839ac4ce(const float * m0, size_t m0_extraOffset, float * m1, size_t m1_extraOffset, size_t numElements0, unsigned * flags0 = nullptr, void* streamPtr = nullptr);
+inline constexpr tensorforge::LaunchInfo launch_info_kernel_0ca72d399185c380 = {{16, 16, 1}, 16, 16, 1, 16, 4096, false, true, 1};
+tensorforge::LaunchConfig launch_config_kernel_0ca72d399185c380(size_t numElements0, void* streamPtr = nullptr);
+void launcher_kernel_0ca72d399185c380(const float * m0, size_t m0_extraOffset, float * m1, size_t m1_extraOffset, size_t numElements0, unsigned * flags0 = nullptr, void* streamPtr = nullptr);
 
 
 // === launcher ===
@@ -58,7 +58,7 @@ struct LaunchConfig {
 };
 } // namespace tensorforge
 #endif
-tensorforge::LaunchConfig launch_config_kernel_0a9b6436839ac4ce(size_t numElements0, void* streamPtr) {
+tensorforge::LaunchConfig launch_config_kernel_0ca72d399185c380(size_t numElements0, void* streamPtr) {
   (void)numElements0;
   (void)streamPtr;
   sycl::range<3> block (16, 16, 1);
@@ -77,21 +77,21 @@ tensorforge::LaunchConfig launch_config_kernel_0a9b6436839ac4ce(size_t numElemen
   config.cooperative = false;
   return config;
 }
-void launcher_kernel_0a9b6436839ac4ce(const float * m0, size_t m0_extraOffset, float * m1, size_t m1_extraOffset, size_t numElements0, unsigned * flags0, void* streamPtr) {
-  const tensorforge::LaunchConfig config = launch_config_kernel_0a9b6436839ac4ce(numElements0, streamPtr);
+void launcher_kernel_0ca72d399185c380(const float * m0, size_t m0_extraOffset, float * m1, size_t m1_extraOffset, size_t numElements0, unsigned * flags0, void* streamPtr) {
+  const tensorforge::LaunchConfig config = launch_config_kernel_0ca72d399185c380(numElements0, streamPtr);
   sycl::range<3> block (config.block[0], config.block[1], config.block[2]);
   sycl::range<3> grid (config.grid[0], config.grid[1], config.grid[2]);
   if (streamPtr == nullptr) {
     throw std::invalid_argument("stream may not be null!");
   }
   sycl::queue *stream = static_cast<sycl::queue *>(streamPtr);
-  kernel_kernel_0a9b6436839ac4ce(stream, grid, block, m0, m0_extraOffset, m1, m1_extraOffset, numElements0, flags0);
+  kernel_kernel_0ca72d399185c380(stream, grid, block, m0, m0_extraOffset, m1, m1_extraOffset, numElements0, flags0);
   CHECK_ERR;
 }
 
 
 // === kernel ===
-inline void kernel_kernel_0a9b6436839ac4ce(sycl::queue *stream, sycl::range<3> group_count, sycl::range<3> group_size, const float * m0, size_t m0_extraOffset, float * m1, size_t m1_extraOffset, size_t numElements0, unsigned * flags0) {
+inline void kernel_kernel_0ca72d399185c380(sycl::queue *stream, sycl::range<3> group_count, sycl::range<3> group_size, const float * m0, size_t m0_extraOffset, float * m1, size_t m1_extraOffset, size_t numElements0, unsigned * flags0) {
   stream->submit([&](sycl::handler &cgh) {
     sycl::accessor<float, 1, sycl::access::mode::read_write, sycl::access::target::local> totalShrMem (1024, cgh); {
       cgh.parallel_for(sycl::nd_range<3>{{group_count.get(2) * group_size.get(2), group_count.get(1) * group_size.get(1), group_count.get(0) * group_size.get(0)}, {group_size.get(2), group_size.get(1), group_size.get(0)}}, [=](sycl::nd_item<3> item)  {
@@ -113,74 +113,68 @@ inline void kernel_kernel_0a9b6436839ac4ce(sycl::queue *stream, sycl::range<3> g
           float* localShrMem0 = &totalShrMem[64 * item.get_local_id(1) + 0];
           float* tempShrMem = &localShrMem0[48];
           float * __restrict__ s0 = &localShrMem0[0];
-          float * __restrict__ s1 = &localShrMem0[0];
-          for (size_t v5_batchId0 = (item.get_local_id(1) + item.get_group().get_local_range(1) * (item.get_group().get_group_id(2))); v5_batchId0 < numElements0; v5_batchId0 += (item.get_group_range(2) * item.get_group().get_local_range(1))) {
-            size_t v6_ahead1 = v5_batchId0 + (item.get_group_range(2) * item.get_group().get_local_range(1));
-            size_t v8_batchId1 = (v6_ahead1 < numElements0) ? v6_ahead1 : v5_batchId0;
-            const bool allowed = flags0 == nullptr ? true : static_cast<bool>(flags0[v5_batchId0]);
+          for (size_t v4_batchId0 = (item.get_local_id(1) + item.get_group().get_local_range(1) * (item.get_group().get_group_id(2))); v4_batchId0 < numElements0; v4_batchId0 += (item.get_group_range(2) * item.get_group().get_local_range(1))) {
+            size_t v5_ahead1 = v4_batchId0 + (item.get_group_range(2) * item.get_group().get_local_range(1));
+            size_t v7_batchId1 = (v5_ahead1 < numElements0) ? v5_ahead1 : v4_batchId0;
+            const bool allowed = flags0 == nullptr ? true : static_cast<bool>(flags0[v4_batchId0]);
             if (allowed) {
-              const float *const __restrict__ glb_m0 = &m0[v5_batchId0 * 40 + 0 + m0_extraOffset];
-              float *const __restrict__ glb_m1 = &m1[v5_batchId0 * 40 + 0 + m1_extraOffset];
+              const float *const __restrict__ glb_m0 = &m0[v4_batchId0 * 40 + 0 + m0_extraOffset];
+              float *const __restrict__ glb_m1 = &m1[v4_batchId0 * 40 + 0 + m1_extraOffset];
               float r0[3]{};
               // r0 = abs(glb_m0)
-              int32_t v18_lead = item.get_local_id(2) % 16;
+              int32_t v17_lead = item.get_local_id(2) % 16;
               #pragma unroll
-              for (int32_t v19_k0 = 0; v19_k0 < 2; ++v19_k0) {
-                float v22_data = glb_m0[(v18_lead + (v19_k0 * 16))];
-                r0[v19_k0] = (sycl::fabs(v22_data));
+              for (int32_t v18_k0 = 0; v18_k0 < 2; ++v18_k0) {
+                float v21_data = glb_m0[(v17_lead + (v18_k0 * 16))];
+                r0[v18_k0] = (sycl::fabs(v21_data));
               }
-              if (v18_lead < 8) {
-                float v27_data = glb_m0[(v18_lead + 32_i32)];
-                r0[2] = (sycl::fabs(v27_data));
+              if (v17_lead < 8) {
+                float v26_data = glb_m0[(v17_lead + 32_i32)];
+                r0[2] = (sycl::fabs(v26_data));
               }
               // s0 = store{r>s}(localShrMem0, r0);
               #pragma unroll
-              for (int32_t v32_i0 = 0; v32_i0 < 2; ++v32_i0) {
-                float v33_data = r0[v32_i0];
-                s0[(v18_lead + (v32_i0 * 16))] = v33_data;
+              for (int32_t v31_i0 = 0; v31_i0 < 2; ++v31_i0) {
+                float v32_data = r0[v31_i0];
+                s0[(v17_lead + (v31_i0 * 16))] = v32_data;
               }
-              bool v36_g = v18_lead < 8;
-              if (v36_g) {
-                float v37_data = r0[2];
-                s0[(v18_lead + 32_i32)] = v37_data;
+              bool v35_g = v17_lead < 8;
+              if (v35_g) {
+                float v36_data = r0[2];
+                s0[(v17_lead + 32_i32)] = v36_data;
               }
               float r1[1]{};
               sycl::group_barrier(item.get_sub_group());
               // r1 = max(s0, dims=[0])
-              float v43_data = s0[v18_lead];
-              float v46_data = s0[(v18_lead + 16_i32)];
-              float v47_r = sycl::max(float(v43_data), float(v46_data));
-              float v52_sel0;
-              if (v36_g) {
-                float v50_data = s0[(v18_lead + 32_i32)];
-                v52_sel0 = v50_data;
+              float v42_data = s0[v17_lead];
+              float v45_data = s0[(v17_lead + 16_i32)];
+              float v46_r = sycl::max(float(v42_data), float(v45_data));
+              float v51_sel0;
+              if (v35_g) {
+                float v49_data = s0[(v17_lead + 32_i32)];
+                v51_sel0 = v49_data;
               }
               else {
-                v52_sel0 = -INFINITY;
+                v51_sel0 = -INFINITY;
               }
-              float v53_r = sycl::max(float(v47_r), float(v52_sel0));
-              float v55_r = sycl::max(float(v53_r), float((sycl::permute_group_by_xor(item.get_sub_group(), v53_r, 1))));
-              float v57_r = sycl::max(float(v55_r), float((sycl::permute_group_by_xor(item.get_sub_group(), v55_r, 2))));
-              float v59_r = sycl::max(float(v57_r), float((sycl::permute_group_by_xor(item.get_sub_group(), v57_r, 4))));
-              r1[0] = (sycl::max(float(v59_r), float((sycl::permute_group_by_xor(item.get_sub_group(), v59_r, 8)))));
-              sycl::group_barrier(item.get_sub_group());
-              // s1 = store{r>s}(localShrMem0, r1);
-              float v62_data = r1[0];
-              s1[0] = v62_data;
-              sycl::group_barrier(item.get_sub_group());
-              // glb_m1 = mul(glb_m0, s1)
-              float v67_data = s1[0];
+              float v52_r = sycl::max(float(v46_r), float(v51_sel0));
+              float v54_r = sycl::max(float(v52_r), float((sycl::permute_group_by_xor(item.get_sub_group(), v52_r, 1))));
+              float v56_r = sycl::max(float(v54_r), float((sycl::permute_group_by_xor(item.get_sub_group(), v54_r, 2))));
+              float v58_r = sycl::max(float(v56_r), float((sycl::permute_group_by_xor(item.get_sub_group(), v56_r, 4))));
+              r1[0] = (sycl::max(float(v58_r), float((sycl::permute_group_by_xor(item.get_sub_group(), v58_r, 8)))));
+              // glb_m1 = mul(glb_m0, r1)
+              float v65_data = r1[0];
               #pragma unroll
-              for (int32_t v63_k0 = 0; v63_k0 < 2; ++v63_k0) {
-                int32_t v65_lead = v18_lead + (v63_k0 * 16);
-                float v66_data = glb_m0[v65_lead];
-                glb_m1[v65_lead] = ((v66_data * v67_data));
+              for (int32_t v61_k0 = 0; v61_k0 < 2; ++v61_k0) {
+                int32_t v63_lead = v17_lead + (v61_k0 * 16);
+                float v64_data = glb_m0[v63_lead];
+                glb_m1[v63_lead] = ((v64_data * v65_data));
               }
-              if (v36_g) {
-                int32_t v70_lead = v18_lead + 32_i32;
-                float v71_data = glb_m0[v70_lead];
-                float v72_data = s1[0];
-                glb_m1[v70_lead] = ((v71_data * v72_data));
+              if (v35_g) {
+                int32_t v68_lead = v17_lead + 32_i32;
+                float v69_data = glb_m0[v68_lead];
+                float v70_data = r1[0];
+                glb_m1[v68_lead] = ((v69_data * v70_data));
               }
               sycl::group_barrier(item.get_sub_group());
             }
