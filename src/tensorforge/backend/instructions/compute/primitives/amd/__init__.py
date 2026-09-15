@@ -485,7 +485,8 @@ def _matmul(writer, ops, ctx, span, width):
                         tile=fit.tile, lead_wave=lead_wave,
                         lead_quad=lead_quad, quad=width,
                         mults=(mults if lead_wave is not None
-                               or lead_quad is not None else 1))
+                               or lead_quad is not None else 1),
+                        lead_zero=ops.A_zero)
     mults = wave_mults(threads, ops.a_uniform, ops.lead_width, dtype)
     if (mults > 1 and ops.lockstep and ops.A_wave is not None
             and not ops.a_shared):

@@ -2146,6 +2146,7 @@ class Generator:
                   stype=SymbolType.SharedMem, obj=stand_in.obj)
     dest.block_shared = True
     # a verbatim copy, laid out as the member is (`GlobalLoaderBuilder`)
+    # a verbatim copy: indexed as the tensor is (`GlobalLoaderBuilder`)
     dest.verbatim = True
     self._scopes.add_symbol(dest)
     loader = GlbToShrLoader(context=self._context, src=src, dest=dest,

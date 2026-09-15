@@ -366,10 +366,24 @@ def _shared_fragment(writer, tile, ftype, threads, regs):
 
 def matmul32(writer: Writer, C, B, A, M, N, K, kx, threads, dtype, sparse,
              ctx, start, stop, width=1, tile=None, lead_wave=None, mults=1,
-             lead_quad=None, quad=0):
+             lead_quad=None, quad=0, lead_zero=None):
     with writer.AnonymousScope():
 
         ftype = ScalarType(dtype)
+
+        def zero(i, r):
+            """Whether the lead operand's rows of slot `i` are known to be
+            zero at its step `r` (`MatmulOperands.A_zero`): the MFMA for that
+            step multiplies nothing and is left out, with its read.
+
+            One step covers the `threads` rows of a slot -- a batch-constant
+            operand has the same rows in every multiplication sharing the
+            wave -- so sixteen lanes a multiplication ask about sixteen rows.
+            `r` is the lead's own step, as `A_zero` counts it; the shared
+            matrix's is `kx + r` (see below).
+            """
+            return (lead_zero is not None
+                    and lead_zero(i * threads, (i + 1) * threads, r, r + 1))
 
         def write_matmul(tile, start, end):
             block = tile.block
@@ -453,10 +467,15 @@ def matmul32(writer: Writer, C, B, A, M, N, K, kx, threads, dtype, sparse,
                                 group = mults * quad
                                 for g in range(0, K, quad):
                                     if g % group == 0 and g + group <= K:
+                                        if all(zero(i, s)
+                                               for s in range(g, g + group)):
+                                            continue
                                         lead = lead_quad(writer, i, g // quad,
                                                          mults)
                                         for q in range(mults):
                                             for c in range(quad):
+                                                if zero(i, g + q * quad + c):
+                                                    continue
                                                 acc = step(
                                                     acc, kx + g + q * quad + c,
                                                     writer.extract(lead, c,
@@ -468,10 +487,16 @@ def matmul32(writer: Writer, C, B, A, M, N, K, kx, threads, dtype, sparse,
                                         continue
                                     for q0 in range(g, min(g + group, K),
                                                     quad):
+                                        steps = [q0 + c for c in
+                                                 range(min(quad, K - q0))]
+                                        if all(zero(i, s) for s in steps):
+                                            continue
                                         lead = lead_quad(writer, i, q0 // quad)
-                                        for c in range(min(quad, K - q0)):
+                                        for c, s in enumerate(steps):
+                                            if zero(i, s):
+                                                continue
                                             acc = step(
-                                                acc, kx + q0 + c,
+                                                acc, kx + s,
                                                 writer.extract(lead, c, ftype),
                                                 0)
                                 for jj in range(min(block, N - j)):
@@ -490,14 +515,21 @@ def matmul32(writer: Writer, C, B, A, M, N, K, kx, threads, dtype, sparse,
                                 # each step was read `mults` times.  A tail
                                 # shorter than the group reads as before.
                                 for g in range(0, K, mults):
+                                    if all(zero(i, r) for r in
+                                           range(g, min(g + mults, K))):
+                                        continue
                                     lead = (lead_wave(writer, i, g, mults)
                                             if g + mults <= K else None)
                                     if lead is not None and lead is not False:
                                         for q in range(mults):
+                                            if zero(i, g + q):
+                                                continue
                                             acc = step(acc, kx + g + q, lead,
                                                        _blgp(mults, q))
                                         continue
                                     for r in range(g, min(g + mults, K)):
+                                        if zero(i, r):
+                                            continue
                                         lead = B(writer, None, i, r)
                                         if lead is None or lead is False:
                                             continue
@@ -523,10 +555,13 @@ def matmul32(writer: Writer, C, B, A, M, N, K, kx, threads, dtype, sparse,
                                     dkk = min(block, dk - kk)
                                     for kkk in range(dkk):
                                         # The lead's step, `kx` behind the
-                                        # block's; none before the window.
+                                        # block's; none before the window, and
+                                        # none the description says is zero.
                                         s = k + kk + kkk
                                         tB[kkk] = (B(writer, None, i, s - kx)
-                                                   if s >= kx else None)
+                                                   if s >= kx
+                                                   and not zero(i, s - kx)
+                                                   else None)
                                     for kkk in range(dkk, block):
                                         tB[kkk] = writer.const(0.0, ftype)
                                     for kkk in range(dkk):

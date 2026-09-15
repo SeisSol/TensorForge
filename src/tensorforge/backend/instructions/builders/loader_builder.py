@@ -44,6 +44,10 @@ class GlobalLoaderBuilder(AbstractBuilder):
     # an order the host stored it in is the image's order as well -- which is
     # what lets a reader of the image take that order (`_offer_simt_order`,
     # `Symbol._interleaved_load`).
+    # Copied verbatim, with the tensor's own bounding box (`GlbToShrLoader`):
+    # an index into the image is a cell of the tensor.  Stated so a reader of
+    # the tensor's values -- `skip_known_zeros` -- can tell this image from a
+    # staging window, whose origin is wherever the window starts.
     dest.verbatim = True
 
     self._scopes.add_symbol(dest)

@@ -391,12 +391,13 @@ class MultilinearInstruction(ComputeInstruction):
             return False
         symbol = self._ops[i].symbol
         obj = getattr(symbol, 'obj', None)
-        # The tensor itself, read where the caller put it: an index then is a
-        # cell of the tensor, which is what its values are indexed by.  A
-        # staged copy -- in shared memory under `preload_globals`, or in
-        # registers -- is addressed in its own window, shifted, and is left
-        # alone rather than translated back.
-        if (symbol.stype is not SymbolType.Global or not isinstance(obj, Tensor)
+        # The tensor itself, or a verbatim copy of it -- the section's
+        # preloaded image, which `GlobalLoaderBuilder` lays out exactly as the
+        # tensor: an index then is a cell of the tensor, which is what its
+        # values are indexed by.  A copy staged for one operation is addressed
+        # in its own window, shifted, and is left alone rather than
+        # translated back.
+        if (not self._indexed_as_tensor(symbol) or not isinstance(obj, Tensor)
                 or obj.addressing is not Addressing.NONE or not obj.has_values()):
             return False
         data = obj.get_values()
@@ -426,6 +427,17 @@ class MultilinearInstruction(ComputeInstruction):
             axes.append(cells)
         return all(data[cell] == 0 for cell in itertools.product(*axes))
 
+    @staticmethod
+    def _indexed_as_tensor(symbol) -> bool:
+        """Is an index into `symbol` a cell of its tensor?
+
+        The tensor in global memory, or a copy made verbatim -- the section's
+        preloaded image of a batch-constant operand (`verbatim`, set where
+        the copy is made).  A per-operation staging window is not: its origin
+        is wherever the window starts."""
+        return (symbol.stype is SymbolType.Global
+                or bool(getattr(symbol, 'verbatim', False)))
+
     def _zero_block(self, e_lo, e_hi, k_lo, k_hi, span) -> bool:
         """`_known_zero` for a matrix path: is `A` zero over a block?
 
@@ -440,7 +452,7 @@ class MultilinearInstruction(ComputeInstruction):
             return False
         symbol = self._ops[0].symbol
         obj = getattr(symbol, 'obj', None)
-        if (symbol.stype is not SymbolType.Global or not isinstance(obj, Tensor)
+        if (not self._indexed_as_tensor(symbol) or not isinstance(obj, Tensor)
                 or obj.addressing is not Addressing.NONE or not obj.has_values()
                 or len(self._ks) != 1
                 or sorted(self._opdim_to_nks[0]) != ['k0', 'n0']):
