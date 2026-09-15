@@ -278,18 +278,26 @@ class EsimdEmitter(Emitter):
             nm = name or self.name(v)
             ptr = self._as_pointer(expr)
             part = self._valid_width(s, v)
-            if part is not None:
+            head = self._head_width(s, v)
+            if part is not None or head is not None:
                 # A full-lane tail: the vector is the whole wave, memory past
-                # `valid` is not ours.  Zero, then read the part that is.
+                # `valid` is not ours.  A window's head: the elements before
+                # `head` are not the operand's.  Zero, then read the part that
+                # is.
                 elem = v.type.base.ctype()
+                lo = head or 0
+                hi = self._vector_width(v) if part is None else part
                 self.writer(f'{self.ctype(v.type, v)} {nm}({self.zero(v.type)});')
-                slm = self._slm_load_width(s.args[0], elem, part, ptr)
+                if hi <= lo:
+                    return
+                at = ptr if not lo else f'({ptr}) + {lo}'
+                slm = self._slm_load_width(s.args[0], elem, hi - lo, at)
                 if slm is None:
                     tmp = f'{nm}_part'
-                    self.writer(f'{self.simd_type(elem, part)} {tmp};')
-                    self.writer(f'{tmp}.copy_from({ptr});')
+                    self.writer(f'{self.simd_type(elem, hi - lo)} {tmp};')
+                    self.writer(f'{tmp}.copy_from({at});')
                     slm = tmp
-                self.writer(f'{nm}.template select<{part}, 1>(0) = {slm};')
+                self.writer(f'{nm}.template select<{hi - lo}, 1>({lo}) = {slm};')
                 return
             slm = self._slm_load(s.args[0], v, ptr)
             if slm is not None:
@@ -375,6 +383,12 @@ class EsimdEmitter(Emitter):
             return None
         part = valid * (v.type.length or 1)
         return part if part < self._vector_width(v) else None
+
+    def _head_width(self, s, v: Value):
+        """Elements at the front of `v` a read may not touch: a window that
+        starts inside the block (`LeadIndex.first`, the `head` attribute)."""
+        head = s.attr('head') if getattr(s, 'op', None) == Op.LOAD else None
+        return head * (v.type.length or 1) if head else None
 
     def _slm_load_width(self, base, elem: str, width: int, address: str):
         lex = self._lexic()
@@ -1028,7 +1042,9 @@ class EsimdEmitter(Emitter):
             if (not isinstance(v.type, ScalarType) or v.type.length
                     or v.layout is None or not v.distributed
                     or v.type.base not in self._VECTOR_ELEMS
-                    or x.attr('nontemporal')):
+                    or x.attr('nontemporal') or x.attr('head')):
+                # A head keeps its narrower read (`_declare_unpredicated`);
+                # a run reads the whole vector.
                 continue
             flat = self._const_flat(buf, x.args[1:], consts)
             if flat is None:

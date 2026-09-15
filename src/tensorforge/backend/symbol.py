@@ -381,7 +381,7 @@ class LeadIndex:
 
   # TODO: make nonlead a variable
   def __init__(self, nonlead, block, stride, value=None, width=1,
-               offset=0, valid=None, pad=False):
+               offset=0, valid=None, pad=False, first=0):
     self._nonlead = nonlead
     #: The lanes past `valid` land on the destination's padding and may be
     #: written -- with zeros (`Symbol.store`).  See `StoreRegToGlb._pad_writable`.
@@ -390,6 +390,14 @@ class LeadIndex:
     #: a full-lane tail (`LeadLoop.full_lane`): the arithmetic runs on
     #: `block` lanes and only a memory access is held to `valid`.
     self._valid = valid
+    #: Lanes, from the base, that hold no data: the head of a window that
+    #: starts inside a block and is read a block at a time -- the matrix
+    #: paths' lead-indexed operand, whose contraction starts `kx` elements
+    #: in.  A memory access is held off them as it is held to `valid`
+    #: (`Symbol._valid_access`).  The element before a window is not the
+    #: operand's, and before a buffer's first element there may be nothing:
+    #: `s[-1]` in shared memory stops the kernel on an A100.
+    self._first = first
     self._block = block
     self._stride = stride
     self._value = value
@@ -463,9 +471,13 @@ class LeadIndex:
   def pad(self) -> bool:
     return self._pad
 
+  @property
+  def first(self) -> int:
+    return self._first
+
   def _key(self):
     return (self._nonlead, self._block, self._stride, self._value,
-            self._width, self._offset, self._valid, self._pad)
+            self._width, self._offset, self._valid, self._pad, self._first)
 
   def __eq__(self, other):
     # Structural, including `nonlead`: this is value equality of the *index*,
@@ -484,6 +496,7 @@ class LeadIndex:
     off = '' if self._offset == 0 else f', offset={self._offset}'
     ok = '' if self._valid is None else f', valid={self._valid}'
     ok += ', pad' if self._pad else ''
+    ok += f', first={self._first}' if self._first else ''
     return (f'LeadIndex({self._nonlead!r}, block={self._block}, '
             f'stride={self._stride}{tail}{wide}{off}{ok})')
 
@@ -514,7 +527,7 @@ class LeadIndex:
 
   def with_offset(self, offset):
     return LeadIndex(self._nonlead, self._block, self._stride, self._value,
-                     self._width, offset, self._valid, self._pad)
+                     self._width, offset, self._valid, self._pad, self._first)
 
   def nonlead(self):
     return self._nonlead
@@ -2464,23 +2477,86 @@ class Symbol:
         return lead[0].valid
     return None
 
-  def _valid_access(self, writer, index, valid, ltype=None):
-    """How an access holds itself to a full-lane tail's `valid` lanes.
+  def _memory_first(self, index):
+    """How many lanes, from the base, a window's head holds a memory access
+    off (`LeadIndex.first`), or 0.
+
+    Memory only, as for `_memory_valid`: a register image holds those lanes
+    like any others.  And only where the head may reach before the buffer.
+    Where lane 0's element is a known number and not negative, the lanes
+    before the window read the buffer's own elements -- the previous
+    column's, which nothing here uses -- and the read stays whole, so that
+    the one of that column at the same place still serves both.
+    """
+    if self.stype not in (SymbolType.Global, SymbolType.Batch,
+                          SymbolType.SharedMem):
+      return 0
+    first = 0
+    for i in index:
+      lead = unwrap_lead(i)
+      if lead is not None and lead[0].first:
+        first = lead[0].first
+        break
+    if not first:
+      return 0
+    origin = self._lane_origin(index)
+    return 0 if origin is not None and origin >= 0 else first
+
+  def _lane_origin(self, index):
+    """The element lane 0 of `index` reads, where every term is a number:
+    `sum_d (i_d - lower_d) * stride_d`, as `_wide_claim` has it."""
+    view = self.data_view
+    if view is None:
+      return None
+    strides, lowers = view.get_dim_strides(), view.get_dim_offsets()
+    if len(index) != len(strides):
+      return None
+    total = 0
+    for idx, stride, lower in zip(index, strides, lowers):
+      lead = unwrap_lead(idx)
+      if lead is not None:
+        li, shift = lead
+        if not isinstance(li.nonlead(), (int, np.integer)):
+          return None
+        pos = li.lead() + shift
+      else:
+        shift = 0
+        while isinstance(idx, VarOffset):
+          shift += idx.offset
+          idx = idx.variable
+        if isinstance(idx, Immediate):
+          idx = idx._value
+        if not isinstance(idx, (int, np.integer)):
+          return None
+        pos = int(idx) + shift
+      if not isinstance(pos, (int, np.integer)):
+        return None
+      total += (pos - lower) * stride
+    return total
+
+  def _valid_access(self, writer, index, valid, ltype=None, first=0):
+    """How an access holds itself to a full-lane tail's `valid` lanes, and
+    off a window head's `first` ones.
 
     As the `valid` attribute where the lowering spells a narrower transfer
     (ESIMD: a 24-wide read into a zeroed 32-wide vector, a 24-wide write out
     of it), and as a predicate on the lane elsewhere -- a read then folds to
     `lane < valid ? p[i] : 0`, and a write keeps its branch.  Zero, not
     merely defined, so that the padding lanes' arithmetic stays finite.
+    The head is `lane >= first` in the same predicate, and the `head`
+    attribute where the lowering spells a narrower transfer: a read of the
+    lanes from `first` on into a zeroed vector.
     """
-    if valid is None:
+    if valid is None and not first:
       return {}
     if getattr(writer, '_explicit_simd', lambda: False)():
-      return {'valid': valid}
+      held = {'valid': valid} if valid is not None else {}
+      return {**held, 'head': first} if first else held
     lead = None
     for i in index:
       unwrapped = unwrap_lead(i)
-      if unwrapped is not None and unwrapped[0].valid is not None:
+      if unwrapped is not None and (unwrapped[0].valid is not None
+                                    or unwrapped[0].first):
         lead = unwrapped[0]
         break
     lane = writer.lane_index(lead._block, lead._stride, hint='lead')
@@ -2488,7 +2564,14 @@ class Symbol:
     # use.  A constant value here was declared wherever the builder first made
     # it, and a pass that moves the read ahead of that (the wrap pass does)
     # left it naming a variable that was never declared.
-    return {'predicate': writer.op('lt', BOOL, lane, valid, hint='g')}
+    held = None
+    if first:
+      held = writer.op('ge', BOOL, lane, first, hint='g')
+    if valid is not None:
+      below = writer.op('lt', BOOL, lane, valid, hint='g')
+      held = below if held is None else writer.op('and', BOOL, held, below,
+                                                  hint='g')
+    return {'predicate': held}
 
   def _memory_pad(self, index):
     """The full-lane lead index whose padding lanes this memory access may
@@ -2695,13 +2778,13 @@ class Symbol:
         # the caller decides is *which* part; what that means for the access
         # is one addend.
         valid = self._memory_valid(read_index)
-        if valid is not None and parts > 1:
+        first = self._memory_first(read_index)
+        if (valid is not None or first) and parts > 1:
           raise InternalError(
-              f'{self.name}: a full-lane tail reached a split read')
-        # A full-lane tail (`valid`) takes the interleave too: its lanes past
-        # the data read the order's padding, inside the buffer.
+              f'{self.name}: a full-lane tail or a window head reached a '
+              f'split read')
         if (bc_lane is None and w == 1 and not part and parts == 1
-                and shift is None
+                and valid is None and not first and shift is None
                 and getattr(self.obj, 'simt_interleave', None) is not None
                 and self.stype in (SymbolType.Global, SymbolType.Batch)):
           interleaved = self._interleaved_load(writer, context, read_index,
@@ -2786,7 +2869,8 @@ class Symbol:
                                                          else part)),
                             layout=layout_of(read_index, self.num_threads),
                             nontemporal=nontemp,
-                            **self._valid_access(writer, read_index, valid, ltype))
+                            **self._valid_access(writer, read_index, valid, ltype,
+                                                 first))
         if bc_lane is None or not broadcast:
           # `broadcast=False` keeps the register index and drops the
           # cross-lane read of it.  The caller is then saying it will use the
@@ -2816,11 +2900,12 @@ class Symbol:
         return writer.rawexpr(text, value, type_=ltype, hint='bc',
                               pure=True, movable=True, crosslane=True)
 
-      if self._memory_valid(read_index) is not None and not (
+      if (self._memory_valid(read_index) is not None
+              or self._memory_first(read_index)) and not (
           variable is not None and bc_lane is None):
         raise InternalError(
-            f'{self.name}: a full-lane tail reached a text read, which cannot '
-            f'hold itself to the lanes that hold data')
+            f'{self.name}: a full-lane tail or a window head reached a text '
+            f'read, which cannot hold itself to the lanes that hold data')
       pre_access = self.access(context, read_index, writer, addrs)
       if bc_lane is not None:
         access = context.get_vm().get_lexic().broadcast(
@@ -2856,7 +2941,8 @@ class Symbol:
                     layout=layout_of(index, self.num_threads),
                     nontemporal=nontemp, extern=str(variable),
                     **self._valid_access(writer, index,
-                                         self._memory_valid(index), ltype))
+                                         self._memory_valid(index), ltype,
+                                         self._memory_first(index)))
         return True
       if self.stype == SymbolType.Global:
         # The hint goes on the read and the broadcast goes around it.  Only a

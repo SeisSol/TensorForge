@@ -1201,8 +1201,15 @@ class MultilinearInstruction(ComputeInstruction):
                     idx = [k % size + ks00]
                 else:
                     sizeL = -(-(size + kx) // span)
+                    # The block holding the window's first element starts at
+                    # a whole span, `ks00 % span` elements before it.  The
+                    # paths pair step `s` with lane `s % threads` and never
+                    # use those lanes; a block read still touches them, and
+                    # in memory they are not the operand's (`LeadIndex`).
+                    head = (ks00 % span) // width if k % sizeL == 0 else 0
                     idx = [LeadIndex(k % sizeL + ks00 // span,
-                                     self._num_threads, 1, width=width)]
+                                     self._num_threads, 1, width=width,
+                                     first=head)]
                 k //= size
                 for mi, mx in self._ks[1:]:
                     size = mx - mi

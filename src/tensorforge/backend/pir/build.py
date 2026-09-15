@@ -1051,7 +1051,8 @@ class IRBuilder:
              nontemporal: bool = False,
              extern: str = None,
              shift: Optional[Operand] = None,
-             valid: Optional[int] = None) -> Value:
+             valid: Optional[int] = None,
+             head: Optional[int] = None) -> Value:
         """``layout`` is how the loaded value ends up spread over the lanes.
 
         ``shift`` is added to the index after the swizzle -- see `_shifted`.
@@ -1104,6 +1105,10 @@ class IRBuilder:
             # decides how to hold the access to it, and so that `load_cse`
             # does not take a partial read for a whole one.
             attrs += [('valid', valid)]
+        if head:
+            # Lanes before a window's start (`LeadIndex.first`), the other
+            # end of the same statement.
+            attrs += [('head', head)]
         attrs = tuple(attrs)
 
         self._emit_op(Op.LOAD, (v,), (base,) + tuple(indices),
