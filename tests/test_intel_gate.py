@@ -491,7 +491,14 @@ def _products(src):
     """`acc += (B[lane] * A)` triples, by accumulator."""
     import re
     out = {}
-    for m in re.finditer(r'(\w+_acc) \+= \(\((\w+)\[(\d+)\]\) \* (\w+)\)', src):
+    # The scalar goes through a cast where the element's type is not the
+    # accumulator's, so the read may sit inside `static_cast<T>(...)`.  Without
+    # this the match finds nothing and every assertion below passes or fails
+    # for the wrong reason -- `test_one_b_vector_per_output_column` was green
+    # on an empty set.
+    for m in re.finditer(
+            r'(\w+_acc) \+= \(\((?:static_cast<\w+>\()?(\w+)\[(\d+)\]\)?\) \* (\w+)\)',
+            src):
         out.setdefault(m.group(1), []).append(
             (m.group(2), int(m.group(3)), m.group(4)))
     return out
