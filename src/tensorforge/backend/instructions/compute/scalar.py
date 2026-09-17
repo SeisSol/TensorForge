@@ -156,16 +156,24 @@ class ScalarContractionInstruction(ComputeInstruction):
         """`view` at `coords`, in its own index space."""
         from tensorforge.backend.pir.core import ScalarType
         if view.symbol.stype == SymbolType.Scalar:
-            # A named factor, passed by value -- and movable only where the
-            # name is bound around the body rather than by it.
+            # A factor passed by value: the number its binding published, if
+            # the binding belongs to the body being built.
             #
-            # A bare name has no operands, so `licm` reads it as invariant and
-            # is right for a kernel parameter.  A merged run's stand-in is the
-            # other case: its name is bound by the loop's own table, which is
-            # a pinned raw statement with no value to depend on, so hoisting
-            # the read moves it out of the scope the name exists in.  Not a
-            # slower kernel -- an undeclared identifier, and SeisSol's damage
-            # step has 36 of them once its 362-operation run rolls.
+            # Read as a bare name instead, it is a value with no operands --
+            # which is what `licm` reads as loop-invariant, rightly for a
+            # kernel parameter and wrongly for a merged run's stand-in, whose
+            # name the loop's own table binds.  Hoisted, the read leaves the
+            # scope the name is declared in: not a slower kernel but an
+            # undeclared identifier, 36 of them once SeisSol's damage step
+            # rolls its run of 362 operations.  Taking the value instead of
+            # the name is the def-use edge that settles it, and settles it
+            # for every pass rather than for the one that was caught.
+            bound = view.symbol.pir_scalar(writer)
+            if bound is not None:
+                return bound
+            # No binding in this body -- a legacy writer, or a name bound
+            # around it.  Then the name is all there is, and a stand-in's is
+            # pinned so that the fallback cannot do what the value prevents.
             return writer.rawexpr(
                 view.symbol.name, type_=ScalarType(self._context.fp_type),
                 hint='s', pure=True,

@@ -1301,10 +1301,29 @@ class Symbol:
     #: rather than assuming the common one and emitting a dangling id in the
     #: rare one.
     self._pir_buffer = None
+    #: The same for an operand that *is* a number rather than addressing one.
+    #:
+    #: Kept apart from the buffer on purpose.  A buffer is what `load` and
+    #: `store` index -- `name[addr]` -- and a scalar passed by value has no
+    #: address to index; a scalar that varies per element is a buffer of one
+    #: number and belongs on the other field, where the addressing is.  One
+    #: field for both would make the reader guess which kind it holds.
+    self._pir_scalar = None
     self._users = []
 
   def set_pir_buffer(self, builder, value) -> None:
     self._pir_buffer = (self._builder_uid(builder), value)
+
+  def set_pir_scalar(self, builder, value) -> None:
+    self._pir_scalar = (self._builder_uid(builder), value)
+
+  def pir_scalar(self, builder):
+    """The bound number, if it belongs to the body currently being built."""
+    if self._pir_scalar is None:
+      return None
+    owner, value = self._pir_scalar
+    uid = self._builder_uid(builder)
+    return value if uid is not None and owner == uid else None
 
   @staticmethod
   def _builder_uid(builder):

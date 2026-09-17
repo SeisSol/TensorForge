@@ -242,7 +242,7 @@ class GetElementPtr(AbstractInstruction):
       if self._src.obj.addressing == Addressing.SCALAR:
         # A table over scalars selects a value, and the binding is that value.
         self._emit_binding(writer, f'{datatype} {self._dest.name}',
-                           self._table.access(self._variant))
+                           self._table.access(self._variant), scalar=True)
         return
       lhs = self._declarator(datatype, 'const')
       # The table is declared generic -- its members may come from either
@@ -313,9 +313,11 @@ class GetElementPtr(AbstractInstruction):
         writer(f'{self._dest.name} = '
                f'{rhs.replace(self._INDEX_HOLE, self.batch_index())};')
     else:
-      self._emit_binding(writer, lhs, rhs)
+      self._emit_binding(writer, lhs, rhs,
+                         scalar=batch_addressing == Addressing.SCALAR)
 
-  def _emit_binding(self, writer, lhs: str, rhs: str) -> None:
+  def _emit_binding(self, writer, lhs: str, rhs: str,
+                    scalar: bool = False) -> None:
     """The binding, as a definition rather than a statement.
 
     It was a bare statement, so `Effect.UNKNOWN`, so it conflicted with every
@@ -345,20 +347,29 @@ class GetElementPtr(AbstractInstruction):
     distinct bases as never aliasing, and a window that claimed its own
     identity would let a write through the underlying buffer reorder past a
     read through the window.
+
+    `scalar` says the binding *is* the number rather than addressing one --
+    `Addressing.SCALAR`, whose pointer type is the empty string.  Then the
+    value is typed as a scalar and published on the symbol's scalar field, so
+    a reader takes a number where a number is what the text holds.  Only that
+    addressing: a scalar that varies per element is a buffer of one number,
+    read through an address like any other operand, and typing it here as a
+    value would say it is the same for every element.
     """
     if hasattr(writer, 'decl_expr'):
-      from tensorforge.backend.pir.core import BufferType
+      from tensorforge.backend.pir.core import BufferType, ScalarType
       # Name the element index as an operand.  The address is
       # `&m2[batchId0 * 324 + ...]`, and with the element only in the text a
       # pass that moves this binding to another one has nothing to substitute
       # -- which is exactly why `wrap_prefetch` could not advance a transfer
       # that reads through it.
       text, args = self._splice_index(writer, rhs)
+      type_ = (ScalarType(self._dest.get_fptype()) if scalar else
+               BufferType(self._dest.get_fptype(), (1,), MemSpace.GLOBAL,
+                          readonly=self._src.obj.direction
+                          == DataFlowDirection.SOURCE))
       value = writer.decl_expr(
-          lhs, text,
-          BufferType(self._dest.get_fptype(), (1,), MemSpace.GLOBAL,
-                     readonly=self._src.obj.direction
-                     == DataFlowDirection.SOURCE),
+          lhs, text, type_,
           self._src, args=args, kind=Effect.READ, hint=self._dest.name,
           extern=self._dest.name, alias_root=self._src,
           # Only where nothing is written through it.  `restrict` promises
@@ -367,10 +378,14 @@ class GetElementPtr(AbstractInstruction):
           # while the original is still live -- two pointers into one buffer,
           # which is a promise kept as long as both only read and broken the
           # moment one writes.
-          quals=((Qual.RESTRICT,)
+          quals=(() if scalar else
+                 (Qual.RESTRICT,)
                  if self._src.obj.direction == DataFlowDirection.SOURCE
                  else ()))
-      self._dest.set_pir_buffer(writer, value)
+      if scalar:
+        self._dest.set_pir_scalar(writer, value)
+      else:
+        self._dest.set_pir_buffer(writer, value)
     else:
       writer(f'{lhs} = {rhs};')
 
