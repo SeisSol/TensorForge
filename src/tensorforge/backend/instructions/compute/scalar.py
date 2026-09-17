@@ -156,10 +156,20 @@ class ScalarContractionInstruction(ComputeInstruction):
         """`view` at `coords`, in its own index space."""
         from tensorforge.backend.pir.core import ScalarType
         if view.symbol.stype == SymbolType.Scalar:
-            # a named factor, passed by value
-            return writer.rawexpr(view.symbol.name,
-                                  type_=ScalarType(self._context.fp_type),
-                                  hint='s', pure=True, movable=True)
+            # A named factor, passed by value -- and movable only where the
+            # name is bound around the body rather than by it.
+            #
+            # A bare name has no operands, so `licm` reads it as invariant and
+            # is right for a kernel parameter.  A merged run's stand-in is the
+            # other case: its name is bound by the loop's own table, which is
+            # a pinned raw statement with no value to depend on, so hoisting
+            # the read moves it out of the scope the name exists in.  Not a
+            # slower kernel -- an undeclared identifier, and SeisSol's damage
+            # step has 36 of them once its 362-operation run rolls.
+            return writer.rawexpr(
+                view.symbol.name, type_=ScalarType(self._context.fp_type),
+                hint='s', pure=True,
+                movable=not getattr(view.symbol.obj, 'is_variant', False))
         offset = list(getattr(view, 'offset', None) or [0] * len(coords))
         value = view.symbol.load(writer, self._context, None,
                                  [add_offset(c, o)
