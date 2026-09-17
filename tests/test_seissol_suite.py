@@ -323,3 +323,40 @@ def test_every_kernel_builds(request, system, config, backend, arch):
         except Exception as error:     # noqa: BLE001 -- collected, all named
             failed.append(f'{kernel}: {type(error).__name__}: {error}')
     assert not failed, '\n'.join(failed[:20])
+
+
+def test_a_merged_run_carries_the_temporaries_it_reads_back():
+    """What the body reads before it assigns rides the back edge -- including
+    the values that are not `+=` and the ones that are temporaries.
+
+    The residency keys its entries by *symbol* name, and the loop spelled its
+    keys from the tensor instead: `glb_` and the tensor's name, which is the
+    symbol for a kernel parameter and for nothing else.  A temporary is `s233`
+    where its tensor is `t232`, so the damage step's seven integrals were
+    never found -- the peeled copy left each as a register image, the chain
+    was never closed, and `I` and `sourceI` came out at three fifths of what
+    the written-out kernel computes (A100, every input scale) while
+    `transportDer(0..3)`, which are parameters, were right.
+    """
+    from tensorforge.backend.instructions.ptr_manip import VariantLoop
+
+    system = 'damage-nonlinearck'
+    gen = Generator(_read(system, f'{system}-o4-s', 'gpu_damageStep'),
+                    Context(arch='sm_86', backend='cuda', fp_type=Datatype.F32))
+    with contextlib.redirect_stdout(io.StringIO()), warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        gen.generate()
+
+    def loops(instructions):
+        for instr in instructions:
+            if isinstance(instr, VariantLoop):
+                yield instr
+            for region in instr.regions() or ():
+                yield from loops(region)
+
+    found = [loop for section in gen._sections
+             for loop in loops(section.stream)]
+    assert found, 'the damage step merged nothing'
+    biggest = max(found, key=lambda loop: len(loop.region))
+    assert biggest.carried, ('the longest run carries nothing round its back '
+                             'edge, though its body reads its integrals back')

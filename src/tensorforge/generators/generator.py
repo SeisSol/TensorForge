@@ -1939,9 +1939,9 @@ class Generator:
     # residency established already, and peeling again writes a second copy of
     # the body for nothing.
     accumulated_keys = [
-        f'{GeneralLexicon.GLOBAL_MEM_PREFIX}{d.writes().tensor.name}'
-        for d in loop.body(0)
-        if getattr(d, 'add', False) and d.writes() is not None]
+        key for key in (self._residency_key(d.writes()) for d in loop.body(0)
+                        if getattr(d, 'add', False) and d.writes() is not None)
+        if key is not None]
     resident = bool(accumulated_keys) and all(
         self._residency.get(key) is not None for key in accumulated_keys)
 
@@ -2032,11 +2032,17 @@ class Generator:
           return bool(getattr(descr, 'add', False))
       return False
 
+    # Every destination the body reads before it assigns, and not only the
+    # accumulating ones.  `carries` is the whole question, and asking it of
+    # `+=` destinations alone answers it for a chain written as `X += ...`
+    # and not for one written as `X = f(X, ...)` -- the same dependency, from
+    # a frontend that folded the read into the operands.  SeisSol's damage
+    # step has fifteen of the second kind and none of the first.
     keys = list(dict.fromkeys(
-        f'{GeneralLexicon.GLOBAL_MEM_PREFIX}{descr.writes().tensor.name}'
-        for descr in body
-        if getattr(descr, 'add', False) and descr.writes() is not None
-        and carries(descr.writes().tensor)))
+        key for key in (self._residency_key(descr.writes()) for descr in body
+                        if descr.writes() is not None
+                        and carries(descr.writes().tensor))
+        if key is not None))
     before = {}
     for key in keys:
       entry = self._residency.get(key)
@@ -2113,14 +2119,34 @@ class Generator:
       dest = descr.writes()
       if dest is None or not getattr(dest.tensor, 'is_variant', False):
         continue
-      key = f'{GeneralLexicon.GLOBAL_MEM_PREFIX}{dest.tensor.name}'
-      if self._residency.get(key) is not None:
+      key = self._residency_key(dest)
+      if key is not None and self._residency.get(key) is not None:
         region.extend(self._residency.flush(key))
 
     self._section.ir.extend(allocations)
     self._section.ir.append(
         VariantLoop(self._context, counter, loop.iterations, region, tables,
                     start=0 if resident else 1, carried=tuple(carried)))
+
+  def _residency_key(self, view) -> Optional[str]:
+    """What the residency knows this destination by, or None.
+
+    Entries are keyed by *symbol* name, and spelling the key from the tensor
+    instead -- `glb_` and the tensor's name -- agrees with that for exactly
+    one kind of operand: a kernel parameter, whose binding is `glb_m115`
+    where the tensor is `m115`.  A temporary is `s233` where its tensor is
+    `t232`, so every one of them missed, silently, and a merged run carried
+    its parameters round the back edge and none of its temporaries.
+
+    SeisSol's damage step is where that shows: the seven integrals its
+    outputs are read from are temporaries, the peeled copy leaves each as a
+    register image, and with the chain never closed every iteration read the
+    image the peel left.  `I` and `sourceI` came out at three fifths of what
+    the written-out kernel computes, while `transportDer(0..3)` -- kernel
+    parameters, and so the one kind the key matched -- were right.
+    """
+    sym = self._scopes.get_symbol(view.tensor)
+    return None if sym is None else sym.name
 
   def _stages(self, stand_in, written) -> bool:
     """Whether a merged run's hole is staged per iteration (`stage_members`):
