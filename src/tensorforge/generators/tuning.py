@@ -400,20 +400,35 @@ def _geometry(result: Build) -> Tuple[int, int, int]:
 def static_score(result: Build):
     """What the build alone says, per multiplication rather than per block.
 
-    Past the register file first (`_over_budget`), then past the instruction
-    cache (`_icache_over`).  Then multiplications
+    Past the register file first (`_over_budget`): a build that spills is
+    slower than any difference the other keys can see.  Then multiplications
     resident per SM -- blocks times the multiplications a block holds, since
     eight lanes put four times as many in a block as 32.
     Then the least clocks one SM needs per multiplication (`analysis.pipeline`):
     the busiest pipe at its peak rate, from the statements the emitter counted
     by what they occupy -- where the build counted nothing, the warp issue
-    slots of the arithmetic written out, as before.  Then the modeled register
-    footprint, both in granules of sixteen registers (`_GRANULE`).  Last the
-    length of the source: where nothing else differs, the smaller kernel --
-    merged, on every measurement taken (GB200's winners, sm_120 by 5 to 24 %,
-    and fewer spills from hipcc).  Per block and per lane, as `lanes.search`
-    ranks, the default 32 lanes came first at every size GB200 measured, and
-    it was the slowest at three of five.
+    slots of the arithmetic written out, as before.
+
+    Only then how far the body is past the instruction cache
+    (`_icache_over`), and that is where measuring moved it (2026-09-17,
+    ~/tf-probe/tune_order.py, 100 items on sm_120, geomean of the pick against
+    the default: 0.911 here against 0.973 with the cache ahead of everything).
+    It used to rank second, as a cliff: a body that does not fit is fetched
+    again on every iteration of the batch loop.  The cliff is real where one
+    candidate fits and another does not -- which is what merging local_flux
+    decides -- but ahead of the issue estimate it also decides between two
+    candidates that both overflow, and there the smaller one is not the
+    faster one.  SeisSol's elastic time derivative at order 8: rolled by 17 it
+    is 230 kB past the cache and whole 625 kB, and whole is 28 % faster.  The
+    same key picked `k_roll=11` for the order 6 derivative, which is 75 %
+    slower than the default.  Ranking it as a cliff only (fits or not) fixes
+    the rolling but keeps three of four such picks unmade -- 0.920 -- so the
+    excess ranks after the issue estimate and nothing ranks before it.
+
+    Then the modeled register footprint, in granules of sixteen registers
+    (`_GRANULE`).  Last the length of the source: where nothing else differs,
+    the smaller kernel -- merged, on every measurement taken (GB200's winners,
+    sm_120 by 5 to 24 %, and fewer spills from hipcc).
     """
     if not result.ok:
         return None
@@ -424,8 +439,8 @@ def static_score(result: Build):
         mults = gen.launch_config().mults_per_block
         resident = min(resident, blocks * mults)
     issue = _least_cycles(gen, lanes, wave)
-    return (_granule(_over_budget(result)), _icache_over(result), -resident,
-            issue, _granule(gen.peak_pressure or 0),
+    return (_granule(_over_budget(result)), -resident, issue,
+            _icache_over(result), _granule(gen.peak_pressure or 0),
             len(gen.get_kernel() or ''))
 
 
