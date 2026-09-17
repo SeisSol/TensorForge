@@ -842,6 +842,20 @@ class Generator:
             size = self._context.fp_type.size()
             cap = self._context.get_vm().get_hw_descr() \
                 .max_local_mem_size_per_block
+            # Which of the two bounds bit, because they ask for different
+            # answers: shared memory for a narrower multiplication or fewer
+            # preloaded operators, the thread count for a narrower one only.
+            # `RegmaxBlockPolicy` caps a block at 128 threads on NVIDIA and
+            # 256 elsewhere, so a multiplication 512 lanes wide got no block
+            # and was refused as though its 11 KB of shared memory were the
+            # problem.
+            asked = per_mult * size + obj.get_global_size() * size
+            if asked <= cap:
+              raise GenerationError(
+                  f'one multiplication is {self._num_threads} threads wide '
+                  f'and no block holds one: the block is capped below that, '
+                  f'while its {asked} B of shared memory would fit the '
+                  f'{cap} B a block has')
             raise GenerationError(
                 f'one multiplication needs {per_mult * size} B of shared '
                 f'memory ({per_mult} elements, plus {obj.get_global_size() * size}'

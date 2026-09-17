@@ -187,21 +187,44 @@ def test_a_table_over_constants_holds_their_numbers():
 
 
 def test_a_multiplication_that_does_not_fit_is_refused():
-    """At order 6 in double precision one multiplication of the damage step
-    needs more shared memory than a block has, colored.  The block was then
-    sized to hold no multiplication at all -- height 0, the window never
-    declared -- and the source went out as if nothing had happened."""
+    """At order 7 in double precision one multiplication of the damage step
+    needs more shared memory than a block has.  The block was then sized to
+    hold no multiplication at all -- height 0, the window never declared --
+    and the source went out as if nothing had happened.  Order 6 stood here
+    until the known-zero steps and `shared_packing` brought it under the
+    limit; order 7 is the first that still does not fit."""
     from tensorforge.common.context import Options
     from tensorforge.common.exceptions import GenerationError
 
     system = 'damage-nonlinearck'
-    gen = Generator(_read(system, f'{system}-o6-d', 'gpu_damageStep'),
+    gen = Generator(_read(system, f'{system}-o7-d', 'gpu_damageStep'),
                     Context(arch='sm_86', backend='cuda', fp_type=Datatype.F64,
                             options=Options(merge_variants=False,
                                             shared_packing=False)))
     with contextlib.redirect_stdout(io.StringIO()), warnings.catch_warnings():
         warnings.simplefilter('ignore')
         with pytest.raises(GenerationError, match='shared memory'):
+            gen.generate()
+
+
+def test_a_multiplication_wider_than_a_block_says_so():
+    """The other way to get no multiplication per block, and it used to be
+    reported as the first: `RegmaxBlockPolicy` caps a block at 128 threads on
+    NVIDIA, so a multiplication 512 lanes wide gets none -- while its shared
+    memory, half a kilobyte, fits a hundred times over."""
+    from tensorforge.common.exceptions import GenerationError
+    from tensorforge.generators.lanes import LaneConfig, deduce
+
+    descrs = _read('elastic-linearck', 'elastic-linearck-o2-s', 'gpu_volume')
+    context = Context(arch='sm_86', backend='cuda', fp_type=Datatype.F32)
+    rows = deduce([op for d in descrs for op in d.operations()],
+                  context).num_active_threads
+    gen = Generator(descrs, context,
+                    lanes=LaneConfig(num_threads=512, num_active_threads=rows,
+                                     lead_width=1))
+    with contextlib.redirect_stdout(io.StringIO()), warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        with pytest.raises(GenerationError, match='no block holds one'):
             gen.generate()
 
 
