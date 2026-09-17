@@ -45,6 +45,27 @@ class Context:
     #: register budget is per kernel and the widest body is what has to fit.
     self.peak_pressure: Optional[int] = None
 
+    #: The same figure split by which register file holds it: the peak of the
+    #: lane-varying values and the peak of the ones a whole wave agrees on.
+    #: They are taken at their own program points, so they do not add up to
+    #: `peak_pressure`.
+    #:
+    #: Two files, because on AMD they are two: a wave-uniform value is an
+    #: SGPR, of which a wave has about a hundred, and the scalar unit is a pipe
+    #: of its own.  SeisSol's damage step fills both on gfx1150 -- 107 SGPRs
+    #: with 117 spilled beside 256 VGPRs -- and one figure against
+    #: `max_reg_per_thread` shows neither.  On NVIDIA the uniform datapath
+    #: carries integer and address arithmetic only, so a uniform float is a
+    #: vector register there and the split is a diagnostic rather than a
+    #: budget.
+    self.peak_lane_pressure: Optional[int] = None
+    self.peak_uniform_pressure: Optional[int] = None
+
+    #: Lanes one multiplication is spread over, once the generator has settled
+    #: it.  Read where only the context is to hand -- the shared body is built
+    #: by a classmethod -- to tell whether mult-uniform is also wave-uniform.
+    self.lane_threads: Optional[int] = None
+
     #: Arithmetic operations written out so far, or None (`record_work`).
     self.emitted_work: Optional[int] = None
 
@@ -60,9 +81,19 @@ class Context:
     #: 'global.read' -> bytes, or None.
     self.memory_bytes: Optional[dict] = None
 
-  def record_pressure(self, value: int) -> None:
+  def record_pressure(self, value: int, lane: Optional[int] = None,
+                      uniform: Optional[int] = None) -> None:
     if self.peak_pressure is None or value > self.peak_pressure:
       self.peak_pressure = value
+    # Each file keeps its own maximum: the body with the widest register image
+    # need not be the one holding the most uniform values, and a budget is
+    # per file.
+    if lane is not None and (self.peak_lane_pressure is None
+                             or lane > self.peak_lane_pressure):
+      self.peak_lane_pressure = lane
+    if uniform is not None and (self.peak_uniform_pressure is None
+                                or uniform > self.peak_uniform_pressure):
+      self.peak_uniform_pressure = uniform
 
   def record_work(self, value: int = 1) -> None:
     """Count arithmetic the emitter wrote out.

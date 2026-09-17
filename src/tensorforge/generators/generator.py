@@ -357,6 +357,12 @@ class Generator:
     #: because the budget is per kernel and the widest body is what has to
     #: fit.
     self.peak_pressure: Optional[int] = None
+    #: The same, split by the file that holds it: lane-varying values, and the
+    #: ones a whole wave agrees on.  A scalar register file is AMD's; see
+    #: `Context.peak_lane_pressure`.  Peaks of their own, so they do not add
+    #: up to `peak_pressure`.
+    self.peak_lane_pressure: Optional[int] = None
+    self.peak_uniform_pressure: Optional[int] = None
     #: Arithmetic operations this build wrote out (`Context.record_work`).
     self.emitted_work: Optional[int] = None
     #: Instructions laid down, in emitter units (`Context.record_code`); what
@@ -610,6 +616,8 @@ class Generator:
     # previous build would be attributed to this one, and a maximum never
     # falls back on its own.
     self._context.peak_pressure = None
+    self._context.peak_lane_pressure = None
+    self._context.peak_uniform_pressure = None
     self._context.emitted_work = None
     self._context.code_units = None
     self._context.issue_mix = None
@@ -656,6 +664,8 @@ class Generator:
     self._base_kernel_name = name
     self.tuned = pick
     self._context.peak_pressure = None
+    self._context.peak_lane_pressure = None
+    self._context.peak_uniform_pressure = None
     self._context.emitted_work = None
     self._context.code_units = None
 
@@ -1195,6 +1205,8 @@ class Generator:
 
     self._kernel = writer.get_src()
     self.peak_pressure = self._context.peak_pressure
+    self.peak_lane_pressure = self._context.peak_lane_pressure
+    self.peak_uniform_pressure = self._context.peak_uniform_pressure
     self.emitted_work = self._context.emitted_work
     self.code_units = self._context.code_units
     self.issue_mix = self._context.issue_mix
@@ -1462,6 +1474,9 @@ class Generator:
     self._num_threads = config.num_threads
     self._num_active_threads = config.num_active_threads
     self._lead_width = config.lead_width
+    # Where only the context is to hand -- the shared body is built by a
+    # classmethod -- this is what says whether mult-uniform is wave-uniform.
+    self._context.lane_threads = config.num_threads
 
   def _preload_admits(self, symbol) -> bool:
     """Whether `preload_globals` may stage this batch-constant operand."""

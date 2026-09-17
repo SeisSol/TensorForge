@@ -44,6 +44,16 @@ class HwDecription:
     self.max_reg_per_thread = (
         parseBytes(param_table['max_reg_per_thread'])
         if param_table.get('max_reg_per_thread') is not None else None)
+    #: Scalar register file one *wave* has, where the target holds values the
+    #: whole wave agrees on apart from the lane-varying ones.  AMD's SGPRs;
+    #: None elsewhere, and not because the others have nothing of the kind:
+    #: NVIDIA's uniform datapath carries integer and address arithmetic only,
+    #: so a uniform *float* is a vector register there and no budget of its
+    #: own applies.  `Context.peak_uniform_pressure` is what it is compared
+    #: against.
+    self.max_scalar_reg_per_wave = (
+        parseBytes(param_table['max_scalar_reg_per_wave'])
+        if param_table.get('max_scalar_reg_per_wave') is not None else None)
     self.max_threads_per_sm = param_table['max_threads_per_sm']
     self.max_block_per_sm = param_table['max_block_per_sm']
     self.vendor = param_table['name']

@@ -15,6 +15,30 @@ from tensorforge.backend.pir.core import (Access, Effect, MemSpace,
                                           Participants, Uniformity)
 
 
+def _record_pressure(context, body, simd: bool,
+                     num_threads: Optional[int] = None) -> None:
+  """Measure `body` and hand the figure to the context, split by file.
+
+  What separates the two files is whether a whole wave agrees on the value,
+  and that is a fact about the geometry rather than about the value: a
+  multiplication narrower than a wave holds several per wave, so mult-uniform
+  is then not wave-uniform.  `Participants.WAVE.arrival` answers exactly that
+  question for barriers, and the answer is the same one here.
+
+  The thread count comes from the instruction where there is one and from the
+  context otherwise -- the shared body is built by a classmethod, which has no
+  instruction to ask.
+  """
+  from tensorforge.backend.pir.core import Participants
+  wave = context.get_vm().get_hw_descr().vec_unit_length
+  threads = num_threads or getattr(context, 'lane_threads', None) or wave
+  split: List[int] = []
+  total = pir.pressure(body, in_bytes=True, explicit_simd=simd,
+                       by_file=split,
+                       wave_uniform=Participants.WAVE.arrival(threads, wave))
+  context.record_pressure(total, *split)
+
+
 def _explicit_simd(context) -> bool:
   """Whether this kernel is lowered with the lane in the type.
 
@@ -414,9 +438,7 @@ class AbstractInstruction(ABC):
         for w in why:
           print(f'wrap: declined -- {w}')
     if getattr(context, 'measure_pressure', False):
-      context.record_pressure(
-          pir.pressure(body, in_bytes=True,
-                       explicit_simd=_explicit_simd(context)))
+      _record_pressure(context, body, _explicit_simd(context))
     pir.emit(body, writer, context)
 
   def through_pir(self, writer: Writer, build) -> None:
@@ -471,8 +493,8 @@ class AbstractInstruction(ABC):
     # the sake of the callers that search over configurations, and they are
     # the only ones that read it.
     if getattr(self._context, 'measure_pressure', False):
-      self._context.record_pressure(
-          pir.pressure(body, in_bytes=True, explicit_simd=simd))
+      _record_pressure(self._context, body, simd,
+                       getattr(self, '_num_threads', None))
     if self._context.get_user_options().ir_stats:
       print(f'{type(self).__name__}: {sum(1 for _ in pir.walk(body))} Knoten, '
             f'Registerdruck {pir.pressure(body)} Werte, '

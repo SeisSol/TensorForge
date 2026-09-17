@@ -81,6 +81,12 @@
   # AMDGPUBaseInfo.cpp.  gfx908 inherits it -- its AGPRs are a separate file
   # the compiler spills into, not addressable VGPRs.
   max_reg_per_thread: 1kB
+  # 102 SGPRs of 4 bytes per *wave*, not per lane: `getAddressableNumSGPRs`
+  # for GFX9.  A value the whole wave agrees on lives here and is computed by
+  # the scalar unit, a pipe of its own -- which is why the register model
+  # counts it apart (`Context.peak_uniform_pressure`).  SeisSol's damage step
+  # fills this file on gfx1150 and spills 117 of them.
+  max_scalar_reg_per_wave: 408B
   vec_unit_length: 64
   max_local_mem_size_per_block: 64kB
   max_num_threads: 1024
@@ -122,6 +128,8 @@
   max_argument_size: 4kB
   # 256 VGPRs per lane in wave32 and wave64 alike, through gfx12.
   max_reg_per_thread: 1kB
+  # 106 SGPRs of 4 bytes per wave from GFX10 on (`getAddressableNumSGPRs`).
+  max_scalar_reg_per_wave: 424B
   vec_unit_length: 32
   # What one work-group may allocate, not what a WGP holds: 128 kB per WGP,
   # 64 kB per work-group.  gfx1150 reports 65536 for MaxSharedMemoryPerBlock

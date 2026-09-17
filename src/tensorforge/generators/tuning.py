@@ -546,13 +546,47 @@ def _over_budget(result: Build) -> float:
     budget = getattr(hw, 'max_reg_per_thread', None)
     peak = result.generator.peak_pressure
     if not (budget and peak):
-        return 0
+        return _over_scalar_budget(result)
     if hw.vendor == 'amd':
         # hipcc allocates about 1.26 registers per modeled four bytes, so the
         # byte budget alone let eight lanes at b = 56 through (2449 B against
         # 2048) that gfx942 spilled 2 KB for.  In bytes, like the rest.
-        return max(0.0, 4 * register_estimate(result) - budget)
-    return max(0, peak - budget)
+        #
+        # Against the *whole* figure and not the lane-varying part of it,
+        # although the vector file is what this budget is: the fit was taken
+        # over totals, and feeding it a smaller number without refitting moves
+        # every estimate down by however much of a kernel is uniform.  The
+        # scalar file gets its own term instead.
+        return (max(0.0, 4 * register_estimate(result) - budget)
+                + _over_scalar_budget(result))
+    return max(0, peak - budget) + _over_scalar_budget(result)
+
+
+def _over_scalar_budget(result: Build) -> float:
+    """How far the wave-uniform values are past the scalar register file.
+
+    A second file and a second budget, on the targets that have one: AMD keeps
+    what a whole wave agrees on in SGPRs, about a hundred of them per wave, and
+    runs it on a pipe of its own.  A model with one number cannot see that file
+    fill -- SeisSol's damage step at order 4 on gfx1150 allocates 107 SGPRs and
+    spills 117 more while its VGPRs are also full.
+
+    A floor rather than an estimate, and the difference is stated because it is
+    large: the compiler also keeps addresses, loop counters and the kernel's
+    own arguments there, and `pir.pressure` counts none of them (an address
+    offset is an immediate -- see `_affine_costs`).  The same damage step
+    models 336 B of 424 B here.  So it catches a body whose *values* alone
+    overflow the file, which is what a scorer can act on, and stays quiet where
+    the overflow is the compiler's own bookkeeping.
+    """
+    if not result.ok:
+        return 0.0
+    hw = result.context.get_vm().get_hw_descr()
+    budget = getattr(hw, 'max_scalar_reg_per_wave', None)
+    peak = getattr(result.generator, 'peak_uniform_pressure', None)
+    if not (budget and peak):
+        return 0.0
+    return max(0.0, peak - budget)
 
 
 @dataclass

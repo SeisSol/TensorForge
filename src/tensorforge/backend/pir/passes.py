@@ -1404,7 +1404,9 @@ def _index(body: Tuple[Stmt, ...], start: int = 0):
 
 def pressure(body: Tuple[Stmt, ...], in_bytes: bool = False,
              explicit_simd: bool = True,
-             profile: Optional[List[Tuple[Stmt, int]]] = None) -> int:
+             profile: Optional[List[Tuple[Stmt, int]]] = None,
+             by_file: Optional[List[int]] = None,
+             wave_uniform: Uniformity = Uniformity.MULT) -> int:
     """Peak simultaneously live SSA values, or the bytes they occupy.
 
     `in_bytes` is what a caller comparing against a register budget has to
@@ -1437,6 +1439,22 @@ def pressure(body: Tuple[Stmt, ...], in_bytes: bool = False,
     end of the outermost region that contains a use but not its definition ---
     a value read inside a loop is live across every iteration, not just at the
     one statement that mentions it.
+
+    `by_file` asks for the same figure split by which register file holds it,
+    and is filled as `[lane-varying peak, wave-uniform peak]` -- an out
+    parameter like `profile`, so that one walk answers both.  A value the
+    whole wave agrees on (`wave_uniform` and above) is a scalar register on
+    AMD, where SGPRs are a file of their own and the scalar unit a pipe of its
+    own: SeisSol's damage step at order 4 fills both on gfx1150 -- 107 SGPRs
+    with 117 of them spilled beside 256 VGPRs -- which one figure compared
+    against `max_reg_per_thread` cannot show.  The threshold is the caller's
+    because it is a fact about the geometry: a multiplication narrower than a
+    wave holds several per wave, so mult-uniform is then *not* wave-uniform
+    (`Participants.WAVE.arrival`).  The two peaks are taken at their own
+    program points and do not add up to the total.
+
+    Register arrays count as lane-varying whatever their uniformity: they are
+    the distributed image of a tensor, one slot per lane.
     """
     values = _value_index(body) if in_bytes else {}
     weight = ((lambda vid: register_bytes(values[vid], explicit_simd)
@@ -1520,6 +1538,7 @@ def pressure(body: Tuple[Stmt, ...], in_bytes: bool = False,
     # the same point, so two ranges that only touch are not both counted.
     v_none = Value(id=-1, type=ScalarType(Datatype.I32))
     events: List[Tuple[int, int]] = []
+    split: Tuple[List[Tuple[int, int]], List[Tuple[int, int]]] = ([], [])
     for vid, d in define.items():
         if isinstance(values.get(vid, v_none).type, BufferType):
             continue
@@ -1527,9 +1546,16 @@ def pressure(body: Tuple[Stmt, ...], in_bytes: bool = False,
             continue
         w = weight(vid)
         if w:
-            events += [(d, w), (last.get(vid, d) + 1, -w)]
+            span_events = [(d, w), (last.get(vid, d) + 1, -w)]
+            events += span_events
+            if by_file is not None:
+                uniform = values.get(vid, v_none).uniformity >= wave_uniform
+                split[int(uniform)].extend(span_events)
     if in_bytes and not explicit_simd:
-        events += _register_slot_events(order, span, enclosing, values, reach)
+        slots = _register_slot_events(order, span, enclosing, values, reach)
+        events += slots
+        if by_file is not None:
+            split[0].extend(slots)
     elif in_bytes:
         # Under an explicit vector the array stays whole for the whole body,
         # as it always was here.  Not because slots cannot be freed there but
@@ -1538,7 +1564,10 @@ def pressure(body: Tuple[Stmt, ...], in_bytes: bool = False,
         # 128.  Until that is understood the warning keeps its old footing.
         floor = sum(register_bytes(v, explicit_simd) for v in values.values()
                     if isinstance(v.type, BufferType))
-        events += [(0, floor), (len(order), -floor)] if floor else []
+        raised = [(0, floor), (len(order), -floor)] if floor else []
+        events += raised
+        if by_file is not None:
+            split[0].extend(raised)
     events.sort()
     if profile is not None:
         # The same sweep, sampled at every statement: what is live across
@@ -1551,11 +1580,16 @@ def pressure(body: Tuple[Stmt, ...], in_bytes: bool = False,
         for st, d in zip(order, delta):
             live += d
             profile.append((st, live))
-    live = peak = 0
-    for _, w in events:
-        live += w
-        peak = max(peak, live)
-    return peak
+    def sweep(items: List[Tuple[int, int]]) -> int:
+        live = high = 0
+        for _, w in sorted(items):
+            live += w
+            high = max(high, live)
+        return high
+
+    if by_file is not None:
+        by_file[:] = [sweep(split[0]), sweep(split[1])]
+    return sweep(events)
 
 
 def pressure_profile(body: Tuple[Stmt, ...], in_bytes: bool = True,

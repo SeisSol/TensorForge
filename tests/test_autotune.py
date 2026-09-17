@@ -194,3 +194,36 @@ def test_amd_takes_width_two_only_with_one_pair_per_lane():
     assert pairs and all(2 * t >= 56 for t in pairs)
     nvidia = {c.num_threads for c in _simple("sm_100")['lanes'] if c.lead_width == 2}
     assert 16 in nvidia, 'ptxas takes two pairs per lane without spilling'
+
+
+@pytest.mark.parametrize("arch,backend,stated", [
+    ("gfx900", "hip", 102 * 4), ("gfx942", "hip", 102 * 4),
+    ("gfx1150", "hip", 106 * 4), ("gfx1250", "hip", 106 * 4),
+    ("sm_120", "cuda", None), ("pvc", "oneapi", None)])
+def test_a_scalar_register_file_is_stated_where_there_is_one(arch, backend,
+                                                             stated):
+    """AMD keeps what a whole wave agrees on in SGPRs, and a wave has about a
+    hundred.  NVIDIA's uniform datapath is not the same offer: it carries
+    integer and address arithmetic, so a uniform float is a vector register
+    there and no second budget applies."""
+    hw = Context(arch=arch, backend=backend,
+                 fp_type=_case().DTYPE).get_vm().get_hw_descr()
+    assert hw.max_scalar_reg_per_wave == stated
+
+
+def test_the_scalar_file_is_judged_on_its_own():
+    """`local_flux` never fills it; SeisSol's damage step does -- 107 SGPRs
+    allocated and 117 spilled on gfx1150, beside full VGPRs.  One figure
+    against `max_reg_per_thread` shows neither, so the uniform values are
+    weighed against their own budget."""
+    fits = _fake('gfx1150', 'hip', 32, 4, 400)
+    fits.generator.peak_uniform_pressure = 100 * 4
+    assert tuning._over_scalar_budget(fits) == 0
+
+    over = _fake('gfx1150', 'hip', 32, 4, 400)
+    over.generator.peak_uniform_pressure = 150 * 4
+    assert tuning._over_scalar_budget(over) == (150 - 106) * 4
+
+    silent = _fake('sm_120', 'cuda', 32, 4, 400)
+    silent.generator.peak_uniform_pressure = 150 * 4
+    assert tuning._over_scalar_budget(silent) == 0, 'no file, no judgement'

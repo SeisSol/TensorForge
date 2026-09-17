@@ -111,3 +111,59 @@ def test_a_peeled_element_is_one_slot_and_not_the_whole_array():
     times the figure at width one (ptxas: 213 registers against 146)."""
     mod = _local_flux(35)
     assert _peak(mod, 2) < 2 * _peak(mod, 1)
+
+
+def _mixed(uniform: int, lane: int):
+    """`uniform` values read from one address and `lane` values read from a
+    lane-dependent one, all live at once and summed at the end."""
+    b = IRBuilder(fptype=Datatype.F32, scratch=('tempShrMem', 1 << 16))
+    # `lane_index`, not the raw text the helper above uses: a raw expression
+    # takes the uniformity of its arguments and has none here, so it would
+    # claim to be the same on every lane.
+    here = b.lane_index(32, 1, hint='lead')
+    with b.scratch_scope():
+        tile = b.alloc(Datatype.F32, (1 << 15,), MemSpace.SHARED, hint='t')
+        held = [b.load(tile, b.const(7 * i, INDEX), hint='u')
+                for i in range(uniform)]
+        held += [b.load(tile, b.op('add', INDEX, here, 4096 * i, hint='a'),
+                        hint='l') for i in range(lane)]
+        total = held[0]
+        for v in held[1:]:
+            total = b.op('add', total.type, total, v, hint='s')
+        b.store(tile, total, here)
+    return b.finish()
+
+
+def test_the_two_register_files_are_counted_apart():
+    """A value a whole wave agrees on is a scalar register on AMD, and the
+    lane-varying ones are the vector file; a single figure sees neither fill.
+    The two peaks are taken at their own program points, so each is at most
+    the total and they need not add up to it."""
+    split: list = []
+    body = _mixed(uniform=8, lane=8)
+    total = passes.pressure(body, in_bytes=True, explicit_simd=False,
+                            by_file=split)
+    lane, uniform = split
+    assert uniform >= 8 * 4, 'the values read from one address are uniform'
+    assert lane >= 8 * 4, 'the lane-dependent ones are not'
+    assert max(lane, uniform) <= total <= lane + uniform
+
+
+def test_what_counts_as_uniform_follows_the_geometry():
+    """Mult-uniform is wave-uniform only where a multiplication is at least a
+    wave wide; below that a wave holds several and they disagree.  Asked at
+    the threshold rather than assumed, so a narrow geometry puts those values
+    back in the vector file."""
+    from tensorforge.backend.pir.core import Participants, Uniformity
+
+    assert Participants.WAVE.arrival(32, 32) is Uniformity.MULT
+    assert Participants.WAVE.arrival(16, 32) is Uniformity.MULTGROUP
+
+    body = _mixed(uniform=8, lane=8)
+    wide: list = []
+    narrow: list = []
+    passes.pressure(body, in_bytes=True, explicit_simd=False, by_file=wide,
+                    wave_uniform=Uniformity.MULT)
+    passes.pressure(body, in_bytes=True, explicit_simd=False, by_file=narrow,
+                    wave_uniform=Uniformity.GRID)
+    assert narrow[1] <= wide[1], 'a stricter threshold cannot hold more'
