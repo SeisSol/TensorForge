@@ -125,7 +125,8 @@ def _simple(arch, backend="cuda"):
 
 def test_the_simple_space_turns_only_what_is_safe_to_ship():
     knobs = _simple("sm_100")
-    assert set(knobs) <= {'lanes', 'merge_variants', 'k_roll', 'k_unroll_max'}
+    assert set(knobs) <= {'lanes', 'merge_variants', 'k_roll', 'k_unroll_max',
+                          'register_temporaries'}
     widths = {c.num_threads for c in knobs['lanes']}
     assert all(w & (w - 1) == 0 for w in widths), 'powers of two only'
     assert knobs['k_roll'] == [0, 28]

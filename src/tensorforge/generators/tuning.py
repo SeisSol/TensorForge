@@ -317,6 +317,20 @@ def simple_space(descrs, context: Context) -> List[Knob]:
     lengths = contraction_lengths(descrs)
     if cap and lengths and max(lengths) > cap:
         knobs.append(Knob('k_unroll_max', lambda c: (0,)))
+    # Reading an array temporary out of its producer's register image trades
+    # a shared buffer for registers that stay live to the last reader, and
+    # which of the two a kernel wants is measured rather than argued: over 70
+    # corpus cases on sm_120 it is a geomean of 1 % for `all`, with
+    # `mixed/ew_then_ew` at +72 % and five cases 4-6 % the other way;
+    # SeisSol's damage step gains 6 %, and 11 % once its material part is a
+    # kernel of its own.  Only where something is written that a later
+    # operation reads: with no intermediate there is no image to keep, and the
+    # knob would spend a build to arrive back where it started.
+    written = {id(d.writes().tensor) for d in flat
+               if getattr(d, 'writes', None) is not None
+               and d.writes() is not None}
+    if written & {id(v.tensor) for d in flat for v in d.reads()}:
+        knobs.append(Knob('register_temporaries', lambda c: ('all', 'scalars')))
     return knobs
 
 

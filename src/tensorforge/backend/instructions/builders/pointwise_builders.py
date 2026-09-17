@@ -22,6 +22,7 @@ from typing import List
 from tensorforge.backend.instructions.builders.operation_builder import (
     OperationBuilder)
 from tensorforge.backend.instructions.compute import ComputeInstruction
+from tensorforge.backend.symbol import SymbolView
 from tensorforge.backend.instructions.compute.elementwise import (
     ElementwiseInstruction, ScalarLike)
 from tensorforge.backend.instructions.compute.reduction import (
@@ -67,6 +68,74 @@ class ScalarBuilder(OperationBuilder):
     def accepts(descr) -> bool:
         return (isinstance(descr, MultilinearDescr)
                 and descr.dest.bbox.rank() == 0)
+
+    def build(self, descr) -> None:
+        """A long sum over one axis is a product and a fold, not a loop.
+
+        `alpha = alphaNodal[l] * quadratureWeights[l]` over 125 elements is
+        one value, and every lane computed all of it: 125 reads of a shared
+        buffer per lane, where the tensor is spread over the lanes to begin
+        with.  Written as a pointwise product into a register image and a
+        reduction over it, each lane multiplies the four elements it owns and
+        the lanes fold their partials (`CrossLaneFold`) -- and with
+        `register_temporaries=all` the image never reaches memory at all.
+
+        Both halves are instructions that already exist, which is the point:
+        the fold is the reduction's, not a second one written here.  SeisSol's
+        damage step has ten such contractions and they are 11 % of its shared
+        traffic.
+        """
+        box = self._foldable(descr)
+        if box is None:
+            super().build(descr)
+            return
+        self._reset()
+        operands = self.resolve_in_place(descr, arrays=True)
+        self._instructions.extend(self._product_and_fold(descr, operands, box))
+
+    def _foldable(self, descr):
+        """`(lo, hi)` of the contracted axis where folding is the better shape.
+
+        Narrow on purpose.  One contracted axis, every operand a tensor spread
+        over it, nothing accumulated, and an extent past the lane count -- at
+        13 elements over 32 lanes the fold would exchange more than the loop
+        reads.  `target` says which of an operand's axes the destination has,
+        and for these all of them are contracted (`-1`).
+        """
+        if descr.add or len(descr.ops) != 2:
+            return None
+        lo, hi = None, None
+        for view, axes in zip(descr.ops, descr.target):
+            if (list(axes) != [-1] or view.bbox.rank() != 1
+                    or any(view.offset or [0])):
+                return None
+            low, high = view.bbox.lower()[0], view.bbox.upper()[0]
+            lo = low if lo is None else max(lo, low)
+            hi = high if hi is None else min(hi, high)
+        if hi - lo <= self._num_threads:
+            return None
+        return lo, hi
+
+    def _product_and_fold(self, descr, operands, box) -> List:
+        from tensorforge.common.matrix.boundingbox import BoundingBox
+        from tensorforge.common.operation import AddOperator, Operation
+
+        lo, hi = box
+        extent = BoundingBox([0], [hi - lo])
+        registers, alloc = self._temporaries.register_array(extent, 0)
+        product = SymbolView(registers, extent, [0])
+        # Each operand over the part all of them cover, read at `i + lo`:
+        # `ElementwiseInstruction` indexes a source by the loop value plus its
+        # box's lower corner, and applies no offset of its own -- which is why
+        # `_foldable` refuses a view that carries one.
+        srcs = [SymbolView(view.symbol, BoundingBox([lo], [hi]), [0])
+                for view in operands]
+        dest = self.materialize_dest(descr, ()) or self.view_of(descr.dest)
+        return [alloc,
+                ElementwiseInstruction(self._context, Operation.MUL, product,
+                                       srcs, False, self._num_threads),
+                ReductionInstruction(self._context, dest, product, [0],
+                                     AddOperator(), False, self._num_threads)]
 
     def resolve_operands(self, descr) -> List:
         # Values without axes only.  Every lane runs the whole sum, so an
