@@ -268,16 +268,48 @@ def test_the_loop_reports_block_uniformity_only_at_one_mult_per_block():
     assert loop.uniform_scope() is Uniformity.BLOCK
 
 
-def test_the_reduction_refuses_a_cross_lane_fold_it_cannot_synchronize():
-    """Better a named refusal than a generic barrier diagnostic.
+def _fold(threads: int, rows: int = 64) -> str:
+    """`out[j] = sum_i a[i, j]` at `threads` lanes: a fold over the lead axis."""
+    from tensorforge.common.basic_types import Addressing
+    from tensorforge.common.matrix.boundingbox import BoundingBox
+    from tensorforge.common.matrix.tensor import SubTensor, Tensor
+    from tensorforge.common.operation import AddOperator
+    from tensorforge.generators.descriptions import ReductionDescr
+    from tensorforge.generators.generator import Generator
+    from tensorforge.generators.lanes import LaneConfig
 
-    `ReductionInstruction` reads the same fact from the other side. The
-    verifier would catch the configuration anyway; refusing here says which
-    feature is missing rather than which invariant was violated.
-    """
-    from tensorforge.backend.instructions.compute.reduction import \
-        ReductionInstruction
+    source = SubTensor(Tensor([rows, 4], Addressing.STRIDED,
+                              BoundingBox([0, 0], [rows, 4]), alias="A",
+                              datatype=Datatype.F32))
+    dest = SubTensor(Tensor([4], Addressing.STRIDED, BoundingBox([0], [4]),
+                            alias="OUT", datatype=Datatype.F32))
+    gen = Generator([ReductionDescr(dest, source, [0], AddOperator())],
+                    Context(arch="sm_86", backend="cuda",
+                            fp_type=Datatype.F32),
+                    lanes=LaneConfig(num_threads=threads,
+                                     num_active_threads=rows, lead_width=1))
+    gen.generate()
+    return gen.get_kernel()
 
-    source = ReductionInstruction._check_cross_lane_is_available.__doc__
-    assert source and "sync_simd" in source, (
-        "the refusal has stopped naming the reason it refuses")
+
+def test_a_fold_wider_than_a_wave_meets_in_shared_memory():
+    """A shuffle reaches one wave, so a wider multiplication folds in two
+    stages: each wave folds its own lanes, its first lane writes that partial
+    into the scratch tail `ReductionInstruction.temp_shmem` reserves, and a
+    rendezvous of the multiplication separates the stores from the reads.
+    Measured on sm_120: `reduction_sum_axis0` gives the same checksum at 32,
+    64 and 128 lanes, and SeisSol's damage step agrees with itself at 32 and
+    64."""
+    assert "barrier.sync" in _fold(64), "no rendezvous of the multiplication"
+    assert "barrier.sync" not in _fold(32), (
+        "a fold inside one wave is in lockstep and needs no barrier")
+
+
+def test_a_fold_over_a_partial_wave_is_refused():
+    """Between two multiples of the wave, `MultLayout` interleaves the
+    multiplications, so the lanes of one are not the contiguous run that the
+    slot index and the rendezvous count both assume."""
+    from tensorforge.common.exceptions import InternalError
+
+    with pytest.raises(InternalError, match="partial wave"):
+        _fold(48)

@@ -13,9 +13,11 @@ thread-distributed one:
   no shared memory and no barrier.  This is the path implemented here.
 
 * **lead** -- a contracted axis *is* the thread-distributed one, so the fold
-  crosses lanes.  Within one wave that is a shuffle butterfly; across waves it
-  needs a scratch tile in shared memory plus a barrier.  Not implemented; the
-  guard below says so rather than emitting something plausible and wrong.
+  crosses lanes.  Within one wave that is a shuffle butterfly; across waves the
+  waves' partials meet in a scratch tile in shared memory, with a rendezvous of
+  the multiplication around it (`_fold_across_waves`).  A width that is not a
+  whole number of waves is still refused: its lanes are interleaved with other
+  multiplications' and are not the contiguous run the second stage indexes.
 """
 
 from typing import List, Sequence
@@ -154,32 +156,71 @@ class ReductionInstruction(ComputeInstruction):
         write_loops(self._context, writer, loopstack, self._body(writer, kept))
 
     def _check_cross_lane_is_available(self) -> None:
-        """A cross-lane fold that spans more than one wave has no lowering.
+        """A cross-lane fold needs whole waves once it spans more than one.
 
         The exchange in `tensorforge_device` is a shuffle, and a shuffle
-        reaches one wave.  Above `vec_unit_length` the lane partials have to
-        meet in shared memory instead: one slot per wave, a barrier, then a
-        fold over the slots.  `temp_shmem()` below reserves for exactly that,
-        and the missing piece is the barrier.
+        reaches one wave (`_reach`).  Above that the waves' partials meet in
+        shared memory -- one slot per wave, a rendezvous, a fold over the
+        slots -- which `_fold_across_waves` emits and `temp_shmem` reserves
+        for.  Both index the waves of one multiplication as a contiguous run
+        of lanes.
 
-        `Uniformity.MULT` is the scope such a barrier needs -- a rendezvous of
-        the threads working on one multiplication -- and `emit._sync` lowers
-        MULT to `sync_simd()`, which is correct today because a multiplication
-        cannot outgrow a wave.  Lifting that cap is what brings `sync_block()`
-        with it, and with it the second stage here.
-
-        Until then this raises.  The verifier would reject the configuration
-        anyway -- see `tests/test_barrier_scope.py` -- but it would say which
-        invariant was violated, and this says which feature is missing.
+        That run is what a width between two multiples of the wave does not
+        have: `MultLayout` interleaves such widths with the other
+        multiplications in the same wave (gcd units), so lane `l` of a
+        multiplication is not thread `l`, and neither the slot index nor the
+        rendezvous count is expressible.  `CudaLexic.has_sync_mult` says the
+        same thing from the other side -- `barrier.sync` counts threads in
+        whole warps.
         """
         vul = self._reach()
-        if self._num_threads > vul:
+        if self._num_threads > vul and self._num_threads % vul:
             raise InternalError(
                 f'reduction: a cross-lane fold over {self._num_threads} '
-                f'threads spans {self._num_threads // vul} waves of {vul}, '
-                f'and the second stage needs a shared-memory rendezvous of '
-                f'one multiplication. Uniformity.MULT lowers to sync_simd() '
-                f'while the thread count is capped at a wave.')
+                f'threads spans {self._num_threads / vul:.2f} waves of {vul}. '
+                f'The second stage meets the waves of one multiplication in '
+                f'shared memory, which needs their lanes contiguous -- a '
+                f'width that leaves a partial wave is interleaved with the '
+                f'other multiplications of that wave instead.')
+
+    def _fold_across_waves(self, writer: Writer, total, lead):
+        """The second stage: the waves' partials meet in shared memory.
+
+        Each wave has folded its own lanes by shuffle; its first lane writes
+        that partial into a slot of the scratch tail `temp_shmem` reserved,
+        and after a rendezvous of the multiplication every lane reads every
+        slot and folds them.  Every lane, not one: this is an all-reduce, and
+        a destination in registers keeps a copy per lane
+        (`_fold_across_lanes`).
+
+        Two barriers rather than one.  The second is what makes the stores
+        visible to the reads.  The first is for the kept axes around this:
+        their loop runs the whole sequence again, and without it a lane that
+        has arrived at the next round's store would overwrite a slot another
+        lane is still reading.
+        """
+        reach = self._reach()
+        waves = self._num_threads // reach
+        if waves <= 1:
+            return total
+
+        from tensorforge.backend.pir.core import BOOL, INDEX, MemSpace
+
+        slots = writer.alloc(self._dtype, (waves,), MemSpace.SHARED,
+                             hint='fold')
+        wave = writer.op('div', INDEX, lead, writer.const(reach, INDEX),
+                         hint='wave')
+        lane = writer.op('rem', INDEX, lead, writer.const(reach, INDEX),
+                         hint='inwave')
+        writer.barrier('mult', threads=self._num_threads)
+        with writer.if_(writer.op('eq', BOOL, lane, 0, hint='w')):
+            writer.store(slots, total, wave)
+        writer.barrier('mult', threads=self._num_threads, handoff=True)
+        out = None
+        for i in range(waves):
+            part = writer.load(slots, writer.const(i, INDEX), hint='fold')
+            out = part if out is None else self._combine(writer, out, part)
+        return out
 
     def temp_shmem(self) -> int:
         """One slot per wave, per multiplication, for the super-wave fold.
@@ -254,7 +295,8 @@ class ReductionInstruction(ComputeInstruction):
 
         lead = self._lane(writer)
         partial = self._lane_partial(writer, index, src_lead, lead)
-        total = self._cross_lane(writer, partial, src_lead)
+        total = self._fold_across_waves(
+            writer, self._cross_lane(writer, partial, src_lead), lead)
 
         # In SPMD `reduction` is an all-reduce, so every lane holds the answer
         # and letting them all write would be a race on one address rather
@@ -392,13 +434,16 @@ class ReductionInstruction(ComputeInstruction):
         lane keeps the answer (`_fold_across_lanes`), and a lane outside lane
         0's group would keep its own group's fold of neutral elements.
         """
+        # And never wider than one exchange reaches: past that the fold is in
+        # two stages, and this is the first of them (`_fold_across_waves`).
+        reach = self._reach()
         if self._slots(src_lead) > 1 or self._into_registers():
-            return self._num_threads
+            return min(self._num_threads, reach)
         extent = self._op.bbox.size(src_lead)
         width = 1
         while width < extent:
             width <<= 1
-        return min(width, self._num_threads)
+        return min(width, self._num_threads, reach)
 
     def _cross_lane(self, writer: Writer, partial, src_lead: int):
         """The all-reduce, as the lexic spells it.
