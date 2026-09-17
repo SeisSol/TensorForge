@@ -960,3 +960,52 @@ def test_a_stand_in_reads_what_its_members_store():
     assert clone.is_variant
     assert clone.storage_parts == 2
     assert clone.storage_order is None
+
+
+def test_a_factor_the_loop_binds_is_read_inside_it():
+    """A scalar hole is read where its name exists, not before the loop.
+
+    The body reads a factor passed by value, and the loop binds that name from
+    the table its counter selects.  Read as a bare name the read is a value
+    with no operands, which is what `licm` calls loop-invariant -- so it was
+    hoisted past the header, out of the scope the name is declared in, and the
+    kernel stopped compiling rather than slowing down.
+
+    Stated on the emitted text because that is where it goes wrong: a name
+    used before its declaration is a C++ error and nothing earlier in the
+    pipeline has an opinion about it.  SeisSol's damage step had 36 of them
+    once its run of 362 operations rolled; this is the same shape in six.
+    """
+    import re
+    scalar = Addressing.SCALAR
+
+    def number(alias):
+        return SubTensor(Tensor([], scalar, BoundingBox([], []),
+                                alias=alias, datatype=DTYPE))
+
+    from tensorforge.generators.descriptions import MultilinearDescr
+    acc = make('acc', [])
+    descrs = []
+    for k in range(6):
+        # A destination without axes: read as a value, not folded into a
+        # product's text, which is the read that has to stay inside.  The
+        # contraction beside it is what gives the body something to hoist
+        # past, which is how the read leaves the loop at all.
+        descrs.append(MultilinearDescr(dest=acc,
+                                       ops=[make(f'u{k}', []),
+                                            number(f's{k}')],
+                                       target=[[], []], permute=[[], []],
+                                       add=k > 0))
+        descrs.append(gemm(make(f'A{k}', [56, 56]), make('I', [56, 9]),
+                           make('Q', [56, 9]), add=True))
+    text = _generated(roll(descrs, min_count=3))
+    declared, used = {}, {}
+    for i, line in enumerate(text.splitlines(), 1):
+        for m in re.finditer(r'\bglb_(\w+)\b', line):
+            if re.search(rf'(float|double)[^;=]*\bglb_{m.group(1)}\b\s*=', line):
+                declared.setdefault(m.group(1), i)
+            else:
+                used.setdefault(m.group(1), []).append(i)
+    early = {n: (used[n][0], declared.get(n)) for n in used
+             if n not in declared or used[n][0] < declared[n]}
+    assert not early, f'read before it is bound: {early}'
