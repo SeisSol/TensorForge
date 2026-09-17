@@ -15,8 +15,10 @@ from tensorforge.analysis.families import Repeat, find_repeats
 from tensorforge.common.basic_types import Addressing, Datatype
 from tensorforge.common.matrix.boundingbox import BoundingBox
 from tensorforge.common.matrix.tensor import SubTensor, Tensor
+from tensorforge.common.operation import MaxOperator
 from tensorforge.generators.descriptions import (GemmDescr, GridBarrierDescr,
-                                                 GridFenceDescr)
+                                                 GridFenceDescr,
+                                                 ReductionDescr)
 
 DTYPE = Datatype.F32
 
@@ -43,6 +45,13 @@ def face(i):
     return [gemm(tensor(f'fPrT{i}', [56, 56]),
                  tensor('I', [56, 9]),
                  tensor('Q', [56, 9]))]
+
+
+def reduce_max(k):
+    """``bound{k} = max(deriv{k+1})`` -- with this step's own operator."""
+    return [ReductionDescr(tensor(f'bound{k}', [1]),
+                           tensor(f'deriv{k + 1}', [56, 9]), [0, 1],
+                           MaxOperator())]
 
 
 def flat(chunks):
@@ -115,6 +124,21 @@ def test_equal_shapes_over_unrelated_tensors_are_one_run():
     bounded = find_repeats(head + flat([face(i) for i in range(3)]),
                            max_arity=1)
     assert [(r.start, r.count) for r in bounded] == [(1, 3)]
+
+
+def test_an_operator_built_per_step_does_not_break_the_run():
+    """Every step carries its own `MaxOperator`, and they are one operator.
+
+    The frontend builds one operator object per use, so a run that reduces
+    once per step holds a different instance in every chunk while nothing
+    about what the body computes differs.  Compared by identity there is no
+    run at all -- which is how the chunk of 362 operations that SeisSol's
+    damage step states four times stayed written out in full.
+    """
+    descrs = flat([step(k) + reduce_max(k) for k in range(4)])
+    runs = find_repeats(descrs)
+    assert len(runs) == 1
+    assert (runs[0].start, runs[0].period, runs[0].count) == (0, 2, 4)
 
 
 def test_nothing_repeats():

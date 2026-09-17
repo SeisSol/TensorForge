@@ -42,6 +42,7 @@ from itertools import product
 from typing import Dict, List, Optional, Sequence, Tuple, Union
 
 from tensorforge.common.matrix.boundingbox import BoundingBox
+from tensorforge.common.operation import Operator
 from tensorforge.generators.descriptions import (BarrierDescription,
                                                  ElementwiseDescr,
                                                  MultilinearDescr,
@@ -166,6 +167,33 @@ def _tuple2(rows) -> Tuple:
     return tuple(tuple(r) for r in rows) if rows is not None else None
 
 
+def _op_key(op):
+    """An operator keyed by what it does, not by which instance it is.
+
+    The operators are value objects and the frontend builds one per use, so
+    two max reductions of the same shape carry two `MaxOperator` objects.
+    Keyed by identity those are two different bodies, and that is enough to
+    hide a repetition entirely: SeisSol's damage step states one chunk of 362
+    operations four times, every chunk holds two such reductions, and the run
+    covering 81 % of the kernel was not even a candidate.
+
+    An operator that does carry state keeps it in the key, and one whose
+    state cannot be hashed keeps its identity -- calling two bodies the same
+    when they are not is worse than missing a run.  Anything that is not an
+    operator, an `Operation` member in particular, is already its own key.
+    """
+    if not isinstance(op, Operator):
+        return op
+    state = tuple(sorted((name, _op_key(value)) for name, value
+                         in getattr(op, '__dict__', {}).items()))
+    key = (type(op).__qualname__, state)
+    try:
+        hash(key)
+    except TypeError:
+        return op
+    return key
+
+
 def _attrs(descr) -> Tuple:
     """The part of a descriptor that no substitution may change.
 
@@ -184,11 +212,11 @@ def _attrs(descr) -> Tuple:
                 bool(getattr(descr, 'prefer_align', False)))
     if isinstance(descr, ElementwiseDescr):
         scalars = tuple(descr.scalar_srcs())
-        return ('elementwise', descr.op, scalars,
+        return ('elementwise', _op_key(descr.op), scalars,
                 bool(getattr(descr, 'strict_match', False)),
                 bool(getattr(descr, 'prefer_align', False)))
     if isinstance(descr, ReductionDescr):
-        return ('reduction', descr.op, tuple(descr.dims),
+        return ('reduction', _op_key(descr.op), tuple(descr.dims),
                 bool(getattr(descr, 'prefer_align', False)))
     if isinstance(descr, BarrierDescription):
         return ('barrier', bool(descr.trueBarrier()))
