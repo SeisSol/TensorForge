@@ -484,26 +484,6 @@ def dpas_matmul(writer, C, A, B, M, N, K, kx, threads, dtype, ctx,
                 continue
             ahi = _fragment(writer, Datatype.TF32, atom.a_elems, 'ahi')
             alo = _fragment(writer, Datatype.TF32, atom.a_elems, 'alo')
-            bhi = _fragment(writer, Datatype.TF32, atom.b_elems, 'bhi')
-            blo = _fragment(writer, Datatype.TF32, atom.b_elems, 'blo')
-
-            # Src1 <- this generator's A: one lane vector per contraction step.
-            # `k0` counts `B`'s steps, from its block's start; `A` counts from
-            # the first step the contraction walks, `kx` later.  A step before
-            # the window has no `A`, and its slot stays the zero the fragment
-            # was declared as.
-            for k in range(min(atom.k, depth - k0)):
-                if k0 + k < kx:
-                    continue
-                v = A(writer, None, 0, k0 + k - kx)
-                if v is None or v is False:
-                    return False
-                off = b_offset(atom, k, 0)
-                writer.call_stmt(f'tensorforge::splitFloatTF32<{atom.n}>',
-                                 _run(writer, bhi, off, atom.n, 'bh'),
-                                 _run(writer, blo, off, atom.n, 'bl'),
-                                 v, writes=(bhi, blo))
-
             # Src2 <- this generator's B: one run per repeat row.
             # `B(j, k0 // threads)` is the lane vector holding depths
             # `k0 .. k0 + threads - 1`, so this block's depths start at lane
@@ -535,9 +515,14 @@ def dpas_matmul(writer, C, A, B, M, N, K, kx, threads, dtype, ctx,
                 # call ends a run (`EsimdEmitter._plan_runs`), and the steps of
                 # a slot-major operand are one run -- a fragment in two block
                 # messages where it was eight.
-                steps = range(min(atom.k, depth - k0))
+                # `k0` counts `B`'s steps, from its block's start; `A` counts
+                # from the first step the contraction walks, `kx` later.  A
+                # step before the window has no `A`, and its slot stays the
+                # zero the fragment was declared as.
+                steps = [k for k in range(min(atom.k, depth - k0))
+                         if k0 + k >= kx]
                 if parts == 1:
-                    vs = [A(writer, None, i, k0 + k) for k in steps]
+                    vs = [A(writer, None, i, k0 + k - kx) for k in steps]
                     if any(v is None or v is False for v in vs):
                         return False
                     for k, v in zip(steps, vs):
@@ -552,7 +537,7 @@ def dpas_matmul(writer, C, A, B, M, N, K, kx, threads, dtype, ctx,
                     # halves are read one plane after the other and each is
                     # a run as well.
                     for part, frag, hint in ((0, bhi, 'bh'), (1, blo, 'bl')):
-                        vs = [A(writer, None, i, k0 + k, part=part)
+                        vs = [A(writer, None, i, k0 + k - kx, part=part)
                               for k in steps]
                         if any(v is None or v is False for v in vs):
                             return False
