@@ -716,7 +716,7 @@ declare('shared_packing',
             'block holds, and 65 KB packed, the most that is ever live.')
 
 declare('register_temporaries',
-        default='scalars',
+        default='all',
         env='TF_REGISTER_TEMPORARIES',
         doc='Which temporaries a pointwise operation -- elementwise, a '
             'reduction, a contraction to one value -- reads straight out of '
@@ -728,7 +728,13 @@ declare('register_temporaries',
             'the buffer would.  SeisSol\'s damage step (order 4, single, 32 '
             'lanes) stored 398 scalars and loaded them 2061 times, each store '
             'followed by a barrier; arrays trade the shared buffer for '
-            'registers that stay live until their last reader.')
+            'registers that stay live until their last reader.  `all` since '
+            '2026-09-18, on measurement: over 70 corpus cases on sm_120 a '
+            'geomean of 1 %, with `mixed/ew_then_ew` at +72 % and five cases '
+            '4-6 % the other way, and SeisSol\'s damage step 6 % -- 11 % once '
+            'its material part is a kernel of its own.  A kernel the trade '
+            'does not suit says so through the tuner, which carries this '
+            'knob (`tuning.simple_space`).')
 
 declare('skip_known_zeros',
         default=True,
