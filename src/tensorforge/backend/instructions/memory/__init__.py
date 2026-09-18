@@ -220,6 +220,22 @@ class AbstractShrMemWrite(MemoryInstruction):
   #: gain from permuting over a longer period than that.
   _BANKS = 32
 
+  def transfer_granule(self) -> int:
+    """Elements this transfer writes in one access.
+
+    One, unless a subclass moves more: `StoreRegToShr` walks its register
+    image element by element, and every element is its own store.  What a
+    transfer moves at once is the unit a permutation of this window has to
+    keep whole, exactly as a wide read is (`XorSwizzle.granule`), so the
+    writer states it and `_swizzle` grants at least that much.
+
+    Stated by the writer rather than asked of the permutation, because the
+    permutation is decided when the buffer is allocated and the accesses come
+    later.  The decline it replaces -- no swizzle at all wherever a bulk copy
+    could reach the window -- was the same fact with no number attached.
+    """
+    return 1
+
   def _swizzle(self, writer=None):
     """A row permutation for this window, when one is both legal and useful.
 
@@ -254,19 +270,25 @@ class AbstractShrMemWrite(MemoryInstruction):
     if _explicit_simd(self._context):
       return None
 
-    # Only when every write to this window will be a structured store.
-    # `GlbToShrLoader` falls back to raw text when the *source* has no buffer
-    # in this body -- `addressing_none` reads through `ptr_glb_m1`, which
-    # `ptr_manip` binds only on the structured path -- and a raw write does not
-    # go through `store`, so it would not permute while every read did.
+    # Only when every write to this window goes through the IR.  A *raw* write
+    # does not pass `store` and so would not permute while every read did:
+    # `GlbToShrLoader` falls back to text when the *source* has no buffer in
+    # this body -- `addressing_none` reads through `ptr_glb_m1`, which
+    # `ptr_manip` binds only on the structured path.
+    #
+    # It is the text that is the problem, not the bulk.  A structured
+    # `copy_async` permutes its destination like any other access now
+    # (`PirBuilder.copy_async`), and the width it moves is granted above, so a
+    # window filled by one is as permutable as a window filled element by
+    # element.  Until that change this asked `_structured_copy` and took the
+    # answer to mean both things at once.
     #
     # Asked here rather than caught later on purpose: the guard at `finish`
     # can only raise by then, because the permutation is already baked into
     # every index it emitted.  Declining is the only response available before
     # that, and it needs the same question asked earlier.
-    # Asked of the loader, not of every writer: `_structured_copy` is what
-    # decides whether the transfer goes through `store`, and it is the
-    # loader's question.  Asking `self._src.pir_buffer(...)` instead was a
+    # Asked of the loader, not of every writer: it is the loader that decides
+    # whether the transfer goes through `store`, and it is its question.  Asking `self._src.pir_buffer(...)` instead was a
     # proxy that happened to agree for `GlbToShrLoader` and never did for
     # `StoreRegToShr`, whose source is a register and has no buffer by
     # construction -- so when the loader's own bindings moved, every macro
@@ -296,12 +318,20 @@ class AbstractShrMemWrite(MemoryInstruction):
     for n in view.shape:
       volume *= n
 
-    # The granule is what a *reader* may take in one access, and only
-    # `k_width` asks for more than one today.  It has to be decided here
-    # because the permutation is decided here, and the reader that wants the
-    # wide access comes later and cannot change it -- so the writer grants the
-    # unit rather than the reader claiming it.  At `k_width` 1, which is the
-    # default, this is exactly the previous rule and the corpus does not move.
+    # The granule is what an access may take in one go, from either side: a
+    # reader's `k_width`, and this transfer's own hop (`transfer_granule`).
+    # It has to be decided here because the permutation is decided here, and
+    # the accesses come later and cannot change it -- so the window grants the
+    # unit rather than an access claiming it.  At `k_width` 1 and a transfer
+    # that writes one element at a time, which is the default and every
+    # recorded kernel, this is exactly the previous rule.
+    #
+    # The transfer's own hop is a *requirement*, not a wish: a copy that moves
+    # four elements into a window permuted per element writes them where the
+    # readers will not look.  Where the volume cannot carry a granule that
+    # wide, the answer is no permutation at all -- which is the decline this
+    # replaces, now made for the buffers that actually need it instead of for
+    # every buffer a bulk copy could reach.
     #
     # Granted as wide as asked, even where that leaves no width to permute --
     # a 180-element window takes granule 4 and then width 1, which is no
@@ -309,10 +339,13 @@ class AbstractShrMemWrite(MemoryInstruction):
     # failure of it: the alternative is a narrower granule, which does not make
     # the wide read slower, it makes it a scalar read again.  The permutation
     # is worth a few bank cycles; the access it would forbid is worth a load.
+    need = max(1, self.transfer_granule())
     granule = 1
-    want = getattr(self._context.get_user_options(), 'k_width', 1) or 1
+    want = max(need, getattr(self._context.get_user_options(), 'k_width', 1) or 1)
     while granule * 2 <= want and volume % (granule * 2) == 0:
       granule *= 2
+    if granule < need:
+      return None
 
     width = 1
     while width * 2 <= self._BANKS and volume % (width * granule * 2) == 0:

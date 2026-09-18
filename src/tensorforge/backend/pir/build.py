@@ -1022,12 +1022,15 @@ class IRBuilder:
         t = getattr(buf if buf is not None else base, 'type', None)
         return getattr(t, 'swizzle', None)
 
-    def _check_width(self, base: Any, type_) -> None:
+    def _check_width(self, base: Any, length: Optional[int]) -> None:
         """A wide access to a permuted buffer, refused.
 
-        The permutation is applied to the *index*, and a vector access uses
-        its index once: the address names the first element and the hardware
-        reads the next `length - 1` from beside it.  So the elements after the
+        The permutation is applied to the *index*, and an access of several
+        adjacent elements uses its index once: the address names the first
+        element and the hardware moves the next `length - 1` from beside it.
+        A vector load is one such access and a bulk copy is another -- the
+        `elems` of a `copy_async` are as adjacent as a vector's components,
+        and the permutation cannot tell them apart.  So the elements after the
         first bypass the permutation entirely -- and `i ^ ((i / w) % w)` does
         not map runs onto runs.  A pair at an even `i` lands on `{i^s, i^s^1}`,
         which is the same pair permuted only when `s` is even; where `s` is
@@ -1056,14 +1059,13 @@ class IRBuilder:
         aligned is the caller's proof, carried in `align` like every other wide
         access, since the index is an expression this cannot evaluate.
         """
-        length = getattr(type_, 'length', None)
-        if length is None or length < 2:
+        if not length or length < 2:
             return
         swz = self._swizzle_of(base)
         if swz is None or swz.admits(length):
             return
         raise IRError(
-            f'{base}: a {length}-wide access to a buffer permuted by '
+            f'{base}: a {length}-element access to a buffer permuted by '
             f'{swz} -- the permutation applies to the first element only, so '
             f'the rest of the vector would read the wrong elements (and, at '
             f'an odd image, a misaligned address). Ask `Symbol.swizzled` and '
@@ -1133,7 +1135,7 @@ class IRBuilder:
             type_ = (ScalarType(base.type.elem)
                      if isinstance(base, Value) and isinstance(base.type, BufferType)
                      else ScalarType(self._fptype))
-        self._check_width(base, type_)
+        self._check_width(base, getattr(type_, 'length', None))
         indices = self._shifted(tuple(self._swizzled(base, i) for i in indices),
                                 shift)
         if uniform is None:
@@ -1203,7 +1205,7 @@ class IRBuilder:
             space = (base.type.space if isinstance(base, Value)
                      and isinstance(base.type, BufferType)
                      else MemSpace.from_symbol_type(getattr(base, 'stype', None)))
-        self._check_width(base, getattr(value, 'type', None))
+        self._check_width(base, getattr(getattr(value, 'type', None), 'length', None))
         indices = self._shifted(tuple(self._swizzled(base, i) for i in indices),
                                 shift)
         kind = Effect.ATOMIC if atomic else Effect.WRITE
@@ -1278,6 +1280,23 @@ class IRBuilder:
         src_space = src_space if src_space is not None else self._space_of(src)
         accesses = (Access(Effect.READ, src_space, self.alias_root(src)),
                     Access(Effect.WRITE, dst_space, self.alias_root(dst)))
+
+        # The last access path that did not permute.  It was safe only because
+        # the loader declines the swizzle wherever a bulk copy might reach the
+        # window (`AbstractShrMemWrite._swizzle`), which is a decline standing
+        # in for a rule -- and the check at `finish` could not have caught the
+        # mistake, since it reads raw text and this emits none.  Asked and
+        # applied here, the copy is like every other access: it permutes what
+        # it writes, and it is refused where it cannot.
+        #
+        # `elems` adjacent elements move as one, so the same question a vector
+        # load asks -- and the same answer, which a granule of that width makes
+        # yes.  The source is asked too, though nothing swizzles global memory
+        # today: a path that asks only where it expects an answer is the shape
+        # this bug had.
+        self._check_width(dst, elems)
+        dst_index = tuple(self._swizzled(dst, i) for i in dst_index)
+        src_index = tuple(self._swizzled(src, i) for i in src_index)
 
         tok = self.value(TOKEN, hint=hint)
         self._emit_op(Op.COPY_ASYNC, (tok,),

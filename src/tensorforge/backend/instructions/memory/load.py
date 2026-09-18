@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: MIT
 from typing import Union
 import math
+from tensorforge.common.basic_types import Addressing
 from tensorforge.common.matrix.tensor import Tensor
 from . import AbstractShrMemWrite, MemoryInstruction
 from tensorforge.backend.symbol import Symbol, SymbolType, DataView, LeadIndex, write_loops, LeadLoop, Loop, add_offset
@@ -140,6 +141,25 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
     self._lanes = num_threads
     if self._blockwide:
       self._num_threads = num_threads * mults
+
+  def _hop_granularities(self):
+    """Elements per hop this transfer will try, widest first.
+
+    The widths `_write_datatransfer` walks, named once so that the permutation
+    can ask the same question the transfer answers.  A source the description
+    does not claim 16-byte alignment for drops the *whole* transfer to single
+    elements, not merely its tail: `cp.async` needs both ends naturally
+    aligned to the width it moves, and an unaligned source has no width to
+    fall back to other than one.
+    """
+    if self._use_cuda_memcpy and self._src.obj.alignment < 16:
+      return [1]
+    return [m for m in [4, 2, 1] if m * self._dest.get_fptype().size() <= 16]
+
+  def transfer_granule(self) -> int:
+    """See `AbstractShrMemWrite.transfer_granule`: the widest hop, which is
+    what a permutation of the destination has to keep whole."""
+    return max(self._hop_granularities())
 
   def _next_size(self, size):
     return _find_next_coprime(size, self._context.get_vm().get_hw_descr().shmem_banks)
@@ -363,10 +383,7 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
   def _write_datatransfer(self, writer, src_offset, dst_offset, index, length, nontemporal, linscale=None):
     pos = 0
 
-    if self._use_cuda_memcpy and self._src.obj.alignment < 16:
-      granularities = [1]
-    else:
-      granularities = [m for m in [4, 2, 1] if m * self._dest.get_fptype().size() <= 16]
+    granularities = self._hop_granularities()
 
     if self._use_tma_memcpy:
       dest_access_index = self._dest.access_address(self._context, index, writer)
@@ -596,6 +613,23 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
     if self._src.pir_buffer(writer) is None:
       return False
     return self._destination_buffer(writer) is not None
+
+  # `will_be_structured` lived here: `_structured_copy` asked before this body
+  # has bound anything, which is what `_swizzle` needs and cannot have.  The
+  # question is asked from inside `writer.alloc`, the call that binds the
+  # destination, so at that moment neither end is bound and the answer is no
+  # for every transfer in the corpus -- and the same transfer says yes three
+  # times afterwards.  That ordering, not anything about the copies, is why 92
+  # of the 94 unpermuted windows are unpermuted, and 63 of them would take a
+  # real swizzle (47 of those `xor32`).
+  #
+  # Predicting the answer instead does not work: `Addressing.NONE` is not the
+  # discriminator, and a rolled or pipelined transfer is emitted in a body its
+  # pointer bindings do not reach.  Guessing yes there is caught rather than
+  # shipped -- `_check_swizzles_are_total` refused seven bodies -- but caught
+  # is not fixed.  The fix is to decide the permutation once the body exists,
+  # which means applying it where the address is *emitted* rather than where it
+  # is built; `pir.banks` was written against exactly that point.
 
   def _destination_buffer(self, writer):
     """The value this transfer fills.
