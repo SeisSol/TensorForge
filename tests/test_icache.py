@@ -138,3 +138,26 @@ class TestTargets:
         hw = Context(arch=arch, backend=backend,
                      fp_type=Datatype.F32).get_vm().get_hw_descr()
         assert hw.instruction_bytes == size
+
+
+def test_the_hot_set_is_the_code_the_executions_need():
+    """`hot_set` answers what a size alone cannot: how much of a body a
+    kernel actually runs through.
+
+    Two statements written once, one run a hundred times and one run once:
+    half the executions need one unit, all of them need both.  A kernel whose
+    code does not fit is a problem only where the part it runs does not fit
+    either -- `elastic-o6s:derivative` needs every counted unit of its 118 kB
+    to cover nine tenths of its executions, and 35 kB of them once the
+    contraction is rolled by two.
+    """
+    from tensorforge.analysis.icache import hot_set
+
+    profile = {(100, 1): 1, (1, 1): 1}
+    assert hot_set(profile, share=0.5) == (1, 2)
+    assert hot_set(profile, share=0.999) == (2, 2)
+    # Copies count as the code they are: one statement written four times is
+    # four units, however often each copy runs.
+    assert hot_set({(10, 4): 1}, share=0.9) == (4, 4)
+    assert hot_set(None) is None
+    assert hot_set({}) is None

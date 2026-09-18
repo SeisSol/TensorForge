@@ -81,6 +81,20 @@ class Context:
     #: 'global.read' -> bytes, or None.
     self.memory_bytes: Optional[dict] = None
 
+    #: The same two numbers per statement rather than summed (`record_hot`):
+    #: (issued, copies) -> how many statements.  `issue_mix` says how much a
+    #: kernel runs and how much it occupies; this says how the two are spread,
+    #: which is what tells a kernel that does not fit the instruction cache
+    #: but spends its time in a part that does from one that does not
+    #: (`analysis.icache.hot_set`).
+    self.hot_profile: Optional[dict] = None
+
+    #: Statements between a load and the first statement reading it
+    #: (`record_slack`): distance -> how many loads.  A load whose consumer is
+    #: the next statement stalls on its latency; the scheduler's whole job is
+    #: to make this number large, and nothing counted whether it does.
+    self.load_slack: Optional[dict] = None
+
   def record_pressure(self, value: int, lane: Optional[int] = None,
                       uniform: Optional[int] = None) -> None:
     if self.peak_pressure is None or value > self.peak_pressure:
@@ -138,6 +152,25 @@ class Context:
     if self.memory_bytes is None:
       self.memory_bytes = {}
     self.memory_bytes[key] = self.memory_bytes.get(key, 0) + value
+
+  def record_hot(self, issued: int, copies: int) -> None:
+    """One statement, by how often it runs and how often it is written down.
+
+    A histogram and not a list: a kernel lays down tens of thousands of
+    statements and they take a handful of distinct weights, since the weights
+    are the trip counts around them.
+    """
+    if self.hot_profile is None:
+      self.hot_profile = {}
+    key = (issued, copies)
+    self.hot_profile[key] = self.hot_profile.get(key, 0) + 1
+
+  def record_slack(self, distance: int) -> None:
+    """One load, and how many statements stand between it and its first
+    reader in the same body."""
+    if self.load_slack is None:
+      self.load_slack = {}
+    self.load_slack[distance] = self.load_slack.get(distance, 0) + 1
 
   def set_fp_type(self, fp_type: Datatype):
     self.fp_type = fp_type

@@ -277,6 +277,9 @@ class Emitter:
         if category is None:
             return
         mix(category, self._work_scale, self._code_scale)
+        hot = getattr(self.context, 'record_hot', None)
+        if hot is not None:
+            hot(self._work_scale, self._code_scale)
         record = getattr(self.context, 'record_bytes', None)
         if record is not None:
             for key, nbytes in moved:
@@ -821,6 +824,7 @@ class Emitter:
 
     def _emit_body(self, body: Tuple[Stmt, ...],
                    yield_to: Tuple[Optional[str], ...]) -> None:
+        self._record_slack(body)
         for s in body:
             if (s.predicate is not None and s.op != Op.YIELD
                     and not _folds_predicate(s)):
@@ -828,6 +832,38 @@ class Emitter:
                     self._emit_stmt(s, yield_to)
             else:
                 self._emit_stmt(s, yield_to)
+
+    def _record_slack(self, body: Tuple[Stmt, ...]) -> None:
+        """How far each load stands from the statement that reads it.
+
+        The distance a scheduler buys: a load read by the next statement
+        stalls on its whole latency, one read twenty statements later on
+        almost none.  Counted in statements of this body, which is the scope
+        the order is fixed in -- a reader in a nested region is a different
+        question and is left out rather than guessed at.
+
+        Loads only.  Everything else has a latency the compiler can hide by
+        register renaming; a memory access has one the program has to hide.
+        """
+        record = getattr(self.context, 'record_slack', None)
+        if record is None:
+            return
+        # One pass for where each value is first read, one for the loads that
+        # produced them.  Scanning forward per load instead would be quadratic
+        # in the body, and SeisSol's damage step emits bodies of thousands.
+        first_read: Dict[int, int] = {}
+        loaded: Dict[int, int] = {}
+        for index, s in enumerate(body):
+            for value in s.args:
+                key = getattr(value, 'id', None)
+                if key is not None and key not in first_read:
+                    first_read[key] = index
+            if s.op in (Op.LOAD, Op.LOAD_ASYNC) and s.target:
+                loaded.setdefault(s.target[0].id, index)
+        for key, index in loaded.items():
+            reader = first_read.get(key)
+            if reader is not None and reader > index:
+                record(reader - index)
 
     def _emit_stmt(self, s: Stmt, yield_to: Tuple[Optional[str], ...]) -> None:
         w = self.writer

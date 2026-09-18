@@ -66,3 +66,35 @@ def icache_excess(code_units: Optional[int], hw) -> int:
     if size is None or not capacity:
         return 0
     return max(0, size - capacity)
+
+
+def hot_set(profile: Optional[dict], share: float = 0.9) -> Optional[tuple]:
+    """`(code units carrying `share` of the executions, units in total)`.
+
+    The instruction cache holds code; a kernel spends its time in statements.
+    Those are the two numbers `Context.record_hot` keeps apart, and the
+    distance between them is what says whether a body over the capacity is a
+    problem: `elastic-o6s:derivative` lays down 195 742 B against 131 072 B of
+    cache, and if nine tenths of what it runs sits in a tenth of that code,
+    the fetch it pays for is the tenth and not the whole.
+
+    None where nothing was recorded.  The units are the emitter's own, as
+    `code_bytes` takes them.
+    """
+    if not profile:
+        return None
+    # Most-run statements first: the cheapest way to cover the executions.
+    entries = sorted(((issued, copies, count)
+                      for (issued, copies), count in profile.items()),
+                     key=lambda e: -e[0])
+    total_issues = sum(issued * copies * count for issued, copies, count in entries)
+    total_units = sum(copies * count for _, copies, count in entries)
+    if not total_issues:
+        return 0, total_units
+    seen, units = 0.0, 0
+    for issued, copies, count in entries:
+        if seen >= share * total_issues:
+            break
+        seen += issued * copies * count
+        units += copies * count
+    return units, total_units
