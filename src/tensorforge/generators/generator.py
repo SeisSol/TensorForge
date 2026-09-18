@@ -382,6 +382,11 @@ class Generator:
     #: settled before they were built: tuning them again would open a walk
     #: inside every probe, and a probe inside every build of every walk.
     self._may_tune: bool = True
+    #: The geometry this build settled on, which with none asked for is what
+    #: the deduction, or the tuner, arrived at.  Beside the other figures a
+    #: caller reads back, because a harness that reports the geometry it
+    #: passed in reports the question and not the answer.
+    self.lanes: Optional[LaneConfig] = None
 
     self._section: Section = Section()
     self._sections: List[Section] = []
@@ -1234,6 +1239,8 @@ class Generator:
     self.memory_bytes = self._context.memory_bytes
     self._warn_icache()
     self.resident_blocks = self._resident_blocks()
+    self.lanes = LaneConfig(self._num_threads, self._num_active_threads,
+                            self._lead_width)
 
   def _warn_icache(self) -> None:
     """Say so when the kernel's code is larger than the instruction cache.

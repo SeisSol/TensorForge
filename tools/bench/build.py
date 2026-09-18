@@ -209,9 +209,15 @@ def generate(workload: Workload, unit: BuildUnit) -> Tuple[Optional[str],
         # `lanes` over the option (`Generator` builds with `self._lanes or
         # lanes.requested(...)`), so passing only the deduction here built
         # every lane-count configuration at the deduced count.
-        config = (lanes.requested(descrs, ctx)
-                  or lanes.deduce(descrs, ctx, ceiling=unit.config.lane_ceiling))
-        gen = Generator(descrs, ctx, attrs=workload.attrs, lanes=config)
+        #
+        # And only what the configuration asked for is passed: a geometry
+        # given here is one the tuner holds fixed, so handing it the deduction
+        # -- which is the generator's own answer, not the caller's -- takes
+        # the lane count out of the space for every build this harness does.
+        asked = (lanes.requested(descrs, ctx)
+                 or (lanes.deduce(descrs, ctx, ceiling=unit.config.lane_ceiling)
+                     if unit.config.lane_ceiling else None))
+        gen = Generator(descrs, ctx, attrs=workload.attrs, lanes=asked)
         with contextlib.redirect_stdout(io.StringIO()):
             gen.generate()
         headers = list(ctx.get_vm().get_headers()) + list(
@@ -224,7 +230,9 @@ def generate(workload: Workload, unit: BuildUnit) -> Tuple[Optional[str],
         return None, record
 
     record.symbol = f'kernel_{gen.get_base_name()}'
-    record.lanes = config.num_threads
+    # What it was built at, which with nothing asked for is what the generator
+    # deduced or the tuner picked.
+    record.lanes = gen.lanes.num_threads
     record.cost = list_cost(workload.descrs(), batch=1,
                             datatype=unit.datatype)
     return src, record
