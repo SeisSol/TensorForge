@@ -181,7 +181,31 @@ def test_no_lane_reads_past_its_operand(name):
 # The corpus reaches the widths at all
 # --------------------------------------------------------------------------- #
 
-def test_the_corpus_exercises_every_copy_width():
+#: The copy's size, and the zero-fill after it where there is one.  Written
+#: out because the size is no longer the last number in the call.
+_COPY = re.compile(r'__pipeline_memcpy_async\([^;]*?,\s*(\d+)(?:,\s*(\d+))?\)')
+
+
+def _widths(src):
+    return {int(m.group(1)) for m in _COPY.finditer(src)}
+
+
+def test_an_aligned_transfer_moves_everything_sixteen_bytes_at_a_time():
+    """Because that is the width that bypasses L1.
+
+    On sm_120 the sixteen-byte `cp.async` lowers to `cp.async.cg` and
+    `LDGSTS.E.BYPASS.128`, while four and eight lower to `cp.async.ca` and fill
+    L1 on the way.  So a transfer that ends in narrower accesses does not
+    merely take more of them, it evicts the working set of every other read in
+    the kernel -- which is why `_bypass_covering` would rather cover a whole
+    run at sixteen than step down through the widths.
+    """
+    for name in STAGED:
+        _, src, _ = _build(name)
+        assert _widths(src) <= {16}, f'{name} reached {sorted(_widths(src))}'
+
+
+def test_the_cascade_is_still_reached_where_the_covering_declines():
     """Stated as a property, because it silently stopped being true once.
 
     `alignment` defaults to 0 and 0 is *unknown*, which `widths_for` turns
@@ -189,12 +213,17 @@ def test_the_corpus_exercises_every_copy_width():
     and one hop count: 128 elements over 16 lanes is two hops of four and
     nothing else, so the cascade below four was unreachable and the code for
     it was as good as absent from every snapshot diff.
+
+    It stopped being true a second time, and for a better reason: every
+    aligned transfer in the corpus now takes the covering above.  The cascade
+    is what serves the rest -- a sub-box copy, a transposed staging, an
+    unstructured transfer -- so it is reached here through a case built
+    without the rounding the covering needs.
     """
     seen = set()
     for name in STAGED:
-        _, src, _ = _build(name)
-        seen |= {int(w) for w in
-                 re.findall(r'__pipeline_memcpy_async\([^;]*?,\s*(\d+)\)', src)}
+        _, src, _ = _build(name, align_shr_mem=False)
+        seen |= _widths(src)
     assert {4, 8, 16} <= seen, f'widths reached: {sorted(seen)}'
 
 

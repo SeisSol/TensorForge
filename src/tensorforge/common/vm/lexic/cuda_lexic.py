@@ -211,13 +211,19 @@ class CudaLexic(Lexic):
   def copy_async_sizes(self):
     return (4, 8, 16)
 
-  def copy_async(self, dst, src, nbytes):
-    # `cp.async` also has a src-size operand -- the pipeline API's fourth
-    # argument -- which moves `nbytes - zfill` bytes and zeroes the rest, in
-    # one access and without reading past the source.  Not plumbed through:
-    # the only caller that wanted it was a transfer covering its run in
-    # whole 16-byte chunks, and that covering saves 0 to 2 accesses against
-    # the widths this already steps through.
+  def copy_async(self, dst, src, nbytes, zfill: int = 0):
+    # The size is not only a count here.  Measured from what this toolchain
+    # emits for sm_120: sixteen bytes lower to `cp.async.cg` and
+    # `LDGSTS.E.BYPASS.128`, four and eight to `cp.async.ca`, which fills L1 on
+    # the way -- so a staging transfer that ends in narrower accesses evicts
+    # the working set of every other read in the kernel.
+    #
+    # `zfill` is the src-size operand: the copy moves `nbytes - zfill` from
+    # global memory and zeroes the rest, and it stays on the bypass
+    # (`LDGSTS.E.BYPASS.128.ZFILL`).  That is what lets a run whose length is
+    # not a whole number of accesses be covered at sixteen anyway.
+    if zfill:
+      return f'__pipeline_memcpy_async({dst}, {src}, {nbytes}, {zfill});'
     return f'__pipeline_memcpy_async({dst}, {src}, {nbytes});'
 
   def commit_async(self):

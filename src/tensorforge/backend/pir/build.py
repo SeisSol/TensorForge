@@ -1241,6 +1241,7 @@ class IRBuilder:
                    dst_index: Sequence[Operand] = (),
                    src_index: Sequence[Operand] = (),
                    elems: int = 1,
+                   zfill: int = 0,
                    dst_space: Optional[MemSpace] = None,
                    src_space: Optional[MemSpace] = None,
                    predicate: Optional[Value] = None,
@@ -1305,7 +1306,8 @@ class IRBuilder:
                       effect=Effect.READ | Effect.WRITE | Effect.ASYNC,
                       accesses=accesses,
                       attrs=(('ndst', len(tuple(dst_index))), ('elems', elems),
-                             ('counter', 'copy')))
+                             ('counter', 'copy'))
+                            + ((('zfill', zfill),) if zfill else ()))
         self._token_accesses[tok.id] = accesses
         self._token_results[tok.id] = ()
         return tok

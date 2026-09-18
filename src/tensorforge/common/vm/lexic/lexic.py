@@ -385,7 +385,15 @@ class Lexic(ABC):
     """Per-thread copy sizes in bytes the hardware path accepts."""
     return ()
 
-  def copy_async(self, dst, src, nbytes):
+  def copy_async(self, dst, src, nbytes, zfill: int = 0):
+    """`zfill` trailing bytes are written as zero instead of copied.
+
+    The hardware reads `nbytes - zfill` from `src` and fills the rest, so a run
+    that does not end on a whole access is still moved by one and the source is
+    never read past its end.  A backend without such an operand returns None
+    for a non-zero `zfill`, and the caller narrows rather than silently copying
+    whatever follows the source.
+    """
     return None
 
   def commit_async(self):

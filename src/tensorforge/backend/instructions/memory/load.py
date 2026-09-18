@@ -409,6 +409,59 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
         writer(f'__syncwarp();')
         writer(f'cuda::device::barrier_arrive_tx(mbarrier, 1, {self._loadsize});')
 
+  def _bypass_covering(self, writer, src_offset, length) -> int:
+    """Elements per access if this whole run can take the L1-bypassing form.
+
+    Width is not only a count of accesses here.  On sm_120 the 16-byte
+    `cp.async` lowers to `cp.async.cg` and `LDGSTS.E.BYPASS.128`, while the
+    4- and 8-byte ones lower to `cp.async.ca` and fill L1 on the way -- so a
+    staging transfer that ends in narrower accesses evicts the working set of
+    every other read in the kernel, which for a kernel already at its L1
+    datapath is the expensive half.  The zero-filling variant keeps the bypass
+    (`LDGSTS.E.BYPASS.128.ZFILL`), which is what lets a ragged run stay on it
+    instead of finishing in two narrower passes and a scalar tail.  Measured
+    from the PTX and SASS this toolchain emits, not from the documentation.
+
+    Zero -- keep the stepping -- unless all of it holds:
+
+    * the asynchronous path is available at all, and this transfer takes it;
+    * the widest admissible access is exactly sixteen bytes (`_hop_granularities`
+      proves the source alignment, `_swizzle_cap` the destination's permutation)
+      and the run starts on that boundary;
+    * the run is the only one, so the elements the last access zero-fills are
+      past the data rather than in the next row of it -- a padded row would do
+      as well, and `stage_row_bytes` is how one gets asked for;
+    * the window has room for them, which `align_shr_mem` gives by rounding a
+      stage up to the vector unit.
+    """
+    if not (self._use_cuda_memcpy and self._structured_copy(writer)):
+      return 0
+    if self._explicit_simd() or self._loop_indices or self._needs_reorder:
+      return 0
+    if not self._context.get_user_options().align_shr_mem:
+      return 0
+    elem = self._dest.get_fptype().size()
+    width = min(max(self._hop_granularities()), self._swizzle_cap(writer))
+    if width * elem != 16 or src_offset % width:
+      return 0
+    if length % width and self._vm.get_lexic().copy_async('d', 's', 16, 4) is None:
+      # The last access covers part of an element group, which only the
+      # zero-filling form can do, and this target has none.
+      #
+      # Reachable, though a strided operand cannot show it: there the run *is*
+      # the storage volume, which is the batch stride, so a stride that is a
+      # multiple of sixteen bytes and a run that is not a multiple of four
+      # elements are the same number twice.  `Addressing.PTR_BASED` has no
+      # stride at all -- every element names its own buffer -- so the promise
+      # is about those buffers and says nothing about the length.  45 elements
+      # behind pointers is then a run that not only ends ragged but, at 16
+      # lanes, never reaches one whole sixteen-byte round: without the fill it
+      # goes to L1 in its entirety.
+      return 0
+    if self.stage_size() < length + width:
+      return 0
+    return width
+
   def _write_datatransfer(self, writer, src_offset, dst_offset, index, length, nontemporal, linscale=None):
     pos = 0
 
@@ -418,7 +471,37 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
       dest_access_index = self._dest.access_address(self._context, index, writer)
       src_access_index = self._src.access_address(self._context, index, writer)
       writer(f'cuda::device::memcpy_async_tx(&{self.write_base()}[{dest_access_index}], &{self._src.name}[{src_access_index}], cuda::aligned_size_t<16>({length}), mbarrier);')
-    else:
+      return
+
+    wide = self._bypass_covering(writer, src_offset, length)
+    if wide:
+      # Every access sixteen bytes, so every access bypasses L1.  The whole
+      # rounds first, then the one partial round: the lanes that still have a
+      # full access, and then the single lane whose access straddles the end,
+      # which zero-fills the rest.  Two guards where the stepping had two
+      # narrower passes and a scalar tail -- and the point is not that there
+      # are fewer of them.
+      pos = (length // (self._num_threads * wide)) * wide
+      self._write_hop(writer, src_offset, dst_offset, index, 0, pos, wide,
+                      nontemporal, linscale)
+      rest = length - pos * self._num_threads
+      if rest:
+        whole, part = divmod(rest, wide)
+        if whole:
+          with writer.If(f'{self._linear_idx()} < {whole}'):
+            self._write_hop(writer, src_offset, dst_offset, index, pos,
+                            pos + wide, wide, nontemporal, linscale)
+        if part:
+          # The one lane whose access straddles the end: `part` elements of
+          # source and the rest zeroed, in an access that is still sixteen
+          # bytes and still bypasses L1.
+          with writer.If(f'{self._linear_idx()} == {whole}'):
+            self._write_hop(writer, src_offset, dst_offset, index, pos,
+                            pos + wide, wide, nontemporal, linscale,
+                            zfill=wide - part)
+      return
+
+    if True:
       cap = self._swizzle_cap(writer)
       for vecsize in granularities:
         if vecsize <= cap and src_offset % vecsize == 0:
@@ -484,7 +567,7 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
                         1, nontemporal, linscale, lanes=width)
 
   def _write_hop(self, writer, src_offset, dst_offset, index, start, end,
-                 increment, nontemporal, linscale, lanes=None):
+                 increment, nontemporal, linscale, lanes=None, zfill=0):
     """`lanes` narrows the transfer's own register without touching the claim
     the fill leaves on the image.
 
@@ -527,10 +610,10 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
         dst_buf = self._destination_buffer(writer)
         src_buf = self._src.pir_buffer(writer)
         def write_load(lhs, rhs, _d=dst_buf, _s=src_buf, _n=increment,
-                       _p=self._copy_predicate):
+                       _p=self._copy_predicate, _z=zfill):
           self._tokens.append(writer.copy_async(
               _d, _s, dst_index=(lhs,), src_index=(rhs,), elems=_n,
-              predicate=_p))
+              zfill=_z, predicate=_p))
       elif structured:
         # No async engine, so the transfer is a load and a store -- which is
         # what it always was, spelled in a way every pass can read.

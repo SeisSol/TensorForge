@@ -1025,10 +1025,23 @@ class Emitter:
             dst_a = self.address(s.copy_dst, s.copy_dst_index)
             src_a = self.address(s.copy_src, s.copy_src_index)
             elems = s.attr('elems', 1)
+            zfill = s.attr('zfill', 0)
+            text = None
             if self._async_lex is not None:
-                nbytes = elems * self.elem_size(s.copy_dst)
-                w(self._async_lex.copy_async(f'&{dst_b}[{dst_a}]',
-                                             f'&{src_b}[{src_a}]', nbytes))
+                elem = self.elem_size(s.copy_dst)
+                text = self._async_lex.copy_async(
+                    f'&{dst_b}[{dst_a}]', f'&{src_b}[{src_a}]', elems * elem,
+                    zfill * elem)
+            if text is not None:
+                w(text)
+            elif zfill:
+                # No zero-filling copy here, and the fallbacks below would read
+                # the elements the fill stands for -- which are past the
+                # source.  The caller asks the lexic first and narrows; getting
+                # here means it did not.
+                raise IRError(
+                    f'a copy of {elems} elements with {zfill} zero-filled is '
+                    f'not available on this target')
             elif elems == 1:
                 w(f'{dst_b}[{dst_a}] = {src_b}[{src_a}];')
             else:

@@ -243,9 +243,13 @@ class HipLexic(CudaLexic):
       return super().copy_async_sizes()
     return (1, 2, 4)
 
-  def copy_async(self, dst, src, nbytes):
+  def copy_async(self, dst, src, nbytes, zfill: int = 0):
     if self._underlying_hardware != 'amd':
-      return super().copy_async(dst, src, nbytes)
+      return super().copy_async(dst, src, nbytes, zfill)
+    if zfill:
+      # `global_load_lds` has no src-size operand: it moves `nbytes` and reads
+      # them.  Refused rather than approximated, so the caller narrows.
+      return None
 
     # TODO: use address space templates from tensorforge_device/hip.h
     return (f'__builtin_amdgcn_global_load_lds('
