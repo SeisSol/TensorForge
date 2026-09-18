@@ -214,9 +214,17 @@ def generate(workload: Workload, unit: BuildUnit) -> Tuple[Optional[str],
         # given here is one the tuner holds fixed, so handing it the deduction
         # -- which is the generator's own answer, not the caller's -- takes
         # the lane count out of the space for every build this harness does.
+        #
+        # A stated ceiling counts as asked; the default one does not.  Every
+        # `Config` carries `lane_ceiling`, and it is `DEFAULT_LANE_CEILING`
+        # unless the configuration says otherwise -- so testing it for
+        # truthiness pins every build again, which is the whole of what this
+        # was meant to stop.
+        ceiling = unit.config.lane_ceiling
+        stated = unit.config.wave_wide or ceiling != lanes.DEFAULT_LANE_CEILING
         asked = (lanes.requested(descrs, ctx)
-                 or (lanes.deduce(descrs, ctx, ceiling=unit.config.lane_ceiling)
-                     if unit.config.lane_ceiling else None))
+                 or (lanes.deduce(descrs, ctx, ceiling=ceiling)
+                     if stated else None))
         gen = Generator(descrs, ctx, attrs=workload.attrs, lanes=asked)
         with contextlib.redirect_stdout(io.StringIO()):
             gen.generate()
