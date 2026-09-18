@@ -525,6 +525,18 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
                        _nt=nontemporal):
           writer(f'{lhs} = {self._context.get_vm().get_lexic().glb_load(rhs, datatype=_t, length=_n, nontemporal=_nt)};')
 
+      # The destination's rows are longer than the source's -- padded, so
+      # that a row starts where a wide access may start.  A linear transfer
+      # counts in *source* elements, so element `i` of the copy belongs at
+      # `(i / read) * dst + i % read` in the image: the row number scaled up,
+      # the position inside the row kept.
+      #
+      # Only on the destination.  Applying it to both sides is the same
+      # rescaling of an address whose rows are still `read` long, which reads
+      # the source at the padded stride and copies the wrong elements -- one
+      # `k9` GEMM at `stage_row_bytes` 16 came out with a checksum off in the
+      # fourth digit, and every value in it was a real number from the wrong
+      # place, which is the failure that does not look like one.
       if linscale is None:
         indexwrapper = lambda x: x
       else:
@@ -533,28 +545,30 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
       if (end - start) / increment > self._manual_unroll_threshold:
         # load using a for-loop
         with writer.For(f'int32_t i = {start}; i < {end}; i += {increment}', True):
-          contiguous_index = indexwrapper(f'{increment} * {self._linear_idx()} + i * {self._num_threads}')
+          linear = f'{increment} * {self._linear_idx()} + i * {self._num_threads}'
+          dst_index, src_index = indexwrapper(linear), linear
           dest_access_index = self._dest.access_address(self._context, index, writer)
           src_access_index = self._src.access_address(self._context, index, writer)
           if structured:
-            write_load(f'{dst_offset} + {dest_access_index} + {contiguous_index}',
-                       f'{src_offset} + {src_access_index} + {contiguous_index}')
+            write_load(f'{dst_offset} + {dest_access_index} + {dst_index}',
+                       f'{src_offset} + {src_access_index} + {src_index}')
           else:
-            lhs = f'{typeprefix}{self.write_base()}[{dst_offset} + {dest_access_index} + {contiguous_index}]'
-            rhs = f'{typeprefix}{self._src.name}[{src_offset} + {src_access_index} + {contiguous_index}]'
+            lhs = f'{typeprefix}{self.write_base()}[{dst_offset} + {dest_access_index} + {dst_index}]'
+            rhs = f'{typeprefix}{self._src.name}[{src_offset} + {src_access_index} + {src_index}]'
             write_load(lhs, rhs)
       else:
         # load using manual loop unrolling
         for counter in range(start, end, increment):
-          contiguous_index = indexwrapper(f'{increment} * {self._linear_idx()} + {counter * self._num_threads}')
+          linear = f'{increment} * {self._linear_idx()} + {counter * self._num_threads}'
+          dst_index, src_index = indexwrapper(linear), linear
           dest_access_index = self._dest.access_address(self._context, index, writer)
           src_access_index = self._src.access_address(self._context, index, writer)
           if structured:
-            write_load(f'{dst_offset} + {dest_access_index} + {contiguous_index}',
-                       f'{src_offset} + {src_access_index} + {contiguous_index}')
+            write_load(f'{dst_offset} + {dest_access_index} + {dst_index}',
+                       f'{src_offset} + {src_access_index} + {src_index}')
           else:
-            lhs = f'{typeprefix}{self.write_base()}[{dst_offset} + {dest_access_index} + {contiguous_index}]'
-            rhs = f'{typeprefix}{self._src.name}[{src_offset} + {src_access_index} + {contiguous_index}]'
+            lhs = f'{typeprefix}{self.write_base()}[{dst_offset} + {dest_access_index} + {dst_index}]'
+            rhs = f'{typeprefix}{self._src.name}[{src_offset} + {src_access_index} + {src_index}]'
             write_load(lhs, rhs)
 
   def tokens_for(self, writer):

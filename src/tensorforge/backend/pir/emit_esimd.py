@@ -220,6 +220,17 @@ class EsimdEmitter(Emitter):
             return
         return self._declare_unpredicated(v, expr, s, name)
 
+    def zero(self, t, value=None) -> str:
+        """A scalar, whatever the width -- which the base emitter cannot say.
+
+        There a vector is `VectorStruct`, an aggregate that no scalar converts
+        to, so a zero of one has to be spelled as that type.  Here it is
+        `simd<T, N>`, which is constructed from a scalar by broadcasting it,
+        and the scalar is both shorter and the spelling every other site in
+        this file already uses.
+        """
+        return t.base.literal(0)
+
     @staticmethod
     def _masked(cond, v: Value) -> bool:
         """Is `cond` a lane mask, and `v` something a merge can hold?"""

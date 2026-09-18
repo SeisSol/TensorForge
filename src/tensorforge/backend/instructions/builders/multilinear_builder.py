@@ -506,6 +506,24 @@ class MultilinearBuilder(OperationBuilder):
                                      src_offset = opview.offset)
     return SymbolView(registers, bbox), load_op
 
+  def _stage_row_elements(self) -> int:
+    """Elements the staged image's leading dimension is rounded up to.
+
+    `Options.stage_row_bytes` in elements, and 1 -- no padding -- when it is
+    not set, which is the default and what every recorded kernel has.
+
+    The row is the only dimension worth padding: it is the one a wide access
+    runs along, and it is the stride of every dimension above it, so an odd
+    one makes every later row start at an odd element.  That is why the damage
+    step's `(125, 6)` buffers refuse every pack and its `(20, 9)` one takes
+    them all.  Padding it costs the pad and buys the rows above it as well.
+    """
+    want = self._context.get_user_options().stage_row_bytes
+    if not want:
+      return 1
+    elem = self._context.fp_type.size()
+    return max(1, want // elem)
+
   def _make_loader_and_symbol(self, opview, is_transpose) -> Tuple[Symbol, GlbToShrLoader]:
     operand = opview.symbol
     shr_mem_region = Symbol(name=self._temporaries.next_shared_name(),
@@ -518,6 +536,7 @@ class MultilinearBuilder(OperationBuilder):
                                      src=operand,
                                      shr_mem=self._shr_mem,
                                      num_threads=self._num_threads,
+                                     alignment=self._stage_row_elements(),
                                      permute=is_transpose)
     # GlbToShrLoader copies the whole storage bounding box verbatim and gives
     # the copy the *same* bbox (only the shape is padded), so the operand's

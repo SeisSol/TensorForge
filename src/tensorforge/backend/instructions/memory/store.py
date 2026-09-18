@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 SeisSol Group
 #
 # SPDX-License-Identifier: MIT
-from typing import Union
+from typing import List, Union
 from tensorforge.common.context import Context
 from tensorforge.common.matrix.tensor import Tensor
 from tensorforge.common.matrix.boundingbox import BoundingBox
@@ -81,6 +81,31 @@ class StoreRegToReg(MemoryInstruction):
   def __str__(self) -> str:
     return f'{self._dest.name} = store{{r>r}}({self._src.name});'
 
+def _padded_row(sizes, context) -> List[int]:
+  """The buffer's physical extent: its box, with the leading dimension rounded
+  up to `Options.stage_row_bytes`.
+
+  A `DataView` already separates the two -- `shape` is the extent the strides
+  are built from and `bbox` the live range inside it -- because a staged
+  operand has been padded against bank conflicts since long before this.  A
+  temporary written out of registers never was, and it is the one the damage
+  step reads widest: five buffers of `(125, 6)` carrying a third of all its
+  shared traffic, every pack refused because 125 is odd and so every row above
+  the first starts at an odd element.
+
+  Only the leading dimension, because it is the one a wide access runs along
+  *and* the stride of every dimension above it.  The pad itself is never read:
+  a group that does not fit whole in the box stays scalar.
+  """
+  sizes = list(sizes)
+  want = context.get_user_options().stage_row_bytes
+  if not want or not sizes:
+    return sizes
+  unit = max(1, want // context.fp_type.size())
+  sizes[0] = -(-sizes[0] // unit) * unit
+  return sizes
+
+
 class StoreRegToShr(AbstractShrMemWrite):
   def __init__(self,
                context: Context,
@@ -130,7 +155,7 @@ class StoreRegToShr(AbstractShrMemWrite):
     self._clear = clear
     if clear:
       self._partial = False
-    dest.data_view = DataView(buffer_bbox.sizes(),
+    dest.data_view = DataView(_padded_row(buffer_bbox.sizes(), context),
                               permute=None,
                               bbox=buffer_bbox)
 

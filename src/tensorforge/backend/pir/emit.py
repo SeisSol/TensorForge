@@ -661,7 +661,19 @@ class Emitter:
             return
         self._prefetch_lex = lex
 
-    def zero(self, t) -> str:
+    def zero(self, t, value: Optional[Value] = None) -> str:
+        """What a predicated statement produces where the predicate is false.
+
+        A vector-typed one needs a vector.  `pred ? vec : 0.0f` does not
+        compile: `VectorStruct` is an aggregate and a scalar does not convert
+        to one, so the ternary has no common type -- which is how `k_width` 2
+        turned four corpus cases from slow into unbuildable, all of them a
+        wide load under a lane guard.  Value-initialized rather than filled,
+        because the guard is the statement's own and the elements it covers
+        are the ones the false branch stands for: all of them.
+        """
+        if isinstance(t, ScalarType) and t.is_vector:
+            return f'{self.ctype(t, value)}{{}}'
         return t.base.literal(0)
 
     def declare(self, v: Value, expr: str, s: Stmt, name: str = None) -> None:
@@ -675,7 +687,7 @@ class Emitter:
         if s.predicate is not None and _folds_predicate(s):
             other = s.attr('other')
             other = (self.operand(other) if other is not None
-                     else self.zero(v.type))
+                     else self.zero(v.type, v))
             expr = f'{self.operand(s.predicate)} ? ({expr}) : ({other})'
         if name is None and v.id in self._inline:
             self.bind(v, _atomic(expr) and expr or f'({expr})')

@@ -930,6 +930,18 @@ declare('k_width',
             'removes loads of the broadcast operand rather than instructions on '
             'the vectorized one, and it works with or without a lead width at all.')
 
+declare('stage_row_bytes',
+        default=0,
+        env='TF_STAGE_ROW_BYTES',
+        doc='Pad the leading dimension of a staged shared-memory image up to a '
+            'multiple of this many bytes.  0 copies the storage box as it is.\n'
+            'The image is our own layout -- the tensor keeps its own in global '
+            "memory -- so this costs shared memory and nothing else.  What it "
+            'buys is a row whose length a wide access divides: `k_width` 2 '
+            "packs SeisSol's damage step only out of the buffers whose row is "
+            'even, and every one of its 4216 refusals is a row of 125.  The pad '
+            'is never read: a group that does not fit whole stays scalar.')
+
 declare('ir_debug',
         default='',
         env='TF_IR_DEBUG',

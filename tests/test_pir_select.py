@@ -90,3 +90,28 @@ def test_if_else_still_branches():
     builder.store(image, handle.result, 0)
 
     assert 'if' in _emit(builder)
+
+
+def test_a_predicated_wide_load_falls_back_to_a_vector_and_not_a_scalar():
+    """The zero arm has to have the type of the arm beside it.
+
+    A vector is `VectorStruct`, an aggregate, and no scalar converts to one --
+    so `pred ? vec : 0.0f` has no common type and does not compile.  It is a
+    shape that only appears where a wide access meets a lane guard, which is
+    why it went unnoticed until `k_width` 2 put wide reads in the reduction:
+    `chain_five` and the three `slicing/register_operand` cases went straight
+    from slow to unbuildable, with 16 to 28 errors each.
+    """
+    builder = IRBuilder(fptype=Datatype.F32, scratch=('tempShrMem', 512))
+    tile = builder.alloc(Datatype.F32, (64,), MemSpace.SHARED, hint='s0')
+    lane = builder.thread_id('x')
+    guard = builder.op('lt', BOOL, lane, 16, hint='g')
+    builder.load(tile, lane, type_=ScalarType(Datatype.F32, 2),
+                 hint='wide', align='relaxed', predicate=guard)
+
+    src = _emit(builder)
+    assert '?' in src, src
+    # The arm, not the cast in front of the load: `: (0.0f)` is the bug.
+    arm = src.split('?', 1)[1].split(':', 1)[1]
+    assert '0.0f' not in arm, f"a scalar zero for a vector:\n{src}"
+    assert 'VectorT<float, 2>{}' in arm or '{}' in arm, src
