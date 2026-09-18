@@ -178,6 +178,23 @@ def _simple(arch, backend="cuda"):
     return {k.name: list(k.values(origin)) for k in tuning.simple_space(descrs, ctx)}
 
 
+def test_the_lane_space_stops_at_the_vector_unit_under_spmd():
+    """A multiplication narrower than the vector unit idles part of it.
+
+    Under SPMD there is one work-item per lane and nothing to put in the rest
+    of the vector, where a wave holding several multiplications fills itself.
+    Measured on a 16-wide PVC: with the geometry free, both scorers took
+    `elastic-o6s:derivative` to eight lanes and 66.1 ns an element against
+    29.9 at the deduced 32 and 12.7 at sixteen.
+    """
+    intel = _simple("pvc", "oneapi")
+    assert min(c.num_threads for c in intel['lanes']) >= 16
+    nvidia = _simple("sm_100")
+    assert min(c.num_threads for c in nvidia['lanes']) < 16, (
+        'a narrow multiplication shares its wave there, so the floor is not '
+        'the wave width')
+
+
 def test_the_simple_space_turns_only_what_is_safe_to_ship():
     knobs = _simple("sm_100")
     assert set(knobs) <= {'lanes', 'merge_variants', 'k_roll', 'k_unroll_max',

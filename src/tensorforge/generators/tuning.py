@@ -293,9 +293,21 @@ def simple_space(descrs, context: Context) -> List[Knob]:
     hw = context.get_vm().get_hw_descr()
     base = lane_config.deduce(flat, context)
     rows = base.num_active_threads or base.num_threads
+    # A multiplication narrower than the vector unit leaves lanes of it idle
+    # under SPMD -- there is one work-item per lane and nothing else to put in
+    # the rest of the vector, where a wave that holds several multiplications
+    # fills itself.  On a 16-wide PVC that is measured and steep: with the
+    # geometry free to move, both scorers took `elastic-o6s:derivative` to
+    # eight lanes and 66.1 ns an element, against 29.9 at the deduced 32 and
+    # 12.7 at sixteen.  So the floor is the vector unit there, and
+    # `MIN_LANES` elsewhere, where a narrow multiplication shares its wave.
+    floor = lane_config.MIN_LANES
+    if hw.vendor == 'intel' and not getattr(context.get_vm().get_lexic(),
+                                            'simd_mode', False):
+        floor = max(floor, getattr(hw, 'vec_unit_length', 1))
     geometries = []
     t = base.num_threads
-    while t >= lane_config.MIN_LANES:
+    while t >= floor:
         geometries.append(LaneConfig(t, base.num_active_threads, base.lead_width))
         if t & (t - 1):
             break
