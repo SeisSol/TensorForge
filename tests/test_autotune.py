@@ -275,6 +275,26 @@ def test_amd_is_guarded_by_what_hipcc_allocates_and_nvidia_by_bytes():
     assert tuning._over_budget(_fake('sm_100', 'cuda', 8, 16, 1112))
 
 
+def test_intel_states_its_spilling_in_the_binary_and_not_on_the_console(tmp_path):
+    """IGC prints nothing about a SPMD kernel that spills.
+
+    `elastic-o6s:neighboringFlux` at sixteen lanes carries 13888 bytes of
+    spilling -- 55 spill and 72 fill messages in its ISA -- and its build
+    prints not one word; at 32 lanes the same kernel has none and is 1.5x
+    faster.  So the figure that decides between them is in the object's
+    `.ze_info` note, which is where this looks.
+    """
+    obj = tmp_path / 'k.so'
+    obj.write_bytes(b'\x7fELF' + b'...' + b'  spill_size:      13888\n' + b'...')
+    assert tuning._zeinfo_spill(str(obj)) == 13888
+    quiet = tmp_path / 'q.so'
+    quiet.write_bytes(b'\x7fELF nothing to say')
+    assert tuning._zeinfo_spill(str(quiet)) == 0
+    assert tuning._zeinfo_spill(str(tmp_path / 'missing.so')) == 0
+    # and the console parser still answers for what it can see
+    assert tuning.parse_igc('spill memory used = 96 bytes').spill_bytes == 96
+
+
 def test_intel_spmd_shares_one_register_file_over_the_sub_group():
     """The file is a thread's, and under SPMD a thread holds the sub-group.
 

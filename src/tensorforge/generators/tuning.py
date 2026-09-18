@@ -755,6 +755,34 @@ def parse_igc(log: str) -> Resources:
     return Resources(None, spill)
 
 
+#: `spill_size:      13888` in the binary's `.ze_info`, which is the only
+#: place IGC states it for a SPMD build.
+_ZEINFO_SPILL = re.compile(rb'spill_size:\s*(\d+)')
+
+
+def _zeinfo_spill(path: str) -> int:
+    """What the ahead-of-time binary says it spilled, or 0.
+
+    IGC says nothing on the console about a SPMD kernel that spills -- the
+    build of `elastic-o6s:neighboringFlux` at sixteen lanes prints not one
+    word and carries 13888 bytes of spilling, 55 spill and 72 fill messages
+    in its ISA, while the same kernel at 32 lanes has none.  So the log is
+    not where to look: the figure is in the `.ze_info` note of the object,
+    and that is in the file whatever the compiler chose to print.
+
+    Read as bytes rather than parsed as ELF: the note is text in a section
+    whose name has moved between releases, and one regular expression over
+    the file is both shorter and harder to break.
+    """
+    try:
+        with open(path, 'rb') as f:
+            blob = f.read()
+    except OSError:
+        return 0
+    return max((int(m.group(1)) for m in _ZEINFO_SPILL.finditer(blob)),
+               default=0)
+
+
 def parse_amdgpu(log: str) -> Optional[Resources]:
     """`-Rpass-analysis=kernel-resource-usage`.  The occupancy it reports is
     waves per SIMD; kept as the register figure's blocks-equivalent."""
@@ -847,9 +875,13 @@ class CompiledScore:
                 parse = parse_amdgpu
             run = subprocess.run(cmd + list(self.flags), capture_output=True,
                                  text=True, timeout=self.timeout)
+            spilled = (_zeinfo_spill(os.path.join(tmp, 'k.so'))
+                       if hw.vendor == 'intel' else 0)
         report = parse(run.stdout + run.stderr)
         if report is None or run.returncode:
             return None
+        if spilled > report.spill_bytes:
+            report = replace(report, spill_bytes=spilled)
         if hw.vendor == 'nvidia' and report.registers:
             gen = result.generator
             threads = gen._num_threads * gen.launch_config().mults_per_block
