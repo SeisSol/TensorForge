@@ -42,7 +42,8 @@ import shutil
 import subprocess
 import tempfile
 from dataclasses import dataclass, field, replace
-from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import (Any, Callable, Dict, Iterable, List, Mapping, Optional,
+                    Sequence, Tuple)
 
 from tensorforge.common.basic_types import Addressing
 from tensorforge.common.context import Context, Options
@@ -92,12 +93,13 @@ class Candidate:
             return self.lanes
         return dict(self.options).get(name, default)
 
-    def context(self, base: Context) -> Context:
+    def context(self, base: Context, **override) -> Context:
         """A context for this candidate: the base's target and options, with
-        this candidate's on top."""
+        this candidate's on top, and `override` over everything."""
         hw = base.get_vm().get_hw_descr()
         asked = dict(base._asked_options.asked())
         asked.update(self.options)
+        asked.update(override)
         return Context(arch=hw.model, backend=backend_of(base),
                        fp_type=base.fp_type, options=Options(**asked))
 
@@ -170,9 +172,18 @@ def contraction_lengths(descrs) -> List[int]:
 
 
 def _roll_values(descrs) -> List[int]:
-    """0, and the largest divisors of the longest reduction at up to 32 and up
-    to 8 steps -- the two ends of what rolling buys: a body the instruction
-    cache holds, and one whose registers stay small."""
+    """0, the largest divisors of the longest reduction at up to 32 and up to
+    8 steps, and 2 -- the ends of what rolling buys and the smallest body it
+    can leave.
+
+    A divisor rolls without a remainder, which is why the two ends are chosen
+    from them, but the option does not require one and the shortest body is
+    what a kernel at the register limit wants.  `elastic-o6s:derivative`
+    contracts over 55, so the divisors offer 11 and 5; on a GH200 it runs at
+    21.2 ns/el rolled by two and 25.7 rolled by four, and rolled by eleven it
+    is slower than the 23.2 it reaches unrolled.  Two was not in the space, so
+    no ranking could have found it.
+    """
     ks = contraction_lengths(descrs)
     if not ks:
         return [0]
@@ -182,6 +193,8 @@ def _roll_values(descrs) -> List[int]:
         divisors = [d for d in range(2, min(cap, k - 1) + 1) if k % d == 0]
         if divisors and divisors[-1] not in out:
             out.append(divisors[-1])
+    if k > 2 and 2 not in out:
+        out.append(2)
     return out
 
 
@@ -304,7 +317,15 @@ def simple_space(descrs, context: Context) -> List[Knob]:
     knobs = [Knob('lanes', lambda c, g=tuple(geometries): g)] if len(geometries) > 1 else []
     if _mergeable(descrs, context):
         knobs.append(Knob('merge_variants', lambda c: (False, True)))
-    rolls = _roll_values(descrs)[:2]
+    # Unrolled, rolled by the largest divisor, and rolled by two.  The first
+    # two are the ends `_roll_values` picks; the third is the shortest body
+    # the option can leave, which no divisor offers where the contraction is
+    # prime to it.  `elastic-o6s:derivative` contracts over 55, so the
+    # divisors are 11 and 5: on a GH200 it runs at 21.2 ns/el rolled by two,
+    # 23.2 unrolled and 25.7 rolled by four, and the value that wins was not
+    # in the space at all.
+    rolls = _roll_values(descrs)
+    rolls = rolls[:2] + [r for r in rolls[2:] if r == 2]
     if len(rolls) > 1:
         knobs.append(Knob('k_roll', lambda c, r=tuple(rolls): r))
     # And unrolled whole where `k_unroll_max` would roll.  Rolled, a reduction
@@ -391,7 +412,12 @@ def build(descr_factory, base: Context, candidate: Candidate) -> Build:
     eight-lane interleave behind for the next build to inherit.
     """
     from tensorforge.generators.generator import Generator
-    ctx = candidate.context(base)
+    # Tuning off for the trial: it asks what *this* candidate costs, so it
+    # builds this one and does not go looking for another.  With a knob pinned
+    # the tuner no longer stands aside when a geometry is given, so a trial
+    # that kept `autotune` would open a walk of its own, once per trial, all
+    # the way down.
+    ctx = candidate.context(base, autotune='off')
     ctx.measure_pressure = True
     try:
         gen = Generator(descr_factory(), ctx, lanes=candidate.lanes)
@@ -1004,7 +1030,8 @@ def _store(path: Optional[str], key: str, pick: Candidate) -> None:
 
 def autotune(descr_factory, context: Context, mode: str = 'static',
              budget: Optional[int] = 24,
-             cache: Optional[str] = None) -> Optional[Candidate]:
+             cache: Optional[str] = None,
+             fixed: Optional[Mapping[str, Any]] = None) -> Optional[Candidate]:
     """The configuration `Options.autotune` builds a kernel with.
 
     One build of the default first: its source is the cache key, and a kernel
@@ -1012,6 +1039,13 @@ def autotune(descr_factory, context: Context, mode: str = 'static',
     `simple_space`, the default seeded in, within `budget` builds.  None where
     the default does not build -- the generator then fails the way it would
     have, instead of this failing differently.
+
+    `fixed` names what the caller has already decided: each one is set in the
+    origin and its knob leaves the space, so the walk turns the rest around
+    it.  A caller who states the geometry is stating that and not "do not
+    tune" -- `elastic-o6s:derivative` is built at a geometry the benchmark
+    harness passes explicitly, and with the whole space abandoned for it
+    nothing was ever tuned there.
     """
     descrs = descr_factory()
     # A measurement first: where one says what is best for this device and
@@ -1030,6 +1064,9 @@ def autotune(descr_factory, context: Context, mode: str = 'static',
         return None
     knobs = simple_space(descrs, context)
     origin = start(descrs, context)
+    for name, value in (fixed or {}).items():
+        origin = origin.set(name, value)
+    knobs = [knob for knob in knobs if knob.name not in (fixed or {})]
     first = build(descr_factory, context, origin)
     if not first.ok:
         return None

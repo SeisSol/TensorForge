@@ -81,6 +81,28 @@ def test_the_budget_caps_the_builds(monkeypatch):
     assert len(set(built)) <= 4
 
 
+def test_a_probe_the_generator_builds_for_itself_is_not_tuned(monkeypatch):
+    """Tuning is one question about the caller's kernel, asked once.
+
+    The merging probe and the prefetch probes are generators this one builds
+    to ask something about itself, at a geometry that is already settled.
+    Tuning them opens a walk inside every probe and a probe inside every
+    build of every walk -- hundreds of builds that all keep to
+    `autotune_budget` in *distinct* candidates, so the budget test above does
+    not see them.  Counted here, in total.
+    """
+    built = []
+    real = tuning.build
+
+    def counting(factory, context, candidate):
+        built.append(candidate)
+        return real(factory, context, candidate)
+    monkeypatch.setattr(tuning, 'build', counting)
+    # sm_120: no measured preference, so the walk actually runs
+    _generate("sm_120", autotune='static', autotune_budget=4)
+    assert len(built) <= 5, f'{len(built)} builds against a budget of four'
+
+
 def test_a_remembered_pick_costs_one_build(monkeypatch, tmp_path):
     # sm_120: no measured preference for it, so the walk runs and is remembered
     path = tmp_path / "picks.json"
@@ -103,16 +125,49 @@ def test_a_remembered_pick_costs_one_build(monkeypatch, tmp_path):
     assert again.get_kernel() == first.get_kernel()
 
 
-def test_an_explicit_geometry_is_not_tuned():
+def test_an_explicit_geometry_is_kept_and_the_rest_still_turned(monkeypatch):
+    """A caller who states the geometry states that, not "do not tune".
+
+    Standing aside for an explicit `lanes` turned tuning off for every caller
+    that passes one, and `tools/bench/build.py` passes one for every build --
+    so nothing measured through it was ever tuned.  What is fixed is pinned
+    into the origin and leaves the space; the other knobs are still walked.
+
+    The walk itself is another test's business: this one watches what the
+    generator asks for, because asking is the decision.
+    """
     mod = _case()
     base = tuning.start(mod.descr_list(),
                         Context(arch="sm_100", backend="cuda", fp_type=mod.DTYPE))
+    asked = {}
+
+    def watching(factory, context, mode='static', budget=None, cache=None,
+                 fixed=None):
+        asked['fixed'] = fixed
+        return None
+
+    monkeypatch.setattr(tuning, 'autotune', watching)
     gen = Generator(mod.descr_list(),
                     Context(arch="sm_100", backend="cuda", fp_type=mod.DTYPE,
                             options=Options(autotune='static')),
                     lanes=base.lanes)
     gen.generate()
-    assert gen.tuned is None
+    assert asked, 'the geometry switched tuning off'
+    assert asked['fixed'] == {'lanes': base.lanes}
+
+
+def test_a_pinned_knob_leaves_the_space_and_stays_in_the_origin():
+    """`fixed` is applied to the origin and its knob is not walked."""
+    mod = _case()
+    ctx = Context(arch="sm_100", backend="cuda", fp_type=mod.DTYPE)
+    descrs = mod.descr_list()
+    origin = tuning.start(descrs, ctx)
+    knobs = tuning.simple_space(descrs, ctx)
+    assert any(k.name == 'lanes' for k in knobs), 'nothing to pin in this case'
+    pinned = origin.set('lanes', origin.lanes)
+    assert pinned.lanes == origin.lanes
+    rest = [k for k in knobs if k.name not in {'lanes'}]
+    assert {k.name for k in rest} == {k.name for k in knobs} - {'lanes'}
 
 
 def _simple(arch, backend="cuda"):
@@ -129,7 +184,9 @@ def test_the_simple_space_turns_only_what_is_safe_to_ship():
                           'register_temporaries', 'k_width'}
     widths = {c.num_threads for c in knobs['lanes']}
     assert all(w & (w - 1) == 0 for w in widths), 'powers of two only'
-    assert knobs['k_roll'] == [0, 28]
+    # 2 beside the divisors: the shortest body, which is what a kernel at
+    # the register limit wants and no divisor of 55 offers.
+    assert knobs['k_roll'][:2] == [0, 28] and 2 in knobs['k_roll']
 
 
 def test_the_reduction_width_offers_only_the_other_side():

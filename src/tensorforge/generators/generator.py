@@ -376,6 +376,12 @@ class Generator:
     #: shared memory and threads.  Not the register limit; see
     #: `_resident_blocks`.
     self.resident_blocks: Optional[int] = None
+    #: Whether `Options.autotune` applies to this generator.  False on the
+    #: ones built here to ask a question -- the merging probe, the prefetch
+    #: probes -- because the configuration is the caller's kernel's and was
+    #: settled before they were built: tuning them again would open a walk
+    #: inside every probe, and a probe inside every build of every walk.
+    self._may_tune: bool = True
 
     self._section: Section = Section()
     self._sections: List[Section] = []
@@ -518,6 +524,7 @@ class Generator:
       return original(body, make_value, next_index, report, assume_rotated)
 
     probe = Generator(self.descr_list, self._context, attrs=self._attrs)
+    probe._may_tune = False
     probe._rotate = set()
     probe._announce_identity = False
     # The list as this generator builds it, merged or not.
@@ -565,6 +572,7 @@ class Generator:
       return after
 
     check = Generator(self.descr_list, self._context, attrs=self._attrs)
+    check._may_tune = False
     check._rotate = set(names)
     check._announce_identity = False
     check._emit_loops = self._emit_loops
@@ -633,24 +641,35 @@ class Generator:
   def _autotune(self) -> None:
     """Rebuild this generator at the configuration `Options.autotune` picks.
 
-    Only where nobody fixed the geometry: an explicit `lanes` is a caller's
-    decision, and it is also what every candidate build carries, so a
-    candidate never tunes itself.  The candidates are built from deep copies,
-    because preparing and rolling leave their marks on the tensors; the pick
-    is then built here, on the caller's own, which is where the host reads the
-    storage from.
+    What the caller fixed stays fixed and the rest is still tuned: an explicit
+    `lanes`, or `Options.lanes_per_mult`, pins that knob and leaves the others
+    in the space.  Standing aside instead -- which is what a fixed geometry
+    used to do -- turns tuning off for every caller that states one, and
+    `tools/bench/build.py` states one for every build, so nothing measured
+    through it was ever tuned.
+
+    The candidates are built from deep copies, because preparing and rolling
+    leave their marks on the tensors; the pick is then built here, on the
+    caller's own, which is where the host reads the storage from.
     """
     opts = self._context.get_user_options()
-    if opts.autotune in ('', 'off') or self._lanes is not None:
-      return
-    if opts.lanes_per_mult:
+    if opts.autotune in ('', 'off') or not self._may_tune:
       return
     import copy
+    from tensorforge.generators import lanes as lane_config
     from tensorforge.generators import tuning
     given = self._given
+    fixed = {}
+    if self._lanes is not None:
+      fixed['lanes'] = self._lanes
+    elif opts.lanes_per_mult:
+      asked = lane_config.requested(given, self._context)
+      if asked is not None:
+        fixed['lanes'] = asked
     pick = tuning.autotune(lambda: copy.deepcopy(given), self._context,
                            mode=opts.autotune, budget=opts.autotune_budget,
-                           cache=opts.autotune_cache or None)
+                           cache=opts.autotune_cache or None,
+                           fixed=fixed or None)
     if pick is None:
       return
     announce = self._announce_identity
@@ -712,6 +731,7 @@ class Generator:
                       attrs=self._attrs)
     probe._merge_decided = True
     probe._announce_identity = False
+    probe._may_tune = False
     probe._rotate = set()
     try:
       probe.generate()
@@ -735,6 +755,7 @@ class Generator:
                        self._thread_block_policy_type, lanes=self._lanes,
                        attrs=self._attrs, merge_within=(budget, share))
     merged._announce_identity = False
+    merged._may_tune = False
     merged._base_kernel_name = self._base_kernel_name
     try:
       merged.generate()
