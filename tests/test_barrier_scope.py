@@ -239,17 +239,28 @@ def test_the_cap_is_asked_only_where_a_barrier_needs_it():
     assert quiet._barrier_cap() is None
     assert quiet.get_num_mults_per_block() > 1
 
+    # Narrower than the sub-group the kernel will state: several
+    # multiplications then share one, and the barrier meets all of them.
     loud = RegmaxBlockPolicy(ctx, global_mem=0, mem_size_per_mult=0,
-                             num_threads=2 * wave)
+                             num_threads=wave // 2)
     loud.set_has_barrier(True)
-    assert loud._barrier_cap() == 1
-    assert loud.get_num_mults_per_block() == 1
+    assert loud._barrier_cap() == 2
+    assert loud.get_num_mults_per_block() == 2
 
     exact = RegmaxBlockPolicy(ctx, global_mem=0, mem_size_per_mult=0,
                               num_threads=wave)
     exact.set_has_barrier(True)
     assert exact._barrier_cap() is None, (
         "a multiplication that is the wave needs nothing narrower")
+
+    # And one that fills the sub-group the kernel *states* needs nothing
+    # either, though it is two waves wide: the sub-group is the request, not
+    # the wave, and its barrier meets exactly this multiplication.
+    stated = RegmaxBlockPolicy(ctx, global_mem=0, mem_size_per_mult=0,
+                               num_threads=2 * wave)
+    stated.set_has_barrier(True)
+    assert stated._barrier_cap() is None
+    assert stated.get_num_mults_per_block() > 1
 
 
 def test_the_loop_reports_block_uniformity_only_at_one_mult_per_block():
