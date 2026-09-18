@@ -44,7 +44,7 @@ from tensorforge.backend.instructions.compute.elementwise import (
     ElementwiseInstruction)
 from tensorforge.backend.instructions.memory.store import StoreRegToShr
 from tensorforge.backend.instructions.sync_block import SyncThreads
-from tensorforge.common.context import Context
+from tensorforge.common.context import Context, Options
 from tensorforge.common.exceptions import GenerationError
 from tensorforge.generators.generator import Generator
 
@@ -63,11 +63,12 @@ def _load(stem: str):
     return mod
 
 
-def _generate(stem: str, backend: str, arch: str):
+def _generate(stem: str, backend: str, arch: str, **options):
     """The generator and the descriptor list, whose tensors it has named."""
     mod = _load(stem)
     descrs = mod.descr_list()
-    ctx = Context(arch=arch, backend=backend, fp_type=mod.DTYPE)
+    ctx = Context(arch=arch, backend=backend, fp_type=mod.DTYPE,
+                  options=Options(**options) if options else None)
     gen = Generator(descrs, ctx)
     gen.generate()
     return gen, descrs
@@ -284,7 +285,14 @@ def test_a_settled_temporary_is_published_before_it_is_read(backend, arch):
     scheduling), so a textual assertion would test the architecture rather than
     the pass.
     """
-    gen, _ = _generate("mixed/ml_then_ew", backend, arch)
+    # Asked for explicitly, because the default no longer produces a settle
+    # here: `register_temporaries=all` lets the pointwise read take the
+    # accumulator's image where it is, and then there is no store to publish
+    # and no barrier to find.  What this pins is the pair, for every temporary
+    # an image cannot serve -- one whose lane axis a consumer moves, one whose
+    # type differs from the image's, a global result.
+    gen, _ = _generate("mixed/ml_then_ew", backend, arch,
+                       register_temporaries='scalars')
     stream = _flatten(gen._sections[0].stream)
 
     def index_of(predicate, what):

@@ -187,12 +187,17 @@ def test_a_table_over_constants_holds_their_numbers():
 
 
 def test_a_multiplication_that_does_not_fit_is_refused():
-    """At order 7 in double precision one multiplication of the damage step
-    needs more shared memory than a block has.  The block was then sized to
-    hold no multiplication at all -- height 0, the window never declared --
-    and the source went out as if nothing had happened.  Order 6 stood here
-    until the known-zero steps and `shared_packing` brought it under the
-    limit; order 7 is the first that still does not fit."""
+    """One multiplication of the damage step needs more shared memory than a
+    block has.  The block was then sized to hold no multiplication at all --
+    height 0, the window never declared -- and the source went out as if
+    nothing had happened.
+
+    Three things have to be off for the damage step to reach that size at all,
+    and each of them is why it no longer does by default: `shared_packing`
+    (the coloring made every color its largest buffer), `merge_variants`, and
+    `register_temporaries` (a temporary read out of its producer's image never
+    reaches a buffer).  Order 6 stood here, then order 7; with images the
+    whole family fits, so what the test pins is the guard, not the order."""
     from tensorforge.common.context import Options
     from tensorforge.common.exceptions import GenerationError
 
@@ -200,7 +205,8 @@ def test_a_multiplication_that_does_not_fit_is_refused():
     gen = Generator(_read(system, f'{system}-o7-d', 'gpu_damageStep'),
                     Context(arch='sm_86', backend='cuda', fp_type=Datatype.F64,
                             options=Options(merge_variants=False,
-                                            shared_packing=False)))
+                                            shared_packing=False,
+                                            register_temporaries='none')))
     with contextlib.redirect_stdout(io.StringIO()), warnings.catch_warnings():
         warnings.simplefilter('ignore')
         with pytest.raises(GenerationError, match='shared memory'):

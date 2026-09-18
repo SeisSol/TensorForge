@@ -295,12 +295,31 @@ class AbstractShrMemWrite(MemoryInstruction):
     volume = 1
     for n in view.shape:
       volume *= n
+
+    # The granule is what a *reader* may take in one access, and only
+    # `k_width` asks for more than one today.  It has to be decided here
+    # because the permutation is decided here, and the reader that wants the
+    # wide access comes later and cannot change it -- so the writer grants the
+    # unit rather than the reader claiming it.  At `k_width` 1, which is the
+    # default, this is exactly the previous rule and the corpus does not move.
+    #
+    # Granted as wide as asked, even where that leaves no width to permute --
+    # a 180-element window takes granule 4 and then width 1, which is no
+    # permutation at all.  That is the right end of the trade rather than a
+    # failure of it: the alternative is a narrower granule, which does not make
+    # the wide read slower, it makes it a scalar read again.  The permutation
+    # is worth a few bank cycles; the access it would forbid is worth a load.
+    granule = 1
+    want = getattr(self._context.get_user_options(), 'k_width', 1) or 1
+    while granule * 2 <= want and volume % (granule * 2) == 0:
+      granule *= 2
+
     width = 1
-    while width * 2 <= self._BANKS and volume % (width * 2) == 0:
+    while width * 2 <= self._BANKS and volume % (width * granule * 2) == 0:
       width *= 2
     if width < 2:
       return None
-    return XorSwizzle(width)
+    return XorSwizzle(width, granule)
 
   def compute_shared_mem_size(self) -> int:
     # What the region allocator must reserve: every stage at once.  Returning

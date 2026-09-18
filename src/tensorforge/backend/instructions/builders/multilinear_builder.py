@@ -124,11 +124,15 @@ class MultilinearBuilder(OperationBuilder):
         or getattr(symbol.obj, 'addressing', None) == Addressing.NONE)
     image_bytes, budget = (self._register_image_cost(i, lead_pos)
                            if addressable else (None, None))
+    window = 1
+    for size in self._ops[i].bbox.sizes():
+      window *= size
     placement = choose_operand_placement(
         legal_operand_placements(addressable=addressable,
                                  transposed=transpose,
                                  carries_lead_dim=has_lead_dim,
-                                 policy=self._policy),
+                                 policy=self._policy,
+                                 single_element=window == 1),
         self._policy, image_bytes=image_bytes, register_budget=budget)
 
     name = self._ops[i].symbol.name

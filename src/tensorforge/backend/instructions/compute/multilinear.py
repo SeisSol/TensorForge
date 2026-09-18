@@ -793,6 +793,8 @@ class MultilinearInstruction(ComputeInstruction):
                 # vector of them to load.  Its steps are read one by one --
                 # `derivative` at k_width 2 did not generate at all.
                 continue
+            if not self._pack_is_aligned(i, sym, steps, writer):
+                continue
             base = varlist[loopmap[kslot]]
             idx = [add_offset(VecIndex(base, steps) if j == 0
                               else varlist[loopmap[nk]],
@@ -804,6 +806,58 @@ class MultilinearInstruction(ComputeInstruction):
             for c in range(steps):
                 packs[(i, c)] = writer.extract(v, c)
         return packs
+
+    def _pack_is_aligned(self, i: int, sym, steps: int, writer=None) -> bool:
+        """Whether a group of `steps` may be read as one vector from `sym`.
+
+        Contiguity says the values are adjacent; it does not say the vector
+        starts where a vector may start, and a wide access that begins
+        mid-vector is a fault rather than a slower access.  SeisSol's damage
+        step reads `epsTotal[125, 6]`: the 125 are adjacent, so the pack was
+        taken -- and every second column begins at element 125, which is odd,
+        so the kernel died on a misaligned address at `k_width` 2 and 4.
+
+        Four conditions, and they are different facts.  The base has to be
+        *provably* aligned to the whole group (`Symbol.linear_align_bytes`,
+        through `vectorize.reduction_vector_width` -- the rule the lead width
+        already asks, with the reduction's own answer that divisibility does
+        not matter here).  Every other axis has to move the window by a whole
+        number of groups, because the index that moves it is a loop variable
+        and one value of it landing mid-vector is enough.  And the group's
+        first element has to be one: the reduction need not start at zero and
+        the view need not either.
+
+        And the buffer must not be permuted against bank conflicts, which is
+        what actually killed the damage step: `*(VectorT<float,2>*)&s0[21]`,
+        where 21 is the image of 20 under the staging buffer's `xor4`.  The
+        other three conditions were all true there, and could not have caught
+        it -- every one of them is about the tensor's layout, and the
+        permutation is not in the layout.  It is applied to the index inside
+        `PirBuilder`, once, to the first element of the access; the rest of a
+        vector reads past it unpermuted.  See `PirBuilder._check_width`, which
+        refuses such an access outright for the callers that have no choice.
+        """
+        from tensorforge.backend.instructions.memory.vectorize import (
+            reduction_vector_width)
+
+        if writer is not None and getattr(sym, 'swizzled', None) is not None \
+                and sym.swizzled(writer, steps):
+            return False
+        try:
+            strides = list(sym.data_view.get_dim_strides())
+        except Exception:                # a symbol without a view: no promise
+            return False
+        if any(stride % steps for stride in strides[1:]):
+            return False
+        start = self._eff_offset(i, 0) + (self._ks[-1][0] if self._ks else 0)
+        if start % steps:
+            return False
+        obj = getattr(sym, 'obj', None)
+        dense = obj.is_dense() if obj is not None and hasattr(obj, 'is_dense') \
+            else True
+        return reduction_vector_width(steps, sym.get_fptype().size(),
+                                      sym.linear_align_bytes(), 1, dense,
+                                      cap=steps) >= steps
 
     def _splat(self, writer, ftype, v):
         """A scalar operand broadcast into every component of the vector.

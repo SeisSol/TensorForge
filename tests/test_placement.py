@@ -41,11 +41,12 @@ class _Hw:
 
 
 def _legal(policy, *, addressable=True, transposed=False,
-           carries_lead_dim=True):
+           carries_lead_dim=True, single_element=False):
     return legal_operand_placements(addressable=addressable,
                                     transposed=transposed,
                                     carries_lead_dim=carries_lead_dim,
-                                    policy=policy)
+                                    policy=policy,
+                                    single_element=single_element)
 
 
 # ----------------------------------------------------------------------
@@ -71,6 +72,25 @@ def test_an_operand_without_the_lead_index_can_only_be_staged(policy):
     """Same problem from the other side: there is no lane axis to spread."""
     assert _legal(policy, carries_lead_dim=False) \
         == frozenset({Placement.SHARED})
+
+
+@pytest.mark.parametrize("policy", [NVIDIA, DEFAULT_POLICY],
+                         ids=["nvidia", "unnamed"])
+def test_one_element_needs_no_staging_wherever_it_sits(policy):
+    """A window of one element has no lane axis to move.
+
+    Every lane wants that one value, so the copy through shared memory buys
+    nothing a broadcast does not -- and it costs a store, a barrier and a read
+    per use, against one exchange `licm` can lift out of the loop.  Held
+    whatever the vendor thinks of broadcasts in general, which is what the
+    flag decides for windows that have a shape.  SeisSol's damage step reads
+    `waveIntegral[1]` and `shearIntegral[1]` at 18 of its 68 staging sites;
+    no corpus case has one.
+    """
+    assert Placement.IN_PLACE in _legal(policy, carries_lead_dim=False,
+                                        single_element=True)
+    assert Placement.IN_PLACE in _legal(policy, transposed=True,
+                                        single_element=True)
 
 
 @pytest.mark.parametrize("policy", [AMD, INTEL], ids=["amd", "intel"])

@@ -137,21 +137,50 @@ class XorSwizzle:
 
     because ``k`` occupies the low ``log2(width)`` bits and ``n % width`` is
     smaller than ``width``, so the XOR cannot carry out of them.
+
+    ``granule`` is the unit that moves.  At 1 the permutation moves single
+    elements, which is the strongest form and the one incompatible with a wide
+    access: a vector's address names its first element and the hardware reads
+    the rest from beside it, where the permutation has not been applied.
+    Permuting granules of ``g`` elements instead keeps each granule contiguous
+    and ``g``-aligned, so a ``g``-wide access is exactly one granule and stays
+    correct -- at the price of proportionally fewer distinct bank keys, since
+    ``g`` neighbouring elements now always share a row's worth of ordering.
+    Which of the two is worth more is a measurement, not a rule: it trades
+    bank cycles against the number of load instructions.
     """
 
     width: int
+    #: Elements that move together.  1 permutes single elements.
+    granule: int = 1
 
     def __post_init__(self):
         if self.width < 1 or self.width & (self.width - 1):
             raise IRError(f'swizzle width must be a power of two, got '
                           f'{self.width}')
+        if self.granule < 1 or self.granule & (self.granule - 1):
+            raise IRError(f'swizzle granule must be a power of two, got '
+                          f'{self.granule}')
 
     def apply(self, index: int) -> int:
         """The permuted index, for tests and for constant folding."""
-        return index ^ ((index // self.width) % self.width)
+        g, r = divmod(index, self.granule)
+        return (g ^ ((g // self.width) % self.width)) * self.granule + r
+
+    def admits(self, length: int) -> bool:
+        """May an access of `length` adjacent elements be permuted as one?
+
+        Only inside a granule.  An access names one index and reads the rest
+        of its elements from beside it, so it is permuted as a unit or not at
+        all -- and a run that crosses a granule boundary has two units, which
+        this map may send to two different places.
+        """
+        return (length < 2 or self.width < 2
+                or (length <= self.granule and self.granule % length == 0))
 
     def __repr__(self):
-        return f'xor{self.width}'
+        return (f'xor{self.width}' if self.granule == 1
+                else f'xor{self.width}g{self.granule}')
 
 
 @dataclass(frozen=True)

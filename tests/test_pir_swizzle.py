@@ -381,34 +381,158 @@ def test_a_contiguous_run_does_not_survive_an_element_permutation():
         'a run at 36 leaves its own four positions entirely')
 
 
-def test_a_granular_permutation_would_keep_them_together():
-    """Recorded because it is the option, not a defect.
+def test_a_granular_permutation_keeps_them_together():
+    """The way out, and what it costs.
 
     Permuting *granules* of `g` elements moves the components of one vector
     together and in order.  It costs exactly the spreading it preserves: a
     coarser unit has proportionally fewer distinct keys, so a stride-32 column
     read goes 1-way at granule 1, 2-way at granule 2, 4-way at granule 4.
     """
-    def granular(width, g):
-        def f(i):
-            gran, off = divmod(i, g)
-            return (gran ^ ((gran // width) % width)) * g + off
-        return f
-
     for g in (2, 4):
-        f = granular(8, g)
+        swz = XorSwizzle(8, g)
         for start in range(0, 64, g):
-            run = [f(start + k) for k in range(g)]
+            run = [swz.apply(start + k) for k in range(g)]
             assert run == list(range(run[0], run[0] + g)), (
                 f'granule {g} split a run at {start}: {run}')
+            assert run[0] % g == 0, f'granule {g} landed unaligned at {start}'
 
-    def ways(f, stride):
+    def ways(swz, stride):
         per = {}
         for t in range(32):
-            a = f(t * stride)
+            a = swz.apply(t * stride)
             per.setdefault(a % 32, set()).add(a)
         return max(len(v) for v in per.values())
 
-    assert ways(granular(32, 1), 32) == 1
-    assert ways(granular(16, 2), 32) == 2
-    assert ways(granular(8, 4), 32) == 4
+    assert ways(XorSwizzle(32, 1), 32) == 1
+    assert ways(XorSwizzle(16, 2), 32) == 2
+    assert ways(XorSwizzle(8, 4), 32) == 4
+
+
+@pytest.mark.parametrize("width,granule", [(2, 2), (8, 2), (8, 4), (4, 8)])
+def test_a_granular_permutation_is_still_a_bijection(width, granule):
+    swz = XorSwizzle(width, granule)
+    n = 4 * width * granule
+    assert sorted(swz.apply(i) for i in range(n)) == list(range(n))
+
+
+@pytest.mark.parametrize("granule", [3, 6, 0])
+def test_a_granule_that_is_not_a_power_of_two_is_refused(granule):
+    with pytest.raises(IRError, match="granule must be a power of two"):
+        XorSwizzle(4, granule)
+
+
+def test_the_granule_shows_in_the_type():
+    assert repr(XorSwizzle(8)) == 'xor8'
+    assert repr(XorSwizzle(8, 2)) == 'xor8g2'
+
+
+# --------------------------------------------------------------------------- #
+# A wide access is the one thing the permutation is not compatible with
+# --------------------------------------------------------------------------- #
+
+def test_a_wide_access_to_an_element_permuted_buffer_is_refused():
+    """What the damage step died of at `k_width` 2.
+
+    The permutation is applied to the *index*, once, and a vector access uses
+    its index once: the address names the first element and the hardware reads
+    the rest from beside it, unpermuted.  `s0[21]` -- the image of 20 under
+    `xor4` -- was both the wrong element and, being odd, a misaligned address.
+    """
+    from tensorforge.backend.pir.core import ScalarType
+
+    b = builder()
+    tile = b.alloc(Datatype.F32, (64,), MemSpace.SHARED, hint='s0',
+                   swizzle=XorSwizzle(4))
+    idx = b.rawexpr('threadIdx.x', type_=INDEX, hint='a')
+    with pytest.raises(IRError, match="permutation applies to the first"):
+        b.load(tile, idx, type_=ScalarType(Datatype.F32, 2), hint='v',
+               align='relaxed')
+
+
+def test_a_wide_access_within_a_granule_is_allowed():
+    """Which is the whole point of the granule: the access is one unit, so it
+    is permuted as one."""
+    from tensorforge.backend.pir.core import ScalarType
+
+    b = builder()
+    tile = b.alloc(Datatype.F32, (64,), MemSpace.SHARED, hint='s0',
+                   swizzle=XorSwizzle(4, 2))
+    idx = b.rawexpr('threadIdx.x', type_=INDEX, hint='a')
+    assert b.load(tile, idx, type_=ScalarType(Datatype.F32, 2), hint='v',
+                  align='relaxed') is not None
+
+
+def test_an_access_wider_than_the_granule_is_still_refused():
+    """A run of four crosses two granules of two, and the map may send them to
+    two different places."""
+    from tensorforge.backend.pir.core import ScalarType
+
+    b = builder()
+    tile = b.alloc(Datatype.F32, (64,), MemSpace.SHARED, hint='s0',
+                   swizzle=XorSwizzle(4, 2))
+    idx = b.rawexpr('threadIdx.x', type_=INDEX, hint='a')
+    with pytest.raises(IRError, match="permutation applies to the first"):
+        b.load(tile, idx, type_=ScalarType(Datatype.F32, 4), hint='v',
+               align='relaxed')
+
+
+def test_the_granule_is_emitted_as_a_shifted_selector():
+    """`i ^ (((i / g / width) % width) * g)`: the low `log2(g)` bits, which are
+    the position inside the granule, come through untouched."""
+    b = builder()
+    tile = b.alloc(Datatype.F32, (64,), MemSpace.SHARED, hint='btile',
+                   swizzle=XorSwizzle(4, 2))
+    idx = b.rawexpr('threadIdx.x', type_=INDEX, hint='a')
+    b.load(tile, idx, hint='v')
+    text = emitted(b.finish())
+    assert '>> 3' in text and '& 3' in text and '<< 1' in text, text
+
+
+# --------------------------------------------------------------------------- #
+# What the window rule grants
+# --------------------------------------------------------------------------- #
+
+def _window(volume, want, banks=32):
+    """The rule `AbstractShrMemWrite._swizzle` applies, in one place to test."""
+    granule = 1
+    while granule * 2 <= want and volume % (granule * 2) == 0:
+        granule *= 2
+    width = 1
+    while width * 2 <= banks and volume % (width * granule * 2) == 0:
+        width *= 2
+    return (width, granule)
+
+
+def test_the_default_width_leaves_every_window_as_it_was():
+    """`k_width` 1 is the default, and at 1 this is the previous rule
+    exactly -- otherwise the whole corpus would move for a lever nobody
+    pulled."""
+    for volume in (512, 256, 728, 96, 1024, 81, 169, 180):
+        assert _window(volume, 1) == (_window_width(volume), 1)
+
+
+@pytest.mark.parametrize("volume,want,expect", [
+    (180, 2, (2, 2)),    # the damage step's 9x20 staging window
+    (180, 4, (1, 4)),    # granted as asked, and then there is nothing left to
+                         # permute -- the right end of the trade, see `_swizzle`
+    (512, 2, (32, 2)),
+    (512, 4, (32, 4)),
+    (81, 2, (1, 1)),     # odd: no granule to take and no swizzle either
+])
+def test_the_granule_is_granted_as_wide_as_asked(volume, want, expect):
+    assert _window(volume, want) == expect
+
+
+@pytest.mark.parametrize("volume,want", [(180, 2), (512, 4), (256, 2)])
+def test_a_granted_window_permutes_whole_granules_inside_itself(volume, want):
+    width, granule = _window(volume, want)
+    if width < 2:
+        return
+    swz = XorSwizzle(width, granule)
+    images = [swz.apply(i) for i in range(volume)]
+    assert max(images) < volume, "the permutation escaped the buffer"
+    assert sorted(images) == list(range(volume)), "not a bijection"
+    for start in range(0, volume - granule + 1, granule):
+        run = [swz.apply(start + k) for k in range(granule)]
+        assert run == list(range(run[0], run[0] + granule))

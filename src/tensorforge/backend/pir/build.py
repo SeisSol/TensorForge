@@ -1009,6 +1009,66 @@ class IRBuilder:
         *head, last = indices
         return tuple(head) + (self.op('add', INDEX, last, shift, hint='at'),)
 
+    def _swizzle_of(self, base: Any) -> Optional[XorSwizzle]:
+        """This buffer's permutation, whichever way the access names it.
+
+        A `Symbol` base resolves to its buffer the same way the rest of the
+        access path does.  Reading `.type` off the base alone missed every
+        macro-level window -- `Symbol.load` passes the symbol, not the value
+        -- so a swizzle set at the alloc was accepted and then applied to
+        nothing.
+        """
+        buf = base.pir_buffer(self) if hasattr(base, 'pir_buffer') else base
+        t = getattr(buf if buf is not None else base, 'type', None)
+        return getattr(t, 'swizzle', None)
+
+    def _check_width(self, base: Any, type_) -> None:
+        """A wide access to a permuted buffer, refused.
+
+        The permutation is applied to the *index*, and a vector access uses
+        its index once: the address names the first element and the hardware
+        reads the next `length - 1` from beside it.  So the elements after the
+        first bypass the permutation entirely -- and `i ^ ((i / w) % w)` does
+        not map runs onto runs.  A pair at an even `i` lands on `{i^s, i^s^1}`,
+        which is the same pair permuted only when `s` is even; where `s` is
+        odd the two elements come back swapped, and the address itself is odd,
+        which on NVIDIA is a misaligned-address fault rather than wrong data.
+
+        SeisSol's damage step read a 9x20 staging buffer that way at
+        `k_width` 2: `*(VectorT<float,2>*)&s0[21]`, where 21 is the permuted
+        image of 20.  The kernel faulted -- and the three conditions
+        `MultilinearInstruction._pack_is_aligned` had proved (strides, start
+        offset, base alignment) were all true, because every one of them is
+        about the tensor's layout and the permutation is not in it.
+
+        Raised here rather than checked at the call site, for the reason
+        `_swizzled` exists at all: the swizzle is meant to be invisible to
+        everything outside this class, so a caller cannot be asked to know
+        about it -- but it can be told that the access it asked for is not
+        available.  A caller that has an alternative asks first
+        (`Symbol.swizzled`); one that has none gets an error instead of a
+        kernel that is quietly wrong.
+
+        The way out is the swizzle's `granule`: permuting units of `g`
+        elements keeps each unit contiguous and `g`-aligned, so an access of at
+        most `g` elements lies inside one granule and is permuted as a whole.
+        Accepted here on that arithmetic alone -- that the *address* is granule
+        aligned is the caller's proof, carried in `align` like every other wide
+        access, since the index is an expression this cannot evaluate.
+        """
+        length = getattr(type_, 'length', None)
+        if length is None or length < 2:
+            return
+        swz = self._swizzle_of(base)
+        if swz is None or swz.admits(length):
+            return
+        raise IRError(
+            f'{base}: a {length}-wide access to a buffer permuted by '
+            f'{swz} -- the permutation applies to the first element only, so '
+            f'the rest of the vector would read the wrong elements (and, at '
+            f'an odd image, a misaligned address). Ask `Symbol.swizzled` and '
+            f'read the elements one by one, or drop the swizzle.')
+
     def _swizzled(self, base: Any, index: Operand) -> Operand:
         """The index a swizzled buffer is actually addressed by.
 
@@ -1020,14 +1080,7 @@ class IRBuilder:
         buffer is swizzled, which is the property that makes it safe to turn
         on for a tile that already works.
         """
-        # A `Symbol` base resolves to its buffer the same way the rest of the
-        # access path does.  Reading `.type` off the base alone missed every
-        # macro-level window -- `Symbol.load` passes the symbol, not the value
-        # -- so a swizzle set at the alloc was accepted and then applied to
-        # nothing.
-        buf = base.pir_buffer(self) if hasattr(base, 'pir_buffer') else base
-        t = getattr(buf if buf is not None else base, 'type', None)
-        swz = getattr(t, 'swizzle', None)
+        swz = self._swizzle_of(base)
         if swz is None:
             return index
         if isinstance(index, int):
@@ -1037,9 +1090,19 @@ class IRBuilder:
         # A shift and a mask, not a divide and a modulo: the width is a power
         # of two, and this way the emitted address needs no strength reduction
         # to be what one would have written by hand.
+        #
+        # With a granule the selector is taken from the granule number and put
+        # back where the granule number lives, which is the same expression
+        # shifted: `i ^ (((i / g / width) % width) * g)`.  The XOR still cannot
+        # carry out of the granule's own bits, so the low `log2(g)` bits -- the
+        # position inside the granule -- come through untouched, which is what
+        # keeps a granule contiguous.
+        gbits = swz.granule.bit_length() - 1
         bits = swz.width.bit_length() - 1
-        row = self.op('shr', INDEX, index, bits, hint='sw')
+        row = self.op('shr', INDEX, index, gbits + bits, hint='sw')
         sel = self.op('bitand', INDEX, row, swz.width - 1, hint='sw')
+        if gbits:
+            sel = self.op('shl', INDEX, sel, gbits, hint='sw')
         return self.op('bitxor', INDEX, index, sel, hint='sw')
 
     def load(self, base: Any, *indices: Operand, type_=None, hint: str = '',
@@ -1070,6 +1133,7 @@ class IRBuilder:
             type_ = (ScalarType(base.type.elem)
                      if isinstance(base, Value) and isinstance(base.type, BufferType)
                      else ScalarType(self._fptype))
+        self._check_width(base, type_)
         indices = self._shifted(tuple(self._swizzled(base, i) for i in indices),
                                 shift)
         if uniform is None:
@@ -1139,6 +1203,7 @@ class IRBuilder:
             space = (base.type.space if isinstance(base, Value)
                      and isinstance(base.type, BufferType)
                      else MemSpace.from_symbol_type(getattr(base, 'stype', None)))
+        self._check_width(base, getattr(value, 'type', None))
         indices = self._shifted(tuple(self._swizzled(base, i) for i in indices),
                                 shift)
         kind = Effect.ATOMIC if atomic else Effect.WRITE

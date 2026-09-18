@@ -1346,6 +1346,20 @@ class Symbol:
     uid = self._builder_uid(builder)
     return value if uid is not None and owner == uid else None
 
+  def swizzled(self, builder, width: int = 1) -> bool:
+    """Would this buffer's permutation refuse a `width`-wide access?
+
+    Asked by a caller that has a choice, so that it can make the other one.
+    The permutation is otherwise invisible -- `PirBuilder._swizzled` applies
+    it in the single place every access passes through -- and being invisible
+    is what makes it safe to switch on for a tile that already works.  A wide
+    access is the one thing it is not compatible with, and a caller weighing
+    one asks here rather than finding out from a fault.
+    """
+    buf = self.pir_buffer(builder)
+    swz = getattr(getattr(buf, 'type', None), 'swizzle', None)
+    return swz is not None and not swz.admits(width)
+
   def _interleaved_load(self, writer, context: Context, index, nontemp):
     """One row of an operand stored in the SIMT interleave, or `None`.
 

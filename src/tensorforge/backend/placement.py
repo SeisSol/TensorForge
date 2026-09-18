@@ -142,7 +142,8 @@ def legal_operand_placements(*,
                              addressable: bool,
                              transposed: bool,
                              carries_lead_dim: bool,
-                             policy: VendorPolicy) -> FrozenSet[Placement]:
+                             policy: VendorPolicy,
+                             single_element: bool = False) -> FrozenSet[Placement]:
     """Which placements would produce a correct read of this operand.
 
     An operand that is not addressable -- a scalar, or a tensor with no
@@ -155,10 +156,19 @@ def legal_operand_placements(*,
     memory, since a register image fixes its lane axis when it is written.
     The exception is a hardware broadcast: where one is cheap, every lane can
     read the same element and the missing lane axis stops mattering.
+
+    `single_element` is that exception at its smallest, and it holds whatever
+    the vendor thinks of broadcasts in general.  A window of one element has
+    no lane axis to move: every lane wants that one value, so the copy through
+    shared memory buys nothing a broadcast does not, and it costs a store, a
+    barrier and a read per use where the broadcast costs one exchange that
+    `licm` can lift out of the loop entirely.  SeisSol's damage step reads
+    `waveIntegral[1]` and `shearIntegral[1]` this way at 18 of its 68 staging
+    sites.
     """
     if not addressable:
         return frozenset({Placement.IN_PLACE})
-    if (transposed or not carries_lead_dim) \
+    if (transposed or not carries_lead_dim) and not single_element \
             and not policy.broadcast_without_staging:
         return frozenset({Placement.SHARED})
     return frozenset({Placement.IN_PLACE, Placement.SHARED,
