@@ -236,6 +236,10 @@ def test_width_two_only_where_one_instruction_does_two_fmas(arch, backend, paire
 class _FakeGen:
     def __init__(self, threads, mults, peak, blocks=16):
         self._num_threads = threads
+        from tensorforge.generators.lanes import LaneConfig
+        #: What the build settled on, which `_over_budget` reads on Intel to
+        #: know how many lanes share one thread's register file.
+        self.lanes = LaneConfig(threads, threads, 1)
         self.peak_pressure = peak
         self.resident_blocks = blocks
         self.emitted_work = 1000
@@ -269,6 +273,24 @@ def test_amd_is_guarded_by_what_hipcc_allocates_and_nvidia_by_bytes():
     assert not tuning._over_budget(_fake('gfx942', 'hip', 32, 4, 1403))
     assert not tuning._over_budget(_fake('sm_100', 'cuda', 8, 16, 816))
     assert tuning._over_budget(_fake('sm_100', 'cuda', 8, 16, 1112))
+
+
+def test_intel_spmd_shares_one_register_file_over_the_sub_group():
+    """The file is a thread's, and under SPMD a thread holds the sub-group.
+
+    Compared against the whole file, as every other target is, the guard
+    never fired on Intel: `elastic-o6s:derivative` models 1716 B a lane
+    against 8192 and IGC spills it hard -- 1108 scratch messages in the ISA
+    at 32 lanes against 9 at sixteen.  Per thread it is 6.7 times the file
+    against 3.9, which is the order the machine agrees with.
+    """
+    wide = _fake('pvc', 'oneapi', 32, 8, 1716)
+    narrow = _fake('pvc', 'oneapi', 16, 8, 1972)
+    assert tuning._over_budget(wide) > tuning._over_budget(narrow) > 0
+    # Under an explicit vector the work-item *is* the multiplication, so the
+    # file is not shared and the figure is the footprint itself.
+    esimd = _fake('pvc', 'esimd', 32, 8, 9000)
+    assert tuning._over_budget(esimd) == 9000 - 8192
 
 
 def test_amd_ranks_by_the_waves_its_registers_leave():

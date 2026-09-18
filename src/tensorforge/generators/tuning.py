@@ -630,6 +630,23 @@ def _over_budget(result: Build) -> float:
         # scalar file gets its own term instead.
         return (max(0.0, 4 * register_estimate(result) - budget)
                 + _over_scalar_budget(result))
+    if hw.vendor == 'intel' and not getattr(
+            result.context.get_vm().get_lexic(), 'simd_mode', False):
+        # The file is a *thread's*, and under SPMD one thread holds the whole
+        # sub-group: the budget a lane may spend is the file divided by the
+        # lanes that share it, or -- the same statement the other way up --
+        # what has to fit is the lane's footprint times the sub-group.
+        #
+        # Compared against the whole file, as every other target is, the guard
+        # never fired on Intel at all: `elastic-o6s:derivative` models 1716 B
+        # a lane against 8192, and IGC spills it hard.  Per thread it is 54.9
+        # KB at 32 lanes against 31.6 at sixteen -- 6.7 and 3.9 times the file
+        # -- and the IGC dump agrees about which of the two that hurts: 1108
+        # scratch messages against 9, which is the whole difference in sends
+        # between the two builds.
+        lanes = result.generator.lanes
+        share = lanes.num_threads if lanes else 1
+        return max(0, peak * share - budget) + _over_scalar_budget(result)
     return max(0, peak - budget) + _over_scalar_budget(result)
 
 
