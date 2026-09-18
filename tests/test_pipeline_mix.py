@@ -133,6 +133,24 @@ def test_dram_is_what_an_element_streams_and_binds_when_scarce():
     assert 'dram' not in pipeline.of(gen).per_resource
 
 
+def test_intel_is_calibrated_and_its_cross_lane_row_is_zero():
+    """81 kernels of the case set, compiled ahead of time and counted.
+
+    Intel had no row at all, so every statement counted one -- a message over
+    the send unit like a `mad`.  The entry worth naming is `xlane`: 16938
+    cross-lane statements emitted and not one instruction compiled, because
+    the broadcast is a region on the reading instruction there.
+    """
+    for table in (pipeline.INSTRUCTIONS_PER_STATEMENT,
+                  pipeline.INSTRUCTIONS_PER_STATEMENT_P10):
+        intel = table['intel']
+        assert intel, 'Intel is fitted now'
+        assert intel['xlane'] == 0.0
+        assert 0.3 < intel['fp'] < 1.0, 'an FP statement folds into a mad'
+    gen = _built('local_flux', 'pvc', 'oneapi')
+    assert pipeline.of(gen).cycles > 0
+
+
 def test_spilling_is_traffic_and_not_a_tier_of_its_own():
     """A spill costs a store, a load back and the bytes of both.
 

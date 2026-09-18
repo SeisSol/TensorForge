@@ -51,7 +51,17 @@ INSTRUCTIONS_PER_STATEMENT: Dict[str, Dict[str, float]] = {
              'xlane': 1.51, 'global.load': 1.01, 'global.store': 1.0,
              'shared.load': 0.69, 'shared.store': 0.91, 'barrier': 0.08,
              'branch': 3.14},
-    'intel': {},
+    # PVC, 81 kernels of the case set (`tools/calibrate_mix.py --arch pvc`,
+    # IGC's shader dump, 2026-09-18).  `xlane` is the entry worth naming: 16938
+    # cross-lane statements emitted and *no* instruction compiled, because a
+    # broadcast of one lane's element is a region on the reading instruction
+    # there and not an operation (`Lexic.folds_broadcast`).  `fp64` is the
+    # ratio of totals like the rest and its median is 0.69: a handful of
+    # kernels carry the difference, so a search ranking by it should know that
+    # this row is the least settled of them.
+    'intel': {'fp': 0.65, 'fp64': 6.38, 'int': 1.79, 'sfu': 1.31, 'xlane': 0.0,
+              'global.load': 1.21, 'global.store': 0.99, 'shared.load': 0.55,
+              'shared.store': 1.0, 'barrier': 5.13, 'branch': 8.55},
 }
 
 #: The same, at the 10th percentile over the kernels rather than as a ratio
@@ -71,7 +81,9 @@ INSTRUCTIONS_PER_STATEMENT_P10: Dict[str, Dict[str, float]] = {
              'xlane': 1.0, 'global.load': 1.01, 'global.store': 1.0,
              'shared.load': 0.0, 'shared.store': 0.50, 'barrier': 0.0,
              'branch': 1.78},
-    'intel': {},
+    'intel': {'fp': 0.41, 'fp64': 0.62, 'int': 0.56, 'sfu': 0.0, 'xlane': 0.0,
+              'global.load': 1.02, 'global.store': 1.0, 'shared.load': 0.26,
+              'shared.store': 1.0, 'barrier': 2.0, 'branch': 1.67},
 }
 
 #: Every category the emitter counts under (`pir.emit._mix_category`).

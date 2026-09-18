@@ -40,7 +40,9 @@ def generate(path: Path, arch: str):
         spec.loader.exec_module(module)
     if not hasattr(module, 'descr_list'):
         return None
-    backend = 'cuda' if arch.startswith('sm_') else 'hip'
+    backend = ('cuda' if arch.startswith('sm_')
+               else 'oneapi' if arch in ('pvc', 'acm', 'dg2')
+               else 'hip')
     context = Context(arch=arch, backend=backend, fp_type=module.DTYPE)
     generator = Generator(module.descr_list(), context)
     with contextlib.redirect_stdout(io.StringIO()):

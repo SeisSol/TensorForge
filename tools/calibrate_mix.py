@@ -14,11 +14,15 @@ and its instructions sorted into the same categories by opcode.  The factor is
 the ratio of the totals, over the copies laid down (static, as compiled), with
 the spread per kernel beside it.
 
-  python tools/calibrate_mix.py --arch sm_120 [--arch gfx942 ...] [--cases GLOB]
+  python tools/calibrate_mix.py --arch sm_120 [--arch gfx942 --arch pvc ...] [--cases GLOB]
+
+On Intel the assembly is IGC's shader dump rather than a disassembler's
+output (`xe_mix`), which needs `icpx` and the environment `setvars.sh` makes.
 """
 
 import argparse
 import collections
+import os
 import re
 import statistics
 import subprocess
@@ -82,6 +86,35 @@ ISA = [
 ]
 
 
+#: Xe (PVC) mnemonic -> category.  The destination type tells arithmetic
+#: apart, so `xe_mix` passes `opcode:type` and the patterns match on both.
+#: Taken from what IGC emits for this corpus: `mad`, `mov`, `add`, `mul`,
+#: `shl`, `sel`, `cmp`, the `send` family, the `sync` family, `goto`/`join`
+#: for control flow, and `load.ugm`/`store.ugm` for memory.
+XE = [
+    (r'^dpas', 'matrix'),
+    (r'^(math\.)?(exp|log|inv|rsqt|sqt|sin|cos|pow)', 'sfu'),
+    (r'^\w+:(df|q)$', 'fp64'),
+    (r'^(mad|mac|add|mul|sub|min|max|sel|mov|cmp|line|lrp):f$', 'fp'),
+    (r'^load\.slm', 'shared.load'),
+    (r'^store\.slm', 'shared.store'),
+    (r'^atomic\.slm', 'shared.store'),
+    (r'^load\.ugm', 'global.load'),
+    (r'^(store|atomic)\.ugm', 'global.store'),
+    (r'^load\.(ugml|slm|bti)', 'global.load'),
+    (r'^send\.slm', 'shared.load'),
+    # a scratch message is a spill or a fill; the model calls that local
+    (r'^send\.dc0', 'local.load'),
+    (r'^send\.(dc1|ugm|bti)', 'global.load'),
+    (r'^send', 'global.load'),
+    (r'^sync\.(bar|allrd|allwr)', 'barrier'),
+    (r'^sync', 'sync'),
+    (r'^(goto|join|while|break|cont|call|ret|jmpi|endif|if|else|brc|brd)', 'branch'),
+    (r'^(nop|illegal)', 'padding'),
+    (r'^\w+', 'int'),
+]
+
+
 def classify(opcode: str, table) -> str:
     for pattern, category in table:
         if re.match(pattern, opcode):
@@ -123,6 +156,39 @@ def isa_mix(source: str, arch: str, tmp: Path) -> collections.Counter:
     return mix
 
 
+def xe_mix(source: str, arch: str, tmp: Path) -> collections.Counter:
+    """icpx ahead of time, and the ISA out of IGC's shader dump.
+
+    There is no `cuobjdump` here: the assembly exists only if IGC is asked to
+    write it (`IGC_ShaderDumpEnable`), and it writes one file per kernel plus
+    its own intermediates, so the largest `.asm` is the kernel.  The build is a
+    shared object because the device compile runs at link time; `-c` leaves
+    `-device` unused and IGC silent.
+    """
+    src, dump = tmp / 'k.cpp', tmp / 'dump'
+    dump.mkdir(exist_ok=True)
+    src.write_text(source)
+    env = dict(os.environ, IGC_ShaderDumpEnable='1',
+               IGC_DumpToCustomDir=str(dump))
+    subprocess.run(['icpx', '-fsycl', '-fsycl-targets=spir64_gen', '-O3',
+                    '-shared', '-fPIC', '-Xsycl-target-backend',
+                    f'-device {arch}', '-I', str(INCLUDE),
+                    '-o', str(tmp / 'k.so'), str(src)],
+                   check=True, capture_output=True, env=env)
+    files = sorted(dump.glob('*.asm'), key=lambda p: p.stat().st_size)
+    if not files:
+        raise RuntimeError('IGC wrote no .asm')
+    mix = collections.Counter()
+    for line in files[-1].read_text(errors='ignore').splitlines():
+        m = re.match(r'^\s*(?:\(\S+\)\s*)?([a-z][a-z0-9_.]*)\s*(?:\(\d+\|\w+\))?'
+                     r'\s+\S*?(?::(\w+))?\s', line)
+        if not m:
+            continue
+        opcode, dtype = m.group(1), m.group(2) or ''
+        mix[classify(f'{opcode}:{dtype}' if dtype else opcode, XE)] += 1
+    return mix
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument('--arch', action='append', required=True)
@@ -141,8 +207,10 @@ def main(argv=None):
                     continue
                 generator, source = built
                 with tempfile.TemporaryDirectory() as tmp:
-                    mix = (sass_mix if arch.startswith('sm_') else isa_mix)(
-                        source, arch, Path(tmp))
+                    tool = (sass_mix if arch.startswith('sm_')
+                            else xe_mix if arch in ('pvc', 'acm', 'dg2')
+                            else isa_mix)
+                    mix = tool(source, arch, Path(tmp))
             except Exception as error:   # a case this target does not build
                 print(f'  {path.stem}: skipped ({type(error).__name__})',
                       file=sys.stderr)
