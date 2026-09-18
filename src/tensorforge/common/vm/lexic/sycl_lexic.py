@@ -247,27 +247,41 @@ class SyclLexic(Lexic):
     return "sycl::group_barrier(item.get_sub_group());"
 
   def has_sync_mult(self, num_threads: int, hw) -> bool:
-    """True under an explicit vector, False under SPMD, and the asymmetry is
-    the point.
+    """Whether one multiplication can be met on its own.
 
     Under ESIMD one work-item *is* the vector: a multiplication of any width is
     held by a single work-item, executed in order, with no second party to wait
     for.  So the rendezvous costs nothing and is exact.
 
-    Under SPMD there is no spelling.  `sycl::group_barrier` takes a group
-    object and the narrowest one available is the sub-group, which is all of
-    it -- there is no mask, so a multiplication occupying part of a sub-group
-    cannot be met on its own.  The named barriers Xe has are reachable from
-    ESIMD (`named_barrier_signal` / `named_barrier_wait`) and exactly there
-    they are not needed; from SPMD, where they would be, they are not exposed.
-    So a narrow multiplication is met at its group instead, and the block is
-    sized to hold one.
+    Under SPMD there is no mask.  `sycl::group_barrier` takes a group object,
+    the narrowest one is the sub-group, and a multiplication occupying *part*
+    of a sub-group cannot be met on its own -- the named barriers Xe has are
+    reachable from ESIMD (`named_barrier_signal` / `named_barrier_wait`) and
+    exactly there they are not needed.  Such a multiplication is met at its
+    group instead, and the block is sized to hold one.
+
+    But the sub-group's width is not the hardware wave's here: the kernel
+    states it (`reqd_sub_group_size`, `_pins_sub_group`) and states it as the
+    multiplication's own width where one of the supported sizes fits.  Where
+    it does, the sub-group *is* the multiplication and its barrier meets
+    exactly the threads that have to meet.  Asking the wave instead cost
+    every 32-lane kernel on a 16-wide PVC its block: the cap fell to one
+    multiplication per work-group -- 32 work-items where the thread budget
+    allows 256 -- and `elastic-o6s:derivative` ran at 30.2 ns an element
+    against 12.7 at sixteen lanes, where the multiplication happens to equal
+    the wave and no cap applies.
     """
-    return bool(self.simd_mode)
+    if self.simd_mode:
+      return True
+    return (self._pins_sub_group()
+            and self.sub_group_for(num_threads) == num_threads)
 
   def sync_mult(self, num_threads: int, hw):
     if self.simd_mode:
       return None
+    if self.has_sync_mult(num_threads, hw):
+      # The pinned sub-group is this multiplication, so its barrier is exact.
+      return 'sycl::group_barrier(item.get_sub_group());'
     return self.sync_block()
 
   def sync_grid(self):
