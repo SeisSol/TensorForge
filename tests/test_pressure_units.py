@@ -24,7 +24,7 @@ import pytest
 
 from tensorforge.backend.pir.core import (BufferType, MemSpace, RegisterLayout,
                                           LaneAxis, ScalarType, Value)
-from tensorforge.backend.pir.passes import register_bytes
+from tensorforge.backend.pir.passes import pressure, register_bytes
 from tensorforge.common.basic_types import Datatype
 
 
@@ -110,3 +110,48 @@ def test_the_wave_total_barely_moves_where_the_per_lane_figure_halves(
     assert wave[1] > 0.9 * wave[0], (
         "as a wave total the same change is noise or a loss, which is the "
         "reading that would have driven a search to the narrower answer")
+
+
+def test_a_broadcast_the_target_folds_holds_no_register():
+    """On Intel a broadcast of one lane's element is a region, not a value.
+
+    `r20.3<0;1,0>` reads one element of a register and spreads it over the
+    instruction's lanes, so it occupies nothing of its own -- the order-6
+    derivative's simd32 build has 8033 such regions and no message that is not
+    a spill.  Counted as values they were 1944 of the 3400 bytes a lane that
+    the kernel is judged by.
+    """
+    from tensorforge.backend.pir.build import IRBuilder
+    from tensorforge.backend.pir.core import MemSpace
+
+    def built():
+        b = IRBuilder(fptype=Datatype.F32)
+        g = b.alloc(Datatype.F32, (16,), MemSpace.GLOBAL, hint='g')
+        loaded = b.load(g, 0)
+        shared = b.rawexpr('broadcast({0})', loaded, type_=ScalarType(Datatype.F32),
+                           hint='bc', pure=True, crosslane=True)
+        for _ in range(4):
+            b.store(g, shared, 1)
+        return b.finish()
+
+    body = built()
+    counted = pressure(body, in_bytes=True, explicit_simd=False)
+    folded = pressure(body, in_bytes=True, explicit_simd=False,
+                      folded_crosslane=True)
+    assert folded < counted, 'the broadcast is a region there, not a value'
+    # its source still holds one: the region reads that register
+    assert folded > 0
+
+
+def test_which_targets_fold_a_broadcast():
+    """Intel under SPMD does; an instruction that writes a register does not."""
+    from tensorforge.common.context import Context
+
+    def lexic(arch, backend):
+        return Context(arch=arch, backend=backend,
+                       fp_type=Datatype.F32).get_vm().get_lexic()
+
+    assert lexic('pvc', 'oneapi').folds_broadcast()
+    assert not lexic('pvc', 'esimd').folds_broadcast()
+    assert not lexic('sm_90', 'cuda').folds_broadcast()
+    assert not lexic('gfx942', 'hip').folds_broadcast()

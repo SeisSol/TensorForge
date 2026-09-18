@@ -246,6 +246,15 @@ class SyclLexic(Lexic):
     # ordinary operator shapes to reach it.
     return "sycl::group_barrier(item.get_sub_group());"
 
+  def folds_broadcast(self) -> bool:
+    """True under SPMD: `sycl::group_broadcast` of a fixed lane becomes a
+    scalar region on the reading instruction.
+
+    Not under an explicit vector, where a broadcast is a `simd` operation that
+    produces a vector of its own.
+    """
+    return not self.simd_mode
+
   def has_sync_mult(self, num_threads: int, hw) -> bool:
     """Whether one multiplication can be met on its own.
 

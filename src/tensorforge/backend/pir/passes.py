@@ -1406,7 +1406,8 @@ def pressure(body: Tuple[Stmt, ...], in_bytes: bool = False,
              explicit_simd: bool = True,
              profile: Optional[List[Tuple[Stmt, int]]] = None,
              by_file: Optional[List[int]] = None,
-             wave_uniform: Uniformity = Uniformity.MULT) -> int:
+             wave_uniform: Uniformity = Uniformity.MULT,
+             folded_crosslane: bool = False) -> int:
     """Peak simultaneously live SSA values, or the bytes they occupy.
 
     `in_bytes` is what a caller comparing against a register budget has to
@@ -1455,6 +1456,15 @@ def pressure(body: Tuple[Stmt, ...], in_bytes: bool = False,
 
     Register arrays count as lane-varying whatever their uniformity: they are
     the distributed image of a tensor, one slot per lane.
+
+    `folded_crosslane` leaves out what the target spells as an operand rather
+    than as a value.  A broadcast of one lane's element is a *region* on Intel
+    -- `r20.3<0;1,0>` -- so it occupies no register of its own, and the ISA
+    says so: the order-6 derivative's simd32 build has 8033 scalar regions
+    and not one message that is not a spill.  Counted as values they were 1944
+    of the 3400 bytes a lane, 57 % of a figure that is compared against a
+    register file.  Where the exchange is an instruction instead (`__shfl_sync`
+    writes a register) the default stands.
     """
     values = _value_index(body) if in_bytes else {}
     weight = ((lambda vid: register_bytes(values[vid], explicit_simd)
@@ -1537,12 +1547,18 @@ def pressure(body: Tuple[Stmt, ...], in_bytes: bool = False,
     # statements, and the product was the cost.  Ends sort before starts at
     # the same point, so two ranges that only touch are not both counted.
     v_none = Value(id=-1, type=ScalarType(Datatype.I32))
+    # What the target reads as an operand modifier holds no register of its
+    # own; its source does, and that one is counted as usual.
+    folded = {t.id for st in order if folded_crosslane and st.pure
+              and st.attr('crosslane') for t in st.target}
     events: List[Tuple[int, int]] = []
     split: Tuple[List[Tuple[int, int]], List[Tuple[int, int]]] = ([], [])
     for vid, d in define.items():
         if isinstance(values.get(vid, v_none).type, BufferType):
             continue
         if vid in root and vid not in carrier:
+            continue
+        if vid in folded:
             continue
         w = weight(vid)
         if w:

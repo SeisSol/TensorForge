@@ -36,7 +36,9 @@ def _record_pressure(context, body, simd: bool,
   split: List[int] = []
   total = pir.pressure(body, in_bytes=True, explicit_simd=simd,
                        by_file=split,
-                       wave_uniform=Participants.WAVE.arrival(threads, wave))
+                       wave_uniform=Participants.WAVE.arrival(threads, wave),
+                       folded_crosslane=context.get_vm().get_lexic()
+                       .folds_broadcast())
   context.record_pressure(total, *split)
 
 

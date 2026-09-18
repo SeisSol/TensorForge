@@ -193,6 +193,22 @@ class Lexic(ABC):
     """
     return None
 
+  def folds_broadcast(self) -> bool:
+    """Whether a broadcast of one lane's element is an operand, not a value.
+
+    On Intel it is a region: `r20.3<0;1,0>` reads one element of a register
+    and spreads it over the instruction's lanes, so the broadcast occupies no
+    register of its own -- the order-6 derivative's simd32 build has 8033 such
+    regions and not one message that is not a spill.  Where the exchange is an
+    instruction (`__shfl_sync` writes a register, and an AMD DPP chain writes
+    one per step) the result is a value like any other.
+
+    Read by `pir.pressure` through `_record_pressure`: counted as values, the
+    broadcasts were 1944 of the 3400 bytes a lane that the order-6 derivative
+    is judged by, which is 57 % of a figure compared against a register file.
+    """
+    return False
+
   def has_sync_mult(self, num_threads: int, hw) -> bool:
     """Whether `sync_mult` rendezvouses fewer threads than the whole block.
 
