@@ -146,15 +146,44 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
     """Elements per hop this transfer will try, widest first.
 
     The widths `_write_datatransfer` walks, named once so that the permutation
-    can ask the same question the transfer answers.  A source the description
-    does not claim 16-byte alignment for drops the *whole* transfer to single
-    elements, not merely its tail: `cp.async` needs both ends naturally
-    aligned to the width it moves, and an unaligned source has no width to
-    fall back to other than one.
+    can ask the same question the transfer answers.
+
+    Bounded by what is *proved* about the source address, not by what is
+    likely: `cp.async` needs both ends naturally aligned to the width it
+    moves, and `Symbol.linear_align_bytes` is the promise the frontend
+    attached -- 16 where the layout reports an aligned stride, the element
+    size where it reports nothing.  An unproved alignment and a natural one
+    are the same number and opposite facts, so the element size means width 1,
+    and the whole transfer drops to it rather than only its tail.
+
+    The destination is 16-byte aligned by construction (`_suballocate` rounds
+    every window start up), so it constrains nothing here.  Its *permutation*
+    does, and that is asked at the access -- see `_swizzle_cap`.
     """
-    if self._use_cuda_memcpy and self._src.obj.alignment < 16:
-      return [1]
-    return [m for m in [4, 2, 1] if m * self._dest.get_fptype().size() <= 16]
+    elem = self._dest.get_fptype().size()
+    limit = min(16, self._src.linear_align_bytes()) if self._use_cuda_memcpy \
+        else 16
+    return [m for m in [4, 2, 1] if m * elem <= limit]
+
+  def _swizzle_cap(self, writer) -> int:
+    """The widest access the destination's permutation admits, in elements.
+
+    A permuted window moves *granules*, and an access wider than one granule
+    would be permuted by its first element only -- which is what
+    `PirBuilder._check_width` refuses.  So the transfer narrows instead: a
+    16-byte load is worth having and a wrong one is not.
+
+    Usually no constraint at all, because `_swizzle` grants a granule at least
+    as wide as `transfer_granule()` or declines to permute.  Asked even so:
+    the window may carry a permutation this transfer did not choose -- the
+    matrix path sets one on its own tiles -- and the invariant then holds only
+    by nobody having tried.
+    """
+    buf = self._destination_buffer(writer) if writer is not None else None
+    swz = getattr(getattr(buf, 'type', None), 'swizzle', None)
+    if swz is None:
+      return 16
+    return max(1, swz.granule) if swz.width > 1 else 16
 
   def transfer_granule(self) -> int:
     """See `AbstractShrMemWrite.transfer_granule`: the widest hop, which is
@@ -390,8 +419,9 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
       src_access_index = self._src.access_address(self._context, index, writer)
       writer(f'cuda::device::memcpy_async_tx(&{self.write_base()}[{dest_access_index}], &{self._src.name}[{src_access_index}], cuda::aligned_size_t<16>({length}), mbarrier);')
     else:
+      cap = self._swizzle_cap(writer)
       for vecsize in granularities:
-        if src_offset % vecsize == 0:
+        if vecsize <= cap and src_offset % vecsize == 0:
           num_hops = ((length - pos * self._num_threads) // (self._num_threads * vecsize)) * vecsize
           self._write_hop(writer, src_offset, dst_offset, index, pos, pos + num_hops, vecsize, nontemporal, linscale)
           pos += num_hops

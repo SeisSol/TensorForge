@@ -212,6 +212,12 @@ class CudaLexic(Lexic):
     return (4, 8, 16)
 
   def copy_async(self, dst, src, nbytes):
+    # `cp.async` also has a src-size operand -- the pipeline API's fourth
+    # argument -- which moves `nbytes - zfill` bytes and zeroes the rest, in
+    # one access and without reading past the source.  Not plumbed through:
+    # the only caller that wanted it was a transfer covering its run in
+    # whole 16-byte chunks, and that covering saves 0 to 2 accesses against
+    # the widths this already steps through.
     return f'__pipeline_memcpy_async({dst}, {src}, {nbytes});'
 
   def commit_async(self):

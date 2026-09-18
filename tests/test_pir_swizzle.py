@@ -49,6 +49,17 @@ def emitted(body):
     return "\n".join(lines)
 
 
+def _emit_with_writer(b):
+    """A real `Writer`, for a body the emitter may want to annotate: an
+    asynchronous copy makes it note whether the target has the hardware path,
+    and a note is a comment, which a bare sink cannot take."""
+    from tensorforge.backend.pir import emit as _emit
+    from tensorforge.backend.writer import Writer
+    writer = Writer()
+    _emit(b.finish(), writer)
+    return writer.get_src()
+
+
 # --------------------------------------------------------------------------- #
 # The permutation itself
 # --------------------------------------------------------------------------- #
@@ -536,3 +547,53 @@ def test_a_granted_window_permutes_whole_granules_inside_itself(volume, want):
     for start in range(0, volume - granule + 1, granule):
         run = [swz.apply(start + k) for k in range(granule)]
         assert run == list(range(run[0], run[0] + granule))
+
+
+# --------------------------------------------------------------------------- #
+# A bulk copy is an access like any other
+# --------------------------------------------------------------------------- #
+
+def test_an_async_copy_permutes_its_destination():
+    """The last path that did not.
+
+    `copy_async` passed its destination index straight through, and the guard
+    at `finish` could never have caught that: it reads raw text and this emits
+    none.  What kept it safe was the loader declining the swizzle wherever a
+    bulk copy might reach the window -- a decline standing in for a rule.
+    """
+    b = builder()
+    tile = b.alloc(Datatype.F32, (64,), MemSpace.SHARED, hint='s0',
+                   swizzle=XorSwizzle(8))
+    src = b.alloc(Datatype.F32, (64,), MemSpace.GLOBAL, hint='g0', extern='g0')
+    b.copy_async(tile, src, dst_index=(9,), src_index=(9,), elems=1)
+    text = _emit_with_writer(b)
+    # 9 permutes to 8; the source is not permuted, so it stays 9.
+    assert '[8]' in text and '[9]' in text, text
+
+
+def test_a_bulk_copy_wider_than_the_granule_is_refused():
+    """`elems` adjacent elements move as one, so the question a vector load
+    asks is the question a copy asks."""
+    b = builder()
+    tile = b.alloc(Datatype.F32, (64,), MemSpace.SHARED, hint='s0',
+                   swizzle=XorSwizzle(4, 2))
+    src = b.alloc(Datatype.F32, (64,), MemSpace.GLOBAL, hint='g0', extern='g0')
+    with pytest.raises(IRError, match="permutation applies to the first"):
+        b.copy_async(tile, src, dst_index=(0,), src_index=(0,), elems=4)
+
+
+def test_a_bulk_copy_within_the_granule_is_allowed():
+    b = builder()
+    tile = b.alloc(Datatype.F32, (64,), MemSpace.SHARED, hint='s0',
+                   swizzle=XorSwizzle(4, 4))
+    src = b.alloc(Datatype.F32, (64,), MemSpace.GLOBAL, hint='g0', extern='g0')
+    assert b.copy_async(tile, src, dst_index=(0,), src_index=(0,),
+                        elems=4) is not None
+
+
+def test_the_window_grants_a_granule_the_transfer_can_use():
+    """`_swizzle` asks the writer what it moves at once and grants at least
+    that much -- or declines, rather than permuting a window a bulk copy then
+    writes wrongly."""
+    from tensorforge.backend.instructions.memory import AbstractShrMemWrite
+    assert AbstractShrMemWrite.transfer_granule(object()) == 1
