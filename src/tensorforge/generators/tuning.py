@@ -331,6 +331,19 @@ def simple_space(descrs, context: Context) -> List[Knob]:
                and d.writes() is not None}
     if written & {id(v.tensor) for d in flat for v in d.reads()}:
         knobs.append(Knob('register_temporaries', lambda c: ('all', 'scalars')))
+    # Two reduction steps per body, so an operand contiguous along the
+    # reduction is read once for both.  What it removes is mostly *address*
+    # arithmetic rather than loads -- SeisSol's damage step goes from 40 % of
+    # its instruction mix in `int` to 19 %, and runs 17 % faster -- and what it
+    # costs is a larger body, which is why it is measured per kernel rather
+    # than turned on: over 78 corpus cases it is a geomean of 0.991, 14 faster,
+    # 62 within 2 %, and two slower (a lead window spanning two blocks by 13 %).
+    #
+    # Only where a reduction is long enough to have whole groups to pack, and
+    # only the one value: 1 is the default the walk starts from, and
+    # `coordinate` sets a knob's value as it is given.
+    if lengths and max(lengths) >= 4:
+        knobs.append(Knob('k_width', lambda c: (2,)))
     return knobs
 
 

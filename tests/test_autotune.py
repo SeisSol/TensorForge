@@ -126,10 +126,29 @@ def _simple(arch, backend="cuda"):
 def test_the_simple_space_turns_only_what_is_safe_to_ship():
     knobs = _simple("sm_100")
     assert set(knobs) <= {'lanes', 'merge_variants', 'k_roll', 'k_unroll_max',
-                          'register_temporaries'}
+                          'register_temporaries', 'k_width'}
     widths = {c.num_threads for c in knobs['lanes']}
     assert all(w & (w - 1) == 0 for w in widths), 'powers of two only'
     assert knobs['k_roll'] == [0, 28]
+
+
+def test_the_reduction_width_offers_only_the_other_side():
+    """1 is the default and the origin the walk starts from, and `coordinate`
+    sets a knob's value as it is given -- so offering it back would spend a
+    build to arrive where it started."""
+    assert _simple("sm_100")['k_width'] == [2]
+
+
+def test_a_reduction_too_short_to_have_a_whole_group_is_not_offered_one():
+    import tensorforge.generators.tuning as t
+    real = t.contraction_lengths
+    try:
+        t.contraction_lengths = lambda d: [3]
+        assert 'k_width' not in _simple("sm_100")
+        t.contraction_lengths = lambda d: [4]
+        assert 'k_width' in _simple("sm_100")
+    finally:
+        t.contraction_lengths = real
 
 
 @pytest.mark.parametrize("arch,backend,paired", [
