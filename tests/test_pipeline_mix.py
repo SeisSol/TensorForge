@@ -133,6 +133,30 @@ def test_dram_is_what_an_element_streams_and_binds_when_scarce():
     assert 'dram' not in pipeline.of(gen).per_resource
 
 
+def test_spilling_is_traffic_and_not_a_tier_of_its_own():
+    """A spill costs a store, a load back and the bytes of both.
+
+    Written into the same tables as every other access, so that it is weighed
+    against the issue count instead of ranked before it: more spilling is a
+    higher bound, and the pipes it loads are the ones a local access uses.
+    """
+    gen = _built('local_flux', 'sm_120', 'cuda')
+    plain = pipeline.of(gen)
+    little = pipeline.of(gen, spill_bytes=32)
+    lots = pipeline.of(gen, spill_bytes=1024)
+    assert plain.cycles < little.cycles < lots.cycles
+    # the LSU carries the local accesses, and the L1 path their bytes
+    assert lots.per_resource['lsu'] > plain.per_resource['lsu']
+    assert lots.per_resource['l1_bytes'] > plain.per_resource['l1_bytes']
+    # and nothing is charged where nothing spilled
+    assert pipeline.of(gen, spill_bytes=0).cycles == plain.cycles
+
+    mix, moved = pipeline.spilled({'fp': [10, 10]}, {'global.read': 8}, 64)
+    assert mix['local.store'] == mix['local.load'] == [8, 8]
+    assert moved['local.write'] == moved['local.read'] == 32
+    assert moved['global.read'] == 8
+
+
 def test_a_measured_search_skips_what_cannot_win():
     """Once a candidate is measured, one whose least time is already longer
     is not run: a proof, not a guess."""

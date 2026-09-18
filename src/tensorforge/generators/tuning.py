@@ -497,11 +497,17 @@ def static_score(result: Build):
             len(gen.get_kernel() or ''))
 
 
-def _least_cycles(gen, lanes: int, wave: int) -> float:
+def _least_cycles(gen, lanes: int, wave: int, spill_bytes: float = 0.0) -> float:
     """The busiest pipe's clocks per multiplication (`analysis.pipeline`), or
-    the arithmetic's warp issue slots where the build counted no mix."""
+    the arithmetic's warp issue slots where the build counted no mix.
+
+    `spill_bytes` is what a compiler reported for this build, written into
+    the same tables as every other access (`pipeline.spilled`): a spill costs
+    a store, a load back and the bytes of both, and counting it here is what
+    lets it be weighed against the issue count rather than ranked before it.
+    """
     from tensorforge.analysis import pipeline
-    b = pipeline.of(gen)
+    b = pipeline.of(gen, spill_bytes=spill_bytes)
     if b is not None:
         return b.cycles
     return (gen.emitted_work or 0) * lanes / wave
@@ -740,9 +746,29 @@ class CompiledScore:
     The static model cannot say whether a configuration spills: on GB200 it
     gave eight lanes at b = 56 its highest figure and ptxas no spill, and at
     b = 80 a low one and ptxas 328 bytes.  The compiler can, so where one is
-    available it decides that part: no spill before any spill, fewer spilled
-    bytes before more, then multiplications resident per SM under shared
-    memory, threads *and* registers, then issue slots per multiplication.
+    available its figure is what the spilling is taken from -- and as
+    *traffic*, written into the same tables as every other access, so that
+    how much is spilled is weighed against what it buys: whether anything
+    spills, then code past the instruction cache, then multiplications
+    resident per SM under shared memory, threads *and* registers, then the
+    busiest pipe's clocks with the spilling in them.
+
+    Which of those the clock agrees with is measured, not argued.  Over the
+    72 (device, kernel) groups of the benchmark corpus that carry three or
+    more configurations, as loss against the measured best
+    (`tools/../beast/spillrank.py`):
+
+        rule                                   mean   median   picked best
+        the default build                     20.3 %    9.7 %      31 %
+        spilled bytes as a tier of their own  10.1 %    0.8 %      49 %
+        the bound with the spilling in it      9.7 %    1.4 %      43 %
+        the bound alone, spilling and all     15.2 %    2.9 %      39 %
+        the bound alone, no spilling in it    25.3 %    3.3 %      38 %
+        this one                               9.6 %    0.8 %      49 %
+
+    The two halves are doing different work: "does it spill" is a cliff and
+    belongs in front, the bytes are a slope and belong in the figure they
+    compete with.
     """
 
     def __init__(self, toolchain: Optional[Toolchain] = None,
@@ -815,9 +841,16 @@ class CompiledScore:
         if report.register_blocks is not None and result.context.get_vm().get_hw_descr().vendor == 'nvidia':
             blocks = min(result.generator.resident_blocks or 0, report.register_blocks)
             resident = blocks * mults
-        issue = _least_cycles(result.generator, lanes, wave)
-        return (report.spill_bytes > 0, report.spill_bytes,
-                _icache_over(result), -resident, issue)
+        # The *amount* spilled goes into the issue figure rather than in
+        # front of it (`pipeline.spilled`): it is a store, a load back and
+        # the bytes of both, and ranking bytes before every issue count
+        # cannot trade 32 of them against a reduction rolled by two.
+        # Whether anything spills at all stays in front, because over 72
+        # measured (device, kernel) groups that is what the clock agrees
+        # with -- see the table in the class docstring.
+        issue = _least_cycles(result.generator, lanes, wave,
+                              spill_bytes=report.spill_bytes)
+        return (report.spill_bytes > 0, _icache_over(result), -resident, issue)
 
 
 class MeasuredScore:

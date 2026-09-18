@@ -227,10 +227,45 @@ def stream_bytes(descr_list) -> float:
                                                             batch=1).bytes
 
 
+def spilled(issue_mix: Optional[dict], memory_bytes: Optional[dict],
+            spill_bytes: float, word_bytes: int = 4):
+    """The same two tables with `spill_bytes` of spilling written into them.
+
+    A spilled value is not a property of the kernel the way a shared-memory
+    round trip is -- the compiler puts it there, and only where the register
+    file ran out -- but it costs what every other access costs: a store, a
+    load back, and the bytes of both through the same L1 path.  Counting it
+    anywhere else makes it incomparable with what it competes against; a rule
+    that ranks "no spill" before every issue figure cannot say that 32 bytes
+    of spilling is worth a reduction rolled by two.
+
+    `spill_bytes` is per lane and per element, in the units the compiler
+    reports (ptxas's spill stores plus spill loads, IGC's scratch).  One
+    instruction per register word each way, because that is how a spill is
+    spelled: there is no wide form of it.
+
+    The categories are the ones the emitter already has and never fills
+    (`local.load`, `local.store`) -- local memory is where a spill goes, and
+    `resources` already routes those through the LSU and the L1 bandwidth.
+    """
+    if spill_bytes <= 0:
+        return issue_mix, memory_bytes
+    mix = dict(issue_mix or {})
+    words = spill_bytes / max(1, word_bytes) / 2      # half stored, half read
+    for category in ('local.store', 'local.load'):
+        issued, copies = mix.get(category, [0, 0])
+        mix[category] = [issued + words, copies + words]
+    moved = dict(memory_bytes or {})
+    for key in ('local.write', 'local.read'):
+        moved[key] = moved.get(key, 0) + spill_bytes / 2
+    return mix, moved
+
+
 def bound(issue_mix: Optional[dict], memory_bytes: Optional[dict], hw,
           lanes: int, active_lanes: Optional[int] = None,
           conservative: bool = False, stream: Optional[float] = None,
-          dram_bytes_per_clock: Optional[float] = None) -> Optional[Bound]:
+          dram_bytes_per_clock: Optional[float] = None,
+          spill_bytes: float = 0.0) -> Optional[Bound]:
     """The least clocks per element on one SM of `hw`, or None where the
     build counted nothing.
 
@@ -239,9 +274,13 @@ def bound(issue_mix: Optional[dict], memory_bytes: Optional[dict], hw,
     the bound to prune a search with, where the default is the one to rank
     by.  `stream` (`stream_bytes`) against `dram_bytes_per_clock` -- the
     device's bandwidth over its SMs and clock, a property of the part and not
-    of the architecture -- adds DRAM as one more pipe."""
+    of the architecture -- adds DRAM as one more pipe.  `spill_bytes`
+    (`spilled`) writes what a compiler said it spilled into the same tables,
+    so that it is weighed against the issue count instead of before it."""
     if not issue_mix:
         return None
+    if spill_bytes:
+        issue_mix, memory_bytes = spilled(issue_mix, memory_bytes, spill_bytes)
     counts = instructions_per_element(issue_mix, hw, lanes, conservative)
     wave = max(1, getattr(hw, 'vec_unit_length', 32))
     # Per lane, times the lanes that access; a broadcast (`.bcast`) is one
@@ -274,16 +313,26 @@ def bound(issue_mix: Optional[dict], memory_bytes: Optional[dict], hw,
 
 
 def of(generator, conservative: bool = False,
-       dram_bytes_per_clock: Optional[float] = None) -> Optional[Bound]:
+       dram_bytes_per_clock: Optional[float] = None,
+       spill_bytes: float = 0.0) -> Optional[Bound]:
     """`bound` for a generated kernel; with the device's DRAM bandwidth per
-    SM and clock, DRAM included."""
+    SM and clock, DRAM included, and with what a compiler said it spilled.
+
+    The spilling is the caller's to pass because this module cannot know it:
+    `Context.peak_pressure` is the emitter's own live set and sits well under
+    the file where ptxas reports spilling anyway -- 407 bytes a lane against
+    a 1020-byte budget for `elastic-o6s:derivative`, which the compiler
+    builds at 255 registers with spills.  What the compiler reports is the
+    figure with the addressing and the schedule in it, and only
+    `tuning.CompiledScore` has one.
+    """
     hw = generator._context.get_vm().get_hw_descr()
     stream = (stream_bytes(generator._given) if dram_bytes_per_clock
               else None)
     return bound(generator.issue_mix, generator.memory_bytes, hw,
                  max(1, generator._num_threads or 1),
                  generator._num_active_threads or None, conservative,
-                 stream, dram_bytes_per_clock)
+                 stream, dram_bytes_per_clock, spill_bytes)
 
 
 def prunable(least: float, incumbent: float) -> bool:
