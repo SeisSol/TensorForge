@@ -10,11 +10,13 @@ body contains, so no pass can move anything across the back edge.
 
 Before restructuring the generator around that, the cheap half is worth
 checking on its own: does a PIR loop *emit* the header that is there today,
-character for character?  Two things had to give.  The induction variable is
-called `batchId0`, spelled out by the lookahead bindings, the flag guard and
-every `access_address` in the body, so the IR cannot pick its own name.  And
-its type is `size_t`, because it is compared against `numElements0`, where
-`INDEX` renders to `int32_t`.
+character for character?  Two things had to give.  The induction variable
+carries the name `batchId0` that the lookahead bindings, the flag guard and
+every `access_address` in the body spell out, so the IR cannot pick one
+unrelated to it -- it names the value from that hint and its own number,
+`v8_batchId0`, which is the one difference between the two sides and the one
+`_same_but_for_the_number` takes out.  And its type is `size_t`, because it is
+compared against `numElements0`, where `INDEX` renders to `int32_t`.
 
 The expected string below is copied from a recorded snapshot rather than
 written by hand, so it fails if either side moves.
@@ -22,6 +24,7 @@ written by hand, so it fails if either side moves.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -35,18 +38,28 @@ from tensorforge.common.vm.vm import vm_factory
 
 SNAPSHOTS = Path(__file__).resolve().parent / "snapshots"
 
-#: The header as the generator emits it today, for the persistent loop mode.
-EXPECTED = ("for (size_t batchId0 = threadIdx.y + blockDim.y * (blockIdx.x); "
+#: The header as the generator emits it today, for the persistent loop mode,
+#: with the value's number taken out of the induction variable's name.
+EXPECTED = ("for (size_t batchId0 = (threadIdx.y + blockDim.y * (blockIdx.x)); "
             "batchId0 < numElements0; "
             "batchId0 += (gridDim.x * blockDim.y)) {")
 
 
+def _same_but_for_the_number(line: str) -> str:
+    """`v8_batchId0` and `v1329_batchId0` are the same variable.
+
+    The number is the value's, and a snapshot of another kernel has another
+    one; everything else in the header is what this test is about.
+    """
+    return re.sub(r"\bv\d+_batchId0\b", "batchId0", line.strip())
+
+
 def test_the_expected_header_is_the_one_in_the_corpus():
     """Guard against the two sides drifting apart quietly."""
-    hits = [line.strip()
+    hits = [_same_but_for_the_number(line)
             for path in SNAPSHOTS.glob("*.cuda.cpp")
             for line in path.read_text().splitlines()
-            if "for (size_t batchId0" in line]
+            if re.search(r"for \(size_t v?\d*_?batchId0", line)]
     assert hits, "no persistent batch loop in the recorded snapshots"
     assert EXPECTED in hits, (
         f"the generator's header changed; update EXPECTED.\n"
@@ -57,7 +70,9 @@ def test_the_expected_header_is_the_one_in_the_corpus():
 def test_a_pir_loop_renders_that_header():
     b = IRBuilder(fptype=Datatype.F32)
     g = b.alloc(Datatype.F32, (16,), MemSpace.GLOBAL, hint="g")
-    with b.for_("threadIdx.y + blockDim.y * (blockIdx.x)", "numElements0",
+    # Parenthesised as the macro layer writes it, which is the other half of
+    # emitting the same header: the expression is the caller's text either way.
+    with b.for_("(threadIdx.y + blockDim.y * (blockIdx.x))", "numElements0",
                 "(gridDim.x * blockDim.y)",
                 extern="batchId0", index_type=SIZE):
         b.store(g, 1.0, 0)
@@ -66,7 +81,7 @@ def test_a_pir_loop_renders_that_header():
 
     w = Writer()
     emit(optimize(body), w, vm_factory("sm_86", "cuda", "float"))
-    lines = [l.strip() for l in w.get_src().splitlines()]
+    lines = [_same_but_for_the_number(l) for l in w.get_src().splitlines()]
     assert EXPECTED in lines, (
         "a PIR loop must be able to spell the header the macro layer emits, "
         f"or the migration changes generated code for no reason:\n"
