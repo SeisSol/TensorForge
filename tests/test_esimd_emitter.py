@@ -992,9 +992,18 @@ def test_a_comment_naming_the_array_does_not_keep_it():
     assert 'simd<float, 32> r9(' in src, src
 
 
-def test_register_arrays_are_simd_all_or_none():
-    """Next to an array that has to stay one, the small ones did better as
-    arrays too (`chain_three_matrices`: 1984 B of spill against 3392 B)."""
+def test_register_arrays_are_simd_whatever_the_file_holds():
+    """An array too big for the register file is still better as a `simd`.
+
+    It was not taken -- and neither was any other, since the rule was all or
+    none -- on the evidence of two kernels where taking *some* of them was
+    worse than taking none.  Taking all of them is a different arrangement: a
+    `simd` that does not fit spills in blocks, an array that stays an array is
+    a `copy_from` per access.  Measured on pvc: `gemm_56x18_x_18x18` 266.11 ->
+    4.93 ns an element, `register_operand_lead_slice` 661.92 -> 6.47,
+    `elastic-o6s:derivative` 2126.83 -> 111.32, and the two kernels the old
+    rule was built on within a hundredth.
+    """
     from tensorforge.backend.pir import MemSpace
 
     def build(b):
@@ -1003,7 +1012,8 @@ def test_register_arrays_are_simd_all_or_none():
         b.load(small, 0, hint='lo', layout=SPREAD16)
         b.load(big, 0, hint='hi', layout=SPREAD16)
     src = _esimd_src(build)
-    assert 'float r8[32]' in src and 'float r9[4096]' in src, src
+    assert 'float r8[32]' not in src and 'float r9[4096]' not in src, src
+    assert 'simd<float, 32>' in src and 'simd<float, 4096>' in src, src
 
 
 def test_a_register_array_read_past_its_end_stays_an_array():

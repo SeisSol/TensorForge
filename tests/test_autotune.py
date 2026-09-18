@@ -290,7 +290,8 @@ def test_intel_states_its_spilling_in_the_binary_and_not_on_the_console(tmp_path
     quiet = tmp_path / 'q.so'
     quiet.write_bytes(b'\x7fELF nothing to say')
     assert tuning._zeinfo_spill(str(quiet)) == 0
-    assert tuning._zeinfo_spill(str(tmp_path / 'missing.so')) == 0
+    assert tuning._zeinfo_spill(str(tmp_path / 'missing.so')) is None, (
+        'no object is not the same answer as no spilling')
     # and the console parser still answers for what it can see
     assert tuning.parse_igc('spill memory used = 96 bytes').spill_bytes == 96
 

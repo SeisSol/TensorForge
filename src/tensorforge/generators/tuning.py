@@ -760,8 +760,9 @@ def parse_igc(log: str) -> Resources:
 _ZEINFO_SPILL = re.compile(rb'spill_size:\s*(\d+)')
 
 
-def _zeinfo_spill(path: str) -> int:
-    """What the ahead-of-time binary says it spilled, or 0.
+def _zeinfo_spill(path: str) -> Optional[int]:
+    """What the ahead-of-time binary says it spilled, or None where there
+    is no object to ask.
 
     IGC says nothing on the console about a SPMD kernel that spills -- the
     build of `elastic-o6s:neighboringFlux` at sixteen lanes prints not one
@@ -778,7 +779,7 @@ def _zeinfo_spill(path: str) -> int:
         with open(path, 'rb') as f:
             blob = f.read()
     except OSError:
-        return 0
+        return None                    # no object: nothing is known
     return max((int(m.group(1)) for m in _ZEINFO_SPILL.finditer(blob)),
                default=0)
 
@@ -876,11 +877,16 @@ class CompiledScore:
             run = subprocess.run(cmd + list(self.flags), capture_output=True,
                                  text=True, timeout=self.timeout)
             spilled = (_zeinfo_spill(os.path.join(tmp, 'k.so'))
-                       if hw.vendor == 'intel' else 0)
+                       if hw.vendor == 'intel' else None)
         report = parse(run.stdout + run.stderr)
         if report is None or run.returncode:
             return None
-        if spilled > report.spill_bytes:
+        if spilled is not None:
+            # The object's own figure, and it decides: the console heuristic
+            # reads a recompilation as "spilled, amount unknown", and IGC
+            # recompiles for other reasons too -- the 32-lane
+            # `neighboringFlux` build retries and spills nothing, which that
+            # heuristic reported as a spill and the ranking acted on.
             report = replace(report, spill_bytes=spilled)
         if hw.vendor == 'nvidia' and report.registers:
             gen = result.generator

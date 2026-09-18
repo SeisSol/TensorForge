@@ -207,10 +207,11 @@ def main(argv=None):
                     continue
                 generator, source = built
                 with tempfile.TemporaryDirectory() as tmp:
+                    device = arch.rsplit('-esimd', 1)[0]
                     tool = (sass_mix if arch.startswith('sm_')
-                            else xe_mix if arch in ('pvc', 'acm', 'dg2')
+                            else xe_mix if device in ('pvc', 'acm', 'dg2')
                             else isa_mix)
-                    mix = tool(source, arch, Path(tmp))
+                    mix = tool(source, device, Path(tmp))
             except Exception as error:   # a case this target does not build
                 print(f'  {path.stem}: skipped ({type(error).__name__})',
                       file=sys.stderr)

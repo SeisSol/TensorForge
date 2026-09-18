@@ -40,9 +40,14 @@ def generate(path: Path, arch: str):
         spec.loader.exec_module(module)
     if not hasattr(module, 'descr_list'):
         return None
+    # `pvc-esimd` is the same device under the explicit-vector lowering: the
+    # two compile the same descriptors to very different code, and the mix is
+    # fitted per lowering rather than per device.
     backend = ('cuda' if arch.startswith('sm_')
+               else 'esimd' if arch.endswith('-esimd')
                else 'oneapi' if arch in ('pvc', 'acm', 'dg2')
                else 'hip')
+    arch = arch.rsplit('-esimd', 1)[0]
     context = Context(arch=arch, backend=backend, fp_type=module.DTYPE)
     generator = Generator(module.descr_list(), context)
     with contextlib.redirect_stdout(io.StringIO()):

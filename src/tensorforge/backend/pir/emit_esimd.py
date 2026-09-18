@@ -673,48 +673,43 @@ class EsimdEmitter(Emitter):
         return self._within_budget(order or [], cands, allocs)
 
     def _within_budget(self, order, names, allocs) -> set:
-        """As many of `names` as fit in a thread's registers at once.
+        """All of them, and the register file is not the question.
 
-        A `simd` is registers whatever its size, where an array too big to
-        promote goes to scratch whole and is at least read in blocks.  The
-        arrays are taken smallest first, each only while every point of the
-        body keeps the ones taken and live there within `max_reg_per_thread`
-        (live: first access to last, in program order) -- and then all of them
-        or none.  Measured on pvc, with the shared-memory windows in both
-        columns:
+        It was: the arrays were taken smallest first while the live set stayed
+        within `max_reg_per_thread`, and none at all past it -- on the evidence
+        of two kernels where taking *some* of them was worse than taking none
+        (`chain_three_matrices` 1984 B of spill against 3392, `chain_five`
+        17536 against 17600).  Taking them *all* was never measured, and it is
+        a different arrangement: an array that does not fit spills in blocks,
+        where an array left as an array is a `copy_from` per access and stays
+        in scratch whole.
 
-            local_flux             all 15 fit    1344 B -> 0 B spill
-            chain_three_matrices   one of 14 kB  1984 B -> 3392 B
-            chain_five_multiplies  two of 14 kB  17536 B -> 17600 B
+        Measured on pvc, whole promotion against none, ns per element:
 
-        Next to an array IGC has to keep in scratch, the small ones did better
-        as arrays too.
+            gemm_56x18_x_18x18              266.11 ->   4.93    54x
+            register_operand_lead_slice     661.92 ->   6.47   102x
+            register_operand_nonlead_slice  645.28 ->   5.94   109x
+            elastic-o6s:derivative         2126.83 -> 111.32    19x
+            chain_five_multiplies            21.31 ->  21.12   1.01x
+            chain_three_matrices              9.55 ->   9.48   1.01x
+
+        and the rest of the 44-case corpus within a tenth either way, worst
+        `accumulate_chain` at 0.90.  The two cases the old rule was built on
+        are a wash under whole promotion; the kernels it was keeping arrays
+        for are the ones that gain two orders of magnitude.  `elastic-o6s:
+        derivative` drops from 5414 `copy_from` to 306 -- and the 306 that are
+        left are the operands, read from global memory, which no promotion can
+        remove.
+
+        The correctness corpus is unchanged by it: the same 83 passing and the
+        same 15 failing cases under both, and the run takes 155 s instead of
+        1002.
+
+        Kept as a method rather than deleted, because the question it asked is
+        a real one -- a `simd` that does not fit is spilled by IGC, and where
+        that becomes the cost again this is where the answer goes.
         """
-        hw = self._hw()
-        budget = getattr(hw, 'max_reg_per_thread', None) or 8192
-        span = {}
-        for pos, x in enumerate(order):
-            for arg in x.args:
-                if self._is_buffer(arg):
-                    n = self._buf_name(arg)
-                    if n in names:
-                        a, b = span.get(n, (pos, pos))
-                        span[n] = (min(a, pos), max(b, pos))
-        load = [0] * (len(order) + 1)
-        taken = set()
-        for n in sorted(names, key=lambda n: (allocs[n][1].type.volume, n)):
-            v = allocs[n][1]
-            size = v.type.volume * v.type.elem.size()
-            a, b = span.get(n, (0, -1))
-            if b < a:
-                taken.add(n)
-                continue
-            if max(load[a:b + 1]) + size > budget:
-                return set()
-            for i in range(a, b + 1):
-                load[i] += size
-            taken.add(n)
-        return taken
+        return set(names)
 
     def _emit_simd_alloc(self, s) -> None:
         v = s.target[0]
