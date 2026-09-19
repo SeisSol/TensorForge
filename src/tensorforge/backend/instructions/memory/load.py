@@ -1004,8 +1004,16 @@ class GlbToRegLoader(MemoryInstruction, LoadInstruction):
       loops = []
       for i in range(src_bbox.rank()):
         if i == lead_pos:
+          # The destination's block, not the multiplication's lane count.
+          # They are the same for an image spread over every lane, and differ
+          # for a replicated one -- and it is the block `LeadIndex` divides
+          # by (`idx = ((tid / stride) % block) + nonlead * block`), so
+          # filling with the wider number writes each lane a different element
+          # of an image whose readers expect every run of `block` lanes to
+          # hold the same ones.
           loops += [LeadLoop(f'i{i}', src_bbox.lower()[i], src_bbox.upper()[i],
-                             self._num_threads, 1, width=self._lead_width)]
+                             self._dest.lead_block(lead_pos), 1,
+                             width=self._lead_width)]
         else:
           loops += [Loop(f'i{i}', src_bbox.lower()[i], src_bbox.upper()[i], 1)]
 

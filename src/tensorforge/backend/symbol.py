@@ -2442,7 +2442,17 @@ class Symbol:
     if len(axes) != len(self.lead_dims):
       return None
     layout = RegisterLayout(tuple(axes))
-    return layout if layout.tiles(self.num_threads) else None
+    if layout.tiles(self.num_threads):
+      return layout
+    # Replicated rather than unknown: each run of `block_span` lanes holds a
+    # whole copy, which is a distribution like any other and is what lets a
+    # multiplication span several sub-groups -- the broadcast then reads a
+    # lane of its *own* group (`reading_lane`).  What replication does not
+    # give is a single owner, and that is `owning_lane`'s answer to make: it
+    # returns None where the holders are more than one, so a store still
+    # refuses to guard itself to a lane that is one of several.
+    span = layout.block_span()
+    return layout if span and self.num_threads % span == 0 else None
 
   def lead_block(self, dim: int) -> int:
     """How many elements of dimension `dim` one round of the lanes holds.
@@ -2501,24 +2511,53 @@ class Symbol:
     layout = self.register_layout()
     if layout is None:
       return None
-    if self.lead_width > 1 and len(self.lead_dims) > 1:
-      # One width and no statement of which axis carries it.  The same gap
-      # `lead_width_of` has -- a packing belongs to a named dimension and
-      # neither the symbol nor the access says which -- and dividing an
-      # arbitrary coordinate by it would name a lane confidently and wrongly.
+    holders = self._holders(index, layout)
+    return holders[0] if len(holders) == 1 else None
+
+  def reading_lane(self, index):
+    """Which lane a reader takes a fixed element from.
+
+    The same question as `owning_lane` for an image that tiles the wave, and
+    a different one for a replicated image: every run of `block_span` lanes
+    holds a copy, so there is no single owner -- and a reader does not need
+    one.  It needs a lane that holds the element *within its own run*, which
+    is the first holder; the broadcast then wraps the index at the run's
+    width, so each group reads its own copy and nothing crosses.
+
+    Kept apart from `owning_lane` because the two answers differ exactly
+    where it matters: a store has to reach every copy or none, so it still
+    gets `None` and stays unguarded-by-lane, while a read gets a lane.
+    """
+    layout = self.register_layout()
+    if layout is None:
       return None
+    holders = self._holders(index, layout)
+    if not holders:
+      return None
+    span = layout.block_span()
+    if len(holders) * span != self.num_threads and len(holders) != 1:
+      # Not the replication pattern: more holders than the copies account
+      # for, so which one to read is not decided by this rule.
+      return None
+    return holders[0]
+
+  def _holders(self, index, layout):
+    """The lanes holding a fixed element, or `()` where the question does not
+    resolve -- shared by `owning_lane` and `reading_lane` so the two cannot
+    derive it differently."""
+    if self.lead_width > 1 and len(self.lead_dims) > 1:
+      return ()
     coords = []
     for position, dim in enumerate(self.lead_dims):
       idx = index[dim]
       if unwrap_lead(idx) is not None:
-        return None               # still distributed; every lane has a share
+        return ()
       if isinstance(idx, Immediate):
         idx = idx._value
       if not isinstance(idx, (int, np.integer)):
-        return None
+        return ()
       coords.append(int(idx) // self.lead_width if position == 0 else int(idx))
-    holders = layout.holders(tuple(coords), self.num_threads)
-    return holders[0] if len(holders) == 1 else None
+    return layout.holders(tuple(coords), self.num_threads)
 
   def _memory_valid(self, index):
     """How many lanes a full-lane tail may touch here, or None for all.
@@ -2776,7 +2815,7 @@ class Symbol:
           # `None` covers everything this branch used to fall through: an
           # index still distributed, one that resolves to no number, and a
           # distribution the symbol cannot state.
-          bc_lane = self.owning_lane(index)
+          bc_lane = self.reading_lane(index)
           if bc_lane is not None:
             # The register float, resolved here rather than carried as a
             # width: this access reads *one* element, so it has to stay
@@ -2982,8 +3021,16 @@ class Symbol:
         # effect and the same operands give the same result, so the emitter
         # may inline it into the use, which keeps the emitted source the shape
         # it was.
+        # The lanes the image's map runs over before it repeats, not the
+        # multiplication's width: they differ where the image is replicated,
+        # and it is that span which says whether a broadcast can stay inside
+        # one sub-group.  The *span*, not one axis' block -- a rank-two image
+        # spreads a row over one axis and a column over the other, and either
+        # block alone is a fraction of the lanes it takes to hold both.
+        layout = self.register_layout()
+        span = layout.block_span() if layout is not None else None
         text = context.get_vm().get_lexic().broadcast(
-            '{0}', bc_lane, self.num_threads)
+            '{0}', bc_lane, span or self.num_threads)
         return writer.rawexpr(text, value, type_=ltype, hint='bc',
                               pure=True, movable=True, crosslane=True)
 

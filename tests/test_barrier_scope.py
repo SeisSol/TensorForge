@@ -201,13 +201,28 @@ def test_a_wide_multiplication_is_packed_by_what_the_target_can_separate():
         gen = Generator([gemm], ctx,
                         lanes=LaneConfig(num_threads=64,
                                          num_active_threads=56, lead_width=1))
-        if backend in ("hip", "oneapi"):
+        if backend == "hip":
             # No block to pack.  The AMD SIMT path refuses a multiplication
             # wider than the wave: across waves it came out wrong with no error
-            # (measured on gfx1150).  SPMD SYCL places a multiplication in one
-            # sub-group, and none is 64 lanes wide.
+            # (measured on gfx1150).
             with pytest.raises(GenerationError):
                 gen.generate()
+            continue
+        if backend == "oneapi":
+            # Wider than any sub-group, and SPMD SYCL can broadcast only
+            # within one -- so this works exactly where the broadcast sources
+            # are replicated into each sub-group, which a single product's
+            # operands are (`Temporaries._lead_axes`).  It generates, and the
+            # image it broadcasts from says it is replicated rather than
+            # spread over all 64.
+            gen.generate()
+            src = gen.get_kernel()
+            # The broadcast the product needs: it names a sub-group, and the
+            # kernel states one of 32, so the element it reads has to be in
+            # this lane's own group -- which is what the replication puts
+            # there.  Wider than that there is no spelling at all, and the
+            # lexic says so rather than emitting one.
+            assert "group_broadcast" in src or "select_from_group" in src, src
             continue
         gen.generate()
         threads = gen._num_threads

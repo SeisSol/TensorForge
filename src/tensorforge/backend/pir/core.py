@@ -622,6 +622,16 @@ class RegisterLayout:
         """
         return self.replication(threads) == 1
 
+    def block_span(self) -> int:
+        """Lanes the map runs over before it repeats: the product of the
+        blocks.  Equal to the wave for a layout that tiles it, and a divisor
+        of it for one that replicates -- each run of `block_span` lanes then
+        holds one whole copy."""
+        span = 1
+        for axis in self.axes:
+            span *= axis.block
+        return span
+
     def replication(self, threads: int) -> int:
         """How many lanes hold a copy of the same element.
 

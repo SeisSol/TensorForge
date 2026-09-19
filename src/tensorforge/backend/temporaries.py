@@ -116,11 +116,21 @@ class Temporaries:
         product = 1
         for block in axes.values():
             product *= block
-        if self._num_threads and product != self._num_threads:
+        if self._num_threads and self._num_threads % product != 0:
             raise InternalError(
-                f'lane blocks {list(axes.values())} multiply to {product} and '
-                f'do not tile a {self._num_threads}-lane wave; the lanes would '
-                f'hold copies and no element would have one owner')
+                f'lane blocks {list(axes.values())} multiply to {product}, '
+                f'which does not divide a {self._num_threads}-lane wave; the '
+                f'lanes would hold overlapping parts of the image rather than '
+                f'whole copies of it')
+        # A product *smaller* than the wave is allowed and means replication:
+        # every run of `product` lanes holds one whole copy.  That is what a
+        # multiplication spanning several sub-groups needs -- a broadcast
+        # reaches only within one, so the image it reads has to be in each of
+        # them (`Symbol.reading_lane`).  It costs a copy per run and buys the
+        # register image being divided by the lanes that share a register
+        # file rather than by the lanes of the whole multiplication.  What it
+        # does not give is a single owner, which `owning_lane` answers `None`
+        # to, so a store still refuses to guard itself to one of several.
         return axes
 
     def register_array(self, bbox: BoundingBox, lead,
@@ -180,7 +190,14 @@ class Temporaries:
                            obj=RegMemObject(name, regsize, spp=spp))
         registers.lead_dims = list(axes)
         registers.num_threads = self._num_threads
-        registers.lead_axes = None if len(axes) == 1 else tuple(
+        # `None` means "one axis over the whole wave", which is the default
+        # every reader assumes.  A single axis whose block is *narrower* than
+        # the wave is not that: the lanes then hold copies, and a reader that
+        # fell back to the wave would divide by the wrong number.  So the axes
+        # are written down whenever they say something the default does not.
+        default = (len(axes) == 1
+                   and next(iter(axes.values())) == self._num_threads)
+        registers.lead_axes = None if default else tuple(
             LaneAxis(block, stride) for block, stride in
             zip(axes.values(), self._strides(axes.values())))
         # The blocking of this image, set once here so every access resolves

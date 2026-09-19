@@ -228,7 +228,8 @@ class MultilinearBuilder(OperationBuilder):
             shift = self._stage_shift(i, absorb_lead=not lane_axis_needs_moving)
             staged, load_op = self._make_loader_and_symbol_reg(
                 self._stage_view(i, shift), linearize=linearize,
-                lead_pos=lead_pos)
+                lead_pos=lead_pos,
+                carries_lead=0 in self._descr.target[i])
             self._mem_regions[i] = self._staged_region(i, staged, shift)
             self._residency.record_preload(
                 self._ops[i].symbol.name, self._mem_regions[i].symbol,
@@ -476,7 +477,9 @@ class MultilinearBuilder(OperationBuilder):
     return next(iter(pins), 0)
 
   def _make_loader_and_symbol_reg(self, opview, linearize,
-                                  lead_pos: int = 0) -> Tuple[Symbol, GlbToRegLoader]:
+                                  lead_pos: int = 0,
+                                  carries_lead: bool = True
+                                  ) -> Tuple[Symbol, GlbToRegLoader]:
     operand = opview.symbol
 
     # the register image holds the operand's *logical* region: GlbToRegLoader
@@ -491,8 +494,27 @@ class MultilinearBuilder(OperationBuilder):
     else:
       bbox = opview.bbox
 
+    # An operand that does *not* carry the destination's lead dimension is
+    # read across the lanes -- every product broadcasts an element of it --
+    # and a broadcast reaches only within one sub-group.  So where the
+    # multiplication is wider than one, such an image is spread over a
+    # sub-group and replicated into each rather than spread over the whole
+    # multiplication: `lead=[(dim, block)]` with a block that divides the lane
+    # count is what `Temporaries._lead_axes` reads as replication.
+    #
+    # The one that *does* carry it keeps the whole width, and that is the
+    # point of the arrangement: its rows are the destination's rows, split
+    # over the lanes, while the operand every row needs is copied.  Replicated
+    # too, it held rows 0..31 in both sub-groups and rows 32..55 in neither --
+    # `gemm_56x18_x_18x18` at 64 lanes came out with a relative error of 1.
+    lead = lead_pos
+    width = getattr(self._context.get_vm().get_lexic(), 'sub_group_width', None)
+    if width is not None and self._num_threads and not carries_lead:
+      group = width(self._num_threads)
+      if group < self._num_threads:
+        lead = [(lead_pos, group)]
     registers, registerAlloc = self._temporaries.register_array(
-        bbox, lead_pos,
+        bbox, lead,
         spp=None if operand.obj.is_dense() else operand.obj.spp)
     self._instructions.append(registerAlloc)
 

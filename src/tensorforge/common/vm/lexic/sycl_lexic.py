@@ -130,6 +130,21 @@ class SyclLexic(Lexic):
         return size
     return None
 
+  def sub_group_width(self, lanes) -> int:
+    """The sub-group the kernel asks for at `lanes` (`kernel_definition`).
+
+    `sub_group_for` answers "which supported size holds one multiplication
+    whole", and is None past the widest.  This one answers what the kernel
+    will state, which is that size where there is one and the widest
+    otherwise -- the multiplication then spans several sub-groups, and its
+    broadcast sources have to be replicated into each.
+    """
+    if not lanes:
+      return self.SUB_GROUP_SIZES[-1]
+    return (self.sub_group_for(lanes)
+            or next((s for s in self.SUB_GROUP_SIZES if s >= lanes),
+                    self.SUB_GROUP_SIZES[-1]))
+
   def _pins_sub_group(self) -> bool:
     """Whether the kernel states its sub-group size (`kernel_definition`),
     so that the lexic knows it; elsewhere it is the device's."""
@@ -324,11 +339,19 @@ class SyclLexic(Lexic):
       if self._pins_sub_group():
         size = self.sub_group_for(block)
         if size is None:
+          # `block` is the *image's* lane block, so this says the image is
+          # spread over more lanes than a sub-group holds and no group can
+          # read it whole.  The way across is not a wider broadcast -- there
+          # is none -- but a replicated image: spread over a sub-group and
+          # copied into each (`Temporaries._lead_axes`), which lands in the
+          # `size == block` case below and needs nothing here.  So this stays
+          # a refusal, and it names what to do instead.
           from tensorforge.common.exceptions import GenerationError
           raise GenerationError(
-              f'a multiplication of {block} lanes lies in no sub-group of '
-              f'{" or ".join(map(str, self.SUB_GROUP_SIZES))} lanes, so a '
-              f'broadcast over it cannot address its lanes within one')
+              f'a register image spread over {block} lanes lies in no '
+              f'sub-group of {" or ".join(map(str, self.SUB_GROUP_SIZES))}, '
+              f'so a broadcast cannot read it within one; stage it over a '
+              f'sub-group and replicate it instead')
         if size == block:
           return f'sycl::group_broadcast({group}, {variable}, {lane})'
       base = f'({group}.get_local_linear_id() / {block}) * {block}'

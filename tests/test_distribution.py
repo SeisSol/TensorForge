@@ -477,17 +477,34 @@ def test_the_lane_nesting_is_the_order_the_pairs_came_in():
             assert sym.owning_lane([row, col]) == row * 4 + col
 
 
-def test_blocks_that_do_not_tile_the_wave_are_refused_where_they_are_chosen():
-    """Rather than at the reader.  They would leave lanes holding copies,
-    `register_layout` would refuse the layout, `lead_block` would fall back to
-    the wave -- and the addressing would then divide by a number this
-    allocation did not size in."""
+def test_blocks_that_do_not_divide_the_wave_are_refused_where_they_are_chosen():
+    """Rather than at the reader.  Blocks that overrun the wave would leave
+    the lanes holding overlapping *parts* of the image, `register_layout`
+    would refuse the layout, `lead_block` would fall back to the wave -- and
+    the addressing would then divide by a number this allocation did not size
+    in."""
     from tensorforge.common.exceptions import InternalError
     temps = _temporaries(32)
-    with pytest.raises(InternalError, match='do not tile'):
+    with pytest.raises(InternalError, match='does not divide'):
         temps.register_array(_bbox(16, 8), [(0, 8), (1, 8)])
     with pytest.raises(InternalError, match='two lane axes'):
         temps.register_array(_bbox(16, 8), [(0, 8), (0, 4)])
+
+
+def test_blocks_that_divide_the_wave_are_taken_as_replication():
+    """A product *smaller* than the wave is not a mistake: every run of that
+    many lanes then holds a whole copy, which is what a multiplication
+    spanning several sub-groups needs -- a broadcast reaches only within one,
+    so its source has to be in each of them.  The image says so itself, and
+    `owning_lane` still answers `None`, so nothing guards a store to one of
+    several holders."""
+    temps = _temporaries(32)
+    sym, _ = temps.register_array(_bbox(16), [(0, 16)])
+    layout = sym.register_layout()
+    assert layout is not None, 'a replicated image states its distribution'
+    assert layout.block_span() == 16
+    assert layout.replication(32) == 2
+    assert not layout.tiles(32)
 
 
 def test_a_packed_image_on_two_axes_has_no_owner():
