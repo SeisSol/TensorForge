@@ -485,6 +485,29 @@ class Emitter:
         vm = self._vm()
         return None if vm is None else vm.get_hw_descr()
 
+    def _split_predicated_load(self) -> bool:
+        """Whether a predicated load is read unconditionally and selected after.
+
+        A context without options is one of the emitter's own tests, and those
+        read the plain form; the option's own default is what decides for a
+        real build.
+        """
+        opts = getattr(self.context, 'get_user_options', None)
+        if opts is None:
+            return False
+        try:
+            if not opts().split_predicated_load:
+                return False
+        except AttributeError:
+            return False
+        # Under an explicit vector the predicate is a mask over the work-item's
+        # own lanes, not a comparison against a thread index: it selects
+        # *elements* of one value and there is no second lane to read from, so
+        # neither the fault nor the remedy applies -- and an address clamped by
+        # a mask is not an address at all.
+        lex = self._lexic()
+        return not getattr(lex, 'simd_mode', False)
+
     def _infix(self, op: str, v: Value, args: Sequence[str]) -> str:
         """`a op b`.  A hook: the explicit-vector emitter spells a comparison
         by the type its result is declared as."""
@@ -679,18 +702,31 @@ class Emitter:
             return f'{self.ctype(t, value)}{{}}'
         return t.base.literal(0)
 
-    def declare(self, v: Value, expr: str, s: Stmt, name: str = None) -> None:
+    def declare(self, v: Value, expr: str, s: Stmt, name: str = None,
+                split: bool = False) -> None:
         """Emit `Ty name = expr;`, folding a predicate into a select.
 
         A predicated statement that produces a value must *not* be wrapped in a
         guard block --- the declaration would be scoped inside it and the value
         would be unusable afterwards.  Lowering to a select also keeps the
         statement hoistable, which a guard region never is.
+
+        `split` puts the work in a statement of its own and selects over its
+        result, which computes the same thing and reads differently to a
+        compiler that carries the predicate backwards --- see
+        `split_predicated_load`, the only caller that asks for it.
         """
         if s.predicate is not None and _folds_predicate(s):
             other = s.attr('other')
             other = (self.operand(other) if other is not None
                      else self.zero(v.type, v))
+            if split:
+                raw = f'{name or self.name(v)}_pre'
+                self.writer(f'{self.ctype(v.type, v)} {raw} = {expr};')
+                expr = f'{self.operand(s.predicate)} ? ({raw}) : ({other})'
+                self.writer(f'{self.ctype(v.type, v)} {name or self.name(v)} = {expr};')
+                self.bind(v, name or self.name(v))
+                return
             expr = f'{self.operand(s.predicate)} ? ({expr}) : ({other})'
         if name is None and v.id in self._inline:
             self.bind(v, _atomic(expr) and expr or f'({expr})')
@@ -776,6 +812,11 @@ class Emitter:
         """
         _, uses = def_use(body)
         inline: set = set()
+        opts = getattr(self.context, 'get_user_options', None)
+        opts = opts() if opts is not None else None
+        if opts is not None and not getattr(opts, 'inline_pir_values', True):
+            # Nothing inlined: every value is named where it is produced.
+            return inline
 
         def scan(stmts: Tuple[Stmt, ...]) -> None:
             here: Dict[int, int] = {}
@@ -983,6 +1024,14 @@ class Emitter:
 
             v = s.target[0]
             addr = self.address(s.args[0], s.args[1:])
+            # Clamp the address and hoist the load out of the select, where the
+            # target asks for it: the read then happens in every lane, at an
+            # address the predicate keeps in bounds, and the predicate decides
+            # only the value.  `split_predicated_load` says why.
+            split = (s.predicate is not None and _folds_predicate(s)
+                     and self._split_predicated_load())
+            if split:
+                addr = f'{self.operand(s.predicate)} ? ({addr}) : (0)'
             nontemporal = s.attr('nontemporal')
             access = self.elem_access(s.args[0], addr, v.type,
                                       s.attr('align') == 'relaxed')
@@ -996,10 +1045,14 @@ class Emitter:
                 # The attribute is the kind of hint (`hints.cache_hint`), and
                 # the lexic spells whichever it has.
                 dt, width = self.access_type(v.type, s.args[0])
+                # Passed only when asked for: `declare` is overridden by the
+                # explicit-vector emitter, which never splits and whose
+                # signature does not carry the argument.
                 self.declare(v, f'{lex.glb_load(access, datatype=dt, length=width, nontemporal=nontemporal)}',
-                             s, name=named)
+                             s, name=named, **({'split': True} if split else {}))
             else:
-                self.declare(v, access, s, name=named)
+                self.declare(v, access, s, name=named,
+                             **({'split': True} if split else {}))
             if named:
                 self.bind(v, named)
             return

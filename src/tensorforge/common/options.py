@@ -454,6 +454,56 @@ declare('preload_globals',
             'been compared against its own alternative.  A benchmark cannot ask '
             'a question the generator cannot be asked.')
 
+declare('split_predicated_load',
+        rule=lambda hw: hw.vendor == 'intel',
+        parse=parse_bool,
+        doc='Read a predicated load unconditionally at a clamped address and '
+            'select the value afterwards, instead of predicating the load '
+            'itself.\n'
+            'For a miscompilation and not for the program; the two forms '
+            'compute the same thing.  `p ? base[i] : 0` predicates the *load*, '
+            'and the Intel device compiler carries that predicate backwards '
+            'through the dependency chain: where a multiplication has fewer '
+            'active rows than lanes, it concludes that the lanes above the '
+            'active count produce nothing, drops their share of the register '
+            'images staged for the same multiplication, and the broadcasts '
+            'that read exactly those lanes read whatever the register held.  '
+            'The loss is silent and exact -- the contraction steps whose '
+            'source lane lies between the active count and the vector width; '
+            '`tests/cases/tw_split_load` is the case, and `-cl-opt-disable` '
+            'computes it.  Hoisting the load out of the conditional expression '
+            'is what stops it: the load is then unconditional, nothing is '
+            'predicated backwards, and the select on the value keeps the zero '
+            'the false branch stands for.  Clamping the address is what makes '
+            'the unconditional read legal.\n'
+            'Both halves are needed.  Clamping alone, with the load still '
+            'inside the ternary, still loses the steps; the barrier that looks '
+            'like the obvious remedy makes it worse, from one wrong column to '
+            'five.\n'
+            'Intel only, and there only under SPMD: elsewhere a predicated '
+            'load is one instruction and this would add a select to every one '
+            'of them, and under the explicit-vector lowering the predicate is '
+            'a mask over one work-item\'s own lanes -- it selects elements of '
+            'a value, there is no other lane to read from, and an address '
+            'clamped by a mask is not an address.')
+
+declare('inline_pir_values',
+        default=True,
+        parse=parse_bool,
+        doc='Write a pure single-use value straight into its consumer instead '
+            'of naming it.\n'
+            'Off, every structured operation leaves a named temporary and the '
+            'source grows -- which is the reason it is on.  It is a question '
+            'and not a constant because the Intel device compiler reads our '
+            'nesting: hoisting one predicated load out of a conditional '
+            'expression moved `o6d:volume` by 2.2x and the suite by 1.13x '
+            '(`split_predicated_load`), so how deeply the rest nests is worth '
+            'asking about rather than assuming.  The answer on pvc is no: '
+            'naming everything grows `elastic-linearck` order 4 and 6 from '
+            '1116 to 1736 lines and the twenty kernels to 0.987x of the '
+            'default, so what the compiler minds is a *predicated* load and '
+            'not how deeply an expression nests.')
+
 declare('preload_partial',
         default=False,
         parse=parse_bool,

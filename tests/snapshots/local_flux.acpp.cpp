@@ -1,5 +1,5 @@
 // === base name ===
-kernel_b50de12ea6113f6c
+kernel_bf4b43f0a85df483
 
 // === header ===
 #ifndef TENSORFORGE_LAUNCH_TYPES
@@ -27,9 +27,9 @@ struct LaunchConfig {
 };
 } // namespace tensorforge
 #endif
-inline constexpr tensorforge::LaunchInfo launch_info_kernel_b50de12ea6113f6c = {{32, 1, 1}, 32, 56, 1, 1, 0, false, true, 1};
-tensorforge::LaunchConfig launch_config_kernel_b50de12ea6113f6c(size_t numElements0, void* streamPtr = nullptr);
-void launcher_kernel_b50de12ea6113f6c(const float * m0, const float ** m1, size_t m1_extraOffset, float ** m2, size_t m2_extraOffset, const float ** m3, size_t m3_extraOffset, const float * m4, const float ** m5, size_t m5_extraOffset, const float * m6, const float ** m7, size_t m7_extraOffset, const float * m8, const float ** m9, size_t m9_extraOffset, size_t numElements0, unsigned * flags0 = nullptr, void* streamPtr = nullptr);
+inline constexpr tensorforge::LaunchInfo launch_info_kernel_bf4b43f0a85df483 = {{32, 1, 1}, 32, 56, 1, 1, 0, false, true, 1};
+tensorforge::LaunchConfig launch_config_kernel_bf4b43f0a85df483(size_t numElements0, void* streamPtr = nullptr);
+void launcher_kernel_bf4b43f0a85df483(const float * m0, const float ** m1, size_t m1_extraOffset, float ** m2, size_t m2_extraOffset, const float ** m3, size_t m3_extraOffset, const float * m4, const float ** m5, size_t m5_extraOffset, const float * m6, const float ** m7, size_t m7_extraOffset, const float * m8, const float ** m9, size_t m9_extraOffset, size_t numElements0, unsigned * flags0 = nullptr, void* streamPtr = nullptr);
 
 
 // === launcher ===
@@ -58,7 +58,7 @@ struct LaunchConfig {
 };
 } // namespace tensorforge
 #endif
-tensorforge::LaunchConfig launch_config_kernel_b50de12ea6113f6c(size_t numElements0, void* streamPtr) {
+tensorforge::LaunchConfig launch_config_kernel_bf4b43f0a85df483(size_t numElements0, void* streamPtr) {
   (void)numElements0;
   (void)streamPtr;
   sycl::range<3> block (32, 1, 1);
@@ -73,21 +73,21 @@ tensorforge::LaunchConfig launch_config_kernel_b50de12ea6113f6c(size_t numElemen
   config.cooperative = false;
   return config;
 }
-void launcher_kernel_b50de12ea6113f6c(const float * m0, const float ** m1, size_t m1_extraOffset, float ** m2, size_t m2_extraOffset, const float ** m3, size_t m3_extraOffset, const float * m4, const float ** m5, size_t m5_extraOffset, const float * m6, const float ** m7, size_t m7_extraOffset, const float * m8, const float ** m9, size_t m9_extraOffset, size_t numElements0, unsigned * flags0, void* streamPtr) {
-  const tensorforge::LaunchConfig config = launch_config_kernel_b50de12ea6113f6c(numElements0, streamPtr);
+void launcher_kernel_bf4b43f0a85df483(const float * m0, const float ** m1, size_t m1_extraOffset, float ** m2, size_t m2_extraOffset, const float ** m3, size_t m3_extraOffset, const float * m4, const float ** m5, size_t m5_extraOffset, const float * m6, const float ** m7, size_t m7_extraOffset, const float * m8, const float ** m9, size_t m9_extraOffset, size_t numElements0, unsigned * flags0, void* streamPtr) {
+  const tensorforge::LaunchConfig config = launch_config_kernel_bf4b43f0a85df483(numElements0, streamPtr);
   sycl::range<3> block (config.block[0], config.block[1], config.block[2]);
   sycl::range<3> grid (config.grid[0], config.grid[1], config.grid[2]);
   if (streamPtr == nullptr) {
     throw std::invalid_argument("stream may not be null!");
   }
   sycl::queue *stream = static_cast<sycl::queue *>(streamPtr);
-  kernel_kernel_b50de12ea6113f6c(stream, grid, block, m0, m1, m1_extraOffset, m2, m2_extraOffset, m3, m3_extraOffset, m4, m5, m5_extraOffset, m6, m7, m7_extraOffset, m8, m9, m9_extraOffset, numElements0, flags0);
+  kernel_kernel_bf4b43f0a85df483(stream, grid, block, m0, m1, m1_extraOffset, m2, m2_extraOffset, m3, m3_extraOffset, m4, m5, m5_extraOffset, m6, m7, m7_extraOffset, m8, m9, m9_extraOffset, numElements0, flags0);
   CHECK_ERR;
 }
 
 
 // === kernel ===
-inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> group_count, sycl::range<3> group_size, const float * m0, const float ** m1, size_t m1_extraOffset, float ** m2, size_t m2_extraOffset, const float ** m3, size_t m3_extraOffset, const float * m4, const float ** m5, size_t m5_extraOffset, const float * m6, const float ** m7, size_t m7_extraOffset, const float * m8, const float ** m9, size_t m9_extraOffset, size_t numElements0, unsigned * flags0) {
+inline void kernel_kernel_bf4b43f0a85df483(sycl::queue *stream, sycl::range<3> group_count, sycl::range<3> group_size, const float * m0, const float ** m1, size_t m1_extraOffset, float ** m2, size_t m2_extraOffset, const float ** m3, size_t m3_extraOffset, const float * m4, const float ** m5, size_t m5_extraOffset, const float * m6, const float ** m7, size_t m7_extraOffset, const float * m8, const float ** m9, size_t m9_extraOffset, size_t numElements0, unsigned * flags0) {
   stream->submit([&](sycl::handler &cgh) {
     sycl::accessor<float, 1, sycl::access::mode::read_write, sycl::access::target::local> totalShrMem (0, cgh); {
       cgh.parallel_for(sycl::nd_range<3>{{group_count.get(2) * group_size.get(2), group_count.get(1) * group_size.get(1), group_count.get(0) * group_size.get(0)}, {group_size.get(2), group_size.get(1), group_size.get(0)}}, [=](sycl::nd_item<3> item)  {
@@ -207,7 +207,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               float v106_data = r1[16];
               r1[16] = (v106_data + (v54_data * v104_bc));
               int32_t v109_lead = v22_lead + 32_i32;
-              float v111_data = v32_g ? (glb_m0[v109_lead]) : (0.0f);
+              float v111_data_pre = glb_m0[v32_g ? (v109_lead) : (0)];
+              float v111_data = v32_g ? (v111_data_pre) : (0.0f);
               float v115_data = r1[1];
               r1[1] = (v115_data + (v111_data * v56_bc));
               float v121_data = r1[3];
@@ -255,7 +256,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               float v216_bc = sycl::select_from_group(item.get_sub_group(), v103_data, (item.get_sub_group().get_local_linear_id() / 32) * 32 + (1));
               float v218_data = r1[16];
               r1[16] = (v218_data + (v166_data * v216_bc));
-              float v221_data = v32_g ? (glb_m0[(v109_lead + 56)]) : (0.0f);
+              float v221_data_pre = glb_m0[v32_g ? ((v109_lead + 56)) : (0)];
+              float v221_data = v32_g ? (v221_data_pre) : (0.0f);
               float v225_data = r1[1];
               r1[1] = (v225_data + (v221_data * v168_bc));
               float v231_data = r1[3];
@@ -303,7 +305,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               float v326_bc = sycl::select_from_group(item.get_sub_group(), v103_data, (item.get_sub_group().get_local_linear_id() / 32) * 32 + (2));
               float v328_data = r1[16];
               r1[16] = (v328_data + (v276_data * v326_bc));
-              float v331_data = v32_g ? (glb_m0[(v109_lead + 112)]) : (0.0f);
+              float v331_data_pre = glb_m0[v32_g ? ((v109_lead + 112)) : (0)];
+              float v331_data = v32_g ? (v331_data_pre) : (0.0f);
               float v335_data = r1[1];
               r1[1] = (v335_data + (v331_data * v278_bc));
               float v341_data = r1[3];
@@ -351,7 +354,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               float v436_bc = sycl::select_from_group(item.get_sub_group(), v103_data, (item.get_sub_group().get_local_linear_id() / 32) * 32 + (3));
               float v438_data = r1[16];
               r1[16] = (v438_data + (v386_data * v436_bc));
-              float v441_data = v32_g ? (glb_m0[(v109_lead + 168)]) : (0.0f);
+              float v441_data_pre = glb_m0[v32_g ? ((v109_lead + 168)) : (0)];
+              float v441_data = v32_g ? (v441_data_pre) : (0.0f);
               float v445_data = r1[1];
               r1[1] = (v445_data + (v441_data * v388_bc));
               float v451_data = r1[3];
@@ -399,7 +403,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               float v546_bc = sycl::select_from_group(item.get_sub_group(), v103_data, (item.get_sub_group().get_local_linear_id() / 32) * 32 + (4));
               float v548_data = r1[16];
               r1[16] = (v548_data + (v496_data * v546_bc));
-              float v551_data = v32_g ? (glb_m0[(v109_lead + 224)]) : (0.0f);
+              float v551_data_pre = glb_m0[v32_g ? ((v109_lead + 224)) : (0)];
+              float v551_data = v32_g ? (v551_data_pre) : (0.0f);
               float v555_data = r1[1];
               r1[1] = (v555_data + (v551_data * v498_bc));
               float v561_data = r1[3];
@@ -447,7 +452,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               float v656_bc = sycl::select_from_group(item.get_sub_group(), v103_data, (item.get_sub_group().get_local_linear_id() / 32) * 32 + (5));
               float v658_data = r1[16];
               r1[16] = (v658_data + (v606_data * v656_bc));
-              float v661_data = v32_g ? (glb_m0[(v109_lead + 280)]) : (0.0f);
+              float v661_data_pre = glb_m0[v32_g ? ((v109_lead + 280)) : (0)];
+              float v661_data = v32_g ? (v661_data_pre) : (0.0f);
               float v665_data = r1[1];
               r1[1] = (v665_data + (v661_data * v608_bc));
               float v671_data = r1[3];
@@ -495,7 +501,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               float v766_bc = sycl::select_from_group(item.get_sub_group(), v103_data, (item.get_sub_group().get_local_linear_id() / 32) * 32 + (6));
               float v768_data = r1[16];
               r1[16] = (v768_data + (v716_data * v766_bc));
-              float v771_data = v32_g ? (glb_m0[(v109_lead + 336)]) : (0.0f);
+              float v771_data_pre = glb_m0[v32_g ? ((v109_lead + 336)) : (0)];
+              float v771_data = v32_g ? (v771_data_pre) : (0.0f);
               float v775_data = r1[1];
               r1[1] = (v775_data + (v771_data * v718_bc));
               float v781_data = r1[3];
@@ -543,7 +550,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               float v876_bc = sycl::select_from_group(item.get_sub_group(), v103_data, (item.get_sub_group().get_local_linear_id() / 32) * 32 + (7));
               float v878_data = r1[16];
               r1[16] = (v878_data + (v826_data * v876_bc));
-              float v881_data = v32_g ? (glb_m0[(v109_lead + 392)]) : (0.0f);
+              float v881_data_pre = glb_m0[v32_g ? ((v109_lead + 392)) : (0)];
+              float v881_data = v32_g ? (v881_data_pre) : (0.0f);
               float v885_data = r1[1];
               r1[1] = (v885_data + (v881_data * v828_bc));
               float v891_data = r1[3];
@@ -591,7 +599,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               float v986_bc = sycl::select_from_group(item.get_sub_group(), v103_data, (item.get_sub_group().get_local_linear_id() / 32) * 32 + (8));
               float v988_data = r1[16];
               r1[16] = (v988_data + (v936_data * v986_bc));
-              float v991_data = v32_g ? (glb_m0[(v109_lead + 448)]) : (0.0f);
+              float v991_data_pre = glb_m0[v32_g ? ((v109_lead + 448)) : (0)];
+              float v991_data = v32_g ? (v991_data_pre) : (0.0f);
               float v995_data = r1[1];
               r1[1] = (v995_data + (v991_data * v938_bc));
               float v1001_data = r1[3];
@@ -639,7 +648,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               float v1096_bc = sycl::select_from_group(item.get_sub_group(), v103_data, (item.get_sub_group().get_local_linear_id() / 32) * 32 + (9));
               float v1098_data = r1[16];
               r1[16] = (v1098_data + (v1046_data * v1096_bc));
-              float v1101_data = v32_g ? (glb_m0[(v109_lead + 504)]) : (0.0f);
+              float v1101_data_pre = glb_m0[v32_g ? ((v109_lead + 504)) : (0)];
+              float v1101_data = v32_g ? (v1101_data_pre) : (0.0f);
               float v1105_data = r1[1];
               r1[1] = (v1105_data + (v1101_data * v1048_bc));
               float v1111_data = r1[3];
@@ -687,7 +697,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               float v1206_bc = sycl::select_from_group(item.get_sub_group(), v103_data, (item.get_sub_group().get_local_linear_id() / 32) * 32 + (10));
               float v1208_data = r1[16];
               r1[16] = (v1208_data + (v1156_data * v1206_bc));
-              float v1211_data = v32_g ? (glb_m0[(v109_lead + 560)]) : (0.0f);
+              float v1211_data_pre = glb_m0[v32_g ? ((v109_lead + 560)) : (0)];
+              float v1211_data = v32_g ? (v1211_data_pre) : (0.0f);
               float v1215_data = r1[1];
               r1[1] = (v1215_data + (v1211_data * v1158_bc));
               float v1221_data = r1[3];
@@ -735,7 +746,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               float v1316_bc = sycl::select_from_group(item.get_sub_group(), v103_data, (item.get_sub_group().get_local_linear_id() / 32) * 32 + (11));
               float v1318_data = r1[16];
               r1[16] = (v1318_data + (v1266_data * v1316_bc));
-              float v1321_data = v32_g ? (glb_m0[(v109_lead + 616)]) : (0.0f);
+              float v1321_data_pre = glb_m0[v32_g ? ((v109_lead + 616)) : (0)];
+              float v1321_data = v32_g ? (v1321_data_pre) : (0.0f);
               float v1325_data = r1[1];
               r1[1] = (v1325_data + (v1321_data * v1268_bc));
               float v1331_data = r1[3];
@@ -783,7 +795,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               float v1426_bc = sycl::select_from_group(item.get_sub_group(), v103_data, (item.get_sub_group().get_local_linear_id() / 32) * 32 + (12));
               float v1428_data = r1[16];
               r1[16] = (v1428_data + (v1376_data * v1426_bc));
-              float v1431_data = v32_g ? (glb_m0[(v109_lead + 672)]) : (0.0f);
+              float v1431_data_pre = glb_m0[v32_g ? ((v109_lead + 672)) : (0)];
+              float v1431_data = v32_g ? (v1431_data_pre) : (0.0f);
               float v1435_data = r1[1];
               r1[1] = (v1435_data + (v1431_data * v1378_bc));
               float v1441_data = r1[3];
@@ -831,7 +844,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               float v1536_bc = sycl::select_from_group(item.get_sub_group(), v103_data, (item.get_sub_group().get_local_linear_id() / 32) * 32 + (13));
               float v1538_data = r1[16];
               r1[16] = (v1538_data + (v1486_data * v1536_bc));
-              float v1541_data = v32_g ? (glb_m0[(v109_lead + 728)]) : (0.0f);
+              float v1541_data_pre = glb_m0[v32_g ? ((v109_lead + 728)) : (0)];
+              float v1541_data = v32_g ? (v1541_data_pre) : (0.0f);
               float v1545_data = r1[1];
               r1[1] = (v1545_data + (v1541_data * v1488_bc));
               float v1551_data = r1[3];
@@ -879,7 +893,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               float v1646_bc = sycl::select_from_group(item.get_sub_group(), v103_data, (item.get_sub_group().get_local_linear_id() / 32) * 32 + (14));
               float v1648_data = r1[16];
               r1[16] = (v1648_data + (v1596_data * v1646_bc));
-              float v1651_data = v32_g ? (glb_m0[(v109_lead + 784)]) : (0.0f);
+              float v1651_data_pre = glb_m0[v32_g ? ((v109_lead + 784)) : (0)];
+              float v1651_data = v32_g ? (v1651_data_pre) : (0.0f);
               float v1655_data = r1[1];
               r1[1] = (v1655_data + (v1651_data * v1598_bc));
               float v1661_data = r1[3];
@@ -927,7 +942,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               float v1756_bc = sycl::select_from_group(item.get_sub_group(), v103_data, (item.get_sub_group().get_local_linear_id() / 32) * 32 + (15));
               float v1758_data = r1[16];
               r1[16] = (v1758_data + (v1706_data * v1756_bc));
-              float v1761_data = v32_g ? (glb_m0[(v109_lead + 840)]) : (0.0f);
+              float v1761_data_pre = glb_m0[v32_g ? ((v109_lead + 840)) : (0)];
+              float v1761_data = v32_g ? (v1761_data_pre) : (0.0f);
               float v1765_data = r1[1];
               r1[1] = (v1765_data + (v1761_data * v1708_bc));
               float v1771_data = r1[3];
@@ -975,7 +991,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               float v1866_bc = sycl::select_from_group(item.get_sub_group(), v103_data, (item.get_sub_group().get_local_linear_id() / 32) * 32 + (16));
               float v1868_data = r1[16];
               r1[16] = (v1868_data + (v1816_data * v1866_bc));
-              float v1871_data = v32_g ? (glb_m0[(v109_lead + 896)]) : (0.0f);
+              float v1871_data_pre = glb_m0[v32_g ? ((v109_lead + 896)) : (0)];
+              float v1871_data = v32_g ? (v1871_data_pre) : (0.0f);
               float v1875_data = r1[1];
               r1[1] = (v1875_data + (v1871_data * v1818_bc));
               float v1881_data = r1[3];
@@ -1023,7 +1040,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               float v1976_bc = sycl::select_from_group(item.get_sub_group(), v103_data, (item.get_sub_group().get_local_linear_id() / 32) * 32 + (17));
               float v1978_data = r1[16];
               r1[16] = (v1978_data + (v1926_data * v1976_bc));
-              float v1981_data = v32_g ? (glb_m0[(v109_lead + 952)]) : (0.0f);
+              float v1981_data_pre = glb_m0[v32_g ? ((v109_lead + 952)) : (0)];
+              float v1981_data = v32_g ? (v1981_data_pre) : (0.0f);
               float v1985_data = r1[1];
               r1[1] = (v1985_data + (v1981_data * v1928_bc));
               float v1991_data = r1[3];
@@ -1071,7 +1089,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               float v2086_bc = sycl::select_from_group(item.get_sub_group(), v103_data, (item.get_sub_group().get_local_linear_id() / 32) * 32 + (18));
               float v2088_data = r1[16];
               r1[16] = (v2088_data + (v2036_data * v2086_bc));
-              float v2091_data = v32_g ? (glb_m0[(v109_lead + 1008)]) : (0.0f);
+              float v2091_data_pre = glb_m0[v32_g ? ((v109_lead + 1008)) : (0)];
+              float v2091_data = v32_g ? (v2091_data_pre) : (0.0f);
               float v2095_data = r1[1];
               r1[1] = (v2095_data + (v2091_data * v2038_bc));
               float v2101_data = r1[3];
@@ -1119,7 +1138,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               float v2196_bc = sycl::select_from_group(item.get_sub_group(), v103_data, (item.get_sub_group().get_local_linear_id() / 32) * 32 + (19));
               float v2198_data = r1[16];
               r1[16] = (v2198_data + (v2146_data * v2196_bc));
-              float v2201_data = v32_g ? (glb_m0[(v109_lead + 1064)]) : (0.0f);
+              float v2201_data_pre = glb_m0[v32_g ? ((v109_lead + 1064)) : (0)];
+              float v2201_data = v32_g ? (v2201_data_pre) : (0.0f);
               float v2205_data = r1[1];
               r1[1] = (v2205_data + (v2201_data * v2148_bc));
               float v2211_data = r1[3];
@@ -1167,7 +1187,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               float v2306_bc = sycl::select_from_group(item.get_sub_group(), v103_data, (item.get_sub_group().get_local_linear_id() / 32) * 32 + (20));
               float v2308_data = r1[16];
               r1[16] = (v2308_data + (v2256_data * v2306_bc));
-              float v2311_data = v32_g ? (glb_m0[(v109_lead + 1120)]) : (0.0f);
+              float v2311_data_pre = glb_m0[v32_g ? ((v109_lead + 1120)) : (0)];
+              float v2311_data = v32_g ? (v2311_data_pre) : (0.0f);
               float v2315_data = r1[1];
               r1[1] = (v2315_data + (v2311_data * v2258_bc));
               float v2321_data = r1[3];
@@ -1215,7 +1236,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               float v2416_bc = sycl::select_from_group(item.get_sub_group(), v103_data, (item.get_sub_group().get_local_linear_id() / 32) * 32 + (21));
               float v2418_data = r1[16];
               r1[16] = (v2418_data + (v2366_data * v2416_bc));
-              float v2421_data = v32_g ? (glb_m0[(v109_lead + 1176)]) : (0.0f);
+              float v2421_data_pre = glb_m0[v32_g ? ((v109_lead + 1176)) : (0)];
+              float v2421_data = v32_g ? (v2421_data_pre) : (0.0f);
               float v2425_data = r1[1];
               r1[1] = (v2425_data + (v2421_data * v2368_bc));
               float v2431_data = r1[3];
@@ -1263,7 +1285,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               float v2526_bc = sycl::select_from_group(item.get_sub_group(), v103_data, (item.get_sub_group().get_local_linear_id() / 32) * 32 + (22));
               float v2528_data = r1[16];
               r1[16] = (v2528_data + (v2476_data * v2526_bc));
-              float v2531_data = v32_g ? (glb_m0[(v109_lead + 1232)]) : (0.0f);
+              float v2531_data_pre = glb_m0[v32_g ? ((v109_lead + 1232)) : (0)];
+              float v2531_data = v32_g ? (v2531_data_pre) : (0.0f);
               float v2535_data = r1[1];
               r1[1] = (v2535_data + (v2531_data * v2478_bc));
               float v2541_data = r1[3];
@@ -1311,7 +1334,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               float v2636_bc = sycl::select_from_group(item.get_sub_group(), v103_data, (item.get_sub_group().get_local_linear_id() / 32) * 32 + (23));
               float v2638_data = r1[16];
               r1[16] = (v2638_data + (v2586_data * v2636_bc));
-              float v2641_data = v32_g ? (glb_m0[(v109_lead + 1288)]) : (0.0f);
+              float v2641_data_pre = glb_m0[v32_g ? ((v109_lead + 1288)) : (0)];
+              float v2641_data = v32_g ? (v2641_data_pre) : (0.0f);
               float v2645_data = r1[1];
               r1[1] = (v2645_data + (v2641_data * v2588_bc));
               float v2651_data = r1[3];
@@ -1359,7 +1383,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               float v2746_bc = sycl::select_from_group(item.get_sub_group(), v103_data, (item.get_sub_group().get_local_linear_id() / 32) * 32 + (24));
               float v2748_data = r1[16];
               r1[16] = (v2748_data + (v2696_data * v2746_bc));
-              float v2751_data = v32_g ? (glb_m0[(v109_lead + 1344)]) : (0.0f);
+              float v2751_data_pre = glb_m0[v32_g ? ((v109_lead + 1344)) : (0)];
+              float v2751_data = v32_g ? (v2751_data_pre) : (0.0f);
               float v2755_data = r1[1];
               r1[1] = (v2755_data + (v2751_data * v2698_bc));
               float v2761_data = r1[3];
@@ -1407,7 +1432,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               float v2856_bc = sycl::select_from_group(item.get_sub_group(), v103_data, (item.get_sub_group().get_local_linear_id() / 32) * 32 + (25));
               float v2858_data = r1[16];
               r1[16] = (v2858_data + (v2806_data * v2856_bc));
-              float v2861_data = v32_g ? (glb_m0[(v109_lead + 1400)]) : (0.0f);
+              float v2861_data_pre = glb_m0[v32_g ? ((v109_lead + 1400)) : (0)];
+              float v2861_data = v32_g ? (v2861_data_pre) : (0.0f);
               float v2865_data = r1[1];
               r1[1] = (v2865_data + (v2861_data * v2808_bc));
               float v2871_data = r1[3];
@@ -1455,7 +1481,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               float v2966_bc = sycl::select_from_group(item.get_sub_group(), v103_data, (item.get_sub_group().get_local_linear_id() / 32) * 32 + (26));
               float v2968_data = r1[16];
               r1[16] = (v2968_data + (v2916_data * v2966_bc));
-              float v2971_data = v32_g ? (glb_m0[(v109_lead + 1456)]) : (0.0f);
+              float v2971_data_pre = glb_m0[v32_g ? ((v109_lead + 1456)) : (0)];
+              float v2971_data = v32_g ? (v2971_data_pre) : (0.0f);
               float v2975_data = r1[1];
               r1[1] = (v2975_data + (v2971_data * v2918_bc));
               float v2981_data = r1[3];
@@ -1503,7 +1530,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               float v3076_bc = sycl::select_from_group(item.get_sub_group(), v103_data, (item.get_sub_group().get_local_linear_id() / 32) * 32 + (27));
               float v3078_data = r1[16];
               r1[16] = (v3078_data + (v3026_data * v3076_bc));
-              float v3081_data = v32_g ? (glb_m0[(v109_lead + 1512)]) : (0.0f);
+              float v3081_data_pre = glb_m0[v32_g ? ((v109_lead + 1512)) : (0)];
+              float v3081_data = v32_g ? (v3081_data_pre) : (0.0f);
               float v3085_data = r1[1];
               r1[1] = (v3085_data + (v3081_data * v3028_bc));
               float v3091_data = r1[3];
@@ -1551,7 +1579,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               float v3186_bc = sycl::select_from_group(item.get_sub_group(), v103_data, (item.get_sub_group().get_local_linear_id() / 32) * 32 + (28));
               float v3188_data = r1[16];
               r1[16] = (v3188_data + (v3136_data * v3186_bc));
-              float v3191_data = v32_g ? (glb_m0[(v109_lead + 1568)]) : (0.0f);
+              float v3191_data_pre = glb_m0[v32_g ? ((v109_lead + 1568)) : (0)];
+              float v3191_data = v32_g ? (v3191_data_pre) : (0.0f);
               float v3195_data = r1[1];
               r1[1] = (v3195_data + (v3191_data * v3138_bc));
               float v3201_data = r1[3];
@@ -1599,7 +1628,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               float v3296_bc = sycl::select_from_group(item.get_sub_group(), v103_data, (item.get_sub_group().get_local_linear_id() / 32) * 32 + (29));
               float v3298_data = r1[16];
               r1[16] = (v3298_data + (v3246_data * v3296_bc));
-              float v3301_data = v32_g ? (glb_m0[(v109_lead + 1624)]) : (0.0f);
+              float v3301_data_pre = glb_m0[v32_g ? ((v109_lead + 1624)) : (0)];
+              float v3301_data = v32_g ? (v3301_data_pre) : (0.0f);
               float v3305_data = r1[1];
               r1[1] = (v3305_data + (v3301_data * v3248_bc));
               float v3311_data = r1[3];
@@ -1647,7 +1677,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               float v3406_bc = sycl::select_from_group(item.get_sub_group(), v103_data, (item.get_sub_group().get_local_linear_id() / 32) * 32 + (30));
               float v3408_data = r1[16];
               r1[16] = (v3408_data + (v3356_data * v3406_bc));
-              float v3411_data = v32_g ? (glb_m0[(v109_lead + 1680)]) : (0.0f);
+              float v3411_data_pre = glb_m0[v32_g ? ((v109_lead + 1680)) : (0)];
+              float v3411_data = v32_g ? (v3411_data_pre) : (0.0f);
               float v3415_data = r1[1];
               r1[1] = (v3415_data + (v3411_data * v3358_bc));
               float v3421_data = r1[3];
@@ -1695,7 +1726,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               float v3516_bc = sycl::select_from_group(item.get_sub_group(), v103_data, (item.get_sub_group().get_local_linear_id() / 32) * 32 + (31));
               float v3518_data = r1[16];
               r1[16] = (v3518_data + (v3466_data * v3516_bc));
-              float v3521_data = v32_g ? (glb_m0[(v109_lead + 1736)]) : (0.0f);
+              float v3521_data_pre = glb_m0[v32_g ? ((v109_lead + 1736)) : (0)];
+              float v3521_data = v32_g ? (v3521_data_pre) : (0.0f);
               float v3525_data = r1[1];
               r1[1] = (v3525_data + (v3521_data * v3468_bc));
               float v3531_data = r1[3];
@@ -1752,7 +1784,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               float v3626_bc = sycl::select_from_group(item.get_sub_group(), v3625_data, (item.get_sub_group().get_local_linear_id() / 32) * 32 + (0));
               float v3628_data = r1[16];
               r1[16] = (v3628_data + (v3576_data * v3626_bc));
-              float v3631_data = v32_g ? (glb_m0[(v109_lead + 1792)]) : (0.0f);
+              float v3631_data_pre = glb_m0[v32_g ? ((v109_lead + 1792)) : (0)];
+              float v3631_data = v32_g ? (v3631_data_pre) : (0.0f);
               float v3635_data = r1[1];
               r1[1] = (v3635_data + (v3631_data * v3578_bc));
               float v3641_data = r1[3];
@@ -1800,7 +1833,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               float v3736_bc = sycl::select_from_group(item.get_sub_group(), v3625_data, (item.get_sub_group().get_local_linear_id() / 32) * 32 + (1));
               float v3738_data = r1[16];
               r1[16] = (v3738_data + (v3686_data * v3736_bc));
-              float v3741_data = v32_g ? (glb_m0[(v109_lead + 1848)]) : (0.0f);
+              float v3741_data_pre = glb_m0[v32_g ? ((v109_lead + 1848)) : (0)];
+              float v3741_data = v32_g ? (v3741_data_pre) : (0.0f);
               float v3745_data = r1[1];
               r1[1] = (v3745_data + (v3741_data * v3688_bc));
               float v3751_data = r1[3];
@@ -1848,7 +1882,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               float v3846_bc = sycl::select_from_group(item.get_sub_group(), v3625_data, (item.get_sub_group().get_local_linear_id() / 32) * 32 + (2));
               float v3848_data = r1[16];
               r1[16] = (v3848_data + (v3796_data * v3846_bc));
-              float v3851_data = v32_g ? (glb_m0[(v109_lead + 1904)]) : (0.0f);
+              float v3851_data_pre = glb_m0[v32_g ? ((v109_lead + 1904)) : (0)];
+              float v3851_data = v32_g ? (v3851_data_pre) : (0.0f);
               float v3855_data = r1[1];
               r1[1] = (v3855_data + (v3851_data * v3798_bc));
               float v3861_data = r1[3];
@@ -1896,7 +1931,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               float v3956_bc = sycl::select_from_group(item.get_sub_group(), v3625_data, (item.get_sub_group().get_local_linear_id() / 32) * 32 + (3));
               float v3958_data = r1[16];
               r1[16] = (v3958_data + (v3906_data * v3956_bc));
-              float v3961_data = v32_g ? (glb_m0[(v109_lead + 1960)]) : (0.0f);
+              float v3961_data_pre = glb_m0[v32_g ? ((v109_lead + 1960)) : (0)];
+              float v3961_data = v32_g ? (v3961_data_pre) : (0.0f);
               float v3965_data = r1[1];
               r1[1] = (v3965_data + (v3961_data * v3908_bc));
               float v3971_data = r1[3];
@@ -1944,7 +1980,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               float v4066_bc = sycl::select_from_group(item.get_sub_group(), v3625_data, (item.get_sub_group().get_local_linear_id() / 32) * 32 + (4));
               float v4068_data = r1[16];
               r1[16] = (v4068_data + (v4016_data * v4066_bc));
-              float v4071_data = v32_g ? (glb_m0[(v109_lead + 2016)]) : (0.0f);
+              float v4071_data_pre = glb_m0[v32_g ? ((v109_lead + 2016)) : (0)];
+              float v4071_data = v32_g ? (v4071_data_pre) : (0.0f);
               float v4075_data = r1[1];
               r1[1] = (v4075_data + (v4071_data * v4018_bc));
               float v4081_data = r1[3];
@@ -1992,7 +2029,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               float v4176_bc = sycl::select_from_group(item.get_sub_group(), v3625_data, (item.get_sub_group().get_local_linear_id() / 32) * 32 + (5));
               float v4178_data = r1[16];
               r1[16] = (v4178_data + (v4126_data * v4176_bc));
-              float v4181_data = v32_g ? (glb_m0[(v109_lead + 2072)]) : (0.0f);
+              float v4181_data_pre = glb_m0[v32_g ? ((v109_lead + 2072)) : (0)];
+              float v4181_data = v32_g ? (v4181_data_pre) : (0.0f);
               float v4185_data = r1[1];
               r1[1] = (v4185_data + (v4181_data * v4128_bc));
               float v4191_data = r1[3];
@@ -2040,7 +2078,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               float v4286_bc = sycl::select_from_group(item.get_sub_group(), v3625_data, (item.get_sub_group().get_local_linear_id() / 32) * 32 + (6));
               float v4288_data = r1[16];
               r1[16] = (v4288_data + (v4236_data * v4286_bc));
-              float v4291_data = v32_g ? (glb_m0[(v109_lead + 2128)]) : (0.0f);
+              float v4291_data_pre = glb_m0[v32_g ? ((v109_lead + 2128)) : (0)];
+              float v4291_data = v32_g ? (v4291_data_pre) : (0.0f);
               float v4295_data = r1[1];
               r1[1] = (v4295_data + (v4291_data * v4238_bc));
               float v4301_data = r1[3];
@@ -2088,7 +2127,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               float v4396_bc = sycl::select_from_group(item.get_sub_group(), v3625_data, (item.get_sub_group().get_local_linear_id() / 32) * 32 + (7));
               float v4398_data = r1[16];
               r1[16] = (v4398_data + (v4346_data * v4396_bc));
-              float v4401_data = v32_g ? (glb_m0[(v109_lead + 2184)]) : (0.0f);
+              float v4401_data_pre = glb_m0[v32_g ? ((v109_lead + 2184)) : (0)];
+              float v4401_data = v32_g ? (v4401_data_pre) : (0.0f);
               float v4405_data = r1[1];
               r1[1] = (v4405_data + (v4401_data * v4348_bc));
               float v4411_data = r1[3];
@@ -2136,7 +2176,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               float v4506_bc = sycl::select_from_group(item.get_sub_group(), v3625_data, (item.get_sub_group().get_local_linear_id() / 32) * 32 + (8));
               float v4508_data = r1[16];
               r1[16] = (v4508_data + (v4456_data * v4506_bc));
-              float v4511_data = v32_g ? (glb_m0[(v109_lead + 2240)]) : (0.0f);
+              float v4511_data_pre = glb_m0[v32_g ? ((v109_lead + 2240)) : (0)];
+              float v4511_data = v32_g ? (v4511_data_pre) : (0.0f);
               float v4515_data = r1[1];
               r1[1] = (v4515_data + (v4511_data * v4458_bc));
               float v4521_data = r1[3];
@@ -2184,7 +2225,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               float v4616_bc = sycl::select_from_group(item.get_sub_group(), v3625_data, (item.get_sub_group().get_local_linear_id() / 32) * 32 + (9));
               float v4618_data = r1[16];
               r1[16] = (v4618_data + (v4566_data * v4616_bc));
-              float v4621_data = v32_g ? (glb_m0[(v109_lead + 2296)]) : (0.0f);
+              float v4621_data_pre = glb_m0[v32_g ? ((v109_lead + 2296)) : (0)];
+              float v4621_data = v32_g ? (v4621_data_pre) : (0.0f);
               float v4625_data = r1[1];
               r1[1] = (v4625_data + (v4621_data * v4568_bc));
               float v4631_data = r1[3];
@@ -2232,7 +2274,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               float v4726_bc = sycl::select_from_group(item.get_sub_group(), v3625_data, (item.get_sub_group().get_local_linear_id() / 32) * 32 + (10));
               float v4728_data = r1[16];
               r1[16] = (v4728_data + (v4676_data * v4726_bc));
-              float v4731_data = v32_g ? (glb_m0[(v109_lead + 2352)]) : (0.0f);
+              float v4731_data_pre = glb_m0[v32_g ? ((v109_lead + 2352)) : (0)];
+              float v4731_data = v32_g ? (v4731_data_pre) : (0.0f);
               float v4735_data = r1[1];
               r1[1] = (v4735_data + (v4731_data * v4678_bc));
               float v4741_data = r1[3];
@@ -2280,7 +2323,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               float v4836_bc = sycl::select_from_group(item.get_sub_group(), v3625_data, (item.get_sub_group().get_local_linear_id() / 32) * 32 + (11));
               float v4838_data = r1[16];
               r1[16] = (v4838_data + (v4786_data * v4836_bc));
-              float v4841_data = v32_g ? (glb_m0[(v109_lead + 2408)]) : (0.0f);
+              float v4841_data_pre = glb_m0[v32_g ? ((v109_lead + 2408)) : (0)];
+              float v4841_data = v32_g ? (v4841_data_pre) : (0.0f);
               float v4845_data = r1[1];
               r1[1] = (v4845_data + (v4841_data * v4788_bc));
               float v4851_data = r1[3];
@@ -2328,7 +2372,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               float v4946_bc = sycl::select_from_group(item.get_sub_group(), v3625_data, (item.get_sub_group().get_local_linear_id() / 32) * 32 + (12));
               float v4948_data = r1[16];
               r1[16] = (v4948_data + (v4896_data * v4946_bc));
-              float v4951_data = v32_g ? (glb_m0[(v109_lead + 2464)]) : (0.0f);
+              float v4951_data_pre = glb_m0[v32_g ? ((v109_lead + 2464)) : (0)];
+              float v4951_data = v32_g ? (v4951_data_pre) : (0.0f);
               float v4955_data = r1[1];
               r1[1] = (v4955_data + (v4951_data * v4898_bc));
               float v4961_data = r1[3];
@@ -2376,7 +2421,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               float v5056_bc = sycl::select_from_group(item.get_sub_group(), v3625_data, (item.get_sub_group().get_local_linear_id() / 32) * 32 + (13));
               float v5058_data = r1[16];
               r1[16] = (v5058_data + (v5006_data * v5056_bc));
-              float v5061_data = v32_g ? (glb_m0[(v109_lead + 2520)]) : (0.0f);
+              float v5061_data_pre = glb_m0[v32_g ? ((v109_lead + 2520)) : (0)];
+              float v5061_data = v32_g ? (v5061_data_pre) : (0.0f);
               float v5065_data = r1[1];
               r1[1] = (v5065_data + (v5061_data * v5008_bc));
               float v5071_data = r1[3];
@@ -2424,7 +2470,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               float v5166_bc = sycl::select_from_group(item.get_sub_group(), v3625_data, (item.get_sub_group().get_local_linear_id() / 32) * 32 + (14));
               float v5168_data = r1[16];
               r1[16] = (v5168_data + (v5116_data * v5166_bc));
-              float v5171_data = v32_g ? (glb_m0[(v109_lead + 2576)]) : (0.0f);
+              float v5171_data_pre = glb_m0[v32_g ? ((v109_lead + 2576)) : (0)];
+              float v5171_data = v32_g ? (v5171_data_pre) : (0.0f);
               float v5175_data = r1[1];
               r1[1] = (v5175_data + (v5171_data * v5118_bc));
               float v5181_data = r1[3];
@@ -2472,7 +2519,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               float v5276_bc = sycl::select_from_group(item.get_sub_group(), v3625_data, (item.get_sub_group().get_local_linear_id() / 32) * 32 + (15));
               float v5278_data = r1[16];
               r1[16] = (v5278_data + (v5226_data * v5276_bc));
-              float v5281_data = v32_g ? (glb_m0[(v109_lead + 2632)]) : (0.0f);
+              float v5281_data_pre = glb_m0[v32_g ? ((v109_lead + 2632)) : (0)];
+              float v5281_data = v32_g ? (v5281_data_pre) : (0.0f);
               float v5285_data = r1[1];
               r1[1] = (v5285_data + (v5281_data * v5228_bc));
               float v5291_data = r1[3];
@@ -2520,7 +2568,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               float v5386_bc = sycl::select_from_group(item.get_sub_group(), v3625_data, (item.get_sub_group().get_local_linear_id() / 32) * 32 + (16));
               float v5388_data = r1[16];
               r1[16] = (v5388_data + (v5336_data * v5386_bc));
-              float v5391_data = v32_g ? (glb_m0[(v109_lead + 2688)]) : (0.0f);
+              float v5391_data_pre = glb_m0[v32_g ? ((v109_lead + 2688)) : (0)];
+              float v5391_data = v32_g ? (v5391_data_pre) : (0.0f);
               float v5395_data = r1[1];
               r1[1] = (v5395_data + (v5391_data * v5338_bc));
               float v5401_data = r1[3];
@@ -2568,7 +2617,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               float v5496_bc = sycl::select_from_group(item.get_sub_group(), v3625_data, (item.get_sub_group().get_local_linear_id() / 32) * 32 + (17));
               float v5498_data = r1[16];
               r1[16] = (v5498_data + (v5446_data * v5496_bc));
-              float v5501_data = v32_g ? (glb_m0[(v109_lead + 2744)]) : (0.0f);
+              float v5501_data_pre = glb_m0[v32_g ? ((v109_lead + 2744)) : (0)];
+              float v5501_data = v32_g ? (v5501_data_pre) : (0.0f);
               float v5505_data = r1[1];
               r1[1] = (v5505_data + (v5501_data * v5448_bc));
               float v5511_data = r1[3];
@@ -2616,7 +2666,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               float v5606_bc = sycl::select_from_group(item.get_sub_group(), v3625_data, (item.get_sub_group().get_local_linear_id() / 32) * 32 + (18));
               float v5608_data = r1[16];
               r1[16] = (v5608_data + (v5556_data * v5606_bc));
-              float v5611_data = v32_g ? (glb_m0[(v109_lead + 2800)]) : (0.0f);
+              float v5611_data_pre = glb_m0[v32_g ? ((v109_lead + 2800)) : (0)];
+              float v5611_data = v32_g ? (v5611_data_pre) : (0.0f);
               float v5615_data = r1[1];
               r1[1] = (v5615_data + (v5611_data * v5558_bc));
               float v5621_data = r1[3];
@@ -2664,7 +2715,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               float v5716_bc = sycl::select_from_group(item.get_sub_group(), v3625_data, (item.get_sub_group().get_local_linear_id() / 32) * 32 + (19));
               float v5718_data = r1[16];
               r1[16] = (v5718_data + (v5666_data * v5716_bc));
-              float v5721_data = v32_g ? (glb_m0[(v109_lead + 2856)]) : (0.0f);
+              float v5721_data_pre = glb_m0[v32_g ? ((v109_lead + 2856)) : (0)];
+              float v5721_data = v32_g ? (v5721_data_pre) : (0.0f);
               float v5725_data = r1[1];
               r1[1] = (v5725_data + (v5721_data * v5668_bc));
               float v5731_data = r1[3];
@@ -2712,7 +2764,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               float v5826_bc = sycl::select_from_group(item.get_sub_group(), v3625_data, (item.get_sub_group().get_local_linear_id() / 32) * 32 + (20));
               float v5828_data = r1[16];
               r1[16] = (v5828_data + (v5776_data * v5826_bc));
-              float v5831_data = v32_g ? (glb_m0[(v109_lead + 2912)]) : (0.0f);
+              float v5831_data_pre = glb_m0[v32_g ? ((v109_lead + 2912)) : (0)];
+              float v5831_data = v32_g ? (v5831_data_pre) : (0.0f);
               float v5835_data = r1[1];
               r1[1] = (v5835_data + (v5831_data * v5778_bc));
               float v5841_data = r1[3];
@@ -2760,7 +2813,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               float v5936_bc = sycl::select_from_group(item.get_sub_group(), v3625_data, (item.get_sub_group().get_local_linear_id() / 32) * 32 + (21));
               float v5938_data = r1[16];
               r1[16] = (v5938_data + (v5886_data * v5936_bc));
-              float v5941_data = v32_g ? (glb_m0[(v109_lead + 2968)]) : (0.0f);
+              float v5941_data_pre = glb_m0[v32_g ? ((v109_lead + 2968)) : (0)];
+              float v5941_data = v32_g ? (v5941_data_pre) : (0.0f);
               float v5945_data = r1[1];
               r1[1] = (v5945_data + (v5941_data * v5888_bc));
               float v5951_data = r1[3];
@@ -2808,7 +2862,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               float v6046_bc = sycl::select_from_group(item.get_sub_group(), v3625_data, (item.get_sub_group().get_local_linear_id() / 32) * 32 + (22));
               float v6048_data = r1[16];
               r1[16] = (v6048_data + (v5996_data * v6046_bc));
-              float v6051_data = v32_g ? (glb_m0[(v109_lead + 3024)]) : (0.0f);
+              float v6051_data_pre = glb_m0[v32_g ? ((v109_lead + 3024)) : (0)];
+              float v6051_data = v32_g ? (v6051_data_pre) : (0.0f);
               float v6055_data = r1[1];
               r1[1] = (v6055_data + (v6051_data * v5998_bc));
               float v6061_data = r1[3];
@@ -2856,7 +2911,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               float v6156_bc = sycl::select_from_group(item.get_sub_group(), v3625_data, (item.get_sub_group().get_local_linear_id() / 32) * 32 + (23));
               float v6158_data = r1[16];
               r1[16] = (v6158_data + (v6106_data * v6156_bc));
-              float v6161_data = v32_g ? (glb_m0[(v109_lead + 3080)]) : (0.0f);
+              float v6161_data_pre = glb_m0[v32_g ? ((v109_lead + 3080)) : (0)];
+              float v6161_data = v32_g ? (v6161_data_pre) : (0.0f);
               float v6165_data = r1[1];
               r1[1] = (v6165_data + (v6161_data * v6108_bc));
               float v6171_data = r1[3];
@@ -3362,7 +3418,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir4[14] = (v7257_data + (v7211_data * v98_bc));
               float v7263_data = ir4[16];
               ir4[16] = (v7263_data + (v7211_data * v104_bc));
-              float v7268_data = v32_g ? (glb_m4[v109_lead]) : (0.0f);
+              float v7268_data_pre = glb_m4[v32_g ? (v109_lead) : (0)];
+              float v7268_data = v32_g ? (v7268_data_pre) : (0.0f);
               float v7272_data = ir4[1];
               ir4[1] = (v7272_data + (v7268_data * v56_bc));
               float v7278_data = ir4[3];
@@ -3400,7 +3457,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir4[14] = (v7369_data + (v7323_data * v210_bc));
               float v7375_data = ir4[16];
               ir4[16] = (v7375_data + (v7323_data * v216_bc));
-              float v7378_data = v32_g ? (glb_m4[(v109_lead + 56)]) : (0.0f);
+              float v7378_data_pre = glb_m4[v32_g ? ((v109_lead + 56)) : (0)];
+              float v7378_data = v32_g ? (v7378_data_pre) : (0.0f);
               float v7382_data = ir4[1];
               ir4[1] = (v7382_data + (v7378_data * v168_bc));
               float v7388_data = ir4[3];
@@ -3438,7 +3496,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir4[14] = (v7479_data + (v7433_data * v320_bc));
               float v7485_data = ir4[16];
               ir4[16] = (v7485_data + (v7433_data * v326_bc));
-              float v7488_data = v32_g ? (glb_m4[(v109_lead + 112)]) : (0.0f);
+              float v7488_data_pre = glb_m4[v32_g ? ((v109_lead + 112)) : (0)];
+              float v7488_data = v32_g ? (v7488_data_pre) : (0.0f);
               float v7492_data = ir4[1];
               ir4[1] = (v7492_data + (v7488_data * v278_bc));
               float v7498_data = ir4[3];
@@ -3476,7 +3535,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir4[14] = (v7589_data + (v7543_data * v430_bc));
               float v7595_data = ir4[16];
               ir4[16] = (v7595_data + (v7543_data * v436_bc));
-              float v7598_data = v32_g ? (glb_m4[(v109_lead + 168)]) : (0.0f);
+              float v7598_data_pre = glb_m4[v32_g ? ((v109_lead + 168)) : (0)];
+              float v7598_data = v32_g ? (v7598_data_pre) : (0.0f);
               float v7602_data = ir4[1];
               ir4[1] = (v7602_data + (v7598_data * v388_bc));
               float v7608_data = ir4[3];
@@ -3514,7 +3574,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir4[14] = (v7699_data + (v7653_data * v540_bc));
               float v7705_data = ir4[16];
               ir4[16] = (v7705_data + (v7653_data * v546_bc));
-              float v7708_data = v32_g ? (glb_m4[(v109_lead + 224)]) : (0.0f);
+              float v7708_data_pre = glb_m4[v32_g ? ((v109_lead + 224)) : (0)];
+              float v7708_data = v32_g ? (v7708_data_pre) : (0.0f);
               float v7712_data = ir4[1];
               ir4[1] = (v7712_data + (v7708_data * v498_bc));
               float v7718_data = ir4[3];
@@ -3552,7 +3613,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir4[14] = (v7809_data + (v7763_data * v650_bc));
               float v7815_data = ir4[16];
               ir4[16] = (v7815_data + (v7763_data * v656_bc));
-              float v7818_data = v32_g ? (glb_m4[(v109_lead + 280)]) : (0.0f);
+              float v7818_data_pre = glb_m4[v32_g ? ((v109_lead + 280)) : (0)];
+              float v7818_data = v32_g ? (v7818_data_pre) : (0.0f);
               float v7822_data = ir4[1];
               ir4[1] = (v7822_data + (v7818_data * v608_bc));
               float v7828_data = ir4[3];
@@ -3590,7 +3652,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir4[14] = (v7919_data + (v7873_data * v760_bc));
               float v7925_data = ir4[16];
               ir4[16] = (v7925_data + (v7873_data * v766_bc));
-              float v7928_data = v32_g ? (glb_m4[(v109_lead + 336)]) : (0.0f);
+              float v7928_data_pre = glb_m4[v32_g ? ((v109_lead + 336)) : (0)];
+              float v7928_data = v32_g ? (v7928_data_pre) : (0.0f);
               float v7932_data = ir4[1];
               ir4[1] = (v7932_data + (v7928_data * v718_bc));
               float v7938_data = ir4[3];
@@ -3628,7 +3691,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir4[14] = (v8029_data + (v7983_data * v870_bc));
               float v8035_data = ir4[16];
               ir4[16] = (v8035_data + (v7983_data * v876_bc));
-              float v8038_data = v32_g ? (glb_m4[(v109_lead + 392)]) : (0.0f);
+              float v8038_data_pre = glb_m4[v32_g ? ((v109_lead + 392)) : (0)];
+              float v8038_data = v32_g ? (v8038_data_pre) : (0.0f);
               float v8042_data = ir4[1];
               ir4[1] = (v8042_data + (v8038_data * v828_bc));
               float v8048_data = ir4[3];
@@ -3666,7 +3730,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir4[14] = (v8139_data + (v8093_data * v980_bc));
               float v8145_data = ir4[16];
               ir4[16] = (v8145_data + (v8093_data * v986_bc));
-              float v8148_data = v32_g ? (glb_m4[(v109_lead + 448)]) : (0.0f);
+              float v8148_data_pre = glb_m4[v32_g ? ((v109_lead + 448)) : (0)];
+              float v8148_data = v32_g ? (v8148_data_pre) : (0.0f);
               float v8152_data = ir4[1];
               ir4[1] = (v8152_data + (v8148_data * v938_bc));
               float v8158_data = ir4[3];
@@ -3704,7 +3769,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir4[14] = (v8249_data + (v8203_data * v1090_bc));
               float v8255_data = ir4[16];
               ir4[16] = (v8255_data + (v8203_data * v1096_bc));
-              float v8258_data = v32_g ? (glb_m4[(v109_lead + 504)]) : (0.0f);
+              float v8258_data_pre = glb_m4[v32_g ? ((v109_lead + 504)) : (0)];
+              float v8258_data = v32_g ? (v8258_data_pre) : (0.0f);
               float v8262_data = ir4[1];
               ir4[1] = (v8262_data + (v8258_data * v1048_bc));
               float v8268_data = ir4[3];
@@ -3742,7 +3808,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir4[14] = (v8359_data + (v8313_data * v1200_bc));
               float v8365_data = ir4[16];
               ir4[16] = (v8365_data + (v8313_data * v1206_bc));
-              float v8368_data = v32_g ? (glb_m4[(v109_lead + 560)]) : (0.0f);
+              float v8368_data_pre = glb_m4[v32_g ? ((v109_lead + 560)) : (0)];
+              float v8368_data = v32_g ? (v8368_data_pre) : (0.0f);
               float v8372_data = ir4[1];
               ir4[1] = (v8372_data + (v8368_data * v1158_bc));
               float v8378_data = ir4[3];
@@ -3780,7 +3847,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir4[14] = (v8469_data + (v8423_data * v1310_bc));
               float v8475_data = ir4[16];
               ir4[16] = (v8475_data + (v8423_data * v1316_bc));
-              float v8478_data = v32_g ? (glb_m4[(v109_lead + 616)]) : (0.0f);
+              float v8478_data_pre = glb_m4[v32_g ? ((v109_lead + 616)) : (0)];
+              float v8478_data = v32_g ? (v8478_data_pre) : (0.0f);
               float v8482_data = ir4[1];
               ir4[1] = (v8482_data + (v8478_data * v1268_bc));
               float v8488_data = ir4[3];
@@ -3818,7 +3886,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir4[14] = (v8579_data + (v8533_data * v1420_bc));
               float v8585_data = ir4[16];
               ir4[16] = (v8585_data + (v8533_data * v1426_bc));
-              float v8588_data = v32_g ? (glb_m4[(v109_lead + 672)]) : (0.0f);
+              float v8588_data_pre = glb_m4[v32_g ? ((v109_lead + 672)) : (0)];
+              float v8588_data = v32_g ? (v8588_data_pre) : (0.0f);
               float v8592_data = ir4[1];
               ir4[1] = (v8592_data + (v8588_data * v1378_bc));
               float v8598_data = ir4[3];
@@ -3856,7 +3925,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir4[14] = (v8689_data + (v8643_data * v1530_bc));
               float v8695_data = ir4[16];
               ir4[16] = (v8695_data + (v8643_data * v1536_bc));
-              float v8698_data = v32_g ? (glb_m4[(v109_lead + 728)]) : (0.0f);
+              float v8698_data_pre = glb_m4[v32_g ? ((v109_lead + 728)) : (0)];
+              float v8698_data = v32_g ? (v8698_data_pre) : (0.0f);
               float v8702_data = ir4[1];
               ir4[1] = (v8702_data + (v8698_data * v1488_bc));
               float v8708_data = ir4[3];
@@ -3894,7 +3964,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir4[14] = (v8799_data + (v8753_data * v1640_bc));
               float v8805_data = ir4[16];
               ir4[16] = (v8805_data + (v8753_data * v1646_bc));
-              float v8808_data = v32_g ? (glb_m4[(v109_lead + 784)]) : (0.0f);
+              float v8808_data_pre = glb_m4[v32_g ? ((v109_lead + 784)) : (0)];
+              float v8808_data = v32_g ? (v8808_data_pre) : (0.0f);
               float v8812_data = ir4[1];
               ir4[1] = (v8812_data + (v8808_data * v1598_bc));
               float v8818_data = ir4[3];
@@ -3932,7 +4003,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir4[14] = (v8909_data + (v8863_data * v1750_bc));
               float v8915_data = ir4[16];
               ir4[16] = (v8915_data + (v8863_data * v1756_bc));
-              float v8918_data = v32_g ? (glb_m4[(v109_lead + 840)]) : (0.0f);
+              float v8918_data_pre = glb_m4[v32_g ? ((v109_lead + 840)) : (0)];
+              float v8918_data = v32_g ? (v8918_data_pre) : (0.0f);
               float v8922_data = ir4[1];
               ir4[1] = (v8922_data + (v8918_data * v1708_bc));
               float v8928_data = ir4[3];
@@ -3970,7 +4042,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir4[14] = (v9019_data + (v8973_data * v1860_bc));
               float v9025_data = ir4[16];
               ir4[16] = (v9025_data + (v8973_data * v1866_bc));
-              float v9028_data = v32_g ? (glb_m4[(v109_lead + 896)]) : (0.0f);
+              float v9028_data_pre = glb_m4[v32_g ? ((v109_lead + 896)) : (0)];
+              float v9028_data = v32_g ? (v9028_data_pre) : (0.0f);
               float v9032_data = ir4[1];
               ir4[1] = (v9032_data + (v9028_data * v1818_bc));
               float v9038_data = ir4[3];
@@ -4008,7 +4081,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir4[14] = (v9129_data + (v9083_data * v1970_bc));
               float v9135_data = ir4[16];
               ir4[16] = (v9135_data + (v9083_data * v1976_bc));
-              float v9138_data = v32_g ? (glb_m4[(v109_lead + 952)]) : (0.0f);
+              float v9138_data_pre = glb_m4[v32_g ? ((v109_lead + 952)) : (0)];
+              float v9138_data = v32_g ? (v9138_data_pre) : (0.0f);
               float v9142_data = ir4[1];
               ir4[1] = (v9142_data + (v9138_data * v1928_bc));
               float v9148_data = ir4[3];
@@ -4046,7 +4120,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir4[14] = (v9239_data + (v9193_data * v2080_bc));
               float v9245_data = ir4[16];
               ir4[16] = (v9245_data + (v9193_data * v2086_bc));
-              float v9248_data = v32_g ? (glb_m4[(v109_lead + 1008)]) : (0.0f);
+              float v9248_data_pre = glb_m4[v32_g ? ((v109_lead + 1008)) : (0)];
+              float v9248_data = v32_g ? (v9248_data_pre) : (0.0f);
               float v9252_data = ir4[1];
               ir4[1] = (v9252_data + (v9248_data * v2038_bc));
               float v9258_data = ir4[3];
@@ -4084,7 +4159,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir4[14] = (v9349_data + (v9303_data * v2190_bc));
               float v9355_data = ir4[16];
               ir4[16] = (v9355_data + (v9303_data * v2196_bc));
-              float v9358_data = v32_g ? (glb_m4[(v109_lead + 1064)]) : (0.0f);
+              float v9358_data_pre = glb_m4[v32_g ? ((v109_lead + 1064)) : (0)];
+              float v9358_data = v32_g ? (v9358_data_pre) : (0.0f);
               float v9362_data = ir4[1];
               ir4[1] = (v9362_data + (v9358_data * v2148_bc));
               float v9368_data = ir4[3];
@@ -4122,7 +4198,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir4[14] = (v9459_data + (v9413_data * v2300_bc));
               float v9465_data = ir4[16];
               ir4[16] = (v9465_data + (v9413_data * v2306_bc));
-              float v9468_data = v32_g ? (glb_m4[(v109_lead + 1120)]) : (0.0f);
+              float v9468_data_pre = glb_m4[v32_g ? ((v109_lead + 1120)) : (0)];
+              float v9468_data = v32_g ? (v9468_data_pre) : (0.0f);
               float v9472_data = ir4[1];
               ir4[1] = (v9472_data + (v9468_data * v2258_bc));
               float v9478_data = ir4[3];
@@ -4160,7 +4237,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir4[14] = (v9569_data + (v9523_data * v2410_bc));
               float v9575_data = ir4[16];
               ir4[16] = (v9575_data + (v9523_data * v2416_bc));
-              float v9578_data = v32_g ? (glb_m4[(v109_lead + 1176)]) : (0.0f);
+              float v9578_data_pre = glb_m4[v32_g ? ((v109_lead + 1176)) : (0)];
+              float v9578_data = v32_g ? (v9578_data_pre) : (0.0f);
               float v9582_data = ir4[1];
               ir4[1] = (v9582_data + (v9578_data * v2368_bc));
               float v9588_data = ir4[3];
@@ -4198,7 +4276,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir4[14] = (v9679_data + (v9633_data * v2520_bc));
               float v9685_data = ir4[16];
               ir4[16] = (v9685_data + (v9633_data * v2526_bc));
-              float v9688_data = v32_g ? (glb_m4[(v109_lead + 1232)]) : (0.0f);
+              float v9688_data_pre = glb_m4[v32_g ? ((v109_lead + 1232)) : (0)];
+              float v9688_data = v32_g ? (v9688_data_pre) : (0.0f);
               float v9692_data = ir4[1];
               ir4[1] = (v9692_data + (v9688_data * v2478_bc));
               float v9698_data = ir4[3];
@@ -4236,7 +4315,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir4[14] = (v9789_data + (v9743_data * v2630_bc));
               float v9795_data = ir4[16];
               ir4[16] = (v9795_data + (v9743_data * v2636_bc));
-              float v9798_data = v32_g ? (glb_m4[(v109_lead + 1288)]) : (0.0f);
+              float v9798_data_pre = glb_m4[v32_g ? ((v109_lead + 1288)) : (0)];
+              float v9798_data = v32_g ? (v9798_data_pre) : (0.0f);
               float v9802_data = ir4[1];
               ir4[1] = (v9802_data + (v9798_data * v2588_bc));
               float v9808_data = ir4[3];
@@ -4274,7 +4354,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir4[14] = (v9899_data + (v9853_data * v2740_bc));
               float v9905_data = ir4[16];
               ir4[16] = (v9905_data + (v9853_data * v2746_bc));
-              float v9908_data = v32_g ? (glb_m4[(v109_lead + 1344)]) : (0.0f);
+              float v9908_data_pre = glb_m4[v32_g ? ((v109_lead + 1344)) : (0)];
+              float v9908_data = v32_g ? (v9908_data_pre) : (0.0f);
               float v9912_data = ir4[1];
               ir4[1] = (v9912_data + (v9908_data * v2698_bc));
               float v9918_data = ir4[3];
@@ -4312,7 +4393,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir4[14] = (v10009_data + (v9963_data * v2850_bc));
               float v10015_data = ir4[16];
               ir4[16] = (v10015_data + (v9963_data * v2856_bc));
-              float v10018_data = v32_g ? (glb_m4[(v109_lead + 1400)]) : (0.0f);
+              float v10018_data_pre = glb_m4[v32_g ? ((v109_lead + 1400)) : (0)];
+              float v10018_data = v32_g ? (v10018_data_pre) : (0.0f);
               float v10022_data = ir4[1];
               ir4[1] = (v10022_data + (v10018_data * v2808_bc));
               float v10028_data = ir4[3];
@@ -4350,7 +4432,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir4[14] = (v10119_data + (v10073_data * v2960_bc));
               float v10125_data = ir4[16];
               ir4[16] = (v10125_data + (v10073_data * v2966_bc));
-              float v10128_data = v32_g ? (glb_m4[(v109_lead + 1456)]) : (0.0f);
+              float v10128_data_pre = glb_m4[v32_g ? ((v109_lead + 1456)) : (0)];
+              float v10128_data = v32_g ? (v10128_data_pre) : (0.0f);
               float v10132_data = ir4[1];
               ir4[1] = (v10132_data + (v10128_data * v2918_bc));
               float v10138_data = ir4[3];
@@ -4388,7 +4471,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir4[14] = (v10229_data + (v10183_data * v3070_bc));
               float v10235_data = ir4[16];
               ir4[16] = (v10235_data + (v10183_data * v3076_bc));
-              float v10238_data = v32_g ? (glb_m4[(v109_lead + 1512)]) : (0.0f);
+              float v10238_data_pre = glb_m4[v32_g ? ((v109_lead + 1512)) : (0)];
+              float v10238_data = v32_g ? (v10238_data_pre) : (0.0f);
               float v10242_data = ir4[1];
               ir4[1] = (v10242_data + (v10238_data * v3028_bc));
               float v10248_data = ir4[3];
@@ -4426,7 +4510,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir4[14] = (v10339_data + (v10293_data * v3180_bc));
               float v10345_data = ir4[16];
               ir4[16] = (v10345_data + (v10293_data * v3186_bc));
-              float v10348_data = v32_g ? (glb_m4[(v109_lead + 1568)]) : (0.0f);
+              float v10348_data_pre = glb_m4[v32_g ? ((v109_lead + 1568)) : (0)];
+              float v10348_data = v32_g ? (v10348_data_pre) : (0.0f);
               float v10352_data = ir4[1];
               ir4[1] = (v10352_data + (v10348_data * v3138_bc));
               float v10358_data = ir4[3];
@@ -4464,7 +4549,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir4[14] = (v10449_data + (v10403_data * v3290_bc));
               float v10455_data = ir4[16];
               ir4[16] = (v10455_data + (v10403_data * v3296_bc));
-              float v10458_data = v32_g ? (glb_m4[(v109_lead + 1624)]) : (0.0f);
+              float v10458_data_pre = glb_m4[v32_g ? ((v109_lead + 1624)) : (0)];
+              float v10458_data = v32_g ? (v10458_data_pre) : (0.0f);
               float v10462_data = ir4[1];
               ir4[1] = (v10462_data + (v10458_data * v3248_bc));
               float v10468_data = ir4[3];
@@ -4502,7 +4588,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir4[14] = (v10559_data + (v10513_data * v3400_bc));
               float v10565_data = ir4[16];
               ir4[16] = (v10565_data + (v10513_data * v3406_bc));
-              float v10568_data = v32_g ? (glb_m4[(v109_lead + 1680)]) : (0.0f);
+              float v10568_data_pre = glb_m4[v32_g ? ((v109_lead + 1680)) : (0)];
+              float v10568_data = v32_g ? (v10568_data_pre) : (0.0f);
               float v10572_data = ir4[1];
               ir4[1] = (v10572_data + (v10568_data * v3358_bc));
               float v10578_data = ir4[3];
@@ -4540,7 +4627,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir4[14] = (v10669_data + (v10623_data * v3510_bc));
               float v10675_data = ir4[16];
               ir4[16] = (v10675_data + (v10623_data * v3516_bc));
-              float v10678_data = v32_g ? (glb_m4[(v109_lead + 1736)]) : (0.0f);
+              float v10678_data_pre = glb_m4[v32_g ? ((v109_lead + 1736)) : (0)];
+              float v10678_data = v32_g ? (v10678_data_pre) : (0.0f);
               float v10682_data = ir4[1];
               ir4[1] = (v10682_data + (v10678_data * v3468_bc));
               float v10688_data = ir4[3];
@@ -4578,7 +4666,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir4[14] = (v10779_data + (v10733_data * v3620_bc));
               float v10785_data = ir4[16];
               ir4[16] = (v10785_data + (v10733_data * v3626_bc));
-              float v10788_data = v32_g ? (glb_m4[(v109_lead + 1792)]) : (0.0f);
+              float v10788_data_pre = glb_m4[v32_g ? ((v109_lead + 1792)) : (0)];
+              float v10788_data = v32_g ? (v10788_data_pre) : (0.0f);
               float v10792_data = ir4[1];
               ir4[1] = (v10792_data + (v10788_data * v3578_bc));
               float v10798_data = ir4[3];
@@ -4616,7 +4705,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir4[14] = (v10889_data + (v10843_data * v3730_bc));
               float v10895_data = ir4[16];
               ir4[16] = (v10895_data + (v10843_data * v3736_bc));
-              float v10898_data = v32_g ? (glb_m4[(v109_lead + 1848)]) : (0.0f);
+              float v10898_data_pre = glb_m4[v32_g ? ((v109_lead + 1848)) : (0)];
+              float v10898_data = v32_g ? (v10898_data_pre) : (0.0f);
               float v10902_data = ir4[1];
               ir4[1] = (v10902_data + (v10898_data * v3688_bc));
               float v10908_data = ir4[3];
@@ -4654,7 +4744,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir4[14] = (v10999_data + (v10953_data * v3840_bc));
               float v11005_data = ir4[16];
               ir4[16] = (v11005_data + (v10953_data * v3846_bc));
-              float v11008_data = v32_g ? (glb_m4[(v109_lead + 1904)]) : (0.0f);
+              float v11008_data_pre = glb_m4[v32_g ? ((v109_lead + 1904)) : (0)];
+              float v11008_data = v32_g ? (v11008_data_pre) : (0.0f);
               float v11012_data = ir4[1];
               ir4[1] = (v11012_data + (v11008_data * v3798_bc));
               float v11018_data = ir4[3];
@@ -4692,7 +4783,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir4[14] = (v11109_data + (v11063_data * v3950_bc));
               float v11115_data = ir4[16];
               ir4[16] = (v11115_data + (v11063_data * v3956_bc));
-              float v11118_data = v32_g ? (glb_m4[(v109_lead + 1960)]) : (0.0f);
+              float v11118_data_pre = glb_m4[v32_g ? ((v109_lead + 1960)) : (0)];
+              float v11118_data = v32_g ? (v11118_data_pre) : (0.0f);
               float v11122_data = ir4[1];
               ir4[1] = (v11122_data + (v11118_data * v3908_bc));
               float v11128_data = ir4[3];
@@ -4730,7 +4822,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir4[14] = (v11219_data + (v11173_data * v4060_bc));
               float v11225_data = ir4[16];
               ir4[16] = (v11225_data + (v11173_data * v4066_bc));
-              float v11228_data = v32_g ? (glb_m4[(v109_lead + 2016)]) : (0.0f);
+              float v11228_data_pre = glb_m4[v32_g ? ((v109_lead + 2016)) : (0)];
+              float v11228_data = v32_g ? (v11228_data_pre) : (0.0f);
               float v11232_data = ir4[1];
               ir4[1] = (v11232_data + (v11228_data * v4018_bc));
               float v11238_data = ir4[3];
@@ -4768,7 +4861,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir4[14] = (v11329_data + (v11283_data * v4170_bc));
               float v11335_data = ir4[16];
               ir4[16] = (v11335_data + (v11283_data * v4176_bc));
-              float v11338_data = v32_g ? (glb_m4[(v109_lead + 2072)]) : (0.0f);
+              float v11338_data_pre = glb_m4[v32_g ? ((v109_lead + 2072)) : (0)];
+              float v11338_data = v32_g ? (v11338_data_pre) : (0.0f);
               float v11342_data = ir4[1];
               ir4[1] = (v11342_data + (v11338_data * v4128_bc));
               float v11348_data = ir4[3];
@@ -4806,7 +4900,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir4[14] = (v11439_data + (v11393_data * v4280_bc));
               float v11445_data = ir4[16];
               ir4[16] = (v11445_data + (v11393_data * v4286_bc));
-              float v11448_data = v32_g ? (glb_m4[(v109_lead + 2128)]) : (0.0f);
+              float v11448_data_pre = glb_m4[v32_g ? ((v109_lead + 2128)) : (0)];
+              float v11448_data = v32_g ? (v11448_data_pre) : (0.0f);
               float v11452_data = ir4[1];
               ir4[1] = (v11452_data + (v11448_data * v4238_bc));
               float v11458_data = ir4[3];
@@ -4844,7 +4939,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir4[14] = (v11549_data + (v11503_data * v4390_bc));
               float v11555_data = ir4[16];
               ir4[16] = (v11555_data + (v11503_data * v4396_bc));
-              float v11558_data = v32_g ? (glb_m4[(v109_lead + 2184)]) : (0.0f);
+              float v11558_data_pre = glb_m4[v32_g ? ((v109_lead + 2184)) : (0)];
+              float v11558_data = v32_g ? (v11558_data_pre) : (0.0f);
               float v11562_data = ir4[1];
               ir4[1] = (v11562_data + (v11558_data * v4348_bc));
               float v11568_data = ir4[3];
@@ -4882,7 +4978,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir4[14] = (v11659_data + (v11613_data * v4500_bc));
               float v11665_data = ir4[16];
               ir4[16] = (v11665_data + (v11613_data * v4506_bc));
-              float v11668_data = v32_g ? (glb_m4[(v109_lead + 2240)]) : (0.0f);
+              float v11668_data_pre = glb_m4[v32_g ? ((v109_lead + 2240)) : (0)];
+              float v11668_data = v32_g ? (v11668_data_pre) : (0.0f);
               float v11672_data = ir4[1];
               ir4[1] = (v11672_data + (v11668_data * v4458_bc));
               float v11678_data = ir4[3];
@@ -4920,7 +5017,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir4[14] = (v11769_data + (v11723_data * v4610_bc));
               float v11775_data = ir4[16];
               ir4[16] = (v11775_data + (v11723_data * v4616_bc));
-              float v11778_data = v32_g ? (glb_m4[(v109_lead + 2296)]) : (0.0f);
+              float v11778_data_pre = glb_m4[v32_g ? ((v109_lead + 2296)) : (0)];
+              float v11778_data = v32_g ? (v11778_data_pre) : (0.0f);
               float v11782_data = ir4[1];
               ir4[1] = (v11782_data + (v11778_data * v4568_bc));
               float v11788_data = ir4[3];
@@ -4958,7 +5056,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir4[14] = (v11879_data + (v11833_data * v4720_bc));
               float v11885_data = ir4[16];
               ir4[16] = (v11885_data + (v11833_data * v4726_bc));
-              float v11888_data = v32_g ? (glb_m4[(v109_lead + 2352)]) : (0.0f);
+              float v11888_data_pre = glb_m4[v32_g ? ((v109_lead + 2352)) : (0)];
+              float v11888_data = v32_g ? (v11888_data_pre) : (0.0f);
               float v11892_data = ir4[1];
               ir4[1] = (v11892_data + (v11888_data * v4678_bc));
               float v11898_data = ir4[3];
@@ -4996,7 +5095,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir4[14] = (v11989_data + (v11943_data * v4830_bc));
               float v11995_data = ir4[16];
               ir4[16] = (v11995_data + (v11943_data * v4836_bc));
-              float v11998_data = v32_g ? (glb_m4[(v109_lead + 2408)]) : (0.0f);
+              float v11998_data_pre = glb_m4[v32_g ? ((v109_lead + 2408)) : (0)];
+              float v11998_data = v32_g ? (v11998_data_pre) : (0.0f);
               float v12002_data = ir4[1];
               ir4[1] = (v12002_data + (v11998_data * v4788_bc));
               float v12008_data = ir4[3];
@@ -5034,7 +5134,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir4[14] = (v12099_data + (v12053_data * v4940_bc));
               float v12105_data = ir4[16];
               ir4[16] = (v12105_data + (v12053_data * v4946_bc));
-              float v12108_data = v32_g ? (glb_m4[(v109_lead + 2464)]) : (0.0f);
+              float v12108_data_pre = glb_m4[v32_g ? ((v109_lead + 2464)) : (0)];
+              float v12108_data = v32_g ? (v12108_data_pre) : (0.0f);
               float v12112_data = ir4[1];
               ir4[1] = (v12112_data + (v12108_data * v4898_bc));
               float v12118_data = ir4[3];
@@ -5072,7 +5173,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir4[14] = (v12209_data + (v12163_data * v5050_bc));
               float v12215_data = ir4[16];
               ir4[16] = (v12215_data + (v12163_data * v5056_bc));
-              float v12218_data = v32_g ? (glb_m4[(v109_lead + 2520)]) : (0.0f);
+              float v12218_data_pre = glb_m4[v32_g ? ((v109_lead + 2520)) : (0)];
+              float v12218_data = v32_g ? (v12218_data_pre) : (0.0f);
               float v12222_data = ir4[1];
               ir4[1] = (v12222_data + (v12218_data * v5008_bc));
               float v12228_data = ir4[3];
@@ -5110,7 +5212,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir4[14] = (v12319_data + (v12273_data * v5160_bc));
               float v12325_data = ir4[16];
               ir4[16] = (v12325_data + (v12273_data * v5166_bc));
-              float v12328_data = v32_g ? (glb_m4[(v109_lead + 2576)]) : (0.0f);
+              float v12328_data_pre = glb_m4[v32_g ? ((v109_lead + 2576)) : (0)];
+              float v12328_data = v32_g ? (v12328_data_pre) : (0.0f);
               float v12332_data = ir4[1];
               ir4[1] = (v12332_data + (v12328_data * v5118_bc));
               float v12338_data = ir4[3];
@@ -5148,7 +5251,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir4[14] = (v12429_data + (v12383_data * v5270_bc));
               float v12435_data = ir4[16];
               ir4[16] = (v12435_data + (v12383_data * v5276_bc));
-              float v12438_data = v32_g ? (glb_m4[(v109_lead + 2632)]) : (0.0f);
+              float v12438_data_pre = glb_m4[v32_g ? ((v109_lead + 2632)) : (0)];
+              float v12438_data = v32_g ? (v12438_data_pre) : (0.0f);
               float v12442_data = ir4[1];
               ir4[1] = (v12442_data + (v12438_data * v5228_bc));
               float v12448_data = ir4[3];
@@ -5186,7 +5290,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir4[14] = (v12539_data + (v12493_data * v5380_bc));
               float v12545_data = ir4[16];
               ir4[16] = (v12545_data + (v12493_data * v5386_bc));
-              float v12548_data = v32_g ? (glb_m4[(v109_lead + 2688)]) : (0.0f);
+              float v12548_data_pre = glb_m4[v32_g ? ((v109_lead + 2688)) : (0)];
+              float v12548_data = v32_g ? (v12548_data_pre) : (0.0f);
               float v12552_data = ir4[1];
               ir4[1] = (v12552_data + (v12548_data * v5338_bc));
               float v12558_data = ir4[3];
@@ -5224,7 +5329,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir4[14] = (v12649_data + (v12603_data * v5490_bc));
               float v12655_data = ir4[16];
               ir4[16] = (v12655_data + (v12603_data * v5496_bc));
-              float v12658_data = v32_g ? (glb_m4[(v109_lead + 2744)]) : (0.0f);
+              float v12658_data_pre = glb_m4[v32_g ? ((v109_lead + 2744)) : (0)];
+              float v12658_data = v32_g ? (v12658_data_pre) : (0.0f);
               float v12662_data = ir4[1];
               ir4[1] = (v12662_data + (v12658_data * v5448_bc));
               float v12668_data = ir4[3];
@@ -5262,7 +5368,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir4[14] = (v12759_data + (v12713_data * v5600_bc));
               float v12765_data = ir4[16];
               ir4[16] = (v12765_data + (v12713_data * v5606_bc));
-              float v12768_data = v32_g ? (glb_m4[(v109_lead + 2800)]) : (0.0f);
+              float v12768_data_pre = glb_m4[v32_g ? ((v109_lead + 2800)) : (0)];
+              float v12768_data = v32_g ? (v12768_data_pre) : (0.0f);
               float v12772_data = ir4[1];
               ir4[1] = (v12772_data + (v12768_data * v5558_bc));
               float v12778_data = ir4[3];
@@ -5300,7 +5407,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir4[14] = (v12869_data + (v12823_data * v5710_bc));
               float v12875_data = ir4[16];
               ir4[16] = (v12875_data + (v12823_data * v5716_bc));
-              float v12878_data = v32_g ? (glb_m4[(v109_lead + 2856)]) : (0.0f);
+              float v12878_data_pre = glb_m4[v32_g ? ((v109_lead + 2856)) : (0)];
+              float v12878_data = v32_g ? (v12878_data_pre) : (0.0f);
               float v12882_data = ir4[1];
               ir4[1] = (v12882_data + (v12878_data * v5668_bc));
               float v12888_data = ir4[3];
@@ -5338,7 +5446,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir4[14] = (v12979_data + (v12933_data * v5820_bc));
               float v12985_data = ir4[16];
               ir4[16] = (v12985_data + (v12933_data * v5826_bc));
-              float v12988_data = v32_g ? (glb_m4[(v109_lead + 2912)]) : (0.0f);
+              float v12988_data_pre = glb_m4[v32_g ? ((v109_lead + 2912)) : (0)];
+              float v12988_data = v32_g ? (v12988_data_pre) : (0.0f);
               float v12992_data = ir4[1];
               ir4[1] = (v12992_data + (v12988_data * v5778_bc));
               float v12998_data = ir4[3];
@@ -5376,7 +5485,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir4[14] = (v13089_data + (v13043_data * v5930_bc));
               float v13095_data = ir4[16];
               ir4[16] = (v13095_data + (v13043_data * v5936_bc));
-              float v13098_data = v32_g ? (glb_m4[(v109_lead + 2968)]) : (0.0f);
+              float v13098_data_pre = glb_m4[v32_g ? ((v109_lead + 2968)) : (0)];
+              float v13098_data = v32_g ? (v13098_data_pre) : (0.0f);
               float v13102_data = ir4[1];
               ir4[1] = (v13102_data + (v13098_data * v5888_bc));
               float v13108_data = ir4[3];
@@ -5414,7 +5524,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir4[14] = (v13199_data + (v13153_data * v6040_bc));
               float v13205_data = ir4[16];
               ir4[16] = (v13205_data + (v13153_data * v6046_bc));
-              float v13208_data = v32_g ? (glb_m4[(v109_lead + 3024)]) : (0.0f);
+              float v13208_data_pre = glb_m4[v32_g ? ((v109_lead + 3024)) : (0)];
+              float v13208_data = v32_g ? (v13208_data_pre) : (0.0f);
               float v13212_data = ir4[1];
               ir4[1] = (v13212_data + (v13208_data * v5998_bc));
               float v13218_data = ir4[3];
@@ -5452,7 +5563,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir4[14] = (v13309_data + (v13263_data * v6150_bc));
               float v13315_data = ir4[16];
               ir4[16] = (v13315_data + (v13263_data * v6156_bc));
-              float v13318_data = v32_g ? (glb_m4[(v109_lead + 3080)]) : (0.0f);
+              float v13318_data_pre = glb_m4[v32_g ? ((v109_lead + 3080)) : (0)];
+              float v13318_data = v32_g ? (v13318_data_pre) : (0.0f);
               float v13322_data = ir4[1];
               ir4[1] = (v13322_data + (v13318_data * v6108_bc));
               float v13328_data = ir4[3];
@@ -5978,7 +6090,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir7[14] = (v14427_data + (v14381_data * v98_bc));
               float v14433_data = ir7[16];
               ir7[16] = (v14433_data + (v14381_data * v104_bc));
-              float v14438_data = v32_g ? (glb_m6[v109_lead]) : (0.0f);
+              float v14438_data_pre = glb_m6[v32_g ? (v109_lead) : (0)];
+              float v14438_data = v32_g ? (v14438_data_pre) : (0.0f);
               float v14442_data = ir7[1];
               ir7[1] = (v14442_data + (v14438_data * v56_bc));
               float v14448_data = ir7[3];
@@ -6016,7 +6129,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir7[14] = (v14539_data + (v14493_data * v210_bc));
               float v14545_data = ir7[16];
               ir7[16] = (v14545_data + (v14493_data * v216_bc));
-              float v14548_data = v32_g ? (glb_m6[(v109_lead + 56)]) : (0.0f);
+              float v14548_data_pre = glb_m6[v32_g ? ((v109_lead + 56)) : (0)];
+              float v14548_data = v32_g ? (v14548_data_pre) : (0.0f);
               float v14552_data = ir7[1];
               ir7[1] = (v14552_data + (v14548_data * v168_bc));
               float v14558_data = ir7[3];
@@ -6054,7 +6168,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir7[14] = (v14649_data + (v14603_data * v320_bc));
               float v14655_data = ir7[16];
               ir7[16] = (v14655_data + (v14603_data * v326_bc));
-              float v14658_data = v32_g ? (glb_m6[(v109_lead + 112)]) : (0.0f);
+              float v14658_data_pre = glb_m6[v32_g ? ((v109_lead + 112)) : (0)];
+              float v14658_data = v32_g ? (v14658_data_pre) : (0.0f);
               float v14662_data = ir7[1];
               ir7[1] = (v14662_data + (v14658_data * v278_bc));
               float v14668_data = ir7[3];
@@ -6092,7 +6207,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir7[14] = (v14759_data + (v14713_data * v430_bc));
               float v14765_data = ir7[16];
               ir7[16] = (v14765_data + (v14713_data * v436_bc));
-              float v14768_data = v32_g ? (glb_m6[(v109_lead + 168)]) : (0.0f);
+              float v14768_data_pre = glb_m6[v32_g ? ((v109_lead + 168)) : (0)];
+              float v14768_data = v32_g ? (v14768_data_pre) : (0.0f);
               float v14772_data = ir7[1];
               ir7[1] = (v14772_data + (v14768_data * v388_bc));
               float v14778_data = ir7[3];
@@ -6130,7 +6246,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir7[14] = (v14869_data + (v14823_data * v540_bc));
               float v14875_data = ir7[16];
               ir7[16] = (v14875_data + (v14823_data * v546_bc));
-              float v14878_data = v32_g ? (glb_m6[(v109_lead + 224)]) : (0.0f);
+              float v14878_data_pre = glb_m6[v32_g ? ((v109_lead + 224)) : (0)];
+              float v14878_data = v32_g ? (v14878_data_pre) : (0.0f);
               float v14882_data = ir7[1];
               ir7[1] = (v14882_data + (v14878_data * v498_bc));
               float v14888_data = ir7[3];
@@ -6168,7 +6285,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir7[14] = (v14979_data + (v14933_data * v650_bc));
               float v14985_data = ir7[16];
               ir7[16] = (v14985_data + (v14933_data * v656_bc));
-              float v14988_data = v32_g ? (glb_m6[(v109_lead + 280)]) : (0.0f);
+              float v14988_data_pre = glb_m6[v32_g ? ((v109_lead + 280)) : (0)];
+              float v14988_data = v32_g ? (v14988_data_pre) : (0.0f);
               float v14992_data = ir7[1];
               ir7[1] = (v14992_data + (v14988_data * v608_bc));
               float v14998_data = ir7[3];
@@ -6206,7 +6324,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir7[14] = (v15089_data + (v15043_data * v760_bc));
               float v15095_data = ir7[16];
               ir7[16] = (v15095_data + (v15043_data * v766_bc));
-              float v15098_data = v32_g ? (glb_m6[(v109_lead + 336)]) : (0.0f);
+              float v15098_data_pre = glb_m6[v32_g ? ((v109_lead + 336)) : (0)];
+              float v15098_data = v32_g ? (v15098_data_pre) : (0.0f);
               float v15102_data = ir7[1];
               ir7[1] = (v15102_data + (v15098_data * v718_bc));
               float v15108_data = ir7[3];
@@ -6244,7 +6363,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir7[14] = (v15199_data + (v15153_data * v870_bc));
               float v15205_data = ir7[16];
               ir7[16] = (v15205_data + (v15153_data * v876_bc));
-              float v15208_data = v32_g ? (glb_m6[(v109_lead + 392)]) : (0.0f);
+              float v15208_data_pre = glb_m6[v32_g ? ((v109_lead + 392)) : (0)];
+              float v15208_data = v32_g ? (v15208_data_pre) : (0.0f);
               float v15212_data = ir7[1];
               ir7[1] = (v15212_data + (v15208_data * v828_bc));
               float v15218_data = ir7[3];
@@ -6282,7 +6402,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir7[14] = (v15309_data + (v15263_data * v980_bc));
               float v15315_data = ir7[16];
               ir7[16] = (v15315_data + (v15263_data * v986_bc));
-              float v15318_data = v32_g ? (glb_m6[(v109_lead + 448)]) : (0.0f);
+              float v15318_data_pre = glb_m6[v32_g ? ((v109_lead + 448)) : (0)];
+              float v15318_data = v32_g ? (v15318_data_pre) : (0.0f);
               float v15322_data = ir7[1];
               ir7[1] = (v15322_data + (v15318_data * v938_bc));
               float v15328_data = ir7[3];
@@ -6320,7 +6441,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir7[14] = (v15419_data + (v15373_data * v1090_bc));
               float v15425_data = ir7[16];
               ir7[16] = (v15425_data + (v15373_data * v1096_bc));
-              float v15428_data = v32_g ? (glb_m6[(v109_lead + 504)]) : (0.0f);
+              float v15428_data_pre = glb_m6[v32_g ? ((v109_lead + 504)) : (0)];
+              float v15428_data = v32_g ? (v15428_data_pre) : (0.0f);
               float v15432_data = ir7[1];
               ir7[1] = (v15432_data + (v15428_data * v1048_bc));
               float v15438_data = ir7[3];
@@ -6358,7 +6480,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir7[14] = (v15529_data + (v15483_data * v1200_bc));
               float v15535_data = ir7[16];
               ir7[16] = (v15535_data + (v15483_data * v1206_bc));
-              float v15538_data = v32_g ? (glb_m6[(v109_lead + 560)]) : (0.0f);
+              float v15538_data_pre = glb_m6[v32_g ? ((v109_lead + 560)) : (0)];
+              float v15538_data = v32_g ? (v15538_data_pre) : (0.0f);
               float v15542_data = ir7[1];
               ir7[1] = (v15542_data + (v15538_data * v1158_bc));
               float v15548_data = ir7[3];
@@ -6396,7 +6519,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir7[14] = (v15639_data + (v15593_data * v1310_bc));
               float v15645_data = ir7[16];
               ir7[16] = (v15645_data + (v15593_data * v1316_bc));
-              float v15648_data = v32_g ? (glb_m6[(v109_lead + 616)]) : (0.0f);
+              float v15648_data_pre = glb_m6[v32_g ? ((v109_lead + 616)) : (0)];
+              float v15648_data = v32_g ? (v15648_data_pre) : (0.0f);
               float v15652_data = ir7[1];
               ir7[1] = (v15652_data + (v15648_data * v1268_bc));
               float v15658_data = ir7[3];
@@ -6434,7 +6558,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir7[14] = (v15749_data + (v15703_data * v1420_bc));
               float v15755_data = ir7[16];
               ir7[16] = (v15755_data + (v15703_data * v1426_bc));
-              float v15758_data = v32_g ? (glb_m6[(v109_lead + 672)]) : (0.0f);
+              float v15758_data_pre = glb_m6[v32_g ? ((v109_lead + 672)) : (0)];
+              float v15758_data = v32_g ? (v15758_data_pre) : (0.0f);
               float v15762_data = ir7[1];
               ir7[1] = (v15762_data + (v15758_data * v1378_bc));
               float v15768_data = ir7[3];
@@ -6472,7 +6597,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir7[14] = (v15859_data + (v15813_data * v1530_bc));
               float v15865_data = ir7[16];
               ir7[16] = (v15865_data + (v15813_data * v1536_bc));
-              float v15868_data = v32_g ? (glb_m6[(v109_lead + 728)]) : (0.0f);
+              float v15868_data_pre = glb_m6[v32_g ? ((v109_lead + 728)) : (0)];
+              float v15868_data = v32_g ? (v15868_data_pre) : (0.0f);
               float v15872_data = ir7[1];
               ir7[1] = (v15872_data + (v15868_data * v1488_bc));
               float v15878_data = ir7[3];
@@ -6510,7 +6636,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir7[14] = (v15969_data + (v15923_data * v1640_bc));
               float v15975_data = ir7[16];
               ir7[16] = (v15975_data + (v15923_data * v1646_bc));
-              float v15978_data = v32_g ? (glb_m6[(v109_lead + 784)]) : (0.0f);
+              float v15978_data_pre = glb_m6[v32_g ? ((v109_lead + 784)) : (0)];
+              float v15978_data = v32_g ? (v15978_data_pre) : (0.0f);
               float v15982_data = ir7[1];
               ir7[1] = (v15982_data + (v15978_data * v1598_bc));
               float v15988_data = ir7[3];
@@ -6548,7 +6675,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir7[14] = (v16079_data + (v16033_data * v1750_bc));
               float v16085_data = ir7[16];
               ir7[16] = (v16085_data + (v16033_data * v1756_bc));
-              float v16088_data = v32_g ? (glb_m6[(v109_lead + 840)]) : (0.0f);
+              float v16088_data_pre = glb_m6[v32_g ? ((v109_lead + 840)) : (0)];
+              float v16088_data = v32_g ? (v16088_data_pre) : (0.0f);
               float v16092_data = ir7[1];
               ir7[1] = (v16092_data + (v16088_data * v1708_bc));
               float v16098_data = ir7[3];
@@ -6586,7 +6714,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir7[14] = (v16189_data + (v16143_data * v1860_bc));
               float v16195_data = ir7[16];
               ir7[16] = (v16195_data + (v16143_data * v1866_bc));
-              float v16198_data = v32_g ? (glb_m6[(v109_lead + 896)]) : (0.0f);
+              float v16198_data_pre = glb_m6[v32_g ? ((v109_lead + 896)) : (0)];
+              float v16198_data = v32_g ? (v16198_data_pre) : (0.0f);
               float v16202_data = ir7[1];
               ir7[1] = (v16202_data + (v16198_data * v1818_bc));
               float v16208_data = ir7[3];
@@ -6624,7 +6753,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir7[14] = (v16299_data + (v16253_data * v1970_bc));
               float v16305_data = ir7[16];
               ir7[16] = (v16305_data + (v16253_data * v1976_bc));
-              float v16308_data = v32_g ? (glb_m6[(v109_lead + 952)]) : (0.0f);
+              float v16308_data_pre = glb_m6[v32_g ? ((v109_lead + 952)) : (0)];
+              float v16308_data = v32_g ? (v16308_data_pre) : (0.0f);
               float v16312_data = ir7[1];
               ir7[1] = (v16312_data + (v16308_data * v1928_bc));
               float v16318_data = ir7[3];
@@ -6662,7 +6792,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir7[14] = (v16409_data + (v16363_data * v2080_bc));
               float v16415_data = ir7[16];
               ir7[16] = (v16415_data + (v16363_data * v2086_bc));
-              float v16418_data = v32_g ? (glb_m6[(v109_lead + 1008)]) : (0.0f);
+              float v16418_data_pre = glb_m6[v32_g ? ((v109_lead + 1008)) : (0)];
+              float v16418_data = v32_g ? (v16418_data_pre) : (0.0f);
               float v16422_data = ir7[1];
               ir7[1] = (v16422_data + (v16418_data * v2038_bc));
               float v16428_data = ir7[3];
@@ -6700,7 +6831,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir7[14] = (v16519_data + (v16473_data * v2190_bc));
               float v16525_data = ir7[16];
               ir7[16] = (v16525_data + (v16473_data * v2196_bc));
-              float v16528_data = v32_g ? (glb_m6[(v109_lead + 1064)]) : (0.0f);
+              float v16528_data_pre = glb_m6[v32_g ? ((v109_lead + 1064)) : (0)];
+              float v16528_data = v32_g ? (v16528_data_pre) : (0.0f);
               float v16532_data = ir7[1];
               ir7[1] = (v16532_data + (v16528_data * v2148_bc));
               float v16538_data = ir7[3];
@@ -6738,7 +6870,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir7[14] = (v16629_data + (v16583_data * v2300_bc));
               float v16635_data = ir7[16];
               ir7[16] = (v16635_data + (v16583_data * v2306_bc));
-              float v16638_data = v32_g ? (glb_m6[(v109_lead + 1120)]) : (0.0f);
+              float v16638_data_pre = glb_m6[v32_g ? ((v109_lead + 1120)) : (0)];
+              float v16638_data = v32_g ? (v16638_data_pre) : (0.0f);
               float v16642_data = ir7[1];
               ir7[1] = (v16642_data + (v16638_data * v2258_bc));
               float v16648_data = ir7[3];
@@ -6776,7 +6909,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir7[14] = (v16739_data + (v16693_data * v2410_bc));
               float v16745_data = ir7[16];
               ir7[16] = (v16745_data + (v16693_data * v2416_bc));
-              float v16748_data = v32_g ? (glb_m6[(v109_lead + 1176)]) : (0.0f);
+              float v16748_data_pre = glb_m6[v32_g ? ((v109_lead + 1176)) : (0)];
+              float v16748_data = v32_g ? (v16748_data_pre) : (0.0f);
               float v16752_data = ir7[1];
               ir7[1] = (v16752_data + (v16748_data * v2368_bc));
               float v16758_data = ir7[3];
@@ -6814,7 +6948,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir7[14] = (v16849_data + (v16803_data * v2520_bc));
               float v16855_data = ir7[16];
               ir7[16] = (v16855_data + (v16803_data * v2526_bc));
-              float v16858_data = v32_g ? (glb_m6[(v109_lead + 1232)]) : (0.0f);
+              float v16858_data_pre = glb_m6[v32_g ? ((v109_lead + 1232)) : (0)];
+              float v16858_data = v32_g ? (v16858_data_pre) : (0.0f);
               float v16862_data = ir7[1];
               ir7[1] = (v16862_data + (v16858_data * v2478_bc));
               float v16868_data = ir7[3];
@@ -6852,7 +6987,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir7[14] = (v16959_data + (v16913_data * v2630_bc));
               float v16965_data = ir7[16];
               ir7[16] = (v16965_data + (v16913_data * v2636_bc));
-              float v16968_data = v32_g ? (glb_m6[(v109_lead + 1288)]) : (0.0f);
+              float v16968_data_pre = glb_m6[v32_g ? ((v109_lead + 1288)) : (0)];
+              float v16968_data = v32_g ? (v16968_data_pre) : (0.0f);
               float v16972_data = ir7[1];
               ir7[1] = (v16972_data + (v16968_data * v2588_bc));
               float v16978_data = ir7[3];
@@ -6890,7 +7026,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir7[14] = (v17069_data + (v17023_data * v2740_bc));
               float v17075_data = ir7[16];
               ir7[16] = (v17075_data + (v17023_data * v2746_bc));
-              float v17078_data = v32_g ? (glb_m6[(v109_lead + 1344)]) : (0.0f);
+              float v17078_data_pre = glb_m6[v32_g ? ((v109_lead + 1344)) : (0)];
+              float v17078_data = v32_g ? (v17078_data_pre) : (0.0f);
               float v17082_data = ir7[1];
               ir7[1] = (v17082_data + (v17078_data * v2698_bc));
               float v17088_data = ir7[3];
@@ -6928,7 +7065,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir7[14] = (v17179_data + (v17133_data * v2850_bc));
               float v17185_data = ir7[16];
               ir7[16] = (v17185_data + (v17133_data * v2856_bc));
-              float v17188_data = v32_g ? (glb_m6[(v109_lead + 1400)]) : (0.0f);
+              float v17188_data_pre = glb_m6[v32_g ? ((v109_lead + 1400)) : (0)];
+              float v17188_data = v32_g ? (v17188_data_pre) : (0.0f);
               float v17192_data = ir7[1];
               ir7[1] = (v17192_data + (v17188_data * v2808_bc));
               float v17198_data = ir7[3];
@@ -6966,7 +7104,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir7[14] = (v17289_data + (v17243_data * v2960_bc));
               float v17295_data = ir7[16];
               ir7[16] = (v17295_data + (v17243_data * v2966_bc));
-              float v17298_data = v32_g ? (glb_m6[(v109_lead + 1456)]) : (0.0f);
+              float v17298_data_pre = glb_m6[v32_g ? ((v109_lead + 1456)) : (0)];
+              float v17298_data = v32_g ? (v17298_data_pre) : (0.0f);
               float v17302_data = ir7[1];
               ir7[1] = (v17302_data + (v17298_data * v2918_bc));
               float v17308_data = ir7[3];
@@ -7004,7 +7143,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir7[14] = (v17399_data + (v17353_data * v3070_bc));
               float v17405_data = ir7[16];
               ir7[16] = (v17405_data + (v17353_data * v3076_bc));
-              float v17408_data = v32_g ? (glb_m6[(v109_lead + 1512)]) : (0.0f);
+              float v17408_data_pre = glb_m6[v32_g ? ((v109_lead + 1512)) : (0)];
+              float v17408_data = v32_g ? (v17408_data_pre) : (0.0f);
               float v17412_data = ir7[1];
               ir7[1] = (v17412_data + (v17408_data * v3028_bc));
               float v17418_data = ir7[3];
@@ -7042,7 +7182,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir7[14] = (v17509_data + (v17463_data * v3180_bc));
               float v17515_data = ir7[16];
               ir7[16] = (v17515_data + (v17463_data * v3186_bc));
-              float v17518_data = v32_g ? (glb_m6[(v109_lead + 1568)]) : (0.0f);
+              float v17518_data_pre = glb_m6[v32_g ? ((v109_lead + 1568)) : (0)];
+              float v17518_data = v32_g ? (v17518_data_pre) : (0.0f);
               float v17522_data = ir7[1];
               ir7[1] = (v17522_data + (v17518_data * v3138_bc));
               float v17528_data = ir7[3];
@@ -7080,7 +7221,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir7[14] = (v17619_data + (v17573_data * v3290_bc));
               float v17625_data = ir7[16];
               ir7[16] = (v17625_data + (v17573_data * v3296_bc));
-              float v17628_data = v32_g ? (glb_m6[(v109_lead + 1624)]) : (0.0f);
+              float v17628_data_pre = glb_m6[v32_g ? ((v109_lead + 1624)) : (0)];
+              float v17628_data = v32_g ? (v17628_data_pre) : (0.0f);
               float v17632_data = ir7[1];
               ir7[1] = (v17632_data + (v17628_data * v3248_bc));
               float v17638_data = ir7[3];
@@ -7118,7 +7260,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir7[14] = (v17729_data + (v17683_data * v3400_bc));
               float v17735_data = ir7[16];
               ir7[16] = (v17735_data + (v17683_data * v3406_bc));
-              float v17738_data = v32_g ? (glb_m6[(v109_lead + 1680)]) : (0.0f);
+              float v17738_data_pre = glb_m6[v32_g ? ((v109_lead + 1680)) : (0)];
+              float v17738_data = v32_g ? (v17738_data_pre) : (0.0f);
               float v17742_data = ir7[1];
               ir7[1] = (v17742_data + (v17738_data * v3358_bc));
               float v17748_data = ir7[3];
@@ -7156,7 +7299,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir7[14] = (v17839_data + (v17793_data * v3510_bc));
               float v17845_data = ir7[16];
               ir7[16] = (v17845_data + (v17793_data * v3516_bc));
-              float v17848_data = v32_g ? (glb_m6[(v109_lead + 1736)]) : (0.0f);
+              float v17848_data_pre = glb_m6[v32_g ? ((v109_lead + 1736)) : (0)];
+              float v17848_data = v32_g ? (v17848_data_pre) : (0.0f);
               float v17852_data = ir7[1];
               ir7[1] = (v17852_data + (v17848_data * v3468_bc));
               float v17858_data = ir7[3];
@@ -7194,7 +7338,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir7[14] = (v17949_data + (v17903_data * v3620_bc));
               float v17955_data = ir7[16];
               ir7[16] = (v17955_data + (v17903_data * v3626_bc));
-              float v17958_data = v32_g ? (glb_m6[(v109_lead + 1792)]) : (0.0f);
+              float v17958_data_pre = glb_m6[v32_g ? ((v109_lead + 1792)) : (0)];
+              float v17958_data = v32_g ? (v17958_data_pre) : (0.0f);
               float v17962_data = ir7[1];
               ir7[1] = (v17962_data + (v17958_data * v3578_bc));
               float v17968_data = ir7[3];
@@ -7232,7 +7377,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir7[14] = (v18059_data + (v18013_data * v3730_bc));
               float v18065_data = ir7[16];
               ir7[16] = (v18065_data + (v18013_data * v3736_bc));
-              float v18068_data = v32_g ? (glb_m6[(v109_lead + 1848)]) : (0.0f);
+              float v18068_data_pre = glb_m6[v32_g ? ((v109_lead + 1848)) : (0)];
+              float v18068_data = v32_g ? (v18068_data_pre) : (0.0f);
               float v18072_data = ir7[1];
               ir7[1] = (v18072_data + (v18068_data * v3688_bc));
               float v18078_data = ir7[3];
@@ -7270,7 +7416,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir7[14] = (v18169_data + (v18123_data * v3840_bc));
               float v18175_data = ir7[16];
               ir7[16] = (v18175_data + (v18123_data * v3846_bc));
-              float v18178_data = v32_g ? (glb_m6[(v109_lead + 1904)]) : (0.0f);
+              float v18178_data_pre = glb_m6[v32_g ? ((v109_lead + 1904)) : (0)];
+              float v18178_data = v32_g ? (v18178_data_pre) : (0.0f);
               float v18182_data = ir7[1];
               ir7[1] = (v18182_data + (v18178_data * v3798_bc));
               float v18188_data = ir7[3];
@@ -7308,7 +7455,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir7[14] = (v18279_data + (v18233_data * v3950_bc));
               float v18285_data = ir7[16];
               ir7[16] = (v18285_data + (v18233_data * v3956_bc));
-              float v18288_data = v32_g ? (glb_m6[(v109_lead + 1960)]) : (0.0f);
+              float v18288_data_pre = glb_m6[v32_g ? ((v109_lead + 1960)) : (0)];
+              float v18288_data = v32_g ? (v18288_data_pre) : (0.0f);
               float v18292_data = ir7[1];
               ir7[1] = (v18292_data + (v18288_data * v3908_bc));
               float v18298_data = ir7[3];
@@ -7346,7 +7494,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir7[14] = (v18389_data + (v18343_data * v4060_bc));
               float v18395_data = ir7[16];
               ir7[16] = (v18395_data + (v18343_data * v4066_bc));
-              float v18398_data = v32_g ? (glb_m6[(v109_lead + 2016)]) : (0.0f);
+              float v18398_data_pre = glb_m6[v32_g ? ((v109_lead + 2016)) : (0)];
+              float v18398_data = v32_g ? (v18398_data_pre) : (0.0f);
               float v18402_data = ir7[1];
               ir7[1] = (v18402_data + (v18398_data * v4018_bc));
               float v18408_data = ir7[3];
@@ -7384,7 +7533,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir7[14] = (v18499_data + (v18453_data * v4170_bc));
               float v18505_data = ir7[16];
               ir7[16] = (v18505_data + (v18453_data * v4176_bc));
-              float v18508_data = v32_g ? (glb_m6[(v109_lead + 2072)]) : (0.0f);
+              float v18508_data_pre = glb_m6[v32_g ? ((v109_lead + 2072)) : (0)];
+              float v18508_data = v32_g ? (v18508_data_pre) : (0.0f);
               float v18512_data = ir7[1];
               ir7[1] = (v18512_data + (v18508_data * v4128_bc));
               float v18518_data = ir7[3];
@@ -7422,7 +7572,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir7[14] = (v18609_data + (v18563_data * v4280_bc));
               float v18615_data = ir7[16];
               ir7[16] = (v18615_data + (v18563_data * v4286_bc));
-              float v18618_data = v32_g ? (glb_m6[(v109_lead + 2128)]) : (0.0f);
+              float v18618_data_pre = glb_m6[v32_g ? ((v109_lead + 2128)) : (0)];
+              float v18618_data = v32_g ? (v18618_data_pre) : (0.0f);
               float v18622_data = ir7[1];
               ir7[1] = (v18622_data + (v18618_data * v4238_bc));
               float v18628_data = ir7[3];
@@ -7460,7 +7611,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir7[14] = (v18719_data + (v18673_data * v4390_bc));
               float v18725_data = ir7[16];
               ir7[16] = (v18725_data + (v18673_data * v4396_bc));
-              float v18728_data = v32_g ? (glb_m6[(v109_lead + 2184)]) : (0.0f);
+              float v18728_data_pre = glb_m6[v32_g ? ((v109_lead + 2184)) : (0)];
+              float v18728_data = v32_g ? (v18728_data_pre) : (0.0f);
               float v18732_data = ir7[1];
               ir7[1] = (v18732_data + (v18728_data * v4348_bc));
               float v18738_data = ir7[3];
@@ -7498,7 +7650,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir7[14] = (v18829_data + (v18783_data * v4500_bc));
               float v18835_data = ir7[16];
               ir7[16] = (v18835_data + (v18783_data * v4506_bc));
-              float v18838_data = v32_g ? (glb_m6[(v109_lead + 2240)]) : (0.0f);
+              float v18838_data_pre = glb_m6[v32_g ? ((v109_lead + 2240)) : (0)];
+              float v18838_data = v32_g ? (v18838_data_pre) : (0.0f);
               float v18842_data = ir7[1];
               ir7[1] = (v18842_data + (v18838_data * v4458_bc));
               float v18848_data = ir7[3];
@@ -7536,7 +7689,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir7[14] = (v18939_data + (v18893_data * v4610_bc));
               float v18945_data = ir7[16];
               ir7[16] = (v18945_data + (v18893_data * v4616_bc));
-              float v18948_data = v32_g ? (glb_m6[(v109_lead + 2296)]) : (0.0f);
+              float v18948_data_pre = glb_m6[v32_g ? ((v109_lead + 2296)) : (0)];
+              float v18948_data = v32_g ? (v18948_data_pre) : (0.0f);
               float v18952_data = ir7[1];
               ir7[1] = (v18952_data + (v18948_data * v4568_bc));
               float v18958_data = ir7[3];
@@ -7574,7 +7728,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir7[14] = (v19049_data + (v19003_data * v4720_bc));
               float v19055_data = ir7[16];
               ir7[16] = (v19055_data + (v19003_data * v4726_bc));
-              float v19058_data = v32_g ? (glb_m6[(v109_lead + 2352)]) : (0.0f);
+              float v19058_data_pre = glb_m6[v32_g ? ((v109_lead + 2352)) : (0)];
+              float v19058_data = v32_g ? (v19058_data_pre) : (0.0f);
               float v19062_data = ir7[1];
               ir7[1] = (v19062_data + (v19058_data * v4678_bc));
               float v19068_data = ir7[3];
@@ -7612,7 +7767,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir7[14] = (v19159_data + (v19113_data * v4830_bc));
               float v19165_data = ir7[16];
               ir7[16] = (v19165_data + (v19113_data * v4836_bc));
-              float v19168_data = v32_g ? (glb_m6[(v109_lead + 2408)]) : (0.0f);
+              float v19168_data_pre = glb_m6[v32_g ? ((v109_lead + 2408)) : (0)];
+              float v19168_data = v32_g ? (v19168_data_pre) : (0.0f);
               float v19172_data = ir7[1];
               ir7[1] = (v19172_data + (v19168_data * v4788_bc));
               float v19178_data = ir7[3];
@@ -7650,7 +7806,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir7[14] = (v19269_data + (v19223_data * v4940_bc));
               float v19275_data = ir7[16];
               ir7[16] = (v19275_data + (v19223_data * v4946_bc));
-              float v19278_data = v32_g ? (glb_m6[(v109_lead + 2464)]) : (0.0f);
+              float v19278_data_pre = glb_m6[v32_g ? ((v109_lead + 2464)) : (0)];
+              float v19278_data = v32_g ? (v19278_data_pre) : (0.0f);
               float v19282_data = ir7[1];
               ir7[1] = (v19282_data + (v19278_data * v4898_bc));
               float v19288_data = ir7[3];
@@ -7688,7 +7845,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir7[14] = (v19379_data + (v19333_data * v5050_bc));
               float v19385_data = ir7[16];
               ir7[16] = (v19385_data + (v19333_data * v5056_bc));
-              float v19388_data = v32_g ? (glb_m6[(v109_lead + 2520)]) : (0.0f);
+              float v19388_data_pre = glb_m6[v32_g ? ((v109_lead + 2520)) : (0)];
+              float v19388_data = v32_g ? (v19388_data_pre) : (0.0f);
               float v19392_data = ir7[1];
               ir7[1] = (v19392_data + (v19388_data * v5008_bc));
               float v19398_data = ir7[3];
@@ -7726,7 +7884,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir7[14] = (v19489_data + (v19443_data * v5160_bc));
               float v19495_data = ir7[16];
               ir7[16] = (v19495_data + (v19443_data * v5166_bc));
-              float v19498_data = v32_g ? (glb_m6[(v109_lead + 2576)]) : (0.0f);
+              float v19498_data_pre = glb_m6[v32_g ? ((v109_lead + 2576)) : (0)];
+              float v19498_data = v32_g ? (v19498_data_pre) : (0.0f);
               float v19502_data = ir7[1];
               ir7[1] = (v19502_data + (v19498_data * v5118_bc));
               float v19508_data = ir7[3];
@@ -7764,7 +7923,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir7[14] = (v19599_data + (v19553_data * v5270_bc));
               float v19605_data = ir7[16];
               ir7[16] = (v19605_data + (v19553_data * v5276_bc));
-              float v19608_data = v32_g ? (glb_m6[(v109_lead + 2632)]) : (0.0f);
+              float v19608_data_pre = glb_m6[v32_g ? ((v109_lead + 2632)) : (0)];
+              float v19608_data = v32_g ? (v19608_data_pre) : (0.0f);
               float v19612_data = ir7[1];
               ir7[1] = (v19612_data + (v19608_data * v5228_bc));
               float v19618_data = ir7[3];
@@ -7802,7 +7962,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir7[14] = (v19709_data + (v19663_data * v5380_bc));
               float v19715_data = ir7[16];
               ir7[16] = (v19715_data + (v19663_data * v5386_bc));
-              float v19718_data = v32_g ? (glb_m6[(v109_lead + 2688)]) : (0.0f);
+              float v19718_data_pre = glb_m6[v32_g ? ((v109_lead + 2688)) : (0)];
+              float v19718_data = v32_g ? (v19718_data_pre) : (0.0f);
               float v19722_data = ir7[1];
               ir7[1] = (v19722_data + (v19718_data * v5338_bc));
               float v19728_data = ir7[3];
@@ -7840,7 +8001,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir7[14] = (v19819_data + (v19773_data * v5490_bc));
               float v19825_data = ir7[16];
               ir7[16] = (v19825_data + (v19773_data * v5496_bc));
-              float v19828_data = v32_g ? (glb_m6[(v109_lead + 2744)]) : (0.0f);
+              float v19828_data_pre = glb_m6[v32_g ? ((v109_lead + 2744)) : (0)];
+              float v19828_data = v32_g ? (v19828_data_pre) : (0.0f);
               float v19832_data = ir7[1];
               ir7[1] = (v19832_data + (v19828_data * v5448_bc));
               float v19838_data = ir7[3];
@@ -7878,7 +8040,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir7[14] = (v19929_data + (v19883_data * v5600_bc));
               float v19935_data = ir7[16];
               ir7[16] = (v19935_data + (v19883_data * v5606_bc));
-              float v19938_data = v32_g ? (glb_m6[(v109_lead + 2800)]) : (0.0f);
+              float v19938_data_pre = glb_m6[v32_g ? ((v109_lead + 2800)) : (0)];
+              float v19938_data = v32_g ? (v19938_data_pre) : (0.0f);
               float v19942_data = ir7[1];
               ir7[1] = (v19942_data + (v19938_data * v5558_bc));
               float v19948_data = ir7[3];
@@ -7916,7 +8079,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir7[14] = (v20039_data + (v19993_data * v5710_bc));
               float v20045_data = ir7[16];
               ir7[16] = (v20045_data + (v19993_data * v5716_bc));
-              float v20048_data = v32_g ? (glb_m6[(v109_lead + 2856)]) : (0.0f);
+              float v20048_data_pre = glb_m6[v32_g ? ((v109_lead + 2856)) : (0)];
+              float v20048_data = v32_g ? (v20048_data_pre) : (0.0f);
               float v20052_data = ir7[1];
               ir7[1] = (v20052_data + (v20048_data * v5668_bc));
               float v20058_data = ir7[3];
@@ -7954,7 +8118,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir7[14] = (v20149_data + (v20103_data * v5820_bc));
               float v20155_data = ir7[16];
               ir7[16] = (v20155_data + (v20103_data * v5826_bc));
-              float v20158_data = v32_g ? (glb_m6[(v109_lead + 2912)]) : (0.0f);
+              float v20158_data_pre = glb_m6[v32_g ? ((v109_lead + 2912)) : (0)];
+              float v20158_data = v32_g ? (v20158_data_pre) : (0.0f);
               float v20162_data = ir7[1];
               ir7[1] = (v20162_data + (v20158_data * v5778_bc));
               float v20168_data = ir7[3];
@@ -7992,7 +8157,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir7[14] = (v20259_data + (v20213_data * v5930_bc));
               float v20265_data = ir7[16];
               ir7[16] = (v20265_data + (v20213_data * v5936_bc));
-              float v20268_data = v32_g ? (glb_m6[(v109_lead + 2968)]) : (0.0f);
+              float v20268_data_pre = glb_m6[v32_g ? ((v109_lead + 2968)) : (0)];
+              float v20268_data = v32_g ? (v20268_data_pre) : (0.0f);
               float v20272_data = ir7[1];
               ir7[1] = (v20272_data + (v20268_data * v5888_bc));
               float v20278_data = ir7[3];
@@ -8030,7 +8196,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir7[14] = (v20369_data + (v20323_data * v6040_bc));
               float v20375_data = ir7[16];
               ir7[16] = (v20375_data + (v20323_data * v6046_bc));
-              float v20378_data = v32_g ? (glb_m6[(v109_lead + 3024)]) : (0.0f);
+              float v20378_data_pre = glb_m6[v32_g ? ((v109_lead + 3024)) : (0)];
+              float v20378_data = v32_g ? (v20378_data_pre) : (0.0f);
               float v20382_data = ir7[1];
               ir7[1] = (v20382_data + (v20378_data * v5998_bc));
               float v20388_data = ir7[3];
@@ -8068,7 +8235,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir7[14] = (v20479_data + (v20433_data * v6150_bc));
               float v20485_data = ir7[16];
               ir7[16] = (v20485_data + (v20433_data * v6156_bc));
-              float v20488_data = v32_g ? (glb_m6[(v109_lead + 3080)]) : (0.0f);
+              float v20488_data_pre = glb_m6[v32_g ? ((v109_lead + 3080)) : (0)];
+              float v20488_data = v32_g ? (v20488_data_pre) : (0.0f);
               float v20492_data = ir7[1];
               ir7[1] = (v20492_data + (v20488_data * v6108_bc));
               float v20498_data = ir7[3];
@@ -8594,7 +8762,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir10[14] = (v21597_data + (v21551_data * v98_bc));
               float v21603_data = ir10[16];
               ir10[16] = (v21603_data + (v21551_data * v104_bc));
-              float v21608_data = v32_g ? (glb_m8[v109_lead]) : (0.0f);
+              float v21608_data_pre = glb_m8[v32_g ? (v109_lead) : (0)];
+              float v21608_data = v32_g ? (v21608_data_pre) : (0.0f);
               float v21612_data = ir10[1];
               ir10[1] = (v21612_data + (v21608_data * v56_bc));
               float v21618_data = ir10[3];
@@ -8632,7 +8801,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir10[14] = (v21709_data + (v21663_data * v210_bc));
               float v21715_data = ir10[16];
               ir10[16] = (v21715_data + (v21663_data * v216_bc));
-              float v21718_data = v32_g ? (glb_m8[(v109_lead + 56)]) : (0.0f);
+              float v21718_data_pre = glb_m8[v32_g ? ((v109_lead + 56)) : (0)];
+              float v21718_data = v32_g ? (v21718_data_pre) : (0.0f);
               float v21722_data = ir10[1];
               ir10[1] = (v21722_data + (v21718_data * v168_bc));
               float v21728_data = ir10[3];
@@ -8670,7 +8840,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir10[14] = (v21819_data + (v21773_data * v320_bc));
               float v21825_data = ir10[16];
               ir10[16] = (v21825_data + (v21773_data * v326_bc));
-              float v21828_data = v32_g ? (glb_m8[(v109_lead + 112)]) : (0.0f);
+              float v21828_data_pre = glb_m8[v32_g ? ((v109_lead + 112)) : (0)];
+              float v21828_data = v32_g ? (v21828_data_pre) : (0.0f);
               float v21832_data = ir10[1];
               ir10[1] = (v21832_data + (v21828_data * v278_bc));
               float v21838_data = ir10[3];
@@ -8708,7 +8879,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir10[14] = (v21929_data + (v21883_data * v430_bc));
               float v21935_data = ir10[16];
               ir10[16] = (v21935_data + (v21883_data * v436_bc));
-              float v21938_data = v32_g ? (glb_m8[(v109_lead + 168)]) : (0.0f);
+              float v21938_data_pre = glb_m8[v32_g ? ((v109_lead + 168)) : (0)];
+              float v21938_data = v32_g ? (v21938_data_pre) : (0.0f);
               float v21942_data = ir10[1];
               ir10[1] = (v21942_data + (v21938_data * v388_bc));
               float v21948_data = ir10[3];
@@ -8746,7 +8918,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir10[14] = (v22039_data + (v21993_data * v540_bc));
               float v22045_data = ir10[16];
               ir10[16] = (v22045_data + (v21993_data * v546_bc));
-              float v22048_data = v32_g ? (glb_m8[(v109_lead + 224)]) : (0.0f);
+              float v22048_data_pre = glb_m8[v32_g ? ((v109_lead + 224)) : (0)];
+              float v22048_data = v32_g ? (v22048_data_pre) : (0.0f);
               float v22052_data = ir10[1];
               ir10[1] = (v22052_data + (v22048_data * v498_bc));
               float v22058_data = ir10[3];
@@ -8784,7 +8957,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir10[14] = (v22149_data + (v22103_data * v650_bc));
               float v22155_data = ir10[16];
               ir10[16] = (v22155_data + (v22103_data * v656_bc));
-              float v22158_data = v32_g ? (glb_m8[(v109_lead + 280)]) : (0.0f);
+              float v22158_data_pre = glb_m8[v32_g ? ((v109_lead + 280)) : (0)];
+              float v22158_data = v32_g ? (v22158_data_pre) : (0.0f);
               float v22162_data = ir10[1];
               ir10[1] = (v22162_data + (v22158_data * v608_bc));
               float v22168_data = ir10[3];
@@ -8822,7 +8996,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir10[14] = (v22259_data + (v22213_data * v760_bc));
               float v22265_data = ir10[16];
               ir10[16] = (v22265_data + (v22213_data * v766_bc));
-              float v22268_data = v32_g ? (glb_m8[(v109_lead + 336)]) : (0.0f);
+              float v22268_data_pre = glb_m8[v32_g ? ((v109_lead + 336)) : (0)];
+              float v22268_data = v32_g ? (v22268_data_pre) : (0.0f);
               float v22272_data = ir10[1];
               ir10[1] = (v22272_data + (v22268_data * v718_bc));
               float v22278_data = ir10[3];
@@ -8860,7 +9035,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir10[14] = (v22369_data + (v22323_data * v870_bc));
               float v22375_data = ir10[16];
               ir10[16] = (v22375_data + (v22323_data * v876_bc));
-              float v22378_data = v32_g ? (glb_m8[(v109_lead + 392)]) : (0.0f);
+              float v22378_data_pre = glb_m8[v32_g ? ((v109_lead + 392)) : (0)];
+              float v22378_data = v32_g ? (v22378_data_pre) : (0.0f);
               float v22382_data = ir10[1];
               ir10[1] = (v22382_data + (v22378_data * v828_bc));
               float v22388_data = ir10[3];
@@ -8898,7 +9074,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir10[14] = (v22479_data + (v22433_data * v980_bc));
               float v22485_data = ir10[16];
               ir10[16] = (v22485_data + (v22433_data * v986_bc));
-              float v22488_data = v32_g ? (glb_m8[(v109_lead + 448)]) : (0.0f);
+              float v22488_data_pre = glb_m8[v32_g ? ((v109_lead + 448)) : (0)];
+              float v22488_data = v32_g ? (v22488_data_pre) : (0.0f);
               float v22492_data = ir10[1];
               ir10[1] = (v22492_data + (v22488_data * v938_bc));
               float v22498_data = ir10[3];
@@ -8936,7 +9113,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir10[14] = (v22589_data + (v22543_data * v1090_bc));
               float v22595_data = ir10[16];
               ir10[16] = (v22595_data + (v22543_data * v1096_bc));
-              float v22598_data = v32_g ? (glb_m8[(v109_lead + 504)]) : (0.0f);
+              float v22598_data_pre = glb_m8[v32_g ? ((v109_lead + 504)) : (0)];
+              float v22598_data = v32_g ? (v22598_data_pre) : (0.0f);
               float v22602_data = ir10[1];
               ir10[1] = (v22602_data + (v22598_data * v1048_bc));
               float v22608_data = ir10[3];
@@ -8974,7 +9152,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir10[14] = (v22699_data + (v22653_data * v1200_bc));
               float v22705_data = ir10[16];
               ir10[16] = (v22705_data + (v22653_data * v1206_bc));
-              float v22708_data = v32_g ? (glb_m8[(v109_lead + 560)]) : (0.0f);
+              float v22708_data_pre = glb_m8[v32_g ? ((v109_lead + 560)) : (0)];
+              float v22708_data = v32_g ? (v22708_data_pre) : (0.0f);
               float v22712_data = ir10[1];
               ir10[1] = (v22712_data + (v22708_data * v1158_bc));
               float v22718_data = ir10[3];
@@ -9012,7 +9191,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir10[14] = (v22809_data + (v22763_data * v1310_bc));
               float v22815_data = ir10[16];
               ir10[16] = (v22815_data + (v22763_data * v1316_bc));
-              float v22818_data = v32_g ? (glb_m8[(v109_lead + 616)]) : (0.0f);
+              float v22818_data_pre = glb_m8[v32_g ? ((v109_lead + 616)) : (0)];
+              float v22818_data = v32_g ? (v22818_data_pre) : (0.0f);
               float v22822_data = ir10[1];
               ir10[1] = (v22822_data + (v22818_data * v1268_bc));
               float v22828_data = ir10[3];
@@ -9050,7 +9230,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir10[14] = (v22919_data + (v22873_data * v1420_bc));
               float v22925_data = ir10[16];
               ir10[16] = (v22925_data + (v22873_data * v1426_bc));
-              float v22928_data = v32_g ? (glb_m8[(v109_lead + 672)]) : (0.0f);
+              float v22928_data_pre = glb_m8[v32_g ? ((v109_lead + 672)) : (0)];
+              float v22928_data = v32_g ? (v22928_data_pre) : (0.0f);
               float v22932_data = ir10[1];
               ir10[1] = (v22932_data + (v22928_data * v1378_bc));
               float v22938_data = ir10[3];
@@ -9088,7 +9269,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir10[14] = (v23029_data + (v22983_data * v1530_bc));
               float v23035_data = ir10[16];
               ir10[16] = (v23035_data + (v22983_data * v1536_bc));
-              float v23038_data = v32_g ? (glb_m8[(v109_lead + 728)]) : (0.0f);
+              float v23038_data_pre = glb_m8[v32_g ? ((v109_lead + 728)) : (0)];
+              float v23038_data = v32_g ? (v23038_data_pre) : (0.0f);
               float v23042_data = ir10[1];
               ir10[1] = (v23042_data + (v23038_data * v1488_bc));
               float v23048_data = ir10[3];
@@ -9126,7 +9308,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir10[14] = (v23139_data + (v23093_data * v1640_bc));
               float v23145_data = ir10[16];
               ir10[16] = (v23145_data + (v23093_data * v1646_bc));
-              float v23148_data = v32_g ? (glb_m8[(v109_lead + 784)]) : (0.0f);
+              float v23148_data_pre = glb_m8[v32_g ? ((v109_lead + 784)) : (0)];
+              float v23148_data = v32_g ? (v23148_data_pre) : (0.0f);
               float v23152_data = ir10[1];
               ir10[1] = (v23152_data + (v23148_data * v1598_bc));
               float v23158_data = ir10[3];
@@ -9164,7 +9347,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir10[14] = (v23249_data + (v23203_data * v1750_bc));
               float v23255_data = ir10[16];
               ir10[16] = (v23255_data + (v23203_data * v1756_bc));
-              float v23258_data = v32_g ? (glb_m8[(v109_lead + 840)]) : (0.0f);
+              float v23258_data_pre = glb_m8[v32_g ? ((v109_lead + 840)) : (0)];
+              float v23258_data = v32_g ? (v23258_data_pre) : (0.0f);
               float v23262_data = ir10[1];
               ir10[1] = (v23262_data + (v23258_data * v1708_bc));
               float v23268_data = ir10[3];
@@ -9202,7 +9386,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir10[14] = (v23359_data + (v23313_data * v1860_bc));
               float v23365_data = ir10[16];
               ir10[16] = (v23365_data + (v23313_data * v1866_bc));
-              float v23368_data = v32_g ? (glb_m8[(v109_lead + 896)]) : (0.0f);
+              float v23368_data_pre = glb_m8[v32_g ? ((v109_lead + 896)) : (0)];
+              float v23368_data = v32_g ? (v23368_data_pre) : (0.0f);
               float v23372_data = ir10[1];
               ir10[1] = (v23372_data + (v23368_data * v1818_bc));
               float v23378_data = ir10[3];
@@ -9240,7 +9425,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir10[14] = (v23469_data + (v23423_data * v1970_bc));
               float v23475_data = ir10[16];
               ir10[16] = (v23475_data + (v23423_data * v1976_bc));
-              float v23478_data = v32_g ? (glb_m8[(v109_lead + 952)]) : (0.0f);
+              float v23478_data_pre = glb_m8[v32_g ? ((v109_lead + 952)) : (0)];
+              float v23478_data = v32_g ? (v23478_data_pre) : (0.0f);
               float v23482_data = ir10[1];
               ir10[1] = (v23482_data + (v23478_data * v1928_bc));
               float v23488_data = ir10[3];
@@ -9278,7 +9464,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir10[14] = (v23579_data + (v23533_data * v2080_bc));
               float v23585_data = ir10[16];
               ir10[16] = (v23585_data + (v23533_data * v2086_bc));
-              float v23588_data = v32_g ? (glb_m8[(v109_lead + 1008)]) : (0.0f);
+              float v23588_data_pre = glb_m8[v32_g ? ((v109_lead + 1008)) : (0)];
+              float v23588_data = v32_g ? (v23588_data_pre) : (0.0f);
               float v23592_data = ir10[1];
               ir10[1] = (v23592_data + (v23588_data * v2038_bc));
               float v23598_data = ir10[3];
@@ -9316,7 +9503,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir10[14] = (v23689_data + (v23643_data * v2190_bc));
               float v23695_data = ir10[16];
               ir10[16] = (v23695_data + (v23643_data * v2196_bc));
-              float v23698_data = v32_g ? (glb_m8[(v109_lead + 1064)]) : (0.0f);
+              float v23698_data_pre = glb_m8[v32_g ? ((v109_lead + 1064)) : (0)];
+              float v23698_data = v32_g ? (v23698_data_pre) : (0.0f);
               float v23702_data = ir10[1];
               ir10[1] = (v23702_data + (v23698_data * v2148_bc));
               float v23708_data = ir10[3];
@@ -9354,7 +9542,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir10[14] = (v23799_data + (v23753_data * v2300_bc));
               float v23805_data = ir10[16];
               ir10[16] = (v23805_data + (v23753_data * v2306_bc));
-              float v23808_data = v32_g ? (glb_m8[(v109_lead + 1120)]) : (0.0f);
+              float v23808_data_pre = glb_m8[v32_g ? ((v109_lead + 1120)) : (0)];
+              float v23808_data = v32_g ? (v23808_data_pre) : (0.0f);
               float v23812_data = ir10[1];
               ir10[1] = (v23812_data + (v23808_data * v2258_bc));
               float v23818_data = ir10[3];
@@ -9392,7 +9581,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir10[14] = (v23909_data + (v23863_data * v2410_bc));
               float v23915_data = ir10[16];
               ir10[16] = (v23915_data + (v23863_data * v2416_bc));
-              float v23918_data = v32_g ? (glb_m8[(v109_lead + 1176)]) : (0.0f);
+              float v23918_data_pre = glb_m8[v32_g ? ((v109_lead + 1176)) : (0)];
+              float v23918_data = v32_g ? (v23918_data_pre) : (0.0f);
               float v23922_data = ir10[1];
               ir10[1] = (v23922_data + (v23918_data * v2368_bc));
               float v23928_data = ir10[3];
@@ -9430,7 +9620,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir10[14] = (v24019_data + (v23973_data * v2520_bc));
               float v24025_data = ir10[16];
               ir10[16] = (v24025_data + (v23973_data * v2526_bc));
-              float v24028_data = v32_g ? (glb_m8[(v109_lead + 1232)]) : (0.0f);
+              float v24028_data_pre = glb_m8[v32_g ? ((v109_lead + 1232)) : (0)];
+              float v24028_data = v32_g ? (v24028_data_pre) : (0.0f);
               float v24032_data = ir10[1];
               ir10[1] = (v24032_data + (v24028_data * v2478_bc));
               float v24038_data = ir10[3];
@@ -9468,7 +9659,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir10[14] = (v24129_data + (v24083_data * v2630_bc));
               float v24135_data = ir10[16];
               ir10[16] = (v24135_data + (v24083_data * v2636_bc));
-              float v24138_data = v32_g ? (glb_m8[(v109_lead + 1288)]) : (0.0f);
+              float v24138_data_pre = glb_m8[v32_g ? ((v109_lead + 1288)) : (0)];
+              float v24138_data = v32_g ? (v24138_data_pre) : (0.0f);
               float v24142_data = ir10[1];
               ir10[1] = (v24142_data + (v24138_data * v2588_bc));
               float v24148_data = ir10[3];
@@ -9506,7 +9698,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir10[14] = (v24239_data + (v24193_data * v2740_bc));
               float v24245_data = ir10[16];
               ir10[16] = (v24245_data + (v24193_data * v2746_bc));
-              float v24248_data = v32_g ? (glb_m8[(v109_lead + 1344)]) : (0.0f);
+              float v24248_data_pre = glb_m8[v32_g ? ((v109_lead + 1344)) : (0)];
+              float v24248_data = v32_g ? (v24248_data_pre) : (0.0f);
               float v24252_data = ir10[1];
               ir10[1] = (v24252_data + (v24248_data * v2698_bc));
               float v24258_data = ir10[3];
@@ -9544,7 +9737,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir10[14] = (v24349_data + (v24303_data * v2850_bc));
               float v24355_data = ir10[16];
               ir10[16] = (v24355_data + (v24303_data * v2856_bc));
-              float v24358_data = v32_g ? (glb_m8[(v109_lead + 1400)]) : (0.0f);
+              float v24358_data_pre = glb_m8[v32_g ? ((v109_lead + 1400)) : (0)];
+              float v24358_data = v32_g ? (v24358_data_pre) : (0.0f);
               float v24362_data = ir10[1];
               ir10[1] = (v24362_data + (v24358_data * v2808_bc));
               float v24368_data = ir10[3];
@@ -9582,7 +9776,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir10[14] = (v24459_data + (v24413_data * v2960_bc));
               float v24465_data = ir10[16];
               ir10[16] = (v24465_data + (v24413_data * v2966_bc));
-              float v24468_data = v32_g ? (glb_m8[(v109_lead + 1456)]) : (0.0f);
+              float v24468_data_pre = glb_m8[v32_g ? ((v109_lead + 1456)) : (0)];
+              float v24468_data = v32_g ? (v24468_data_pre) : (0.0f);
               float v24472_data = ir10[1];
               ir10[1] = (v24472_data + (v24468_data * v2918_bc));
               float v24478_data = ir10[3];
@@ -9620,7 +9815,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir10[14] = (v24569_data + (v24523_data * v3070_bc));
               float v24575_data = ir10[16];
               ir10[16] = (v24575_data + (v24523_data * v3076_bc));
-              float v24578_data = v32_g ? (glb_m8[(v109_lead + 1512)]) : (0.0f);
+              float v24578_data_pre = glb_m8[v32_g ? ((v109_lead + 1512)) : (0)];
+              float v24578_data = v32_g ? (v24578_data_pre) : (0.0f);
               float v24582_data = ir10[1];
               ir10[1] = (v24582_data + (v24578_data * v3028_bc));
               float v24588_data = ir10[3];
@@ -9658,7 +9854,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir10[14] = (v24679_data + (v24633_data * v3180_bc));
               float v24685_data = ir10[16];
               ir10[16] = (v24685_data + (v24633_data * v3186_bc));
-              float v24688_data = v32_g ? (glb_m8[(v109_lead + 1568)]) : (0.0f);
+              float v24688_data_pre = glb_m8[v32_g ? ((v109_lead + 1568)) : (0)];
+              float v24688_data = v32_g ? (v24688_data_pre) : (0.0f);
               float v24692_data = ir10[1];
               ir10[1] = (v24692_data + (v24688_data * v3138_bc));
               float v24698_data = ir10[3];
@@ -9696,7 +9893,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir10[14] = (v24789_data + (v24743_data * v3290_bc));
               float v24795_data = ir10[16];
               ir10[16] = (v24795_data + (v24743_data * v3296_bc));
-              float v24798_data = v32_g ? (glb_m8[(v109_lead + 1624)]) : (0.0f);
+              float v24798_data_pre = glb_m8[v32_g ? ((v109_lead + 1624)) : (0)];
+              float v24798_data = v32_g ? (v24798_data_pre) : (0.0f);
               float v24802_data = ir10[1];
               ir10[1] = (v24802_data + (v24798_data * v3248_bc));
               float v24808_data = ir10[3];
@@ -9734,7 +9932,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir10[14] = (v24899_data + (v24853_data * v3400_bc));
               float v24905_data = ir10[16];
               ir10[16] = (v24905_data + (v24853_data * v3406_bc));
-              float v24908_data = v32_g ? (glb_m8[(v109_lead + 1680)]) : (0.0f);
+              float v24908_data_pre = glb_m8[v32_g ? ((v109_lead + 1680)) : (0)];
+              float v24908_data = v32_g ? (v24908_data_pre) : (0.0f);
               float v24912_data = ir10[1];
               ir10[1] = (v24912_data + (v24908_data * v3358_bc));
               float v24918_data = ir10[3];
@@ -9772,7 +9971,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir10[14] = (v25009_data + (v24963_data * v3510_bc));
               float v25015_data = ir10[16];
               ir10[16] = (v25015_data + (v24963_data * v3516_bc));
-              float v25018_data = v32_g ? (glb_m8[(v109_lead + 1736)]) : (0.0f);
+              float v25018_data_pre = glb_m8[v32_g ? ((v109_lead + 1736)) : (0)];
+              float v25018_data = v32_g ? (v25018_data_pre) : (0.0f);
               float v25022_data = ir10[1];
               ir10[1] = (v25022_data + (v25018_data * v3468_bc));
               float v25028_data = ir10[3];
@@ -9810,7 +10010,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir10[14] = (v25119_data + (v25073_data * v3620_bc));
               float v25125_data = ir10[16];
               ir10[16] = (v25125_data + (v25073_data * v3626_bc));
-              float v25128_data = v32_g ? (glb_m8[(v109_lead + 1792)]) : (0.0f);
+              float v25128_data_pre = glb_m8[v32_g ? ((v109_lead + 1792)) : (0)];
+              float v25128_data = v32_g ? (v25128_data_pre) : (0.0f);
               float v25132_data = ir10[1];
               ir10[1] = (v25132_data + (v25128_data * v3578_bc));
               float v25138_data = ir10[3];
@@ -9848,7 +10049,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir10[14] = (v25229_data + (v25183_data * v3730_bc));
               float v25235_data = ir10[16];
               ir10[16] = (v25235_data + (v25183_data * v3736_bc));
-              float v25238_data = v32_g ? (glb_m8[(v109_lead + 1848)]) : (0.0f);
+              float v25238_data_pre = glb_m8[v32_g ? ((v109_lead + 1848)) : (0)];
+              float v25238_data = v32_g ? (v25238_data_pre) : (0.0f);
               float v25242_data = ir10[1];
               ir10[1] = (v25242_data + (v25238_data * v3688_bc));
               float v25248_data = ir10[3];
@@ -9886,7 +10088,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir10[14] = (v25339_data + (v25293_data * v3840_bc));
               float v25345_data = ir10[16];
               ir10[16] = (v25345_data + (v25293_data * v3846_bc));
-              float v25348_data = v32_g ? (glb_m8[(v109_lead + 1904)]) : (0.0f);
+              float v25348_data_pre = glb_m8[v32_g ? ((v109_lead + 1904)) : (0)];
+              float v25348_data = v32_g ? (v25348_data_pre) : (0.0f);
               float v25352_data = ir10[1];
               ir10[1] = (v25352_data + (v25348_data * v3798_bc));
               float v25358_data = ir10[3];
@@ -9924,7 +10127,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir10[14] = (v25449_data + (v25403_data * v3950_bc));
               float v25455_data = ir10[16];
               ir10[16] = (v25455_data + (v25403_data * v3956_bc));
-              float v25458_data = v32_g ? (glb_m8[(v109_lead + 1960)]) : (0.0f);
+              float v25458_data_pre = glb_m8[v32_g ? ((v109_lead + 1960)) : (0)];
+              float v25458_data = v32_g ? (v25458_data_pre) : (0.0f);
               float v25462_data = ir10[1];
               ir10[1] = (v25462_data + (v25458_data * v3908_bc));
               float v25468_data = ir10[3];
@@ -9962,7 +10166,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir10[14] = (v25559_data + (v25513_data * v4060_bc));
               float v25565_data = ir10[16];
               ir10[16] = (v25565_data + (v25513_data * v4066_bc));
-              float v25568_data = v32_g ? (glb_m8[(v109_lead + 2016)]) : (0.0f);
+              float v25568_data_pre = glb_m8[v32_g ? ((v109_lead + 2016)) : (0)];
+              float v25568_data = v32_g ? (v25568_data_pre) : (0.0f);
               float v25572_data = ir10[1];
               ir10[1] = (v25572_data + (v25568_data * v4018_bc));
               float v25578_data = ir10[3];
@@ -10000,7 +10205,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir10[14] = (v25669_data + (v25623_data * v4170_bc));
               float v25675_data = ir10[16];
               ir10[16] = (v25675_data + (v25623_data * v4176_bc));
-              float v25678_data = v32_g ? (glb_m8[(v109_lead + 2072)]) : (0.0f);
+              float v25678_data_pre = glb_m8[v32_g ? ((v109_lead + 2072)) : (0)];
+              float v25678_data = v32_g ? (v25678_data_pre) : (0.0f);
               float v25682_data = ir10[1];
               ir10[1] = (v25682_data + (v25678_data * v4128_bc));
               float v25688_data = ir10[3];
@@ -10038,7 +10244,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir10[14] = (v25779_data + (v25733_data * v4280_bc));
               float v25785_data = ir10[16];
               ir10[16] = (v25785_data + (v25733_data * v4286_bc));
-              float v25788_data = v32_g ? (glb_m8[(v109_lead + 2128)]) : (0.0f);
+              float v25788_data_pre = glb_m8[v32_g ? ((v109_lead + 2128)) : (0)];
+              float v25788_data = v32_g ? (v25788_data_pre) : (0.0f);
               float v25792_data = ir10[1];
               ir10[1] = (v25792_data + (v25788_data * v4238_bc));
               float v25798_data = ir10[3];
@@ -10076,7 +10283,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir10[14] = (v25889_data + (v25843_data * v4390_bc));
               float v25895_data = ir10[16];
               ir10[16] = (v25895_data + (v25843_data * v4396_bc));
-              float v25898_data = v32_g ? (glb_m8[(v109_lead + 2184)]) : (0.0f);
+              float v25898_data_pre = glb_m8[v32_g ? ((v109_lead + 2184)) : (0)];
+              float v25898_data = v32_g ? (v25898_data_pre) : (0.0f);
               float v25902_data = ir10[1];
               ir10[1] = (v25902_data + (v25898_data * v4348_bc));
               float v25908_data = ir10[3];
@@ -10114,7 +10322,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir10[14] = (v25999_data + (v25953_data * v4500_bc));
               float v26005_data = ir10[16];
               ir10[16] = (v26005_data + (v25953_data * v4506_bc));
-              float v26008_data = v32_g ? (glb_m8[(v109_lead + 2240)]) : (0.0f);
+              float v26008_data_pre = glb_m8[v32_g ? ((v109_lead + 2240)) : (0)];
+              float v26008_data = v32_g ? (v26008_data_pre) : (0.0f);
               float v26012_data = ir10[1];
               ir10[1] = (v26012_data + (v26008_data * v4458_bc));
               float v26018_data = ir10[3];
@@ -10152,7 +10361,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir10[14] = (v26109_data + (v26063_data * v4610_bc));
               float v26115_data = ir10[16];
               ir10[16] = (v26115_data + (v26063_data * v4616_bc));
-              float v26118_data = v32_g ? (glb_m8[(v109_lead + 2296)]) : (0.0f);
+              float v26118_data_pre = glb_m8[v32_g ? ((v109_lead + 2296)) : (0)];
+              float v26118_data = v32_g ? (v26118_data_pre) : (0.0f);
               float v26122_data = ir10[1];
               ir10[1] = (v26122_data + (v26118_data * v4568_bc));
               float v26128_data = ir10[3];
@@ -10190,7 +10400,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir10[14] = (v26219_data + (v26173_data * v4720_bc));
               float v26225_data = ir10[16];
               ir10[16] = (v26225_data + (v26173_data * v4726_bc));
-              float v26228_data = v32_g ? (glb_m8[(v109_lead + 2352)]) : (0.0f);
+              float v26228_data_pre = glb_m8[v32_g ? ((v109_lead + 2352)) : (0)];
+              float v26228_data = v32_g ? (v26228_data_pre) : (0.0f);
               float v26232_data = ir10[1];
               ir10[1] = (v26232_data + (v26228_data * v4678_bc));
               float v26238_data = ir10[3];
@@ -10228,7 +10439,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir10[14] = (v26329_data + (v26283_data * v4830_bc));
               float v26335_data = ir10[16];
               ir10[16] = (v26335_data + (v26283_data * v4836_bc));
-              float v26338_data = v32_g ? (glb_m8[(v109_lead + 2408)]) : (0.0f);
+              float v26338_data_pre = glb_m8[v32_g ? ((v109_lead + 2408)) : (0)];
+              float v26338_data = v32_g ? (v26338_data_pre) : (0.0f);
               float v26342_data = ir10[1];
               ir10[1] = (v26342_data + (v26338_data * v4788_bc));
               float v26348_data = ir10[3];
@@ -10266,7 +10478,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir10[14] = (v26439_data + (v26393_data * v4940_bc));
               float v26445_data = ir10[16];
               ir10[16] = (v26445_data + (v26393_data * v4946_bc));
-              float v26448_data = v32_g ? (glb_m8[(v109_lead + 2464)]) : (0.0f);
+              float v26448_data_pre = glb_m8[v32_g ? ((v109_lead + 2464)) : (0)];
+              float v26448_data = v32_g ? (v26448_data_pre) : (0.0f);
               float v26452_data = ir10[1];
               ir10[1] = (v26452_data + (v26448_data * v4898_bc));
               float v26458_data = ir10[3];
@@ -10304,7 +10517,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir10[14] = (v26549_data + (v26503_data * v5050_bc));
               float v26555_data = ir10[16];
               ir10[16] = (v26555_data + (v26503_data * v5056_bc));
-              float v26558_data = v32_g ? (glb_m8[(v109_lead + 2520)]) : (0.0f);
+              float v26558_data_pre = glb_m8[v32_g ? ((v109_lead + 2520)) : (0)];
+              float v26558_data = v32_g ? (v26558_data_pre) : (0.0f);
               float v26562_data = ir10[1];
               ir10[1] = (v26562_data + (v26558_data * v5008_bc));
               float v26568_data = ir10[3];
@@ -10342,7 +10556,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir10[14] = (v26659_data + (v26613_data * v5160_bc));
               float v26665_data = ir10[16];
               ir10[16] = (v26665_data + (v26613_data * v5166_bc));
-              float v26668_data = v32_g ? (glb_m8[(v109_lead + 2576)]) : (0.0f);
+              float v26668_data_pre = glb_m8[v32_g ? ((v109_lead + 2576)) : (0)];
+              float v26668_data = v32_g ? (v26668_data_pre) : (0.0f);
               float v26672_data = ir10[1];
               ir10[1] = (v26672_data + (v26668_data * v5118_bc));
               float v26678_data = ir10[3];
@@ -10380,7 +10595,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir10[14] = (v26769_data + (v26723_data * v5270_bc));
               float v26775_data = ir10[16];
               ir10[16] = (v26775_data + (v26723_data * v5276_bc));
-              float v26778_data = v32_g ? (glb_m8[(v109_lead + 2632)]) : (0.0f);
+              float v26778_data_pre = glb_m8[v32_g ? ((v109_lead + 2632)) : (0)];
+              float v26778_data = v32_g ? (v26778_data_pre) : (0.0f);
               float v26782_data = ir10[1];
               ir10[1] = (v26782_data + (v26778_data * v5228_bc));
               float v26788_data = ir10[3];
@@ -10418,7 +10634,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir10[14] = (v26879_data + (v26833_data * v5380_bc));
               float v26885_data = ir10[16];
               ir10[16] = (v26885_data + (v26833_data * v5386_bc));
-              float v26888_data = v32_g ? (glb_m8[(v109_lead + 2688)]) : (0.0f);
+              float v26888_data_pre = glb_m8[v32_g ? ((v109_lead + 2688)) : (0)];
+              float v26888_data = v32_g ? (v26888_data_pre) : (0.0f);
               float v26892_data = ir10[1];
               ir10[1] = (v26892_data + (v26888_data * v5338_bc));
               float v26898_data = ir10[3];
@@ -10456,7 +10673,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir10[14] = (v26989_data + (v26943_data * v5490_bc));
               float v26995_data = ir10[16];
               ir10[16] = (v26995_data + (v26943_data * v5496_bc));
-              float v26998_data = v32_g ? (glb_m8[(v109_lead + 2744)]) : (0.0f);
+              float v26998_data_pre = glb_m8[v32_g ? ((v109_lead + 2744)) : (0)];
+              float v26998_data = v32_g ? (v26998_data_pre) : (0.0f);
               float v27002_data = ir10[1];
               ir10[1] = (v27002_data + (v26998_data * v5448_bc));
               float v27008_data = ir10[3];
@@ -10494,7 +10712,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir10[14] = (v27099_data + (v27053_data * v5600_bc));
               float v27105_data = ir10[16];
               ir10[16] = (v27105_data + (v27053_data * v5606_bc));
-              float v27108_data = v32_g ? (glb_m8[(v109_lead + 2800)]) : (0.0f);
+              float v27108_data_pre = glb_m8[v32_g ? ((v109_lead + 2800)) : (0)];
+              float v27108_data = v32_g ? (v27108_data_pre) : (0.0f);
               float v27112_data = ir10[1];
               ir10[1] = (v27112_data + (v27108_data * v5558_bc));
               float v27118_data = ir10[3];
@@ -10532,7 +10751,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir10[14] = (v27209_data + (v27163_data * v5710_bc));
               float v27215_data = ir10[16];
               ir10[16] = (v27215_data + (v27163_data * v5716_bc));
-              float v27218_data = v32_g ? (glb_m8[(v109_lead + 2856)]) : (0.0f);
+              float v27218_data_pre = glb_m8[v32_g ? ((v109_lead + 2856)) : (0)];
+              float v27218_data = v32_g ? (v27218_data_pre) : (0.0f);
               float v27222_data = ir10[1];
               ir10[1] = (v27222_data + (v27218_data * v5668_bc));
               float v27228_data = ir10[3];
@@ -10570,7 +10790,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir10[14] = (v27319_data + (v27273_data * v5820_bc));
               float v27325_data = ir10[16];
               ir10[16] = (v27325_data + (v27273_data * v5826_bc));
-              float v27328_data = v32_g ? (glb_m8[(v109_lead + 2912)]) : (0.0f);
+              float v27328_data_pre = glb_m8[v32_g ? ((v109_lead + 2912)) : (0)];
+              float v27328_data = v32_g ? (v27328_data_pre) : (0.0f);
               float v27332_data = ir10[1];
               ir10[1] = (v27332_data + (v27328_data * v5778_bc));
               float v27338_data = ir10[3];
@@ -10608,7 +10829,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir10[14] = (v27429_data + (v27383_data * v5930_bc));
               float v27435_data = ir10[16];
               ir10[16] = (v27435_data + (v27383_data * v5936_bc));
-              float v27438_data = v32_g ? (glb_m8[(v109_lead + 2968)]) : (0.0f);
+              float v27438_data_pre = glb_m8[v32_g ? ((v109_lead + 2968)) : (0)];
+              float v27438_data = v32_g ? (v27438_data_pre) : (0.0f);
               float v27442_data = ir10[1];
               ir10[1] = (v27442_data + (v27438_data * v5888_bc));
               float v27448_data = ir10[3];
@@ -10646,7 +10868,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir10[14] = (v27539_data + (v27493_data * v6040_bc));
               float v27545_data = ir10[16];
               ir10[16] = (v27545_data + (v27493_data * v6046_bc));
-              float v27548_data = v32_g ? (glb_m8[(v109_lead + 3024)]) : (0.0f);
+              float v27548_data_pre = glb_m8[v32_g ? ((v109_lead + 3024)) : (0)];
+              float v27548_data = v32_g ? (v27548_data_pre) : (0.0f);
               float v27552_data = ir10[1];
               ir10[1] = (v27552_data + (v27548_data * v5998_bc));
               float v27558_data = ir10[3];
@@ -10684,7 +10907,8 @@ inline void kernel_kernel_b50de12ea6113f6c(sycl::queue *stream, sycl::range<3> g
               ir10[14] = (v27649_data + (v27603_data * v6150_bc));
               float v27655_data = ir10[16];
               ir10[16] = (v27655_data + (v27603_data * v6156_bc));
-              float v27658_data = v32_g ? (glb_m8[(v109_lead + 3080)]) : (0.0f);
+              float v27658_data_pre = glb_m8[v32_g ? ((v109_lead + 3080)) : (0)];
+              float v27658_data = v32_g ? (v27658_data_pre) : (0.0f);
               float v27662_data = ir10[1];
               ir10[1] = (v27662_data + (v27658_data * v6108_bc));
               float v27668_data = ir10[3];
