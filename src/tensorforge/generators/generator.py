@@ -106,6 +106,17 @@ class AbstractThreadBlockPolicy:
     self._barrier_group = group
 
 
+def _explicit_simd_lowering(context) -> bool:
+  """Whether this context lowers to an explicit vector."""
+  return bool(getattr(context.get_vm().get_lexic(), 'simd_mode', False))
+
+
+#: Work-items a block holds under the explicit-vector lowering when it
+#: preloads operators into shared memory.  Measured, not a hardware
+#: constant: see `RegmaxBlockPolicy.get_num_mults_per_block`.
+_ESIMD_WORK_ITEMS = 32
+
+
 class RegmaxBlockPolicy(AbstractThreadBlockPolicy):
   def __init__(self, context, global_mem, mem_size_per_mult, num_threads,
                lead_width=1):
@@ -154,6 +165,25 @@ class RegmaxBlockPolicy(AbstractThreadBlockPolicy):
     vendor = self._context.get_vm().get_hw_descr().vendor
     threads = 128 if vendor == 'nvidia' and self._global_mem == 0 else 256
     max_thread_mults = threads // lanes or 256 // lanes
+    # Under the explicit-vector lowering one work-item *is* a thread and
+    # holds the whole vector, so `threads // lanes` counts lanes where it
+    # means work-items and caps the block at eight multiplications.  That
+    # matters only because the preloaded operators are one copy the block's
+    # multiplications share (see the paragraph above): eight amortise it
+    # badly, and the measurement is steep.  pvc, `elastic-linearck` order 6,
+    # seven kernels, against the SPMD default -- 8: 0.73x, 16: 1.04x,
+    # 32: 1.22x, 64: 1.22x, so 32 and saturated by 64.  With a narrower
+    # vector as well (`lanes_per_mult=16`, which the tuner may pick) the two
+    # compound: 32 lanes at 32 mults is 1.07x, 16 lanes at 16 is 1.04x, and
+    # 16 at 32 is 1.22x.
+    #
+    # Only where the block preloads, and that is not a caution but the
+    # measurement: with no shared copy the same three block sizes are
+    # 0.36x, 0.36x and 0.38x -- more work-items each staging their own copy
+    # buy nothing.
+    if self._global_mem and getattr(
+        self._context.get_vm().get_lexic(), 'simd_mode', False):
+      max_thread_mults = max(max_thread_mults, _ESIMD_WORK_ITEMS)
     if self._mem_per_mult == 0:
       mults = max_thread_mults
     else:
@@ -471,8 +501,26 @@ class Generator:
     # The vendor rule is the default and not the decision; it is carried by the
     # option's declaration, and a caller asking either way overrides it there,
     # so that a sweep can price both.
+    # Under the explicit vector a preload and `prepare_operands` are two
+    # answers to the same question -- how a batch-constant operator reaches
+    # the instruction that reads it -- and the preload wins, leaving the
+    # preparation inert.  That would be tolerable if preparing were free, but
+    # it is opt-in and its cost is the caller's: a host that packs an operator
+    # the kernel never reads has paid for nothing.  So there an asked-for
+    # preparation beats a *default* preload, and only an asked-for preload
+    # beats it back.
+    #
+    # Only there.  On AMD the two compose rather than compete -- a prepared
+    # operator is read out of shared memory four steps at a time
+    # (`tests/test_amd_quads`) -- so the same subtraction would take away a
+    # preload that is doing its job, and on a target where nobody has measured
+    # the alternative.
+    asked = context.get_asked_options().asked()
     prefer_preload = (context.get_user_options().preload_globals
-                      and not prefer_launchcontrol)
+                      and not prefer_launchcontrol
+                      and not (_explicit_simd_lowering(context)
+                               and context.get_user_options().prepare_operands
+                               and 'preload_globals' not in asked))
 
     self._persistent_threading = prefer_persistent
     self._preload_globals = prefer_preload

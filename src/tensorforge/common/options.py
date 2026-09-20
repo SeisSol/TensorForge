@@ -131,9 +131,21 @@ class Opt:
     #: every kernel in the build.
     self.codegen = codegen
 
-  def base(self, hw) -> Any:
-    """The value for this hardware when nobody asked for one."""
-    return self.default if self.rule is None else self.rule(hw)
+  def base(self, hw, explicit_simd: bool = False) -> Any:
+    """The value for this target when nobody asked for one.
+
+    `explicit_simd` because a default is not always a fact about the hardware:
+    the same Intel device runs both lowerings, and an operand staged once per
+    block is worth 1.71x under the explicit vector and 0.86x under SPMD.  A
+    rule that sees only the vendor has to answer both with one number.
+    """
+    if self.rule is None:
+      return self.default
+    try:
+      return self.rule(hw, explicit_simd)
+    except TypeError:
+      # A rule written before the second argument existed.
+      return self.rule(hw)
 
   def check(self, value: Any) -> None:
     if value is UNSET:
@@ -225,14 +237,17 @@ class Options:
   def asked(self) -> Dict[str, Any]:
     return dict(self._asked)
 
-  def resolve(self, hw) -> 'ResolvedOptions':
-    """Settle every declared option against this hardware descriptor."""
+  def resolve(self, hw, explicit_simd: bool = False) -> 'ResolvedOptions':
+    """Settle every declared option against this target.
+
+    `explicit_simd` is the lowering, which some defaults depend on -- see
+    `Opt.base`."""
     from_env = _from_environment()
     asked = self.asked()
     values: Dict[str, Any] = {}
     delta: Dict[str, Any] = {}
     for name, opt in _REGISTRY.items():
-      base = opt.base(hw)
+      base = opt.base(hw, explicit_simd)
       if name in asked:
         value = asked[name]
       elif name in from_env:
@@ -442,7 +457,8 @@ declare('hint_outputs',
             'destination but transfers (a `+=` destination\'s own preload).')
 
 declare('preload_globals',
-        rule=lambda hw: hw.vendor in ('amd',),
+        rule=lambda hw, simd: (hw.vendor in ('amd',)
+                               or (hw.vendor == 'intel' and simd)),
         parse=parse_bool,
         doc='Stage every `Addressing.NONE` operand into shared memory once per '
             'block, in the section prologue, instead of reading it from global '
@@ -452,7 +468,16 @@ declare('preload_globals',
             'NVIDIA path -- including the tensor-core one, where a batch-constant '
             'operand would also carry a batch-constant *conversion* -- has never '
             'been compared against its own alternative.  A benchmark cannot ask '
-            'a question the generator cannot be asked.')
+            'a question the generator cannot be asked.\n'
+            'On Intel it depends on the lowering rather than the vendor, which '
+            'is why the rule takes one.  Under the explicit vector every '
+            'work-item holds its own copy of an operator, so staging it once '
+            'per block is 1.71x over the twenty elastic kernels -- fifteen of '
+            'them faster, up to 6.4x, and the five that lose give up 1 to 9 %.  '
+            'Under SPMD the operators are read in place and the same switch is '
+            '0.86x, ranging from 0.35x to 1.41x.  Both stay in the tuner\'s '
+            'space, so the five are recoverable and the default is only where '
+            'the walk starts.')
 
 declare('split_predicated_load',
         rule=lambda hw: hw.vendor == 'intel',

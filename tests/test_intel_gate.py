@@ -354,7 +354,14 @@ def test_a_prepared_operator_is_read_in_runs():
     runs = [len(re.findall(m + r'_run\d+;', src))
             for m in set(re.findall(r'(glb_m\d+)_run\d+;', src))]
     assert sorted(runs) == [56] * 4
-    plain, _ = _prepared('local_flux', lanes_per_mult=16)
+    # The control holds the preload fixed, because it is what this compares
+    # against: an unprepared operator *read from global memory*.  Under the
+    # explicit vector a preload is the default (`preload_globals`), and one
+    # staged into shared memory is already cheap to read -- against that
+    # baseline preparing wins nothing, and the assertion would be measuring
+    # two changes at once.
+    plain, _ = _prepared('local_flux', lanes_per_mult=16,
+                         preload_globals=False)
     assert 3 * src.count('copy_from') < plain.count('copy_from')
 
 
@@ -410,7 +417,8 @@ def test_every_reader_of_an_operator_shares_its_order():
     for op in operators:
         assert op.slot_major is not None, op.alias
         assert list(op.get_bbox().lower()) == [0, 1]
-    plain, _ = generate()
+    # Preload held fixed: see `test_a_prepared_operator_is_read_in_runs`.
+    plain, _ = generate(preload_globals=False)
     assert 3 * src.count('copy_from') < plain.count('copy_from')
 
 

@@ -282,8 +282,16 @@ def simple_space(descrs, context: Context) -> List[Knob]:
     elsewhere it is two scalar FMAs, and at 35 rows on GB200 it was 70 %
     slower.  Merging where something repeats, and rolling by the largest
     divisor up to 32.  Not `prepare_operands`: the host packs for it.  Not
-    `preload_globals` or the matrix path, whose defaults are per vendor and
-    not yet measured.
+    the matrix path, whose default is per vendor and not yet measured.
+
+    `preload_globals` on Intel, where it is now measured and where the answer
+    is per kernel rather than per vendor.  Under the explicit-vector lowering
+    it is the difference between 0.31x and 0.74x of the SPMD default over the
+    order-6 elastic kernels -- the operators are one shared copy there instead
+    of one per work-item -- and up to 1.22x once the block holds the
+    work-items to amortise it.  Under SPMD it is 0.86x on average and ranges
+    from 0.35x to 1.41x, which is exactly a knob and not a default.  Elsewhere
+    the vendor default stands: nobody has taken the measurement.
     """
     from tensorforge.common.basic_types import Datatype
     from tensorforge.generators.descriptions import ElementwiseDescr
@@ -350,6 +358,29 @@ def simple_space(descrs, context: Context) -> List[Knob]:
     lengths = contraction_lengths(descrs)
     if cap and lengths and max(lengths) > cap:
         knobs.append(Knob('k_unroll_max', lambda c: (0,)))
+    # Staging the batch-constant operators once per block, where a measurement
+    # says both answers are live.  Only with something to stage: with no
+    # `Addressing.NONE` operand the option changes nothing and the trial is a
+    # duplicate build.
+    #
+    # Not under the explicit vector, where it is the default and worth 1.71x.
+    # A tuned build is *worse* there than the untuned one -- 0.85x of the SPMD
+    # default against 1.14x -- so the walk gives away more than it finds, and
+    # what it gives away is not this: taking the knob out of the space moved
+    # the tuned figure from 0.88x to 0.85x and the untuned one not at all.
+    # The damage is in the other knobs under this lowering, the lane count
+    # above all: the walk loses `o6d:derivative` 59.8 -> 112.0 ns an element
+    # and `o4s:derivative` 4.5 -> 10.5, which is the size and the direction of
+    # the vector-width difference measured on the same kernels.
+    #
+    # So this is a stay of execution and not a verdict on the option: with
+    # nothing to gain here it is one build per kernel spent on a decision the
+    # default already makes correctly.  It comes back when a tuned ESIMD build
+    # beats its own default, which is a measurement and not an opinion.
+    if (hw.vendor == 'intel'
+            and not getattr(context.get_vm().get_lexic(), 'simd_mode', False)
+            and any(t.addressing == Addressing.NONE for t in _tensors(descrs))):
+        knobs.append(Knob('preload_globals', lambda c: (False, True)))
     # Reading an array temporary out of its producer's register image trades
     # a shared buffer for registers that stay live to the last reader, and
     # which of the two a kernel wants is measured rather than argued: over 70
@@ -465,14 +496,32 @@ def _geometry(result: Build) -> Tuple[int, int, int]:
 def static_score(result: Build):
     """What the build alone says, per multiplication rather than per block.
 
-    Past the register file first (`_over_budget`): a build that spills is
-    slower than any difference the other keys can see.  Then multiplications
-    resident per SM -- blocks times the multiplications a block holds, since
-    eight lanes put four times as many in a block as 32.
-    Then the least clocks one SM needs per multiplication (`analysis.pipeline`):
-    the busiest pipe at its peak rate, from the statements the emitter counted
-    by what they occupy -- where the build counted nothing, the warp issue
-    slots of the arithmetic written out, as before.
+    Past the register file first (`_over_budget`), but only as *whether* and
+    not by how much: a build that spills is worse than one that does not, and
+    past that the size of the overshoot is not a better predictor than the
+    clocks it costs.  So the overshoot is also priced into the issue estimate
+    (`_least_cycles(spill_bytes=...)`, which counts a spill as the store, the
+    load back and the bytes of both) and the two keys say different things --
+    the first that it spills at all, the second what that is worth against
+    everything else.
+
+    Ranking the overshoot by size ahead of the issue estimate is what the
+    measurement removed (2026-09-20).  Over twenty elastic kernels on pvc with
+    the lane count free it is a wash -- 15 of 20 picks against 14, geomean 1.079
+    against 1.089 -- and over the ten where `preload_globals` is the question it
+    is not: 3 of 10 against 8, geomean 1.822 against 1.035.  Staging the
+    operators into shared memory moves bytes out of the register file, which is
+    exactly the quantity the old first key sorted on, so it decided that axis by
+    itself and always the same way.  Taken together, 1.285 against 1.071.  The
+    same shape wins on the compiled scorer's own corpus (`~/tf/beast/spillrank.py`,
+    72 workloads on sm_90 and sm_80): the cliff *and* the penalty, at 9.6 %
+    mean against 10.1 % for the cliff alone and 9.7 % for the penalty alone.
+    A cliff that keeps its size but moves behind the issue estimate changes
+    nothing on either axis (15 of 20, 3 of 10), so it is the precedence and not
+    the granularity that was wrong.
+
+    Then multiplications resident per SM -- blocks times the multiplications a
+    block holds, since eight lanes put four times as many in a block as 32.
 
     Only then how far the body is past the instruction cache
     (`_icache_over`), and that is where measuring moved it (2026-09-17,
@@ -503,8 +552,9 @@ def static_score(result: Build):
     if blocks is not None:
         mults = gen.launch_config().mults_per_block
         resident = min(resident, blocks * mults)
-    issue = _least_cycles(gen, lanes, wave)
-    return (_granule(_over_budget(result)), -resident, issue,
+    over = _over_budget(result)
+    issue = _least_cycles(gen, lanes, wave, spill_bytes=float(over))
+    return (over > 0, issue, -resident,
             _icache_over(result), _granule(gen.peak_pressure or 0),
             len(gen.get_kernel() or ''))
 

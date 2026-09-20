@@ -24,7 +24,8 @@ class Context:
     #: name the first while generation reads the second.
     self._asked_options: Options = Options() if options is None else options
     self._options: ResolvedOptions = self._asked_options.resolve(
-        self._vm.get_hw_descr())
+        self._vm.get_hw_descr(),
+        getattr(self._vm.get_lexic(), 'simd_mode', False))
 
     #: Whether every emitted body should report its peak register footprint.
     #:
