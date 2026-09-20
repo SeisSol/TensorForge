@@ -351,12 +351,14 @@ class Tensor:
 
         What a caller puts into its buffer, in the order the kernel addresses
         it: the bounding box in F-order where the tensor is stored dense, the
-        order of `storage_map` where not.  `None` without numbers, and for an
-        operand stored prepared (`storage_parts`, a storage order), whose
-        slots hold something other than a cell's value.
+        order of `storage_map` where not.  A slot with no source cell reads
+        zero, as `storage_map` says it does.
+
+        `None` without numbers, and where an element is spread over several
+        slots (`storage_parts`): what those slots hold is arithmetic on a
+        cell's value rather than the value, and nothing here does it.
         """
-        if (not self.has_values() or self.storage_parts != 1
-                or self._storage_order is not None):
+        if not self.has_values() or self.storage_parts != 1:
             return None
         box = tuple(int(extent) for extent in self.get_actual_shape())
         lower = tuple(int(bound) for bound in self.bbox.lower())

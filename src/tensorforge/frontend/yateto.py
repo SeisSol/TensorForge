@@ -992,6 +992,14 @@ class KernelEmitter:
 
     routineCache.addRoutine(routine_name, TensorForgeWriter(tensorforge_generator, context.get_vm().get_headers()))
 
+  def tensors(self):
+    """The operands this kernel was built from, by the name it was given them.
+
+    Read after `generate`, when what the instructions decided about them is
+    on them.
+    """
+    return self._cache
+
   def _gen_call_site(self, generator):
     mat_name_map = {}
     offset_name_map = {}
@@ -1169,6 +1177,36 @@ class YatetoFrontend:
       if self._recorded is not None:
         self._recorded.descrs, _ = self._terms.result()
     return self._terms.add_operation(dest, ops, target, permute, add)
+
+  def layout_offerings(self):
+    """How this kernel wants its batch-constant operands held in memory.
+
+    Asked after `generate`, which is when the instructions have decided.
+    Where one of them settled on a storage order -- a fragment image, a
+    vectorisable run of slots -- the operand is no longer the bounding box in
+    F-order, and whoever fills the buffer has to write it the way the kernel
+    reads it. So the numbers go back in that order, and what stores them
+    stores them as they come.
+
+    Silent about an operand whose elements are spread over several slots:
+    what those slots hold is arithmetic on a cell's value, and until
+    something computes it there is nothing to offer.
+    """
+    if self._emitter is None:
+      return {}
+    offerings = {}
+    for name, tensor in self._emitter.tensors().items():
+      if tensor.addressing is not Addressing.NONE:
+        continue
+      if getattr(tensor, 'storage_order', None) is None:
+        continue
+      values = tensor.storage_values()
+      if values is None:
+        continue
+      offerings[name] = {'data': [float(v) for v in values],
+                         'parts': int(tensor.storage_parts),
+                         'planar': bool(tensor.storage_planar)}
+    return offerings
 
   def generate(self, cpp, cache):
     if self._emitter is None and self._terms is not None:
