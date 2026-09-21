@@ -313,13 +313,42 @@ def simple_space(descrs, context: Context) -> List[Knob]:
     if hw.vendor == 'intel' and not getattr(context.get_vm().get_lexic(),
                                             'simd_mode', False):
         floor = max(floor, getattr(hw, 'vec_unit_length', 1))
-    geometries = []
-    t = base.num_threads
-    while t >= floor:
-        geometries.append(LaneConfig(t, base.num_active_threads, base.lead_width))
-        if t & (t - 1):
-            break
-        t //= 2
+    # Under the explicit vector, the deduced width alone.  The scorers do not
+    # rank these: over the twenty elastic kernels on pvc, against the fastest
+    # of 8, 16 and 32, the implemented order picks the best 3 times at a
+    # geomean loss of 1.404 -- exactly what "always take the narrowest" does,
+    # and so does every variant tried (issue alone, issue without the spill
+    # price, the cliff or the register footprint in front of it).  Taking the
+    # widest every time, which knows nothing, is 11 of 20 at 1.127.
+    #
+    # A floor at the vector unit looks better on that evaluation (7 of 20 at
+    # 1.097) and is worse on the clock: tuned, it runs at 0.99x of the SPMD
+    # default where pinning the deduced width is 1.14x, against 1.09x untuned
+    # and 3 % of run-to-run noise.  The evaluation weighs one axis with
+    # everything else held still; the walk turns `k_roll`, `k_width` and
+    # `register_temporaries` around whatever width it took first, and a bad
+    # first step is not a bad step alone.  So the axis goes, not its lower end.
+    #
+    # The widths differ by spilling and the modelled footprint cannot see it:
+    # `o6d:localFluxAll` is 79396 B at sixteen lanes and 79760 at 32, half a
+    # percent apart, while the build spills 0 times and 1376.  What would
+    # replace this is the compiled scorer's own figure.  What would earn the
+    # narrow end back is packing: a `simd` of eight on a sixteen-wide unit uses
+    # half of it, and four such multiplications side by side in one 32-wide
+    # register would be the same work at full occupancy.  Nothing does either
+    # today.
+    if getattr(context.get_vm().get_lexic(), 'simd_mode', False):
+        geometries = [LaneConfig(base.num_threads, base.num_active_threads,
+                                 base.lead_width)]
+    else:
+        geometries = []
+        t = base.num_threads
+        while t >= floor:
+            geometries.append(LaneConfig(t, base.num_active_threads,
+                                         base.lead_width))
+            if t & (t - 1):
+                break
+            t //= 2
     backend = getattr(context.get_vm().get_lexic(), '_backend', None)
     if (hw.has_packed_fp32_fma() and context.fp_type == Datatype.F32
             and backend in ('cuda', 'hip') and rows % 2 == 0
@@ -808,6 +837,9 @@ def parse_igc(log: str) -> Resources:
 #: `spill_size:      13888` in the binary's `.ze_info`, which is the only
 #: place IGC states it for a SPMD build.
 _ZEINFO_SPILL = re.compile(rb'spill_size:\s*(\d+)')
+#: The note itself, to tell "it says no spilling" from "it does not
+#: say anything because it is not there".
+_ZEINFO_NOTE = re.compile(rb'ze_info|payload_arguments|execution_env')
 
 
 def _zeinfo_spill(path: str) -> Optional[int]:
@@ -824,14 +856,29 @@ def _zeinfo_spill(path: str) -> Optional[int]:
     Read as bytes rather than parsed as ELF: the note is text in a section
     whose name has moved between releases, and one regular expression over
     the file is both shorter and harder to break.
+
+    Three answers and not two.  No object: nothing is known.  An object whose
+    note is there and says no `spill_size`: no spilling, which is what the
+    note not mentioning it means.  An object with no note at all: nothing is
+    known either, and that used to be read as zero.  The explicit-SIMD build
+    of `elastic-o6d:localFluxAll` at 32 lanes is the third case -- no
+    `.ze_info` section, the string nowhere in the file -- while its console
+    says 10688 bytes and its ISA carries 1376 spill messages.  Read as zero,
+    it let the caller's "the object's figure decides" overrule a correct
+    console reading with a number nobody measured, and every explicit-SIMD
+    candidate came back spill-free.
     """
     try:
         with open(path, 'rb') as f:
             blob = f.read()
     except OSError:
         return None                    # no object: nothing is known
-    return max((int(m.group(1)) for m in _ZEINFO_SPILL.finditer(blob)),
-               default=0)
+    figures = [int(m.group(1)) for m in _ZEINFO_SPILL.finditer(blob)]
+    if figures:
+        return max(figures)            # it says so
+    if _ZEINFO_NOTE.search(blob):
+        return 0                       # the note is there and does not
+    return None                        # no note: nothing is known either
 
 
 def parse_amdgpu(log: str) -> Optional[Resources]:

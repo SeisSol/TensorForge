@@ -288,8 +288,15 @@ def test_intel_states_its_spilling_in_the_binary_and_not_on_the_console(tmp_path
     obj.write_bytes(b'\x7fELF' + b'...' + b'  spill_size:      13888\n' + b'...')
     assert tuning._zeinfo_spill(str(obj)) == 13888
     quiet = tmp_path / 'q.so'
-    quiet.write_bytes(b'\x7fELF nothing to say')
-    assert tuning._zeinfo_spill(str(quiet)) == 0
+    quiet.write_bytes(b'\x7fELF ze_info: kernels: nothing to say')
+    assert tuning._zeinfo_spill(str(quiet)) == 0, (
+        'a note that does not mention spilling is a note saying there is none')
+    bare = tmp_path / 'b.so'
+    bare.write_bytes(b'\x7fELF nothing to say')
+    assert tuning._zeinfo_spill(str(bare)) is None, (
+        'no note is not the same answer as a note saying nothing: the '
+        'explicit-SIMD `elastic-o6d:localFluxAll` at 32 lanes links without '
+        'one and spills 10688 bytes by its own console')
     assert tuning._zeinfo_spill(str(tmp_path / 'missing.so')) is None, (
         'no object is not the same answer as no spilling')
     # and the console parser still answers for what it can see
