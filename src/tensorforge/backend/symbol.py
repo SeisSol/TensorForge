@@ -943,9 +943,22 @@ class LeadLoop:
     return hi - base, elem_lo
 
   def _full(self, lo) -> bool:
-    """Is this a tail the caller let compute on every lane?  Never a head:
-    the lanes before a window's start are always rows of its own tensor."""
+    """Is this a tail the caller let compute on every lane?"""
     return self.full_lane and not lo and self.width == 1
+
+  def _full_head(self, lo) -> bool:
+    """The same for a head: every lane computes, and `LeadIndex.first` keeps
+    the memory accesses off the lanes before the window, the way `valid`
+    keeps them off the lanes past its end.
+
+    A head is the more expensive of the two to narrow.  A ragged tail loses
+    the lanes it does not use; a head loses those *and* leaves the rest based
+    at an element the vector cannot address -- 31 of 32 lanes, reading from
+    element 1 -- so the block arrives through a shuffle instead of a load.
+    `elastic-o6s:volume` under the explicit vector spends 114 of them, and
+    they are what its register moves were: 7479 of 23964 instructions, down
+    to 1814 of 9169 once the head runs whole."""
+    return self.full_lane and lo is not None and self.width == 1
 
   def _widened(self, narrowed, lo):
     """`(extent, base, valid)` for a narrowed block -- or, on a full-lane
@@ -1098,18 +1111,22 @@ class LeadLoop:
         # is what makes it addressable -- the leftover lanes are a
         # displacement inside the slot run, which exists only when the run is
         # longer than one entry.
-        narrowed = self._narrow(writer, actualstart, lo, None,
-                                self.start, (actualstart + 1) * span)
-        if narrowed is not None:
-          extent, base, valid = self._widened(narrowed, lo)
-          inner([LeadIndex(0, extent, self.stride,
-                           width=self.width, offset=base, valid=valid,
-                         pad=self.pad and valid is not None)])
+        if self._full_head(lo):
+          inner([LeadIndex(actualstart, self.threads, self.stride,
+                           width=self.width, first=lo)])
         else:
-          index = LeadIndex(actualstart, self.threads, self.stride,
-                            width=self.width)
-          with self._guard(writer, lead(), lo, None):
-            inner([index])
+          narrowed = self._narrow(writer, actualstart, lo, None,
+                                  self.start, (actualstart + 1) * span)
+          if narrowed is not None:
+            extent, base, valid = self._widened(narrowed, lo)
+            inner([LeadIndex(0, extent, self.stride,
+                             width=self.width, offset=base, valid=valid,
+                             pad=self.pad and valid is not None)])
+          else:
+            index = LeadIndex(actualstart, self.threads, self.stride,
+                              width=self.width)
+            with self._guard(writer, lead(), lo, None):
+              inner([index])
       if self.unroll:
         for value in range(realstart, realend):
           inner([LeadIndex(value, self.threads, self.stride,
