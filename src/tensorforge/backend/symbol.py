@@ -1079,9 +1079,19 @@ class LeadLoop:
       lo = self._lane_lo(startIdx) if startIdx > 0 else None
       hi = self._lane_hi(tail)
       # one slot, and the range is the loop's own
-      narrowed = self._narrow(writer, actualstart, lo, hi,
-                              self.start, self.end)
-      if narrowed is not None:
+      if self._full_head(lo):
+        # both ends at once: `first` holds the accesses off the lanes before
+        # the window, `valid` off the ones past it.
+        inner([LeadIndex(actualstart, self.threads, self.stride,
+                         width=self.width, first=lo,
+                         valid=hi if hi > 0 else None, pad=self.pad)])
+        narrowed = None
+      else:
+        narrowed = self._narrow(writer, actualstart, lo, hi,
+                                self.start, self.end)
+      if self._full_head(lo):
+        pass                      # oben erledigt
+      elif narrowed is not None:
         extent, base, valid = self._widened(narrowed, lo)
         inner([LeadIndex(0, extent, self.stride, width=self.width,
                          offset=base, valid=valid,
