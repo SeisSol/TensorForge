@@ -294,9 +294,28 @@ def test_intel_states_its_spilling_in_the_binary_and_not_on_the_console(tmp_path
     bare = tmp_path / 'b.so'
     bare.write_bytes(b'\x7fELF nothing to say')
     assert tuning._zeinfo_spill(str(bare)) is None, (
-        'no note is not the same answer as a note saying nothing: the '
-        'explicit-SIMD `elastic-o6d:localFluxAll` at 32 lanes links without '
-        'one and spills 10688 bytes by its own console')
+        'no note is not the same answer as a note saying nothing')
+    # The vector backend writes no `spill_size:` line, ever.  What it spills
+    # is the scratch buffer it asks the runtime for, and the 32-lane
+    # explicit-SIMD `elastic-o6d:localFluxAll` -- 1376 spill messages in its
+    # ISA -- states it only this way.
+    vc = tmp_path / 'vc.so'
+    vc.write_bytes(b'\x7fELF' + b'''
+  execution_env:
+    grf_count:       256
+  per_thread_memory_buffers:
+    - type:            scratch
+      usage:           single_space
+      size:            10688
+''')
+    assert tuning._zeinfo_spill(str(vc)) == 10688, (
+        'reading only the first spelling made every explicit-SIMD candidate '
+        'come back spill-free, and the two lane counts indistinguishable to '
+        'the one scorer able to tell them apart')
+    clean_vc = tmp_path / 'cvc.so'
+    clean_vc.write_bytes(b'\x7fELF  execution_env:\n    grf_count:       256\n')
+    assert tuning._zeinfo_spill(str(clean_vc)) == 0, (
+        'and a vector build that spills nothing asks for no such buffer')
     assert tuning._zeinfo_spill(str(tmp_path / 'missing.so')) is None, (
         'no object is not the same answer as no spilling')
     # and the console parser still answers for what it can see

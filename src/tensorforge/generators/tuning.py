@@ -841,6 +841,13 @@ _ZEINFO_SPILL = re.compile(rb'spill_size:\s*(\d+)')
 #: say anything because it is not there".
 _ZEINFO_NOTE = re.compile(rb'ze_info|payload_arguments|execution_env')
 
+#: What the vector backend writes instead.  A `-vc-codegen` build carries no
+#: `spill_size:` line at all; what it spills appears as the per-thread
+#: scratch buffer it asks the runtime for, and a build that spills nothing
+#: has no such buffer.
+_ZEINFO_SCRATCH = re.compile(
+    rb'-\s*type:\s*scratch\s*\n\s*usage:\s*\w+\s*\n\s*size:\s*(\d+)')
+
 
 def _zeinfo_spill(path: str) -> Optional[int]:
     """What the ahead-of-time binary says it spilled, or None where there
@@ -858,15 +865,27 @@ def _zeinfo_spill(path: str) -> Optional[int]:
     the file is both shorter and harder to break.
 
     Three answers and not two.  No object: nothing is known.  An object whose
-    note is there and says no `spill_size`: no spilling, which is what the
-    note not mentioning it means.  An object with no note at all: nothing is
-    known either, and that used to be read as zero.  The explicit-SIMD build
-    of `elastic-o6d:localFluxAll` at 32 lanes is the third case -- no
-    `.ze_info` section, the string nowhere in the file -- while its console
-    says 10688 bytes and its ISA carries 1376 spill messages.  Read as zero,
-    it let the caller's "the object's figure decides" overrule a correct
-    console reading with a number nobody measured, and every explicit-SIMD
-    candidate came back spill-free.
+    note is there and names neither a `spill_size` nor a scratch buffer: no
+    spilling, which is what the note not mentioning it means.  An object with
+    no note at all: nothing is known either, and that used to be read as zero.
+
+    Two spellings, because the two backends do not write the same note.  A
+    SPMD build states `spill_size:`.  A `-vc-codegen` build -- every
+    explicit-SIMD kernel -- states none, ever, and puts what it spills in the
+    per-thread scratch buffer it asks the runtime for:
+
+        per_thread_memory_buffers:
+          - type:            scratch
+            usage:           single_space
+            size:            10688
+
+    That is the 32-lane build of `elastic-o6d:localFluxAll`, whose ISA carries
+    1376 spill messages; the same kernel at sixteen lanes has no such buffer
+    and spills nothing.  Reading only the first spelling made every
+    explicit-SIMD candidate come back spill-free -- the two lane counts
+    indistinguishable to the one scorer able to tell them apart, since the
+    modelled footprint puts them half a percent apart (79760 B against
+    79396) while the clock puts them at 99.45 ns an element against 33.07.
     """
     try:
         with open(path, 'rb') as f:
@@ -876,6 +895,9 @@ def _zeinfo_spill(path: str) -> Optional[int]:
     figures = [int(m.group(1)) for m in _ZEINFO_SPILL.finditer(blob)]
     if figures:
         return max(figures)            # it says so
+    scratch = [int(m.group(1)) for m in _ZEINFO_SCRATCH.finditer(blob)]
+    if scratch:
+        return max(scratch)            # the vector backend says it this way
     if _ZEINFO_NOTE.search(blob):
         return 0                       # the note is there and does not
     return None                        # no note: nothing is known either
