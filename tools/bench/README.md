@@ -26,6 +26,7 @@ the thing timed.
 | `run.py` | the vendor-neutral timing run |
 | `profile.py` | the vendor profilers, over the same binary |
 | `roofline.py` | measured machine ceilings, and the kernels under them |
+| `plot.py` | charts over what the two runs wrote |
 
 The driver itself is emitted by `tests/harness/driver_bench.py`, next to the
 correctness driver and sharing its operand collection and its launcher call —
@@ -197,6 +198,54 @@ is bound by something the roofline does not draw — occupancy, launch overhead,
 latency — which for batched small operators is the common case. Calling that
 one *memory bound* would send a reader to optimize reuse that was never the
 constraint.
+
+## Charts
+
+`roofline.py` answers one question at one launch size. The questions that come
+up next are about the shape of the curve rather than a point on it, so
+`plot.py` draws a family of views over the same two files. It runs nothing and
+builds nothing.
+
+```bash
+python3 tools/bench/plot.py out/bench.json --peak-flops 51.8 --peak-bytes 2100
+python3 tools/bench/plot.py a/bench.json b/bench.json --label before --label after
+python3 tools/bench/plot.py out/bench.json --profile prof/ --out plots/
+```
+
+| view | needs | the question |
+|---|---|---|
+| `scaling` | | where does the rate stop rising with the launch size? |
+| `bandwidth` | | the same against compulsory bytes |
+| `latency` | | what does one element cost, and from which batch on? |
+| `spread` | | is the measurement steady enough for the difference claimed? |
+| `roofline` | ceilings | is the kernel allowed to go faster? |
+| `trajectory` | ceilings | how does it climb toward its roof as the launch grows? |
+| `efficiency` | ceilings | the same climb with the roof divided out |
+| `compare` | 2+ runs | which build is ahead, per kernel, and by how much? |
+| `traffic` | a profile | how much of the traffic was compulsory? |
+| `occupancy` | a profile | does the rate follow how much of the machine was busy? |
+| `measured-roofline` | a profile | where does the point move at the intensity the memory controller saw? |
+
+Everything lands in one `index.html` beside the individual SVGs, and a view
+whose data is missing is skipped with the reason rather than drawn empty —
+most often *only one batch size in the run*, which the suite's `BATCHES`
+fixes.
+
+Three of them matter more than they look. `spread` draws min to p90 from
+columns `run.py` already writes, and a difference smaller than that bar is not
+a difference. `compare` prints the ratio rather than two absolute axes,
+pointing it the right way round for the quantity — reference over candidate
+where lower is better. And `measured-roofline` draws the compulsory point
+hollow beside the measured one filled: where a kernel re-reads an operand the
+point slides left, often off the flat onto the slope, which changes what the
+chart says to do about it.
+
+The charts do not smooth, fit or extrapolate, and a gap in the data breaks the
+line rather than being drawn across — an interpolated roofline point is a
+statement about a launch that never happened. Nor do they average over
+configurations: two configurations of one kernel are two curves, because
+collapsing them is how one that wins everywhere and one that wins nowhere come
+to look alike.
 
 The plot is a hand-written SVG with no plotting dependency: this directory
 exists to run on a login node somebody else administers, where `pip install
