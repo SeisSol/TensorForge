@@ -71,7 +71,9 @@ def test_local_flux_on_nvidia_offers_every_knob_that_can_matter():
     assert {'lanes', 'merge_variants', 'prepare_operands', 'preload_globals',
             'k_roll', 'tensor_cores', 'mma_prefetch'} <= set(knobs)
     # the reductions are 56 and 9 long: rolled by 28 and by 8, or not at all
-    assert knobs['k_roll'] == [0, 28, 8]
+    # -- and by two, which is the shortest body the option can leave and
+    # which no divisor offers where the contraction is prime to it.
+    assert knobs['k_roll'] == [0, 28, 8, 2]
     geometries = {(c.num_threads, c.lead_width) for c in knobs['lanes']}
     assert {(32, 1), (8, 1), (16, 2)} <= geometries
     # the matrix path's prefetch depth is a question only where it is taken
