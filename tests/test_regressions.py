@@ -1091,3 +1091,29 @@ def test_reduction_reads_a_slice_at_its_offset(backend, arch):
         if got is None or abs(got - want) > 1e-9:
             wrong.append(r)
     assert not wrong, f"rows {wrong[:8]} summed the wrong columns"
+
+
+# ----------------------------------------------------------------------
+# A term of scalars alone accumulates the empty product
+# ----------------------------------------------------------------------
+
+@pytest.mark.parametrize("backend,arch", [("cuda", "sm_86"), ("hip", "gfx90a")])
+def test_a_term_of_scalars_alone_is_their_product(backend, arch):
+    """`O[i] += 3 * 2` adds 6 to every entry, not 0.
+
+    Every operand of the term is a scalar, so none is left to accumulate and
+    the accumulator is never written.  The epilogue read it anyway and scaled
+    its zero, which is how SeisSol's damage step turned `1 - B` into `-B`.
+    """
+    case = _load("scalar_broadcast")
+    gen = _generate("scalar_broadcast", backend, arch)
+    names = _kernel_names(gen.get_kernel())
+    out, b = names["O"], names["B"]
+    mem, before = _run_wave(gen, seed=11)
+    wrong = []
+    for r in range(case.M):
+        want = before.read(b, r) + case.A * case.B
+        got = mem.get((out, r))
+        if got is None or abs(got - want) > 1e-6 * max(1.0, abs(want)):
+            wrong.append((r, got, want))
+    assert not wrong, f"{len(wrong)} entries of O are wrong, first {wrong[:3]}"

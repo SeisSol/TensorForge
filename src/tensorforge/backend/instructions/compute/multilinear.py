@@ -1775,7 +1775,8 @@ class MultilinearInstruction(ComputeInstruction):
                                    self._prev_offset, self._ns,
                                    self._lead_dims, self._num_threads,
                                    self._lead_width, self._productOperation,
-                                   self._sumOperation)
+                                   self._sumOperation,
+                                   empty_product=len(self._ops) == 0)
 
     def defs(self):
         # the accumulator, where an epilogue writes the destination from it

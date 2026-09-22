@@ -9,6 +9,12 @@ product of the scalar operands, added onto the destination's previous value,
 and over the destination's whole box, with the sum's neutral element where the
 accumulated range does not reach.  GEMM libraries call it the epilogue.
 
+A contraction whose every operand is a scalar -- a broadcast, `t[i] = s[]` --
+has moved all of them here and accumulated nothing.  What it would have
+accumulated is the empty product, the product's neutral element, and it is the
+same at every point of the box; reading the accumulator instead read the sum's
+neutral element, and every broadcast came out zero.
+
 It was the tail of `MultilinearInstruction` (`_apply_linear`), which made the
 accumulator and the destination two views inside one instruction.  Apart, the
 contraction writes exactly what it accumulates, and this is the one place the
@@ -67,7 +73,8 @@ class MultilinearEpilogue(ComputeInstruction):
                  num_threads: int,
                  lead_width: int,
                  product_operation,
-                 sum_operation):
+                 sum_operation,
+                 empty_product: bool = False):
         super().__init__(context)
         self._acc = accumulator
         self._dest = dest
@@ -80,6 +87,9 @@ class MultilinearEpilogue(ComputeInstruction):
         self._lead_width = lead_width
         self._productOperation = product_operation
         self._sumOperation = sum_operation
+        #: The contraction had no tensor operand, so what it accumulated is
+        #: the empty product rather than anything in the accumulator.
+        self._empty_product = empty_product
         self._is_ready = True
         self._user_options = context.get_user_options()
         self._gemm_meta_data = None
@@ -177,7 +187,11 @@ class MultilinearEpilogue(ComputeInstruction):
             btype = (ftype if width == 1
                      else ScalarType(self._acc.get_fptype(), width))
             needsLoad = all(_dim_covered(i, varlist[loopmap[f'n{i}']]) for i,_ in enumerate(self._ns))
-            if needsLoad:
+            if self._empty_product:
+                valvar = _splat(writer, btype, writer.const(
+                    self._productOperation.neutral(self._context.fp_type),
+                    ftype))
+            elif needsLoad:
                 valvar = self._acc.load(writer, self._context, None, [varlist[loopmap[f'n{i}']] for i,_ in enumerate(self._ns)], False)
             else:
                 valvar = _splat(writer, btype, writer.const(
