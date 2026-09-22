@@ -87,8 +87,17 @@ class Metric:
 
 
 #: The normalized set.  Deliberately short; see the module docstring.
+#:
+#: `simd_utilization` is the fraction of the vector's lanes that carried work
+#: -- VTune's own column, and the figure that separates "the machine was
+#: busy" from "the machine was busy on lanes that were masked off".  Declared
+#: here rather than left as one vendor's extra column, because the others can
+#: supply it too (`smsp__thread_inst_executed_per_inst_executed` on NVIDIA)
+#: and a column that exists for one vendor only is the shape of an accidental
+#: cross-vendor comparison.
 NORMALIZED = ('duration_ns', 'dram_read_bytes', 'dram_write_bytes',
-              'l2_bytes', 'occupancy', 'grid_size', 'block_size')
+              'l2_bytes', 'occupancy', 'simd_utilization',
+              'grid_size', 'block_size')
 
 
 @dataclass
@@ -184,6 +193,76 @@ def normalize(per_kernel: Dict[str, Dict[str, float]],
                 row[metric.key] = value * metric.scale
         out.append(row)
     return out
+
+
+# ----------------------------------------------------------------------
+# VTune's summary
+# ----------------------------------------------------------------------
+
+#: The sub-table inside the summary that names kernels.  Its header row is
+#: the marker; the rows under it are the tasks.
+_VTUNE_TASK_HEADER = 'Computing Task'
+
+
+def read_vtune_summary(text: str) -> Tuple[Dict[str, Dict[str, float]], str]:
+    """`vtune -report summary -format csv` into the same shape as the others.
+
+    Not the long format ncu and rocprofv3 emit.  VTune writes an indented
+    document flattened into CSV: a hierarchy level, then either a
+    `name,value` pair or the header of a nested table followed by its rows.
+
+        Hierarchy Level,Metric Name,Metric Value
+        0,Elapsed Time,4.979711
+        1,GPU Time,0.009750
+        1,Occupancy,8.4
+        2,Computing Task,Total Time,Occupancy(%),SIMD Utilization(%)
+        2,"kernel_kernel_70ff80f1...",0.003859,5.5,12.5
+
+    Two things come out of that.  The run-level pairs are the metrics, and
+    they are the *workload's* because `profile.py` gives one invocation one
+    workload -- there is no other kernel in the run to confuse them with.
+    The nested task table supplies the kernel's own name and its own
+    occupancy, which is the figure to prefer: the run-level one is averaged
+    over an interval that includes the launch gaps.
+
+    What this mode does not carry is memory traffic in bytes, so no traffic
+    amplification comes out of it.  `characterization-mode=global-local-accesses`
+    is where those live and it refused to collect on this stack; Advisor is
+    the tool that has them, and `profile.py` does not wrap it.
+    """
+    rows: Dict[str, Dict[str, float]] = {}
+    run: Dict[str, float] = {}
+    task_columns: List[str] = []
+    for fields in csv.reader(io.StringIO(text)):
+        if len(fields) < 2 or fields[0] == 'Hierarchy Level':
+            continue
+        if fields[1] == _VTUNE_TASK_HEADER:
+            task_columns = fields[2:]
+            continue
+        if task_columns and len(fields) == len(task_columns) + 2:
+            kernel = fields[1]
+            values: Dict[str, float] = {}
+            for name, raw in zip(task_columns, fields[2:]):
+                try:
+                    values[name] = float(raw)
+                except ValueError:
+                    pass
+            rows.setdefault(kernel, {}).update(values)
+            continue
+        if len(fields) == 3 and fields[2]:
+            try:
+                run[fields[1]] = float(fields[2])
+            except ValueError:
+                pass
+    if not rows:
+        # No task table: the run-level figures are all there is, and they
+        # still describe the one workload this invocation ran.
+        return ({'(the run)': run}, '') if run else (
+            {}, 'vtune summary carried neither a task table nor a metric')
+    for values in rows.values():
+        for name, value in run.items():
+            values.setdefault(name, value)
+    return rows, ''
 
 
 # ----------------------------------------------------------------------
@@ -425,13 +504,19 @@ class Vtune(Profiler):
         result = outdir / 'vtune'
         program = [str(exe), 'profile', workload, str(batch), str(iters),
                    str(warmup), '0']
+        # `characterization-mode=overview`, and the report is `summary`.
+        # Measured on a Data Center GPU Max 1550, oneAPI 2025.0.1, one
+        # collection read three ways: `-report hw-events` writes a header row
+        # and nothing under it, `-report gpu-hotspots` writes nothing at all,
+        # and `-report summary` writes 60 rows under overview against 28
+        # under the source analysis this used to ask for.  The pair that was
+        # here produced an empty table on every kernel, which reads as "the
+        # profiler found nothing" rather than as "the wrong report was asked
+        # for".
         collect = [self.invocation(), '-collect', 'gpu-hotspots',
-                   '-knob', 'profiling-mode=source-analysis',
-                   '-knob', 'source-analysis=mem-latency',
+                   '-knob', 'characterization-mode=overview',
                    '-result-dir', str(result), '--', *program]
-        # The report step is what produces something readable; `-format csv`
-        # lands in the same long shape ncu and rocprofv3 use.
-        report = [self.invocation(), '-report', 'hw-events',
+        report = [self.invocation(), '-report', 'summary',
                   '-result-dir', str(result), '-format', 'csv',
                   '-csv-delimiter', 'comma',
                   '-report-output', str(outdir / 'vtune.csv')]
@@ -441,7 +526,7 @@ class Vtune(Profiler):
         path = outdir / 'vtune.csv'
         if not path.exists():
             return [], [], 'vtune wrote no CSV report'
-        per_kernel, note = read_long_csv(path.read_text())
+        per_kernel, note = read_vtune_summary(path.read_text())
         return normalize(per_kernel, metrics), [str(path)], note
 
 
@@ -474,11 +559,15 @@ PROFILERS: Dict[str, Profiler] = {
     )),
     'vtune': Vtune('vtune', 'TF_VTUNE', 'vtune', kernel_filter=False,
                    metrics=(
-        Metric('duration_ns', 'Elapsed Time', scale=1e9,
+        # The task table's own column, not the run's `GPU Time`: the latter
+        # is the whole invocation including the warm-up launches.
+        Metric('duration_ns', 'Total Time', scale=1e9,
                note='VTune reports seconds'),
-        Metric('dram_read_bytes', 'GPU_MEMORY_READ_BYTES'),
-        Metric('dram_write_bytes', 'GPU_MEMORY_WRITE_BYTES'),
-        Metric('l2_bytes', 'GPU_L3_BYTES'),
+        Metric('occupancy', 'Occupancy(%)', scale=0.01,
+               note='reported as a percentage'),
+        Metric('simd_utilization', 'SIMD Utilization(%)', scale=0.01,
+               note='reported as a percentage'),
+        # No bytes: see `read_vtune_summary` on why this mode has none.
     )),
 }
 

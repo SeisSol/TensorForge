@@ -257,3 +257,62 @@ def test_the_intel_default_needs_no_license():
     reaches for the one that is there. The memory counters are behind
     `--tool vtune`, and that is a choice the caller makes knowingly."""
     assert bench_profile.BY_VENDOR["intel"] == "unitrace"
+
+def test_the_vtune_summary_is_read_as_a_table_and_not_as_long_format():
+    """VTune does not write the long format ncu and rocprofv3 do.  It writes
+    an indented document flattened into CSV, and the kernel's own figures are
+    in a nested table inside it."""
+    text = (
+        "Hierarchy Level,Metric Name,Metric Value\n"
+        "0,Elapsed Time,4.979711\n"
+        "1,GPU Time,0.009750\n"
+        "1,Occupancy,8.4\n"
+        "2,Computing Task,Total Time,Occupancy(%),SIMD Utilization(%)\n"
+        '2,"kernel_kernel_70ff80f1(sycl::queue*)",0.003859,5.5,12.5\n'
+        "0,Collection and Platform Info,\n"
+        "1,Computer Name,sap4\n")
+    rows, note = bench_profile.read_vtune_summary(text)
+    assert note == ""
+    (kernel, values), = rows.items()
+    assert kernel.startswith("kernel_kernel_70ff80f1")
+    assert values["Total Time"] == pytest.approx(0.003859)
+    assert values["Occupancy(%)"] == pytest.approx(5.5)
+
+
+def test_the_task_occupancy_wins_over_the_runs():
+    """The run-level figure is averaged over an interval that includes the
+    gaps between launches; the task's is the kernel's own."""
+    text = (
+        "Hierarchy Level,Metric Name,Metric Value\n"
+        "1,Occupancy,8.4\n"
+        "2,Computing Task,Total Time,Occupancy(%)\n"
+        "2,k,0.001,5.5\n")
+    rows, _ = bench_profile.read_vtune_summary(text)
+    assert rows["k"]["Occupancy(%)"] == pytest.approx(5.5)
+    assert rows["k"]["Occupancy"] == pytest.approx(8.4)   # kept, not confused
+    normalized, = bench_profile.normalize(
+        rows, bench_profile.PROFILERS["vtune"].metrics)
+    assert normalized["occupancy"] == pytest.approx(0.055)
+
+
+def test_a_summary_with_no_task_table_still_carries_the_runs_figures():
+    """One invocation runs one workload, so the run-level metrics are that
+    workload's -- reporting nothing would throw away a measurement that was
+    taken."""
+    rows, note = bench_profile.read_vtune_summary(
+        "Hierarchy Level,Metric Name,Metric Value\n1,GPU Time,0.5\n")
+    assert note == ""
+    assert rows["(the run)"]["GPU Time"] == pytest.approx(0.5)
+
+
+def test_a_summary_with_nothing_in_it_says_so():
+    rows, note = bench_profile.read_vtune_summary("Hierarchy Level,x,y\n")
+    assert not rows and "neither" in note
+
+
+def test_vtune_collects_in_the_mode_whose_report_has_rows():
+    """`profiling-mode=source-analysis` with `-report hw-events` wrote a
+    header row and nothing under it, on every kernel."""
+    steps = _commands("vtune", Path("/tmp"))
+    assert "characterization-mode=overview" in steps[0]
+    assert "summary" in steps[1]

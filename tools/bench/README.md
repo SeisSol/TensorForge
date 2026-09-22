@@ -222,9 +222,11 @@ python3 tools/bench/plot.py out/bench.json --profile prof/ --out plots/
 | `trajectory` | ceilings | how does it climb toward its roof as the launch grows? |
 | `efficiency` | ceilings | the same climb with the roof divided out |
 | `compare` | 2+ runs | which build is ahead, per kernel, and by how much? |
-| `traffic` | a profile | how much of the traffic was compulsory? |
+| `traffic` | a profile with byte counters | how much of the traffic was compulsory? |
 | `occupancy` | a profile | does the rate follow how much of the machine was busy? |
-| `measured-roofline` | a profile | where does the point move at the intensity the memory controller saw? |
+| `measured-roofline` | a profile with byte counters | where does the point move at the intensity the memory controller saw? |
+
+On Intel the byte counters are the gap: `vtune -collect gpu-hotspots -knob characterization-mode=overview` carries the kernel's time, its occupancy and its SIMD utilization but no traffic in bytes, and `global-local-accesses` refused to collect on this stack. Advisor has them and is not wrapped, so `traffic` and `measured-roofline` are NVIDIA and AMD for now.
 
 Everything lands in one `index.html` beside the individual SVGs, and a view
 whose data is missing is skipped with the reason rather than drawn empty —
