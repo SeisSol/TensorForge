@@ -337,7 +337,17 @@ def simple_space(descrs, context: Context) -> List[Knob]:
     # half of it, and four such multiplications side by side in one 32-wide
     # register would be the same work at full occupancy.  Nothing does either
     # today.
-    if getattr(context.get_vm().get_lexic(), 'simd_mode', False):
+    explicit = getattr(context.get_vm().get_lexic(), 'simd_mode', False)
+    if explicit and context.get_user_options().autotune != 'compiled':
+        # Nothing else can rank these.  The modelled footprint counts the
+        # bytes of the tile and those barely move -- half a percent between
+        # sixteen lanes and 32 on `o6d:localFluxAll`, where the clock is
+        # threefold apart -- because what separates them is not how much the
+        # tile holds but how it is cut: a `simd<double,32>` occupies four
+        # register banks in a row where a `simd<double,16>` occupies two, and
+        # the allocator gives up on the first where it places the second.
+        # Only a build sees that, so only the compiled scorer gets the axis,
+        # and there only as an escape from spilling (`CompiledScore`).
         geometries = [LaneConfig(base.num_threads, base.num_active_threads,
                                  base.lead_width)]
     else:
@@ -1036,6 +1046,19 @@ class CompiledScore:
         # with -- see the table in the class docstring.
         issue = _least_cycles(result.generator, lanes, wave,
                               spill_bytes=report.spill_bytes)
+        if getattr(result.context.get_vm().get_lexic(), 'simd_mode', False):
+            # Widest unless it spills.  Under the explicit vector the lane
+            # count is the vector's width, and a narrower one does strictly
+            # less work per instruction; the only thing it buys is a value
+            # the allocator can place.  Where nothing spills there is nothing
+            # to buy, and letting the rest of the tuple decide is how the
+            # axis lost 16 % over the twenty elastic kernels on pvc --
+            # `o6s:derivative` 15.92 -> 35.10 ns an element, `o6s:localFluxAll`
+            # 11.02 -> 24.34, neither of which spills at either width, while
+            # `o6d:localFluxAll` spills 10688 B at 32 lanes and none at
+            # sixteen and wants the move (99.58 -> 46.08).
+            return (report.spill_bytes > 0, -lanes, _icache_over(result),
+                    -resident, issue)
         return (report.spill_bytes > 0, _icache_over(result), -resident, issue)
 
 
