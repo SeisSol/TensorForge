@@ -103,6 +103,21 @@ class ElementwiseInstruction(ComputeInstruction):
         write_loops(self._context, writer, loopstack, self._body(writer))
 
     @staticmethod
+    def _origin(view: SymbolView) -> List[int]:
+        """Where iteration point 0 sits in the view's tensor.
+
+        The box's lower corner *plus* the slicing offset: a view states its
+        box in its own index space, and the offset maps that space onto the
+        tensor (`SubTensor.storage_box`).  The lower corner alone addressed a
+        slice `I[:, 17:19]` at columns 0 and 1 -- SeisSol's damage
+        `accumulateIntegrals` took the maximum of two columns its sums had
+        just overwritten, while the multilinear store back applied the 17.
+        """
+        lower = view.bbox.lower()
+        offset = view.offset or [0] * len(lower)
+        return [l + o for l, o in zip(lower, offset)]
+
+    @staticmethod
     def _index(view: SymbolView, varlist) -> List:
         # optree emitted `(n{k} + bbox.lower()[k])` as text, which forced a
         # named `n{k}` variable and left the address arithmetic opaque.  A
@@ -113,7 +128,7 @@ class ElementwiseInstruction(ComputeInstruction):
         # origin (yateto's `elementwise` cut at a stored table's edge) was
         # refused by `VarOffset`.
         return [add_offset(varlist[i], o)
-                for i, o in enumerate(view.bbox.lower())]
+                for i, o in enumerate(ElementwiseInstruction._origin(view))]
 
     def _body(self, writer: Writer):
         from tensorforge.backend.pir.core import ScalarType
@@ -189,7 +204,7 @@ class ElementwiseInstruction(ComputeInstruction):
             counter += 1
             src.symbol.load(writer, self._context, var,
                             [f'(n{i} + {o})'
-                             for i, o in enumerate(src.bbox.lower())], False)
+                             for i, o in enumerate(self._origin(src))], False)
             operands.append(var)
         padded = operands + [''] if len(operands) == 1 else operands
         lexic = self._context.get_vm().get_lexic()
@@ -203,7 +218,7 @@ class ElementwiseInstruction(ComputeInstruction):
         writer(f'const auto {result} = {expression};')
         self._dest.symbol.store(writer, self._context, result,
                                 [f'(n{i} + {o})'
-                                 for i, o in enumerate(self._dest.bbox.lower())],
+                                 for i, o in enumerate(self._origin(self._dest))],
                                 False)
 
     def __str__(self):

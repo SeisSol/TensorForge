@@ -126,8 +126,9 @@ class ScalarBuilder(OperationBuilder):
         product = SymbolView(registers, extent, [0])
         # Each operand over the part all of them cover, read at `i + lo`:
         # `ElementwiseInstruction` indexes a source by the loop value plus its
-        # box's lower corner, and applies no offset of its own -- which is why
-        # `_foldable` refuses a view that carries one.
+        # box's lower corner and its offset.  The views below are rebuilt with
+        # a zero offset, which is why `_foldable` refuses a view that carries
+        # one.
         srcs = [SymbolView(view.symbol, BoundingBox([lo], [hi]), [0])
                 for view in operands]
         dest = self.materialize_dest(descr, ()) or self.view_of(descr.dest)

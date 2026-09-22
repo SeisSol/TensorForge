@@ -303,6 +303,9 @@ class Interp:
             self.env[fn] = __builtins__[fn] if isinstance(__builtins__, dict) \
                 else getattr(__builtins__, fn)
         self.env['fabsf'] = self.env['fabs'] = abs
+        # CUDA and HIP spell an elementwise `max`/`min` this way.
+        self.env['fmaxf'] = self.env['fmax'] = self.env['max']
+        self.env['fminf'] = self.env['fmin'] = self.env['min']
         import math
         for name, fn in (('sqrt', lambda x: abs(x) ** 0.5), ('exp', math.exp),
                          ('log', lambda x: math.log(abs(x) + 1e-9)),

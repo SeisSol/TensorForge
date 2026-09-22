@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import importlib.util
 import itertools
+import json
 import re
 from pathlib import Path
 
@@ -1007,3 +1008,86 @@ def test_broadcast_accumulation_is_refused_rather_than_miscompiled():
     next(d for d in partial if d.add).add_dims = [0]
     with pytest.raises(GenerationError, match="broadcast accumulation"):
         Generator(partial, ctx).generate()
+
+
+# ----------------------------------------------------------------------
+# A pointwise operation reads and writes a slice where the slice is
+# ----------------------------------------------------------------------
+
+def _kernel_names(src):
+    """Alias -> kernel parameter name, from the kernel's metadata line."""
+    meta = json.loads(re.search(r"tensorforge-meta: (.*)", src).group(1))
+    return {op["alias"]: op["name"] for op in meta["operands"]}
+
+
+def _run_wave(gen, seed):
+    """The kernel's memory after one wave, and the inputs it started from."""
+    lanes, _ = kernel_eval.launch_geometry(gen.get_launcher())
+    mem = kernel_eval.evaluate_wave(gen.get_kernel(), lanes, seed=seed,
+                                    globals_only=True)
+    return mem, kernel_eval.Slot(seed)
+
+
+@pytest.mark.parametrize("backend,arch", [("cuda", "sm_86"), ("hip", "gfx90a")])
+def test_elementwise_reads_a_slice_at_its_offset(backend, arch):
+    """`max(IA[:, 17:], I[:, 17:])` reads columns 17 and 18, not 0 and 1.
+
+    `ElementwiseInstruction` indexed its operands by their box alone and
+    dropped the slicing offset, so SeisSol's damage `accumulateIntegrals`
+    took the maximum of two columns the sum before it had just overwritten.
+    The multilinear store back applied the offset, so the wrong values
+    landed in the right columns and nothing else changed.
+    """
+    case = _load("sliced_max")
+    gen = _generate("sliced_max", backend, arch)
+    names = _kernel_names(gen.get_kernel())
+    ia, i = names["IA"], names["I"]
+    mem, before = _run_wave(gen, seed=7)
+    wrong = []
+    for c in range(case.N):
+        for r in range(case.M):
+            idx = r + case.M * c
+            a, b = before.read(ia, idx), before.read(i, idx)
+            want = a + b if c < case.CUT else max(a, b)
+            got = mem.get((ia, idx))
+            if got is None or abs(got - want) > 1e-9:
+                wrong.append((r, c))
+    assert not wrong, (f"{len(wrong)} entries of IA are wrong, first "
+                       f"{wrong[:4]}")
+
+
+@pytest.mark.parametrize("backend,arch", [("cuda", "sm_86"), ("hip", "gfx90a")])
+def test_reduction_reads_a_slice_at_its_offset(backend, arch):
+    """`D[r] = sum(A[r, 17:19])` sums columns 17 and 18.
+
+    `ReductionInstruction` dropped the offset the same way the elementwise
+    did, and read columns 0 and 1.
+    """
+    from tensorforge.common.basic_types import Addressing
+    from tensorforge.common.matrix.boundingbox import BoundingBox
+    from tensorforge.common.matrix.tensor import SubTensor, Tensor
+    from tensorforge.common.operation import AddOperator
+    from tensorforge.generators.descriptions import ReductionDescr
+
+    def tensor(shape, alias):
+        return Tensor(list(shape), Addressing.STRIDED,
+                      BoundingBox([0] * len(shape), list(shape)),
+                      alias=alias, datatype=Datatype.F32)
+
+    a, d = tensor([64, 19], "A"), tensor([64], "D")
+    descr = ReductionDescr(
+        SubTensor(d), SubTensor(a, BoundingBox([0, 0], [64, 2]), [0, 17]),
+        [1], AddOperator())
+    gen = Generator([descr], Context(arch=arch, backend=backend,
+                                     fp_type=Datatype.F32))
+    gen.generate()
+    names = _kernel_names(gen.get_kernel())
+    mem, before = _run_wave(gen, seed=7)
+    wrong = []
+    for r in range(64):
+        got = mem.get((names["D"], r))
+        want = (before.read(names["A"], r + 64 * 17)
+                + before.read(names["A"], r + 64 * 18))
+        if got is None or abs(got - want) > 1e-9:
+            wrong.append(r)
+    assert not wrong, f"rows {wrong[:8]} summed the wrong columns"

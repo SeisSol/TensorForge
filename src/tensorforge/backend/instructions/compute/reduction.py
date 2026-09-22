@@ -490,10 +490,14 @@ class ReductionInstruction(CrossLaneFold, ComputeInstruction):
 
     @staticmethod
     def _offset(view: SymbolView, varlist: List) -> List:
-        """Fold the bounding box's lower corner into each index -- into a
-        `LeadIndex` itself, which a `VarOffset` may not wrap."""
-        return [add_offset(varlist[i], o)
-                for i, o in enumerate(view.bbox.lower())]
+        """Fold the bounding box's lower corner and the slicing offset into
+        each index -- into a `LeadIndex` itself, which a `VarOffset` may not
+        wrap.  Without the offset a slice is read from the tensor's origin,
+        as `ElementwiseInstruction._origin` explains."""
+        lower = view.bbox.lower()
+        offset = view.offset or [0] * len(lower)
+        return [add_offset(varlist[i], l + o)
+                for i, (l, o) in enumerate(zip(lower, offset))]
 
     def __str__(self):
         return (f'{self._dest.symbol.name} = {self._operation}'
