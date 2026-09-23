@@ -3056,6 +3056,16 @@ class Symbol:
         # block alone is a fraction of the lanes it takes to hold both.
         layout = self.register_layout()
         span = layout.block_span() if layout is not None else None
+        if span == 1:
+          # Every lane holds the whole image already -- a scalar, or one
+          # replicated once per lane -- so there is nothing to read from
+          # another lane, and the vector spelling does not even apply: the
+          # value is a `float` rather than a `simd`, and
+          # `mixed_red_scalar_then_ew` came out as
+          # `float v56_bc = v55_data.select<1, 1>(0);`, which no compiler
+          # accepts.  The same answer the guarded path above gives, for the
+          # same reason: the owning lane is this one.
+          return value
         text = context.get_vm().get_lexic().broadcast(
             '{0}', bc_lane, span or self.num_threads)
         return writer.rawexpr(text, value, type_=ltype, hint='bc',
