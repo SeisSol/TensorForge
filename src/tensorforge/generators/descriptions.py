@@ -221,7 +221,11 @@ class MultilinearDescr(OperationDescription):
   def _lead_dim(self):
     # A destination without axes has nothing to spread over the lanes; the
     # scalar branch computes it on every lane, which asks for none.
-    return self.dest.bbox.sizes()[0] if self.dest.bbox.rank() else 1
+    # `int`, because a bounding box measures itself in numpy counts, and this
+    # one travels through `get_num_threads` into `LaneConfig` and on into
+    # `LaunchConfig.active_threads`, where `json.dumps` in the kernel metadata
+    # refuses it (as it does the shared memory size, see `MemRegion`).
+    return int(self.dest.bbox.sizes()[0]) if self.dest.bbox.rank() else 1
 
   def _analyze(self):
     pass
