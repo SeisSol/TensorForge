@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: MIT
 from .spp import SparsityPattern, FullSPP
 from .boundingbox import BoundingBox
+from .prepare import TF32_PARTS, split_tf32
 from functools import reduce
 from typing import List, Union
 
@@ -354,11 +355,15 @@ class Tensor:
         order of `storage_map` where not.  A slot with no source cell reads
         zero, as `storage_map` says it does.
 
-        `None` without numbers, and where an element is spread over several
-        slots (`storage_parts`): what those slots hold is arithmetic on a
-        cell's value rather than the value, and nothing here does it.
+        Where an element is spread over several slots (`storage_parts`), the
+        slots hold arithmetic on the cell's value rather than the value, and
+        the arithmetic is done here: two parts of an F32 operand are the TF32
+        halves a matrix instruction multiplies.  `None` without numbers, and
+        for a decomposition nothing computes yet.
         """
-        if not self.has_values() or self.storage_parts != 1:
+        if not self.has_values():
+            return None
+        if self.storage_parts != 1 and not self._prepares_parts():
             return None
         box = tuple(int(extent) for extent in self.get_actual_shape())
         lower = tuple(int(bound) for bound in self.bbox.lower())
@@ -372,7 +377,23 @@ class Tensor:
             local = np.unravel_index(int(cell), box, order='F')
             out.append(float(self.data[tuple(lo + c for lo, c
                                               in zip(lower, local))]))
-        return tuple(out)
+        if self.storage_parts == 1:
+            return tuple(out)
+        # Planar puts each part's slots in one run, which is what the reader
+        # wants where a lane holds several neighbouring slots; adjacent is
+        # right where one lane reads one element.
+        planar = int(self.storage_elements()) if self.storage_planar else 0
+        return tuple(float(v) for v in split_tf32(np.asarray(out, dtype=np.float32),
+                                                  planar=planar))
+
+    def _prepares_parts(self):
+        """Whether the decomposition this tensor is stored in can be produced.
+
+        The TF32 pair, and nothing else so far: a wider emulation's limbs are
+        a decomposition too, and the routine for them is what is missing
+        rather than the room to put them.
+        """
+        return self.storage_parts == TF32_PARTS and self.datatype == Datatype.F32
 
     def storage_runs(self):
         """The stored cells as `(slot, cell, length)` runs, or `None`.

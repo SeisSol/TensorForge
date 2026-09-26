@@ -23,6 +23,8 @@ from typing import Iterable, Tuple
 
 import numpy as np
 
+from tensorforge.common.matrix import prepare
+
 from tensorforge.common.basic_types import Datatype
 
 #from numpy_quaddtype import QuadPrecDType
@@ -158,58 +160,13 @@ def pack(view: np.ndarray, pack_index: np.ndarray,
 def split_tf32(flat: np.ndarray, dt: Datatype, planar: int = 0) -> np.ndarray:
     """Store each scalar as the two TF32 halves a matrix instruction multiplies.
 
-    What `splitFloatTF32` in ``tensorforge_device/cuda.h`` computes for an
-    operand the kernel splits itself, done here for one it reads prepared --
-    though not bit for bit any more: the kernel rounds `upper` to nearest-even
-    and leaves `lower` unrounded, which is as accurate and cheaper there, and
-    either is a valid pair of halves.  Done here,
-    once, for an operand that is constant across the batch, the kernel reads
-    the pair instead of computing it -- which is the whole point.
-
-    Interleaved, `[hi0, lo0, hi1, lo1, ...]`, because that is what
-    ``DataView.get_dim_strides`` produces for ``storage_parts == 2``: the part
-    index is the innermost stride, so the halves of one element are adjacent
-    and a single wide access fetches both.  Planar, `[hi0, hi1, ..., lo0, lo1,
-    ...]` per batch element of ``planar`` elements, where the operand is
-    stored in fragment order (``Tensor.storage_planar``): a lane reads several
-    neighboring slots there, and each part's have to be one run.
-
-    Both halves are stored as ``float`` and not as ``uint32``.  A TF32 value
-    *is* a float with its low thirteen mantissa bits zero, so the kernel loads
-    them through the accessor it already has and reinterprets -- no
-    conversion, which is the arithmetic this exists to remove.
-
-    The rounding is `cvt.rna`: nearest, ties **away from zero**.  Not
-    ties-to-even, however much the mnemonic looks like `rne`.  The difference
-    is two values in four thousand, which is exactly the kind of margin that
-    passes every test that does not compare bit for bit -- and this one has
-    been compared bit for bit against the device's `cvt.rna`, over 4096 values, both
-    halves.
+    The library's own, so that what the harness writes into a buffer and what
+    a prepared operand is filled with are one routine.
     """
     if np_dtype(dt) != np.float32:
         raise ValueError(
             f"the TF32 split is defined for F32 operands; got {dt}")
-
-    def _rna(x: np.ndarray) -> np.ndarray:
-        # The bits below the sign are a magnitude, so adding half an ulp of
-        # the kept width and truncating rounds away from zero for both signs.
-        u = x.view(np.uint32).astype(np.uint64)
-        return ((u + 0x1000) & 0xFFFFE000).astype(np.uint32)
-
-    x = np.ascontiguousarray(flat, dtype=np.float32)
-    hi = _rna(x)
-    lo = _rna((x - hi.view(np.float32)).astype(np.float32))
-    if planar:
-        # ``planar`` elements per batch element, and each part of them as one
-        # run: all the upper halves, then all the lower ones --
-        # ``Tensor.storage_planar``, for an operand stored in fragment order.
-        out = np.stack([hi.view(np.float32).reshape(-1, planar),
-                        lo.view(np.float32).reshape(-1, planar)], axis=1)
-        return np.ascontiguousarray(out.ravel())
-    out = np.empty(x.size * 2, dtype=np.float32)
-    out[0::2] = hi.view(np.float32)
-    out[1::2] = lo.view(np.float32)
-    return out
+    return prepare.split_tf32(flat, planar=planar)
 
 
 def unpack(flat: np.ndarray, pack_index: np.ndarray,

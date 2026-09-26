@@ -70,3 +70,54 @@ class TestLayoutOfferings:
         frontend._emitter = None
 
         assert frontend.layout_offerings() == {}
+
+
+class TestSplitOperands:
+    """An operand whose elements are spread over several slots.
+
+    Where the decomposition is one the library computes -- the TF32 pair --
+    the numbers go back with the rest; where it is not, nothing is offered
+    and the kernel keeps splitting for itself.
+    """
+
+    @staticmethod
+    def _split(planar=False, datatype=Datatype.F32):
+        data = np.arange(6.0).reshape(3, 2, order='F')
+        t = Tensor(shape=[3, 2], addressing=Addressing.NONE, datatype=datatype,
+                   data=data, alias='A')
+        t.storage_order = (0, 1, 2, 3, 4, 5)
+        t.storage_parts = 2
+        t.storage_planar = planar
+        return t
+
+    def test_the_pair_is_offered(self):
+        offerings = _offerings({'A': self._split()})
+
+        assert offerings['A']['parts'] == 2
+        assert len(offerings['A']['data']) == 12
+
+    def test_the_halves_add_back_up(self):
+        data = _offerings({'A': self._split()})['A']['data']
+
+        recovered = [data[2 * i] + data[2 * i + 1] for i in range(6)]
+        assert recovered == pytest.approx(list(range(6)), abs=1e-6)
+
+    def test_the_upper_half_is_a_tf32_value(self):
+        data = _offerings({'A': self._split()})['A']['data']
+
+        for i in range(6):
+            bits = np.float32(data[2 * i]).view(np.uint32)
+            assert bits & 0x1FFF == 0
+
+    def test_planar_puts_each_part_in_one_run(self):
+        adjacent = _offerings({'A': self._split()})['A']['data']
+        planar = _offerings({'A': self._split(planar=True)})['A']['data']
+
+        assert sorted(planar) == sorted(adjacent)
+        assert planar[:6] == adjacent[0::2]
+        assert planar[6:] == adjacent[1::2]
+
+    def test_a_decomposition_nobody_computes_is_not_offered(self):
+        t = self._split(datatype=Datatype.F64)
+
+        assert _offerings({'A': t}) == {}
