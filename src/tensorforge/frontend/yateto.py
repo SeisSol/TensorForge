@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: MIT
 
 from tensorforge.interface import YatetoInterface as yi
+from tensorforge.analysis.cost import list_cost
 from tensorforge.common.basic_types import Addressing, Datatype, DataFlowDirection, Residence
 from tensorforge.common.context import Context
 from tensorforge.common.helper import generate_tmp_tensor
@@ -1000,6 +1001,10 @@ class KernelEmitter:
     """
     return self._cache
 
+  def descriptors(self):
+    """The operations this kernel was built from, as they were described."""
+    return list(self._descr_list)
+
   def _gen_call_site(self, generator):
     mat_name_map = {}
     offset_name_map = {}
@@ -1207,6 +1212,26 @@ class YatetoFrontend:
                          'parts': int(tensor.storage_parts),
                          'planar': bool(tensor.storage_planar)}
     return offerings
+
+  def flop_report(self):
+    """The arithmetic this kernel's operations contain, per batch element.
+
+    yateto asks for it once the kernel is generated and files it as the
+    kernel's hardware flops -- which were zero for every kernel generated
+    here, because nothing answered. Counted by the static cost model
+    (`analysis.cost`): the multiplications and additions of the operations as
+    written, over the boxes they run on, which is what a roofline divides by.
+    Transcendentals and comparisons stay out, as they do there.
+
+    Filed as plain arithmetic, in the operations' own type, which is what the
+    FMA paths issue. Where the matrix path multiplies in another precision --
+    TF32, split into parts -- that is a different kind of arithmetic, and this
+    does not yet say so; with tensor cores off, the default, there is none.
+    """
+    if self._emitter is None:
+      return {}
+    flops = list_cost(self._emitter.descriptors()).flops
+    return {'plain': flops} if flops else {}
 
   def generate(self, cpp, cache):
     if self._emitter is None and self._terms is not None:
