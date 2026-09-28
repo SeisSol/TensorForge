@@ -130,6 +130,9 @@ class MultilinearInstruction(ComputeInstruction):
         # MultilinearBuilder._lead_origin_shift).  Only relative offsets
         # matter, so shifting it is free apart from at most one extra slot.
         self._theta = theta
+        # origin of the first reduction loop, chosen in `_analyze` on the same
+        # grounds (see _reduction_origin_shift)
+        self._kappa = 0
         self._prev = prev
         self._prev_offset = prev_offset
         self._next = next
@@ -167,9 +170,43 @@ class MultilinearInstruction(ComputeInstruction):
         self._has_epilogue = self.needs_epilogue()
 
     def _eff_offset(self, i, j):
-        """Operand offset as seen from the shifted lead origin."""
-        return self._ops[i].offset[j] - (self._theta
-                                         if self._target[i][j] == 0 else 0)
+        """Operand offset as seen from the shifted lead and reduction origins."""
+        return (self._ops[i].offset[j]
+                - (self._theta if self._target[i][j] == 0 else 0)
+                - (self._kappa if self._target[i][j] == -1 else 0))
+
+    def _reduction_origin_shift(self):
+        """Pick the origin of the first reduction loop, as `theta` does for `n0`.
+
+        The reduction's first index is distributed across lanes wherever it is
+        read a block at a time (`unwindK` hands it out as a `LeadIndex`), so a
+        register-resident operand that carries it pins the origin modulo T
+        exactly like one carrying the lead index does: its element `s` sits in
+        lane `s % T` whatever the loop would prefer.  An intermediate written
+        from a slice starting at row 35 was laid out from lane 3 on, and read
+        back as the reduced operand of the next product it was three lanes off
+        -- a remainder no address can apply.  Starting the loop where the data
+        already is costs nothing: every operand's effective offset along the
+        reduction drops by the same amount, and the ones in memory take any.
+
+        Register operands that disagree modulo T would need a shuffle; the
+        origin then stays where it was, and so does what that meant before.
+        An explicit-SIMD lowering has the lane in the type and selects any
+        remainder (`Symbol.build_address`), so it keeps its origin as well: a
+        shifted window would only split its vector loads in two.
+        """
+        threads = self._num_threads
+        if not threads or _explicit_simd(self._context):
+            return 0
+        pins = set()
+        for i, op in enumerate(self._ops):
+            if op.symbol is None or op.symbol.stype not in (SymbolType.Register,
+                                                            SymbolType.Scratch):
+                continue
+            for j, target in enumerate(self._target[i]):
+                if target == -1 and j < len(op.offset):
+                    pins.add(op.offset[j] % threads)
+        return next(iter(pins)) if len(pins) == 1 else 0
 
     def _check_offsets(self):
         """A slicing offset is a logical->storage shift, never a loop bound.
@@ -281,6 +318,12 @@ class MultilinearInstruction(ComputeInstruction):
             assert -i-1 in preKs
             self._ks[i] = preKs[-i-1]
             self._sparseK[i] = sparseK[-i-1]
+
+        # and the first reduction loop into its own, likewise (_eff_offset)
+        self._kappa = self._reduction_origin_shift() if self._ks else 0
+        if self._kappa:
+            self._ks[0] = (self._ks[0][0] + self._kappa,
+                           self._ks[0][1] + self._kappa)
 
         iterate_dimensions = []
         loads = []
