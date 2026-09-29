@@ -59,6 +59,29 @@ class ComputeInstruction(AbstractInstruction):
   def get_operands(self):
     return []
 
+  @staticmethod
+  def partial_shared(view) -> tuple:
+    """`(symbol,)` when this writes a shared buffer in place over less than
+    all of it, else `()` -- what `partial_defs` reports for liveness.
+
+    A pointwise or reduction destination that already has a shared buffer is
+    written where it is, over the box the descriptor states; the rest of the
+    buffer keeps what an earlier write put there, so the write must not end
+    that buffer's live range (`LivenessAnalysis._assembling`).
+    """
+    symbol = view.symbol
+    if symbol.stype != SymbolType.SharedMem or symbol.data_view is None:
+      return ()
+    buf = symbol.data_view.get_bbox()
+    if view.bbox.rank() != buf.rank():
+      return (symbol,)
+    offset = view.offset or [0] * buf.rank()
+    lo = [l + o for l, o in zip(view.bbox.lower(), offset)]
+    hi = [u + o for u, o in zip(view.bbox.upper(), offset)]
+    covers = all(a <= b and c <= d for a, b, c, d in
+                 zip(lo, buf.lower(), buf.upper(), hi))
+    return () if covers else (symbol,)
+
   def claim_destination(self, view, bbox=None) -> None:
     """Give a fresh register array the shape this operation writes into it.
 

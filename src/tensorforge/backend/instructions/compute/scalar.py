@@ -81,6 +81,9 @@ class ScalarContractionInstruction(ComputeInstruction):
     def defs(self):
         return (self._dest.symbol,)
 
+    def partial_defs(self):
+        return self.partial_shared(self._dest)
+
     def uses(self):
         out = tuple(v.symbol for v in self._ops)
         return out + ((self._dest.symbol,) if self._add else ())

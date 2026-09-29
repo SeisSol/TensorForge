@@ -10,8 +10,10 @@ buffer placed on overlapping memory has been written since the buffer was last
 written in full; a read of a buffer in that state is a clobber.  Coverage is
 judged from the boxes each write names, not from `partial_defs`, so the check
 does not reuse the reasoning it checks: that is what let a slice written into
-a buffer a whole write defined (`temp_slice_after_whole`) come out clobbered
-while the verifier stayed green.
+a buffer a whole write defined (`temp_slice_after_whole`), a pointwise write
+into a slice (`elementwise_slice_after_whole`) and a slice written first
+inside a merged run (below) all come out clobbered while the verifier stayed
+green.
 
 A merged run whose body reads the image it carries after re-computing it is
 the other thing pinned here: closing the chain renames the image register,
@@ -169,6 +171,26 @@ def _rows(tensor, lo, hi):
                      sliced=True)
 
 
+def slice_first_in_run(count=3):
+    """`tmp` written whole before a merged run, whose body writes rows 0..4
+    of it first and then reads all of it."""
+    b, c, g, h = (SubTensor(_t(12, n)) for n in "BCGH")
+    f1, f2 = SubTensor(_t(6, "F1")), SubTensor(_t(6, "F2"))
+    d = SubTensor(_t(12, "D"))
+    tmp, x = generate_tmp_matrix(b, c), generate_tmp_matrix(b, c)
+    out = [GemmDescr(False, False, a=b, b=c, c=SubTensor(tmp)),
+           GemmDescr(False, False, a=f1, b=g, c=_rows(x, 0, 6)),
+           GemmDescr(False, False, a=f2, b=g, c=_rows(x, 6, 12)),
+           GemmDescr(False, False, a=SubTensor(x), b=h, c=d)]
+    for k in range(count):
+        out += [GemmDescr(False, False, a=SubTensor(_t(4, f"N{k}")), b=c,
+                          c=_rows(tmp, 0, 4)),
+                GemmDescr(False, False, a=SubTensor(tmp),
+                          b=SubTensor(_t(12, f"E{k}")), c=d,
+                          alpha=1.0, beta=1.0)]
+    return out
+
+
 def carried_reader(count=4):
     """`t = N(k) C; t += u Q(k)` in a merged run, read again by `D += t E(k)`."""
     b, c, p = (SubTensor(_t(12, n)) for n in "BCP")
@@ -214,11 +236,21 @@ def _case(stem):
                                   "slicing/temp_dead_slice_reassign",
                                   "slicing/two_assembled_reuse",
                                   "slicing/temp_two_writers",
+                                  "elementwise/slice_after_whole",
                                   "mixed/ml_slices_then_ew"])
 @pytest.mark.parametrize("backend,arch", TARGETS, ids=[b for b, _ in TARGETS])
 def test_a_slice_keeps_what_it_does_not_write(stem, backend, arch):
     mod = _case(stem)
     gen = _generate(mod.descr_list(), backend, arch, fp=mod.DTYPE)
+    assert clobbers(gen) == []
+
+
+@pytest.mark.parametrize("backend,arch", TARGETS, ids=[b for b, _ in TARGETS])
+def test_a_slice_first_in_a_merged_run_keeps_what_came_before(backend, arch):
+    gen = _generate(slice_first_in_run(), backend, arch, merge_variants=True)
+    assert any(isinstance(i, VariantLoop)
+               for s in gen._sections for i in _flat(list(s.stream), [])), \
+        "the repetition was not merged; the test no longer tests a loop"
     assert clobbers(gen) == []
 
 

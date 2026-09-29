@@ -90,20 +90,23 @@ class LivenessAnalysis(AbstractOptStage):
 
   def _backward(self, body: Sequence[AbstractInstruction],
                 live_out: OrderedSet,
-                live_out_map: Dict[int, OrderedSet]) -> OrderedSet:
+                live_out_map: Dict[int, OrderedSet],
+                written: frozenset = frozenset()) -> OrderedSet:
     live = live_out
-    spared = self._assembling(body)
+    spared, entering = self._assembling(body, written)
     for instr in reversed(list(body)):
       # record the live-out, which is what the forward pass needs
       live_out_map[id(instr)] = live
       if instr.regions():
-        live = self._region_transfer(instr, live, live_out_map)
+        live = self._region_transfer(instr, live, live_out_map,
+                                     entering[id(instr)])
       else:
         live = self._transfer(instr, live, spared)
     return live
 
   @staticmethod
-  def _assembling(body: Sequence[AbstractInstruction]) -> frozenset:
+  def _assembling(body: Sequence[AbstractInstruction],
+                  written: frozenset = frozenset()):
     """`(instruction, symbol)` pairs whose write must not kill the symbol.
 
     Every partial write of a buffer after an earlier write of it in this
@@ -125,21 +128,29 @@ class LivenessAnalysis(AbstractOptStage):
     nothing.
 
     Per straight-line block, which is what `_backward` is handed; a nested
-    region is its own block.  A buffer assembled partly before a loop and
-    partly inside it would be cut at the first slice inside -- no case does
-    that.
+    region is its own block, and `written` is what the blocks around it wrote
+    before it (`entering`, returned alongside for each region-bearing
+    instruction).  Without it the first slice inside a region killed a buffer
+    the enclosing block had written whole, and the stretch before the region
+    went to another buffer: a temporary assigned ahead of a merged run whose
+    body rewrites some of its rows and reads all of them.
     """
-    seen, out = set(), set()
+    seen, out, entering = set(written), set(), {}
     for instr in body:
+      if instr.regions():
+        # what a nested block finds written on the way in: a slice there
+        # continues it (see `written`)
+        entering[id(instr)] = frozenset(seen)
       partial = {id(s) for s in instr.partial_defs()}
       for sym in instr.defs():
         if id(sym) in partial and id(sym) in seen:
           out.add((id(instr), id(sym)))
         seen.add(id(sym))
-    return frozenset(out)
+    return frozenset(out), entering
 
   def _region_transfer(self, instr, live_out: OrderedSet,
-                       live_out_map: Dict[int, OrderedSet]) -> OrderedSet:
+                       live_out_map: Dict[int, OrderedSet],
+                       written: frozenset = frozenset()) -> OrderedSet:
     """``LFP(S) = live_out union (union over regions of live_in(region, S))``.
 
     The union with ``live_out`` accounts for zero iterations.  Each round
@@ -151,7 +162,7 @@ class LivenessAnalysis(AbstractOptStage):
     for iteration in range(bound):
       nxt = live_out.copy()
       for region in instr.regions():
-        nxt = nxt.union(self._backward(region, state, live_out_map))
+        nxt = nxt.union(self._backward(region, state, live_out_map, written))
       self._fixpoint_iterations += 1
       if nxt == state:
         return state
