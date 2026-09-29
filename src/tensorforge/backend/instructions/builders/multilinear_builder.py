@@ -646,8 +646,10 @@ class MultilinearBuilder(OperationBuilder):
       self._invalidate_residency(dest_symbol.name)
     if dest_symbol.name in self._residency:
       return self._residency.get(dest_symbol.name).image
-    elif self._policy.atomic_accumulation and prev:
-      # should be found in the previous step already
+    elif (self._policy.atomic_accumulation and prev
+          and (next or dest_symbol.stype == SymbolType.Global)):
+      # the atomic store adds onto what global memory holds; a buffer of the
+      # section's own is stored plainly, so its old value has to be read
       return None
     elif (self._policy.preload_operands_into_registers
           and dest_symbol.stype == SymbolType.Global
