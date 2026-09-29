@@ -70,9 +70,6 @@ class SyncThreads(AbstractInstruction):
   def __str__(self) -> str:
     return f'{self.participants().value}({self._num_threads})'
 
-  def gen_mask_threads(self, num_threads) -> str:
-    return ''
-
 
 class SyncBlock(AbstractInstruction):
   def __init__(self, context: Context):
@@ -91,8 +88,6 @@ class SyncBlock(AbstractInstruction):
   def __str__(self) -> str:
     return self.barrier_scope()
 
-  def gen_mask_threads(self, num_threads) -> str:
-    return ''
 
 class SyncGrid(AbstractInstruction):
   def __init__(self, context: Context):
@@ -110,6 +105,3 @@ class SyncGrid(AbstractInstruction):
 
   def __str__(self) -> str:
     return self.barrier_scope()
-
-  def gen_mask_threads(self, num_threads) -> str:
-    return ''

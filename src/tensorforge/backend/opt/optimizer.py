@@ -155,11 +155,6 @@ class OptimizationStage:
         scope=PassScope.PER_REGION,
         enabled=lambda pc: opts.enable_sync_block_opt))
 
-    # RemoveRedundancyOpt is deliberately absent: its _remove_bottom_instrs
-    # pops every instruction but one when the stream contains no
-    # StoreRegToGlb, which is why the call was commented out.  Dead-code
-    # elimination over defs()/uses() subsumes it.
-
     return pm
 
   # ------------------------------------------------------------------ #
@@ -169,9 +164,6 @@ class OptimizationStage:
 
   def get_instructions(self):
     return self._pc.instrs
-
-  def get_timings(self):
-    return self._manager.timings
 
 
 class _AssignShrMemOffsets(LegacyTransform):

@@ -197,13 +197,3 @@ class Context:
 
     align_length = (vec_unit_length * hw_fp_word_size) / fp_size
     return int(ceil(num / align_length) * align_length)
-
-  def align_range(self, begin, end):
-    assert end > begin
-    fp_size = self.fp_type.size()
-    mem_access_align_size = self._vm.get_hw_descr().mem_access_align_size
-    align_factor =  mem_access_align_size / fp_size
-
-    aligned_begin = begin - begin % align_factor
-    aligned_end = end + (align_factor - end % align_factor) % align_factor
-    return int(aligned_begin), int(aligned_end)

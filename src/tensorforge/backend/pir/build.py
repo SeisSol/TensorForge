@@ -7,8 +7,8 @@
 
 ``IRBuilder`` is deliberately call-compatible with ``backend.writer.Writer``
 for the subset that instruction code actually uses (``__call__``, ``varalloc``,
-``If``, ``For``, ``Block``, ``Scope``, ``Assignment``, ``VariableDeclaration``,
-``Comment``, ``Pragma``).  Legacy call sites keep working unchanged and simply
+``If``, ``For``, ``Block``, ``Scope``, ``Comment``, ``Pragma``).  Call sites
+written against the writer keep working unchanged and simply
 produce opaque ``raw*`` nodes; new code uses the structured constructors
 (``for_``, ``if_``, ``load``, ``store``, ``alloc``, ``op``) and gets real
 optimization.  Migration progress is measurable: count the ``raw*`` nodes.
@@ -1778,14 +1778,6 @@ class IRBuilder:
                       attrs=(('crosslane', True),) if crosslane else ())
         return v
 
-    def tempvar(self, prefix: str = 'tmp') -> Value:
-        """What ``primitives/{nvidia,amd}.py`` already call.
-
-        ``Writer`` never defined it, so every DPP / shuffle path that reaches
-        ``writer.tempvar()`` raises ``AttributeError`` today.
-        """
-        return self.varalloc(prefix)
-
     def new_line(self) -> Stmt:
         # Writer.new_line() is __call__(''), which writes no line but *does*
         # flush the pending block head -- keep the side effect.
@@ -1954,21 +1946,6 @@ class IRBuilder:
                       text=text)
         return v
 
-    def value_block(self, type_, base: Any = None, *,
-                    kind: Effect = Effect.READ, hint: str = 'v',
-                    layout: Optional[RegisterLayout] = None):
-        """A region that produces one value by assigning to it internally.
-
-        The escape hatch for code that is not SSA and cannot cheaply be made
-        so --- the sparse loader declares a variable and then assigns to it
-        under guards.  Wrapping the whole sequence gives it a *declared
-        result* and a *declared memory effect*, so consumers can take the
-        value as an operand even though the inside stays opaque.  The name
-        comes from the shared allocator, so it no longer needs an enclosing
-        scope to avoid colliding with the next instruction.
-        """
-        return _ValueBlock(self, type_, base, kind, hint, layout)
-
     def pack(self, type_, *parts: Operand, hint: str = 'pk') -> Value:
         """Aggregate initialization: ``VecTy v{a, b};``.
 
@@ -1995,12 +1972,11 @@ class IRBuilder:
     def accumulate(self, target: Value, value: Operand) -> Stmt:
         """``target += value;`` on a declared register.
 
-        The structured counterpart of :meth:`Accumulate`, for the same reason
-        :meth:`call_stmt` exists: an accumulator is mutated in place, so it is
-        not an SSA producer, but the mutation can still declare *which*
-        register it touches instead of being an opaque write.  `value` goes in
-        as an operand, so the computation it comes from cannot be reordered
-        past this statement.
+        Structured for the same reason :meth:`call_stmt` is: an accumulator is
+        mutated in place, so it is not an SSA producer, but the mutation can
+        still declare *which* register it touches instead of being an opaque
+        write.  `value` goes in as an operand, so the computation it comes
+        from cannot be reordered past this statement.
         """
         self.pin(target)
         return self._emit_op(Op.ACCUM, (), (target, value), pure=False,
@@ -2016,19 +1992,8 @@ class IRBuilder:
     def Pragma(self, name: str) -> Stmt:
         return self.__call__(f'#pragma {name}')
 
-    def Assignment(self, left, right) -> Stmt:
-        return self.__call__(f'{left} = {right};')
-
-    def Accumulate(self, left, right) -> Stmt:
-        return self.__call__(f'{left} += {right};')
-
     def Expression(self, expression) -> Stmt:
         return self.__call__(f'{expression};')
-
-    def VariableDeclaration(self, type_, name, expression=None) -> Stmt:
-        if expression is not None:
-            return self.__call__(f'{type_} {name} = {expression};')
-        return self.__call__(f'{type_} {name};')
 
     def Block(self, text: str = '') -> '_RawBlock':
         return _RawBlock(self, text)
@@ -2114,32 +2079,6 @@ class IRBuilder:
 
     def dump(self) -> str:
         return dump(tuple(self._stack[0].body))
-
-
-class _ValueBlock:
-    def __init__(self, builder, type_, base, kind, hint, layout=None):
-        self.builder = builder
-        self._type = type_
-        self._base = base
-        self._kind = kind
-        self.value = builder.value(type_, hint=hint, layout=layout)
-
-    def __enter__(self) -> Value:
-        self.builder.push(kind='valueblock')
-        return self.value
-
-    def __exit__(self, exc_type, exc, tb):
-        region = self.builder.pop()
-        if exc_type is not None:
-            return False
-        acc = ()
-        if self._base is not None:
-            acc = (Access(self._kind, self.builder._space_of(self._base),
-                          self.builder.alias_root(self._base)),)
-        self.builder.emit(Stmt(op=Op.RAWBLOCK, target=(self.value,),
-                               regions=(region,), text='', pure=False,
-                               movable=False, effect=self._kind, accesses=acc))
-        return False
 
 
 class _Speculation:

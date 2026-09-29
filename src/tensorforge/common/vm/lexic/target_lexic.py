@@ -21,9 +21,6 @@ class TargetLexic(Lexic):
     self.stream_type = "int"
     self.restrict_kw = "__restrict"
 
-  def multifile(self):
-    return False
-
   def get_launch_size(self, func_name, block, shmem, resident=False):
     return ''
 
@@ -39,50 +36,6 @@ class TargetLexic(Lexic):
   def kernel_definition(self, file, kernel_bounds, base_name, params, precision=None, total_shared_mem_size=None, global_symbols=None, lanes=None):
     bounds = "*".join(str(kb) for kb in kernel_bounds)
     stream_type = self.stream_type
-    class TargetContextCpu:
-      def __init__(self):
-        self.function = file.Function(f'kernel_{base_name}', f'{stream_type}* streamobj, int bX, int tX, int tY, {bounds}')
-        self.blockloop = file.For('int bx = 0; bx < bX; ++bx')
-        self.teamloop1 = file.For('int ty = 0; ty < tY; ++ty')
-        self.teamloop2 = file.For('int tx = 0; tx < tX; ++tx')
-      def __enter__(self):
-        self.function.__enter__()
-        file(f'#pragma omp parallel for nowait depend(inout: streamobj[0])')
-        self.blockloop.__enter__()
-        file(f'{precision} {GeneralLexicon.TOTAL_SHR_MEM} [{total_shared_mem_size}];')
-        file(f'#pragma omp simd collapse(2)')
-        self.teamloop1.__enter__()
-        self.teamloop2.__enter__()
-      def __exit__(self, type, value, traceback):
-        self.teamloop2.__exit__(type, value, traceback)
-        self.teamloop1.__exit__(type, value, traceback)
-        self.blockloop.__exit__(type, value, traceback)
-        self.function.__exit__(type, value, traceback)
-
-    class TargetContext:
-      def __init__(self):
-        self.function = file.Function(f'kernel_{base_name}', f'{stream_type}* streamobj, int bX, int tX, int tY, {bounds}')
-        self.blockloop = file.For('int bx = 0; bx < bX; ++bx')
-        self.teamloop1 = file.For('int ty = 0; ty < tY; ++ty')
-        self.teamloop2 = file.For('int tx = 0; tx < tX; ++tx')
-      def __enter__(self):
-        self.function.__enter__()
-        if backend == 'targetdart':
-          device = 'device(TARGETDART_DEVICE(0))'
-        else:
-          device = ''
-        file(f'#pragma omp target teams distribute nowait depend(inout: streamobj[0]) is_device_ptr({", ".join(symbol.name for symbol in global_symbols if symbol.obj.addressing != Addressing.SCALAR)}) thread_limit({bounds}) {device}')
-        self.blockloop.__enter__()
-        file(f'{precision} {GeneralLexicon.TOTAL_SHR_MEM} [{total_shared_mem_size}];')
-        file(f'#pragma omp parallel for collapse(2)')
-        self.teamloop1.__enter__()
-        self.teamloop2.__enter__()
-      def __exit__(self, type, value, traceback):
-        self.teamloop2.__exit__(type, value, traceback)
-        self.teamloop1.__exit__(type, value, traceback)
-        self.blockloop.__exit__(type, value, traceback)
-        self.function.__exit__(type, value, traceback)
-
     backend = self._backend
     class TargetContext:
       def __init__(self):
@@ -170,9 +123,6 @@ class TargetLexic(Lexic):
   def sync_grid(self):
     return ""
 
-  def get_sub_group_id(self, sub_group_size):
-    return f'{self.thread_idx_x} % {sub_group_size}'
-
   def active_sub_group_mask(self):
     return f''
 
@@ -188,18 +138,6 @@ class TargetLexic(Lexic):
 
     stream_obj = f'static_cast<{self.stream_type} *>({pointer_name})'
     file(f'{self.stream_type} *stream = {stream_obj};')
-
-  def check_error(self):
-    return None
-
-  def batch_indexer_gemm(self):
-    return self.get_tid_counter(self.thread_idx_y, self.block_dim_y, self.block_idx_z)
-
-  def batch_indexer_csa(self):
-    return self.get_tid_counter(self.thread_idx_z, self.block_dim_z, self.block_idx_z)
-
-  def batch_indexer_init(self):
-    return self.get_tid_counter(self.thread_idx_z, self.block_dim_z, self.block_idx_z)
 
   def get_headers(self):
     headers = ['cstdlib', 'stdexcept', 'omp.h', 'cmath']

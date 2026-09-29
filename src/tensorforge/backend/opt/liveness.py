@@ -279,16 +279,8 @@ class LivenessAnalysis(AbstractOptStage):
   def get_live_map(self) -> Dict[int, OrderedSet]:
     return self._live_map
 
-  def get_ranges(self) -> List[Tuple[Symbol, int, int]]:
-    """One entry per live range, so a reused buffer appears more than once."""
-    return self._ranges
-
   def max_pressure(self) -> int:
     return max((len(v) for v in self._live_map.values()), default=0)
-
-  def fixpoint_iterations(self) -> int:
-    """Rounds spent on back edges; zero for a straight-line stream."""
-    return self._fixpoint_iterations
 
 
 def _flatten(instrs: Sequence[AbstractInstruction]

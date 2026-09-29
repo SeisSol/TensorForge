@@ -56,7 +56,7 @@ from .core import (Effect, Op, Region, Stmt, TokenType, Value,
                    accesses_conflict, walk, walk_stmts)
 from .passes import substitute
 from .schedule import (_defines, _touches_fixed, _uses, can_reorder,
-                       is_wall, may_cross, touches)
+                       may_cross, touches)
 
 
 def _why_not(group: Sequence[Stmt], fixed: Stmt) -> str:
@@ -159,14 +159,6 @@ def _sole_async(region: Region) -> Tuple[int, Stmt, Optional[int]]:
     if not tokens <= {a.id for a in waits[0].args if isinstance(a, Value)}:
         raise Refusal('the wait does not name every token of the group')
     return group, waits[0], guard_at
-
-
-def _its_wait(region: Region, token: Value) -> Tuple[int, Stmt]:
-    for i, s in enumerate(region.body):
-        if s.op is Op.WAIT and any(isinstance(a, Value) and a.id == token.id
-                                   for a in s.args):
-            return i, s
-    raise Refusal('the token is not waited in the same region')
 
 
 def wrap_prefetch(body: Tuple[Stmt, ...], make_value,

@@ -114,9 +114,6 @@ class AbstractShrMemWrite(MemoryInstruction):
     self._stage_expr = stage_expr
     self._write_stage_expr = write_stage_expr
 
-  def num_stages(self) -> int:
-    return self._stages
-
   def _stage_offset(self, expr: Union[str, None] = None) -> str:
     expr = expr if expr is not None else self._stage_expr
     if self._stages == 1 or not expr:

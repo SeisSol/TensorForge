@@ -76,23 +76,6 @@ def _uses(s: Stmt) -> Set[int]:
     return ids
 
 
-def is_wall(s: Stmt) -> bool:
-    """Nothing crosses this statement.
-
-    A region is no longer one by itself.  It was, and the docstring said the
-    cheap thing was to treat it as a wall until something needed better --
-    which turned out to be six of the corpus's loops, where the statement
-    between a transfer and its wait is a `rawblock` and nothing else.
-
-    What replaces the blanket rule is `touches`: a region's accesses are the
-    union of its body's, and it is a wall only when something *inside* it is.
-    That keeps the conservatism where it belongs -- a barrier or an unknown
-    effect anywhere in the subtree still stops everything -- and drops it
-    where a loop merely reads and writes buffers it declares.
-    """
-    return bool(s.effect & _WALL) or not s.movable or touches(s) is None
-
-
 def touches(s: Stmt) -> Optional[Tuple]:
     """Every access in this statement's subtree, or None if it is a wall.
 

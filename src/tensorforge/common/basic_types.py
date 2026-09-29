@@ -56,16 +56,6 @@ class Addressing(enum.Enum):
     return map[addr_type]
 
   @classmethod
-  def str2addr(cls, string):
-    map = {'none': Addressing.NONE,
-           'strided': Addressing.STRIDED,
-           'pointer_based': Addressing.PTR_BASED,
-           'scalar': Addressing.SCALAR}
-    if string not in map:
-      raise ValueError(f'arg must be either none, strided, pointer_based, or scalar; given: {string}')
-    return map[string]
-
-  @classmethod
   def addr2str(cls, addr):
     map = {Addressing.NONE: 'none',
            Addressing.STRIDED: 'strided',

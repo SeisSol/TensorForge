@@ -465,9 +465,6 @@ class Tensor:
     def get_bbox(self):
         return self.bbox
 
-    def _set_name(self, name):
-        self.name = name
-
     def is_similar(self, other):
         # `storage_parts` belongs in here and not merely alongside: two
         # tensors agreeing on shape, addressing and box still address memory
@@ -499,9 +496,6 @@ class Tensor:
 
     def density(self):
         return self.spp.count_nz() / self.get_real_volume()
-
-    def sparsity(self):
-        return 1 - self.density()
 
     def is_dense(self):
         return self.spp.count_nz() == self.get_real_volume()
@@ -586,7 +580,3 @@ class SubTensor(TensorWrapper):
 
     def __repr__(self):
         return f'{self.tensor}({self.bbox})'
-
-class FullTensor(TensorWrapper):
-    def __init__(self, tensor: Tensor):
-        self.tensor = tensor

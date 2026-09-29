@@ -47,9 +47,6 @@ class SyclLexic(Lexic):
     # emitter exists to answer for the body as well.
     self.simd_mode = explicit_simd
 
-  def multifile(self):
-    return False
-
   def bounds_grid(self) -> bool:
     # On a Data Center GPU Max 1550 a work-group that loops over more than one
     # round of the batch is slow, whatever the occupancy: the SeisSol elastic
@@ -312,9 +309,6 @@ class SyclLexic(Lexic):
     raise NotImplementedError() # TODO
     #return "item.barrier();"
 
-  def get_sub_group_id(self, sub_group_size):
-    return f'item.get_sub_group().get_local_id()[0]'
-
   def active_sub_group_mask(self):
     return f'item.get_sub_group()'
 
@@ -366,9 +360,6 @@ class SyclLexic(Lexic):
 
     stream_obj = f'static_cast<{self.stream_type} *>({pointer_name})'
     file(f'{self.stream_type} *stream = {stream_obj};')
-
-  def check_error(self):
-    return None
 
   def get_headers(self):
     # The explicit-SIMD lowering spells its body through `tensorforge::

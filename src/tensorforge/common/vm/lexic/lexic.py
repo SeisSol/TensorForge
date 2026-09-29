@@ -136,10 +136,6 @@ class Lexic(ABC):
     return True
 
   @abstractmethod
-  def multifile(self):
-    pass
-
-  @abstractmethod
   def get_launch_code(self, func_name, grid, block, stream, func_params):
     pass
 
@@ -274,19 +270,11 @@ class Lexic(ABC):
     return None
 
   @abstractmethod
-  def get_sub_group_id(self, sub_group_size):
-    return None
-
-  @abstractmethod
   def kernel_range_object(self, name, values):
     pass
 
   @abstractmethod
   def get_stream_via_pointer(self, file, stream_name, pointer_name):
-    pass
-
-  @abstractmethod
-  def check_error(self):
     pass
 
   @abstractmethod

@@ -541,21 +541,6 @@ class AbstractInstruction(ABC):
   def set_threadconfig_pre(self, num_threads, mults):
     pass
 
-  def gen_mask_threads(self, num_threads) -> str:
-    return f'{self._vm.get_lexic().thread_idx_x} < {num_threads}'
-
-  def gen_range_mask_threads(self, begin, end) -> str:
-    assert begin < end
-    tid = self._vm.get_lexic().thread_idx_x
-    if begin == 0:
-      return f'{tid} < {end}'
-    else:
-      return f'({tid} >= {begin}) && ({tid} < {end})'
-
-  # @abstractmethod
-  def get_perfdata(self):
-    pass
-
   def temp_shmem(self):
     return 0
 

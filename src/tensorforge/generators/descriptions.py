@@ -284,24 +284,6 @@ class MultilinearDescr(OperationDescription):
     return vectorize.lead_pair(self._lead_dim(), fp, align,
                                blocking=context.get_user_options().lead_blocking)[1]
 
-  def scalar_num_threads(self, context: Context) -> int:
-    """The lane count this operator would have had without vectorization.
-
-    What `RegmaxBlockPolicy` has to divide by.  Sizing `mults_per_block` from
-    the *reduced* lane count would double the mults, double the shared memory
-    per block and halve the occupancy -- the whole win spent on memory.
-    Dividing by the count the operator started with keeps the mults where
-    they were and makes the block smaller instead, which is the arrangement
-    that leaves blocks per SM unchanged or better.
-
-    Computed by the same ladder `get_num_threads` uses rather than by a
-    formula that looks equivalent: `context.align` rounds 20 up to 32 and 35
-    up to 64, while the ladder caps at 32, and using the wrong one moves
-    `mults_per_block` on every operator whose lead dimension is not a power
-    of two.
-    """
-    return self._thread_ladder(context)
-
   def _thread_ladder(self, context: Context) -> int:
     num_threads = context.align(num=self._lead_dim())
     for cap in (32, 16, 8, 4, 2, 1):
@@ -841,16 +823,6 @@ class ForDescr(OperationDescription):
                             members=[operand_name(m) for m in v.members])
                        for v in variants])
 
-class IfDescr:
-  def __init__(self, condition, subdescr):
-    self.condition = condition
-    self.subdescr = subdescr
-
-  def __str__(self):
-    return f'if ({self.condition}): {self.subdescr}'
-
-class ConsecutiveDescr:
-  pass
 
 class BarrierDescription(OperationDescription):
   def barrier(self):

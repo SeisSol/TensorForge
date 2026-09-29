@@ -529,8 +529,6 @@ class StoreRegToGlb(AbstractInstruction):
   def __str__(self) -> str:
     return f'{self._dest.name} = store{{r>g}}({self._src.name});'
 
-def round_up_to_nearest_vec_length(n, vec_length):
-    return math.ceil(n / vec_length) * vec_length
 
 class StoreShrMemToGlb(AbstractInstruction):
   def __init__(self,

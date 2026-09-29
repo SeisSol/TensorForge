@@ -2,7 +2,6 @@
 #
 # SPDX-License-Identifier: MIT
 from typing import List, Optional, Union, Type
-from copy import deepcopy
 import hashlib
 from tensorforge.generators.descriptions import ForDescr, OperationDescription, MultilinearDescr, ElementwiseDescr, RegionDescription, ReductionDescr
 from tensorforge.common.context import Context
@@ -2764,19 +2763,6 @@ class Generator:
     str_params = ', '.join(self._declare(params, with_defaults=with_defaults,
                                          host=True))
     return f'void launcher_{self._base_kernel_name}({str_params})'
-
-  def default_generate_call_site(self):
-    if not self._is_registerd:
-      raise RuntimeError('generator is not registered. Call register first.')
-    symbols = deepcopy(list(self._scopes.get_global_scope().values()))
-    for item in symbols:
-      if item.obj.alias:
-        item.name = item.obj.alias
-
-    args = [p.argument() for p in self._base_params(symbol_list=symbols)]
-    args.append(f'{GeneralLexicon.STREAM_PTR_STR}')
-    str_args = ', '.join(args)
-    return f'launcher_{self._base_kernel_name}({str_args});'
 
   def get_helper_headers(self):
     headerset = set()

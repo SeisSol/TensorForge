@@ -41,9 +41,6 @@ def determine_dim_index(term, index, shape, permute):
   modpos = shape[permute[index]]
   return f'((({term}) / {divpos}) % {modpos})'
 
-class SparseDataView:
-  def __init__(self, shape: List[int], permute: Union[List[int], None], ssp):
-    pass
 
 def slots_for(lower: int, upper: int, block: int,
               lead_width: int = 1) -> int:
@@ -135,17 +132,6 @@ class DataView:
     # every operation returns a new box -- so the defensive deepcopy that used
     # to be here bought nothing and cost ~700k copies on a single large GEMM.
     return self._bbox
-
-  def reset_bbox(self, bbox):
-    self._bbox = bbox
-    self._offset = self.get_offset()
-
-  def get_offset(self):
-    addr = 0
-    for i, s in reversed(zip(self._bbox.lower()[1:], self.shape[:-1])):
-      addr = s * (i + addr)
-    addr = self._bbox.lower()[0] + addr
-    return addr
 
   def rank(self):
     return len(self.shape)
@@ -1240,11 +1226,6 @@ class LinearizedLoop:
         idx.append(Variable(str(v), Datatype.I32, v))
       inner(idx)
 
-class MultiLoop:
-  pass
-
-class SparseLoop:
-  pass
 
 def write_loops(context: Context, writer: Writer, loops: List[Loop], inner):
   def write_loops_inner(context: Context, writer: Writer, loops: List[Loop], inner, varlist):

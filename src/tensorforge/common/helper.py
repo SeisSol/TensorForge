@@ -3,7 +3,6 @@
 # SPDX-License-Identifier: MIT
 from tensorforge.common.matrix.tensor import Tensor, SubTensor
 from tensorforge.common.basic_types import Addressing, GeneralLexicon
-from tensorforge.common.vm.vm import VM
 from tensorforge.backend.symbol import Symbol
 from typing import List
 
@@ -38,9 +37,6 @@ def generate_tmp_matrix(op1: Tensor, op2: Tensor, trans_a: bool = False, trans_b
   target_a = [-1, 0] if trans_a else [0, -1]
   target_b = [1, -1] if trans_b else [-1, 1]
   return generate_tmp_tensor([op1, op2], [target_a, target_b])
-
-def get_2d_block_id(vm: VM):
-  return f'{vm.lexic.thread_idx_y} + {vm.lexic.block_dim_y} * {vm.lexic.block_idx_x}'
 
 
 def get_extra_offset_name(symbol: Symbol):

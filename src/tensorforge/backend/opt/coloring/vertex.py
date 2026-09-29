@@ -20,9 +20,6 @@ class Vertex(Generic[VertexType]):
   def get_neighbors(self) -> OrderedSet:
     return self._neighbors
 
-  def has_neighbors(self) -> bool:
-    return bool(self._neighbors)
-
   def remove_neighbor(self, vertex: VertexType) -> None:
     self._neighbors.remove(vertex)
 

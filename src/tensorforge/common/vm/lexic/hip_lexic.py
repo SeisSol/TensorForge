@@ -87,9 +87,6 @@ class HipLexic(CudaLexic):
     tail = ' const' if const else ''
     return f'tensorforge::{alias}<{ro}{elem}, {name}>{tail}'
 
-  def multifile(self):
-    return False
-
   def get_launch_size(self, func_name, block, shmem, resident=False):
     # ROCm up to 7.2 sizes a block's LDS against one CU's 64 KB even in WGP
     # mode, where a "multiprocessor" is a WGP of two CUs and 128 KB -- the
@@ -165,22 +162,11 @@ class HipLexic(CudaLexic):
     wave = hw.vec_unit_length
     if num_threads <= wave:
       return wave % num_threads == 0
-    # Above a wave the answer is False until the prologue exists: the objects
-    # need `s_barrier_init` with the expected count, a workgroup barrier so
-    # that nobody joins before the init lands, and one `s_barrier_join` per
-    # wave, all before the first use.  `_named_barriers` says which targets
-    # could carry it.
+    # Above a wave the answer is False: the objects would need a prologue --
+    # `s_barrier_init` with the expected count, a workgroup barrier so that
+    # nobody joins before the init lands, and one `s_barrier_join` per wave,
+    # all before the first use -- and the generator emits none.
     return False
-
-  @staticmethod
-  def _named_barriers(hw) -> bool:
-    model = str(hw.model)
-    if not model.startswith('gfx'):
-      return False
-    try:
-      return int(model[3:], base=16) >= 0x1250
-    except ValueError:
-      return False
 
   def sync_mult(self, num_threads: int, hw):
     if num_threads <= hw.vec_unit_length:
@@ -198,9 +184,6 @@ class HipLexic(CudaLexic):
     lane and read back by the guard read the old `X1` in the other lanes on
     gfx1150 -- one element in a thousand took both branches."""
     return '__builtin_amdgcn_fence(__ATOMIC_ACQ_REL, "wavefront");'
-
-  def get_sub_group_id(self, sub_group_size):
-    return f'{self.thread_idx_x} % {sub_group_size}'
 
   def active_sub_group_mask(self):
     return None

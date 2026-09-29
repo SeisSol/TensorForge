@@ -294,17 +294,3 @@ class XorOperator(ReductionOperator):
 
   def __str__(self):
     return '^'
-
-class UnaryOperator(Operator):
-  def num_operands(self):
-    return 1
-
-class BinaryOperator(Operator):
-  def num_operands(self):
-    return 2
-
-class NegativeOperator:
-  pass
-
-class InverseOperator:
-  pass

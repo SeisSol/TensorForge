@@ -19,9 +19,6 @@ class OpenCLLexic(Lexic):
     self.stream_type = "clqueue_t"
     self.restrict_kw = "__restrict__"
 
-  def multifile(self):
-    return True
-
   def get_launch_size(self, func_name, block):
     return None
 
@@ -37,9 +34,6 @@ class OpenCLLexic(Lexic):
 
   def sync_simd(self):
     return "item.barrier();"
-
-  def get_sub_group_id(self, sub_group_size):
-    return f'item.get_sub_group().get_local_id()[0]'
 
   def active_sub_group_mask(self):
     return f'item.get_sub_group()'

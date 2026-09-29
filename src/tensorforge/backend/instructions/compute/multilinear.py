@@ -63,7 +63,6 @@ def _contiguous_first_axis(sym) -> bool:
         return False
 
 
-
 def _roll_count(dimmin, dimmax, step, k_roll, k_unroll_max):
     """The unroll count of a rolled reduction, or 0 to unroll it whole.
 
@@ -1737,40 +1736,6 @@ class MultilinearInstruction(ComputeInstruction):
                     spec.discard()
             return taken
         return False
-
-    def _cublasdx_nonleadim_dim(self, writer: Writer):
-        assert self._is_log
-        with writer.Scope():
-            # a _tiny_ bit hacky... But ok.
-            writer('using namespace cublasdx;')
-
-            m = 0
-            n = 0
-            k = 0
-
-            num_threads = self._num_threads
-
-            gemm_traits = []
-            gemm_traits += [f'Size<{m}, {n}, {k}>']
-            gemm_traits += ['Function<function::MM>']
-            gemm_traits += ['Type<type::real>']
-
-            transpose = lambda isTrue: 'transpose_mode::transposed' if isTrue else 'transpose_mode::non_transposed'
-            gemm_traits += [f'TransposeMode<{transpose(False)}, {transpose(False)}>']
-            gemm_traits += [f'Precision<{self._vm.fp_as_str()}>']
-
-            # gemm_traits += [f'LeadingDimension<A,B,C>']
-
-            sm = self._vm.get_hw_descr().model[3:]
-            smprint = f'{sm}0'
-            gemm_traits += [f'SM<{smprint}>']
-            gemm_traits += ['Block']
-            gemm_traits += [f'Block_Dim<{num_threads}>']
-            traittype = '+'.join(f'{trait}()' for trait in gemm_traits)
-            writer(f'using GemmType = decltype({traittype});')
-
-            # currently, the alpha, beta are handled when storing back to global memory
-            writer(f'GemmType().execute(1, {self._op1.name}, {self._op2.name}, 1, {self._dest.name});')
 
     def _leading_dim(self, writer: Writer):
         with writer.Scope():

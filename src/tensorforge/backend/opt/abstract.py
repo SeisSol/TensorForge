@@ -31,7 +31,3 @@ class AbstractTransformer(AbstractOptStage):
 
   def get_instructions(self) -> List[AbstractInstruction]:
     return self._instrs
-
-  def _print_instr(self) -> None:
-    for index, instr in enumerate(self._instrs):
-      print(f'{index}:   {instr}')

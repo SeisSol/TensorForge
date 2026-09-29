@@ -54,10 +54,6 @@ class CudaLexic(Lexic):
     # sm_70 and up; below it the annotation does not exist and the parameter
     # is copied per thread, which is the behavior without it anyway.
 
-
-  def multifile(self):
-    return False
-
   def get_launch_size(self, func_name, block, shmem, resident=False):
     return f"""static std::size_t gridsize = 0;
     if (gridsize == 0) {{
@@ -98,10 +94,6 @@ class CudaLexic(Lexic):
   def declare_shared_memory(self, name, precision, size=None):
     return f'auto* {name} = reinterpret_cast<{precision}*>({GeneralLexicon.TOTAL_SHR_MEM}Ptr)'
 
-  def get_launch_bounds(self, total_num_threads_per_block, min_blocks_per_mp=None):
-    params = [str(item) for item in [total_num_threads_per_block, min_blocks_per_mp] if item]
-    return f'__launch_bounds__({", ".join(params)})'
-
   def storage_class(self, space):
     # The one space CUDA needs told: without it a by-value parameter whose
     # address is taken, or which a runtime value indexes, is copied to `.local`
@@ -113,7 +105,6 @@ class CudaLexic(Lexic):
   def kernel_definition(self, file, kernel_bounds, base_name, params, precision=None,
                         total_shared_mem_size=None, global_symbols=None,
                         lanes=None):
-    #return file.CudaKernel(base_name, params, kernel_bounds)
     args = [str(item) for item in kernel_bounds]
     bounds = f"\n__launch_bounds__({', '.join(args)})\n"
     header = f'__global__ void {bounds} kernel_{base_name}({params})'
@@ -168,9 +159,6 @@ class CudaLexic(Lexic):
     return (f'asm volatile("barrier.sync %0, %1;" :: '
             f'"r"({self.thread_idx_y} + 1), "r"({num_threads}) : "memory");')
 
-  def get_sub_group_id(self, sub_group_size):
-    return f'{self.thread_idx_x} % {sub_group_size}'
-
   def active_sub_group_mask(self):
     return "__activemask()"
 
@@ -189,18 +177,6 @@ class CudaLexic(Lexic):
     if_stream_exists = f'({pointer_name} != nullptr)'
     stream_obj = f'static_cast<{self.stream_type}>({pointer_name})'
     file(f'{self.stream_type} stream = {if_stream_exists} ? {stream_obj} : 0;')
-
-  def check_error(self):
-    return "CHECK_ERR"
-
-  def batch_indexer_gemm(self):
-    return self.get_tid_counter(self.thread_idx_y, self.block_dim_y, self.block_idx_x)
-
-  def batch_indexer_csa(self):
-    return self.get_tid_counter(self.thread_idx_z, self.block_dim_z, self.block_idx_x)
-
-  def batch_indexer_init(self):
-    return self.get_tid_counter(self.thread_idx_y, self.block_dim_y, self.block_idx_x)
 
   def get_headers(self):
     return ["tensorforge_device/cuda.h", "cuda_pipeline.h"]

@@ -16,10 +16,6 @@ class VertexStack:
   def pop_edges(self) -> Vertex:
     return self._vertices.pop()
 
-  def print_stack(self) -> None:
-    for edge in self._vertices:
-      print(edge)
-
   def empty(self) -> bool:
     return len(self._vertices) == 0
 
@@ -73,11 +69,6 @@ class GraphColoring:
     for vertex, color in self._vertex2color_map.items():
       vertex2object[vertex] = self._color2object_map[color]
     return vertex2object
-
-  def print_graph(self) -> None:
-    print('~' * 80)
-    for vertex in self._graph:
-      print(vertex)
 
   def _coarse_graph(self) -> bool:
     for index, vertex in enumerate(self._graph):

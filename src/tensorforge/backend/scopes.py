@@ -54,12 +54,6 @@ class Scopes:
     self._does_name_exist(self._inv_tables, symbol.name)
     self._inv_tables[-1][symbol.obj] = symbol
 
-  def delete_symbol(self, obj):
-    self._inv_tables[-1].pop(obj)
-
-  def delete_from_global(self, obj):
-    self._inv_tables[Scopes.GLOBAL_SCOPE].pop(obj)
-
   def get_symbol(self, obj):
     for table in reversed(self._inv_tables):
       if obj in table:
@@ -79,18 +73,6 @@ class Scopes:
 
   def get_num_scopes(self):
     return len(self._inv_tables)
-
-  def print_scope(self, level=-1):
-    if level > len(self._inv_tables):
-      raise InternalError(f'level {level} exceeds num scopes equal to {len(self._inv_tables)}')
-
-    for symbol in self._inv_tables[level].values():
-      print(symbol)
-
-  def print_scopes(self):
-    for level, _ in enumerate(self._inv_tables):
-      print('*' * 80)
-      self.print_scope(level)
 
   def __contains__(self, obj):
     result = False

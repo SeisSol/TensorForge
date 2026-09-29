@@ -295,9 +295,6 @@ class ResolvedOptions:
   def __contains__(self, name):
     return name in self._values
 
-  def as_dict(self) -> Dict[str, Any]:
-    return dict(self._values)
-
   def delta(self) -> Dict[str, Any]:
     """What this configuration says that the bare default for the same hardware
     does not.  Empty for the default build."""
