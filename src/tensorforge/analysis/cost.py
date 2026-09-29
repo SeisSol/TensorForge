@@ -48,7 +48,7 @@ from tensorforge.common.operation import Operation
 TRANSCENDENTAL = frozenset({
     Operation.SQRT, Operation.RSQRT, Operation.CBRT, Operation.RCBRT,
     Operation.RCP, Operation.DIV, Operation.MOD, Operation.POW,
-    Operation.EXP, Operation.EXPM1, Operation.LOG, Operation.LOGP1,
+    Operation.EXP, Operation.EXPM1, Operation.LOG, Operation.LOG1P,
     Operation.SIN, Operation.COS, Operation.TAN,
     Operation.ASIN, Operation.ACOS, Operation.ATAN,
     Operation.SINH, Operation.COSH, Operation.TANH,

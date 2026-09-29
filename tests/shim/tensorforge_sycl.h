@@ -219,7 +219,7 @@ template <typename T> T cbrt(T x) { return x; }
 template <typename T> T exp(T x) { return x; }
 template <typename T> T log(T x) { return x; }
 template <typename T> T expm1(T x) { return x; }
-template <typename T> T logp1(T x) { return x; }
+template <typename T> T log1p(T x) { return x; }
 template <typename T> T sin(T x) { return x; }
 template <typename T> T cos(T x) { return x; }
 template <typename T> T tan(T x) { return x; }

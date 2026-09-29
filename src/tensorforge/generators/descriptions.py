@@ -437,7 +437,7 @@ class ElementwiseDescr(OperationDescription):
       Operation.ABS, Operation.ACOS, Operation.ACOSH, Operation.ASIN,
       Operation.ASINH, Operation.ATAN, Operation.ATANH, Operation.CBRT,
       Operation.COS, Operation.COSH, Operation.EXP, Operation.EXPM1,
-      Operation.LOG, Operation.LOGP1, Operation.NEG, Operation.NOT,
+      Operation.LOG, Operation.LOG1P, Operation.NEG, Operation.NOT,
       Operation.RCBRT, Operation.RCP, Operation.ROUND, Operation.RSQRT,
       Operation.SIN, Operation.SINH, Operation.SQRT, Operation.TAN,
       Operation.TANH, Operation.COPY, Operation.CEIL, Operation.FLOOR,

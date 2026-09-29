@@ -770,8 +770,8 @@ class SyclLexic(Lexic):
       return f'sycl::log({value1})' # has __logf
     elif op == Operation.EXPM1:
       return f'sycl::expm1({value1})'
-    elif op == Operation.LOGP1:
-      return f'sycl::logp1({value1})'
+    elif op == Operation.LOG1P:
+      return f'sycl::log1p({value1})'
     elif op == Operation.SQRT:
       return f'sycl::sqrt({value1})'
     elif op == Operation.CBRT:

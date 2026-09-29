@@ -312,8 +312,8 @@ class CudaLexic(Lexic):
       return f'log{fpsuffix}({value1})' # has __logf
     elif op == Operation.EXPM1:
       return f'expm1{fpsuffix}({value1})'
-    elif op == Operation.LOGP1:
-      return f'logp1{fpsuffix}({value1})'
+    elif op == Operation.LOG1P:
+      return f'log1p{fpsuffix}({value1})'
     elif op == Operation.SQRT:
       # return f'__{fpprefix}sqrt_rn({value1})'
       return f'sqrt{fpsuffix}({value1})'

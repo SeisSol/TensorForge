@@ -43,7 +43,7 @@ def _is_num(x) -> bool:
 # --------------------------------------------------------------------------- #
 
 _UNARY = ('abs acos acosh asin asinh atan atanh cbrt ceil cos cosh erf exp '
-          'expm1 floor gamma log logp1 neg rcbrt rcp round rsqrt sign sin '
+          'expm1 floor gamma log log1p neg rcbrt rcp round rsqrt sign sin '
           'sinh sqrt tan tanh trunc copy').split()
 
 # --------------------------------------------------------------------------- #

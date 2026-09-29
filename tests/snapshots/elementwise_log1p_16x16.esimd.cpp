@@ -1,0 +1,1 @@
+FAILED: NotImplementedError: Operation.LOG1P has no ESIMD intrinsic. `sycl::log1p` is not a substitute -- it does not accept a simd<> operand, and where a conversion exists it would silently compute on one element. Composing it from the intrinsics that do exist is a numerics decision, not a spelling one.

@@ -243,8 +243,8 @@ class TargetLexic(Lexic):
       return f'std::log({value1})' # has __logf
     elif op == Operation.EXPM1:
       return f'std::expm1({value1})'
-    elif op == Operation.LOGP1:
-      return f'std::logp1({value1})'
+    elif op == Operation.LOG1P:
+      return f'std::log1p({value1})'
     elif op == Operation.SQRT:
       return f'std::sqrt({value1})'
     elif op == Operation.CBRT:

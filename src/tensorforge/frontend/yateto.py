@@ -110,7 +110,7 @@ class DescriptionReader(Reader):
     'Asinh': Operation.ASINH, 'Acosh': Operation.ACOSH,
     'Atanh': Operation.ATANH,
     'Log': Operation.LOG, 'Exp': Operation.EXP,
-    'Log1p': Operation.LOGP1, 'Expm1': Operation.EXPM1,
+    'Log1p': Operation.LOG1P, 'Expm1': Operation.EXPM1,
     'Sqrt': Operation.SQRT, 'Cbrt': Operation.CBRT, 'Abs': Operation.ABS,
     'Min': Operation.MIN, 'Max': Operation.MAX, 'Pow': Operation.POW,
     'Div': Operation.DIV, 'Add': Operation.ADD, 'Mul': Operation.MUL,
