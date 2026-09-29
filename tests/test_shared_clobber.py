@@ -19,6 +19,10 @@ A merged run whose body reads the image it carries after re-computing it is
 the other thing pinned here: closing the chain renames the image register,
 and a reader holding it as a view kept the old name -- a register nothing
 writes.
+
+And a store into a buffer a clearing store wrote waits for a barrier: the
+zeros go out on the clearing nest's lanes, the later store writes some of the
+same cells from others, and two lanes writing one cell unordered is a race.
 """
 
 from __future__ import annotations
@@ -33,9 +37,11 @@ from pathlib import Path
 import pytest
 
 from tensorforge.backend.instructions.allocate import RegisterAlloc
+from tensorforge.backend.instructions.memory import AbstractShrMemWrite
 from tensorforge.backend.instructions.memory.load import (GlbToShrLoader,
                                                           LoadWait)
 from tensorforge.backend.instructions.memory.store import StoreRegToShr
+from tensorforge.backend.instructions.sync_block import SyncThreads
 from tensorforge.backend.instructions.ptr_manip import VariantLoop
 from tensorforge.backend.symbol import SymbolType
 from tensorforge.common.basic_types import Addressing, Datatype
@@ -158,6 +164,23 @@ def unwritten_registers(gen):
     return found
 
 
+def unfenced_rewrites(gen):
+    """Shared writes into a buffer a clearing store wrote, no barrier between."""
+    found = []
+    for section in gen._sections:
+        cleared = set()
+        for instr in _flat(list(section.stream), []):
+            if isinstance(instr, SyncThreads):
+                cleared = set()
+            elif isinstance(instr, AbstractShrMemWrite):
+                dest = instr.get_dest()
+                if id(dest) in cleared:
+                    found.append((str(instr), dest.name))
+                if getattr(instr, '_clear', False):
+                    cleared.add(id(dest))
+    return found
+
+
 # -- shapes -------------------------------------------------------------- #
 
 def _t(rows, alias, cols=12):
@@ -261,3 +284,14 @@ def test_a_merged_run_reads_the_image_it_carries(backend, arch):
                for s in gen._sections for i in _flat(list(s.stream), [])), \
         "the repetition was not merged; the test no longer tests a loop"
     assert unwritten_registers(gen) == []
+
+
+@pytest.mark.parametrize("stem", ["slicing/temp_dead_slice_reassign",
+                                  "slicing/temp_reassign_narrower_slice",
+                                  "slicing/temp_two_writers",
+                                  "mixed/ml_then_ew_temp_narrower"])
+@pytest.mark.parametrize("backend,arch", TARGETS, ids=[b for b, _ in TARGETS])
+def test_a_store_after_a_clear_waits_for_it(stem, backend, arch):
+    mod = _case(stem)
+    gen = _generate(mod.descr_list(), backend, arch, fp=mod.DTYPE)
+    assert unfenced_rewrites(gen) == []

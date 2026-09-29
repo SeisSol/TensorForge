@@ -96,9 +96,21 @@ class SyncThreadsOpt(AbstractTransformer):
     """
     selected = []
     writes = list(writes)
+    # Buffers a store has cleared (`StoreRegToShr`, `clear`) with no barrier
+    # since.  The zeros go out on the clear nest's lanes; a later store into
+    # the same buffer writes some of those cells again from other lanes -- a
+    # narrowed assignment followed by a slice -- and two lanes writing one
+    # cell unordered is a race whichever write the compiler issues first.
+    cleared = []
     for instr in self._instrs:
       if isinstance(instr, AbstractShrMemWrite):
-        writes.append((instr.get_dest(), False))
+        dest = instr.get_dest()
+        if any(c is dest for c in cleared):
+          selected.append((instr, False))
+          writes, cleared = [], []
+        writes.append((dest, False))
+        if getattr(instr, '_clear', False):
+          cleared.append(dest)
       # An asynchronous transfer lands at its wait, and the wait makes it
       # visible to the lane that issued it and no other.  A barrier between
       # issue and wait -- the one some other buffer's consumer needed --
@@ -121,7 +133,7 @@ class SyncThreadsOpt(AbstractTransformer):
       hits = [handoff for sym, handoff in writes if sym in reads]
       if hits:
         selected.append((instr, any(hits)))
-        writes = []
+        writes, cleared = [], []
 
       if isinstance(instr, ComputeInstruction):
         writes.extend((sym, True) for sym in instr.defs()
