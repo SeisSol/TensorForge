@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 SeisSol Group
 #
 # SPDX-License-Identifier: MIT
-from tensorforge.common.matrix.tensor import Tensor, SubTensor
+from tensorforge.common.matrix.tensor import Tensor
 from tensorforge.common.matrix.boundingbox import BoundingBox
 from tensorforge.common.matrix.spp import ListSPP
 
@@ -60,4 +60,3 @@ class YatetoInterface:
                     datatype=datatype,
                     alignment=alignment)
     return tensor
-    return SubTensor(tensor, chainforge_bbox)

@@ -308,8 +308,8 @@ module-level `DTYPE` constant but forgetting the per-tensor argument.
 point used by SeisSol. The in-repo suite carries one host-only smoke
 (`test_yateto_frontend_imports_and_constructs`) that imports
 `YatetoFrontend` and constructs an instance — enough to catch
-interface drift in `tensorforge.interface` / `tensorforge.ir` that
-would break SeisSol's import path. End-to-end tests that actually
+interface drift in `tensorforge.interface` that would break SeisSol's
+import path. End-to-end tests that actually
 feed yateto-emitted descriptions are out of scope for this suite;
 SeisSol's CI is the right place for those.
 

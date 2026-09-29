@@ -15,12 +15,6 @@ from tensorforge.generators.descriptions import MultilinearDescr, ElementwiseDes
 from tensorforge.common.operation import Operation
 from tensorforge.common.operation import AddOperator, MulOperator, MinOperator, MaxOperator, AndOperator, OrOperator, XorOperator
 
-from tensorforge.ir.data.variable import TensorView, TensorAlloc
-from tensorforge.ir.data.variable import TensorData
-from tensorforge.ir.logical.compute import Multilinear
-from tensorforge.ir.type import BaseDatatype
-from tensorforge.ir.data.memory import Logical
-
 import copy
 import itertools
 import numpy as np
@@ -40,8 +34,6 @@ class Reader:
 
   def __init__(self):
     self._cache = {}
-
-    # to be replaced by the IR list
     self._descr_list = []
 
     # TODO: maybe remove again
@@ -85,12 +77,6 @@ class DescriptionReader(Reader):
     #: no attribute channel to attach them with.  Passed on untouched; the
     #: Generator is what reads them.
     self._attrs = attrs
-
-    self._ir_list = []
-    self._tensor_list = {}
-
-    # TODO: maybe remove again
-    self._prefix = ""
 
     #: Numbers the scratch tensors this reader introduces, so that two of them
     #: in one kernel do not land on the same name.
@@ -684,8 +670,6 @@ class DescriptionReader(Reader):
 
     datatype = Datatype.ytt2enum(d['datatype'])
 
-    datatype_new = BaseDatatype.ytt2enum(d['datatype'])
-
     shape = d['storage']['shape']
     storagetype = d['storage']['type']
 
@@ -739,8 +723,6 @@ class DescriptionReader(Reader):
     self._cache[name] = Tensor(shape, addressing, bbox, name, is_temporary, spp,
                                values, datatype, d.get('alignment', 0),
                                residence=residence)
-
-    self._tensor_list[name] = TensorData(datatype_new, shape, spp, values=values)
 
   @staticmethod
   def _values(values):
@@ -1015,8 +997,6 @@ class KernelEmitter:
     context = Context(arch=self._arch.name,
                       backend=self._arch.backend,
                       fp_type=fptype)
-
-    # print(self._ir_list)
 
     tensorforge_generator = TensorForgeGenerator(self._descr_list, context,
                                                 attrs=self._attrs)
