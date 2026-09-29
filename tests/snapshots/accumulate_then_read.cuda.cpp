@@ -1,5 +1,5 @@
 // === base name ===
-kernel_200b543132f3c14b
+kernel_6dc4815821bbdc0e
 
 // === header ===
 #ifndef TENSORFORGE_LAUNCH_TYPES
@@ -27,9 +27,9 @@ struct LaunchConfig {
 };
 } // namespace tensorforge
 #endif
-inline constexpr tensorforge::LaunchInfo launch_info_kernel_200b543132f3c14b = {{32, 4, 1}, 32, 32, 1, 4, 9728, false, true, 1};
-tensorforge::LaunchConfig launch_config_kernel_200b543132f3c14b(size_t numElements0, void* streamPtr = nullptr);
-void launcher_kernel_200b543132f3c14b(float * m0, size_t m0_extraOffset, const float * m1, size_t m1_extraOffset, const float * m2, size_t m2_extraOffset, const float * m3, size_t m3_extraOffset, const float * m4, size_t m4_extraOffset, const float * m5, size_t m5_extraOffset, const float * m6, size_t m6_extraOffset, const float * m7, size_t m7_extraOffset, const float * m8, size_t m8_extraOffset, float * m9, size_t m9_extraOffset, const float * m10, size_t m10_extraOffset, size_t numElements0, unsigned * flags0 = nullptr, void* streamPtr = nullptr);
+inline constexpr tensorforge::LaunchInfo launch_info_kernel_6dc4815821bbdc0e = {{32, 4, 1}, 32, 32, 1, 4, 6656, false, true, 1};
+tensorforge::LaunchConfig launch_config_kernel_6dc4815821bbdc0e(size_t numElements0, void* streamPtr = nullptr);
+void launcher_kernel_6dc4815821bbdc0e(float * m0, size_t m0_extraOffset, const float * m1, size_t m1_extraOffset, const float * m2, size_t m2_extraOffset, const float * m3, size_t m3_extraOffset, const float * m4, size_t m4_extraOffset, const float * m5, size_t m5_extraOffset, const float * m6, size_t m6_extraOffset, const float * m7, size_t m7_extraOffset, const float * m8, size_t m8_extraOffset, float * m9, size_t m9_extraOffset, const float * m10, size_t m10_extraOffset, size_t numElements0, unsigned * flags0 = nullptr, void* streamPtr = nullptr);
 
 
 // === launcher ===
@@ -58,7 +58,7 @@ struct LaunchConfig {
 };
 } // namespace tensorforge
 #endif
-tensorforge::LaunchConfig launch_config_kernel_200b543132f3c14b(size_t numElements0, void* streamPtr) {
+tensorforge::LaunchConfig launch_config_kernel_6dc4815821bbdc0e(size_t numElements0, void* streamPtr) {
   (void)numElements0;
   (void)streamPtr;
   dim3 block (32, 4, 1);
@@ -69,7 +69,7 @@ tensorforge::LaunchConfig launch_config_kernel_200b543132f3c14b(size_t numElemen
         CHECK_ERR;
         cudaDeviceGetAttribute(&smCount, cudaDevAttrMultiProcessorCount, device);
         CHECK_ERR;
-        cudaOccupancyMaxActiveBlocksPerMultiprocessor(&blocksPerSM, kernel_kernel_200b543132f3c14b, block.x * block.y * block.z, 2432 * sizeof(float));
+        cudaOccupancyMaxActiveBlocksPerMultiprocessor(&blocksPerSM, kernel_kernel_6dc4815821bbdc0e, block.x * block.y * block.z, 1664 * sizeof(float));
         CHECK_ERR;
         if (blocksPerSM > 0) {
           gridsize = smCount * blocksPerSM;
@@ -86,36 +86,36 @@ tensorforge::LaunchConfig launch_config_kernel_200b543132f3c14b(size_t numElemen
   config.block[0] = 32;
   config.block[1] = 4;
   config.block[2] = 1;
-  config.sharedMemBytes = 2432 * sizeof(float);
+  config.sharedMemBytes = 1664 * sizeof(float);
   config.cooperative = false;
   return config;
 }
-void launcher_kernel_200b543132f3c14b(float * m0, size_t m0_extraOffset, const float * m1, size_t m1_extraOffset, const float * m2, size_t m2_extraOffset, const float * m3, size_t m3_extraOffset, const float * m4, size_t m4_extraOffset, const float * m5, size_t m5_extraOffset, const float * m6, size_t m6_extraOffset, const float * m7, size_t m7_extraOffset, const float * m8, size_t m8_extraOffset, float * m9, size_t m9_extraOffset, const float * m10, size_t m10_extraOffset, size_t numElements0, unsigned * flags0, void* streamPtr) {
-  const tensorforge::LaunchConfig config = launch_config_kernel_200b543132f3c14b(numElements0, streamPtr);
+void launcher_kernel_6dc4815821bbdc0e(float * m0, size_t m0_extraOffset, const float * m1, size_t m1_extraOffset, const float * m2, size_t m2_extraOffset, const float * m3, size_t m3_extraOffset, const float * m4, size_t m4_extraOffset, const float * m5, size_t m5_extraOffset, const float * m6, size_t m6_extraOffset, const float * m7, size_t m7_extraOffset, const float * m8, size_t m8_extraOffset, float * m9, size_t m9_extraOffset, const float * m10, size_t m10_extraOffset, size_t numElements0, unsigned * flags0, void* streamPtr) {
+  const tensorforge::LaunchConfig config = launch_config_kernel_6dc4815821bbdc0e(numElements0, streamPtr);
   dim3 block (config.block[0], config.block[1], config.block[2]);
   dim3 grid (config.grid[0], config.grid[1], config.grid[2]);
   static bool shmemsizeset = false;
       if (!shmemsizeset) {
-        cudaFuncSetAttribute(kernel_kernel_200b543132f3c14b, cudaFuncAttributeMaxDynamicSharedMemorySize, config.sharedMemBytes);
+        cudaFuncSetAttribute(kernel_kernel_6dc4815821bbdc0e, cudaFuncAttributeMaxDynamicSharedMemorySize, config.sharedMemBytes);
         CHECK_ERR;
         shmemsizeset = true;
       }
       
   cudaStream_t stream = (streamPtr != nullptr) ? static_cast<cudaStream_t>(streamPtr) : 0;
-  kernel_kernel_200b543132f3c14b<<<grid,block,config.sharedMemBytes,stream>>>(m0, m0_extraOffset, m1, m1_extraOffset, m2, m2_extraOffset, m3, m3_extraOffset, m4, m4_extraOffset, m5, m5_extraOffset, m6, m6_extraOffset, m7, m7_extraOffset, m8, m8_extraOffset, m9, m9_extraOffset, m10, m10_extraOffset, numElements0, flags0);
+  kernel_kernel_6dc4815821bbdc0e<<<grid,block,config.sharedMemBytes,stream>>>(m0, m0_extraOffset, m1, m1_extraOffset, m2, m2_extraOffset, m3, m3_extraOffset, m4, m4_extraOffset, m5, m5_extraOffset, m6, m6_extraOffset, m7, m7_extraOffset, m8, m8_extraOffset, m9, m9_extraOffset, m10, m10_extraOffset, numElements0, flags0);
   CHECK_ERR;
 }
 
 
 // === kernel ===
 __global__ void 
-__launch_bounds__(128)
- kernel_kernel_200b543132f3c14b(float * m0, size_t m0_extraOffset, const float * m1, size_t m1_extraOffset, const float * m2, size_t m2_extraOffset, const float * m3, size_t m3_extraOffset, const float * m4, size_t m4_extraOffset, const float * m5, size_t m5_extraOffset, const float * m6, size_t m6_extraOffset, const float * m7, size_t m7_extraOffset, const float * m8, size_t m8_extraOffset, float * m9, size_t m9_extraOffset, const float * m10, size_t m10_extraOffset, size_t numElements0, unsigned * flags0) {
+__launch_bounds__(128, 1)
+ kernel_kernel_6dc4815821bbdc0e(float * m0, size_t m0_extraOffset, const float * m1, size_t m1_extraOffset, const float * m2, size_t m2_extraOffset, const float * m3, size_t m3_extraOffset, const float * m4, size_t m4_extraOffset, const float * m5, size_t m5_extraOffset, const float * m6, size_t m6_extraOffset, const float * m7, size_t m7_extraOffset, const float * m8, size_t m8_extraOffset, float * m9, size_t m9_extraOffset, const float * m10, size_t m10_extraOffset, size_t numElements0, unsigned * flags0) {
   extern __shared__ char totalShrMemPtr[];
    {
     // generated with TensorForge. Version: 0.0.1
     // options: default
-    // launch: 32 lanes x 4 per block = block 32x4x1, 9728 B shared, occupancy grid
+    // launch: 32 lanes x 4 per block = block 32x4x1, 6656 B shared, occupancy grid
     // operands:
     //   m0 32×13(32×13) {0..32}×{0..13} strided
     //   m1 32×13(32×13) {0..32}×{0..13} strided
@@ -138,16 +138,16 @@ __launch_bounds__(128)
     //     v0 ∈ {m3, m5, m7}
     //     v1 ∈ {m4, m6, m8}
     //   m9[i,j] = m0[i,k] × m10[k,j]
-    // tensorforge-meta: {"fp":"float","launch":{"active_threads":32,"block":[32,4,1],"cooperative":false,"lead_width":1,"mults_per_block":4,"persistent":true,"sections":[{"barrier":false,"mults_per_block":4,"shared_elements":2432}],"shared_bytes":9728,"shared_elements":2432,"threads_per_mult":32},"loops":[{"body":[{"add":false,"dest":{"addressing":"pointer_based","bbox":[[0,0],[32,13]],"is_tmp":true,"name":"t0","offset":[0,0],"shape":[32,13]},"kind":"multilinear","ops":[{"addressing":"strided","bbox":[[0,0],[32,13]],"is_tmp":false,"name":"m1","offset":[0,0],"shape":[32,13]},{"addressing":"strided","bbox":[[0,0],[13,13]],"is_tmp":false,"name":"v0","offset":[0,0],"shape":[13,13]}],"permute":[[0,1],[0,1]],"target":[[0,-1],[-1,1]]},{"add":true,"dest":{"addressing":"strided","bbox":[[0,0],[16,13]],"is_tmp":false,"name":"m0","offset":[0,0],"shape":[32,13]},"kind":"multilinear","ops":[{"addressing":"strided","bbox":[[0,0],[16,32]],"is_tmp":false,"name":"v1","offset":[0,0],"shape":[16,32]},{"addressing":"pointer_based","bbox":[[0,0],[32,13]],"is_tmp":true,"name":"t0","offset":[0,0],"shape":[32,13]}],"permute":[[0,1],[0,1]],"target":[[0,-1],[-1,1]]}],"holes":[{"members":["m3","m5","m7"],"stand_in":"v0"},{"members":["m4","m6","m8"],"stand_in":"v1"}],"iterations":3,"kind":"for","sequential":false}],"operands":[{"addressing":"strided","alias":"D","bbox":[[0,0],[32,13]],"name":"m0","ordered":false,"parts":1,"shape":[32,13],"variant":false},{"addressing":"strided","alias":"Q","bbox":[[0,0],[32,13]],"name":"m1","ordered":false,"parts":1,"shape":[32,13],"variant":false},{"addressing":"strided","alias":"S","bbox":[[0,0],[13,13]],"name":"m2","ordered":false,"parts":1,"shape":[13,13],"variant":false},{"addressing":"strided","alias":"variant0","bbox":[[0,0],[13,13]],"name":"v0","ordered":false,"parts":1,"shape":[13,13],"variant":true},{"addressing":"strided","alias":"variant1","bbox":[[0,0],[16,32]],"name":"v1","ordered":false,"parts":1,"shape":[16,32],"variant":true},{"addressing":"strided","alias":"B0","bbox":[[0,0],[13,13]],"name":"m3","ordered":false,"parts":1,"shape":[13,13],"variant":false},{"addressing":"strided","alias":"W0","bbox":[[0,0],[16,32]],"name":"m4","ordered":false,"parts":1,"shape":[16,32],"variant":false},{"addressing":"strided","alias":"B1","bbox":[[0,0],[13,13]],"name":"m5","ordered":false,"parts":1,"shape":[13,13],"variant":false},{"addressing":"strided","alias":"W1","bbox":[[0,0],[16,32]],"name":"m6","ordered":false,"parts":1,"shape":[16,32],"variant":false},{"addressing":"strided","alias":"B2","bbox":[[0,0],[13,13]],"name":"m7","ordered":false,"parts":1,"shape":[13,13],"variant":false},{"addressing":"strided","alias":"W2","bbox":[[0,0],[16,32]],"name":"m8","ordered":false,"parts":1,"shape":[16,32],"variant":false},{"addressing":"strided","alias":"O","bbox":[[0,0],[32,13]],"name":"m9","ordered":false,"parts":1,"shape":[32,13],"variant":false},{"addressing":"strided","alias":"C","bbox":[[0,0],[13,13]],"name":"m10","ordered":false,"parts":1,"shape":[13,13],"variant":false}],"operations":[{"add":false,"dest":{"addressing":"strided","bbox":[[0,0],[32,13]],"is_tmp":false,"name":"m0","offset":[0,0],"shape":[32,13]},"kind":"multilinear","ops":[{"addressing":"strided","bbox":[[0,0],[32,13]],"is_tmp":false,"name":"m1","offset":[0,0],"shape":[32,13]},{"addressing":"strided","bbox":[[0,0],[13,13]],"is_tmp":false,"name":"m2","offset":[0,0],"shape":[13,13]}],"permute":[[0,1],[0,1]],"target":[[0,-1],[-1,1]]},{"add":false,"dest":{"addressing":"pointer_based","bbox":[[0,0],[32,13]],"is_tmp":true,"name":"t0","offset":[0,0],"shape":[32,13]},"kind":"multilinear","ops":[{"addressing":"strided","bbox":[[0,0],[32,13]],"is_tmp":false,"name":"m1","offset":[0,0],"shape":[32,13]},{"addressing":"strided","bbox":[[0,0],[13,13]],"is_tmp":false,"name":"m3","offset":[0,0],"shape":[13,13]}],"permute":[[0,1],[0,1]],"target":[[0,-1],[-1,1]]},{"add":true,"dest":{"addressing":"strided","bbox":[[0,0],[16,13]],"is_tmp":false,"name":"m0","offset":[0,0],"shape":[32,13]},"kind":"multilinear","ops":[{"addressing":"strided","bbox":[[0,0],[16,32]],"is_tmp":false,"name":"m4","offset":[0,0],"shape":[16,32]},{"addressing":"pointer_based","bbox":[[0,0],[32,13]],"is_tmp":true,"name":"t0","offset":[0,0],"shape":[32,13]}],"permute":[[0,1],[0,1]],"target":[[0,-1],[-1,1]]},{"add":false,"dest":{"addressing":"pointer_based","bbox":[[0,0],[32,13]],"is_tmp":true,"name":"t0","offset":[0,0],"shape":[32,13]},"kind":"multilinear","ops":[{"addressing":"strided","bbox":[[0,0],[32,13]],"is_tmp":false,"name":"m1","offset":[0,0],"shape":[32,13]},{"addressing":"strided","bbox":[[0,0],[13,13]],"is_tmp":false,"name":"m5","offset":[0,0],"shape":[13,13]}],"permute":[[0,1],[0,1]],"target":[[0,-1],[-1,1]]},{"add":true,"dest":{"addressing":"strided","bbox":[[0,0],[16,13]],"is_tmp":false,"name":"m0","offset":[0,0],"shape":[32,13]},"kind":"multilinear","ops":[{"addressing":"strided","bbox":[[0,0],[16,32]],"is_tmp":false,"name":"m6","offset":[0,0],"shape":[16,32]},{"addressing":"pointer_based","bbox":[[0,0],[32,13]],"is_tmp":true,"name":"t0","offset":[0,0],"shape":[32,13]}],"permute":[[0,1],[0,1]],"target":[[0,-1],[-1,1]]},{"add":false,"dest":{"addressing":"pointer_based","bbox":[[0,0],[32,13]],"is_tmp":true,"name":"t0","offset":[0,0],"shape":[32,13]},"kind":"multilinear","ops":[{"addressing":"strided","bbox":[[0,0],[32,13]],"is_tmp":false,"name":"m1","offset":[0,0],"shape":[32,13]},{"addressing":"strided","bbox":[[0,0],[13,13]],"is_tmp":false,"name":"m7","offset":[0,0],"shape":[13,13]}],"permute":[[0,1],[0,1]],"target":[[0,-1],[-1,1]]},{"add":true,"dest":{"addressing":"strided","bbox":[[0,0],[16,13]],"is_tmp":false,"name":"m0","offset":[0,0],"shape":[32,13]},"kind":"multilinear","ops":[{"addressing":"strided","bbox":[[0,0],[16,32]],"is_tmp":false,"name":"m8","offset":[0,0],"shape":[16,32]},{"addressing":"pointer_based","bbox":[[0,0],[32,13]],"is_tmp":true,"name":"t0","offset":[0,0],"shape":[32,13]}],"permute":[[0,1],[0,1]],"target":[[0,-1],[-1,1]]},{"add":false,"dest":{"addressing":"strided","bbox":[[0,0],[32,13]],"is_tmp":false,"name":"m9","offset":[0,0],"shape":[32,13]},"kind":"multilinear","ops":[{"addressing":"strided","bbox":[[0,0],[32,13]],"is_tmp":false,"name":"m0","offset":[0,0],"shape":[32,13]},{"addressing":"strided","bbox":[[0,0],[13,13]],"is_tmp":false,"name":"m10","offset":[0,0],"shape":[13,13]}],"permute":[[0,1],[0,1]],"target":[[0,-1],[-1,1]]}],"version":"0.0.1\n"}
+    // tensorforge-meta: {"fp":"float","launch":{"active_threads":32,"block":[32,4,1],"cooperative":false,"lead_width":1,"mults_per_block":4,"persistent":true,"sections":[{"barrier":false,"mults_per_block":4,"shared_elements":1664}],"shared_bytes":6656,"shared_elements":1664,"threads_per_mult":32},"loops":[{"body":[{"add":false,"dest":{"addressing":"pointer_based","bbox":[[0,0],[32,13]],"is_tmp":true,"name":"t0","offset":[0,0],"shape":[32,13]},"kind":"multilinear","ops":[{"addressing":"strided","bbox":[[0,0],[32,13]],"is_tmp":false,"name":"m1","offset":[0,0],"shape":[32,13]},{"addressing":"strided","bbox":[[0,0],[13,13]],"is_tmp":false,"name":"v0","offset":[0,0],"shape":[13,13]}],"permute":[[0,1],[0,1]],"target":[[0,-1],[-1,1]]},{"add":true,"dest":{"addressing":"strided","bbox":[[0,0],[16,13]],"is_tmp":false,"name":"m0","offset":[0,0],"shape":[32,13]},"kind":"multilinear","ops":[{"addressing":"strided","bbox":[[0,0],[16,32]],"is_tmp":false,"name":"v1","offset":[0,0],"shape":[16,32]},{"addressing":"pointer_based","bbox":[[0,0],[32,13]],"is_tmp":true,"name":"t0","offset":[0,0],"shape":[32,13]}],"permute":[[0,1],[0,1]],"target":[[0,-1],[-1,1]]}],"holes":[{"members":["m3","m5","m7"],"stand_in":"v0"},{"members":["m4","m6","m8"],"stand_in":"v1"}],"iterations":3,"kind":"for","sequential":false}],"operands":[{"addressing":"strided","alias":"D","bbox":[[0,0],[32,13]],"name":"m0","ordered":false,"parts":1,"shape":[32,13],"variant":false},{"addressing":"strided","alias":"Q","bbox":[[0,0],[32,13]],"name":"m1","ordered":false,"parts":1,"shape":[32,13],"variant":false},{"addressing":"strided","alias":"S","bbox":[[0,0],[13,13]],"name":"m2","ordered":false,"parts":1,"shape":[13,13],"variant":false},{"addressing":"strided","alias":"variant0","bbox":[[0,0],[13,13]],"name":"v0","ordered":false,"parts":1,"shape":[13,13],"variant":true},{"addressing":"strided","alias":"variant1","bbox":[[0,0],[16,32]],"name":"v1","ordered":false,"parts":1,"shape":[16,32],"variant":true},{"addressing":"strided","alias":"B0","bbox":[[0,0],[13,13]],"name":"m3","ordered":false,"parts":1,"shape":[13,13],"variant":false},{"addressing":"strided","alias":"W0","bbox":[[0,0],[16,32]],"name":"m4","ordered":false,"parts":1,"shape":[16,32],"variant":false},{"addressing":"strided","alias":"B1","bbox":[[0,0],[13,13]],"name":"m5","ordered":false,"parts":1,"shape":[13,13],"variant":false},{"addressing":"strided","alias":"W1","bbox":[[0,0],[16,32]],"name":"m6","ordered":false,"parts":1,"shape":[16,32],"variant":false},{"addressing":"strided","alias":"B2","bbox":[[0,0],[13,13]],"name":"m7","ordered":false,"parts":1,"shape":[13,13],"variant":false},{"addressing":"strided","alias":"W2","bbox":[[0,0],[16,32]],"name":"m8","ordered":false,"parts":1,"shape":[16,32],"variant":false},{"addressing":"strided","alias":"O","bbox":[[0,0],[32,13]],"name":"m9","ordered":false,"parts":1,"shape":[32,13],"variant":false},{"addressing":"strided","alias":"C","bbox":[[0,0],[13,13]],"name":"m10","ordered":false,"parts":1,"shape":[13,13],"variant":false}],"operations":[{"add":false,"dest":{"addressing":"strided","bbox":[[0,0],[32,13]],"is_tmp":false,"name":"m0","offset":[0,0],"shape":[32,13]},"kind":"multilinear","ops":[{"addressing":"strided","bbox":[[0,0],[32,13]],"is_tmp":false,"name":"m1","offset":[0,0],"shape":[32,13]},{"addressing":"strided","bbox":[[0,0],[13,13]],"is_tmp":false,"name":"m2","offset":[0,0],"shape":[13,13]}],"permute":[[0,1],[0,1]],"target":[[0,-1],[-1,1]]},{"add":false,"dest":{"addressing":"pointer_based","bbox":[[0,0],[32,13]],"is_tmp":true,"name":"t0","offset":[0,0],"shape":[32,13]},"kind":"multilinear","ops":[{"addressing":"strided","bbox":[[0,0],[32,13]],"is_tmp":false,"name":"m1","offset":[0,0],"shape":[32,13]},{"addressing":"strided","bbox":[[0,0],[13,13]],"is_tmp":false,"name":"m3","offset":[0,0],"shape":[13,13]}],"permute":[[0,1],[0,1]],"target":[[0,-1],[-1,1]]},{"add":true,"dest":{"addressing":"strided","bbox":[[0,0],[16,13]],"is_tmp":false,"name":"m0","offset":[0,0],"shape":[32,13]},"kind":"multilinear","ops":[{"addressing":"strided","bbox":[[0,0],[16,32]],"is_tmp":false,"name":"m4","offset":[0,0],"shape":[16,32]},{"addressing":"pointer_based","bbox":[[0,0],[32,13]],"is_tmp":true,"name":"t0","offset":[0,0],"shape":[32,13]}],"permute":[[0,1],[0,1]],"target":[[0,-1],[-1,1]]},{"add":false,"dest":{"addressing":"pointer_based","bbox":[[0,0],[32,13]],"is_tmp":true,"name":"t0","offset":[0,0],"shape":[32,13]},"kind":"multilinear","ops":[{"addressing":"strided","bbox":[[0,0],[32,13]],"is_tmp":false,"name":"m1","offset":[0,0],"shape":[32,13]},{"addressing":"strided","bbox":[[0,0],[13,13]],"is_tmp":false,"name":"m5","offset":[0,0],"shape":[13,13]}],"permute":[[0,1],[0,1]],"target":[[0,-1],[-1,1]]},{"add":true,"dest":{"addressing":"strided","bbox":[[0,0],[16,13]],"is_tmp":false,"name":"m0","offset":[0,0],"shape":[32,13]},"kind":"multilinear","ops":[{"addressing":"strided","bbox":[[0,0],[16,32]],"is_tmp":false,"name":"m6","offset":[0,0],"shape":[16,32]},{"addressing":"pointer_based","bbox":[[0,0],[32,13]],"is_tmp":true,"name":"t0","offset":[0,0],"shape":[32,13]}],"permute":[[0,1],[0,1]],"target":[[0,-1],[-1,1]]},{"add":false,"dest":{"addressing":"pointer_based","bbox":[[0,0],[32,13]],"is_tmp":true,"name":"t0","offset":[0,0],"shape":[32,13]},"kind":"multilinear","ops":[{"addressing":"strided","bbox":[[0,0],[32,13]],"is_tmp":false,"name":"m1","offset":[0,0],"shape":[32,13]},{"addressing":"strided","bbox":[[0,0],[13,13]],"is_tmp":false,"name":"m7","offset":[0,0],"shape":[13,13]}],"permute":[[0,1],[0,1]],"target":[[0,-1],[-1,1]]},{"add":true,"dest":{"addressing":"strided","bbox":[[0,0],[16,13]],"is_tmp":false,"name":"m0","offset":[0,0],"shape":[32,13]},"kind":"multilinear","ops":[{"addressing":"strided","bbox":[[0,0],[16,32]],"is_tmp":false,"name":"m8","offset":[0,0],"shape":[16,32]},{"addressing":"pointer_based","bbox":[[0,0],[32,13]],"is_tmp":true,"name":"t0","offset":[0,0],"shape":[32,13]}],"permute":[[0,1],[0,1]],"target":[[0,-1],[-1,1]]},{"add":false,"dest":{"addressing":"strided","bbox":[[0,0],[32,13]],"is_tmp":false,"name":"m9","offset":[0,0],"shape":[32,13]},"kind":"multilinear","ops":[{"addressing":"strided","bbox":[[0,0],[32,13]],"is_tmp":false,"name":"m0","offset":[0,0],"shape":[32,13]},{"addressing":"strided","bbox":[[0,0],[13,13]],"is_tmp":false,"name":"m10","offset":[0,0],"shape":[13,13]}],"permute":[[0,1],[0,1]],"target":[[0,-1],[-1,1]]}],"version":"0.0.1\n"}
     {
       const auto batchId_start = (threadIdx.y + blockDim.y * (blockIdx.x));
       const auto batchId1 = batchId_start < numElements0 ? batchId_start : 0;
       const auto batchId2 = batchId1 + (gridDim.x * blockDim.y) < numElements0 ? batchId1 + (gridDim.x * blockDim.y) : batchId1;
       auto* totalShrMem = reinterpret_cast<float*>(totalShrMemPtr);
-      float* localShrMem0 = &totalShrMem[608 * threadIdx.y + 0];
-      float* tempShrMem = &localShrMem0[608];
-      float * __restrict__ s0 = &localShrMem0[0];
-      float * __restrict__ s1 = &localShrMem0[416];
+      float* localShrMem0 = &totalShrMem[416 * threadIdx.y + 0];
+      float* tempShrMem = &localShrMem0[416];
+      float * __restrict__ s0 = &localShrMem0[192];
+      float * __restrict__ s1 = &localShrMem0[0];
       float * __restrict__ s2 = &localShrMem0[0];
       float * __restrict__ s4 = &localShrMem0[0];
       for (size_t v8_batchId0 = (threadIdx.y + blockDim.y * (blockIdx.x)); v8_batchId0 < numElements0; v8_batchId0 += (gridDim.x * blockDim.y)) {
@@ -757,6 +757,7 @@ __launch_bounds__(128)
           // wait(s1 = load{g>s}(glb_m3[0, 1]));
           __pipeline_wait_prior(0);
           float r2[13]{};
+          __syncwarp();
           // r2 = +(r0 * s1) + None
           // [(0, 32), (0, 13)] [(0, 13)]
           float v913_data = s1[0];

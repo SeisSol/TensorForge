@@ -1,9 +1,5 @@
 // === base name ===
-<<<<<<< HEAD
-kernel_d065402a2f7cb620
-=======
-kernel_9e708de55c52b821
->>>>>>> fix: keep narrowing accumulation chains in registers
+kernel_ab48842ca2e53d2a
 
 // === header ===
 #ifndef TENSORFORGE_LAUNCH_TYPES
@@ -31,15 +27,9 @@ struct LaunchConfig {
 };
 } // namespace tensorforge
 #endif
-<<<<<<< HEAD
-inline constexpr tensorforge::LaunchInfo launch_info_kernel_d065402a2f7cb620 = {{32, 1, 1}, 32, 32, 1, 1, 1152, false, true, 1};
-tensorforge::LaunchConfig launch_config_kernel_d065402a2f7cb620(size_t numElements0, void* streamPtr = nullptr);
-void launcher_kernel_d065402a2f7cb620(const float ** m0, size_t m0_extraOffset, const float ** m1, size_t m1_extraOffset, const float ** m2, size_t m2_extraOffset, float ** m3, size_t m3_extraOffset, const float ** m4, size_t m4_extraOffset, size_t numElements0, unsigned * flags0 = nullptr, void* streamPtr = nullptr);
-=======
-inline constexpr tensorforge::LaunchInfo launch_info_kernel_9e708de55c52b821 = {{32, 1, 1}, 32, 32, 1, 1, 0, false, true, 1};
-tensorforge::LaunchConfig launch_config_kernel_9e708de55c52b821(size_t numElements0, void* streamPtr = nullptr);
-void launcher_kernel_9e708de55c52b821(const float ** m0, size_t m0_extraOffset, const float ** m1, size_t m1_extraOffset, const float ** m2, size_t m2_extraOffset, float ** m3, size_t m3_extraOffset, const float ** m4, size_t m4_extraOffset, size_t numElements0, unsigned * flags0 = nullptr, void* streamPtr = nullptr);
->>>>>>> fix: keep narrowing accumulation chains in registers
+inline constexpr tensorforge::LaunchInfo launch_info_kernel_ab48842ca2e53d2a = {{32, 1, 1}, 32, 32, 1, 1, 0, false, true, 1};
+tensorforge::LaunchConfig launch_config_kernel_ab48842ca2e53d2a(size_t numElements0, void* streamPtr = nullptr);
+void launcher_kernel_ab48842ca2e53d2a(const float ** m0, size_t m0_extraOffset, const float ** m1, size_t m1_extraOffset, const float ** m2, size_t m2_extraOffset, float ** m3, size_t m3_extraOffset, const float ** m4, size_t m4_extraOffset, size_t numElements0, unsigned * flags0 = nullptr, void* streamPtr = nullptr);
 
 
 // === launcher ===
@@ -68,11 +58,7 @@ struct LaunchConfig {
 };
 } // namespace tensorforge
 #endif
-<<<<<<< HEAD
-tensorforge::LaunchConfig launch_config_kernel_d065402a2f7cb620(size_t numElements0, void* streamPtr) {
-=======
-tensorforge::LaunchConfig launch_config_kernel_9e708de55c52b821(size_t numElements0, void* streamPtr) {
->>>>>>> fix: keep narrowing accumulation chains in registers
+tensorforge::LaunchConfig launch_config_kernel_ab48842ca2e53d2a(size_t numElements0, void* streamPtr) {
   (void)numElements0;
   (void)streamPtr;
   sycl::range<3> block (32, 1, 1);
@@ -87,34 +73,21 @@ tensorforge::LaunchConfig launch_config_kernel_9e708de55c52b821(size_t numElemen
   config.cooperative = false;
   return config;
 }
-<<<<<<< HEAD
-void launcher_kernel_d065402a2f7cb620(const float ** m0, size_t m0_extraOffset, const float ** m1, size_t m1_extraOffset, const float ** m2, size_t m2_extraOffset, float ** m3, size_t m3_extraOffset, const float ** m4, size_t m4_extraOffset, size_t numElements0, unsigned * flags0, void* streamPtr) {
-  const tensorforge::LaunchConfig config = launch_config_kernel_d065402a2f7cb620(numElements0, streamPtr);
-=======
-void launcher_kernel_9e708de55c52b821(const float ** m0, size_t m0_extraOffset, const float ** m1, size_t m1_extraOffset, const float ** m2, size_t m2_extraOffset, float ** m3, size_t m3_extraOffset, const float ** m4, size_t m4_extraOffset, size_t numElements0, unsigned * flags0, void* streamPtr) {
-  const tensorforge::LaunchConfig config = launch_config_kernel_9e708de55c52b821(numElements0, streamPtr);
->>>>>>> fix: keep narrowing accumulation chains in registers
+void launcher_kernel_ab48842ca2e53d2a(const float ** m0, size_t m0_extraOffset, const float ** m1, size_t m1_extraOffset, const float ** m2, size_t m2_extraOffset, float ** m3, size_t m3_extraOffset, const float ** m4, size_t m4_extraOffset, size_t numElements0, unsigned * flags0, void* streamPtr) {
+  const tensorforge::LaunchConfig config = launch_config_kernel_ab48842ca2e53d2a(numElements0, streamPtr);
   sycl::range<3> block (config.block[0], config.block[1], config.block[2]);
   sycl::range<3> grid (config.grid[0], config.grid[1], config.grid[2]);
   if (streamPtr == nullptr) {
     throw std::invalid_argument("stream may not be null!");
   }
   sycl::queue *stream = static_cast<sycl::queue *>(streamPtr);
-<<<<<<< HEAD
-  kernel_kernel_d065402a2f7cb620(stream, grid, block, m0, m0_extraOffset, m1, m1_extraOffset, m2, m2_extraOffset, m3, m3_extraOffset, m4, m4_extraOffset, numElements0, flags0);
-=======
-  kernel_kernel_9e708de55c52b821(stream, grid, block, m0, m0_extraOffset, m1, m1_extraOffset, m2, m2_extraOffset, m3, m3_extraOffset, m4, m4_extraOffset, numElements0, flags0);
->>>>>>> fix: keep narrowing accumulation chains in registers
+  kernel_kernel_ab48842ca2e53d2a(stream, grid, block, m0, m0_extraOffset, m1, m1_extraOffset, m2, m2_extraOffset, m3, m3_extraOffset, m4, m4_extraOffset, numElements0, flags0);
   CHECK_ERR;
 }
 
 
 // === kernel ===
-<<<<<<< HEAD
-inline void kernel_kernel_d065402a2f7cb620(sycl::queue *stream, sycl::range<3> group_count, sycl::range<3> group_size, const float ** m0, size_t m0_extraOffset, const float ** m1, size_t m1_extraOffset, const float ** m2, size_t m2_extraOffset, float ** m3, size_t m3_extraOffset, const float ** m4, size_t m4_extraOffset, size_t numElements0, unsigned * flags0) {
-=======
-inline void kernel_kernel_9e708de55c52b821(sycl::queue *stream, sycl::range<3> group_count, sycl::range<3> group_size, const float ** m0, size_t m0_extraOffset, const float ** m1, size_t m1_extraOffset, const float ** m2, size_t m2_extraOffset, float ** m3, size_t m3_extraOffset, const float ** m4, size_t m4_extraOffset, size_t numElements0, unsigned * flags0) {
->>>>>>> fix: keep narrowing accumulation chains in registers
+inline void kernel_kernel_ab48842ca2e53d2a(sycl::queue *stream, sycl::range<3> group_count, sycl::range<3> group_size, const float ** m0, size_t m0_extraOffset, const float ** m1, size_t m1_extraOffset, const float ** m2, size_t m2_extraOffset, float ** m3, size_t m3_extraOffset, const float ** m4, size_t m4_extraOffset, size_t numElements0, unsigned * flags0) {
   stream->submit([&](sycl::handler &cgh) {
     sycl::accessor<float, 1, sycl::access::mode::read_write, sycl::access::target::local> totalShrMem (0, cgh); {
       cgh.parallel_for(sycl::nd_range<3>{{group_count.get(2) * group_size.get(2), group_count.get(1) * group_size.get(1), group_count.get(0) * group_size.get(0)}, {group_size.get(2), group_size.get(1), group_size.get(0)}}, [=](sycl::nd_item<3> item)  {
