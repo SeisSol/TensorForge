@@ -55,28 +55,18 @@ Captures are not vendored. One is tied to an order, an equation set and a
 memory layout, and a checked-in capture would still be measured long after it
 stopped describing what SeisSol generates.
 
-## Why one binary per configuration
+## Symbols and build units
 
-The emitted symbol is `kernel_kernel_<md5>`, and the hash covers the descriptor
-list and the flag mode. It does not cover `Options`. Three configurations of
-`gemm_square_16` — default, `wide_bodies=False`, `enable_pipeline=True` —
-produce three different kernel bodies under one name:
+The emitted symbol is `kernel_kernel_<digest>`, a digest of the generated source
+with the name taken out. The source records the options it was built with
+(`// options: ...`), so two configurations of one workload never share a
+symbol, and two workloads that generate the same kernel under one configuration
+always do.
 
-```text
-baseline  kernel_30948bd44e   38427 bytes of source
-narrow    kernel_30948bd44e   38605
-pipeline  kernel_30948bd44e   38764
-```
-
-A profiler keys its report on that symbol. Putting two configurations in one
-binary therefore produces a report in which they cannot be told apart, and the
-failure is silent — two rows, one name, plausible numbers.
-
-So the build unit is one binary per `(target, datatype, options, lane
-ceiling)`, holding every workload in the suite. Inside a binary the
-configuration is fixed and the hash is unique per kernel, which is what a
-report needs; across binaries the configuration is the binary's identity and
-goes in the manifest. The batch is a runtime argument and forces no rebuild.
+The build unit is one binary per `(target, datatype, options, lane ceiling)`,
+holding every workload in the suite. Inside a binary the configuration is
+fixed; across binaries the configuration is the binary's identity and goes in
+the manifest. The batch is a runtime argument and forces no rebuild.
 
 Unique per kernel is not unique per workload: two workloads can generate the
 same kernel — a pointwise operation that does not change with the order, for
@@ -86,13 +76,14 @@ its number.
 
 ## Why the manifest is not optional
 
-`kernel_30948bd44e` is not a name anyone can read. Every run writes a manifest
-mapping symbol to workload, descriptors, configuration, launch geometry and the
-static figures the compiler reported, and every report is joined against it.
+`kernel_kernel_6dfbb1ec88226b8d` is not a name anyone can read. Every run writes
+a manifest mapping symbol to workload, descriptors, configuration, launch
+geometry and the static figures the compiler reported, and every report is
+joined against it.
 
-The hash earns something in return: it is a content key over the descriptors,
-so the same symbol in two runs is the same operation, and two operations cannot
-collide onto one name. Comparing runs is a join, not a guess.
+The digest earns something in return: it is a content key over the generated
+source, so the same symbol in two runs is the same kernel, and two different
+kernels cannot collide onto one name. Comparing runs is a join, not a guess.
 
 ## Reading the output
 

@@ -83,19 +83,19 @@ def test_an_unknown_option_is_refused_by_name():
 # -- layers ------------------------------------------------------------------ #
 
 def test_nothing_asked_takes_the_declared_default():
-  assert _resolved().wrap_distance == 1
-  assert _resolved().wide_bodies is True
+  assert _resolved().move_distance == 1
+  assert _resolved().skip_known_zeros is True
 
 
 def test_the_caller_beats_the_default():
-  assert _resolved(wrap_distance=3).wrap_distance == 3
+  assert _resolved(move_distance=3).move_distance == 3
 
 
 def test_the_general_variable_reaches_every_option(monkeypatch):
-  monkeypatch.setenv(opt.OPTIONS_ENV, 'enable_pipeline=1,wrap_distance=2')
+  monkeypatch.setenv(opt.OPTIONS_ENV, 'enable_pipeline=1,move_distance=2')
   resolved = _resolved()
   assert resolved.enable_pipeline is True
-  assert resolved.wrap_distance == 2
+  assert resolved.move_distance == 2
 
 
 def test_a_bare_name_in_the_general_variable_means_on(monkeypatch):
@@ -110,14 +110,14 @@ def test_the_general_variable_is_checked_against_the_registry(monkeypatch):
 
 
 def test_the_specific_variable_beats_the_general_one(monkeypatch):
-  monkeypatch.setenv(opt.OPTIONS_ENV, 'wide_bodies=1')
-  monkeypatch.setenv('TF_IR_WIDE', '0')
-  assert _resolved().wide_bodies is False
+  monkeypatch.setenv(opt.OPTIONS_ENV, 'skip_known_zeros=1')
+  monkeypatch.setenv('TF_SKIP_KNOWN_ZEROS', '0')
+  assert _resolved().skip_known_zeros is False
 
 
 def test_the_caller_beats_both(monkeypatch):
-  monkeypatch.setenv('TF_IR_WIDE', '0')
-  assert _resolved(wide_bodies=True).wide_bodies is True
+  monkeypatch.setenv('TF_SKIP_KNOWN_ZEROS', '0')
+  assert _resolved(skip_known_zeros=True).skip_known_zeros is True
 
 
 def test_an_unparseable_variable_names_itself(monkeypatch):
@@ -151,18 +151,18 @@ def test_none_stays_a_value_where_it_is_one():
 # -- identity ---------------------------------------------------------------- #
 
 def test_two_equal_requests_are_one_key():
-  assert Options(wrap_distance=2) == Options(wrap_distance=2)
-  assert len({Options(wrap_distance=2), Options(wrap_distance=2)}) == 1
+  assert Options(move_distance=2) == Options(move_distance=2)
+  assert len({Options(move_distance=2), Options(move_distance=2)}) == 1
 
 
 def test_the_order_of_the_keywords_does_not_change_the_request():
-  assert (Options(wrap_distance=2, enable_pipeline=True)
-          == Options(enable_pipeline=True, wrap_distance=2))
+  assert (Options(move_distance=2, enable_pipeline=True)
+          == Options(enable_pipeline=True, move_distance=2))
 
 
 def test_a_resolved_set_cannot_be_written_to():
   with pytest.raises(AttributeError):
-    _resolved().wrap_distance = 4
+    _resolved().move_distance = 4
 
 
 def test_asking_for_nothing_leaves_no_delta_and_no_digest():
@@ -187,8 +187,8 @@ def test_the_two_sides_of_a_question_get_different_digests():
 
 
 def test_the_digest_is_the_same_for_the_same_configuration():
-  first = _resolved(enable_pipeline=True, wrap_distance=2)
-  second = _resolved(wrap_distance=2, enable_pipeline=True)
+  first = _resolved(enable_pipeline=True, move_distance=2)
+  second = _resolved(move_distance=2, enable_pipeline=True)
   assert first.digest() == second.digest()
   assert first == second
 
@@ -214,10 +214,10 @@ def test_the_context_keeps_what_was_asked_apart_from_what_it_became():
 
 
 def test_two_contexts_do_not_share_their_options():
-  first = _ctx(wrap_distance=2)
+  first = _ctx(move_distance=2)
   second = _ctx()
-  assert first.get_user_options().wrap_distance == 2
-  assert second.get_user_options().wrap_distance == 1
+  assert first.get_user_options().move_distance == 2
+  assert second.get_user_options().move_distance == 1
 
 
 def test_two_contexts_do_not_share_their_pressure_state():

@@ -1182,50 +1182,6 @@ class Loop:
       with loop:
         inner([Variable(str(loop.induction), Datatype.I32, loop.induction)])
 
-# TODO: add leading
-class LinearizedLoop:
-  def __init__(self, loops, blocksize = 1):
-    self.loops = loops
-    self.blocksize = blocksize
-
-  def write(self, context: Context, writer: Writer, inner):
-    totalloopsize = 1
-    multiplies = [0] * len(self.loops)
-    loopsize = [0] * len(self.loops)
-    for i, loop in enumerate(self.loops):
-      multiplies[i] = totalloopsize
-      loopsize[i] = (loop.end - loop.start) // loop.step
-      totalloopsize *= loopsize[i]
-
-    # the pragma bears great control over the application speed. And the compile time.
-    outer = writer.for_(0, totalloopsize, self.blocksize, unroll=True,
-                        hint='var')
-    with outer:
-      flat = outer.induction
-      if self.blocksize != 1:
-        lane = writer.op('rem', INDEX, writer.thread_id('x'), self.blocksize,
-                         hint='lane')
-        flat = writer.op('add', INDEX, flat, lane, hint='var2')
-      idx = []
-      for i, loop in enumerate(self.loops):
-        # Skip the identities up front rather than letting `fold` remove them:
-        # the last op carries the `escapes` marker and so is exempt from
-        # folding, and `x + 0` would survive as noise.
-        steps = []
-        if multiplies[i] != 1:
-          steps.append(('div', multiplies[i]))
-        steps.append(('rem', loopsize[i]))
-        if loop.step != 1:
-          steps.append(('mul', loop.step))
-        if loop.start != 0:
-          steps.append(('add', loop.start))
-        v = flat
-        for j, (name, operand) in enumerate(steps):
-          v = writer.op(name, INDEX, v, operand, hint=loop.var,
-                        escapes=(j == len(steps) - 1))
-        idx.append(Variable(str(v), Datatype.I32, v))
-      inner(idx)
-
 
 def write_loops(context: Context, writer: Writer, loops: List[Loop], inner):
   def write_loops_inner(context: Context, writer: Writer, loops: List[Loop], inner, varlist):
@@ -1299,8 +1255,8 @@ class Symbol:
     self.lead_axes = None
     #: The PIR value for this buffer, and the builder that made it.
     #:
-    #: A value belongs to the body it was built into.  With one body per loop
-    #: body most buffers are allocated and used inside one, so the value
+    #: A value belongs to the body it was built into.  A loop body is one
+    #: body, so most buffers are allocated and used inside one, the value
     #: reaches its consumers and the C++ name is redundant; a buffer that
     #: outlives the body -- the shared arena, or a tile shared between two
     #: batch loops -- is allocated in one builder and read in another, and

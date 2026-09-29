@@ -170,10 +170,9 @@ class GuardedRegion(AbstractInstruction):
     """Emit the guard and its body.
 
     Like `BatchLoop`, this drives child instructions that route themselves,
-    so it overrides `gen_code` rather than `gen_ir`. When the caller handed
-    over a plain `Writer` -- one body per instruction rather than one for the
-    region -- a body is opened here, because the condition is a value and
-    only the builder can make one.
+    so it overrides `gen_code` rather than `gen_ir`. When the caller hands
+    over a plain `Writer` -- no body is open yet -- a body is opened here,
+    because the condition is a value and only the builder can make one.
     """
     if hasattr(writer, 'if_') and hasattr(writer, 'op'):
       self._emit(writer)

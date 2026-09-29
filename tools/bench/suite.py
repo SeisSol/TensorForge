@@ -17,20 +17,19 @@ the same objects to two configurations and comparing them is not obviously
 fine, and `lanes.search` already refuses lists for this reason.  A factory
 makes the repetition explicit at the call site that does it.
 
-## Why the build unit is a configuration and not a kernel
+## The build unit is a configuration
 
-The emitted symbol is `kernel_kernel_<md5>` where the hash covers the
-descriptor list and the flag mode -- and nothing else.  Two builds that differ
-only in `Options` (pipelining, wrapped loads, wide bodies) therefore emit *the
-same symbol* for different code.  A profiler keys its report on that symbol, so
-putting two configurations of one workload in one binary produces a report in
-which they are indistinguishable.
+The emitted symbol is `kernel_kernel_<digest>`, a digest of the generated
+source, and the source records the options it was built with.  So a symbol
+names one kernel under one configuration: two configurations of a workload
+never share one, and two workloads that generate the same kernel under one
+configuration always do (`build.build` reports the second as the first).
 
-So the unit is one binary per `(target, datatype, options, lane ceiling)`,
+The unit is one binary per `(target, datatype, options, lane ceiling)`,
 holding every workload in the suite.  Within a binary the configuration is
-fixed and the hash is unique per workload, which is exactly the property a
-report needs; across binaries the configuration is the binary's identity and is
-recorded in the manifest.  The batch is a runtime argument and needs no rebuild.
+fixed; across binaries the configuration is the binary's identity and is
+recorded in the manifest.  The batch is a runtime argument and needs no
+rebuild.
 """
 
 from __future__ import annotations
@@ -150,9 +149,8 @@ CONFIGS: Dict[str, Config] = {
     'multibuffer': Config('multibuffer',
                           Options(enable_pipeline=True,
                                   enable_multibuffer=True)),
-    'wrap1': Config('wrap1', Options(enable_wrap_loads=True, wrap_distance=1)),
-    'wrap2': Config('wrap2', Options(enable_wrap_loads=True, wrap_distance=2)),
-    'narrow-bodies': Config('narrow-bodies', Options(wide_bodies=False)),
+    'wrap1': Config('wrap1', Options(enable_wrap_loads=True, move_distance=1)),
+    'wrap2': Config('wrap2', Options(enable_wrap_loads=True, move_distance=2)),
     # The two sides of the prologue question.  Named rather than left to the
     # vendor default so a run states which one it measured: `preload` stages
     # every batch-constant operand into shared memory once per block,

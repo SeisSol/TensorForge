@@ -26,7 +26,6 @@ as the sparse loader's layout.  The check is necessary, not sufficient, and
 from __future__ import annotations
 
 import importlib.util
-import os
 from pathlib import Path
 
 import pytest
@@ -189,15 +188,6 @@ def test_the_generated_packing_is_consistent(case_file):
         f"{seen} statements did not declare their accesses, up from {budget}: "
         f"something new is emitting raw text into a body that a pass has to "
         f"reason about")
-    if os.environ.get("TF_IR_WIDE") is not None:
-        # The counts are a property of the body boundaries, not of the
-        # generator: with one body per macro instruction the scratch-carrying
-        # body holds the matmul alone, so the `glb_m*` bindings and the `r0`
-        # declaration that make up six of the sixteen are simply in other
-        # bodies and never reach the check.  The upper bound above still
-        # applies; the exact ratchet is asserted for the shipped
-        # configuration only, so the override stays usable for bisecting.
-        return
     assert seen == budget, (
         f"only {seen} opaque statements now, down from {budget} -- lower the "
         f"entry in STILL_OPAQUE so the ratchet holds")

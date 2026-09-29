@@ -4,10 +4,10 @@
 """``C = A @ B`` with a banded sparsity pattern on B.
 
 B carries a :class:`MaskSPP` mask: the cells with ``|i - j| <= 1``
-are non-zero, everything else is structurally zero. This triggers the
-sparsity-aware code path in :mod:`multilinear` (cf.\\
-``multilinear.py:111`` where ``_sparseN`` is set, and ``:432`` where
-the k-loop is unrolled for sparse operands).
+are non-zero, everything else is structurally zero. The reduction over
+B is sparse, so :mod:`multilinear` keeps it unrolled whatever ``k_roll``
+says (``_rollable``) and the structural zeros drop out at generation
+time.
 
 Host-side treatment: B is stored compressed, 46 cells per batch
 element rather than 256, in the order ``Tensor.linear_index``

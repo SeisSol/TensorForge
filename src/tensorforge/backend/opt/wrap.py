@@ -36,7 +36,7 @@ iteration -- exactly when ``j < d``.  So at ``d = 1`` the first transfer wraps
 and the rest are ``MoveLoads``' pipeline inside the body; a larger ``d`` wraps
 more of them, and one at least the number of transfers wraps every one it may.
 Where a wrapped transfer lands does not depend on ``d``: it goes to the tail,
-the one place outside the flag guard.  ``wrap_distance`` is not read.
+the one place outside the flag guard.
 
 A register destination needs little from the rest of the pipeline: it is
 thread-private, so a barrier is no obstacle and none is needed; its loads are
@@ -198,14 +198,6 @@ class WrapLoads(AbstractTransformer):
             return self._reject(name, 'loaded value is never read in this body')
         alloc = None
         if shared:
-            if not self._context.get_user_options().wide_bodies:
-                # The peel and the drain have to share a body with the loop,
-                # or the transfers fall back to text -- see the module
-                # docstring.
-                return self._reject(name, 'the loop is not one body '
-                                          '(wide_bodies is off), so the peel '
-                                          'cannot be issued as a copy into '
-                                          'the window it fills')
             if getattr(load, '_stages', 1) > 1:
                 return self._reject(name, 'buffer is rotated; the stage it '
                                           'fills is chosen per iteration, and '

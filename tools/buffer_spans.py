@@ -1,48 +1,25 @@
 # SPDX-FileCopyrightText: 2026 SeisSol Group
 #
 # SPDX-License-Identifier: MIT
-"""Does `r0` need a name, or does it need a shorter body?
+"""Which macro-owned names still span more than one PIR body?
 
 A PIR value connects a definition to its uses.  A C++ name does the same job,
 badly, and is needed exactly when the definition and the uses are built into
 *different* IRBuilder instances: there is no value to pass, so the only thing
 they can share is text.
 
-So "pin the name, or migrate the consumers" is not a matter of taste, it is a
-count.  Over the corpus, 590 buffer occurrences:
+With one body per loop body, what still needs a name is what outlives one:
+the shared arena and its scratch tail, and the tiles of the cases with two
+batch loops (`barrier_two_gemms`, `fence_two_gemms`).  This counts them over
+the corpus, so that moving the kernel skeleton into the IR has a number to
+bring down.
 
-                          one body    2+ bodies
-    per macro-op body       39.3%        60.7%
-    per loop body           89.7%        10.3%
-
-Per macro-op --- today's default --- a majority of buffers are named because
-`RegisterAlloc` declares in one body, the loader writes in a second and the
-multilinear reads in a third.  Pinning names there would be permanent: three
-fifths of every buffer in the corpus would keep a macro-owned name forever,
-and `symbol.py`'s access helpers would keep building `f'{self.name}[...]'`
-because there would be nothing else to build.
-
-Per loop body the same buffers need nothing.  What is left is 49 arena and
-scratch-tail occurrences, 2 shared tiles, and 10 register tiles --- and the 10
-are all `barrier_two_gemms` and `fence_two_gemms`, which have two batch loops
-apiece.  Every name still required in wide mode belongs to something that
-outlives one loop body.  None is required by how the macro layer is factored.
-
-That is the argument for migrating the consumers rather than pinning the name,
-and for the order: wide bodies first, or the migration has nothing to migrate
-to.  A pinning mechanism is still wanted afterwards, for the arena --- but
-scoped to a resource that genuinely is kernel-scope, rather than as a general
-bridge that would let every value keep its name.
-
-    python3 tools/buffer_spans.py                  # the default: one body per loop
-    TF_IR_WIDE=0 python3 tools/buffer_spans.py     # force one body per macro-op
+    python3 tools/buffer_spans.py
 """
 import contextlib
 import importlib.util
 import io
-import os
 import re
-import sys
 from collections import Counter, defaultdict
 from pathlib import Path
 
@@ -116,9 +93,7 @@ for path in sorted(Path('tests/cases').rglob('*.py')):
             if count > 1:
                 worst.append((count, path.stem, backend, name))
 
-mode = 'narrow (one body per macro-op)' if os.environ.get('TF_IR_WIDE') in ('0','false','False') \
-    else 'WIDE (one body per loop body, the default)'
-print(f'{mode}: {total_names} buffer occurrences over the corpus\n')
+print(f'{total_names} buffer occurrences over the corpus\n')
 print('bodies that mention the same buffer:')
 for k in sorted(spread):
     label = f'{k}' if k < 5 else '5+'

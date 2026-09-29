@@ -1034,20 +1034,13 @@ class BatchLoop(AbstractInstruction):
             # Already inside one -- opened by `gen_code` around the loop.
             for instr in guarded:
                 instr.gen_code(writer)
-        elif self._wide_bodies():
+        else:
             # one body for every instruction of the region
             budget = max((i.temp_shmem() for i in guarded), default=0)
             AbstractInstruction.build_shared_body(
                 self._context, writer,
                 lambda _builder: [instr.gen_code(writer) for instr in guarded],
                 scratch=budget)
-        else:
-            for instr in guarded:
-                instr.gen_code(writer)
-
-    def _wide_bodies(self) -> bool:
-        """One PIR body for the whole region, or one per instruction."""
-        return self._context.get_user_options().wide_bodies
 
     def gen_code(self, writer) -> None:
         # Deliberately no writer.Scope() and no comment: the loop used to be
@@ -1090,8 +1083,6 @@ class BatchLoop(AbstractInstruction):
         one would put the loop inside the body it is meant to contain.
         """
         if self._mode is LoopMode.SINGLE:
-            return False
-        if not self._wide_bodies():
             return False
         if AbstractInstruction._shared_body:
             return False
@@ -1354,37 +1345,35 @@ class BatchLoop(AbstractInstruction):
         """The body of the queried traversal, once its index is published."""
         from tensorforge.backend.pir.core import (INDEX, SIZE, BOOL, Access,
                                                   Effect, MemSpace, Uniformity)
-        if True:
-            if True:
-                guard = builder.op('lt', BOOL, loop.induction,
-                                   self._count(builder), hint='inrange')
-                with builder.if_(guard):
-                    self._emit_body(builder)
-                self._advance_stage_counter(builder)
-                # Outside the size guard, deliberately.  The barrier `next`
-                # carries separates one element's shared memory from the next
-                # one's, and the guard is per element: the rows of a block
-                # hold different elements, so a barrier inside it is reached
-                # by some rows and not others.  That does not reliably
-                # deadlock -- `bar.sync` pairs arrivals by barrier *number*,
-                # so the rows that skipped rendezvous at the next one instead
-                # and the loop limps on one barrier out of step, reusing the
-                # tile an iteration early.
-                nxt = builder.call(
-                    f'launchCursor{index}.next', INDEX, queue,
-                    hint='next', pure=False, movable=False,
-                    effect=Effect.BARRIER,
-                    accesses=(Access(Effect.READ | Effect.WRITE,
-                                     MemSpace.SHARED, queue),),
-                    uniform=Uniformity.BLOCK, materialize=True)
-                loop.exit_when(builder.op('lt', BOOL, nxt, 0, hint='drained'))
-                # The successor index, in the same shape the initial one has.
-                # `threadIdx.y` is the multiplication's index and says so, so
-                # the sum comes out `MULT` without anyone claiming it.
-                offset = builder.op('mul', INDEX, lexic.block_dim_y, nxt,
-                                    hint='row')
-                loop.yield_(builder.op('add', SIZE, builder.thread_id('y'),
-                                       offset, hint=self._batch(0)))
+        guard = builder.op('lt', BOOL, loop.induction,
+                           self._count(builder), hint='inrange')
+        with builder.if_(guard):
+            self._emit_body(builder)
+        self._advance_stage_counter(builder)
+        # Outside the size guard, deliberately.  The barrier `next`
+        # carries separates one element's shared memory from the next
+        # one's, and the guard is per element: the rows of a block
+        # hold different elements, so a barrier inside it is reached
+        # by some rows and not others.  That does not reliably
+        # deadlock -- `bar.sync` pairs arrivals by barrier *number*,
+        # so the rows that skipped rendezvous at the next one instead
+        # and the loop limps on one barrier out of step, reusing the
+        # tile an iteration early.
+        nxt = builder.call(
+            f'launchCursor{index}.next', INDEX, queue,
+            hint='next', pure=False, movable=False,
+            effect=Effect.BARRIER,
+            accesses=(Access(Effect.READ | Effect.WRITE,
+                             MemSpace.SHARED, queue),),
+            uniform=Uniformity.BLOCK, materialize=True)
+        loop.exit_when(builder.op('lt', BOOL, nxt, 0, hint='drained'))
+        # The successor index, in the same shape the initial one has.
+        # `threadIdx.y` is the multiplication's index and says so, so
+        # the sum comes out `MULT` without anyone claiming it.
+        offset = builder.op('mul', INDEX, lexic.block_dim_y, nxt,
+                            hint='row')
+        loop.yield_(builder.op('add', SIZE, builder.thread_id('y'),
+                               offset, hint=self._batch(0)))
 
     def _gen_grouped(self, writer) -> None:
         """One traversal for a whole group of rows.

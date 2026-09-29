@@ -40,10 +40,10 @@ class Context:
     #: The largest figure reported so far, in bytes per lane, or None.
     #:
     #: Here rather than on the instruction that measured it, because the body
-    #: that matters has no instruction: with wide bodies a whole section is one
-    #: body, emitted by `AbstractInstruction.shared_body`, which is a
-    #: classmethod and has only the context to hand.  A maximum, since a
-    #: register budget is per kernel and the widest body is what has to fit.
+    #: that matters has no instruction: a whole section is one body, emitted
+    #: by `AbstractInstruction.shared_body`, which is a classmethod and has
+    #: only the context to hand.  A maximum, since a register budget is per
+    #: kernel and the widest body is what has to fit.
     self.peak_pressure: Optional[int] = None
 
     #: The same figure split by which register file holds it: the peak of the

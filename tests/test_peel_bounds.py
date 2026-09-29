@@ -60,7 +60,7 @@ def _before_the_loop(kernel: str) -> list:
 def test_peeled_load_does_not_dereference_the_raw_block_id(case_file, backend,
                                                            arch, distance):
     kernel = _kernel(case_file, backend, arch,
-                     enable_wrap_loads=True, wrap_distance=distance)
+                     enable_wrap_loads=True, move_distance=distance)
     head = _before_the_loop(kernel)
 
     # The binding itself is fine and has to stay; what must not appear is a
@@ -77,7 +77,7 @@ def test_peeled_load_does_not_dereference_the_raw_block_id(case_file, backend,
 def test_peeled_load_reads_a_clamped_element(case_file):
     """The peel should still read *something*, and it should be batchId1."""
     kernel = _kernel(case_file, "hip", "gfx90a",
-                     enable_wrap_loads=True, wrap_distance=2)
+                     enable_wrap_loads=True, move_distance=2)
     head = _before_the_loop(kernel)
     peels = [l for l in head if "peel_" in l and "=" in l]
     assert peels, "expected WrapLoads to peel at least one transfer"

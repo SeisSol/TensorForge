@@ -389,7 +389,6 @@ class StoreRegToGlb(AbstractInstruction):
                        self._atomic)
       return
     with writer.Scope():
-      manual = [False]
       loops = []
       # The lead loop is built from the accumulator alone: it drives the thread
       # mapping, and widening it would hand `inner` a LeadIndex outside what
@@ -408,7 +407,6 @@ class StoreRegToGlb(AbstractInstruction):
         lower = min(src_bbox.lower()[i], dest_bbox.lower()[i])
         upper = max(src_bbox.upper()[i], dest_bbox.upper()[i])
         loops += [Loop(f'i{i}', lower, upper, 1, unroll)]
-        manual += [unroll]
 
       def inner(indices):
         needsLoad = all(not isinstance(index, Immediate) or (src_bbox.lower()[i] <= index._value and src_bbox.upper()[i] > index._value) for i,index in enumerate(indices))
@@ -451,10 +449,7 @@ class StoreRegToGlb(AbstractInstruction):
                          f' == {owner}'):
             emit()
 
-      if not any(manual) and self._context.get_vm().get_hw_descr().vendor in ['amd'] and False:
-        pass
-      else:
-        write_loops(self._context, writer, loops, inner)
+      write_loops(self._context, writer, loops, inner)
 
       # The whole tail wrote its padding lanes' zeros already.
       threads = self._num_threads

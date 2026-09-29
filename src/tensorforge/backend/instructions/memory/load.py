@@ -103,12 +103,8 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
 
     #: Whether the transfer is a `copy.async` where it can be one.  Where it
     #: cannot -- a source that is not a value of the body it is issued in --
-    #: it moves its bytes with ordinary loads.  The third route, driving a
-    #: `cuda::pipeline` object as text, is gone: nothing declared the object,
-    #: so every kernel that took it failed to compile (the preload prologue
-    #: until it became one body, and every loader under `wide_bodies=0`).
+    #: it moves its bytes with ordinary loads.
     self._use_cuda_memcpy = self._context.get_vm().get_hw_descr().vendor == 'nvidia' and not self._no_memcpy
-    self._use_tma_memcpy = False
     #: tokens issued by this transfer, for the `LoadWait` that retires them
     self._tokens = []
     self._token_owner = None
@@ -399,16 +395,6 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
       for loop in loops[::-1]:
         loop.__exit__(None, None, None)
 
-      if structured_issue:
-        # `__pipeline_commit()` comes from the emitter, once per copy, via
-        # `commit_async()`.  No acquire, no release, and no stage count: the
-        # object those belonged to is gone, and with it the compile-time N
-        # that made prefetch distance a number of iterations.
-        pass
-      if self._use_tma_memcpy:
-        writer(f'__syncwarp();')
-        writer(f'cuda::device::barrier_arrive_tx(mbarrier, 1, {self._loadsize});')
-
   def _bypass_covering(self, writer, src_offset, length) -> int:
     """Elements per access if this whole run can take the L1-bypassing form.
 
@@ -467,12 +453,6 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
 
     granularities = self._hop_granularities()
 
-    if self._use_tma_memcpy:
-      dest_access_index = self._dest.access_address(self._context, index, writer)
-      src_access_index = self._src.access_address(self._context, index, writer)
-      writer(f'cuda::device::memcpy_async_tx(&{self.write_base()}[{dest_access_index}], &{self._src.name}[{src_access_index}], cuda::aligned_size_t<16>({length}), mbarrier);')
-      return
-
     wide = self._bypass_covering(writer, src_offset, length)
     if wide:
       # Every access sixteen bytes, so every access bypasses L1.  The whole
@@ -501,31 +481,27 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
                             zfill=wide - part)
       return
 
-    if True:
-      cap = self._swizzle_cap(writer)
-      for vecsize in granularities:
-        if vecsize <= cap and src_offset % vecsize == 0:
-          num_hops = ((length - pos * self._num_threads) // (self._num_threads * vecsize)) * vecsize
-          self._write_hop(writer, src_offset, dst_offset, index, pos, pos + num_hops, vecsize, nontemporal, linscale)
-          pos += num_hops
-      rest = length % self._num_threads
-      if rest > 0:
-        if self._explicit_simd():
-          self._write_tail_vector(writer, src_offset, dst_offset, index, pos,
-                                  rest, nontemporal, linscale)
-        else:
-          # The tail: `length % num_threads` elements, moved by the lanes below
-          # `rest`.  On the structured path this is the copy's own predicate
-          # rather than a block around it -- a guard block would put the token
-          # in a scope the wait cannot name.
-          # A guard block, not the copy's own predicate, and not for want of
-          # support: `copy_async` takes one, but it has to be a Value and
-          # `_linear_idx()` is still text.  The block costs nothing here -- a
-          # token has no C++ representation, so nothing is scoped inside it that
-          # the wait needs to name.  It becomes the predicate on the commit that
-          # makes the linear index a value.
-          with writer.If(f'{self._linear_idx()} < {rest}'):
-            self._write_hop(writer, src_offset, dst_offset, index, pos, pos+1, 1, nontemporal, linscale)
+    cap = self._swizzle_cap(writer)
+    for vecsize in granularities:
+      if vecsize <= cap and src_offset % vecsize == 0:
+        num_hops = ((length - pos * self._num_threads) // (self._num_threads * vecsize)) * vecsize
+        self._write_hop(writer, src_offset, dst_offset, index, pos, pos + num_hops, vecsize, nontemporal, linscale)
+        pos += num_hops
+    rest = length % self._num_threads
+    if rest > 0:
+      if self._explicit_simd():
+        self._write_tail_vector(writer, src_offset, dst_offset, index, pos,
+                                rest, nontemporal, linscale)
+      else:
+        # The tail: `length % num_threads` elements, moved by the lanes below
+        # `rest`.  A guard block, not the copy's own predicate, and not for
+        # want of support: `copy_async` takes one, but it has to be a Value
+        # and `_linear_idx()` is text.  The block costs nothing here -- a
+        # token has no C++ representation, so nothing is scoped inside it that
+        # the wait needs to name.  With the linear index as a Value, the guard
+        # would be the copy's predicate instead.
+        with writer.If(f'{self._linear_idx()} < {rest}'):
+          self._write_hop(writer, src_offset, dst_offset, index, pos, pos+1, 1, nontemporal, linscale)
 
   def _write_tail_vector(self, writer, src_offset, dst_offset, index, pos,
                          rest, nontemporal, linscale):
@@ -705,8 +681,8 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
     """The tokens this transfer issued, if they belong to the body at hand.
 
     Same guard as `Symbol.pir_buffer`, and for the same reason: a token is a
-    value of one body, and the loader and its wait are only guaranteed to
-    share one under wide bodies.
+    value of one body, and a wait emitted into another body than the one its
+    transfer was issued in cannot name it.
     """
     owner = getattr(writer, 'uid', None)
     if owner is None or owner != self._token_owner:
@@ -931,59 +907,6 @@ class GlbToRegLoader(MemoryInstruction, LoadInstruction):
                                   threads=self._num_threads),
             total_size - tail, 1, base=self.write_base(),
             threads=self._num_threads)
-
-    elif self._context.get_vm().get_hw_descr().vendor in ['amd'] and False:
-
-      # float4 load
-
-      # for now: use  0 1 2 3, transpose4x4
-
-      # TODO: sort into 4x4x4 blocks
-
-      lead_size = src_bbox.size(0)
-      lead_count = (lead_size + self._num_threads - 1) // self._num_threads
-
-      total_count = lead_count
-      for dim in src_bbox.sizes()[1:]:
-        total_count *= dim
-
-      start = 0
-
-      prec = 'float'
-
-      for g in [4, 2, 1]: # [4, 3, 2, 1]
-        # 4x4
-        # writer(f'const auto f{g}idx = (threadIdx.x % {g}) * {self._num_threads} + (threadIdx.x / {g}) * {g};')
-        total_count_g = (total_count // g) * g
-
-        if start != total_count_g:
-          writer(f'const auto f{g}idx = ((threadIdx.x / {16 // g}) % {g}) * {self._num_threads} + (threadIdx.x % {16 // g}) * {g} + (threadIdx.x / 16) * 16;')
-
-        for i in range(start, total_count_g, g):
-          sidx = i // lead_count
-          ridx = i % lead_count
-          index = sidx * lead_size + ridx * self._num_threads
-          writer(f'const auto v{i} = __builtin_nontemporal_load((tensorforge::VectorT<{prec}, {g}>*)&{self._src.name}[{index} + f{g}idx]);')
-
-          args2 = ', '.join(f'v{i}[{k}]' for k in range(g))
-
-          for k in range(g):
-            writer(f'{prec} v{i}w{k} = 0;')
-
-          args1 = ', '.join(f'v{i}w{k}' for k in range(g))
-
-          if g == 4:
-            writer(f'tensorforge::transpose16x4({args1}, {args2});')
-          if g == 2:
-            writer(f'tensorforge::transpose16x2({args1}, {args2});')
-          if g == 1:
-            writer(f'{args1} = {args2};')
-
-          # TODO: generalize
-          for k in range(g):
-            writer(f'{self._dest.name}[{i + k}] = v{i}w{k};')
-
-        start = total_count_g
 
     else:
       # The lane axis is whichever dimension the destination declares, not

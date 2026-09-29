@@ -16,11 +16,10 @@ that, and each of them was a bug at some point while the pass was written:
   its first -- a buffer read in two slots stays live between them, and
   wrapping to the first read overwrites what the second still wants.
 
-The pass used to place a register transfer ``wrap_distance`` slots ahead, and
-the last property is why that distance was clamped per transfer.  It now places
-every transfer by dependence, at the tail, where the last one holds by
-construction; the tests keep passing the distances, which the pass no longer
-reads, because this is the property that broke silently before.
+The pass places every transfer by dependence, at the tail, where the last one
+holds by construction.  The tests still check it at several ``move_distance``s,
+since the distance decides how many transfers wrap, and a violation computes
+wrong numbers without anything raising.
 """
 
 from __future__ import annotations
@@ -100,7 +99,7 @@ def test_pass_is_inert_when_disabled(backend, arch):
 @pytest.mark.parametrize("backend,arch", [("hip", "gfx90a"), ("cuda", "sm_86")])
 def test_wrapped_declaration_leaves_the_loop(backend, arch):
     kernel = _generate(CHAIN, backend, arch,
-                       enable_wrap_loads=True, wrap_distance=1)
+                       enable_wrap_loads=True, move_distance=1)
     lines = kernel.splitlines()
     loop = _loop_start(lines)
     wrapped = [m.group(1) for m in re.finditer(r'wrap_glb_(\w+)', kernel)]
@@ -123,7 +122,7 @@ def test_wrapped_declaration_leaves_the_loop(backend, arch):
 @pytest.mark.parametrize("backend,arch", [("hip", "gfx90a"), ("cuda", "sm_86")])
 def test_peeled_and_wrapped_transfers_use_the_right_element(backend, arch):
     kernel = _generate(CHAIN, backend, arch,
-                       enable_wrap_loads=True, wrap_distance=1)
+                       enable_wrap_loads=True, move_distance=1)
     # `= (cast)&m1[...]` on a backend whose pointers carry an address space:
     # the address is generic and the declaration is not, so the cast is part
     # of the binding rather than an artifact of one vendor's spelling.
@@ -154,15 +153,15 @@ def test_peeled_and_wrapped_transfers_use_the_right_element(backend, arch):
 @pytest.mark.parametrize("d", [1, 2, 4, 8])
 @pytest.mark.parametrize("backend,arch", [("hip", "gfx90a"), ("cuda", "sm_86")])
 def test_wrapped_write_lands_after_the_last_read(d, backend, arch):
-    """The write-after-read the span clamp exists to prevent.
+    """A wrapped write after the buffer's last read, not merely its first.
 
-    Without clamping ``d`` to ``n - 1 - span``, a buffer read in two slots gets
-    its wrapped write placed between them: the second read then sees the *next*
-    element's data.  Nothing raises, the kernel just computes the wrong answer,
-    which is why this is asserted on every distance rather than the default.
+    A buffer read in two slots with its wrapped write between them hands the
+    second read the *next* element's data.  Nothing raises, the kernel just
+    computes the wrong answer, which is why this is asserted on every distance
+    rather than the default.
     """
     kernel = _generate(CHAIN, backend, arch,
-                       enable_wrap_loads=True, wrap_distance=d)
+                       enable_wrap_loads=True, move_distance=d)
     lines = kernel.splitlines()
     loop = _loop_start(lines)
 

@@ -124,19 +124,3 @@ def test_an_rdna_work_group_holds_64_kb():
         hw = Context(arch=arch, backend="hip",
                      fp_type=_descrs()[0].DTYPE).get_vm().get_hw_descr()
         assert hw.max_local_mem_size_per_block == 64 * 1024, arch
-
-
-@pytest.mark.parametrize("preload", [True, False])
-def test_no_transfer_drives_a_pipeline_object_without_wide_bodies(preload):
-    """One body per instruction: a loader's source is a value of another body,
-    so the copy cannot be structured.  It used to drive a `cuda::pipeline` no
-    kernel declares; it moves its bytes with plain loads now."""
-    mod, descrs = _descrs()
-    ctx = Context(arch="sm_120", backend="cuda", fp_type=mod.DTYPE,
-                  options=Options(preload_globals=preload, wide_bodies=False))
-    gen = Generator(descrs, ctx)
-    gen.generate()
-    kernel = gen.get_kernel()
-    for text in ('producer_acquire', 'producer_commit', 'consumer_wait',
-                 'cuda::memcpy_async'):
-        assert text not in kernel

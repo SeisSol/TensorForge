@@ -5,7 +5,7 @@ from typing import Union
 import math
 from . import ComputeInstruction
 from tensorforge.common.matrix.boundingbox import BoundingBox
-from tensorforge.backend.symbol import slots_for, VecIndex, SymbolType, add_offset, Symbol, SymbolView, DataView, Loop, LeadLoop, write_loops, LeadIndex, LinearizedLoop, Immediate, passed_by_value
+from tensorforge.backend.symbol import slots_for, VecIndex, SymbolType, add_offset, Symbol, SymbolView, DataView, Loop, LeadLoop, write_loops, LeadIndex, Immediate, passed_by_value
 from tensorforge.common.exceptions import InternalError, GenerationError
 from tensorforge.backend.writer import Writer
 from tensorforge.common.context import Context
@@ -275,7 +275,6 @@ class MultilinearInstruction(ComputeInstruction):
         preKs = {}
         self._opdim_to_nks = []
         sparseK = {}
-        self._sparseN = [False] * targetrank
         for i, op in enumerate(self._ops):
             opdim = [''] * op.bbox.rank()
             for j in range(op.bbox.rank()):
@@ -294,7 +293,6 @@ class MultilinearInstruction(ComputeInstruction):
                 else:
                     self._ns[self._target[i][j]] = (max(self._ns[self._target[i][j]][0], lower), min(self._ns[self._target[i][j]][1], upper))
                     opdim[j] = f'n{self._target[i][j]}'
-                    self._sparseN[self._target[i][j]] |= op.symbol is not None and op.symbol.obj is not None and not op.symbol.obj.is_dense()
 
             self._opdim_to_nks += [opdim]
 
@@ -562,31 +560,19 @@ class MultilinearInstruction(ComputeInstruction):
         # TODO: preload values where necessary (i.e. no N in there)
         # Also, postpone multiplications until necessary
 
-        # thread_mask: TODO
-        # writer(f'int32_t n0 = {self._vm.get_lexic().thread_idx_x} % {self._ns[0]};')
-        # writer(f'int32_t n1a = {self._vm.get_lexic().thread_idx_x} / {self._ns[0]};')
-        # n1i = self._num_threads // self._ns[0]
-        # writer(f'int32_t n{i} = dimmin + n1a; n{i} < {dimmax}; n{i} += {n1i}')
-
-        # (for broadcasting)
-        force_unroll = True #self._context.get_vm().get_hw_descr().vendor == 'amd'
-        # A count here rolls the reduction -- see `_rollable` and the option.
+        # Every loop is unrolled, which is what lets an operand that lacks an
+        # index be read once and broadcast.  A count here rolls the reduction
+        # instead -- see `_rollable` and the option.
         opts = self._context.get_user_options()
         k_roll, k_unroll_max = opts.k_roll, opts.k_unroll_max
 
-        matrixK = 1
-
         loopmap = {}
 
-        outerLoops = []
-
-        # TODO: linearize
         for i, (dimmin, dimmax) in enumerate(self._ks):
-            loopmap[f'k{i}'] = len(loopstack) + len(outerLoops)
+            loopmap[f'k{i}'] = len(loopstack)
             if -i-1 not in self._lead_dims:
-                step = matrixK if i == len(self._ks) - 1 else 1
-                if (i == len(self._ks) - 1 and self._k_width > 1
-                        and (self._sparseK[i] or force_unroll)):
+                step = 1
+                if i == len(self._ks) - 1 and self._k_width > 1:
                     # Unrolled only.  The last group of a ragged extent is
                     # shorter than the rest, and knowing *how much* shorter is
                     # what lets the body emit the right number of products.
@@ -598,26 +584,19 @@ class MultilinearInstruction(ComputeInstruction):
                 roll = _roll_count(dimmin, dimmax, step, k_roll, k_unroll_max)
                 rolled = (i == len(self._ks) - 1
                           and self._rollable(i, dimmin, dimmax, step, roll))
-                loop = [Loop(f'k{i}', dimmin, dimmax, step,
-                             unroll=(self._sparseK[i] or force_unroll)
-                             and not rolled,
-                             pragma=roll if rolled else True)]
-                if self._sparseK[i] or force_unroll or True:# and False:
-                    loopstack += loop
-                else:
-                    outerLoops += loop
-
-        #loopstack += [LinearizedLoop(outerLoops)]
+                loopstack += [Loop(f'k{i}', dimmin, dimmax, step,
+                                   unroll=not rolled,
+                                   pragma=roll if rolled else True)]
 
         stride = 1
         threads = self._num_threads
         for i, (dimmin, dimmax) in enumerate(self._ns):
-            loopmap[f'n{i}'] = len(loopstack) + len(outerLoops) #- 1
+            loopmap[f'n{i}'] = len(loopstack)
             if i not in self._lead_dims or threads == 0:
-                loopstack += [Loop(f'n{i}', dimmin, dimmax, 1, unroll=self._sparseN[i] or force_unroll)]
+                loopstack += [Loop(f'n{i}', dimmin, dimmax, 1, unroll=True)]
             else:
                 loopstack += [LeadLoop(f'n{i}', dimmin, dimmax, threads, stride,
-                                       unroll=self._sparseN[i] or force_unroll,
+                                       unroll=True,
                                        width=self._lead_width,
                                        full_lane=self._full_lane_tail(
                                            i, dimmin, dimmax))]

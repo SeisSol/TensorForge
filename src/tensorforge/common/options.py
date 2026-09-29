@@ -4,7 +4,7 @@
 """The generator's options: one place that declares them, one that resolves them.
 
 An option is an *entry* and not a class attribute.  `declare` refuses a name it
-already holds, so a second declaration of `wrap_distance` is an error at import
+already holds, so a second declaration of `move_distance` is an error at import
 naming the option, rather than an assignment in a class body where the last one
 silently wins.
 
@@ -51,7 +51,7 @@ class _Unset:
 UNSET = _Unset()
 
 #: A comma-separated ``name=value`` list setting any declared option, e.g.
-#: ``TF_OPTIONS=enable_pipeline=1,wrap_distance=2``.  A bare ``name`` means
+#: ``TF_OPTIONS=enable_pipeline=1,move_distance=2``.  A bare ``name`` means
 #: ``name=1``.
 OPTIONS_ENV = 'TF_OPTIONS'
 
@@ -332,11 +332,6 @@ class ResolvedOptions:
 
 # -- the options ------------------------------------------------------------- #
 
-declare('exact_contraction_length',
-        default=False,
-        doc='Cover the contraction range exactly rather than rounding it up to '
-            'the lane count.')
-
 declare('align_shr_mem',
         default=True,
         doc='Round every shared-memory allocation up to the access alignment.')
@@ -390,13 +385,6 @@ declare('move_distance',
             'one before it, as always); `WrapLoads` wraps the transfers whose '
             'move runs across the back edge, which are the first this many of '
             'the body.  A dependence stops a transfer whatever the distance.')
-
-declare('wrap_distance',
-        default=1,
-        doc='Not read any more; superseded by `move_distance`.  `WrapLoads` '
-            'placed register transfers this many compute slots ahead; it now '
-            'places every transfer by dependence.  Still declared because '
-            'callers pass it (the bench suite, the option tests).')
 
 declare('enable_prefetch',
         default=False,
@@ -672,23 +660,6 @@ declare('launch_control_depth',
             'a transfer with.  Beyond two a block reserves elements it has not '
             'started, which costs at the tail: depth 4 measured worse than '
             'depth 2 in every configuration.')
-
-declare('wide_bodies',
-        default=True,
-        env='TF_IR_WIDE',
-        doc='One PIR body per loop body, rather than one per macro instruction.\n'
-            'A pass sees a body.  Per macro instruction that means `RegisterAlloc`, '
-            'the loader that fills the buffer and the multilinear that reads it are '
-            'three separate bodies, and the only thing connecting them is the C++ '
-            'name -- 60.7% of buffers in the corpus are named for that reason alone, '
-            'against 10.3% per loop body (tools/buffer_spans.py).  Everything still '
-            'needing a name here outlives one loop body: the shared arena, its '
-            'scratch tail, and the tiles of the two cases that have two batch loops.\n'
-            'So this is not primarily a code-quality switch -- the cross-instruction '
-            'CSE win is 0.2% -- it is what makes the naming go away, and with it the '
-            'reason `symbol.py` builds addresses as text.\n'
-            '`TF_IR_WIDE=0` reaches it without touching a call site, because a '
-            'setting that moves 71 of 108 generated outputs has to stay bisectable.')
 
 declare('merge_variants',
         default='auto',
