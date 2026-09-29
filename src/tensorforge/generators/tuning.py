@@ -270,6 +270,52 @@ def space(descrs, context: Context) -> List[Knob]:
     return knobs
 
 
+def _wider(base, rows: int, hw) -> List[LaneConfig]:
+    """Lane counts *above* the deduced one, up to the next power of two at or
+    above the extent.
+
+    The deduced count is the widest the lead dimension is worth spreading
+    over in one slot; a multiplication may still be given more lanes than
+    that, and where the block is capped by threads rather than by rows this
+    is the only way to make it hold fewer multiplications.  On NVIDIA with
+    nothing preloaded the cap is 128 threads, so the block holds
+    `128 // lanes` multiplications -- and at 128 lanes that is exactly one,
+    whose shared memory is one multiplication's worth instead of four.
+
+    `poroelastic-stp` is what this is for.  Its operand tile is what caps the
+    block, and from order 6 up only one block fits on an SM: order 8 in
+    double precision runs one multiplication of 32 lanes, which is one warp
+    per SM.  At 128 lanes the same kernel keeps its 140672 B of shared memory
+    and gets four times the threads, at 2632 B of register pressure instead
+    of 6739 and 433261 code units instead of 755906.
+
+    The ceiling is the next power of two at or above the extent, and not one
+    step further.  Lanes past the extent hold nothing: order 8 spreads 120
+    rows, so 128 lanes waste eight, while order 6 spreads 56 and 128 lanes
+    would waste 72 -- and the register pressure that buys is a figure *per
+    thread*, which is exactly how idle lanes hide.  64 is the honest widening
+    there, and it is in this list; 128 is not.
+
+    Offered to the compiled scorer alone, for the reason the axis downward is
+    (`CompiledScore`): the modelled figures do not separate lane widths, and
+    a candidate nothing can rank is a candidate taken at random.  Measured
+    over the twenty elastic kernels on sm_90, the widening costs 0.969x under
+    `static` -- `o6s:derivativeTaylorExpansion` 3.35 -> 4.88 ns an element,
+    `o6d:derivativeTaylorExpansion` 5.78 -> 7.29 -- and 1.0008x under
+    `compiled`, which is the noise.
+    """
+    if base.num_threads & (base.num_threads - 1):
+        return []                      # not a power of two: nothing to double
+    ceiling = min(1 << max(0, (rows - 1).bit_length()),
+                  getattr(hw, 'max_threads_per_block', 1024))
+    out = []
+    t = base.num_threads * 2
+    while t <= ceiling:
+        out.append(LaneConfig(t, base.num_active_threads, base.lead_width))
+        t *= 2
+    return out
+
+
 def simple_space(descrs, context: Context) -> List[Knob]:
     """The knobs `Options.autotune` turns: only those whose every value is
     safe to ship without the caller knowing.
@@ -359,6 +405,8 @@ def simple_space(descrs, context: Context) -> List[Knob]:
             if t & (t - 1):
                 break
             t //= 2
+        if context.get_user_options().autotune == 'compiled':
+            geometries += _wider(base, rows, hw)
     backend = getattr(context.get_vm().get_lexic(), '_backend', None)
     if (hw.has_packed_fp32_fma() and context.fp_type == Datatype.F32
             and backend in ('cuda', 'hip') and rows % 2 == 0
