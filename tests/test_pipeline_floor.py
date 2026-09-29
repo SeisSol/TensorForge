@@ -4,11 +4,12 @@
 """`cuda::pipeline` has a floor, and two files have to agree on where it is.
 
 `<cuda/pipeline>` reaches `<cuda/barrier>`, which is a hard `#error` below
-sm_70.  So the pipeline object is not a declaration the compiler drops for want
-of a use on Pascal --- it is a translation unit that does not build, and the
-generator puts one in every NVIDIA kernel.  Nothing about that is visible in
-the generated text, which renders and snapshots identically either way; it only
-shows up in a compiler that no unit test runs.
+sm_70.  So the include is not a line the compiler drops for want of a use on
+Pascal --- it is a translation unit that does not build.  `cuda.h` takes it
+only above the floor, and no generated kernel names the type on either side
+of it.  Nothing about that is visible in the generated text, which renders and
+snapshots identically either way; it only shows up in a compiler that no unit
+test runs.
 
 Two numbers state the floor: the preprocessor guard in `cuda.h` and
 :meth:`HwDecription.has_cuda_pipeline`.  They are in different languages and
@@ -58,21 +59,12 @@ def _render(arch: str, backend: str = "cuda") -> str:
     return str(gen.get_kernel())
 
 
-@pytest.mark.parametrize("arch", BELOW)
-def test_no_pipeline_object_below_the_floor(arch):
+@pytest.mark.parametrize("arch", BELOW + ABOVE)
+def test_no_kernel_names_a_pipeline_object(arch):
+    """Asynchronous copies lower to the `__pipeline_*` primitives, which
+    carry no floor, so no kernel names the type on either side of it."""
     assert "cuda::pipeline" not in _render(arch), (
-        f"{arch} cannot include <cuda/pipeline>, so a kernel naming the type "
-        f"does not compile there")
-
-
-@pytest.mark.parametrize("arch", ABOVE)
-def test_pipeline_object_above_the_floor(arch):
-    """The declaration is unconditional where the type exists.
-
-    Whether any transfer drives it is decided per body, after this point, so an
-    unused local is the deliberate price of not building the section twice.
-    """
-    assert "cuda::pipeline" in _render(arch)
+        f"a kernel for {arch} names cuda::pipeline, which nothing drives")
 
 
 def test_hip_on_an_nvidia_model_names_no_cuda_type():

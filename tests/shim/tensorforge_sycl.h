@@ -274,6 +274,9 @@ template <int N> class simd_mask;
 
 template <typename T, int N, int Size, int Stride> class simd_view {
 public:
+  /// The number of elements the view names, as the real view states it.
+  static constexpr int length = Size;
+
   explicit simd_view(T *base) : _base(base) {}
   simd_view &operator=(const simd_view &o) {
     _base[0] = o._base[0];
@@ -300,6 +303,10 @@ private:
 
 template <typename T, int N> class simd {
 public:
+  /// The element count, which the helpers in `isycl.h` read off a view or
+  /// vector type to find `N`.
+  static constexpr int length = N;
+
   simd() = default;
   explicit simd(T v) {
     for (int i = 0; i < N; ++i)
@@ -616,6 +623,28 @@ template <typename T, typename = std::enable_if_t<!std::is_arithmetic_v<
 auto expF64(const T &x) {
   constexpr int N = std::remove_cv_t<std::remove_reference_t<T>>::length;
   return expF64<N>(intel_esimd::simd<double, N>(x));
+}
+
+/// Mirrors `tanhF32` in `isycl.h`: tanh for floats, one or a view.
+inline float tanhF32(float x) { return x; }
+template <typename T, typename = std::enable_if_t<!std::is_arithmetic_v<
+                          std::remove_cv_t<std::remove_reference_t<T>>>>>
+auto tanhF32(const T &x) {
+  constexpr int N = std::remove_cv_t<std::remove_reference_t<T>>::length;
+  return intel_esimd::simd<float, N>(x);
+}
+
+/// Mirrors `tanhF64` in `isycl.h`: tanh for doubles, a vector, one, or a view.
+template <int N>
+intel_esimd::simd<double, N> tanhF64(intel_esimd::simd<double, N> x) {
+  return x;
+}
+inline double tanhF64(double x) { return x; }
+template <typename T, typename = std::enable_if_t<!std::is_arithmetic_v<
+                          std::remove_cv_t<std::remove_reference_t<T>>>>>
+auto tanhF64(const T &x) {
+  constexpr int N = std::remove_cv_t<std::remove_reference_t<T>>::length;
+  return tanhF64<N>(intel_esimd::simd<double, N>(x));
 }
 
 } // namespace tensorforge

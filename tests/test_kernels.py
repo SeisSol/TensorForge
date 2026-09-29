@@ -93,11 +93,15 @@ def test_reference_matches_einsum():
 
 
 def test_elementwise_descr_constructs():
-    """Every elementwise case can build an ElementwiseDescr without a GPU.
+    """Every elementwise case builds its ElementwiseDescrs without a GPU.
 
     Catches breakage in ``generators/elementwise.py`` or in
     ``ElementwiseDescr.__init__`` (arity check, shape check, the
     data-flow-direction assignment) even on a CI runner with no toolchain.
+
+    A case may surround its pointwise operation with the products that give
+    it something to read (``slice_after_whole``, ``sliced_max``); what makes
+    it an elementwise case is that it has one.  Every one it has is checked.
     """
     from pathlib import Path
     import importlib.util
@@ -115,18 +119,21 @@ def test_elementwise_descr_constructs():
             f"_smoke_{path.stem}", path)
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
-        descrs = mod.descr_list()
-        assert len(descrs) == 1, f"{path.name}: expected one descr"
-        d = descrs[0]
-        assert isinstance(d, ElementwiseDescr), (
-            f"{path.name}: not an ElementwiseDescr ({type(d).__name__})")
-        # ElementwiseDescr.__init__ sets directions on the underlying
-        # tensors; assert that side effect actually happened.
-        seen_sink = d.dest.tensor.direction == DataFlowDirection.SINK
-        seen_source = any(src.tensor.direction == DataFlowDirection.SOURCE
-                          for src in d.tensor_srcs())
-        assert seen_sink, f"{path.name}: no SINK direction set"
-        assert seen_source, f"{path.name}: no SOURCE direction set"
+        pointwise = [d for d in mod.descr_list()
+                     if isinstance(d, ElementwiseDescr)]
+        assert pointwise, f"{path.name}: no ElementwiseDescr"
+        for d in pointwise:
+            # ElementwiseDescr.__init__ sets directions on the underlying
+            # tensors; assert that side effect actually happened.  A
+            # destination another operation reads again is a SOURCESINK.
+            assert d.dest.tensor.direction in (
+                DataFlowDirection.SINK, DataFlowDirection.SOURCESINK), (
+                f"{path.name}: no SINK direction set")
+            assert any(src.tensor.direction in (
+                           DataFlowDirection.SOURCE,
+                           DataFlowDirection.SOURCESINK)
+                       for src in d.tensor_srcs()), (
+                f"{path.name}: no SOURCE direction set")
 
 
 def test_slicing_cases_construct_and_generate():
@@ -166,9 +173,17 @@ def test_slicing_cases_construct_and_generate():
                 if list(op.tensor.shape) != list(op.bbox.sizes()):
                     saw_slice = True
                     break
-        assert saw_slice, (
-            f"{path.name}: no operand has bbox != shape — this is not a "
-            "slicing case")
+        # A control case (`CONTROL_FOR`) is the sliced case with the slice
+        # taken out, so the check turns around: sliced, it would stop being
+        # the comparison it exists for.
+        if getattr(mod, "CONTROL_FOR", None):
+            assert not saw_slice, (
+                f"{path.name}: a control for {mod.CONTROL_FOR} slices an "
+                "operand")
+        else:
+            assert saw_slice, (
+                f"{path.name}: no operand has bbox != shape — this is not a "
+                "slicing case")
 
         # Generation must not crash on a known-good arch/backend.
         ctx = Context(arch="sm_86", backend="cuda", fp_type=mod.DTYPE)
@@ -342,7 +357,7 @@ def test_sparsity_band_uses_maskspp_and_generates():
     from tensorforge.common.matrix.spp import FullSPP
     from tensorforge.generators.generator import Generator
 
-    mod = _import_case("slicing/sparsity_band.py")
+    mod = _import_case("sparsity_band.py")
     descrs = mod.descr_list()
     sparse_ops = [op for d in descrs for op in d.matrix_list()
                   if not isinstance(op.tensor.spp, FullSPP)]

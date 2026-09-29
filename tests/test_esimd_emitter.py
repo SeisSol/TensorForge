@@ -182,11 +182,27 @@ def test_reciprocal_is_inv_not_a_division():
     assert 'inv(a)' in out and '1 /' not in out
 
 
-@pytest.mark.parametrize('op', ['TANH', 'TAN', 'ASIN', 'CBRT', 'ATANH'])
+def test_tanh_goes_through_the_composed_helpers():
+    """`tanh` has no core intrinsic; `isycl.h` provides one per type.
+
+    In float from the experimental ESIMD math, in double composed from
+    `expF64` -- both through `tensorforge::` so that a view is taken as well
+    as a vector.
+    """
+    from tensorforge.common.operation import Operation
+    lexic = _lexic()
+    assert lexic.get_operation(Operation.TANH, Datatype.F32, 'a', None) \
+        == 'tensorforge::tanhF32(a)'
+    assert lexic.get_operation(Operation.TANH, Datatype.F64, 'a', None) \
+        == 'tensorforge::tanhF64(a)'
+
+
+@pytest.mark.parametrize('op', ['TAN', 'ASIN', 'CBRT', 'ATANH', 'LOG1P',
+                                'EXPM1'])
 def test_functions_the_hardware_library_lacks_are_declined(op):
     """Declined, not substituted.
 
-    `sycl::tanh` is not a slower tanh for a `simd<>` operand -- it does not
+    `sycl::tan` is not a slower tan for a `simd<>` operand -- it does not
     accept one, and where a conversion exists it would compute on a single
     element and look like it worked.  Composing one from the intrinsics that
     do exist is a numerics decision and does not belong in a spelling table.

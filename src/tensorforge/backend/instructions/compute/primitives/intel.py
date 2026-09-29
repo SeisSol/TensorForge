@@ -279,8 +279,10 @@ def supports(threads, dtype, sparse) -> bool:
       of this one.
     * ``dtype is F32``.  FP64 has no DPAS at all (see the module docstring),
       and the lower precisions are not what SeisSol asks for.
-    * ``not sparse``.  The sparse operand path loads by linear index, which is
-      not a fragment.
+
+    A sparse operand is still servable by the target; which arrangement can
+    take it is `strategies`' question, and neither can -- the sparse path
+    loads by linear index, which is not a fragment and not a lane either.
     """
     return threads == EXECUTION_SIZE and dtype == Datatype.F32
 

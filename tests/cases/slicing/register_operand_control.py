@@ -23,6 +23,7 @@ from tensorforge.common.matrix.tensor import SubTensor, Tensor
 from tensorforge.generators.descriptions import GemmDescr
 
 NAME = "register_operand_control"
+CONTROL_FOR = "register_operand"
 DTYPE = Datatype.F32
 BATCH = 2
 TOL = (1e-3, 1e-3)

@@ -115,13 +115,10 @@ def test_amd_never_offers_the_chain_a_sparse_operand():
     assert Strategy.BROADCAST not in amd.strategies(shape, None)
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "intel.supports documents `not sparse` as one of its three conditions "
-    "and no longer applies it, and strategies() guards only MATRIX with it. "
-    "So an ESIMD kernel with a sparse second operand is offered the chain, "
-    "which then reads B through the coordinate accessor it is not stored "
-    "under -- a wrong answer rather than a failure."))
 def test_intel_never_offers_the_chain_a_sparse_operand():
+    """The same guarantee on Intel: the chain would read B through the
+    coordinate accessor it is not stored under -- a wrong answer rather than
+    a failure."""
     shape = ComputeShape(threads=16, accumulator=Datatype.F32, sparse=True,
                          explicit_simd=True)
     assert Strategy.BROADCAST not in intel.strategies(shape, None)

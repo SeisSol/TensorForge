@@ -216,7 +216,7 @@ def test_sparsity_is_recorded_and_not_applied():
     and the block shape's, so the density is on the record and the flop count
     stays dense.  A model that applied it would attribute a code-generation
     choice to the operation."""
-    cost = _cost_of("slicing/sparsity_band.py")
+    cost = _cost_of("sparsity_band.py")
     banded = {t.name: t for t in cost.tensors}["B"]
     assert banded.density < 1.0
     assert cost.flops == _cost_of("square_notrans.py").flops

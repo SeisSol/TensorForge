@@ -191,13 +191,19 @@ def test_the_assembled_exchange_is_emitted_now(monkeypatch):
 
 @pytest.mark.parametrize('ext', [4, 8, 16])
 def test_what_is_emitted_stays_under_what_was_planned(ext):
-    """And by exactly the ternaries.
+    """And by exactly the ternaries and the swaps another move already did.
 
     `Move.cost` counts a `cndmask` region as swaps, a merge and a select,
     because setting the mask is a scalar move beside the merge.  `laneMerge`
     takes it as a template constant, so the IR issues one call and the move is
     the compiler's to hoist out of the loop -- both true, at different levels,
     and the plan being the conservative one is the right direction.
+
+    The plan also prices every move's swaps on their own, while the builder
+    shares a pure call with the scopes that can reach it: two moves that put
+    the same source register through the same leading swaps issue them once.
+    So what is emitted is one merge per move and one call per distinct
+    `(source, swap prefix)`.
     """
     from tensorforge.backend.instructions.compute.primitives.amd import (
         exchange_codegen, reorder)
@@ -218,10 +224,13 @@ def test_what_is_emitted_stays_under_what_was_planned(ext):
     exchange_codegen.apply_exchange(writer, regs, assembled, ftype)
     emitted = len(writer._stack[-1].body) - before
 
-    ternaries = sum(1 for group in assembled for move in group
-                    if not move.select.free)
-    assert emitted == reorder.compose_cost(assembled) - ternaries
+    moves = [move for group in assembled for move in group]
+    ternaries = sum(1 for move in moves if not move.select.free)
     assert ternaries == ext * ext
+    assert emitted <= reorder.compose_cost(assembled) - ternaries
+    prefixes = {(move.contraction, move.swaps[:i]) for move in moves
+                for i in range(1, len(move.swaps) + 1)}
+    assert emitted == len(moves) + len(prefixes)
 
 
 def test_the_builtin_still_wins_where_there_is_one():

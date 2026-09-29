@@ -192,7 +192,7 @@ def test_a_sparse_operand_is_allocated_at_its_storage_volume():
     (`ptr_manip.py`), and for a compressed tensor it is smaller than the
     bounding box's volume. Allocating the box would be harmless; the two names
     being one word apart is why this is pinned rather than assumed."""
-    mod = _load(CASES / "slicing" / "sparsity_band.py")
+    mod = _load(CASES / "sparsity_band.py")
     _, gen = _generate(mod, "cuda", "sm_80")
     sparse = [o for o in collect_operands(gen)
               if not o.is_scalar and o.storage_volume < o.volume]

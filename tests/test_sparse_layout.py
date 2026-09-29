@@ -43,7 +43,7 @@ CASES = Path(__file__).resolve().parent / "cases"
 
 #: A case whose B operand is sparse, so the linearized register path is taken.
 #: (`NAME` is `gemm_sparse_band_B`; the snapshot goes by that.)
-SPARSE_CASE = "slicing/sparsity_band.py"
+SPARSE_CASE = "sparsity_band.py"
 
 #: `float v23_lin = glb_m2[0 + threadIdx.x * 1];`
 #:
@@ -90,7 +90,7 @@ def _fills(source: str):
 # `case` is auto-parametrized across the whole corpus by conftest, so the
 # name is taken; this test wants one specific sparse case.
 @pytest.mark.parametrize("case_file,threads", [
-    ("slicing/sparsity_band.py", 16),
+    ("sparsity_band.py", 16),
 ])
 def test_the_fill_puts_element_slot_times_threads_plus_lane_in_each_slot(
         case_file, threads):

@@ -154,23 +154,33 @@ def test_no_instruction_hardcodes_the_lane_axis(cls):
         "from the symbol")
 
 
-def test_a_register_array_states_its_lane_axis():
+@pytest.mark.parametrize("lead,size", [
+    # 8 x 40 over 32 lanes: along axis 0 one slot per column, along axis 1
+    # two slots per row.
+    (0, 1 * 40),
+    (1, 8 * 2),
+])
+def test_a_register_array_states_its_lane_axis(lead, size):
     """Whoever counts the slots also tells the symbol.
 
-    The count is taken from the lane axis, so the answer is known right there;
-    the symbol just did not get told, and a reader taking `lead_dims` got the
-    constructor's guess instead. Both now come from the one argument
-    `Temporaries.register_array` is given, which is what keeps them from
-    parting company.
+    The count is taken from the lane axis, so the answer is known right there,
+    and a reader taking `lead_dims` has to get the same axis rather than the
+    constructor's default.  Asked of both axes of one box: the allocation and
+    the symbol follow the argument together.
     """
-    import inspect
+    from tensorforge.backend.scopes import Scopes
+    from tensorforge.backend.temporaries import Temporaries
+    from tensorforge.common.context import Context
+    from tensorforge.common.basic_types import Datatype
+    from tensorforge.common.matrix.boundingbox import BoundingBox
 
-    from tensorforge.backend import temporaries
-
-    source = inspect.getsource(temporaries.Temporaries.register_array)
-    assert "registers.lead_dims = [lead_pos]" in source
-    assert "d != lead_pos" in source, (
-        "the slot count no longer keys on the same lane axis the symbol is "
+    context = Context(arch="sm_86", backend="cuda", fp_type=Datatype.F32)
+    temporaries = Temporaries(context, Scopes(), 32)
+    registers, _ = temporaries.register_array(BoundingBox([0, 0], [8, 40]),
+                                              lead)
+    assert registers.lead_dims == [lead]
+    assert registers.obj.size == size, (
+        "the slot count keys on another axis than the one the symbol is "
         "given")
 
 
