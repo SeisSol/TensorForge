@@ -592,26 +592,80 @@ def static_score(result: Build):
         mults = gen.launch_config().mults_per_block
         resident = min(resident, blocks * mults)
     over = _over_budget(result)
-    issue = _least_cycles(gen, lanes, wave, spill_bytes=float(over))
+    issue = _least_cycles(gen, lanes, wave, spill_bytes=float(over),
+                          resident=resident,
+                          hw=result.context.get_vm().get_hw_descr())
     return (over > 0, issue, -resident,
             _icache_over(result), _granule(gen.peak_pressure or 0),
             len(gen.get_kernel() or ''))
 
 
-def _least_cycles(gen, lanes: int, wave: int, spill_bytes: float = 0.0) -> float:
+def _least_cycles(gen, lanes: int, wave: int, spill_bytes: float = 0.0,
+                  resident: int = 0, hw=None) -> float:
     """The busiest pipe's clocks per multiplication (`analysis.pipeline`), or
-    the arithmetic's warp issue slots where the build counted no mix.
+    the arithmetic's warp issue slots where the build counted no mix --
+    stretched by however far the candidate falls short of keeping the issue
+    ports fed.
 
     `spill_bytes` is what a compiler reported for this build, written into
     the same tables as every other access (`pipeline.spilled`): a spill costs
     a store, a load back and the bytes of both, and counting it here is what
     lets it be weighed against the issue count rather than ranked before it.
+
+    The stretch is what makes the bound rankable.  `pipeline.of` is a lower
+    bound on one multiplication given the whole SM, and it is an honest one;
+    what it does not say is how close the machine can come to it, and that
+    differs between candidates by more than the bound itself does.  A
+    multiplication spread over more lanes is more warps, and its pipe
+    occupancy rises with them -- so the bound grows with the width while the
+    clock falls, and ranking by the bound alone takes the narrowest every
+    time.
+
+    `poroelastic-stp` order 8 in double precision is the case that shows it.
+    One multiplication of 32 lanes is **one warp** on an SM whose shared
+    memory admits one block, and a single warp cannot saturate an FP64 pipe
+    that takes a warp instruction per clock, because its instructions depend
+    on one another.  Measured against the bound: 13.8 % of it at 32 lanes,
+    6.1 % at 64 and 2.6 % at 128, so the bound gets looser exactly as the
+    kernel gets faster.
+
+      lanes   bound   x shortfall   stretched      clock
+         32  146006            x4      584024   20161 ns
+         64  207662            x2      415324   12617
+        128  339960            x1      339960    8927
+
+    and `poroelastic-stp` order 4 in single precision, where 20 to 64 warps
+    are already resident, keeps every factor at one and so keeps its order:
+    9693, 19405, 38797 against 72, 122 and 238 ns an element.
+
+    The shortfall is measured against the issue ports themselves -- the rate
+    of the `issue` resource, which is the SM's warp schedulers (four on
+    NVIDIA since Volta) -- rather than against a fresh constant.  Where the
+    caller knows neither the residency nor the hardware, nothing is
+    stretched and this is the bound as before.
     """
     from tensorforge.analysis import pipeline
     b = pipeline.of(gen, spill_bytes=spill_bytes)
-    if b is not None:
-        return b.cycles
-    return (gen.emitted_work or 0) * lanes / wave
+    cycles = b.cycles if b is not None else (gen.emitted_work or 0) * lanes / wave
+    return cycles * _shortfall(lanes, wave, resident, hw)
+
+
+def _shortfall(lanes: int, wave: int, resident: int, hw) -> float:
+    """How much of the bound the machine cannot reach for want of warps.
+
+    One where the resident warps meet the issue ports, and the ratio short of
+    them otherwise.  `resident` of zero means the caller does not know, and
+    an unknown residency stretches nothing: guessing here would rank by a
+    number nobody measured.
+    """
+    if not resident or hw is None:
+        return 1.0
+    from tensorforge.analysis import pipeline
+    ports = pipeline.resources(hw).get('issue')
+    if ports is None or ports.rate <= 0:
+        return 1.0
+    warps = max(1, -(-lanes // max(1, wave)))
+    return max(1.0, ports.rate / max(1, resident * warps))
 
 
 def _icache_over(result: Build) -> int:
@@ -1033,8 +1087,9 @@ class CompiledScore:
         if report is None:
             return None
         lanes, wave, resident = _geometry(result)
+        hw = result.context.get_vm().get_hw_descr()
         mults = result.generator.launch_config().mults_per_block
-        if report.register_blocks is not None and result.context.get_vm().get_hw_descr().vendor == 'nvidia':
+        if report.register_blocks is not None and hw.vendor == 'nvidia':
             blocks = min(result.generator.resident_blocks or 0, report.register_blocks)
             resident = blocks * mults
         # The *amount* spilled goes into the issue figure rather than in
@@ -1045,7 +1100,8 @@ class CompiledScore:
         # measured (device, kernel) groups that is what the clock agrees
         # with -- see the table in the class docstring.
         issue = _least_cycles(result.generator, lanes, wave,
-                              spill_bytes=report.spill_bytes)
+                              spill_bytes=report.spill_bytes,
+                              resident=resident, hw=hw)
         if getattr(result.context.get_vm().get_lexic(), 'simd_mode', False):
             # Widest unless it spills.  Under the explicit vector the lane
             # count is the vector's width, and a narrower one does strictly
@@ -1349,12 +1405,28 @@ DEVIATION_MARGIN = 0.05
 
 
 def _bound_cycles(result: Optional['Build']) -> Optional[float]:
-    """The busiest pipe's clocks per multiplication for a build, or None."""
+    """The busiest pipe's clocks per multiplication for a build, or None --
+    stretched the way the ranking stretches it (`_least_cycles`).
+
+    The same yardstick on purpose.  `_worth_it` asks whether the move the
+    ranking chose is worth its margin, and a margin measured on a different
+    figure does not check the decision, it overrules it with another one.
+    `poroelastic-stp` order 8 in double precision is where that showed:
+    ranked on the stretched bound the walk takes 128 lanes (339960 against
+    584025) and is right by 2.26x on the clock, and the raw bound then reads
+    339960 against 146006, calls the move a threefold loss and puts the
+    default back.  Every candidate the widening exists for was discarded
+    exactly this way.
+    """
     if result is None or not result.ok:
         return None
     from tensorforge.analysis import pipeline
     bound = pipeline.of(result.generator)
-    return None if bound is None else bound.cycles
+    if bound is None:
+        return None
+    lanes, wave, resident = _geometry(result)
+    return bound.cycles * _shortfall(
+        lanes, wave, resident, result.context.get_vm().get_hw_descr())
 
 
 def _worth_it(descr_factory, context: Context, best: Candidate,
