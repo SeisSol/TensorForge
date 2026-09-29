@@ -226,7 +226,12 @@ python3 tools/bench/plot.py out/bench.json --profile prof/ --out plots/
 | `occupancy` | a profile | does the rate follow how much of the machine was busy? |
 | `measured-roofline` | a profile with byte counters | where does the point move at the intensity the memory controller saw? |
 
-On Intel the byte counters are the gap: `vtune -collect gpu-hotspots -knob characterization-mode=overview` carries the kernel's time, its occupancy and its SIMD utilization but no traffic in bytes, and `global-local-accesses` refused to collect on this stack. Advisor has them and is not wrapped, so `traffic` and `measured-roofline` are NVIDIA and AMD for now.
+On Intel the byte counters are the gap:
+`vtune -collect gpu-hotspots -knob characterization-mode=overview`
+carries the kernel's time, its occupancy and its SIMD utilization
+but no traffic in bytes, and `global-local-accesses` refused to
+collect on this stack. Advisor has them and is not wrapped,
+so `traffic` and `measured-roofline` are NVIDIA and AMD for now.
 
 Everything lands in one `index.html` beside the individual SVGs, and a view
 whose data is missing is skipped with the reason rather than drawn empty —

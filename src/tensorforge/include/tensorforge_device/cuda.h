@@ -330,7 +330,7 @@ __device__ __forceinline__ T broadcast(T value) {
 // are missing from CCCL 2.3 as well.  Unguarded, every translation unit that
 // includes this header needed that toolkit -- sm_80 and sm_90 included, where
 // nothing can ask for `launch_control` -- and CUDA 12.4 refused all of them.
-#if defined(CCCL_VERSION) && CCCL_VERSION >= 2008000 && \
+#if defined(CCCL_VERSION) && CCCL_VERSION >= 2008000 &&                        \
     defined(__cccl_ptx_isa) && __cccl_ptx_isa >= 860
 
 /// Blackwell's hardware work queue, as a ring of `Depth` outstanding requests.
@@ -478,12 +478,14 @@ template <int Depth = 1> struct ClusterLaunchCursor {
 // older toolkit fails with the reason instead of an undeclared identifier.
 // The assertion depends on `Depth` and fires only on instantiation.
 template <int Depth = 1> struct ClusterLaunchQueue {
-  static_assert(Depth < 0, "launch_control needs cuda::ptx::clusterlaunchcontrol_*: "
-                           "CCCL >= 2.8 and PTX ISA >= 8.6 (CUDA 12.8 or newer)");
+  static_assert(Depth < 0,
+                "launch_control needs cuda::ptx::clusterlaunchcontrol_*: "
+                "CCCL >= 2.8 and PTX ISA >= 8.6 (CUDA 12.8 or newer)");
 };
 template <int Depth = 1> struct ClusterLaunchCursor {
-  static_assert(Depth < 0, "launch_control needs cuda::ptx::clusterlaunchcontrol_*: "
-                           "CCCL >= 2.8 and PTX ISA >= 8.6 (CUDA 12.8 or newer)");
+  static_assert(Depth < 0,
+                "launch_control needs cuda::ptx::clusterlaunchcontrol_*: "
+                "CCCL >= 2.8 and PTX ISA >= 8.6 (CUDA 12.8 or newer)");
 };
 
 #endif

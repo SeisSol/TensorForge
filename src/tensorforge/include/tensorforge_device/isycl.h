@@ -58,7 +58,8 @@ using TF32 = tf32;
 /// correctly rounded value over the whole range (against numpy's `exp`, 10^6
 /// points); overflow gives infinity, underflow zero, and a NaN stays one.
 template <int N>
-ESIMD_INLINE intel_esimd::simd<double, N> expF64(intel_esimd::simd<double, N> x) {
+ESIMD_INLINE intel_esimd::simd<double, N>
+expF64(intel_esimd::simd<double, N> x) {
   using D = intel_esimd::simd<double, N>;
   using I = intel_esimd::simd<int64_t, N>;
   using U = intel_esimd::simd<uint64_t, N>;
@@ -70,8 +71,8 @@ ESIMD_INLINE intel_esimd::simd<double, N> expF64(intel_esimd::simd<double, N> x)
   half.merge(D(-0.5), t < 0.0);
   const I k = I(t + half);
   const D kd = D(k);
-  const D r = (xc - kd * 6.93147180369123816490e-01) -
-              kd * 1.90821492927058770002e-10;
+  const D r =
+      (xc - kd * 6.93147180369123816490e-01) - kd * 1.90821492927058770002e-10;
   D p(1.0 / 6227020800.0);
   p = p * r + 1.0 / 479001600.0;
   p = p * r + 1.0 / 39916800.0;
@@ -102,9 +103,8 @@ ESIMD_INLINE intel_esimd::simd<double, N> expF64(intel_esimd::simd<double, N> x)
 ESIMD_INLINE double expF64(double x) {
   return expF64<1>(intel_esimd::simd<double, 1>(x))[0];
 }
-template <typename T,
-          typename = std::enable_if_t<!std::is_arithmetic_v<
-              std::remove_cv_t<std::remove_reference_t<T>>>>>
+template <typename T, typename = std::enable_if_t<!std::is_arithmetic_v<
+                          std::remove_cv_t<std::remove_reference_t<T>>>>>
 ESIMD_INLINE auto expF64(const T &x) {
   constexpr int N = std::remove_cv_t<std::remove_reference_t<T>>::length;
   return expF64<N>(intel_esimd::simd<double, N>(x));
@@ -117,9 +117,8 @@ ESIMD_INLINE auto expF64(const T &x) {
 ESIMD_INLINE float tanhF32(float x) {
   return sycl::ext::intel::experimental::esimd::tanh(x);
 }
-template <typename T,
-          typename = std::enable_if_t<!std::is_arithmetic_v<
-              std::remove_cv_t<std::remove_reference_t<T>>>>>
+template <typename T, typename = std::enable_if_t<!std::is_arithmetic_v<
+                          std::remove_cv_t<std::remove_reference_t<T>>>>>
 ESIMD_INLINE auto tanhF32(const T &x) {
   constexpr int N = std::remove_cv_t<std::remove_reference_t<T>>::length;
   return sycl::ext::intel::experimental::esimd::tanh<N>(
@@ -137,7 +136,8 @@ ESIMD_INLINE auto tanhF32(const T &x) {
 /// (`e < 5e-18`).  Within 3 ulp of `math.tanh` over [-30, 30] and down to
 /// 1e-300 (a numpy mirror, `exp` in place of `expF64`; 0.3 ulp on average).
 template <int N>
-ESIMD_INLINE intel_esimd::simd<double, N> tanhF64(intel_esimd::simd<double, N> x) {
+ESIMD_INLINE intel_esimd::simd<double, N>
+tanhF64(intel_esimd::simd<double, N> x) {
   using D = intel_esimd::simd<double, N>;
   const D a = intel_esimd::abs(x);
   const D e = expF64<N>(D(-2.0) * intel_esimd::min(a, D(20.0)));
@@ -168,9 +168,8 @@ ESIMD_INLINE intel_esimd::simd<double, N> tanhF64(intel_esimd::simd<double, N> x
 ESIMD_INLINE double tanhF64(double x) {
   return tanhF64<1>(intel_esimd::simd<double, 1>(x))[0];
 }
-template <typename T,
-          typename = std::enable_if_t<!std::is_arithmetic_v<
-              std::remove_cv_t<std::remove_reference_t<T>>>>>
+template <typename T, typename = std::enable_if_t<!std::is_arithmetic_v<
+                          std::remove_cv_t<std::remove_reference_t<T>>>>>
 ESIMD_INLINE auto tanhF64(const T &x) {
   constexpr int N = std::remove_cv_t<std::remove_reference_t<T>>::length;
   return tanhF64<N>(intel_esimd::simd<double, N>(x));
@@ -452,8 +451,7 @@ public:
   // `const`, so that the assignment binds to the prvalue `s0[i]` produces.
   const SlmRef &operator=(T value) const {
     if constexpr (std::is_same_v<std::remove_const_t<T>, bool>) {
-      intel_esimd::slm_scalar_store<std::uint8_t>(at_.bytes(),
-                                                  value ? 1 : 0);
+      intel_esimd::slm_scalar_store<std::uint8_t>(at_.bytes(), value ? 1 : 0);
     } else {
       intel_esimd::slm_scalar_store<T>(at_.bytes(), value);
     }
@@ -535,7 +533,8 @@ ESIMD_INLINE intel_esimd::simd<std::uint8_t, N> slmBytes(std::uint32_t at) {
   constexpr int C = N >= 16 ? 16 : N >= 8 ? 8 : N >= 4 ? 4 : N >= 2 ? 2 : 1;
   const intel_esimd::simd<std::uint32_t, C> offsets(at, 1u);
   intel_esimd::simd<std::uint8_t, N> out;
-  out.template select<C, 1>(0) = intel_esimd::slm_gather<std::uint8_t, C>(offsets);
+  out.template select<C, 1>(0) =
+      intel_esimd::slm_gather<std::uint8_t, C>(offsets);
   if constexpr (N > C) {
     out.template select<N - C, 1>(C) = slmBytes<N - C>(at + C);
   }
@@ -549,7 +548,8 @@ ESIMD_INLINE void slmStoreBytes(std::uint32_t at,
   constexpr int C = N >= 16 ? 16 : N >= 8 ? 8 : N >= 4 ? 4 : N >= 2 ? 2 : 1;
   const intel_esimd::simd<std::uint32_t, C> offsets(at, 1u);
   intel_esimd::slm_scatter<std::uint8_t, C>(
-      offsets, intel_esimd::simd<std::uint8_t, C>(value.template select<C, 1>(0)));
+      offsets,
+      intel_esimd::simd<std::uint8_t, C>(value.template select<C, 1>(0)));
   if constexpr (N > C) {
     slmStoreBytes<N - C>(at + C, intel_esimd::simd<std::uint8_t, N - C>(
                                      value.template select<N - C, 1>(C)));
@@ -562,8 +562,7 @@ inline constexpr bool slmIsBool = std::is_same_v<std::remove_const_t<T>, bool>;
 /// `N` consecutive elements out of SLM, as a vector -- and a boolean run as a
 /// mask.  A boolean is a byte in SLM and a mask in registers: `simd<bool, N>`
 /// converts to neither `simd_mask` nor anything an operation takes.
-template <typename T, int N>
-ESIMD_INLINE auto slmLoad(SlmPtr<T> at) {
+template <typename T, int N> ESIMD_INLINE auto slmLoad(SlmPtr<T> at) {
   if constexpr (slmIsBool<T>) {
     return slmBytes<N>(at.bytes()) != std::uint8_t(0);
   } else {
@@ -640,8 +639,7 @@ ESIMD_INLINE void slmStore(SlmPtr<bool> at, const V &value) {
 }
 
 /// The same run, written.
-template <typename T, int N,
-          typename = std::enable_if_t<!slmIsBool<T>>>
+template <typename T, int N, typename = std::enable_if_t<!slmIsBool<T>>>
 ESIMD_INLINE void slmStore(SlmPtr<T> at, intel_esimd::simd<T, N> value) {
   constexpr int C = slmChunk<T, N>();
   if constexpr (C == N) {
