@@ -1009,3 +1009,64 @@ def test_a_factor_the_loop_binds_is_read_inside_it():
     early = {n: (used[n][0], declared.get(n)) for n in used
              if n not in declared or used[n][0] < declared[n]}
     assert not early, f'read before it is bound: {early}'
+
+
+def test_a_run_reads_its_table_and_its_factor_inside_the_loop():
+    """A merged run over ten scalars: nothing it binds is read before the loop.
+
+    Two reads leave the loop, and neither is the one the test beside this
+    covers.  The table a counter selects from is an array once the run is
+    longer than a chain is worth, and the binding that indexes it names the
+    counter in text alone -- so it has no operand that varies and `licm` moved
+    it ahead of the header.  The factor's own read is the same shape one step
+    later: a stand-in read as a bare name is a value with no operands too, and
+    a multilinear that takes it as an epilogue factor had it hoisted out from
+    under the loop that declares it.
+
+    Ten iterations because eight is where a select chain gives way to an
+    array, and a destination with an axis because a factor beside a rank-0
+    destination is read by the scalar contraction instead.
+    """
+    import re
+    from tensorforge.generators.descriptions import MultilinearDescr
+
+    def number(alias):
+        return SubTensor(Tensor([], Addressing.SCALAR, BoundingBox([], []),
+                                alias=alias, datatype=DTYPE))
+
+    descrs = []
+    for k in range(10):
+        descrs.append(MultilinearDescr(dest=make('acc', [56]),
+                                       ops=[make(f'b{k}', [56]),
+                                            number(f's{k}')],
+                                       target=[[0], []], permute=[[0], []],
+                                       add=k > 0))
+        descrs.append(gemm(make(f'A{k}', [56, 56]), make('I', [56, 9]),
+                           make('Q', [56, 9]), add=True))
+    text = _generated(roll(descrs, min_count=3))
+
+    lines = text.splitlines()
+    counters = {}
+    for i, line in enumerate(lines, 1):
+        for m in re.finditer(r'for \(int32_t (batchIdv\d+) =', line):
+            counters[m.group(1)] = i
+    assert counters, 'expected the run to be emitted as a loop'
+    early = []
+    for i, line in enumerate(lines, 1):
+        if re.search(r'for \(int32_t batchIdv\d+ =', line):
+            continue
+        for m in re.finditer(r'\bbatchIdv\d+\b', line):
+            if i < counters.get(m.group(0), 0) or m.group(0) not in counters:
+                early.append((i, m.group(0), line.strip()[:70]))
+    assert not early, f'counter read outside its loop: {early[:3]}'
+
+    declared, used = {}, {}
+    for i, line in enumerate(lines, 1):
+        for m in re.finditer(r'\bglb_(\w+)\b', line):
+            if re.search(rf'(float|double)[^;=]*\bglb_{m.group(1)}\b\s*=', line):
+                declared.setdefault(m.group(1), i)
+            else:
+                used.setdefault(m.group(1), []).append(i)
+    early = {n: (used[n][0], declared.get(n)) for n in used
+             if n in declared and used[n][0] < declared[n]}
+    assert not early, f'read before it is bound: {early}'

@@ -2,6 +2,8 @@
 #
 # SPDX-License-Identifier: MIT
 import enum
+from typing import List, Optional, Tuple
+from contextlib import contextmanager
 
 from .abstract_instruction import AbstractInstruction
 from tensorforge.common.context import Context
@@ -57,6 +59,14 @@ class GetElementPtr(AbstractInstruction):
   #: enclosing body does not bind.  A token no address can otherwise contain is
   #: the same splice without the search.
   _INDEX_HOLE = '\x00batchIndex\x00'
+
+  #: Stands in for a merged run's counter while a table access is assembled.
+  #:
+  #: Same reason as the index's hole, and a sharper one: with the counter only
+  #: in the text, a table access has no operand that varies with the loop, so
+  #: `licm` hoisted it out of the loop that binds the counter -- to a place
+  #: where the name is not in scope at all.
+  _VARIANT_HOLE = '\x00variantIndex\x00'
 
   def batch_index(self) -> str:
     """The name this binding's element index goes by.
@@ -124,12 +134,38 @@ class GetElementPtr(AbstractInstruction):
     have to know.
     """
     escaped = text.replace('{', '{{').replace('}', '}}')
-    if self._INDEX_HOLE not in escaped:
-      return escaped, ()
-    value = self.batch_value(writer)
-    if value is None:
-      return escaped.replace(self._INDEX_HOLE, self.batch_index()), ()
-    return escaped.replace(self._INDEX_HOLE, '{0}'), (value,)
+    args = []
+    for hole, value, name in ((self._INDEX_HOLE, self.batch_value(writer)
+                               if self._INDEX_HOLE in escaped else None,
+                               self.batch_index),
+                              (self._VARIANT_HOLE, self.variant_value(writer)
+                               if self._VARIANT_HOLE in escaped else None,
+                               lambda: str(self._variant))):
+      if hole not in escaped:
+        continue
+      if value is None:
+        escaped = escaped.replace(hole, name())
+      else:
+        escaped = escaped.replace(hole, f'{{{len(args)}}}')
+        args.append(value)
+    return escaped, tuple(args)
+
+  def _as_text(self, rhs: str) -> str:
+    """The right-hand side with both holes spelled out, for an emitter that
+    takes no operands."""
+    return (rhs.replace(self._INDEX_HOLE, self.batch_index())
+            .replace(self._VARIANT_HOLE, str(self._variant)))
+
+  def variant_value(self, writer):
+    """The counter of the merged run this binding belongs to, as an operand.
+
+    `None` where the run's loop is not the one open here, or where it does not
+    publish a value -- an unrolled emission, say. The access then keeps the
+    name as text, which is what it did before there was a value to take.
+    """
+    if self._variant is None:
+      return None
+    return VariantLoop.counter_value(writer, self._variant)
 
   def dereferences_the_batch(self) -> bool:
     """Does computing this address read memory indexed by the element?
@@ -165,7 +201,7 @@ class GetElementPtr(AbstractInstruction):
     """What the right-hand side reads the base pointer out of."""
     if self._table is None:
       return self._src.name
-    return self._table.access(self._variant)
+    return self._table.access(self._VARIANT_HOLE)
 
   def _pointer_type(self, datatype, const_mod: str) -> str:
     """The type of this binding, as the backend spells a pointer into global.
@@ -242,7 +278,7 @@ class GetElementPtr(AbstractInstruction):
       if self._src.obj.addressing == Addressing.SCALAR:
         # A table over scalars selects a value, and the binding is that value.
         self._emit_binding(writer, f'{datatype} {self._dest.name}',
-                           self._table.access(self._variant), scalar=True)
+                           self._table.access(self._VARIANT_HOLE), scalar=True)
         return
       lhs = self._declarator(datatype, 'const')
       # The table is declared generic -- its members may come from either
@@ -250,7 +286,7 @@ class GetElementPtr(AbstractInstruction):
       # the space it claims, as every other addressing mode does (`_coerce`).
       self._emit_binding(writer, lhs,
                          self._coerce(datatype, 'const',
-                                      self._table.access(self._variant)))
+                                      self._table.access(self._VARIANT_HOLE)))
       return
 
     batch_obj = self._src.obj
@@ -310,8 +346,7 @@ class GetElementPtr(AbstractInstruction):
       if args and hasattr(writer, 'batch_id'):
         writer(f'{self._dest.name} = {text};', *args, fmt=True)
       else:
-        writer(f'{self._dest.name} = '
-               f'{rhs.replace(self._INDEX_HOLE, self.batch_index())};')
+        writer(f'{self._dest.name} = {self._as_text(rhs)};')
     else:
       self._emit_binding(writer, lhs, rhs,
                          scalar=batch_addressing == Addressing.SCALAR)
@@ -387,7 +422,7 @@ class GetElementPtr(AbstractInstruction):
       else:
         self._dest.set_pir_buffer(writer, value)
     else:
-      writer(f'{lhs} = {rhs};')
+      writer(f'{lhs} = {self._as_text(rhs)};')
 
   def defs(self):
     return (self._dest,) if self._update_dest is None else (self._dest, self._update_dest)
@@ -716,6 +751,38 @@ class VariantLoop(AbstractInstruction):
       out.extend(table.get_operands())
     return out
 
+  # -- the counter, as a value ---------------------------------------------- #
+
+  #: `(builder, {name: value})`, innermost last: what the runs open here bind.
+  _counters: List[Tuple] = []
+
+  @classmethod
+  @contextmanager
+  def counter_bound(cls, builder, name, value):
+    """Publish this run's counter while its body is open.
+
+    Kept apart from the element indices `BatchLoop` publishes, although a
+    reader reaches both the same way. A frame there is the answer to *every*
+    name a body asks for, so a second one would leave `batchId0` unbound;
+    and a counter is not an element index, which is the distinction that
+    registry is careful about.
+    """
+    frame = (builder, {name: value})
+    cls._counters.append(frame)
+    try:
+      yield
+    finally:
+      cls._counters.pop()
+
+  @classmethod
+  def counter_value(cls, builder, name):
+    """The value of `name` where `builder`'s body is inside the run that
+    binds it, else `None`."""
+    for owner, bound in reversed(cls._counters):
+      if owner is builder and name in bound:
+        return bound[name]
+    return None
+
   # -- emission ------------------------------------------------------------ #
 
   @property
@@ -752,8 +819,12 @@ class VariantLoop(AbstractInstruction):
       # header, but pinned is all it is.  Publishing a value for the counter is
       # only worth doing together with the readers that would take it.
       with writer.for_(self._start, self._count, 1, extern=self._counter,
-                       unroll=self._unroll):
-        self._emit_region(writer, per_iteration)
+                       unroll=self._unroll) as loop:
+        # The counter as a value, so that a table access reading it carries an
+        # edge back to the loop. Named in the text alone it read as invariant,
+        # and `licm` moved the access ahead of the header.
+        with self.counter_bound(writer, self._counter, loop.induction):
+          self._emit_region(writer, per_iteration)
       return
 
     with writer.For(self.header(), unroll=self._unroll):

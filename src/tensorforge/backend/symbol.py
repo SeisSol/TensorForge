@@ -2661,6 +2661,25 @@ class Symbol:
       raise InternalError(
           f'{self.name}: a shifted read needs a dense operand in memory, in '
           f'its logical order, read as a value')
+    if (self.stype == SymbolType.Scalar and variable is None
+        and hasattr(writer, 'rawexpr')):
+      # A factor passed by value, read as `ScalarContractionInstruction` reads
+      # one: the number its binding published, where the binding belongs to
+      # the body being built.
+      #
+      # Read as a bare name it is a value with no operands, which `licm` takes
+      # for loop-invariant -- rightly for a kernel parameter and wrongly for a
+      # merged run's stand-in, whose name the loop's own table binds. Hoisted
+      # out, the read leaves the scope the name is declared in: the multilinear
+      # epilogue of SeisSol's damage step read two stand-ins that way, and the
+      # kernel did not compile once the run was merged.
+      # Only where there is one: a name bound around this body is read the way
+      # it was before, since a value standing for it carries no distribution
+      # across the lanes and the ESIMD lowering needs one.
+      bound = self.pir_scalar(writer)
+      if bound is not None:
+        return bound
+
     addrs = []
     # A register image of a sparse operand keeps the pattern, but not its
     # storage: it is laid out densely over the box, in slots
