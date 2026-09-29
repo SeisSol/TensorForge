@@ -1,5 +1,5 @@
 // === base name ===
-kernel_4b92f52e18b8c879
+kernel_409096004075eb5f
 
 // === header ===
 #ifndef TENSORFORGE_LAUNCH_TYPES
@@ -27,9 +27,9 @@ struct LaunchConfig {
 };
 } // namespace tensorforge
 #endif
-inline constexpr tensorforge::LaunchInfo launch_info_kernel_4b92f52e18b8c879 = {{16, 16, 1}, 16, 12, 1, 16, 10240, false, true, 1};
-tensorforge::LaunchConfig launch_config_kernel_4b92f52e18b8c879(size_t numElements0, void* streamPtr = nullptr);
-void launcher_kernel_4b92f52e18b8c879(const float * m0, size_t m0_extraOffset, const float * m1, size_t m1_extraOffset, const float * m2, size_t m2_extraOffset, const float * m3, size_t m3_extraOffset, float * m4, size_t m4_extraOffset, size_t numElements0, unsigned * flags0 = nullptr, void* streamPtr = nullptr);
+inline constexpr tensorforge::LaunchInfo launch_info_kernel_409096004075eb5f = {{16, 16, 1}, 16, 12, 1, 16, 10240, false, true, 1};
+tensorforge::LaunchConfig launch_config_kernel_409096004075eb5f(size_t numElements0, void* streamPtr = nullptr);
+void launcher_kernel_409096004075eb5f(const float * m0, size_t m0_extraOffset, const float * m1, size_t m1_extraOffset, const float * m2, size_t m2_extraOffset, const float * m3, size_t m3_extraOffset, float * m4, size_t m4_extraOffset, size_t numElements0, unsigned * flags0 = nullptr, void* streamPtr = nullptr);
 
 
 // === launcher ===
@@ -58,7 +58,7 @@ struct LaunchConfig {
 };
 } // namespace tensorforge
 #endif
-tensorforge::LaunchConfig launch_config_kernel_4b92f52e18b8c879(size_t numElements0, void* streamPtr) {
+tensorforge::LaunchConfig launch_config_kernel_409096004075eb5f(size_t numElements0, void* streamPtr) {
   (void)numElements0;
   (void)streamPtr;
   sycl::range<3> block (16, 16, 1);
@@ -73,21 +73,21 @@ tensorforge::LaunchConfig launch_config_kernel_4b92f52e18b8c879(size_t numElemen
   config.cooperative = false;
   return config;
 }
-void launcher_kernel_4b92f52e18b8c879(const float * m0, size_t m0_extraOffset, const float * m1, size_t m1_extraOffset, const float * m2, size_t m2_extraOffset, const float * m3, size_t m3_extraOffset, float * m4, size_t m4_extraOffset, size_t numElements0, unsigned * flags0, void* streamPtr) {
-  const tensorforge::LaunchConfig config = launch_config_kernel_4b92f52e18b8c879(numElements0, streamPtr);
+void launcher_kernel_409096004075eb5f(const float * m0, size_t m0_extraOffset, const float * m1, size_t m1_extraOffset, const float * m2, size_t m2_extraOffset, const float * m3, size_t m3_extraOffset, float * m4, size_t m4_extraOffset, size_t numElements0, unsigned * flags0, void* streamPtr) {
+  const tensorforge::LaunchConfig config = launch_config_kernel_409096004075eb5f(numElements0, streamPtr);
   sycl::range<3> block (config.block[0], config.block[1], config.block[2]);
   sycl::range<3> grid (config.grid[0], config.grid[1], config.grid[2]);
   if (streamPtr == nullptr) {
     throw std::invalid_argument("stream may not be null!");
   }
   sycl::queue *stream = static_cast<sycl::queue *>(streamPtr);
-  kernel_kernel_4b92f52e18b8c879(stream, grid, block, m0, m0_extraOffset, m1, m1_extraOffset, m2, m2_extraOffset, m3, m3_extraOffset, m4, m4_extraOffset, numElements0, flags0);
+  kernel_kernel_409096004075eb5f(stream, grid, block, m0, m0_extraOffset, m1, m1_extraOffset, m2, m2_extraOffset, m3, m3_extraOffset, m4, m4_extraOffset, numElements0, flags0);
   CHECK_ERR;
 }
 
 
 // === kernel ===
-inline void kernel_kernel_4b92f52e18b8c879(sycl::queue *stream, sycl::range<3> group_count, sycl::range<3> group_size, const float * m0, size_t m0_extraOffset, const float * m1, size_t m1_extraOffset, const float * m2, size_t m2_extraOffset, const float * m3, size_t m3_extraOffset, float * m4, size_t m4_extraOffset, size_t numElements0, unsigned * flags0) {
+inline void kernel_kernel_409096004075eb5f(sycl::queue *stream, sycl::range<3> group_count, sycl::range<3> group_size, const float * m0, size_t m0_extraOffset, const float * m1, size_t m1_extraOffset, const float * m2, size_t m2_extraOffset, const float * m3, size_t m3_extraOffset, float * m4, size_t m4_extraOffset, size_t numElements0, unsigned * flags0) {
   stream->submit([&](sycl::handler &cgh) {
     sycl::accessor<float, 1, sycl::access::mode::read_write, sycl::access::target::local> totalShrMem (2560, cgh); {
       cgh.parallel_for(sycl::nd_range<3>{{group_count.get(2) * group_size.get(2), group_count.get(1) * group_size.get(1), group_count.get(0) * group_size.get(0)}, {group_size.get(2), group_size.get(1), group_size.get(0)}}, [=](sycl::nd_item<3> item)  {
@@ -1027,51 +1027,63 @@ inline void kernel_kernel_4b92f52e18b8c879(sycl::queue *stream, sycl::range<3> g
               // ir7 = +(s0)
               // [(0, 12), (0, 12)] []
               float ir7[12]{};
-              float v1880_data = v30_g ? (s0[(v20_lead ^ ((v20_lead >> 4) & 15))]) : (0.0f);
+              float v1880_data_pre = s0[v30_g ? ((v20_lead ^ ((v20_lead >> 4) & 15))) : (0)];
+              float v1880_data = v30_g ? (v1880_data_pre) : (0.0f);
               float v1881_data = ir7[0];
               ir7[0] = (v1881_data + v1880_data);
               int32_t v1883_a = v20_lead + 12;
-              float v1887_data = v30_g ? (s0[(v1883_a ^ ((v1883_a >> 4) & 15))]) : (0.0f);
+              float v1887_data_pre = s0[v30_g ? ((v1883_a ^ ((v1883_a >> 4) & 15))) : (0)];
+              float v1887_data = v30_g ? (v1887_data_pre) : (0.0f);
               float v1888_data = ir7[1];
               ir7[1] = (v1888_data + v1887_data);
               int32_t v1890_a = v20_lead + 24;
-              float v1894_data = v30_g ? (s0[(v1890_a ^ ((v1890_a >> 4) & 15))]) : (0.0f);
+              float v1894_data_pre = s0[v30_g ? ((v1890_a ^ ((v1890_a >> 4) & 15))) : (0)];
+              float v1894_data = v30_g ? (v1894_data_pre) : (0.0f);
               float v1895_data = ir7[2];
               ir7[2] = (v1895_data + v1894_data);
               int32_t v1897_a = v20_lead + 36;
-              float v1901_data = v30_g ? (s0[(v1897_a ^ ((v1897_a >> 4) & 15))]) : (0.0f);
+              float v1901_data_pre = s0[v30_g ? ((v1897_a ^ ((v1897_a >> 4) & 15))) : (0)];
+              float v1901_data = v30_g ? (v1901_data_pre) : (0.0f);
               float v1902_data = ir7[3];
               ir7[3] = (v1902_data + v1901_data);
               int32_t v1904_a = v20_lead + 48;
-              float v1908_data = v30_g ? (s0[(v1904_a ^ ((v1904_a >> 4) & 15))]) : (0.0f);
+              float v1908_data_pre = s0[v30_g ? ((v1904_a ^ ((v1904_a >> 4) & 15))) : (0)];
+              float v1908_data = v30_g ? (v1908_data_pre) : (0.0f);
               float v1909_data = ir7[4];
               ir7[4] = (v1909_data + v1908_data);
               int32_t v1911_a = v20_lead + 60;
-              float v1915_data = v30_g ? (s0[(v1911_a ^ ((v1911_a >> 4) & 15))]) : (0.0f);
+              float v1915_data_pre = s0[v30_g ? ((v1911_a ^ ((v1911_a >> 4) & 15))) : (0)];
+              float v1915_data = v30_g ? (v1915_data_pre) : (0.0f);
               float v1916_data = ir7[5];
               ir7[5] = (v1916_data + v1915_data);
               int32_t v1918_a = v20_lead + 72;
-              float v1922_data = v30_g ? (s0[(v1918_a ^ ((v1918_a >> 4) & 15))]) : (0.0f);
+              float v1922_data_pre = s0[v30_g ? ((v1918_a ^ ((v1918_a >> 4) & 15))) : (0)];
+              float v1922_data = v30_g ? (v1922_data_pre) : (0.0f);
               float v1923_data = ir7[6];
               ir7[6] = (v1923_data + v1922_data);
               int32_t v1925_a = v20_lead + 84;
-              float v1929_data = v30_g ? (s0[(v1925_a ^ ((v1925_a >> 4) & 15))]) : (0.0f);
+              float v1929_data_pre = s0[v30_g ? ((v1925_a ^ ((v1925_a >> 4) & 15))) : (0)];
+              float v1929_data = v30_g ? (v1929_data_pre) : (0.0f);
               float v1930_data = ir7[7];
               ir7[7] = (v1930_data + v1929_data);
               int32_t v1932_a = v20_lead + 96;
-              float v1936_data = v30_g ? (s0[(v1932_a ^ ((v1932_a >> 4) & 15))]) : (0.0f);
+              float v1936_data_pre = s0[v30_g ? ((v1932_a ^ ((v1932_a >> 4) & 15))) : (0)];
+              float v1936_data = v30_g ? (v1936_data_pre) : (0.0f);
               float v1937_data = ir7[8];
               ir7[8] = (v1937_data + v1936_data);
               int32_t v1939_a = v20_lead + 108;
-              float v1943_data = v30_g ? (s0[(v1939_a ^ ((v1939_a >> 4) & 15))]) : (0.0f);
+              float v1943_data_pre = s0[v30_g ? ((v1939_a ^ ((v1939_a >> 4) & 15))) : (0)];
+              float v1943_data = v30_g ? (v1943_data_pre) : (0.0f);
               float v1944_data = ir7[9];
               ir7[9] = (v1944_data + v1943_data);
               int32_t v1946_a = v20_lead + 120;
-              float v1950_data = v30_g ? (s0[(v1946_a ^ ((v1946_a >> 4) & 15))]) : (0.0f);
+              float v1950_data_pre = s0[v30_g ? ((v1946_a ^ ((v1946_a >> 4) & 15))) : (0)];
+              float v1950_data = v30_g ? (v1950_data_pre) : (0.0f);
               float v1951_data = ir7[10];
               ir7[10] = (v1951_data + v1950_data);
               int32_t v1953_a = v20_lead + 132;
-              float v1957_data = v30_g ? (s0[(v1953_a ^ ((v1953_a >> 4) & 15))]) : (0.0f);
+              float v1957_data_pre = s0[v30_g ? ((v1953_a ^ ((v1953_a >> 4) & 15))) : (0)];
+              float v1957_data = v30_g ? (v1957_data_pre) : (0.0f);
               float v1958_data = ir7[11];
               ir7[11] = (v1958_data + v1957_data);
               // r7 = ir7

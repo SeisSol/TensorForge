@@ -1,5 +1,5 @@
 // === base name ===
-kernel_84f094baec016dd0
+kernel_37681ac22dd38f14
 
 // === header ===
 #ifndef TENSORFORGE_LAUNCH_TYPES
@@ -27,9 +27,9 @@ struct LaunchConfig {
 };
 } // namespace tensorforge
 #endif
-inline constexpr tensorforge::LaunchInfo launch_info_kernel_84f094baec016dd0 = {{16, 16, 1}, 16, 12, 1, 16, 10240, false, true, 1};
-tensorforge::LaunchConfig launch_config_kernel_84f094baec016dd0(size_t numElements0, void* streamPtr = nullptr);
-void launcher_kernel_84f094baec016dd0(const float * m0, size_t m0_extraOffset, const float * m1, size_t m1_extraOffset, const float * m2, size_t m2_extraOffset, float * m3, size_t m3_extraOffset, const float * m4, size_t m4_extraOffset, float * m5, size_t m5_extraOffset, size_t numElements0, unsigned * flags0 = nullptr, void* streamPtr = nullptr);
+inline constexpr tensorforge::LaunchInfo launch_info_kernel_37681ac22dd38f14 = {{16, 16, 1}, 16, 12, 1, 16, 10240, false, true, 1};
+tensorforge::LaunchConfig launch_config_kernel_37681ac22dd38f14(size_t numElements0, void* streamPtr = nullptr);
+void launcher_kernel_37681ac22dd38f14(const float * m0, size_t m0_extraOffset, const float * m1, size_t m1_extraOffset, const float * m2, size_t m2_extraOffset, float * m3, size_t m3_extraOffset, const float * m4, size_t m4_extraOffset, float * m5, size_t m5_extraOffset, size_t numElements0, unsigned * flags0 = nullptr, void* streamPtr = nullptr);
 
 
 // === launcher ===
@@ -58,7 +58,7 @@ struct LaunchConfig {
 };
 } // namespace tensorforge
 #endif
-tensorforge::LaunchConfig launch_config_kernel_84f094baec016dd0(size_t numElements0, void* streamPtr) {
+tensorforge::LaunchConfig launch_config_kernel_37681ac22dd38f14(size_t numElements0, void* streamPtr) {
   (void)numElements0;
   (void)streamPtr;
   sycl::range<3> block (16, 16, 1);
@@ -73,21 +73,21 @@ tensorforge::LaunchConfig launch_config_kernel_84f094baec016dd0(size_t numElemen
   config.cooperative = false;
   return config;
 }
-void launcher_kernel_84f094baec016dd0(const float * m0, size_t m0_extraOffset, const float * m1, size_t m1_extraOffset, const float * m2, size_t m2_extraOffset, float * m3, size_t m3_extraOffset, const float * m4, size_t m4_extraOffset, float * m5, size_t m5_extraOffset, size_t numElements0, unsigned * flags0, void* streamPtr) {
-  const tensorforge::LaunchConfig config = launch_config_kernel_84f094baec016dd0(numElements0, streamPtr);
+void launcher_kernel_37681ac22dd38f14(const float * m0, size_t m0_extraOffset, const float * m1, size_t m1_extraOffset, const float * m2, size_t m2_extraOffset, float * m3, size_t m3_extraOffset, const float * m4, size_t m4_extraOffset, float * m5, size_t m5_extraOffset, size_t numElements0, unsigned * flags0, void* streamPtr) {
+  const tensorforge::LaunchConfig config = launch_config_kernel_37681ac22dd38f14(numElements0, streamPtr);
   sycl::range<3> block (config.block[0], config.block[1], config.block[2]);
   sycl::range<3> grid (config.grid[0], config.grid[1], config.grid[2]);
   if (streamPtr == nullptr) {
     throw std::invalid_argument("stream may not be null!");
   }
   sycl::queue *stream = static_cast<sycl::queue *>(streamPtr);
-  kernel_kernel_84f094baec016dd0(stream, grid, block, m0, m0_extraOffset, m1, m1_extraOffset, m2, m2_extraOffset, m3, m3_extraOffset, m4, m4_extraOffset, m5, m5_extraOffset, numElements0, flags0);
+  kernel_kernel_37681ac22dd38f14(stream, grid, block, m0, m0_extraOffset, m1, m1_extraOffset, m2, m2_extraOffset, m3, m3_extraOffset, m4, m4_extraOffset, m5, m5_extraOffset, numElements0, flags0);
   CHECK_ERR;
 }
 
 
 // === kernel ===
-inline void kernel_kernel_84f094baec016dd0(sycl::queue *stream, sycl::range<3> group_count, sycl::range<3> group_size, const float * m0, size_t m0_extraOffset, const float * m1, size_t m1_extraOffset, const float * m2, size_t m2_extraOffset, float * m3, size_t m3_extraOffset, const float * m4, size_t m4_extraOffset, float * m5, size_t m5_extraOffset, size_t numElements0, unsigned * flags0) {
+inline void kernel_kernel_37681ac22dd38f14(sycl::queue *stream, sycl::range<3> group_count, sycl::range<3> group_size, const float * m0, size_t m0_extraOffset, const float * m1, size_t m1_extraOffset, const float * m2, size_t m2_extraOffset, float * m3, size_t m3_extraOffset, const float * m4, size_t m4_extraOffset, float * m5, size_t m5_extraOffset, size_t numElements0, unsigned * flags0) {
   stream->submit([&](sycl::handler &cgh) {
     sycl::accessor<float, 1, sycl::access::mode::read_write, sycl::access::target::local> totalShrMem (2560, cgh); {
       cgh.parallel_for(sycl::nd_range<3>{{group_count.get(2) * group_size.get(2), group_count.get(1) * group_size.get(1), group_count.get(0) * group_size.get(0)}, {group_size.get(2), group_size.get(1), group_size.get(0)}}, [=](sycl::nd_item<3> item)  {
@@ -965,62 +965,74 @@ inline void kernel_kernel_84f094baec016dd0(sycl::queue *stream, sycl::range<3> g
               // [(0, 12), (0, 12)] []
               float ir5[12]{};
               int32_t v1817_sw = (v21_lead >> 4) & 15;
-              float v1819_data = v31_g ? (s0[(v21_lead ^ v1817_sw)]) : (0.0f);
+              float v1819_data_pre = s0[v31_g ? ((v21_lead ^ v1817_sw)) : (0)];
+              float v1819_data = v31_g ? (v1819_data_pre) : (0.0f);
               float v1820_data = ir5[0];
               ir5[0] = (v1820_data + v1819_data);
               int32_t v1822_a = v21_lead + 12;
               int32_t v1823_sw = v1822_a >> 4;
-              float v1826_data = v31_g ? (s0[(v1822_a ^ (v1823_sw & 15))]) : (0.0f);
+              float v1826_data_pre = s0[v31_g ? ((v1822_a ^ (v1823_sw & 15))) : (0)];
+              float v1826_data = v31_g ? (v1826_data_pre) : (0.0f);
               float v1827_data = ir5[1];
               ir5[1] = (v1827_data + v1826_data);
               int32_t v1829_a = v21_lead + 24;
               int32_t v1830_sw = v1829_a >> 4;
-              float v1833_data = v31_g ? (s0[(v1829_a ^ (v1830_sw & 15))]) : (0.0f);
+              float v1833_data_pre = s0[v31_g ? ((v1829_a ^ (v1830_sw & 15))) : (0)];
+              float v1833_data = v31_g ? (v1833_data_pre) : (0.0f);
               float v1834_data = ir5[2];
               ir5[2] = (v1834_data + v1833_data);
               int32_t v1836_a = v21_lead + 36;
               int32_t v1837_sw = v1836_a >> 4;
-              float v1840_data = v31_g ? (s0[(v1836_a ^ (v1837_sw & 15))]) : (0.0f);
+              float v1840_data_pre = s0[v31_g ? ((v1836_a ^ (v1837_sw & 15))) : (0)];
+              float v1840_data = v31_g ? (v1840_data_pre) : (0.0f);
               float v1841_data = ir5[3];
               ir5[3] = (v1841_data + v1840_data);
               int32_t v1843_a = v21_lead + 48;
               int32_t v1844_sw = v1843_a >> 4;
-              float v1847_data = v31_g ? (s0[(v1843_a ^ (v1844_sw & 15))]) : (0.0f);
+              float v1847_data_pre = s0[v31_g ? ((v1843_a ^ (v1844_sw & 15))) : (0)];
+              float v1847_data = v31_g ? (v1847_data_pre) : (0.0f);
               float v1848_data = ir5[4];
               ir5[4] = (v1848_data + v1847_data);
               int32_t v1850_a = v21_lead + 60;
               int32_t v1851_sw = v1850_a >> 4;
-              float v1854_data = v31_g ? (s0[(v1850_a ^ (v1851_sw & 15))]) : (0.0f);
+              float v1854_data_pre = s0[v31_g ? ((v1850_a ^ (v1851_sw & 15))) : (0)];
+              float v1854_data = v31_g ? (v1854_data_pre) : (0.0f);
               float v1855_data = ir5[5];
               ir5[5] = (v1855_data + v1854_data);
               int32_t v1857_a = v21_lead + 72;
               int32_t v1858_sw = v1857_a >> 4;
-              float v1861_data = v31_g ? (s0[(v1857_a ^ (v1858_sw & 15))]) : (0.0f);
+              float v1861_data_pre = s0[v31_g ? ((v1857_a ^ (v1858_sw & 15))) : (0)];
+              float v1861_data = v31_g ? (v1861_data_pre) : (0.0f);
               float v1862_data = ir5[6];
               ir5[6] = (v1862_data + v1861_data);
               int32_t v1864_a = v21_lead + 84;
               int32_t v1865_sw = v1864_a >> 4;
-              float v1868_data = v31_g ? (s0[(v1864_a ^ (v1865_sw & 15))]) : (0.0f);
+              float v1868_data_pre = s0[v31_g ? ((v1864_a ^ (v1865_sw & 15))) : (0)];
+              float v1868_data = v31_g ? (v1868_data_pre) : (0.0f);
               float v1869_data = ir5[7];
               ir5[7] = (v1869_data + v1868_data);
               int32_t v1871_a = v21_lead + 96;
               int32_t v1872_sw = v1871_a >> 4;
-              float v1875_data = v31_g ? (s0[(v1871_a ^ (v1872_sw & 15))]) : (0.0f);
+              float v1875_data_pre = s0[v31_g ? ((v1871_a ^ (v1872_sw & 15))) : (0)];
+              float v1875_data = v31_g ? (v1875_data_pre) : (0.0f);
               float v1876_data = ir5[8];
               ir5[8] = (v1876_data + v1875_data);
               int32_t v1878_a = v21_lead + 108;
               int32_t v1879_sw = v1878_a >> 4;
-              float v1882_data = v31_g ? (s0[(v1878_a ^ (v1879_sw & 15))]) : (0.0f);
+              float v1882_data_pre = s0[v31_g ? ((v1878_a ^ (v1879_sw & 15))) : (0)];
+              float v1882_data = v31_g ? (v1882_data_pre) : (0.0f);
               float v1883_data = ir5[9];
               ir5[9] = (v1883_data + v1882_data);
               int32_t v1885_a = v21_lead + 120;
               int32_t v1886_sw = v1885_a >> 4;
-              float v1889_data = v31_g ? (s0[(v1885_a ^ (v1886_sw & 15))]) : (0.0f);
+              float v1889_data_pre = s0[v31_g ? ((v1885_a ^ (v1886_sw & 15))) : (0)];
+              float v1889_data = v31_g ? (v1889_data_pre) : (0.0f);
               float v1890_data = ir5[10];
               ir5[10] = (v1890_data + v1889_data);
               int32_t v1892_a = v21_lead + 132;
               int32_t v1893_sw = v1892_a >> 4;
-              float v1896_data = v31_g ? (s0[(v1892_a ^ (v1893_sw & 15))]) : (0.0f);
+              float v1896_data_pre = s0[v31_g ? ((v1892_a ^ (v1893_sw & 15))) : (0)];
+              float v1896_data = v31_g ? (v1896_data_pre) : (0.0f);
               float v1897_data = ir5[11];
               ir5[11] = (v1897_data + v1896_data);
               // r5 = ir5
@@ -1375,40 +1387,52 @@ inline void kernel_kernel_84f094baec016dd0(sycl::queue *stream, sycl::range<3> g
               // ir8 = +(s0)
               // [(0, 12), (0, 12)] []
               float ir8[12]{};
-              float v2808_data = v31_g ? (s0[(v21_lead ^ v1817_sw)]) : (0.0f);
+              float v2808_data_pre = s0[v31_g ? ((v21_lead ^ v1817_sw)) : (0)];
+              float v2808_data = v31_g ? (v2808_data_pre) : (0.0f);
               float v2809_data = ir8[0];
               ir8[0] = (v2809_data + v2808_data);
-              float v2815_data = v31_g ? (s0[(v1822_a ^ (v1823_sw & 15))]) : (0.0f);
+              float v2815_data_pre = s0[v31_g ? ((v1822_a ^ (v1823_sw & 15))) : (0)];
+              float v2815_data = v31_g ? (v2815_data_pre) : (0.0f);
               float v2816_data = ir8[1];
               ir8[1] = (v2816_data + v2815_data);
-              float v2822_data = v31_g ? (s0[(v1829_a ^ (v1830_sw & 15))]) : (0.0f);
+              float v2822_data_pre = s0[v31_g ? ((v1829_a ^ (v1830_sw & 15))) : (0)];
+              float v2822_data = v31_g ? (v2822_data_pre) : (0.0f);
               float v2823_data = ir8[2];
               ir8[2] = (v2823_data + v2822_data);
-              float v2829_data = v31_g ? (s0[(v1836_a ^ (v1837_sw & 15))]) : (0.0f);
+              float v2829_data_pre = s0[v31_g ? ((v1836_a ^ (v1837_sw & 15))) : (0)];
+              float v2829_data = v31_g ? (v2829_data_pre) : (0.0f);
               float v2830_data = ir8[3];
               ir8[3] = (v2830_data + v2829_data);
-              float v2836_data = v31_g ? (s0[(v1843_a ^ (v1844_sw & 15))]) : (0.0f);
+              float v2836_data_pre = s0[v31_g ? ((v1843_a ^ (v1844_sw & 15))) : (0)];
+              float v2836_data = v31_g ? (v2836_data_pre) : (0.0f);
               float v2837_data = ir8[4];
               ir8[4] = (v2837_data + v2836_data);
-              float v2843_data = v31_g ? (s0[(v1850_a ^ (v1851_sw & 15))]) : (0.0f);
+              float v2843_data_pre = s0[v31_g ? ((v1850_a ^ (v1851_sw & 15))) : (0)];
+              float v2843_data = v31_g ? (v2843_data_pre) : (0.0f);
               float v2844_data = ir8[5];
               ir8[5] = (v2844_data + v2843_data);
-              float v2850_data = v31_g ? (s0[(v1857_a ^ (v1858_sw & 15))]) : (0.0f);
+              float v2850_data_pre = s0[v31_g ? ((v1857_a ^ (v1858_sw & 15))) : (0)];
+              float v2850_data = v31_g ? (v2850_data_pre) : (0.0f);
               float v2851_data = ir8[6];
               ir8[6] = (v2851_data + v2850_data);
-              float v2857_data = v31_g ? (s0[(v1864_a ^ (v1865_sw & 15))]) : (0.0f);
+              float v2857_data_pre = s0[v31_g ? ((v1864_a ^ (v1865_sw & 15))) : (0)];
+              float v2857_data = v31_g ? (v2857_data_pre) : (0.0f);
               float v2858_data = ir8[7];
               ir8[7] = (v2858_data + v2857_data);
-              float v2864_data = v31_g ? (s0[(v1871_a ^ (v1872_sw & 15))]) : (0.0f);
+              float v2864_data_pre = s0[v31_g ? ((v1871_a ^ (v1872_sw & 15))) : (0)];
+              float v2864_data = v31_g ? (v2864_data_pre) : (0.0f);
               float v2865_data = ir8[8];
               ir8[8] = (v2865_data + v2864_data);
-              float v2871_data = v31_g ? (s0[(v1878_a ^ (v1879_sw & 15))]) : (0.0f);
+              float v2871_data_pre = s0[v31_g ? ((v1878_a ^ (v1879_sw & 15))) : (0)];
+              float v2871_data = v31_g ? (v2871_data_pre) : (0.0f);
               float v2872_data = ir8[9];
               ir8[9] = (v2872_data + v2871_data);
-              float v2878_data = v31_g ? (s0[(v1885_a ^ (v1886_sw & 15))]) : (0.0f);
+              float v2878_data_pre = s0[v31_g ? ((v1885_a ^ (v1886_sw & 15))) : (0)];
+              float v2878_data = v31_g ? (v2878_data_pre) : (0.0f);
               float v2879_data = ir8[10];
               ir8[10] = (v2879_data + v2878_data);
-              float v2885_data = v31_g ? (s0[(v1892_a ^ (v1893_sw & 15))]) : (0.0f);
+              float v2885_data_pre = s0[v31_g ? ((v1892_a ^ (v1893_sw & 15))) : (0)];
+              float v2885_data = v31_g ? (v2885_data_pre) : (0.0f);
               float v2886_data = ir8[11];
               ir8[11] = (v2886_data + v2885_data);
               // r8 = ir8
