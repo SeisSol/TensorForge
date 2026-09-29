@@ -22,6 +22,7 @@ import numpy as np
 import pytest
 
 import kernel_eval
+from harness import syntax
 from tensorforge.common.basic_types import Datatype
 from tensorforge.common.context import Context
 from tensorforge.common.operation import Operation
@@ -138,6 +139,47 @@ class TestHoisted:
         got = np.array([[mem.get((a.name, i + j * N), np.nan)
                          for j in range(N)] for i in range(N)])
         assert np.allclose(got, want)
+
+
+    def test_a_branch_that_writes_a_temporary_stores_it_under_its_own_guard(self):
+        """`t = cond ? yes : no` where `t` is a temporary a later operation
+        reads: a shared window, so the branch computes into registers and a
+        store carries the value home.
+
+        That store belongs inside the region that computed the value.  It used
+        to be emitted where the *other* half asked the residency to flush it,
+        which is the region under the opposite condition: the value was stored
+        when it did not exist and not stored when it did, and the register it
+        named was scoped to the region that declared it.  The window itself is
+        the mirror image -- declared by whichever half stores first, so it has
+        to be hoisted ahead of both.  Either way round the host compiler
+        rejects the kernel, which is what this asserts.
+        """
+        cond = {'type': 'elementwise', 'result': ref('c'),
+                'args': [ref('x'), ref('y')], 'condition': [],
+                'linear': {'alpha': None, 'add': False}, 'optype': 'CmpGt'}
+        choose = {'type': 'elementwise', 'result': ref('t'),
+                  'args': [ref('B0'), ref('z'), ref('c')], 'condition': [],
+                  'linear': {'alpha': None, 'add': False}, 'optype': 'Ternary'}
+        use = {'type': 'multilinear', 'result': ref('A', 'ij', (N, N)),
+               'args': [ref('B', 'ij', (N, N)), ref('t')],
+               'target': [[0, 1], []], 'permute': [[0, 1], []],
+               'condition': [], 'linear': {'alpha': None, 'add': False}}
+        tensors = [tensor(n, (N, N)) for n in 'AB'] + [
+            tensor(n, ()) for n in ('B0', 'x', 'y', 'z')] + [
+            tensor('c', (), 'bool'), tensor('t', ())]
+        for name in ('c', 't'):
+            next(t for t in tensors if t['name'] == name)['flags'] = {
+                'temporary': True, 'constant': False}
+        descrs, _ = DescriptionReader(None, {}).read(
+            {'version': 7, 'tensors': tensors,
+             'operations': [cond, choose, use]})
+        kernel = generated(descrs).get_kernel()
+        cxx = syntax.compiler()
+        if cxx is None:
+            pytest.skip('no host compiler to check scopes with')
+        result = syntax.check_source(kernel, cxx, shim=syntax.shim_for('cuda'))
+        assert result.ok, '\n'.join(result.errors())
 
 
 class TestSelect:

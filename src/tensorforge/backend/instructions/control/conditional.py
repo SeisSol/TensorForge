@@ -129,10 +129,42 @@ class GuardedRegion(AbstractInstruction):
                                                        literal, hint='g')
     return value
 
+  def _declare_windows_early(self, builder, cleared) -> None:
+    """Declare the shared windows this body fills ahead of the guard.
+
+    `s0 = &localShrMem0[64]` is where a transfer writes, and its offset comes
+    from the shared-memory layout rather than from the condition -- the window
+    is the same whether the guard holds or not. It is declared by whichever
+    instruction fills it first, though, so a first writer inside the region
+    scopes the name to the region, and every later reader of that window names
+    something that was never declared where it stands. Both halves of a
+    hoisted `where` write one tensor: the first half declares its home and the
+    second refers to it.
+
+    The same hoist `BatchLoop` does out of its flag guard, for the same reason
+    and on the same grounds: nothing in the declaration depends on the guard,
+    so moving it out cannot observe anything the guarded body would not have.
+    """
+    for instr in self._region:
+      declare = getattr(instr, 'gen_code_declare', None)
+      if declare is None or not getattr(instr, '_declare', False):
+        continue
+      declare(builder)
+      instr._declare = False
+      cleared.append(instr)
+
   def _emit(self, builder) -> None:
-    with builder.if_(self._condition(builder)):
-      for instr in self._region:
-        instr.gen_code(builder)
+    # Restored afterwards: clearing the flag is a statement about this build,
+    # and a body built twice would otherwise declare nothing at all.
+    cleared = []
+    try:
+      self._declare_windows_early(builder, cleared)
+      with builder.if_(self._condition(builder)):
+        for instr in self._region:
+          instr.gen_code(builder)
+    finally:
+      for instr in cleared:
+        instr._declare = True
 
   def gen_code(self, writer) -> None:
     """Emit the guard and its body.

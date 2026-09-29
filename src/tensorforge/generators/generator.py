@@ -220,7 +220,15 @@ class _GuardGrouping:
     return [(self._scopes.get_symbol(literal.tensor.tensor), literal.negated)
             for literal in descr.condition]
 
-  def add(self, descr, instrs) -> None:
+  def begin(self, descr) -> None:
+    """Open the region `descr` belongs to, before `descr` is built.
+
+    Before, and not when its instructions arrive: building an operation asks
+    the residency for its operands and its destination, and a flush that
+    answering costs is emitted into the operation's own instructions. Closing
+    the previous run afterwards would leave that store inside the new region
+    -- under a condition that has nothing to do with the value.
+    """
     key = self._key_of(descr)
     if key != self._key:
       self.flush()
@@ -232,15 +240,51 @@ class _GuardGrouping:
       # operands, and a guard's operands are not among them.
       for symbol, _ in self._literals:
         self._out.extend(self._residency.flush(symbol.name))
+
+  def add(self, descr, instrs) -> None:
+    assert self._key == self._key_of(descr), \
+        'the run this operation belongs to was not opened for it'
     self._pending.extend(instrs)
+
+  def _defined_inside(self, instrs):
+    """The ids of the symbols the instructions define, regions included."""
+    out = set()
+    for instr in instrs:
+      for symbol in instr.defs():
+        out.add(id(symbol))
+      for region in instr.regions():
+        out |= self._defined_inside(region)
+    return out
+
+  def _writebacks(self, instrs) -> List[AbstractInstruction]:
+    """Stores for the values this region computed and did not write out.
+
+    A result the region leaves in registers has to reach its home *inside*
+    the region. Both halves of a hoisted `where` write one tensor, so the
+    second half asks the residency to flush what the first left behind -- and
+    that store was emitted where the asking happened, in the region under the
+    opposite condition. It then ran when the value did not exist and did not
+    run when it did, and the register it read was not even in scope there,
+    which the host compiler says out loud.
+
+    So every entry whose image this region defined is flushed here, before the
+    region closes. A guard is a scope: what is computed under it is stored
+    under it.
+    """
+    defined = self._defined_inside(instrs)
+    out = []
+    for name, entry in self._residency.items():
+      if id(entry.image) in defined:
+        out.extend(self._residency.flush(name))
+    return out
 
   def flush(self) -> None:
     if self._pending:
       if self._key is None:
         self._out.extend(self._pending)
       else:
-        self._out.append(GuardedRegion(self._context, self._literals,
-                                       self._pending))
+        body = self._pending + self._writebacks(self._pending)
+        self._out.append(GuardedRegion(self._context, self._literals, body))
     self._key = None
     self._literals = []
     self._pending = []
@@ -1888,6 +1932,7 @@ class Generator:
           self._retire_writebacks(residency, last, index, guard)
         continue
       for descr in outer.operations():
+        guard.begin(descr)
         for kind, builder in builders:
           if (isinstance(descr, kind) if isinstance(kind, type) else kind(descr)):
             builder.build(descr)
