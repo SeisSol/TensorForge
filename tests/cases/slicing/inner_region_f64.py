@@ -47,4 +47,4 @@ def descr_list():
 
 
 def reference(inputs, dest_in):
-    return np.einsum("bik,bkj->bij", inputs["A"][:, *A_SUB], inputs["B"])
+    return np.einsum("bik,bkj->bij", inputs["A"][(slice(None), *A_SUB)], inputs["B"])

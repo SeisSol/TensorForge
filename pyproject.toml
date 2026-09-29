@@ -4,9 +4,9 @@
 
 [project]
 name = "tensorforge"
-description="Small GEMM/GETT generator for GPUs"
+description = "Code generator for small batched tensor contraction kernels on GPUs"
 license = "MIT"
-requires-python = ">=3.5"
+requires-python = ">=3.10"
 authors = [
     { name = "David Schneller", email = "david.schneller@tum.de" },
     { name = "Ravil Dorozhinskii", email = "ravil.aviva.com@gmail.com" },
@@ -21,6 +21,9 @@ classifiers= [
     "Operating System :: OS Independent",
 ]
 dynamic = ["version", "readme", "dependencies"]
+
+[project.optional-dependencies]
+test = ["pytest", "pytest-xdist"]
 
 [build-system]
 requires = ["setuptools>=77.0.0", "wheel"]
