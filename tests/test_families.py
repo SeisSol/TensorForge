@@ -247,6 +247,7 @@ def test_the_hashed_search_finds_what_comparing_every_skeleton_finds():
 
     def every_skeleton(period, max_arity):
         skeletons = families._chunk_skeletons(descrs, period)
+        table = families._Chunks(descrs)
         runs, start = [], 0
         while start + period * 2 <= len(descrs):
             count, seen = 1, None
@@ -258,10 +259,12 @@ def test_the_hashed_search_finds_what_comparing_every_skeleton_finds():
                     groups = skeletons[start].groups()
                     if seen is None:
                         seen = [{i} for i in families._identities(
-                            descrs, start, period, groups)]
+                            descrs, start, period, groups,
+                            table.observed(start, period))]
                     widened = [s | {i} for s, i in zip(
-                        seen, families._identities(descrs, nxt, period,
-                                                   groups))]
+                        seen, families._identities(
+                            descrs, nxt, period, groups,
+                            table.observed(nxt, period)))]
                     if sum(1 for s in widened if len(s) > 1) > max_arity:
                         break
                     seen = widened

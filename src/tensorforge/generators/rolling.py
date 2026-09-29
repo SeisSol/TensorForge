@@ -15,7 +15,7 @@ bindings -- rests on binding being the inverse of generalizing.  Testing it on
 the loop binder tests it for the binders that follow, since they differ only
 in what the hole is bound *to*.
 
-Two refusals are deliberate.  A run whose chunk contains a barrier is not
+Three refusals.  Two are deliberate.  A run whose chunk contains a barrier is not
 rolled: the descriptor list is split into sections at every barrier, so a
 barrier inside a loop body is one the split cannot see, and hiding it would
 turn a synchronization into a silent reordering.  A run that varies in nothing
@@ -37,6 +37,30 @@ def _chunks(descrs: Sequence[OperationDescription], start: int, period: int,
             count: int) -> List[List[OperationDescription]]:
     return [list(descrs[start + period * i:start + period * (i + 1)])
             for i in range(count)]
+
+
+def _selects_a_temporary(run) -> bool:
+    """Whether a hole of this run binds a temporary.
+
+    A loop reaches its members through a table of their addresses, and an
+    address is something a symbol has.  A kernel argument has one from the
+    prologue; a temporary's buffer is handed out by whichever operation first
+    asks for it, and a member the loop writes has nobody who has asked -- nor
+    has the stand-in, which is a name that resolves to a member and not a
+    buffer of its own.  Binding one per iteration is a table over the
+    section's own storage, which the emission does not do yet.
+
+    So a run that varies in a temporary is left written out.  Third of three
+    refusals, and the one that is a limitation rather than a decision: the
+    damage step's sums over nodal sources are exactly this shape, and they
+    were rolled while every temporary was identified by its slot -- which is
+    what made the loop add one node's source six times
+    (`antiunify._scratch_origins`).  Telling the temporaries apart turns that
+    wrong loop into a correct written-out run, and lifting this needs the
+    loop to bind a buffer per iteration.
+    """
+    return any(getattr(getattr(view, 'tensor', view), 'is_tmp', False)
+               for binding in run.general.bindings for view in binding)
 
 
 def roll(descrs: Sequence[OperationDescription],
@@ -89,6 +113,8 @@ def roll(descrs: Sequence[OperationDescription],
         if not allow_barriers and any(d.barrier() for d in chunks[0]):
             continue
         if run.arity == 0:
+            continue
+        if _selects_a_temporary(run):
             continue
         flat = [d for chunk in chunks for d in chunk]
         written_out = size(flat) if size is not None else 0

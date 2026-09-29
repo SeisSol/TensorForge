@@ -16,6 +16,7 @@ from tensorforge.common.basic_types import Addressing, Datatype
 from tensorforge.common.matrix.boundingbox import BoundingBox
 from tensorforge.common.matrix.tensor import SubTensor, Tensor
 from tensorforge.generators.descriptions import (ForDescr, GemmDescr,
+                                                 MultilinearDescr,
                                                  GridBarrierDescr,
                                                  GridFenceDescr)
 from tensorforge.generators.rolling import roll, unroll
@@ -82,6 +83,107 @@ def test_unroll_undoes_roll_with_a_prologue_and_an_epilogue():
     rolled = roll(original, max_arity=1)
     assert any(isinstance(d, ForDescr) for d in rolled)
     assert same_shape(unroll(rolled)) == same_shape(original)
+
+
+def _bound(descrs):
+    """Each descriptor as the tensors it names, by identity.
+
+    `same_shape` compares skeletons, which is what a hole abstracts away -- so
+    a roll that binds the wrong tensor comes back as the same shape and the
+    round trip says nothing about it.  This says which tensors.
+
+    The kind is left out deliberately: `rebuild` makes a `MultilinearDescr`
+    of a `GemmDescr`, which is the same operation stated in the general form,
+    and `same_shape` is where that belongs.
+    """
+    out = []
+    for descr in descrs:
+        dest = descr.writes()
+        out.append((bool(getattr(descr, 'add', False)),
+                    None if dest is None else id(dest.tensor),
+                    tuple(id(v.tensor) for v in descr.reads())))
+    return out
+
+
+def nodal_sources(nodes=3):
+    """The damage step's shape: two sums over nodal sources, all temporaries.
+
+    Per node, one contribution to `alphaNodal` and one to `breakageNodal`,
+    each weighted by that node's own scalar.  The sources are written before
+    the run and the sums read after it, so every tensor in the run carries a
+    value in or out -- and all six are temporaries, which is the whole point:
+    identified by position they all look alike, and a run of six chunks then
+    varies in nothing but the scalar.
+    """
+    def number(alias):
+        return SubTensor(Tensor([], Addressing.SCALAR, BoundingBox([], []),
+                                alias=alias, datatype=DTYPE))
+
+    def contribution(dest, source, scalar):
+        return MultilinearDescr(dest=dest, ops=[source, number(scalar)],
+                                target=[[0], []], permute=[[0], []], add=True)
+
+    before, run = [], []
+    for k in range(nodes):
+        for kind in ('alpha', 'breakage'):
+            source = make(f'source{kind.capitalize()}{k}', [343], True)
+            before.append(MultilinearDescr(
+                dest=source, ops=[make(f'state{k}', [343])],
+                target=[[0]], permute=[[0]], add=False))
+            run.append(contribution(make(f'{kind}Nodal', [343], True),
+                                    source, f'weight{k}'))
+    after = [MultilinearDescr(dest=make('out', [343]),
+                              ops=[make(f'{kind}Nodal', [343], True)],
+                              target=[[0]], permute=[[0]], add=True)
+             for kind in ('alpha', 'breakage')]
+    return before + run + after
+
+
+def test_a_run_over_temporaries_keeps_which_temporary_it_names():
+    """Two sums over nodal sources, rolled: iteration k adds source k.
+
+    A temporary used to be identified by the slot it sits in, on the grounds
+    that the generator names its own scratch and two chunks each holding one
+    hold the same thing.  These are not that: `sourceAlpha0` and
+    `sourceAlpha1` are two values, written elsewhere, and `alphaNodal` and
+    `breakageNodal` are two sums read afterwards.  With position standing in
+    for all four, the six additions came out as one chunk varying in the
+    scalar alone -- so the loop added the first source six times and the
+    breakage sums were never computed.  SeisSol's damage step is this list:
+    35 of its 2271 descriptors came back as another operation, and its
+    breakage scenario grew a drift that ended in a NaN.
+    """
+    original = nodal_sources()
+    assert _bound(unroll(roll(original, min_count=3))) == _bound(original)
+
+
+def temporary_chain(steps=6):
+    """A recursion through temporaries: each step reads what the last wrote."""
+    return [gemm(make('kDivM', [56, 56]), make(f'deriv{k}', [56, 9], True),
+                 make(f'deriv{k + 1}', [56, 9], True)) for k in range(steps)]
+
+
+def test_scratch_that_crosses_into_the_next_chunk_is_not_scratch():
+    """The other half of the same question.
+
+    `deriv{k}` is written by one chunk and read by the next, so it is a value
+    passed on and not scratch, even though nothing outside the run ever looks
+    at one.  The anti-unifier makes a hole of it -- identified by its slot it
+    would have been invisible, and every chunk would have read the first
+    step's input.
+    """
+    from tensorforge.analysis.families import find_repeats
+    run = find_repeats(temporary_chain(), min_count=3)[0]
+    assert run.arity >= 2
+
+
+def test_a_run_that_varies_in_a_temporary_is_left_written_out():
+    """And no loop is built for it: a member is reached through a table of
+    addresses, and a temporary's buffer is the section's to hand out."""
+    descrs = temporary_chain()
+    rolled = roll(descrs, min_count=3)
+    assert not any(isinstance(d, ForDescr) for d in rolled)
+    assert _bound(unroll(rolled)) == _bound(descrs)
 
 
 def test_unroll_leaves_a_list_without_loops_alone():

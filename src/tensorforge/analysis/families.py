@@ -24,10 +24,11 @@ reading -- what a fence orders is not something a substitution may change.
 """
 
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, FrozenSet, List, Optional, Sequence, Tuple
 
 from tensorforge.analysis.antiunify import (Generalization, Skeleton,
-                                            _attrs, _identity, _slots,
+                                            _attrs, _identity,
+                                            _scratch_origins, _slots,
                                             anti_unify, operand_key,
                                             skeleton)
 from tensorforge.generators.descriptions import OperationDescription
@@ -113,6 +114,18 @@ class _Chunks:
                                    + code * self._power[i]) % _MOD
             self._power[i + 1] = self._power[i] * _BASE % _MOD
         self._skeletons: Dict[Tuple[int, int], Skeleton] = {}
+        # Where each tensor is first and last read, so that a chunk can be
+        # asked what it makes for itself.  Once for the list: a chunk then
+        # asks in time proportional to the tensors, where walking the rest of
+        # the list per chunk is quadratic in a list of two thousand.
+        from tensorforge.analysis.dependence import accesses
+        self._first: Dict[int, int] = {}
+        self._last: Dict[int, int] = {}
+        for index, descr in enumerate(descrs):
+            reads, _ = accesses(descr)
+            for tensor in reads:
+                self._first.setdefault(id(tensor), index)
+                self._last[id(tensor)] = index
 
     def skeleton(self, start: int, period: int) -> Skeleton:
         key = (start, period)
@@ -120,6 +133,21 @@ class _Chunks:
             self._skeletons[key] = skeleton(
                 self._descrs[start:start + period])[0]
         return self._skeletons[key]
+
+    def observed(self, start: int, period: int) -> FrozenSet[int]:
+        """The tensors this chunk does not have to itself.
+
+        A temporary read only inside the chunk that writes it is that chunk's
+        scratch, and which one it is cannot be seen from outside -- so two
+        chunks holding one each hold the same thing.  Read anywhere else, by a
+        later chunk of the same run or by anything after it, it carries a
+        value from one place to another and its identity is part of the
+        computation.  `antiunify._scratch_origins` takes this and tells the
+        two apart.
+        """
+        stop = start + period
+        return frozenset(key for key, last in self._last.items()
+                         if last >= stop or self._first[key] < start)
 
     def same(self, a: int, b: int, period: int) -> bool:
         # Both hashes brought to the same power of the base: no inverse needed.
@@ -131,11 +159,14 @@ class _Chunks:
 
 
 def _identities(descrs: Sequence[OperationDescription],
-                start: int, period: int, groups: List[List[int]]) -> Tuple:
+                start: int, period: int, groups: List[List[int]],
+                observed: FrozenSet[int] = frozenset()) -> Tuple:
     """What each slot group of one chunk names, in the chunk's own terms."""
-    views = [view for descr in descrs[start:start + period]
-             for _, view in _slots(descr)]
-    return tuple(_identity(views[group[0]], group[0]) for group in groups)
+    chunk = descrs[start:start + period]
+    views = [view for descr in chunk for _, view in _slots(descr)]
+    origins = _scratch_origins(chunk, observed)
+    return tuple(_identity(views[group[0]], group[0], origins.get(group[0]))
+                 for group in groups)
 
 
 def _runs_at(descrs: Sequence[OperationDescription], period: int,
@@ -176,9 +207,11 @@ def _runs_at(descrs: Sequence[OperationDescription], period: int,
                 if groups is None:
                     groups = chunks.skeleton(start, period).groups()
                     seen = [{ident} for ident in
-                            _identities(descrs, start, period, groups)]
+                            _identities(descrs, start, period, groups,
+                                        chunks.observed(start, period))]
                 widened = [s | {ident} for s, ident in
-                           zip(seen, _identities(descrs, nxt, period, groups))]
+                           zip(seen, _identities(descrs, nxt, period, groups,
+                                                 chunks.observed(nxt, period)))]
                 if sum(1 for s in widened if len(s) > 1) > max_arity:
                     break
                 seen = widened
@@ -219,7 +252,10 @@ def find_repeats(descrs: Sequence[OperationDescription],
                                      table):
             chunks = [list(descrs[start + period * i:start + period * (i + 1)])
                       for i in range(count)]
-            general = anti_unify(chunks)
+            general = anti_unify(
+                chunks,
+                [table.observed(start + period * i, period)
+                 for i in range(count)])
             if not general:
                 continue
             candidates.append(Repeat(start, period, count, general))

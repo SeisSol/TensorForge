@@ -39,7 +39,8 @@ lowerings with three different costs, and none of them is a structural fact.
 import copy
 from dataclasses import dataclass
 from itertools import product
-from typing import Dict, List, Optional, Sequence, Tuple, Union
+from typing import (Dict, FrozenSet, List, Optional, Sequence, Tuple,
+                    Union)
 
 from tensorforge.common.matrix.boundingbox import BoundingBox
 from tensorforge.common.operation import Operator
@@ -248,21 +249,73 @@ def _tensor_of(view):
     return getattr(view, 'tensor', view)
 
 
-def _identity(view, slot: int) -> object:
+def _scratch_origins(body: Sequence[OperationDescription],
+                     observed: FrozenSet[int] = frozenset()) -> Dict[int, int]:
+    """Slot -> the slot that first holds it, for scratch the body makes itself.
+
+    A temporary the generator invented has no name anyone outside agreed on,
+    and the generator may rename it, so two bodies each holding one of their
+    own hold the same thing and the position stands in for the name.  That is
+    what keeps a run of chunks with a scratch buffer each from paying a hole
+    for it.
+
+    It holds only for scratch the body *makes*.  A temporary written somewhere
+    else and read here is a name from outside exactly as a parameter is, and a
+    body reading another one is a different body: SeisSol's damage step adds
+    its nodal sources into `alphaNodal` and `breakageNodal` in turn, all four
+    temporaries, and with position alone standing for every one of them a run
+    of six such additions varied in nothing but a scalar -- so the loop added
+    the first source six times and the breakage contributions were never
+    computed.  Read `unroll(roll(x))` against `x` by tensor and 35 of the step
+    kernel's 2271 descriptors came back as another operation.
+
+    So the first use decides: a write that does not read the destination back
+    makes the tensor here, anything else names one from elsewhere.  An
+    accumulating destination reads it, which is why `add` is asked.
+
+    `observed` closes the other side: the ids of tensors read outside this
+    body.  One of those is made here and looked at elsewhere -- by a later
+    chunk of the same run, or by anything after it -- so which one it is
+    matters as much as a parameter's identity does.  The caller knows the list
+    and this does not, so it is passed in; left out, only the inbound half is
+    told apart.
+    """
+    origin: Dict[int, int] = {}
+    made: Dict[int, Optional[int]] = {}
+    slot = 0
+    for descr in body:
+        accumulates = (getattr(descr, 'add_dims', None) is not None
+                       or bool(getattr(descr, 'add', False)))
+        for role, view in _slots(descr):
+            tensor = _tensor_of(view)
+            key = id(tensor)
+            if key not in made:
+                made[key] = (slot if (role == 'dest' and not accumulates
+                                      and getattr(tensor, 'is_tmp', False)
+                                      and key not in observed)
+                             else None)
+            first = made[key]
+            if first is not None:
+                origin[slot] = first
+            slot += 1
+    return origin
+
+
+def _identity(view, slot: int, origin: Optional[int] = None) -> object:
     """What names this operand outside its own body.
 
     An alias is a name the frontend chose and the same alias in two bodies is
-    the same tensor, which is what makes a difference in alias a hole.  A
-    temporary has no name outside the body that creates it, so it is
-    identified by where it sits instead: two bodies with a temporary in the
-    same position hold the same thing, and a temporary is never a hole.
+    the same tensor, which is what makes a difference in alias a hole.  Scratch
+    the body makes for itself is named by its position instead
+    (`_scratch_origins`), by the slot it first appears in so that two slots
+    holding it still show as one tensor.
     """
     tensor = _tensor_of(view)
+    if origin is not None:
+        return ('#tmp', origin)
     alias = getattr(tensor, 'alias', None) or getattr(tensor, 'name', None)
     if alias is None:
         return ('#anon', slot)
-    if getattr(tensor, 'is_tmp', False):
-        return ('#tmp', slot)
     return ('#named', alias)
 
 
@@ -307,6 +360,7 @@ def skeleton(descrs: Sequence[OperationDescription]) -> Tuple[Skeleton, List]:
     keys: List[OperandKey] = []
     views: List = []
     identities: List = []
+    origins = _scratch_origins(descrs)
     for descr in descrs:
         slots = _slots(descr)
         shape.append((_attrs(descr), tuple(role for role, _ in slots)))
@@ -314,7 +368,7 @@ def skeleton(descrs: Sequence[OperationDescription]) -> Tuple[Skeleton, List]:
             slot = len(keys)
             keys.append(operand_key(view))
             views.append(view)
-            identities.append(_identity(view, slot))
+            identities.append(_identity(view, slot, origins.get(slot)))
 
     first: Dict[object, int] = {}
     sharing: List[int] = []
@@ -414,7 +468,8 @@ def _compare(base: Skeleton, other: Skeleton, index: int) -> Optional[Mismatch]:
     return None
 
 
-def anti_unify(bodies: Sequence[Sequence[OperationDescription]]
+def anti_unify(bodies: Sequence[Sequence[OperationDescription]],
+               observed: Optional[Sequence[FrozenSet[int]]] = None
                ) -> Union[Generalization, Mismatch]:
     """The least general body of which every input is an instance.
 
@@ -425,19 +480,27 @@ def anti_unify(bodies: Sequence[Sequence[OperationDescription]]
     if not bodies:
         return Mismatch('empty', 'no bodies given')
 
+    seen = ([frozenset()] * len(bodies) if observed is None
+            else list(observed))
+    if len(seen) != len(bodies):
+        raise ValueError(f'{len(bodies)} bodies and {len(seen)} sets of what '
+                         f'is read outside them')
     base, base_views = skeleton(bodies[0])
     all_views = [base_views]
+    all_origins = [_scratch_origins(bodies[0], seen[0])]
     for index, body in enumerate(bodies[1:], start=1):
         other, views = skeleton(body)
         problem = _compare(base, other, index)
         if problem is not None:
             return problem
         all_views.append(views)
+        all_origins.append(_scratch_origins(body, seen[index]))
 
     holes: List[Tuple[int, ...]] = []
     for group in base.groups():
         slot = group[0]
-        names = {_identity(views[slot], slot) for views in all_views}
+        names = {_identity(views[slot], slot, origins.get(slot))
+                 for views, origins in zip(all_views, all_origins)}
         if len(names) > 1:
             holes.append(tuple(group))
 

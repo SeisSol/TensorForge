@@ -2052,15 +2052,15 @@ class Generator:
     # loop, and the next level read the launch's input in its place.
     for variant in variants:
       for view in variant.members:
-        member = self._scopes.get_symbol(view.tensor)
+        member = self._member_symbol(view)
         self._section.ir.extend(self._residency.flush(member.name))
     counter = f'{GeneralLexicon.BATCH_ID_NAME}v{len(self._section.ir)}'
 
     tables, region = [], []
     pointers = GetElementPtrBuilder(self._context, self._scopes)
     for variant in variants:
-      members = [self._scopes.get_symbol(view.tensor) for view in variant.members]
-      stand_in = self._scopes.get_symbol(variant.stand_in.tensor)
+      members = [self._member_symbol(view) for view in variant.members]
+      stand_in = self._member_symbol(variant.stand_in)
       # The members are the bindings, not the parameters: `glb_m5` is
       # already `&m5[batchId][offset]`, one element's data, whatever the
       # parameter's addressing was -- and the binding after the table reads
@@ -2215,6 +2215,23 @@ class Generator:
     self._section.ir.append(
         VariantLoop(self._context, counter, loop.iterations, region, tables,
                     start=0 if resident else 1, carried=tuple(carried)))
+
+  def _member_symbol(self, view):
+    """The symbol a merged run reaches an operand through.
+
+    A kernel argument has one from the prologue.  A temporary does not until
+    an operation asks for its buffer, so a run that selects one per iteration
+    has nothing to build a table from -- `rolling.roll` refuses such a run
+    before it becomes a loop, and reaching here with nothing means that
+    refusal was bypassed rather than that a buffer should be invented.
+    """
+    symbol = self._scopes.get_symbol(view.tensor)
+    if symbol is None:
+      raise InternalError(
+          f'{getattr(view.tensor, "alias", None) or view.tensor}: a merged '
+          f'run selects it per iteration and it has no symbol to select '
+          f'through; a temporary cannot be a member (`rolling.roll`)')
+    return symbol
 
   def _residency_key(self, view) -> Optional[str]:
     """What the residency knows this destination by, or None.
