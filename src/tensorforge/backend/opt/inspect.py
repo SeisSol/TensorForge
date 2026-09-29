@@ -370,7 +370,14 @@ def _live_shared(instrs: Sequence[AbstractInstruction]
     # module, so there is no cycle
     from .liveness import LivenessAnalysis
 
-    analysis = LivenessAnalysis(None, list(_flatten(instrs)))
+    # The nest as it is, not flattened: the analysis walks regions itself
+    # and appends its records depth first, which is `_flatten`'s numbering.
+    # Flattened, a region-bearing instruction stood ahead of its own body in
+    # one block, and its `defs()` -- the body's -- counted as an earlier
+    # write of every buffer the body assembles (`_assembling`): each first
+    # slice was spared, and the buffer looked live where the allocator,
+    # which is handed the nest, had rightly reused its memory.
+    analysis = LivenessAnalysis(None, list(instrs))
     analysis.apply()
     return dict(analysis.get_live_map())
 

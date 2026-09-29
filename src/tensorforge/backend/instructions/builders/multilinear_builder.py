@@ -816,6 +816,34 @@ class MultilinearBuilder(OperationBuilder):
       upper[0] += self._theta
     return BoundingBox(lower, upper)
 
+  def _assignment_zero_box(self):
+    """Where an assignment into a shared buffer owes zeros, or None.
+
+    The shared-memory side of the promise `StoreRegToGlb` keeps: an
+    assignment defines its whole promised box (`_promised_box`), the part
+    `_analyze` narrowed away as zeros.  Without it, a temporary assigned anew
+    from a narrower operand kept whatever its buffer held outside the new
+    values -- SeisSol's free-surface-gravity kernel re-assigns `MPrev` from a
+    product that one row of the Taylor derivative supports, and the
+    accumulation that followed added to the previous step's rows.
+
+    In buffer coordinates, as `StoreRegToShr` takes it.  None for an
+    accumulation, which promises nothing, and where the accumulator covers
+    the promise anyway.
+    """
+    if self._add:
+      return None
+    promise = self._promised_box()
+    covered = self._temp_regs.data_view.get_bbox()
+    if promise.rank() == 0 or covered.rank() != promise.rank():
+      return None
+    if all(cl <= pl and pu <= cu for pl, pu, cl, cu in zip(
+        promise.lower(), promise.upper(), covered.lower(), covered.upper())):
+      return None
+    shift = self._store_offset()
+    return BoundingBox([l + o for l, o in zip(promise.lower(), shift)],
+                       [u + o for u, o in zip(promise.upper(), shift)])
+
   def _narrows_pending(self, name) -> bool:
     """Would recording this result displace a pending writeback that holds
     more than it does?
@@ -853,6 +881,7 @@ class MultilinearBuilder(OperationBuilder):
           # assembled from several writes: this slice has to land in the shared
           # buffer now, since `_temp_regs` only ever holds our own part and the
           # deferred entry keeps just one of them
+          zero_box = self._assignment_zero_box()
           self._instructions.append(StoreRegToShr(context=self._context,
                                                   src=self._temp_regs,
                                                   dest=dest_symbol,
@@ -860,7 +889,9 @@ class MultilinearBuilder(OperationBuilder):
                                                   num_threads=self._num_threads,
                                                   lead_width=self._lead_width,
                                                   dest_bbox=self._plan.dest_union(self._dest_obj.tensor),
-                                                  dest_offset=self._store_offset()))
+                                                  dest_offset=self._store_offset(),
+                                                  clear=zero_box is not None,
+                                                  clear_within=zero_box))
           return
         # see note below (but update to the new temp regs)
         self._residency.record_writeback(
@@ -959,7 +990,10 @@ class MultilinearBuilder(OperationBuilder):
         # a pending image that holds more than this result goes out first
         self._invalidate_residency(dest_symbol.name)
         # the first write of the temporary: where the plan found a use of
-        # cells nothing defined before it, this store clears the buffer
+        # cells nothing defined before it, this store clears the buffer; an
+        # assignment clears at least what it promised and did not compute
+        zero_first = self._plan.zero_first(self._dest_obj.tensor)
+        zero_box = self._assignment_zero_box()
         self._instructions.append(StoreRegToShr(context=self._context,
                                                 src=self._temp_regs,
                                                 dest=dest_symbol,
@@ -968,7 +1002,8 @@ class MultilinearBuilder(OperationBuilder):
                                                 lead_width=self._lead_width,
                                                 dest_bbox=self._plan.dest_union(self._dest_obj.tensor),
                                                 dest_offset=self._store_offset(),
-                                                clear=self._plan.zero_first(self._dest_obj.tensor)))
+                                                clear=zero_first or zero_box is not None,
+                                                clear_within=None if zero_first else zero_box))
         return
       self._residency.record_writeback(
           dest_symbol.name, self._temp_regs, dest_symbol,

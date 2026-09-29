@@ -106,6 +106,21 @@ def _padded_row(sizes, context) -> List[int]:
   return sizes
 
 
+def _contains(outer, inner) -> bool:
+  """Whether box `inner` lies inside box `outer`."""
+  return all(ol <= il and iu <= ou for il, iu, ol, ou in zip(
+      inner.lower(), inner.upper(), outer.lower(), outer.upper()))
+
+
+def _intersect(a, b):
+  """The common part of two boxes, or None where they share no cell."""
+  lower = [max(x, y) for x, y in zip(a.lower(), b.lower())]
+  upper = [min(x, y) for x, y in zip(a.upper(), b.upper())]
+  if any(l >= u for l, u in zip(lower, upper)):
+    return None
+  return BoundingBox(lower, upper)
+
+
 class StoreRegToShr(AbstractShrMemWrite):
   def __init__(self,
                context: Context,
@@ -116,7 +131,8 @@ class StoreRegToShr(AbstractShrMemWrite):
                lead_width: int = 1,
                dest_bbox=None,
                dest_offset=None,
-               clear: bool = False):
+               clear: bool = False,
+               clear_within=None):
     super(StoreRegToShr, self).__init__(context)
 
     if src.stype != SymbolType.Register:
@@ -152,8 +168,23 @@ class StoreRegToShr(AbstractShrMemWrite):
     #: Whether this store also zeroes the rest of the buffer -- see
     #: `SectionPlan.zero_first`.  It is the temporary's first write then, and
     #: it defines the whole buffer rather than a slice of it.
+    #:
+    #: `clear_within` confines that to a box of the buffer: an assignment owes
+    #: zeros only over the box it promised to define
+    #: (`MultilinearBuilder._assignment_zero_box`), and a slice of a buffer
+    #: other operations assemble must not touch their parts.  A store that
+    #: confined has no zero left to write clears nothing, and it defines the
+    #: whole buffer only where the box covers it.
+    self._clear_within = None
+    if clear and clear_within is not None:
+      src_bbox = src.data_view.get_bbox()
+      own = BoundingBox([l + o for l, o in zip(src_bbox.lower(), self._dest_offset)],
+                        [u + o for u, o in zip(src_bbox.upper(), self._dest_offset)])
+      within = _intersect(buffer_bbox, clear_within)
+      clear = within is not None and not _contains(own, within)
+      self._clear_within = within
     self._clear = clear
-    if clear:
+    if clear and (clear_within is None or _contains(clear_within, buffer_bbox)):
       self._partial = False
     dest.data_view = DataView(_padded_row(buffer_bbox.sizes(), context),
                               permute=None,
@@ -214,7 +245,8 @@ class StoreRegToShr(AbstractShrMemWrite):
     write_loops(self._context, writer, loops, inner)
 
   def _clear_rest(self, writer: Writer, src_bbox) -> None:
-    """Zero every cell of the buffer this store does not write itself.
+    """Zero every cell of the buffer this store does not write itself --
+    of the part `clear_within` confines it to, where it does.
 
     The complement only, as disjoint boxes, and never a cell the store then
     writes: the two nests map a row to a lane each in their own way -- the
@@ -223,6 +255,8 @@ class StoreRegToShr(AbstractShrMemWrite):
     section's barriers order, as they do for every shared write.
     """
     buf = self._dest.data_view.get_bbox()
+    if getattr(self, '_clear_within', None) is not None:
+      buf = self._clear_within
     own_lo = [l + o for l, o in zip(src_bbox.lower(), self._dest_offset)]
     own_hi = [u + o for u, o in zip(src_bbox.upper(), self._dest_offset)]
     lo, hi = list(buf.lower()), list(buf.upper())

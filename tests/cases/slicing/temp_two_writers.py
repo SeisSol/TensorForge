@@ -45,7 +45,8 @@ def descr_list():
     c = SubTensor(_t((12, 12), "C"))
     d = SubTensor(_t((12, 12), "D"))
     tmp = generate_tmp_matrix(SubTensor(_t((12, 12), "Bfull")), c)
-    top = SubTensor(tmp, bbox=BoundingBox([0, 0], [SPLIT, 12]), offset=[0, 0])
+    top = SubTensor(tmp, bbox=BoundingBox([0, 0], [SPLIT, 12]), offset=[0, 0],
+                    sliced=True)
     bot = SubTensor(tmp, bbox=BoundingBox([0, 0], [SPLIT, 12]), offset=[SPLIT, 0])
     return [
         GemmDescr(False, False, a=b1, b=c, c=top),

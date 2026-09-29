@@ -106,14 +106,23 @@ class LivenessAnalysis(AbstractOptStage):
   def _assembling(body: Sequence[AbstractInstruction]) -> frozenset:
     """`(instruction, symbol)` pairs whose write must not kill the symbol.
 
-    Every partial write of a buffer after the first one in this block, until
-    a whole write starts over.  Between two slices the first is still wanted
-    -- killing the buffer at the second made the first dead in between, and
-    the allocator gave that stretch to a buffer read there
-    (`mixed/ml_slices_then_ew`).  The first slice does kill: nothing written
-    to the buffer before it is needed, and sparing it too made an assembled
-    buffer live across the whole body and around the back edge, which grew
-    two arenas in the corpus by a third and by nine tenths for nothing.
+    Every partial write of a buffer after an earlier write of it in this
+    block.  A partial write leaves the cells outside its slice as they were,
+    so whatever wrote them before is still wanted: between two slices the
+    first -- killing the buffer at the second made the first dead in between,
+    and the allocator gave that stretch to a buffer read there
+    (`mixed/ml_slices_then_ew`) -- and just as much a whole write followed by
+    a slice.  That one had counted as a fresh start: between the whole write
+    and the slice the buffer was dead, and the allocator laid another buffer
+    read there over it (`slicing/temp_slice_after_whole`).  An assignment
+    that clears what it promised and did not compute (`StoreRegToShr`,
+    `clear_within`) is such a whole write, which made the shape common.
+
+    The first write in the block does kill, slice or not: nothing written to
+    the buffer before it is needed, and sparing a first slice too made an
+    assembled buffer live across the whole body and around the back edge,
+    which grew two arenas in the corpus by a third and by nine tenths for
+    nothing.
 
     Per straight-line block, which is what `_backward` is handed; a nested
     region is its own block.  A buffer assembled partly before a loop and
@@ -124,12 +133,9 @@ class LivenessAnalysis(AbstractOptStage):
     for instr in body:
       partial = {id(s) for s in instr.partial_defs()}
       for sym in instr.defs():
-        if id(sym) in partial:
-          if id(sym) in seen:
-            out.add((id(instr), id(sym)))
-          seen.add(id(sym))
-        else:
-          seen.discard(id(sym))
+        if id(sym) in partial and id(sym) in seen:
+          out.add((id(instr), id(sym)))
+        seen.add(id(sym))
     return frozenset(out)
 
   def _region_transfer(self, instr, live_out: OrderedSet,
@@ -170,6 +176,19 @@ class LivenessAnalysis(AbstractOptStage):
       for sym in instr.uses():
         if self._tracked(sym) and sym in defined:
           here.add(sym)
+      # A write occupies its buffer where it happens, whether or not anything
+      # reads the value: a store whose value a later whole write kills before
+      # any read (a slice written, then the tensor assigned anew) still writes
+      # its bytes.  Recorded only from the live-out, that store's buffer was
+      # live nowhere, and the allocator laid it over a buffer still read after
+      # it -- the staged operand of the very assignment that killed it.
+      # Only for an instruction of its own: a construct with a region reports
+      # every buffer its body writes, and its body records them where they
+      # are written.
+      if not instr.regions():
+        for sym in instr.defs():
+          if self._tracked(sym):
+            here.add(sym)
       # A construct with a region is live wherever its body is, so record the
       # union rather than just the boundary: the allocator asks "may these two
       # share an offset", and a buffer live anywhere inside the loop conflicts
