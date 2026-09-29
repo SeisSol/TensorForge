@@ -13,6 +13,9 @@ repos:
     hooks:
     -   id: check-merge-conflict
         name: '[GENERIC] merge conflict check'
+        # Without it the hook looks only while a merge or rebase is running,
+        # which is never the case in CI or for a patch applied with `git am`.
+        args: [--assume-in-merge]
     -   id: check-symlinks
         name: '[GENERIC] symlink check'
     -   id: destroyed-symlinks

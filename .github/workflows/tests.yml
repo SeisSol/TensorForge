@@ -10,10 +10,29 @@ on:
   - push
 
 jobs:
-  tensorforge-install:
-    name: tensorforge-install
+  host-tests:
+    # Everything that needs neither a GPU nor a vendor toolchain: snapshots,
+    # the host syntax check, the IR and pass tests, the tools.  The GPU cases
+    # skip themselves when no target is found.
+    name: host-tests (python ${{ matrix.python }})
     runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        # The floor `requires-python` states, and a current release.
+        python: ['3.10', '3.13']
     steps:
       - uses: actions/checkout@v6
         with:
           submodules: recursive
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: install
+        run: python -m pip install -e '.[test]'
+
+      - name: test
+        working-directory: tests
+        run: python -m pytest -q -ra -n auto
