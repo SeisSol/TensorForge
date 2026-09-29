@@ -13,11 +13,12 @@ needs no GPU.
 
 The idea is small.  `tests/kernel_eval.py` already interprets one thread of a
 generated CUDA kernel.  Shared memory is where threads meet, so a single thread
-sees whatever the others have not written --- but splitting the per-element body
-at its barriers and driving all 32 lanes through one phase at a time gives the
-same guarantee the hardware does, on one shared `Slot`.  The other half is a
-NumPy evaluation of the same descriptor list the frontend handed the backend.
-Agreement to machine precision is then a real statement about the kernel.
+sees whatever the others have not written --- but driving all of the kernel's
+lanes (as many as its meta line states) through its body together, statement
+by statement, gives the same guarantee the hardware does, on one shared
+`Slot`.  The other half is a NumPy evaluation of the same
+descriptor list the frontend handed the backend.  Agreement to machine
+precision is then a real statement about the kernel.
 
 Validated against the poroelastic order-4 set: 56 of 60 kernels run (the other
 four use vectorized loads the interpreter does not model), and on a correct
@@ -83,14 +84,41 @@ is worth running on any new generation:
     python3 check_structure.py gen/gpulike_subroutine.cpp
     flagged: 0 of 60
 
+## Assignments, slices and accumulations
+
+`reference.py` evaluates an operation as yateto means it, which is not always
+"write the result where it was computed":
+
+* `=` onto the tensor itself defines the whole tensor.  Where the operands
+  support only part of it --- the destination's box narrowed below the
+  tensor's --- the rest is zero, and the kernel has to write those zeros.
+* `=` onto a slice (`sliced`, or an offset) defines that slice, zeros
+  included, and nothing else.
+* `+=` adds where it computed and defines nothing.
+
+It used to assign the computed part only and keep whatever the tensor held
+elsewhere --- which is exactly what a kernel does that forgets the zeros, so
+the oracle agreed with it.  A temporary assigned anew from a narrower product
+is the case that went through (SeisSol's free-surface-gravity kernel).
+
+`validate_dump.py` and `prefix_bisect.py` give every destination in memory a
+nonzero value on entry, so that each of the three shows when it is broken: a
+missing zero, a slice that reaches past its box, a dropped bias.  They seeded
+only destinations nothing assigns to, while the reference could not say which
+cells an assignment clears.
+
 ## What it does not cover
 
-`validate_dump.py` seeds a destination that is *only* accumulated onto with a
-nonzero value, so a dropped bias shows.  It deliberately does not do that for a
-tensor with an assignment among its writers: yateto's contract is that such a
-tensor is fully defined by the kernel, and the store zero-fills outside the
-eqspp window --- which `reference.py` does not model, so a seeded value would
-register as a disagreement that is not one.
+Only products are evaluated.  An elementwise operation or a reduction is
+recorded but skipped (`reference.evaluable`): the reference has nothing for
+what one writes, so neither that nor anything computed from it is checked ---
+including whether a pointwise assignment writes the zeros it owes.
+
+SeisSol's elastic order-4 GPU set runs whole: all 116 kernels agree.  Until
+the lanes moved statement by statement, a barrier inside a loop (a rolled
+face loop) and a cross-lane read (`readlane`) were outside the model, and
+`kernel_eval` read a chained ternary, `k == 0 ? a : k == 1 ? b : c`, from the
+left -- 54 of them aborted or disagreed.
 
 `read_before_write.py` reports reads with no preceding write.  Not all of them
 are defects: a global output may be filled by the caller.  In the poroelastic

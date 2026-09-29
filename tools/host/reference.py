@@ -125,6 +125,48 @@ def make(shapes, written, seed=0, constants=None, storage=None):
     return out
 
 
+def seed_destinations(descrs, arrays, shapes, storage=None, seed=0):
+    """Give every destination in memory a value on entry; return their names.
+
+    Starting at zero, a destination hides whether the kernel keeps what an
+    operation promises (`promised_box`): a missing zero looks like the zero
+    it should have written.  A seed makes each of the three checkable -- an
+    assignment has to overwrite it, zeros included; a slice has to leave it
+    alone outside its box; and an accumulation has to add to it, which is the
+    dropped bias this was first done for.  It used to be done for that case
+    only, since the reference could not say which cells an assignment clears.
+
+    The seed goes where the tensor is stored, and nowhere else: the kernel
+    sees nothing outside its box or its pack map, and a value there would
+    stay in the reference alone.  A temporary has no entry value the harness
+    could give it.
+    """
+    rng = np.random.default_rng(seed + 5)
+    seeded = []
+    for d in descrs:
+        if not evaluable(d):
+            continue
+        dest = d["dest"]
+        name = dest["name"]
+        if dest["is_tmp"] or name in seeded:
+            continue
+        shape = shapes[name]
+        entry = (storage or {}).get(name) or (shape, (0,) * len(shape))
+        ashape, lower = tuple(entry[0]), tuple(entry[1])
+        pack = entry[2] if len(entry) > 2 else None
+        cells = np.asarray(rng.standard_normal(ashape))
+        if pack is not None:
+            kept = np.zeros(cells.size)
+            idx = np.asarray(pack)
+            kept[idx] = cells.reshape(-1, order="F")[idx]
+            cells = kept.reshape(cells.shape, order="F")
+        value = np.zeros(shape or (1,))      # the rank-0 form `make` gives
+        value[tuple(slice(lo, lo + n) for lo, n in zip(lower, ashape))] = cells
+        arrays[name] = value
+        seeded.append(name)
+    return set(seeded)
+
+
 def ranges_of(d):
     """Replay _analyze: intersect every index range across operands and dest."""
     rng = {}
@@ -143,6 +185,37 @@ def ranges_of(d):
     for j in range(len(lo)):
         narrow(j, lo[j], hi[j])
     return rng
+
+
+def promised_box(d):
+    """What an assignment defines, as (lower, upper) in the tensor's
+    coordinates; None for an accumulation.
+
+    yateto's `=` defines its whole destination, not the part the operands
+    happen to support: where `ranges_of` narrows below the destination, the
+    rest is zero.  Which box that is depends on what the destination names --
+    the backend's `MultilinearBuilder._promised_box` makes the same call.
+
+    A destination that is the tensor itself promises the tensor's box
+    (`tbbox`); its own, narrower box is only the window yateto knows the
+    result can be nonzero in.  Nothing outside `tbbox` is stored at all.
+
+    A slice promises its own box: the rest of the tensor belongs to other
+    descriptors, and zeroing it would destroy their work.  The capture says
+    which one it is (`sliced`); one that predates the field is taken as a
+    slice exactly where it carries an offset, as `SubTensor` does.
+
+    `+=` promises nothing: it is defined in terms of what is there.
+    """
+    if d["add"]:
+        return None
+    dest = d["dest"]
+    if dest.get("sliced") or any(dest["offset"]):
+        lo, hi = dest["bbox"]
+        off = dest["offset"]
+        return ([l + o for l, o in zip(lo, off)],
+                [h + o for h, o in zip(hi, off)])
+    return tuple(list(x) for x in dest["tbbox"])
 
 
 def apply(d, arrays):
@@ -198,10 +271,17 @@ def apply(d, arrays):
     dsl = tuple(slice(rng[j][0] + d["dest"]["offset"][j],
                       rng[j][1] + d["dest"]["offset"][j])
                 for j in range(out_rank))
+    dest = arrays[d["dest"]["name"]]
     if d["add"]:
-        arrays[d["dest"]["name"]][dsl] += res
-    else:
-        arrays[d["dest"]["name"]][dsl] = res
+        dest[dsl] += res
+        return
+    # An assignment defines its whole promise; assigning just the computed
+    # part left the rest of it as whatever an earlier write put there -- the
+    # very defect this is the oracle for, so it could not see it.
+    box = promised_box(d)
+    if out_rank and box is not None:
+        dest[tuple(slice(l, h) for l, h in zip(*box))] = 0.0
+    dest[dsl] = res
 
 
 def run(path, seed=0, kernel=None):

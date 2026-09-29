@@ -35,6 +35,17 @@ class RunResult:
 # Reference dispatch
 # ----------------------------------------------------------------------
 
+def _whole(view) -> bool:
+    """Whether a view is all of its tensor: box, storage and index space."""
+    t = view.tensor
+    whole = ([0] * len(t.shape), [int(s) for s in t.shape])
+    return (not getattr(view, "sliced", False)
+            and ([int(x) for x in view.bbox.lower()],
+                 [int(x) for x in view.bbox.upper()]) == whole
+            and ([int(x) for x in t.bbox.lower()],
+                 [int(x) for x in t.bbox.upper()]) == whole)
+
+
 def _reference_for_case(case, inputs: Dict[str, np.ndarray],
                        dest_in: np.ndarray) -> np.ndarray:
     """If the case provides its own ``reference()``, use it; else derive from descr."""
@@ -50,6 +61,21 @@ def _reference_for_case(case, inputs: Dict[str, np.ndarray],
             "give the case an explicit reference(inputs, dest_in) function"
         )
     d = descr_list[0]
+    boxed = [v for v in [d.dest] + [o for o in d.ops if hasattr(o, "tensor")]
+             if not _whole(v)]
+    if boxed:
+        # `multilinear_reference` knows no boxes: it contracts whole operands
+        # into a whole destination.  That is yateto's `=` only where the boxes
+        # are the tensors -- a narrower one is an eqspp window (the rest of
+        # the destination zero, the rest of an operand unread) or a slice
+        # (the rest of the destination someone else's), and neither is what
+        # an einsum over the whole arrays computes.
+        raise RuntimeError(
+            "auto-reference evaluates whole tensors only; "
+            f"{', '.join(v.tensor.alias or '?' for v in boxed)} "
+            "view a box of theirs -- give the case an explicit "
+            "reference(inputs, dest_in) function"
+        )
     # Pull operand arrays by alias. Synthetic scalar operands (e.g. the
     # alpha tensor that GemmDescr injects for alpha != 1) carry their
     # value in op.tensor.data, not in the user-supplied inputs dict.

@@ -4,10 +4,11 @@
 """Execute a generated CUDA kernel on the host, all lanes, one batch element.
 
 `kernel_eval` interprets one thread.  Shared memory is where threads meet, so
-a single thread sees whatever the others have not written.  Splitting the
-per-element body at its barriers and driving every lane through one phase at a
-time gives the same guarantee the hardware does, on the same `Slot`.
+a single thread sees whatever the others have not written.  Driving every lane
+through the kernel together, statement by statement (`kernel_eval.Lockstep`),
+gives the same guarantee the hardware does, on the same `Slot`.
 """
+import json
 import re
 
 from tfpaths import add_tests_to_path
@@ -15,7 +16,28 @@ from tfpaths import add_tests_to_path
 add_tests_to_path()
 import kernel_eval as ke                                       # noqa: E402
 
+#: The lane count of a kernel that does not state its own.
 THREADS = 32
+
+
+def lanes_of(src):
+    """The lanes one multiplication runs on, as the kernel's meta line states.
+
+    Not a round number: with `threadIdx.y` held at 0, every lane past the
+    kernel's own width is another copy of one of its lanes, on the same
+    element.  A copy that repeats an assignment changes nothing, which is why
+    32 went unnoticed; one that repeats an accumulation whose load and store
+    share a phase adds its term again -- eight times over for a 4-lane
+    kernel.  `kernel_eval.launch_geometry` makes the same point for the
+    single-wave runner, which reads the launcher this does not have.
+    """
+    m = re.search(r"tensorforge-meta: (\{.*\})\s*$", src, re.M)
+    if m:
+        try:
+            return int(json.loads(m.group(1))["launch"]["threads_per_mult"])
+        except (ValueError, KeyError, TypeError):
+            pass
+    return THREADS
 
 
 def extract(path, kernel):
@@ -23,33 +45,45 @@ def extract(path, kernel):
     starts = [(i, re.match(r"\s*kernel_(kernel_\w+)\(", l).group(1))
               for i, l in enumerate(lines)
               if re.match(r"\s*kernel_kernel_\w+\(.*\{$", l)]
-    ends = [i for i, l in enumerate(lines) if l.startswith("void launcher_")]
     s = [a for a, b in starts if b == kernel][0]
-    e = min(x for x in ends if x > s)
-    return "\n".join(lines[s - 2:e])
+    # up to the brace that closes the kernel: what follows it is no longer
+    # just the launcher -- a launch configuration and a namespace sit between
+    depth, e = 0, s
+    for e in range(s, len(lines)):
+        depth += lines[e].count("{") - lines[e].count("}")
+        if depth == 0:
+            break
+    return "\n".join(lines[s - 2:e + 1])
 
 
 def desugar_async(src):
     """The shared-memory staging, modeled as the copy it is.
 
-    Two spellings reach here.  `cuda::memcpy_async` is the pipeline object
-    form, and `kernel_eval` skips anything with `::` --- right for the object,
-    wrong for the transfer, which carries the values every consumer reads.
-    `__pipeline_memcpy_async` is the intrinsic form and has no `::` to be
-    skipped by; it is simply a call the interpreter has no body for, and a
-    staging that silently does nothing leaves every consumer reading zeros.
+    `cuda::memcpy_async` is the pipeline object form, and `kernel_eval` skips
+    anything with `::` --- right for the object, wrong for the transfer, which
+    carries the values every consumer reads.
+
+    `__pipeline_memcpy_async`, the intrinsic form, is left alone: `kernel_eval`
+    models it itself, by its byte count.  Rewritten here into a one-element
+    assignment, as it used to be, it moved one of the two doubles (or four
+    floats) of every 16-byte copy, and the consumers read the rest of the
+    window as zeros.
     """
-    src = re.sub(
-        r"cuda::memcpy_async\(\s*&([^,]+?),\s*&([^,]+?),[^;]*\);",
-        r"\1 = \2;", src)
     return re.sub(
-        r"__pipeline_memcpy_async\(\s*&([^,]+?),\s*&([^,]+?),[^;]*\);",
+        r"cuda::memcpy_async\(\s*&([^,]+?),\s*&([^,]+?),[^;]*\);",
         r"\1 = \2;", src)
 
 
 def flatten_batching(src):
-    """One element, no extra offset: make every global pointer point at 0."""
+    """One element, no extra offset: make every global pointer point at 0.
+
+    A pointer-based operand is indexed by the element first, and the loop
+    variable carries a prefix these days (`&m0[v5_batchId0][0 +
+    m0_extraOffset]`); the offset within the element stays, the extra offset
+    is bound to zero.
+    """
     src = re.sub(r"&(m\d+)\[batchId0\]\[[^\]]*\]", r"&\1[0]", src)
+    src = re.sub(r"&(m\d+)\[\w*batchId\d+\]\[([^\]]*)\]", r"&\1[\2]", src)
     src = re.sub(r"&(m\d+)\[batchId0 \* \d+ \+ 0 \+ \w+\]", r"&\1[0]", src)
     src = re.sub(r"&(m\d+)\[0 \+ \w+_extraOffset\]", r"&\1[0]", src)
     return desugar_async(src)
@@ -71,8 +105,11 @@ def split_body(src):
     nodes = ke.parse(src[src.index("{"):])
     found = []
     _walk(nodes, lambda n: n[0] == "if" and "allowed" in str(n[1]), found)
+    if not found:
+        # a kernel without flags has no guard: the element loop's body is it
+        _walk(nodes, lambda n: n[0] == "for" and "batchId0" in str(n[1]), found)
     guard = found[0]
-    body = guard[2]
+    body = guard[6] if guard[0] == "for" else guard[2]
     stmts = body[1] if isinstance(body, tuple) and body[0] == "block" else body
 
     # everything the body needs -- pipeline, shared base, glb_ pointers, the
@@ -82,6 +119,8 @@ def split_body(src):
     def collect(node):
         if isinstance(node, tuple):
             if node is guard:
+                if node[0] == "for":
+                    prologue.append(("expr", f"{node[1]} = {node[2]}"))
                 return
             if node[0] == "for":
                 prologue.append(("expr", f"{node[1]} = {node[2]}"))
@@ -120,7 +159,8 @@ def strides(shape):
     return out
 
 
-def run(src, inputs, shapes, storage=None):
+def run(src, inputs, shapes, storage=None, lanes=None):
+    lanes = lanes or lanes_of(src)
     mem = ke.Slot(0)
     # Every slot the kernel can touch has to be defined, or `Slot.read`
     # fabricates one and the comparison measures that instead.  Inputs get
@@ -150,6 +190,7 @@ def run(src, inputs, shapes, storage=None):
             flat = flat[_np.asarray(pack)]
         for idx in range(max(n, 1)):
             mem.write(name, idx, float(flat[idx]) if idx < len(flat) else 0.0)
+    mem.write("flags0", 0, 1)
     m = re.search(r"&totalShrMem\[(\d+) \* threadIdx\.y", src)
     arena = int(m.group(1)) * 2 if m else 0
     for idx in range(arena):
@@ -157,17 +198,22 @@ def run(src, inputs, shapes, storage=None):
 
     base = {
         "blockIdx": type("B", (), {"x": 0, "y": 0, "z": 0})(),
-        "blockDim": type("D", (), {"x": THREADS, "y": 1, "z": 1})(),
+        "blockDim": type("D", (), {"x": lanes, "y": 1, "z": 1})(),
         "gridDim": type("G", (), {"x": 1, "y": 1, "z": 1})(),
         "numElements0": 1,
-        "flags0": None,
+        # every element allowed: a kernel that requires flags reads them
+        # without asking for nullptr first
+        "flags0": ke.Ptr(mem, "flags0"),
         "totalShrMemPtr": ke.Ptr(mem, "shr"),
     }
-    # a SCALAR-addressed tensor is passed by value, not as a pointer
+    # a SCALAR-addressed tensor is passed by value, not as a pointer -- in
+    # either precision: a `double` one was taken for a pointer, and the first
+    # product with it aborted a double-precision kernel
     k = src.index("kernel_kernel_")
     sig = src[src.index("(", k):src.index(")", k)]
-    scalars = set(re.findall(r"(?<!\*)\bfloat (m\d+)\b", sig))
-    scalars -= set(re.findall(r"float\s*\*+\s*(?:const\s*)?(m\d+)", sig))
+    scalars = set(re.findall(r"(?<!\*)\b(?:float|double) (m\d+)\b", sig))
+    scalars -= set(re.findall(r"(?:float|double)\s*\*+\s*(?:const\s*)?(m\d+)",
+                              sig))
     for name in re.findall(r"\b(m\d+)\b", src):
         if name in scalars:
             base.setdefault(name, float(inputs[name].reshape(-1)[0])
@@ -177,17 +223,18 @@ def run(src, inputs, shapes, storage=None):
     for name in re.findall(r"\b(\w*_extraOffset)\b", src):
         base.setdefault(name, 0)
 
-    prologue, phases = split_body(src)
+    # Statement by statement, not phase by phase: splitting the body at its
+    # top-level barriers (`split_body`) has nothing for a barrier inside a
+    # loop -- a rolled face loop has one per iteration -- nor for a lane
+    # reading another's register (`readlane`), which needs the other lane at
+    # the same statement.  For a body without races, any schedule the
+    # barriers allow gives the same values, this one included.
     interps = []
-    for lane in range(THREADS):
+    for lane in range(lanes):
         env = dict(base)
         env["threadIdx"] = type("T", (), {"x": lane, "y": 0, "z": 0})()
-        it = ke.Interp(mem, env, limit=40_000_000)
-        it.run(prologue)
-        interps.append(it)
-    for phase in phases:
-        for it in interps:
-            it.run(phase)
+        interps.append(ke.Interp(mem, env, limit=40_000_000))
+    ke.Lockstep(interps).run(ke.parse(src[src.index("{"):]))
     return mem
 
 

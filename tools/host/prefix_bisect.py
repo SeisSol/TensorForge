@@ -77,19 +77,10 @@ def evaluate(descrs, upto, backend="cuda", arch="sm_86", seed=1):
     storage = ref.storage_of(prefix)
     arrays = ref.make(shapes, written, seed,
                       ref.constants_of(prefix_descrs(descrs, upto)), storage)
-    # A destination that is *only* accumulated onto must carry a value on
-    # entry, or a dropped bias cannot show.  One with an assignment among its
-    # writers must not -- see the note in validate_dump.py.
+    # Every destination in memory carries a value on entry -- see
+    # `reference.seed_destinations`.
     prefix = prefix_descrs(descrs, upto)
-    assigned = {d["dest"]["name"] for d in prefix if not d["add"]}
-    seeded = set()
-    rng = np.random.default_rng(seed + 5)
-    for d in prefix:
-        n = d["dest"]["name"]
-        if (d["add"] and not d["dest"]["is_tmp"]
-                and n not in assigned and n not in seeded):
-            arrays[n] = rng.standard_normal(shapes[n])
-            seeded.add(n)
+    seeded = ref.seed_destinations(prefix, arrays, shapes, storage, seed)
     inputs = {k: v.copy() for k, v in arrays.items() if k not in written}
     inputs.update({n: arrays[n].copy() for n in seeded})
     for d in prefix:

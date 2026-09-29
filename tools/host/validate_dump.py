@@ -36,22 +36,13 @@ def check(dump, descriptors, kernel, seed=1, nonzero_dest=True):
     storage = reference.storage_of(prefix)
     arrays = reference.make(shapes, written, seed,
                             reference.constants_of(prefix), storage)
-    # A destination that is *only* accumulated onto must carry a value on
-    # entry, or a dropped bias cannot show.  One with an assignment among its
-    # writers must not: yateto's contract is that such a tensor is fully
-    # defined by the kernel, and the store zero-fills outside the eqspp window
-    # -- which the reference here does not model, so a seeded value would
-    # register as a disagreement that is not one.
+    # Every destination in memory carries a value on entry, or neither a
+    # dropped bias nor a zero an assignment owes but did not write can show
+    # -- see `reference.seed_destinations`.
     seeded = set()
     if nonzero_dest:
-        assigned = {d["dest"]["name"] for d in prefix if not d["add"]}
-        rng = np.random.default_rng(seed + 5)
-        for d in prefix:
-            name = d["dest"]["name"]
-            if (d["add"] and not d["dest"]["is_tmp"]
-                    and name not in assigned and name not in seeded):
-                arrays[name] = rng.standard_normal(shapes[name])
-                seeded.add(name)
+        seeded = reference.seed_destinations(prefix, arrays, shapes, storage,
+                                             seed)
     inputs = {k: v.copy() for k, v in arrays.items() if k not in written}
     inputs.update({name: arrays[name].copy() for name in seeded})
     for d in prefix:

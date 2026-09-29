@@ -245,6 +245,7 @@ def _py(expr: str) -> str:
 
         depth = 0
         start = None
+        inner = False          # this ternary is the true arm of another
         for i in range(q - 1, -1, -1):
             if e[i] == ')':
                 depth += 1
@@ -253,6 +254,13 @@ def _py(expr: str) -> str:
                     start = i
                     break
                 depth -= 1
+            elif depth == 0 and (e[i] == '?' or (
+                    e[i] == ':' and e[i - 1:i + 1] != '::'
+                    and e[i:i + 2] != '::')):
+                # `a ? b : c ? d : e` is `a ? b : (c ? d : e)`
+                start = i
+                inner = e[i] == '?'
+                break
         if start is None:
             start = -1
 
@@ -269,6 +277,9 @@ def _py(expr: str) -> str:
                 depth -= 1
             elif e[i] == ':' and depth == 0 and colon is None:
                 colon = i
+            elif e[i] == ':' and depth == 0 and inner:
+                stop = i                # the outer ternary's own `:`
+                break
         if colon is None:
             raise Abort(f'unbalanced ternary in {expr!r}')
         if stop is None:
