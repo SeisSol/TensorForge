@@ -36,6 +36,7 @@ from git before anything else runs.
 """
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -97,6 +98,32 @@ def sub(path, old, new, count=0):
     return make
 
 
+
+def resub(path, pattern, repl, count=1):
+    """`sub` with a pattern, for text whose names are not stable.
+
+    A snapshot names its values by SSA number, and every regeneration
+    renumbers them: an anchor spelled with `v41_data` stops matching the
+    first time the corpus is rewritten, for no reason the check cares about.
+    The pattern names the construct instead -- a call, its arity, a type --
+    and the same "did not apply" rule holds.
+    """
+    compiled = re.compile(pattern)
+
+    def make():
+        if not path.exists():
+            raise AssertionError(
+                f'{path} does not exist: the file has moved, so this check is '
+                f'no longer testing anything')
+        text = path.read_text()
+        out = compiled.sub(repl, text, count=count)
+        if out == text:
+            raise AssertionError(
+                f'mutation did not apply to {path}: the code has moved, so '
+                f'this check is no longer testing anything')
+        return path, out
+    return make
+
 GROUPS = {
     # The diagnostics themselves.  `ir_opacity` reported the whole corpus as
     # failing to generate for as long as nobody re-derived its number.
@@ -112,8 +139,8 @@ GROUPS = {
     'irbanks': ('tests/test_pir_banks.py', [
         ('the volume rule picks a width the pattern does not want',
          sub(Path('src/tensorforge/backend/instructions/memory/__init__.py'),
-             '    while width * 2 <= self._BANKS and volume % (width * 2) == 0:',
-             '    while width * 2 <= 8 and volume % (width * 2) == 0:', 1)),
+             '    while width * 2 <= self._BANKS and volume % (width * granule * 2) == 0:',
+             '    while width * 2 <= 8 and volume % (width * granule * 2) == 0:', 1)),
         ('the recommender scores every candidate the same',
          sub(Path('src/tensorforge/backend/pir/banks.py'),
              '                if candidate > 1:',
@@ -216,10 +243,10 @@ GROUPS = {
              '        m = None', 1)),
         ('the C tile loses its swizzle',
          sub(Path('src/tensorforge/backend/instructions/compute/primitives/nvidia.py'),
-             "hint='ctile', swizzle=XorSwizzle(threads))", "hint='ctile')", 1)),
+             "hint='ctile', swizzle=XorSwizzle(wave))", "hint='ctile')", 1)),
         ('the C tile takes the B tile\'s width',
          sub(Path('src/tensorforge/backend/instructions/compute/primitives/nvidia.py'),
-             "hint='ctile', swizzle=XorSwizzle(threads))",
+             "hint='ctile', swizzle=XorSwizzle(wave))",
              "hint='ctile', swizzle=XorSwizzle(atom.k))", 1)),
         ('a named load falls back to text',
          sub(Path('src/tensorforge/backend/pir/build.py'),
@@ -234,7 +261,7 @@ GROUPS = {
              '        buf = base', 1)),
         ('the window width stops dividing the volume',
          sub(Path('src/tensorforge/backend/instructions/memory/__init__.py'),
-             '    while width * 2 <= self._BANKS and volume % (width * 2) == 0:',
+             '    while width * 2 <= self._BANKS and volume % (width * granule * 2) == 0:',
              '    while width * 2 <= self._BANKS:', 1)),
         ('an odd volume swizzled anyway',
          sub(Path('src/tensorforge/backend/instructions/memory/__init__.py'),
@@ -246,18 +273,22 @@ GROUPS = {
              '    volume = view.shape[0]', 1)),
         ('the load stops applying it',
          sub(Path('src/tensorforge/backend/pir/build.py'),
-             '        indices = tuple(self._swizzled(base, i) for i in indices)\n'
+             '        indices = self._shifted(tuple(self._swizzled(base, i) for i in indices),\n'
+             '                                shift)\n'
              '        if uniform is None:',
+             '        indices = self._shifted(tuple(indices), shift)\n'
              '        if uniform is None:', 1)),
         ('the store stops applying it',
          sub(Path('src/tensorforge/backend/pir/build.py'),
-             '        indices = tuple(self._swizzled(base, i) for i in indices)\n'
+             '        indices = self._shifted(tuple(self._swizzled(base, i) for i in indices),\n'
+             '                                shift)\n'
              '        kind = Effect.ATOMIC if atomic else Effect.WRITE',
+             '        indices = self._shifted(tuple(indices), shift)\n'
              '        kind = Effect.ATOMIC if atomic else Effect.WRITE', 1)),
         ('the permutation stops being a bijection',
          sub(Path('src/tensorforge/backend/pir/core.py'),
-             'return index ^ ((index // self.width) % self.width)',
-             'return index ^ (index % self.width)', 1)),
+             'return (g ^ ((g // self.width) % self.width)) * self.granule + r',
+             'return (g ^ (g % self.width)) * self.granule + r', 1)),
         ('a non-power-of-two width accepted',
          sub(Path('src/tensorforge/backend/pir/core.py'),
              'if self.width < 1 or self.width & (self.width - 1):',
@@ -376,10 +407,10 @@ GROUPS = {
         ('gfx900 guard removed (the original bug)',
          sub(PKG / 'caps.py', '    return amdarch(ctx) != 0x900',
              '    return True')),
-        ('fmacdpp8 re-enabled without a runtime',
+        ('fmacdpp8 offered below gfx10, where the runtime has none',
          sub(PKG / 'caps.py',
-             '    return False\n\n\ndef has_fmacdpp16',
-             '    return True\n\n\ndef has_fmacdpp16')),
+             '    return amdarch(ctx) >= 0x1000\n',
+             '    return amdarch(ctx) >= 0x900\n', 1)),
         ('codegen widened past the header (gfx908)',
          sub(PKG / 'caps.py',
              'return arch in (0x90a, 0x940, 0x941, 0x942, 0x950) or arch >= 0x1000',
@@ -442,9 +473,9 @@ GROUPS = {
         ('a packed lead operand offered the AMD arrangements anyway',
          sub(Path('src/tensorforge/backend/instructions/compute/primitives/amd/__init__.py'),
              '    if bitlayout.packed(shape.lead_layout):\n'
-             '        return (frozenset({Strategy.MATRIX})',
+             '        offered = set()',
              '    if False:\n'
-             '        return (frozenset({Strategy.MATRIX})')),
+             '        offered = set()')),
         ('a packed lead operand offered the NVIDIA fragments',
          sub(Path('src/tensorforge/backend/instructions/compute/primitives/nvidia.py'),
              '    if not takes(lead_route(shape)):\n        return frozenset()',
@@ -475,8 +506,8 @@ GROUPS = {
              '      coords.append(int(idx))')),
         ('a replicating pair of axes taken as a bijection',
          sub(Path('src/tensorforge/backend/symbol.py'),
-             '    return layout if layout.tiles(self.num_threads) else None',
-             '    return layout')),
+             '  return layout if layout.tiles(num_threads) else None',
+             '  return layout')),
         ('the broadcast index divided by the wave on every axis',
          sub(Path('src/tensorforge/backend/symbol.py'),
              '              block = self.lead_block(dim)\n'
@@ -499,15 +530,15 @@ GROUPS = {
              "* DataView.lead_lanes(\n"
              "                    None, _explicit_simd(self._context), "
              "self._num_threads)")),
-        ('blocks that leave the lanes holding copies admitted',
+        ('lane blocks that do not divide the wave admitted',
          sub(Path('src/tensorforge/backend/temporaries.py'),
-             '        if self._num_threads and product != self._num_threads:',
+             '        if self._num_threads and self._num_threads % product != 0:',
              '        if False:')),
         ('a packed image on two axes given an owner anyway',
          sub(Path('src/tensorforge/backend/symbol.py'),
              '    if self.lead_width > 1 and len(self.lead_dims) > 1:\n'
-             '      # One width',
-             '    if False:\n      # One width')),
+             '      return ()',
+             '    if False:\n      return ()')),
         ('an undeclared lead index read as unspread',
          sub(Path('src/tensorforge/backend/symbol.py'),
              '    if dim not in self.lead_dims:\n      return self.num_threads',
@@ -689,8 +720,8 @@ GROUPS = {
              '            out |= set(axis.holders(i, threads))')),
         ('replication ignores the stride',
          sub(CORE,
-             '            key = tuple((t // a.stride) % a.block for a in self.axes)',
-             '            key = tuple(t % a.block for a in self.axes)')),
+             '        key = tuple((t // a.stride) % a.block for a in axes)',
+             '        key = tuple(t % a.block for a in axes)')),
         ('tiles reintroduced as a second rule',
          sub(CORE, '        return self.replication(threads) == 1',
              '        return all(a.stride == 1 for a in self.axes)')),
@@ -726,7 +757,7 @@ GROUPS = {
     'scratch': ('tests/test_pir_scratch.py', [
         ('a shared alloc declares its own array again',
          sub(EMIT,
-             "                w(f'{self.ctype(t, v)} {self.name(v)} = &{arena}[{off}];')",
+             "                w(f'{self.ctype(t, v)} {self.name(v)} = {window};')",
              "                w(f'__shared__ {t.elem.ctype()} {self.name(v)}[{t.volume}];')")),
         ('the budget check dropped',
          sub(BUILD, '        if max(end, self._scratch_peak) > budget:',
@@ -738,7 +769,8 @@ GROUPS = {
         ('no budget read as unlimited',
          sub(BUILD, '        if self._scratch is None:', '        if False:')),
         ('the instruction hands over a budget it did not declare',
-         sub(ABSTR, "scratch=(('tempShrMem', budget) if budget else None))",
+         sub(ABSTR, "scratch=(('tempShrMem', budget) if budget\n"
+                    "                                       else None))",
              "scratch=('tempShrMem', 1 << 20))")),
     ]),
 
@@ -784,8 +816,10 @@ GROUPS = {
          sub(SYM, '    structured = (not atomic and isinstance(variable, _Value)',
              '    structured = (isinstance(variable, _Value)')),
         ('the address pinned again, so nothing folds or shares',
-         sub(SYM, '    return self.build_address(writer, context, index)\n\n  def access_address',
-             '    return writer.pin(self.build_address(writer, context, index))\n\n  def access_address')),
+         sub(SYM, '    return self.build_address(writer, context, index, shift=shift)\n\n'
+                  '  def access_address',
+             '    return writer.pin(self.build_address(writer, context, index, shift=shift))\n\n'
+             '  def access_address')),
         ('the innermost loop body wrapped in a scope again',
          sub(SYM, '    if len(loops) == 0:\n      inner(varlist)',
              '    if len(loops) == 0:\n      with writer.Scope():\n        inner(varlist)')),
@@ -817,21 +851,21 @@ GROUPS = {
     # in an argument it could not type --- was outside what it could see.
     'syntax': ('tests/test_syntax.py', [
         ('a literal handed to a reference parameter',
-         sub(Path('tests/snapshots/gemm_56x18_x_18x18.hip.cpp'),
-             'tensorforge::transpose4x4b32(v55_tp, v56_tp, v57_tp, v58_tp,',
-             'tensorforge::transpose4x4b32(v55_tp, v56_tp, 0.0f, 0.0f,', 1)),
+         resub(Path('tests/snapshots/gemm_56x18_x_18x18.hip.cpp'),
+               r'tensorforge::transpose4x4b32\((\w+), (\w+), \w+, \w+,',
+               r'tensorforge::transpose4x4b32(\1, \2, 0.0f, 0.0f,')),
         ('an argument dropped from a transpose',
-         sub(Path('tests/snapshots/gemm_square_16.hip.cpp'),
-             ', v41_data, v42_data, v43_data, v44_data);',
-             ', v41_data, v42_data, v43_data);', 1)),
+         resub(Path('tests/snapshots/gemm_square_16.hip.cpp'),
+               r'(tensorforge::transpose16x16b32\((?:\w+, ){14}\w+), \w+\);',
+               r'\1);')),
         ('an operand that is never declared',
-         sub(Path('tests/snapshots/gemm_square_16.hip.cpp'),
-             ', v41_data, v42_data, v43_data, v44_data);',
-             ', v41_data, v42_data, v43_data, v44_undeclared);', 1)),
+         resub(Path('tests/snapshots/gemm_square_16.hip.cpp'),
+               r'(tensorforge::transpose16x16b32\((?:\w+, ){15})\w+\);',
+               r'\1undeclared_operand);')),
         ('an MFMA accumulator of the wrong width',
-         sub(Path('tests/snapshots/gemm_square_16.hip.cpp'),
-             'tensorforge::VectorT<float, 4>',
-             'tensorforge::VectorT<float, 2>', 1)),
+         resub(Path('tests/snapshots/gemm_56x18_x_18x18.hip.cpp'),
+               r'tensorforge::VectorT<float, 4> (\w+_acc) =',
+               r'tensorforge::VectorT<float, 2> \1 =')),
         ('a store past the end of a shared-memory declaration',
          sub(Path('tests/snapshots/gemm_square_16.hip.cpp'),
              'const auto batchId_start',
@@ -861,8 +895,9 @@ GROUPS = {
              '', 1)),
         ('the shim made more permissive than the header',
          sub(Path('tests/shim/tensorforge_host.h'),
-             'template <int Row> float movdpp16(float a);',
-             'template <int Row, typename T> T movdpp16(T a);', 1)),
+             'template <int Row, typename T> T movdpp16(T a);',
+             'template <int Row, typename T> T movdpp16(T a);\n'
+             'template <int Row, typename T> T movdpp16(T a, T b);', 1)),
         ('a parameter that should be a reference passed by value',
          sub(Path('tests/shim/tensorforge_host.h'),
              'void transpose16x2(T &w1, T &w2, T v1, T v2);',
@@ -886,7 +921,8 @@ GROUPS = {
         ('the read drops what the fill recorded',
          sub(Path('src/tensorforge/backend/symbol.py'),
              "        return writer.load(buf, addr, type_=ltype, hint='lin',\n"
-             "                           layout=self.layout,",
+             "                           layout=self._linear_read_layout(index, vec,\n"
+             "                                                           threads),",
              "        return writer.load(buf, addr, type_=ltype, hint='lin',\n"
              "                           layout=None,", 1)),
         ('the wave width taken as the block instead of the thread count',
@@ -1015,36 +1051,36 @@ GROUPS = {
              '    if scale != 1:', '    if False:', 1)),
         ('a staged fragment goes back to a varalloc name',
          sub(Path('src/tensorforge/backend/instructions/compute/primitives/nvidia.py'),
-             '                                            got = A(writer, None, i // threads,\n'
-             '                                                    k + kk + kkk, parts=aparts)',
-             "                                            got = writer.varalloc()\n"
-             "                                            A(writer, f'{got}', i // threads,\n"
-             "                                              k + kk + kkk, parts=aparts)", 1)),
+             '                                    got = A(writer, None, slot,\n'
+             '                                            k + kk + kkk, parts=aparts)',
+             "                                    got = writer.varalloc()\n"
+             "                                    A(writer, f'{got}', slot,\n"
+             "                                      k + kk + kkk, parts=aparts)", 1)),
         ('a padding fragment declared as text again',
          sub(Path('src/tensorforge/backend/instructions/compute/primitives/nvidia.py'),
-             "                                                AregParts[pt][kkk] = writer.declare(\n"
-             "                                                    ScalarType(atom.d), hint='as')",
-             "                                                AregParts[pt][kkk] = writer.varalloc()\n"
-             "                                                writer(f'float {AregParts[pt][kkk]}{{}};',\n"
-             "                                                       accesses=())", 1)),
+             "                                        AregParts[pt][q, kkk] = writer.declare(\n"
+             "                                            ScalarType(atom.d), hint='as')",
+             "                                        AregParts[pt][q, kkk] = writer.varalloc()\n"
+             "                                        writer(f'float {AregParts[pt][q, kkk]}{{}};',\n"
+             "                                               accesses=())", 1)),
         ('the wave width no longer checked',
          sub(Path('src/tensorforge/backend/instructions/compute/primitives/nvidia.py'),
-             '    return (threads == 32 and dtype in (Datatype.F32, '
-             'Datatype.F64)',
+             '    return (threads <= WAVE and WAVE % threads == 0\n'
+             '            and dtype in (Datatype.F32, Datatype.F64)',
              '    return (dtype in (Datatype.F32, Datatype.F64)', 1)),
         ('the operand type no longer checked',
          sub(Path('src/tensorforge/backend/instructions/compute/primitives/nvidia.py'),
-             '    return (threads == 32 and dtype in (Datatype.F32, '
-             'Datatype.F64)\n            and not sparse',
-             '    return (threads == 32\n            and not sparse', 1)),
+             '            and dtype in (Datatype.F32, Datatype.F64)\n'
+             '            and not sparse',
+             '            and not sparse', 1)),
         ('the gate bypassed entirely',
          sub(Path('src/tensorforge/backend/instructions/compute/primitives/nvidia.py'),
-             '    if (ENABLED\n'
+             '    if (enabled(ctx)\n'
              '            and supports(shape.threads, shape.accumulator, '
              'shape.sparse,\n'
              '                         shape.depth)\n'
              '            and instrs_for(shape.accumulator, sm_of(ctx))):',
-             '    if ENABLED:', 1)),
+             '    if enabled(ctx):', 1)),
         ('the arch dropped from the offer, so a target with no entry is offered one',
          sub(Path('src/tensorforge/backend/instructions/compute/primitives/nvidia.py'),
              '            and instrs_for(shape.accumulator, sm_of(ctx))):',
