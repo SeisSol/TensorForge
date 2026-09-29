@@ -74,6 +74,64 @@ _INTRINSIC = (('threadIdx.x', 'TIDX'), ('threadIdx.y', 'TIDY'),
 _SUFFIX = re.compile(r'\b(\d+)_[iu]\d+\b')
 
 
+def _ternaries(text):
+    """C's `c ? a : b` spelled as Python's `(a if c else b)`.
+
+    A predicated read takes its guard into the address rather than around
+    the access -- `s1[g ? (i) : (0)]` -- so the conditional is part of what
+    an access is.  Right-associative, as in C, and converted per parenthesized
+    level, which is where the generated code puts one: `(g ? x : y) * 256`.
+    """
+    def split(part):
+        # the `?` at this level, and the `:` that closes it past any nested pair
+        depth = nested = 0
+        q = None
+        for i, ch in enumerate(part):
+            if ch == '(':
+                depth += 1
+            elif ch == ')':
+                depth -= 1
+            elif depth == 0 and ch == '?':
+                if q is None:
+                    q = i
+                else:
+                    nested += 1
+            elif depth == 0 and ch == ':' and q is not None:
+                if nested:
+                    nested -= 1
+                else:
+                    return q, i
+        return None
+
+    def groups(part):
+        # every parenthesized group converted on its own
+        out, i = [], 0
+        while i < len(part):
+            if part[i] != '(':
+                out.append(part[i])
+                i += 1
+                continue
+            depth, j = 0, i
+            while True:
+                depth += {'(': 1, ')': -1}.get(part[j], 0)
+                if depth == 0:
+                    break
+                j += 1
+            out.append('(' + convert(part[i + 1:j]) + ')')
+            i = j + 1
+        return ''.join(out)
+
+    def convert(part):
+        found = split(part)
+        if found is None:
+            return groups(part)
+        q, c = found
+        return (f'({convert(part[q + 1:c])} if {convert(part[:q])} '
+                f'else {convert(part[c + 1:])})')
+
+    return convert(text) if '?' in text else text
+
+
 class _Fold(ast.NodeTransformer):
     """The identities an unpinned address folds on its own."""
 
@@ -118,6 +176,7 @@ def _canon_expr(expr):
     text = _SUFFIX.sub(r'\1', expr)
     for c, py in _INTRINSIC:
         text = text.replace(c, py)
+    text = _ternaries(text)
     try:
         tree = _Fold().visit(ast.parse(text, mode='eval'))
     except SyntaxError:
@@ -159,10 +218,19 @@ def accesses(src):
     return out
 
 
+#: The kernel section of a snapshot.  A snapshot also records the header and
+#: the launcher, whose `block[3]` and `grid[3]` read like subscripts and are
+#: no accesses of the kernel -- compared whole, every target differed.
+_KERNEL = re.compile(r'^// === kernel ===\n(.*?)(?=^// === |\Z)', re.M | re.S)
+
+
 def _at_rev(rev, path):
     r = subprocess.run(['git', 'show', f'{rev}:{path}'],
                        capture_output=True, text=True)
-    return r.stdout if r.returncode == 0 else None
+    if r.returncode != 0:
+        return None
+    m = _KERNEL.search(r.stdout)
+    return m.group(1) if m else ''
 
 
 def _case_paths():
@@ -195,7 +263,8 @@ def main(argv):
             try:
                 gen = Generator(mod.descr_list(),
                                 Context(arch=arch, backend=backend,
-                                        fp_type=getattr(mod, 'DTYPE', None)))
+                                        fp_type=getattr(mod, 'DTYPE', None)),
+                                attrs=getattr(mod, 'ATTRS', None))
                 gen.generate()
                 new = gen.get_kernel() or ''
             except Exception as exc:

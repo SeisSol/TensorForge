@@ -123,13 +123,29 @@ def test_a_typed_literal_is_not_a_parse_failure():
               'float a = s0[(v0_i % 32) + 32];')
 
 
+def test_a_predicated_subscript_is_read_through():
+    """A predicated read carries its guard in the address, as C's `?:`.
+    Renumbered and reparenthesized, it is the same access."""
+    assert eq('float v4_d = s1[v2_g ? (v3_i) : (0)];',
+              'float v9_d = s1[(v7_g ? v8_i : 0)];')
+    assert eq('float v4_d = s1[(v2_g ? (v3_i + 1) : v3_i) * 256 + 0];',
+              'float v4_d = s1[(v2_g ? v3_i + 1 : v3_i) * 256];')
+
+
+def test_the_branches_of_a_predicated_subscript_are_not_interchangeable():
+    assert not eq('float v4_d = s1[v2_g ? v3_i : 0];',
+                  'float v4_d = s1[v2_g ? 0 : v3_i];')
+    assert not eq('float v4_d = s1[v2_g ? v3_i : 0];',
+                  'float v4_d = s1[v3_i ? v2_g : 0];')
+
+
 def test_an_unparseable_subscript_raises():
     """The tool's answer licenses not reading the diff, so a construct it
     cannot parse has to be loud. Falling back to text, or dropping the entry,
     would both end in a quiet "identical" over accesses it stopped reading."""
     import pytest
     with pytest.raises(ValueError, match='cannot parse the subscript'):
-        accesses('float a = s0[p ? i : j];')
+        accesses('float a = s0[p && i];')
 
 
 def test_renaming_is_positional_not_wholesale():
