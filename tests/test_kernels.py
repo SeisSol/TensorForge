@@ -287,17 +287,34 @@ def test_add_true_sets_accumulate_and_promotes_dest():
                               fp_type=mod.DTYPE)).generate()
 
 
-def test_beta_nonzero_is_marked_xfail_and_constructs():
-    """``beta_nonzero`` must declare ``XFAIL=True`` (the silently-dropped
-    beta is a known bug). Construction itself must succeed so the case
-    actually reaches the comparison phase to fail there."""
-    mod = _import_case("beta_nonzero.py")
-    assert getattr(mod, "XFAIL", False), (
-        "beta_nonzero case: must be XFAIL until GemmDescr forwards beta")
-    descrs = mod.descr_list()
-    assert any(getattr(d, "beta", None) not in (None, 0.0)
-               or "beta" in mod.__doc__.lower()
-               for d in descrs)  # weak: beta is dropped at construction
+def test_gemm_descr_refuses_a_beta_it_cannot_apply():
+    """``beta`` is 0 (overwrite C) or 1 (add onto C), and nothing else.
+
+    A multilinear has no third mode, so any other value is refused where it
+    is given instead of being computed as one of the two.  Both admitted
+    values construct; 1 is the accumulation ``add_true`` checks end to end.
+    """
+    import pytest
+
+    from tensorforge.common.basic_types import Addressing
+    from tensorforge.common.exceptions import GenerationError
+    from tensorforge.common.matrix.boundingbox import BoundingBox
+    from tensorforge.common.matrix.tensor import SubTensor, Tensor
+    from tensorforge.generators.descriptions import GemmDescr
+
+    def matrix(alias, rows, cols):
+        return SubTensor(Tensor([rows, cols], Addressing.STRIDED,
+                                BoundingBox([0, 0], [rows, cols]),
+                                alias=alias, datatype=Datatype.F32))
+
+    def gemm(beta):
+        return GemmDescr(False, False, matrix("A", 12, 16),
+                         matrix("B", 16, 8), matrix("C", 12, 8), beta=beta)
+
+    assert not gemm(0.0).add
+    assert gemm(1.0).add
+    with pytest.raises(GenerationError, match="beta = 0.5"):
+        gemm(0.5)
 
 
 def test_addressing_none_uses_none_for_operator():

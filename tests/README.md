@@ -59,7 +59,7 @@ Cases live under `cases/`, grouped by feature:
 | Barriers              | `cases/barriers/`     | `GridFenceDescr` / `GridBarrierDescr` between descrs (multi-section, cooperative launch)|
 
 Top-level `cases/*.py` also include the *single-feature* coverage
-cases — `trans_b`, `add_true`, `beta_nonzero`, `addressing_none`,
+cases — `trans_b`, `add_true`, `addressing_none`,
 `addressing_ptr_based`, `sparsity_band` — each of which carries a
 host-only smoke test in `test_kernels.py` asserting its distinguishing
 property (so a case that gets accidentally rewritten into a plain GEMM
@@ -67,18 +67,13 @@ is caught).
 
 ### XFAIL strict
 
-Several cases are marked `XFAIL=True` with a `XFAIL_REASON` string,
+A case can be marked `XFAIL=True` with an `XFAIL_REASON` string,
 which `conftest.py:pytest_generate_tests` translates into
 `pytest.mark.xfail(strict=True, run=True)`. The strict flag matters:
 the first time one of these cases passes, it turns into a hard
 failure, which is the signal to drop the marker.
 
-Currently XFAIL:
-
-* `cases/beta_nonzero.py` — `GemmDescr` silently drops the `beta` argument
-
-* `cases/addressing_ptr_based.py` — the test driver
-doesn't yet emit `T**`-style allocations
+No case carries the marker at the moment.
 
 ## Selecting subsets
 
@@ -329,9 +324,8 @@ GEMMs but each tests exactly one feature axis:
 | `trans_b.py`               | `trans_b=True` (transpose second operand)          | green                                                                                                                    |
 | `csa_alpha.py`             | `alpha != 1` synthetic-scalar path                 | green; regression test for an earlier datatype-on-synthetic-scalar bug                                                   |
 | `add_true.py`              | `add=True` on bare `MultilinearDescr`              | green; exists because `GemmDescr` positionally hands `strict_match` into the `add` slot (`descriptions.py:147`/`:158`)   |
-| `beta_nonzero.py`          | `beta != 0` on `GemmDescr`                         | **XFAIL** — `beta` is silently dropped at construction; deterministic reproducer                                          |
 | `addressing_none.py`       | `Addressing.NONE` (batch-constant operator matrix) | green; SeisSol's static-operator pattern                                                                                  |
-| `addressing_ptr_based.py`  | `Addressing.PTR_BASED` (heterogeneous batches)     | **XFAIL** — generation works, the harness driver doesn't yet emit per-batch `malloc` + `T**` indirection                  |
+| `addressing_ptr_based.py`  | `Addressing.PTR_BASED` (heterogeneous batches)     | green; the driver builds the per-batch pointer array (`T**`)                                                             |
 | `sparsity_band.py`         | `Tensor(..., spp=MaskSPP(...))`                    | green; banded `B` operand with cells outside the mask zeroed by `INPUT_TRANSFORM`                                          |
 | `f64.py`, `f128.py`        | non-F32 dtypes                                     | green; F128 requires a compiler with `__float128` support                                                                 |
 
@@ -355,36 +349,31 @@ has a deterministic reproducer in the suite:
    either way. Reproducer: `add_true.py` documents why it can't be
    written via `GemmDescr`.
 
-2. **`GemmDescr` silently drops `beta`** — the original
-   `assert beta == 0.0` at `descriptions.py:144` was commented out
-   rather than replaced with handling. Any `beta != 0` produces the
-   same kernel as `beta == 0`. Reproducer: `beta_nonzero.py` (XFAIL).
-
-3. **`ElementwiseInstruction._assignment_loop` calls `LeadLoop` without
+2. **`ElementwiseInstruction._assignment_loop` calls `LeadLoop` without
    `stride`** — every `cases/elementwise/*` case crashes generation with
    `TypeError: LeadLoop.__init__() missing 1 required positional
    argument: 'stride'` (`elementwise.py:57` vs.\\ `symbol.py:196`).
 
-4. **`Operation.TANH` aliases `Operation.TAN`** (and the same for
+3. **`Operation.TANH` aliases `Operation.TAN`** (and the same for
    `sinh`/`sin`, `cosh`/`cos`, `asinh`/`asin`, `acosh`/`acos`,
    `atanh`/`atan`) — duplicate-valued `enum.Enum` members collapse, so
    `optree.tanh(x)` lowers to a `TAN` node and the CUDA lexic emits
    `tanf`. Reproducer: `cases/elementwise/tanh.py` will fail
    numerically once generation works.
 
-5. **A partial lead-axis reduction has no lowering** — contracting the
+4. **A partial lead-axis reduction has no lowering** — contracting the
    thread-distributed axis works only when every axis is contracted.
    Keeping some would mean redistributing them over the lanes first.
    `ReductionInstruction` raises with an explicit message. No case
    reproduces it; `ReductionDescr` has no shape that reaches it today.
 
-6. **PTR_BASED needs harness driver work** — the generator emits
+5. **PTR_BASED needs harness driver work** — the generator emits
    correct device code, but `tests/harness/driver_emit.py:257` only
    handles `strided`, `none`, and `scalar`. Reproducer:
    `addressing_ptr_based.py` (XFAIL).
 
 The order of fixes that turns the most XFAIL cases green at once is
-roughly 3 → 4 → 2 → 1 → 5 → 6.
+roughly 2 → 3 → 1 → 4 → 5.
 
 ## Backends
 

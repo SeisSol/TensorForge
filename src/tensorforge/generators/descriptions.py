@@ -656,11 +656,14 @@ class GemmDescr(MultilinearDescr):
     # separate step.
     permute_a = [1, 0] if trans_a else [0, 1]
     permute_b = [1, 0] if trans_b else [0, 1]
-    # assert beta == 0.0
-    # super(GemmDescr, self).__init__(c, [a, b, alpha, beta], [target_a, target_b, [], []], strict_match, prefer_align)
-    add = True if beta == 1 else False
-
-    assert beta in (0, 1)
+    # A multilinear either overwrites its destination or adds onto it, so
+    # beta has two values it can express.  Any other scales C before the
+    # product is added, which is an operation of its own ahead of this one.
+    if beta not in (0, 1):
+      raise GenerationError(
+          f'GemmDescr: beta = {beta} is neither 0 (overwrite C) nor 1 (add '
+          f'onto C); scale C with a MultilinearDescr of its own first.')
+    add = beta == 1
 
     if alpha == 1.0:
       super(GemmDescr, self).__init__(c, [a, b], [target_a, target_b], [permute_a, permute_b], add, strict_match, prefer_align)

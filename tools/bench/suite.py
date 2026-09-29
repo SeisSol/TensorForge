@@ -200,9 +200,8 @@ def from_cases(pattern: str = '*', root: Optional[Path] = None
     launch overhead and nothing else.  The case's own `BATCH` is therefore
     dropped here rather than carried; the suite says what to run at.
 
-    A case whose descriptors refuse to construct is skipped, not raised: the
-    corpus deliberately contains some (`beta_nonzero` asserts on `beta`), and a
-    benchmark that stops on them measures nothing rather than most things.
+    A case whose descriptors refuse to construct is skipped, not raised: a
+    benchmark that stops on one measures nothing rather than most things.
     """
     root = root or CASES
     out: List[Workload] = []
