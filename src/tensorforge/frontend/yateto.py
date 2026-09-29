@@ -330,9 +330,13 @@ class DescriptionReader(Reader):
     """
     if not self._accumulates(add):
       return dest, lambda: None
+    return self._through_scratch(result, dest, 'accum', add=True)
 
+  def _through_scratch(self, result, dest, kind, add):
+    """A scratch tensor over `dest`'s box, and the multilinear that puts it
+    into the result afterwards: adding it on, or assigning it."""
     box = dest.bbox
-    name = f'{self._prefix}_accum{self._scratch}'
+    name = f'{self._prefix}_{kind}{self._scratch}'
     self._scratch += 1
     tensor = Tensor(shape=[int(extent) for extent in box.upper()],
                     addressing=Addressing.PTR_BASED,
@@ -348,16 +352,41 @@ class DescriptionReader(Reader):
     # as having none while the view carries it as an axis of extent one.
     axes = list(range(box.rank()))
 
-    def accumulate():
+    def put():
       self._descr_list.append(MultilinearDescr(self.tensor_ref(result),
                                                [scratch],
                                                [axes],
                                                [axes],
-                                               add=axes,
+                                               add=axes if add else False,
                                                strict_match=False,
                                                prefer_align=False))
 
-    return scratch, accumulate
+    return scratch, put
+
+  def _assembled(self, result, dest, args):
+    """Where the pieces `_cells` cuts an assignment into are written.
+
+    An assignment to the tensor itself through a narrower window defines the
+    whole tensor, zeros outside the window (`SubTensor.owed_zeros`), and each
+    `ElementwiseDescr` keeps that promise on its own.  A piece of one would
+    zero its siblings' parts with it.  So pieces that owe zeros are assembled
+    in a scratch over the window, which owes nothing, and one multilinear
+    assigns the scratch to the destination, zeros included -- the shape an
+    accumulating one already takes (`_accumulator`).
+
+    Returns the view to write, the pieces, and a callable appending the
+    assignment, which is nothing where the pieces write the destination.
+    """
+    cells = self._cells(dest, args)
+    if len(cells) == 1:
+      # one piece is the whole window (an operand's box reaching past it was
+      # clamped to it): it is the destination, and owes what the destination
+      # owes -- a piece marked as a slice would owe nothing
+      return dest, [(dest, cells[0][1])], lambda: None
+    if dest.owed_zeros() is None:
+      return dest, cells, lambda: None
+    scratch, assign = self._through_scratch(result, dest, 'pieces', add=False)
+    return scratch, self._cells(scratch, args), assign
 
   def add_operation_new(self, d):
     kind = d['type']
@@ -432,11 +461,13 @@ class DescriptionReader(Reader):
         op, args = Operation.EQ, args + [0]
       else:
         op = self.convert_op(d['optype'], d['result'])
-      for cell, cell_args in self._cells(dest, args):
+      dest, cells, assign = self._assembled(d['result'], dest, args)
+      for cell, cell_args in cells:
         self._descr_list.append(ElementwiseDescr(op, cell, cell_args,
                                                  strict_match=False,
                                                  prefer_align=False))
       self._append_scaling(d['result'], linear.get('alpha'), dest)
+      assign()
       accumulate()
     elif kind == 'reduction':
       dest, accumulate = self._accumulator(d['result'], result, add)
@@ -492,6 +523,10 @@ class DescriptionReader(Reader):
       hi = [piece[1] for piece in pieces]
       cell = copy.copy(dest)
       cell.bbox = BBox(lo, hi)
+      # a piece owns its part and nothing else: as the tensor itself through
+      # a narrower window, it would owe zeros over its siblings' parts
+      # (`SubTensor.owed_zeros`), which `_assembled` keeps for the whole
+      cell.sliced = True
       cell_args = []
       for arg in args:
         if not boxed(arg):

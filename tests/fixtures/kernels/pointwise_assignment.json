@@ -1,0 +1,4232 @@
+{
+ "descriptions": {
+  "pointwise_temporary_reassigned_from_narrower": {
+   "version": 7,
+   "tensors": [
+    {
+     "name": "M",
+     "addressing": "n*N+o&",
+     "residence": "memory",
+     "datatype": "f64",
+     "storage": {
+      "shape": [
+       4
+      ],
+      "type": "bbox",
+      "start": [
+       0
+      ],
+      "sizes": [
+       4
+      ]
+     },
+     "values": null,
+     "alignment": 0,
+     "flags": {
+      "temporary": true,
+      "constant": false
+     }
+    },
+    {
+     "name": "b0",
+     "addressing": "n&+o&",
+     "residence": "memory",
+     "datatype": "f64",
+     "storage": {
+      "shape": [
+       4
+      ],
+      "type": "bbox",
+      "start": [
+       0
+      ],
+      "sizes": [
+       4
+      ]
+     },
+     "values": null,
+     "alignment": 0,
+     "flags": {
+      "temporary": false,
+      "constant": false
+     }
+    },
+    {
+     "name": "_scalar0",
+     "addressing": "",
+     "residence": "argument",
+     "datatype": "f64",
+     "storage": {
+      "shape": [],
+      "type": "full"
+     },
+     "alignment": 0,
+     "values": {
+      "kind": "entries",
+      "data": [
+       [
+        [],
+        1.0
+       ]
+      ]
+     },
+     "flags": {
+      "temporary": false,
+      "constant": true
+     }
+    },
+    {
+     "name": "b1",
+     "addressing": "n&+o&",
+     "residence": "memory",
+     "datatype": "f64",
+     "storage": {
+      "shape": [
+       4
+      ],
+      "type": "bbox",
+      "start": [
+       0
+      ],
+      "sizes": [
+       1
+      ]
+     },
+     "values": null,
+     "alignment": 0,
+     "flags": {
+      "temporary": false,
+      "constant": false
+     }
+    },
+    {
+     "name": "_scalar1",
+     "addressing": "",
+     "residence": "argument",
+     "datatype": "f64",
+     "storage": {
+      "shape": [],
+      "type": "full"
+     },
+     "alignment": 0,
+     "values": {
+      "kind": "entries",
+      "data": [
+       [
+        [],
+        1.0
+       ]
+      ]
+     },
+     "flags": {
+      "temporary": false,
+      "constant": true
+     }
+    },
+    {
+     "name": "out",
+     "addressing": "n&+o&",
+     "residence": "memory",
+     "datatype": "f64",
+     "storage": {
+      "shape": [
+       4
+      ],
+      "type": "bbox",
+      "start": [
+       0
+      ],
+      "sizes": [
+       4
+      ]
+     },
+     "values": null,
+     "alignment": 0,
+     "flags": {
+      "temporary": false,
+      "constant": false
+     }
+    },
+    {
+     "name": "_scalar2",
+     "addressing": "",
+     "residence": "argument",
+     "datatype": "f64",
+     "storage": {
+      "shape": [],
+      "type": "full"
+     },
+     "alignment": 0,
+     "values": {
+      "kind": "entries",
+      "data": [
+       [
+        [],
+        1.0
+       ]
+      ]
+     },
+     "flags": {
+      "temporary": false,
+      "constant": true
+     }
+    }
+   ],
+   "operations": [
+    {
+     "type": "multilinear",
+     "result": {
+      "name": "M",
+      "indices": [
+       "a"
+      ],
+      "bbox": [
+       [
+        0
+       ],
+       [
+        4
+       ]
+      ],
+      "offset": [
+       0
+      ],
+      "offset_from": null,
+      "sliced": false
+     },
+     "args": [
+      {
+       "name": "b0",
+       "indices": [
+        "a"
+       ],
+       "bbox": [
+        [
+         0
+        ],
+        [
+         4
+        ]
+       ],
+       "offset": [
+        0
+       ],
+       "offset_from": null,
+       "sliced": false
+      }
+     ],
+     "condition": [],
+     "permute": [
+      [
+       0
+      ]
+     ],
+     "target": [
+      [
+       0
+      ]
+     ],
+     "linear": {
+      "alpha": {
+       "name": "_scalar0",
+       "indices": [],
+       "bbox": null,
+       "offset": null,
+       "offset_from": null,
+       "sliced": false
+      },
+      "add": false
+     }
+    },
+    {
+     "type": "elementwise",
+     "result": {
+      "name": "M",
+      "indices": [
+       "l"
+      ],
+      "bbox": [
+       [
+        0
+       ],
+       [
+        1
+       ]
+      ],
+      "offset": [
+       0
+      ],
+      "offset_from": null,
+      "sliced": false
+     },
+     "args": [
+      {
+       "name": "b1",
+       "indices": [
+        "l"
+       ],
+       "bbox": [
+        [
+         0
+        ],
+        [
+         1
+        ]
+       ],
+       "offset": [
+        0
+       ],
+       "offset_from": null,
+       "sliced": false
+      }
+     ],
+     "condition": [],
+     "linear": {
+      "alpha": {
+       "name": "_scalar1",
+       "indices": [],
+       "bbox": null,
+       "offset": null,
+       "offset_from": null,
+       "sliced": false
+      },
+      "add": false
+     },
+     "optype": "Sqrt"
+    },
+    {
+     "type": "multilinear",
+     "result": {
+      "name": "out",
+      "indices": [
+       "a"
+      ],
+      "bbox": [
+       [
+        0
+       ],
+       [
+        4
+       ]
+      ],
+      "offset": [
+       0
+      ],
+      "offset_from": null,
+      "sliced": false
+     },
+     "args": [
+      {
+       "name": "M",
+       "indices": [
+        "a"
+       ],
+       "bbox": [
+        [
+         0
+        ],
+        [
+         4
+        ]
+       ],
+       "offset": [
+        0
+       ],
+       "offset_from": null,
+       "sliced": false
+      }
+     ],
+     "condition": [],
+     "permute": [
+      [
+       0
+      ]
+     ],
+     "target": [
+      [
+       0
+      ]
+     ],
+     "linear": {
+      "alpha": {
+       "name": "_scalar2",
+       "indices": [],
+       "bbox": null,
+       "offset": null,
+       "offset_from": null,
+       "sliced": false
+      },
+      "add": false
+     }
+    }
+   ]
+  },
+  "pointwise_output_reassigned_from_narrower": {
+   "version": 7,
+   "tensors": [
+    {
+     "name": "M",
+     "addressing": "n&+o&",
+     "residence": "memory",
+     "datatype": "f64",
+     "storage": {
+      "shape": [
+       4
+      ],
+      "type": "bbox",
+      "start": [
+       0
+      ],
+      "sizes": [
+       4
+      ]
+     },
+     "values": null,
+     "alignment": 0,
+     "flags": {
+      "temporary": false,
+      "constant": false
+     }
+    },
+    {
+     "name": "b0",
+     "addressing": "n&+o&",
+     "residence": "memory",
+     "datatype": "f64",
+     "storage": {
+      "shape": [
+       4
+      ],
+      "type": "bbox",
+      "start": [
+       0
+      ],
+      "sizes": [
+       4
+      ]
+     },
+     "values": null,
+     "alignment": 0,
+     "flags": {
+      "temporary": false,
+      "constant": false
+     }
+    },
+    {
+     "name": "_scalar0",
+     "addressing": "",
+     "residence": "argument",
+     "datatype": "f64",
+     "storage": {
+      "shape": [],
+      "type": "full"
+     },
+     "alignment": 0,
+     "values": {
+      "kind": "entries",
+      "data": [
+       [
+        [],
+        1.0
+       ]
+      ]
+     },
+     "flags": {
+      "temporary": false,
+      "constant": true
+     }
+    },
+    {
+     "name": "b1",
+     "addressing": "n&+o&",
+     "residence": "memory",
+     "datatype": "f64",
+     "storage": {
+      "shape": [
+       4
+      ],
+      "type": "bbox",
+      "start": [
+       0
+      ],
+      "sizes": [
+       1
+      ]
+     },
+     "values": null,
+     "alignment": 0,
+     "flags": {
+      "temporary": false,
+      "constant": false
+     }
+    },
+    {
+     "name": "_scalar1",
+     "addressing": "",
+     "residence": "argument",
+     "datatype": "f64",
+     "storage": {
+      "shape": [],
+      "type": "full"
+     },
+     "alignment": 0,
+     "values": {
+      "kind": "entries",
+      "data": [
+       [
+        [],
+        1.0
+       ]
+      ]
+     },
+     "flags": {
+      "temporary": false,
+      "constant": true
+     }
+    }
+   ],
+   "operations": [
+    {
+     "type": "multilinear",
+     "result": {
+      "name": "M",
+      "indices": [
+       "a"
+      ],
+      "bbox": [
+       [
+        0
+       ],
+       [
+        4
+       ]
+      ],
+      "offset": [
+       0
+      ],
+      "offset_from": null,
+      "sliced": false
+     },
+     "args": [
+      {
+       "name": "b0",
+       "indices": [
+        "a"
+       ],
+       "bbox": [
+        [
+         0
+        ],
+        [
+         4
+        ]
+       ],
+       "offset": [
+        0
+       ],
+       "offset_from": null,
+       "sliced": false
+      }
+     ],
+     "condition": [],
+     "permute": [
+      [
+       0
+      ]
+     ],
+     "target": [
+      [
+       0
+      ]
+     ],
+     "linear": {
+      "alpha": {
+       "name": "_scalar0",
+       "indices": [],
+       "bbox": null,
+       "offset": null,
+       "offset_from": null,
+       "sliced": false
+      },
+      "add": false
+     }
+    },
+    {
+     "type": "elementwise",
+     "result": {
+      "name": "M",
+      "indices": [
+       "l"
+      ],
+      "bbox": [
+       [
+        0
+       ],
+       [
+        1
+       ]
+      ],
+      "offset": [
+       0
+      ],
+      "offset_from": null,
+      "sliced": false
+     },
+     "args": [
+      {
+       "name": "b1",
+       "indices": [
+        "l"
+       ],
+       "bbox": [
+        [
+         0
+        ],
+        [
+         1
+        ]
+       ],
+       "offset": [
+        0
+       ],
+       "offset_from": null,
+       "sliced": false
+      }
+     ],
+     "condition": [],
+     "linear": {
+      "alpha": {
+       "name": "_scalar1",
+       "indices": [],
+       "bbox": null,
+       "offset": null,
+       "offset_from": null,
+       "sliced": false
+      },
+      "add": false
+     },
+     "optype": "Sqrt"
+    }
+   ]
+  },
+  "pointwise_temporary_reassigned_after_read": {
+   "version": 7,
+   "tensors": [
+    {
+     "name": "M",
+     "addressing": "n*N+o&",
+     "residence": "memory",
+     "datatype": "f64",
+     "storage": {
+      "shape": [
+       4
+      ],
+      "type": "bbox",
+      "start": [
+       0
+      ],
+      "sizes": [
+       4
+      ]
+     },
+     "values": null,
+     "alignment": 0,
+     "flags": {
+      "temporary": true,
+      "constant": false
+     }
+    },
+    {
+     "name": "b0",
+     "addressing": "n&+o&",
+     "residence": "memory",
+     "datatype": "f64",
+     "storage": {
+      "shape": [
+       4
+      ],
+      "type": "bbox",
+      "start": [
+       0
+      ],
+      "sizes": [
+       4
+      ]
+     },
+     "values": null,
+     "alignment": 0,
+     "flags": {
+      "temporary": false,
+      "constant": false
+     }
+    },
+    {
+     "name": "b1",
+     "addressing": "n&+o&",
+     "residence": "memory",
+     "datatype": "f64",
+     "storage": {
+      "shape": [
+       4
+      ],
+      "type": "bbox",
+      "start": [
+       0
+      ],
+      "sizes": [
+       1
+      ]
+     },
+     "values": null,
+     "alignment": 0,
+     "flags": {
+      "temporary": false,
+      "constant": false
+     }
+    },
+    {
+     "name": "out1",
+     "addressing": "n&+o&",
+     "residence": "memory",
+     "datatype": "f64",
+     "storage": {
+      "shape": [
+       4
+      ],
+      "type": "bbox",
+      "start": [
+       0
+      ],
+      "sizes": [
+       4
+      ]
+     },
+     "values": null,
+     "alignment": 0,
+     "flags": {
+      "temporary": false,
+      "constant": false
+     }
+    },
+    {
+     "name": "out",
+     "addressing": "n&+o&",
+     "residence": "memory",
+     "datatype": "f64",
+     "storage": {
+      "shape": [
+       4
+      ],
+      "type": "bbox",
+      "start": [
+       0
+      ],
+      "sizes": [
+       4
+      ]
+     },
+     "values": null,
+     "alignment": 0,
+     "flags": {
+      "temporary": false,
+      "constant": false
+     }
+    },
+    {
+     "name": "_scalar0",
+     "addressing": "",
+     "residence": "argument",
+     "datatype": "f64",
+     "storage": {
+      "shape": [],
+      "type": "full"
+     },
+     "alignment": 0,
+     "values": {
+      "kind": "entries",
+      "data": [
+       [
+        [],
+        1.0
+       ]
+      ]
+     },
+     "flags": {
+      "temporary": false,
+      "constant": true
+     }
+    },
+    {
+     "name": "_scalar1",
+     "addressing": "",
+     "residence": "argument",
+     "datatype": "f64",
+     "storage": {
+      "shape": [],
+      "type": "full"
+     },
+     "alignment": 0,
+     "values": {
+      "kind": "entries",
+      "data": [
+       [
+        [],
+        1.0
+       ]
+      ]
+     },
+     "flags": {
+      "temporary": false,
+      "constant": true
+     }
+    },
+    {
+     "name": "_scalar2",
+     "addressing": "",
+     "residence": "argument",
+     "datatype": "f64",
+     "storage": {
+      "shape": [],
+      "type": "full"
+     },
+     "alignment": 0,
+     "values": {
+      "kind": "entries",
+      "data": [
+       [
+        [],
+        1.0
+       ]
+      ]
+     },
+     "flags": {
+      "temporary": false,
+      "constant": true
+     }
+    },
+    {
+     "name": "_scalar3",
+     "addressing": "",
+     "residence": "argument",
+     "datatype": "f64",
+     "storage": {
+      "shape": [],
+      "type": "full"
+     },
+     "alignment": 0,
+     "values": {
+      "kind": "entries",
+      "data": [
+       [
+        [],
+        1.0
+       ]
+      ]
+     },
+     "flags": {
+      "temporary": false,
+      "constant": true
+     }
+    }
+   ],
+   "operations": [
+    {
+     "type": "multilinear",
+     "result": {
+      "name": "M",
+      "indices": [
+       "a"
+      ],
+      "bbox": [
+       [
+        0
+       ],
+       [
+        4
+       ]
+      ],
+      "offset": [
+       0
+      ],
+      "offset_from": null,
+      "sliced": false
+     },
+     "args": [
+      {
+       "name": "b0",
+       "indices": [
+        "a"
+       ],
+       "bbox": [
+        [
+         0
+        ],
+        [
+         4
+        ]
+       ],
+       "offset": [
+        0
+       ],
+       "offset_from": null,
+       "sliced": false
+      }
+     ],
+     "condition": [],
+     "permute": [
+      [
+       0
+      ]
+     ],
+     "target": [
+      [
+       0
+      ]
+     ],
+     "linear": {
+      "alpha": {
+       "name": "_scalar0",
+       "indices": [],
+       "bbox": null,
+       "offset": null,
+       "offset_from": null,
+       "sliced": false
+      },
+      "add": false
+     }
+    },
+    {
+     "type": "multilinear",
+     "result": {
+      "name": "out1",
+      "indices": [
+       "a"
+      ],
+      "bbox": [
+       [
+        0
+       ],
+       [
+        4
+       ]
+      ],
+      "offset": [
+       0
+      ],
+      "offset_from": null,
+      "sliced": false
+     },
+     "args": [
+      {
+       "name": "M",
+       "indices": [
+        "a"
+       ],
+       "bbox": [
+        [
+         0
+        ],
+        [
+         4
+        ]
+       ],
+       "offset": [
+        0
+       ],
+       "offset_from": null,
+       "sliced": false
+      }
+     ],
+     "condition": [],
+     "permute": [
+      [
+       0
+      ]
+     ],
+     "target": [
+      [
+       0
+      ]
+     ],
+     "linear": {
+      "alpha": {
+       "name": "_scalar1",
+       "indices": [],
+       "bbox": null,
+       "offset": null,
+       "offset_from": null,
+       "sliced": false
+      },
+      "add": false
+     }
+    },
+    {
+     "type": "elementwise",
+     "result": {
+      "name": "M",
+      "indices": [
+       "l"
+      ],
+      "bbox": [
+       [
+        0
+       ],
+       [
+        1
+       ]
+      ],
+      "offset": [
+       0
+      ],
+      "offset_from": null,
+      "sliced": false
+     },
+     "args": [
+      {
+       "name": "b1",
+       "indices": [
+        "l"
+       ],
+       "bbox": [
+        [
+         0
+        ],
+        [
+         1
+        ]
+       ],
+       "offset": [
+        0
+       ],
+       "offset_from": null,
+       "sliced": false
+      }
+     ],
+     "condition": [],
+     "linear": {
+      "alpha": {
+       "name": "_scalar2",
+       "indices": [],
+       "bbox": null,
+       "offset": null,
+       "offset_from": null,
+       "sliced": false
+      },
+      "add": false
+     },
+     "optype": "Abs"
+    },
+    {
+     "type": "multilinear",
+     "result": {
+      "name": "out",
+      "indices": [
+       "a"
+      ],
+      "bbox": [
+       [
+        0
+       ],
+       [
+        4
+       ]
+      ],
+      "offset": [
+       0
+      ],
+      "offset_from": null,
+      "sliced": false
+     },
+     "args": [
+      {
+       "name": "M",
+       "indices": [
+        "a"
+       ],
+       "bbox": [
+        [
+         0
+        ],
+        [
+         4
+        ]
+       ],
+       "offset": [
+        0
+       ],
+       "offset_from": null,
+       "sliced": false
+      }
+     ],
+     "condition": [],
+     "permute": [
+      [
+       0
+      ]
+     ],
+     "target": [
+      [
+       0
+      ]
+     ],
+     "linear": {
+      "alpha": {
+       "name": "_scalar3",
+       "indices": [],
+       "bbox": null,
+       "offset": null,
+       "offset_from": null,
+       "sliced": false
+      },
+      "add": false
+     }
+    }
+   ]
+  },
+  "pointwise_temporary_slice_reassigned": {
+   "version": 7,
+   "tensors": [
+    {
+     "name": "M",
+     "addressing": "n*N+o&",
+     "residence": "memory",
+     "datatype": "f64",
+     "storage": {
+      "shape": [
+       4
+      ],
+      "type": "bbox",
+      "start": [
+       0
+      ],
+      "sizes": [
+       4
+      ]
+     },
+     "values": null,
+     "alignment": 0,
+     "flags": {
+      "temporary": true,
+      "constant": false
+     }
+    },
+    {
+     "name": "b0",
+     "addressing": "n&+o&",
+     "residence": "memory",
+     "datatype": "f64",
+     "storage": {
+      "shape": [
+       4
+      ],
+      "type": "bbox",
+      "start": [
+       0
+      ],
+      "sizes": [
+       4
+      ]
+     },
+     "values": null,
+     "alignment": 0,
+     "flags": {
+      "temporary": false,
+      "constant": false
+     }
+    },
+    {
+     "name": "b1",
+     "addressing": "n&+o&",
+     "residence": "memory",
+     "datatype": "f64",
+     "storage": {
+      "shape": [
+       4
+      ],
+      "type": "bbox",
+      "start": [
+       0
+      ],
+      "sizes": [
+       1
+      ]
+     },
+     "values": null,
+     "alignment": 0,
+     "flags": {
+      "temporary": false,
+      "constant": false
+     }
+    },
+    {
+     "name": "out",
+     "addressing": "n&+o&",
+     "residence": "memory",
+     "datatype": "f64",
+     "storage": {
+      "shape": [
+       4
+      ],
+      "type": "bbox",
+      "start": [
+       0
+      ],
+      "sizes": [
+       4
+      ]
+     },
+     "values": null,
+     "alignment": 0,
+     "flags": {
+      "temporary": false,
+      "constant": false
+     }
+    },
+    {
+     "name": "_scalar0",
+     "addressing": "",
+     "residence": "argument",
+     "datatype": "f64",
+     "storage": {
+      "shape": [],
+      "type": "full"
+     },
+     "alignment": 0,
+     "values": {
+      "kind": "entries",
+      "data": [
+       [
+        [],
+        1.0
+       ]
+      ]
+     },
+     "flags": {
+      "temporary": false,
+      "constant": true
+     }
+    },
+    {
+     "name": "_scalar1",
+     "addressing": "",
+     "residence": "argument",
+     "datatype": "f64",
+     "storage": {
+      "shape": [],
+      "type": "full"
+     },
+     "alignment": 0,
+     "values": {
+      "kind": "entries",
+      "data": [
+       [
+        [],
+        1.0
+       ]
+      ]
+     },
+     "flags": {
+      "temporary": false,
+      "constant": true
+     }
+    },
+    {
+     "name": "_scalar2",
+     "addressing": "",
+     "residence": "argument",
+     "datatype": "f64",
+     "storage": {
+      "shape": [],
+      "type": "full"
+     },
+     "alignment": 0,
+     "values": {
+      "kind": "entries",
+      "data": [
+       [
+        [],
+        1.0
+       ]
+      ]
+     },
+     "flags": {
+      "temporary": false,
+      "constant": true
+     }
+    }
+   ],
+   "operations": [
+    {
+     "type": "multilinear",
+     "result": {
+      "name": "M",
+      "indices": [
+       "a"
+      ],
+      "bbox": [
+       [
+        0
+       ],
+       [
+        4
+       ]
+      ],
+      "offset": [
+       0
+      ],
+      "offset_from": null,
+      "sliced": false
+     },
+     "args": [
+      {
+       "name": "b0",
+       "indices": [
+        "a"
+       ],
+       "bbox": [
+        [
+         0
+        ],
+        [
+         4
+        ]
+       ],
+       "offset": [
+        0
+       ],
+       "offset_from": null,
+       "sliced": false
+      }
+     ],
+     "condition": [],
+     "permute": [
+      [
+       0
+      ]
+     ],
+     "target": [
+      [
+       0
+      ]
+     ],
+     "linear": {
+      "alpha": {
+       "name": "_scalar0",
+       "indices": [],
+       "bbox": null,
+       "offset": null,
+       "offset_from": null,
+       "sliced": false
+      },
+      "add": false
+     }
+    },
+    {
+     "type": "elementwise",
+     "result": {
+      "name": "M",
+      "indices": [
+       "l"
+      ],
+      "bbox": [
+       [
+        0
+       ],
+       [
+        1
+       ]
+      ],
+      "offset": [
+       0
+      ],
+      "offset_from": null,
+      "sliced": true
+     },
+     "args": [
+      {
+       "name": "b1",
+       "indices": [
+        "l"
+       ],
+       "bbox": [
+        [
+         0
+        ],
+        [
+         1
+        ]
+       ],
+       "offset": [
+        0
+       ],
+       "offset_from": null,
+       "sliced": false
+      }
+     ],
+     "condition": [],
+     "linear": {
+      "alpha": {
+       "name": "_scalar1",
+       "indices": [],
+       "bbox": null,
+       "offset": null,
+       "offset_from": null,
+       "sliced": false
+      },
+      "add": false
+     },
+     "optype": "Abs"
+    },
+    {
+     "type": "multilinear",
+     "result": {
+      "name": "out",
+      "indices": [
+       "a"
+      ],
+      "bbox": [
+       [
+        0
+       ],
+       [
+        4
+       ]
+      ],
+      "offset": [
+       0
+      ],
+      "offset_from": null,
+      "sliced": false
+     },
+     "args": [
+      {
+       "name": "M",
+       "indices": [
+        "a"
+       ],
+       "bbox": [
+        [
+         0
+        ],
+        [
+         4
+        ]
+       ],
+       "offset": [
+        0
+       ],
+       "offset_from": null,
+       "sliced": false
+      }
+     ],
+     "condition": [],
+     "permute": [
+      [
+       0
+      ]
+     ],
+     "target": [
+      [
+       0
+      ]
+     ],
+     "linear": {
+      "alpha": {
+       "name": "_scalar2",
+       "indices": [],
+       "bbox": null,
+       "offset": null,
+       "offset_from": null,
+       "sliced": false
+      },
+      "add": false
+     }
+    }
+   ]
+  },
+  "pointwise_temporary_pieces_reassigned": {
+   "version": 7,
+   "tensors": [
+    {
+     "name": "M",
+     "addressing": "n*N+o&",
+     "residence": "memory",
+     "datatype": "f64",
+     "storage": {
+      "shape": [
+       4
+      ],
+      "type": "bbox",
+      "start": [
+       0
+      ],
+      "sizes": [
+       4
+      ]
+     },
+     "values": null,
+     "alignment": 0,
+     "flags": {
+      "temporary": true,
+      "constant": false
+     }
+    },
+    {
+     "name": "b0",
+     "addressing": "n&+o&",
+     "residence": "memory",
+     "datatype": "f64",
+     "storage": {
+      "shape": [
+       4
+      ],
+      "type": "bbox",
+      "start": [
+       0
+      ],
+      "sizes": [
+       4
+      ]
+     },
+     "values": null,
+     "alignment": 0,
+     "flags": {
+      "temporary": false,
+      "constant": false
+     }
+    },
+    {
+     "name": "b1",
+     "addressing": "n&+o&",
+     "residence": "memory",
+     "datatype": "f64",
+     "storage": {
+      "shape": [
+       4
+      ],
+      "type": "bbox",
+      "start": [
+       0
+      ],
+      "sizes": [
+       1
+      ]
+     },
+     "values": null,
+     "alignment": 0,
+     "flags": {
+      "temporary": false,
+      "constant": false
+     }
+    },
+    {
+     "name": "out",
+     "addressing": "n&+o&",
+     "residence": "memory",
+     "datatype": "f64",
+     "storage": {
+      "shape": [
+       4
+      ],
+      "type": "bbox",
+      "start": [
+       0
+      ],
+      "sizes": [
+       4
+      ]
+     },
+     "values": null,
+     "alignment": 0,
+     "flags": {
+      "temporary": false,
+      "constant": false
+     }
+    },
+    {
+     "name": "_scalar0",
+     "addressing": "",
+     "residence": "argument",
+     "datatype": "f64",
+     "storage": {
+      "shape": [],
+      "type": "full"
+     },
+     "alignment": 0,
+     "values": {
+      "kind": "entries",
+      "data": [
+       [
+        [],
+        1.0
+       ]
+      ]
+     },
+     "flags": {
+      "temporary": false,
+      "constant": true
+     }
+    },
+    {
+     "name": "_scalar1",
+     "addressing": "",
+     "residence": "argument",
+     "datatype": "f64",
+     "storage": {
+      "shape": [],
+      "type": "full"
+     },
+     "alignment": 0,
+     "values": {
+      "kind": "entries",
+      "data": [
+       [
+        [],
+        1.0
+       ]
+      ]
+     },
+     "flags": {
+      "temporary": false,
+      "constant": true
+     }
+    },
+    {
+     "name": "_scalar2",
+     "addressing": "",
+     "residence": "argument",
+     "datatype": "f64",
+     "storage": {
+      "shape": [],
+      "type": "full"
+     },
+     "alignment": 0,
+     "values": {
+      "kind": "entries",
+      "data": [
+       [
+        [],
+        1.0
+       ]
+      ]
+     },
+     "flags": {
+      "temporary": false,
+      "constant": true
+     }
+    }
+   ],
+   "operations": [
+    {
+     "type": "multilinear",
+     "result": {
+      "name": "M",
+      "indices": [
+       "a"
+      ],
+      "bbox": [
+       [
+        0
+       ],
+       [
+        4
+       ]
+      ],
+      "offset": [
+       0
+      ],
+      "offset_from": null,
+      "sliced": false
+     },
+     "args": [
+      {
+       "name": "b0",
+       "indices": [
+        "a"
+       ],
+       "bbox": [
+        [
+         0
+        ],
+        [
+         4
+        ]
+       ],
+       "offset": [
+        0
+       ],
+       "offset_from": null,
+       "sliced": false
+      }
+     ],
+     "condition": [],
+     "permute": [
+      [
+       0
+      ]
+     ],
+     "target": [
+      [
+       0
+      ]
+     ],
+     "linear": {
+      "alpha": {
+       "name": "_scalar0",
+       "indices": [],
+       "bbox": null,
+       "offset": null,
+       "offset_from": null,
+       "sliced": false
+      },
+      "add": false
+     }
+    },
+    {
+     "type": "elementwise",
+     "result": {
+      "name": "M",
+      "indices": [
+       "l"
+      ],
+      "bbox": [
+       [
+        0
+       ],
+       [
+        2
+       ]
+      ],
+      "offset": [
+       0
+      ],
+      "offset_from": null,
+      "sliced": false
+     },
+     "args": [
+      {
+       "name": "b1",
+       "indices": [
+        "l"
+       ],
+       "bbox": [
+        [
+         0
+        ],
+        [
+         1
+        ]
+       ],
+       "offset": [
+        0
+       ],
+       "offset_from": null,
+       "sliced": false
+      }
+     ],
+     "condition": [],
+     "linear": {
+      "alpha": {
+       "name": "_scalar1",
+       "indices": [],
+       "bbox": null,
+       "offset": null,
+       "offset_from": null,
+       "sliced": false
+      },
+      "add": false
+     },
+     "optype": "Exp"
+    },
+    {
+     "type": "multilinear",
+     "result": {
+      "name": "out",
+      "indices": [
+       "a"
+      ],
+      "bbox": [
+       [
+        0
+       ],
+       [
+        4
+       ]
+      ],
+      "offset": [
+       0
+      ],
+      "offset_from": null,
+      "sliced": false
+     },
+     "args": [
+      {
+       "name": "M",
+       "indices": [
+        "a"
+       ],
+       "bbox": [
+        [
+         0
+        ],
+        [
+         4
+        ]
+       ],
+       "offset": [
+        0
+       ],
+       "offset_from": null,
+       "sliced": false
+      }
+     ],
+     "condition": [],
+     "permute": [
+      [
+       0
+      ]
+     ],
+     "target": [
+      [
+       0
+      ]
+     ],
+     "linear": {
+      "alpha": {
+       "name": "_scalar2",
+       "indices": [],
+       "bbox": null,
+       "offset": null,
+       "offset_from": null,
+       "sliced": false
+      },
+      "add": false
+     }
+    }
+   ]
+  },
+  "pointwise_output_pieces_reassigned": {
+   "version": 7,
+   "tensors": [
+    {
+     "name": "M",
+     "addressing": "n&+o&",
+     "residence": "memory",
+     "datatype": "f64",
+     "storage": {
+      "shape": [
+       4
+      ],
+      "type": "bbox",
+      "start": [
+       0
+      ],
+      "sizes": [
+       4
+      ]
+     },
+     "values": null,
+     "alignment": 0,
+     "flags": {
+      "temporary": false,
+      "constant": false
+     }
+    },
+    {
+     "name": "b0",
+     "addressing": "n&+o&",
+     "residence": "memory",
+     "datatype": "f64",
+     "storage": {
+      "shape": [
+       4
+      ],
+      "type": "bbox",
+      "start": [
+       0
+      ],
+      "sizes": [
+       4
+      ]
+     },
+     "values": null,
+     "alignment": 0,
+     "flags": {
+      "temporary": false,
+      "constant": false
+     }
+    },
+    {
+     "name": "b1",
+     "addressing": "n&+o&",
+     "residence": "memory",
+     "datatype": "f64",
+     "storage": {
+      "shape": [
+       4
+      ],
+      "type": "bbox",
+      "start": [
+       0
+      ],
+      "sizes": [
+       1
+      ]
+     },
+     "values": null,
+     "alignment": 0,
+     "flags": {
+      "temporary": false,
+      "constant": false
+     }
+    },
+    {
+     "name": "_scalar0",
+     "addressing": "",
+     "residence": "argument",
+     "datatype": "f64",
+     "storage": {
+      "shape": [],
+      "type": "full"
+     },
+     "alignment": 0,
+     "values": {
+      "kind": "entries",
+      "data": [
+       [
+        [],
+        1.0
+       ]
+      ]
+     },
+     "flags": {
+      "temporary": false,
+      "constant": true
+     }
+    },
+    {
+     "name": "_scalar1",
+     "addressing": "",
+     "residence": "argument",
+     "datatype": "f64",
+     "storage": {
+      "shape": [],
+      "type": "full"
+     },
+     "alignment": 0,
+     "values": {
+      "kind": "entries",
+      "data": [
+       [
+        [],
+        1.0
+       ]
+      ]
+     },
+     "flags": {
+      "temporary": false,
+      "constant": true
+     }
+    }
+   ],
+   "operations": [
+    {
+     "type": "multilinear",
+     "result": {
+      "name": "M",
+      "indices": [
+       "a"
+      ],
+      "bbox": [
+       [
+        0
+       ],
+       [
+        4
+       ]
+      ],
+      "offset": [
+       0
+      ],
+      "offset_from": null,
+      "sliced": false
+     },
+     "args": [
+      {
+       "name": "b0",
+       "indices": [
+        "a"
+       ],
+       "bbox": [
+        [
+         0
+        ],
+        [
+         4
+        ]
+       ],
+       "offset": [
+        0
+       ],
+       "offset_from": null,
+       "sliced": false
+      }
+     ],
+     "condition": [],
+     "permute": [
+      [
+       0
+      ]
+     ],
+     "target": [
+      [
+       0
+      ]
+     ],
+     "linear": {
+      "alpha": {
+       "name": "_scalar0",
+       "indices": [],
+       "bbox": null,
+       "offset": null,
+       "offset_from": null,
+       "sliced": false
+      },
+      "add": false
+     }
+    },
+    {
+     "type": "elementwise",
+     "result": {
+      "name": "M",
+      "indices": [
+       "l"
+      ],
+      "bbox": [
+       [
+        0
+       ],
+       [
+        2
+       ]
+      ],
+      "offset": [
+       0
+      ],
+      "offset_from": null,
+      "sliced": false
+     },
+     "args": [
+      {
+       "name": "b1",
+       "indices": [
+        "l"
+       ],
+       "bbox": [
+        [
+         0
+        ],
+        [
+         1
+        ]
+       ],
+       "offset": [
+        0
+       ],
+       "offset_from": null,
+       "sliced": false
+      }
+     ],
+     "condition": [],
+     "linear": {
+      "alpha": {
+       "name": "_scalar1",
+       "indices": [],
+       "bbox": null,
+       "offset": null,
+       "offset_from": null,
+       "sliced": false
+      },
+      "add": false
+     },
+     "optype": "Exp"
+    }
+   ]
+  },
+  "pointwise_temporary_first_write_read_wider": {
+   "version": 7,
+   "tensors": [
+    {
+     "name": "M",
+     "addressing": "n*N+o&",
+     "residence": "memory",
+     "datatype": "f64",
+     "storage": {
+      "shape": [
+       4
+      ],
+      "type": "bbox",
+      "start": [
+       0
+      ],
+      "sizes": [
+       4
+      ]
+     },
+     "values": null,
+     "alignment": 0,
+     "flags": {
+      "temporary": true,
+      "constant": false
+     }
+    },
+    {
+     "name": "b1",
+     "addressing": "n&+o&",
+     "residence": "memory",
+     "datatype": "f64",
+     "storage": {
+      "shape": [
+       4
+      ],
+      "type": "bbox",
+      "start": [
+       0
+      ],
+      "sizes": [
+       1
+      ]
+     },
+     "values": null,
+     "alignment": 0,
+     "flags": {
+      "temporary": false,
+      "constant": false
+     }
+    },
+    {
+     "name": "out",
+     "addressing": "n&+o&",
+     "residence": "memory",
+     "datatype": "f64",
+     "storage": {
+      "shape": [
+       4
+      ],
+      "type": "bbox",
+      "start": [
+       0
+      ],
+      "sizes": [
+       4
+      ]
+     },
+     "values": null,
+     "alignment": 0,
+     "flags": {
+      "temporary": false,
+      "constant": false
+     }
+    },
+    {
+     "name": "_scalar0",
+     "addressing": "",
+     "residence": "argument",
+     "datatype": "f64",
+     "storage": {
+      "shape": [],
+      "type": "full"
+     },
+     "alignment": 0,
+     "values": {
+      "kind": "entries",
+      "data": [
+       [
+        [],
+        1.0
+       ]
+      ]
+     },
+     "flags": {
+      "temporary": false,
+      "constant": true
+     }
+    },
+    {
+     "name": "_scalar1",
+     "addressing": "",
+     "residence": "argument",
+     "datatype": "f64",
+     "storage": {
+      "shape": [],
+      "type": "full"
+     },
+     "alignment": 0,
+     "values": {
+      "kind": "entries",
+      "data": [
+       [
+        [],
+        1.0
+       ]
+      ]
+     },
+     "flags": {
+      "temporary": false,
+      "constant": true
+     }
+    }
+   ],
+   "operations": [
+    {
+     "type": "elementwise",
+     "result": {
+      "name": "M",
+      "indices": [
+       "l"
+      ],
+      "bbox": [
+       [
+        0
+       ],
+       [
+        1
+       ]
+      ],
+      "offset": [
+       0
+      ],
+      "offset_from": null,
+      "sliced": false
+     },
+     "args": [
+      {
+       "name": "b1",
+       "indices": [
+        "l"
+       ],
+       "bbox": [
+        [
+         0
+        ],
+        [
+         1
+        ]
+       ],
+       "offset": [
+        0
+       ],
+       "offset_from": null,
+       "sliced": false
+      }
+     ],
+     "condition": [],
+     "linear": {
+      "alpha": {
+       "name": "_scalar0",
+       "indices": [],
+       "bbox": null,
+       "offset": null,
+       "offset_from": null,
+       "sliced": false
+      },
+      "add": false
+     },
+     "optype": "Abs"
+    },
+    {
+     "type": "multilinear",
+     "result": {
+      "name": "out",
+      "indices": [
+       "a"
+      ],
+      "bbox": [
+       [
+        0
+       ],
+       [
+        4
+       ]
+      ],
+      "offset": [
+       0
+      ],
+      "offset_from": null,
+      "sliced": false
+     },
+     "args": [
+      {
+       "name": "M",
+       "indices": [
+        "a"
+       ],
+       "bbox": [
+        [
+         0
+        ],
+        [
+         4
+        ]
+       ],
+       "offset": [
+        0
+       ],
+       "offset_from": null,
+       "sliced": false
+      }
+     ],
+     "condition": [],
+     "permute": [
+      [
+       0
+      ]
+     ],
+     "target": [
+      [
+       0
+      ]
+     ],
+     "linear": {
+      "alpha": {
+       "name": "_scalar1",
+       "indices": [],
+       "bbox": null,
+       "offset": null,
+       "offset_from": null,
+       "sliced": false
+      },
+      "add": false
+     }
+    }
+   ]
+  },
+  "reduction_temporary_reassigned_from_narrower": {
+   "version": 7,
+   "tensors": [
+    {
+     "name": "M",
+     "addressing": "n*N+o&",
+     "residence": "memory",
+     "datatype": "f64",
+     "storage": {
+      "shape": [
+       4
+      ],
+      "type": "bbox",
+      "start": [
+       0
+      ],
+      "sizes": [
+       4
+      ]
+     },
+     "values": null,
+     "alignment": 0,
+     "flags": {
+      "temporary": true,
+      "constant": false
+     }
+    },
+    {
+     "name": "b0",
+     "addressing": "n&+o&",
+     "residence": "memory",
+     "datatype": "f64",
+     "storage": {
+      "shape": [
+       4
+      ],
+      "type": "bbox",
+      "start": [
+       0
+      ],
+      "sizes": [
+       4
+      ]
+     },
+     "values": null,
+     "alignment": 0,
+     "flags": {
+      "temporary": false,
+      "constant": false
+     }
+    },
+    {
+     "name": "A",
+     "addressing": "n&+o&",
+     "residence": "memory",
+     "datatype": "f64",
+     "storage": {
+      "shape": [
+       4,
+       3
+      ],
+      "type": "bbox",
+      "start": [
+       0,
+       0
+      ],
+      "sizes": [
+       1,
+       3
+      ]
+     },
+     "values": null,
+     "alignment": 0,
+     "flags": {
+      "temporary": false,
+      "constant": false
+     }
+    },
+    {
+     "name": "out",
+     "addressing": "n&+o&",
+     "residence": "memory",
+     "datatype": "f64",
+     "storage": {
+      "shape": [
+       4
+      ],
+      "type": "bbox",
+      "start": [
+       0
+      ],
+      "sizes": [
+       4
+      ]
+     },
+     "values": null,
+     "alignment": 0,
+     "flags": {
+      "temporary": false,
+      "constant": false
+     }
+    },
+    {
+     "name": "_scalar0",
+     "addressing": "",
+     "residence": "argument",
+     "datatype": "f64",
+     "storage": {
+      "shape": [],
+      "type": "full"
+     },
+     "alignment": 0,
+     "values": {
+      "kind": "entries",
+      "data": [
+       [
+        [],
+        1.0
+       ]
+      ]
+     },
+     "flags": {
+      "temporary": false,
+      "constant": true
+     }
+    },
+    {
+     "name": "_scalar1",
+     "addressing": "",
+     "residence": "argument",
+     "datatype": "f64",
+     "storage": {
+      "shape": [],
+      "type": "full"
+     },
+     "alignment": 0,
+     "values": {
+      "kind": "entries",
+      "data": [
+       [
+        [],
+        1.0
+       ]
+      ]
+     },
+     "flags": {
+      "temporary": false,
+      "constant": true
+     }
+    },
+    {
+     "name": "_scalar2",
+     "addressing": "",
+     "residence": "argument",
+     "datatype": "f64",
+     "storage": {
+      "shape": [],
+      "type": "full"
+     },
+     "alignment": 0,
+     "values": {
+      "kind": "entries",
+      "data": [
+       [
+        [],
+        1.0
+       ]
+      ]
+     },
+     "flags": {
+      "temporary": false,
+      "constant": true
+     }
+    }
+   ],
+   "operations": [
+    {
+     "type": "multilinear",
+     "result": {
+      "name": "M",
+      "indices": [
+       "a"
+      ],
+      "bbox": [
+       [
+        0
+       ],
+       [
+        4
+       ]
+      ],
+      "offset": [
+       0
+      ],
+      "offset_from": null,
+      "sliced": false
+     },
+     "args": [
+      {
+       "name": "b0",
+       "indices": [
+        "a"
+       ],
+       "bbox": [
+        [
+         0
+        ],
+        [
+         4
+        ]
+       ],
+       "offset": [
+        0
+       ],
+       "offset_from": null,
+       "sliced": false
+      }
+     ],
+     "condition": [],
+     "permute": [
+      [
+       0
+      ]
+     ],
+     "target": [
+      [
+       0
+      ]
+     ],
+     "linear": {
+      "alpha": {
+       "name": "_scalar0",
+       "indices": [],
+       "bbox": null,
+       "offset": null,
+       "offset_from": null,
+       "sliced": false
+      },
+      "add": false
+     }
+    },
+    {
+     "type": "reduction",
+     "result": {
+      "name": "M",
+      "indices": [
+       "l"
+      ],
+      "bbox": [
+       [
+        0
+       ],
+       [
+        1
+       ]
+      ],
+      "offset": [
+       0
+      ],
+      "offset_from": null,
+      "sliced": false
+     },
+     "args": [
+      {
+       "name": "A",
+       "indices": [
+        "l",
+        "j"
+       ],
+       "bbox": [
+        [
+         0,
+         0
+        ],
+        [
+         1,
+         3
+        ]
+       ],
+       "offset": [
+        0,
+        0
+       ],
+       "offset_from": null,
+       "sliced": false
+      }
+     ],
+     "condition": [],
+     "linear": {
+      "alpha": {
+       "name": "_scalar1",
+       "indices": [],
+       "bbox": null,
+       "offset": null,
+       "offset_from": null,
+       "sliced": false
+      },
+      "add": false
+     },
+     "optype": "Mul"
+    },
+    {
+     "type": "multilinear",
+     "result": {
+      "name": "out",
+      "indices": [
+       "a"
+      ],
+      "bbox": [
+       [
+        0
+       ],
+       [
+        4
+       ]
+      ],
+      "offset": [
+       0
+      ],
+      "offset_from": null,
+      "sliced": false
+     },
+     "args": [
+      {
+       "name": "M",
+       "indices": [
+        "a"
+       ],
+       "bbox": [
+        [
+         0
+        ],
+        [
+         4
+        ]
+       ],
+       "offset": [
+        0
+       ],
+       "offset_from": null,
+       "sliced": false
+      }
+     ],
+     "condition": [],
+     "permute": [
+      [
+       0
+      ]
+     ],
+     "target": [
+      [
+       0
+      ]
+     ],
+     "linear": {
+      "alpha": {
+       "name": "_scalar2",
+       "indices": [],
+       "bbox": null,
+       "offset": null,
+       "offset_from": null,
+       "sliced": false
+      },
+      "add": false
+     }
+    }
+   ]
+  },
+  "reduction_output_reassigned_from_narrower": {
+   "version": 7,
+   "tensors": [
+    {
+     "name": "M",
+     "addressing": "n&+o&",
+     "residence": "memory",
+     "datatype": "f64",
+     "storage": {
+      "shape": [
+       4
+      ],
+      "type": "bbox",
+      "start": [
+       0
+      ],
+      "sizes": [
+       4
+      ]
+     },
+     "values": null,
+     "alignment": 0,
+     "flags": {
+      "temporary": false,
+      "constant": false
+     }
+    },
+    {
+     "name": "b0",
+     "addressing": "n&+o&",
+     "residence": "memory",
+     "datatype": "f64",
+     "storage": {
+      "shape": [
+       4
+      ],
+      "type": "bbox",
+      "start": [
+       0
+      ],
+      "sizes": [
+       4
+      ]
+     },
+     "values": null,
+     "alignment": 0,
+     "flags": {
+      "temporary": false,
+      "constant": false
+     }
+    },
+    {
+     "name": "A",
+     "addressing": "n&+o&",
+     "residence": "memory",
+     "datatype": "f64",
+     "storage": {
+      "shape": [
+       4,
+       3
+      ],
+      "type": "bbox",
+      "start": [
+       0,
+       0
+      ],
+      "sizes": [
+       1,
+       3
+      ]
+     },
+     "values": null,
+     "alignment": 0,
+     "flags": {
+      "temporary": false,
+      "constant": false
+     }
+    },
+    {
+     "name": "_scalar0",
+     "addressing": "",
+     "residence": "argument",
+     "datatype": "f64",
+     "storage": {
+      "shape": [],
+      "type": "full"
+     },
+     "alignment": 0,
+     "values": {
+      "kind": "entries",
+      "data": [
+       [
+        [],
+        1.0
+       ]
+      ]
+     },
+     "flags": {
+      "temporary": false,
+      "constant": true
+     }
+    },
+    {
+     "name": "_scalar1",
+     "addressing": "",
+     "residence": "argument",
+     "datatype": "f64",
+     "storage": {
+      "shape": [],
+      "type": "full"
+     },
+     "alignment": 0,
+     "values": {
+      "kind": "entries",
+      "data": [
+       [
+        [],
+        1.0
+       ]
+      ]
+     },
+     "flags": {
+      "temporary": false,
+      "constant": true
+     }
+    }
+   ],
+   "operations": [
+    {
+     "type": "multilinear",
+     "result": {
+      "name": "M",
+      "indices": [
+       "a"
+      ],
+      "bbox": [
+       [
+        0
+       ],
+       [
+        4
+       ]
+      ],
+      "offset": [
+       0
+      ],
+      "offset_from": null,
+      "sliced": false
+     },
+     "args": [
+      {
+       "name": "b0",
+       "indices": [
+        "a"
+       ],
+       "bbox": [
+        [
+         0
+        ],
+        [
+         4
+        ]
+       ],
+       "offset": [
+        0
+       ],
+       "offset_from": null,
+       "sliced": false
+      }
+     ],
+     "condition": [],
+     "permute": [
+      [
+       0
+      ]
+     ],
+     "target": [
+      [
+       0
+      ]
+     ],
+     "linear": {
+      "alpha": {
+       "name": "_scalar0",
+       "indices": [],
+       "bbox": null,
+       "offset": null,
+       "offset_from": null,
+       "sliced": false
+      },
+      "add": false
+     }
+    },
+    {
+     "type": "reduction",
+     "result": {
+      "name": "M",
+      "indices": [
+       "l"
+      ],
+      "bbox": [
+       [
+        0
+       ],
+       [
+        1
+       ]
+      ],
+      "offset": [
+       0
+      ],
+      "offset_from": null,
+      "sliced": false
+     },
+     "args": [
+      {
+       "name": "A",
+       "indices": [
+        "l",
+        "j"
+       ],
+       "bbox": [
+        [
+         0,
+         0
+        ],
+        [
+         1,
+         3
+        ]
+       ],
+       "offset": [
+        0,
+        0
+       ],
+       "offset_from": null,
+       "sliced": false
+      }
+     ],
+     "condition": [],
+     "linear": {
+      "alpha": {
+       "name": "_scalar1",
+       "indices": [],
+       "bbox": null,
+       "offset": null,
+       "offset_from": null,
+       "sliced": false
+      },
+      "add": false
+     },
+     "optype": "Mul"
+    }
+   ]
+  },
+  "pointwise_output_window_past_zero": {
+   "version": 7,
+   "tensors": [
+    {
+     "name": "M",
+     "addressing": "n&+o&",
+     "residence": "memory",
+     "datatype": "f64",
+     "storage": {
+      "shape": [
+       4
+      ],
+      "type": "bbox",
+      "start": [
+       0
+      ],
+      "sizes": [
+       4
+      ]
+     },
+     "values": null,
+     "alignment": 0,
+     "flags": {
+      "temporary": false,
+      "constant": false
+     }
+    },
+    {
+     "name": "b0",
+     "addressing": "n&+o&",
+     "residence": "memory",
+     "datatype": "f64",
+     "storage": {
+      "shape": [
+       4
+      ],
+      "type": "bbox",
+      "start": [
+       0
+      ],
+      "sizes": [
+       4
+      ]
+     },
+     "values": null,
+     "alignment": 0,
+     "flags": {
+      "temporary": false,
+      "constant": false
+     }
+    },
+    {
+     "name": "b2",
+     "addressing": "n&+o&",
+     "residence": "memory",
+     "datatype": "f64",
+     "storage": {
+      "shape": [
+       4
+      ],
+      "type": "bbox",
+      "start": [
+       2
+      ],
+      "sizes": [
+       2
+      ]
+     },
+     "values": null,
+     "alignment": 0,
+     "flags": {
+      "temporary": false,
+      "constant": false
+     }
+    },
+    {
+     "name": "_scalar0",
+     "addressing": "",
+     "residence": "argument",
+     "datatype": "f64",
+     "storage": {
+      "shape": [],
+      "type": "full"
+     },
+     "alignment": 0,
+     "values": {
+      "kind": "entries",
+      "data": [
+       [
+        [],
+        1.0
+       ]
+      ]
+     },
+     "flags": {
+      "temporary": false,
+      "constant": true
+     }
+    },
+    {
+     "name": "_scalar1",
+     "addressing": "",
+     "residence": "argument",
+     "datatype": "f64",
+     "storage": {
+      "shape": [],
+      "type": "full"
+     },
+     "alignment": 0,
+     "values": {
+      "kind": "entries",
+      "data": [
+       [
+        [],
+        1.0
+       ]
+      ]
+     },
+     "flags": {
+      "temporary": false,
+      "constant": true
+     }
+    }
+   ],
+   "operations": [
+    {
+     "type": "multilinear",
+     "result": {
+      "name": "M",
+      "indices": [
+       "a"
+      ],
+      "bbox": [
+       [
+        0
+       ],
+       [
+        4
+       ]
+      ],
+      "offset": [
+       0
+      ],
+      "offset_from": null,
+      "sliced": false
+     },
+     "args": [
+      {
+       "name": "b0",
+       "indices": [
+        "a"
+       ],
+       "bbox": [
+        [
+         0
+        ],
+        [
+         4
+        ]
+       ],
+       "offset": [
+        0
+       ],
+       "offset_from": null,
+       "sliced": false
+      }
+     ],
+     "condition": [],
+     "permute": [
+      [
+       0
+      ]
+     ],
+     "target": [
+      [
+       0
+      ]
+     ],
+     "linear": {
+      "alpha": {
+       "name": "_scalar0",
+       "indices": [],
+       "bbox": null,
+       "offset": null,
+       "offset_from": null,
+       "sliced": false
+      },
+      "add": false
+     }
+    },
+    {
+     "type": "elementwise",
+     "result": {
+      "name": "M",
+      "indices": [
+       "l"
+      ],
+      "bbox": [
+       [
+        2
+       ],
+       [
+        4
+       ]
+      ],
+      "offset": [
+       0
+      ],
+      "offset_from": null,
+      "sliced": false
+     },
+     "args": [
+      {
+       "name": "b2",
+       "indices": [
+        "l"
+       ],
+       "bbox": [
+        [
+         2
+        ],
+        [
+         4
+        ]
+       ],
+       "offset": [
+        0
+       ],
+       "offset_from": null,
+       "sliced": false
+      }
+     ],
+     "condition": [],
+     "linear": {
+      "alpha": {
+       "name": "_scalar1",
+       "indices": [],
+       "bbox": null,
+       "offset": null,
+       "offset_from": null,
+       "sliced": false
+      },
+      "add": false
+     },
+     "optype": "Abs"
+    }
+   ]
+  },
+  "pointwise_temporary_window_past_zero": {
+   "version": 7,
+   "tensors": [
+    {
+     "name": "M",
+     "addressing": "n*N+o&",
+     "residence": "memory",
+     "datatype": "f64",
+     "storage": {
+      "shape": [
+       4
+      ],
+      "type": "bbox",
+      "start": [
+       0
+      ],
+      "sizes": [
+       4
+      ]
+     },
+     "values": null,
+     "alignment": 0,
+     "flags": {
+      "temporary": true,
+      "constant": false
+     }
+    },
+    {
+     "name": "b0",
+     "addressing": "n&+o&",
+     "residence": "memory",
+     "datatype": "f64",
+     "storage": {
+      "shape": [
+       4
+      ],
+      "type": "bbox",
+      "start": [
+       0
+      ],
+      "sizes": [
+       4
+      ]
+     },
+     "values": null,
+     "alignment": 0,
+     "flags": {
+      "temporary": false,
+      "constant": false
+     }
+    },
+    {
+     "name": "b2",
+     "addressing": "n&+o&",
+     "residence": "memory",
+     "datatype": "f64",
+     "storage": {
+      "shape": [
+       4
+      ],
+      "type": "bbox",
+      "start": [
+       2
+      ],
+      "sizes": [
+       2
+      ]
+     },
+     "values": null,
+     "alignment": 0,
+     "flags": {
+      "temporary": false,
+      "constant": false
+     }
+    },
+    {
+     "name": "out",
+     "addressing": "n&+o&",
+     "residence": "memory",
+     "datatype": "f64",
+     "storage": {
+      "shape": [
+       4
+      ],
+      "type": "bbox",
+      "start": [
+       0
+      ],
+      "sizes": [
+       4
+      ]
+     },
+     "values": null,
+     "alignment": 0,
+     "flags": {
+      "temporary": false,
+      "constant": false
+     }
+    },
+    {
+     "name": "_scalar0",
+     "addressing": "",
+     "residence": "argument",
+     "datatype": "f64",
+     "storage": {
+      "shape": [],
+      "type": "full"
+     },
+     "alignment": 0,
+     "values": {
+      "kind": "entries",
+      "data": [
+       [
+        [],
+        1.0
+       ]
+      ]
+     },
+     "flags": {
+      "temporary": false,
+      "constant": true
+     }
+    },
+    {
+     "name": "_scalar1",
+     "addressing": "",
+     "residence": "argument",
+     "datatype": "f64",
+     "storage": {
+      "shape": [],
+      "type": "full"
+     },
+     "alignment": 0,
+     "values": {
+      "kind": "entries",
+      "data": [
+       [
+        [],
+        1.0
+       ]
+      ]
+     },
+     "flags": {
+      "temporary": false,
+      "constant": true
+     }
+    },
+    {
+     "name": "_scalar2",
+     "addressing": "",
+     "residence": "argument",
+     "datatype": "f64",
+     "storage": {
+      "shape": [],
+      "type": "full"
+     },
+     "alignment": 0,
+     "values": {
+      "kind": "entries",
+      "data": [
+       [
+        [],
+        1.0
+       ]
+      ]
+     },
+     "flags": {
+      "temporary": false,
+      "constant": true
+     }
+    }
+   ],
+   "operations": [
+    {
+     "type": "multilinear",
+     "result": {
+      "name": "M",
+      "indices": [
+       "a"
+      ],
+      "bbox": [
+       [
+        0
+       ],
+       [
+        4
+       ]
+      ],
+      "offset": [
+       0
+      ],
+      "offset_from": null,
+      "sliced": false
+     },
+     "args": [
+      {
+       "name": "b0",
+       "indices": [
+        "a"
+       ],
+       "bbox": [
+        [
+         0
+        ],
+        [
+         4
+        ]
+       ],
+       "offset": [
+        0
+       ],
+       "offset_from": null,
+       "sliced": false
+      }
+     ],
+     "condition": [],
+     "permute": [
+      [
+       0
+      ]
+     ],
+     "target": [
+      [
+       0
+      ]
+     ],
+     "linear": {
+      "alpha": {
+       "name": "_scalar0",
+       "indices": [],
+       "bbox": null,
+       "offset": null,
+       "offset_from": null,
+       "sliced": false
+      },
+      "add": false
+     }
+    },
+    {
+     "type": "elementwise",
+     "result": {
+      "name": "M",
+      "indices": [
+       "l"
+      ],
+      "bbox": [
+       [
+        2
+       ],
+       [
+        4
+       ]
+      ],
+      "offset": [
+       0
+      ],
+      "offset_from": null,
+      "sliced": false
+     },
+     "args": [
+      {
+       "name": "b2",
+       "indices": [
+        "l"
+       ],
+       "bbox": [
+        [
+         2
+        ],
+        [
+         4
+        ]
+       ],
+       "offset": [
+        0
+       ],
+       "offset_from": null,
+       "sliced": false
+      }
+     ],
+     "condition": [],
+     "linear": {
+      "alpha": {
+       "name": "_scalar1",
+       "indices": [],
+       "bbox": null,
+       "offset": null,
+       "offset_from": null,
+       "sliced": false
+      },
+      "add": false
+     },
+     "optype": "Abs"
+    },
+    {
+     "type": "multilinear",
+     "result": {
+      "name": "out",
+      "indices": [
+       "a"
+      ],
+      "bbox": [
+       [
+        0
+       ],
+       [
+        4
+       ]
+      ],
+      "offset": [
+       0
+      ],
+      "offset_from": null,
+      "sliced": false
+     },
+     "args": [
+      {
+       "name": "M",
+       "indices": [
+        "a"
+       ],
+       "bbox": [
+        [
+         0
+        ],
+        [
+         4
+        ]
+       ],
+       "offset": [
+        0
+       ],
+       "offset_from": null,
+       "sliced": false
+      }
+     ],
+     "condition": [],
+     "permute": [
+      [
+       0
+      ]
+     ],
+     "target": [
+      [
+       0
+      ]
+     ],
+     "linear": {
+      "alpha": {
+       "name": "_scalar2",
+       "indices": [],
+       "bbox": null,
+       "offset": null,
+       "offset_from": null,
+       "sliced": false
+      },
+      "add": false
+     }
+    }
+   ]
+  },
+  "pointwise_temporary_divided_by_wider": {
+   "version": 7,
+   "tensors": [
+    {
+     "name": "M",
+     "addressing": "n*N+o&",
+     "residence": "memory",
+     "datatype": "f64",
+     "storage": {
+      "shape": [
+       4
+      ],
+      "type": "bbox",
+      "start": [
+       0
+      ],
+      "sizes": [
+       4
+      ]
+     },
+     "values": null,
+     "alignment": 0,
+     "flags": {
+      "temporary": true,
+      "constant": false
+     }
+    },
+    {
+     "name": "b0",
+     "addressing": "n&+o&",
+     "residence": "memory",
+     "datatype": "f64",
+     "storage": {
+      "shape": [
+       4
+      ],
+      "type": "bbox",
+      "start": [
+       0
+      ],
+      "sizes": [
+       4
+      ]
+     },
+     "values": null,
+     "alignment": 0,
+     "flags": {
+      "temporary": false,
+      "constant": false
+     }
+    },
+    {
+     "name": "_scalar0",
+     "addressing": "",
+     "residence": "argument",
+     "datatype": "f64",
+     "storage": {
+      "shape": [],
+      "type": "full"
+     },
+     "alignment": 0,
+     "values": {
+      "kind": "entries",
+      "data": [
+       [
+        [],
+        1.0
+       ]
+      ]
+     },
+     "flags": {
+      "temporary": false,
+      "constant": true
+     }
+    },
+    {
+     "name": "b1",
+     "addressing": "n&+o&",
+     "residence": "memory",
+     "datatype": "f64",
+     "storage": {
+      "shape": [
+       4
+      ],
+      "type": "bbox",
+      "start": [
+       0
+      ],
+      "sizes": [
+       1
+      ]
+     },
+     "values": null,
+     "alignment": 0,
+     "flags": {
+      "temporary": false,
+      "constant": false
+     }
+    },
+    {
+     "name": "b2",
+     "addressing": "n&+o&",
+     "residence": "memory",
+     "datatype": "f64",
+     "storage": {
+      "shape": [
+       4
+      ],
+      "type": "bbox",
+      "start": [
+       0
+      ],
+      "sizes": [
+       4
+      ]
+     },
+     "values": null,
+     "alignment": 0,
+     "flags": {
+      "temporary": false,
+      "constant": false
+     }
+    },
+    {
+     "name": "_scalar1",
+     "addressing": "",
+     "residence": "argument",
+     "datatype": "f64",
+     "storage": {
+      "shape": [],
+      "type": "full"
+     },
+     "alignment": 0,
+     "values": {
+      "kind": "entries",
+      "data": [
+       [
+        [],
+        1.0
+       ]
+      ]
+     },
+     "flags": {
+      "temporary": false,
+      "constant": true
+     }
+    },
+    {
+     "name": "out",
+     "addressing": "n&+o&",
+     "residence": "memory",
+     "datatype": "f64",
+     "storage": {
+      "shape": [
+       4
+      ],
+      "type": "bbox",
+      "start": [
+       0
+      ],
+      "sizes": [
+       4
+      ]
+     },
+     "values": null,
+     "alignment": 0,
+     "flags": {
+      "temporary": false,
+      "constant": false
+     }
+    },
+    {
+     "name": "_scalar2",
+     "addressing": "",
+     "residence": "argument",
+     "datatype": "f64",
+     "storage": {
+      "shape": [],
+      "type": "full"
+     },
+     "alignment": 0,
+     "values": {
+      "kind": "entries",
+      "data": [
+       [
+        [],
+        1.0
+       ]
+      ]
+     },
+     "flags": {
+      "temporary": false,
+      "constant": true
+     }
+    }
+   ],
+   "operations": [
+    {
+     "type": "multilinear",
+     "result": {
+      "name": "M",
+      "indices": [
+       "a"
+      ],
+      "bbox": [
+       [
+        0
+       ],
+       [
+        4
+       ]
+      ],
+      "offset": [
+       0
+      ],
+      "offset_from": null,
+      "sliced": false
+     },
+     "args": [
+      {
+       "name": "b0",
+       "indices": [
+        "a"
+       ],
+       "bbox": [
+        [
+         0
+        ],
+        [
+         4
+        ]
+       ],
+       "offset": [
+        0
+       ],
+       "offset_from": null,
+       "sliced": false
+      }
+     ],
+     "condition": [],
+     "permute": [
+      [
+       0
+      ]
+     ],
+     "target": [
+      [
+       0
+      ]
+     ],
+     "linear": {
+      "alpha": {
+       "name": "_scalar0",
+       "indices": [],
+       "bbox": null,
+       "offset": null,
+       "offset_from": null,
+       "sliced": false
+      },
+      "add": false
+     }
+    },
+    {
+     "type": "elementwise",
+     "result": {
+      "name": "M",
+      "indices": [
+       "l"
+      ],
+      "bbox": [
+       [
+        0
+       ],
+       [
+        1
+       ]
+      ],
+      "offset": [
+       0
+      ],
+      "offset_from": null,
+      "sliced": false
+     },
+     "args": [
+      {
+       "name": "b1",
+       "indices": [
+        "l"
+       ],
+       "bbox": [
+        [
+         0
+        ],
+        [
+         1
+        ]
+       ],
+       "offset": [
+        0
+       ],
+       "offset_from": null,
+       "sliced": false
+      },
+      {
+       "name": "b2",
+       "indices": [
+        "l"
+       ],
+       "bbox": [
+        [
+         0
+        ],
+        [
+         4
+        ]
+       ],
+       "offset": [
+        0
+       ],
+       "offset_from": null,
+       "sliced": false
+      }
+     ],
+     "condition": [],
+     "linear": {
+      "alpha": {
+       "name": "_scalar1",
+       "indices": [],
+       "bbox": null,
+       "offset": null,
+       "offset_from": null,
+       "sliced": false
+      },
+      "add": false
+     },
+     "optype": "Div"
+    },
+    {
+     "type": "multilinear",
+     "result": {
+      "name": "out",
+      "indices": [
+       "a"
+      ],
+      "bbox": [
+       [
+        0
+       ],
+       [
+        4
+       ]
+      ],
+      "offset": [
+       0
+      ],
+      "offset_from": null,
+      "sliced": false
+     },
+     "args": [
+      {
+       "name": "M",
+       "indices": [
+        "a"
+       ],
+       "bbox": [
+        [
+         0
+        ],
+        [
+         4
+        ]
+       ],
+       "offset": [
+        0
+       ],
+       "offset_from": null,
+       "sliced": false
+      }
+     ],
+     "condition": [],
+     "permute": [
+      [
+       0
+      ]
+     ],
+     "target": [
+      [
+       0
+      ]
+     ],
+     "linear": {
+      "alpha": {
+       "name": "_scalar2",
+       "indices": [],
+       "bbox": null,
+       "offset": null,
+       "offset_from": null,
+       "sliced": false
+      },
+      "add": false
+     }
+    }
+   ]
+  },
+  "pointwise_output_divided_by_wider": {
+   "version": 7,
+   "tensors": [
+    {
+     "name": "M",
+     "addressing": "n&+o&",
+     "residence": "memory",
+     "datatype": "f64",
+     "storage": {
+      "shape": [
+       4
+      ],
+      "type": "bbox",
+      "start": [
+       0
+      ],
+      "sizes": [
+       4
+      ]
+     },
+     "values": null,
+     "alignment": 0,
+     "flags": {
+      "temporary": false,
+      "constant": false
+     }
+    },
+    {
+     "name": "b0",
+     "addressing": "n&+o&",
+     "residence": "memory",
+     "datatype": "f64",
+     "storage": {
+      "shape": [
+       4
+      ],
+      "type": "bbox",
+      "start": [
+       0
+      ],
+      "sizes": [
+       4
+      ]
+     },
+     "values": null,
+     "alignment": 0,
+     "flags": {
+      "temporary": false,
+      "constant": false
+     }
+    },
+    {
+     "name": "_scalar0",
+     "addressing": "",
+     "residence": "argument",
+     "datatype": "f64",
+     "storage": {
+      "shape": [],
+      "type": "full"
+     },
+     "alignment": 0,
+     "values": {
+      "kind": "entries",
+      "data": [
+       [
+        [],
+        1.0
+       ]
+      ]
+     },
+     "flags": {
+      "temporary": false,
+      "constant": true
+     }
+    },
+    {
+     "name": "b1",
+     "addressing": "n&+o&",
+     "residence": "memory",
+     "datatype": "f64",
+     "storage": {
+      "shape": [
+       4
+      ],
+      "type": "bbox",
+      "start": [
+       0
+      ],
+      "sizes": [
+       1
+      ]
+     },
+     "values": null,
+     "alignment": 0,
+     "flags": {
+      "temporary": false,
+      "constant": false
+     }
+    },
+    {
+     "name": "b2",
+     "addressing": "n&+o&",
+     "residence": "memory",
+     "datatype": "f64",
+     "storage": {
+      "shape": [
+       4
+      ],
+      "type": "bbox",
+      "start": [
+       0
+      ],
+      "sizes": [
+       4
+      ]
+     },
+     "values": null,
+     "alignment": 0,
+     "flags": {
+      "temporary": false,
+      "constant": false
+     }
+    },
+    {
+     "name": "_scalar1",
+     "addressing": "",
+     "residence": "argument",
+     "datatype": "f64",
+     "storage": {
+      "shape": [],
+      "type": "full"
+     },
+     "alignment": 0,
+     "values": {
+      "kind": "entries",
+      "data": [
+       [
+        [],
+        1.0
+       ]
+      ]
+     },
+     "flags": {
+      "temporary": false,
+      "constant": true
+     }
+    }
+   ],
+   "operations": [
+    {
+     "type": "multilinear",
+     "result": {
+      "name": "M",
+      "indices": [
+       "a"
+      ],
+      "bbox": [
+       [
+        0
+       ],
+       [
+        4
+       ]
+      ],
+      "offset": [
+       0
+      ],
+      "offset_from": null,
+      "sliced": false
+     },
+     "args": [
+      {
+       "name": "b0",
+       "indices": [
+        "a"
+       ],
+       "bbox": [
+        [
+         0
+        ],
+        [
+         4
+        ]
+       ],
+       "offset": [
+        0
+       ],
+       "offset_from": null,
+       "sliced": false
+      }
+     ],
+     "condition": [],
+     "permute": [
+      [
+       0
+      ]
+     ],
+     "target": [
+      [
+       0
+      ]
+     ],
+     "linear": {
+      "alpha": {
+       "name": "_scalar0",
+       "indices": [],
+       "bbox": null,
+       "offset": null,
+       "offset_from": null,
+       "sliced": false
+      },
+      "add": false
+     }
+    },
+    {
+     "type": "elementwise",
+     "result": {
+      "name": "M",
+      "indices": [
+       "l"
+      ],
+      "bbox": [
+       [
+        0
+       ],
+       [
+        1
+       ]
+      ],
+      "offset": [
+       0
+      ],
+      "offset_from": null,
+      "sliced": false
+     },
+     "args": [
+      {
+       "name": "b1",
+       "indices": [
+        "l"
+       ],
+       "bbox": [
+        [
+         0
+        ],
+        [
+         1
+        ]
+       ],
+       "offset": [
+        0
+       ],
+       "offset_from": null,
+       "sliced": false
+      },
+      {
+       "name": "b2",
+       "indices": [
+        "l"
+       ],
+       "bbox": [
+        [
+         0
+        ],
+        [
+         4
+        ]
+       ],
+       "offset": [
+        0
+       ],
+       "offset_from": null,
+       "sliced": false
+      }
+     ],
+     "condition": [],
+     "linear": {
+      "alpha": {
+       "name": "_scalar1",
+       "indices": [],
+       "bbox": null,
+       "offset": null,
+       "offset_from": null,
+       "sliced": false
+      },
+      "add": false
+     },
+     "optype": "Div"
+    }
+   ]
+  }
+ }
+}

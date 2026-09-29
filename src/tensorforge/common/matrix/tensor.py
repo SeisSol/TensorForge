@@ -559,6 +559,28 @@ class SubTensor(TensorWrapper):
             [l + o for l, o in zip(self.bbox.lower(), self.offset)],
             [u + o for u, o in zip(self.bbox.upper(), self.offset)])
 
+    def owed_zeros(self) -> Union[BoundingBox, None]:
+        """The box an assignment through this view defines beyond its own, or
+        None where there is nothing beyond.
+
+        The tensor's box, in the tensor's coordinates, for a view that is the
+        tensor itself with a narrower window: the window has the values and
+        the rest of the box is zero.  Nothing for a slice, which owns only
+        what it names, for a view without axes, and where the window already
+        covers the box.  An accumulation owes nothing either way; that is the
+        caller's to say, since a view does not know how it is written.
+        """
+        if self.sliced or self.bbox is None or self.bbox.rank() == 0:
+            return None
+        promise = self.tensor.get_bbox()
+        own = self.storage_box()
+        if promise is None or promise.rank() != own.rank():
+            return None
+        if all(ol <= pl and pu <= ou for pl, pu, ol, ou in zip(
+                promise.lower(), promise.upper(), own.lower(), own.upper())):
+            return None
+        return promise
+
     def __str__(self):
         return f'{self.tensor}({self.bbox})'
 

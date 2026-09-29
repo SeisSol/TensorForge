@@ -47,8 +47,7 @@ class ElementwiseBuilder(OperationBuilder):
             ElementwiseInstruction,
             [v for v in operands if not isinstance(v, ScalarLike)],
             'elementwise')
-        return self.materialize_dest(descr, lead_pos) \
-            or self.view_of(descr.dest)
+        return self.pointwise_dest(descr, lead_pos)
 
     def emit_compute(self, descr, operands, dest) -> None:
         self._instructions.append(ElementwiseInstruction(
@@ -170,8 +169,7 @@ class ReductionBuilder(OperationBuilder):
         kept = [d for d in range(var.bbox.rank()) if d not in set(descr.dims)]
         src_lead = ComputeInstruction.lead_dim(var)
         lead_pos = kept.index(src_lead) if src_lead in kept else 0
-        return self.materialize_dest(descr, lead_pos) \
-            or self.view_of(descr.dest)
+        return self.pointwise_dest(descr, lead_pos)
 
     def emit_compute(self, descr, operands, dest) -> None:
         var, = operands

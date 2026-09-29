@@ -233,17 +233,28 @@ class ReductionInstruction(CrossLaneFold, ComputeInstruction):
         element, which is as uncoalesced as it sounds and is the price of
         contracting the axis the hardware distributes.
         """
+        by_number = self._image_axis(kept, writer)
         loopstack = [Loop(f'k{i}', 0, self._op.bbox.size(i), 1, unroll=False)
-                     for i in kept]
+                     for i in kept if i != by_number]
 
-        def inner(varlist):
+        def inner(varlist, fixed=None):
+            if by_number is not None:
+                varlist = list(varlist)
+                varlist.insert(kept.index(by_number), fixed)
             index = dict(zip(kept, varlist))
             self._fold_across_lanes(writer, index, kept, varlist, src_lead)
 
-        if loopstack:
-            write_loops(self._context, writer, loopstack, inner)
-        else:
-            inner([])
+        # The kept axis a register image spreads over the lanes is walked by
+        # number: a fixed element of it has one owning lane and a slot there,
+        # which `Symbol.store` resolves from an integer and cannot from a
+        # loop variable (`_image_axis`).
+        for fixed in (range(self._op.bbox.size(by_number))
+                      if by_number is not None else [None]):
+            if loopstack:
+                write_loops(self._context, writer, loopstack,
+                            lambda varlist, fixed=fixed: inner(varlist, fixed))
+            else:
+                inner([], fixed)
 
     def _fold_across_lanes(self, writer: Writer, index: dict,
                            kept: Sequence[int], varlist, src_lead: int) -> None:
@@ -253,7 +264,8 @@ class ReductionInstruction(CrossLaneFold, ComputeInstruction):
         partial = self._lane_partial(writer, index, src_lead, lead)
         total = self._fold_across_waves(
             writer,
-            self._cross_lane(writer, partial, self._exchange_width(src_lead)),
+            self._cross_lane(writer, partial,
+                             self._exchange_width(src_lead, writer)),
             lead)
 
         # In SPMD `reduction` is an all-reduce, so every lane holds the answer
@@ -275,7 +287,14 @@ class ReductionInstruction(CrossLaneFold, ComputeInstruction):
         # damage step takes the `max` of ten temporaries this way, and read
         # back whichever lane won.  `_exchange_width` makes the all-reduce
         # reach every lane for it.
-        if writer._explicit_simd() or self._into_registers():
+        #
+        # A register image with axes is the same, one element at a time: its
+        # element is written by the lane that owns it, into its slot there,
+        # which `Symbol.store` guards by itself for an element named by number
+        # (`_image_axis`).  Guarded to lane 0 as well, lane 0 wrote every
+        # element of a kept axis into its own slot 0 -- and past it.
+        if (writer._explicit_simd() or self._into_registers()
+                or self._image_axis(kept, writer) is not None):
             self._dest.symbol.store(writer, self._context, total,
                                     self._dest_index(kept, varlist), False)
             return
@@ -294,6 +313,33 @@ class ReductionInstruction(CrossLaneFold, ComputeInstruction):
         return (self._dest.bbox.rank() == 0
                 and self._dest.symbol.stype in (SymbolType.Register,
                                                 SymbolType.Scratch))
+
+    def _image_axis(self, kept: Sequence[int], writer=None):
+        """The kept axis a register-image destination spreads over the lanes,
+        where the fold crosses them; None otherwise.
+
+        The lanes are spoken for by the contracted axis, so the kept ones are
+        walked sequentially -- and an image spread over the lanes is not
+        addressed by a sequential index: `Symbol.build_address` takes a loop
+        variable on its lead axis for the slot.  Every element went to lane
+        0's slot `k`, past the end of an image one slot deep, and the image
+        stored back one wrong value.  A temporary written first by such a
+        reduction had it; the pointwise path's register images
+        (`OperationBuilder.pointwise_dest`) would have spread it.
+
+        Not under an explicit vector, where the work-item holds the whole
+        wave and the fold's one value is stored as it always was.
+        """
+        if (self._dest.bbox.rank() == 0 or not self._contracts_lead()
+                or self._dest.bbox.rank() != len(kept)
+                or self._dest.symbol.stype not in (SymbolType.Register,
+                                                   SymbolType.Scratch)
+                or (writer is not None and writer._explicit_simd())):
+            return None
+        lead = list(getattr(self._dest.symbol, 'lead_dims', None) or [])
+        if len(lead) != 1:
+            return None
+        return kept[lead[0]]
 
     def _slots(self, src_lead: int) -> int:
         """How many elements of the lead axis one lane owns.
@@ -363,7 +409,7 @@ class ReductionInstruction(CrossLaneFold, ComputeInstruction):
                                                             contrib)
         return acc
 
-    def _exchange_width(self, src_lead: int) -> int:
+    def _exchange_width(self, src_lead: int, writer=None) -> int:
         """How many lanes the fold actually has to cross.
 
         `num_threads` is the upper bound, not the answer.  When the lead axis
@@ -382,7 +428,8 @@ class ReductionInstruction(CrossLaneFold, ComputeInstruction):
         # And never wider than one exchange reaches: past that the fold is in
         # two stages, and this is the first of them (`_fold_across_waves`).
         reach = self._reach()
-        if self._slots(src_lead) > 1 or self._into_registers():
+        if (self._slots(src_lead) > 1 or self._into_registers()
+                or self._image_axis(self._kept(), writer) is not None):
             return min(self._num_threads, reach)
         extent = self._op.bbox.size(src_lead)
         width = 1
