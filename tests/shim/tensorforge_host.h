@@ -112,42 +112,9 @@ inline float4 make_float4(float a, float b, float c, float d) {
 }
 
 // --------------------------------------------------------------------------
-// libcu++ pipeline surface, as used by the async-copy path.
-// --------------------------------------------------------------------------
-
-namespace cuda {
-enum thread_scope {
-  thread_scope_thread,
-  thread_scope_block,
-  thread_scope_device,
-  thread_scope_system
-};
-template <thread_scope S> struct pipeline {
-  void producer_acquire() {}
-  void producer_commit() {}
-  void consumer_wait() {}
-  void consumer_release() {}
-};
-template <std::size_t A> struct aligned_size_t {
-  std::size_t v;
-  aligned_size_t(std::size_t n) : v(n) {}
-  operator std::size_t() const { return v; }
-};
-inline pipeline<thread_scope_thread> make_pipeline() { return {}; }
-template <typename D, typename S, typename Sz, thread_scope Sc>
-void memcpy_async(D *, const S *, Sz, pipeline<Sc> &);
-} // namespace cuda
-
-// --------------------------------------------------------------------------
-// The `__pipeline_*` primitives from <cuda_pipeline.h>.
-//
-// `cuda::pipeline` above is a wrapper over exactly these, and the structured
-// copy path lowers to the primitives directly: no stage count fixed at
-// compile time, no acquire/release bookkeeping, and `__pipeline_wait_prior`
-// takes the number of outstanding groups to leave in flight rather than a
-// number of stages.  Both surfaces are declared here because both are
-// reachable -- a transfer that migrated uses the primitives, one that did not
-// still drives the object.
+// The `__pipeline_*` primitives from <cuda_pipeline.h>, which the structured
+// copy path lowers to.  `__pipeline_wait_prior` takes the number of committed
+// groups to leave in flight.
 // --------------------------------------------------------------------------
 
 void __pipeline_memcpy_async(void *, const void *, std::size_t);

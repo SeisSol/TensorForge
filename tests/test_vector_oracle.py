@@ -3,19 +3,14 @@
 # SPDX-License-Identifier: MIT
 """The widened path, checked against the scalar one by evaluating both.
 
-Until the host oracle could model vector values there was no numerical
-coverage of the vectorized path at all -- and worse than none for a while,
-because a catch-all for `cuda::pipeline` swallowed every statement containing
-`::`, so a widened kernel evaluated to a destination of all zeros and every
-oracle test passed without touching the arithmetic it was there to check.
-
-What these compare is the generated code against *itself*: the same case with
-the vectorization off and on has to write the same numbers to the same places.
-That is the check that catches a lane-mapping disagreement, which is the
-failure mode the whole arrangement is prone to -- the compute instruction
-blocks the register image by the width and every other loop over it has to
-agree, and when one does not the code still compiles and the snapshot still
-looks plausible.
+The host oracle models vector values, which is what puts numbers behind the
+vectorized path without a GPU.  What these compare is the generated code
+against *itself*: the same case with the vectorization off and on has to write
+the same numbers to the same places.  That is the check that catches a
+lane-mapping disagreement, which is the failure mode the whole arrangement is
+prone to -- the compute instruction blocks the register image by the width and
+every other loop over it has to agree, and when one does not the code still
+compiles and the snapshot still looks plausible.
 """
 
 from __future__ import annotations

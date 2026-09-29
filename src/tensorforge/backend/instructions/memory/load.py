@@ -754,22 +754,9 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
       raise InternalError(f'shr-load: `dest` operand is not a tensor, instead: {self._dest.obj}')
 
   def get_headers(self) -> List[str]:
-    if (self._use_cuda_memcpy
-        and self._context.get_vm().get_hw_descr().has_cuda_pipeline()):
-      # Only `cuda_pipeline.h` is needed now: the structured route lowers to
-      # the `__pipeline_*` primitives, and the `cuda::pipeline` object the
-      # other two served is gone.  They stay because the kernel's name is the
-      # digest of what it includes: dropping two headers `tensorforge_device/
-      # cuda.h` includes anyway renamed every CUDA kernel in the corpus and
-      # changed nothing in any of them.
-      return ['cooperative_groups.h', 'cooperative_groups/memcpy_async.h',
-              'cuda_pipeline.h']
-    if self._use_cuda_memcpy:
-      # The structured route still lowers to `__pipeline_*` where the target
-      # has the instruction, and that primitive header carries no floor.
-      return ['cuda_pipeline.h']
-    else:
-      return []
+    # The structured route lowers to the `__pipeline_*` primitives, whose
+    # header carries no architecture floor.
+    return ['cuda_pipeline.h'] if self._use_cuda_memcpy else []
 
   def clone(self, **overrides) -> 'GlbToShrLoader':
     """A fresh transfer with the same configuration, minus the overrides.
@@ -1001,12 +988,9 @@ class LoadWait(MemoryInstruction, LoadInstruction):
       return
     if not self._instr._issued_async:
       # Nothing was put in flight: the transfer took the reordering path and
-      # moved its data with plain loads and stores.  Waiting anyway is what
-      # produced `consumer_wait()` on a pipeline that nothing committed to --
-      # undefined behavior per libcu++, generated for two cases in the corpus
-      # and invisible because raw statements say nothing about their pairing.
-      # The flag this keyed on before, `_use_cuda_memcpy`, is a static choice
-      # rather than a record of what happened.
+      # moved its data with plain loads and stores, and a wait would retire
+      # nothing.  `_issued_async` records what the transfer did;
+      # `_use_cuda_memcpy` is only what it was allowed to do.
       return
     tokens = self._instr.tokens_for(writer)
     if not tokens and self._instr._issued_structured:
@@ -1018,8 +1002,7 @@ class LoadWait(MemoryInstruction, LoadInstruction):
     if tokens:
       # One wait for the whole transfer.  `schedule_async` derives the count
       # from the last of them and retires the rest, so the hops need no wait
-      # of their own -- which is the thing the acquire/release pair was
-      # standing in for, expressed as a def-use edge instead.
+      # of their own.
       writer.wait(tokens[-1], *tokens[:-1])
 
   def __str__(self) -> str:

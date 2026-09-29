@@ -241,9 +241,8 @@ def generate(mod, arch: str, ceiling: Optional[int],
         gen = Generator(mod.descr_list(), ctx, lanes=config)
         with contextlib.redirect_stdout(io.StringIO()):
             gen.generate()
-        # the headers the generator asks for, on top of the backend's own: a
-        # CUDA kernel staging through `__pipeline_memcpy_async` needs
-        # `cuda_pipeline.h`, which no fixed list names
+        # the headers the generator asks for, on top of the backend's own: an
+        # instruction can need one the backend does not list
         wanted = dict.fromkeys(ctx.get_vm().get_headers()
                                + gen.get_helper_headers())
         src = ''.join(f'#include "{h}"\n' for h in wanted) + gen.get_kernel()

@@ -591,7 +591,9 @@ def test_pipelined_work_sits_outside_the_element_flag_guard():
         return gen.get_kernel()
 
     advance = ["pipe_glb"]
-    prefetch = ["consumer_wait", "producer_acquire", "producer_commit"]
+    # The rotating build's prefetch: the copy into the write view of the
+    # rotated buffer, the stage the next element reads.
+    prefetch = ["s0_w["]
 
     pipe_only = kernel(enable_pipeline=True)
     assert "pipe_glb" in pipe_only, "address pipelining produced no rolling pointer"
@@ -602,6 +604,8 @@ def test_pipelined_work_sits_outside_the_element_flag_guard():
     rotated = kernel(enable_pipeline=True, enable_multibuffer=True)
     assert not _inside_flag_guard(rotated, advance), \
         "rolling pointer advance under the flag guard in the rotating build"
+    assert any(m in rotated for m in prefetch), \
+        "the rotating build issued no prefetch into the write stage"
     assert not _inside_flag_guard(rotated, prefetch), (
         "the prefetch is under the flag guard; a skipped element leaves the "
         "stage it should have filled untouched")

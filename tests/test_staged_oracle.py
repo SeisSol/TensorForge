@@ -3,27 +3,19 @@
 # SPDX-License-Identifier: MIT
 """The host oracle for operands that arrive by `cp.async`.
 
-Two defects held each other up here, and each one is why the other did not
-show.
+Two properties are pinned here, and a failure of either hides the other.
 
-`kernel_eval` swallowed `__pipeline_memcpy_async` under a catch-all written
-for `cuda::pipeline` objects, which genuinely move nothing.  The transfer
-does.  What that cost was not a visible failure: `Slot` fills an unwritten
-address from its seed, so a kernel whose operand arrives this way still
-produced a full destination of plausible numbers -- 128 of 128 entries
-non-zero for `aligned_operands`, and every one of them wrong.  Against a
-reference the error was 5e+02.
+The copy moves data.  The commit and the wait do not, and `kernel_eval` skips
+them; the transfer it carries out.  `Slot` fills an unwritten address from its
+seed, so an oracle that skipped the transfer as well would still produce a
+full destination of plausible numbers, every one of them wrong.
 
-And because no lane read anything through the staging window, it did not
-matter how many lanes ran.  The oracles named a round number -- 32 lanes, 64
-tids -- where the kernel's own width is 16, or 4 once the lead is widened.
-Surplus lanes are not a wider wave; they are a second block's threads
-addressing one block's memory, and a hop loop is only guarded where the
-extent fails to divide, so they copy from past the end of the operand.  That
-reads exactly like a generator overrun and is not one.
-
-Hence both halves are pinned here: that the copy moves data, and that the
-lanes come from the launcher.
+The lanes come from the launcher.  Once lanes read through the staging window,
+their number matters: a round number -- 32 lanes, 64 tids -- where the
+kernel's own width is 16, or 4 once the lead is widened, is not a wider wave
+but a second block's threads addressing one block's memory, and a hop loop is
+only guarded where the extent fails to divide, so they copy from past the end
+of the operand.  That reads exactly like a generator overrun and is not one.
 """
 
 from __future__ import annotations

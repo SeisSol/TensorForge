@@ -56,24 +56,6 @@ def extract(path, kernel):
     return "\n".join(lines[s - 2:e + 1])
 
 
-def desugar_async(src):
-    """The shared-memory staging, modeled as the copy it is.
-
-    `cuda::memcpy_async` is the pipeline object form, and `kernel_eval` skips
-    anything with `::` --- right for the object, wrong for the transfer, which
-    carries the values every consumer reads.
-
-    `__pipeline_memcpy_async`, the intrinsic form, is left alone: `kernel_eval`
-    models it itself, by its byte count.  Rewritten here into a one-element
-    assignment, as it used to be, it moved one of the two doubles (or four
-    floats) of every 16-byte copy, and the consumers read the rest of the
-    window as zeros.
-    """
-    return re.sub(
-        r"cuda::memcpy_async\(\s*&([^,]+?),\s*&([^,]+?),[^;]*\);",
-        r"\1 = \2;", src)
-
-
 def flatten_batching(src):
     """One element, no extra offset: make every global pointer point at 0.
 
@@ -86,7 +68,7 @@ def flatten_batching(src):
     src = re.sub(r"&(m\d+)\[\w*batchId\d+\]\[([^\]]*)\]", r"&\1[\2]", src)
     src = re.sub(r"&(m\d+)\[batchId0 \* \d+ \+ 0 \+ \w+\]", r"&\1[0]", src)
     src = re.sub(r"&(m\d+)\[0 \+ \w+_extraOffset\]", r"&\1[0]", src)
-    return desugar_async(src)
+    return src
 
 
 def _walk(node, pred, out):

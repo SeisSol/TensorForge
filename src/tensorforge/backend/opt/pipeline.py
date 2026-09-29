@@ -323,21 +323,15 @@ class Pipeline(AbstractTransformer):
             # The wait goes ahead of the transfer, and both go ahead of the
             # flag guard.
             #
-            # Ahead of the transfer: there is one cuda::pipeline per section and
-            # it is a FIFO.  With the wait after the commit, the batch this
-            # iteration issues and the one the previous iteration issued are
-            # both outstanding at producer_acquire(), which needs two stages --
-            # more than the thread-scope pipeline from cuda::make_pipeline() has,
-            # so iteration 0 blocks on a slot that only frees further down.  That
-            # is why the NVIDIA path hung while AMD, which emits no pipeline
-            # object at all, was fine.  Waiting first keeps only one batch in
-            # flight without giving up memcpy_async: FIFO order means
-            # consumer_wait() retires the batch issued in iteration k-1 --
-            # exactly the stage this iteration reads.
+            # Ahead of the transfer, so that the wait retires what the previous
+            # iteration issued -- the stage this iteration reads -- and not the
+            # batch this iteration issues for the next element, which is meant
+            # to overlap the compute.  A draining wait after the issue would
+            # retire both.
             #
-            # This is what the token in the async pir instructions states
+            # The token in the async PIR instructions states the same
             # explicitly: the wait consumes the token of the *previous*
-            # iteration.  Here the FIFO supplies that implicitly.
+            # iteration.  Here the order supplies it.
             self._hoist.extend(body[j] for j in sorted(waits))
             self._hoist.append(replacement)
             load = replacement

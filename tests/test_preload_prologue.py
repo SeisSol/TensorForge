@@ -4,17 +4,17 @@
 """The section prologue's copies of the operators into shared memory.
 
 `preload_globals` copies every batch-constant operand into shared memory once
-per block, before the batch loop.  On NVIDIA that did not build: each copy was
-built into a body of its own, found no source value there, and fell back to
-driving a `cuda::pipeline` object as text -- one no kernel declares, so nvcc
-refused every kernel with the option.  And nothing waited for the copies: the
-barrier after them orders the threads, not the transfers they issued.
+per block, before the batch loop.  On NVIDIA each copy is a structured
+`copy.async`, which needs the pointer it reads and the wait that retires it in
+its own body; and the wait has to come before the barrier after the copies,
+which orders the threads and not the transfers they issued.
 
-Two things were wrong on every target once it built.  The copy counted the
-operator's elements, not the scalars it is stored in, so a TF32-split operator
-arrived half; and an operator offered its fragment order at emission outgrew
-the image sized before it.  `local_flux` checks all of it through the source;
-the numbers were checked on sm_120 and gfx1150 with the probe.
+An image holds the scalars its operator is stored in, not its elements: a
+TF32-split operator is twice its element count, and an operator offered its
+fragment order is padded to that order's slots.  Operators that would leave no
+room for one multiplication are read from global memory instead.  `local_flux`
+checks all of it through the source; the numbers were checked on sm_120 and
+gfx1150 with the probe.
 """
 
 from __future__ import annotations
@@ -71,11 +71,9 @@ def _prologue(kernel):
 
 
 @pytest.mark.parametrize("arch", ["sm_86", "sm_120"])
-def test_the_prologue_drives_no_pipeline_object(arch):
+def test_the_prologue_copies_asynchronously(arch):
     kernel = _generate(arch)[0].get_kernel()
     assert set(_images(kernel)) == set(OPERATORS)
-    assert 'producer_acquire' not in kernel
-    assert 'cuda::memcpy_async' not in kernel
     assert '__pipeline_memcpy_async' in _prologue(kernel)
 
 

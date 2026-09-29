@@ -110,24 +110,6 @@ class HwDecription:
       return 6
     return 12
 
-  def has_cuda_pipeline(self) -> bool:
-    """Whether `cuda::pipeline` and `cuda::memcpy_async` exist for this target.
-
-    `<cuda/pipeline>` reaches `<cuda/barrier>`, which is a hard `#error` below
-    sm_70.  So on Pascal the declaration is not a line the compiler drops for
-    want of a use -- it is a translation unit that does not build, and every
-    kernel carries one.
-
-    Not the same question as `cp.async`, which arrives with sm_80: between the
-    two the type exists and its transfers lower to synchronous copies.  A
-    target that has this but not the instruction gets a pipeline object that
-    costs nothing; a target that has neither must not be handed one.
-    """
-    level = self.sm_level()
-    return (self.vendor == 'nvidia' and self.backend == 'cuda'
-            and level is not None and level >= 70)
-
-
   def has_packed_fp32_fma(self) -> bool:
     """Whether one instruction does two FP32 FMAs, so that a lead width of
     two halves the arithmetic instead of only regrouping it.

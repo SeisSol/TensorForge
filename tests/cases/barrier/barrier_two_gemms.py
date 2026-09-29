@@ -16,9 +16,9 @@ sets ``section.barrier`` and triggers ``persistent_threading``:
 * the cooperative-launch path needs ``tensorforge::argsPtrs`` from
   ``tensorforge_aux.h``, which is already on the test driver's
   include path via ``toolchain.py``;
-* helper headers (``cooperative_groups.h``,
-  ``cooperative_groups/memcpy_async.h``) come in via
-  ``gen.get_helper_headers()`` — already wired in ``runner.py:99``.
+* ``cooperative_groups::this_grid()`` comes from
+  ``cooperative_groups.h``, which ``tensorforge_device/cuda.h``
+  includes.
 
 The fence case is no longer the same arithmetic: it was rewritten to
 two *independent* GEMMs, because a fence does not order its sections

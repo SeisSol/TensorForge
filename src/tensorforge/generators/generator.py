@@ -11,7 +11,7 @@ from tensorforge.generators.kernel_params import KernelParam
 from tensorforge.backend.data_types import ShrMemObject, RegMemObject
 from tensorforge.backend import pir
 from tensorforge.backend.opt import OptimizationStage
-from tensorforge.backend.opt.inspect import async_depth, format_diagnostics, verify
+from tensorforge.backend.opt.inspect import format_diagnostics, verify
 from tensorforge.backend.scopes import Scopes
 from tensorforge.backend.residency import Residency
 from tensorforge.backend.section_plan import SectionPlan
@@ -1859,10 +1859,8 @@ class Generator:
             self._section.global_ir.extend(ptrs.get_instructions())
         # One body for the lot, so that a transfer, the pointer it reads and
         # the wait that retires it are values of the same body -- the
-        # condition for the structured `copy.async`.  Each in a body of its
-        # own, the transfer found no source value and fell back to driving a
-        # `cuda::pipeline` object as text, one no kernel declares: nvcc
-        # refused every NVIDIA kernel with `preload_globals`.
+        # condition for the structured `copy.async`.  A transfer whose source
+        # is not a value of its body moves its bytes with ordinary loads.
         self._section.preload = load_ir
         return True
       else:

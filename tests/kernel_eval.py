@@ -460,29 +460,18 @@ class Interp:
                 base[start + k] = comp
             return
         if '::' in stmt and _VEC_ASSIGN.match(stmt):
-            # A widened store: `*(tensorforge::VectorRelaxedT<float,2>*)&r[i]
-            # = v;`.  The `'::' in stmt` catch-all below was written for
-            # `cuda::pipeline` and friends, which genuinely have no effect on
-            # the values compared here -- and it swallowed these, silently, so
-            # every widened kernel evaluated to a destination of all zeros and
-            # every oracle test passed without touching the arithmetic it was
-            # there to check.
-            #
-            # Refused rather than modeled.  Modeling it means vector values
-            # in the interpreter, which is worth doing; until it is done, an
-            # abort is the honest answer and a silent skip is the dangerous
-            # one.
+            # A widened store in a form `_VEC_STORE` does not parse.  Refused
+            # rather than skipped: a skipped store leaves its destination at
+            # zero, and a kernel evaluated that way still agrees with itself.
             raise Abort(f'vector assignment not modeled: {stmt!r}')
         cp = _ASYNC_COPY.match(stmt)
         if cp:
             # The transfer half of the pipeline primitives.  It moves data, so
-            # it cannot sit in the catch-all below with the commit and the
-            # wait, which do not -- and it did.  What that cost was not a
-            # visible failure: `Slot` fills an unwritten address from its seed,
-            # so a kernel whose operand arrives this way still produced a full
-            # destination of plausible numbers, none of which had been through
-            # the transfer.  Two such kernels then agreed with each other for
-            # the same reason, which is what an oracle exists to rule out.
+            # it is carried out here rather than left to the catch-all below
+            # with the commit and the wait, which do not: `Slot` fills an
+            # unwritten address from its seed, so a skipped transfer would
+            # still produce a full destination of plausible numbers, none of
+            # which had been through it.
             #
             # Completion is not modeled and does not need to be.  The wait is
             # the only point at which the copy is guaranteed done, this
@@ -493,16 +482,15 @@ class Interp:
         if 'memcpy_async' in stmt:
             # Another spelling -- the four-argument zero-fill form, say.
             # Refused rather than swallowed: a transfer that quietly does
-            # nothing is the defect this branch exists to keep from recurring.
+            # nothing produces plausible numbers, as above.
             raise Abort(f'async copy not modeled: {stmt!r}')
         if (('pipeline' in stmt or '::' in stmt)
                 and not _VEC_DECL.match(stmt) and 'tensorforge::' not in stmt):
-            # The catch-all was written for `cuda::pipeline` and friends, which
-            # have no effect on the values compared here.  A declaration whose
-            # *type* is namespaced is not one of those: swallowing
-            # `tensorforge::VectorT<float,2> v = ...` leaves the name unbound
-            # and every later use aborts -- or worse, would have been skipped
-            # too and the kernel evaluated to nothing at all.
+            # The commit and the wait of the pipeline primitives, the grid
+            # barrier: statements with no effect on the values compared here.
+            # A declaration whose *type* is namespaced is not one of those --
+            # swallowing `tensorforge::VectorT<float,2> v = ...` would leave
+            # the name unbound -- and neither is a call into `tensorforge::`.
             return
         if m and m.group('name') not in ('return',):
             name = m.group('name')
@@ -553,16 +541,6 @@ class Interp:
             return                      # the shared arena, modeled as a base
         if re.match(r'^(?:const\s+)?auto\s*\*?\s*\w+', stmt) and '=' not in stmt:
             return
-        if (('pipeline' in stmt or '::' in stmt)
-                and not _VEC_DECL.match(stmt) and 'tensorforge::' not in stmt):
-            # The catch-all was written for `cuda::pipeline` and friends, which
-            # have no effect on the values compared here.  A declaration whose
-            # *type* is namespaced is not one of those: swallowing
-            # `tensorforge::VectorT<float,2> v = ...` leaves the name unbound
-            # and every later use aborts -- or worse, would have been skipped
-            # too and the kernel evaluated to nothing at all.
-            return                      # cuda::pipeline and friends: no effect
-                                        # on the values we compare
         raise Abort(f'unsupported statement {stmt!r}')
 
 
