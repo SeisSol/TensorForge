@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: 2026 SeisSol Group
 #
 # SPDX-License-Identifier: MIT
+import copy
 from abc import ABC, abstractmethod
 from enum import IntEnum
 from typing import List, Optional, Tuple
@@ -193,6 +194,25 @@ class AbstractInstruction(ABC):
       if isinstance(held, list) and any(x is old for x in held):
         setattr(self, attr, [new if x is old else x for x in held])
         changed = True
+      # An operand held as a view (`SymbolView`: the multilinear's `_ops`,
+      # the pointwise `_srcs`) names its symbol one level down.  Missed, a
+      # merged run closing its chain (`Generator`, `carried`) renamed the
+      # epilogue writing the image and left every reader of it in the body
+      # on the register the substitution retired -- never written inside the
+      # loop.  SeisSol's viscoelastic free-surface-gravity kernel at order 6,
+      # merged, read two of its carried temporaries that way.  A copy, not
+      # the view itself: a view may be shared with instructions outside the
+      # region.
+      if isinstance(held, list) and any(
+          getattr(x, 'symbol', None) is old for x in held):
+        setattr(self, attr, [_renamed(x, new)
+                             if getattr(x, 'symbol', None) is old else x
+                             for x in held])
+        changed = True
+    view = getattr(self, '_dest', None)
+    if getattr(view, 'symbol', None) is old:
+      self._dest = _renamed(view, new)
+      changed = True
     return changed
 
   def defs(self) -> Tuple:
@@ -536,3 +556,10 @@ class AbstractInstruction(ABC):
 
   def temp_shmem(self):
     return 0
+
+
+def _renamed(view, symbol):
+  """`view` over `symbol` instead, the rest of it unchanged."""
+  out = copy.copy(view)
+  out.symbol = symbol
+  return out
