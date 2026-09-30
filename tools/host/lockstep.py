@@ -70,76 +70,6 @@ def flatten_batching(src):
     return src
 
 
-def _walk(node, pred, out):
-    if isinstance(node, tuple):
-        if pred(node):
-            out.append(node)
-        for x in node[1:]:
-            _walk(x, pred, out)
-    elif isinstance(node, list):
-        for x in node:
-            _walk(x, pred, out)
-
-
-def split_body(src):
-    """(prologue statements, phases of the per-element body)."""
-    nodes = ke.parse(src[src.index("{"):])
-    found = []
-    _walk(nodes, lambda n: n[0] == "if" and "allowed" in str(n[1]), found)
-    if not found:
-        # a kernel without flags has no guard: the element loop's body is it
-        _walk(nodes, lambda n: n[0] == "for" and "batchId0" in str(n[1]), found)
-    guard = found[0]
-    body = guard[6] if guard[0] == "for" else guard[2]
-    stmts = body[1] if isinstance(body, tuple) and body[0] == "block" else body
-
-    # everything the body needs -- pipeline, shared base, glb_ pointers, the
-    # loop's own induction -- lives in the blocks around it
-    prologue = []
-
-    def collect(node):
-        if isinstance(node, tuple):
-            if node is guard:
-                if node[0] == "for":
-                    prologue.append(("expr", f"{node[1]} = {node[2]}"))
-                return
-            if node[0] == "for":
-                prologue.append(("expr", f"{node[1]} = {node[2]}"))
-                collect(node[6])
-                return
-            if node[0] == "if":
-                return
-            if node[0] == "block":
-                for c in node[1]:
-                    collect(c)
-                return
-            prologue.append(node)
-        elif isinstance(node, list):
-            for c in node:
-                collect(c)
-
-    collect(nodes)
-
-    phases, cur = [], []
-    for st in stmts:
-        cur.append(st)
-        if (isinstance(st, tuple) and st[0] == "expr"
-                and re.match(r"^__sync", str(st[1]).strip())):
-            phases.append(cur)
-            cur = []
-    if cur:
-        phases.append(cur)
-    return prologue, phases
-
-
-def strides(shape):
-    out, cur = [], 1
-    for s in shape:
-        out.append(cur)
-        cur *= s
-    return out
-
-
 def run(src, inputs, shapes, storage=None, lanes=None):
     lanes = lanes or lanes_of(src)
     mem = ke.Slot(0)
@@ -205,10 +135,10 @@ def run(src, inputs, shapes, storage=None, lanes=None):
         base.setdefault(name, 0)
 
     # Statement by statement, not phase by phase: splitting the body at its
-    # top-level barriers (`split_body`) has nothing for a barrier inside a
-    # loop -- a rolled face loop has one per iteration -- nor for a lane
-    # reading another's register (`readlane`), which needs the other lane at
-    # the same statement.  For a body without races, any schedule the
+    # top-level barriers would have nothing for a barrier inside a loop -- a
+    # rolled face loop has one per iteration -- nor for a lane reading
+    # another's register (`readlane`), which needs the other lane at the same
+    # statement.  For a body without races, any schedule the
     # barriers allow gives the same values, this one included.
     interps = []
     for lane in range(lanes):

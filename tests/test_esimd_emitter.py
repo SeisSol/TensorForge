@@ -691,7 +691,6 @@ def test_a_loop_carried_value_adopts_the_distribution_it_is_yielded():
     The accumulator only becomes lane-distributed once the body combines it
     with something that is, so the yield is the first moment it is known.
     """
-    from tensorforge.backend.pir.build import IRBuilder
     from tensorforge.backend.pir.core import ScalarType
     b = _builder('esimd')
     loop = b.for_(0, 4, 1, inits=(0.0,), types=(ScalarType(Datatype.F32),))
@@ -767,7 +766,7 @@ def test_a_segmented_reduction_keeps_its_group(sub):
     """
     from tensorforge.common.operation import Operation
     out = _lexic().reduction('v', Operation.ADD, Datatype.F32, 16, sub)
-    assert f'segmentedReduction<' in out and f', 16, {sub}, float>' in out
+    assert 'segmentedReduction<' in out and f', 16, {sub}, float>' in out
 
 
 def test_the_segmented_form_covers_the_bitwise_operations():

@@ -9,13 +9,10 @@ from typing import List, Sequence, Union
 
 import numpy as np
 
-from tensorforge.backend.scopes import Scopes
-from tensorforge.backend.symbol import (LeadLoop, Loop, Symbol, SymbolView,
-                                        write_loops, add_offset)
+from tensorforge.backend.symbol import (LeadLoop, Loop, SymbolView, write_loops,
+                                        add_offset)
 from tensorforge.backend.writer import Writer
 from tensorforge.common.context import Context
-from tensorforge.common.exceptions import InternalError
-from tensorforge.common.matrix.tensor import Tensor
 from tensorforge.common.operation import Operation
 
 from . import ComputeInstruction

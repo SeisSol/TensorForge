@@ -2,13 +2,13 @@
 #
 # SPDX-License-Identifier: MIT
 import enum
-from typing import List, Optional, Tuple
+from typing import List, Tuple
 from contextlib import contextmanager
 
 from .abstract_instruction import AbstractInstruction
 from tensorforge.common.context import Context
 from tensorforge.common.helper import get_extra_offset_name, Addressing
-from tensorforge.common.basic_types import GeneralLexicon, DataFlowDirection, StridedAddressing, Residence
+from tensorforge.common.basic_types import GeneralLexicon, DataFlowDirection, StridedAddressing
 from tensorforge.common.exceptions import (GenerationError,
                                            InternalError)
 from tensorforge.backend.pir.core import Effect, Qual

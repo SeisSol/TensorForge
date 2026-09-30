@@ -22,8 +22,6 @@ from __future__ import annotations
 
 import re
 
-import pytest
-
 from tensorforge.common.basic_types import Addressing, Datatype
 from tensorforge.common.context import Context
 from tensorforge.common.matrix.boundingbox import BoundingBox

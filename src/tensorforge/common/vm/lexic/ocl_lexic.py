@@ -36,7 +36,7 @@ class OpenCLLexic(Lexic):
     return "item.barrier();"
 
   def active_sub_group_mask(self):
-    return f'item.get_sub_group()'
+    return 'item.get_sub_group()'
 
   def broadcast(self, variable, lane, block=None, subblock=None):
     return (f'sycl::group_broadcast({self.active_sub_group_mask()}, '

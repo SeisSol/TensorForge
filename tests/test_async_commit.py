@@ -60,7 +60,7 @@ def test_a_hop_loop_closes_once_outside_itself():
     b = _scratch()
     dst = b.alloc(Datatype.F32, (512,), MemSpace.SHARED, hint='s')
     glb = b.alloc(Datatype.F32, (4096,), MemSpace.GLOBAL, hint='g')
-    lane = b.thread_id('x')
+    b.thread_id('x')
     with b.for_(0, 15, 1) as f:
         tok = b.copy_async(dst, glb, dst_index=(f.induction,),
                            src_index=(f.induction,))

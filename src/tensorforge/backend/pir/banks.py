@@ -38,8 +38,8 @@ import operator
 from dataclasses import dataclass
 from typing import Dict, List, Sequence, Tuple
 
-from .core import (BufferType, Effect, MemSpace, Op, ScalarType, Stmt, Value,
-                   XorSwizzle, walk, walk_stmts)
+from .core import (BufferType, MemSpace, Op, Stmt, Value, XorSwizzle, walk,
+                   walk_stmts)
 
 #: Bytes one bank serves per cycle.  The count of banks is a property of the
 #: target and comes from `hw_descr.shmem_banks`; the width does not vary

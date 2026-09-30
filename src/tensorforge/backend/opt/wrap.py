@@ -71,7 +71,7 @@ keeps it in range; the pointer is followed only for an element the caller did
 not mask.
 """
 
-from typing import Dict, List, NamedTuple, Optional, Sequence, Tuple
+from typing import List, NamedTuple, Optional, Tuple
 
 from tensorforge.backend.instructions.abstract_instruction import AbstractInstruction
 from tensorforge.backend.instructions.allocate import RegisterAlloc

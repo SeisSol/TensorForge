@@ -3,12 +3,9 @@
 # SPDX-License-Identifier: MIT
 from typing import List
 from .abstract import AbstractTransformer, Context, AbstractInstruction
-from tensorforge.backend.instructions.compute import ComputeInstruction
-from tensorforge.backend.instructions.memory import AbstractShrMemWrite, MemoryInstruction
 from tensorforge.backend.instructions.memory.load import LoadInstruction, LoadWait
 from tensorforge.backend.instructions.ptr_manip import GetElementPtr
 from tensorforge.backend.instructions.allocate import RegisterAlloc
-from tensorforge.backend.pir.core import Uniformity
 from tensorforge.backend.symbol import SymbolType
 
 class MoveLoads(AbstractTransformer):

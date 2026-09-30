@@ -24,9 +24,9 @@ from dataclasses import dataclass
 from typing import List
 
 from tensorforge.backend.symbol import SymbolType
-from tensorforge.common.basic_types import Addressing, DataFlowDirection, FlagMode
+from tensorforge.common.basic_types import DataFlowDirection, FlagMode
 
-from .layout import ctype, volume
+from .layout import ctype
 
 
 @dataclass
@@ -414,7 +414,7 @@ def emit(generator, backend: str, default_batch: int) -> str:
             f"    DEV_MALLOC(d_{op.kernel_name}, {total_expr});"
         )
         if op.addressing == "pointer_based":
-            ptr_size = f"(batch * sizeof(void*))"
+            ptr_size = "(batch * sizeof(void*))"
 
             allocs_host.append(
                 f"    void** h_p_{op.kernel_name} = (void**)std::malloc({ptr_size});\n"

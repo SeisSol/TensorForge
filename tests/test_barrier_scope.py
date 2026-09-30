@@ -33,8 +33,6 @@ from __future__ import annotations
 
 import pytest
 
-from tensorforge.backend.pir.build import IRBuilder
-from tensorforge.backend.pir.core import Uniformity
 from tensorforge.common.basic_types import Datatype
 from tensorforge.common.context import Context
 

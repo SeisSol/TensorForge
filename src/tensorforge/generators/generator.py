@@ -5,10 +5,10 @@ from typing import List, Optional, Union, Type
 import hashlib
 from tensorforge.generators.descriptions import ForDescr, OperationDescription, MultilinearDescr, ElementwiseDescr, RegionDescription, ReductionDescr
 from tensorforge.common.context import Context
-from tensorforge.common.basic_types import Addressing, FlagMode, GeneralLexicon, DataFlowDirection, Residence
+from tensorforge.common.basic_types import Addressing, FlagMode, GeneralLexicon, Residence
 from tensorforge.common.helper import get_extra_offset_name
 from tensorforge.generators.kernel_params import KernelParam
-from tensorforge.backend.data_types import ShrMemObject, RegMemObject
+from tensorforge.backend.data_types import ShrMemObject
 from tensorforge.backend import pir
 from tensorforge.backend.opt import OptimizationStage
 from tensorforge.backend.opt.inspect import format_diagnostics, verify
@@ -595,7 +595,6 @@ class Generator:
     a needless query rather than a buffer nobody uses.
     """
     from tensorforge.backend.pir import wrap as _wrap
-    from tensorforge.backend.instructions.memory.load import GlbToShrLoader
 
     names: set = set()
     original = _wrap.wrap_prefetch
@@ -1271,7 +1270,6 @@ class Generator:
         lexic.thread_idx_x, lexic.thread_idx_y, lexic.block_dim_y = saved
 
   def _generate_kernel(self):
-    vm = self._context.get_vm()
 
     writer = Writer()
     # Ahead of the signature that names them, and ahead of the launcher that
@@ -2801,8 +2799,8 @@ class Generator:
         args.append(f'{desc.name}.numElements')
         flags.append(f'{desc.name}.flags')
     if regions == 0:
-      args.append(f'numElements')
-      flags.append(f'flags')
+      args.append('numElements')
+      flags.append('flags')
 
     # The element counts are always arguments; the masks beside them are only
     # arguments when the signature has parameters for them.

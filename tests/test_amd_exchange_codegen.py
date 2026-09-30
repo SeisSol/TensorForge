@@ -23,7 +23,7 @@ import pytest
 
 from tensorforge.common.basic_types import Datatype
 from tensorforge.backend.instructions.compute.primitives.amd import (
-    catalog, exchange_codegen, reorder)
+    exchange_codegen, reorder)
 
 
 class Recorder:

@@ -162,7 +162,6 @@ def test_the_lead_width_is_not_asked_here():
     true of the operation."""
     import inspect
 
-    from tensorforge.backend.instructions.compute import strategy
     assert 'lead_width' not in inspect.signature(is_contraction).parameters
     assert 'lead_width' not in inspect.getsource(is_contraction)
     # Nor on the shape the arrangements read: what they ask about a packed

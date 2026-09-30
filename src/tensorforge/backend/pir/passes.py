@@ -22,7 +22,7 @@ from .schedule import can_reorder
 from .core import (Access, BufferType, Effect, IRError, MemSpace, Op, Operand,
                    Region, ScalarType, Stmt, TokenType, Value,
                    accesses_conflict, collect_accesses, collect_effect,
-                   def_use, defined_within, walk, walk_stmts, Uniformity)
+                   def_use, walk_stmts, Uniformity)
 from .asyncmem import check_commits, check_tokens, schedule_async
 
 

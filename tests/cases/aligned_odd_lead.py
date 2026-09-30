@@ -9,8 +9,6 @@ Every other aligned case in this directory divides, so without this one the
 scalar tail is unreachable and only the unit tests speak to it.
 """
 
-import numpy as np
-
 from tensorforge.common.basic_types import Addressing, Datatype
 from tensorforge.common.matrix.boundingbox import BoundingBox
 from tensorforge.common.matrix.tensor import SubTensor, Tensor

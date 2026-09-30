@@ -380,7 +380,7 @@ def test_a_block_barrier_is_legal_in_the_queue_loop_and_not_in_the_counted_one()
 def test_an_exit_belongs_to_the_loop_it_leaves():
     """Nested, the condition it fires on is not the one the loop is entered under."""
     from tensorforge.backend.pir.build import IRBuilder
-    from tensorforge.backend.pir.core import BOOL, INDEX, SIZE, Uniformity
+    from tensorforge.backend.pir.core import BOOL, INDEX, SIZE
     from tensorforge.backend.pir.passes import verify
 
     builder = IRBuilder(fptype=Datatype.F32)

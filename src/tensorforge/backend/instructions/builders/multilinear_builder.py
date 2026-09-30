@@ -11,7 +11,6 @@ from tensorforge.backend.instructions.compute.multilinear import MultilinearInst
 from tensorforge.common.matrix.tensor import Tensor
 from tensorforge.common.exceptions import InternalError, GenerationError
 from tensorforge.common.matrix.boundingbox import BoundingBox
-from tensorforge.generators.descriptions import MultilinearDescr
 from tensorforge.backend.instructions.builders.operation_builder import OperationBuilder
 from tensorforge.backend.instructions.abstract_instruction import _explicit_simd
 from tensorforge.backend.placement import (Placement, ResultPlacement,
@@ -999,7 +998,7 @@ class MultilinearBuilder(OperationBuilder):
         raise InternalError(f'gemm-builder: `res` must be either in shr. or glb. mem., given: {dest_symbol.stype}')
     else:
       if not self._dest_obj.tensor.is_tmp:
-        raise InternalError(f'gemm-buider: `res` is not in scopes and thus must be tmp')
+        raise InternalError('gemm-buider: `res` is not in scopes and thus must be tmp')
 
       dest_symbol = self._temporaries.shared_symbol(self._dest_obj.tensor)
       if (self._plan.written_in_slices(self._dest_obj.tensor)

@@ -93,7 +93,6 @@ print(f'\nmask example: LeadLoop(1, 22, T=32) -> lanes {lanes[0]}..{lanes[-1]} '
 from tensorforge.backend.symbol import (Symbol, SymbolType, LeadIndex,
                                         add_offset)
 from tensorforge.backend.data_types import RegMemObject
-from tensorforge.common.exceptions import GenerationError
 
 print('\n--- register addressing with slicing offset')
 

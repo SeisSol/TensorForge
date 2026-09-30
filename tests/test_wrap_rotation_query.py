@@ -20,8 +20,6 @@ an unadvanceable index does not get a buffer it cannot use.
 
 from __future__ import annotations
 
-import pytest
-
 from tensorforge.backend.pir import verify, walk
 from tensorforge.backend.pir.build import IRBuilder
 from tensorforge.backend.pir.core import INDEX, MemSpace, Op

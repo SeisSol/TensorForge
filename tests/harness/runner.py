@@ -10,11 +10,11 @@ import subprocess
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Dict
 
 import numpy as np
 
-from tensorforge.common.basic_types import Addressing, DataFlowDirection
+from tensorforge.common.basic_types import Addressing
 from tensorforge.common.context import Context
 from tensorforge.generators.generator import Generator
 from tensorforge.reference.descriptors import multilinear_reference

@@ -152,7 +152,7 @@ def test_u32_exists_because_a_reference_parameter_demands_it():
 
 def test_a_u32_value_declares_as_uint32():
     b = builder()
-    v = b.declare(ScalarType(Datatype.U32), hint='u')
+    b.declare(ScalarType(Datatype.U32), hint='u')
     assert 'uint32_t' in emitted(b.finish())
 
 
@@ -249,7 +249,7 @@ def test_both_results_follow_the_survivor():
                         hints=('u', 'l'))
     u2, l2 = b.split_op('tensorforge::splitFloatTF32', (t, t), x,
                         hints=('u', 'l'))
-    consumer = b.op('add', t, u2, l2, hint='sum')
+    b.op('add', t, u2, l2, hint='sum')
     body = passes.cse(b.finish())
     add = [s for s, _ in walk(body) if str(s.op) == 'add'][0]
     assert list(add.args) == [u1, l1], (

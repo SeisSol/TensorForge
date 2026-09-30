@@ -5,10 +5,8 @@ from tensorforge.common.context import Context
 from tensorforge.backend.scopes import Scopes, Symbol
 from tensorforge.backend.symbol import SymbolType, DataView
 from tensorforge.backend.instructions.memory.load import GlbToShrLoader
-from tensorforge.common.exceptions import InternalError
 from tensorforge.common.basic_types import GeneralLexicon
 from .abstract_builder import AbstractBuilder
-from .allocator_builder import ShrMemAllocBuilder
 from tensorforge.backend.instructions.ptr_manip import GetElementPtr
 from tensorforge.backend.data_types import ShrMemObject
 

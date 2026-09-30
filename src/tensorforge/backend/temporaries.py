@@ -23,7 +23,7 @@ while a compute instruction writing shared memory directly would be a first
 user that cannot answer the question the pass asks it.
 """
 
-from typing import List, Optional, Tuple
+from typing import Tuple
 
 from tensorforge.backend.data_types import RegMemObject
 from tensorforge.backend.instructions.abstract_instruction import _explicit_simd

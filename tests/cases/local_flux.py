@@ -36,8 +36,7 @@ measurement, and this is the workload it has to be taken on;
 
 import numpy as np
 
-from tensorforge.common.basic_types import (Addressing, DataFlowDirection,
-                                            Datatype)
+from tensorforge.common.basic_types import Addressing, Datatype
 from tensorforge.common.matrix.boundingbox import BoundingBox
 from tensorforge.common.matrix.tensor import SubTensor, Tensor
 from tensorforge.generators.descriptions import MultilinearDescr

@@ -5,13 +5,12 @@ import numpy as np
 
 from tensorforge.common.exceptions import GenerationError, InternalError
 from tensorforge.common.context import Context
-from tensorforge.common.basic_types import DataFlowDirection, Datatype
+from tensorforge.common.basic_types import DataFlowDirection
 from tensorforge.common.operation import Operation, ReductionOperator
 from tensorforge.common.matrix.boundingbox import BoundingBox
 from tensorforge.common.matrix.tensor import Tensor, SubTensor
 from tensorforge.common.basic_types import Addressing
 
-import math
 from typing import List
 
 class GuardLiteral:

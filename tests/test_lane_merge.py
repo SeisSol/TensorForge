@@ -14,7 +14,6 @@ comment fuses that with the shuffle as `v_cndmask_b32_dpp`.
 from __future__ import annotations
 
 import pathlib
-import re
 
 import pytest
 

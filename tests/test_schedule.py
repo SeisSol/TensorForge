@@ -11,11 +11,9 @@ timid.
 
 from __future__ import annotations
 
-import pytest
-
 from tensorforge.backend.pir import verify, walk
 from tensorforge.backend.pir.build import IRBuilder
-from tensorforge.backend.pir.core import Effect, MemSpace, Op
+from tensorforge.backend.pir.core import MemSpace, Op
 from tensorforge.backend.pir.schedule import can_reorder, overlap, sink_waits
 from tensorforge.common.basic_types import Datatype
 

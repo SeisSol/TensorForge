@@ -38,7 +38,7 @@ from pathlib import Path
 from tensorforge.common.context import Context
 from tensorforge.generators.generator import Generator
 from tensorforge.backend.opt import OptimizationStage
-from tensorforge.backend.opt.slots import SlotModel, Transfer, models_for
+from tensorforge.backend.opt.slots import models_for
 
 TARGETS = [('sm_86', 'cuda'), ('gfx90a', 'hip')]
 ROOT = Path(__file__).resolve().parent.parent

@@ -26,7 +26,7 @@ from tensorforge.analysis.cost import Cost, descr_cost, list_cost
 from tensorforge.common.basic_types import Addressing, Datatype
 from tensorforge.common.matrix.boundingbox import BoundingBox
 from tensorforge.common.matrix.tensor import SubTensor, Tensor
-from tensorforge.generators.descriptions import GemmDescr, MultilinearDescr
+from tensorforge.generators.descriptions import MultilinearDescr
 
 HERE = Path(__file__).resolve().parent
 CASES = HERE / "cases"

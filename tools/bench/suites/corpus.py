@@ -16,7 +16,7 @@ saturates, 65536 is where per-element cost has stopped moving, and running
 both is what shows which regime a number came from.
 """
 
-from suite import CONFIGS, from_cases  # noqa: F401
+from suite import from_cases
 
 NAME = 'corpus'
 DESCRIPTION = 'the tests/cases corpus at saturating batches'

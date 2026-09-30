@@ -48,8 +48,7 @@ emits can consume them, and the check against LLVM treats the omission as
 
 from dataclasses import dataclass
 from enum import Enum
-from math import ceil
-from typing import Optional, Tuple
+from typing import Optional
 
 from tensorforge.common.basic_types import Datatype
 

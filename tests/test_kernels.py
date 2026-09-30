@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from harness.layout import make_batch, view_of, zeros_batch, np_dtype
+from harness.layout import make_batch, zeros_batch
 from harness.runner import run_case
 from tensorforge.common.basic_types import Datatype
 from tensorforge.reference.descriptors import multilinear_reference

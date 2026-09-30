@@ -31,7 +31,7 @@ import pytest
 
 from tensorforge.common.context import Context, Options
 from tensorforge.generators.generator import Generator
-from tensorforge.backend.opt.slots import SlotModel, Transfer
+from tensorforge.backend.opt.slots import Transfer
 
 CASES = Path(__file__).parent / "cases"
 

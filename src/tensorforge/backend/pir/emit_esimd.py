@@ -35,8 +35,8 @@ from typing import Any, Optional
 from tensorforge.common.basic_types import Datatype
 
 from .core import (BufferType, IRError, MemSpace, Op, ScalarType, TokenType,
-                   Value, def_use, walk_stmts)
-from .emit import Emitter, _folds_predicate
+                   Value, walk_stmts)
+from .emit import Emitter
 
 
 #: `*(VectorT<float, 4>*)&p[i]` -- how the base emitter spells a

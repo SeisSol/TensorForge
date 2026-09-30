@@ -184,7 +184,6 @@ def test_the_default_is_a_measurement_and_says_so():
     otherwise take it for an oversight and remove it.
     """
     assert lanes.DEFAULT_LANE_CEILING == 32
-    doc = lanes.__doc__ + (lanes.deduce.__doc__ or '')
     import inspect
     src = inspect.getsource(lanes)
     assert 'slower' in src, (

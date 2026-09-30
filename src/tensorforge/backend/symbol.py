@@ -8,7 +8,7 @@ import contextlib
 from tensorforge.common.matrix.boundingbox import BoundingBox
 from functools import reduce
 from tensorforge.common.context import Context
-from tensorforge.common.basic_types import Datatype, Addressing
+from tensorforge.common.basic_types import Datatype
 from tensorforge.common.exceptions import GenerationError, InternalError
 from .writer import Writer
 from . import elementmask

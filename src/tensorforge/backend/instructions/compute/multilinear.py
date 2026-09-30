@@ -1,7 +1,6 @@
 # SPDX-FileCopyrightText: 2026 SeisSol Group
 #
 # SPDX-License-Identifier: MIT
-from typing import Union
 import math
 from . import ComputeInstruction
 from tensorforge.common.matrix.boundingbox import BoundingBox
@@ -11,8 +10,8 @@ from tensorforge.backend.writer import Writer
 from tensorforge.common.context import Context
 from tensorforge.common.operation import ReductionOperator
 from typing import Union, List, Tuple
-from tensorforge.common.basic_types import Addressing, Datatype
-from tensorforge.backend.pir.core import INDEX, MemSpace, Uniformity
+from tensorforge.common.basic_types import Addressing
+from tensorforge.backend.pir.core import INDEX, MemSpace
 from tensorforge.backend.instructions.abstract_instruction import _explicit_simd
 
 from tensorforge.common.matrix.tensor import Tensor
@@ -325,9 +324,6 @@ class MultilinearInstruction(ComputeInstruction):
             self._ks[0] = (self._ks[0][0] + self._kappa,
                            self._ks[0][1] + self._kappa)
 
-        iterate_dimensions = []
-        loads = []
-        reductions = []
         self._is_log = False
 
         # TODO: do not really optimize here anything any more (on a higher level)... Just generate code

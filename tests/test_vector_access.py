@@ -24,8 +24,7 @@ from __future__ import annotations
 import pytest
 
 from tensorforge.backend.pir.build import IRBuilder
-from tensorforge.backend.pir.core import (BufferType, MemSpace, Op,
-                                          ScalarType)
+from tensorforge.backend.pir.core import MemSpace, Op, ScalarType
 from tensorforge.backend.pir.emit import Emitter
 from tensorforge.common.basic_types import Datatype
 

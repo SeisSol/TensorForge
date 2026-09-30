@@ -34,15 +34,13 @@ This module answers only that.  It transforms nothing.
 from typing import Dict, List, NamedTuple, Optional, Sequence, Tuple
 
 from tensorforge.backend.instructions.abstract_instruction import (
-    AbstractInstruction, Uniformity)
-from tensorforge.backend.instructions.allocate import RegisterAlloc, ShrMemAlloc
+    AbstractInstruction)
 from tensorforge.backend.instructions.batch_loop import BatchLoop
 from tensorforge.backend.instructions.compute import ComputeInstruction
 from tensorforge.backend.instructions.memory import AbstractShrMemWrite
 from tensorforge.backend.instructions.memory.load import (GlbToRegLoader,
                                                           GlbToShrLoader,
                                                           LoadWait)
-from tensorforge.backend.symbol import SymbolType
 
 
 class Transfer(NamedTuple):

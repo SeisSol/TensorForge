@@ -21,8 +21,6 @@ index 2 is whatever follows it.  ``tools/host/check_structure.py`` compares a
 store's indices against the declared length, which is what catches it.
 """
 
-import numpy as np
-
 from tensorforge.common.basic_types import Addressing, Datatype
 from tensorforge.common.matrix.boundingbox import BoundingBox
 from tensorforge.common.matrix.tensor import SubTensor, Tensor

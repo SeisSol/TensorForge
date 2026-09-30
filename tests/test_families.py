@@ -11,7 +11,7 @@ would roll a step into a loop that does not belong in it.
 
 import pytest
 
-from tensorforge.analysis.families import Repeat, find_repeats
+from tensorforge.analysis.families import find_repeats
 from tensorforge.common.basic_types import Addressing, Datatype
 from tensorforge.common.matrix.boundingbox import BoundingBox
 from tensorforge.common.matrix.tensor import SubTensor, Tensor

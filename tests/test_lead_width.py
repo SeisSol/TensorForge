@@ -352,8 +352,7 @@ def test_a_zero_blocking_is_refused():
 # both the cap and the ceiling for FP64.
 
 from tensorforge.backend.instructions.compute.packed import packed_fma_width
-from tensorforge.backend.instructions.memory.vectorize import (  # noqa: E402
-    lead_width_cap, lead_threads_and_width)
+from tensorforge.backend.instructions.memory.vectorize import lead_width_cap  # noqa: E402
 
 
 @pytest.mark.parametrize('elem,align,expected', [

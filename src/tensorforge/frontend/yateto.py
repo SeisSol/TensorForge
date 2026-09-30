@@ -6,9 +6,8 @@ from tensorforge.interface import YatetoInterface as yi
 from tensorforge.analysis.cost import list_cost
 from tensorforge.common.basic_types import Addressing, Datatype, DataFlowDirection, Residence
 from tensorforge.common.context import Context
-from tensorforge.common.helper import generate_tmp_tensor
 from tensorforge.common.matrix.tensor import Tensor, SubTensor
-from tensorforge.common.matrix.spp import FullSPP, BoundingBoxSPP, ListSPP
+from tensorforge.common.matrix.spp import FullSPP, ListSPP
 from tensorforge.common.matrix.boundingbox import BoundingBox as BBox
 from tensorforge.generators.generator import Generator as TensorForgeGenerator
 from tensorforge.generators.descriptions import MultilinearDescr, ElementwiseDescr, ReductionDescr, GridBarrierDescr, GridFenceDescr, RegionDescription, GuardLiteral
@@ -389,7 +388,6 @@ class DescriptionReader(Reader):
     # empty mask means a destination without axes is accumulated onto, and
     # `bool([])` says the opposite.
     add = linear.get('add', False)
-    accumulates = add is not False and add is not None
     # the guard covers every descriptor this operation turns into, the
     # scaling that may follow included
     first = len(self._descr_list)
@@ -717,7 +715,6 @@ class DescriptionReader(Reader):
 
     values = self._values(d['values'])
     is_temporary = d['flags']['temporary']
-    is_constant = d['flags']['constant']
 
     self._cache[name] = Tensor(shape, addressing, bbox, name, is_temporary, spp,
                                values, datatype, d.get('alignment', 0),

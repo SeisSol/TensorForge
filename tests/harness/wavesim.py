@@ -21,7 +21,7 @@ stays conservative rather than acting on a guess.
 
 from __future__ import annotations
 
-from typing import Callable, List, Sequence, Tuple
+from typing import List, Sequence, Tuple
 
 Lanes = List          # one entry per lane
 

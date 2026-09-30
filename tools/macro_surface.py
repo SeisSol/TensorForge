@@ -31,8 +31,6 @@ from collections import Counter
 from pathlib import Path
 
 from tensorforge.backend import pir
-from tensorforge.backend.pir import build as pirbuild
-from tensorforge.backend.pir.core import walk
 from tensorforge.backend.instructions import abstract_instruction as _ai
 from tensorforge.common.context import Context
 from tensorforge.generators.generator import Generator

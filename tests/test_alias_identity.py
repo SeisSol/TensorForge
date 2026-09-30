@@ -14,8 +14,7 @@ symbol in one body today; the gate that keeps it that way is `vec == 1` in
 `Symbol.load_linear`, and the vector widths in `memory/load.py` are commented
 out rather than absent.  This pins the invariant before that changes.
 """
-from tensorforge.backend.pir import (Effect, IRBuilder, MemSpace, ScalarType,
-                                     load_cse)
+from tensorforge.backend.pir import IRBuilder, MemSpace, ScalarType, load_cse
 from tensorforge.backend.symbol import Symbol, SymbolType
 from tensorforge.common.basic_types import Datatype
 

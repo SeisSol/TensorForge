@@ -32,7 +32,6 @@ who has one.
 
 from typing import Optional
 
-from tensorforge.common.basic_types import Datatype
 from tensorforge.backend.pir.core import ScalarType
 from .catalog import MATRIX_OPS, Call
 from .features import has_feature, wave_size

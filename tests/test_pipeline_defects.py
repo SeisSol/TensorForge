@@ -20,8 +20,6 @@ from pathlib import Path
 
 import re
 
-import pytest
-
 from tensorforge.common.context import Context, Options
 from tensorforge.generators.generator import Generator
 

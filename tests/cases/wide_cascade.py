@@ -15,8 +15,6 @@ so every lane copies in every hop, and what is under test is the width
 arithmetic alone. `wide_cascade_tail` adds the lanes dropping out.
 """
 
-import numpy as np
-
 from tensorforge.common.basic_types import Addressing, Datatype
 from tensorforge.common.matrix.boundingbox import BoundingBox
 from tensorforge.common.matrix.tensor import SubTensor, Tensor

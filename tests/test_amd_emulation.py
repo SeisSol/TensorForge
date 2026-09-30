@@ -19,10 +19,8 @@ from __future__ import annotations
 import pytest
 
 from tensorforge.backend.instructions.compute import packing, split
-from tensorforge.backend.instructions.compute.matmul import MatmulOperands
 from tensorforge.backend.instructions.compute.primitives import amd
 from tensorforge.backend.instructions.compute.primitives.amd import layouts
-from tensorforge.backend.instructions.compute.strategy import Span, Strategy
 from tensorforge.backend.pir.build import IRBuilder
 from tensorforge.common.basic_types import Datatype
 from tensorforge.common.context import Context
@@ -113,12 +111,6 @@ def test_the_deployment_switch_is_separate_from_the_selection():
 
 def _run(hip, n, threads=64, lead_slots=2, k=8):
     rec = _Recorder()
-    ops = MatmulOperands(A=_operand, B=_operand, C=rec, sparse=None,
-                         lead_slots=lead_slots,
-                         lead_elements=lead_slots * threads,
-                         n=n, k=k, kx=0, threads=threads,
-                         a=Datatype.F32, b=Datatype.F32,
-                         accumulator=Datatype.F32)
     tile, terms = amd.emu_tile_for(threads, Datatype.F32, hip)
     writer = IRBuilder(Datatype.F32, context=hip)
     taken = amd.matmulemu(writer, rec, _operand, _operand, lead_slots, n, k, 0,
@@ -141,7 +133,7 @@ def test_it_issues_one_instruction_per_term_product(hip, selected):
     products = split.products(terms)
     assert len(products) == 6
 
-    steps, threads = 8, 64
+    steps = 8
     layout = packing.stages(products, packing.tiles(steps, tile.op.k),
                             capacity=1)
     # One call per (product, k-vector), which is what the emitter loops over.

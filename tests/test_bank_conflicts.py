@@ -101,7 +101,6 @@ def test_a_vector_cast_is_recognized():
 
 
 def test_a_cast_store_is_not_counted_as_a_load():
-    windows = {"tile": 4}
     line = "*(tensorforge::VectorT<float, 4>*)&tile[0] = q;"
     kinds = [k for _n, _i, _b, _w, k, _d, _l in bc.accesses(
         "float* tile = &arena[0];\n" + line)]

@@ -27,8 +27,6 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-import pytest
-
 from tensorforge.backend.pir import emit, optimize, verify
 from tensorforge.backend.pir.build import IRBuilder
 from tensorforge.backend.pir.core import SIZE, MemSpace
@@ -84,7 +82,7 @@ def test_a_pir_loop_renders_that_header():
     lines = [_same_but_for_the_number(l) for l in w.get_src().splitlines()]
     assert EXPECTED in lines, (
         "a PIR loop must be able to spell the header the macro layer emits, "
-        f"or the migration changes generated code for no reason:\n"
+        "or the migration changes generated code for no reason:\n"
         + "\n".join(lines))
 
 

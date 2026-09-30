@@ -154,7 +154,7 @@ def test_a_prefix_of_a_value_name_does_not_count_as_a_use():
     b = builder()
     for _ in range(13):
         b.rawexpr('0', type_=INDEX, hint='')
-    b(f'float x = 1;', accesses=())          # names nothing
+    b('float x = 1;', accesses=())          # names nothing
 
 
 # --------------------------------------------------------------------------- #

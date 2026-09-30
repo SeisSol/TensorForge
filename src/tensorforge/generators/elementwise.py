@@ -19,7 +19,7 @@ order.
 from __future__ import annotations
 
 import math
-from typing import List, Union
+from typing import Union
 
 from tensorforge.common.operation import Operation
 from tensorforge.generators.descriptions import ElementwiseDescr

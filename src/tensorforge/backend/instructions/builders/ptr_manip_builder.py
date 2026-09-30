@@ -3,10 +3,8 @@
 # SPDX-License-Identifier: MIT
 from tensorforge.common.context import Context
 from tensorforge.backend.scopes import Scopes, Symbol
-from tensorforge.common.matrix.tensor import Tensor
 from tensorforge.backend.symbol import SymbolType, DataView
 from tensorforge.backend.instructions.ptr_manip import GetElementPtr
-from tensorforge.common.exceptions import InternalError
 from tensorforge.common.basic_types import GeneralLexicon
 from .abstract_builder import AbstractBuilder
 

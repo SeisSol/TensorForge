@@ -28,7 +28,7 @@ Design decisions (see the region-vs-CFG discussion):
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from functools import lru_cache
 from enum import IntEnum, IntFlag, auto, Enum
 from typing import Any, Dict, Iterator, List, Optional, Tuple, Union

@@ -21,8 +21,6 @@ feeds its own FMA against its own `A` vector and still needs its own `{b, b}`.
 
 from __future__ import annotations
 
-import pytest
-
 from tensorforge.backend.instructions.memory.vectorize import (
     reduction_vector_width)
 

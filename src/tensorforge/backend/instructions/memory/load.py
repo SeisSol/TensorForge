@@ -1,15 +1,13 @@
 # SPDX-FileCopyrightText: 2026 SeisSol Group
 #
 # SPDX-License-Identifier: MIT
-from typing import Union
+from typing import List, Union
 import math
-from tensorforge.common.basic_types import Addressing
 from tensorforge.common.matrix.tensor import Tensor
 from . import AbstractShrMemWrite, MemoryInstruction
-from tensorforge.backend.symbol import Symbol, SymbolType, DataView, LeadIndex, write_loops, LeadLoop, Loop, add_offset
+from tensorforge.backend.symbol import Symbol, SymbolType, DataView, write_loops, LeadLoop, Loop, add_offset
 from tensorforge.common.exceptions import InternalError
 from tensorforge.backend.writer import Writer
-from tensorforge.common.matrix.boundingbox import BoundingBox
 from tensorforge.common.context import Context
 from tensorforge.backend.data_types import RegMemObject
 from .hints import cache_hint, readers
@@ -29,7 +27,7 @@ def _hint_allowed(loader) -> bool:
     return False
   mine = readers(src)
   return len(mine) == 1 and mine[0] is loader
-from typing import Union, List
+
 
 # to find a number coprime to the number of shared memory banks
 def _find_next_coprime(number, conumber):
@@ -828,7 +826,6 @@ class GlbToRegLoader(MemoryInstruction, LoadInstruction):
 
   def gen_code_inner(self, writer: Writer) -> None:
     writer.new_line()
-    dest_view = self._dest.data_view
 
     allow_nontemporal = cache_hint(self._context, _hint_allowed(self))
 

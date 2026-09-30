@@ -24,7 +24,6 @@ wrongly reused pre-transpose value would show up as a mismatch.
 from __future__ import annotations
 
 import re
-import sys
 from pathlib import Path
 
 # --- statement forms actually produced by the generator --------------------- #

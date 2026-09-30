@@ -9,9 +9,8 @@ from .. import ranking
 from ..bitlayout import Bit, BitLayout, Place
 from ..routes import lead_route as routes_lead_route
 from ..strategy import Strategy, whole
-from tensorforge.backend.pir.core import (BOOL, INDEX, Access, Effect, MemSpace, Uniformity,
-                                          XorSwizzle,
-                                          ScalarType, Value)
+from tensorforge.backend.pir.core import (BOOL, INDEX, MemSpace, Uniformity,
+                                          XorSwizzle, ScalarType)
 from tensorforge.backend.writer import Writer
 
 #: The two halves an FP32 value splits into for `mma.sync ... .tf32`.
@@ -946,21 +945,12 @@ def matmul(writer, ops, ctx, span):
     atom = instr_for(dtype, columns=ops.n, lead=ops.lead_elements,
                      depth=ops.k + ops.kx, sm=sm_of(ctx))
 
-    mma = writer.varalloc()
-    mmaT = writer.varalloc()
-
-    Ashm = writer.varalloc()
-    Bshm = writer.varalloc()
-
-
-
     # Staged fragments, by slot.  Dicts because the B index is a pair and the
     # extents are loop-derived; what matters is that these hold values, not
     # C++ identifiers built out of a `varalloc` name.
     Areg = {}
     AregParts = None            # per part, allocated once the atom is known
     Breg = {}
-    Creg = writer.varalloc()
 
     # `supports()` is the gate; this is the guard for a direct caller.
     assert threads <= wave and wave % threads == 0
@@ -1000,10 +990,9 @@ def matmul(writer, ops, ctx, span):
     # That is a lifetime argument, and it belongs to a liveness analysis;
     # until the body is structured enough for one to see it, the windows are
     # requested and the overlap is stated in one place.
-    # Fragment slots, filled by the loads and read by the MMA.  Generously
-    # sized: the index is `iii + kk * mregs` and `kkk + jj * kregs`, so the
-    # bound is a product of loop extents rather than the register count.
-    Afrag = [None] * (aregs * mregs * kregs * 8)
+    # Fragment slots of `B`, filled by the loads and read by the MMA.
+    # Generously sized: the index is `kkk + jj * kregs`, so the bound is a
+    # product of loop extents rather than the register count.
     # One list per round: round `p` multiplies multiplication `p`'s `B`.
     Bfrag = [[None] * (bregs * nregs * kregs * 8) for _ in range(mults)]
     BfragLo = [[None] * (bregs * nregs * kregs * 8) for _ in range(mults)]
@@ -1132,11 +1121,6 @@ def matmul(writer, ops, ctx, span):
         Cshm = writer.alloc(atom.d, (tailbase + tailed * ntail * tailcol
                                      + (mults - 1) * cpad,), MemSpace.SHARED,
                             hint='ctile', swizzle=XorSwizzle(wave))
-
-    x4type = {
-        Datatype.F32: 'float4',
-        Datatype.F64: 'double4'
-    }[dtype]
 
     # Every step of the contraction, per block of rows.
     steps = [(k, kk) for k in range(0, K, wave)

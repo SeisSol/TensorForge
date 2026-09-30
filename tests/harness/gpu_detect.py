@@ -91,7 +91,6 @@ def detect_amd() -> List[DetectedGPU]:
     gpus: List[DetectedGPU] = []
     current_name: str | None = None
     current_display_name: str | None = None
-    current_is_gpu = False
     idx = 0
 
     for raw in out.splitlines():
@@ -99,7 +98,6 @@ def detect_amd() -> List[DetectedGPU]:
         if line.startswith("Agent "):
             current_name = None
             current_display_name = None
-            current_is_gpu = False
             continue
         if line.startswith("Device Type:") and "GPU" in line:
             if current_name is not None:

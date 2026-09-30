@@ -70,7 +70,7 @@ class TargetLexic(Lexic):
             with file.Scope():
               for symbol in batched_symbols_in + batched_symbols_inout:
                 file('#pragma omp loop collapse(2)')
-                with file.For(f'int j = 0; j < bX; ++j'):
+                with file.For('int j = 0; j < bX; ++j'):
                   with file.For(f'int i = 0; i < {symbol.obj.get_real_volume()}; ++i'):
                     file(f'{symbol.name}_ptr[j][i] = {symbol.name}[j][i];')
           if len(batched_symbols_out + batched_symbols_inout) > 0:
@@ -79,7 +79,7 @@ class TargetLexic(Lexic):
               with file.Scope():
                 for symbol in batched_symbols_out + batched_symbols_inout:
                   file('#pragma omp loop collapse(2)')
-                  with file.For(f'int j = 0; j < bX; ++j'):
+                  with file.For('int j = 0; j < bX; ++j'):
                     with file.For(f'int i = 0; i < {symbol.obj.get_real_volume()}; ++i'):
                       file(f'{symbol.name}[j][i] = {symbol.name}_ptr[j][i];')
             self.epilogue = epilogue
@@ -102,9 +102,9 @@ class TargetLexic(Lexic):
         file(f'{precision} {GeneralLexicon.TOTAL_SHR_MEM}[{total_shared_mem_size}];')
         file(f'#pragma omp parallel num_threads({bounds})')
         self.threadblock.__enter__()
-        file(f'int bx = omp_get_team_num();')
-        file(f'int ty = omp_get_thread_num() / tX;')
-        file(f'int tx = omp_get_thread_num() % tX;')
+        file('int bx = omp_get_team_num();')
+        file('int ty = omp_get_thread_num() / tX;')
+        file('int tx = omp_get_thread_num() % tX;')
       def __exit__(self, type, value, traceback):
         self.threadblock.__exit__(type, value, traceback)
         self.blockloop.__exit__(type, value, traceback)
@@ -124,7 +124,7 @@ class TargetLexic(Lexic):
     return ""
 
   def active_sub_group_mask(self):
-    return f''
+    return ''
 
   def broadcast(self, variable, lane, block=None, subblock=None):
     return 'NOTSUPPORTED' #f'__builtin_shufflevector()'
@@ -152,7 +152,6 @@ class TargetLexic(Lexic):
 
   def get_operation(self, op: Operation, fptype, value1, value2):
     fpsuffix = 'f' if fptype == Datatype.F32 else ''
-    fpprefix = 'f' if fptype == Datatype.F32 else 'd'
     if op == Operation.COPY:
       return value1
     elif op == Operation.ADD:

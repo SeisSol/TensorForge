@@ -20,7 +20,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from tensorforge.backend.instructions.abstract_instruction import (
     AbstractInstruction, Uniformity)
-from tensorforge.backend.pir.core import Effect, MemSpace, accesses_conflict
+from tensorforge.backend.pir.core import Effect
 from tensorforge.backend.symbol import SymbolType
 from tensorforge.common.ordered import OrderedSet
 

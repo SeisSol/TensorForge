@@ -51,10 +51,10 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 from .asyncmem import strip_commits
 from .core import (Effect, Op, Region, Stmt, TokenType, Value,
-                   accesses_conflict, walk, walk_stmts)
+                   accesses_conflict, walk_stmts)
 from .passes import substitute
-from .schedule import (_defines, _touches_fixed, _uses, can_reorder,
-                       may_cross, touches)
+from .schedule import (_defines, _touches_fixed, _uses, may_cross,
+                       touches)
 
 
 def _why_not(group: Sequence[Stmt], fixed: Stmt) -> str:
@@ -437,7 +437,6 @@ def _fresh_tokens(stmt: Stmt, make_value):
     fresh: List[Value] = []
 
     def rewrite(st: Stmt) -> Stmt:
-        nonlocal fresh
         if st.op in (Op.COPY_ASYNC, Op.LOAD_ASYNC):
             new = tuple(make_value(t.type, 'cp') for t in st.target)
             fresh.extend(new)
@@ -465,7 +464,6 @@ def _index_slice(region: Region, group: Sequence[Stmt],
     not moved -- the current element still needs its own copy -- so a member
     that wrote anything would write it twice.
     """
-    by_def = {t.id: s for s in region.body for t in s.target}
     want = {a.id for g in group for x in walk_stmts((g,))
             for a in x.args if isinstance(a, Value)}
     slice_: List[Stmt] = []

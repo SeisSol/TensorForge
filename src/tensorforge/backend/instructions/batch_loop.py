@@ -29,8 +29,7 @@ from tensorforge.common.context import Context
 from tensorforge.common.exceptions import InternalError
 
 from tensorforge.backend import elementmask
-from tensorforge.backend.pir.core import Participants, Uniformity
-from tensorforge.common.threads import mults_per_group
+from tensorforge.backend.pir.core import Uniformity
 from .abstract_instruction import AbstractInstruction
 
 
@@ -1295,9 +1294,7 @@ class BatchLoop(AbstractInstruction):
         is what makes a block barrier legal in this body -- and it stays
         illegal under the size guard, whose condition is only `MULT`-uniform.
         """
-        from tensorforge.backend.pir.core import (SIZE, INDEX, BOOL,
-                                                  Access, Effect, MemSpace,
-                                                  Uniformity)
+        from tensorforge.backend.pir.core import SIZE, Uniformity
 
         index = self._section_index
         queue = f'launchQueue{index}'

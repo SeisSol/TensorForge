@@ -17,8 +17,6 @@ between a later consumer and the wrong elements from the wrong lanes.
 
 from __future__ import annotations
 
-import pytest
-
 from tensorforge.backend.residency import (Residency, ResidencyEntry,
                                            ResidencyKind)
 from tensorforge.backend.symbol import Symbol, SymbolType

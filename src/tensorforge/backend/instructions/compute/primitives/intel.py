@@ -756,7 +756,7 @@ def matmul(writer, ops, ctx, span):
     """
     C, A, B = ops.C, ops.A, ops.B
     M, N, K, kx = ops.lead_slots, ops.n, ops.k, ops.kx
-    threads, dtype, sparse = ops.threads, ops.accumulator, ops.sparse
+    threads, dtype = ops.threads, ops.accumulator
 
     if span.strategy is Strategy.BROADCAST:
         if ops.a_parts != 1:

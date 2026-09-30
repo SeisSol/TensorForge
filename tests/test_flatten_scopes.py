@@ -32,7 +32,6 @@ import pytest
 from tensorforge.backend.pir import passes
 from tensorforge.backend.pir.build import IRBuilder
 from tensorforge.backend.pir.core import Op, walk
-from tensorforge.backend.pir.emit import Emitter
 from tensorforge.common.basic_types import Datatype
 
 

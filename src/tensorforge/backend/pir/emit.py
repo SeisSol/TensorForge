@@ -22,12 +22,10 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from tensorforge.common.basic_types import Addressing, Datatype
 
-from tensorforge.common.basic_types import GeneralLexicon
 from tensorforge.common.operation import Operation
-from .core import (Access, BufferType, Effect, IRError, MemSpace, Op, Operand,
-                   Qual,
-                   Region, ScalarType, Stmt, TokenType, Uniformity, Value, def_use,
-                   walk, walk_stmts)
+from .core import (BufferType, Effect, IRError, MemSpace, Op, Operand, Qual,
+                   ScalarType, Stmt, TokenType, Uniformity, Value, def_use,
+                   walk_stmts)
 
 _ATOM = __import__('re').compile(r'^(?:[A-Za-z_][A-Za-z0-9_.:]*|\d[\w.]*)$')
 

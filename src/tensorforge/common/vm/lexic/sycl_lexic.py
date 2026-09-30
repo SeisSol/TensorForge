@@ -201,7 +201,7 @@ class SyclLexic(Lexic):
       add_items = ''
 
     l1 = f"inline void kernel_{base_name}(sycl::queue *stream, sycl::range<3> group_count, sycl::range<3> group_size, {params})"
-    l2 = f"stream->submit([&](sycl::handler &cgh)"
+    l2 = "stream->submit([&](sycl::handler &cgh)"
     # `group_count` and `group_size` come in CUDA order (x, y, z) and go out in
     # SYCL order, x last; see the index spellings in `__init__`.
     l3 = (f"cgh.parallel_for(sycl::nd_range<3>{{{{group_count.get(2) * group_size.get(2), "
@@ -292,7 +292,7 @@ class SyclLexic(Lexic):
     #return "item.barrier();"
 
   def active_sub_group_mask(self):
-    return f'item.get_sub_group()'
+    return 'item.get_sub_group()'
 
   def broadcast(self, variable, lane, block=None, subblock=1):
     if self.simd_mode:

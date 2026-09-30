@@ -21,8 +21,6 @@ decision happen, not to test arithmetic; ``accumulate_chain`` and the rest
 already cover the numerics.
 """
 
-import numpy as np
-
 from tensorforge.common.basic_types import Addressing, Datatype
 from tensorforge.common.matrix.boundingbox import BoundingBox
 from tensorforge.common.matrix.tensor import SubTensor, Tensor

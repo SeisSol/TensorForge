@@ -258,7 +258,6 @@ class CudaLexic(Lexic):
 
   def get_operation(self, op: Operation, fptype, value1, value2):
     fpsuffix = 'f' if fptype == Datatype.F32 else ''
-    fpprefix = 'f' if fptype == Datatype.F32 else 'd'
     if op == Operation.COPY:
       return value1
     elif op == Operation.ADD:

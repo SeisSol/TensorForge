@@ -173,7 +173,7 @@ def test_the_exceptions_are_reachable_at_all():
     tests above pass vacuously and the special cases rot. This fails loudly
     instead.
     """
-    from tensorforge.backend.symbol import Symbol, SymbolType
+    from tensorforge.backend.symbol import Symbol
     import inspect
     src = inspect.getsource(Symbol.load) + inspect.getsource(Symbol.store)
     assert 'SymbolType.Register' in src

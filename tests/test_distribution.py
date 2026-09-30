@@ -25,7 +25,7 @@ import pytest
 from tensorforge.backend.pir.core import (SCALAR_LAYOUT, IRError, LaneAxis,
                                           RegisterLayout, ScalarType,
                                           Uniformity, Value, join_layout)
-from tensorforge.backend.symbol import LeadIndex, VarOffset, layout_of
+from tensorforge.backend.symbol import LeadIndex, layout_of
 from tensorforge.common.basic_types import Datatype
 
 F32 = ScalarType(Datatype.F32)

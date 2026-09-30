@@ -15,11 +15,10 @@ happened to run this, reachability says no case can.
 from __future__ import annotations
 
 import ast
-import io
 import tokenize
 from collections import defaultdict
 from pathlib import Path
-from typing import Dict, Iterable, List, Sequence, Set, Tuple
+from typing import Dict, List, Sequence, Set, Tuple
 
 
 def module_defs(tree: ast.Module) -> Dict[str, List[ast.AST]]:

@@ -20,19 +20,17 @@ from __future__ import annotations
 
 import re
 from contextlib import contextmanager
-from dataclasses import replace
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 from tensorforge.common.basic_types import Datatype
 from tensorforge.common.exceptions import GenerationError
 
 from tensorforge.common.basic_types import GeneralLexicon
-from .core import (BOOL, INDEX, SCALAR_LAYOUT, TOKEN, Access, BufferType,
-                   Participants,
-                   Effect, IRError,
-                   LaneAxis, MemSpace, Op, Operand, Region, RegisterLayout,
-                   ScalarType, Stmt, TokenType, Value, XorSwizzle, dump, walk, walk_stmts,
-                   join_layout, base_space, Uniformity, SIZE)
+from .core import (INDEX, SCALAR_LAYOUT, TOKEN, Access, BufferType,
+                   Participants, Effect, IRError, LaneAxis, MemSpace, Op,
+                   Operand, Region, RegisterLayout, ScalarType, Stmt,
+                   TokenType, Value, XorSwizzle, dump, walk_stmts, join_layout,
+                   base_space, Uniformity, SIZE)
 
 
 def access_of(symbol: Any, kind: Effect) -> Access:

@@ -55,11 +55,11 @@ contain both.
 from __future__ import annotations
 
 import re
-from typing import List, Sequence
+from typing import Sequence
 
 from tensorforge.common.basic_types import FlagMode
 
-from .driver_emit import DriverOperand, collect_operands, launcher_call_expr
+from .driver_emit import collect_operands, launcher_call_expr
 
 #: Bytes per element, keyed by the C++ spelling `driver_emit` produces.
 _ELEM_BYTES = {"__half": 2, "float": 4, "double": 8, "__float128": 16}
@@ -155,7 +155,7 @@ def emit_workload_tu(generator, backend: str, name: str,
     tag = slug(name)
     lang = "sycl" if backend in ("oneapi", "acpp", "esimd", "sycl") else backend
 
-    decls, allocs, fills, copies, frees = [], [], [], [], []
+    decls, allocs, fills, frees = [], [], [], []
     for op in ops:
         if op.is_scalar:
             continue

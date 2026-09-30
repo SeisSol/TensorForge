@@ -32,7 +32,6 @@ class RegisterAlloc(AbstractInstruction):
         if self._init_value == 0:
           init_values_list = "{}"
         else:
-          real_literal = self._vm.get_real_literal()
           init_values = ', '.join([datatype.literal(self._init_value)] * self._dest.obj.size)
           init_values_list = f' = {{{init_values}}}'
       # Structured: the tile becomes a value the body can reason about

@@ -6,7 +6,7 @@ from tensorforge.common.context import Context
 from tensorforge.common.matrix.tensor import Tensor
 from tensorforge.common.matrix.boundingbox import BoundingBox
 from tensorforge.backend.data_types import RegMemObject
-from tensorforge.backend.symbol import Symbol, SymbolType, DataView, LeadIndex, write_loops, LeadLoop, Loop, Immediate, add_offset
+from tensorforge.backend.symbol import Symbol, SymbolType, DataView, write_loops, LeadLoop, Loop, Immediate, add_offset
 from tensorforge.common.exceptions import InternalError
 from tensorforge.backend.writer import Writer
 from . import AbstractShrMemWrite
@@ -146,7 +146,6 @@ class StoreRegToShr(AbstractShrMemWrite):
     return (self._dest,) if self._partial else ()
 
   def gen_code_inner(self, writer: Writer) -> None:
-    dest_view = self._dest.data_view
     src_bbox = self._src.data_view.get_bbox()
     if getattr(self, '_clear', False):
       self._clear_rest(writer, src_bbox)
@@ -290,7 +289,6 @@ class StoreRegToGlb(AbstractInstruction):
 
   def gen_ir(self, writer: Writer) -> None:
     writer.new_line()
-    dest_view = self._dest.data_view
 
     # With `Options.hint_outputs`, also a destination that nothing reads but
     # transfers -- a `+=` destination's own preload: an accumulated register

@@ -22,8 +22,6 @@ What is checked here:
 
 from __future__ import annotations
 
-import pytest
-
 from tensorforge.backend.pir import optimize, verify, walk
 from tensorforge.backend.pir.asyncmem import schedule_async
 from tensorforge.backend.pir.build import IRBuilder

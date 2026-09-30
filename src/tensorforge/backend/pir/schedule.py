@@ -57,9 +57,9 @@ they belong on top of this predicate rather than inside it.
 from __future__ import annotations
 
 from dataclasses import replace
-from typing import Dict, List, Optional, Sequence, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
-from .core import Effect, Op, Stmt, Value, accesses_conflict, walk, walk_stmts
+from .core import Effect, Op, Stmt, accesses_conflict, walk, walk_stmts
 
 #: Effects that no access analysis can reason across.
 _WALL = Effect.BARRIER | Effect.UNKNOWN

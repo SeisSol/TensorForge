@@ -27,7 +27,7 @@ an order here rather than a condition somewhere.
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Dict, FrozenSet, Iterable, List, Optional, Tuple
+from typing import FrozenSet, Optional, Tuple
 
 from ... import packing, ranking
 from .catalog import emu_tile_for, emu_tiles, mfma_tile_for, mfma_tiles_for

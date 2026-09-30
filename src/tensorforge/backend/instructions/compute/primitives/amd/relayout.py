@@ -34,7 +34,7 @@ from tensorforge.backend.pir.core import LaneAxis, RegisterLayout
 
 from . import catalog
 from .reorder import compose_cost, compose_exchange, emittable
-from ... import bitlayout, staging
+from ... import bitlayout
 from ...routes import Rungs
 from ...routes import reach as routes_reach
 

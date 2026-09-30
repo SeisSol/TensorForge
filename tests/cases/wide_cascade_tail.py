@@ -13,8 +13,6 @@ computed in one unit meets a bound computed in the other, which only a kernel
 with both on the same transfer exercises.
 """
 
-import numpy as np
-
 from tensorforge.common.basic_types import Addressing, Datatype
 from tensorforge.common.matrix.boundingbox import BoundingBox
 from tensorforge.common.matrix.tensor import SubTensor, Tensor

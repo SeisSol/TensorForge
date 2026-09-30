@@ -168,8 +168,7 @@ def test_a_loop_variable_resolves_to_its_bound():
     """
     b = builder()
     tile = b.alloc(Datatype.F32, (256,), MemSpace.SHARED, hint='s')
-    with b.for_(0, 4) as loop:
-        i = loop.index if hasattr(loop, 'index') else None
+    with b.for_(0, 4):
         b.load(tile, b.thread_id('x'), hint='v')
     accesses, unresolved = banks.analyze(b.finish())
     assert unresolved == 0 and accesses[0].ways == 1
@@ -263,7 +262,7 @@ def test_the_volume_rule_picks_the_width_the_pattern_wants():
     """
     import importlib.util
 
-    from tensorforge.backend.pir import banks, passes
+    from tensorforge.backend.pir import banks
     from tensorforge.backend.pir import passes as pir
     import tensorforge.backend.instructions.abstract_instruction as absinstr
     from tensorforge.common.basic_types import Datatype

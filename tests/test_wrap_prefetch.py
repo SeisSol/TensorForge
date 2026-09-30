@@ -14,8 +14,6 @@ loop reads and when is only as good as the cases where it declines, and
 
 from __future__ import annotations
 
-import pytest
-
 from tensorforge.backend.pir import emit, verify, walk
 from tensorforge.backend.pir.asyncmem import schedule_async
 from tensorforge.backend.pir.build import IRBuilder

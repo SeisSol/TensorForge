@@ -19,7 +19,6 @@ from tensorforge.backend.instructions.memory.load import (GlbToRegLoader,
                                                           LoadInstruction,
                                                           LoadWait)
 from tensorforge.backend.instructions.ptr_manip import GetElementPtr
-from tensorforge.backend.pir.core import accesses_conflict
 from tensorforge.backend.symbol import Symbol
 from tensorforge.common.exceptions import InternalError
 

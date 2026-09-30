@@ -20,7 +20,6 @@ import pytest
 
 from tensorforge.backend.instructions.compute.primitives import intel
 from tensorforge.common.basic_types import Datatype
-from tensorforge.backend.instructions.compute.matmul import MatmulOperands
 from tensorforge.backend.instructions.compute import split
 from tensorforge.backend.instructions.compute.strategy import (
     ComputeShape, Strategy)

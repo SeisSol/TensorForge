@@ -367,7 +367,7 @@ def main(argv):
             print(f'  {totals[k]:6d}  {k}')
 
     if conflicting:
-        print(f'\nworst per case:')
+        print('\nworst per case:')
         for (case, backend), w in sorted(worst_case.items(),
                                          key=lambda kv: -kv[1])[:10]:
             print(f'  {w}-way  {case}/{backend}')

@@ -3,7 +3,6 @@
 # SPDX-License-Identifier: MIT
 import copy
 from abc import ABC, abstractmethod
-from enum import IntEnum
 from typing import List, Optional, Tuple
 from tensorforge.common.context import Context, VM
 from tensorforge.backend.writer import Writer
@@ -13,7 +12,7 @@ from contextlib import contextmanager
 
 from tensorforge.backend import pir
 from tensorforge.backend.pir.core import (Access, Effect, MemSpace,
-                                          Participants, Uniformity)
+                                          Uniformity)
 
 
 def _record_pressure(context, body, simd: bool,

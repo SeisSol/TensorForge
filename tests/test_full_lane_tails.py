@@ -21,8 +21,6 @@ import re
 import warnings
 from pathlib import Path
 
-import numpy as np
-
 from tensorforge.common.basic_types import Addressing, Datatype
 from tensorforge.common.context import Context, Options
 from tensorforge.common.matrix.boundingbox import BoundingBox

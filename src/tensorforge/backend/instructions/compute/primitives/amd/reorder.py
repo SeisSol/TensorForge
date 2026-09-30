@@ -83,7 +83,7 @@ it assumes.
 """
 
 from dataclasses import dataclass
-from typing import Iterable, Optional, Tuple
+from typing import Optional, Tuple
 
 from . import layouts
 
