@@ -82,8 +82,8 @@ def _reference_for_case(case, inputs: Dict[str, np.ndarray],
     operand_arrays = []
     for op in d.ops:
         if op.tensor.addressing == Addressing.SCALAR and op.tensor.has_values():
-            val = op.tensor.get_values()[0]
-            operand_arrays.append(np.array(val, dtype=layout.np_dtype(dt)))
+            val = np.asarray(op.tensor.get_values()).reshape(-1)[0]
+            operand_arrays.append(np.array(val, dtype=layout.np_dtype(case.DTYPE)))
             continue
         key = op.tensor.alias
         if key is None or key not in inputs:

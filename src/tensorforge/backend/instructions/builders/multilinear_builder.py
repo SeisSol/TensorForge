@@ -5,7 +5,7 @@ from typing import Tuple
 from tensorforge.common.basic_types import Addressing
 from tensorforge.backend.symbol import Symbol, SymbolType, SymbolView
 from tensorforge.backend.instructions.memory.load import GlbToShrLoader, GlbToRegLoader
-from tensorforge.backend.instructions.memory.store import StoreRegToGlb, StoreRegToShr, StoreRegToReg
+from tensorforge.backend.instructions.memory.store import StoreRegToGlb, StoreRegToShr
 from tensorforge.backend.instructions.sync_block import SyncThreads
 from tensorforge.backend.instructions.compute.multilinear import MultilinearInstruction
 from tensorforge.common.matrix.tensor import Tensor
@@ -995,11 +995,6 @@ class MultilinearBuilder(OperationBuilder):
                                                   dest_offset=self._store_offset(),
                                                   dest_bbox=self._promised_box(),
                                                   zero_fill=not self._add))
-      elif dest_symbol.stype == SymbolType.Register:
-        self._instructions.append(StoreRegToReg(context=self._context,
-                                                src=self._temp_regs,
-                                                dest=dest_symbol,
-                                                num_threads=self._num_threads))
       else:
         raise InternalError(f'gemm-builder: `res` must be either in shr. or glb. mem., given: {dest_symbol.stype}')
     else:

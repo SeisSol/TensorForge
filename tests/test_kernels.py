@@ -92,6 +92,35 @@ def test_reference_matches_einsum():
     assert np.allclose(trans, np.einsum("bki,bkj->bij", A_raw, B))
 
 
+def test_the_auto_reference_reads_a_synthesized_alpha():
+    """`GemmDescr` with `alpha != 1` carries alpha as a scalar operand of its
+    own; the auto-reference takes it from the tensor, in the case's dtype."""
+    import types
+
+    from harness.runner import _reference_for_case
+    from tensorforge.common.basic_types import Addressing
+    from tensorforge.common.matrix.boundingbox import BoundingBox
+    from tensorforge.common.matrix.tensor import SubTensor, Tensor
+    from tensorforge.generators.descriptions import GemmDescr
+
+    def t(shape, alias):
+        return SubTensor(Tensor(shape, Addressing.STRIDED,
+                                BoundingBox([0, 0], list(shape)),
+                                alias=alias, datatype=Datatype.F32))
+
+    case = types.SimpleNamespace(
+        DTYPE=Datatype.F32,
+        descr_list=lambda: [GemmDescr(False, False, a=t([4, 5], "A"),
+                                      b=t([5, 6], "B"), c=t([4, 6], "C"),
+                                      alpha=1.5, beta=0.0)])
+    rng = np.random.default_rng(2)
+    inputs = {"A": rng.standard_normal((2, 4, 5)).astype(np.float32),
+              "B": rng.standard_normal((2, 5, 6)).astype(np.float32)}
+    got = _reference_for_case(case, inputs, np.zeros((2, 4, 6), np.float32))
+    assert np.allclose(got, 1.5 * np.einsum("bik,bkj->bij", inputs["A"],
+                                            inputs["B"]))
+
+
 def test_elementwise_descr_constructs():
     """Every elementwise case builds its ElementwiseDescrs without a GPU.
 

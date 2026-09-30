@@ -403,9 +403,9 @@ class MultilinearInstruction(ComputeInstruction):
         # destination axis indices: an N axis in `_lead_dims` becomes a
         # `LeadLoop`, everything else a sequential `Loop`.  A K axis would be
         # written `-i-1`, which is the encoding the test at the head of the K
-        # nest reads -- nothing produces one today, since a contraction axis
-        # spread across the lanes is the cross-lane fold that `_leading_dim`
-        # does not have.
+        # nest reads -- nothing produces one, since a contraction axis spread
+        # across the lanes needs a cross-lane fold, which this instruction does
+        # not do.
         #
         # The value is [0] for every case in the corpus, because
         # `MultilinearDescr._lead_dim` aligns the thread count to the
@@ -552,8 +552,6 @@ class MultilinearInstruction(ComputeInstruction):
                    accesses=())
         if not self._nonleading_dim_test(writer):
             self._nonleading_dim(writer)
-        if len(self._ns) == 0:
-            self._leading_dim(writer)
 
     def _nonleading_dim(self, writer: Writer):
         self._offer_simt_order()
@@ -1719,25 +1717,6 @@ class MultilinearInstruction(ComputeInstruction):
                     spec.discard()
             return taken
         return False
-
-    def _leading_dim(self, writer: Writer):
-        with writer.Scope():
-            loopstack = []
-            for i, (dimmin, dimmax) in enumerate(self._ns[1:]):
-                loop = writer.For(f'int32_t n{i+1} = {dimmin}; n{i+1} < {dimmax}; ++n{i+1}', True)
-                loop.__enter__()
-                loopstack += [loop]
-
-            self._idest.load(writer, self._context, 'value', [self._vm.get_lexic().thread_idx_x] + [f'n{i+1}' for i,_ in enumerate(self._ns[1:])], False)
-            #writer(f'auto* shmAddr = &{self._shr_mem.name}[{self._shr_mem_offset}];')
-            self._reduction(writer)
-            write(f'value = tensorforge::reduction<tensorforge::ReductionOperation<{self._fp_as_str}, tensorforge::Op::Sum>, {self._num_threads}, 1, {self._fp_as_str}>(value);')
-            # self._butterfly_reduction_loop(writer, max_array_length = 32, amd = False)
-            #writer(f'{self._fp_as_str} newvalue = shmAddr[{sublane_address}];')
-            self._idest.store(writer, self._context, 'value', [self._vm.get_lexic().thread_idx_x] + [f'n{i+1}' for i,_ in enumerate(self._ns[1:])], False)
-
-            for loop in loopstack[::-1]:
-                loop.__exit__(None, None, None)
 
     def get_operands(self):
         # The scalar factors and the previous value are the epilogue's.
