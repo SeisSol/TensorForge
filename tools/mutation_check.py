@@ -50,7 +50,6 @@ HIP = Path('src/tensorforge/include/tensorforge_device/hip.h')
 EMIT = Path('src/tensorforge/backend/pir/emit.py')
 ABSTR = Path('src/tensorforge/backend/instructions/abstract_instruction.py')
 EQUIV = Path('tools/access_equiv.py')
-SYM = Path('src/tensorforge/backend/symbol.py')
 
 
 def _run_tests(target):
@@ -64,9 +63,15 @@ def _run_tests(target):
     harness exists to catch exactly that class of false confidence, so it had
     better not produce it.
     """
-    for cache in Path('tensorforge').rglob('__pycache__'):
+    for cache in Path('src/tensorforge').rglob('__pycache__'):
         shutil.rmtree(cache, ignore_errors=True)
-    env = dict(os.environ, PYTHONDONTWRITEBYTECODE='1')
+    # This tree's package ahead of any installed one: the mutations are made
+    # here, and a run that imported another copy would report every one of
+    # them as uncaught.
+    path = [str(Path('src').resolve())] + [
+        p for p in [os.environ.get('PYTHONPATH')] if p]
+    env = dict(os.environ, PYTHONDONTWRITEBYTECODE='1',
+               PYTHONPATH=os.pathsep.join(path))
     return subprocess.run(
         [sys.executable, '-B', '-m', 'pytest', *target.split(), '-q', '-x',
          '--no-header'],

@@ -19,6 +19,9 @@ enough, because steps that differ do so in their shapes and their operands.
 import argparse
 import re
 import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'src'))
 
 from tensorforge.common.basic_types import Addressing, Datatype
 from tensorforge.common.matrix.boundingbox import BoundingBox

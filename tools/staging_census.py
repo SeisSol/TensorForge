@@ -46,6 +46,8 @@ import warnings
 from collections import Counter
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
+
 import tensorforge.backend.symbol as sym
 from tensorforge.common.basic_types import Datatype
 from tensorforge.common.context import Context

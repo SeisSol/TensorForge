@@ -39,6 +39,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 
 from spp_metrics import measure                     # noqa: E402
 from spp_occupancy import Machine, frontier         # noqa: E402

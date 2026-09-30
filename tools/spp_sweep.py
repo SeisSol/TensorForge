@@ -37,6 +37,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 
 from seissol_corpus import COVER_WIDTHS, family_of, load, order_of  # noqa: E402
 from spp_metrics import measure                                     # noqa: E402

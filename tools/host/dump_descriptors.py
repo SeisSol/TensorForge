@@ -27,8 +27,11 @@ import json
 import os
 import runpy
 import sys
+from pathlib import Path
 
 import numpy as np
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'src'))
 
 from tensorforge.frontend.yateto import YatetoFrontend
 from tensorforge.generators.descriptions import (ElementwiseDescr,

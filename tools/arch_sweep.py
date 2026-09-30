@@ -7,7 +7,8 @@ import re
 import sys
 from pathlib import Path
 
-sys.path.insert(0, 'tests')
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'tests'))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 
 from tensorforge.common.context import Context
 from tensorforge.generators.generator import Generator

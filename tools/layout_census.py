@@ -10,8 +10,12 @@ appearing as the operator shapes change -- the relayouts have to be derived
 rather than enumerated, and that needs an algebra.
 """
 import importlib.util
+import sys
 from collections import Counter
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
+
 from tensorforge.common.context import Context
 from tensorforge.generators.generator import Generator
 from tensorforge.backend.pir import build as pirbuild

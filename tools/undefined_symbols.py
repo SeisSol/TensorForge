@@ -4,8 +4,12 @@
 """Which fmacdpp symbols does the generator actually put in the source,
 and does the runtime define each of them for that target?"""
 import importlib.util, re
+import sys
 from collections import defaultdict
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
+
 from tensorforge.common.context import Context
 from tensorforge.generators.generator import Generator
 

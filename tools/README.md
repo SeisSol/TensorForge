@@ -4,111 +4,145 @@
     SPDX-License-Identifier: MIT
 -->
 
-# Diagnostics
+# Tools
 
-Read-only reports on the state of the AMD code generation path. None of them
-change anything; they answer questions that came up repeatedly while working
-on it, and that are easier to re-run than to re-derive.
+Scripts that answer questions about the generator and what it emits. They
+read; the exceptions say so below: `mutation_check.py` edits the source and
+restores it, the `amd_matrix_*` scripts regenerate reference data under
+`tests/data`, and the `seissol_*` scripts write captures.
 
-Run from the repository root.
+Run them from the repository root, since they find `tests/cases` and
+`tests/snapshots` by relative path. Each puts the `src` directory of the
+checkout it belongs to ahead of an installed TensorForge, so a tool reports on
+its own tree whatever else is installed.
+
+Two subdirectories have their own READMEs: [`bench/`](bench/README.md) builds
+and times kernels on a device, and [`host/`](host/README.md) runs generated
+kernels on the host against a NumPy evaluation of their descriptors.
+
+## The generated code
 
 | tool | question |
 |---|---|
-| `reachability.py` | what can `matmul()` actually reach, and what is defined twice? |
-| `arch_sweep.py` | does every supported AMD target still generate, and which helpers does it emit? |
-| `undefined_symbols.py` | does any target call a `fmacdpp` variant its runtime does not define? |
-| `duplicate_elements.py` | does any output element get computed by more than one path? |
-| `access_equiv.py` | did a refactor change *which* memory is touched, or only what it is called? |
-| `ir_opacity.py` | how much of the emitted IR is opaque to the passes, versus structured -- and which function emitted it? |
-| `access_equiv.py` | did a refactor change *which* memory gets touched, or only what it is called? |
-| `layout_census.py` | which register layouts does the generator actually produce? |
-| `operand_layouts.py` | do the vendor intrinsics receive their operands in the distribution they require? |
+| `syntax_check.py` | does every snapshot's kernel parse, and does every call in it resolve? `g++` over the host shim, for machines without a vendor compiler |
+| `arch_sweep.py` | does every AMD target generate the case corpus, and which helpers does each emit? |
+| `undefined_symbols.py` | does any target call an `fmacdpp` variant its runtime does not define? |
+| `duplicate_elements.py` | is any output element computed by more than one path? |
+| `operand_layouts.py` | does the A operand of `fmacdpp{step}` always arrive in the distribution the instruction requires? |
+| `reachability.py` | what in the AMD package can its single entry point, `amd.matmul`, reach, and what is defined twice? |
 
-`ir_opacity.py` distinguishes three kinds rather than two. A `rawexpr` still
-carries vendor-specific text, but it has an SSA result and a declared memory
-effect, so a pass can reorder around it and reuse it; a `rawstmt` with
-`Effect.UNKNOWN` can do neither. Counting them together hides the difference
-that matters.
+## Guards for a change
 
-`access_equiv.py` exists because a textual snapshot diff answers "did the
-source change", which during a migration is almost always yes and almost never
-the question. Unpinning an address renumbers every SSA value after it and lets
-single-use addresses inline into their loads, so thousands of lines move
-without a single access moving. It expands every subscript down to leaves and
-compares the multiset of `(base, address)` pairs against a git revision.
+| tool | question |
+|---|---|
+| `access_equiv.py` | did a change alter *which* memory a kernel touches, or only what things are called? |
+| `mutation_check.py` | do the tests catch the defects they exist for? |
 
-What it canonicalizes away -- renumbering, parenthesization, `0 + x` -- is
-chosen; what it refuses to canonicalize -- associativity, distribution -- is
-chosen just as deliberately, because on an address those are usually real. Its
-answer licenses not reading the diff, so `tests/test_access_equiv.py` pins both
-directions: for each thing it ignores, a pair it must call identical, and next
-to it a pair it must call different.
+`access_equiv.py` answers the question a snapshot diff cannot. Unpinning an
+address renumbers every later SSA value and lets single-use addresses fold
+into their loads, so thousands of lines move without a single access moving,
+and reviewing that by eye is how a real change gets waved through inside it.
+The tool expands every name in every subscript down to leaves (loop variables,
+thread indices, literals), canonicalizes, and compares the multiset of
+`(base, address)` pairs with the snapshots at a git revision:
 
-It reports two numbers, because they answer different questions and conflating
-them made this tool wrong once. *Constructed* is what the generator emits into
-the builder; *lowered* is what survives `pir.optimize` and reaches codegen. The
-second is smaller, because passes delete raw nodes: `flatten_scopes` removes
-every textless `Op.RAWBLOCK`, and the 18016 empty scopes `write_loops_inner`
-used to open read as 67% of everything opaque while lowering to no text at all.
-Quoting the constructed number as progress overstated the work left roughly
-fivefold.
+```bash
+python3 tools/access_equiv.py            # against HEAD
+python3 tools/access_equiv.py HEAD~3
+```
 
-Both are attributed to the function that emitted them. Lowered nodes are
-matched back to their site by their raw text, since the passes rebuild
-statements with `replace` and the emitting frame is gone by then -- and putting
-the site in `attrs` would change behavior, because `flatten_scopes` keys on
-`attrs` being empty.
+Renumbering, parenthesization and identity terms (`0 + x`, `1 * x`) are
+canonicalized away; associativity and distribution deliberately are not,
+because on an address `a*(b+c)` and `a*b + c` usually differ for a reason. A
+subscript it cannot parse raises rather than falling back to comparing text:
+the answer is worth something only because it licenses not reading the diff.
+`tests/test_access_equiv.py` pins both directions, a pair it must call
+identical next to a pair it must call different for everything it ignores.
 
-It runs the whole case corpus -- recursively, the way `conftest.py` discovers
-cases, because `barrier/`, `elementwise/`, `reduction/` and `slicing/` hold 23
-of the 52 between them. The percentage says how far along
-the migration is; the site table says what to change next, which is the
-question that actually gets asked. Cases that stop generating still count
-whatever they emitted before stopping -- dropping them would move the total
-whenever an unrelated defect is fixed, and a baseline that moves for reasons
-outside the change under test is not a baseline.
-
-## mutation_check.py
-
-Not a report: it puts defects *back* and checks that the guards notice.
-
-Every test added alongside these tools is only worth its runtime if it can
-fail, and two ways of failing silently are easy to reach — a property that is
-trivially true, or a test that shares a mistake with the code it checks. Both
-happened here. So each guard has a matching mutation, taken from the defects
-that were actually found rather than invented:
+`mutation_check.py` plants defects and checks that the tests notice. A
+test can pass because its property is trivially true, or because it shares a
+mistake with the code it checks, and either reads as coverage. So each guard
+has a matching mutation, a defect the code can actually have:
 
 ```bash
 python3 tools/mutation_check.py            # every group
 python3 tools/mutation_check.py layout     # one group
+python3 tools/mutation_check.py --dry-run  # do the anchors still match?
 ```
 
-Source files are edited in place and restored in a `finally`; run it on a
-clean tree. A mutation that no longer applies is reported as skipped rather
-than passed — if the code has moved, that check has stopped testing anything
-and should be repaired, not trusted.
+Source files are edited in place and restored in a `finally`, and the paths
+under mutation are also written to a lock file, so a run killed before its
+`finally` is restored from git by the next one. Run it on a clean tree. A
+mutation that no longer applies is reported as skipped rather than passed:
+the code has moved, and that check has stopped testing anything. The tests
+run with this tree's `src` first and without bytecode caches, since CPython
+compares source mtimes at one-second resolution and a stale `.pyc` would let
+the run import the unmutated module.
 
-The harness clears `__pycache__` and runs pytest with `-B`. That is not
-hygiene: CPython invalidates a `.pyc` by comparing the source mtime at
-one-second resolution, and these files are rewritten several times a second,
-so a stale cache would let the subprocess import the unmutated module and
-report a guard as working when it was never exercised. That is exactly the
-false confidence this harness exists to prevent, and it produced it once
-before the caches were cleared.
+## What the passes can see
 
-`access_equiv.py` answers the question a snapshot diff cannot during a
-migration. Unpinning an address renumbers every later SSA value and lets the
-emitter fold single-use addresses into their loads, so 55000 lines move and
-almost none of it is a change in behavior. Reviewing that by eye is how a real
-change gets waved through in the middle of it.
+| tool | question |
+|---|---|
+| `ir_opacity.py` | how much of each kernel is raw text a pass cannot see through, and which function emitted it? |
+| `macro_surface.py` | which statements are written straight to the output and never reach the IR at all? |
+| `buffer_spans.py` | which names still connect definitions and uses across separate IR bodies? |
+| `layout_census.py` | how many distinct register layouts does the generator produce? |
+| `slot_census.py` | how many compute slots does a loop body have, which bounds the prefetch distance a wrap-around schedule gets for free? |
+| `overlap_census.py` | how far apart are a transfer, its wait, and the next transfer? |
+| `lane_census.py` | how much of the wave does each descriptor use, given that a kernel's widest descriptor sets the thread count for all? |
+| `staging_census.py` | what does each staged shared image accomplish: a broadcast, a relayout, or a round trip that only spills? |
 
-So it expands every SSA name in every subscript down to leaves, canonicalizes,
-and compares the multiset of `(base, address)` pairs against a git revision.
-Renumbering, parenthesization and identity terms are canonicalized away;
-associativity and distribution deliberately are not, because on an address
-`a*(b+c)` and `a*b + c` usually differ for a reason.
+`ir_opacity.py` sorts raw nodes into three kinds. A `rawexpr` still carries
+vendor text, but it has an SSA result and a declared memory effect, so a pass
+can reorder around it and reuse it; a `rawstmt` with `Effect.UNKNOWN` can do
+neither; and a comment is inert. It counts twice: *constructed* is what the
+generator hands the builder, and *lowered* is what survives `pir.optimize` and
+reaches codegen. The second is the one that says how much of the output is
+opaque, and it is smaller, because passes delete raw nodes -- `flatten_scopes`
+removes every scope that declares nothing. Both are attributed to the
+function that emitted them, lowered nodes by their text, since the passes
+rebuild statements and the emitting frame is gone by then.
 
-A subscript it cannot parse raises rather than falling back to a text
-comparison. The quiet alternative ends with the tool reporting "identical" over
-accesses it stopped reading, and its entire value is that the answer licenses
-not reading the diff.
+It runs the whole corpus, recursively, as `conftest.py` discovers it. A case
+that stops generating still counts what it emitted before stopping, so the
+total does not move whenever an unrelated defect is fixed.
+
+## Cost models
+
+| tool | question |
+|---|---|
+| `bank_conflicts.py` | what does every shared-memory access cost in bank cycles? |
+| `register_usage.py` | does the register-pressure model rank two lane configurations the way the vendor compiler does? |
+| `register_tradeoff.py` | would keeping a staged image in registers fit? |
+| `rotation_cost.py` | what does a buffer's second stage cost, found by generating twice or given to every transfer? |
+| `calibrate_icache.py` | fits the instruction-cache estimate to what the compilers emit |
+| `calibrate_mix.py` | fits the machine instructions per emitted statement, by kind of statement |
+
+## Constant operands and their staging
+
+For SeisSol's globally constant matrices: how sparse they are, and what
+staging them in shared memory buys.
+
+| tool | question |
+|---|---|
+| `spp_metrics.py` | the metrics over one sparsity pattern |
+| `spp_layout.py` | the storage layout, in the form the frontend takes |
+| `spp_plan.py` | which operands get staged, and in what layout |
+| `spp_occupancy.py` | what staging an operand costs in residency |
+| `spp_sweep.py` | where the staging decision changes, across the corpus |
+| `spp_kernels.py` | the constant operands as the code generator sees them, from a descriptor capture |
+| `seissol_corpus.py` | the metrics over SeisSol's `matrices_N.xml` |
+
+## SeisSol captures
+
+| tool | question |
+|---|---|
+| `seissol_export.py` | what does SeisSol's code generator hand a GPU exporter for one configuration? |
+| `seissol_store.py` | packs those exports into the content-addressed store under `tests/fixtures/seissol` |
+
+## Reference data
+
+| tool | question |
+|---|---|
+| `amd_matrix_table.py` | regenerates `tests/data/amd_matrix_builtins.json` from LLVM |
+| `amd_matrix_layouts.py` | regenerates `tests/data/amd_matrix_layouts.json` from AMD's matrix instruction calculator |

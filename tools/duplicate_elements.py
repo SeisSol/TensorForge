@@ -8,8 +8,12 @@ places logs every store of the inner call twice.  Wrap once, at `matmul`, and
 attribute the path by asking which function is on the stack.
 """
 import importlib.util, inspect
+import sys
 from collections import Counter
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
+
 from tensorforge.common.context import Context
 from tensorforge.generators.generator import Generator
 import tensorforge.backend.instructions.compute.primitives.amd as amd

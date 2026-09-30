@@ -8,8 +8,12 @@ they would do beyond describing. If it does not always, the exceptions are
 the interesting part.
 """
 import importlib.util
+import sys
 from collections import Counter
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
+
 from tensorforge.common.context import Context
 from tensorforge.generators.generator import Generator
 from tensorforge.backend.pir import build as pirbuild

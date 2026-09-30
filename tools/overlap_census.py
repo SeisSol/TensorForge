@@ -42,6 +42,8 @@ import sys
 from collections import Counter
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
+
 from tensorforge.backend import pir
 from tensorforge.backend.pir.core import BufferType, Effect, MemSpace, Op
 from tensorforge.backend.pir.schedule import may_cross, touches

@@ -9,8 +9,11 @@ is not, and a prefix that still misbehaves is a minimal case.
 """
 import json
 import sys
+from pathlib import Path
 
 import numpy as np
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'src'))
 
 import lockstep as lanes
 from tensorforge.common.basic_types import Addressing, Datatype

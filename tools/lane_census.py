@@ -37,6 +37,8 @@ import importlib.util
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
+
 from tensorforge.common.basic_types import Datatype
 from tensorforge.common.context import Context
 

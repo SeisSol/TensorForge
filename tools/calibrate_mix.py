@@ -31,6 +31,8 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
+
 from calibrate_icache import INCLUDE, ROOT, generate  # noqa: E402
 
 #: SASS opcode (without modifiers) -> category.

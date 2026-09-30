@@ -16,8 +16,11 @@ A kernel that uses a construct `kernel_eval` does not model reports an ERROR:
 that is a gap in the interpreter, not a finding.
 """
 import sys
+from pathlib import Path
 
 import numpy as np
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'src'))
 
 import lockstep
 from tensorforge.reference import descriptors as reference

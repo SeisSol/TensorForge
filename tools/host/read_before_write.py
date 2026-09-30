@@ -9,7 +9,9 @@ and yateto's eqspp contract makes anything outside a window zero --- but every
 one is worth an explanation.
 """
 import sys, os, runpy
+from pathlib import Path
 sys.path.insert(0, os.getcwd())
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'src'))
 from tensorforge.backend.instructions.builders import multilinear_builder as MB
 from tensorforge.common.matrix.boundingbox import BoundingBox
 import itertools
