@@ -518,10 +518,10 @@ class AbstractInstruction(ABC):
       _record_pressure(self._context, body, simd,
                        getattr(self, '_num_threads', None))
     if self._context.get_user_options().ir_stats:
-      print(f'{type(self).__name__}: {sum(1 for _ in pir.walk(body))} Knoten, '
-            f'Registerdruck {pir.pressure(body)} Werte, '
+      print(f'{type(self).__name__}: {sum(1 for _ in pir.walk(body))} nodes, '
+            f'register pressure {pir.pressure(body)} values, '
             f'{pir.pressure(body, in_bytes=True, explicit_simd=simd)} B '
-            f'({"pro Work-Item" if simd else "pro Lane"})')
+            f'({"per work-item" if simd else "per lane"})')
     pir.emit(body, writer, self._context)
 
   def _check_register_budget(self, body, simd: bool) -> None:

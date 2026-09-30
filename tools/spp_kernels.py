@@ -170,8 +170,8 @@ def report(rows: Sequence[dict]) -> str:
             f'{r["lds"] / 1024:>8.1f}K {r["staged"]:>3}/{r["operands"]:<3} '
             f'{",".join(r["layouts"])}')
     keys = {(r['blocks'], r['staged'], tuple(r['layouts'])) for r in rows}
-    lines.append(f'\n{len(rows)} Kernel mit konstanten Operanden, '
-                 f'{len(keys)} verschiedene Entscheidungen')
+    lines.append(f'\n{len(rows)} kernels with constant operands, '
+                 f'{len(keys)} distinct decisions')
     return '\n'.join(lines)
 
 

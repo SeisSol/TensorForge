@@ -44,9 +44,6 @@ class Addressing(enum.Enum):
   PTR_BASED = 2
   SCALAR = 3
 
-  def __str__(self):
-    return self.addr2str(self)
-
   @classmethod
   def addr2ptr_type(cls, addr_type):
     map = {Addressing.NONE: '*',

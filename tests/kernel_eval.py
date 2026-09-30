@@ -793,10 +793,10 @@ def compare(a: str, b: str, tids=DEFAULT_TIDS, seeds=DEFAULT_SEEDS,
                 ma = evaluate(a, tid, seed, globals_only)
                 mb = evaluate(b, tid, seed, globals_only)
             except Abort as exc:
-                return None, f'nicht auswertbar: {exc}'
+                return None, f'not evaluable: {exc}'
             if ma != mb:
                 diff = [k for k in set(ma) | set(mb) if ma.get(k) != mb.get(k)]
                 k = sorted(diff)[0]
                 return False, (f'tid={tid} seed={seed}: {k} = {ma.get(k)!r} '
-                               f'vs {mb.get(k)!r} ({len(diff)} Unterschiede)')
-    return True, 'gleich'
+                               f'vs {mb.get(k)!r} ({len(diff)} slots differ)')
+    return True, 'equal'

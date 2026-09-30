@@ -481,9 +481,6 @@ class Tensor:
     def is_same(self, other):
         return self.is_similar(other) # and self.alias == other.alias and self.is_tmp == other.is_tmp
 
-    def __str__(self):
-        return self.name
-
     def gen_descr(self):
         # The suffix appears only where there is something to say.  This
         # string is read by the metainfo header and the reproduction tools,

@@ -91,7 +91,7 @@ class Residency:
     limit: str
 
     def __str__(self) -> str:
-        return f'{self.blocks} Blöcke, {self.waves} Wellen ({self.limit})'
+        return f'{self.blocks} blocks, {self.waves} waves ({self.limit})'
 
 
 def residency(machine: Machine, lds_per_block: int,

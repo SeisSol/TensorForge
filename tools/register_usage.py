@@ -431,41 +431,43 @@ def report(rows: List[Measurement], verbose: bool,
         agree += model_prefers.lanes == compiler_prefers.lanes
 
     decided = len(pairs) - ties
-    print(f'\n{len(pairs)} Fälle mit zwei vergleichbaren Konfigurationen, '
-          f'{ties} davon gleichteuer')
+    print(f'\n{len(pairs)} cases with two comparable configurations, '
+          f'{ties} of them tied')
     if decided:
-        print(f'Rangübereinstimmung Modell/Compiler: {agree}/{decided} '
+        print(f'rank agreement model/compiler: {agree}/{decided} '
               f'({100.0 * agree / decided:.0f}%)')
-        print('  Das ist die Zahl, an der hängt, ob eine Suche das Modell '
-              'benutzen kann.')
+        print('  This is the number that decides whether a search can use '
+              'the model.')
 
     flat = [r for r in rows if r.vgprs and r.model_bytes]
     if len(flat) >= 3:
         xs = [r.model_bytes for r in flat]
         ys = [(r.vgprs or 0) + (r.agprs or 0) for r in flat]
-        print(f'\nModellbytes gegen VGPR+AGPR über {len(flat)} Messungen:')
+        print(f'\nmodel bytes against VGPR+AGPR over {len(flat)} '
+              f'measurements:')
         if len(set(ys)) == 1:
             # Said rather than printed as `nan`: a correlation against a
             # constant is undefined, and the reason is worth naming -- either
             # every kernel really does use the same registers, or the numbers
             # are not coming from where they are supposed to.
-            print(f'  der Compiler meldet überall {ys[0]}; ohne Streuung gibt '
-                  f'es nichts zu korrelieren')
+            print(f'  the compiler reports {ys[0]} everywhere; without '
+                  f'spread there is nothing to correlate')
         else:
             print(f'  Pearson  r = {_pearson(xs, ys):+.3f}')
             print(f'  Spearman r = {_pearson(_ranks(xs), _ranks(ys)):+.3f}')
         ratio = [y / x for x, y in zip(xs, ys) if x]
         if ratio and len(set(ys)) > 1:
-            print(f'  VGPR je Modellbyte: Median {statistics.median(ratio):.4f}, '
-                  f'Spanne {min(ratio):.4f}..{max(ratio):.4f}')
-            print('  Eine enge Spanne ist, was ein Schwellwert bräuchte; '
-                  'eine weite sagt, dass nur der Rang trägt.')
+            print(f'  VGPRs per model byte: median '
+                  f'{statistics.median(ratio):.4f}, '
+                  f'range {min(ratio):.4f}..{max(ratio):.4f}')
+            print('  A narrow range is what a threshold would need; a wide '
+                  'one says only the rank carries.')
 
     spilled = [r for r in rows if r.spills]
     if spilled:
-        print(f'\n{len(spilled)} Konfigurationen mit Spills:')
+        print(f'\n{len(spilled)} configurations that spill:')
         for r in spilled[:10]:
-            print(f'  {r.case} @ {r.lanes} Lanes: {r.spills} '
+            print(f'  {r.case} @ {r.lanes} lanes: {r.spills} '
                   f'({r.scratch} B scratch)')
     return 0
 
@@ -534,8 +536,8 @@ def main() -> int:
     if not mods:
         print(f'no case matches {args.cases!r}', file=sys.stderr)
         return 2
-    print(f'{len(mods)} Fälle, backend={backend.name}, arch={args.arch}, '
-          f'{"nur Modell" if not compiler else compiler}')
+    print(f'{len(mods)} cases, backend={backend.name}, arch={args.arch}, '
+          f'{"model only" if not compiler else compiler}')
 
     rows: List[Measurement] = []
     # Generation mutates module-level hooks, so it runs serially; only the
@@ -564,7 +566,7 @@ def main() -> int:
 
     if args.json:
         args.json.write_text(json.dumps([asdict(r) for r in rows], indent=2))
-        print(f'geschrieben: {args.json}')
+        print(f'written: {args.json}')
     return report(rows, args.verbose, model_only=not compiler)
 
 

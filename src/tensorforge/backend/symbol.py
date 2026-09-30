@@ -32,8 +32,8 @@ class SymbolType(enum.Enum):
   Register = 4
   Scratch = 5
   Scalar = 6
-  Data = 7,
-  WarpwideSource = 8,
+  Data = 7
+  WarpwideSource = 8
   WarpwideAccumulator = 9
 
 def determine_dim_index(term, index, shape, permute):

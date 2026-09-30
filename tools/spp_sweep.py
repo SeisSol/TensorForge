@@ -187,8 +187,8 @@ def main(argv=None) -> int:
                  cache_hit=args.cache_hit)
     print(report(rows, only_flips=args.flips_only))
     distinct = len({r.key for r in rows})
-    print(f'\n{len(rows)} Zeilen, {sum(1 for r in rows if r.flip)} Wechsel, '
-          f'{distinct} verschiedene Entscheidungen')
+    print(f'\n{len(rows)} rows, {sum(1 for r in rows if r.flip)} flips, '
+          f'{distinct} distinct decisions')
     return 0
 
 

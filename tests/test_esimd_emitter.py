@@ -153,11 +153,6 @@ def test_a_subscript_becomes_a_pointer(emitter):
 # math: the ESIMD namespace, or nothing
 # --------------------------------------------------------------------------
 
-def _lexic():
-    from tensorforge.common.vm.lexic.sycl_lexic import SyclLexic
-    return SyclLexic('oneapi', 'intel', explicit_simd=True)
-
-
 @pytest.mark.parametrize('op,expected', [
     ('ABS', 'intel_esimd::abs(a)'),
     ('SQRT', 'intel_esimd::sqrt(a)'),
