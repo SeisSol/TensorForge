@@ -732,7 +732,7 @@ class Generator:
   def generate(self):
     self._autotune()
     if self._auto_merge():
-      # built merged, by the generator this one has taken over
+      # built, by the generator this one has taken over
       return None
     # After both, so that the rotation is asked of the list that is built.
     if (self._rotate is None
@@ -791,8 +791,9 @@ class Generator:
 
   def _auto_merge(self) -> bool:
     """Merge repeated runs where the kernel written out crowds the
-    instruction cache (`merge_variants='auto'`, the default).  True where the
-    merged kernel was built -- this generator then holds it.
+    instruction cache (`merge_variants='auto'`, the default).  True where
+    this generator was built here -- it then holds the merged kernel, or the
+    probe's written-out one.
 
     The size that matters is the one the emitter lays down (`code_units`),
     and that is known only once it has: so the list is built unmerged first,
@@ -802,6 +803,12 @@ class Generator:
     A run's share of the measured code is taken to be its share of the
     arithmetic -- a split of a measured size, not a model of one such as a
     line count fitted to one SeisSol corpus.
+
+    Where the written-out kernel fits, the probe is the build, and this
+    generator takes it over rather than building the same list again --
+    unless the build would differ from the probe: where it still has the
+    rotation query to ask, was told to emit loops, or was handed operand
+    tables (`register_param_table`), which name symbols of its own.
 
     Nothing to decide where nothing repeats, where the target states no
     instruction cache, or where the probe does not build.  And nothing merged
@@ -836,7 +843,12 @@ class Generator:
     budget = opts.merge_icache_fraction * capacity
     whole = list_cost(list(self._given)).flops
     if size is None or size <= budget or not whole:
-      return False
+      if (self._rotate is not None or opts.enable_wrap_loads
+              or self._emit_loops != probe._emit_loops or self._param_tables):
+        return False
+      self._adopt(probe)
+      self._announce()
+      return True
 
     def share(descrs):
       return size * list_cost(list(descrs)).flops / whole

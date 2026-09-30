@@ -962,6 +962,36 @@ def test_auto_merges_nothing_where_the_cache_is_unknown():
                                     merge_icache_fraction=1e-6))
 
 
+def test_a_kernel_that_fits_is_built_once(monkeypatch):
+    """The probe that finds the written-out kernel fits has built it.
+
+    Taken over, the list is built once instead of twice -- and what is taken
+    over is what building it again gives, which a generator that still has
+    the rotation question to ask does."""
+    from tensorforge.common.context import Context
+    from tensorforge.generators.generator import Generator
+
+    builds = []
+    real = Generator._generate_bound
+
+    def counting(self):
+        builds.append(self)
+        return real(self)
+
+    monkeypatch.setattr(Generator, '_generate_bound', counting)
+    taken = _with_option(_flux())
+    assert not _merged(taken)
+    assert len(builds) == 1
+
+    builds.clear()
+    again = Generator(_flux(), Context(arch='sm_86', backend='cuda',
+                                       fp_type=DTYPE))
+    again._rotate = set()          # a question left: the probe is not taken
+    again.generate()
+    assert len(builds) == 2
+    assert again.get_kernel() == taken.get_kernel()
+
+
 def test_a_sibling_builds_what_its_generator_would():
     """The probes and the merged build are siblings (`Generator._sibling`),
     and what was settled after construction goes with them: a pinned name,
