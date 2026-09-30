@@ -135,12 +135,45 @@ def test_a_transfer_opens_no_scope_unless_its_buffer_rotates():
     source either way; not opening them keeps them out of the IR at build
     time, where the passes that matter run.
     """
-    import inspect
+    import contextlib
 
     from tensorforge.backend.instructions import memory
 
-    src = inspect.getsource(memory.MemoryInstruction.gen_ir)
-    assert 'rotates' in src, (
-        'the scope is opened unconditionally again; it is a wall for every '
-        'transfer, not only the rotating ones')
-    assert src.count('sink.Scope()') == 1
+    class Sink:
+        def __init__(self):
+            self.scopes = 0
+
+        def Comment(self, text):
+            pass
+
+        @contextlib.contextmanager
+        def Scope(self):
+            self.scopes += 1
+            yield
+
+    class Transfer(memory.MemoryInstruction):
+        def __init__(self, rotating):
+            self._declare = False
+            self._rotating = rotating
+
+        def rotates(self):
+            return self._rotating
+
+        def gen_write_base(self, sink):
+            pass
+
+        def gen_code_inner(self, sink):
+            pass
+
+        def __str__(self):
+            return 'transfer'
+
+    def scopes(rotating):
+        sink = Sink()
+        Transfer(rotating).gen_ir(sink)
+        return sink.scopes
+
+    assert scopes(rotating=False) == 0, (
+        'a transfer opened a scope for a buffer that does not rotate; it is a '
+        'wall for every transfer, not only the rotating ones')
+    assert scopes(rotating=True) == 1

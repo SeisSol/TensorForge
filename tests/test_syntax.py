@@ -33,7 +33,7 @@ from pathlib import Path
 
 import pytest
 
-from harness import syntax
+from harness import UNSUPPORTED, syntax
 
 pytestmark = pytest.mark.skipif(
     syntax.compiler() is None,
@@ -314,7 +314,7 @@ def test_generated_kernel_survives_the_device_front_end(dev_case, backend):
         gen = Generator(dev_case.descr_list(), ctx,
                         attrs=getattr(dev_case, "ATTRS", None))
         gen.generate()
-    except Exception as exc:                      # noqa: BLE001
+    except UNSUPPORTED as exc:
         pytest.skip(f"{dev_case.NAME} does not generate on {backend}: "
                     f"{type(exc).__name__}")
 

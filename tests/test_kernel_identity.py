@@ -24,6 +24,7 @@ import collections
 
 import pytest
 
+from harness import UNSUPPORTED
 from tensorforge.common.basic_types import Addressing, Datatype
 from tensorforge.common.context import Context
 from tensorforge.common.matrix.boundingbox import BoundingBox
@@ -94,7 +95,7 @@ def _generated_or_skip(case, backend: str = BACKEND, arch: str = ARCH):
     """
     try:
         return _generate(case, backend, arch)
-    except Exception as exc:                       # noqa: BLE001
+    except UNSUPPORTED as exc:
         pytest.skip(f"{case.NAME} [{backend}] does not generate: "
                     f"{type(exc).__name__}")
 

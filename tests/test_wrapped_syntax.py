@@ -30,7 +30,7 @@ from pathlib import Path
 
 import pytest
 
-from harness import syntax
+from harness import UNSUPPORTED, syntax
 from tensorforge.common.context import Context, Options
 from tensorforge.generators.generator import Generator
 
@@ -111,7 +111,7 @@ def test_wrapped_kernel_is_well_formed(name, backend, arch):
 
     try:
         kernel = _generate(mod, backend, arch, wrap=True)
-    except Exception as exc:
+    except UNSUPPORTED as exc:
         # Only a skip if it fails *both* ways.  A case that generates without
         # the pass and not with it is a regression the pass caused, and
         # skipping on any exception is how this test would hide exactly what
@@ -120,7 +120,7 @@ def test_wrapped_kernel_is_well_formed(name, backend, arch):
         # in.
         try:
             _generate(mod, backend, arch, wrap=False)
-        except Exception:
+        except UNSUPPORTED:
             pytest.skip(f"does not generate either way: {type(exc).__name__}")
         raise AssertionError(
             f"{name} [{backend}] generates with the wrap pass off and not on: "

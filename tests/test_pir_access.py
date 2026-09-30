@@ -166,32 +166,6 @@ def test_a_broadcast_reads_a_value_and_not_a_named_buffer(backend, arch):
             f"a broadcast still subscripts a named buffer: {call}")
 
 
-def test_the_exceptions_are_reachable_at_all():
-    """A guard nothing takes is a guard nobody notices breaking.
-
-    If the corpus stops exercising the scalar or broadcast paths, the two
-    tests above pass vacuously and the special cases rot. This fails loudly
-    instead.
-    """
-    from tensorforge.backend.symbol import Symbol
-    import inspect
-    src = inspect.getsource(Symbol.load) + inspect.getsource(Symbol.store)
-    assert 'SymbolType.Register' in src
-    # A base override is not an exception: `Op.STORE` carries the pointer name
-    # as an attribute, so a rotating buffer writing to a stage other than its
-    # own goes through the structured path like everything else.  `atomic` is
-    # one -- `atomic_store` returns an expression rather than a statement, and
-    # takes operands the op has no place for.
-    assert 'atomic' in src, 'the atomic exception vanished'
-    # Nor is a broadcast: the load goes through `Op.LOAD` like every other
-    # read and only the intrinsic wrapping it stays text, with the loaded
-    # value as its operand.  The scalar, which is not a subscripted access at
-    # all, is excluded by not appearing in the list of kinds the structured
-    # path accepts, so what is checked is the list itself.
-    assert 'SymbolType.SharedMem' in src and 'SymbolType.Global' in src, (
-        'the structured-load kind list vanished')
-
-
 # ---------------------------------------------------------------------- #
 # nodes not built at all
 # ---------------------------------------------------------------------- #

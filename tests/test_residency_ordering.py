@@ -35,12 +35,12 @@ from pathlib import Path
 
 import pytest
 
+from harness import UNSUPPORTED
 from tensorforge.backend.instructions.compute.elementwise import (
     ElementwiseInstruction)
 from tensorforge.backend.instructions.memory.store import StoreRegToShr
 from tensorforge.backend.instructions.sync_block import SyncThreads
 from tensorforge.common.context import Context, Options
-from tensorforge.common.exceptions import GenerationError
 from tensorforge.generators.generator import Generator
 
 CASES = Path(__file__).parent / "cases"
@@ -213,7 +213,7 @@ def test_a_sections_residency_empties_at_the_section_boundary(case_stem, backend
     """
     try:
         gen, descrs = _generate(case_stem, backend, arch)
-    except (GenerationError, NotImplementedError) as exc:
+    except UNSUPPORTED as exc:
         # Two separate gaps on the Intel targets, neither about ordering: a
         # group barrier under a simd-uniform trip count is refused, and
         # `SyclLexic.sync_grid` is an unimplemented stub.  Either way there is
@@ -329,9 +329,7 @@ def test_a_contraction_reads_a_produced_temporary_out_of_registers(
     """
     try:
         gen, _ = _generate(case_stem, backend, arch)
-    except GenerationError as exc:
-        pytest.skip(f"{case_stem} does not generate on {backend}: {exc}")
-    except Exception as exc:            # ESIMD has no reduction lowering yet
+    except UNSUPPORTED as exc:
         pytest.skip(f"{case_stem} does not generate on {backend}: {exc}")
 
     stream = _flatten(gen._sections[0].stream)

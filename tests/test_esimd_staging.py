@@ -30,6 +30,7 @@ from pathlib import Path
 
 import pytest
 
+from harness import UNSUPPORTED
 from tensorforge.common.basic_types import Datatype
 from tensorforge.common.context import Context, Options
 from tensorforge.common.vm.vm import vm_factory
@@ -57,8 +58,8 @@ def _generate(name, backend='esimd', **options):
 
 #: Every case in the corpus, by name, paired with both answers to the option
 #: this file is about.  Cases the ESIMD lowering cannot take at all are
-#: skipped where they raise -- they fail for reasons of their own and are not
-#: this file's subject.
+#: skipped where they are refused (`harness.UNSUPPORTED`) -- they fail for
+#: reasons of their own and are not this file's subject.
 ALL_CASES = sorted({p.stem for p in CASES.rglob('*.py')
                     if '__pycache__' not in str(p)})
 
@@ -82,7 +83,7 @@ def test_no_work_group_coordinate_is_used_as_a_lane(name, preload):
     """
     try:
         src = _generate(name, preload_globals=preload).get_kernel()
-    except Exception as exc:  # noqa: BLE001 -- see the docstring above
+    except UNSUPPORTED as exc:  # see the comment on ALL_CASES
         pytest.skip(f'{name} does not lower to ESIMD: {type(exc).__name__}')
     assert 'get_local_id(0)' not in src
 

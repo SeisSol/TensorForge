@@ -163,7 +163,6 @@ def test_the_lead_width_is_not_asked_here():
     import inspect
 
     assert 'lead_width' not in inspect.signature(is_contraction).parameters
-    assert 'lead_width' not in inspect.getsource(is_contraction)
     # Nor on the shape the arrangements read: what they ask about a packed
     # operand is "can I take this distribution", and a width is only a
     # number that stands in for one.

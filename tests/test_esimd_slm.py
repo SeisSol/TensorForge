@@ -31,6 +31,7 @@ from pathlib import Path
 
 import pytest
 
+from harness import UNSUPPORTED
 from tensorforge.common.basic_types import Datatype
 from tensorforge.common.context import Context, Options
 from tensorforge.common.vm.vm import vm_factory
@@ -120,7 +121,7 @@ POINTERISH = (
 def test_no_slm_offset_is_used_as_a_pointer(name, preload):
     try:
         src = _kernel(name, preload_globals=preload)
-    except Exception as exc:  # noqa: BLE001 -- cases that do not lower at all
+    except UNSUPPORTED as exc:  # cases that do not lower at all
         pytest.skip(f'{name} does not lower to ESIMD: {type(exc).__name__}')
     names = set(DECL.findall(src))
     for line in src.splitlines():
@@ -169,7 +170,7 @@ def test_a_subscripted_slm_access_is_only_ever_a_whole_statement(name):
     """
     try:
         src = _kernel(name)
-    except Exception as exc:  # noqa: BLE001
+    except UNSUPPORTED as exc:
         pytest.skip(f'{name} does not lower to ESIMD: {type(exc).__name__}')
     names = set(DECL.findall(src))
     for line in src.splitlines():

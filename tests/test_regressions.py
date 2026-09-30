@@ -20,6 +20,7 @@ from pathlib import Path
 
 import pytest
 
+from harness import UNSUPPORTED
 from tensorforge.backend.instructions.memory.load import GlbToRegLoader
 from tensorforge.common.basic_types import Datatype
 from tensorforge.common.context import Context
@@ -403,8 +404,7 @@ def test_case_names_a_single_output(path):
     try:
         gen = Generator(mod.descr_list(), ctx)
         gen.generate()
-    except Exception:
-        # cases pinned as XFAIL do not build a descriptor list at all
+    except UNSUPPORTED:
         pytest.skip("case does not generate on this target")
     sinks = [o.alias or o.kernel_name
              for o in driver_emit.collect_operands(gen) if o.is_sink]

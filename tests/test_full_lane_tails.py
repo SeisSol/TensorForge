@@ -21,6 +21,7 @@ import re
 import warnings
 from pathlib import Path
 
+from harness import UNSUPPORTED
 from tensorforge.common.basic_types import Addressing, Datatype
 from tensorforge.common.context import Context, Options
 from tensorforge.common.matrix.boundingbox import BoundingBox
@@ -121,7 +122,7 @@ def test_an_accumulation_into_a_slice_of_an_image_keeps_the_tail_narrow():
     is not the image's, so a full-lane tail would overwrite `t[40:64]`."""
     try:
         off = _kernel(_slice_accumulation(), full_lane_tails=False)
-    except Exception as exc:  # pragma: no cover - shape not lowerable
+    except UNSUPPORTED as exc:  # pragma: no cover - shape not lowerable
         import pytest
         pytest.skip(f'the slice accumulation does not lower: {exc}')
     on = _kernel(_slice_accumulation(), full_lane_tails=True)
