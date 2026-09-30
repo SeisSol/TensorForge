@@ -330,7 +330,8 @@ def measure_ceiling(device: bench_run.Device, datatype: Datatype,
         return None, f'no compiler recipe for {backend!r}'
     cc = bench_build.compiler_binary(compiler)
     if cc is None:
-        return None, f'{compiler.default} not found; set ${compiler.env}'
+        return None, (f'{compiler.entry.binary} not found; set '
+                      f'${compiler.entry.env[0]}')
 
     try:
         source = emit_ceiling(backend, datatype)

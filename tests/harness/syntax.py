@@ -20,6 +20,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional
 
+from tensorforge import toolchain
+
 HERE = Path(__file__).resolve().parent
 TESTS = HERE.parent
 SHIM = TESTS / "shim" / "tensorforge_host.h"
@@ -170,9 +172,9 @@ def snapshots(pattern: str = "*.cpp") -> List[Path]:
 
 @dataclass(frozen=True)
 class _DeviceFrontEnd:
-    #: Overriding variable, the same names `toolchain.py` honors.
-    env: str
-    default: str
+    #: The entry of `tensorforge.toolchain.COMPILERS`: where the binary is,
+    #: and how an architecture is named to it.
+    backend: str
     #: The architecture to compile *for*.  A front end targets any
     #: architecture it knows without the hardware present, so this is a
     #: property of the check and not of the machine running it -- the same
@@ -181,13 +183,24 @@ class _DeviceFrontEnd:
     arch: str
     flags: tuple
 
+    @property
+    def compiler(self) -> toolchain.Compiler:
+        return toolchain.COMPILERS[self.backend]
+
+    @property
+    def default(self) -> str:
+        return self.compiler.binary
+
+    @property
+    def env(self) -> str:
+        return self.compiler.env[0]
+
 
 _DEVICE_FRONT_ENDS = {
     "cuda": _DeviceFrontEnd(
-        env="NVCC", default="nvcc", arch="sm_86",
-        flags=("-x", "cu", "--expt-relaxed-constexpr", "-ptx")),
+        backend="cuda", arch="sm_86", flags=("-x", "cu", "-ptx")),
     "hip": _DeviceFrontEnd(
-        env="HIPCC", default="hipcc", arch="gfx90a",
+        backend="hip", arch="gfx90a",
         flags=("-x", "hip", "--cuda-device-only", "-fsyntax-only")),
 }
 
@@ -276,7 +289,7 @@ def device_compiler(backend: str) -> Optional[str]:
     fe = device_front_end(backend)
     if fe is None:
         return None
-    return os.environ.get(fe.env) or shutil.which(fe.default)
+    return fe.compiler.find()
 
 
 def check_device_source(kernel: str, headers, backend: str,
@@ -304,11 +317,10 @@ def check_device_source(kernel: str, headers, backend: str,
     with tempfile.NamedTemporaryFile("w", suffix=suffix, delete=False) as f:
         f.write(preamble + "\n" + kernel)
         tmp = f.name
-    arch_flag = (f"-arch={arch or fe.arch}" if backend == "cuda"
-                 else f"--offload-arch={arch or fe.arch}")
     try:
         r = subprocess.run(
-            [cc, "-std=c++17", "-w", arch_flag, *fe.flags,
+            [cc, *fe.compiler.language_flags(), "-w",
+             *fe.compiler.target_flags(arch or fe.arch), *fe.flags,
              "-I", str(INCLUDE), tmp, "-o", os.devnull],
             capture_output=True, text=True)
     finally:

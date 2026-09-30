@@ -276,53 +276,6 @@ def test_amd_is_guarded_by_what_hipcc_allocates_and_nvidia_by_bytes():
     assert tuning._over_budget(_fake('sm_100', 'cuda', 8, 16, 1112))
 
 
-def test_intel_states_its_spilling_in_the_binary_and_not_on_the_console(tmp_path):
-    """IGC prints nothing about a SPMD kernel that spills.
-
-    `elastic-o6s:neighboringFlux` at sixteen lanes carries 13888 bytes of
-    spilling -- 55 spill and 72 fill messages in its ISA -- and its build
-    prints not one word; at 32 lanes the same kernel has none and is 1.5x
-    faster.  So the figure that decides between them is in the object's
-    `.ze_info` note, which is where this looks.
-    """
-    obj = tmp_path / 'k.so'
-    obj.write_bytes(b'\x7fELF' + b'...' + b'  spill_size:      13888\n' + b'...')
-    assert tuning._zeinfo_spill(str(obj)) == 13888
-    quiet = tmp_path / 'q.so'
-    quiet.write_bytes(b'\x7fELF ze_info: kernels: nothing to say')
-    assert tuning._zeinfo_spill(str(quiet)) == 0, (
-        'a note that does not mention spilling is a note saying there is none')
-    bare = tmp_path / 'b.so'
-    bare.write_bytes(b'\x7fELF nothing to say')
-    assert tuning._zeinfo_spill(str(bare)) is None, (
-        'no note is not the same answer as a note saying nothing')
-    # The vector backend writes no `spill_size:` line, ever.  What it spills
-    # is the scratch buffer it asks the runtime for, and the 32-lane
-    # explicit-SIMD `elastic-o6d:localFluxAll` -- 1376 spill messages in its
-    # ISA -- states it only this way.
-    vc = tmp_path / 'vc.so'
-    vc.write_bytes(b'\x7fELF' + b'''
-  execution_env:
-    grf_count:       256
-  per_thread_memory_buffers:
-    - type:            scratch
-      usage:           single_space
-      size:            10688
-''')
-    assert tuning._zeinfo_spill(str(vc)) == 10688, (
-        'reading only the first spelling made every explicit-SIMD candidate '
-        'come back spill-free, and the two lane counts indistinguishable to '
-        'the one scorer able to tell them apart')
-    clean_vc = tmp_path / 'cvc.so'
-    clean_vc.write_bytes(b'\x7fELF  execution_env:\n    grf_count:       256\n')
-    assert tuning._zeinfo_spill(str(clean_vc)) == 0, (
-        'and a vector build that spills nothing asks for no such buffer')
-    assert tuning._zeinfo_spill(str(tmp_path / 'missing.so')) is None, (
-        'no object is not the same answer as no spilling')
-    # and the console parser still answers for what it can see
-    assert tuning.parse_igc('spill memory used = 96 bytes').spill_bytes == 96
-
-
 def test_intel_spmd_shares_one_register_file_over_the_sub_group():
     """The file is a thread's, and under SPMD a thread holds the sub-group.
 

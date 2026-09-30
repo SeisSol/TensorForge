@@ -350,8 +350,11 @@ The harness supports four backends:
 | `oneapi` | `icpx`    | Intel           | uses `-fsycl` (JIT)            |
 | `acpp`   | `acpp`    | any             | AdaptiveCpp (any vendor)       |
 
-Override the compiler binary via `$NVCC`, `$HIPCC`, `$ICPX`, or
-`$ACPP`.
+Override the compiler binary via `$TF_NVCC`, `$TF_HIPCC`, `$TF_ICPX` or
+`$TF_ACPP`; the plain `$NVCC`, `$HIPCC`, `$ICPX` and `$ACPP` are honored
+where the `TF_` one is not set (`tensorforge.toolchain`).  `TF_SYCL_AOT=1`
+builds the SYCL binaries ahead of time for the detected device, and
+`$TF_ICPX_DEVICE_OPTIONS` reaches its device compiler.
 
 ## CI use
 

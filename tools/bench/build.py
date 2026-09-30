@@ -25,10 +25,10 @@ arrangement `lanes.search` uses for a candidate that does not build.
 ## What the compiler is asked on the way past
 
 The resource remarks cost nothing extra: `-Xptxas=-v`, ROCm's
-`-Rpass-analysis=kernel-resource-usage`, IGC's spill warnings. The parsers for
-all three already exist in `tools/register_usage.py` and are imported rather
-than written again, so registers, spills and occupancy land in the manifest
-beside the timings without a second compilation.
+`-Rpass-analysis=kernel-resource-usage`, IGC's spill warnings. They are read
+by `tensorforge.toolchain`, the parsers every caller of a compiler shares, so
+registers, spills and occupancy land in the manifest beside the timings
+without a second compilation.
 """
 
 from __future__ import annotations
@@ -37,7 +37,6 @@ import contextlib
 import hashlib
 import io
 import os
-import shutil
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
@@ -51,7 +50,7 @@ for extra in (ROOT / 'src', ROOT / 'tests', ROOT / 'tools'):
         sys.path.insert(0, str(extra))
 
 from harness import driver_bench                                # noqa: E402
-from register_usage import parse_igc, parse_ptxas, parse_remarks  # noqa: E402
+from tensorforge import toolchain                               # noqa: E402
 from tensorforge.analysis.cost import list_cost                 # noqa: E402
 from tensorforge.common.context import Context, Options         # noqa: E402
 from tensorforge.generators import lanes                        # noqa: E402
@@ -71,90 +70,57 @@ CACHE = Path(os.environ.get(
 
 @dataclass(frozen=True)
 class Compiler:
-    """One toolchain: how to compile an object, how to link, how to read it.
+    """How the benchmark builds with one compiler of `toolchain.COMPILERS`.
 
-    `aux` is the runtime translation unit `tensorforge_aux` lives in, which is
-    per-language and has to be linked in even though nothing here calls it
-    directly: the generated launcher does, through `CHECK_ERR`.
+    What the entry says -- the binary, the target, the report flags, the
+    runtime translation unit -- plus what a measurement needs on top: `-O3`
+    and `-DNDEBUG`, and the line information a profiler maps back to source.
     """
-    name: str
-    env: str
-    default: str
-    aux: str
-    parse: object
+    entry: toolchain.Compiler
+    extra: Tuple[str, ...] = ()
+
+    @property
+    def name(self) -> str:
+        return self.entry.backend
+
+    @property
+    def aux(self) -> str:
+        return self.entry.aux
+
+    def parse(self, log: str) -> Dict[str, int]:
+        return toolchain.report_fields(self.entry.backend, log)
 
     def compile_flags(self, arch: str) -> List[str]:
-        raise NotImplementedError
+        return [*self.entry.language_flags(), '-O3', '-DNDEBUG',
+                *self.entry.target_flags(arch), *self.entry.report_flags(),
+                *self.extra]
 
     def link_flags(self, arch: str) -> List[str]:
         return self.compile_flags(arch)
 
     def source_suffix(self) -> str:
-        return '.cpp'
-
-
-@dataclass(frozen=True)
-class Nvcc(Compiler):
-    def compile_flags(self, arch):
-        return ['-std=c++17', '-O3', '-DNDEBUG', f'-arch={arch}',
-                '--expt-relaxed-constexpr', '-Xptxas=-v', '-lineinfo']
-
-    def source_suffix(self):
-        return '.cu'
-
-
-@dataclass(frozen=True)
-class Hipcc(Compiler):
-    def compile_flags(self, arch):
-        return ['-std=c++17', '-O3', '-DNDEBUG', f'--offload-arch={arch}',
-                '-Rpass-analysis=kernel-resource-usage', '-g1']
-
-
-@dataclass(frozen=True)
-class Icpx(Compiler):
-    def compile_flags(self, arch):
-        # Ahead of time.  A JIT build never reaches IGC, so it reports nothing
-        # about registers or spills -- and it also moves the first kernel
-        # launch's cost into the measurement, where a warm-up cannot reach it
-        # because the compilation happens once per process and not once per
-        # launcher.
-        # `TF_ICPX_DEVICE_OPTIONS` reaches the device compiler, e.g.
-        # `-internal_options -ze-opt-disable-sendwarwa`: a question about the
-        # code IGC makes rather than the code TensorForge makes, and part of
-        # the cache key through `_digest`.
-        extra = os.environ.get('TF_ICPX_DEVICE_OPTIONS', '').strip()
-        return ['-fsycl', '-std=c++17', '-O3', '-DNDEBUG',
-                '-fsycl-targets=spir64_gen',
-                '-Xsycl-target-backend',
-                f'-device {arch}' + (f' {extra}' if extra else '')]
-
-
-@dataclass(frozen=True)
-class Acpp(Compiler):
-    def compile_flags(self, arch):
-        return ['-std=c++17', '-O3', '-DNDEBUG', f'--acpp-targets={arch}']
+        return self.entry.suffix
 
 
 #: Keyed by the *generator* backend, since that is what a `TargetSpec` carries.
 #: `esimd` and `oneapi` are one toolchain and two code generators, which is
 #: exactly why they are separate build units: the binaries differ, the compiler
-#: does not.
+#: does not.  Ahead of time for `icpx` (`toolchain.Icpx`): a JIT build never
+#: reaches IGC, so it reports nothing about registers or spills, and it moves
+#: the first launch's compilation into the measurement, where a warm-up cannot
+#: reach it because the compilation happens once per process and not once per
+#: launcher.
 COMPILERS: Dict[str, Compiler] = {
-    'cuda': Nvcc('cuda', 'TF_NVCC', 'nvcc', 'tensorforge_aux.cu', parse_ptxas),
-    'hip': Hipcc('hip', 'TF_HIPCC', 'hipcc', 'tensorforge_aux.cpp',
-                 parse_remarks),
-    'oneapi': Icpx('oneapi', 'TF_ICPX', 'icpx', 'tensorforge_aux_sycl.cpp',
-                   parse_igc),
-    'esimd': Icpx('esimd', 'TF_ICPX', 'icpx', 'tensorforge_aux_sycl.cpp',
-                  parse_igc),
-    'acpp': Acpp('acpp', 'TF_ACPP', 'acpp', 'tensorforge_aux_sycl.cpp',
-                 lambda err: {}),
+    'cuda': Compiler(toolchain.COMPILERS['cuda'], ('-lineinfo',)),
+    'hip': Compiler(toolchain.COMPILERS['hip'], ('-g1',)),
+    'oneapi': Compiler(toolchain.COMPILERS['oneapi']),
+    'esimd': Compiler(toolchain.COMPILERS['esimd']),
+    'acpp': Compiler(toolchain.COMPILERS['acpp']),
 }
 
 
 def compiler_binary(compiler: Compiler) -> Optional[str]:
-    return (os.environ.get(compiler.env)
-            or shutil.which(compiler.default))
+    return compiler.entry.find()
 
 
 @dataclass
@@ -319,7 +285,8 @@ def build(unit: BuildUnit, cache: Path = CACHE,
     cc = compiler_binary(compiler)
     if cc is None:
         return UnitBuild(unit, None, records,
-                         f'{compiler.default} not found; set ${compiler.env}')
+                         f'{compiler.entry.binary} not found; set '
+                         f'${compiler.entry.env[0]}')
 
     if not sources:
         return UnitBuild(unit, None, records, 'nothing generated')

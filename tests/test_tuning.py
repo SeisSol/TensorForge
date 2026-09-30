@@ -13,7 +13,6 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 
-import pytest
 
 from tensorforge.common.basic_types import Datatype
 from tensorforge.common.context import Context, Options
@@ -157,34 +156,6 @@ def test_exhaustive_agrees_with_coordinate_on_a_separable_score(monkeypatch):
 # ---------------------------------------------------------------------- #
 # compilers
 # ---------------------------------------------------------------------- #
-
-def test_ptxas_output_is_read():
-    log = ("ptxas info    : Used 168 registers, used 1 barriers, 384 bytes cmem[0]\n"
-           "    328 bytes stack frame, 328 bytes spill stores, 196 bytes spill loads\n")
-    r = tuning.parse_ptxas(log)
-    assert (r.registers, r.spill_bytes) == (168, 524)
-
-
-def test_amdgpu_resource_remarks_are_read():
-    log = ("remark:     VGPRs: 110 [-Rpass-analysis=kernel-resource-usage]\n"
-           "remark:     AGPRs: 16 [-Rpass-analysis=kernel-resource-usage]\n"
-           "remark:     ScratchSize [bytes/lane]: 124 [-Rpass-analysis=kernel-resource-usage]\n"
-           "remark:     Occupancy [waves/SIMD]: 4 [-Rpass-analysis=kernel-resource-usage]\n")
-    r = tuning.parse_amdgpu(log)
-    assert (r.registers, r.spill_bytes, r.register_blocks) == (126, 124, 4)
-
-
-def test_the_compiler_is_the_callers_then_the_environments_then_the_paths(monkeypatch):
-    monkeypatch.setenv('TF_NVCC', '/from/env/nvcc')
-    monkeypatch.setattr(tuning.shutil, 'which', lambda name: '/on/path/' + name)
-    assert tuning.Toolchain(nvcc='/given/nvcc').compiler('nvidia') == '/given/nvcc'
-    assert tuning.Toolchain().compiler('nvidia') == '/from/env/nvcc'
-    monkeypatch.delenv('TF_NVCC')
-    assert tuning.Toolchain().compiler('nvidia') == '/on/path/nvcc'
-    assert tuning.Toolchain().compiler('intel') == '/on/path/icpx'
-    assert tuning.Toolchain(icpx='/given/icpx').compiler('intel') == '/given/icpx'
-    assert tuning.Toolchain().compiler('other') is None
-
 
 # ---------------------------------------------------------------------- #
 # the work count a ranking reads

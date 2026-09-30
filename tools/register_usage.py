@@ -46,7 +46,6 @@ import io
 import json
 import os
 import re
-import shutil
 import statistics
 import subprocess
 import sys
@@ -60,104 +59,10 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / 'src'))
 
 import tensorforge.backend.pir as pir  # noqa: E402
+from tensorforge import toolchain  # noqa: E402
 from tensorforge.common.context import Context  # noqa: E402
 from tensorforge.generators import lanes  # noqa: E402
 from tensorforge.generators.generator import Generator  # noqa: E402
-
-#: What `-Rpass-analysis=kernel-resource-usage` prints, one remark per field.
-#: Parsed rather than read off an object file because it needs no extra tool
-#: and survives the object being discarded.
-#:
-#: Deliberately not a list of the field names.  Half of them carry their unit
-#: in brackets before the colon -- `ScratchSize [bytes/lane]`, `Occupancy
-#: [waves/SIMD]`, `LDS Size [bytes/block]` -- and the spill fields are `SGPRs
-#: Spill` and `VGPRs Spill`, not one count.  Matching a name list against that
-#: silently returns nothing for the fields that matter most, on a tool whose
-#: whole job is to report numbers, so this takes whatever `name: integer` the
-#: remarks contain and normalizes the name afterwards.  Non-numeric remarks
-#: (`Function Name`, `Dynamic Stack: False`) simply do not match.
-_REMARK = re.compile(
-    r'remark:\s*(?P<field>[A-Za-z][A-Za-z ]*?)\s*'
-    r'(?:\[[^\]]*\])?\s*:\s*(?P<value>-?[0-9]+)\b')
-
-
-#: `nvcc -Xptxas=-v` -- a different shape entirely, and a stable one::
-#:
-#:     ptxas info    : Used 93 registers, 7136 bytes smem, 432 bytes cmem[0]
-#:     ptxas info    : 0 bytes stack frame, 12 bytes spill stores, ...
-#:
-#: A comma-separated list of `<number> <unit> <what>` with the register count
-#: written the other way round, so it takes two patterns rather than one.
-_PTXAS_REGS = re.compile(r'Used\s+(?P<value>\d+)\s+registers')
-_PTXAS_FIELD = re.compile(
-    r'(?P<value>\d+)\s+bytes\s+(?P<field>smem|spill stores|spill loads|'
-    r'stack frame|lmem)')
-
-#: What `icpx` says about an Intel AOT build.  There is no per-kernel resource
-#: remark to parse: IGC reports the register count only into a shader dump
-#: (`IGC_ShaderDumpEnable=1`, then the `.asm` files under `/tmp/IntelIGC`),
-#: which is a directory to scrape rather than a stream to read, and its format
-#: moves with the driver.  What it does say on the command line is when a
-#: kernel spills, and that is the signal that decides whether a configuration
-#: blew the register file.
-_IGC_SPILL = re.compile(
-    r"(?:kernel|Kernel)\s+.*?\bspill(?:s|ed)?\b.*?(?P<value>\d+)\s*bytes"
-    r"|spill(?:ed)?\s+(?P<value2>\d+)\s*bytes", re.I)
-
-
-def parse_ptxas(stderr: str) -> Dict[str, int]:
-    """`nvcc -Xptxas=-v` output, in the same keys the AMD path produces.
-
-    Registers land under `vgprs` deliberately.  NVIDIA has one register file
-    where CDNA has two, so the comparison the report makes -- `vgprs + agprs`
-    -- reads correctly with `agprs` absent, and the caller needs no per-vendor
-    case for the one thing it does with the numbers.
-    """
-    fields: Dict[str, int] = {}
-    for m in _PTXAS_REGS.finditer(stderr):
-        fields['vgprs'] = max(fields.get('vgprs', 0), int(m.group('value')))
-    spill = 0
-    for m in _PTXAS_FIELD.finditer(stderr):
-        key = m.group('field').replace(' ', '')
-        value = int(m.group('value'))
-        if key in ('spillstores', 'spillloads'):
-            spill = max(spill, value)
-        elif key == 'stackframe':
-            fields['scratch'] = max(fields.get('scratch', 0), value)
-        elif key == 'smem':
-            fields['ldssize'] = max(fields.get('ldssize', 0), value)
-    if spill:
-        fields['vgprsspill'] = spill
-    return fields
-
-
-def parse_igc(stderr: str) -> Dict[str, int]:
-    """What an Intel AOT build reports, which is spills and nothing else.
-
-    Returned with no register count at all rather than with a zero: the two
-    have to stay distinguishable, since a caller comparing configurations on a
-    missing number would rank them as equal instead of declining to rank them.
-    """
-    fields: Dict[str, int] = {}
-    for m in _IGC_SPILL.finditer(stderr):
-        value = int(m.group('value') or m.group('value2'))
-        fields['vgprsspill'] = max(fields.get('vgprsspill', 0), value)
-    return fields
-
-
-def parse_remarks(stderr: str) -> Dict[str, int]:
-    """Every `name: integer` remark, keyed by a squashed lower-case name.
-
-    The maximum per field, because a translation unit may hold more than one
-    kernel and the budget is per kernel: the largest is the only reading that
-    cannot understate.
-    """
-    fields: Dict[str, int] = {}
-    for m in _REMARK.finditer(stderr):
-        key = m.group('field').strip().lower().replace(' ', '')
-        fields[key] = max(fields.get(key, 0), int(m.group('value')))
-    return fields
-
 
 @dataclass
 class Measurement:
@@ -263,21 +168,28 @@ def generate(mod, arch: str, ceiling: Optional[int],
 
 @dataclass(frozen=True)
 class Backend:
-    """One toolchain: how to build for it and how to read what it says.
+    """One toolchain: how to build an object for it, under which headers.
 
-    Three of them, and they are not equally informative -- which is the point
-    of naming them apart rather than branching inside one function.  AMD
-    reports every field per kernel, NVIDIA reports registers and spills,
-    Intel reports only that a kernel spilled.  A caller gets what the
+    Three of them, and they are not equally informative.  AMD reports every
+    field per kernel, NVIDIA reports registers and spills, Intel reports only
+    that a kernel spilled (`toolchain.report_fields`).  A caller gets what the
     toolchain gives and can tell absence from zero.
     """
 
     name: str
+    #: What the generator emits for it ...
     generator_backend: str
+    #: ... and which entry of `toolchain.COMPILERS` builds it: the SYCL
+    #: backend generates SPMD SYCL and asks `icpx`, since IGC is what reports.
+    compiler_backend: str
     headers: str
-    compiler_env: str
-    default_compiler: str
-    parse: object
+
+    @property
+    def compiler(self) -> toolchain.Compiler:
+        return toolchain.COMPILERS[self.compiler_backend]
+
+    def parse(self, log: str) -> Dict[str, int]:
+        return toolchain.report_fields(self.compiler_backend, log)
 
     def command(self, compiler: str, arch: str, src: Path, obj: Path,
                 include: Path, extra: List[str]) -> List[str]:
@@ -297,48 +209,43 @@ class Backend:
 @dataclass(frozen=True)
 class HipBackend(Backend):
     def command(self, compiler, arch, src, obj, include, extra):
-        return [compiler, '-x', 'hip', f'--offload-arch={arch}', '-O3', '-c',
-                '-Rpass-analysis=kernel-resource-usage',
+        c = self.compiler
+        return [compiler, '-x', 'hip', *c.language_flags(),
+                *c.target_flags(arch), '-O3', '-c', *c.report_flags(),
                 '-I', str(include), *extra, str(src), '-o', str(obj)]
 
 
 @dataclass(frozen=True)
 class CudaBackend(Backend):
     def command(self, compiler, arch, src, obj, include, extra):
-        return [compiler, '-x', 'cu', f'-arch={arch}', '-O3', '-c',
-                '--expt-relaxed-constexpr',
-                '-Xptxas=-v', '-I', str(include), *extra,
-                str(src), '-o', str(obj)]
+        c = self.compiler
+        return [compiler, '-x', 'cu', *c.language_flags(),
+                *c.target_flags(arch), '-O3', '-c', *c.report_flags(),
+                '-I', str(include), *extra, str(src), '-o', str(obj)]
 
 
 @dataclass(frozen=True)
 class SyclBackend(Backend):
     def command(self, compiler, arch, src, obj, include, extra):
-        # Ahead of time, because a JIT build never reaches IGC and so never
-        # says anything about registers at all.
-        return [compiler, '-fsycl', '-fsycl-targets=spir64_gen', '-O3', '-c',
-                '-Xsycl-target-backend', f'-device {arch}',
-                '-I', str(include), *extra, str(src), '-o', str(obj)]
+        # Ahead of time (`target_flags`), because a JIT build never reaches
+        # IGC and so never says anything at all.
+        c = self.compiler
+        return [compiler, *c.language_flags(), *c.target_flags(arch), '-O3',
+                '-c', '-I', str(include), *extra, str(src), '-o', str(obj)]
 
 
 BACKENDS = {
     'hip': HipBackend(
-        name='hip', generator_backend='hip',
+        name='hip', generator_backend='hip', compiler_backend='hip',
         headers=('#include <hip/hip_runtime.h>\n'
-                 '#include "tensorforge_device/hip.h"'),
-        compiler_env='TF_HIPCC', default_compiler='hipcc',
-        parse=lambda err: parse_remarks(err)),
+                 '#include "tensorforge_device/hip.h"')),
     'cuda': CudaBackend(
-        name='cuda', generator_backend='cuda',
-        headers='#include "tensorforge_device/cuda.h"',
-        compiler_env='TF_NVCC', default_compiler='nvcc',
-        parse=lambda err: parse_ptxas(err)),
+        name='cuda', generator_backend='cuda', compiler_backend='cuda',
+        headers='#include "tensorforge_device/cuda.h"'),
     'sycl': SyclBackend(
-        name='sycl', generator_backend='acpp',
+        name='sycl', generator_backend='acpp', compiler_backend='oneapi',
         headers=('#include <sycl/sycl.hpp>\n'
-                 '#include "tensorforge_device/isycl.h"'),
-        compiler_env='TF_ICPX', default_compiler='icpx',
-        parse=lambda err: parse_igc(err)),
+                 '#include "tensorforge_device/isycl.h"')),
 }
 
 
@@ -524,12 +431,12 @@ def main() -> int:
     backend = BACKENDS[args.backend]
     args.arch = args.arch or {'hip': 'gfx90a', 'cuda': 'sm_80',
                               'sycl': 'pvc'}[args.backend]
-    compiler = None if args.model_only else (
-        args.compiler or os.environ.get(backend.compiler_env)
-        or shutil.which(backend.default_compiler))
+    compiler = None if args.model_only else backend.compiler.find(
+        args.compiler)
     if not args.model_only and not compiler:
-        print(f'no {backend.default_compiler} found; pass --compiler or set '
-              f'${backend.compiler_env}, or use --model-only', file=sys.stderr)
+        print(f'no {backend.compiler.binary} found; pass --compiler or set '
+              f'${backend.compiler.env[0]}, or use --model-only',
+              file=sys.stderr)
         return 2
 
     mods = load_cases(args.cases)

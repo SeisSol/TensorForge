@@ -26,19 +26,17 @@ Three parts, kept apart because they answer to different things:
   (one knob at a time from the default, until nothing improves) otherwise.
 
 The compiler is the caller's to name.  Nothing here assumes one is installed:
-`Toolchain` takes paths, falls back on `TF_NVCC` / `TF_HIPCC` and then on
-`PATH`, and a scorer that finds none says so instead of guessing.
+`toolchain.Toolchain` takes paths, falls back on the environment (`TF_NVCC`,
+`TF_HIPCC`, `TF_ICPX`) and then on `PATH`, and a scorer that finds none says
+so instead of guessing.
 """
 
 from __future__ import annotations
 
-import copy
 import hashlib
 import json
 import os
 import warnings
-import re
-import shutil
 import subprocess
 import tempfile
 from dataclasses import dataclass, field, replace
@@ -47,6 +45,8 @@ from typing import (Any, Callable, Dict, Iterable, List, Mapping, Optional,
 
 from tensorforge.common.basic_types import Addressing
 from tensorforge.common.context import Context, Options
+from tensorforge import toolchain
+from tensorforge.toolchain import Resources, Toolchain
 from tensorforge.generators import lanes as lane_config
 from tensorforge.generators.lanes import LaneConfig
 
@@ -870,167 +870,6 @@ def _over_scalar_budget(result: Build) -> float:
     return max(0.0, peak - budget)
 
 
-@dataclass
-class Toolchain:
-    """Where the compilers are.  Paths from the caller, then `TF_NVCC` /
-    `TF_HIPCC`, then `PATH`; None where none of them has one."""
-    nvcc: Optional[str] = None
-    hipcc: Optional[str] = None
-    #: oneAPI's `icpx`.  It needs the environment `setvars.sh` makes; a path
-    #: alone reaches the driver, not the device compiler behind it.
-    icpx: Optional[str] = None
-    include: Optional[str] = None
-
-    def compiler(self, vendor: str) -> Optional[str]:
-        if vendor == 'nvidia':
-            return (self.nvcc or os.environ.get('TF_NVCC')
-                    or shutil.which('nvcc'))
-        if vendor == 'amd':
-            return (self.hipcc or os.environ.get('TF_HIPCC')
-                    or shutil.which('hipcc'))
-        if vendor == 'intel':
-            return (self.icpx or os.environ.get('TF_ICPX')
-                    or shutil.which('icpx'))
-        return None
-
-    def include_dir(self) -> str:
-        if self.include:
-            return self.include
-        import tensorforge
-        return os.path.join(os.path.dirname(tensorforge.__file__), 'include')
-
-
-@dataclass(frozen=True)
-class Resources:
-    """What a compiler reports for one kernel."""
-    registers: Optional[int]
-    spill_bytes: int
-    #: Blocks the register file admits per SM, where it can be said.
-    register_blocks: Optional[int] = None
-
-
-def parse_ptxas(log: str) -> Optional[Resources]:
-    regs = re.search(r'Used (\d+) registers', log)
-    spill = re.search(r'(\d+) bytes spill stores, (\d+) bytes spill loads', log)
-    if regs is None:
-        return None
-    stores, loads = (int(spill.group(1)), int(spill.group(2))) if spill else (0, 0)
-    return Resources(int(regs.group(1)), stores + loads)
-
-
-#: IGC's word for a kernel it compiled twice: the first attempt blew the
-#: register file and it retries with another strategy.  It says nothing else
-#: per kernel -- no register count, and a spill size only where it gives up
-#: (`tools/register_usage.py` reads the same stream).
-_IGC_RETRY = re.compile(r'\[RetryManager\]\s+Start recompilation', re.I)
-#: `Spill memory used = 33088 bytes for kernel ...` is what IGC 2026 prints,
-#: for ESIMD and SPMD alike; the other two are older spellings.
-_IGC_SPILL = re.compile(
-    r"(?:kernel|Kernel)\s+.*?\bspill(?:s|ed)?\b.*?(?P<value>\d+)\s*bytes"
-    r"|spill(?:ed)?\s+(?P<value2>\d+)\s*bytes"
-    r"|spill memory used\s*=\s*(?P<value3>\d+)\s*bytes", re.I)
-
-
-def parse_igc(log: str) -> Resources:
-    """An Intel AOT build: whether it spilled, and how much where IGC says.
-
-    Always a report, never None: IGC is silent about a kernel that fits, so
-    silence is the answer "no spill" and not a failure to parse.  A retry
-    without a size counts as one byte -- spilled, amount unknown -- so that it
-    ranks behind every build that did not.
-    """
-    spill = 0
-    for m in _IGC_SPILL.finditer(log):
-        spill = max(spill, int(m.group('value') or m.group('value2')
-                               or m.group('value3')))
-    if not spill and _IGC_RETRY.search(log):
-        spill = 1
-    return Resources(None, spill)
-
-
-#: `spill_size:      13888` in the binary's `.ze_info`, which is the only
-#: place IGC states it for a SPMD build.
-_ZEINFO_SPILL = re.compile(rb'spill_size:\s*(\d+)')
-#: The note itself, to tell "it says no spilling" from "it does not
-#: say anything because it is not there".
-_ZEINFO_NOTE = re.compile(rb'ze_info|payload_arguments|execution_env')
-
-#: What the vector backend writes instead.  A `-vc-codegen` build carries no
-#: `spill_size:` line at all; what it spills appears as the per-thread
-#: scratch buffer it asks the runtime for, and a build that spills nothing
-#: has no such buffer.
-_ZEINFO_SCRATCH = re.compile(
-    rb'-\s*type:\s*scratch\s*\n\s*usage:\s*\w+\s*\n\s*size:\s*(\d+)')
-
-
-def _zeinfo_spill(path: str) -> Optional[int]:
-    """What the ahead-of-time binary says it spilled, or None where there
-    is no object to ask.
-
-    IGC says nothing on the console about a SPMD kernel that spills -- the
-    build of `elastic-o6s:neighboringFlux` at sixteen lanes prints not one
-    word and carries 13888 bytes of spilling, 55 spill and 72 fill messages
-    in its ISA, while the same kernel at 32 lanes has none.  So the log is
-    not where to look: the figure is in the `.ze_info` note of the object,
-    and that is in the file whatever the compiler chose to print.
-
-    Read as bytes rather than parsed as ELF: the note is text in a section
-    whose name has moved between releases, and one regular expression over
-    the file is both shorter and harder to break.
-
-    Three answers and not two.  No object: nothing is known.  An object whose
-    note is there and names neither a `spill_size` nor a scratch buffer: no
-    spilling, which is what the note not mentioning it means.  An object with
-    no note at all: nothing is known either, which is not the same as zero.
-
-    Two spellings, because the two backends do not write the same note.  A
-    SPMD build states `spill_size:`.  A `-vc-codegen` build -- every
-    explicit-SIMD kernel -- states none, ever, and puts what it spills in the
-    per-thread scratch buffer it asks the runtime for:
-
-        per_thread_memory_buffers:
-          - type:            scratch
-            usage:           single_space
-            size:            10688
-
-    That is the 32-lane build of `elastic-o6d:localFluxAll`, whose ISA carries
-    1376 spill messages; the same kernel at sixteen lanes has no such buffer
-    and spills nothing.  Reading only the first spelling would make every
-    explicit-SIMD candidate come back spill-free -- the two lane counts
-    indistinguishable to the one scorer able to tell them apart, since the
-    modelled footprint puts them half a percent apart (79760 B against
-    79396) while the clock puts them at 99.45 ns an element against 33.07.
-    """
-    try:
-        with open(path, 'rb') as f:
-            blob = f.read()
-    except OSError:
-        return None                    # no object: nothing is known
-    figures = [int(m.group(1)) for m in _ZEINFO_SPILL.finditer(blob)]
-    if figures:
-        return max(figures)            # it says so
-    scratch = [int(m.group(1)) for m in _ZEINFO_SCRATCH.finditer(blob)]
-    if scratch:
-        return max(scratch)            # the vector backend says it this way
-    if _ZEINFO_NOTE.search(blob):
-        return 0                       # the note is there and does not
-    return None                        # no note: nothing is known either
-
-
-def parse_amdgpu(log: str) -> Optional[Resources]:
-    """`-Rpass-analysis=kernel-resource-usage`.  The occupancy it reports is
-    waves per SIMD; kept as the register figure's blocks-equivalent."""
-    vgprs = re.search(r'VGPRs: (\d+)', log)
-    agprs = re.search(r'AGPRs: (\d+)', log)
-    scratch = re.search(r'ScratchSize \[bytes/lane\]: (\d+)', log)
-    occupancy = re.search(r'Occupancy \[waves/SIMD\]: (\d+)', log)
-    if vgprs is None:
-        return None
-    return Resources(int(vgprs.group(1)) + (int(agprs.group(1)) if agprs else 0),
-                     int(scratch.group(1)) if scratch else 0,
-                     int(occupancy.group(1)) if occupancy else None)
-
-
 class CompiledScore:
     """Registers and spills from the target's own compiler.
 
@@ -1085,33 +924,31 @@ class CompiledScore:
             with open(src, 'w') as f:
                 f.write(kernel_source(result))
             inc = self.toolchain.include_dir()
+            entry = toolchain.compiler_for_vendor(hw.vendor)
+            backend = entry.backend
+            flags = entry.language_flags() + entry.report_flags()
             if hw.vendor == 'nvidia':
                 arch = hw.model if hw.model.endswith('a') else (
                     hw.model + 'a' if hw.model in ('sm_90', 'sm_100', 'sm_101', 'sm_120')
                     else hw.model)
-                cmd = [compiler, '-cubin', f'-arch={arch}', '--expt-relaxed-constexpr',
-                       '-Xptxas', '-v', '-I', inc, '-o', os.path.join(tmp, 'k.cubin'), src]
-                parse = parse_ptxas
+                cmd = [compiler, '-cubin', *flags, *entry.target_flags(arch),
+                       '-I', inc, '-o', os.path.join(tmp, 'k.cubin'), src]
             elif hw.vendor == 'intel':
                 # Linked, as a shared object: the ahead-of-time device build
                 # runs at link time, and `-c` leaves `-device` unused and IGC
                 # silent.
-                cmd = [compiler, '-fsycl', '-fsycl-targets=spir64_gen', '-O3',
-                       '-shared', '-fPIC', '-Xsycl-target-backend',
-                       f'-device {hw.model}', '-I', inc,
+                cmd = [compiler, *flags, *entry.target_flags(hw.model), '-O3',
+                       '-shared', '-fPIC', '-I', inc,
                        '-o', os.path.join(tmp, 'k.so'), src]
-                parse = parse_igc
             else:
-                cmd = [compiler, '-x', 'hip', '-c', f'--offload-arch={hw.model}',
-                       '--offload-device-only', '-O3', '-I', inc,
-                       '-Rpass-analysis=kernel-resource-usage',
-                       '-o', os.path.join(tmp, 'k.o'), src]
-                parse = parse_amdgpu
+                cmd = [compiler, '-x', 'hip', '-c', *flags,
+                       *entry.target_flags(hw.model), '--offload-device-only',
+                       '-O3', '-I', inc, '-o', os.path.join(tmp, 'k.o'), src]
             run = subprocess.run(cmd + list(self.flags), capture_output=True,
                                  text=True, timeout=self.timeout)
-            spilled = (_zeinfo_spill(os.path.join(tmp, 'k.so'))
+            spilled = (toolchain.zeinfo_spill(os.path.join(tmp, 'k.so'))
                        if hw.vendor == 'intel' else None)
-        report = parse(run.stdout + run.stderr)
+        report = toolchain.resources(backend, run.stdout + run.stderr)
         if report is None or run.returncode:
             return None
         if spilled is not None:

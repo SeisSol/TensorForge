@@ -1,24 +1,27 @@
 # SPDX-FileCopyrightText: 2026 SeisSol Group
 #
 # SPDX-License-Identifier: MIT
-"""Toolchain discovery, per-arch feasibility probing, and compilation.
+"""Per-arch feasibility probing, and compilation of the test binaries.
 
 Two things gate a test ``Target``: the GPU is present (from
 :mod:`gpu_detect`) *and* a toolchain exists that can target its arch.
 A probe compile is done once per ``(backend, arch)`` and cached in
-memory for the session.
+memory for the session.  Where the compilers are and how a target is named
+to them is :mod:`tensorforge.toolchain`'s; what is built here, and without
+an optimization flag, is the harness's own.
 """
 
 from __future__ import annotations
 
 import hashlib
 import os
-import shutil
 import subprocess
 import textwrap
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+
+from tensorforge import toolchain
 
 from .gpu_detect import DetectedGPU
 
@@ -45,17 +48,9 @@ _probe_cache: Dict[Tuple[str, str], bool] = {}
 
 
 def _compiler_for(backend: str) -> Optional[str]:
-    exe = {
-        "cuda": os.environ.get("NVCC", "nvcc"),
-        "hip": os.environ.get("HIPCC", "hipcc"),
-        "oneapi": os.environ.get("ICPX", "icpx"),
-        # the same compiler, the other code generator
-        "esimd": os.environ.get("ICPX", "icpx"),
-        "acpp": os.environ.get("ACPP", "acpp"),
-    }.get(backend)
-    if exe is None or shutil.which(exe) is None:
-        return None
-    return exe
+    """The binary for ``backend``, where one is installed (`toolchain`)."""
+    entry = toolchain.COMPILERS.get(backend)
+    return entry.find() if entry is not None else None
 
 
 def _sycl_aot_flags(arch: str) -> List[str]:
@@ -65,15 +60,12 @@ def _sycl_aot_flags(arch: str) -> List[str]:
     finds.  `TF_SYCL_AOT=1` compiles for the detected device instead, which
     moves IGC's work from the first launch of every test binary to the build
     -- worth it on a machine that runs the whole corpus, and it reports a
-    spill at build time rather than never.
+    spill at build time rather than never.  `TF_ICPX_DEVICE_OPTIONS` reaches
+    the device compiler (`toolchain.Icpx`).
     """
     if os.environ.get("TF_SYCL_AOT", "") not in ("1", "true", "yes", "on"):
         return []
-    # `TF_SYCL_AOT_OPTIONS` reaches the device compiler, e.g.
-    # `-internal_options -ze-opt-disable-sendwarwa`.
-    extra = os.environ.get("TF_SYCL_AOT_OPTIONS", "").strip()
-    return ["-fsycl-targets=spir64_gen", "-Xsycl-target-backend",
-            f"-device {arch}" + (f" {extra}" if extra else "")]
+    return toolchain.COMPILERS["oneapi"].target_flags(arch)
 
 
 def _probe_compile(backend: str, arch: str, scratch: Path) -> bool:
@@ -88,16 +80,19 @@ def _probe_compile(backend: str, arch: str, scratch: Path) -> bool:
         return False
 
     scratch.mkdir(parents=True, exist_ok=True)
+    entry = toolchain.COMPILERS[backend]
     if backend == "cuda":
         src = scratch / "probe.cu"
         src.write_text("__global__ void k() {}\n")
         obj = scratch / "probe.o"
-        cmd = [cc, "-std=c++17", f"-arch={arch}", "-c", str(src), "-o", str(obj)]
+        cmd = [cc, *entry.language_flags(), *entry.target_flags(arch), "-c",
+               str(src), "-o", str(obj)]
     elif backend == "hip":
         src = scratch / "probe.cpp"
         src.write_text("#include <hip/hip_runtime.h>\n__global__ void k() {}\n")
         obj = scratch / "probe.o"
-        cmd = [cc, "-std=c++17", f"--offload-arch={arch}", "-c", str(src), "-o", str(obj)]
+        cmd = [cc, *entry.language_flags(), *entry.target_flags(arch), "-c",
+               str(src), "-o", str(obj)]
     elif backend in ("oneapi", "esimd"):
         # icpx -fsycl with the JIT path, or ahead of time where asked
         # (`_sycl_aot_flags`).  The ESIMD probe includes the ESIMD header: a
@@ -109,7 +104,7 @@ def _probe_compile(backend: str, arch: str, scratch: Path) -> bool:
             + "int main() { sycl::queue q; q.wait(); return 0; }\n"
         )
         obj = scratch / f"probe_{backend}.bin"
-        cmd = ([cc, "-fsycl", "-std=c++17"] + _sycl_aot_flags(arch)
+        cmd = ([cc, *entry.language_flags()] + _sycl_aot_flags(arch)
                + [str(src), "-o", str(obj)])
     elif backend == "acpp":
         src = scratch / "probe.cpp"
@@ -118,7 +113,7 @@ def _probe_compile(backend: str, arch: str, scratch: Path) -> bool:
             "int main() { sycl::queue q; q.wait(); return 0; }\n"
         )
         obj = scratch / "probe.bin"
-        cmd = [cc, "-std=c++17", str(src), "-o", str(obj)]
+        cmd = [cc, *entry.language_flags(), str(src), "-o", str(obj)]
     else:
         _probe_cache[key] = False
         return False
@@ -253,9 +248,10 @@ def _compile_cuda(b: BuildInputs, kernel: Path, driver: Path, exe: Path) -> None
     if cc is None:
         raise RuntimeError("nvcc not found")
 
-    aux_cu = b.tensorforge_include / "tensorforge_aux.cu"
+    entry = toolchain.COMPILERS["cuda"]
+    aux_cu = b.tensorforge_include / entry.aux
     cmd = [
-        cc, "-std=c++17", f"-arch={b.target.arch}", "--expt-relaxed-constexpr",
+        cc, *entry.language_flags(), *entry.target_flags(b.target.arch),
         "-I", str(b.tensorforge_include),
         "-I", str(exe.parent),
         str(driver), str(kernel), str(aux_cu),
@@ -272,9 +268,10 @@ def _compile_hip(b: BuildInputs, kernel: Path, driver: Path, exe: Path) -> None:
     if cc is None:
         raise RuntimeError("hipcc not found")
 
-    aux = b.tensorforge_include / "tensorforge_aux.cpp"
+    entry = toolchain.COMPILERS["hip"]
+    aux = b.tensorforge_include / entry.aux
     cmd = [
-        cc, "-std=c++17", f"--offload-arch={b.target.arch}",
+        cc, *entry.language_flags(), *entry.target_flags(b.target.arch),
         "-I", str(b.tensorforge_include),
         "-I", str(exe.parent),
         str(driver), str(kernel), str(aux),
@@ -300,16 +297,15 @@ def _compile_sycl(b: BuildInputs, kernel: Path, driver: Path, exe: Path) -> None
     if cc is None:
         raise RuntimeError(f"{b.target.backend} compiler not found")
 
-    aux = b.tensorforge_include / "tensorforge_aux_sycl.cpp"
-    base = [cc, "-std=c++17",
-            "-I", str(b.tensorforge_include),
-            "-I", str(exe.parent),
-            str(driver), str(kernel), str(aux),
-            "-o", str(exe)]
-    if b.target.backend in ("oneapi", "esimd"):
-        cmd = [cc, "-fsycl"] + _sycl_aot_flags(b.target.arch) + base[1:]
-    else:        # acpp
-        cmd = base
+    entry = toolchain.COMPILERS[b.target.backend]
+    aux = b.tensorforge_include / entry.aux
+    aot = (_sycl_aot_flags(b.target.arch)
+           if b.target.backend in ("oneapi", "esimd") else [])
+    cmd = [cc, *entry.language_flags(), *aot,
+           "-I", str(b.tensorforge_include),
+           "-I", str(exe.parent),
+           str(driver), str(kernel), str(aux),
+           "-o", str(exe)]
     res = subprocess.run(cmd, capture_output=True, text=True, check=False)
     if res.returncode != 0:
         _dump_failure(exe.parent, cmd, res)
