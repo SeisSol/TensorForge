@@ -96,6 +96,29 @@ class Context:
     #: to make this number large, and nothing counted whether it does.
     self.load_slack: Optional[dict] = None
 
+    #: The prefetch-wrapping pass the bodies of a build go through, where
+    #: something has to watch it: the rotation query
+    #: (`Generator._rotation_targets`) asks it what it would move.  None for
+    #: `pir.wrap.wrap_prefetch` itself.
+    self.wrap_pass = None
+
+  def begin_build(self) -> None:
+    """Forget the figures of the previous build.
+
+    A context outlives one generator -- a search builds several against the
+    same one, and so does each probe -- so a figure left over would be
+    attributed to the next build, and a maximum never falls back on its own.
+    """
+    self.peak_pressure = None
+    self.peak_lane_pressure = None
+    self.peak_uniform_pressure = None
+    self.emitted_work = None
+    self.code_units = None
+    self.issue_mix = None
+    self.memory_bytes = None
+    self.hot_profile = None
+    self.load_slack = None
+
   def record_pressure(self, value: int, lane: Optional[int] = None,
                       uniform: Optional[int] = None) -> None:
     if self.peak_pressure is None or value > self.peak_pressure:

@@ -445,8 +445,9 @@ class AbstractInstruction(ABC):
       # changes what is outstanding at every wait, and those counts describe
       # the final order.
       from tensorforge.backend.pir.wrap import wrap_prefetch
+      wrap = getattr(context, 'wrap_pass', None) or wrap_prefetch
       why: list = []
-      body = wrap_prefetch(
+      body = wrap(
           body,
           lambda ty, hint, quals=(): builder.value(ty, hint=hint,
                                                    quals=quals),

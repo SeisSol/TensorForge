@@ -962,6 +962,31 @@ def test_auto_merges_nothing_where_the_cache_is_unknown():
                                     merge_icache_fraction=1e-6))
 
 
+def test_a_sibling_builds_what_its_generator_would():
+    """The probes and the merged build are siblings (`Generator._sibling`),
+    and what was settled after construction goes with them: a pinned name,
+    the configuration a tuner picked, the geometry, the attributes."""
+    from tensorforge.common.context import Context
+    from tensorforge.generators.generator import Generator
+    from tensorforge.generators.lanes import LaneConfig
+
+    lanes = LaneConfig(32, 32, 1)
+    gen = Generator(_flux(), Context(arch='sm_86', backend='cuda',
+                                     fp_type=DTYPE), lanes=lanes, attrs={})
+    gen.set_kernel_name('kernel_pinned')
+    gen.tuned = object()
+    sibling = gen._sibling()
+    assert sibling._lanes == lanes and sibling._attrs == {}
+    assert sibling._base_kernel_name == 'kernel_pinned'
+    assert sibling.tuned is gen.tuned
+    assert sibling._thread_block_policy_type is gen._thread_block_policy_type
+    # and it settles nothing again
+    assert not sibling._may_tune and sibling._merge_decided
+    assert not sibling._announce_identity
+    assert sibling._rotate == set()
+    assert gen._sibling(rotate=None)._rotate is None
+
+
 def _accumulate_then_read():
     import importlib.util
     from pathlib import Path

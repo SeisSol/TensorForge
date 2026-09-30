@@ -341,6 +341,20 @@ class MergeFallbackWarning(UserWarning):
   the kernel was built written out."""
 
 
+def _carried_transfers(body) -> set:
+  """The buffers whose asynchronous transfers sit in a loop that carries
+  values across its back edge -- the loops `wrap_prefetch` produces."""
+  names: set = set()
+  for stmt, _ in pir.walk(body):
+    if stmt.op is pir.Op.FOR and stmt.target:
+      for inner, _ in pir.walk((stmt,)):
+        if inner.op in (pir.Op.COPY_ASYNC, pir.Op.LOAD_ASYNC) and inner.args:
+          base = getattr(inner.args[0], 'hint', None)
+          if base:
+            names.add(base)
+  return names
+
+
 class Generator:
   #: Hex characters of the digest that end up in the symbol.  Sixty-four bits
   #: rather than forty: the digest is the whole of the name's discriminating
@@ -597,34 +611,18 @@ class Generator:
     from tensorforge.backend.pir import wrap as _wrap
 
     names: set = set()
-    original = _wrap.wrap_prefetch
 
     def asking(body, make_value, next_index=None, report=None,
                assume_rotated=False):
-      before = original(body, make_value, next_index, [], assume_rotated=True)
-      for stmt, _ in pir.walk(before):
-        if stmt.op is pir.Op.FOR and stmt.target:
-          for x, _ in pir.walk((stmt,)):
-            if x.op in (pir.Op.COPY_ASYNC, pir.Op.LOAD_ASYNC) and x.args:
-              base = getattr(x.args[0], 'hint', None)
-              if base:
-                names.add(base)
-      return original(body, make_value, next_index, report, assume_rotated)
+      names.update(_carried_transfers(_wrap.wrap_prefetch(
+          body, make_value, next_index, [], assume_rotated=True)))
+      return _wrap.wrap_prefetch(body, make_value, next_index, report,
+                                 assume_rotated)
 
-    probe = Generator(self.descr_list, self._context, attrs=self._attrs)
-    probe._may_tune = False
-    probe._rotate = set()
-    probe._announce_identity = False
     # The list as this generator builds it, merged or not.
-    probe._emit_loops = self._emit_loops
-    probe._merge_decided = True
-    _wrap.wrap_prefetch = asking
-    try:
-      probe.generate()
-    except Exception:
+    if not self._build_watching(
+        self._sibling(self.descr_list, emit_loops=self._emit_loops), asking):
       return set()
-    finally:
-      _wrap.wrap_prefetch = original
     if not names:
       return names
 
@@ -643,36 +641,70 @@ class Generator:
     #
     # Hence the invariant this restores: rotated if and only if wrapped.
     confirmed: set = set()
-    original2 = _wrap.wrap_prefetch
 
     def confirming(body, make_value, next_index=None, report=None,
                    assume_rotated=False):
       # `assume_rotated=True`: the buffers really are rotated in this build, so
       # the refusal that exists only for a single copy does not apply.
-      after = original2(body, make_value, next_index, report, True)
-      for stmt, _ in pir.walk(after):
-        if stmt.op is pir.Op.FOR and stmt.target:
-          for x, _ in pir.walk((stmt,)):
-            if x.op in (pir.Op.COPY_ASYNC, pir.Op.LOAD_ASYNC) and x.args:
-              base = getattr(x.args[0], 'hint', None)
-              if base:
-                confirmed.add(base)
+      after = _wrap.wrap_prefetch(body, make_value, next_index, report, True)
+      confirmed.update(_carried_transfers(after))
       return after
 
-    check = Generator(self.descr_list, self._context, attrs=self._attrs)
-    check._may_tune = False
-    check._rotate = set(names)
-    check._announce_identity = False
-    check._emit_loops = self._emit_loops
-    check._merge_decided = True
-    _wrap.wrap_prefetch = confirming
-    try:
-      check.generate()
-    except Exception:
+    if not self._build_watching(
+        self._sibling(self.descr_list, rotate=names,
+                      emit_loops=self._emit_loops), confirming):
       return set()
-    finally:
-      _wrap.wrap_prefetch = original2
     return names & confirmed
+
+  def _build_watching(self, probe: 'Generator', wrap) -> bool:
+    """Build `probe` with `wrap` standing in for the prefetch-wrapping pass;
+    whether it built.  The stand-in is the context's, so it sees this build
+    and nothing else in the process."""
+    saved = self._context.wrap_pass
+    self._context.wrap_pass = wrap
+    try:
+      probe.generate()
+    except Exception:
+      return False
+    finally:
+      self._context.wrap_pass = saved
+    return True
+
+  def _sibling(self, descrs=None, rotate: Optional[set] = frozenset(),
+               merge_within: Optional[tuple] = None,
+               emit_loops: Optional[bool] = None) -> 'Generator':
+    """A generator for this kernel, built to answer a question or to be taken
+    over (`_adopt`).
+
+    Same context, policy, lanes and attributes, and what was settled after
+    construction -- a pinned name, the configuration the tuner picked -- so
+    that it builds what this generator would.  It settles nothing again: it
+    does not tune or merge, asks the rotation query only where `rotate` is
+    None, and announces no name.
+    """
+    other = Generator(self._given if descrs is None else descrs,
+                      self._context, self._thread_block_policy_type,
+                      lanes=self._lanes, attrs=self._attrs,
+                      merge_within=merge_within)
+    other._may_tune = False
+    other._merge_decided = True
+    other._announce_identity = False
+    other._rotate = None if rotate is None else set(rotate)
+    other._base_kernel_name = self._base_kernel_name
+    other.tuned = self.tuned
+    if emit_loops is not None:
+      other._emit_loops = emit_loops
+    return other
+
+  def _adopt(self, other: 'Generator') -> None:
+    """Become `other`: what it built, or, unbuilt, what it would build.
+
+    Whether a completed build announces its name stays this generator's --
+    it is the caller's generator, and `other` was made not to.
+    """
+    announce = self._announce_identity
+    self.__dict__.update(other.__dict__)
+    self._announce_identity = announce
 
   def _apply_rotation(self, loop) -> None:
     """Give the chosen transfers two stages, before anything is allocated."""
@@ -700,24 +732,14 @@ class Generator:
   def generate(self):
     self._autotune()
     if self._auto_merge():
-      # built merged, by the probe this generator has taken over
+      # built merged, by the generator this one has taken over
       return None
     # After both, so that the rotation is asked of the list that is built.
     if (self._rotate is None
         and self._context.get_user_options().enable_wrap_loads):
       self._rotate = self._rotation_targets()
-    # Reset rather than only read at the end, and after every probe above: a
-    # context outlives one generator -- a search builds several against the
-    # same one, and so does each probe -- so a figure left over from a
-    # previous build would be attributed to this one, and a maximum never
-    # falls back on its own.
-    self._context.peak_pressure = None
-    self._context.peak_lane_pressure = None
-    self._context.peak_uniform_pressure = None
-    self._context.emitted_work = None
-    self._context.code_units = None
-    self._context.issue_mix = None
-    self._context.memory_bytes = None
+    # After every probe above, which build against the same context.
+    self._context.begin_build()
 
     self.register()
 
@@ -759,21 +781,13 @@ class Generator:
                            fixed=fixed or None)
     if pick is None:
       return
-    announce = self._announce_identity
-    rotate = self._rotate
-    name = self._base_kernel_name
-    self.__init__(given, pick.context(self._context),
-                  self._thread_block_policy_type, lanes=pick.lanes,
-                  attrs=self._attrs)
-    self._announce_identity = announce
-    self._rotate = rotate
-    self._base_kernel_name = name
-    self.tuned = pick
-    self._context.peak_pressure = None
-    self._context.peak_lane_pressure = None
-    self._context.peak_uniform_pressure = None
-    self._context.emitted_work = None
-    self._context.code_units = None
+    tuned = Generator(given, pick.context(self._context),
+                      self._thread_block_policy_type, lanes=pick.lanes,
+                      attrs=self._attrs)
+    tuned._rotate = self._rotate
+    tuned._base_kernel_name = self._base_kernel_name
+    tuned.tuned = pick
+    self._adopt(tuned)
 
   def _auto_merge(self) -> bool:
     """Merge repeated runs where the kernel written out crowds the
@@ -813,13 +827,7 @@ class Generator:
         max_arity=opts.merge_max_arity)):
       return False
 
-    probe = Generator(self._given, self._context,
-                      self._thread_block_policy_type, lanes=self._lanes,
-                      attrs=self._attrs)
-    probe._merge_decided = True
-    probe._announce_identity = False
-    probe._may_tune = False
-    probe._rotate = set()
+    probe = self._sibling()
     try:
       probe.generate()
     except Exception:
@@ -835,15 +843,9 @@ class Generator:
 
     # Built as a probe of its own first, so that a failure leaves this
     # generator as it was; taken over whole where it succeeds, rather than
-    # built a third time.  What the caller set between construction and
-    # `generate` goes with it -- a pinned name above all, which the build
-    # would otherwise replace by the digest.
-    merged = Generator(self._given, self._context,
-                       self._thread_block_policy_type, lanes=self._lanes,
-                       attrs=self._attrs, merge_within=(budget, share))
-    merged._announce_identity = False
-    merged._may_tune = False
-    merged._base_kernel_name = self._base_kernel_name
+    # built a third time.  It asks the rotation query itself, of the list it
+    # builds.
+    merged = self._sibling(rotate=None, merge_within=(budget, share))
     try:
       merged.generate()
     except Exception as error:
@@ -853,13 +855,16 @@ class Generator:
           f'{str(error)[:200]}); built written out instead',
           MergeFallbackWarning, stacklevel=3)
       return False
-    announce = self._announce_identity
-    self.__dict__.update(merged.__dict__)
-    self._announce_identity = announce
-    if announce:
+    self._adopt(merged)
+    self._announce()
+    return True
+
+  def _announce(self) -> None:
+    """Register the name of a build taken over from a sibling, which did
+    not announce it."""
+    if self._announce_identity:
       registry().register(self._base_kernel_name, self.unnamed_source(),
                           self.descr_list)
-    return True
 
   def _generate_bound(self):
     descrlist = []
