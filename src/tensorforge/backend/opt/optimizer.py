@@ -4,11 +4,8 @@
 
 """Macro-level optimization stage, driven by the pass manager.
 
-The pipeline used to be a hardcoded sequence with the order implicit, three
-passes commented out, one constructed but never applied, and analysis results
-handed on as bare dictionaries.  It is now a registered pass list: each entry
-names what it consumes and produces, the manager schedules and verifies, and
-a disabled pass is a flag rather than a comment.
+A registered pass list: each entry names what it consumes and produces, the
+manager schedules and verifies, and a disabled pass is a switch.
 """
 
 from typing import List
@@ -18,8 +15,8 @@ from tensorforge.backend.instructions.abstract_instruction import AbstractInstru
 from tensorforge.backend.data_types import ShrMemObject
 
 from .liveness import LivenessAnalysis
-from .manager import (LegacyAnalysis, LegacyTransform, PassContext, PassManager,
-                      PassScope)
+from .manager import (Analysis, Pass, PassContext, PassManager, PassScope,
+                      Transform)
 from .mem_region_allocation import MemoryRegionAllocation
 from .memmove import MoveLoads
 from .pipeline import Pipeline
@@ -58,41 +55,41 @@ class OptimizationStage:
     # changes the distance between a definition and its consumers.
     # Scheduling within a straight-line block: per region, or it would hoist a
     # load across a loop boundary.
-    pm.add(LegacyTransform(
+    pm.add(Transform(
         'MoveLoads',
         lambda pc, instrs: MoveLoads(pc.context, instrs,
-                                     distance=getattr(opts, 'move_distance', 1)),
+                                     distance=opts.move_distance),
         scope=PassScope.PER_REGION,
-        enabled=lambda pc: getattr(opts, 'enable_move_loads', True)))
+        enabled=lambda pc: opts.enable_move_loads))
 
     # Prefetch across the back edge, placed the way MoveLoads would place a
     # transfer in the loop unrolled once.  Whole nest, like Pipeline: it
-    # rewrites the loop's body and hands the loop its peel.  Runs after MoveLoads, which splits the transfer
-    # from its wait -- this pass moves the transfer and leaves the wait where
-    # the consumer is -- and before Pipeline, so a body it has already wrapped
-    # is not also rotated.
+    # rewrites the loop's body and hands the loop its peel.  Runs after
+    # MoveLoads, which splits the transfer from its wait -- this pass moves
+    # the transfer and leaves the wait where the consumer is -- and before
+    # Pipeline, so a body it has already wrapped is not also rotated.
     #
     # Off by default.
-    pm.add(LegacyTransform(
+    pm.add(Transform(
         'WrapLoads',
         lambda pc, instrs: WrapLoads(pc.context, instrs,
-                                     distance=getattr(opts, 'move_distance', 1)),
-        enabled=lambda pc: getattr(opts, 'enable_wrap_loads', False)))
+                                     distance=opts.move_distance),
+        enabled=lambda pc: opts.enable_wrap_loads))
 
-    # Software pipelining, one pass where there used to be two (MultiBuffer
-    # and PtrPipe were the same transform at two granularities).  Whole nest:
-    # the peeled iteration has to land outside the loop.
+    # Software pipelining: the address of the next element's transfer ahead of
+    # the iteration that consumes it, and with `enable_multibuffer` the
+    # transfer itself into a rotating buffer.  Rotation is implemented for a
+    # depth of two; any other depth raises with the reason (see pipeline.py).
+    # Whole nest: the peeled iteration has to land outside the loop.
     #
-    # Off by default. The pointer-advance half is implemented; buffer rotation
-    # raises with the precise reason (see pipeline.py) rather than emitting
-    # something plausible.
-    pm.add(LegacyTransform(
+    # Off by default.
+    pm.add(Transform(
         'Pipeline',
         lambda pc, instrs: Pipeline(
             pc.context, instrs,
-            depth=getattr(opts, 'pipeline_depth', 2),
-            rotate_buffers=getattr(opts, 'enable_multibuffer', False)),
-        enabled=lambda pc: getattr(opts, 'enable_pipeline', False)))
+            depth=opts.pipeline_depth,
+            rotate_buffers=opts.enable_multibuffer),
+        enabled=lambda pc: opts.enable_pipeline))
 
     # The cache hint for the next element's pointer.  After the two passes
     # above and not before: both rewrite the head of the region, and the head
@@ -100,23 +97,23 @@ class OptimizationStage:
     # has to be told it ran.
     #
     # Off by default.
-    pm.add(LegacyTransform(
+    pm.add(Transform(
         'PrefetchBatch',
         lambda pc, instrs: PrefetchBatch(
             pc.context, instrs,
-            level=getattr(opts, 'prefetch_level', 'l2')),
-        enabled=lambda pc: getattr(opts, 'enable_prefetch', False)))
+            level=opts.prefetch_level),
+        enabled=lambda pc: opts.enable_prefetch))
 
     # The next element's data, hinted at the tail of the body where
     # `WrapLoads` would issue its transfer -- the transfer stays.  After
     # `WrapLoads`, whose wrapped transfers need no hint, and after the pointer
     # hints, which it shares the head with.  Off by default.
-    pm.add(LegacyTransform(
+    pm.add(Transform(
         'PrefetchData',
         lambda pc, instrs: PrefetchData(
             pc.context, instrs,
-            level=getattr(opts, 'prefetch_level', 'l2')),
-        enabled=lambda pc: getattr(opts, 'prefetch_data', False)))
+            level=opts.prefetch_level),
+        enabled=lambda pc: opts.prefetch_data))
 
     # Whole nest: a value carried across the loop's back edge is only visible
     # to a fixed point over the region structure.
@@ -126,13 +123,13 @@ class OptimizationStage:
     # bump allocator in a separate arena -- so they are deliberately *not* fed
     # to the region allocator, which would give them a second offset.  Unifying
     # the two allocators is its own change.
-    pm.add(LegacyAnalysis(
+    pm.add(Analysis(
         'LivenessAnalysis',
         lambda pc: LivenessAnalysis(pc.context, pc.local_stream),
         lambda opt: opt.get_live_map(),
         provides='live_map'))
 
-    pm.add(LegacyAnalysis(
+    pm.add(Analysis(
         'MemoryRegionAllocation',
         lambda pc: MemoryRegionAllocation(pc.context, pc.get('live_map')),
         lambda opt: opt.get_regions(),
@@ -145,7 +142,7 @@ class OptimizationStage:
     # allocation it depends on.  Per region: "the previous write to this buffer"
     # must not be read across a loop boundary, where the previous write is the
     # previous *iteration*.
-    pm.add(LegacyTransform(
+    pm.add(Transform(
         'SyncThreadsOpt',
         lambda pc, instrs: SyncThreadsOpt(
             pc.context, instrs, pc.get('regions'), pc.num_threads,
@@ -166,7 +163,7 @@ class OptimizationStage:
     return self._pc.instrs
 
 
-class _AssignShrMemOffsets(LegacyTransform):
+class _AssignShrMemOffsets(Pass):
   """ShrMemOpt: turn regions into byte offsets and size the arena.
 
   A transform rather than an analysis -- it mutates the instructions' offsets
@@ -178,12 +175,6 @@ class _AssignShrMemOffsets(LegacyTransform):
   requires = ('live_map', 'regions')
   preserves = ('live_map', 'regions')
   is_transform = True
-
-  def __init__(self):
-    pass
-
-  def enabled(self, pc: PassContext) -> bool:
-    return True
 
   def run(self, pc: PassContext) -> None:
     fp_size = pc.context.fp_type.size()

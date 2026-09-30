@@ -4,18 +4,13 @@
 
 """Pass manager for the macro instruction stream.
 
-Replaces the hardcoded sequence in ``OptimizationStage.optimize``, where the
-order was implicit, three passes sat commented out, one was constructed but
-never applied, and analysis results were handed on as bare
-``Dict[int, Set[Symbol]]`` with no notion of who invalidates what.
-
 Three things are explicit here:
 
 *Analyses vs. transforms.*  An analysis derives a fact and stores it under a
 name; a transform rewrites the stream.  A transform invalidates every
 analysis unless it declares otherwise, so a stale ``live_map`` cannot be
-read by accident -- that was a real hazard, because ``live_map`` is keyed by
-*instruction index* and any transform that inserts or removes an instruction
+read by accident -- which matters because ``live_map`` is keyed by
+*instruction index*, and any transform that inserts or removes an instruction
 silently reinterprets every key.
 
 *Declared dependencies.*  A pass names the analyses it consumes; the manager
@@ -29,7 +24,6 @@ halfway through code generation.
 
 from __future__ import annotations
 
-import time
 from enum import Enum
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set
 
@@ -176,7 +170,6 @@ class PassManager:
         #: a pipeline is built per generation and the options belong to the
         #: context that asked for it.
         self._debug = debug
-        self.timings: List[tuple] = []
 
     def add(self, p: Pass) -> 'PassManager':
         available: Set[str] = set()
@@ -201,12 +194,10 @@ class PassManager:
                 raise GenerationError(
                     f'pass {p.name!r} needs {missing}, invalidated by an '
                     f'earlier transform and not recomputed')
-            t0 = time.perf_counter()
             if p.scope is PassScope.PER_REGION:
                 self._run_per_region(p, pc)
             else:
                 p.run(pc)
-            self.timings.append((p.name, time.perf_counter() - t0))
             if p.is_transform:
                 pc.invalidate(keep=p.preserves)
             self._check(pc, p.name, offsets=pc.extra.get('offsets_assigned', False))
@@ -271,16 +262,15 @@ class PassManager:
 
 
 # --------------------------------------------------------------------------- #
-# Adapters for the existing pass classes
+# Passes written as optimization stages
 # --------------------------------------------------------------------------- #
 
-class LegacyTransform(Pass):
-    """Wraps an ``AbstractTransformer``: construct, ``apply``, take the list.
+class Transform(Pass):
+    """An ``AbstractTransformer`` as a pass: construct, ``apply``, take the list.
 
-    Exists so the migration is incremental -- the existing passes keep working
-    unchanged while new ones are written against ``Pass``.  The factory takes
-    the instruction list explicitly rather than reading ``pc.instrs``, so the
-    same wrapper serves both scopes.
+    The stage keeps its own constructor arguments; the factory binds them from
+    the pass context.  It takes the instruction list explicitly rather than
+    reading ``pc.instrs``, so the same wrapper serves both scopes.
     """
 
     is_transform = True
@@ -309,8 +299,8 @@ class LegacyTransform(Pass):
         return list(opt.get_instructions())
 
 
-class LegacyAnalysis(Pass):
-    """Wraps an ``AbstractOptStage`` that computes one named result.
+class Analysis(Pass):
+    """An ``AbstractOptStage`` that computes one named result, as a pass.
 
     Always ``WHOLE_NEST``: an analysis whose result is consumed against the
     whole stream must be computed over the whole stream.
